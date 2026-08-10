@@ -201,3 +201,60 @@ def test_soft_delete_propagates_commit_mutex_timeout_without_committing(
 
     with pg_session_factory() as s:
         assert s.get(Workspace, ws_id).soft_deleted_at is None  # nothing committed
+
+
+def test_split_halves_compose_to_the_wrapper(pg_session_factory, tmp_path):
+    """soft_delete_workspace_db + scrub_workspace_bytes must equal the retained
+    soft_delete_workspace wrapper: same soft_deleted_at stamp, same running-turn
+    terminalization, same idempotent WorkspaceDeleted-on-redelete. This pins the
+    split as behaviour-preserving."""
+    from call_manager.proposal_assist.drafting.locking import WorkspaceDeleted
+    from call_manager.workspaces import (
+        scrub_workspace_bytes,
+        soft_delete_workspace,
+        soft_delete_workspace_db,
+    )
+    from tests.proposal_assist.conftest import make_chat_turn, make_user, make_workspace
+
+    # (a) the split halves, run explicitly.
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=make_user(s, email="split-a@ki.se"))
+        ut = make_chat_turn(s, ws, role="user", content={"type": "text", "text": "q"},
+                            tokens_in=1234)
+        job = TurnJob(workspace_id=ws.id, status="running",
+                      user_turn_id=ut.id, submitted_by_user_id=ws.owner_id)
+        s.add(job)
+        s.commit()
+        split_id, job_id, ut_id = ws.id, job.id, ut.id
+
+    with pg_session_factory() as s:
+        soft_delete_workspace_db(s, workspace_id=split_id)     # DB half only
+    scrub_workspace_bytes(split_id, workspaces_dir=tmp_path)   # FS half only
+
+    with pg_session_factory() as s:
+        assert s.get(Workspace, split_id).soft_deleted_at is not None
+        assert s.get(TurnJob, job_id).status != "running"      # terminalized
+        assert s.get(ChatTurn, ut_id).tokens_in == 1234        # estimate retained
+    # DB half is idempotent-refusing exactly like the wrapper.
+    with pg_session_factory() as s:
+        with pytest.raises(WorkspaceDeleted):
+            soft_delete_workspace_db(s, workspace_id=split_id)
+        s.rollback()
+
+    # (b) the retained wrapper, run whole — same observable end state.
+    with pg_session_factory() as s:
+        ws2 = make_workspace(s, owner=make_user(s, email="split-b@ki.se"))
+        job2 = TurnJob(workspace_id=ws2.id, status="running",
+                       user_turn_id=make_chat_turn(
+                           s, ws2, role="user", content={"type": "text", "text": "q"}).id,
+                       submitted_by_user_id=ws2.owner_id)
+        s.add(job2)
+        s.commit()
+        wrap_id, job2_id = ws2.id, job2.id
+
+    with pg_session_factory() as s:
+        soft_delete_workspace(s, workspace_id=wrap_id, workspaces_dir=tmp_path)
+
+    with pg_session_factory() as s:
+        assert s.get(Workspace, wrap_id).soft_deleted_at is not None
+        assert s.get(TurnJob, job2_id).status != "running"

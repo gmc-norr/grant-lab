@@ -75,8 +75,13 @@ from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.proposals.kernel_accept import RoomEvicted
 from call_manager.proposal_assist.references.storage import ReferenceStorage
+from call_manager.proposal_assist.retirement import signal_workspace_retirement
 from call_manager.proposal_assist.web._perms import require_member, require_owner
-from call_manager.workspaces import create_workspace, soft_delete_workspace
+from call_manager.workspaces import (
+    create_workspace,
+    scrub_workspace_bytes,
+    soft_delete_workspace_db,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1487,20 +1492,20 @@ def soft_delete_workspace_api(
     request: Request,
     user: User = Depends(get_current_user),  # noqa: B008
 ) -> Response:
-    """Owner-only soft-delete. Cascades active jobs + queued turns and scrubs
-    file bytes via the shared soft_delete_workspace service. Re-delete of an
-    already-soft-deleted workspace → 404 (require_owner filters soft_deleted_at),
-    matching the Jinja route — not idempotent, by design."""
+    """Owner-only soft-delete. Cascades active jobs + queued turns, retires the
+    workspace in-process, and scrubs file bytes. Re-delete of an already-soft-
+    deleted workspace → 404 (require_owner filters soft_deleted_at), matching the
+    Jinja route — not idempotent, by design.
+
+    The ORDER is the contract (spec B5): DB commit → retire → scrub → 204."""
     settings = request.app.state.settings
     sf = request.app.state.session_factory
     with sf() as session:
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
-        # soft_delete_workspace commits internally (unlike create_workspace_api,
-        # where the caller commits) — do not add a second commit here.
+        # DB half commits internally (mutex acquire + soft_deleted_at + job/turn
+        # cancellation) — do not add a second commit here.
         try:
-            soft_delete_workspace(
-                session, workspace_id=ws.id, workspaces_dir=Path(settings.workspaces_dir)
-            )
+            soft_delete_workspace_db(session, workspace_id=ws.id)
         except CommitMutexTimeout as e:
             # Deletion participates in the commit mutex (so live writers can
             # linearize against it). A wedged writer means nothing was committed —
@@ -1511,5 +1516,11 @@ def soft_delete_workspace_api(
                 detail=BUSY_ERROR_MESSAGE,
                 headers={"Retry-After": "2"},
             ) from e
-    signal_from_request(request, workspace_id=workspace_id, artifacts=["draft", "spec"])
+    # DB soft-delete is durable. Retire in-process (bounded ~5s, never raises):
+    # tombstone the turns registry so no new subprocess installs and tear down any
+    # live one, and tear down both collab rooms (close editors 1008, no
+    # checkpoint). This SUBSUMES the old signal_from_request permission
+    # reconciliation — the rooms are gone. THEN scrub bytes, THEN 204.
+    signal_workspace_retirement(request, workspace_id=workspace_id)
+    scrub_workspace_bytes(workspace_id, workspaces_dir=Path(settings.workspaces_dir))
     return Response(status_code=204)

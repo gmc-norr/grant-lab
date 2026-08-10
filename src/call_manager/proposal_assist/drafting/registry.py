@@ -16,6 +16,7 @@ from call_manager.proposal_assist.drafting.contract import (
     DraftingAgent,
     DraftingAtCapacity,
     StreamEvent,
+    WorkspaceRetired,
 )
 
 if TYPE_CHECKING:
@@ -73,6 +74,15 @@ class SubprocessRegistry:
         # and fulfill_pending_launch() / fail_pending_launch().
         self._pending_launches: dict[uuid.UUID, asyncio.Future[AgentHandle]] = {}
         self._lock = asyncio.Lock()
+        # Retirement tombstone (Slice B-retire). Populated by retire_workspace when
+        # a workspace is deleted; claim_launch_or_wait rejects it FIRST and
+        # fulfill_pending_launch refuses to install for it.
+        # A linearization point for INSTALL, not for an in-flight streaming query.
+        # The DURABLE floor is soft_deleted_at (controller.launch checks it); this
+        # set is only a promptness optimisation, so pruning it would be safe.
+        # Unbounded: one UUID per workspace deleted per process lifetime — a
+        # Slice-C eviction candidate, not built now (YAGNI).
+        self._retired: set[uuid.UUID] = set()
 
     # ------------------------------------------------------------------
     # Pending-launch coordination (Pattern B)
@@ -116,6 +126,12 @@ class SubprocessRegistry:
         victim: _Entry | None = None
         victim_id: uuid.UUID | None = None
         async with self._lock:
+            # Retirement tombstone (B-retire): refuse a retired workspace BEFORE the
+            # cached-entry check, or a cached handle would be handed straight back
+            # for a workspace that is being deleted. Nothing has been mutated yet,
+            # so raising here is clean.
+            if workspace_id in self._retired:
+                raise WorkspaceRetired(workspace_id)
             # Already cached — wrap the handle in a resolved future.
             existing = self._entries.get(workspace_id)
             if existing is not None:
@@ -177,6 +193,37 @@ class SubprocessRegistry:
                 await self.fail_pending_launch(workspace_id, exc)
                 raise exc
         return (True, None)
+
+    async def retire_workspace(self, workspace_id: uuid.UUID) -> None:
+        """Turns retirement hook (coordinator-invoked). Two effects, in order:
+
+        1. Tombstone the workspace in _retired so no NEW launch can install:
+           claim_launch_or_wait rejects it first, and an in-flight
+           fulfill_pending_launch refuses to install.
+        2. Pop an already-live entry and tear it down best-effort, so a running
+           subprocess is interrupted now rather than at the next idle sweep
+           (WORKSPACE_IDLE_SWEEP_SECONDS, default 60). This is the design's
+           "prompt interrupt->terminate (B2) ... Best-effort" guarantee.
+
+        Idempotent (a second call finds no entry). Never raises: _teardown_entry
+        swallows and logs both the adapter.terminate and the lock-release paths.
+
+        Honest scope: a linearization point for INSTALL. Deletion can commit
+        between any precheck and an in-flight streaming client.query, so this
+        does NOT prove the subprocess died — Slice A's reconciliation sweep
+        remains the retry.
+        """
+        async with self._lock:
+            self._retired.add(workspace_id)
+            entry = self._entries.pop(workspace_id, None)
+        if entry is not None:
+            # Popped REGARDLESS of in_flight — a running turn on a deleted
+            # workspace is exactly the target (mirrors reconcile_deleted_entries
+            # below, which the idle sweep deliberately does not do). Teardown runs
+            # OUTSIDE self._lock: it awaits adapter.terminate (hard-bounded by
+            # Slice A) and closes the lock_session, and holding the registry lock
+            # across it would stall every other claim for that duration.
+            await self._teardown_entry(workspace_id, entry, context="retire-hook")
 
     async def reconcile_deleted_entries(self, is_deleted) -> int:
         """Pop and tear down entries whose workspace is soft-deleted, REGARDLESS of
@@ -251,9 +298,16 @@ class SubprocessRegistry:
         handle: AgentHandle,
         *,
         lock_session: Session | None,
-    ) -> None:
-        """Called by the launcher on success.  Installs the entry and resolves
-        any waiting futures.
+    ) -> bool:
+        """Called by the launcher on success.  Installs the entry and resolves any
+        waiting futures — UNLESS the workspace was retired while this launch was in
+        flight, in which case it installs nothing and resolves the waiter with
+        WorkspaceRetired.
+
+        Returns True if the entry was installed, False if retirement refused it.
+        On False the launcher (controller.launch) raises WorkspaceRetired so its
+        own except tears down the fresh handle + releases the lock + closes the
+        session (adapter-level teardown alone cannot release the advisory lock).
 
         If a waiter's future was cancelled before this is called, the result
         is still set on it (set_result on a cancelled future is silently
@@ -261,6 +315,13 @@ class SubprocessRegistry:
         """
         async with self._lock:
             future = self._pending_launches.pop(workspace_id, None)
+            if workspace_id in self._retired:
+                # Retired mid-launch: do NOT install. Resolve the waiter (if any)
+                # with WorkspaceRetired so a caller awaiting the pending future
+                # raises rather than hanging on a handle we are about to discard.
+                if future is not None and not future.done():
+                    future.set_exception(WorkspaceRetired(workspace_id))
+                return False
             self._entries[workspace_id] = _Entry(
                 handle=handle,
                 last_touched_monotonic=time.monotonic(),
@@ -268,6 +329,7 @@ class SubprocessRegistry:
             )
         if future is not None and not future.done():
             future.set_result(handle)
+        return True
 
     async def fail_pending_launch(
         self,
