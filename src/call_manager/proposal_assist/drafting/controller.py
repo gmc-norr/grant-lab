@@ -55,6 +55,8 @@ class WorkspaceController:
     ) -> None:
         self._registry = registry
         self._session_factory = session_factory
+        # (see `registry` property below — the retirement wiring in main.py needs
+        # the registry, which the factory does not otherwise expose)
         # Defect 1: the long-held advisory-lock session (kept checked out for
         # the subprocess's whole life) is opened from lock_session_factory — a
         # DEDICATED small pool sized to the live-subprocess ceiling — so it never
@@ -66,6 +68,15 @@ class WorkspaceController:
         # Production callers pass settings.workspaces_dir explicitly;
         # the default keeps existing tests that omit this parameter working.
         self._workspaces_dir = Path(workspaces_dir)
+
+    @property
+    def registry(self) -> SubprocessRegistry:
+        """The subprocess registry this controller drives.
+
+        Public because build_workspace_controller returns only the controller, so
+        the retirement wiring in main.py has no other way to reach
+        registry.retire_workspace when it registers the "turns" hook."""
+        return self._registry
 
     async def launch(self, workspace_id: uuid.UUID) -> AgentHandle:
         """Launch (or return cached) handle, coalescing concurrent callers.
@@ -177,11 +188,18 @@ class WorkspaceController:
                 resume_session_id=resume_session_id,
             )
             handle = await self._registry._adapter.launch(context)
-            await self._registry.fulfill_pending_launch(
+            installed = await self._registry.fulfill_pending_launch(
                 workspace_id,
                 handle,
                 lock_session=lock_session,
             )
+            if not installed:
+                # Retired while this launch was in flight (B-retire): nothing was
+                # installed, so we still own the fresh handle + lock + session.
+                # Raise BEFORE handed_off=True so the except below performs the
+                # normal teardown — adapter-level termination alone would leak the
+                # advisory lock and its session.
+                raise WorkspaceRetired(workspace_id)
             handed_off = True
 
         except BaseException as e:
