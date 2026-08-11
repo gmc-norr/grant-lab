@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from call_manager.db.models import Workspace, WorkspaceSetupJob
 from call_manager.proposal_assist.drafting.locking import (
@@ -162,3 +163,56 @@ def test_a_wedged_m1_makes_delete_time_out_at_the_mutex_not_the_row(
     finally:
         release.set()
         t.join(timeout=30)
+
+
+def test_m1_acquires_the_mutex_before_the_workspace_row_lock(
+    pg_session_factory, current_user, tmp_path, phase0_client, monkeypatch
+):
+    """Gate 3b, the ordering half. The wedge test above proves the mutex is
+    HELD across M1's filesystem window; it does not prove the mutex is taken
+    BEFORE the workspace row lock — a version of _m1 with the two lines
+    swapped (row lock, then mutex) passes it just as well. This test records
+    acquisition order directly and fails on that swap.
+
+    Why order matters: soft_delete_workspace_db takes this SAME mutex before
+    it mutates anything. Mutex-then-row means a concurrent DELETE blocks at
+    the mutex and times out (429) without ever touching the row lock.
+    Row-then-mutex means a DELETE can win the mutex and then block on M1's row
+    lock, which by then has no timeout at all — the delete path resets
+    lock_timeout to DEFAULT — i.e. an unbounded hang, the exact bug this slice
+    exists to prevent.
+    """
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        s.add(WorkspaceSetupJob(workspace_id=ws.id, status="running"))
+        s.commit()
+        ws_id = ws.id
+        job_id = s.scalars(
+            select(WorkspaceSetupJob.id).where(WorkspaceSetupJob.workspace_id == ws_id)
+        ).one()
+
+    order: list[str] = []
+    real_acquire = setup_mod.acquire_commit_mutex_live
+    real_get = Session.get
+
+    def _tracking_acquire(session, workspace_id, *a, **kw):
+        order.append("mutex")
+        return real_acquire(session, workspace_id, *a, **kw)
+
+    def _tracking_get(self, entity, ident, **kw):
+        if entity is Workspace and kw.get("with_for_update"):
+            order.append("row")
+        return real_get(self, entity, ident, **kw)
+
+    # Patch the name as USED inside setup.py, not where it's defined — `from
+    # ... import acquire_commit_mutex_live` binds the name into setup_mod's
+    # namespace at import time, so patching locking.acquire_commit_mutex_live
+    # would not intercept _m1's call at all.
+    monkeypatch.setattr(setup_mod, "acquire_commit_mutex_live", _tracking_acquire)
+    monkeypatch.setattr(Session, "get", _tracking_get)
+
+    worker = _worker(pg_session_factory, tmp_path, phase0_client)
+    worker._m1(job_id, ws_id)
+
+    assert order == ["mutex", "row"]
