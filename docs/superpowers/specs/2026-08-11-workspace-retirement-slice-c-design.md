@@ -317,10 +317,19 @@ jobs, and extended here to claim-analysis — awaited alongside the others:
   hook bounded: a row a live worker holds is *skipped*, never waited on, so the
   hook cannot inherit the worker's transaction lifetime. Without SKIP LOCKED
   the reviewer's objection stands — the wait is unbounded.
-- **Skipped rows are retried by the reconciliation tick** (§4.4's sibling),
-  which re-attempts the cancel once the lock frees. In the meantime the
-  worker's own liveness checkpoint aborts it, so the skip is not the only
-  defence.
+- **Skipped rows are retried by the reconciliation tick**, which re-attempts
+  the cancel once the lock frees. In the meantime the worker's own liveness
+  checkpoint aborts it, so the skip is not the only defence.
+
+  **This is an explicit extension, not an assumption.** The prerequisite slice
+  ships that tick handling *setup jobs only*; Slice C extends the same tick to
+  terminalize `ClaimAnalysisJob` rows for soft-deleted workspaces. It uses
+  **`failed`**, not a new status: `ck_claim_analysis_jobs_status` allows
+  `queued/running/done/failed/superseded` and Slice C ships no migration. Both
+  the tick change and its gate (10b) are in this slice's footprint — without
+  them a skipped row is never cancelled by anything, since the worker's
+  checkpoint only aborts a *live* worker and a crashed one leaves the row
+  behind.
 - **Budget `_JOBS_CANCEL_SECONDS = 1.0`** — a pair of indexed UPDATEs that by
   construction never block. It is a timeout for pathology, not for expected
   waiting.
@@ -413,8 +422,15 @@ dropped. The production surface then offers only `soft_delete_workspace_db` and
    *retained* repo after the workspace is deleted: it can still read workspace
    content, and can write or recreate sibling data, with no owner and no
    session. This slice reduces the window and makes it observable
-   (`drafting_termination_unconfirmed`); closing it means blocking scrub on
-   confirmation, which is larger than this slice.
+   (`drafting_termination_unconfirmed`).
+
+   **Blocking scrub would not close it.** Since the scrub never touches
+   `repo/`, delaying an unrelated operation changes nothing about the live
+   process. Real closure needs one of: confirmed process death before the
+   delete completes; filesystem or process isolation so the subprocess cannot
+   outlive its workspace; or a deletion protocol that actively revokes the
+   subprocess's access to the repo. All three are larger than this slice, and
+   naming them is the point — the residual has no cheap fix.
 2. **Claim-analysis cannot be cancelled mid-call.** Sync code in a thread pool.
    §6 bounds the residual to the interval between abort callbacks.
 3. **Phase-0 cannot stop a running extractor call**, for the same reason — it
@@ -484,6 +500,12 @@ reverted.
     callback fires inside the semantic-audit loop; a cancelled job is not
     returned to `queued` by `mark_failed`; and the delete transaction does not
     block on a running job's row.
+10b. **Tick convergence for skipped rows.** The full path, not just the hook: a
+    running claim-analysis job holds its row → the hook's `SKIP LOCKED` cancel
+    skips it → the worker's session ends *without* the worker terminalizing it
+    (simulating a crash, so the cooperative checkpoint cannot be what saves us)
+    → a later reconciliation tick marks the row `failed`. Mutation: leave the
+    tick handling setup jobs only and the row stays `running` forever.
 11. **Lock order.** For `activate` and `retry_setup`, a delete concurrent with
     the route resolves without deadlock. Mutation: take the setup-job lock
     first and the test must fail.
@@ -532,9 +554,10 @@ in each of four prefixes plus review's child prefix; one explicit catch at the
 tick boundary; one claim-query filter; a `"jobs"` hook doing SKIP LOCKED cancels
 off the delete transaction; an abort callback threaded into the semantic-audit
 loop; one failure-path special case; six route changes with a normative lock
-order; one hook registration plus a second population added to the inherited
-`"jobs"` hook; the wrapper deletion plus its test helper; and the
-`retirement.py:35` comment correction. No schema migration.
+order; one hook registration plus a second population added to **both** the
+inherited `"jobs"` hook **and** its reconciliation tick; the wrapper deletion
+plus its test helper; and the `retirement.py:35` comment correction. No schema
+migration — claim-analysis terminalizes to the existing `failed`.
 
 Phase-0's share — a second claim-query filter, the transaction split, its
 recovery story and its cancel path — moves to the prerequisite slice.

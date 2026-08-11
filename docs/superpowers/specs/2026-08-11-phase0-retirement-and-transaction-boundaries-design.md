@@ -127,12 +127,19 @@ Three changes make it genuinely bounded:
 
 1. **`acquire_commit_mutex_live` before the row lock.** This is the established
    mutex→row order, and `soft_delete_workspace_db` takes the same mutex before
-   it mutates anything (`locking.py:207`). So the row lock is only ever
-   reachable by a mutex holder, and a DELETE blocked behind a wedged M1 hits
-   `CommitMutexTimeout` and returns the house **429** rather than hanging on a
-   row lock with no timeout. It also gives M1 the liveness re-read for free —
-   `acquire_commit_mutex_live` raises `WorkspaceDeleted` on an already-deleted
-   workspace, which is exactly M1's abort condition.
+   it mutates anything (`locking.py:207`). A DELETE blocked behind a wedged M1
+   therefore hits `CommitMutexTimeout` and returns the house **429** rather
+   than hanging on a row lock with no timeout. It also gives M1 the liveness
+   re-read for free — `acquire_commit_mutex_live` raises `WorkspaceDeleted` on
+   an already-deleted workspace, which is exactly M1's abort condition.
+
+   **Stated precisely:** DELETE cannot reach the workspace row *while M1 owns
+   it*, because both take the mutex first and DELETE loses at the mutex. The
+   broader claim that the row lock is only reachable by a mutex holder would be
+   false — M2, M3 and Slice C's pass prefixes all take the row lock without the
+   mutex. DELETE can block on the row behind those, but each is a short
+   DB-only transaction with no subprocess and no LLM inside it, which is the
+   property that makes them safe and M1 the one case needing the mutex.
 2. **Hermetic git.** Every command runs with hooks disabled and system/global
    config neutralized, so no site configuration can introduce a hook, a signing
    helper or a credential prompt into the locked region.
@@ -316,6 +323,10 @@ every skipped cancellation on a deployment with drafting off. The tick needs no
 LLM client: it re-attempts the cancel UPDATE for setup jobs whose workspace is
 soft-deleted.
 
+This slice's tick handles **setup jobs only**. Slice C extends the same tick to
+claim-analysis when it adds that population to the hook — the extension point
+is named here so the obligation is not lost between the two specs.
+
 ## 11. Recovery
 
 **No progress column is added.** Recovery is "re-run from M1", and each
@@ -368,13 +379,24 @@ reverted.
    Mutation: hold the workspace row lock across `_run_steps` and the test must
    fail — the indefinite-block case, so the gate must assert latency, not that
    the delete eventually committed.
-3. **A wedged git does not wedge DELETE.** With a git command hung inside M1,
-   the `subprocess.run` timeout fires, M1 rolls back, and **both** the mutex
-   and the row lock release. A concurrent DELETE returns — 429 while M1 still
-   holds the mutex, 204 after it releases — and never blocks unbounded on the
-   row lock. Mutation: drop the mutex acquisition from M1 and the DELETE must
-   hang on the row lock instead of returning 429. A hold-duration assertion is
-   kept as a secondary signal, but it is explicitly *not* the bound.
+3. **A wedged M1 does not wedge DELETE.** Two separate assertions, because one
+   test cannot carry both:
+
+   *3a — the timeout works.* A hung git command inside M1 hits its
+   `subprocess.run(timeout=…)`, M1 rolls back, and both the mutex and the row
+   lock release.
+
+   *3b — the mutex is what protects DELETE.* The wedge here is **an
+   filesystem operation, not a subprocess** — patch M1's `mkdir`/`write_text`
+   to block — precisely so no `subprocess.run` timeout can release the row
+   early and make the result depend on which timeout fires first. With M1
+   wedged that way, a concurrent DELETE returns 429 at the mutex timeout.
+   Mutation: drop the mutex acquisition from M1 and DELETE hangs on the row
+   lock past the observation window instead of returning 429.
+
+   Gate 3b is the load-bearing one; 3a only proves the subprocess escape hatch
+   exists. A hold-duration assertion is kept as a secondary signal but is
+   explicitly *not* the bound.
 4. **Re-ingestion between milestones.** Call text changes after M1; the job
    restarts from M1 rather than committing a mixed snapshot.
 5. **Re-ingestion during an extractor call.** Call text changes while compute
