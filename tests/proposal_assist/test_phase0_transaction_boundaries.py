@@ -1,5 +1,6 @@
 """Phase-0 milestone boundaries: locks, Call pinning, bounded retry."""
 
+import json
 import subprocess
 import threading
 import time
@@ -11,26 +12,44 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from call_manager.db.models import Workspace, WorkspaceSetupJob
+from call_manager.db.models import Call, CallSectionExtract, Workspace, WorkspaceSetupJob
 from call_manager.proposal_assist.drafting.locking import (
     CommitMutexTimeout,
     acquire_commit_mutex,
 )
+from call_manager.proposal_assist.extractors.refresh import persist_section_extracts
 from call_manager.proposal_assist.extractors.sections import SECTION_NAMES
 from call_manager.proposal_assist.phases import setup as setup_mod
-from call_manager.proposal_assist.phases.setup import Phase0Worker
+from call_manager.proposal_assist.phases.setup import CallSourceChanged, Phase0Worker
 from tests.proposal_assist.conftest import make_workspace
 
 
 @dataclass
 class _StubClient:
+    """Returns the OpenAI-shaped envelope (`choices[0].message.content` as a
+    JSON string) that the real extractors (extract_sections / extract_rubric)
+    parse. A flat dict here works only for tests that never call .chat() —
+    the moment a test drives _m2/_m3, a flat-dict stub breaks with a
+    ValueError("unexpected envelope shape...")."""
+
     model: str = "stub-model"
 
     def chat(self, *, messages, response_format=None):
+        payload = {name: f"{name} text" for name in SECTION_NAMES}
+        payload["criteria"] = [
+            {
+                "name": "Excellence",
+                "description": "Excellence of the proposal",
+                "weight": 1.0,
+                "scale_max": 5,
+            }
+        ]
+        payload["funder_notes"] = "notes"
         return {
-            "sections": {name: f"{name} text" for name in SECTION_NAMES},
-            "criteria": [{"name": "Excellence", "weight": 1}],
-            "funder_notes": "notes",
+            "choices": [
+                {"message": {"role": "assistant", "content": json.dumps(payload)}}
+            ],
+            "model": self.model,
         }
 
 
@@ -78,6 +97,16 @@ def _worker(pg_session_factory, tmp_path, client):
         rubric_extractor_version="v1",
         workspaces_dir=str(tmp_path),
     )
+
+
+def _queued_job(pg_session_factory, current_user):
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        job = WorkspaceSetupJob(workspace_id=ws.id, status="running")
+        s.add(job)
+        s.commit()
+        return job.id, ws.id
 
 
 def test_m1_creates_the_repo_and_pins_the_call_hash(
@@ -216,3 +245,100 @@ def test_m1_acquires_the_mutex_before_the_workspace_row_lock(
     worker._m1(job_id, ws_id)
 
     assert order == ["mutex", "row"]
+
+
+def test_m2_snapshots_sections_onto_the_workspace(
+    pg_session_factory, current_user, tmp_path, phase0_client
+):
+    job_id, ws_id = _queued_job(pg_session_factory, current_user)
+    w = _worker(pg_session_factory, tmp_path, phase0_client)
+    pinned = w._m1(job_id, ws_id)
+    w._m2(job_id, ws_id, pinned)
+
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, ws_id)
+        assert set(ws.section_extracts) == set(SECTION_NAMES)
+        assert s.scalars(
+            select(CallSectionExtract).where(CallSectionExtract.call_id == ws.call_id)
+        ).all()
+
+
+def test_m2_raises_when_the_call_changed_under_it(
+    pg_session_factory, current_user, tmp_path, phase0_client
+):
+    job_id, ws_id = _queued_job(pg_session_factory, current_user)
+    w = _worker(pg_session_factory, tmp_path, phase0_client)
+    pinned = w._m1(job_id, ws_id)
+
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, ws_id)
+        s.get(Call, ws.call_id).full_text = "re-ingested body"
+        s.commit()
+
+    with pytest.raises(CallSourceChanged):
+        w._m2(job_id, ws_id, pinned)
+
+    with pg_session_factory() as s:
+        assert s.get(Workspace, ws_id).section_extracts in (None, {})
+
+
+def test_m2_does_not_start_a_cloud_call_for_a_deleted_workspace(
+    pg_session_factory, current_user, tmp_path
+):
+    """Pre-compute liveness: the delete lands after M1, before M2's LLM call."""
+    calls = {"n": 0}
+
+    @dataclass
+    class _CountingClient:
+        model: str = "stub-model"
+
+        def chat(self, *, messages, response_format=None):
+            calls["n"] += 1
+            return _StubClient().chat(messages=messages)
+
+    client = _CountingClient()
+    job_id, ws_id = _queued_job(pg_session_factory, current_user)
+    w = _worker(pg_session_factory, tmp_path, client)
+    pinned = w._m1(job_id, ws_id)
+
+    with pg_session_factory() as s:
+        s.get(Workspace, ws_id).soft_deleted_at = datetime.now(UTC)
+        s.commit()
+
+    with pytest.raises(Exception):  # noqa: B017
+        w._m2(job_id, ws_id, pinned)
+
+    assert calls["n"] == 0
+
+
+def test_m2_discards_a_payload_another_worker_made_redundant(
+    pg_session_factory, current_user, tmp_path, phase0_client
+):
+    """Two workspaces share a Call. If the cache went fresh while we computed,
+    snapshot the canonical rows rather than overwriting them."""
+    job_id, ws_id = _queued_job(pg_session_factory, current_user)
+    w = _worker(pg_session_factory, tmp_path, phase0_client)
+    pinned = w._m1(job_id, ws_id)
+
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, ws_id)
+        call = s.get(Call, ws.call_id)
+        persist_section_extracts(
+            session=s,
+            call=call,
+            sections={n: f"canonical {n}" for n in SECTION_NAMES},
+            model="other-worker",
+            extractor_version="v1",
+            source_hash=pinned,
+        )
+        s.commit()
+
+    w._m2(job_id, ws_id, pinned)
+
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, ws_id)
+        assert ws.section_extracts["eligibility"] == "canonical eligibility"
+        rows = s.scalars(
+            select(CallSectionExtract).where(CallSectionExtract.call_id == ws.call_id)
+        ).all()
+        assert {r.extracted_by_model for r in rows} == {"other-worker"}

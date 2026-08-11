@@ -56,6 +56,20 @@ logger = logging.getLogger(__name__)
 
 MAX_SETUP_ATTEMPTS = 5
 
+
+class CallSourceChanged(RuntimeError):
+    """The Call's text was re-ingested mid-run, so the milestones would otherwise
+    commit snapshots taken from different revisions.
+
+    Deliberately a typed failure rather than an internal retry loop: a Call being
+    re-scraped repeatedly would spin forever. It goes through the normal failure
+    path, consuming an attempt and dead-lettering at MAX_SETUP_ATTEMPTS."""
+
+
+class WorkspaceGoneDuringSetup(RuntimeError):
+    """The workspace was soft-deleted, or the job was cancelled, between
+    milestones. Routed to a terminal status, never a requeue."""
+
 # A setup job that's been 'running' longer than this is presumed abandoned —
 # the worker process crashed between the status='running' commit and a terminal
 # transition. Phase-0 extraction (a couple of LLM calls) is well under this, so
@@ -300,42 +314,6 @@ class Phase0Worker:
                 ["commit", "-q", "-m", "phase0: initialize empty artifacts"], cwd=repo_dir
             )
 
-    def _ensure_section_extracts_snapshot_on(
-        self, session: Session, workspace_id: uuid.UUID
-    ) -> None:
-        ws = session.get(Workspace, workspace_id)
-        if ws is None or ws.call_id is None:
-            raise RuntimeError("workspace or call missing for section extracts")
-        call = session.get(Call, ws.call_id)
-        if call is None:
-            raise RuntimeError(f"call {ws.call_id} not found")
-
-        if not section_extracts_are_fresh(
-            session=session, call=call, extractor_version=self.extractor_version
-        ):
-            sections = compute_section_extracts(call_text=call.full_text or "", client=self.client)
-            persist_section_extracts(
-                session=session,
-                call=call,
-                sections=sections,
-                model=self.client.model,
-                extractor_version=self.extractor_version,
-                source_hash=source_text_hash(call.full_text or ""),
-            )
-        # Read back into a workspace-owned dict; the workspace snapshot is
-        # what every later phase reads via get_section_extract.
-        rows = (
-            session.query(CallSectionExtract)
-            .filter(CallSectionExtract.call_id == call.id)
-            .all()
-        )
-        snapshot = {r.section: r.extract_text for r in rows}
-        # Defensive: ensure all six keys present (extract_sections backfills,
-        # but if the template was seeded by a different path, fill any gaps).
-        for name in SECTION_NAMES:
-            snapshot.setdefault(name, "")
-        ws.section_extracts = snapshot
-
     def _ensure_rubric_snapshot_on(self, session: Session, workspace_id: uuid.UUID) -> None:
         ws = session.get(Workspace, workspace_id)
         if ws is None or ws.call_id is None:
@@ -378,12 +356,80 @@ class Phase0Worker:
             )
         )
 
-    def _m2(self, job_id: uuid.UUID, workspace_id: uuid.UUID, pinned: str) -> None:
-        """Interim: preserves today's behaviour on its own session. Task 6
-        replaces this with the pre-compute liveness check, the Call pin and the
-        locked persist. `pinned` is accepted but unused until then."""
+    def _assert_live(self, job_id: uuid.UUID, workspace_id: uuid.UUID) -> None:
+        """Short, lock-free liveness read. Used BEFORE computing so a deleted
+        workspace costs no cloud spend; the locked persist re-checks for the
+        race that opens after this returns."""
         with self.session_factory() as s:
-            self._ensure_section_extracts_snapshot_on(s, workspace_id)
+            deleted = s.scalar(
+                select(Workspace.soft_deleted_at).where(Workspace.id == workspace_id)
+            )
+            status = s.scalar(
+                select(WorkspaceSetupJob.status).where(WorkspaceSetupJob.id == job_id)
+            )
+        if deleted is not None or status != "running":
+            raise WorkspaceGoneDuringSetup(
+                f"workspace {workspace_id} deleted or job {job_id} no longer running"
+            )
+
+    def _m2(self, job_id: uuid.UUID, workspace_id: uuid.UUID, pinned: str) -> None:
+        """Milestone 2: section extracts. The LLM call happens with NO
+        transaction open; only the write is under lock."""
+        self._assert_live(job_id, workspace_id)
+
+        with self.session_factory() as s:
+            ws = s.get(Workspace, workspace_id)
+            call = s.get(Call, ws.call_id) if ws is not None else None
+            if call is None:
+                raise RuntimeError("workspace or call missing for section extracts")
+            call_id = call.id
+            call_text = call.full_text or ""
+            fresh = section_extracts_are_fresh(
+                session=s, call=call, extractor_version=self.extractor_version
+            )
+
+        sections = (
+            None if fresh else compute_section_extracts(call_text=call_text, client=self.client)
+        )
+
+        with self.session_factory() as s:
+            ws = s.get(Workspace, workspace_id, with_for_update=True)
+            if ws is None or ws.soft_deleted_at is not None:
+                raise WorkspaceGoneDuringSetup(f"workspace {workspace_id} deleted")
+            # Workspace row THEN Call row — the normative order. Two workspaces
+            # sharing a Call therefore queue rather than deadlock, and neither
+            # inverts against the delete transaction's workspace-row update.
+            call = s.get(Call, call_id, with_for_update=True)
+            if call is None:
+                raise RuntimeError(f"call {call_id} not found")
+            if source_text_hash(call.full_text or "") != pinned:
+                raise CallSourceChanged(
+                    f"call {call_id} was re-ingested during setup of workspace {workspace_id}"
+                )
+
+            # Re-check under the lock: another worker may have made the cache
+            # fresh while we computed. Snapshot the canonical rows instead of
+            # overwriting them with our now-redundant payload.
+            if sections is not None and not section_extracts_are_fresh(
+                session=s, call=call, extractor_version=self.extractor_version
+            ):
+                persist_section_extracts(
+                    session=s,
+                    call=call,
+                    sections=sections,
+                    model=self.client.model,
+                    extractor_version=self.extractor_version,
+                    source_hash=pinned,
+                )
+                s.flush()
+
+            rows = s.scalars(
+                select(CallSectionExtract).where(CallSectionExtract.call_id == call_id)
+            ).all()
+            snapshot = {r.section: r.extract_text for r in rows}
+            for name in SECTION_NAMES:
+                snapshot.setdefault(name, "")
+            ws.section_extracts = snapshot
             s.commit()
 
     def _m3(self, job_id: uuid.UUID, workspace_id: uuid.UUID, pinned: str) -> None:

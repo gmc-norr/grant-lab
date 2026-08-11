@@ -6,6 +6,7 @@ from sqlalchemy import select
 
 from call_manager.db.models import Workspace, WorkspaceEvent, WorkspaceSetupJob
 from call_manager.proposal_assist.extractors.sections import SECTION_NAMES
+from call_manager.proposal_assist.hashing import source_text_hash
 from call_manager.proposal_assist.phases.setup import (
     MAX_SETUP_ATTEMPTS,
     Phase0Worker,
@@ -218,9 +219,11 @@ def test_phase0_step_4_copies_section_extracts_into_workspace(
         call = make_call(s)
         s.commit()
         ws = make_workspace(s, call_id=call.id, current_phase="setup")
-        s.add(WorkspaceSetupJob(workspace_id=ws.id, status="running"))
+        job = WorkspaceSetupJob(workspace_id=ws.id, status="running")
+        s.add(job)
         s.commit()
-        ws_id = ws.id
+        ws_id, job_id = ws.id, job.id
+        pinned = source_text_hash(call.full_text or "")
 
         client = Mock()
         client.model = "claude-opus-4-7"
@@ -252,8 +255,9 @@ def test_phase0_step_4_copies_section_extracts_into_workspace(
             rubric_extractor_version="rubric-v1",
             workspaces_dir=str(tmp_path / "repos"),
         )
-        worker._ensure_section_extracts_snapshot_on(s, ws_id)
-        s.commit()
+        worker._m2(job_id, ws_id, pinned)
+
+    with pg_session_factory() as s:
         ws_refetch = s.get(Workspace, ws_id)
         assert set(ws_refetch.section_extracts.keys()) == set(SECTION_NAMES)
         assert ws_refetch.section_extracts["eligibility"] == "E"
@@ -552,15 +556,17 @@ def test_phase0_step_4_second_call_with_unchanged_call_skips_llm(
     the section-extracts snapshot step twice against the same workspace with
     an unchanged extractor_version and unchanged call text must issue
     exactly one LLM call in total — proving the `if not fresh:` short-circuit
-    in _ensure_section_extracts_snapshot_on actually gates the compute+persist
-    path, not just that the freshness predicate itself is correct."""
+    in _m2 actually gates the compute+persist path, not just that the
+    freshness predicate itself is correct."""
     with pg_session_factory() as s:
         call = make_call(s)
         s.commit()
         ws = make_workspace(s, call_id=call.id, current_phase="setup")
-        s.add(WorkspaceSetupJob(workspace_id=ws.id, status="running"))
+        job = WorkspaceSetupJob(workspace_id=ws.id, status="running")
+        s.add(job)
         s.commit()
-        ws_id = ws.id
+        ws_id, job_id = ws.id, job.id
+        pinned = source_text_hash(call.full_text or "")
 
         client = Mock()
         client.model = "claude-opus-4-7"
@@ -593,14 +599,12 @@ def test_phase0_step_4_second_call_with_unchanged_call_skips_llm(
             workspaces_dir=str(tmp_path / "repos"),
         )
 
-        worker._ensure_section_extracts_snapshot_on(s, ws_id)
-        s.commit()
+        worker._m2(job_id, ws_id, pinned)
         assert client.chat.call_count == 1
 
         # Second run: same extractor_version, same call text — cached rows
         # are fresh, so this must NOT pay for another LLM call.
-        worker._ensure_section_extracts_snapshot_on(s, ws_id)
-        s.commit()
+        worker._m2(job_id, ws_id, pinned)
         assert client.chat.call_count == 1
 
 
