@@ -883,7 +883,7 @@ def claim_next_setup_job(*, session: Session) -> WorkspaceSetupJob | None:
     return job
 ```
 
-`of=WorkspaceSetupJob` is required: without it Postgres tries to lock the joined `workspaces` rows too, which both widens the lock and conflicts with `FOR UPDATE` on a subquery target.
+CORRECTION (verified empirically during Task 4's review): `of=WorkspaceSetupJob` is **not** required, and the original rationale here was wrong. A `WHERE ... IN (subquery)` is not a join — `workspaces` never enters the outer `FROM`, so Postgres's locking clause was never going to touch it. There is no lock to widen and no error to avoid. The four precedent claim queries (`coherence/jobs.py:71`, `evaluator/jobs.py:71`, `uncited_claims/jobs.py:73`, `review/jobs.py:71`) use the identical shape without `of=` and are correct. Keeping `of=` is harmless (it compiles to `FOR UPDATE OF workspace_setup_jobs`, identical on a single-table FROM) but inconsistent with those four.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
