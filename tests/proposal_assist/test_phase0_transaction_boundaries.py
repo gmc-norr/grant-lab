@@ -20,7 +20,11 @@ from call_manager.proposal_assist.drafting.locking import (
 from call_manager.proposal_assist.extractors.refresh import persist_section_extracts
 from call_manager.proposal_assist.extractors.sections import SECTION_NAMES
 from call_manager.proposal_assist.phases import setup as setup_mod
-from call_manager.proposal_assist.phases.setup import CallSourceChanged, Phase0Worker
+from call_manager.proposal_assist.phases.setup import (
+    CallSourceChanged,
+    Phase0Worker,
+    WorkspaceGoneDuringSetup,
+)
 from tests.proposal_assist.conftest import make_workspace
 
 
@@ -264,16 +268,32 @@ def test_m2_snapshots_sections_onto_the_workspace(
 
 
 def test_m2_raises_when_the_call_changed_under_it(
-    pg_session_factory, current_user, tmp_path, phase0_client
+    pg_session_factory, current_user, tmp_path, phase0_client, monkeypatch
 ):
+    """The re-ingest must land DURING the compute window — while _m2 holds no
+    lock — which is the only window the real race occupies. Re-ingesting
+    before _m2 is called at all would also be caught by a version that hashes
+    the pre-lock `call_text` (the mismatch being reported here is deliberately
+    pinned to the under-lock re-read at setup.py, not the pre-lock read)."""
     job_id, ws_id = _queued_job(pg_session_factory, current_user)
     w = _worker(pg_session_factory, tmp_path, phase0_client)
     pinned = w._m1(job_id, ws_id)
 
-    with pg_session_factory() as s:
-        ws = s.get(Workspace, ws_id)
-        s.get(Call, ws.call_id).full_text = "re-ingested body"
-        s.commit()
+    real_compute = setup_mod.compute_section_extracts
+
+    def _compute_then_reingest_the_call(*, call_text, client):
+        result = real_compute(call_text=call_text, client=client)
+        # Interference during the compute window: no session/lock is held by
+        # _m2 here, which is exactly the race this milestone must survive.
+        with pg_session_factory() as s:
+            ws = s.get(Workspace, ws_id)
+            s.get(Call, ws.call_id).full_text = "re-ingested body"
+            s.commit()
+        return result
+
+    monkeypatch.setattr(
+        setup_mod, "compute_section_extracts", _compute_then_reingest_the_call
+    )
 
     with pytest.raises(CallSourceChanged):
         w._m2(job_id, ws_id, pinned)
@@ -305,33 +325,49 @@ def test_m2_does_not_start_a_cloud_call_for_a_deleted_workspace(
         s.get(Workspace, ws_id).soft_deleted_at = datetime.now(UTC)
         s.commit()
 
-    with pytest.raises(Exception):  # noqa: B017
+    with pytest.raises(WorkspaceGoneDuringSetup):
         w._m2(job_id, ws_id, pinned)
 
     assert calls["n"] == 0
 
 
 def test_m2_discards_a_payload_another_worker_made_redundant(
-    pg_session_factory, current_user, tmp_path, phase0_client
+    pg_session_factory, current_user, tmp_path, phase0_client, monkeypatch
 ):
     """Two workspaces share a Call. If the cache went fresh while we computed,
-    snapshot the canonical rows rather than overwriting them."""
+    snapshot the canonical rows rather than overwriting them.
+
+    The other worker's persist must land DURING the compute window — while
+    _m2 holds no lock — so the pre-lock freshness check (which runs before
+    the compute) still sees a stale cache, `sections` comes back non-None,
+    and the under-lock re-check this test is actually about gets exercised."""
     job_id, ws_id = _queued_job(pg_session_factory, current_user)
     w = _worker(pg_session_factory, tmp_path, phase0_client)
     pinned = w._m1(job_id, ws_id)
 
-    with pg_session_factory() as s:
-        ws = s.get(Workspace, ws_id)
-        call = s.get(Call, ws.call_id)
-        persist_section_extracts(
-            session=s,
-            call=call,
-            sections={n: f"canonical {n}" for n in SECTION_NAMES},
-            model="other-worker",
-            extractor_version="v1",
-            source_hash=pinned,
-        )
-        s.commit()
+    real_compute = setup_mod.compute_section_extracts
+
+    def _compute_then_another_worker_wins(*, call_text, client):
+        result = real_compute(call_text=call_text, client=client)
+        # Interference during the compute window: another worker races in
+        # and persists the canonical rows while _m2 holds no lock.
+        with pg_session_factory() as s:
+            ws = s.get(Workspace, ws_id)
+            call = s.get(Call, ws.call_id)
+            persist_section_extracts(
+                session=s,
+                call=call,
+                sections={n: f"canonical {n}" for n in SECTION_NAMES},
+                model="other-worker",
+                extractor_version="v1",
+                source_hash=pinned,
+            )
+            s.commit()
+        return result
+
+    monkeypatch.setattr(
+        setup_mod, "compute_section_extracts", _compute_then_another_worker_wins
+    )
 
     w._m2(job_id, ws_id, pinned)
 

@@ -68,7 +68,9 @@ class CallSourceChanged(RuntimeError):
 
 class WorkspaceGoneDuringSetup(RuntimeError):
     """The workspace was soft-deleted, or the job was cancelled, between
-    milestones. Routed to a terminal status, never a requeue."""
+    milestones. The terminal-status routing (never a requeue) arrives with
+    the failure-path task; today it goes through the same requeue/dead-letter
+    path as any other milestone failure."""
 
 # A setup job that's been 'running' longer than this is presumed abandoned —
 # the worker process crashed between the status='running' commit and a terminal
