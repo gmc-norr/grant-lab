@@ -12,7 +12,13 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from call_manager.db.models import Call, CallSectionExtract, Workspace, WorkspaceSetupJob
+from call_manager.db.models import (
+    Call,
+    CallSectionExtract,
+    Workspace,
+    WorkspaceEvent,
+    WorkspaceSetupJob,
+)
 from call_manager.proposal_assist.drafting.locking import (
     CommitMutexTimeout,
     acquire_commit_mutex,
@@ -378,3 +384,158 @@ def test_m2_discards_a_payload_another_worker_made_redundant(
             select(CallSectionExtract).where(CallSectionExtract.call_id == ws.call_id)
         ).all()
         assert {r.extracted_by_model for r in rows} == {"other-worker"}
+
+
+def test_m3_writes_rubric_event_and_status_atomically(
+    pg_session_factory, current_user, tmp_path, phase0_client
+):
+    job_id, ws_id = _queued_job(pg_session_factory, current_user)
+    w = _worker(pg_session_factory, tmp_path, phase0_client)
+    pinned = w._m1(job_id, ws_id)
+    w._m2(job_id, ws_id, pinned)
+    w._m3(job_id, ws_id, pinned)
+
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, ws_id)
+        assert ws.rubric_criteria
+        assert ws.rubric_updated_at is not None
+        events = s.scalars(
+            select(WorkspaceEvent).where(
+                WorkspaceEvent.workspace_id == ws_id,
+                WorkspaceEvent.kind == "rubric_initialized",
+            )
+        ).all()
+        assert len(events) == 1
+        assert s.get(WorkspaceSetupJob, job_id).status == "waiting_for_rubric_review"
+
+
+def test_a_cancel_beats_m3_and_is_not_overwritten(
+    pg_session_factory, current_user, tmp_path, phase0_client
+):
+    """The compare-and-set: a job cancelled while M3 computed must stay
+    cancelled, not be resurrected into waiting_for_rubric_review."""
+    job_id, ws_id = _queued_job(pg_session_factory, current_user)
+    w = _worker(pg_session_factory, tmp_path, phase0_client)
+    pinned = w._m1(job_id, ws_id)
+    w._m2(job_id, ws_id, pinned)
+
+    with pg_session_factory() as s:
+        s.get(WorkspaceSetupJob, job_id).status = "cancelled"
+        s.commit()
+
+    with pytest.raises(WorkspaceGoneDuringSetup):
+        w._m3(job_id, ws_id, pinned)
+
+    with pg_session_factory() as s:
+        assert s.get(WorkspaceSetupJob, job_id).status == "cancelled"
+        assert (
+            s.scalars(
+                select(WorkspaceEvent).where(
+                    WorkspaceEvent.workspace_id == ws_id,
+                    WorkspaceEvent.kind == "rubric_initialized",
+                )
+            ).all()
+            == []
+        )
+
+
+def test_m3_raises_when_the_call_changed_under_it(
+    pg_session_factory, current_user, tmp_path, phase0_client
+):
+    job_id, ws_id = _queued_job(pg_session_factory, current_user)
+    w = _worker(pg_session_factory, tmp_path, phase0_client)
+    pinned = w._m1(job_id, ws_id)
+    w._m2(job_id, ws_id, pinned)
+
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, ws_id)
+        s.get(Call, ws.call_id).full_text = "re-ingested body"
+        s.commit()
+
+    with pytest.raises(CallSourceChanged):
+        w._m3(job_id, ws_id, pinned)
+
+    with pg_session_factory() as s:
+        assert s.get(WorkspaceSetupJob, job_id).status == "running"
+
+
+def test_a_cancel_during_the_compute_window_beats_m3_under_lock(
+    pg_session_factory, current_user, tmp_path, phase0_client, monkeypatch
+):
+    """The compare-and-set exercised for real. Cancelling before calling
+    `_m3` at all (test_a_cancel_beats_m3_and_is_not_overwritten above) is
+    caught by the pre-lock `_assert_live` liveness read and never reaches
+    the CAS inside the locked transaction — the Step-5 atomicity mutation
+    proves that test stays green even when the status write is pulled out
+    of the transaction. The real race the CAS exists for is a cancel that
+    lands DURING the compute window, after `_assert_live` has already seen
+    'running' and before the locked session re-reads the row — so the
+    interference here happens from inside a `compute_rubric` wrapper,
+    mirroring test_m2_raises_when_the_call_changed_under_it's pattern."""
+    job_id, ws_id = _queued_job(pg_session_factory, current_user)
+    w = _worker(pg_session_factory, tmp_path, phase0_client)
+    pinned = w._m1(job_id, ws_id)
+    w._m2(job_id, ws_id, pinned)
+
+    real_compute = setup_mod.compute_rubric
+
+    def _compute_then_cancel(*, call_text, client):
+        result = real_compute(call_text=call_text, client=client)
+        # Interference during the compute window: no session/lock is held by
+        # _m3 here, which is exactly the race the CAS must survive.
+        with pg_session_factory() as s:
+            s.get(WorkspaceSetupJob, job_id).status = "cancelled"
+            s.commit()
+        return result
+
+    monkeypatch.setattr(setup_mod, "compute_rubric", _compute_then_cancel)
+
+    with pytest.raises(WorkspaceGoneDuringSetup):
+        w._m3(job_id, ws_id, pinned)
+
+    with pg_session_factory() as s:
+        assert s.get(WorkspaceSetupJob, job_id).status == "cancelled"
+        assert (
+            s.scalars(
+                select(WorkspaceEvent).where(
+                    WorkspaceEvent.workspace_id == ws_id,
+                    WorkspaceEvent.kind == "rubric_initialized",
+                )
+            ).all()
+            == []
+        )
+
+
+def test_m3_raises_when_the_call_changes_during_the_compute_window(
+    pg_session_factory, current_user, tmp_path, phase0_client, monkeypatch
+):
+    """The under-lock hash re-check exercised for real. Re-ingesting the Call
+    before calling `_m3` at all (test_m3_raises_when_the_call_changed_under_it
+    above) would be caught just as well by a buggy implementation that
+    compared `pinned` against the pre-lock-captured `call_text` instead of
+    re-reading the Call under the lock — the interference already landed
+    before either read happened. This test lands the re-ingest DURING the
+    compute window (inside the `compute_rubric` wrapper, no lock held),
+    which only an under-lock re-read can catch."""
+    job_id, ws_id = _queued_job(pg_session_factory, current_user)
+    w = _worker(pg_session_factory, tmp_path, phase0_client)
+    pinned = w._m1(job_id, ws_id)
+    w._m2(job_id, ws_id, pinned)
+
+    real_compute = setup_mod.compute_rubric
+
+    def _compute_then_reingest_the_call(*, call_text, client):
+        result = real_compute(call_text=call_text, client=client)
+        with pg_session_factory() as s:
+            ws = s.get(Workspace, ws_id)
+            s.get(Call, ws.call_id).full_text = "re-ingested body"
+            s.commit()
+        return result
+
+    monkeypatch.setattr(setup_mod, "compute_rubric", _compute_then_reingest_the_call)
+
+    with pytest.raises(CallSourceChanged):
+        w._m3(job_id, ws_id, pinned)
+
+    with pg_session_factory() as s:
+        assert s.get(WorkspaceSetupJob, job_id).status == "running"

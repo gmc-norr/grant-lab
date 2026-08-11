@@ -271,9 +271,11 @@ def test_phase0_step_5_copies_rubric_into_workspace_and_writes_init_event(
         call = make_call(s)
         s.commit()
         ws = make_workspace(s, call_id=call.id, current_phase="setup")
-        s.add(WorkspaceSetupJob(workspace_id=ws.id, status="running"))
+        job = WorkspaceSetupJob(workspace_id=ws.id, status="running")
+        s.add(job)
         s.commit()
-        ws_id = ws.id
+        ws_id, job_id = ws.id, job.id
+        pinned = source_text_hash(call.full_text or "")
 
         client = Mock()
         client.model = "claude-opus-4-7"
@@ -303,12 +305,17 @@ def test_phase0_step_5_copies_rubric_into_workspace_and_writes_init_event(
             rubric_extractor_version="rubric-v1",
             workspaces_dir=str(tmp_path / "repos"),
         )
-        worker._ensure_rubric_snapshot_on(s, ws_id)
-        s.commit()
+
+    # _m3 owns its own sessions (like every other milestone), so it runs
+    # after the setup session above has closed.
+    worker._m3(job_id, ws_id, pinned)
+
+    with pg_session_factory() as s:
         ws_refetch = s.get(Workspace, ws_id)
         assert len(ws_refetch.rubric_criteria) == 1
         assert ws_refetch.rubric_criteria[0]["name"] == "X"
         assert ws_refetch.rubric_funder_notes == "see FAQ"
+        assert s.get(WorkspaceSetupJob, job_id).status == "waiting_for_rubric_review"
 
         events = s.scalars(
             select(WorkspaceEvent).where(
@@ -617,13 +624,13 @@ def test_phase0_step_5_second_workspace_same_call_skips_llm(
     The rubric TEMPLATE lives on the call (CallRubric, keyed by call_id), not
     the workspace, but `workspace_events` enforces at most one
     'rubric_initialized' audit event per workspace (migration 0061) — so a
-    single workspace's setup step can only legitimately run
-    _ensure_rubric_snapshot_on once. The real case the freshness guard exists
-    for is two DIFFERENT workspaces pointing at the SAME call (two PIs
-    setting up proposal workspaces against one funding call): the second
-    workspace's setup must reuse the already-fresh call-level rubric
-    template rather than paying for a second LLM call, while still writing
-    its own per-workspace audit event and snapshot."""
+    single workspace's setup step can only legitimately run _m3 once. The
+    real case the freshness guard exists for is two DIFFERENT workspaces
+    pointing at the SAME call (two PIs setting up proposal workspaces
+    against one funding call): the second workspace's setup must reuse the
+    already-fresh call-level rubric template rather than paying for a
+    second LLM call, while still writing its own per-workspace audit event
+    and snapshot."""
     with pg_session_factory() as s:
         from tests.proposal_assist.conftest import make_user
 
@@ -633,10 +640,14 @@ def test_phase0_step_5_second_workspace_same_call_skips_llm(
         owner2 = make_user(s, email="rubric-owner-2@ki.se")
         ws1 = make_workspace(s, owner=owner1, call_id=call.id, current_phase="setup")
         ws2 = make_workspace(s, owner=owner2, call_id=call.id, current_phase="setup")
-        s.add(WorkspaceSetupJob(workspace_id=ws1.id, status="running"))
-        s.add(WorkspaceSetupJob(workspace_id=ws2.id, status="running"))
+        job1 = WorkspaceSetupJob(workspace_id=ws1.id, status="running")
+        job2 = WorkspaceSetupJob(workspace_id=ws2.id, status="running")
+        s.add(job1)
+        s.add(job2)
         s.commit()
         ws1_id, ws2_id = ws1.id, ws2.id
+        job1_id, job2_id = job1.id, job2.id
+        pinned = source_text_hash(call.full_text or "")
 
         client = Mock()
         client.model = "claude-opus-4-7"
@@ -667,17 +678,16 @@ def test_phase0_step_5_second_workspace_same_call_skips_llm(
             workspaces_dir=str(tmp_path / "repos"),
         )
 
-        worker._ensure_rubric_snapshot_on(s, ws1_id)
-        s.commit()
-        assert client.chat.call_count == 1
+    worker._m3(job1_id, ws1_id, pinned)
+    assert client.chat.call_count == 1
 
-        # Second workspace, same call, same rubric_extractor_version, call
-        # text unchanged — the call-level rubric template is fresh, so this
-        # must NOT pay for another LLM call.
-        worker._ensure_rubric_snapshot_on(s, ws2_id)
-        s.commit()
-        assert client.chat.call_count == 1
+    # Second workspace, same call, same rubric_extractor_version, call
+    # text unchanged — the call-level rubric template is fresh, so this
+    # must NOT pay for another LLM call.
+    worker._m3(job2_id, ws2_id, pinned)
+    assert client.chat.call_count == 1
 
+    with pg_session_factory() as s:
         # ws2 still gets its own copied snapshot despite skipping the LLM.
         ws2_refetch = s.get(Workspace, ws2_id)
         assert ws2_refetch.rubric_criteria[0]["name"] == "X"

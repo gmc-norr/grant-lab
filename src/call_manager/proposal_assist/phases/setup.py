@@ -316,48 +316,6 @@ class Phase0Worker:
                 ["commit", "-q", "-m", "phase0: initialize empty artifacts"], cwd=repo_dir
             )
 
-    def _ensure_rubric_snapshot_on(self, session: Session, workspace_id: uuid.UUID) -> None:
-        ws = session.get(Workspace, workspace_id)
-        if ws is None or ws.call_id is None:
-            raise RuntimeError("workspace or call missing for rubric")
-        call = session.get(Call, ws.call_id)
-        if call is None:
-            raise RuntimeError(f"call {ws.call_id} not found")
-
-        if not rubric_is_fresh(
-            session=session, call=call, extractor_version=self.rubric_extractor_version
-        ):
-            payload = compute_rubric(call_text=call.full_text or "", client=self.client)
-            persist_rubric(
-                session=session,
-                call=call,
-                payload=payload,
-                model=self.client.model,
-                extractor_version=self.rubric_extractor_version,
-                source_hash=source_text_hash(call.full_text or ""),
-            )
-        template = session.get(CallRubric, call.id)
-        if template is None:
-            raise RuntimeError(f"rubric template for call {call.id} not found after fresh")
-
-        ws.rubric_criteria = template.criteria
-        ws.rubric_funder_notes = template.funder_notes
-        ws.rubric_updated_at = datetime.now(UTC)
-
-        # Audit: write the canonical starting state for forward-replay of
-        # rubric edits (per the phased spec's audit-reconstruction contract).
-        session.add(
-            WorkspaceEvent(
-                workspace_id=ws.id,
-                kind="rubric_initialized",
-                payload={
-                    "criteria": template.criteria,
-                    "funder_notes": template.funder_notes,
-                    "seeded_from_call_rubrics_extracted_at": (template.extracted_at.isoformat()),
-                },
-            )
-        )
-
     def _assert_live(self, job_id: uuid.UUID, workspace_id: uuid.UUID) -> None:
         """Short, lock-free liveness read. Used BEFORE computing so a deleted
         workspace costs no cloud spend; the locked persist re-checks for the
@@ -435,14 +393,85 @@ class Phase0Worker:
             s.commit()
 
     def _m3(self, job_id: uuid.UUID, workspace_id: uuid.UUID, pinned: str) -> None:
-        """Interim: preserves today's behaviour, including the terminal status
-        transition that `run_one` used to perform. Task 7 replaces this with the
-        atomic version."""
+        """Milestone 3: rubric snapshot, the rubric_initialized audit event, and
+        the job's terminal transition — all in ONE transaction.
+
+        The status write lives here, not in a later step, for two reasons: a
+        crash between them would re-run M3 and append a second audit event
+        (which corrupts forward-replay of rubric edits), and a cancel landing in
+        that gap would be overwritten by the success finalizer. The status write
+        is a compare-and-set on 'running' so a concurrent cancel wins.
+        """
+        self._assert_live(job_id, workspace_id)
+
         with self.session_factory() as s:
-            self._ensure_rubric_snapshot_on(s, workspace_id)
-            job = s.get(WorkspaceSetupJob, job_id)
-            if job is not None and job.status == "running":
-                job.status = "waiting_for_rubric_review"
+            ws = s.get(Workspace, workspace_id)
+            call = s.get(Call, ws.call_id) if ws is not None else None
+            if call is None:
+                raise RuntimeError("workspace or call missing for rubric")
+            call_id = call.id
+            call_text = call.full_text or ""
+            fresh = rubric_is_fresh(
+                session=s, call=call, extractor_version=self.rubric_extractor_version
+            )
+
+        payload = None if fresh else compute_rubric(call_text=call_text, client=self.client)
+
+        with self.session_factory() as s:
+            ws = s.get(Workspace, workspace_id, with_for_update=True)
+            if ws is None or ws.soft_deleted_at is not None:
+                raise WorkspaceGoneDuringSetup(f"workspace {workspace_id} deleted")
+            call = s.get(Call, call_id, with_for_update=True)
+            if call is None:
+                raise RuntimeError(f"call {call_id} not found")
+            if source_text_hash(call.full_text or "") != pinned:
+                raise CallSourceChanged(
+                    f"call {call_id} was re-ingested during setup of workspace {workspace_id}"
+                )
+
+            job = s.get(WorkspaceSetupJob, job_id, with_for_update=True)
+            if job is None or job.status != "running":
+                raise WorkspaceGoneDuringSetup(
+                    f"job {job_id} is no longer running (a cancel won)"
+                )
+
+            if payload is not None and not rubric_is_fresh(
+                session=s, call=call, extractor_version=self.rubric_extractor_version
+            ):
+                persist_rubric(
+                    session=s,
+                    call=call,
+                    payload=payload,
+                    model=self.client.model,
+                    extractor_version=self.rubric_extractor_version,
+                    source_hash=pinned,
+                )
+                s.flush()
+
+            template = s.get(CallRubric, call_id)
+            if template is None:
+                raise RuntimeError(f"rubric template for call {call_id} not found after fresh")
+
+            ws.rubric_criteria = template.criteria
+            ws.rubric_funder_notes = template.funder_notes
+            ws.rubric_updated_at = datetime.now(UTC)
+
+            s.add(
+                WorkspaceEvent(
+                    workspace_id=ws.id,
+                    kind="rubric_initialized",
+                    payload={
+                        "criteria": template.criteria,
+                        "funder_notes": template.funder_notes,
+                        "seeded_from_call_rubrics_extracted_at": (
+                            template.extracted_at.isoformat()
+                        ),
+                    },
+                )
+            )
+
+            # Yield to the owner's rubric review. No completed_at — not terminal.
+            job.status = "waiting_for_rubric_review"
             s.commit()
 
     def _fail(self, job_id: uuid.UUID, exc: BaseException) -> None:
