@@ -3,13 +3,17 @@
 Lifecycle:
     queued
       └─ claim_next_setup_job (FOR UPDATE SKIP LOCKED) → running, started_at
-            ├─ run_steps OK + rubric review pending → waiting_for_rubric_review
-            ├─ run_steps OK + rubric reviewed       → done, completed_at
-            ├─ run_steps raises + attempts < 5      → queued, attempts++
-            └─ run_steps raises + attempts == 5     → failed, completed_at
+            ├─ _m1 → _m2 → _m3 OK, rubric review pending → waiting_for_rubric_review
+            ├─ _m1 → _m2 → _m3 OK, rubric reviewed       → done, completed_at
+            ├─ any milestone raises + attempts < 5       → queued, attempts++
+            └─ any milestone raises + attempts == 5      → failed, completed_at
 
-Each tick claims one job (FIFO via queued_at) under SELECT FOR UPDATE SKIP LOCKED
-so multiple worker instances (future) wouldn't pick the same row.
+Each milestone (_m1, _m2, _m3) opens, uses and commits its own short-lived
+session via Phase0Worker.session_factory — no session is held across two
+milestones, which is what makes it safe for _m1 to take a database lock (see
+its docstring). Each tick claims one job (FIFO via queued_at) under SELECT
+FOR UPDATE SKIP LOCKED so multiple worker instances (future) wouldn't pick
+the same row.
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -35,6 +40,7 @@ from call_manager.db.models import (
     WorkspaceEvent,
     WorkspaceSetupJob,
 )
+from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex_live
 from call_manager.proposal_assist.extractors.refresh import (
     compute_rubric,
     compute_section_extracts,
@@ -194,76 +200,35 @@ def claim_next_setup_job(*, session: Session) -> WorkspaceSetupJob | None:
 class Phase0Worker:
     """Single-threaded worker; one instance per process.
 
-    `_run_steps` is the long-running sub-step sequence — split out so tests
-    can monkeypatch it. Tasks 14–16 fill in its implementation.
+    Holds a session_factory, never a session: each milestone opens, uses and
+    closes its own short transaction. The previous long-lived session is what
+    made a row lock unsafe here — it outlived two LLM calls — so removing it is
+    the point, not an incidental tidy-up.
     """
 
-    session: Session
+    session_factory: sessionmaker
     client: _AnthropicClientLike
     extractor_version: str
     rubric_extractor_version: str
     workspaces_dir: str
 
     def run_one(self) -> bool:
-        """Claim one job, execute it, advance its status. Returns True if a
-        job was processed (success or failure), False if the queue was empty."""
-        job = claim_next_setup_job(session=self.session)
-        if job is None:
-            return False
-        self.session.commit()  # release the FOR UPDATE row lock early
-        job_id = job.id
+        """Claim one job and drive its three milestones. Returns True if a job
+        was processed (success or failure), False if the queue was empty."""
+        with self.session_factory() as s:
+            job = claim_next_setup_job(session=s)
+            if job is None:
+                return False
+            job_id = job.id
+            workspace_id = job.workspace_id
+            s.commit()
 
         try:
-            self._run_steps(job)
-        except Exception as exc:
-            # CRITICAL: rollback any partial work (half-written extracts, etc.)
-            # before writing the failure state. Without rollback we'd commit
-            # destructive intermediate state alongside the job-status row.
-            self.session.rollback()
-
-            # Re-fetch in a clean session so we can write failure state on
-            # a non-detached instance.
-            job = self.session.get(WorkspaceSetupJob, job_id)
-            if job is None:
-                logger.error(
-                    "phase0 setup job %s vanished after rollback",
-                    job_id,
-                )
-                return True
-            job.attempts += 1
-            job.last_error = f"{type(exc).__name__}: {exc}"
-            if job.attempts >= MAX_SETUP_ATTEMPTS:
-                job.status = "failed"
-                job.completed_at = datetime.now(UTC)
-                logger.exception(
-                    "phase0 setup job %s failed permanently after %d attempts",
-                    job.id,
-                    job.attempts,
-                )
-            else:
-                job.status = "queued"
-                job.started_at = None  # ready to be re-claimed on next tick
-                logger.warning(
-                    "phase0 setup job %s transient failure (attempt %d/%d): %s",
-                    job.id,
-                    job.attempts,
-                    MAX_SETUP_ATTEMPTS,
-                    exc,
-                )
-            self.session.commit()
-            return True
-
-        # Success path. _run_steps decides between waiting_for_rubric_review
-        # and done by mutating job.status directly. If it left status as
-        # 'running', treat that as 'done'.
-        if job.status == "running":
-            job.status = "done"
-            job.completed_at = datetime.now(UTC)
-        elif job.status == "waiting_for_rubric_review":
-            # Yield: do NOT set completed_at; the rubric review endpoint
-            # will advance to 'done' when the owner confirms.
-            pass
-        self.session.commit()
+            pinned = self._m1(job_id, workspace_id)
+            self._m2(job_id, workspace_id, pinned)
+            self._m3(job_id, workspace_id, pinned)
+        except Exception as exc:  # noqa: BLE001 — every outcome is recorded on the row
+            self._fail(job_id, exc)
         return True
 
     _PHASE_ARTIFACT_FILES: tuple[str, ...] = (
@@ -275,68 +240,82 @@ class Phase0Worker:
     def _workspace_repo_dir(self, workspace_id) -> Path:
         return Path(self.workspaces_dir) / str(workspace_id) / "repo"
 
-    def _snapshot_and_init_repo(self, job: WorkspaceSetupJob) -> None:
-        ws = self.session.get(Workspace, job.workspace_id)
-        if ws is None:
-            raise RuntimeError(f"workspace {job.workspace_id} vanished")
+    def _m1(self, job_id: uuid.UUID, workspace_id: uuid.UUID) -> str:
+        """Milestone 1: filesystem init + call/profile snapshots. Returns the
+        pinned Call source hash for the rest of the run.
 
-        # Step 1: init git repo with empty phase artifacts.
-        repo_dir = self._workspace_repo_dir(ws.id)
+        Takes the commit mutex BEFORE the workspace row lock. That order is what
+        bounds a concurrent DELETE: soft_delete_workspace_db takes the same mutex
+        first, so a delete blocked behind a wedged M1 raises CommitMutexTimeout
+        (the route's 429) instead of waiting on a row lock that has no timeout.
+        acquire_commit_mutex_live also supplies M1's liveness check — it raises
+        WorkspaceDeleted for an already-deleted workspace, before anything is
+        created on disk.
+        """
+        with self.session_factory() as s:
+            acquire_commit_mutex_live(s, workspace_id)
+            ws = s.get(Workspace, workspace_id, with_for_update=True)
+            if ws is None:
+                raise RuntimeError(f"workspace {workspace_id} vanished")
+            if ws.call_id is None:
+                raise RuntimeError(f"workspace {ws.id} has no call_id — Phase 0 requires one")
+            call = s.get(Call, ws.call_id)
+            if call is None:
+                raise RuntimeError(f"call {ws.call_id} not found")
+
+            pinned = source_text_hash(call.full_text or "")
+
+            self._init_repo(ws.id)
+
+            ws.call_body_snapshot = (call.summary or "") + "\n\n" + (call.full_text or "")
+            if ws.profile_id is not None:
+                profile = s.get(Profile, ws.profile_id)
+                if profile is not None:
+                    ws.profile_desc_snapshot = profile.description or ""
+            ws.snapshot_refreshed_at = datetime.now(UTC)
+            s.commit()
+            return pinned
+
+    def _init_repo(self, workspace_id: uuid.UUID) -> None:
+        """The filesystem half of M1, unchanged in behaviour and still
+        recovery-safe: git init is skipped when .git exists, and the
+        rev-list check finishes a crash between init and the first commit."""
+        repo_dir = self._workspace_repo_dir(workspace_id)
         repo_dir.mkdir(parents=True, exist_ok=True)
-        # Init the git repo if it doesn't exist; safe to skip if it does.
         if not (repo_dir / ".git").is_dir():
             _run_git(["init", "-q", "-b", "main"], cwd=repo_dir)
 
-        # Recovery-safe: separately check whether the initial commit landed.
-        # A previous attempt might have completed `git init` but crashed
-        # before creating the artifact files or committing — in that case
-        # HEAD has no commits and we need to finish the job. `rev-list
-        # --count HEAD` exits non-zero on an unborn branch (no commits),
-        # which is what we treat as "needs initial commit".
         commit_count_proc = _run_git(
             ["rev-list", "--count", "HEAD"], cwd=repo_dir, check=False
         )
         has_initial_commit = (
-            commit_count_proc.returncode == 0 and commit_count_proc.stdout.strip() not in ("", "0")
+            commit_count_proc.returncode == 0
+            and commit_count_proc.stdout.strip() not in ("", "0")
         )
         if not has_initial_commit:
-            # Idempotent: if a previous attempt wrote some files, write_text
-            # rewrites them to empty (matches the initial state contract).
             for fname in self._PHASE_ARTIFACT_FILES:
                 (repo_dir / fname).write_text("")
             _run_git(["add", "-A"], cwd=repo_dir)
-            _run_git(["commit", "-q", "-m", "phase0: initialize empty artifacts"], cwd=repo_dir)
+            _run_git(
+                ["commit", "-q", "-m", "phase0: initialize empty artifacts"], cwd=repo_dir
+            )
 
-        # Step 2: snapshot call body.
-        if ws.call_id is None:
-            raise RuntimeError(f"workspace {ws.id} has no call_id — Phase 0 requires one")
-        call = self.session.get(Call, ws.call_id)
-        if call is None:
-            raise RuntimeError(f"call {ws.call_id} not found")
-        ws.call_body_snapshot = (call.summary or "") + "\n\n" + (call.full_text or "")
-
-        # Step 3: snapshot profile description (if profile linked).
-        if ws.profile_id is not None:
-            profile = self.session.get(Profile, ws.profile_id)
-            if profile is not None:
-                ws.profile_desc_snapshot = profile.description or ""
-
-        ws.snapshot_refreshed_at = datetime.now(UTC)
-
-    def _ensure_section_extracts_snapshot(self, job: WorkspaceSetupJob) -> None:
-        ws = self.session.get(Workspace, job.workspace_id)
+    def _ensure_section_extracts_snapshot_on(
+        self, session: Session, workspace_id: uuid.UUID
+    ) -> None:
+        ws = session.get(Workspace, workspace_id)
         if ws is None or ws.call_id is None:
             raise RuntimeError("workspace or call missing for section extracts")
-        call = self.session.get(Call, ws.call_id)
+        call = session.get(Call, ws.call_id)
         if call is None:
             raise RuntimeError(f"call {ws.call_id} not found")
 
         if not section_extracts_are_fresh(
-            session=self.session, call=call, extractor_version=self.extractor_version
+            session=session, call=call, extractor_version=self.extractor_version
         ):
             sections = compute_section_extracts(call_text=call.full_text or "", client=self.client)
             persist_section_extracts(
-                session=self.session,
+                session=session,
                 call=call,
                 sections=sections,
                 model=self.client.model,
@@ -346,7 +325,7 @@ class Phase0Worker:
         # Read back into a workspace-owned dict; the workspace snapshot is
         # what every later phase reads via get_section_extract.
         rows = (
-            self.session.query(CallSectionExtract)
+            session.query(CallSectionExtract)
             .filter(CallSectionExtract.call_id == call.id)
             .all()
         )
@@ -357,27 +336,27 @@ class Phase0Worker:
             snapshot.setdefault(name, "")
         ws.section_extracts = snapshot
 
-    def _ensure_rubric_snapshot(self, job: WorkspaceSetupJob) -> None:
-        ws = self.session.get(Workspace, job.workspace_id)
+    def _ensure_rubric_snapshot_on(self, session: Session, workspace_id: uuid.UUID) -> None:
+        ws = session.get(Workspace, workspace_id)
         if ws is None or ws.call_id is None:
             raise RuntimeError("workspace or call missing for rubric")
-        call = self.session.get(Call, ws.call_id)
+        call = session.get(Call, ws.call_id)
         if call is None:
             raise RuntimeError(f"call {ws.call_id} not found")
 
         if not rubric_is_fresh(
-            session=self.session, call=call, extractor_version=self.rubric_extractor_version
+            session=session, call=call, extractor_version=self.rubric_extractor_version
         ):
             payload = compute_rubric(call_text=call.full_text or "", client=self.client)
             persist_rubric(
-                session=self.session,
+                session=session,
                 call=call,
                 payload=payload,
                 model=self.client.model,
                 extractor_version=self.rubric_extractor_version,
                 source_hash=source_text_hash(call.full_text or ""),
             )
-        template = self.session.get(CallRubric, call.id)
+        template = session.get(CallRubric, call.id)
         if template is None:
             raise RuntimeError(f"rubric template for call {call.id} not found after fresh")
 
@@ -387,7 +366,7 @@ class Phase0Worker:
 
         # Audit: write the canonical starting state for forward-replay of
         # rubric edits (per the phased spec's audit-reconstruction contract).
-        self.session.add(
+        session.add(
             WorkspaceEvent(
                 workspace_id=ws.id,
                 kind="rubric_initialized",
@@ -399,19 +378,44 @@ class Phase0Worker:
             )
         )
 
-    def _run_steps(self, job: WorkspaceSetupJob) -> None:
-        # Steps 1-3: git init + snapshot call body + snapshot profile
-        self._snapshot_and_init_repo(job)
-        # Step 4: ensure section_extracts template + copy to workspace
-        self._ensure_section_extracts_snapshot(job)
-        # Step 5: ensure rubric template + copy to workspace + write
-        # rubric_initialized audit event
-        self._ensure_rubric_snapshot(job)
-        # Step 6: yield to owner rubric review. The rubric-review endpoint
-        # (Task 18) advances the job to 'done' and the workspace to
-        # current_phase='active' when the owner confirms.
-        job.status = "waiting_for_rubric_review"
-        # NOT setting completed_at — the job isn't terminal yet.
+    def _m2(self, job_id: uuid.UUID, workspace_id: uuid.UUID, pinned: str) -> None:
+        """Interim: preserves today's behaviour on its own session. Task 6
+        replaces this with the pre-compute liveness check, the Call pin and the
+        locked persist. `pinned` is accepted but unused until then."""
+        with self.session_factory() as s:
+            self._ensure_section_extracts_snapshot_on(s, workspace_id)
+            s.commit()
+
+    def _m3(self, job_id: uuid.UUID, workspace_id: uuid.UUID, pinned: str) -> None:
+        """Interim: preserves today's behaviour, including the terminal status
+        transition that `run_one` used to perform. Task 7 replaces this with the
+        atomic version."""
+        with self.session_factory() as s:
+            self._ensure_rubric_snapshot_on(s, workspace_id)
+            job = s.get(WorkspaceSetupJob, job_id)
+            if job is not None and job.status == "running":
+                job.status = "waiting_for_rubric_review"
+            s.commit()
+
+    def _fail(self, job_id: uuid.UUID, exc: BaseException) -> None:
+        """Interim: the failure semantics `run_one` had before this task —
+        attempts++, requeue below MAX_SETUP_ATTEMPTS, dead-letter at it. Task 8
+        adds the terminal path for cancelled/deleted workspaces."""
+        now = datetime.now(UTC)
+        with self.session_factory() as s:
+            job = s.get(WorkspaceSetupJob, job_id, with_for_update=True)
+            if job is None:
+                logger.error("phase0 setup job %s vanished before failure write", job_id)
+                return
+            job.attempts += 1
+            job.last_error = f"{type(exc).__name__}: {exc}"
+            if job.attempts >= MAX_SETUP_ATTEMPTS:
+                job.status = "failed"
+                job.completed_at = now
+            else:
+                job.status = "queued"
+                job.started_at = None
+            s.commit()
 
 
 def run_phase0_tick(
@@ -439,14 +443,14 @@ def run_phase0_tick(
         has_work = session.scalar(
             select(WorkspaceSetupJob.id).where(WorkspaceSetupJob.status == "queued").limit(1)
         )
-        if has_work is None:
-            return
+    if has_work is None:
+        return
 
-        worker = Phase0Worker(
-            session=session,
-            client=client_factory(),
-            extractor_version=extractor_version,
-            rubric_extractor_version=rubric_extractor_version,
-            workspaces_dir=workspaces_dir,
-        )
-        worker.run_one()
+    worker = Phase0Worker(
+        session_factory=session_factory,
+        client=client_factory(),
+        extractor_version=extractor_version,
+        rubric_extractor_version=rubric_extractor_version,
+        workspaces_dir=workspaces_dir,
+    )
+    worker.run_one()

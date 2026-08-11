@@ -203,6 +203,7 @@ def make_workspace(
     profile_id: int | None = None,
     ack_disclosure: bool = False,
     current_phase: str = "active",
+    with_call: bool = False,
 ) -> "Workspace":  # noqa: F821
     """Build a Workspace row. If `owner` not provided, creates a fresh User.
 
@@ -217,11 +218,18 @@ def make_workspace(
     instead of composer; turns rejected with 409). Tests that assert the
     setup default must NOT rely on this helper's default — they pin "setup"
     explicitly or build the row directly.
+
+    `with_call=True` creates and links a Call (via `make_call`, full_text=
+    "call body") when `call_id` isn't already given. Phase-0's M1 raises
+    without a call_id, so any test that drives the real Phase0Worker needs
+    one; callers that already pass `call_id` explicitly are unaffected.
     """
     from call_manager.db.models import Workspace, WorkspaceEvent
 
     if owner is None:
         owner = make_user(session)
+    if with_call and call_id is None:
+        call_id = make_call(session, full_text="call body").id
     ws = Workspace(
         title=title,
         owner_id=owner.id,

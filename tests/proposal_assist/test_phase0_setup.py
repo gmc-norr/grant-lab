@@ -35,11 +35,16 @@ def test_claim_next_returns_none_when_nothing_queued(pg_session_factory):
         assert claim_next_setup_job(session=s) is None
 
 
-def test_phase0_worker_transitions_to_done_on_success(
+def test_phase0_worker_runs_milestones_in_order_on_success(
     pg_session_factory,
     monkeypatch,
     tmp_path,
 ):
+    """Lifecycle-wrapper test. Post-Task-5, run_one() no longer decides the
+    terminal status itself (that moved into the milestones — see
+    test_phase0_yields_to_waiting_for_rubric_review for the real M1-M3 path);
+    it just claims a job and drives _m1 -> _m2 -> _m3 in order, threading the
+    pinned hash through, and does NOT call _fail when none of them raise."""
     with pg_session_factory() as s:
         ws = make_workspace(s)
         s.add(WorkspaceSetupJob(workspace_id=ws.id, status="queued"))
@@ -47,21 +52,42 @@ def test_phase0_worker_transitions_to_done_on_success(
         ws_id = ws.id
 
         worker = Phase0Worker(
-            session=s,
+            session_factory=pg_session_factory,
             client=Mock(model="claude-opus-4-7"),
             extractor_version="sections-v1",
             rubric_extractor_version="rubric-v1",
             workspaces_dir=str(tmp_path / "repos"),
         )
-        # Stub _run_steps so this test isolates the lifecycle wrapper.
-        # monkeypatch.setattr restores at test teardown — no leak.
-        monkeypatch.setattr(Phase0Worker, "_run_steps", lambda self, job: None)
+        calls: list[tuple] = []
 
-        worker.run_one()
+        def fake_m1(self, job_id, workspace_id):
+            calls.append(("m1",))
+            return "pinned"
+
+        monkeypatch.setattr(Phase0Worker, "_m1", fake_m1)
+        monkeypatch.setattr(
+            Phase0Worker,
+            "_m2",
+            lambda self, job_id, workspace_id, pinned: calls.append(("m2", pinned)),
+        )
+        monkeypatch.setattr(
+            Phase0Worker,
+            "_m3",
+            lambda self, job_id, workspace_id, pinned: calls.append(("m3", pinned)),
+        )
+        monkeypatch.setattr(
+            Phase0Worker, "_fail", lambda self, job_id, exc: calls.append(("fail", exc))
+        )
+
+        processed = worker.run_one()
+        assert processed is True
+        assert calls == [("m1",), ("m2", "pinned"), ("m3", "pinned")]
+
         s.expire_all()
         job = s.scalar(select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws_id))
-        assert job.status == "done"
-        assert job.completed_at is not None
+        # run_one() itself claimed the job (running), then left status alone —
+        # the (stubbed-out) milestones own any further transition.
+        assert job.status == "running"
 
 
 def test_phase0_worker_increments_attempts_and_marks_failed_after_5(
@@ -82,17 +108,17 @@ def test_phase0_worker_increments_attempts_and_marks_failed_after_5(
         ws_id = ws.id
 
         worker = Phase0Worker(
-            session=s,
+            session_factory=pg_session_factory,
             client=Mock(model="m"),
             extractor_version="sections-v1",
             rubric_extractor_version="rubric-v1",
             workspaces_dir=str(tmp_path / "repos"),
         )
 
-        def boom(self, job):
+        def boom(self, job_id, workspace_id):
             raise RuntimeError("transient")
 
-        monkeypatch.setattr(Phase0Worker, "_run_steps", boom)
+        monkeypatch.setattr(Phase0Worker, "_m1", boom)
 
         worker.run_one()
         s.expire_all()
@@ -120,17 +146,17 @@ def test_phase0_worker_requeues_on_transient_failure_below_attempt_cap(
         ws_id = ws.id
 
         worker = Phase0Worker(
-            session=s,
+            session_factory=pg_session_factory,
             client=Mock(model="m"),
             extractor_version="sections-v1",
             rubric_extractor_version="rubric-v1",
             workspaces_dir=str(tmp_path / "repos"),
         )
 
-        def boom(self, job):
+        def boom(self, job_id, workspace_id):
             raise RuntimeError("transient")
 
-        monkeypatch.setattr(Phase0Worker, "_run_steps", boom)
+        monkeypatch.setattr(Phase0Worker, "_m1", boom)
 
         worker.run_one()
         s.expire_all()
@@ -147,38 +173,39 @@ def test_phase0_steps_1_3_init_repo_and_snapshot(pg_session_factory, tmp_path):
         profile = make_profile(s)
         s.commit()
         ws = make_workspace(s, call_id=call.id, profile_id=profile.id)
-        s.add(WorkspaceSetupJob(workspace_id=ws.id, status="running"))
+        job = WorkspaceSetupJob(workspace_id=ws.id, status="running")
+        s.add(job)
         s.commit()
+        ws_id, job_id = ws.id, job.id
 
-        worker = Phase0Worker(
-            session=s,
-            client=Mock(model="claude-opus-4-7"),
-            extractor_version="sections-v1",
-            rubric_extractor_version="rubric-v1",
-            workspaces_dir=str(tmp_path / "repos"),
-        )
-        job = s.scalar(select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws.id))
-        worker._snapshot_and_init_repo(job)
-        s.commit()
+    worker = Phase0Worker(
+        session_factory=pg_session_factory,
+        client=Mock(model="claude-opus-4-7"),
+        extractor_version="sections-v1",
+        rubric_extractor_version="rubric-v1",
+        workspaces_dir=str(tmp_path / "repos"),
+    )
+    worker._m1(job_id, ws_id)
 
-        # repo exists with three empty artifact files
-        repo_dir = tmp_path / "repos" / str(ws.id) / "repo"
-        assert (repo_dir / ".git").is_dir()
-        for fname in ("proposal-spec.md", "proposal-plan.md", "proposal.md"):
-            assert (repo_dir / fname).is_file()
-            assert (repo_dir / fname).read_text() == ""
+    # repo exists with three empty artifact files
+    repo_dir = tmp_path / "repos" / str(ws_id) / "repo"
+    assert (repo_dir / ".git").is_dir()
+    for fname in ("proposal-spec.md", "proposal-plan.md", "proposal.md"):
+        assert (repo_dir / fname).is_file()
+        assert (repo_dir / fname).read_text() == ""
 
-        # one initial commit exists
-        out = subprocess.run(
-            ["git", "-C", str(repo_dir), "rev-list", "--count", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        assert int(out.stdout.strip()) == 1
+    # one initial commit exists
+    out = subprocess.run(
+        ["git", "-C", str(repo_dir), "rev-list", "--count", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert int(out.stdout.strip()) == 1
 
-        # snapshots populated
-        ws_refetch = s.get(Workspace, ws.id)
+    # snapshots populated
+    with pg_session_factory() as s:
+        ws_refetch = s.get(Workspace, ws_id)
         assert (call.full_text or "") in ws_refetch.call_body_snapshot
         assert ws_refetch.profile_desc_snapshot == profile.description
 
@@ -219,14 +246,13 @@ def test_phase0_step_4_copies_section_extracts_into_workspace(
         }
 
         worker = Phase0Worker(
-            session=s,
+            session_factory=pg_session_factory,
             client=client,
             extractor_version="sections-v1",
             rubric_extractor_version="rubric-v1",
             workspaces_dir=str(tmp_path / "repos"),
         )
-        job = s.scalar(select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws_id))
-        worker._ensure_section_extracts_snapshot(job)
+        worker._ensure_section_extracts_snapshot_on(s, ws_id)
         s.commit()
         ws_refetch = s.get(Workspace, ws_id)
         assert set(ws_refetch.section_extracts.keys()) == set(SECTION_NAMES)
@@ -267,14 +293,13 @@ def test_phase0_step_5_copies_rubric_into_workspace_and_writes_init_event(
         }
 
         worker = Phase0Worker(
-            session=s,
+            session_factory=pg_session_factory,
             client=client,
             extractor_version="sections-v1",
             rubric_extractor_version="rubric-v1",
             workspaces_dir=str(tmp_path / "repos"),
         )
-        job = s.scalar(select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws_id))
-        worker._ensure_rubric_snapshot(job)
+        worker._ensure_rubric_snapshot_on(s, ws_id)
         s.commit()
         ws_refetch = s.get(Workspace, ws_id)
         assert len(ws_refetch.rubric_criteria) == 1
@@ -361,7 +386,7 @@ def test_phase0_yields_to_waiting_for_rubric_review(
         ]
 
         worker = Phase0Worker(
-            session=s,
+            session_factory=pg_session_factory,
             client=client,
             extractor_version="sections-v1",
             rubric_extractor_version="rubric-v1",
@@ -388,44 +413,43 @@ def test_phase0_steps_1_3_recovers_from_aborted_git_init(
         call = make_call(s)
         s.commit()
         ws = make_workspace(s, call_id=call.id, current_phase="setup")
-        s.add(WorkspaceSetupJob(workspace_id=ws.id, status="running"))
+        job = WorkspaceSetupJob(workspace_id=ws.id, status="running")
+        s.add(job)
         s.commit()
-        ws_id = ws.id
+        ws_id, job_id = ws.id, job.id
 
-        # Manually `git init` the workspace repo dir but DON'T create
-        # files or commit — simulating a crash mid-init.
-        repo_dir = tmp_path / "repos" / str(ws_id) / "repo"
-        repo_dir.mkdir(parents=True, exist_ok=True)
-        subprocess.run(
-            ["git", "init", "-q", "-b", "main"],
-            cwd=repo_dir,
-            check=True,
-        )
-        assert (repo_dir / ".git").is_dir()
-        # No initial commit, no artifact files.
-        assert not (repo_dir / "proposal-spec.md").exists()
+    # Manually `git init` the workspace repo dir but DON'T create
+    # files or commit — simulating a crash mid-init.
+    repo_dir = tmp_path / "repos" / str(ws_id) / "repo"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "init", "-q", "-b", "main"],
+        cwd=repo_dir,
+        check=True,
+    )
+    assert (repo_dir / ".git").is_dir()
+    # No initial commit, no artifact files.
+    assert not (repo_dir / "proposal-spec.md").exists()
 
-        worker = Phase0Worker(
-            session=s,
-            client=Mock(model="claude-opus-4-7"),
-            extractor_version="sections-v1",
-            rubric_extractor_version="rubric-v1",
-            workspaces_dir=str(tmp_path / "repos"),
-        )
-        job = s.scalar(select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws_id))
-        worker._snapshot_and_init_repo(job)
-        s.commit()
+    worker = Phase0Worker(
+        session_factory=pg_session_factory,
+        client=Mock(model="claude-opus-4-7"),
+        extractor_version="sections-v1",
+        rubric_extractor_version="rubric-v1",
+        workspaces_dir=str(tmp_path / "repos"),
+    )
+    worker._m1(job_id, ws_id)
 
-        # Recovery: artifact files + initial commit now exist.
-        for fname in ("proposal-spec.md", "proposal-plan.md", "proposal.md"):
-            assert (repo_dir / fname).is_file()
-        out = subprocess.run(
-            ["git", "-C", str(repo_dir), "rev-list", "--count", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        assert int(out.stdout.strip()) == 1
+    # Recovery: artifact files + initial commit now exist.
+    for fname in ("proposal-spec.md", "proposal-plan.md", "proposal.md"):
+        assert (repo_dir / fname).is_file()
+    out = subprocess.run(
+        ["git", "-C", str(repo_dir), "rev-list", "--count", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert int(out.stdout.strip()) == 1
 
 
 def test_claim_next_returns_oldest_by_queued_at(pg_session_factory):
@@ -528,7 +552,7 @@ def test_phase0_step_4_second_call_with_unchanged_call_skips_llm(
     the section-extracts snapshot step twice against the same workspace with
     an unchanged extractor_version and unchanged call text must issue
     exactly one LLM call in total — proving the `if not fresh:` short-circuit
-    in _ensure_section_extracts_snapshot actually gates the compute+persist
+    in _ensure_section_extracts_snapshot_on actually gates the compute+persist
     path, not just that the freshness predicate itself is correct."""
     with pg_session_factory() as s:
         call = make_call(s)
@@ -562,21 +586,20 @@ def test_phase0_step_4_second_call_with_unchanged_call_skips_llm(
         }
 
         worker = Phase0Worker(
-            session=s,
+            session_factory=pg_session_factory,
             client=client,
             extractor_version="sections-v1",
             rubric_extractor_version="rubric-v1",
             workspaces_dir=str(tmp_path / "repos"),
         )
-        job = s.scalar(select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws_id))
 
-        worker._ensure_section_extracts_snapshot(job)
+        worker._ensure_section_extracts_snapshot_on(s, ws_id)
         s.commit()
         assert client.chat.call_count == 1
 
         # Second run: same extractor_version, same call text — cached rows
         # are fresh, so this must NOT pay for another LLM call.
-        worker._ensure_section_extracts_snapshot(job)
+        worker._ensure_section_extracts_snapshot_on(s, ws_id)
         s.commit()
         assert client.chat.call_count == 1
 
@@ -591,7 +614,7 @@ def test_phase0_step_5_second_workspace_same_call_skips_llm(
     the workspace, but `workspace_events` enforces at most one
     'rubric_initialized' audit event per workspace (migration 0061) — so a
     single workspace's setup step can only legitimately run
-    _ensure_rubric_snapshot once. The real case the freshness guard exists
+    _ensure_rubric_snapshot_on once. The real case the freshness guard exists
     for is two DIFFERENT workspaces pointing at the SAME call (two PIs
     setting up proposal workspaces against one funding call): the second
     workspace's setup must reuse the already-fresh call-level rubric
@@ -633,23 +656,21 @@ def test_phase0_step_5_second_workspace_same_call_skips_llm(
         }
 
         worker = Phase0Worker(
-            session=s,
+            session_factory=pg_session_factory,
             client=client,
             extractor_version="sections-v1",
             rubric_extractor_version="rubric-v1",
             workspaces_dir=str(tmp_path / "repos"),
         )
 
-        job1 = s.scalar(select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws1_id))
-        worker._ensure_rubric_snapshot(job1)
+        worker._ensure_rubric_snapshot_on(s, ws1_id)
         s.commit()
         assert client.chat.call_count == 1
 
         # Second workspace, same call, same rubric_extractor_version, call
         # text unchanged — the call-level rubric template is fresh, so this
         # must NOT pay for another LLM call.
-        job2 = s.scalar(select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws2_id))
-        worker._ensure_rubric_snapshot(job2)
+        worker._ensure_rubric_snapshot_on(s, ws2_id)
         s.commit()
         assert client.chat.call_count == 1
 

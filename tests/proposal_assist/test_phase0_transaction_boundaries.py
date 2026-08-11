@@ -1,10 +1,41 @@
 """Phase-0 milestone boundaries: locks, Call pinning, bounded retry."""
 
 import subprocess
+import threading
+import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 
+from call_manager.db.models import Workspace, WorkspaceSetupJob
+from call_manager.proposal_assist.drafting.locking import (
+    CommitMutexTimeout,
+    acquire_commit_mutex,
+)
+from call_manager.proposal_assist.extractors.sections import SECTION_NAMES
 from call_manager.proposal_assist.phases import setup as setup_mod
+from call_manager.proposal_assist.phases.setup import Phase0Worker
+from tests.proposal_assist.conftest import make_workspace
+
+
+@dataclass
+class _StubClient:
+    model: str = "stub-model"
+
+    def chat(self, *, messages, response_format=None):
+        return {
+            "sections": {name: f"{name} text" for name in SECTION_NAMES},
+            "criteria": [{"name": "Excellence", "weight": 1}],
+            "funder_notes": "notes",
+        }
+
+
+@pytest.fixture
+def phase0_client():
+    return _StubClient()
 
 
 def test_git_runs_hermetically_and_with_a_timeout(tmp_path, monkeypatch):
@@ -36,3 +67,98 @@ def test_a_hung_git_raises_rather_than_blocking(tmp_path, monkeypatch):
     monkeypatch.setattr(setup_mod.subprocess, "run", _boom)
     with pytest.raises(subprocess.TimeoutExpired):
         setup_mod._run_git(["init"], cwd=tmp_path)
+
+
+def _worker(pg_session_factory, tmp_path, client):
+    return Phase0Worker(
+        session_factory=pg_session_factory,
+        client=client,
+        extractor_version="v1",
+        rubric_extractor_version="v1",
+        workspaces_dir=str(tmp_path),
+    )
+
+
+def test_m1_creates_the_repo_and_pins_the_call_hash(
+    pg_session_factory, current_user, tmp_path, phase0_client
+):
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        job = WorkspaceSetupJob(workspace_id=ws.id, status="running")
+        s.add(job)
+        s.commit()
+        job_id, ws_id = job.id, ws.id
+
+    pinned = _worker(pg_session_factory, tmp_path, phase0_client)._m1(job_id, ws_id)
+
+    assert isinstance(pinned, str) and pinned
+    assert (tmp_path / str(ws_id) / "repo" / ".git").is_dir()
+    with pg_session_factory() as s:
+        assert s.get(Workspace, ws_id).snapshot_refreshed_at is not None
+
+
+def test_m1_refuses_a_deleted_workspace_and_creates_nothing(
+    pg_session_factory, current_user, tmp_path, phase0_client
+):
+    """The headline gate: no post-delete repo creation."""
+    from call_manager.proposal_assist.drafting.locking import WorkspaceDeleted
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        ws.soft_deleted_at = datetime.now(UTC)
+        s.flush()
+        job = WorkspaceSetupJob(workspace_id=ws.id, status="running")
+        s.add(job)
+        s.commit()
+        job_id, ws_id = job.id, ws.id
+
+    with pytest.raises(WorkspaceDeleted):
+        _worker(pg_session_factory, tmp_path, phase0_client)._m1(job_id, ws_id)
+
+    assert not (tmp_path / str(ws_id)).exists()
+
+
+def test_a_wedged_m1_makes_delete_time_out_at_the_mutex_not_the_row(
+    pg_session_factory, current_user, tmp_path, phase0_client, monkeypatch
+):
+    """Gate 3b. The wedge is a FILESYSTEM call, not a subprocess: if it were a
+    subprocess, _GIT_TIMEOUT_SECONDS could release the row before the mutex
+    timeout and the result would depend on which timeout fired first."""
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        s.add(WorkspaceSetupJob(workspace_id=ws.id, status="running"))
+        s.commit()
+        ws_id = ws.id
+        job_id = s.scalars(
+            select(WorkspaceSetupJob.id).where(WorkspaceSetupJob.workspace_id == ws_id)
+        ).one()
+
+    inside = threading.Event()
+    release = threading.Event()
+    real_mkdir = Path.mkdir
+
+    def _blocking_mkdir(self, *a, **kw):
+        real_mkdir(self, *a, **kw)
+        if self.name == "repo":
+            inside.set()
+            release.wait(timeout=30)
+
+    monkeypatch.setattr(Path, "mkdir", _blocking_mkdir)
+
+    worker = _worker(pg_session_factory, tmp_path, phase0_client)
+    t = threading.Thread(target=lambda: worker._m1(job_id, ws_id))
+    t.start()
+    try:
+        assert inside.wait(timeout=10)
+        started = time.monotonic()
+        with pg_session_factory() as s2:
+            with pytest.raises(CommitMutexTimeout):
+                acquire_commit_mutex(s2, ws_id, timeout_seconds=2)
+            s2.rollback()
+        # It returned at the mutex timeout, not by hanging on the row lock.
+        assert time.monotonic() - started < 10
+    finally:
+        release.set()
+        t.join(timeout=30)

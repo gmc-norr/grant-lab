@@ -108,21 +108,20 @@ def test_phase0_happy_path_workspace_to_spec(
         call_id = call.id
 
     # === Step B: Run the Phase 0 worker directly (skipping the scheduler) ===
-    with pg_session_factory() as s:
-        llm = Mock()
-        llm.model = "claude-opus-4-7"
-        # Two LLM calls expected: sections + rubric.
-        llm.chat.side_effect = [_section_envelope(), _rubric_envelope()]
+    llm = Mock()
+    llm.model = "claude-opus-4-7"
+    # Two LLM calls expected: sections + rubric.
+    llm.chat.side_effect = [_section_envelope(), _rubric_envelope()]
 
-        worker = Phase0Worker(
-            session=s,
-            client=llm,
-            extractor_version="sections-v1",
-            rubric_extractor_version="rubric-v1",
-            workspaces_dir=str(tmp_path / "repos"),
-        )
-        processed = worker.run_one()
-        assert processed is True
+    worker = Phase0Worker(
+        session_factory=pg_session_factory,
+        client=llm,
+        extractor_version="sections-v1",
+        rubric_extractor_version="rubric-v1",
+        workspaces_dir=str(tmp_path / "repos"),
+    )
+    processed = worker.run_one()
+    assert processed is True
 
     # === Step C: Assert the post-Phase-0 state ===
     with pg_session_factory() as s:
