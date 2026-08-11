@@ -26,13 +26,15 @@ import logging
 import os
 import subprocess
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from call_manager.db.models import (
@@ -79,6 +81,19 @@ class WorkspaceGoneDuringSetup(RuntimeError):
     by acquire_commit_mutex_live in _m1 — straight to a terminal 'cancelled'
     status rather than a requeue; see _fail's docstring."""
 
+
+class SetupRowLockTimeout(RuntimeError):
+    """A persist transaction's SET LOCAL lock_timeout fired while waiting on a
+    row lock — chiefly the Call row, which an ingestion batch upsert holds for
+    its whole loop (src/call_manager/ingestion/orchestrator.py). Deliberately
+    an ORDINARY failure, not a WorkspaceGoneDuringSetup: lock contention says
+    nothing about whether the workspace is gone, so _fail's default branch is
+    right — consume an attempt and requeue (or dead-letter at
+    MAX_SETUP_ATTEMPTS) rather than cancel. The whole point of the timeout is
+    to stop this milestone from pinning the workspace row indefinitely while
+    it waits; letting the wait be unbounded is the bug this exists to avoid.
+    """
+
 # A setup job that's been 'running' longer than this is presumed abandoned —
 # the worker process crashed between the status='running' commit and a terminal
 # transition. Phase-0 extraction (a couple of LLM calls) is well under this, so
@@ -90,6 +105,44 @@ STUCK_SETUP_AFTER = timedelta(minutes=30)
 # ceiling: subprocess.run without a timeout can block forever and no CI duration
 # assertion can prevent that in production.
 _GIT_TIMEOUT_SECONDS = 30.0
+
+# M2's and M3's persist transactions hold the workspace row (and, in M3, the
+# job row) while acquiring the Call row with_for_update — and the Call row can
+# be held for a while by an unrelated writer (an ingestion batch upsert holds
+# every touched Call row for its whole loop; see
+# src/call_manager/ingestion/orchestrator.py). Unlike the commit mutex, a
+# plain row lock has no timeout of its own, and a DELETE past the commit mutex
+# updates the workspace row with lock_timeout back at DEFAULT — i.e. no bound
+# at all — so an unbounded wait here would pin that row against a DELETE
+# indefinitely. Matches acquire_commit_mutex_live's own default
+# (drafting/locking.py) so M1's and M2/M3's contention bounds agree.
+_ROW_LOCK_TIMEOUT_SECONDS = 10
+
+
+@contextmanager
+def _bounded_row_locks(session: Session) -> Iterator[None]:
+    """SET LOCAL lock_timeout around a block of `with_for_update` acquisitions,
+    following acquire_commit_mutex's idiom (drafting/locking.py) exactly: SET
+    LOCAL before the locking reads, translate a 55P03 (lock_not_available) into
+    a typed exception, and restore DEFAULT only on the success path — a
+    timeout aborts the whole Postgres transaction, so there is nothing left to
+    restore it for; the caller's rollback (on `with self.session_factory()`
+    exit) discards the LOCAL setting along with everything else.
+    """
+    timeout_ms = int(_ROW_LOCK_TIMEOUT_SECONDS * 1000)
+    session.execute(text(f"SET LOCAL lock_timeout = '{timeout_ms}ms'"))
+    try:
+        yield
+    except OperationalError as exc:
+        sqlstate = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
+        if sqlstate == "55P03":
+            raise SetupRowLockTimeout(
+                "timed out waiting for a row lock — likely the Call row, held "
+                "by a concurrent ingestion batch or another Phase-0 worker"
+            ) from exc
+        raise
+    else:
+        session.execute(text("SET LOCAL lock_timeout = DEFAULT"))
 
 
 def _git_env() -> dict[str, str]:
@@ -360,13 +413,17 @@ class Phase0Worker:
         )
 
         with self.session_factory() as s:
-            ws = s.get(Workspace, workspace_id, with_for_update=True)
-            if ws is None or ws.soft_deleted_at is not None:
-                raise WorkspaceGoneDuringSetup(f"workspace {workspace_id} deleted")
-            # Workspace row THEN Call row — the normative order. Two workspaces
-            # sharing a Call therefore queue rather than deadlock, and neither
-            # inverts against the delete transaction's workspace-row update.
-            call = s.get(Call, call_id, with_for_update=True)
+            with _bounded_row_locks(s):
+                ws = s.get(Workspace, workspace_id, with_for_update=True)
+                if ws is None or ws.soft_deleted_at is not None:
+                    raise WorkspaceGoneDuringSetup(f"workspace {workspace_id} deleted")
+                # Workspace row THEN Call row — the normative order. Two
+                # workspaces sharing a Call therefore queue rather than
+                # deadlock, and neither inverts against the delete
+                # transaction's workspace-row update. Bounded (see
+                # _bounded_row_locks) so a wait on the Call row can't pin this
+                # workspace row against a DELETE indefinitely.
+                call = s.get(Call, call_id, with_for_update=True)
             if call is None:
                 raise RuntimeError(f"call {call_id} not found")
             if source_text_hash(call.full_text or "") != pinned:
@@ -408,6 +465,16 @@ class Phase0Worker:
         (which corrupts forward-replay of rubric edits), and a cancel landing in
         that gap would be overwritten by the success finalizer. The status write
         is a compare-and-set on 'running' so a concurrent cancel wins.
+
+        Lock order: job (workspace_setup_jobs) THEN workspace THEN Call. Job
+        first because the web `activate` route (rubric.py) locks
+        workspace_setup_jobs before it flushes its workspace-row update —
+        locking workspace before job here would invert against that route and
+        open a real deadlock shape (Postgres 40P01). The delete path never
+        locks setup-job rows, so putting job first costs delete nothing. Each
+        with_for_update acquisition below is bounded (_bounded_row_locks) so a
+        wait on the Call row — held for a whole ingestion batch's upsert loop —
+        can't pin the workspace (or job) row against a DELETE indefinitely.
         """
         self._assert_live(job_id, workspace_id)
 
@@ -425,21 +492,23 @@ class Phase0Worker:
         payload = None if fresh else compute_rubric(call_text=call_text, client=self.client)
 
         with self.session_factory() as s:
-            ws = s.get(Workspace, workspace_id, with_for_update=True)
-            if ws is None or ws.soft_deleted_at is not None:
-                raise WorkspaceGoneDuringSetup(f"workspace {workspace_id} deleted")
-            call = s.get(Call, call_id, with_for_update=True)
+            with _bounded_row_locks(s):
+                # job → ws → call: see the docstring's "Lock order" note.
+                job = s.get(WorkspaceSetupJob, job_id, with_for_update=True)
+                if job is None or job.status != "running":
+                    raise WorkspaceGoneDuringSetup(
+                        f"job {job_id} is no longer running (a cancel won)"
+                    )
+
+                ws = s.get(Workspace, workspace_id, with_for_update=True)
+                if ws is None or ws.soft_deleted_at is not None:
+                    raise WorkspaceGoneDuringSetup(f"workspace {workspace_id} deleted")
+                call = s.get(Call, call_id, with_for_update=True)
             if call is None:
                 raise RuntimeError(f"call {call_id} not found")
             if source_text_hash(call.full_text or "") != pinned:
                 raise CallSourceChanged(
                     f"call {call_id} was re-ingested during setup of workspace {workspace_id}"
-                )
-
-            job = s.get(WorkspaceSetupJob, job_id, with_for_update=True)
-            if job is None or job.status != "running":
-                raise WorkspaceGoneDuringSetup(
-                    f"job {job_id} is no longer running (a cancel won)"
                 )
 
             if payload is not None and not rubric_is_fresh(

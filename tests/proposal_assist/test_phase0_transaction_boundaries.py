@@ -25,13 +25,14 @@ from call_manager.proposal_assist.drafting.locking import (
 )
 from call_manager.proposal_assist.extractors.refresh import persist_section_extracts
 from call_manager.proposal_assist.extractors.sections import SECTION_NAMES
+from call_manager.proposal_assist.hashing import source_text_hash
 from call_manager.proposal_assist.phases import setup as setup_mod
 from call_manager.proposal_assist.phases.setup import (
     CallSourceChanged,
     Phase0Worker,
     WorkspaceGoneDuringSetup,
 )
-from tests.proposal_assist.conftest import make_workspace
+from tests.proposal_assist.conftest import make_call, make_workspace
 
 
 @dataclass
@@ -344,8 +345,16 @@ def test_m2_does_not_start_a_cloud_call_for_a_deleted_workspace(
 def test_m2_discards_a_payload_another_worker_made_redundant(
     pg_session_factory, current_user, tmp_path, phase0_client, monkeypatch
 ):
-    """Two workspaces share a Call. If the cache went fresh while we computed,
-    snapshot the canonical rows rather than overwriting them.
+    """If the shared Call's extract cache goes fresh while we compute (another
+    worker or workspace's _m2 wins the race first), snapshot the canonical
+    rows rather than overwrite them with our own now-redundant payload.
+
+    This is a SINGLE workspace with the other worker simulated inline (a
+    direct persist_section_extracts call from a second session, not a second
+    real _m2 run) — it exercises the under-lock freshness re-check in
+    isolation. For two workspaces actually racing two concurrent `_m2` calls
+    against the same Call row, see
+    test_two_workspaces_sharing_a_call_serialize_m2_on_the_call_row below.
 
     The other worker's persist must land DURING the compute window — while
     _m2 holds no lock — so the pre-lock freshness check (which runs before
@@ -388,6 +397,124 @@ def test_m2_discards_a_payload_another_worker_made_redundant(
             select(CallSectionExtract).where(CallSectionExtract.call_id == ws.call_id)
         ).all()
         assert {r.extracted_by_model for r in rows} == {"other-worker"}
+
+
+def test_two_workspaces_sharing_a_call_serialize_m2_on_the_call_row(
+    pg_session_factory, current_user, tmp_path, phase0_client, monkeypatch
+):
+    """Gate 6. Two DIFFERENT workspaces, ONE shared Call, two REAL concurrent
+    `_m2` runs (actual threads, not simulated interference like the test
+    above) — they must serialize on the Call row's `with_for_update` lock, and
+    the shared `CallSectionExtract` rows must end consistent (one section set,
+    one model, both workspaces snapshot it).
+
+    Mechanism: patch `persist_section_extracts` so whichever thread gets there
+    FIRST (there's a real race — either workspace's job can win) pauses right
+    after it has locked the Call row but before it commits. The other thread's
+    own `with_for_update` SELECT on that same Call row blocks in Postgres for
+    the whole pause — proven by asserting it has NOT finished `_m2` while the
+    winner is paused, then that it DOES finish shortly after we release the
+    winner. A version of _m2 that dropped `with_for_update` on the Call row
+    would let the loser run straight through instead of blocking, so this
+    assertion is the one that actually discriminates the lock (verified by
+    hand: dropping `with_for_update=True` from the Call row acquisition in
+    _m2 turns this red — either on the "loser already finished" assertion or,
+    if timing races the other way, on a primary-key IntegrityError from both
+    threads inserting the same (call_id, section) rows unguarded).
+    """
+    with pg_session_factory() as s:
+        call = make_call(s, external_id="EXT-shared-m2")
+        ws_a = make_workspace(s, owner=current_user, call_id=call.id)
+        ws_b = make_workspace(s, owner=current_user, call_id=call.id)
+        s.add(WorkspaceSetupJob(workspace_id=ws_a.id, status="running"))
+        s.add(WorkspaceSetupJob(workspace_id=ws_b.id, status="running"))
+        s.flush()
+        job_a_id = s.scalars(
+            select(WorkspaceSetupJob.id).where(WorkspaceSetupJob.workspace_id == ws_a.id)
+        ).one()
+        job_b_id = s.scalars(
+            select(WorkspaceSetupJob.id).where(WorkspaceSetupJob.workspace_id == ws_b.id)
+        ).one()
+        call_id, ws_a_id, ws_b_id = call.id, ws_a.id, ws_b.id
+        pinned = source_text_hash(call.full_text or "")
+        s.commit()
+
+    w = _worker(pg_session_factory, tmp_path, phase0_client)
+
+    claim_lock = threading.Lock()
+    winner_tid: dict[str, int | None] = {"tid": None}
+    winner_paused = threading.Event()
+    release_winner = threading.Event()
+    done = {"a": threading.Event(), "b": threading.Event()}
+    errors: dict[str, BaseException] = {}
+
+    real_persist = setup_mod.persist_section_extracts
+
+    def _pausing_persist(*, session, call, **kwargs):
+        with claim_lock:
+            is_winner = winner_tid["tid"] is None
+            if is_winner:
+                winner_tid["tid"] = threading.get_ident()
+        if is_winner:
+            winner_paused.set()
+            release_winner.wait(timeout=10)
+        return real_persist(session=session, call=call, **kwargs)
+
+    monkeypatch.setattr(setup_mod, "persist_section_extracts", _pausing_persist)
+
+    def _run(job_id, ws_id, key):
+        try:
+            w._m2(job_id, ws_id, pinned)
+        except BaseException as exc:  # noqa: BLE001 — surfaced via `errors`, not silenced
+            errors[key] = exc
+        finally:
+            done[key].set()
+
+    t_a = threading.Thread(target=_run, args=(job_a_id, ws_a_id, "a"))
+    t_b = threading.Thread(target=_run, args=(job_b_id, ws_b_id, "b"))
+    t_a.start()
+    t_b.start()
+    try:
+        assert winner_paused.wait(timeout=10), "neither thread reached the persist point"
+        loser_key = "b" if winner_tid["tid"] == t_a.ident else "a"
+
+        # The loser is blocked in Postgres acquiring the Call row the winner
+        # is still holding (uncommitted) — it must NOT have finished yet.
+        assert not done[loser_key].wait(timeout=0.5), (
+            f"the loser ({loser_key}) finished _m2 before the winner released "
+            "the Call row — they did not serialize on it"
+        )
+
+        release_winner.set()
+
+        assert done[loser_key].wait(timeout=10), "loser never unblocked after release"
+        assert t_a.join(timeout=10) is None and not t_a.is_alive()
+        assert t_b.join(timeout=10) is None and not t_b.is_alive()
+    finally:
+        release_winner.set()
+        t_a.join(timeout=10)
+        t_b.join(timeout=10)
+
+    assert errors == {}
+
+    with pg_session_factory() as s:
+        rows = s.scalars(
+            select(CallSectionExtract).where(CallSectionExtract.call_id == call_id)
+        ).all()
+        # One consistent set of section rows for the shared Call — the loser's
+        # under-lock freshness re-check saw the winner's committed rows and
+        # discarded its own now-redundant payload instead of persisting a
+        # second, conflicting copy.
+        assert {r.section for r in rows} == set(SECTION_NAMES)
+        assert len({r.extracted_by_model for r in rows}) == 1
+
+        ws_a_after = s.get(Workspace, ws_a_id)
+        ws_b_after = s.get(Workspace, ws_b_id)
+        assert set(ws_a_after.section_extracts) == set(SECTION_NAMES)
+        assert set(ws_b_after.section_extracts) == set(SECTION_NAMES)
+        # Both workspaces snapshot the SAME canonical text (whichever model
+        # won), not a mix of the winner's and loser's own computed payloads.
+        assert ws_a_after.section_extracts == ws_b_after.section_extracts
 
 
 def test_m3_writes_rubric_event_and_status_atomically(
