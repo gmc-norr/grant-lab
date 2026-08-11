@@ -543,3 +543,62 @@ def test_m3_raises_when_the_call_changes_during_the_compute_window(
 
     with pg_session_factory() as s:
         assert s.get(WorkspaceSetupJob, job_id).status == "running"
+
+
+def test_a_changed_call_consumes_attempts_and_dead_letters(
+    pg_session_factory, current_user, tmp_path, phase0_client
+):
+    """Gate 5b: bounded retry, not a spin. Attempts 1-4 requeue, 5 dead-letters."""
+    job_id, ws_id = _queued_job(pg_session_factory, current_user)
+    w = _worker(pg_session_factory, tmp_path, phase0_client)
+
+    for expected_attempt in range(1, 5):
+        w._fail(job_id, CallSourceChanged("call re-ingested"))
+        with pg_session_factory() as s:
+            job = s.get(WorkspaceSetupJob, job_id)
+            assert job.attempts == expected_attempt
+            assert job.status == "queued"
+            assert job.started_at is None
+            assert "re-ingested" in job.last_error
+        with pg_session_factory() as s:
+            s.get(WorkspaceSetupJob, job_id).status = "running"
+            s.commit()
+
+    w._fail(job_id, CallSourceChanged("call re-ingested"))
+    with pg_session_factory() as s:
+        job = s.get(WorkspaceSetupJob, job_id)
+        assert job.attempts == 5
+        assert job.status == "failed"
+        assert job.completed_at is not None
+
+
+def test_a_deleted_workspace_takes_the_terminal_path_not_the_retry_path(
+    pg_session_factory, current_user, tmp_path, phase0_client
+):
+    job_id, ws_id = _queued_job(pg_session_factory, current_user)
+    with pg_session_factory() as s:
+        s.get(Workspace, ws_id).soft_deleted_at = datetime.now(UTC)
+        s.commit()
+
+    _worker(pg_session_factory, tmp_path, phase0_client)._fail(
+        job_id, WorkspaceGoneDuringSetup("deleted")
+    )
+
+    with pg_session_factory() as s:
+        job = s.get(WorkspaceSetupJob, job_id)
+        assert job.status == "cancelled"
+        assert job.completed_at is not None
+
+
+def test_fail_never_resurrects_an_already_terminal_job(
+    pg_session_factory, current_user, tmp_path, phase0_client
+):
+    job_id, ws_id = _queued_job(pg_session_factory, current_user)
+    with pg_session_factory() as s:
+        s.get(WorkspaceSetupJob, job_id).status = "cancelled"
+        s.commit()
+
+    _worker(pg_session_factory, tmp_path, phase0_client)._fail(job_id, RuntimeError("boom"))
+
+    with pg_session_factory() as s:
+        assert s.get(WorkspaceSetupJob, job_id).status == "cancelled"

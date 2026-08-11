@@ -3,10 +3,14 @@
 Lifecycle:
     queued
       └─ claim_next_setup_job (FOR UPDATE SKIP LOCKED) → running, started_at
-            ├─ _m1 → _m2 → _m3 OK, rubric review pending → waiting_for_rubric_review
-            ├─ _m1 → _m2 → _m3 OK, rubric reviewed       → done, completed_at
-            ├─ any milestone raises + attempts < 5       → queued, attempts++
-            └─ any milestone raises + attempts == 5      → failed, completed_at
+            ├─ _m1 → _m2 → _m3 OK, rubric review pending    → waiting_for_rubric_review
+            ├─ _m1 → _m2 → _m3 OK, rubric reviewed          → done, completed_at
+            ├─ workspace deleted/job cancelled (any raise)  → cancelled, completed_at
+            ├─ other raise + attempts < 5                   → queued, attempts++
+            └─ other raise + attempts == 5                  → failed, completed_at
+
+_fail (called from run_one's except block) is the single place a job leaves
+'running' on any error path — see its docstring for the exact ordering.
 
 Each milestone (_m1, _m2, _m3) opens, uses and commits its own short-lived
 session via Phase0Worker.session_factory — no session is held across two
@@ -40,7 +44,10 @@ from call_manager.db.models import (
     WorkspaceEvent,
     WorkspaceSetupJob,
 )
-from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex_live
+from call_manager.proposal_assist.drafting.locking import (
+    WorkspaceDeleted,
+    acquire_commit_mutex_live,
+)
 from call_manager.proposal_assist.extractors.refresh import (
     compute_rubric,
     compute_section_extracts,
@@ -68,9 +75,9 @@ class CallSourceChanged(RuntimeError):
 
 class WorkspaceGoneDuringSetup(RuntimeError):
     """The workspace was soft-deleted, or the job was cancelled, between
-    milestones. The terminal-status routing (never a requeue) arrives with
-    the failure-path task; today it goes through the same requeue/dead-letter
-    path as any other milestone failure."""
+    milestones. Phase0Worker._fail routes this — and WorkspaceDeleted raised
+    by acquire_commit_mutex_live in _m1 — straight to a terminal 'cancelled'
+    status rather than a requeue; see _fail's docstring."""
 
 # A setup job that's been 'running' longer than this is presumed abandoned —
 # the worker process crashed between the status='running' commit and a terminal
@@ -475,23 +482,62 @@ class Phase0Worker:
             s.commit()
 
     def _fail(self, job_id: uuid.UUID, exc: BaseException) -> None:
-        """Interim: the failure semantics `run_one` had before this task —
-        attempts++, requeue below MAX_SETUP_ATTEMPTS, dead-letter at it. Task 8
-        adds the terminal path for cancelled/deleted workspaces."""
+        """Record the outcome of a failed run in its own short transaction.
+
+        Order matters: a job that is already terminal is left alone, and a
+        deleted/cancelled job goes terminal rather than back to 'queued'. The
+        old code requeued unconditionally while attempts < MAX, which would send
+        a cancelled job straight back into the queue.
+        """
         now = datetime.now(UTC)
         with self.session_factory() as s:
             job = s.get(WorkspaceSetupJob, job_id, with_for_update=True)
             if job is None:
                 logger.error("phase0 setup job %s vanished before failure write", job_id)
                 return
+            if job.status in ("cancelled", "failed", "done", "waiting_for_rubric_review"):
+                return  # already terminal (or already yielded) — never resurrect
+
+            deleted = s.scalar(
+                select(Workspace.soft_deleted_at).where(Workspace.id == job.workspace_id)
+            )
+
             job.attempts += 1
             job.last_error = f"{type(exc).__name__}: {exc}"
-            if job.attempts >= MAX_SETUP_ATTEMPTS:
+
+            # WorkspaceDeleted is _m1's own signal (raised by
+            # acquire_commit_mutex_live before anything is mutated);
+            # WorkspaceGoneDuringSetup is _m2/_m3's. Both mean the same thing
+            # here — route terminal, not just the locally-defined exception.
+            if deleted is not None or isinstance(exc, (WorkspaceGoneDuringSetup, WorkspaceDeleted)):
+                job.status = "cancelled"
+                job.completed_at = now
+                logger.info(
+                    "phase0.cancelled",
+                    extra={
+                        "event": "phase0_cancelled",
+                        "job_id": str(job_id),
+                        "workspace_id": str(job.workspace_id),
+                    },
+                )
+            elif job.attempts >= MAX_SETUP_ATTEMPTS:
                 job.status = "failed"
                 job.completed_at = now
+                logger.exception(
+                    "phase0 setup job %s failed permanently after %d attempts",
+                    job_id,
+                    job.attempts,
+                )
             else:
                 job.status = "queued"
                 job.started_at = None
+                logger.warning(
+                    "phase0 setup job %s transient failure (attempt %d/%d): %s",
+                    job_id,
+                    job.attempts,
+                    MAX_SETUP_ATTEMPTS,
+                    exc,
+                )
             s.commit()
 
 
