@@ -637,7 +637,7 @@ uv run pytest tests/proposal_assist/test_extractors_refresh.py -v > /tmp/t2.txt 
 
 Expected: PASS (10 passed).
 
-`setup.py` still imports the removed names, so the wider suite is red until Task 5. That is expected; do not "fix" it by keeping the old functions.
+`setup.py` still imports the removed names at this point. Do NOT keep the old functions as shims — instead, in the SAME task, update `setup.py`'s import block and its two call sites to inline the freshness/compute/persist composition. The suite must be green when this task ends: the import failure otherwise propagates through a root autouse fixture in `tests/conftest.py` and every test file in the repo errors in teardown.
 
 - [ ] **Step 5: Commit**
 
@@ -785,7 +785,7 @@ Then replace the four existing git invocations inside `_snapshot_and_init_repo` 
 uv run pytest tests/proposal_assist/test_phase0_transaction_boundaries.py tests/proposal_assist/test_phase0_setup.py -v > /tmp/t3.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -40 /tmp/t3.txt
 ```
 
-Expected: the two new tests PASS. `test_phase0_setup.py` may error at import because of Task 2's removed names; that is expected until Task 5.
+Expected: the two new tests PASS, and `test_phase0_setup.py` stays green — Task 2 left the tree importable.
 
 - [ ] **Step 5: Commit**
 
@@ -1176,22 +1176,54 @@ class Phase0Worker:
             )
 ```
 
-Delete the old `_snapshot_and_init_repo` and `_run_steps`; `_m2` and `_m3` arrive in Tasks 6 and 7, and `_fail` in Task 8.
+Delete the old `_snapshot_and_init_repo` and `_run_steps`. The real `_m2` and `_m3` arrive in Tasks 6 and 7, and the real `_fail` in Task 8.
 
-**This task deliberately leaves the wider suite red, and that is the accepted definition of done here.** `Phase0Worker` is mid-conversion: M1 is real, the other three milestones are not yet written. The alternative — writing throwaway working versions of M2/M3 that Tasks 6 and 7 immediately delete — is more discarded code than the redness it avoids. Task 6 restores M2, Task 7 M3, Task 8 `_fail`; the suite is green again at the end of Task 8, and Task 8's Step 4 runs the full Phase-0 suite as its gate. Do **not** "fix" this by reinstating the old single-session path.
+**The suite must stay GREEN after this task.** An earlier revision of this plan had you stub these three with `raise NotImplementedError`. That was withdrawn after Task 2 showed what a broken `setup.py` actually costs: the import failure propagates through a root-level autouse fixture in `tests/conftest.py`, so *every* test file in the repo errors in teardown — an unrelated file went `8 passed, 8 errors`. With that much noise there is no way to tell a genuine regression from expected breakage, across three consecutive tasks.
 
-Add these three temporary stubs now and replace them in their own tasks:
+So write these three as thin delegating implementations now. Each is a handful of lines, and Tasks 6–8 replace them:
 
 ```python
     def _m2(self, job_id: uuid.UUID, workspace_id: uuid.UUID, pinned: str) -> None:
-        raise NotImplementedError  # Task 6
+        """Interim: preserves today's behaviour on its own session. Task 6
+        replaces this with the pre-compute liveness check, the Call pin and the
+        locked persist. `pinned` is accepted but unused until then."""
+        with self.session_factory() as s:
+            self._ensure_section_extracts_snapshot_on(s, workspace_id)
+            s.commit()
 
     def _m3(self, job_id: uuid.UUID, workspace_id: uuid.UUID, pinned: str) -> None:
-        raise NotImplementedError  # Task 7
+        """Interim: preserves today's behaviour, including the terminal status
+        transition that `run_one` used to perform. Task 7 replaces this with the
+        atomic version."""
+        with self.session_factory() as s:
+            self._ensure_rubric_snapshot_on(s, workspace_id)
+            job = s.get(WorkspaceSetupJob, job_id)
+            if job is not None and job.status == "running":
+                job.status = "waiting_for_rubric_review"
+            s.commit()
 
     def _fail(self, job_id: uuid.UUID, exc: BaseException) -> None:
-        raise NotImplementedError  # Task 8
+        """Interim: the failure semantics `run_one` had before this task —
+        attempts++, requeue below MAX_SETUP_ATTEMPTS, dead-letter at it. Task 8
+        adds the terminal path for cancelled/deleted workspaces."""
+        now = datetime.now(UTC)
+        with self.session_factory() as s:
+            job = s.get(WorkspaceSetupJob, job_id, with_for_update=True)
+            if job is None:
+                logger.error("phase0 setup job %s vanished before failure write", job_id)
+                return
+            job.attempts += 1
+            job.last_error = f"{type(exc).__name__}: {exc}"
+            if job.attempts >= MAX_SETUP_ATTEMPTS:
+                job.status = "failed"
+                job.completed_at = now
+            else:
+                job.status = "queued"
+                job.started_at = None
+            s.commit()
 ```
+
+Rename the two existing snapshot methods to take an explicit session — `_ensure_section_extracts_snapshot_on(self, session, workspace_id)` and `_ensure_rubric_snapshot_on(self, session, workspace_id)` — keeping their bodies otherwise unchanged (they already contain the freshness/compute/persist composition that Task 2's fix commit put there). Tasks 6 and 7 delete them.
 
 Finally, update `run_phase0_tick` to build the worker from the factory. Replace the `Phase0Worker(...)` construction and the surrounding session use:
 
