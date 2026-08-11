@@ -143,24 +143,86 @@ async def test_one_rooms_failure_does_not_abandon_the_other(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_retire_does_not_checkpoint(monkeypatch):
-    """drop-style teardown: retirement must NEVER call the checkpoint path (the
-    workspace is soft-deleted; a checkpoint would write to a dead workspace)."""
-    import call_manager.proposal_assist.collab.checkpoint as cp
+async def test_retire_does_not_run_the_deferred_checkpoint_callback():
+    """drop-style teardown: retirement must NEVER checkpoint (the workspace is
+    soft-deleted; a checkpoint would write to a dead workspace).
 
-    called = {"n": 0}
+    Asserts on the ROOM's own on-evict callback rather than by patching
+    checkpoint.checkpoint_artifact. The earlier version of this test did the
+    latter, which could not fail: every real caller (permissions.py, handover.py,
+    kernel.py) does `from ...checkpoint import checkpoint_artifact`, binding the
+    name at import, so setattr on the checkpoint MODULE never intercepts them —
+    the counter could not increment no matter what retirement did.
 
-    def _boom(*a, **k):
-        called["n"] += 1
-        raise AssertionError("retirement must not checkpoint")
-
-    monkeypatch.setattr(cp, "checkpoint_artifact", _boom)
+    `_pending_on_evict` is the actual mechanism a checkpoint would reach
+    retirement through: release()/operate()-exit stash the callback there and run
+    it on eviction. Retirement pops the room without ever running it, and this
+    test fails the moment that changes.
+    """
     mgr = RoomManager()
     ws = uuid.uuid4()
-    await mgr.acquire((ws, "draft"), load=_empty_load, client=FakeClient(),
-                      state=ClientState(user_id=1, can_write=True))
+    key = (ws, "draft")
+    room = await mgr.acquire(key, load=_empty_load, client=FakeClient(),
+                             state=ClientState(user_id=1, can_write=True))
+
+    ran: list[str] = []
+
+    async def _on_evict(_room):
+        ran.append("checkpointed")
+
+    room._pending_on_evict = _on_evict       # what a last-leave checkpoint installs
+
     await mgr.retire_workspace(ws)
-    assert called["n"] == 0
+
+    assert ran == []                          # never invoked
+    assert room._pending_on_evict is _on_evict   # nor consumed and silently dropped
+
+
+@pytest.mark.anyio
+async def test_acquire_rejects_when_retirement_lands_during_another_creators_load():
+    """Covers BOTH of acquire()'s retirement re-checks, which had zero coverage:
+    deleting them left all 371 collab tests green.
+
+    One interleaving reaches both. Creator A enters the per-key lock and parks in
+    its out-of-lock `await load()`. Joiner B blocks on that same key lock.
+    Retirement lands. A's load returns -> A hits the AFTER-LOAD re-check and must
+    refuse rather than publish a room for a deleted workspace; releasing the key
+    lock lets B in, and B hits the UNDER-KEYLOCK re-check on the way to creating
+    its own room.
+    """
+    mgr = RoomManager()
+    ws = uuid.uuid4()
+    key = (ws, "draft")
+    load_entered = asyncio.Event()
+    allow_load_finish = asyncio.Event()
+
+    async def _slow_load():
+        load_entered.set()
+        await allow_load_finish.wait()
+        return []
+
+    async def _creator():
+        return await mgr.acquire(key, load=_slow_load, client=FakeClient(),
+                                 state=ClientState(user_id=1, can_write=True))
+
+    async def _joiner():
+        return await mgr.acquire(key, load=_empty_load, client=FakeClient(),
+                                 state=ClientState(user_id=2, can_write=True))
+
+    a = asyncio.ensure_future(_creator())
+    await asyncio.wait_for(load_entered.wait(), timeout=5)   # A holds the key lock
+    b = asyncio.ensure_future(_joiner())                     # B queues behind it
+    await asyncio.sleep(0.05)                                # let B reach the key lock
+    assert not b.done()
+
+    await mgr.retire_workspace(ws)                           # retirement lands mid-load
+    allow_load_finish.set()
+
+    with pytest.raises(WorkspaceRetired):
+        await asyncio.wait_for(a, timeout=5)                 # after-load re-check
+    with pytest.raises(WorkspaceRetired):
+        await asyncio.wait_for(b, timeout=5)                 # under-keylock re-check
+    assert mgr.get(key) is None                              # never published
 
 
 @pytest.mark.anyio

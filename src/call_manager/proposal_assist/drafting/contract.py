@@ -120,12 +120,23 @@ class DraftingAtCapacity(RuntimeError):
 
 
 class WorkspaceRetired(RuntimeError):
-    """The workspace is soft-deleted, so no subprocess may be launched for it.
+    """The workspace is retired (soft-deleted), so live per-workspace state may
+    not be created for it.
 
-    Raised by WorkspaceController.launch. Turn-path callers finalize instead of
-    sending. NOTE: this is a NARROWING, not a race-free gate — a deletion
-    committing after the check can still see a cached handle returned; the
-    reconciliation sweep is what eventually reaps such a subprocess."""
+    Two families of raise site, both installed by Slice B-retire:
+
+    * TURNS — ``SubprocessRegistry.claim_launch_or_wait`` /
+      ``fulfill_pending_launch`` and ``WorkspaceController.launch``. Turn-path
+      callers finalize instead of sending.
+    * COLLAB — ``RoomManager.acquire`` / ``operate``, including the re-checks
+      after the out-of-lock ``await load()``. The WS route maps this to close
+      1008; on HTTP routes there is no local ``except``, and main.py's
+      app-level handler turns it into the same 404 as WorkspaceDeleted (which
+      it is NOT a subclass of — both are bare RuntimeErrors).
+
+    NOTE: this is a linearization point for CREATION, not a race-free gate on
+    everything — a deletion committing after the check can still meet an
+    in-flight streaming query, and the reconciliation sweep remains the retry."""
 
     def __init__(self, workspace_id: uuid.UUID) -> None:
         super().__init__(f"workspace {workspace_id} is retired")
