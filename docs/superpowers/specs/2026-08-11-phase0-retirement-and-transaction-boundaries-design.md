@@ -37,14 +37,46 @@ block indefinitely behind a Phase-0 job.
 Making the lock safe means giving Phase 0 real transaction boundaries, which is
 why this is its own slice.
 
-### 1.1 An open question this raises
+### 1.1 Repo bytes are deliberately NOT scrubbed here
 
 If deletion is *meant* to erase repo contents — the workspace's drafts, its git
-history — then that scrub operation **does not exist today**, for any
-workspace, deleted before or after this slice. This spec does not add it: doing
-so is a compliance decision, not a retirement mechanism, and it would have to
-cover the repos of every already-deleted workspace, not just new ones. It is
-recorded here as a question for the owner rather than assumed either way.
+history — that scrub **does not exist today**, for any workspace, deleted
+before or after this slice.
+
+**Decision: it stays out of Phase 0 and Slice C.** The product contract today
+is explicit in the UI: *"Soft-deletes the workspace and scrubs uploaded file
+bytes. Audit rows are kept."* (`frontend/src/cockpit/WorkspaceSettingsModal.tsx:78`).
+Adding repo erasure to a retirement slice would silently change what delete
+means to users, in a slice they would not associate with that change.
+
+**But indefinite retention must not remain an accidental policy**, and deleting
+`repo/` alone would not amount to workspace-content erasure in any case.
+Reconstructable or sensitive content also lives in `YjsUpdate.update_bytes`,
+`ChatTurn.content`, proposed-change payloads, `Workspace` snapshot columns
+(`call_body_snapshot`, `section_extracts`, `rubric_*`) and event payloads.
+Purging one store would produce a false sense of erasure.
+
+This is therefore recorded as a **tracked workspace data-lifecycle decision**,
+owned outside engineering, with this shape:
+
+1. Immediate soft-delete and access revocation (already shipped).
+2. Classify which records must be retained, and on what authority.
+3. Give working content a documented `purge_after` period, unless a legal hold
+   or records rule applies.
+4. Purge `repo/` and the corresponding reconstructable database content
+   *together*.
+5. Sweep every already-deleted workspace, and account for backup expiry.
+6. Retain only the explicitly approved minimal audit record.
+
+It needs KI archive/privacy ownership, not an engineering default: GDPR
+storage limitation requires a defined purpose and retention period rather than
+indefinite storage, while KI may be legally required to retain qualifying
+research data and its accompanying documentation under its records schedule.
+Those two pull in opposite directions and the resolution is theirs to make.
+
+The engineering bias to bring to that conversation is bounded purge of working
+drafts, with preservation only where the records schedule or a legal hold
+affirmatively requires it.
 
 Slice C repeats the same incorrect premise and is amended alongside this spec.
 
@@ -77,19 +109,35 @@ but being shared is also what makes them raceable, which §6 addresses.
 M1 is the only milestone that touches the filesystem, so it is the only one
 whose *filesystem* work must be linearized against delete.
 
-M1: open a session → load the workspace `with_for_update` → abort if
-`soft_deleted_at` is set → do the FS work and the snapshot fields → commit,
-releasing the lock.
+M1: open a session → **`acquire_commit_mutex_live`** → load the workspace
+`with_for_update` → do the FS work and the snapshot fields → commit, releasing
+both.
 
 **The lock is held across the FS work deliberately.** Either the delete waits
 for M1, or the delete wins and M1 aborts having created nothing. Checking
 liveness under the lock and *then* releasing before writing would restore the
 exact race this slice exists to close.
 
-The cost is bounded because the work inside the lock is `git init`, three
-zero-byte files and one commit against a fresh repo — local disk, no network,
-no LLM. It is nonetheless **I/O inside a lock**, so its duration is pinned by a
-test rather than asserted here.
+**But a row lock alone is not a bound, and a duration test cannot make it one.**
+The work inside is `subprocess.run`, which has no timeout, and git may invoke
+configured hooks or a signing helper. A CI test asserting the lock is short
+cannot stop a production DELETE from waiting indefinitely on a wedged git.
+
+Three changes make it genuinely bounded:
+
+1. **`acquire_commit_mutex_live` before the row lock.** This is the established
+   mutex→row order, and `soft_delete_workspace_db` takes the same mutex before
+   it mutates anything (`locking.py:207`). So the row lock is only ever
+   reachable by a mutex holder, and a DELETE blocked behind a wedged M1 hits
+   `CommitMutexTimeout` and returns the house **429** rather than hanging on a
+   row lock with no timeout. It also gives M1 the liveness re-read for free —
+   `acquire_commit_mutex_live` raises `WorkspaceDeleted` on an already-deleted
+   workspace, which is exactly M1's abort condition.
+2. **Hermetic git.** Every command runs with hooks disabled and system/global
+   config neutralized, so no site configuration can introduce a hook, a signing
+   helper or a credential prompt into the locked region.
+3. **A real `timeout=` on every `subprocess.run`.** A wedged git raises, M1
+   rolls back, and both locks release.
 
 M2 and M3 also take locks, but only around their persists (§5, §6), never
 around an LLM call.
@@ -128,15 +176,18 @@ revision A, M2's sections from revision B and M3's rubric from revision C — an
 then succeed permanently, with internally inconsistent workspace snapshots and
 no error anywhere.
 
-**The run pins a Call source hash.** M1 records the `source_text_hash` of the
-call text it snapshotted. Every later persist transaction:
+**The run pins a Call source hash.** M1 returns the `source_text_hash` of the
+call text it snapshotted. This is an **immutable run-local value** threaded
+through the worker for the duration of one `run_one` — *not* a new persisted
+column, and not re-read from the database later. Every later persist
+transaction:
 
 1. locks the **workspace row and the Call row** — in that order, normatively,
    so two workspaces sharing a Call cannot deadlock and neither can invert
    against the delete transaction's workspace-row update;
 2. revalidates the pinned hash against the Call's current text;
-3. **restarts the job from M1** if it changed, rather than committing a mixed
-   snapshot.
+3. **fails the job with a typed error** if it changed (§6.1), rather than
+   committing a mixed snapshot.
 
 Locking the Call row also closes the second race the reviewer identified: two
 workspaces can run setup concurrently against the *same* Call while both
@@ -148,6 +199,26 @@ fresh while our computation was in flight, the persist snapshots the canonical
 cache rather than overwriting it with our now-redundant payload. This is the
 same "extract first, then check" discipline the current code applies within one
 transaction, extended across the new boundary.
+
+### 6.1 A changed Call is a bounded failure, not an internal loop
+
+"Restart from M1" must **not** be implemented as a loop inside the worker — a
+Call being re-ingested repeatedly would spin indefinitely. It is normatively a
+typed failure that goes through the existing retry machinery:
+
+1. Roll back the persist transaction.
+2. Raise a typed `CallSourceChanged`.
+3. In the clean failure transaction, re-check deletion and cancellation first —
+   a deleted or cancelled job takes the terminal path (§9.4), not the retry
+   path.
+4. Otherwise increment `attempts` and requeue, recording a `last_error` that
+   names the cause: ingestion kept changing the call while setup ran.
+5. Dead-letter to `failed` at `MAX_SETUP_ATTEMPTS`, as any other failure does.
+
+This converts a theoretical livelock into bounded retry, and the owner can use
+the existing `retry_setup` route once ingestion has settled. Gate 5b pins it:
+attempts 1–4 requeue, attempt 5 dead-letters, and the mutation that omits the
+increment demonstrates the spin.
 
 ## 7. M3 and the job's terminal status are one transaction
 
@@ -297,12 +368,22 @@ reverted.
    Mutation: hold the workspace row lock across `_run_steps` and the test must
    fail — the indefinite-block case, so the gate must assert latency, not that
    the delete eventually committed.
-3. **M1's lock is short.** Hold duration asserted bounded, so a future blocking
-   step added inside M1 fails loudly.
+3. **A wedged git does not wedge DELETE.** With a git command hung inside M1,
+   the `subprocess.run` timeout fires, M1 rolls back, and **both** the mutex
+   and the row lock release. A concurrent DELETE returns — 429 while M1 still
+   holds the mutex, 204 after it releases — and never blocks unbounded on the
+   row lock. Mutation: drop the mutex acquisition from M1 and the DELETE must
+   hang on the row lock instead of returning 429. A hold-duration assertion is
+   kept as a secondary signal, but it is explicitly *not* the bound.
 4. **Re-ingestion between milestones.** Call text changes after M1; the job
    restarts from M1 rather than committing a mixed snapshot.
 5. **Re-ingestion during an extractor call.** Call text changes while compute
    is in flight; the payload is discarded, not persisted.
+5b. **A changed Call is bounded retry, not a spin.** Attempts 1–4 requeue with
+   the ingestion-changed `last_error`; attempt 5 dead-letters to `failed`; and
+   a cancelled or deleted job takes the terminal path instead of requeueing.
+   Mutation: omit the `attempts` increment and the test must demonstrate
+   unbounded restarts.
 6. **Two workspaces, one Call.** Concurrent setup runs sharing a Call serialize
    on the Call row and neither corrupts the shared cache. Mutation: lock only
    the workspace row and the test must fail.
@@ -311,8 +392,12 @@ reverted.
    `waiting_for_rubric_review`. Mutation: move the status write back out of
    M3's transaction and the test must fail.
 8. **The audit event does not double**, and does not survive a Call change
-   (§7). Mutation: remove the guard and the test must fail; separately, the
-   partial unique index must reject a second insert.
+   (§7). Two mutations, matching the two mechanisms actually specified: move
+   the status write back out of M3's transaction (covered by gate 7) and a
+   crash-then-rerun must produce a second event; and drop the partial unique
+   index, whereupon a direct second insert succeeds instead of raising. There
+   is deliberately **no application-level existence guard** to mutate — the
+   atomic transaction is the mechanism and the index is the backstop.
 9. **Pre-compute liveness.** A delete between M2 and M3 means M3 starts no
    cloud call. Mutation: remove the pre-compute check and the test must fail
    (assert on the client, not on elapsed time).
@@ -348,26 +433,31 @@ reverted.
   that is safe because re-running converges, and gate 15 pins it per boundary,
   but every boundary is a new partial state and the existing
   rollback-then-fail path must be re-checked against each one.
-- **The Call-hash restart can livelock in principle.** A Call being re-ingested
-  repeatedly would restart Phase 0 each time. `MAX_SETUP_ATTEMPTS` bounds it,
-  but the restart should be counted as an attempt so a hot Call dead-letters
-  rather than spinning.
-- **M1's lock covers subprocess calls.** `git init`/`commit` are fast and
-  local, but still external processes inside a database lock. Gate 3 is the
-  guard.
+- **A hot Call dead-letters rather than completing.** §6.1 makes repeated
+  re-ingestion consume attempts, which is the right trade — a bounded failure
+  the owner can retry beats a spin — but it means a call being actively
+  re-scraped can exhaust a workspace's setup attempts through no fault of the
+  owner. The `last_error` names the cause so the retry route is an obvious
+  remedy.
+- **M1's lock covers subprocess calls.** Hermetic git plus per-command timeouts
+  plus the mutex make this bounded rather than merely fast (§4), but M1 remains
+  the one place where external processes run inside a database lock, and any
+  step added there inherits that constraint.
 
 ## 16. Footprint
 
 One Alembic migration (`0061`: status CheckConstraint with a data-converting
 downgrade, plus the partial unique index on `rubric_initialized`);
 `Phase0Worker` converted from a session to a session_factory with three
-per-milestone transactions; `ensure_*_fresh` split into `compute_*`/`persist_*`
-with their tests moved to the new shape; the pinned Call hash with
-workspace-then-Call lock ordering and restart-on-change; the M3/status atomic
-transaction; pre-compute liveness checks; a `live_ws` filter on the setup
-claim; the failure path's terminal-vs-requeue fix; the `"jobs"` coordinator
-hook with `wait_for` enforcement; and an independently-scheduled reconciliation
-tick.
+per-milestone transactions; M1 taking `acquire_commit_mutex_live` before the
+row lock, with hermetic git and per-command `subprocess.run` timeouts;
+`ensure_*_fresh` split into `compute_*`/`persist_*` with their tests moved to
+the new shape; the run-local pinned Call hash with workspace-then-Call lock
+ordering and a typed `CallSourceChanged` routed through the existing retry
+machinery; the M3/status atomic transaction; pre-compute liveness checks; a
+`live_ws` filter on the setup claim; the failure path's terminal-vs-requeue
+fix; the `"jobs"` coordinator hook with `wait_for` enforcement; and an
+independently-scheduled reconciliation tick.
 
 Slice C is amended in the same series: it inherits the `"jobs"` hook rather
 than introducing it, adds claim-analysis to it, and drops the incorrect

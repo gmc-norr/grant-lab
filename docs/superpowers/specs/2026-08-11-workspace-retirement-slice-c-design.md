@@ -406,18 +406,23 @@ dropped. The production surface then offers only `soft_delete_workspace_db` and
 
 1. **Teardown completion ≠ process death.** When `_disconnect_bounded` cannot
    confirm death, §4.4's tick retries, but the DELETE route does not wait for
-   it — so `scrub_workspace_bytes` can run while an unconfirmed subprocess is
-   still alive with the repo as its cwd. This slice reduces the window and
-   makes it observable (`drafting_termination_unconfirmed`); it does not close
-   it. Closing it means either blocking scrub on confirmation or making scrub
-   tolerate a live cwd, both larger than this slice.
+   it. The residual is **not** an rmtree-versus-cwd conflict — the scrub never
+   touches `repo/` (`attachments/storage.py:140`,
+   `references/storage.py:106`), so nothing is pulled out from under the
+   process. It is that an unconfirmed subprocess keeps running against the
+   *retained* repo after the workspace is deleted: it can still read workspace
+   content, and can write or recreate sibling data, with no owner and no
+   session. This slice reduces the window and makes it observable
+   (`drafting_termination_unconfirmed`); closing it means blocking scrub on
+   confirmation, which is larger than this slice.
 2. **Claim-analysis cannot be cancelled mid-call.** Sync code in a thread pool.
    §6 bounds the residual to the interval between abort callbacks.
-3. **Phase-0 cannot stop a running extractor call**, for the same reason —
-   it is sync code with no cancellation primitive, so a delete landing mid-
-   extraction waits for that call to return. The prerequisite slice bounds the
-   residual to one extractor call at its milestone boundaries; it does not
-   remove it.
+3. **Phase-0 cannot stop a running extractor call**, for the same reason — it
+   is sync code with no cancellation primitive. **DELETE does not wait for it:**
+   the route returns, and the worker and its cloud spend continue until the
+   call returns on its own. The prerequisite slice bounds the residual to one
+   extractor call by ensuring no *further* call starts; it does not shorten
+   that call.
 4. **A job row held by a live worker is skipped, not cancelled**, until the
    reconciliation tick retries it (§6.1). Bounded by the worker's own
    checkpoint, not by the delete.
