@@ -1175,7 +1175,11 @@ class Phase0Worker:
             )
 ```
 
-Delete the old `_snapshot_and_init_repo` and `_run_steps`; `_m2` and `_m3` arrive in Tasks 6 and 7, and `_fail` in Task 8. To keep the tree importable between tasks, add these three temporary stubs now and replace them in their own tasks:
+Delete the old `_snapshot_and_init_repo` and `_run_steps`; `_m2` and `_m3` arrive in Tasks 6 and 7, and `_fail` in Task 8.
+
+**This task deliberately leaves the wider suite red, and that is the accepted definition of done here.** `Phase0Worker` is mid-conversion: M1 is real, the other three milestones are not yet written. The alternative — writing throwaway working versions of M2/M3 that Tasks 6 and 7 immediately delete — is more discarded code than the redness it avoids. Task 6 restores M2, Task 7 M3, Task 8 `_fail`; the suite is green again at the end of Task 8, and Task 8's Step 4 runs the full Phase-0 suite as its gate. Do **not** "fix" this by reinstating the old single-session path.
+
+Add these three temporary stubs now and replace them in their own tasks:
 
 ```python
     def _m2(self, job_id: uuid.UUID, workspace_id: uuid.UUID, pinned: str) -> None:
