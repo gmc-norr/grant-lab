@@ -519,6 +519,146 @@ def test_requeue_stuck_setup_jobs_dead_letters_after_max_attempts(pg_session_fac
         assert row.completed_at is not None
 
 
+def test_phase0_step_4_second_call_with_unchanged_call_skips_llm(
+    pg_session_factory,
+    tmp_path,
+):
+    """The freshness guard now lives at the call site, not inside the
+    extractor functions (that's what the refresh.py split moved). Running
+    the section-extracts snapshot step twice against the same workspace with
+    an unchanged extractor_version and unchanged call text must issue
+    exactly one LLM call in total — proving the `if not fresh:` short-circuit
+    in _ensure_section_extracts_snapshot actually gates the compute+persist
+    path, not just that the freshness predicate itself is correct."""
+    with pg_session_factory() as s:
+        call = make_call(s)
+        s.commit()
+        ws = make_workspace(s, call_id=call.id, current_phase="setup")
+        s.add(WorkspaceSetupJob(workspace_id=ws.id, status="running"))
+        s.commit()
+        ws_id = ws.id
+
+        client = Mock()
+        client.model = "claude-opus-4-7"
+        client.chat.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": json.dumps(
+                            {
+                                "eligibility": "E",
+                                "scope": "S",
+                                "budget": "B",
+                                "expected_outcomes": "O",
+                                "restrictions": "R",
+                                "mandatory": "M",
+                            }
+                        ),
+                    }
+                }
+            ],
+            "model": "claude-opus-4-7",
+        }
+
+        worker = Phase0Worker(
+            session=s,
+            client=client,
+            extractor_version="sections-v1",
+            rubric_extractor_version="rubric-v1",
+            workspaces_dir=str(tmp_path / "repos"),
+        )
+        job = s.scalar(select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws_id))
+
+        worker._ensure_section_extracts_snapshot(job)
+        s.commit()
+        assert client.chat.call_count == 1
+
+        # Second run: same extractor_version, same call text — cached rows
+        # are fresh, so this must NOT pay for another LLM call.
+        worker._ensure_section_extracts_snapshot(job)
+        s.commit()
+        assert client.chat.call_count == 1
+
+
+def test_phase0_step_5_second_workspace_same_call_skips_llm(
+    pg_session_factory,
+    tmp_path,
+):
+    """Rubric counterpart of the section-extracts freshness-gate test above.
+
+    The rubric TEMPLATE lives on the call (CallRubric, keyed by call_id), not
+    the workspace, but `workspace_events` enforces at most one
+    'rubric_initialized' audit event per workspace (migration 0061) — so a
+    single workspace's setup step can only legitimately run
+    _ensure_rubric_snapshot once. The real case the freshness guard exists
+    for is two DIFFERENT workspaces pointing at the SAME call (two PIs
+    setting up proposal workspaces against one funding call): the second
+    workspace's setup must reuse the already-fresh call-level rubric
+    template rather than paying for a second LLM call, while still writing
+    its own per-workspace audit event and snapshot."""
+    with pg_session_factory() as s:
+        from tests.proposal_assist.conftest import make_user
+
+        call = make_call(s)
+        s.commit()
+        owner1 = make_user(s, email="rubric-owner-1@ki.se")
+        owner2 = make_user(s, email="rubric-owner-2@ki.se")
+        ws1 = make_workspace(s, owner=owner1, call_id=call.id, current_phase="setup")
+        ws2 = make_workspace(s, owner=owner2, call_id=call.id, current_phase="setup")
+        s.add(WorkspaceSetupJob(workspace_id=ws1.id, status="running"))
+        s.add(WorkspaceSetupJob(workspace_id=ws2.id, status="running"))
+        s.commit()
+        ws1_id, ws2_id = ws1.id, ws2.id
+
+        client = Mock()
+        client.model = "claude-opus-4-7"
+        client.chat.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": json.dumps(
+                            {
+                                "criteria": [
+                                    {"name": "X", "description": "x", "weight": 1.0, "scale_max": 5}
+                                ],
+                                "funder_notes": "see FAQ",
+                            }
+                        ),
+                    }
+                }
+            ],
+            "model": "claude-opus-4-7",
+        }
+
+        worker = Phase0Worker(
+            session=s,
+            client=client,
+            extractor_version="sections-v1",
+            rubric_extractor_version="rubric-v1",
+            workspaces_dir=str(tmp_path / "repos"),
+        )
+
+        job1 = s.scalar(select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws1_id))
+        worker._ensure_rubric_snapshot(job1)
+        s.commit()
+        assert client.chat.call_count == 1
+
+        # Second workspace, same call, same rubric_extractor_version, call
+        # text unchanged — the call-level rubric template is fresh, so this
+        # must NOT pay for another LLM call.
+        job2 = s.scalar(select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws2_id))
+        worker._ensure_rubric_snapshot(job2)
+        s.commit()
+        assert client.chat.call_count == 1
+
+        # ws2 still gets its own copied snapshot despite skipping the LLM.
+        ws2_refetch = s.get(Workspace, ws2_id)
+        assert ws2_refetch.rubric_criteria[0]["name"] == "X"
+        assert ws2_refetch.rubric_funder_notes == "see FAQ"
+
+
 def test_requeue_stuck_setup_jobs_ignores_waiting_for_rubric_review(pg_session_factory):
     """'waiting_for_rubric_review' is a legitimate non-terminal state awaiting
     human action — the reaper must never touch it, however old it is."""
