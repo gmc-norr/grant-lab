@@ -106,11 +106,15 @@ def test_delete_returns_204_and_retires(
 
     assert client_authed_owner.delete(f"/api/workspaces/{ws_id}").status_code == 204
 
-    with pg_session_factory() as s:
-        assert s.get(Workspace, ws_id).soft_deleted_at is not None      # DB committed
-    # signal_workspace_retirement ran the collab hook, which tombstones the ws.
-    assert ws_id in MANAGER._retired_ws
-    MANAGER._retired_ws.discard(ws_id)                                  # don't leak the global
+    try:
+        with pg_session_factory() as s:
+            assert s.get(Workspace, ws_id).soft_deleted_at is not None  # DB committed
+        # signal_workspace_retirement ran the collab hook, which tombstones the ws.
+        assert ws_id in MANAGER._retired_ws
+    finally:
+        # try/finally, not a bare trailing call: MANAGER is process-GLOBAL, so if an
+        # assertion above fails the tombstone leaks into every later test in the run.
+        MANAGER._retired_ws.discard(ws_id)
 
 
 def test_delete_runs_db_then_retire_then_scrub_in_that_order(
@@ -160,8 +164,10 @@ def test_delete_runs_db_then_retire_then_scrub_in_that_order(
         ws_id = ws.id
 
     assert client_authed_owner.delete(f"/api/workspaces/{ws_id}").status_code == 204
-    assert calls == ["db", "retire", "scrub"]
-    MANAGER._retired_ws.discard(ws_id)
+    try:
+        assert calls == ["db", "retire", "scrub"]
+    finally:
+        MANAGER._retired_ws.discard(ws_id)      # process-global; release even on failure
 
 
 def test_no_new_turn_dispatches_after_delete_and_row_is_terminal(
@@ -196,6 +202,62 @@ def test_no_new_turn_dispatches_after_delete_and_row_is_terminal(
     # before it would dispatch (Slice A's soft_deleted_at floor). This is the
     # observable "no new dispatch" without driving async launch from a sync test,
     # and it deliberately says NOTHING about an in-flight client.query (conceded race).
-    controller = client_authed_owner.app.state.workspace_controller
-    assert controller._workspace_is_deleted(ws_id) is True
-    MANAGER._retired_ws.discard(ws_id)
+    #
+    # NOTE: this is Slice A's DB read, NOT B-retire's in-process turns tombstone.
+    # test_delete_reaches_the_turns_registry_tombstone below covers that half —
+    # without it the whole turns hook could be unwired and this test would not care.
+    try:
+        controller = client_authed_owner.app.state.workspace_controller
+        assert controller._workspace_is_deleted(ws_id) is True
+    finally:
+        MANAGER._retired_ws.discard(ws_id)
+
+
+def test_delete_reaches_the_turns_registry_tombstone(
+    client_authed_owner, current_user, pg_session_factory
+):
+    """End-to-end for the TURNS half of the retirement fan-out: route ->
+    signal_workspace_retirement -> coordinator -> SubprocessRegistry.retire_workspace.
+
+    Every layer was already covered in isolation (the registry in
+    test_drafting_retire_tombstone, the coordinator in test_retirement_coordinator,
+    the route's db/retire/scrub ORDER with the bridge stubbed out) — but nothing
+    joined them, so replacing main.py's `"turns": ...registry.retire_workspace`
+    hook with a no-op left the entire proposal_assist suite green (1827 passed).
+    A silently unwired hook means deleting a workspace never stops its turns, which
+    is the guarantee B-retire exists to deliver.
+
+    Asserts the FUNCTIONAL refusal, not just set membership: a post-delete launch
+    claim must raise. Driven on the app loop because the registry is async and this
+    route test is sync.
+    """
+    import asyncio
+
+    from call_manager.proposal_assist.collab.room import MANAGER
+    from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.commit()
+        ws_id = ws.id
+
+    app = client_authed_owner.app
+    registry = app.state.workspace_controller.registry
+    assert ws_id not in registry._retired          # precondition: nothing pre-tombstoned
+
+    assert client_authed_owner.delete(f"/api/workspaces/{ws_id}").status_code == 204
+
+    try:
+        assert ws_id in registry._retired          # the turns hook actually ran
+        # ...and the tombstone REFUSES, rather than merely being recorded.
+        fut = asyncio.run_coroutine_threadsafe(
+            registry.claim_launch_or_wait(ws_id), app.state.app_loop
+        )
+        try:
+            fut.result(timeout=5)
+        except WorkspaceRetired:
+            pass                                   # expected
+        else:
+            raise AssertionError("claim_launch_or_wait did not refuse a retired workspace")
+    finally:
+        MANAGER._retired_ws.discard(ws_id)
