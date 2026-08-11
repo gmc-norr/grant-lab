@@ -25,7 +25,7 @@ RetirementHook = Callable[[uuid.UUID], Awaitable[object]]
 
 # Hooks that MUST be registered or the app must not boot: a missing one would
 # mean a delete silently fails to stop that subsystem. Enforced at construction.
-REQUIRED_HOOKS = ("turns", "collab")
+REQUIRED_HOOKS = ("turns", "collab", "jobs")
 
 # Upper bound on how long the sync delete route blocks on the retirement barrier
 # (mirrors permissions._REVOCATION_BARRIER_SECONDS). On overrun the route returns
@@ -40,6 +40,8 @@ REQUIRED_HOOKS = ("turns", "collab")
 #   collab: max over the two rooms (they retire concurrently) of
 #           _RETIRE_LOCK_WAIT_SECONDS (1.0) + _RETIRE_OPS_DRAIN_SECONDS (2.0) = 3.0
 #   turns:  adapter disconnect_deadline_seconds (3.0) + reap_deadline_seconds (2.0) = 5.0
+#   jobs:   _JOBS_CANCEL_SECONDS (1.0), and every query is SKIP LOCKED so it
+#           never waits on a live worker's row = 1.0
 # => 5.0 worst case, so 5.0 was a coin flip rather than a bound. 6.0 keeps 1s of
 # headroom. test_retirement_coordinator.py asserts this inequality against the live
 # constants so raising any sub-bound fails loudly instead of silently eroding it.

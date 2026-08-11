@@ -180,12 +180,14 @@ async def lifespan(app: FastAPI):
     # spec's startup invariant). Local imports follow this module's lifespan
     # convention (see build_workspace_controller above).
     from call_manager.proposal_assist.collab.room import MANAGER as _COLLAB_MANAGER
+    from call_manager.proposal_assist.jobs_retirement import build_jobs_retirement_hook
     from call_manager.proposal_assist.retirement import WorkspaceRetirement
 
     app.state.workspace_retirement = WorkspaceRetirement(
         hooks={
             "turns": workspace_controller.registry.retire_workspace,
             "collab": _COLLAB_MANAGER.retire_workspace,
+            "jobs": build_jobs_retirement_hook(app.state.session_factory),
         }
     )
 
