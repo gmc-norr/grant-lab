@@ -165,13 +165,22 @@ class _AnthropicClientLike(Protocol):
 
 def claim_next_setup_job(*, session: Session) -> WorkspaceSetupJob | None:
     """Claim the oldest queued job under SELECT FOR UPDATE SKIP LOCKED.
-    Sets status='running' and started_at. Caller commits."""
+    Sets status='running' and started_at. Caller commits.
+
+    Jobs for soft-deleted workspaces are excluded in SQL, mirroring the four
+    analysis-pass claim queries. This is the durable half of retirement: it
+    survives a restart, needs no in-process tombstone, and holds even when the
+    "jobs" hook could not reach the row."""
+    live_ws = select(Workspace.id).where(Workspace.soft_deleted_at.is_(None))
     stmt = (
         select(WorkspaceSetupJob)
-        .where(WorkspaceSetupJob.status == "queued")
+        .where(
+            WorkspaceSetupJob.status == "queued",
+            WorkspaceSetupJob.workspace_id.in_(live_ws),
+        )
         .order_by(WorkspaceSetupJob.queued_at)  # FIFO
         .limit(1)
-        .with_for_update(skip_locked=True)
+        .with_for_update(skip_locked=True, of=WorkspaceSetupJob)
     )
     job = session.scalar(stmt)
     if job is None:

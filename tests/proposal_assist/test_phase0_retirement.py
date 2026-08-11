@@ -1,12 +1,14 @@
 """Phase-0 retirement: cancelled status, the jobs hook, and its reconciliation."""
 
 import importlib.util
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from sqlalchemy import text
 
 from call_manager.db.models import WorkspaceEvent, WorkspaceSetupJob
+from call_manager.proposal_assist.phases.setup import claim_next_setup_job
 from tests.proposal_assist.conftest import make_workspace
 
 MIGRATION = (
@@ -72,3 +74,29 @@ def test_downgrade_converts_cancelled_rows_before_restoring_the_constraint(
             s.execute(text(stmt))
         s.commit()
         assert s.get(WorkspaceSetupJob, job_id).status == "failed"
+
+
+def test_a_deleted_workspaces_job_is_never_claimed(pg_session_factory, current_user):
+    with pg_session_factory() as s:
+        live = make_workspace(s, owner=current_user)
+        dead = make_workspace(s, owner=current_user)
+        dead.soft_deleted_at = datetime.now(UTC)
+        s.flush()
+        s.add(WorkspaceSetupJob(workspace_id=dead.id, status="queued"))
+        s.commit()
+        live_id = live.id
+
+    # Only the deleted workspace has a queued job -> nothing claimable.
+    with pg_session_factory() as s:
+        assert claim_next_setup_job(session=s) is None
+        s.commit()
+
+    with pg_session_factory() as s:
+        s.add(WorkspaceSetupJob(workspace_id=live_id, status="queued"))
+        s.commit()
+
+    with pg_session_factory() as s:
+        job = claim_next_setup_job(session=s)
+        assert job is not None
+        assert job.workspace_id == live_id
+        s.commit()
