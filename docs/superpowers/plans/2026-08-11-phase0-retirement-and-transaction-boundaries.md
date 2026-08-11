@@ -13,7 +13,8 @@
 ## Global Constraints
 
 - Python 3.12. Run everything through `uv run` (e.g. `uv run pytest …`, `uv run ruff check .`).
-- `ruff` is the linter and formatter. `uv run ruff check .` and `uv run ruff format --check .` must pass before every commit.
+- `uv run ruff check .` must pass before every commit. This is CI's actual gate (`.github/workflows/ci.yml:44`) and it passes repo-wide today.
+- **Do NOT run `uv run ruff format --check .` repo-wide.** 165 files fail it at this branch's base commit; it is not a CI gate and never has been. If you reformat, scope it to the files you touched (`uv run ruff format <paths>`).
 - Tests requiring Postgres use the existing `pg_session_factory` fixture (testcontainers). Do not add a second database fixture.
 - **Never pipe pytest through `tail`/`head`** — the exit code becomes the pager's. Redirect to a file and echo `$?`:
   `uv run pytest <args> > /tmp/out.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -40 /tmp/out.txt`
@@ -252,7 +253,7 @@ Temporarily swap the second and third entries of `downgrade_statements()` (const
 - [ ] **Step 7: Lint and commit**
 
 ```bash
-uv run ruff check . && uv run ruff format --check .
+uv run ruff check .
 git add alembic/versions/0061_setup_job_cancelled_status.py src/call_manager/db/models.py tests/proposal_assist/test_phase0_retirement.py
 git commit -m "feat(phase0): add cancelled setup status and rubric_initialized uniqueness (0061)"
 ```
@@ -2189,7 +2190,7 @@ Temporarily replace `"jobs": build_jobs_retirement_hook(...)` in `main.py` with 
 - [ ] **Step 8: Commit**
 
 ```bash
-uv run ruff check . && uv run ruff format --check .
+uv run ruff check .
 git add src/call_manager/proposal_assist/jobs_retirement.py src/call_manager/proposal_assist/retirement.py src/call_manager/main.py tests/proposal_assist/
 git commit -m "feat(retirement): add the required jobs hook, bounded and SKIP LOCKED"
 ```
@@ -2417,7 +2418,7 @@ Expected: PASS, no failures. Investigate anything red before committing — do n
 - [ ] **Step 9: Commit**
 
 ```bash
-uv run ruff check . && uv run ruff format --check .
+uv run ruff check .
 git add src/call_manager/proposal_assist/jobs_retirement.py src/call_manager/config.py src/call_manager/scheduler.py tests/proposal_assist/test_phase0_retirement.py
 git commit -m "feat(retirement): reconcile skipped job cancellations on an independent tick"
 ```
@@ -2589,7 +2590,7 @@ The whole-suite run is known to be flaky under load (testcontainers Postgres dro
 - [ ] **Lint and format**
 
 ```bash
-uv run ruff check . && uv run ruff format --check .
+uv run ruff check .
 ```
 
 - [ ] **Migration round-trip against a real database**
