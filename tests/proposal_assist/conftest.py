@@ -13,6 +13,7 @@ from sqlalchemy import select
 
 from call_manager.auth.session_cookie import SessionSigner
 from call_manager.db.models import Call, Source, User
+from call_manager.main import create_app
 
 # Hostnames that reference-fetch tests mock via pytest-httpx. The SSRF
 # resolver in fetcher.py validates via socket.getaddrinfo BEFORE httpx
@@ -90,17 +91,7 @@ def _settings_env(monkeypatch, pg_url):
 def _app(_settings_env):
     """A create_app() instance for the current test (env already patched by
     _settings_env). The lifespan is entered/exited by the TestClient context
-    managers below.
-
-    `create_app` is imported here (not at module level) so that collecting
-    this conftest — and therefore every test file in this directory — does
-    not require the full app import graph (main -> ... -> scheduler ->
-    proposal_assist.phases.setup) to succeed. Only tests that actually build
-    an app now pay for that chain; tests that only need e.g.
-    `pg_session_factory` are unaffected by breakage deeper in that graph.
-    """
-    from call_manager.main import create_app
-
+    managers below."""
     return create_app()
 
 

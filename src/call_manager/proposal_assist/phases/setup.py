@@ -36,10 +36,15 @@ from call_manager.db.models import (
     WorkspaceSetupJob,
 )
 from call_manager.proposal_assist.extractors.refresh import (
-    ensure_rubric_fresh,
-    ensure_section_extracts_fresh,
+    compute_rubric,
+    compute_section_extracts,
+    persist_rubric,
+    persist_section_extracts,
+    rubric_is_fresh,
+    section_extracts_are_fresh,
 )
 from call_manager.proposal_assist.extractors.sections import SECTION_NAMES
+from call_manager.proposal_assist.hashing import source_text_hash
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +114,7 @@ def requeue_stuck_setup_jobs(session: Session, *, max_attempts: int = MAX_SETUP_
 
 class _AnthropicClientLike(Protocol):
     # `model` is stamped onto persisted-row .extracted_by_model by the
-    # downstream caller (ensure_section_extracts_fresh / ensure_rubric_fresh).
+    # downstream caller (persist_section_extracts / persist_rubric).
     model: str
 
     def chat(
@@ -303,12 +308,18 @@ class Phase0Worker:
         if call is None:
             raise RuntimeError(f"call {ws.call_id} not found")
 
-        ensure_section_extracts_fresh(
-            session=self.session,
-            call=call,
-            client=self.client,
-            extractor_version=self.extractor_version,
-        )
+        if not section_extracts_are_fresh(
+            session=self.session, call=call, extractor_version=self.extractor_version
+        ):
+            sections = compute_section_extracts(call_text=call.full_text or "", client=self.client)
+            persist_section_extracts(
+                session=self.session,
+                call=call,
+                sections=sections,
+                model=self.client.model,
+                extractor_version=self.extractor_version,
+                source_hash=source_text_hash(call.full_text or ""),
+            )
         # Read back into a workspace-owned dict; the workspace snapshot is
         # what every later phase reads via get_section_extract.
         rows = (
@@ -331,12 +342,18 @@ class Phase0Worker:
         if call is None:
             raise RuntimeError(f"call {ws.call_id} not found")
 
-        ensure_rubric_fresh(
-            session=self.session,
-            call=call,
-            client=self.client,
-            extractor_version=self.rubric_extractor_version,
-        )
+        if not rubric_is_fresh(
+            session=self.session, call=call, extractor_version=self.rubric_extractor_version
+        ):
+            payload = compute_rubric(call_text=call.full_text or "", client=self.client)
+            persist_rubric(
+                session=self.session,
+                call=call,
+                payload=payload,
+                model=self.client.model,
+                extractor_version=self.rubric_extractor_version,
+                source_hash=source_text_hash(call.full_text or ""),
+            )
         template = self.session.get(CallRubric, call.id)
         if template is None:
             raise RuntimeError(f"rubric template for call {call.id} not found after fresh")
