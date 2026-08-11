@@ -57,6 +57,44 @@ MAX_SETUP_ATTEMPTS = 5
 # is a legitimate non-terminal state awaiting HUMAN action and is NEVER reaped.
 STUCK_SETUP_AFTER = timedelta(minutes=30)
 
+# Every git command in M1 runs inside a database lock, so each one needs a real
+# ceiling: subprocess.run without a timeout can block forever and no CI duration
+# assertion can prevent that in production.
+_GIT_TIMEOUT_SECONDS = 30.0
+
+
+def _git_env() -> dict[str, str]:
+    """Author identity plus a hermetic environment: no site/global config, no
+    credential prompt. Combined with the -c flags in _run_git, nothing an
+    operator configures can introduce a hook, a signing helper or an
+    interactive prompt into M1's locked region."""
+    env = os.environ.copy()
+    env.setdefault("GIT_AUTHOR_NAME", "call-manager")
+    env.setdefault("GIT_AUTHOR_EMAIL", "call-manager@local")
+    env.setdefault("GIT_COMMITTER_NAME", "call-manager")
+    env.setdefault("GIT_COMMITTER_EMAIL", "call-manager@local")
+    env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    env["GIT_CONFIG_SYSTEM"] = "/dev/null"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
+def _run_git(
+    args: list[str], *, cwd: Path, check: bool = True
+) -> subprocess.CompletedProcess[str]:
+    """Run one git command hermetically and bounded. Raises
+    subprocess.TimeoutExpired on overrun, which M1 turns into a rollback that
+    releases both the mutex and the row lock."""
+    return subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", *args],
+        cwd=cwd,
+        check=check,
+        env=_git_env(),
+        timeout=_GIT_TIMEOUT_SECONDS,
+        capture_output=True,
+        text=True,
+    )
+
 
 def requeue_stuck_setup_jobs(session: Session, *, max_attempts: int = MAX_SETUP_ATTEMPTS) -> int:
     """Recover setup jobs stuck in 'running' past STUCK_SETUP_AFTER (worker
@@ -238,11 +276,7 @@ class Phase0Worker:
         repo_dir.mkdir(parents=True, exist_ok=True)
         # Init the git repo if it doesn't exist; safe to skip if it does.
         if not (repo_dir / ".git").is_dir():
-            subprocess.run(
-                ["git", "init", "-q", "-b", "main"],
-                cwd=repo_dir,
-                check=True,
-            )
+            _run_git(["init", "-q", "-b", "main"], cwd=repo_dir)
 
         # Recovery-safe: separately check whether the initial commit landed.
         # A previous attempt might have completed `git init` but crashed
@@ -250,39 +284,19 @@ class Phase0Worker:
         # HEAD has no commits and we need to finish the job. `rev-list
         # --count HEAD` exits non-zero on an unborn branch (no commits),
         # which is what we treat as "needs initial commit".
-        commit_count_proc = subprocess.run(
-            ["git", "rev-list", "--count", "HEAD"],
-            cwd=repo_dir,
-            capture_output=True,
-            text=True,
+        commit_count_proc = _run_git(
+            ["rev-list", "--count", "HEAD"], cwd=repo_dir, check=False
         )
         has_initial_commit = (
             commit_count_proc.returncode == 0 and commit_count_proc.stdout.strip() not in ("", "0")
         )
         if not has_initial_commit:
-            # Author identity for the initial commit — set via env so we
-            # don't depend on the running user's global gitconfig (CI / containers).
-            env = os.environ.copy()
-            env.setdefault("GIT_AUTHOR_NAME", "call-manager")
-            env.setdefault("GIT_AUTHOR_EMAIL", "call-manager@local")
-            env.setdefault("GIT_COMMITTER_NAME", "call-manager")
-            env.setdefault("GIT_COMMITTER_EMAIL", "call-manager@local")
             # Idempotent: if a previous attempt wrote some files, write_text
             # rewrites them to empty (matches the initial state contract).
             for fname in self._PHASE_ARTIFACT_FILES:
                 (repo_dir / fname).write_text("")
-            subprocess.run(
-                ["git", "add", "-A"],
-                cwd=repo_dir,
-                check=True,
-                env=env,
-            )
-            subprocess.run(
-                ["git", "commit", "-q", "-m", "phase0: initialize empty artifacts"],
-                cwd=repo_dir,
-                check=True,
-                env=env,
-            )
+            _run_git(["add", "-A"], cwd=repo_dir)
+            _run_git(["commit", "-q", "-m", "phase0: initialize empty artifacts"], cwd=repo_dir)
 
         # Step 2: snapshot call body.
         if ws.call_id is None:
