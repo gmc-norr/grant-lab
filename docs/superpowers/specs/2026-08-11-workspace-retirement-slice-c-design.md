@@ -38,8 +38,9 @@ extractor_version)` guard, which is the natural basis for that recovery story.
 
 That slice owns: the `live_ws` filter on `claim_next_setup_job`, the
 transaction split, per-milestone idempotency and recovery, cancelling setup
-jobs without requeueing them, and the resurrection gate (delete → scrub → setup
-must not recreate the repo directory). Slice C assumes it has landed.
+jobs without requeueing them, and the post-delete-write gate (a claimed setup
+job must not create a repo directory for a deleted workspace). Slice C assumes
+it has landed.
 
 ## 2. What Slices A/B already guarantee — and its exact limits
 
@@ -74,9 +75,13 @@ performs LLM work, and runs **synchronously** in APScheduler's thread pool via
 `_analysis_drain_tick` (`scheduler.py:989`) — an asyncio registry cannot cancel
 it at all. Phase-0 setup is worse in kind: `_snapshot_and_init_repo` does
 `repo_dir.mkdir(parents=True, exist_ok=True)` (`setup.py:226`), so a setup job
-running after a delete **recreates the tree `scrub_workspace_bytes` just
-removed** — resurrection, not merely a leak. That is why it earns its own
-slice (§1) rather than a paragraph here.
+running after a delete **creates a brand-new repo tree, git history and empty
+artifacts for an already-deleted workspace**. Note this is *not* resurrection
+of scrubbed bytes: `scrub_workspace_bytes` removes only `attachments/` and
+`references/`, and both storage contracts preserve the sibling `repo/`
+(`attachments/storage.py:140`, `references/storage.py:106`). The defect is a
+post-delete write, which is why the prerequisite slice states its guarantee as
+"no post-delete repo creation".
 
 ## 4. Cancelling in-flight passes
 
@@ -490,9 +495,9 @@ reverted.
     fail. This is the gate that would have caught the unbounded wait round 3
     identified.
 
-Phase-0's gates (no long-held lock; delete → scrub must not recreate the repo
-directory; a cancelled setup job is not requeued) move to the prerequisite
-slice (§1) along with the work.
+Phase-0's gates (no long-held lock; a claimed setup job must not create a repo
+directory for a deleted workspace; a cancelled setup job is not requeued) move
+to the prerequisite slice (§1) along with the work.
 
 ## 13. Risks
 
@@ -503,8 +508,8 @@ slice (§1) along with the work.
   future `except BaseException` would defeat the mechanism silently. Gate 2
   catches it.
 - **The prerequisite slice is a hard dependency, not a nice-to-have.** Until
-  Phase-0 lands, delete → scrub → setup can still resurrect a workspace's repo
-  directory. Slice C on its own leaves that path open, so the two must land in
+  Phase-0 lands, a claimed setup job can still create a repo tree for a deleted
+  workspace. Slice C on its own leaves that path open, so the two must land in
   order and the risk of shipping C alone should be stated when planning.
 - **`_JOBS_CANCEL_SECONDS` measures pathology, not waiting.** If SKIP LOCKED is
   ever dropped or a cancel query is rewritten to plain `FOR UPDATE`, the
