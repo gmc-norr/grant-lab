@@ -412,8 +412,12 @@ def test_m3_writes_rubric_event_and_status_atomically(
 def test_a_cancel_beats_m3_and_is_not_overwritten(
     pg_session_factory, current_user, tmp_path, phase0_client
 ):
-    """The compare-and-set: a job cancelled while M3 computed must stay
-    cancelled, not be resurrected into waiting_for_rubric_review."""
+    """A job cancelled before `_m3` is even called must stay cancelled, not
+    be resurrected into waiting_for_rubric_review. Mutation testing showed
+    this is caught by the pre-lock `_assert_live` liveness check — it never
+    reaches the CAS inside the locked transaction, so it does NOT cover a
+    cancel landing while M3 computed. For that race, see
+    test_a_cancel_during_the_compute_window_beats_m3_under_lock below."""
     job_id, ws_id = _queued_job(pg_session_factory, current_user)
     w = _worker(pg_session_factory, tmp_path, phase0_client)
     pinned = w._m1(job_id, ws_id)

@@ -1,29 +1,14 @@
 """Phase-0 retirement: cancelled status, the jobs hook, and its reconciliation."""
 
-import importlib.util
 from datetime import UTC, datetime
-from pathlib import Path
 
 import pytest
-from sqlalchemy import text
+from alembic.config import Config
 
+from alembic import command
 from call_manager.db.models import WorkspaceEvent, WorkspaceSetupJob
 from call_manager.proposal_assist.phases.setup import claim_next_setup_job
 from tests.proposal_assist.conftest import make_workspace
-
-MIGRATION = (
-    Path(__file__).resolve().parents[2]
-    / "alembic"
-    / "versions"
-    / "0061_setup_job_cancelled_status.py"
-)
-
-
-def _load_migration():
-    spec = importlib.util.spec_from_file_location("mig0061", MIGRATION)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def test_cancelled_is_an_accepted_status(pg_session_factory, current_user):
@@ -56,11 +41,20 @@ def test_only_one_rubric_initialized_event_per_workspace(pg_session_factory, cur
 
 
 def test_downgrade_converts_cancelled_rows_before_restoring_the_constraint(
-    pg_session_factory, current_user
+    pg_session_factory, current_user, pg_url
 ):
     """The ordering IS the finding: restoring the old CheckConstraint while a
-    'cancelled' row exists fails. Runs the migration's own statements, so the
-    test cannot drift from the migration."""
+    'cancelled' row exists fails. Runs the migration's own statements (via
+    `command.downgrade`, which calls 0061's `downgrade()`, which iterates
+    `downgrade_statements()`), so the test cannot drift from the migration.
+
+    `pg_session_factory` is session-scoped-DB-backed: the downgrade mutates
+    the shared schema (drops the CHECK constraint's 'cancelled' branch and the
+    partial unique index), so every later test in this pytest session would
+    see the corrupted schema unless it's restored. The try/finally guarantees
+    restoration to head even if the assertion below fails (mirrors the
+    precedent in test_migration_0050_magic_link.py).
+    """
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
         s.flush()
@@ -69,11 +63,14 @@ def test_downgrade_converts_cancelled_rows_before_restoring_the_constraint(
         s.commit()
         job_id = job.id
 
-    with pg_session_factory() as s:
-        for stmt in _load_migration().downgrade_statements():
-            s.execute(text(stmt))
-        s.commit()
-        assert s.get(WorkspaceSetupJob, job_id).status == "failed"
+    cfg = Config("alembic.ini")
+    cfg.set_main_option("sqlalchemy.url", pg_url)
+    try:
+        command.downgrade(cfg, "0060")
+        with pg_session_factory() as s:
+            assert s.get(WorkspaceSetupJob, job_id).status == "failed"
+    finally:
+        command.upgrade(cfg, "head")
 
 
 def test_a_deleted_workspaces_job_is_never_claimed(pg_session_factory, current_user):
