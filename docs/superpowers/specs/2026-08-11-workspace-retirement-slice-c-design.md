@@ -11,14 +11,35 @@ subsystems holding live per-workspace state that they inventoried: turns (SDK
 subprocesses) and collab (Yjs rooms). Two residuals were carried forward: the
 analysis passes, and the non-mutex writers in `web/api/settings.py`.
 
-Two review rounds corrected this design. Round 1 found the residuals were
+Three review rounds corrected this design. Round 1 found the residuals were
 scoped too narrowly and the teardown bound proved nothing. Round 2 found that
-the corrected mechanisms introduced their own defects — most seriously, a
-Phase-0 row lock that could block DELETE indefinitely, and a "confirmed dead"
-guarantee resting on a reconciliation sweep that never sees pass adapters.
+the corrected mechanisms introduced their own defects. Round 3 found that
+post-commit cancellation was named but never operationally defined, that
+unconfirmed subprocesses could be orphaned on *ordinary* pass exit, and that
+the Phase-0 transaction split was too large to ride along here.
 
 **Slice C narrows the gap substantially and does not close it.** §10 states
-exactly what remains open, including one race this slice cannot remove.
+exactly what remains open, including races this slice cannot remove.
+
+### Prerequisite: Phase-0 is now its own slice
+
+Phase-0 setup is removed from Slice C and becomes a separate slice,
+**"Phase-0 retirement and transaction boundaries"**, landed immediately before
+this one. Slice C depends on it.
+
+The reason is that the proposed boundaries are not a rearrangement. Both
+extractors take a session and perform the LLM call *and* the database mutation
+as one unit of work under a "caller commits" contract
+(`proposal_assist/extractors/refresh.py:40` and `:96`). Genuinely short result
+transactions require separating computation from persistence and defining crash
+recovery across partially-completed milestones — with the one asset that both
+extractors are already idempotent under a `(source_text_hash,
+extractor_version)` guard, which is the natural basis for that recovery story.
+
+That slice owns: the `live_ws` filter on `claim_next_setup_job`, the
+transaction split, per-milestone idempotency and recovery, cancelling setup
+jobs without requeueing them, and the resurrection gate (delete → scrub → setup
+must not recreate the repo directory). Slice C assumes it has landed.
 
 ## 2. What Slices A/B already guarantee — and its exact limits
 
@@ -46,7 +67,7 @@ the pre-launch prefix inside the runners themselves.
 | coherence / evaluator / review / uncited — **launch+drive** | yes | yes | **no** | §4 |
 | the same four — **pre-launch prefix** | at claim time only | yes | no | §5 |
 | claim-analysis (`analysis/queue.py:162`) | **no** | **no** | **no — sync, APScheduler threadpool** | §6 |
-| phase-0 setup (`phases/setup.py:123`) | **no** | **no** | no | §7 |
+| phase-0 setup (`phases/setup.py:123`) | **no** | **no** | no | prerequisite slice (§1) |
 
 Claim-analysis claims on `status == "queued"` alone, reads workspace files,
 performs LLM work, and runs **synchronously** in APScheduler's thread pool via
@@ -54,7 +75,8 @@ performs LLM work, and runs **synchronously** in APScheduler's thread pool via
 it at all. Phase-0 setup is worse in kind: `_snapshot_and_init_repo` does
 `repo_dir.mkdir(parents=True, exist_ok=True)` (`setup.py:226`), so a setup job
 running after a delete **recreates the tree `scrub_workspace_bytes` just
-removed** — resurrection, not merely a leak.
+removed** — resurrection, not merely a leak. That is why it earns its own
+slice (§1) rather than a paragraph here.
 
 ## 4. Cancelling in-flight passes
 
@@ -63,11 +85,19 @@ removed** — resurrection, not merely a leak.
 A new module `src/call_manager/proposal_assist/passes.py` holds a
 process-global `PASS_REGISTRY`, mirroring how collab exposes `MANAGER`.
 
-`track(workspace_id, adapter)` is an async context manager registering an
-`Entry` — `(task, adapter, handle | None)` — in a
-`dict[uuid.UUID, set[Entry]]`, discarding it in a `finally` so a cancelled pass
+`track(workspace_id, adapter=None)` is an async context manager registering an
+`Entry` — `(task, adapter | None, handle | None)` — in a
+`dict[uuid.UUID, set[Entry]]`, removing it in a `finally` so a cancelled pass
 still deregisters. The task is `asyncio.current_task()`, which avoids threading
 a handle from the scheduler down to the runner.
+
+`adapter` is optional because **review's orchestration task owns no adapter**:
+`run_review_pass` launches nothing, so its entry is task-only and retirement
+cancels it without terminating anything. Round 3 caught this — the earlier
+`track(workspace_id, adapter)` signature could not represent the parent at all.
+
+**Removal is not discard.** See §4.4: an entry whose generation is unconfirmed
+at exit is *transferred*, not dropped.
 
 **The adapter is bound at entry, not at launch.** Round 2 established that an
 entry is unbound for the whole of `adapter.launch()`, not merely between its
@@ -137,11 +167,23 @@ one-shot pass adapters are built per-pass by `build_keeper_adapter` and friends
 
 ### 4.4 Unconfirmed generations get their own reconciliation
 
-`retire_workspace` asks each adapter whether the generation it just tore down
-is confirmed dead (a small read over the adapter's own live-record inventory —
-the same state `confirm_dead` writes). Unconfirmed entries move to a
-module-level `PASS_REGISTRY` unconfirmed list, drained by a new scheduler tick
-that retries `terminate` and drops the entry once confirmed.
+Confirmation is read from the adapter's own live-record inventory — the same
+state `confirm_dead` writes. An unconfirmed generation moves to a module-level
+`PASS_REGISTRY` unconfirmed list, drained by a new scheduler tick that retries
+`terminate` and drops the entry once confirmed.
+
+**The transfer happens on every `track` exit, not only on retirement-driven
+exit.** Round 3 caught the hole: revision 3 transferred unconfirmed adapters
+only when `retire_workspace` handled them, while the context manager removed
+its entry unconditionally. So an *ordinary* completion — or a pass timeout —
+that calls `terminate()`, gets an unconfirmed result, and exits before any
+deletion snapshots the registry would leave the subprocess ownerless, with
+nothing for the new tick to inspect. Deleting the workspace a moment later
+would then find nothing to retire.
+
+So the `finally` in `track` checks confirmation before removing the entry, and
+transfers when unconfirmed. Retirement-driven exit is just one path into the
+same check.
 
 This mirrors `reconcile_live_clients` for a population it does not cover,
 rather than modifying it. It is a *remediation attempt each tick*, not a
@@ -153,9 +195,10 @@ All four runners establish `workspace_id` in a short opening session
 (`coherence:50`, `evaluator:57`, `review:200`, `uncited_claims:84`). Everything
 from the adapter build onward is wrapped in
 `async with PASS_REGISTRY.track(workspace_id, adapter) as entry:`, with
-`entry.bind_handle(handle)` after launch. For review, both the orchestration
-body and each `_run_one_call` body are wrapped. The prefix preceding all this
-is handled in §5.
+`entry.bind_handle(handle)` after launch. For review, the orchestration body is
+wrapped with `track(workspace_id)` (task-only, no adapter) and each
+`_run_one_call` body with the adapter form. The prefixes preceding all this are
+handled in §5.
 
 Wrapping inside the runner rather than the tick covers every caller, not only
 the scheduler path.
@@ -179,9 +222,10 @@ it explicitly at the tick boundary and log it at info level as a retirement.
 
 ### 4.8 Coordinator wiring and barrier budget
 
-`main.py` registers `"passes": PASS_REGISTRY.retire_workspace`, and
-`REQUIRED_HOOKS` becomes `("turns", "collab", "passes")` so dropping the wiring
-fails at boot.
+`main.py` registers two new hooks — `"passes": PASS_REGISTRY.retire_workspace`
+and `"jobs"` (§6) — so `REQUIRED_HOOKS` becomes
+`("turns", "collab", "passes", "jobs")` and dropping either wiring fails at
+boot.
 
 Hooks run concurrently, so the budget is the max, not the sum:
 
@@ -190,11 +234,12 @@ Hooks run concurrently, so the budget is the max, not the sum:
 | collab | 3.0s (max over two concurrent rooms: 1.0 lock + 2.0 drain) |
 | turns | 5.0s (3.0 disconnect + 2.0 reap) |
 | passes | 5.5s (`_PASS_RETIRE_SECONDS`, independent of entry count per §4.2) |
+| jobs | 1.0s (`_JOBS_CANCEL_SECONDS`; SKIP LOCKED, so it never waits — §6) |
 
-`max(3.0, 5.0, 5.5) = 5.5 < 6.0` — **the barrier constant does not change.**
-`test_the_barrier_exceeds_every_hooks_own_worst_case` is extended to read the
-new constant, and must also assert the *concurrency* property, since a serial
-retirement would silently make the budget entry-count-dependent.
+`max(3.0, 5.0, 5.5, 1.0) = 5.5 < 6.0` — **the barrier constant does not
+change.** `test_the_barrier_exceeds_every_hooks_own_worst_case` is extended to
+read both new constants, and must also assert the *concurrency* property, since
+a serial retirement would silently make the budget entry-count-dependent.
 
 The comment block at `retirement.py:35` is corrected in the same edit.
 
@@ -215,9 +260,26 @@ only two orders exist — the prefix commits and the delete waits briefly behind
 it, or the delete wins and the prefix aborts having written nothing.
 
 This is safe **only because the prefix is short and its session commits
-promptly**. §7 shows the same idiom being unsafe when the holding session lives
-for minutes; the difference is not stylistic, and the prefix's lock duration is
-pinned by a test rather than assumed.
+promptly**. The Phase-0 slice (§1) shows the same idiom being unsafe when the
+holding session lives for minutes; the difference is not stylistic, and the
+prefix's lock duration is pinned by a test rather than assumed.
+
+### 5.1 Review's children have a second prefix
+
+Round 3 found that review has *two* prefixes, not one. Each `_run_one_call`
+commits `item.status = "running"` before its adapter is constructed or tracked
+(`review/pass_runner.py:65-92`). It does re-read `run.status` first, but that
+read takes no lock, so it is a TOCTOU window: a DELETE can cancel the parent
+run between the read and the commit, after which the child commits
+`status = "running"` and is then cancelled — leaving a `ReviewRunItem`
+stranded in `running` on a deleted workspace.
+
+The child prefix is linearized on the **parent `ReviewRun` row**, loaded
+`with_for_update`, rather than on the workspace row. The `ReviewRun` row is the
+tighter choice: the delete transaction already updates review-run rows through
+`cancel_review_runs_for_workspace`, so locking it linearizes against exactly
+the write that matters, without adding N persona-shaped contenders to the
+workspace row every delete must pass through.
 
 ## 6. Claim-analysis
 
@@ -234,6 +296,31 @@ is sync code in a thread pool with no cancellation primitive.
   moves to the post-commit retirement path.
 - **Liveness checks run in short independent sessions**, never the worker's
   per-job session, for the same reason.
+
+### 6.1 What "post-commit" means operationally
+
+Round 3 was right that "moved after commit" is not a design. It is the
+`"jobs"` coordinator hook, awaited alongside the others:
+
+- **It is a required hook**, so an unwired cancel fails at boot. That
+  structural guard is the one that previously caught an unwired turns hook.
+- **It runs its UPDATEs via `asyncio.to_thread`** — the coordinator is async,
+  these are sync DB writes.
+- **Every cancel UPDATE uses `FOR UPDATE SKIP LOCKED`.** This is what makes the
+  hook bounded: a row a live worker holds is *skipped*, never waited on, so the
+  hook cannot inherit the worker's transaction lifetime. Without SKIP LOCKED
+  the reviewer's objection stands — the wait is unbounded.
+- **Skipped rows are retried by the reconciliation tick** (§4.4's sibling),
+  which re-attempts the cancel once the lock frees. In the meantime the
+  worker's own liveness checkpoint aborts it, so the skip is not the only
+  defence.
+- **Budget `_JOBS_CANCEL_SECONDS = 1.0`** — a pair of indexed UPDATEs that by
+  construction never block. It is a timeout for pathology, not for expected
+  waiting.
+
+Because a bounded delete transaction is not the same as a bounded route, gate 14
+measures **end-to-end DELETE latency** with a worker mid-job, not merely that
+the delete transaction committed.
 - **A callback inside the semantic-audit loop.** One checkpoint per job is not
   "bounded by one LLM call": `validate_citations_semantic` iterates evidence
   rows making per-row judgements (`citations/audit.py:583`), so the abort
@@ -244,29 +331,21 @@ is sync code in a thread pool with no cancellation primitive.
   requeue a job the deletion just cancelled. The handler must detect the
   deleted/cancelled case and write a terminal status instead.
 
-## 7. Phase-0 setup
+## 7. Phase-0 setup — carved out
 
-**Do not take a row lock on the long-lived setup session.** `run_one` commits
-immediately after the claim to release the claim lock, then calls `_run_steps`
-on that *same* session, whose next commit is only after every step finishes
-(`setup.py:155`) — including two potentially slow extractors. A `FOR UPDATE` on
-the workspace row taken inside `_snapshot_and_init_repo` would therefore be
-held across the whole of Phase 0. That is not merely slow: `acquire_commit_mutex`
-restores `SET LOCAL lock_timeout = DEFAULT` after acquiring
-(`locking.py:201`), so the delete transaction's subsequent row UPDATE has **no
-timeout and would block indefinitely**.
+Phase-0 is handled by its own prerequisite slice (§1). The finding that forced
+the split is recorded here because it is the sharpest constraint the new slice
+inherits:
 
-Instead:
-
-- **Live filter** on `claim_next_setup_job`.
-- **Split Phase 0 into short linearized transactions**: one around filesystem
-  initialization (take the row lock, re-check liveness, `mkdir` + git init,
-  commit, release), and short result-commit transactions after each extractor,
-  each re-checking liveness. The long extractor work holds no locks.
-- **Cancel setup jobs in the post-commit retirement path**, for the same
-  row-lock reason as §6.
-- **Special-case deletion in the exception path** so a cancelled job is not
-  requeued.
+**A row lock must not be taken on the long-lived setup session.** `run_one`
+commits immediately after the claim to release the claim lock, then calls
+`_run_steps` on that *same* session, whose next commit is only after every step
+finishes (`setup.py:155`) — including two potentially slow extractors. A
+`FOR UPDATE` on the workspace row taken inside `_snapshot_and_init_repo` would
+be held across the whole of Phase 0. That is not merely slow:
+`acquire_commit_mutex` restores `SET LOCAL lock_timeout = DEFAULT` after
+acquiring (`locking.py:201`), so the delete transaction's subsequent row UPDATE
+has **no timeout and would block indefinitely**.
 
 ## 8. Writers under the live mutex
 
@@ -280,7 +359,7 @@ the precedent at `web/api/workspaces.py:537`:
 | `remove_member` | `settings.py:135` | deletes `WorkspaceViewer` + audit event |
 | `update_rubric` | `rubric.py:148` | mutates rubric fields on `Workspace` |
 | `activate` | `rubric.py:206` | rubric fields + phase transition |
-| `retry_setup` | `rubric.py:168` | re-queues a setup job (§7 makes this a resurrection risk) |
+| `retry_setup` | `rubric.py:168` | re-queues a setup job (a resurrection risk until the §1 slice lands) |
 
 **Lock-order rule (normative).** `acquire_commit_mutex_live` is taken
 **immediately after `require_owner`, before any other lock**. `activate` and
@@ -327,12 +406,20 @@ dropped. The production surface then offers only `soft_delete_workspace_db` and
    tolerate a live cwd, both larger than this slice.
 2. **Claim-analysis cannot be cancelled mid-call.** Sync code in a thread pool.
    §6 bounds the residual to the interval between abort callbacks.
-3. **A full per-route writer inventory is not done.** Six routes are
+3. **Phase-0 cannot stop a running extractor call**, for the same reason —
+   it is sync code with no cancellation primitive, so a delete landing mid-
+   extraction waits for that call to return. The prerequisite slice bounds the
+   residual to one extractor call at its milestone boundaries; it does not
+   remove it.
+4. **A job row held by a live worker is skipped, not cancelled**, until the
+   reconciliation tick retries it (§6.1). Bounded by the worker's own
+   checkpoint, not by the delete.
+5. **A full per-route writer inventory is not done.** Six routes are
    linearized; the rest of the mutating surface is uncategorized.
-4. **The conceded in-flight-query race** is unchanged: a delete committing
+6. **The conceded in-flight-query race** is unchanged: a delete committing
    after a check can still meet a live streaming call, with the reconciliation
    sweep as backstop, as documented on `WorkspaceRetired`.
-5. **Two unverified minor findings** from the B-retire review (fixed-sleep
+7. **Two unverified minor findings** from the B-retire review (fixed-sleep
    races in two collab tests) stay out of scope.
 
 ## 11. Non-goals
@@ -349,47 +436,61 @@ Acceptance is by **mutation**: each gate must be shown to fail when its fix is
 reverted.
 
 1. **Hook wiring, end-to-end.** Replacing `main.py`'s `"passes"` hook with a
-   no-op must fail a test driving the real DELETE route against a live pass.
+   no-op must fail a test driving the real DELETE route against a live pass;
+   the same for `"jobs"` against a live claim-analysis job.
 2. **Scrub waits for teardown completion.** With an adapter whose teardown
    outlasts its task's exit, assert `scrub_workspace_bytes` is not entered
    until teardown *finishes* — not merely that `terminate` was called.
-3. **Unconfirmed death is retained, not swallowed.** An adapter reporting
-   unconfirmed must leave the entry on the reconciliation list and the tick
-   must retry it. The gate asserts retention, **not** that scrub waited —
-   §10.1 is a documented residual and the test encodes it as such.
+3. **Unconfirmed death is retained, not swallowed — on every exit path.** Two
+   cases, both required: (a) retirement-driven exit; and (b) **ordinary
+   completion** whose `terminate()` returns unconfirmed, followed by a delete
+   *afterwards*, which must still find the generation on the reconciliation
+   list. Case (b) is the hole round 3 found; a test covering only (a) passes
+   against the broken design. The gate asserts retention, **not** that scrub
+   waited — §10.1 is a documented residual and the test encodes it as such.
 4. **Retirement during `terminate()`.** A delete landing while the runner is
    already inside its own `finally` still ends with teardown joined, via the
    shared generation in `_retire_generation`.
 5. **Retirement during `launch`.** A delete landing while `client.connect()` is
    awaited must still complete teardown within the bound — the case revision 2
    gave only 1.0s.
-6. **Review fan-out.** Every child task and handle is tracked independently;
-   cancelling retires all of them. Mutation: make children share the parent
-   entry and the test must fail.
+6. **Review fan-out.** Every child task and handle is tracked independently,
+   and the adapterless parent is tracked task-only; cancelling retires all of
+   them. Mutation: make children share the parent entry and the test must fail.
+   A second case covers the child prefix (§5.1): a DELETE cancelling the run
+   while a child is between its `run.status` read and its commit must leave no
+   `ReviewRunItem` stranded in `running`.
 7. **Concurrent retirement.** N entries for one workspace retire in
    ~`_PASS_RETIRE_SECONDS`, not N×. Mutation: serialize the gather and the test
    must fail.
 8. **Deregistration.** Normal completion, raise, and cancellation each leave
-   the registry empty for that workspace.
+   the live registry empty for that workspace — with any unconfirmed
+   generation on the reconciliation list rather than gone (gate 3b).
 9. **Prefix guard.** A delete committing while a prefix is mid-flight leaves
    zero prefix writes, and the prefix's lock duration is asserted bounded.
-10. **Phase-0 holds no long lock.** A DELETE issued while Phase 0 runs its
-    extractors must complete promptly. Mutation: hold the row lock across
-    `_run_steps` and the test must fail (this is the indefinite-block case).
-11. **Phase-0 cannot resurrect.** delete → scrub → a setup job already past its
-    claim must not recreate the repo directory, and must not be requeued.
-12. **Claim-analysis.** The live filter refuses at claim time; an abort
+10. **Claim-analysis.** The live filter refuses at claim time; an abort
     callback fires inside the semantic-audit loop; a cancelled job is not
     returned to `queued` by `mark_failed`; and the delete transaction does not
     block on a running job's row.
-13. **Lock order.** For `activate` and `retry_setup`, a delete concurrent with
+11. **Lock order.** For `activate` and `retry_setup`, a delete concurrent with
     the route resolves without deadlock. Mutation: take the setup-job lock
     first and the test must fail.
-14. **Budget invariant.** The extended barrier test fails if
-    `_PASS_RETIRE_SECONDS` is raised past the headroom.
-15. **Route straddles.** Each of the six routes: 404 with nothing written
+12. **Budget invariant.** The extended barrier test fails if
+    `_PASS_RETIRE_SECONDS` or `_JOBS_CANCEL_SECONDS` is raised past the
+    headroom.
+13. **Route straddles.** Each of the six routes: 404 with nothing written
     against a workspace deleted under the mutex; 429 with `Retry-After: 2`
     under a wedged mutex.
+14. **DELETE route latency, end-to-end.** With a claim-analysis worker mid-job
+    holding its row lock, the DELETE *request* must return within the barrier —
+    measured as wall-clock on the route, not as "the delete transaction
+    committed". Mutation: drop `SKIP LOCKED` from the cancel and the test must
+    fail. This is the gate that would have caught the unbounded wait round 3
+    identified.
+
+Phase-0's gates (no long-held lock; delete → scrub must not recreate the repo
+directory; a cancelled setup job is not requeued) move to the prerequisite
+slice (§1) along with the work.
 
 ## 13. Risks
 
@@ -399,12 +500,14 @@ reverted.
 - **A pass that swallows cancellation.** Nothing does today (§4.6), but a
   future `except BaseException` would defeat the mechanism silently. Gate 2
   catches it.
-- **Phase-0 transaction splitting is the largest behavioural change here.**
-  Breaking one long transaction into several changes the failure atomicity of
-  setup: a crash between transactions can now leave a partially-initialized
-  workspace. The split must keep filesystem init and its status write in the
-  same transaction, and the existing rollback-then-fail path must be re-checked
-  against each new boundary.
+- **The prerequisite slice is a hard dependency, not a nice-to-have.** Until
+  Phase-0 lands, delete → scrub → setup can still resurrect a workspace's repo
+  directory. Slice C on its own leaves that path open, so the two must land in
+  order and the risk of shipping C alone should be stated when planning.
+- **`_JOBS_CANCEL_SECONDS` measures pathology, not waiting.** If SKIP LOCKED is
+  ever dropped or a cancel query is rewritten to plain `FOR UPDATE`, the
+  constant silently becomes a real wait and the barrier erodes. Gate 14 is the
+  guard, and it must assert route latency rather than transaction success.
 - **`_PASS_RETIRE_SECONDS` and the adapter's internals are coupled.** 5.5s is
   chosen against 3.0+2.0. Gate 14 reads the adapter's signature defaults, as
   the existing barrier test already does, so raising either fails loudly.
@@ -412,10 +515,13 @@ reverted.
 ## 14. Footprint
 
 One new module and one new scheduler tick; a tracking wrapper in each of four
-runners plus review's per-child wrapper; a row-lock guard in each of four
-prefixes; one explicit catch at the tick boundary; two claim-query filters; two
-cancels moved to the post-commit retirement path; a Phase-0 transaction split;
-an abort callback threaded into the semantic-audit loop; two failure-path
-special cases; six route changes with a normative lock order; one hook
-registration; the wrapper deletion plus its test helper; and the
-`retirement.py:35` comment correction. No schema migration.
+runners plus review's task-only parent and per-child wrappers; a row-lock guard
+in each of four prefixes plus review's child prefix; one explicit catch at the
+tick boundary; one claim-query filter; a `"jobs"` hook doing SKIP LOCKED cancels
+off the delete transaction; an abort callback threaded into the semantic-audit
+loop; one failure-path special case; six route changes with a normative lock
+order; two hook registrations; the wrapper deletion plus its test helper; and
+the `retirement.py:35` comment correction. No schema migration.
+
+Phase-0's share — a second claim-query filter, the transaction split, its
+recovery story and its cancel path — moves to the prerequisite slice.
