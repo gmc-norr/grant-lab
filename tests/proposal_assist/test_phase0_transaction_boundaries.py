@@ -119,6 +119,10 @@ def _queued_job(pg_session_factory, current_user):
         return job.id, ws.id
 
 
+def _run_git_head(repo_dir: Path) -> str:
+    return setup_mod._run_git(["rev-parse", "HEAD"], cwd=repo_dir).stdout.strip()
+
+
 def test_m1_creates_the_repo_and_pins_the_call_hash(
     pg_session_factory, current_user, tmp_path, phase0_client
 ):
@@ -602,3 +606,107 @@ def test_fail_never_resurrects_an_already_terminal_job(
 
     with pg_session_factory() as s:
         assert s.get(WorkspaceSetupJob, job_id).status == "cancelled"
+
+
+def test_delete_route_returns_promptly_while_phase0_runs_its_extractors(
+    client_authed_owner, current_user, pg_session_factory, tmp_path, monkeypatch
+):
+    """Spec gate 2, measured as ROUTE wall-clock. A slow extractor must not be
+    on the DELETE route's critical path: M2/M3 compute with no transaction open
+    and hold no lock while the LLM call runs."""
+    from call_manager.proposal_assist.collab.room import MANAGER
+
+    started = threading.Event()
+    release = threading.Event()
+
+    @dataclass
+    class _SlowClient:
+        model: str = "slow"
+
+        def chat(self, *, messages, response_format=None):
+            started.set()
+            release.wait(timeout=30)
+            return _StubClient().chat(messages=messages)
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        job = WorkspaceSetupJob(workspace_id=ws.id, status="running")
+        s.add(job)
+        s.commit()
+        job_id, ws_id = job.id, ws.id
+
+    w = _worker(pg_session_factory, tmp_path, _SlowClient())
+    pinned = w._m1(job_id, ws_id)
+    t = threading.Thread(target=lambda: w._m2(job_id, ws_id, pinned))
+    t.start()
+    try:
+        assert started.wait(timeout=10)          # the LLM call is in flight
+        began = time.monotonic()
+        resp = client_authed_owner.delete(f"/api/workspaces/{ws_id}")
+        elapsed = time.monotonic() - began
+        assert resp.status_code == 204
+        assert elapsed < 6.0, f"DELETE took {elapsed:.1f}s during a Phase-0 extractor call"
+    finally:
+        release.set()
+        t.join(timeout=30)
+        MANAGER._retired_ws.discard(ws_id)
+
+
+def test_recovery_after_a_crash_between_m1_and_m2(
+    pg_session_factory, current_user, tmp_path, phase0_client
+):
+    """Spec gate 15. M1 committed, then the process died. Re-running from M1 must
+    converge: git init is skipped, the initial commit is detected, and no work is
+    duplicated."""
+    job_id, ws_id = _queued_job(pg_session_factory, current_user)
+    w = _worker(pg_session_factory, tmp_path, phase0_client)
+
+    pinned_first = w._m1(job_id, ws_id)
+    head_before = _run_git_head(tmp_path / str(ws_id) / "repo")
+
+    pinned_again = w._m1(job_id, ws_id)          # the re-run
+    assert pinned_again == pinned_first
+    assert _run_git_head(tmp_path / str(ws_id) / "repo") == head_before
+
+    w._m2(job_id, ws_id, pinned_again)
+    w._m3(job_id, ws_id, pinned_again)
+    with pg_session_factory() as s:
+        assert s.get(WorkspaceSetupJob, job_id).status == "waiting_for_rubric_review"
+
+
+def test_recovery_after_a_crash_between_m2_and_m3_makes_no_second_llm_call(
+    pg_session_factory, current_user, tmp_path
+):
+    """M2 committed, then the process died. The re-run must skip the LLM entirely
+    (the (hash, version) guard) and still produce exactly one audit event."""
+    calls = {"n": 0}
+
+    @dataclass
+    class _CountingClient:
+        model: str = "stub-model"
+
+        def chat(self, *, messages, response_format=None):
+            calls["n"] += 1
+            return _StubClient().chat(messages=messages)
+
+    client = _CountingClient()
+    job_id, ws_id = _queued_job(pg_session_factory, current_user)
+    w = _worker(pg_session_factory, tmp_path, client)
+    pinned = w._m1(job_id, ws_id)
+    w._m2(job_id, ws_id, pinned)
+    after_m2 = calls["n"]
+    assert after_m2 > 0
+
+    w._m2(job_id, ws_id, pinned)                 # the re-run
+    assert calls["n"] == after_m2                # no second cloud call
+
+    w._m3(job_id, ws_id, pinned)
+    with pg_session_factory() as s:
+        events = s.scalars(
+            select(WorkspaceEvent).where(
+                WorkspaceEvent.workspace_id == ws_id,
+                WorkspaceEvent.kind == "rubric_initialized",
+            )
+        ).all()
+        assert len(events) == 1
