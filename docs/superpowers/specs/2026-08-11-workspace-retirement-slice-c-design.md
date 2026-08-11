@@ -222,10 +222,11 @@ it explicitly at the tick boundary and log it at info level as a retirement.
 
 ### 4.8 Coordinator wiring and barrier budget
 
-`main.py` registers two new hooks — `"passes": PASS_REGISTRY.retire_workspace`
-and `"jobs"` (§6) — so `REQUIRED_HOOKS` becomes
-`("turns", "collab", "passes", "jobs")` and dropping either wiring fails at
-boot.
+`main.py` registers `"passes": PASS_REGISTRY.retire_workspace`, so
+`REQUIRED_HOOKS` becomes `("turns", "collab", "jobs", "passes")` and dropping
+the wiring fails at boot. The `"jobs"` hook already exists — the prerequisite
+slice (§1) introduces it for setup jobs, and Slice C adds claim-analysis to it
+rather than inventing a second cancellation path.
 
 Hooks run concurrently, so the budget is the max, not the sum:
 
@@ -300,7 +301,8 @@ is sync code in a thread pool with no cancellation primitive.
 ### 6.1 What "post-commit" means operationally
 
 Round 3 was right that "moved after commit" is not a design. It is the
-`"jobs"` coordinator hook, awaited alongside the others:
+`"jobs"` coordinator hook — introduced by the prerequisite slice (§1) for setup
+jobs, and extended here to claim-analysis — awaited alongside the others:
 
 - **It is a required hook**, so an unwired cancel fails at boot. That
   structural guard is the one that previously caught an unwired turns hook.
@@ -520,8 +522,9 @@ in each of four prefixes plus review's child prefix; one explicit catch at the
 tick boundary; one claim-query filter; a `"jobs"` hook doing SKIP LOCKED cancels
 off the delete transaction; an abort callback threaded into the semantic-audit
 loop; one failure-path special case; six route changes with a normative lock
-order; two hook registrations; the wrapper deletion plus its test helper; and
-the `retirement.py:35` comment correction. No schema migration.
+order; one hook registration plus a second population added to the inherited
+`"jobs"` hook; the wrapper deletion plus its test helper; and the
+`retirement.py:35` comment correction. No schema migration.
 
 Phase-0's share — a second claim-query filter, the transaction split, its
 recovery story and its cancel path — moves to the prerequisite slice.
