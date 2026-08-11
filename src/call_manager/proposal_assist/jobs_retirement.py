@@ -81,3 +81,46 @@ def build_jobs_retirement_hook(
         )
 
     return _hook
+
+
+def reconcile_cancelled_jobs(session: Session) -> int:
+    """Terminalize active job rows belonging to soft-deleted workspaces.
+
+    Convergence for rows the hook SKIP LOCKED past. Deliberately owns no LLM
+    client and is scheduled independently of the Phase-0 tick, which returns
+    early when DRAFTING_ENABLED is false or ANTHROPIC_API_KEY is unset — hiding
+    reconciliation behind that path would strand every skipped cancellation on a
+    deployment with drafting off.
+
+    Slice C extends this to ClaimAnalysisJob (terminalizing to 'failed', which
+    that table's CheckConstraint already allows).
+
+    Returns rows touched. Caller commits.
+    """
+    from call_manager.db.models import Workspace
+
+    dead_ws = select(Workspace.id).where(Workspace.soft_deleted_at.is_not(None))
+    ids = session.scalars(
+        select(WorkspaceSetupJob.id)
+        .where(
+            WorkspaceSetupJob.status.in_(_CANCELLABLE),
+            WorkspaceSetupJob.workspace_id.in_(dead_ws),
+        )
+        .with_for_update(skip_locked=True)
+    ).all()
+    if not ids:
+        return 0
+    session.execute(
+        update(WorkspaceSetupJob)
+        .where(WorkspaceSetupJob.id.in_(ids))
+        .values(
+            status="cancelled",
+            completed_at=datetime.now(UTC),
+            last_error="cancelled: workspace deleted (reconciled)",
+        )
+    )
+    logger.info(
+        "jobs_retirement.reconciled",
+        extra={"event": "jobs_retirement_reconciled", "rows": len(ids)},
+    )
+    return len(ids)

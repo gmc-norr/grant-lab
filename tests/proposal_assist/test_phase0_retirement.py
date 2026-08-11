@@ -212,3 +212,155 @@ def test_delete_reaches_the_jobs_hook(client_authed_owner, current_user, pg_sess
             assert job.status == "cancelled"
     finally:
         MANAGER._retired_ws.discard(ws_id)  # process-global; release even on failure
+
+
+def test_a_row_the_hook_skipped_is_converged_by_the_tick(pg_session_factory, current_user):
+    """Full path: the hook skips a locked row, the worker dies WITHOUT
+    terminalizing it (so the cooperative check cannot be what saves us), and a
+    later tick cancels it."""
+    import threading
+
+    from call_manager.proposal_assist.jobs_retirement import reconcile_cancelled_jobs
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        ws.soft_deleted_at = datetime.now(UTC)
+        s.flush()
+        s.add(WorkspaceSetupJob(workspace_id=ws.id, status="running"))
+        s.commit()
+        ws_id = ws.id
+
+    holding = threading.Event()
+    release = threading.Event()
+
+    def _hold():
+        with pg_session_factory() as s:
+            s.scalars(
+                select(WorkspaceSetupJob)
+                .where(WorkspaceSetupJob.workspace_id == ws_id)
+                .with_for_update()
+            ).one()
+            holding.set()
+            release.wait(timeout=30)
+            s.rollback()  # worker dies without terminalizing
+
+    t = threading.Thread(target=_hold)
+    t.start()
+    try:
+        assert holding.wait(timeout=5)
+        assert asyncio.run(build_jobs_retirement_hook(pg_session_factory)(ws_id)) == 0
+    finally:
+        release.set()
+        t.join(timeout=30)
+
+    with pg_session_factory() as s:
+        assert (
+            s.scalars(
+                select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws_id)
+            )
+            .one()
+            .status
+            == "running"
+        )
+
+    with pg_session_factory() as s:
+        assert reconcile_cancelled_jobs(s) == 1
+        s.commit()
+
+    with pg_session_factory() as s:
+        assert (
+            s.scalars(
+                select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws_id)
+            )
+            .one()
+            .status
+            == "cancelled"
+        )
+
+
+def test_reconcile_leaves_live_workspaces_alone(pg_session_factory, current_user):
+    from call_manager.proposal_assist.jobs_retirement import reconcile_cancelled_jobs
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.flush()
+        s.add(WorkspaceSetupJob(workspace_id=ws.id, status="running"))
+        s.commit()
+
+    with pg_session_factory() as s:
+        assert reconcile_cancelled_jobs(s) == 0
+        s.commit()
+
+
+def test_the_reconcile_tick_is_registered_without_an_llm_client(monkeypatch, pg_url):
+    """A deployment with drafting off must still converge skipped cancellations.
+    The Phase-0 tick returns early when DRAFTING_ENABLED is false or the key is
+    unset, so reconciliation must not live behind it.
+
+    Constructs build_scheduler exactly as
+    test_phase0_scheduler_tick.py::test_build_scheduler_registers_phase0_tick
+    does: build_scheduler takes several required kwargs (alerter, ollama_url,
+    gemma_model, ranking_tick_seconds, ranking_queue_batch,
+    embedding_pregate_threshold, embed_client, workspace_controller) that the
+    brief's shorthand `build_scheduler(settings=..., session_factory=...,
+    start=False)` omits.
+    """
+    from unittest.mock import MagicMock
+
+    from call_manager.config import Settings
+    from call_manager.db.session import make_engine, make_session_factory
+    from call_manager.scheduler import build_scheduler
+
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+    monkeypatch.setenv("DRAFTING_ADAPTER", "fake")
+    monkeypatch.setenv("DRAFTING_ENABLED", "false")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    settings = Settings()
+    assert settings.drafting_enabled is False
+    assert settings.anthropic_api_key is None
+
+    engine = make_engine(settings.database_url)
+    try:
+        session_factory = make_session_factory(engine)
+
+        from call_manager.proposal_assist.drafting.factory import (
+            build_workspace_controller,
+        )
+
+        workspace_controller = build_workspace_controller(
+            settings=settings,
+            session_factory=session_factory,
+        )
+
+        class _Alerter:
+            def record_failure(self, source_slug, *, error=None):
+                pass
+
+            def record_success(self, source_slug):
+                pass
+
+        alerter = _Alerter()
+        embed_client = MagicMock(model="bge-m3")
+        sched = build_scheduler(
+            session_factory=session_factory,
+            settings=settings,
+            alerter=alerter,
+            ollama_url="http://localhost",
+            gemma_model="gemma:test",
+            ranking_tick_seconds=60,
+            ranking_queue_batch=10,
+            embedding_pregate_threshold=0.3,
+            embed_client=embed_client,
+            workspace_controller=workspace_controller,
+            start=False,
+        )
+        try:
+            ids = {j.id for j in sched.get_jobs()}
+            assert "jobs_retirement_reconcile_tick" in ids
+        finally:
+            sched.shutdown(wait=False)
+    finally:
+        engine.dispose()
