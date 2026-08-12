@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from call_manager.db.models import (
     Call,
+    CallRubric,
     CallSectionExtract,
     Workspace,
     WorkspaceEvent,
@@ -24,7 +25,10 @@ from call_manager.proposal_assist.drafting.locking import (
     CommitMutexTimeout,
     acquire_commit_mutex,
 )
-from call_manager.proposal_assist.extractors.refresh import persist_section_extracts
+from call_manager.proposal_assist.extractors.refresh import (
+    persist_rubric,
+    persist_section_extracts,
+)
 from call_manager.proposal_assist.extractors.sections import SECTION_NAMES
 from call_manager.proposal_assist.hashing import source_text_hash
 from call_manager.proposal_assist.phases import setup as setup_mod
@@ -932,6 +936,104 @@ def test_m3_raises_when_the_call_changes_during_the_compute_window(
 
     with pg_session_factory() as s:
         assert s.get(WorkspaceSetupJob, job_id).status == "running"
+
+
+def test_m3_times_out_on_a_held_rubric_row_rather_than_pinning_the_workspace(
+    pg_session_factory, current_user, tmp_path, phase0_client, monkeypatch
+):
+    """The _m3 analogue of
+    test_m2_times_out_on_a_held_cache_row_rather_than_pinning_the_workspace:
+    _bounded_lock_waits must bound the whole persist transaction here too, not
+    just the `with_for_update` acquisitions.
+
+    _m3 holds strictly MORE than _m2 while it waits — the workspace_setup_jobs
+    row AND the workspaces row, both taken FOR UPDATE before any DML runs. The
+    uncovered case is a wait raised AFTER those acquisitions returned:
+    `persist_rubric` mutates the existing call_rubrics row, so the following
+    `s.flush()` issues an UPDATE that must take that row's lock. Without the
+    bound that UPDATE waits forever while _m3 pins both rows against a DELETE
+    that has already won the commit mutex and whose own lock_timeout is back at
+    DEFAULT — i.e. no bound on either side.
+
+    Holding the CallRubric row rather than the Call row is deliberate: a wait on
+    the Call row is a wait on an acquisition, which sits inside the bound either
+    way and would stay green with `_bounded_lock_waits(s)` deleted.
+
+    `_ROW_LOCK_TIMEOUT_SECONDS` is monkeypatched on the module (the helper reads
+    it as a module global at call time, so the patch takes effect) purely to keep
+    the test fast.
+    """
+    monkeypatch.setattr(setup_mod, "_ROW_LOCK_TIMEOUT_SECONDS", 1)
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        job = WorkspaceSetupJob(workspace_id=ws.id, status="running")
+        s.add(job)
+        call = s.get(Call, ws.call_id)
+        # A pre-existing rubric row for this Call stamped with an OLDER extractor
+        # version, for two reasons: `rubric_is_fresh` is False so _m3 really
+        # reaches persist_rubric (a fresh rubric skips the DML entirely and the
+        # test would prove nothing), and persist_rubric therefore takes its
+        # UPDATE-an-existing-row branch — the row the holder below owns.
+        persist_rubric(
+            session=s,
+            call=call,
+            payload={
+                "criteria": [
+                    {
+                        "name": "Stale",
+                        "description": "from an older extractor",
+                        "weight": 1.0,
+                        "scale_max": 5,
+                    }
+                ],
+                "funder_notes": "stale notes",
+            },
+            model="old-model",
+            extractor_version="v0",
+            source_hash=source_text_hash(call.full_text or ""),
+        )
+        s.commit()
+        job_id, ws_id, call_id = job.id, ws.id, call.id
+
+    w = _worker(pg_session_factory, tmp_path, phase0_client)
+    pinned = w._m1(job_id, ws_id)
+
+    holding = threading.Event()
+    release = threading.Event()
+
+    def _hold_the_rubric_row():
+        with pg_session_factory() as s:
+            s.scalars(
+                select(CallRubric).where(CallRubric.call_id == call_id).with_for_update()
+            ).one()
+            holding.set()
+            # Long enough that an UNBOUNDED wait shows up as a failure here
+            # rather than as a hung test run.
+            release.wait(timeout=20)
+            s.rollback()
+
+    t = threading.Thread(target=_hold_the_rubric_row)
+    t.start()
+    try:
+        assert holding.wait(timeout=10), "the holder never took the rubric row"
+        started = time.monotonic()
+        with pytest.raises(setup_mod.SetupRowLockTimeout):
+            w._m3(job_id, ws_id, pinned)
+        # It gave up at its own timeout instead of holding the job and workspace
+        # rows for the whole lifetime of the unrelated rubric-row holder.
+        assert time.monotonic() - started < 10
+        # And it actually LET GO: a third connection can take the workspace row
+        # while the rubric-row holder is still sitting on its lock.
+        with pg_session_factory() as probe:
+            probe.scalars(
+                select(Workspace).where(Workspace.id == ws_id).with_for_update(nowait=True)
+            ).one()
+            probe.rollback()
+    finally:
+        release.set()
+        t.join(timeout=30)
 
 
 def test_a_changed_call_consumes_attempts_and_dead_letters(
