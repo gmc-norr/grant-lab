@@ -2,34 +2,44 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Revision 2.** Revision 1 (`ed341c7`) was reviewed and rejected with seven blocking findings, all verified against the code and all fixed here. What changed, and why it matters when you read the tasks:
+
+1. **Tracking now wraps the WHOLE runner, prefix included.** R1 registered the entry only after the prefix, leaving a race: an already-claimed pass validates the live workspace, releases its row lock, DELETE commits and sees an empty registry, and only then does the pass register and launch. The claim filter cannot help — the job was already claimed.
+2. **The registry no longer tracks handles.** It asks the adapter for its unconfirmed generations. R1 bound a handle after `launch()` returned and treated a handle-less entry as confirmed — but `launch` registers the generation *before* `client.connect()` (`claude_adapter.py:212-216`), so a cancellation during connect leaves an unconfirmed generation with no handle, which R1 would have discarded where nothing could ever reclaim it.
+3. **`ReviewRun < ReviewRunItem` is now a normative rule, and finalization is reordered.** R1's new child-prefix lock took run-then-item while existing finalization takes item-then-run (`review/pass_runner.py:136,144`) — a genuine AB-BA deadlock that R1 introduced.
+4. **The audit abort raises instead of `break`ing.** A `break` returns partial issues to `analyze_job`, which carries on and calls `mark_done` (`analysis/pipeline.py:535`) — turning a deletion into a job marked *done* on partial data.
+5. **`Entry` is `@dataclass(eq=False)`.** R1 put a default (hashable-by-`__eq__`) dataclass into a `set` — `__hash__` is `None`, so `.add()` raises `TypeError` on the first pass ever tracked.
+6. **`reconcile_cancelled_jobs` accumulates instead of returning early.** Its `if not ids: return 0` (`jobs_retirement.py:111`) meant R1's claim-analysis block was unreachable for a workspace with no setup jobs — and R1's own test for it would have failed.
+7. **The new tick is a sync closure dispatching onto `app_loop`.** R1 registered an `async def` directly with `BackgroundScheduler`, which never awaits it. The unit test would have passed while production reconciliation silently never ran.
+8. **Three mutation gates that could not discriminate were replaced** with tests that drive the real production paths. Details in Tasks 5, 7 and 11.
+
 **Goal:** Make a workspace DELETE cancel the analysis work that is actually in flight — the four LLM passes and claim-analysis — instead of letting it run on against a deleted workspace.
 
-**Architecture:** A process-global `PASS_REGISTRY` (mirroring how collab exposes `MANAGER`) tracks one entry per live pass task. A new `"passes"` retirement hook cancels every entry for a workspace concurrently, bounded at 5.5s. Each runner's pre-launch prefix takes a workspace row lock so it cannot commit progress writes for a workspace that is being deleted. Claim-analysis, which is sync code in a thread pool and cannot be cancelled, gets the durable half only: a live-workspace claim filter, a `SKIP LOCKED` cancel on the existing `"jobs"` hook, an abort callback inside its audit loop, and a reconciliation tick for rows the hook skipped.
+**Architecture:** A process-global `PASS_REGISTRY` (mirroring how collab exposes `MANAGER`) holds one entry per live pass task, registered from the moment the runner starts. A new `"passes"` retirement hook cancels every entry for a workspace concurrently, bounded at 5.5s, and asks each entry's adapter to retire any generation whose death is unconfirmed. Each runner's prefix additionally takes a workspace row lock so it cannot commit progress for a workspace being deleted. Claim-analysis, which is sync code in a thread pool and cannot be cancelled, gets the durable half only.
 
 **Tech Stack:** Python 3.12, asyncio, FastAPI, SQLAlchemy 2.x, PostgreSQL 16, APScheduler, pytest + testcontainers.
 
-**Source spec:** `docs/superpowers/specs/2026-08-11-workspace-retirement-slice-c-design.md`. This plan covers the live-work half only. The six routes under the commit mutex (spec §8) and deleting the `soft_delete_workspace` foot-gun (spec §9) are **Slice C2**, a separate plan, and share no files with this one.
+**Source spec:** `docs/superpowers/specs/2026-08-11-workspace-retirement-slice-c-design.md`. Spec §8 (six routes under the commit mutex) and §9 (deleting the `soft_delete_workspace` foot-gun) are **Slice C2**, a separate plan sharing no files with this one.
 
-**Prerequisite, already merged:** the Phase-0 slice (`d459ce1`) — it introduced the `"jobs"` retirement hook, `jobs_retirement.py`, the reconciliation tick this plan extends, and the global lock order below.
+**Prerequisite, already merged:** the Phase-0 slice (`d459ce1`) — the `"jobs"` hook, `jobs_retirement.py`, the reconciliation tick this plan extends, and the global lock order below.
 
 ---
 
 ## Global Constraints
 
-Every task's requirements implicitly include this section.
-
-- **No schema migration.** Claim-analysis terminalizes to the existing `failed` status, which `ck_claim_analysis_jobs_status` already allows (`queued/running/done/failed/superseded`).
-- **`_RETIREMENT_BARRIER_SECONDS` stays 6.0.** Do not change it.
-- **`_PASS_RETIRE_SECONDS = 5.5`** — exceeds the adapter's internal worst case (`disconnect_deadline_seconds=3.0` + `reap_deadline_seconds=2.0` = 5.0) with margin, and fits under the 6.0 barrier.
-- **`_JOBS_CANCEL_SECONDS` stays 1.0.** It already exists in `jobs_retirement.py`.
-- **No change to any pass's own timeout or terminate constants** (`coherence_pass_timeout_seconds`, `coherence_terminate_timeout_seconds`, and the evaluator/review/uncited equivalents).
-- **No change to `reconcile_live_clients`** (`claude_adapter.py:658`). Task 6 adds a sibling sweep for a population it does not cover; it does not edit it.
-- **No new in-memory tombstone for passes.** The "refuse to claim a deleted workspace" gate already exists durably in SQL — all four `{coherence,evaluator,review,uncited_claims}/jobs.py` claim queries join `live_ws`.
-- **No change to any runner's `except Exception` error handling.** `asyncio.CancelledError` inherits from `BaseException`, so it already passes through those handlers and reaches the `finally`. Relying on that is the design, not an accident.
-- **Global lock order (established by the Phase-0 slice, in force now):** `commit mutex < workspace_setup_jobs < workspaces < calls`. Any new `FOR UPDATE` must respect it.
-- **Acceptance is by mutation.** Every gate below must be shown to FAIL when its fix is reverted. A test you have not watched fail is not done. This project has shipped five tests that could not fail; do not add a sixth.
-- **Gates before every commit:** `.venv/bin/python -m pytest tests/proposal_assist/ -q` ending `PYTEST_EXIT=0`, and `.venv/bin/ruff check .` clean. Run pytest as a **directory**, never file-by-file — a per-file pass has hidden real cross-file breakage on this repo before.
-- **Commit with `git commit -F <file>`.** Heredoc `EOF` has broken commits in this repo. Trailer: `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`.
+- **No schema migration.** Claim-analysis terminalizes to the existing `failed`, allowed by `ck_claim_analysis_jobs_status`.
+- **`_RETIREMENT_BARRIER_SECONDS` stays 6.0.** `_PASS_RETIRE_SECONDS = 5.5` — clears the adapter's internal worst case (`disconnect_deadline_seconds` 3.0 + `reap_deadline_seconds` 2.0 = 5.0) and fits under the barrier. `_JOBS_CANCEL_SECONDS` stays 1.0.
+- **No change to any pass's own timeout or terminate constants.**
+- **No change to `reconcile_live_clients`** (`claude_adapter.py:658`). Task 6 adds a sibling for a population it does not cover.
+- **No new in-memory tombstone for passes.** "Refuse to claim a deleted workspace" already exists durably in SQL.
+- **No change to any runner's `except Exception` body.** `asyncio.CancelledError` inherits from `BaseException` and already passes through to the `finally`.
+- **Lock order — workspace chain (from Phase-0, in force):** `commit mutex < workspace_setup_jobs < workspaces < calls`.
+- **Lock order — review chain (NEW, this plan):** `review_runs < review_run_items`. Any transaction touching both must take the run first. Task 5 establishes it and reorders the one existing violator.
+- **Acceptance is by mutation.** Every gate must be shown to FAIL when its fix is reverted — **against the real production path**, not a hand-rolled stand-in. This project has shipped five tests that could not fail. Revision 1 of this plan added three more. Do not add a ninth.
+- **Test helpers are imports, not fixtures.** `make_workspace`, `make_call` and friends are plain functions: `from tests.proposal_assist.conftest import make_workspace`. There is no settings fixture — construct `Settings()` inline, as every existing pass test does (`tests/proposal_assist/coherence/test_pass_runner.py:34`).
+- **`ClaimAnalysisJob` requires `section_index` and `commit_sha`** (both `nullable=False`, no server default). Every construction in this plan passes them; do not drop them.
+- **Gates before every commit:** `.venv/bin/python -m pytest tests/proposal_assist/ -q` ending `PYTEST_EXIT=0`, and `.venv/bin/ruff check .` clean. Run pytest as a **directory**, never file-by-file.
+- **Commit with `git commit -F <file>`.** Heredoc `EOF` has broken commits here. Trailer: `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`.
 
 ---
 
@@ -39,65 +49,54 @@ Every task's requirements implicitly include this section.
 
 | file | responsibility |
 |---|---|
-| `src/call_manager/proposal_assist/passes.py` | The pass registry: `Entry`, `PASS_REGISTRY`, `track()`, `retire_workspace()`, the unconfirmed-generation list and its reconciliation. One file, one responsibility: knowing what is in flight and stopping it. |
-| `tests/proposal_assist/test_passes_registry.py` | Unit gates for the registry in isolation (no DB). |
-| `tests/proposal_assist/test_pass_retirement.py` | Integration gates: real DELETE route against live passes. |
-| `tests/proposal_assist/test_claim_analysis_retirement.py` | Claim-analysis gates, including end-to-end DELETE latency. |
+| `src/call_manager/proposal_assist/passes.py` | The pass registry: `Entry`, `PASS_REGISTRY`, `track()`, `retire_workspace()`, the unconfirmed list and its reconciliation. |
+| `tests/proposal_assist/test_passes_registry.py` | Registry unit gates (no DB). |
+| `tests/proposal_assist/test_pass_retirement.py` | Integration gates driving the real runners. |
+| `tests/proposal_assist/test_claim_analysis_retirement.py` | Claim-analysis gates including route latency. |
 
 **Modified**
 
 | file | change |
 |---|---|
-| `drafting/claude_adapter.py` | Add `generation_confirmed_dead(launch_id)` — a public read of the same state `confirm_dead` writes. No behaviour change. |
-| `drafting/fake_adapter.py` | Same method, so pass tests using the fake exercise the real code path. |
-| `coherence/pass_runner.py` | `track()` wrap from adapter build onward; prefix row-lock guard. |
-| `evaluator/pass_runner.py` | Same. |
-| `uncited_claims/pass_runner.py` | Same. |
-| `review/pass_runner.py` | Parent tracked task-only; each `_run_one_call` tracked with its own adapter; child prefix linearized on the parent `ReviewRun` row. |
-| `retirement.py` | `REQUIRED_HOOKS` gains `"passes"`; the budget comment block is corrected. |
+| `drafting/claude_adapter.py` | `unconfirmed_launch_ids()` + `retire_unconfirmed()`. |
+| `drafting/fake_adapter.py` | The same two methods. |
+| `coherence/`, `evaluator/`, `uncited_claims/pass_runner.py` | `track()` around the whole runner; prefix row-lock guard. |
+| `review/pass_runner.py` | Parent + per-child tracking; child prefix locks the run; **finalization reordered to run-then-item**. |
+| `retirement.py` | `REQUIRED_HOOKS` gains `"passes"`; budget comment corrected. |
 | `main.py` | Register the `"passes"` hook. |
-| `scheduler.py` | New unconfirmed-generation reconcile tick; explicit `concurrent.futures.CancelledError` catch at each of the four pass tick boundaries. |
-| `config.py` | One setting for the new tick's interval. |
-| `analysis/queue.py` | `live_ws` filter on `claim_queued_jobs`; `mark_failed` must not resurrect a cancelled job. |
-| `analysis/pipeline.py` | Thread an abort callback into `analyze_job`; stop the generic handler requeuing a cancelled job. |
-| `citations/audit.py` | Call the abort callback inside the per-evidence-row loop. |
-| `jobs_retirement.py` | Cancel `ClaimAnalysisJob` rows in the hook and in the reconcile pass. |
-
----
-
-## Task Order and Why
-
-Tasks 1–2 build the mechanism and wire it, so every later task has something real to hook into. Tasks 3–5 attach the four runners (coherence first as the simplest template; review last as the only fan-out). Tasks 6–7 add the two scheduler concerns. Tasks 8–11 are claim-analysis, which is independent of the registry entirely and could be done first — it is last because its end-to-end latency gate (Task 11) is the most valuable test in the plan and benefits from everything else being settled.
+| `scheduler.py` | `_drain_pass_future` helper + explicit `CancelledError` handling; new `_passes_reconcile_tick` sync closure. |
+| `config.py` | `passes_reconcile_tick_seconds`. |
+| `analysis/queue.py` | `live_ws` filter on `claim_queued_jobs`; `mark_failed` cannot resurrect a cancelled job. |
+| `analysis/pipeline.py` | `should_abort` threaded into `analyze_job`; `ClaimAnalysisAborted` handled at the drain loop. |
+| `citations/audit.py` | `ClaimAnalysisAborted` raised inside the per-evidence-row loop. |
+| `jobs_retirement.py` | Claim-analysis cancel in the hook; reconcile accumulates both populations. |
 
 ---
 
 ### Task 1: The pass registry
 
 **Files:**
-- Create: `src/call_manager/proposal_assist/passes.py`
-- Create: `tests/proposal_assist/test_passes_registry.py`
-- Modify: `src/call_manager/proposal_assist/drafting/claude_adapter.py` (add one method after `retiring_count`, currently line 653)
-- Modify: `src/call_manager/proposal_assist/drafting/fake_adapter.py` (same method, near its `retiring_count` at line 113)
+- Create: `src/call_manager/proposal_assist/passes.py`, `tests/proposal_assist/test_passes_registry.py`
+- Modify: `drafting/claude_adapter.py` (after `retiring_count`, line 656), `drafting/fake_adapter.py` (near line 113)
 
-**Interfaces:**
-- Consumes: `LiveClientRegistry.get(launch_id)` (`drafting/live_clients.py:66`) — returns `None` once `confirm_dead` has popped the record. That absence IS confirmation; there is no boolean flag.
-- Produces, for Tasks 2–7:
-  - `PASS_REGISTRY` — module-level singleton of `PassRegistry`
-  - `PASS_REGISTRY.track(workspace_id: uuid.UUID, adapter=None)` — async context manager yielding an `Entry`
-  - `Entry.bind_handle(handle) -> None`
-  - `await PASS_REGISTRY.retire_workspace(workspace_id: uuid.UUID) -> int` (count retired; the coordinator discards it)
-  - `await PASS_REGISTRY.reconcile_unconfirmed() -> int`
-  - `_PASS_RETIRE_SECONDS = 5.5`
-  - `ClaudeAgentSDKAdapter.generation_confirmed_dead(launch_id) -> bool`
+**Interfaces produced:**
+- `PASS_REGISTRY.track(workspace_id) -> async context manager yielding Entry`
+- `Entry.bind_adapter(adapter) -> None`
+- `await PASS_REGISTRY.retire_workspace(workspace_id) -> int`
+- `await PASS_REGISTRY.reconcile_unconfirmed() -> int`
+- `PASS_REGISTRY.live_count(workspace_id) -> int`, `.unconfirmed_count() -> int`
+- `_PASS_RETIRE_SECONDS = 5.5`
+- `ClaudeAgentSDKAdapter.unconfirmed_launch_ids() -> list[uuid.UUID]`
+- `ClaudeAgentSDKAdapter.retire_unconfirmed() -> int` (async)
 
-**Why the adapter needs a new method:** the registry must ask "did that generation actually die?" without reaching into `adapter._live`. `confirm_dead` pops the record, so `_live.get(launch_id) is None` is exactly the question. Reading a private attribute from another module would work and would be wrong.
+**Why no handles.** `launch` registers the generation *before* `await client.connect()` and, on any `BaseException`, retires it and re-raises without returning a handle (`claude_adapter.py:212-216`). A handle-keyed registry is therefore blind to exactly the case that matters most — cancellation during connect. Asking the adapter what it still has open covers both cases with less machinery. These are one-shot per-pass adapters, so "what this adapter still has open" is precisely this pass's generations.
 
-- [ ] **Step 1: Write the failing test — the registry tracks and deregisters**
+- [ ] **Step 1: Write the failing tests**
 
 Create `tests/proposal_assist/test_passes_registry.py`:
 
 ```python
-"""Registry gates in isolation — no DB, no SDK. Every await here is real asyncio."""
+"""Registry gates in isolation — no DB, no SDK."""
 
 from __future__ import annotations
 
@@ -106,334 +105,66 @@ import uuid
 
 import pytest
 
-from call_manager.proposal_assist.passes import PASS_REGISTRY, _PASS_RETIRE_SECONDS
+from call_manager.proposal_assist.passes import PASS_REGISTRY
 
 
 class _FakeAdapter:
-    """Minimal adapter surface the registry uses: terminate + confirmation."""
+    """The adapter surface the registry uses: an inventory it can be asked about,
+    and a way to retire what is left."""
 
-    def __init__(self, *, confirmed: bool = True, terminate_delay: float = 0.0):
-        self.terminated: list[object] = []
-        self._confirmed = confirmed
-        self._terminate_delay = terminate_delay
+    def __init__(self, *, open_generations: int = 0, retire_delay: float = 0.0):
+        self._open = [uuid.uuid4() for _ in range(open_generations)]
+        self._retire_delay = retire_delay
+        self.retire_calls = 0
+        self.confirm_on_retire = True
 
-    async def terminate(self, handle) -> None:
-        if self._terminate_delay:
-            await asyncio.sleep(self._terminate_delay)
-        self.terminated.append(handle)
+    def unconfirmed_launch_ids(self):
+        return list(self._open)
 
-    def generation_confirmed_dead(self, launch_id) -> bool:
-        return self._confirmed
-
-
-class _Handle:
-    def __init__(self):
-        self.state = {"launch_id": uuid.uuid4()}
+    async def retire_unconfirmed(self) -> int:
+        self.retire_calls += 1
+        if self._retire_delay:
+            await asyncio.sleep(self._retire_delay)
+        n = len(self._open)
+        if self.confirm_on_retire:
+            self._open.clear()
+        return n
 
 
 @pytest.mark.asyncio
-async def test_track_registers_then_deregisters_on_normal_exit():
+async def test_the_entry_exists_from_the_very_start_not_after_the_prefix():
+    """The race revision 1 had: an entry that only appears after the prefix is
+    invisible to a DELETE that commits during it."""
     ws = uuid.uuid4()
-    adapter = _FakeAdapter()
-    async with PASS_REGISTRY.track(ws, adapter) as entry:
-        entry.bind_handle(_Handle())
-        assert PASS_REGISTRY.live_count(ws) == 1
+    seen_before_adapter = None
+
+    async with PASS_REGISTRY.track(ws) as entry:
+        seen_before_adapter = PASS_REGISTRY.live_count(ws)   # no adapter bound yet
+        entry.bind_adapter(_FakeAdapter())
+
+    assert seen_before_adapter == 1
     assert PASS_REGISTRY.live_count(ws) == 0
-    assert PASS_REGISTRY.unconfirmed_count() == 0
 
 
 @pytest.mark.asyncio
 async def test_track_deregisters_when_the_body_raises():
     ws = uuid.uuid4()
     with pytest.raises(ValueError):
-        async with PASS_REGISTRY.track(ws, _FakeAdapter()) as entry:
-            entry.bind_handle(_Handle())
+        async with PASS_REGISTRY.track(ws) as entry:
+            entry.bind_adapter(_FakeAdapter())
             raise ValueError("boom")
     assert PASS_REGISTRY.live_count(ws) == 0
-```
-
-- [ ] **Step 2: Run to verify it fails**
-
-Run: `.venv/bin/python -m pytest tests/proposal_assist/test_passes_registry.py -q`
-Expected: FAIL — `ModuleNotFoundError: No module named 'call_manager.proposal_assist.passes'`
-
-- [ ] **Step 3: Write the registry**
-
-Create `src/call_manager/proposal_assist/passes.py`:
-
-```python
-"""Process-global registry of in-flight analysis passes, so a workspace DELETE can
-cancel them.
-
-Mirrors how collab exposes MANAGER: one module-level singleton, wired into the
-retirement coordinator at startup (main.py). Tracking happens INSIDE each runner
-rather than at the scheduler tick, so every caller is covered — not only the
-scheduled path.
-
-There is deliberately no in-memory tombstone here. "Refuse to claim a deleted
-workspace" already exists durably in SQL: all four pass claim queries join
-live_ws. This registry answers a different question — what is ALREADY running.
-"""
-
-from __future__ import annotations
-
-import asyncio
-import contextlib
-import logging
-import uuid
-from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
-
-logger = logging.getLogger(__name__)
-
-# Per entry: cancel the task, then await BOTH its exit AND adapter.terminate()
-# concurrently, all under this single bound.
-#
-# Why 5.5 and why one bound rather than two: terminate() routes to
-# _retire_generation, which does `await asyncio.shield(record.teardown)`
-# (claude_adapter.py:571). Under cancellation the shield delivers CancelledError
-# to the awaiter while teardown keeps running — so awaiting the task's exit
-# proves nothing about teardown. The adapter's own internal worst case is
-# disconnect_deadline_seconds (3.0) + reap_deadline_seconds (2.0) = 5.0. An
-# earlier design gave the task 1.0s and teardown 5.0s; that under-budgeted a
-# cancellation landing inside launch()'s own `except BaseException:
-# await self._retire_generation(...)` cleanup, which needs the FULL teardown
-# budget, and a 5.0 outer bound around a 5.0 inner one is a coin flip, not a
-# bound. 5.5 clears 5.0 with real margin and stays under
-# _RETIREMENT_BARRIER_SECONDS (6.0).
-_PASS_RETIRE_SECONDS = 5.5
 
 
-@dataclass
-class Entry:
-    """One live pass task.
-
-    `adapter` is OPTIONAL because review's orchestration task owns no adapter:
-    run_review_pass launches nothing — each _run_one_call builds its own — so the
-    parent's entry is task-only and retirement cancels it without terminating
-    anything.
-
-    The adapter is bound at ENTRY, not after launch. An entry is unbound for the
-    whole of adapter.launch(), not merely between its return and a later bind:
-    launch registers the client and then awaits client.connect()
-    (claude_adapter.py:212), which is unbounded. Binding up front means
-    retirement always has something to act on; bind_handle adds the handle once
-    it exists.
-    """
-
-    workspace_id: uuid.UUID
-    task: asyncio.Task
-    adapter: object | None = None
-    handle: object | None = field(default=None, repr=False)
-
-    def bind_handle(self, handle: object) -> None:
-        self.handle = handle
-
-    @property
-    def launch_id(self) -> uuid.UUID | None:
-        state = getattr(self.handle, "state", None)
-        return state.get("launch_id") if isinstance(state, dict) else None
-
-
-class PassRegistry:
-    """What is running, and how to stop it."""
-
-    def __init__(self) -> None:
-        self._live: dict[uuid.UUID, set[Entry]] = {}
-        # Generations whose teardown COMPLETED without confirming death. Not a
-        # leak-and-forget list: reconcile_unconfirmed retries them.
-        self._unconfirmed: list[Entry] = []
-
-    @contextlib.asynccontextmanager
-    async def track(
-        self, workspace_id: uuid.UUID, adapter: object | None = None
-    ) -> AsyncIterator[Entry]:
-        entry = Entry(
-            workspace_id=workspace_id, task=asyncio.current_task(), adapter=adapter
-        )
-        self._live.setdefault(workspace_id, set()).add(entry)
-        try:
-            yield entry
-        finally:
-            # Removal is NOT discard. An entry whose generation is unconfirmed at
-            # exit is TRANSFERRED to the reconciliation list — and this happens on
-            # EVERY exit path, not only retirement-driven ones. An ordinary
-            # completion (or a pass timeout) that calls terminate(), gets an
-            # unconfirmed result and exits would otherwise leave the subprocess
-            # ownerless, with nothing for the tick to inspect; deleting the
-            # workspace a moment later would then find nothing to retire.
-            self._forget(entry)
-            if self._is_unconfirmed(entry):
-                self._unconfirmed.append(entry)
-                logger.warning(
-                    "passes.generation_unconfirmed",
-                    extra={
-                        "event": "pass_generation_unconfirmed",
-                        "workspace_id": str(workspace_id),
-                    },
-                )
-
-    def _forget(self, entry: Entry) -> None:
-        bucket = self._live.get(entry.workspace_id)
-        if bucket is None:
-            return
-        bucket.discard(entry)
-        if not bucket:
-            self._live.pop(entry.workspace_id, None)
-
-    @staticmethod
-    def _is_unconfirmed(entry: Entry) -> bool:
-        """Confirmation is read from the adapter's own live-record inventory — the
-        same state confirm_dead writes. No handle or no adapter means there is no
-        generation to be unconfirmed about."""
-        launch_id = entry.launch_id
-        if launch_id is None or entry.adapter is None:
-            return False
-        check = getattr(entry.adapter, "generation_confirmed_dead", None)
-        if check is None:
-            return False
-        return not check(launch_id)
-
-    def live_count(self, workspace_id: uuid.UUID) -> int:
-        return len(self._live.get(workspace_id, ()))
-
-    def unconfirmed_count(self) -> int:
-        return len(self._unconfirmed)
-
-    async def retire_workspace(self, workspace_id: uuid.UUID) -> int:
-        """Cancel every live pass for this workspace, CONCURRENTLY.
-
-        Concurrency is what keeps the hook's cost independent of entry count:
-        five review personas plus a coherence pass is six entries, and serial
-        retirement would blow the budget six times over.
-        """
-        entries = list(self._live.get(workspace_id, ()))
-        if not entries:
-            return 0
-        await asyncio.gather(*(self._retire_entry(e) for e in entries))
-        return len(entries)
-
-    async def _retire_entry(self, entry: Entry) -> None:
-        entry.task.cancel()
-        await self._await_bounded(entry)
-
-    async def _await_bounded(self, entry: Entry) -> None:
-        """Await the task's exit AND adapter.terminate() concurrently under one bound.
-
-        Awaiting them concurrently is safe by design: _retire_generation is
-        documented as shared by retirement, capacity eviction, idle sweep and
-        reconciliation, so concurrent callers never spawn a second kill for the
-        same generation — a second caller JOINS the single teardown task rather
-        than racing it. Because this await is not itself cancelled, it observes
-        the shielded teardown to completion.
-
-        What this proves, precisely: TEARDOWN RAN TO COMPLETION. Not that the
-        process died. _teardown_record returns normally when death is unconfirmed
-        (claude_adapter.py:590). track()'s finally catches that case.
-        """
-        waits = [asyncio.shield(_swallow(entry.task))]
-        if entry.adapter is not None and entry.handle is not None:
-            waits.append(entry.adapter.terminate(entry.handle))
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(*waits, return_exceptions=True),
-                timeout=_PASS_RETIRE_SECONDS,
-            )
-        except (TimeoutError, asyncio.TimeoutError):
-            logger.warning(
-                "passes.retire_timeout",
-                extra={
-                    "event": "pass_retire_timeout",
-                    "workspace_id": str(entry.workspace_id),
-                },
-            )
-
-    async def reconcile_unconfirmed(self) -> int:
-        """Retry terminate() for generations whose death was never confirmed, and
-        drop each one that confirms.
-
-        A remediation ATTEMPT each tick, not a guarantee — the same wording
-        WorkspaceController.reconcile_live_clients uses for the population it
-        covers. This is a SIBLING of that sweep, not an edit to it: these one-shot
-        pass adapters are built per-pass by build_keeper_adapter and friends, so
-        nothing else owns or sweeps them.
-        """
-        if not self._unconfirmed:
-            return 0
-        still: list[Entry] = []
-        acted = 0
-        for entry in self._unconfirmed:
-            acted += 1
-            try:
-                if entry.adapter is not None and entry.handle is not None:
-                    await entry.adapter.terminate(entry.handle)
-            except Exception:
-                logger.exception(
-                    "passes.reconcile_terminate_failed",
-                    extra={"workspace_id": str(entry.workspace_id)},
-                )
-            if self._is_unconfirmed(entry):
-                still.append(entry)
-        self._unconfirmed = still
-        return acted
-
-
-async def _swallow(task: asyncio.Task) -> None:
-    """Await a task, absorbing its outcome. A cancelled pass raises
-    CancelledError and a failed one raises its own error; retirement cares about
-    neither, only that the task is finished."""
-    with contextlib.suppress(BaseException):
-        await task
-
-
-PASS_REGISTRY = PassRegistry()
-```
-
-- [ ] **Step 4: Run the two tests to verify they pass**
-
-Run: `.venv/bin/python -m pytest tests/proposal_assist/test_passes_registry.py -q`
-Expected: `2 passed`
-
-- [ ] **Step 5: Add the confirmation accessor to both adapters**
-
-In `src/call_manager/proposal_assist/drafting/claude_adapter.py`, immediately after `retiring_count` (currently ending line 656):
-
-```python
-    def generation_confirmed_dead(self, launch_id: uuid.UUID) -> bool:
-        """True once this generation has left the inventory.
-
-        Only confirm_dead removes a record, and only after a reaped process, so
-        absence IS confirmation. Public so PASS_REGISTRY can ask without reaching
-        into _live.
-        """
-        return self._live.get(launch_id) is None
-```
-
-In `src/call_manager/proposal_assist/drafting/fake_adapter.py`, next to its `retiring_count` (line 113):
-
-```python
-    def generation_confirmed_dead(self, launch_id) -> bool:
-        """The fake always confirms — pass tests that want the unconfirmed path
-        override this attribute explicitly, so the default never hides it."""
-        return True
-```
-
-- [ ] **Step 6: Write the failing tests for retirement, concurrency and the unconfirmed transfer**
-
-Append to `tests/proposal_assist/test_passes_registry.py`:
-
-```python
 @pytest.mark.asyncio
-async def test_retire_cancels_the_task_and_terminates_the_adapter():
-    """Gate 8, live half."""
+async def test_retire_cancels_the_task_and_retires_the_adapter():
     ws = uuid.uuid4()
-    adapter = _FakeAdapter()
-    handle = _Handle()
+    adapter = _FakeAdapter(open_generations=1)
     started = asyncio.Event()
 
     async def _pass():
-        async with PASS_REGISTRY.track(ws, adapter) as entry:
-            entry.bind_handle(handle)
+        async with PASS_REGISTRY.track(ws) as entry:
+            entry.bind_adapter(adapter)
             started.set()
             await asyncio.sleep(3600)
 
@@ -442,23 +173,21 @@ async def test_retire_cancels_the_task_and_terminates_the_adapter():
     retired = await PASS_REGISTRY.retire_workspace(ws)
 
     assert retired == 1
-    assert task.cancelled() or task.done()
-    assert adapter.terminated == [handle]
+    assert task.done()
+    assert adapter.retire_calls == 1
     assert PASS_REGISTRY.live_count(ws) == 0
 
 
 @pytest.mark.asyncio
 async def test_entries_retire_concurrently_not_serially():
-    """Gate 7. Six entries whose terminate each takes 0.3s must finish in about
-    0.3s, not 1.8s. Mutation: replace the gather in retire_workspace with a for
-    loop and this must fail."""
+    """Gate 7. Mutation: replace the gather in retire_workspace with a for loop."""
     ws = uuid.uuid4()
     started = asyncio.Event()
     n = 6
 
     async def _pass(idx: int):
-        async with PASS_REGISTRY.track(ws, _FakeAdapter(terminate_delay=0.3)) as entry:
-            entry.bind_handle(_Handle())
+        async with PASS_REGISTRY.track(ws) as entry:
+            entry.bind_adapter(_FakeAdapter(open_generations=1, retire_delay=0.3))
             if idx == n - 1:
                 started.set()
             await asyncio.sleep(3600)
@@ -478,19 +207,19 @@ async def test_entries_retire_concurrently_not_serially():
 
 
 @pytest.mark.asyncio
-async def test_an_unconfirmed_generation_transfers_on_ORDINARY_exit():
-    """Gate 3(b) — the case that matters most.
+async def test_a_generation_left_open_transfers_on_ORDINARY_exit():
+    """Gate 3(b), the case that matters most: no deletion involved at all.
 
-    An ordinary completion whose terminate() returns unconfirmed must leave the
-    generation on the reconciliation list, with NO deletion involved. A test
-    covering only the retirement-driven path passes against the broken design.
+    Also the launch-cancel case, because unconfirmed_launch_ids() reports a
+    generation registered before connect() even though no handle ever existed.
     """
     ws = uuid.uuid4()
-    adapter = _FakeAdapter(confirmed=False)
+    adapter = _FakeAdapter(open_generations=1)
+    adapter.confirm_on_retire = False
     before = PASS_REGISTRY.unconfirmed_count()
 
-    async with PASS_REGISTRY.track(ws, adapter) as entry:
-        entry.bind_handle(_Handle())
+    async with PASS_REGISTRY.track(ws) as entry:
+        entry.bind_adapter(adapter)
 
     assert PASS_REGISTRY.live_count(ws) == 0
     assert PASS_REGISTRY.unconfirmed_count() == before + 1
@@ -499,38 +228,273 @@ async def test_an_unconfirmed_generation_transfers_on_ORDINARY_exit():
 @pytest.mark.asyncio
 async def test_reconcile_retries_and_drops_once_confirmed():
     ws = uuid.uuid4()
-    adapter = _FakeAdapter(confirmed=False)
-    async with PASS_REGISTRY.track(ws, adapter) as entry:
-        entry.bind_handle(_Handle())
+    adapter = _FakeAdapter(open_generations=1)
+    adapter.confirm_on_retire = False
+    async with PASS_REGISTRY.track(ws) as entry:
+        entry.bind_adapter(adapter)
     assert PASS_REGISTRY.unconfirmed_count() >= 1
 
-    adapter._confirmed = True          # the retry now confirms
+    adapter.confirm_on_retire = True
     acted = await PASS_REGISTRY.reconcile_unconfirmed()
 
     assert acted >= 1
     assert PASS_REGISTRY.unconfirmed_count() == 0
 ```
 
-- [ ] **Step 7: Run them; all four must pass**
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `.venv/bin/python -m pytest tests/proposal_assist/test_passes_registry.py -q`
+Expected: FAIL — `ModuleNotFoundError: No module named 'call_manager.proposal_assist.passes'`
+
+- [ ] **Step 3: Write the registry**
+
+Create `src/call_manager/proposal_assist/passes.py`:
+
+```python
+"""Process-global registry of in-flight analysis passes, so a workspace DELETE can
+cancel them.
+
+Mirrors how collab exposes MANAGER: one module-level singleton, wired into the
+retirement coordinator at startup (main.py). Tracking happens INSIDE each runner
+rather than at the scheduler tick, so every caller is covered — not only the
+scheduled path.
+
+There is deliberately no in-memory tombstone here: "refuse to CLAIM a deleted
+workspace" already exists durably in SQL. This registry answers the other
+question — what is ALREADY running.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+import uuid
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
+
+# Per entry: cancel the task, then await BOTH its exit AND the adapter's retirement
+# of any generation it still has open — concurrently, under this one bound.
+#
+# Why one bound and not two: adapter teardown routes through _retire_generation,
+# which does `await asyncio.shield(record.teardown)` (claude_adapter.py:571). Under
+# cancellation the shield delivers CancelledError to the awaiter while teardown
+# keeps running, so awaiting the task's exit proves nothing about teardown. The
+# adapter's own internal worst case is disconnect_deadline_seconds (3.0) +
+# reap_deadline_seconds (2.0) = 5.0. A 5.0 outer bound around a 5.0 inner one is a
+# coin flip; 5.5 clears it and stays under _RETIREMENT_BARRIER_SECONDS (6.0).
+_PASS_RETIRE_SECONDS = 5.5
+
+
+@dataclass(eq=False)   # identity semantics — entries live in a set
+class Entry:
+    """One live pass task.
+
+    The adapter is bound LATER, not at construction, because the entry must exist
+    before the runner's prefix runs. Revision 1 registered after the prefix and
+    left a race: an already-claimed pass validates the live workspace, releases its
+    row lock, DELETE commits and snapshots an empty registry, and only then does
+    the pass register and launch.
+
+    There is no handle here on purpose. `launch` registers its generation BEFORE
+    `client.connect()` and, on cancellation, retires it and re-raises without ever
+    returning a handle (claude_adapter.py:212-216) — so a handle-keyed registry is
+    blind to precisely that case. Confirmation is asked of the adapter instead.
+    """
+
+    workspace_id: uuid.UUID
+    task: asyncio.Task
+    adapter: object | None = field(default=None, repr=False)
+
+    def bind_adapter(self, adapter: object) -> None:
+        self.adapter = adapter
+
+    def open_generations(self) -> int:
+        """How many generations this entry's adapter still has un-confirmed-dead.
+        Zero when there is no adapter yet — nothing has been launched."""
+        if self.adapter is None:
+            return 0
+        ask = getattr(self.adapter, "unconfirmed_launch_ids", None)
+        return len(ask()) if ask is not None else 0
+
+    async def retire_adapter(self) -> None:
+        if self.adapter is None:
+            return
+        retire = getattr(self.adapter, "retire_unconfirmed", None)
+        if retire is not None:
+            await retire()
+
+
+class PassRegistry:
+    """What is running, and how to stop it."""
+
+    def __init__(self) -> None:
+        self._live: dict[uuid.UUID, set[Entry]] = {}
+        # Entries whose adapter still had an open generation at exit. NOT
+        # leak-and-forget: reconcile_unconfirmed retries them.
+        self._unconfirmed: list[Entry] = []
+
+    @contextlib.asynccontextmanager
+    async def track(self, workspace_id: uuid.UUID) -> AsyncIterator[Entry]:
+        entry = Entry(workspace_id=workspace_id, task=asyncio.current_task())
+        self._live.setdefault(workspace_id, set()).add(entry)
+        try:
+            yield entry
+        finally:
+            # Removal is NOT discard. An entry whose adapter still has an open
+            # generation is TRANSFERRED — on EVERY exit path, not only
+            # retirement-driven ones. An ordinary completion (or a pass timeout)
+            # whose teardown could not confirm death would otherwise leave the
+            # subprocess ownerless, and a delete a moment later would find nothing.
+            self._forget(entry)
+            if entry.open_generations():
+                self._unconfirmed.append(entry)
+                logger.warning(
+                    "passes.generation_unconfirmed",
+                    extra={
+                        "event": "pass_generation_unconfirmed",
+                        "workspace_id": str(workspace_id),
+                    },
+                )
+
+    def _forget(self, entry: Entry) -> None:
+        bucket = self._live.get(entry.workspace_id)
+        if bucket is None:
+            return
+        bucket.discard(entry)
+        if not bucket:
+            self._live.pop(entry.workspace_id, None)
+
+    def live_count(self, workspace_id: uuid.UUID) -> int:
+        return len(self._live.get(workspace_id, ()))
+
+    def unconfirmed_count(self) -> int:
+        return len(self._unconfirmed)
+
+    async def retire_workspace(self, workspace_id: uuid.UUID) -> int:
+        """Cancel every live pass for this workspace, CONCURRENTLY.
+
+        Concurrency keeps the hook's cost independent of entry count: five review
+        personas plus a coherence pass is six entries, and serial retirement would
+        blow the budget six times over.
+        """
+        entries = list(self._live.get(workspace_id, ()))
+        if not entries:
+            return 0
+        await asyncio.gather(*(self._retire_entry(e) for e in entries))
+        return len(entries)
+
+    async def _retire_entry(self, entry: Entry) -> None:
+        entry.task.cancel()
+        waits = [asyncio.shield(_swallow(entry.task)), entry.retire_adapter()]
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*waits, return_exceptions=True),
+                timeout=_PASS_RETIRE_SECONDS,
+            )
+        except (TimeoutError, asyncio.TimeoutError):
+            logger.warning(
+                "passes.retire_timeout",
+                extra={
+                    "event": "pass_retire_timeout",
+                    "workspace_id": str(entry.workspace_id),
+                },
+            )
+
+    async def reconcile_unconfirmed(self) -> int:
+        """Retry adapter retirement for generations never confirmed dead, dropping
+        each entry that comes back clean.
+
+        A remediation ATTEMPT each tick, not a guarantee — the same wording
+        reconcile_live_clients uses. This is a SIBLING of that sweep, not an edit:
+        it covers the interactive registry's adapter, and these one-shot pass
+        adapters are built per-pass by build_keeper_adapter and friends, so nothing
+        else owns them.
+        """
+        if not self._unconfirmed:
+            return 0
+        still: list[Entry] = []
+        acted = 0
+        for entry in self._unconfirmed:
+            acted += 1
+            try:
+                await entry.retire_adapter()
+            except Exception:
+                logger.exception(
+                    "passes.reconcile_retire_failed",
+                    extra={"workspace_id": str(entry.workspace_id)},
+                )
+            if entry.open_generations():
+                still.append(entry)
+        self._unconfirmed = still
+        return acted
+
+
+async def _swallow(task: asyncio.Task) -> None:
+    """Await a task, absorbing its outcome. A cancelled pass raises CancelledError
+    and a failed one raises its own error; retirement cares about neither, only
+    that the task has finished."""
+    with contextlib.suppress(BaseException):
+        await task
+
+
+PASS_REGISTRY = PassRegistry()
+```
+
+- [ ] **Step 4: Run — all six must pass**
 
 Run: `.venv/bin/python -m pytest tests/proposal_assist/test_passes_registry.py -q`
 Expected: `6 passed`
 
-- [ ] **Step 8: Prove the concurrency gate discriminates**
+- [ ] **Step 5: Add the two adapter methods**
 
-Temporarily replace the `asyncio.gather` in `retire_workspace` with:
+In `claude_adapter.py`, after `retiring_count` (line 656):
 
 ```python
-        for e in entries:
-            await self._retire_entry(e)
+    def unconfirmed_launch_ids(self) -> list[uuid.UUID]:
+        """Every generation still in the inventory — i.e. death NOT confirmed.
+
+        confirm_dead POPS the record (live_clients.py:64), so presence is the
+        question and absence is the answer. Covers the generation registered
+        before connect() for which no handle was ever returned.
+        """
+        return [r.launch_id for r in self._live.records()]
+
+    async def retire_unconfirmed(self) -> int:
+        """Retry teardown for every generation still in the inventory.
+
+        Routes through _retire_generation, which is documented as shared by
+        retirement, capacity eviction, idle sweep and reconciliation — so a
+        concurrent caller JOINS the single teardown task rather than spawning a
+        second kill.
+        """
+        ids = self.unconfirmed_launch_ids()
+        for launch_id in ids:
+            await self._retire_generation(launch_id)
+        return len(ids)
 ```
 
+In `fake_adapter.py`, near its `retiring_count` (line 113):
+
+```python
+    def unconfirmed_launch_ids(self) -> list:
+        """The fake confirms everything by default; tests wanting the unconfirmed
+        path set this explicitly, so the default never hides it."""
+        return []
+
+    async def retire_unconfirmed(self) -> int:
+        return 0
+```
+
+- [ ] **Step 6: Prove the concurrency gate discriminates**
+
+Replace the `asyncio.gather` in `retire_workspace` with `for e in entries: await self._retire_entry(e)`.
 Run: `.venv/bin/python -m pytest tests/proposal_assist/test_passes_registry.py -q -k concurrently`
-Expected: **FAIL** — "retirement took ~1.8s — serialized, not concurrent"
+Expected: **FAIL** (~1.8s). Restore, confirm PASS, confirm `git diff --stat src/` is clean.
 
-Restore the `gather`, re-run, expect PASS. Confirm the file is clean: `git diff --stat src/`
-
-- [ ] **Step 9: Full gates and commit**
+- [ ] **Step 7: Full gates and commit**
 
 ```bash
 .venv/bin/python -m pytest tests/proposal_assist/ -q
@@ -539,31 +503,23 @@ git add src/call_manager/proposal_assist/passes.py \
         src/call_manager/proposal_assist/drafting/claude_adapter.py \
         src/call_manager/proposal_assist/drafting/fake_adapter.py \
         tests/proposal_assist/test_passes_registry.py
-git commit -F .git/COMMIT_BRIEF   # message: "feat(passes): registry of in-flight passes, retired concurrently"
+git commit -F <msgfile>   # "feat(passes): registry of in-flight passes, retired concurrently"
 ```
 
 ---
 
 ### Task 2: Wire the hook and pin the budget
 
-**Files:**
-- Modify: `src/call_manager/main.py:186-191`
-- Modify: `src/call_manager/proposal_assist/retirement.py:28` (`REQUIRED_HOOKS`) and the comment block at lines 30-47
-- Modify: `tests/proposal_assist/test_retirement_coordinator.py`
+**Files:** `main.py:186-191`, `retirement.py:28` + comment block, `tests/proposal_assist/test_retirement_coordinator.py`
 
-**Interfaces:**
-- Consumes: `PASS_REGISTRY.retire_workspace` from Task 1.
-- Produces: `REQUIRED_HOOKS == ("turns", "collab", "jobs", "passes")` — Task 5's integration test relies on the hook being live.
+**Interfaces:** consumes `PASS_REGISTRY.retire_workspace`; produces `REQUIRED_HOOKS == ("turns", "collab", "jobs", "passes")`.
 
-- [ ] **Step 1: Write the failing test**
-
-In `tests/proposal_assist/test_retirement_coordinator.py`, add:
+- [ ] **Step 1: Write the failing tests**
 
 ```python
 def test_passes_is_a_required_hook():
-    """Dropping the wiring must fail at BOOT, not silently skip teardown on every
-    delete. This structural guard is the one that previously caught an unwired
-    turns hook."""
+    """Dropping the wiring must fail at BOOT. This structural guard is the one
+    that previously caught an unwired turns hook."""
     from call_manager.proposal_assist.retirement import (
         MissingRetirementHook,
         WorkspaceRetirement,
@@ -577,8 +533,7 @@ def test_passes_is_a_required_hook():
 
 
 def test_the_barrier_exceeds_every_hooks_own_worst_case_including_passes():
-    """Gate 12. Reads the LIVE constants, so raising any sub-bound fails loudly
-    instead of silently eroding the barrier."""
+    """Gate 12, read from the LIVE constants."""
     import inspect
 
     from call_manager.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
@@ -590,102 +545,60 @@ def test_the_barrier_exceeds_every_hooks_own_worst_case_including_passes():
     disconnect = sig.parameters["disconnect_deadline_seconds"].default
     reap = sig.parameters["reap_deadline_seconds"].default
 
-    # The passes bound must clear the adapter's own internal worst case...
     assert _PASS_RETIRE_SECONDS > disconnect + reap
-    # ...and every hook must fit under the barrier. Hooks run CONCURRENTLY, so
-    # the budget is the max, not the sum.
     worst = max(3.0, disconnect + reap, _PASS_RETIRE_SECONDS, _JOBS_CANCEL_SECONDS)
     assert worst < _RETIREMENT_BARRIER_SECONDS
 ```
 
-- [ ] **Step 2: Run to verify both fail**
+- [ ] **Step 2: Run to verify both fail.**
 
-Run: `.venv/bin/python -m pytest tests/proposal_assist/test_retirement_coordinator.py -q -k "passes or worst_case"`
-Expected: FAIL — the first because `WorkspaceRetirement` accepts three hooks today; the second on `ImportError` for `_PASS_RETIRE_SECONDS` only if Task 1 is absent (it is not, so it fails on the `max` assertion once `"passes"` is unwired — read the failure and confirm it is the assertion, not a typo).
+- [ ] **Step 3: Add the hook to `REQUIRED_HOOKS`**
 
-- [ ] **Step 3: Add the hook to REQUIRED_HOOKS and correct the comment**
+`retirement.py` line 28: `REQUIRED_HOOKS = ("turns", "collab", "jobs", "passes")`
 
-In `src/call_manager/proposal_assist/retirement.py`, line 28:
-
-```python
-REQUIRED_HOOKS = ("turns", "collab", "jobs", "passes")
-```
-
-Replace the budget lines inside the comment block above `_RETIREMENT_BARRIER_SECONDS` (currently the `collab:` / `turns:` / `jobs:` bullets) with:
+Add to the budget comment block, after the `jobs:` bullet:
 
 ```python
-#   collab: max over the two rooms (they retire concurrently) of
-#           _RETIRE_LOCK_WAIT_SECONDS (1.0) + _RETIRE_OPS_DRAIN_SECONDS (2.0) = 3.0
-#   turns:  adapter disconnect_deadline_seconds (3.0) + reap_deadline_seconds (2.0) = 5.0
-#   jobs:   _JOBS_CANCEL_SECONDS (1.0), and every query is SKIP LOCKED so it
-#           never waits on a live worker's row = 1.0
 #   passes: _PASS_RETIRE_SECONDS (5.5) — INDEPENDENT of entry count, because
 #           PassRegistry.retire_workspace gathers its entries concurrently. If it
 #           ever retired serially this budget would silently become N x 5.5.
-# => 5.5 worst case. 6.0 keeps headroom.
 ```
 
-- [ ] **Step 4: Register the hook**
+and change the closing line to `# => 5.5 worst case. 6.0 keeps headroom.`
 
-In `src/call_manager/main.py`, inside the `hooks={...}` dict at line 187 (alongside the existing `"jobs"` entry at line 190):
+- [ ] **Step 4: Register the hook** — in `main.py`, alongside the existing `"jobs"` entry:
 
 ```python
     from call_manager.proposal_assist.passes import PASS_REGISTRY
 ```
-
-and in the dict:
-
 ```python
             "passes": PASS_REGISTRY.retire_workspace,
 ```
 
-- [ ] **Step 5: Run to verify they pass**
+- [ ] **Step 5: Run; then prove the budget gate discriminates** by setting `_PASS_RETIRE_SECONDS = 6.5` (expect FAIL) and restoring.
 
-Run: `.venv/bin/python -m pytest tests/proposal_assist/test_retirement_coordinator.py -q`
-Expected: all pass.
-
-- [ ] **Step 6: Prove the budget gate discriminates**
-
-Temporarily set `_PASS_RETIRE_SECONDS = 6.5` in `passes.py`.
-Run: `.venv/bin/python -m pytest tests/proposal_assist/test_retirement_coordinator.py -q -k worst_case`
-Expected: **FAIL**. Restore 5.5, re-run, expect PASS.
-
-- [ ] **Step 7: Full gates and commit**
-
-```bash
-.venv/bin/python -m pytest tests/proposal_assist/ -q
-.venv/bin/ruff check .
-git add src/call_manager/main.py src/call_manager/proposal_assist/retirement.py \
-        tests/proposal_assist/test_retirement_coordinator.py
-git commit -F .git/COMMIT_BRIEF   # "feat(retirement): require and wire the passes hook"
-```
+- [ ] **Step 6: Full gates and commit** — `"feat(retirement): require and wire the passes hook"`
 
 ---
 
-### Task 3: Coherence — track the pass and guard its prefix
+### Task 3: Coherence — track the whole runner, guard the prefix
 
-**Files:**
-- Modify: `src/call_manager/proposal_assist/coherence/pass_runner.py:45-116`
-- Create: `tests/proposal_assist/test_pass_retirement.py`
+**Files:** `coherence/pass_runner.py:44-116`, `tests/proposal_assist/test_pass_retirement.py` (create)
 
-**Interfaces:**
-- Consumes: `PASS_REGISTRY.track`, `Entry.bind_handle` (Task 1).
-- Produces: the wrap+guard shape Tasks 4 and 5 repeat. Coherence is the template: read it before doing the others.
+**Interfaces:** consumes `PASS_REGISTRY.track`, `Entry.bind_adapter`. Produces the shape Tasks 4-5 repeat — read this task before those.
 
-**Two independent changes, both in this file.**
+**Two changes.**
 
-**(a) The prefix guard (spec §5).** The prefix reads workspace files through `assemble_coherence_context(...)` and can commit a cap-failure. Load the workspace `with_for_update=True` and abort if `soft_deleted_at` is set, holding that row lock through the commit. The delete transaction's `ws.soft_deleted_at = ...` takes the same row lock, so only two orders exist: the prefix commits and the delete waits briefly behind it, or the delete wins and the prefix aborts having written nothing.
+**(a) Prefix guard (spec §5).** Load the workspace `with_for_update=True` and abort if `soft_deleted_at` is set, holding the lock through the commit. The delete transaction takes the same row to stamp `soft_deleted_at`, so only two orders exist: the prefix commits and the delete waits briefly, or the delete wins and the prefix aborts having written nothing. Safe **only because this prefix is short and commits promptly** — Step 4 pins the lock duration rather than assuming it.
 
-This is safe **only because the prefix is short and its session commits promptly.** The Phase-0 slice showed this same idiom being unsafe when the holding session lives for minutes. That difference is not stylistic — Step 5's test pins the lock duration rather than assuming it.
-
-**(b) The tracking wrap (spec §4.5).** Everything from the adapter build onward goes inside `track`.
+**(b) Track the WHOLE runner**, starting before the prefix — not from the adapter build. See the revision note: registering after the prefix leaves a window in which a DELETE snapshots an empty registry and the pass launches anyway.
 
 - [ ] **Step 1: Write the failing tests**
 
 Create `tests/proposal_assist/test_pass_retirement.py`:
 
 ```python
-"""Integration gates: the real DELETE route against live passes."""
+"""Integration gates driving the REAL runners."""
 
 from __future__ import annotations
 
@@ -702,12 +615,7 @@ from call_manager.config import Settings
 from call_manager.db.models import CoherenceJob, Workspace
 from call_manager.proposal_assist.coherence.pass_runner import run_coherence_pass
 from call_manager.proposal_assist.passes import PASS_REGISTRY
-
-# `make_workspace`, `current_user`, `client_authed_owner` and `pg_session_factory`
-# are real fixtures — see tests/proposal_assist/conftest.py and tests/conftest.py.
-# There is deliberately NO settings fixture in this repo: every existing pass test
-# constructs `Settings()` inline (e.g. tests/proposal_assist/coherence/
-# test_pass_runner.py:34). Follow that; do not add a fixture for it.
+from tests.proposal_assist.conftest import make_workspace
 
 
 def _now_utc() -> datetime:
@@ -715,14 +623,13 @@ def _now_utc() -> datetime:
 
 
 def _never_called_adapter_builder(**kwargs):
-    """Fails loudly if the prefix guard did NOT abort. This is the assertion —
-    the tests below rely on it being reached only when the guard is broken."""
+    """This IS the assertion for the prefix-guard tests: reached only if the guard
+    failed to abort."""
     raise AssertionError("the prefix guard should have aborted before the adapter build")
 
 
 def _stub_adapter_builder(**kwargs):
-    """A do-nothing adapter for tests that need the pass to proceed past the
-    prefix but do not care what the LLM does."""
+    """Proceeds past the prefix without doing any LLM work."""
 
     class _Stub:
         async def launch(self, context):
@@ -738,8 +645,11 @@ def _stub_adapter_builder(**kwargs):
         async def terminate(self, handle) -> None:
             return None
 
-        def generation_confirmed_dead(self, launch_id) -> bool:
-            return True
+        def unconfirmed_launch_ids(self):
+            return []
+
+        async def retire_unconfirmed(self) -> int:
+            return 0
 
     return _Stub()
 
@@ -747,8 +657,7 @@ def _stub_adapter_builder(**kwargs):
 def test_the_coherence_prefix_aborts_for_a_workspace_deleted_under_it(
     pg_session_factory, current_user
 ):
-    """Gate 9. A delete committing while the prefix is mid-flight must leave ZERO
-    prefix writes."""
+    """Gate 9: zero prefix writes, and the adapter is never built."""
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
         s.flush()
@@ -757,7 +666,6 @@ def test_the_coherence_prefix_aborts_for_a_workspace_deleted_under_it(
         s.commit()
         job_id, ws_id = job.id, ws.id
 
-    # Delete BEFORE the pass runs: the prefix must see soft_deleted_at and stop.
     with pg_session_factory() as s:
         s.get(Workspace, ws_id).soft_deleted_at = _now_utc()
         s.commit()
@@ -772,109 +680,13 @@ def test_the_coherence_prefix_aborts_for_a_workspace_deleted_under_it(
     )
 
     with pg_session_factory() as s:
-        job = s.get(CoherenceJob, job_id)
-        # The prefix aborted: it did not fail the job with a budget message, and
-        # crucially it never built an adapter (that builder raises if called).
-        assert job.status == "running"
+        assert s.get(CoherenceJob, job_id).status == "running"
 
 
 def test_the_coherence_prefix_does_not_hold_its_row_lock_for_long(
     pg_session_factory, current_user
 ):
-    """Gate 9, second half. The guard is only safe because the prefix is short.
-    A concurrent workspace-row UPDATE must not be blocked for more than a moment."""
-    ...  # full body in Step 4
-```
-
-Both helpers (`_never_called_adapter_builder`, `_stub_adapter_builder`) and `_now_utc` are defined in the file header above — do not redefine them per test.
-
-- [ ] **Step 2: Run to verify the first test fails**
-
-Run: `.venv/bin/python -m pytest tests/proposal_assist/test_pass_retirement.py -q -k prefix_aborts`
-Expected: FAIL — `AssertionError: the prefix guard should have aborted before the adapter build`, because today's prefix reads the workspace without checking `soft_deleted_at`.
-
-- [ ] **Step 3: Add the guard and the wrap**
-
-In `coherence/pass_runner.py`, replace lines 45-59 (the prefix session) with:
-
-```python
-    # 1. Read job + workspace state in a short session, under a workspace ROW LOCK.
-    #    The lock is what linearizes this prefix against a concurrent delete: the
-    #    delete transaction takes the same row to stamp soft_deleted_at, so either
-    #    we commit and it waits briefly, or it wins and we abort having written
-    #    nothing. Safe ONLY because this session commits promptly — see the Phase-0
-    #    slice for the same idiom being unsafe on a long-lived session.
-    with session_factory() as s:
-        job = s.get(CoherenceJob, job_id)
-        if job is None or job.status != "running":
-            return
-        ws = s.get(Workspace, job.workspace_id, with_for_update=True)
-        if ws is None or ws.soft_deleted_at is not None:
-            return
-        workspace_id = job.workspace_id
-        requested_by = job.requested_by
-        locked = ws.spec_locked_at is not None
-        if coherence_cap_exceeded(s, workspace_id=workspace_id, settings=settings):
-            _fail(s, job, "daily coherence budget reached")
-            s.commit()
-            return
-        instruction = assemble_coherence_context(
-            session=s, workspace_id=workspace_id, workspaces_dir=settings.workspaces_dir
-        )
-```
-
-Then wrap from the adapter build (line 61) to the end of the existing `finally` (line 115). The body is unchanged — only its indentation and the two new lines:
-
-```python
-    adapter = adapter_builder(
-        settings=settings,
-        session_factory=session_factory,
-        workspace_id=workspace_id,
-        requested_by=requested_by,
-        job_id=job_id,
-        locked=locked,
-    )
-    handle = None
-    done: TurnDoneEvent | None = None
-    async with PASS_REGISTRY.track(workspace_id, adapter) as _entry:
-        try:
-
-            async def _run() -> TurnDoneEvent | None:
-                nonlocal handle
-                handle = await adapter.launch(LaunchContext(workspace_id=workspace_id))
-                _entry.bind_handle(handle)
-                last = None
-                async for event in adapter.send_turn(handle, instruction):
-                    if isinstance(event, TurnDoneEvent):
-                        last = event
-                return last
-
-            done = await asyncio.wait_for(
-                _run(), timeout=settings.coherence_pass_timeout_seconds
-            )
-        except Exception as exc:  # noqa: BLE001 — terminal: fail the job, never propagate
-            # UNCHANGED. asyncio.CancelledError inherits from BaseException, so a
-            # retirement cancellation passes straight through this handler to the
-            # finally — and skipping this failure path is CORRECT, because the
-            # delete transaction already terminalized the job row.
-            ...  # keep the existing body verbatim
-        finally:
-            ...  # keep the existing terminate block verbatim
-```
-
-Add the import at the top of the file:
-
-```python
-from call_manager.proposal_assist.passes import PASS_REGISTRY
-```
-
-**Note on `bind_handle` placement:** it goes on the line immediately after `launch` returns, inside `_run`. The adapter is already bound at entry, so the window before this line is covered.
-
-- [ ] **Step 4: Write the lock-duration test body**
-
-Replace the `...` in `test_the_coherence_prefix_does_not_hold_its_row_lock_for_long`:
-
-```python
+    """Gate 9, second half. The guard is safe ONLY while this prefix stays short."""
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
         s.flush()
@@ -886,7 +698,6 @@ Replace the `...` in `test_the_coherence_prefix_does_not_hold_its_row_lock_for_l
     blocked_for: list[float] = []
 
     def _competing_update():
-        # Start after the prefix has had time to take its lock.
         time.sleep(0.2)
         began = time.monotonic()
         with pg_session_factory() as s:
@@ -908,59 +719,84 @@ Replace the `...` in `test_the_coherence_prefix_does_not_hold_its_row_lock_for_l
 
     assert blocked_for, "the competing update never ran"
     assert blocked_for[0] < 5.0, (
-        f"the prefix held the workspace row for {blocked_for[0]:.1f}s — the guard is "
-        "only safe while this prefix stays short"
+        f"the prefix held the workspace row for {blocked_for[0]:.1f}s"
     )
 ```
 
-- [ ] **Step 5: Run both; both must pass**
+- [ ] **Step 2: Run to verify the first fails**
 
-Run: `.venv/bin/python -m pytest tests/proposal_assist/test_pass_retirement.py -q`
-Expected: `2 passed`
+Expected: `AssertionError: the prefix guard should have aborted before the adapter build`
 
-- [ ] **Step 6: Prove the guard gate discriminates**
+- [ ] **Step 3: Add the guard**
 
-Temporarily revert the guard: change `with_for_update=True` back to a plain `s.get(Workspace, job.workspace_id)` and delete the `soft_deleted_at` check.
-Run: `.venv/bin/python -m pytest tests/proposal_assist/test_pass_retirement.py -q -k prefix_aborts`
-Expected: **FAIL**. Restore, re-run, expect PASS.
+Replace the prefix session opening in `coherence/pass_runner.py`:
 
-- [ ] **Step 7: Full gates and commit**
-
-```bash
-.venv/bin/python -m pytest tests/proposal_assist/ -q
-.venv/bin/ruff check .
-git add src/call_manager/proposal_assist/coherence/pass_runner.py \
-        tests/proposal_assist/test_pass_retirement.py
-git commit -F .git/COMMIT_BRIEF   # "feat(coherence): track the pass and guard its prefix"
+```python
+    # 1. Read job + workspace state in a short session, under a workspace ROW LOCK.
+    #    The lock linearizes this prefix against a concurrent delete: the delete
+    #    takes the same row to stamp soft_deleted_at, so either we commit and it
+    #    waits briefly, or it wins and we abort having written nothing. Safe ONLY
+    #    because this session commits promptly.
+    with session_factory() as s:
+        job = s.get(CoherenceJob, job_id)
+        if job is None or job.status != "running":
+            return
+        ws = s.get(Workspace, job.workspace_id, with_for_update=True)
+        if ws is None or ws.soft_deleted_at is not None:
+            return
+        workspace_id = job.workspace_id
+        requested_by = job.requested_by
+        locked = ws.spec_locked_at is not None
+        ...  # the rest of the existing prefix, unchanged
 ```
+
+- [ ] **Step 4: Wrap the whole runner**
+
+The tracked region starts **before** the prefix. `run_coherence_pass`'s body becomes:
+
+```python
+async def run_coherence_pass(...) -> None:
+    """..."""
+    # Tracked from the FIRST line, before the prefix — an entry that appears only
+    # after the prefix is invisible to a DELETE that commits during it.
+    # workspace_id is not known until the prefix reads it, so the registry is keyed
+    # on the job's workspace, read in its own tiny session first.
+    with session_factory() as s0:
+        job0 = s0.get(CoherenceJob, job_id)
+        if job0 is None or job0.status != "running":
+            return
+        tracked_ws = job0.workspace_id
+
+    async with PASS_REGISTRY.track(tracked_ws) as _entry:
+        ...  # the entire existing body, indented one level
+        # and, immediately after `adapter = adapter_builder(...)`:
+        _entry.bind_adapter(adapter)
+```
+
+Add the import: `from call_manager.proposal_assist.passes import PASS_REGISTRY`
+
+**Do not** touch the `except Exception` body or the `finally` terminate block.
+
+- [ ] **Step 5: Run both; both must pass.**
+
+- [ ] **Step 6: Prove the guard gate discriminates** — revert `with_for_update=True` to a bare `get` and drop the `soft_deleted_at` check; expect FAIL; restore; expect PASS.
+
+- [ ] **Step 7: Full gates and commit** — `"feat(coherence): track the whole pass and guard its prefix"`
 
 ---
 
-### Task 4: Evaluator and uncited-claims — same treatment
+### Task 4: Evaluator and uncited-claims
 
-**Files:**
-- Modify: `src/call_manager/proposal_assist/evaluator/pass_runner.py:57-75` (prefix) and the adapter-build-onward block
-- Modify: `src/call_manager/proposal_assist/uncited_claims/pass_runner.py:84-97` (prefix) and the adapter-build-onward block
-- Modify: `tests/proposal_assist/test_pass_retirement.py`
+**Files:** `evaluator/pass_runner.py`, `uncited_claims/pass_runner.py`, `tests/proposal_assist/test_pass_retirement.py`
 
-**Interfaces:**
-- Consumes: `PASS_REGISTRY.track`, `Entry.bind_handle` (Task 1); the shape established in Task 3.
-- Produces: nothing new.
-
-**Why these two matter more than coherence:** both commit **durable progress writes** in their prefix before any tracking point exists. Evaluator commits `evaluated_draft_sha`, `evaluated_spec_sha` and `evaluated_rubric_updated_at` (`evaluator/pass_runner.py:68-70`); uncited-claims commits `evaluated_draft_sha` (`uncited_claims/pass_runner.py:93`). Those are exactly the writes the guard must prevent for a deleted workspace.
+**Why these matter more than coherence:** both commit **durable progress** in their prefix. Evaluator commits `evaluated_draft_sha`, `evaluated_spec_sha`, `evaluated_rubric_updated_at`; uncited-claims commits `evaluated_draft_sha`. Without the guard those are durable writes against a deleted workspace.
 
 - [ ] **Step 1: Write the failing tests**
-
-Append to `tests/proposal_assist/test_pass_retirement.py`:
 
 ```python
 def test_the_evaluator_prefix_writes_nothing_for_a_deleted_workspace(
     pg_session_factory, current_user
 ):
-    """Gate 9 for the evaluator. Unlike coherence, this prefix COMMITS progress
-    (evaluated_draft_sha / evaluated_spec_sha / evaluated_rubric_updated_at), so a
-    missing guard is a durable write against a deleted workspace, not just wasted
-    work."""
     from call_manager.db.models import EvaluatorJob
     from call_manager.proposal_assist.evaluator.pass_runner import run_evaluator_pass
 
@@ -995,7 +831,6 @@ def test_the_evaluator_prefix_writes_nothing_for_a_deleted_workspace(
 def test_the_uncited_prefix_writes_nothing_for_a_deleted_workspace(
     pg_session_factory, current_user
 ):
-    """Gate 9 for uncited-claims — it commits evaluated_draft_sha in its prefix."""
     from call_manager.db.models import UncitedClaimsJob
     from call_manager.proposal_assist.uncited_claims.pass_runner import (
         run_uncited_claims_pass,
@@ -1026,14 +861,9 @@ def test_the_uncited_prefix_writes_nothing_for_a_deleted_workspace(
         assert s.get(UncitedClaimsJob, job_id).evaluated_draft_sha is None
 ```
 
-- [ ] **Step 2: Run to verify both fail**
+- [ ] **Step 2: Run to verify both fail.**
 
-Run: `.venv/bin/python -m pytest tests/proposal_assist/test_pass_retirement.py -q -k "evaluator_prefix or uncited_prefix"`
-Expected: FAIL — `AssertionError: the prefix guard should have aborted before the adapter build`.
-
-- [ ] **Step 3: Add the guard to the evaluator prefix**
-
-In `evaluator/pass_runner.py`, the prefix currently does `ws = s.get(Workspace, job.workspace_id)` before line 57. Change that read to take the lock and add the abort, immediately after the `job.status != "running"` early return:
+- [ ] **Step 3: Add the guard to each prefix**, immediately after the `job.status != "running"` early return:
 
 ```python
         ws = s.get(Workspace, job.workspace_id, with_for_update=True)
@@ -1041,108 +871,87 @@ In `evaluator/pass_runner.py`, the prefix currently does `ws = s.get(Workspace, 
             return
 ```
 
-Everything below (`workspace_id = job.workspace_id` onward) is unchanged. Note the existing code already uses `ws` at line 70 (`ws.rubric_updated_at if ws else None`) — with the guard above, `ws` can no longer be `None` there, but **leave that expression alone**; narrowing it is not this task's business.
+In the evaluator this replaces the existing unlocked `ws = s.get(Workspace, job.workspace_id)`. Leave the later `ws.rubric_updated_at if ws else None` expression alone — narrowing it is not this task's business.
 
-- [ ] **Step 4: Add the guard to the uncited-claims prefix**
+- [ ] **Step 4: Track the whole runner in each**, using the same pre-prefix pattern as Task 3 (tiny session to read `workspace_id`, then `async with PASS_REGISTRY.track(tracked_ws) as _entry:` around the entire body, and `_entry.bind_adapter(adapter)` after the adapter build). Import `PASS_REGISTRY` in each file.
 
-Identical change in `uncited_claims/pass_runner.py`, immediately after its `job.status != "running"` early return:
+- [ ] **Step 5: Run; prove BOTH guards discriminate** (remove each guard in turn, expect that runner's test to FAIL, restore). Record all four runs.
 
-```python
-        ws = s.get(Workspace, job.workspace_id, with_for_update=True)
-        if ws is None or ws.soft_deleted_at is not None:
-            return
-```
-
-- [ ] **Step 5: Add the tracking wrap to both**
-
-In each file, wrap from the `adapter = adapter_builder(...)` line through the end of the existing `finally` block in `async with PASS_REGISTRY.track(workspace_id, adapter) as _entry:`, and add `_entry.bind_handle(handle)` on the line immediately after `handle = await adapter.launch(...)` inside the inner `_run`. Add to each file's imports:
-
-```python
-from call_manager.proposal_assist.passes import PASS_REGISTRY
-```
-
-Do not touch either runner's `except Exception` body or its terminate block.
-
-- [ ] **Step 6: Run to verify they pass**
-
-Run: `.venv/bin/python -m pytest tests/proposal_assist/test_pass_retirement.py -q`
-Expected: `4 passed`
-
-- [ ] **Step 7: Prove both gates discriminate**
-
-For each runner in turn: remove the two guard lines, run that runner's test, confirm **FAIL**, restore, confirm PASS. Record all four runs.
-
-- [ ] **Step 8: Full gates and commit**
-
-```bash
-.venv/bin/python -m pytest tests/proposal_assist/ -q
-.venv/bin/ruff check .
-git add src/call_manager/proposal_assist/evaluator/pass_runner.py \
-        src/call_manager/proposal_assist/uncited_claims/pass_runner.py \
-        tests/proposal_assist/test_pass_retirement.py
-git commit -F .git/COMMIT_BRIEF   # "feat(passes): track and guard the evaluator and uncited runners"
-```
+- [ ] **Step 6: Full gates and commit** — `"feat(passes): track and guard the evaluator and uncited runners"`
 
 ---
 
-### Task 5: Review — the fan-out, and its second prefix
+### Task 5: Review — fan-out, the second prefix, and the lock-order fix
 
-**Files:**
-- Modify: `src/call_manager/proposal_assist/review/pass_runner.py:60-93` (child prefix), `:95-133` (child wrap), `:193-232` (parent prefix), `:235-260` (parent wrap)
-- Modify: `tests/proposal_assist/test_pass_retirement.py`
+**Files:** `review/pass_runner.py` (child prefix ~60-93, child body 95-133, **finalization 135-144**, parent 193-260), `tests/proposal_assist/test_pass_retirement.py`
 
-**Interfaces:**
-- Consumes: `PASS_REGISTRY.track(workspace_id, adapter=None)` — the adapterless form (Task 1).
-- Produces: nothing new.
+**Three changes, and the third is a correctness fix to existing code.**
 
-**Why review is different, and the mistake to avoid.** `run_review_pass` **launches nothing.** Every `_run_one_call` constructs its own adapter and its own handle (`review/pass_runner.py:95`), so each child has a distinct adapter-local generation. There is no parent handle to bind and no shared generation to inherit. So:
+**(a) Track parent and children separately.** `run_review_pass` **launches nothing** — every `_run_one_call` builds its own adapter, so each child has its own generation. The parent is tracked with no adapter ever bound; each child is tracked and binds its own.
 
-- the orchestration task is tracked **task-only** — `track(workspace_id)` with no adapter;
-- **each child task is tracked as its own entry**, with its own adapter and handle.
+**(b) The child prefix locks the parent run.** Each `_run_one_call` commits `item.status = "running"` before its adapter exists. It re-reads `run.status` first, but that read takes **no lock** — a TOCTOU window in which a DELETE can cancel the run between the read and the commit, stranding a `ReviewRunItem` in `running` on a deleted workspace. Lock the `ReviewRun` row: the delete transaction already updates review runs through `cancel_review_runs_for_workspace`, so it linearizes against exactly the write that matters, without adding N persona-shaped contenders to the workspace row.
 
-Making the children share the parent's entry is the specific error this task exists to prevent, and Step 6 mutates exactly that.
+**(c) Finalization must be reordered — this plan introduces a deadlock otherwise.** The new prefix takes **run → item**. Existing finalization takes **item** (line 136) **→ run** (line 144). That is AB-BA: two review sub-calls on the same run can deadlock (Postgres 40P01). This plan therefore establishes `review_runs < review_run_items` as a normative rule and reorders finalization to match. The rule goes in a comment at both sites so the next reader cannot re-invert it.
 
-**Review's second prefix (spec §5.1).** Each `_run_one_call` commits `item.status = "running"` (line 90-93) before its adapter is constructed. It does re-read `run.status` first (line 84) — but that read takes **no lock**, so it is a TOCTOU window: a DELETE can cancel the parent run between the read and the commit, after which the child commits `running` and is then cancelled, stranding a `ReviewRunItem` in `running` on a deleted workspace.
-
-The child prefix is linearized on the **parent `ReviewRun` row**, not the workspace row. The `ReviewRun` row is the tighter choice: the delete transaction already updates review-run rows through `cancel_review_runs_for_workspace`, so locking it linearizes against exactly the write that matters — without adding N persona-shaped contenders to the workspace row that every delete must pass through.
-
-- [ ] **Step 1: Write the failing tests**
-
-Append to `tests/proposal_assist/test_pass_retirement.py`:
+- [ ] **Step 1: Write the failing tests — all three drive the REAL runner**
 
 ```python
 @pytest.mark.asyncio
-async def test_every_review_child_is_tracked_as_its_own_entry():
-    """Gate 6. The parent is adapterless and task-only; each child carries its own
-    adapter and handle. Mutation: make the children share the parent's entry and
-    this must fail."""
-    ws = uuid.uuid4()
-    seen: list[int] = []
+async def test_every_review_child_is_tracked_as_its_own_entry(
+    pg_session_factory, current_user, monkeypatch
+):
+    """Gate 6, against the REAL run_review_pass.
 
-    async def _child(idx: int):
-        adapter = _CountingAdapter()
-        async with PASS_REGISTRY.track(ws, adapter) as entry:
-            entry.bind_handle(_Handle())
-            seen.append(PASS_REGISTRY.live_count(ws))
-            await asyncio.sleep(0.2)
+    Revision 1 tested hand-rolled coroutines, so deleting the tracking from
+    production review could not have failed it. The peak live count is sampled
+    from inside a real _run_one_call.
+    """
+    from call_manager.db.models import ReviewRun
+    from call_manager.proposal_assist.review import pass_runner as rp
 
-    async def _parent():
-        async with PASS_REGISTRY.track(ws):        # task-only: NO adapter
-            assert PASS_REGISTRY.live_count(ws) == 1
-            await asyncio.gather(*(_child(i) for i in range(5)))
+    peak: list[int] = []
 
-    await _parent()
-    # parent + 5 children were all live simultaneously
-    assert max(seen) == 6
-    assert PASS_REGISTRY.live_count(ws) == 0
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        run = ReviewRun(workspace_id=ws.id, status="running")
+        s.add(run)
+        s.commit()
+        run_id, ws_id = run.id, ws.id
+
+    real_builder = rp.build_review_adapter          # confirm the real name first
+
+    def _sampling_builder(**kwargs):
+        peak.append(PASS_REGISTRY.live_count(ws_id))
+        return _stub_adapter_builder(**kwargs)
+
+    await rp.run_review_pass(
+        run_id=run_id,
+        session_factory=pg_session_factory,
+        settings=Settings(),
+        adapter_builder=_sampling_builder,
+    )
+
+    # parent (task-only) + at least one child alive at the same moment
+    assert peak and max(peak) >= 2, (
+        f"peak live entries was {max(peak) if peak else 0} — children are sharing "
+        "the parent entry instead of registering their own"
+    )
+    assert PASS_REGISTRY.live_count(ws_id) == 0
 
 
-def test_a_delete_mid_child_prefix_strands_no_review_item_in_running(
+def test_a_delete_racing_the_child_prefix_strands_no_item_in_running(
     pg_session_factory, current_user
 ):
-    """Gate 6, second case. A DELETE cancelling the run while a child sits between
-    its run.status read and its commit must leave no ReviewRunItem in 'running'."""
+    """Gate 6, second case — a SYNCHRONIZED race, not a pre-set state.
+
+    Revision 1 cancelled the run BEFORE the child started, which the existing
+    unlocked status check already handles — so it could not fail. Here the child
+    is made to block on the ReviewRun row lock while the cancel commits, which is
+    the actual TOCTOU window.
+    """
     from call_manager.db.models import ReviewRun, ReviewRunItem
+    from call_manager.proposal_assist.review.pass_runner import _run_one_call
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
@@ -1154,60 +963,72 @@ def test_a_delete_mid_child_prefix_strands_no_review_item_in_running(
         s.commit()
         run_id, ws_id = run.id, ws.id
 
-    # Cancel the run the way the delete transaction does, BEFORE the child runs.
-    with pg_session_factory() as s:
-        s.get(ReviewRun, run_id).status = "cancelled"
-        s.commit()
+    holder = pg_session_factory()
+    child_done = threading.Event()
 
-    asyncio.run(
-        _run_one_call(
-            kind="fit_check",
-            instruction="x",
-            run_id=run_id,
-            workspace_id=ws_id,
-            session_factory=pg_session_factory,
-            settings=Settings(),
-            adapter_builder=_never_called_adapter_builder,
+    def _child():
+        asyncio.run(
+            _run_one_call(
+                kind="fit_check",
+                instruction="x",
+                run_id=run_id,
+                workspace_id=ws_id,
+                session_factory=pg_session_factory,
+                settings=Settings(),
+                adapter_builder=_stub_adapter_builder,
+            )
         )
-    )
+        child_done.set()
+
+    try:
+        # Hold the run row so the child's prefix BLOCKS on it (with the fix) or
+        # sails past it (without).
+        holder.get(ReviewRun, run_id, with_for_update=True)
+        t = threading.Thread(target=_child)
+        t.start()
+        time.sleep(0.5)
+
+        # Cancel the run the way the delete transaction does, then release.
+        holder.get(ReviewRun, run_id).status = "cancelled"
+        holder.commit()
+    finally:
+        holder.close()
+
+    assert child_done.wait(timeout=30), "the child never finished"
 
     with pg_session_factory() as s:
         item = s.scalar(
             select(ReviewRunItem).where(ReviewRunItem.review_run_id == run_id)
         )
-        assert item.status != "running", "child committed 'running' on a cancelled run"
+        assert item.status != "running", (
+            "the child committed 'running' on a run the delete had cancelled"
+        )
+
+
+def test_review_takes_the_run_row_before_the_item_row_everywhere(
+    pg_session_factory, current_user
+):
+    """The new normative rule: review_runs < review_run_items.
+
+    Two concurrent sub-calls on one run finalizing while another takes the prefix
+    must not deadlock. Mutation: restore finalization's original item-then-run
+    order and this must fail with a 40P01 deadlock (or hang to the timeout).
+    """
+    ...  # body in Step 5 — it needs the reordered finalization to exist first
 ```
 
-Add the `_CountingAdapter` helper next to `_FakeAdapter` conventions already in the file:
-
-```python
-class _CountingAdapter:
-    async def terminate(self, handle) -> None:
-        return None
-
-    def generation_confirmed_dead(self, launch_id) -> bool:
-        return True
-```
-
-- [ ] **Step 2: Run to verify both fail**
-
-Run: `.venv/bin/python -m pytest tests/proposal_assist/test_pass_retirement.py -q -k "review_child or child_prefix"`
-Expected: FAIL — the first because no tracking exists in review yet (`live_count` stays 0); the second because the child commits `running` without locking the parent run.
+- [ ] **Step 2: Run to verify the first two fail.** Read each failure and confirm it is the assertion, not an import error. Fix the `build_review_adapter` name if my guess is wrong — the file is the authority.
 
 - [ ] **Step 3: Lock the parent run in the child prefix**
 
-In `review/pass_runner.py`, replace the `run = s.get(ReviewRun, run_id)` at line 66 with a locked read, and move it above the item lookup so the lock is taken first:
-
 ```python
     with session_factory() as s:
-        # Lock the PARENT run row for the whole prefix. The bare read this
-        # replaces was a TOCTOU window: a DELETE cancels review runs through
-        # cancel_review_runs_for_workspace, and could land between the status
-        # check below and the `item.status = "running"` commit, stranding the item
-        # in 'running' on a deleted workspace. The ReviewRun row is the right lock
-        # rather than the workspace row: it linearizes against exactly the write
-        # that matters, without putting N persona-shaped contenders on the row
-        # every delete must pass through.
+        # LOCK ORDER: review_runs < review_run_items (normative — see the matching
+        # note in the finalization session below). The bare read this replaces was
+        # a TOCTOU window: a DELETE cancels review runs through
+        # cancel_review_runs_for_workspace and could land between the status check
+        # and the `item.status = "running"` commit, stranding the item in 'running'
+        # on a deleted workspace.
         run = s.get(ReviewRun, run_id, with_for_update=True)
         item = s.scalar(
             select(ReviewRunItem).where(
@@ -1216,237 +1037,230 @@ In `review/pass_runner.py`, replace the `run = s.get(ReviewRun, run_id)` at line
         )
 ```
 
-The rest of the prefix (lines 75-93) is unchanged — the existing `if run is None or run.status != "running":` branch now runs under the lock and its decision can no longer be overtaken.
+The rest of the prefix is unchanged; its existing `if run is None or run.status != "running":` branch now decides under the lock.
 
-- [ ] **Step 4: Track the parent, task-only**
+- [ ] **Step 4: Reorder finalization to run-then-item**
 
-In `run_review_pass`, wrap from the wave-1 semaphore (line 235) through the end of the function in:
+Replace the opening of the finalization session (currently lines 135-144):
+
+```python
+    with session_factory() as s:
+        # LOCK ORDER: review_runs < review_run_items (normative). The run is taken
+        # FIRST here even though the item is what we came to write, because the
+        # child prefix above takes run-then-item; the original item-then-run order
+        # was an AB-BA inversion against it and could deadlock two sub-calls of the
+        # same run (Postgres 40P01).
+        run = s.get(ReviewRun, run_id, with_for_update=True)
+        item = s.get(ReviewRunItem, item_id, with_for_update=True)
+        if item is None:
+            return
+        item.completed_at = _now()
+        ...  # the rest of the existing finalization body, unchanged
+```
+
+Note the `if item is None: return` moves below both acquisitions — taking the run lock for a moment on a vanished item is harmless, and reordering the guard would reintroduce the inversion.
+
+- [ ] **Step 5: Write the deadlock test body**
+
+Replace the `...` in `test_review_takes_the_run_row_before_the_item_row_everywhere`: seed one run with two items; run two threads, each calling `_run_one_call` for a different `kind`, both with `_stub_adapter_builder`; join both with `timeout=30`; assert both threads finished and no exception was recorded. Capture each thread's exception into a list and assert the list is empty, so a 40P01 fails the test rather than escaping as a warning.
+
+- [ ] **Step 6: Track the parent (task-only) and each child**
+
+Parent — wrap from the wave-1 semaphore through the end of `run_review_pass`:
 
 ```python
     async with PASS_REGISTRY.track(workspace_id):
         # Task-only: run_review_pass owns NO adapter — every _run_one_call builds
-        # its own. Retirement cancels this task; there is nothing here to
-        # terminate.
+        # its own. Retirement cancels this task; there is nothing here to retire.
         sem = asyncio.Semaphore(settings.review_persona_concurrency)
-        ...  # the existing body, indented one level
+        ...  # existing body, indented one level
 ```
 
-- [ ] **Step 5: Track each child, with its adapter**
-
-In `_run_one_call`, wrap from `adapter = adapter_builder(...)` (line 95) through the end of the existing `finally` (line 133) in `async with PASS_REGISTRY.track(workspace_id, adapter) as _entry:`, and add `_entry.bind_handle(handle)` immediately after `handle = await adapter.launch(...)` inside `_drive`. Add the import:
+Child — wrap `_run_one_call`'s body from the prefix onward (same pre-prefix rule as Task 3: the entry must exist before the prefix), binding the adapter after it is built:
 
 ```python
-from call_manager.proposal_assist.passes import PASS_REGISTRY
+    async with PASS_REGISTRY.track(workspace_id) as _entry:
+        ...  # prefix, then:
+        adapter = adapter_builder(...)
+        _entry.bind_adapter(adapter)
+        ...  # rest, INCLUDING the finalization session
 ```
 
-The post-call finalization session (lines 135-173) stays **outside** the wrap — it is the child's own bookkeeping and must run whether or not the pass was retired.
+- [ ] **Step 7: Run; then prove all three gates discriminate**
 
-- [ ] **Step 6: Run, then prove the fan-out gate discriminates**
+1. Delete the child's `async with PASS_REGISTRY.track(...)` → fan-out test **FAILS** (peak < 2).
+2. Revert the child prefix to a bare `s.get(ReviewRun, run_id)` → race test **FAILS**.
+3. Restore finalization to item-then-run → deadlock test **FAILS** (40P01 or timeout).
 
-Run: `.venv/bin/python -m pytest tests/proposal_assist/test_pass_retirement.py -q`
-Expected: all pass.
+Restore each, confirm PASS, and confirm `git diff` shows only the intended changes.
 
-Now mutate: make the children share the parent entry by deleting the `async with PASS_REGISTRY.track(workspace_id, adapter) as _entry:` line in `_run_one_call` (and its indentation).
-Run: `.venv/bin/python -m pytest tests/proposal_assist/test_pass_retirement.py -q -k review_child`
-Expected: **FAIL** — `assert max(seen) == 6` sees 1.
-Restore, re-run, expect PASS.
-
-Then mutate the prefix: change `with_for_update=True` back to a bare `s.get(ReviewRun, run_id)`.
-Run: `.venv/bin/python -m pytest tests/proposal_assist/test_pass_retirement.py -q -k child_prefix`
-Expected: **FAIL**. Restore, confirm PASS.
-
-- [ ] **Step 7: Full gates and commit**
-
-```bash
-.venv/bin/python -m pytest tests/proposal_assist/ -q
-.venv/bin/ruff check .
-git add src/call_manager/proposal_assist/review/pass_runner.py \
-        tests/proposal_assist/test_pass_retirement.py
-git commit -F .git/COMMIT_BRIEF   # "feat(review): track parent and children separately, lock the child prefix"
-```
+- [ ] **Step 8: Full gates and commit** — `"fix(review): track parent and children, lock the child prefix, fix the run/item order"`
 
 ---
 
 ### Task 6: The unconfirmed-generation reconciliation tick
 
-**Files:**
-- Modify: `src/call_manager/config.py` (one setting, next to the other tick intervals)
-- Modify: `src/call_manager/scheduler.py` (one tick at module scope)
-- Modify: `tests/proposal_assist/test_phase0_scheduler_tick.py` or a new `tests/proposal_assist/test_passes_reconcile_tick.py`
+**Files:** `config.py`, `scheduler.py`, `tests/proposal_assist/test_passes_reconcile_tick.py`
 
-**Interfaces:**
-- Consumes: `PASS_REGISTRY.reconcile_unconfirmed()` (Task 1).
-- Produces: nothing later tasks depend on.
+**The trap revision 1 fell into:** this scheduler is a `BackgroundScheduler` running **sync** callables. Registering an `async def` gets you an un-awaited coroutine — the unit test passes while production never reconciles. Every async tick here is a **sync closure that dispatches onto `app_loop`**; `_coherence_tick` (`scheduler.py:728`) is the pattern to copy, and `_jobs_reconcile_tick` (`scheduler.py:580`) is sync because its work is sync.
 
-**Placement rule, inherited from the Phase-0 slice:** register this tick at **module scope**, NOT inside any block gated on `DRAFTING_ENABLED` or `ANTHROPIC_API_KEY`. Hiding reconciliation behind those guards would strand every unconfirmed generation on a deployment with drafting off. The Phase-0 slice made exactly this mistake and fixed it; do not reintroduce it.
+**Placement rule (from Phase-0):** register at module scope, **outside** any `drafting_enabled` / `ANTHROPIC_API_KEY` guard. Hiding reconciliation behind those would strand every unconfirmed generation on a deployment with drafting off.
 
-- [ ] **Step 1: Add the setting**
-
-In `src/call_manager/config.py`, next to `jobs_reconcile_tick_seconds`:
+- [ ] **Step 1: Add the setting** — in `config.py`, next to `jobs_reconcile_tick_seconds`:
 
 ```python
     passes_reconcile_tick_seconds: int = 60
 ```
 
-- [ ] **Step 2: Write the failing test**
+- [ ] **Step 2: Write the failing test — it must assert the tick is DISPATCHED, not just awaitable**
 
 ```python
-@pytest.mark.asyncio
-async def test_the_reconcile_tick_retries_an_unconfirmed_generation():
-    """Gate 3(b), scheduler half."""
-    from call_manager.scheduler import passes_reconcile_tick
+def test_the_passes_reconcile_tick_is_dispatched_onto_the_app_loop(...):
+    """The tick registered with APScheduler must be a SYNC callable that schedules
+    its coroutine on app_loop. Registering an `async def` directly would return an
+    un-awaited coroutine: green unit test, dead production path.
 
-    ws = uuid.uuid4()
-    adapter = _FakeAdapter(confirmed=False)
-    async with PASS_REGISTRY.track(ws, adapter) as entry:
-        entry.bind_handle(_Handle())
-    assert PASS_REGISTRY.unconfirmed_count() == 1
-
-    adapter._confirmed = True
-    await passes_reconcile_tick()
-
-    assert PASS_REGISTRY.unconfirmed_count() == 0
-```
-
-- [ ] **Step 3: Run to verify it fails**
-
-Expected: `ImportError: cannot import name 'passes_reconcile_tick'`
-
-- [ ] **Step 4: Add the tick**
-
-In `src/call_manager/scheduler.py`, at module scope alongside `jobs_retirement_reconcile_tick`:
-
-```python
-async def passes_reconcile_tick() -> None:
-    """Retry teardown for pass generations whose death was never confirmed.
-
-    A SIBLING of WorkspaceController.reconcile_live_clients, not an edit to it:
-    that sweep covers the interactive registry's adapter, and these one-shot pass
-    adapters are built per-pass by build_keeper_adapter and friends, so nothing
-    else owns them.
-
-    Registered at MODULE SCOPE, deliberately outside the DRAFTING_ENABLED /
-    ANTHROPIC_API_KEY guards — hiding it behind those would strand every
-    unconfirmed generation on a deployment with drafting off.
+    Assert by calling the registered closure and observing that reconciliation
+    actually ran — not by awaiting a coroutine ourselves.
     """
-    from call_manager.proposal_assist.passes import PASS_REGISTRY
-
-    n = await PASS_REGISTRY.reconcile_unconfirmed()
-    if n:
-        logger.info(
-            "passes.reconciled",
-            extra={"event": "passes_reconciled", "entries": n},
-        )
 ```
 
-Register it next to the existing `jobs_retirement_reconcile_tick` registration. Open `scheduler.py`, find that registration, and copy its form exactly — it is the correct precedent for a module-scope tick and it is already outside the drafting guards:
+Build a real scheduler via the module's existing construction helper with a stub `app_loop`, locate the registered job by id `"passes_reconcile"`, assert `not asyncio.iscoroutinefunction(job.func)`, then invoke `job.func()` and assert the coroutine reached the loop.
+
+- [ ] **Step 3: Run to verify it fails.**
+
+- [ ] **Step 4: Add the tick as a sync closure**
+
+Alongside `_jobs_reconcile_tick`, following `_coherence_tick`'s dispatch form exactly (read both before writing):
 
 ```python
-    scheduler.add_job(
-        passes_reconcile_tick,
-        "interval",
-        seconds=settings.passes_reconcile_tick_seconds,
-        id="passes_reconcile",
-        max_instances=1,
-        coalesce=True,
-        replace_existing=True,
-    )
+    # Unconfirmed pass generations. A SIBLING of reconcile_live_clients, not an
+    # edit to it: that sweep covers the interactive registry's adapter, and these
+    # one-shot pass adapters are built per-pass, so nothing else owns them.
+    # NOT gated on drafting_enabled or the Anthropic key — hiding it there would
+    # strand every unconfirmed generation on a deployment with drafting off.
+    def _passes_reconcile_tick() -> None:
+        from call_manager.proposal_assist.passes import PASS_REGISTRY
+
+        coro = PASS_REGISTRY.reconcile_unconfirmed()
+        ...  # dispatch onto app_loop EXACTLY as _coherence_tick does, including
+             # its app_loop-is-None fallback and its future handling
 ```
 
-**Check two things before you commit this:** that the `add_job` kwargs above match what `jobs_retirement_reconcile_tick` actually uses in this file (correct my guess if it differs — the file is the authority, not this plan), and that your registration is NOT inside any `if settings.drafting_enabled:` or `ANTHROPIC_API_KEY` block.
+Register it with `seconds=settings.passes_reconcile_tick_seconds` and `id="passes_reconcile"`, copying the `add_job` kwargs from the `_jobs_reconcile_tick` registration in this file. **The file is the authority for those kwargs, not this plan.**
 
-- [ ] **Step 5: Run to verify it passes, then gates and commit**
+- [ ] **Step 5: Run; prove it discriminates** by re-registering the raw coroutine function instead of the closure — the test must FAIL. Restore.
 
-```bash
-.venv/bin/python -m pytest tests/proposal_assist/ -q
-.venv/bin/ruff check .
-git add src/call_manager/config.py src/call_manager/scheduler.py tests/proposal_assist/
-git commit -F .git/COMMIT_BRIEF   # "feat(passes): reconcile unconfirmed generations on an independent tick"
-```
+- [ ] **Step 6: Full gates and commit** — `"feat(passes): reconcile unconfirmed generations on an independent tick"`
 
 ---
 
-### Task 7: Stop the tick boundary logging a deliberate cancellation as a crash
+### Task 7: A retired pass is not a tick failure
 
-**Files:**
-- Modify: `src/call_manager/scheduler.py` — `_coherence_tick` (728), `_evaluator_tick` (791), `_review_tick` (847), `_uncited_claims_tick` (894)
-- Modify: `tests/proposal_assist/test_phase0_scheduler_tick.py`
+**Files:** `scheduler.py` (`_coherence_tick` 728, `_evaluator_tick` 791, `_review_tick` 847, `_uncited_claims_tick` 894), tests
 
-**Interfaces:** none new.
+**The bug (spec §4.7).** `concurrent.futures.CancelledError` is a **different class** from `asyncio.CancelledError` and **is** an `Exception` subclass, so each tick's `except Exception` around `fut.result()` reports a deliberate retirement as a crash with a traceback.
 
-**The bug (spec §4.7).** `concurrent.futures.CancelledError` is a **different class** from `asyncio.CancelledError` and **is** an `Exception` subclass. Each pass tick calls `fut.result()` inside an `except Exception` handler, so a deliberate retirement cancellation surfaces as `"coherence tick failed"` with a full traceback. Operationally that trains people to ignore the log line that matters.
+**Revision 1's test invented `_drain_future_for_test`, which does not exist.** Rather than test a fiction, extract the shared drain into one named helper the four ticks call, and test that. The extraction is small and makes the gate real.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Read all four ticks** and confirm their future-draining tails are identical apart from the pass name. If they are not, note the differences before extracting.
+
+- [ ] **Step 2: Write the failing test**
 
 ```python
 def test_a_retired_pass_logs_as_retirement_not_as_a_tick_failure(caplog):
-    """Gate for spec 4.7. concurrent.futures.CancelledError IS an Exception, so
-    the tick's `except Exception` would report a deliberate cancellation as a
-    crash."""
+    """Gate for spec 4.7."""
     import concurrent.futures
+    import logging
+
+    from call_manager.scheduler import _drain_pass_future
 
     class _CancelledFuture:
         def result(self, timeout=None):
             raise concurrent.futures.CancelledError()
 
     with caplog.at_level(logging.INFO):
-        _drain_future_for_test(_CancelledFuture(), name="coherence")
+        _drain_pass_future(_CancelledFuture(), pass_name="coherence", timeout=1)
 
-    assert not any(r.levelno >= logging.ERROR for r in caplog.records)
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert any("retire" in r.getMessage().lower() for r in caplog.records)
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [ ] **Step 3: Run to verify it fails** (`ImportError`).
 
-Expected: FAIL — an ERROR record is present.
-
-- [ ] **Step 3: Add the explicit catch to all four ticks**
-
-In each of the four ticks, **before** the existing `except Exception:` handler around `fut.result(...)`:
+- [ ] **Step 4: Extract the helper and use it in all four ticks**
 
 ```python
-        except concurrent.futures.CancelledError:
-            # A workspace delete retired this pass. Deliberate, not a failure —
-            # and it must be caught BEFORE `except Exception`, because unlike
-            # asyncio.CancelledError this class IS an Exception subclass.
-            logger.info(
-                "coherence tick pass retired (workspace deleted)",
-                extra={"event": "pass_tick_retired", "pass": "coherence"},
-            )
+def _drain_pass_future(fut, *, pass_name: str, timeout: float) -> None:
+    """Drain a pass tick's future, distinguishing a DELIBERATE retirement from a
+    failure.
+
+    concurrent.futures.CancelledError must be caught BEFORE `except Exception`,
+    because — unlike asyncio.CancelledError — it IS an Exception subclass, so a
+    workspace delete would otherwise be logged as a crashed tick with a full
+    traceback, training operators to ignore the line that matters.
+    """
+    import concurrent.futures
+
+    try:
+        fut.result(timeout=timeout)
+    except concurrent.futures.CancelledError:
+        _logger.info(
+            "%s tick pass retired (workspace deleted)",
+            pass_name,
+            extra={"event": "pass_tick_retired", "pass": pass_name},
+        )
+    except Exception:
+        _logger.exception("%s tick failed", pass_name)
 ```
 
-Use the matching pass name in each of the four. Ensure `import concurrent.futures` is present at the top of `scheduler.py`.
+Replace each tick's inline drain with a call to it, preserving each tick's existing timeout value.
 
-- [ ] **Step 4: Run, prove it discriminates by deleting the new catch, restore**
+- [ ] **Step 5: Run; prove it discriminates** by removing the `except concurrent.futures.CancelledError` branch (expect FAIL); restore.
 
-- [ ] **Step 5: Full gates and commit**
-
-```bash
-git add src/call_manager/scheduler.py tests/proposal_assist/
-git commit -F .git/COMMIT_BRIEF   # "fix(scheduler): a retired pass is not a tick failure"
-```
+- [ ] **Step 6: Full gates and commit** — `"fix(scheduler): a retired pass is not a tick failure"`
 
 ---
 
 ### Task 8: Claim-analysis refuses to claim a deleted workspace
 
-**Files:**
-- Modify: `src/call_manager/proposal_assist/analysis/queue.py:162-187` (`claim_queued_jobs`)
-- Create: `tests/proposal_assist/test_claim_analysis_retirement.py`
-
-**Interfaces:**
-- Produces: nothing later tasks consume; Tasks 9-11 are independent of this one.
-
-This is the one guarantee the other four passes already have and claim-analysis does not: its claim filters on `status == "queued"` alone.
+**Files:** `analysis/queue.py:162-187`, `tests/proposal_assist/test_claim_analysis_retirement.py` (create)
 
 - [ ] **Step 1: Write the failing test**
 
-Create `tests/proposal_assist/test_claim_analysis_retirement.py`:
-
 ```python
+"""Claim-analysis retirement gates."""
+
+from __future__ import annotations
+
+import asyncio
+import threading
+import time
+from datetime import UTC, datetime
+
+from call_manager.db.models import ClaimAnalysisJob, Workspace
+from tests.proposal_assist.conftest import make_workspace
+
+_SHA = "0" * 40
+
+
+def _now_utc() -> datetime:
+    return datetime.now(UTC)
+
+
+def _job(ws_id, *, section_sha: str, status: str = "queued", attempts: int = 0):
+    """section_index and commit_sha are NOT NULL with no server default."""
+    return ClaimAnalysisJob(
+        workspace_id=ws_id,
+        section_index=0,
+        section_sha=section_sha,
+        commit_sha=_SHA,
+        status=status,
+        attempts=attempts,
+    )
+
+
 def test_claim_skips_jobs_for_a_soft_deleted_workspace(pg_session_factory, current_user):
-    """Durable in SQL, survives restart — the same gate the other four passes have."""
-    from call_manager.db.models import ClaimAnalysisJob, Workspace
     from call_manager.proposal_assist.analysis.queue import claim_queued_jobs
 
     with pg_session_factory() as s:
@@ -1454,8 +1268,8 @@ def test_claim_skips_jobs_for_a_soft_deleted_workspace(pg_session_factory, curre
         dead = make_workspace(s, owner=current_user, with_call=True)
         s.flush()
         dead.soft_deleted_at = _now_utc()
-        s.add(ClaimAnalysisJob(workspace_id=live.id, section_sha="a", status="queued"))
-        s.add(ClaimAnalysisJob(workspace_id=dead.id, section_sha="b", status="queued"))
+        s.add(_job(live.id, section_sha="a"))
+        s.add(_job(dead.id, section_sha="b"))
         s.commit()
         live_id, dead_id = live.id, dead.id
 
@@ -1468,15 +1282,13 @@ def test_claim_skips_jobs_for_a_soft_deleted_workspace(pg_session_factory, curre
     assert dead_id not in ids
 ```
 
-- [ ] **Step 2: Run to verify it fails** — the deleted workspace's job IS claimed today.
+- [ ] **Step 2: Run to verify it fails.**
 
 - [ ] **Step 3: Add the filter**
 
-In `claim_queued_jobs`, add the live-workspace join, mirroring the four pass claim queries:
-
 ```python
-    # Refuse to claim work for a deleted workspace — durable in SQL, so it
-    # survives restart, exactly like the four pass claim queries.
+    # Refuse to claim work for a deleted workspace — durable in SQL, so it survives
+    # restart, exactly like the four pass claim queries.
     live_ws = select(Workspace.id).where(Workspace.soft_deleted_at.is_(None))
     rows = (
         session.query(ClaimAnalysisJob)
@@ -1491,53 +1303,37 @@ In `claim_queued_jobs`, add the live-workspace join, mirroring the four pass cla
     )
 ```
 
-Add `Workspace` and `select` to the module's imports if absent.
+`WHERE ... IN (subquery)` is not a join, so `FOR UPDATE` still locks only `claim_analysis_jobs`. No `of=` clause is needed — settled empirically during Phase-0, where the opposite was assumed and was wrong.
 
-**Lock-widening note:** `WHERE ... IN (subquery)` is not a join, so `FOR UPDATE` still locks only `claim_analysis_jobs` rows. No `of=` clause is needed and adding one is not required. (This was settled empirically during the Phase-0 slice, where the opposite was assumed and was wrong.)
-
-- [ ] **Step 4: Run, prove it discriminates, gates, commit**
-
-```bash
-git add src/call_manager/proposal_assist/analysis/queue.py tests/proposal_assist/test_claim_analysis_retirement.py
-git commit -F .git/COMMIT_BRIEF   # "feat(analysis): refuse to claim jobs for a deleted workspace"
-```
+- [ ] **Step 4: Run, prove it discriminates, gates, commit** — `"feat(analysis): refuse to claim jobs for a deleted workspace"`
 
 ---
 
-### Task 9: Cancel claim-analysis rows on the jobs hook and its reconcile pass
+### Task 9: Cancel claim-analysis on the hook and its reconcile pass
 
-**Files:**
-- Modify: `src/call_manager/proposal_assist/jobs_retirement.py` (both `cancel_setup_jobs_for_workspace`'s caller path and `reconcile_cancelled_jobs`)
-- Modify: `tests/proposal_assist/test_phase0_retirement.py` or `tests/proposal_assist/test_claim_analysis_retirement.py`
+**Files:** `jobs_retirement.py`, `tests/proposal_assist/test_claim_analysis_retirement.py`
 
-**Interfaces:**
-- Consumes: the `"jobs"` hook and `reconcile_cancelled_jobs` shipped by the Phase-0 slice.
-- Produces: `cancel_claim_analysis_jobs_for_workspace(session, workspace_id) -> int`.
+**Why post-commit and why SKIP LOCKED.** `touch_running_job`'s UPDATE takes a row lock **held for the worker's whole per-job transaction** (`analysis/queue.py:190`, its own docstring says so). A cancel inside the delete transaction would block on that row while holding the uncommitted deletion — stalling DELETE and hiding the deletion from the worker's own liveness re-read. So the cancel lives on the post-commit hook, and every query uses `FOR UPDATE SKIP LOCKED`.
 
-**Why post-commit and why SKIP LOCKED.** `touch_running_job`'s UPDATE takes a row lock **held for the whole per-job transaction** (`analysis/queue.py:190`, and its own docstring says so). A cancel UPDATE inside the delete transaction would block on that row while holding the uncommitted workspace deletion — stalling DELETE and making the worker's own liveness re-read unable to observe the deletion. So the cancel lives on the post-commit hook, and every query uses `FOR UPDATE SKIP LOCKED`: a row a live worker holds is **skipped**, never waited on, so the hook can never inherit the worker's transaction lifetime.
-
-**This extension is required, not optional.** Without the reconcile half, a skipped row is never cancelled by anything: the worker's cooperative checkpoint only aborts a **live** worker, and a crashed one leaves the row behind forever.
+**`reconcile_cancelled_jobs` must be restructured, not appended to.** It currently does `if not ids: return 0` after the setup-job query, so a workspace with only claim-analysis rows returns before reaching any added block.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
 def test_the_hook_cancels_claim_analysis_jobs(pg_session_factory, current_user):
-    """Both non-terminal states go terminal when the workspace is deleted."""
-    from call_manager.db.models import ClaimAnalysisJob
     from call_manager.proposal_assist.jobs_retirement import build_jobs_retirement_hook
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
         s.flush()
         ws.soft_deleted_at = _now_utc()
-        queued = ClaimAnalysisJob(workspace_id=ws.id, section_sha="a", status="queued")
-        running = ClaimAnalysisJob(workspace_id=ws.id, section_sha="b", status="running")
+        queued = _job(ws.id, section_sha="a", status="queued")
+        running = _job(ws.id, section_sha="b", status="running")
         s.add_all([queued, running])
         s.commit()
         queued_id, running_id, ws_id = queued.id, running.id, ws.id
 
-    hook = build_jobs_retirement_hook(pg_session_factory)
-    asyncio.run(hook(ws_id))
+    asyncio.run(build_jobs_retirement_hook(pg_session_factory)(ws_id))
 
     with pg_session_factory() as s:
         for jid in (queued_id, running_id):
@@ -1546,18 +1342,17 @@ def test_the_hook_cancels_claim_analysis_jobs(pg_session_factory, current_user):
             assert job.last_error == "cancelled: workspace deleted"
 
 
-def test_reconcile_terminalizes_a_claim_analysis_row_the_hook_skipped(
+def test_reconcile_terminalizes_a_claim_row_on_a_workspace_with_no_setup_jobs(
     pg_session_factory, current_user
 ):
-    """Gate 10b — the FULL path, not just the hook.
+    """Gate 10b, and the early-return bug.
 
-    A running job holds its row → the hook's SKIP LOCKED cancel skips it → the
-    worker's session ends WITHOUT terminalizing it (simulating a crash, so the
-    cooperative checkpoint cannot be what saves us) → a later reconcile marks the
-    row 'failed'. Mutation: leave the tick handling setup jobs only and the row
-    stays 'running' forever.
+    This workspace has NO setup jobs at all, so a reconcile that returns early
+    when the setup query finds nothing never reaches claim-analysis. Full path: a
+    running job holds its row → the hook's SKIP LOCKED cancel skips it → the
+    worker's session ends WITHOUT terminalizing it (a crash, so the cooperative
+    checkpoint cannot be what saves us) → a later reconcile marks it failed.
     """
-    from call_manager.db.models import ClaimAnalysisJob, Workspace
     from call_manager.proposal_assist.jobs_retirement import (
         build_jobs_retirement_hook,
         reconcile_cancelled_jobs,
@@ -1567,25 +1362,21 @@ def test_reconcile_terminalizes_a_claim_analysis_row_the_hook_skipped(
         ws = make_workspace(s, owner=current_user, with_call=True)
         s.flush()
         ws.soft_deleted_at = _now_utc()
-        job = ClaimAnalysisJob(workspace_id=ws.id, section_sha="a", status="running")
+        job = _job(ws.id, section_sha="a", status="running")
         s.add(job)
         s.commit()
         job_id, ws_id = job.id, ws.id
 
     holder = pg_session_factory()
     try:
-        # A live worker's per-job transaction holding the row.
         holder.query(ClaimAnalysisJob).filter_by(id=job_id).with_for_update().one()
-
-        hook = build_jobs_retirement_hook(pg_session_factory)
-        asyncio.run(hook(ws_id))
-
+        asyncio.run(build_jobs_retirement_hook(pg_session_factory)(ws_id))
         with pg_session_factory() as s:
             assert s.get(ClaimAnalysisJob, job_id).status == "running", (
                 "the hook should have SKIPPED the locked row, not waited on it"
             )
     finally:
-        holder.rollback()      # the 'crash' — no terminal write from the worker
+        holder.rollback()          # the 'crash' — no terminal write from the worker
         holder.close()
 
     with pg_session_factory() as s:
@@ -1594,18 +1385,53 @@ def test_reconcile_terminalizes_a_claim_analysis_row_the_hook_skipped(
 
     with pg_session_factory() as s:
         assert s.get(ClaimAnalysisJob, job_id).status == "failed"
+
+
+def test_the_claim_cancel_does_not_wait_on_a_row_a_worker_holds(
+    pg_session_factory, current_user
+):
+    """The SKIP LOCKED property, asserted DIRECTLY.
+
+    The route-level test cannot prove this: the hook's own asyncio.wait_for
+    (_JOBS_CANCEL_SECONDS = 1.0) plus the coordinator's per-hook exception
+    isolation would keep the route fast even with a blocking query. So assert on
+    the function. Mutation: drop skip_locked and this must fail.
+    """
+    from call_manager.proposal_assist.jobs_retirement import (
+        cancel_claim_analysis_jobs_for_workspace,
+    )
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        ws.soft_deleted_at = _now_utc()
+        s.add(_job(ws.id, section_sha="a", status="running"))
+        s.commit()
+        ws_id = ws.id
+
+    holder = pg_session_factory()
+    try:
+        holder.query(ClaimAnalysisJob).filter_by(workspace_id=ws_id).with_for_update().one()
+        began = time.monotonic()
+        with pg_session_factory() as s:
+            n = cancel_claim_analysis_jobs_for_workspace(s, ws_id)
+            s.commit()
+        elapsed = time.monotonic() - began
+    finally:
+        holder.rollback()
+        holder.close()
+
+    assert n == 0, "the held row should have been SKIPPED, not cancelled"
+    assert elapsed < 2.0, f"the cancel waited {elapsed:.1f}s on a held row"
 ```
 
-- [ ] **Step 2: Run to verify both fail.**
+- [ ] **Step 2: Run to verify all three fail.**
 
 - [ ] **Step 3: Add the claim-analysis cancel**
 
-In `jobs_retirement.py`, add alongside `cancel_setup_jobs_for_workspace`:
-
 ```python
 # Non-terminal claim-analysis states. Terminalizes to 'failed', which
-# ck_claim_analysis_jobs_status already allows (queued/running/done/failed/
-# superseded) — this slice ships NO migration.
+# ck_claim_analysis_jobs_status already allows — this slice ships NO migration.
 _CLAIM_ANALYSIS_CANCELLABLE = ("queued", "running")
 
 
@@ -1615,9 +1441,9 @@ def cancel_claim_analysis_jobs_for_workspace(
     """Terminalize this workspace's active claim-analysis jobs. Caller commits.
 
     SKIP LOCKED for the same reason as the setup-job cancel: touch_running_job
-    holds the job row for the worker's WHOLE per-job transaction, so waiting on it
-    would make this hook inherit that lifetime and stall DELETE. Skipped rows
-    converge via reconcile_cancelled_jobs.
+    holds the job row for the worker's WHOLE per-job transaction, so waiting would
+    make this hook inherit that lifetime. Skipped rows converge via
+    reconcile_cancelled_jobs.
     """
     ids = session.scalars(
         select(ClaimAnalysisJob.id)
@@ -1641,7 +1467,7 @@ def cancel_claim_analysis_jobs_for_workspace(
     return len(ids)
 ```
 
-Call it from `build_jobs_retirement_hook`'s `_work`, summing both counts:
+Call it from the hook's `_work`, summing both counts:
 
 ```python
         def _work() -> int:
@@ -1652,11 +1478,33 @@ Call it from `build_jobs_retirement_hook`'s `_work`, summing both counts:
                 return n
 ```
 
-- [ ] **Step 4: Extend the reconcile pass**
+- [ ] **Step 4: Restructure `reconcile_cancelled_jobs` to accumulate**
 
-In `reconcile_cancelled_jobs`, after the existing setup-job block and before the `logger.info`, add:
+Remove the `if not ids: return 0` early return and make both populations independent:
 
 ```python
+    total = 0
+
+    setup_ids = session.scalars(
+        select(WorkspaceSetupJob.id)
+        .where(
+            WorkspaceSetupJob.status.in_(_CANCELLABLE),
+            WorkspaceSetupJob.workspace_id.in_(dead_ws),
+        )
+        .with_for_update(skip_locked=True)
+    ).all()
+    if setup_ids:
+        session.execute(
+            update(WorkspaceSetupJob)
+            .where(WorkspaceSetupJob.id.in_(setup_ids))
+            .values(
+                status="cancelled",
+                completed_at=datetime.now(UTC),
+                last_error="cancelled: workspace deleted (reconciled)",
+            )
+        )
+        total += len(setup_ids)
+
     claim_ids = session.scalars(
         select(ClaimAnalysisJob.id)
         .where(
@@ -1675,184 +1523,141 @@ In `reconcile_cancelled_jobs`, after the existing setup-job block and before the
                 updated_at=datetime.now(UTC),
             )
         )
+        total += len(claim_ids)
+
+    if total:
+        logger.info(
+            "jobs_retirement.reconciled",
+            extra={"event": "jobs_retirement_reconciled", "rows": total},
+        )
+    return total
 ```
 
-`dead_ws` is the existing subquery already defined in this function. Add `len(claim_ids)` to the returned count and to the `rows` value in the `logger.info` call, so the log reports total rows touched rather than only setup jobs.
+**Keep the existing setup-job behaviour identical** — same statuses, same `last_error`, same `completed_at`. Only the control flow changes. Run the existing Phase-0 reconcile tests to confirm.
 
-- [ ] **Step 5: Run; prove gate 10b discriminates**
+- [ ] **Step 5: Run; prove two gates discriminate** — (a) restore the early return, expect the no-setup-jobs test to FAIL; (b) drop `skip_locked` from the claim cancel, expect the direct SKIP LOCKED test to FAIL. Restore both.
 
-Mutate: remove the claim-analysis block from `reconcile_cancelled_jobs` only (leave the hook change in). The reconcile test must FAIL with the row still `running`. Restore, confirm PASS.
-
-- [ ] **Step 6: Full gates and commit**
-
-```bash
-git add src/call_manager/proposal_assist/jobs_retirement.py tests/proposal_assist/
-git commit -F .git/COMMIT_BRIEF   # "feat(retirement): cancel claim-analysis on the jobs hook and its reconcile"
-```
+- [ ] **Step 6: Full gates and commit** — `"feat(retirement): cancel claim-analysis on the jobs hook and its reconcile"`
 
 ---
 
-### Task 10: An abort callback inside the semantic-audit loop
+### Task 10: Abort the semantic-audit loop — as a failure, not a partial success
 
-**Files:**
-- Modify: `src/call_manager/proposal_assist/citations/audit.py` (the per-evidence-row loop beginning at line 584)
-- Modify: `src/call_manager/proposal_assist/analysis/pipeline.py:327-335` (`analyze_job` signature) and its call site at line 564
-- Modify: `tests/proposal_assist/test_claim_analysis_retirement.py`
+**Files:** `citations/audit.py` (per-row loop from line 584), `analysis/pipeline.py` (`analyze_job` 327-335, the drain loop's handler ~578), tests
 
-**Interfaces:**
-- Produces: `analyze_job(..., should_abort: Callable[[], bool] | None = None)`.
+**Why a per-row callback.** One check per job is **not** "bounded by one LLM call": `validate_citations_semantic` makes a per-evidence-row judgement, so a single pre-flight check leaves a 40-row job spending 40 LLM calls after the workspace is gone.
 
-**Why a callback and not one checkpoint.** One check per job is **not** "bounded by one LLM call": `validate_citations_semantic` iterates evidence rows making a per-row judgement (`citations/audit.py:584`). A single pre-flight check leaves a job with 40 evidence rows running 40 LLM calls after the workspace is gone. The callback must be threaded into that loop.
+**Why it must raise, not `break`.** `analyze_job` ends with an unconditional `mark_done(session, job)` (`analysis/pipeline.py:535`). A `break` returns partial issues, execution continues through uncited analysis, and the job is marked **done** on partial data — a worse outcome than not aborting at all. The abort must prevent every subsequent write.
 
-**Liveness checks run in short independent sessions**, never the worker's per-job session — the same row-lock reason as Task 9.
-
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
 ```python
-def test_the_audit_loop_aborts_partway_when_the_workspace_is_deleted(
-    pg_session_factory, current_user
-):
-    """Gate 10. With 5 judgeable evidence rows and a should_abort that flips True
-    after the first row, the judge must be called ONCE — not 5 times.
-
-    One check per JOB would pass a weaker version of this test while still
-    spending 5 LLM calls after the delete. The count is the whole assertion.
-    """
-    from call_manager.proposal_assist.citations.audit import validate_citations_semantic
-
-    calls: list[str] = []
-
-    class _CountingService:
-        def judge(self, **kwargs):
-            calls.append(kwargs.get("ev_id", "?"))
-            return {"verdict": "supported", "confidence": 0.9}
-
-    ledger = {
-        "evidence": [
-            {"id": f"ev{i}", "citekey": f"k{i}", "stance": "supports"} for i in range(5)
-        ]
-    }
-    proposal_text = " ".join(f"[[ev:ev{i}]]" for i in range(5))
-
-    # True from the SECOND consultation onward: row 1 is judged, then we abort.
-    consulted: list[int] = []
-
-    def _should_abort() -> bool:
-        consulted.append(1)
-        return len(consulted) > 1
-
-    with pg_session_factory() as s:
-        ws = make_workspace(s, owner=current_user, with_call=True)
-        s.commit()
-        ws_id = ws.id
-
-        validate_citations_semantic(
-            proposal_text=proposal_text,
-            ledger=ledger,
-            session=s,
-            session_factory=pg_session_factory,
-            workspace_id=ws_id,
-            citation_service=_CountingService(),
-            deterministic_issues=[],
-            should_abort=_should_abort,
-        )
-
-    assert len(calls) == 1, (
-        f"judged {len(calls)} rows after the abort flipped — the callback is not "
-        "inside the per-row loop"
-    )
+def test_the_audit_loop_stops_judging_rows_once_aborted(pg_session_factory, current_user):
+    """Gate 10. Five judgeable rows, abort flips after the first: exactly one judge
+    call, and the abort surfaces as ClaimAnalysisAborted."""
 ```
 
-**Note on the ledger shape:** read `validate_citations_semantic`'s existing tests before writing this, and copy their evidence-row and `proposal_text` shape exactly. A row that `_SKIP_TYPES` filters out, or one with no live marker, is skipped before the judge — which would make the count 0 and the test green for the wrong reason. Verify you get 5 judge calls with `should_abort=None` FIRST; only then add the abort.
+Before writing it, run the existing `validate_citations_semantic` tests and copy their ledger/`proposal_text` shape exactly. **Verify you get 5 judge calls with `should_abort=None` first** — a row filtered by `_SKIP_TYPES` or lacking a live marker is skipped before the judge, which would make the count 0 and the test green for the wrong reason.
 
-- [ ] **Step 2: Run to verify it fails** — the judge is called 5 times.
+```python
+def test_an_aborted_job_is_never_marked_done(pg_session_factory, current_user):
+    """The bug a `break` would have shipped: partial results, job marked done."""
+```
 
-- [ ] **Step 3: Thread the callback through**
+Drive `analyze_job` with a `should_abort` that fires mid-audit and assert the job's final status is `failed`, never `done`, and that no annotations were committed.
 
-Add the parameter to `validate_citations_semantic` and check it at the **top of the per-row loop**:
+- [ ] **Step 2: Run to verify both fail.**
+
+- [ ] **Step 3: Define the exception and raise it in the loop**
+
+In `citations/audit.py`:
+
+```python
+class ClaimAnalysisAborted(Exception):
+    """The workspace was deleted mid-audit. Raised rather than returning partial
+    results: analyze_job ends with an unconditional mark_done, so a partial return
+    would mark the job DONE on partial data."""
+```
+
+At the top of the per-evidence-row loop:
 
 ```python
     for row in evidence:
         # Cooperative abort: claim-analysis is sync code in a thread pool with no
-        # cancellation primitive, so this callback is the ONLY way a deleted
-        # workspace stops the remaining per-row LLM calls. Checked per row, not
-        # per job — a job with 40 evidence rows would otherwise keep spending
-        # after the delete.
+        # cancellation primitive, so this callback is the ONLY thing that stops the
+        # remaining per-row LLM calls. Checked per ROW, not per job.
         if should_abort is not None and should_abort():
-            logger.info(
-                "claim-analysis semantic audit aborted mid-loop (workspace deleted)",
-                extra={"event": "claim_analysis_aborted", "workspace_id": str(workspace_id)},
+            raise ClaimAnalysisAborted(
+                f"workspace {workspace_id} deleted during the semantic citation audit"
             )
-            break
         if not isinstance(row, dict) or not row.get("id"):
             continue
 ```
 
-Pass it down from `analyze_job`, and construct it at the `run_claim_analysis` call site so it reads liveness in a **short independent session**:
+- [ ] **Step 4: Thread `should_abort` through `analyze_job` and handle the abort at the drain loop**
+
+Add `should_abort: Callable[[], bool] | None = None` to `analyze_job`, pass it to `validate_citations_semantic`, and do **not** catch `ClaimAnalysisAborted` inside `analyze_job` — it must escape past `mark_done`.
+
+In `drain_analysis_queue`'s per-job handler, **before** the generic `except Exception`:
+
+```python
+            except ClaimAnalysisAborted:
+                s.rollback()          # discard every partial write from this job
+                with session_factory() as s2:
+                    job2 = s2.get(ClaimAnalysisJob, jid)
+                    if job2 is not None:
+                        job2.status = "failed"
+                        job2.last_error = "cancelled: workspace deleted"
+                        job2.updated_at = datetime.now(UTC)
+                        s2.commit()
+                counts["failed"] += 1
+```
+
+Construct the callback at the call site so it reads liveness in a **short independent session**, never the worker's per-job session (whose row lock is held for the whole transaction):
 
 ```python
             def _should_abort(wid=job.workspace_id) -> bool:
-                # A SHORT INDEPENDENT session — never the worker's per-job session,
-                # whose row lock is held for the whole transaction.
                 with session_factory() as probe:
                     return probe.scalar(
                         select(Workspace.soft_deleted_at).where(Workspace.id == wid)
                     ) is not None
 ```
 
-- [ ] **Step 4: Run, prove it discriminates (remove the `break`), restore, gates, commit**
+- [ ] **Step 5: Run; prove both gates discriminate** — (a) change the `raise` back to a `break`: the never-marked-done test must FAIL with status `done`; (b) move the check outside the loop: the judge-count test must FAIL with 5 calls. Restore both.
 
-```bash
-git add src/call_manager/proposal_assist/citations/audit.py \
-        src/call_manager/proposal_assist/analysis/pipeline.py tests/proposal_assist/
-git commit -F .git/COMMIT_BRIEF   # "feat(analysis): abort the semantic audit loop for a deleted workspace"
-```
+- [ ] **Step 6: Full gates and commit** — `"feat(analysis): abort the semantic audit as a failure, not a partial success"`
 
 ---
 
-### Task 11: Never resurrect a cancelled job, and prove the route stays fast
+### Task 11: Never resurrect a cancelled job; keep the route fast
 
-**Files:**
-- Modify: `src/call_manager/proposal_assist/analysis/queue.py:216-230` (`mark_failed`)
-- Modify: `src/call_manager/proposal_assist/analysis/pipeline.py:578-586` (the generic handler)
-- Modify: `tests/proposal_assist/test_claim_analysis_retirement.py`
+**Files:** `analysis/queue.py:216-230` (`mark_failed`), tests
 
-**Interfaces:** none new.
+**The resurrection bug.** `mark_failed` returns a job to `queued` whenever `attempts < MAX_ATTEMPTS`, so the generic handler would requeue a job the deletion just cancelled — and with Task 8's filter that row then sits `queued` forever, un-claimable and never terminal.
 
-**The resurrection bug.** `mark_failed` returns a job to `queued` whenever `attempts < MAX_ATTEMPTS`, so the generic handler at `pipeline.py:578` would requeue a job the deletion just cancelled — and with Task 8's filter that row would then sit `queued` forever, un-claimable and never terminal.
+**On gate 14.** The end-to-end route-latency test stays as a **regression guard**, but it is *not* where SKIP LOCKED is proven — Task 9's direct test is. Revision 1 claimed the route test would fail without SKIP LOCKED; it would not, because the hook's own `asyncio.wait_for(_JOBS_CANCEL_SECONDS = 1.0)` bounds it and the coordinator isolates the resulting exception. Keep the test, drop the false claim.
 
-**Gate 14 is the most valuable test in this plan.** A bounded delete *transaction* is not the same as a bounded *route*. It measures end-to-end DELETE latency with a worker mid-job holding its row lock, as wall-clock on the route. Its mutation — dropping `SKIP LOCKED` from the cancel — is the one that would have caught the unbounded wait a review round identified.
-
-- [ ] **Step 1: Write both failing tests**
+- [ ] **Step 1: Write the failing tests**
 
 ```python
 def test_mark_failed_does_not_requeue_a_job_whose_workspace_is_deleted(
     pg_session_factory, current_user
 ):
-    """A cancelled job must go terminal, not back to 'queued' — where Task 8's
-    claim filter would leave it stranded, un-claimable, forever.
-
-    attempts is deliberately set to 1 (well under MAX_ATTEMPTS) so the requeue
-    branch is the one that WOULD run. Setting it at the cap would make this test
-    pass without the fix.
-    """
-    from call_manager.db.models import ClaimAnalysisJob
+    """attempts=1 is deliberately well under MAX_ATTEMPTS so the requeue branch is
+    the one that WOULD run. At the cap this would pass without the fix."""
     from call_manager.proposal_assist.analysis.queue import mark_failed
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
         s.flush()
         ws.soft_deleted_at = _now_utc()
-        job = ClaimAnalysisJob(
-            workspace_id=ws.id, section_sha="a", status="running", attempts=1
-        )
+        job = _job(ws.id, section_sha="a", status="running", attempts=1)
         s.add(job)
         s.commit()
         job_id = job.id
 
     with pg_session_factory() as s:
-        job = s.get(ClaimAnalysisJob, job_id)
-        mark_failed(s, job, error="workspace deleted mid-job")
+        mark_failed(s, s.get(ClaimAnalysisJob, job_id), error="workspace deleted mid-job")
         s.commit()
 
     with pg_session_factory() as s:
@@ -1862,40 +1667,35 @@ def test_mark_failed_does_not_requeue_a_job_whose_workspace_is_deleted(
 def test_the_delete_route_returns_within_the_barrier_with_a_worker_mid_job(
     client_authed_owner, pg_session_factory, current_user
 ):
-    """Gate 14, measured as ROUTE wall-clock.
+    """Gate 14 — a REGRESSION GUARD on end-to-end route latency, measured as
+    wall-clock on the route rather than 'the delete transaction committed'.
 
-    Mutation: drop skip_locked from cancel_claim_analysis_jobs_for_workspace and
-    this must fail — the hook would then wait on the worker's row lock, which is
-    held for the worker's WHOLE per-job transaction.
+    NOTE: this does NOT prove SKIP LOCKED. The hook's own 1.0s wait_for and the
+    coordinator's per-hook exception isolation keep the route fast even with a
+    blocking cancel. The SKIP LOCKED property is proven directly in
+    test_the_claim_cancel_does_not_wait_on_a_row_a_worker_holds (Task 9).
     """
-    from call_manager.db.models import ClaimAnalysisJob
-
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
         s.flush()
-        job = ClaimAnalysisJob(workspace_id=ws.id, section_sha="a", status="running")
-        s.add(job)
+        s.add(_job(ws.id, section_sha="a", status="running"))
         s.commit()
-        job_id, ws_id = job.id, ws.id
+        ws_id = ws.id
 
     holder = pg_session_factory()
     try:
-        holder.query(ClaimAnalysisJob).filter_by(id=job_id).with_for_update().one()
-
+        holder.query(ClaimAnalysisJob).filter_by(workspace_id=ws_id).with_for_update().one()
         began = time.monotonic()
         resp = client_authed_owner.delete(f"/api/workspaces/{ws_id}")
         elapsed = time.monotonic() - began
-
         assert resp.status_code == 204
-        assert elapsed < 6.0, (
-            f"DELETE took {elapsed:.1f}s with a claim-analysis worker holding its row"
-        )
+        assert elapsed < 6.0, f"DELETE took {elapsed:.1f}s with a worker holding its row"
     finally:
         holder.rollback()
         holder.close()
 ```
 
-- [ ] **Step 2: Run to verify both fail.**
+- [ ] **Step 2: Run to verify the first fails.**
 
 - [ ] **Step 3: Make the failure path terminal for a deleted workspace**
 
@@ -1913,21 +1713,9 @@ In `mark_failed`, before the `attempts < MAX_ATTEMPTS` requeue branch:
         return
 ```
 
-- [ ] **Step 4: Run both; prove gate 14 discriminates**
+- [ ] **Step 4: Run both; prove the resurrection gate discriminates** by removing the new block (expect FAIL). Restore.
 
-Mutate: remove `skip_locked=True` from `cancel_claim_analysis_jobs_for_workspace`.
-Expected: the latency test **FAILS** (the route blocks on the held row).
-Restore, confirm PASS. Record both runs — this is the plan's headline gate.
-
-- [ ] **Step 5: Final full gates and commit**
-
-```bash
-.venv/bin/python -m pytest tests/proposal_assist/ -q
-.venv/bin/ruff check .
-git add src/call_manager/proposal_assist/analysis/queue.py \
-        src/call_manager/proposal_assist/analysis/pipeline.py tests/proposal_assist/
-git commit -F .git/COMMIT_BRIEF   # "fix(analysis): a cancelled job goes terminal, and DELETE stays bounded"
-```
+- [ ] **Step 5: Final full gates and commit** — `"fix(analysis): a cancelled job goes terminal, and DELETE stays bounded"`
 
 ---
 
@@ -1935,19 +1723,19 @@ git commit -F .git/COMMIT_BRIEF   # "fix(analysis): a cancelled job goes termina
 
 | spec section | task |
 |---|---|
-| §4.1 registry, optional adapter, bind-at-entry | 1 |
+| §4.1 registry (adapter bound late, no handle) | 1 |
 | §4.2 one entry per live task, concurrent retirement | 1, 5 |
 | §4.3 the 5.5s bound, concurrent await | 1 |
 | §4.4 unconfirmed transfer on EVERY exit | 1, 6 |
-| §4.5 wrap points in all four runners | 3, 4, 5 |
-| §4.6 cancellation reaches the finally (no runner change) | 3 (verified, not changed) |
+| §4.5 wrap points — extended to cover the prefix | 3, 4, 5 |
+| §4.6 cancellation reaches the finally (verified, not changed) | 3 |
 | §4.7 tick-boundary CancelledError | 7 |
 | §4.8 coordinator wiring and budget | 2 |
 | §5 pre-launch prefix guards | 3, 4 |
 | §5.1 review's child prefix | 5 |
-| §6 claim-analysis: filter, post-commit cancel, callback, failure path | 8, 9, 10, 11 |
-| §6.1 what post-commit means; tick convergence | 9 |
-| §12 gates 1-10b, 12, 14 | as annotated per task |
+| §6 / §6.1 claim-analysis | 8, 9, 10, 11 |
+| §12 gates 1-10b, 12, 14 | annotated per task |
+| **NEW, not in the spec:** `review_runs < review_run_items` | 5 |
 | §8, §9 (routes, foot-gun) | **Slice C2 — not this plan** |
 
-**Deliberately not covered here**, per spec §10: teardown completion is not process death (gate 3 encodes it as a residual, not a fix); claim-analysis cannot be cancelled mid-call; a row held by a live worker is skipped until the tick retries. These are documented residuals, and the tests must encode them as such rather than pretending they are closed.
+**Deliberately not closed** (spec §10): teardown completion is not process death; claim-analysis cannot be cancelled mid-call; a row a live worker holds is skipped until the tick retries. The tests encode these as residuals rather than pretending otherwise.
