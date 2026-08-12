@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from call_manager.db.models import (
@@ -122,6 +123,187 @@ def _queued_job(pg_session_factory, current_user):
 
 def _run_git_head(repo_dir: Path) -> str:
     return setup_mod._run_git(["rev-parse", "HEAD"], cwd=repo_dir).stdout.strip()
+
+
+def _assert_already_locked(session_factory, stmt, *, what: str) -> None:
+    """From a THIRD connection, `SELECT ... FOR UPDATE NOWAIT` must fail with
+    55P03 (lock_not_available) — proving somebody else already holds the row.
+
+    NOWAIT is what makes this a probe rather than a participant: a plain
+    `FOR UPDATE` would join the wait queue and tell us nothing.
+    """
+    with session_factory() as probe:
+        with pytest.raises(OperationalError) as excinfo:
+            probe.scalars(stmt.with_for_update(nowait=True)).one()
+        orig = excinfo.value.orig
+        sqlstate = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+        assert sqlstate == "55P03", (
+            f"expected 55P03 (lock_not_available) probing {what}, got {sqlstate}: {orig}"
+        )
+        probe.rollback()
+
+
+def test_m2_holds_the_workspace_row_before_it_blocks_on_the_call_row(
+    pg_session_factory, current_user, tmp_path, phase0_client, monkeypatch
+):
+    """The acquisition ORDER, not merely the fact that a lock is taken.
+
+    The branch's thesis is one global order — commit mutex < workspace_setup_jobs
+    < workspaces < calls. Gate 6
+    (test_two_workspaces_sharing_a_call_serialize_m2_on_the_call_row) proves two
+    workers serialize on the Call row, but it passes just as well if _m2 took the
+    Call row BEFORE the workspace row, so it does not pin the order at all.
+
+    The technique that does: connection B takes and holds the row that comes
+    SECOND (the Call row). _m2, started in a thread, must therefore already HOLD
+    the row that comes FIRST (the workspace row) while it sits blocked on B. A
+    third connection C proves that by failing to take the workspace row with
+    NOWAIT. Under the inverted order _m2 would be blocked on the Call row having
+    acquired nothing, and C's NOWAIT would succeed.
+
+    Why the order matters: soft_delete_workspace_db updates the workspace row
+    while holding the commit mutex. _m2 taking the Call row first and the
+    workspace row second would mean an in-flight ingestion batch (which holds
+    Call rows for its whole upsert loop) could park _m2 between the two
+    acquisitions, and DELETE-vs-_m2 would then be an ordinary lock cycle rather
+    than a queue.
+    """
+    monkeypatch.setattr(setup_mod, "_ROW_LOCK_TIMEOUT_SECONDS", 60)  # must not fire
+
+    job_id, ws_id = _queued_job(pg_session_factory, current_user)
+    w = _worker(pg_session_factory, tmp_path, phase0_client)
+    pinned = w._m1(job_id, ws_id)                 # BEFORE the Session.get patch
+    with pg_session_factory() as s:
+        call_id = s.get(Workspace, ws_id).call_id
+
+    ws_row_locked = threading.Event()
+    real_get = Session.get
+
+    def _tracking_get(self, entity, ident, **kw):
+        obj = real_get(self, entity, ident, **kw)
+        if entity is Workspace and kw.get("with_for_update"):
+            ws_row_locked.set()
+        return obj
+
+    monkeypatch.setattr(Session, "get", _tracking_get)
+
+    b_holding = threading.Event()
+    release_b = threading.Event()
+
+    def _b_holds_the_call_row():
+        with pg_session_factory() as b:
+            b.scalars(select(Call).where(Call.id == call_id).with_for_update()).one()
+            b_holding.set()
+            release_b.wait(timeout=30)
+            b.rollback()
+
+    outcome: list[BaseException | None] = []
+
+    def _run_m2():
+        try:
+            w._m2(job_id, ws_id, pinned)
+        except BaseException as exc:  # noqa: BLE001 — asserted after join
+            outcome.append(exc)
+        else:
+            outcome.append(None)
+
+    b = threading.Thread(target=_b_holds_the_call_row)
+    t = threading.Thread(target=_run_m2)
+    b.start()
+    try:
+        assert b_holding.wait(timeout=10), "B never took the Call row"
+        t.start()
+        assert ws_row_locked.wait(timeout=15), (
+            "_m2 never acquired the workspace row while blocked on the Call row "
+            "— it took the Call row FIRST, inverting the lock order"
+        )
+        _assert_already_locked(
+            pg_session_factory,
+            select(Workspace).where(Workspace.id == ws_id),
+            what="the workspace row _m2 must already hold",
+        )
+    finally:
+        release_b.set()
+        b.join(timeout=30)
+        t.join(timeout=30)
+
+    assert outcome == [None], f"_m2 did not finish cleanly after B released: {outcome}"
+
+
+def test_m3_holds_the_job_row_before_it_blocks_on_the_workspace_row(
+    pg_session_factory, current_user, tmp_path, phase0_client, monkeypatch
+):
+    """The other half of the order, and the one with no coverage at all: _m3
+    takes the SETUP-JOB row before the workspace row.
+
+    That correction is the actual deadlock fix — the web `activate` route
+    (rubric.py) locks workspace_setup_jobs before it flushes its workspace-row
+    update, so a workspace-then-job _m3 inverts against it and gives Postgres a
+    real 40P01 shape. Same discriminating technique as the _m2 order test above:
+    connection B holds the SECOND row (workspace), and a third connection C must
+    find the FIRST row (the job) already held by _m3.
+    """
+    monkeypatch.setattr(setup_mod, "_ROW_LOCK_TIMEOUT_SECONDS", 60)  # must not fire
+
+    job_id, ws_id = _queued_job(pg_session_factory, current_user)
+    w = _worker(pg_session_factory, tmp_path, phase0_client)
+    pinned = w._m1(job_id, ws_id)                 # BEFORE the Session.get patch
+    w._m2(job_id, ws_id, pinned)
+
+    job_row_locked = threading.Event()
+    real_get = Session.get
+
+    def _tracking_get(self, entity, ident, **kw):
+        obj = real_get(self, entity, ident, **kw)
+        if entity is WorkspaceSetupJob and kw.get("with_for_update"):
+            job_row_locked.set()
+        return obj
+
+    monkeypatch.setattr(Session, "get", _tracking_get)
+
+    b_holding = threading.Event()
+    release_b = threading.Event()
+
+    def _b_holds_the_workspace_row():
+        with pg_session_factory() as b:
+            b.scalars(select(Workspace).where(Workspace.id == ws_id).with_for_update()).one()
+            b_holding.set()
+            release_b.wait(timeout=30)
+            b.rollback()
+
+    outcome: list[BaseException | None] = []
+
+    def _run_m3():
+        try:
+            w._m3(job_id, ws_id, pinned)
+        except BaseException as exc:  # noqa: BLE001 — asserted after join
+            outcome.append(exc)
+        else:
+            outcome.append(None)
+
+    b = threading.Thread(target=_b_holds_the_workspace_row)
+    t = threading.Thread(target=_run_m3)
+    b.start()
+    try:
+        assert b_holding.wait(timeout=10), "B never took the workspace row"
+        t.start()
+        assert job_row_locked.wait(timeout=15), (
+            "_m3 never acquired the setup-job row while blocked on the workspace "
+            "row — it took the workspace row FIRST, inverting the lock order"
+        )
+        _assert_already_locked(
+            pg_session_factory,
+            select(WorkspaceSetupJob).where(WorkspaceSetupJob.id == job_id),
+            what="the setup-job row _m3 must already hold",
+        )
+    finally:
+        release_b.set()
+        b.join(timeout=30)
+        t.join(timeout=30)
+
+    assert outcome == [None], f"_m3 did not finish cleanly after B released: {outcome}"
+    with pg_session_factory() as s:
+        assert s.get(WorkspaceSetupJob, job_id).status == "waiting_for_rubric_review"
 
 
 def test_m1_creates_the_repo_and_pins_the_call_hash(
@@ -816,7 +998,15 @@ def test_delete_route_returns_promptly_while_phase0_runs_its_extractors(
 ):
     """Spec gate 2, measured as ROUTE wall-clock. A slow extractor must not be
     on the DELETE route's critical path: M2/M3 compute with no transaction open
-    and hold no lock while the LLM call runs."""
+    and hold no lock while the LLM call runs.
+
+    The worker's outcome is CAPTURED and asserted rather than left to escape the
+    thread. A bare `threading.Thread(target=lambda: w._m2(...))` lets the
+    expected WorkspaceGoneDuringSetup surface only as a
+    PytestUnhandledThreadExceptionWarning — and an UNEXPECTED worker failure
+    (or a silent success, meaning the delete never landed) would be swallowed
+    exactly the same way while this test stayed green.
+    """
     from call_manager.proposal_assist.collab.room import MANAGER
 
     started = threading.Event()
@@ -841,7 +1031,18 @@ def test_delete_route_returns_promptly_while_phase0_runs_its_extractors(
 
     w = _worker(pg_session_factory, tmp_path, _SlowClient())
     pinned = w._m1(job_id, ws_id)
-    t = threading.Thread(target=lambda: w._m2(job_id, ws_id, pinned))
+
+    outcome: list[BaseException | None] = []
+
+    def _run_m2():
+        try:
+            w._m2(job_id, ws_id, pinned)
+        except BaseException as exc:  # noqa: BLE001 — asserted after join, not silenced
+            outcome.append(exc)
+        else:
+            outcome.append(None)
+
+    t = threading.Thread(target=_run_m2)
     t.start()
     try:
         assert started.wait(timeout=10)          # the LLM call is in flight
@@ -854,6 +1055,15 @@ def test_delete_route_returns_promptly_while_phase0_runs_its_extractors(
         release.set()
         t.join(timeout=30)
         MANAGER._retired_ws.discard(ws_id)
+
+    # The worker must have observed the deletion and refused — exactly that, not
+    # some other failure and not a silent success.
+    assert not t.is_alive(), "the worker thread never finished"
+    assert outcome, "the worker thread recorded no outcome"
+    assert type(outcome[0]) is WorkspaceGoneDuringSetup, (
+        f"expected _m2 to raise WorkspaceGoneDuringSetup once the workspace was "
+        f"deleted, got {outcome[0]!r}"
+    )
 
 
 def test_recovery_after_a_crash_between_m1_and_m2(
