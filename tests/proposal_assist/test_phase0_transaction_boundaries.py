@@ -517,6 +517,82 @@ def test_two_workspaces_sharing_a_call_serialize_m2_on_the_call_row(
         assert ws_a_after.section_extracts == ws_b_after.section_extracts
 
 
+def test_m2_times_out_on_a_held_cache_row_rather_than_pinning_the_workspace(
+    pg_session_factory, current_user, tmp_path, phase0_client, monkeypatch
+):
+    """The lock_timeout must bound the whole persist transaction, not just the
+    `with_for_update` acquisitions.
+
+    The Call row is already covered (a wait there is a wait on an acquisition).
+    The uncovered case is a wait raised by the persist DML itself, AFTER the
+    acquisitions have returned: `persist_section_extracts` issues
+    `DELETE FROM call_section_extracts WHERE call_id = :id`, which must take a
+    row lock on every cache row for that Call. Restoring lock_timeout to DEFAULT
+    on the acquisition success path left that DELETE unbounded — and _m2 is
+    holding the workspace row while it waits, which is exactly what pins the row
+    against a concurrent DELETE.
+
+    `_ROW_LOCK_TIMEOUT_SECONDS` is monkeypatched on the module (the helper reads
+    it as a module global at call time, so the patch takes effect) purely to keep
+    the test fast.
+    """
+    monkeypatch.setattr(setup_mod, "_ROW_LOCK_TIMEOUT_SECONDS", 1)
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        job = WorkspaceSetupJob(workspace_id=ws.id, status="running")
+        s.add(job)
+        call = s.get(Call, ws.call_id)
+        # Pre-existing cache rows for this Call, stamped with an OLDER extractor
+        # version so `section_extracts_are_fresh` is False and _m2 really reaches
+        # persist_section_extracts (a fresh cache would skip the DELETE entirely).
+        persist_section_extracts(
+            session=s,
+            call=call,
+            sections={n: f"stale {n}" for n in SECTION_NAMES},
+            model="old-model",
+            extractor_version="v0",
+            source_hash=source_text_hash(call.full_text or ""),
+        )
+        s.commit()
+        job_id, ws_id, call_id = job.id, ws.id, call.id
+
+    w = _worker(pg_session_factory, tmp_path, phase0_client)
+    pinned = w._m1(job_id, ws_id)
+
+    holding = threading.Event()
+    release = threading.Event()
+
+    def _hold_one_cache_row():
+        with pg_session_factory() as s:
+            s.scalars(
+                select(CallSectionExtract)
+                .where(CallSectionExtract.call_id == call_id)
+                .limit(1)
+                .with_for_update()
+            ).one()
+            holding.set()
+            # Long enough that an UNBOUNDED wait shows up as a failure here
+            # rather than as a hung test run.
+            release.wait(timeout=20)
+            s.rollback()
+
+    t = threading.Thread(target=_hold_one_cache_row)
+    t.start()
+    try:
+        assert holding.wait(timeout=10), "the holder never took the cache row"
+        started = time.monotonic()
+        with pytest.raises(setup_mod.SetupRowLockTimeout):
+            w._m2(job_id, ws_id, pinned)
+        # It gave up at its own timeout instead of holding the workspace row for
+        # the whole lifetime of the unrelated cache-row holder.
+        assert time.monotonic() - started < 10
+    finally:
+        release.set()
+        t.join(timeout=30)
+
+
 def test_m3_writes_rubric_event_and_status_atomically(
     pg_session_factory, current_user, tmp_path, phase0_client
 ):

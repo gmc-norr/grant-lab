@@ -84,8 +84,9 @@ class WorkspaceGoneDuringSetup(RuntimeError):
 
 class SetupRowLockTimeout(RuntimeError):
     """A persist transaction's SET LOCAL lock_timeout fired while waiting on a
-    row lock — chiefly the Call row, which an ingestion batch upsert holds for
-    its whole loop (src/call_manager/ingestion/orchestrator.py). Deliberately
+    lock — the Call row an ingestion batch upsert holds for its whole loop
+    (src/call_manager/ingestion/orchestrator.py), a cache row the persist DELETE
+    has to take, or CallRubric's unique index. Deliberately
     an ORDINARY failure, not a WorkspaceGoneDuringSetup: lock contention says
     nothing about whether the workspace is gone, so _fail's default branch is
     right — consume an attempt and requeue (or dead-letter at
@@ -107,27 +108,53 @@ STUCK_SETUP_AFTER = timedelta(minutes=30)
 _GIT_TIMEOUT_SECONDS = 30.0
 
 # M2's and M3's persist transactions hold the workspace row (and, in M3, the
-# job row) while acquiring the Call row with_for_update — and the Call row can
-# be held for a while by an unrelated writer (an ingestion batch upsert holds
-# every touched Call row for its whole loop; see
-# src/call_manager/ingestion/orchestrator.py). Unlike the commit mutex, a
-# plain row lock has no timeout of its own, and a DELETE past the commit mutex
-# updates the workspace row with lock_timeout back at DEFAULT — i.e. no bound
-# at all — so an unbounded wait here would pin that row against a DELETE
-# indefinitely. Matches acquire_commit_mutex_live's own default
-# (drafting/locking.py) so M1's and M2/M3's contention bounds agree.
-_ROW_LOCK_TIMEOUT_SECONDS = 10
+# job row) from their first `with_for_update` until COMMIT — and everything
+# they do in between can wait on a lock: the Call row (an ingestion batch
+# upsert holds every touched Call row for its whole loop; see
+# src/call_manager/ingestion/orchestrator.py), the cache rows the persist
+# DELETE has to take, a unique-index wait on CallRubric. Unlike the commit
+# mutex, a plain row lock has no timeout of its own, and a DELETE past the
+# commit mutex updates the workspace row with lock_timeout back at DEFAULT —
+# i.e. no bound at all — so an unbounded wait ANYWHERE in the transaction
+# pins the workspace row against a DELETE indefinitely.
+#
+# Why 2 seconds specifically — it is derived from the DELETE route's budget,
+# not borrowed from the commit mutex (M2/M3 don't hold that mutex, so its 10s
+# default says nothing about them):
+#   * The route's asserted budget is < 6.0s
+#     (test_delete_route_returns_promptly_while_phase0_runs_its_extractors) and
+#     the retirement barrier _RETIREMENT_BARRIER_SECONDS = 6.0 can consume that
+#     budget on its own. The DB phase's contribution therefore has to be a small
+#     fraction of the budget, not a multiple of it.
+#   * The realistic contender for the Call row is ingestion's batch upsert loop,
+#     and that loop is explicitly network-free: fetch_new_calls is materialized
+#     BEFORE the write transaction opens, so the transaction only upserts bodies
+#     that are already in memory (ingestion/orchestrator.py:160-197). 2s is far
+#     above its real hold time.
+#   * Losing an occasional race to contention is cheap: MAX_SETUP_ATTEMPTS = 5,
+#     so a SetupRowLockTimeout costs a requeue, not a dead letter.
+_ROW_LOCK_TIMEOUT_SECONDS = 2
 
 
 @contextmanager
-def _bounded_row_locks(session: Session) -> Iterator[None]:
-    """SET LOCAL lock_timeout around a block of `with_for_update` acquisitions,
-    following acquire_commit_mutex's idiom (drafting/locking.py) exactly: SET
-    LOCAL before the locking reads, translate a 55P03 (lock_not_available) into
-    a typed exception, and restore DEFAULT only on the success path — a
-    timeout aborts the whole Postgres transaction, so there is nothing left to
-    restore it for; the caller's rollback (on `with self.session_factory()`
-    exit) discards the LOCAL setting along with everything else.
+def _bounded_lock_waits(session: Session) -> Iterator[None]:
+    """SET LOCAL lock_timeout over an ENTIRE persist transaction — every lock
+    wait inside it, not just the `with_for_update` acquisitions.
+
+    Borrows acquire_commit_mutex's idiom (drafting/locking.py) for the SET LOCAL
+    and the 55P03 (lock_not_available) → typed-exception translation, but
+    deliberately NOT its restore-to-DEFAULT on the success path. That mutex
+    restores because it guards one `pg_advisory_xact_lock` call and its caller's
+    remaining statements are its own business. Here the caller's remaining
+    statements are the point: M2/M3 hold the workspace row from the first
+    acquisition to COMMIT, and their cache DML, flush, audit-event insert and
+    commit can all block on a row lock. Restoring DEFAULT after the acquisitions
+    left exactly that stretch unbounded — with the workspace row held — which is
+    what a concurrent DELETE cannot tolerate.
+
+    Nothing needs restoring: SET LOCAL is scoped to the transaction, so the
+    caller's commit (or the rollback on `with self.session_factory()` exit, or
+    the implicit abort a timeout causes) clears it either way.
     """
     timeout_ms = int(_ROW_LOCK_TIMEOUT_SECONDS * 1000)
     session.execute(text(f"SET LOCAL lock_timeout = '{timeout_ms}ms'"))
@@ -141,8 +168,6 @@ def _bounded_row_locks(session: Session) -> Iterator[None]:
                 "by a concurrent ingestion batch or another Phase-0 worker"
             ) from exc
         raise
-    else:
-        session.execute(text("SET LOCAL lock_timeout = DEFAULT"))
 
 
 def _git_env() -> dict[str, str]:
@@ -412,18 +437,18 @@ class Phase0Worker:
             None if fresh else compute_section_extracts(call_text=call_text, client=self.client)
         )
 
-        with self.session_factory() as s:
-            with _bounded_row_locks(s):
-                ws = s.get(Workspace, workspace_id, with_for_update=True)
-                if ws is None or ws.soft_deleted_at is not None:
-                    raise WorkspaceGoneDuringSetup(f"workspace {workspace_id} deleted")
-                # Workspace row THEN Call row — the normative order. Two
-                # workspaces sharing a Call therefore queue rather than
-                # deadlock, and neither inverts against the delete
-                # transaction's workspace-row update. Bounded (see
-                # _bounded_row_locks) so a wait on the Call row can't pin this
-                # workspace row against a DELETE indefinitely.
-                call = s.get(Call, call_id, with_for_update=True)
+        # _bounded_lock_waits wraps the WHOLE transaction, commit included: the
+        # workspace row is held from the acquisition below until COMMIT, and the
+        # persist DELETE further down waits on row locks of its own.
+        with self.session_factory() as s, _bounded_lock_waits(s):
+            ws = s.get(Workspace, workspace_id, with_for_update=True)
+            if ws is None or ws.soft_deleted_at is not None:
+                raise WorkspaceGoneDuringSetup(f"workspace {workspace_id} deleted")
+            # Workspace row THEN Call row — the normative order. Two
+            # workspaces sharing a Call therefore queue rather than
+            # deadlock, and neither inverts against the delete
+            # transaction's workspace-row update.
+            call = s.get(Call, call_id, with_for_update=True)
             if call is None:
                 raise RuntimeError(f"call {call_id} not found")
             if source_text_hash(call.full_text or "") != pinned:
@@ -471,10 +496,11 @@ class Phase0Worker:
         workspace_setup_jobs before it flushes its workspace-row update —
         locking workspace before job here would invert against that route and
         open a real deadlock shape (Postgres 40P01). The delete path never
-        locks setup-job rows, so putting job first costs delete nothing. Each
-        with_for_update acquisition below is bounded (_bounded_row_locks) so a
-        wait on the Call row — held for a whole ingestion batch's upsert loop —
-        can't pin the workspace (or job) row against a DELETE indefinitely.
+        locks setup-job rows, so putting job first costs delete nothing. The
+        whole persist transaction below — acquisitions, rubric DML and commit
+        alike — runs under _bounded_lock_waits, so no wait anywhere in it (the
+        Call row, held for a whole ingestion batch's upsert loop; CallRubric's
+        unique index) can pin the workspace or job row against a DELETE.
         """
         self._assert_live(job_id, workspace_id)
 
@@ -491,19 +517,21 @@ class Phase0Worker:
 
         payload = None if fresh else compute_rubric(call_text=call_text, client=self.client)
 
-        with self.session_factory() as s:
-            with _bounded_row_locks(s):
-                # job → ws → call: see the docstring's "Lock order" note.
-                job = s.get(WorkspaceSetupJob, job_id, with_for_update=True)
-                if job is None or job.status != "running":
-                    raise WorkspaceGoneDuringSetup(
-                        f"job {job_id} is no longer running (a cancel won)"
-                    )
+        # _bounded_lock_waits wraps the WHOLE transaction, commit included: the
+        # job and workspace rows are held from the acquisitions below until
+        # COMMIT, and the rubric persist can wait on CallRubric's unique index.
+        with self.session_factory() as s, _bounded_lock_waits(s):
+            # job → ws → call: see the docstring's "Lock order" note.
+            job = s.get(WorkspaceSetupJob, job_id, with_for_update=True)
+            if job is None or job.status != "running":
+                raise WorkspaceGoneDuringSetup(
+                    f"job {job_id} is no longer running (a cancel won)"
+                )
 
-                ws = s.get(Workspace, workspace_id, with_for_update=True)
-                if ws is None or ws.soft_deleted_at is not None:
-                    raise WorkspaceGoneDuringSetup(f"workspace {workspace_id} deleted")
-                call = s.get(Call, call_id, with_for_update=True)
+            ws = s.get(Workspace, workspace_id, with_for_update=True)
+            if ws is None or ws.soft_deleted_at is not None:
+                raise WorkspaceGoneDuringSetup(f"workspace {workspace_id} deleted")
+            call = s.get(Call, call_id, with_for_update=True)
             if call is None:
                 raise RuntimeError(f"call {call_id} not found")
             if source_text_hash(call.full_text or "") != pinned:
