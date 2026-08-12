@@ -2,7 +2,17 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Revision 2.** Revision 1 (`ed341c7`) was reviewed and rejected with seven blocking findings, all verified against the code and all fixed here. What changed, and why it matters when you read the tasks:
+**Revision 3.** Revision 2 was reviewed and rejected with five further blocking findings plus three on test quality — all verified against the code, all fixed here. Read these before the tasks; several are traps that look fine until you look twice:
+
+- **Review now gets the same treatment as every other runner** — tracked from its first line and with a workspace row-lock guard on its parent prefix. R2 started the parent entry at the wave-1 semaphore, *after* the prefix had created item rows and committed `draft_sha`, so the delete-snapshot race survived for review alone.
+- **The delete now terminalizes review ITEMS, not just runs.** `cancel_review_runs_for_workspace` touches only `ReviewRun` (verified). That was survivable before — a cancelled child still reached its own finalization — but retirement cancellation propagates *past* the `finally`, so the finalization block after the `try` never runs and the item stays `running` forever.
+- **`mark_failed` takes the workspace row `FOR UPDATE`, under `no_autoflush`.** R2's plain `SELECT` was not a linearization point: read "live" → DELETE commits → the hook skips our held job row → we commit `queued`. "Never resurrect" was simply false.
+- **Task 1's unit tests build their own `PassRegistry`.** R2 shared the process-global singleton, so one test's deliberately-unconfirmed entry made the next test's `unconfirmed_count() == 0` assertion fail.
+- **The `SKIP LOCKED` mutation no longer hangs the suite.** R2 held a row and called the cancel inline in the same thread; removing `skip_locked` blocks forever *before* the `finally` that releases it. A mutation must fail, never hang.
+- **Three more gates that could not discriminate were rebuilt:** the child-prefix race asserted after releasing the lock (by which time finalization had already moved the item); the deadlock test used two *different* items, which cannot form a cycle; and the coherence lock-duration test was pure timing. All three now assert while the interference is in force, against the real code.
+- **Two production wirings are now pinned by mutation:** the real adapter's protocol methods, and that all four ticks route through the shared drain helper.
+
+**Revision 2** folded seven blocking findings from revision 1 (`ed341c7`). Those fixes stand and are described below where they apply:
 
 1. **Tracking now wraps the WHOLE runner, prefix included.** R1 registered the entry only after the prefix, leaving a race: an already-claimed pass validates the live workspace, releases its row lock, DELETE commits and sees an empty registry, and only then does the pass register and launch. The claim filter cannot help — the job was already claimed.
 2. **The registry no longer tracks handles.** It asks the adapter for its unconfirmed generations. R1 bound a handle after `launch()` returned and treated a handle-less entry as confirmed — but `launch` registers the generation *before* `client.connect()` (`claude_adapter.py:212-216`), so a cancellation during connect leaves an unconfirmed generation with no handle, which R1 would have discarded where nothing could ever reclaim it.
@@ -35,7 +45,13 @@
 - **No change to any runner's `except Exception` body.** `asyncio.CancelledError` inherits from `BaseException` and already passes through to the `finally`.
 - **Lock order — workspace chain (from Phase-0, in force):** `commit mutex < workspace_setup_jobs < workspaces < calls`.
 - **Lock order — review chain (NEW, this plan):** `review_runs < review_run_items`. Any transaction touching both must take the run first. Task 5 establishes it and reorders the one existing violator.
-- **Acceptance is by mutation.** Every gate must be shown to FAIL when its fix is reverted — **against the real production path**, not a hand-rolled stand-in. This project has shipped five tests that could not fail. Revision 1 of this plan added three more. Do not add a ninth.
+- **Lock order — claim-analysis (NEW, this plan):** `workspaces < claim_analysis_jobs`. Task 11 makes `mark_failed` take the workspace row before it dirties or locks the job row. The `"jobs"` hook is exempt from ordering concerns because every one of its queries is `SKIP LOCKED` and therefore never waits.
+- **Acceptance is by mutation, and a mutation must FAIL — never HANG.** Every gate must be shown to fail when its fix is reverted, **against the real production path**, not a hand-rolled stand-in. Two further rules, both learned from findings against earlier revisions of this plan:
+  - *A test that holds a row lock must never call the code under test synchronously in the same thread.* Removing `SKIP LOCKED` then blocks forever, before the `finally` that would release the lock — the suite hangs instead of reporting. Run the code under test in a thread, and/or give its session a `SET LOCAL lock_timeout`.
+  - *Assert while the interference is still in force.* Sampling state after releasing a lock lets a later code path repair the very thing you were checking, so the assertion passes with or without the fix.
+- **Unit tests construct their own `PassRegistry()`; they never touch the `PASS_REGISTRY` singleton.** It is process-global and its unconfirmed list is deliberately persistent, so one test's leftover entry is the next test's failed assertion. Only the wiring test in Task 2 refers to the singleton.
+- **The registry calls adapter methods directly, never through `getattr(..., None)`.** A defensive fallback would make deleting a method from the real adapter invisible to every test. If an adapter does not satisfy the protocol, that must be an `AttributeError` at the call site.
+- **This project has shipped five tests that could not fail.** Revision 1 of this plan added three more, and revision 2 added three others. Assume your first draft of any concurrency gate does not discriminate until you have watched it go red.
 - **Test helpers are imports, not fixtures.** `make_workspace`, `make_call` and friends are plain functions: `from tests.proposal_assist.conftest import make_workspace`. There is no settings fixture — construct `Settings()` inline, as every existing pass test does (`tests/proposal_assist/coherence/test_pass_runner.py:34`).
 - **`ClaimAnalysisJob` requires `section_index` and `commit_sha`** (both `nullable=False`, no server default). Every construction in this plan passes them; do not drop them.
 - **Gates before every commit:** `.venv/bin/python -m pytest tests/proposal_assist/ -q` ending `PYTEST_EXIT=0`, and `.venv/bin/ruff check .` clean. Run pytest as a **directory**, never file-by-file.
@@ -96,7 +112,13 @@
 Create `tests/proposal_assist/test_passes_registry.py`:
 
 ```python
-"""Registry gates in isolation — no DB, no SDK."""
+"""Registry gates in isolation — no DB, no SDK.
+
+Every test here builds its OWN PassRegistry. The PASS_REGISTRY singleton is
+process-global and its unconfirmed list is deliberately persistent, so sharing it
+across tests means one test's leftover entry becomes the next one's failed
+assertion — which is exactly what revision 2 of the plan would have shipped.
+"""
 
 from __future__ import annotations
 
@@ -105,7 +127,13 @@ import uuid
 
 import pytest
 
-from call_manager.proposal_assist.passes import PASS_REGISTRY
+from call_manager.proposal_assist.passes import PassRegistry
+
+
+@pytest.fixture
+def registry() -> PassRegistry:
+    """A fresh registry per test. Never the singleton."""
+    return PassRegistry()
 
 
 class _FakeAdapter:
@@ -132,61 +160,61 @@ class _FakeAdapter:
 
 
 @pytest.mark.asyncio
-async def test_the_entry_exists_from_the_very_start_not_after_the_prefix():
+async def test_the_entry_exists_from_the_very_start_not_after_the_prefix(registry):
     """The race revision 1 had: an entry that only appears after the prefix is
     invisible to a DELETE that commits during it."""
     ws = uuid.uuid4()
     seen_before_adapter = None
 
-    async with PASS_REGISTRY.track(ws) as entry:
-        seen_before_adapter = PASS_REGISTRY.live_count(ws)   # no adapter bound yet
+    async with registry.track(ws) as entry:
+        seen_before_adapter = registry.live_count(ws)   # no adapter bound yet
         entry.bind_adapter(_FakeAdapter())
 
     assert seen_before_adapter == 1
-    assert PASS_REGISTRY.live_count(ws) == 0
+    assert registry.live_count(ws) == 0
 
 
 @pytest.mark.asyncio
-async def test_track_deregisters_when_the_body_raises():
+async def test_track_deregisters_when_the_body_raises(registry):
     ws = uuid.uuid4()
     with pytest.raises(ValueError):
-        async with PASS_REGISTRY.track(ws) as entry:
+        async with registry.track(ws) as entry:
             entry.bind_adapter(_FakeAdapter())
             raise ValueError("boom")
-    assert PASS_REGISTRY.live_count(ws) == 0
+    assert registry.live_count(ws) == 0
 
 
 @pytest.mark.asyncio
-async def test_retire_cancels_the_task_and_retires_the_adapter():
+async def test_retire_cancels_the_task_and_retires_the_adapter(registry):
     ws = uuid.uuid4()
     adapter = _FakeAdapter(open_generations=1)
     started = asyncio.Event()
 
     async def _pass():
-        async with PASS_REGISTRY.track(ws) as entry:
+        async with registry.track(ws) as entry:
             entry.bind_adapter(adapter)
             started.set()
             await asyncio.sleep(3600)
 
     task = asyncio.create_task(_pass())
     await started.wait()
-    retired = await PASS_REGISTRY.retire_workspace(ws)
+    retired = await registry.retire_workspace(ws)
 
     assert retired == 1
     assert task.done()
     assert adapter.retire_calls == 1
-    assert PASS_REGISTRY.live_count(ws) == 0
+    assert registry.live_count(ws) == 0
 
 
 @pytest.mark.asyncio
-async def test_entries_retire_concurrently_not_serially():
+async def test_entries_retire_concurrently_not_serially(registry):
     """Gate 7. Mutation: replace the gather in retire_workspace with a for loop."""
     ws = uuid.uuid4()
     started = asyncio.Event()
     n = 6
 
     async def _pass(idx: int):
-        async with PASS_REGISTRY.track(ws) as entry:
+        async with registry.track(ws) as entry:
             entry.bind_adapter(_FakeAdapter(open_generations=1, retire_delay=0.3))
             if idx == n - 1:
                 started.set()
@@ -198,7 +226,7 @@ async def test_entries_retire_concurrently_not_serially():
 
     loop = asyncio.get_running_loop()
     began = loop.time()
-    await PASS_REGISTRY.retire_workspace(ws)
+    await registry.retire_workspace(ws)
     elapsed = loop.time() - began
 
     assert elapsed < 1.0, f"retirement took {elapsed:.2f}s — serialized, not concurrent"
@@ -207,7 +235,7 @@ async def test_entries_retire_concurrently_not_serially():
 
 
 @pytest.mark.asyncio
-async def test_a_generation_left_open_transfers_on_ORDINARY_exit():
+async def test_a_generation_left_open_transfers_on_ORDINARY_exit(registry):
     """Gate 3(b), the case that matters most: no deletion involved at all.
 
     Also the launch-cancel case, because unconfirmed_launch_ids() reports a
@@ -216,29 +244,28 @@ async def test_a_generation_left_open_transfers_on_ORDINARY_exit():
     ws = uuid.uuid4()
     adapter = _FakeAdapter(open_generations=1)
     adapter.confirm_on_retire = False
-    before = PASS_REGISTRY.unconfirmed_count()
 
-    async with PASS_REGISTRY.track(ws) as entry:
+    async with registry.track(ws) as entry:
         entry.bind_adapter(adapter)
 
-    assert PASS_REGISTRY.live_count(ws) == 0
-    assert PASS_REGISTRY.unconfirmed_count() == before + 1
+    assert registry.live_count(ws) == 0
+    assert registry.unconfirmed_count() == 1
 
 
 @pytest.mark.asyncio
-async def test_reconcile_retries_and_drops_once_confirmed():
+async def test_reconcile_retries_and_drops_once_confirmed(registry):
     ws = uuid.uuid4()
     adapter = _FakeAdapter(open_generations=1)
     adapter.confirm_on_retire = False
-    async with PASS_REGISTRY.track(ws) as entry:
+    async with registry.track(ws) as entry:
         entry.bind_adapter(adapter)
-    assert PASS_REGISTRY.unconfirmed_count() >= 1
+    assert registry.unconfirmed_count() >= 1
 
     adapter.confirm_on_retire = True
-    acted = await PASS_REGISTRY.reconcile_unconfirmed()
+    acted = await registry.reconcile_unconfirmed()
 
     assert acted >= 1
-    assert PASS_REGISTRY.unconfirmed_count() == 0
+    assert registry.unconfirmed_count() == 0
 ```
 
 - [ ] **Step 2: Run to verify they fail**
@@ -313,18 +340,20 @@ class Entry:
 
     def open_generations(self) -> int:
         """How many generations this entry's adapter still has un-confirmed-dead.
-        Zero when there is no adapter yet — nothing has been launched."""
+        Zero when no adapter is bound yet — nothing has been launched.
+
+        Called DIRECTLY, not through getattr(..., None): a defensive fallback would
+        make deleting this method from the real adapter invisible to every test. An
+        adapter that does not satisfy the protocol must raise AttributeError here.
+        """
         if self.adapter is None:
             return 0
-        ask = getattr(self.adapter, "unconfirmed_launch_ids", None)
-        return len(ask()) if ask is not None else 0
+        return len(self.adapter.unconfirmed_launch_ids())
 
     async def retire_adapter(self) -> None:
         if self.adapter is None:
             return
-        retire = getattr(self.adapter, "retire_unconfirmed", None)
-        if retire is not None:
-            await retire()
+        await self.adapter.retire_unconfirmed()
 
 
 class PassRegistry:
@@ -488,13 +517,42 @@ In `fake_adapter.py`, near its `retiring_count` (line 113):
         return 0
 ```
 
-- [ ] **Step 6: Prove the concurrency gate discriminates**
+- [ ] **Step 6: Pin the REAL adapter to the protocol**
+
+Every test above uses `_FakeAdapter`, so deleting either method from the real adapter would leave them all green. Add a test that exercises the real inventory:
+
+```python
+def test_the_real_adapter_reports_and_retires_its_own_inventory():
+    """Without this, removing unconfirmed_launch_ids or retire_unconfirmed from
+    ClaudeAgentSDKAdapter breaks production and no test notices.
+
+    Uses the adapter's real LiveClientRegistry rather than a stub, because the
+    property under test is that 'still in the inventory' means 'not confirmed
+    dead' — which is confirm_dead's pop (live_clients.py:64), not a flag.
+    """
+    from call_manager.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
+
+    adapter = _build_adapter_for_tests()      # follow the existing adapter tests
+    ws = uuid.uuid4()
+    launch_id = adapter._live.register(ws, client=object())
+
+    assert launch_id in adapter.unconfirmed_launch_ids()
+
+    adapter._live.confirm_dead(launch_id)
+    assert adapter.unconfirmed_launch_ids() == []
+```
+
+Read the existing `claude_adapter` tests first and construct the adapter the way they do; do not invent a constructor.
+
+- [ ] **Step 7: Prove the concurrency gate discriminates**
 
 Replace the `asyncio.gather` in `retire_workspace` with `for e in entries: await self._retire_entry(e)`.
 Run: `.venv/bin/python -m pytest tests/proposal_assist/test_passes_registry.py -q -k concurrently`
 Expected: **FAIL** (~1.8s). Restore, confirm PASS, confirm `git diff --stat src/` is clean.
 
-- [ ] **Step 7: Full gates and commit**
+Then prove the protocol gate: delete `unconfirmed_launch_ids` from `ClaudeAgentSDKAdapter`; Step 6's test must FAIL. Restore.
+
+- [ ] **Step 8: Full gates and commit**
 
 ```bash
 .venv/bin/python -m pytest tests/proposal_assist/ -q
@@ -683,10 +741,23 @@ def test_the_coherence_prefix_aborts_for_a_workspace_deleted_under_it(
         assert s.get(CoherenceJob, job_id).status == "running"
 
 
-def test_the_coherence_prefix_does_not_hold_its_row_lock_for_long(
-    pg_session_factory, current_user
+def test_the_coherence_prefix_holds_the_workspace_row_then_releases_it(
+    pg_session_factory, current_user, monkeypatch
 ):
-    """Gate 9, second half. The guard is safe ONLY while this prefix stays short."""
+    """Gate 9, second half — TWO properties, both asserted while the interference
+    is in force:
+
+      1. the prefix genuinely HOLDS the workspace row (a competing FOR UPDATE
+         cannot take it while the prefix is mid-flight), and
+      2. it RELEASES it before the pass does any cloud work.
+
+    A sleep-then-measure version of this test proves neither: it passes with the
+    guard removed, and it also passes if the whole (fast, stubbed) pass runs under
+    the lock. So the prefix is paused deterministically inside context assembly,
+    and the competing lock is probed with NOWAIT at two chosen moments.
+    """
+    from call_manager.proposal_assist.coherence import pass_runner as cp
+
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
         s.flush()
@@ -695,32 +766,61 @@ def test_the_coherence_prefix_does_not_hold_its_row_lock_for_long(
         s.commit()
         job_id, ws_id = job.id, ws.id
 
-    blocked_for: list[float] = []
+    in_prefix = threading.Event()
+    may_finish_prefix = threading.Event()
+    real_assemble = cp.assemble_coherence_context
 
-    def _competing_update():
-        time.sleep(0.2)
-        began = time.monotonic()
-        with pg_session_factory() as s:
-            s.get(Workspace, ws_id, with_for_update=True)
-            s.commit()
-        blocked_for.append(time.monotonic() - began)
+    def _paused_assemble(**kwargs):
+        in_prefix.set()
+        may_finish_prefix.wait(timeout=30)
+        return real_assemble(**kwargs)
 
-    t = threading.Thread(target=_competing_update)
-    t.start()
-    asyncio.run(
-        run_coherence_pass(
-            job_id=job_id,
-            session_factory=pg_session_factory,
-            settings=Settings(),
-            adapter_builder=_stub_adapter_builder,
+    monkeypatch.setattr(cp, "assemble_coherence_context", _paused_assemble)
+
+    def _row_is_locked() -> bool:
+        """Probe with NOWAIT from a separate connection: True == someone holds it."""
+        from sqlalchemy.exc import OperationalError
+
+        try:
+            with pg_session_factory() as probe:
+                probe.execute(
+                    select(Workspace)
+                    .where(Workspace.id == ws_id)
+                    .with_for_update(nowait=True)
+                )
+                return False
+        except OperationalError:
+            return True
+
+    done = threading.Event()
+
+    def _run_pass():
+        asyncio.run(
+            run_coherence_pass(
+                job_id=job_id,
+                session_factory=pg_session_factory,
+                settings=Settings(),
+                adapter_builder=_stub_adapter_builder,
+            )
         )
-    )
-    t.join(timeout=30)
+        done.set()
 
-    assert blocked_for, "the competing update never ran"
-    assert blocked_for[0] < 5.0, (
-        f"the prefix held the workspace row for {blocked_for[0]:.1f}s"
-    )
+    t = threading.Thread(target=_run_pass)
+    t.start()
+    try:
+        assert in_prefix.wait(timeout=15), "the prefix never ran"
+        # (1) asserted WHILE the prefix is paused — the lock must be held now.
+        assert _row_is_locked(), (
+            "the prefix does not hold the workspace row — the guard cannot "
+            "linearize against a delete without it"
+        )
+    finally:
+        may_finish_prefix.set()
+
+    assert done.wait(timeout=30), "the pass never finished"
+    t.join(timeout=5)
+    # (2) the lock is gone once the prefix's session has committed.
+    assert not _row_is_locked(), "the prefix never released the workspace row"
 ```
 
 - [ ] **Step 2: Run to verify the first fails**
@@ -885,13 +985,19 @@ In the evaluator this replaces the existing unlocked `ws = s.get(Workspace, job.
 
 **Files:** `review/pass_runner.py` (child prefix ~60-93, child body 95-133, **finalization 135-144**, parent 193-260), `tests/proposal_assist/test_pass_retirement.py`
 
-**Three changes, and the third is a correctness fix to existing code.**
+**Five changes. (c), (d) and (e) are correctness fixes to existing code.**
 
-**(a) Track parent and children separately.** `run_review_pass` **launches nothing** — every `_run_one_call` builds its own adapter, so each child has its own generation. The parent is tracked with no adapter ever bound; each child is tracked and binds its own.
+**(a) Track parent and children separately, each from its FIRST line.** `run_review_pass` **launches nothing** — every `_run_one_call` builds its own adapter, so each child has its own generation. The parent is tracked with no adapter ever bound; each child is tracked and binds its own. Both must be tracked *before* their prefix, exactly as Tasks 3-4 do: a parent entry that begins at the wave-1 semaphore is registered only after the prefix has already created `ReviewRunItem` rows and committed `run.draft_sha`, which leaves the delete-snapshot race open for review alone.
 
-**(b) The child prefix locks the parent run.** Each `_run_one_call` commits `item.status = "running"` before its adapter exists. It re-reads `run.status` first, but that read takes **no lock** — a TOCTOU window in which a DELETE can cancel the run between the read and the commit, stranding a `ReviewRunItem` in `running` on a deleted workspace. Lock the `ReviewRun` row: the delete transaction already updates review runs through `cancel_review_runs_for_workspace`, so it linearizes against exactly the write that matters, without adding N persona-shaped contenders to the workspace row.
+**(b) The parent prefix needs the workspace guard too.** Tasks 3-4 give every other runner a `with_for_update` workspace load and a `soft_deleted_at` abort. Review's parent prefix commits durable writes (the item rows and `run.draft_sha`) and had no such guard in earlier revisions. Add it, in the same shape.
 
-**(c) Finalization must be reordered — this plan introduces a deadlock otherwise.** The new prefix takes **run → item**. Existing finalization takes **item** (line 136) **→ run** (line 144). That is AB-BA: two review sub-calls on the same run can deadlock (Postgres 40P01). This plan therefore establishes `review_runs < review_run_items` as a normative rule and reorders finalization to match. The rule goes in a comment at both sites so the next reader cannot re-invert it.
+**(c) The child prefix locks the parent run.** Each `_run_one_call` commits `item.status = "running"` before its adapter exists. It re-reads `run.status` first, but that read takes **no lock** — a TOCTOU window in which a DELETE can cancel the run between the read and the commit, stranding a `ReviewRunItem` in `running` on a deleted workspace. Lock the `ReviewRun` row: the delete transaction already updates review runs through `cancel_review_runs_for_workspace`, so it linearizes against exactly the write that matters, without adding N persona-shaped contenders to the workspace row.
+
+**(d) Finalization must be reordered — this plan introduces a deadlock otherwise.** The new prefix takes **run → item**. Existing finalization takes **item** (line 136) **→ run** (line 144). That is AB-BA: two transactions touching the same run/item pair can deadlock (Postgres 40P01). This plan therefore establishes `review_runs < review_run_items` as a normative rule and reorders finalization to match. The rule goes in a comment at both sites so the next reader cannot re-invert it.
+
+**(e) The delete must terminalize review ITEMS, not only runs.** `cancel_review_runs_for_workspace` (`review/jobs.py:80`) updates `ReviewRun` and nothing else — verified, its single `UPDATE ... RETURNING` touches no item rows. That was survivable before this plan, because a cancelled child still reached its finalization session and set its own item to `cancelled`. It is **not** survivable once retirement cancels the child's task: `CancelledError` propagates out of the `await`, the `finally` runs the terminate, and then it keeps propagating — **the finalization session after the `try` is never reached**. The item is left in `running` on a deleted workspace, with nothing to repair it.
+
+Fixing this in the finalization path would mean doing DB work while a `CancelledError` is in flight — fragile, and it would still not cover a worker that dies outright. Fix it durably instead: terminalize active items in the same delete transaction that cancels their runs, taking the run rows first per the new rule.
 
 - [ ] **Step 1: Write the failing tests — all three drive the REAL runner**
 
@@ -940,15 +1046,19 @@ async def test_every_review_child_is_tracked_as_its_own_entry(
     assert PASS_REGISTRY.live_count(ws_id) == 0
 
 
-def test_a_delete_racing_the_child_prefix_strands_no_item_in_running(
+def test_the_child_prefix_blocks_on_the_run_row_instead_of_committing_running(
     pg_session_factory, current_user
 ):
-    """Gate 6, second case — a SYNCHRONIZED race, not a pre-set state.
+    """Gate 6, second case — assert WHILE the interference is in force.
 
-    Revision 1 cancelled the run BEFORE the child started, which the existing
-    unlocked status check already handles — so it could not fail. Here the child
-    is made to block on the ReviewRun row lock while the cancel commits, which is
-    the actual TOCTOU window.
+    Revision 1 pre-cancelled the run, which the existing unlocked status check
+    already handles. Revision 2 held the run lock but asserted AFTER releasing it —
+    by which time finalization has seen the cancelled run and moved the item off
+    'running' anyway, so it passed with or without the prefix lock.
+
+    The discriminating observation is made while the holder still owns the run row:
+    WITH the fix the child is blocked in its prefix and the item is still 'queued';
+    WITHOUT it the child sails past and commits 'running'.
     """
     from call_manager.db.models import ReviewRun, ReviewRunItem
     from call_manager.proposal_assist.review.pass_runner import _run_one_call
@@ -980,29 +1090,38 @@ def test_a_delete_racing_the_child_prefix_strands_no_item_in_running(
         )
         child_done.set()
 
+    status_while_blocked: list[str] = []
     try:
         # Hold the run row so the child's prefix BLOCKS on it (with the fix) or
         # sails past it (without).
         holder.get(ReviewRun, run_id, with_for_update=True)
         t = threading.Thread(target=_child)
         t.start()
-        time.sleep(0.5)
+        time.sleep(1.0)   # ample time for an UNGUARDED child to commit 'running'
 
-        # Cancel the run the way the delete transaction does, then release.
+        # THE ASSERTION POINT: still holding the run row.
+        with pg_session_factory() as probe:
+            status_while_blocked.append(
+                probe.scalar(
+                    select(ReviewRunItem.status).where(
+                        ReviewRunItem.review_run_id == run_id
+                    )
+                )
+            )
+
+        # Now cancel the run the way the delete transaction does, and release.
         holder.get(ReviewRun, run_id).status = "cancelled"
         holder.commit()
     finally:
         holder.close()
 
     assert child_done.wait(timeout=30), "the child never finished"
+    t.join(timeout=5)
 
-    with pg_session_factory() as s:
-        item = s.scalar(
-            select(ReviewRunItem).where(ReviewRunItem.review_run_id == run_id)
-        )
-        assert item.status != "running", (
-            "the child committed 'running' on a run the delete had cancelled"
-        )
+    assert status_while_blocked == ["queued"], (
+        f"while the run row was held the item was {status_while_blocked!r} — the "
+        "child committed 'running' without waiting for the run lock"
+    )
 
 
 def test_review_takes_the_run_row_before_the_item_row_everywhere(
@@ -1010,11 +1129,80 @@ def test_review_takes_the_run_row_before_the_item_row_everywhere(
 ):
     """The new normative rule: review_runs < review_run_items.
 
-    Two concurrent sub-calls on one run finalizing while another takes the prefix
-    must not deadlock. Mutation: restore finalization's original item-then-run
-    order and this must fail with a 40P01 deadlock (or hang to the timeout).
+    An AB-BA cycle needs the SAME two rows. Revision 2's version used two
+    DIFFERENT items (item A -> run, versus run -> item B), which cannot deadlock
+    however the locks are ordered — it passed with the bug present.
+
+    Here two transactions contend over one run and ONE item:
+      T1 (finalization shape): item then run   <- the pre-fix order
+      T2 (prefix shape):       run then item
+    Each takes its first lock, both are released to take their second, and the
+    cycle forms. With finalization reordered to run-then-item both transactions
+    agree and one simply queues.
+
+    Mutation: restore finalization's item-then-run order; this must FAIL with a
+    40P01 DeadlockDetected (or hit the join timeout).
     """
-    ...  # body in Step 5 — it needs the reordered finalization to exist first
+    from call_manager.db.models import ReviewRun, ReviewRunItem
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        run = ReviewRun(workspace_id=ws.id, status="running")
+        s.add(run)
+        s.flush()
+        item = ReviewRunItem(review_run_id=run.id, kind="fit_check", status="running")
+        s.add(item)
+        s.commit()
+        run_id, item_id = run.id, item.id
+
+    errors: list[BaseException] = []
+    delete_holds_run = threading.Event()
+    finalize_started = threading.Event()
+
+    # T2 is the REAL delete-side path from change (e): it locks the run rows, then
+    # the item rows. Pause it between the two so the cycle can actually form.
+    def _delete_side():
+        try:
+            with pg_session_factory() as s:
+                s.execute(text("SET LOCAL lock_timeout = '10s'"))
+                s.get(ReviewRun, run_id, with_for_update=True)
+                delete_holds_run.set()
+                assert finalize_started.wait(timeout=15)
+                time.sleep(0.5)          # let finalization take its first lock
+                cancel_review_runs_and_items_for_workspace(s, workspace_id=ws_id)
+                s.commit()
+        except BaseException as exc:  # noqa: BLE001 — asserted after join
+            errors.append(exc)
+
+    # T1 is the REAL finalization path, reached by driving _run_one_call against an
+    # item that is already 'running'. Its lock order is the thing under test.
+    def _finalize_side():
+        try:
+            assert delete_holds_run.wait(timeout=15)
+            finalize_started.set()
+            asyncio.run(
+                _run_one_call(
+                    kind="fit_check",
+                    instruction="x",
+                    run_id=run_id,
+                    workspace_id=ws_id,
+                    session_factory=pg_session_factory,
+                    settings=Settings(),
+                    adapter_builder=_stub_adapter_builder,
+                )
+            )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_delete_side), threading.Thread(target=_finalize_side)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=45)
+        assert not t.is_alive(), "a transaction never finished — deadlocked or hung"
+
+    assert not errors, f"lock-order conflict between delete and finalization: {errors!r}"
 ```
 
 - [ ] **Step 2: Run to verify the first two fail.** Read each failure and confirm it is the assertion, not an import error. Fix the `build_review_adapter` name if my guess is wrong — the file is the authority.
@@ -1060,23 +1248,109 @@ Replace the opening of the finalization session (currently lines 135-144):
 
 Note the `if item is None: return` moves below both acquisitions — taking the run lock for a moment on a vanished item is harmless, and reordering the guard would reintroduce the inversion.
 
-- [ ] **Step 5: Write the deadlock test body**
+- [ ] **Step 5: Terminalize items in the delete transaction**
 
-Replace the `...` in `test_review_takes_the_run_row_before_the_item_row_everywhere`: seed one run with two items; run two threads, each calling `_run_one_call` for a different `kind`, both with `_stub_adapter_builder`; join both with `timeout=30`; assert both threads finished and no exception was recorded. Capture each thread's exception into a list and assert the list is empty, so a 40P01 fails the test rather than escaping as a warning.
-
-- [ ] **Step 6: Track the parent (task-only) and each child**
-
-Parent — wrap from the wave-1 semaphore through the end of `run_review_pass`:
+Rename and extend `cancel_review_runs_for_workspace` (`review/jobs.py:80`) to `cancel_review_runs_and_items_for_workspace`, keeping its single-`UPDATE`-per-table, never-load-then-write style:
 
 ```python
-    async with PASS_REGISTRY.track(workspace_id):
-        # Task-only: run_review_pass owns NO adapter — every _run_one_call builds
-        # its own. Retirement cancels this task; there is nothing here to retire.
-        sem = asyncio.Semaphore(settings.review_persona_concurrency)
-        ...  # existing body, indented one level
+def cancel_review_runs_and_items_for_workspace(
+    session: Session, *, workspace_id: uuid.UUID
+) -> int:
+    """Cancel a workspace's active review runs AND their active items (soft-delete
+    handler).
+
+    Items are terminalized here, durably, because retirement cancellation does NOT
+    reach a child's finalization session: CancelledError propagates out of the
+    awaited turn, the `finally` runs the adapter terminate, and it keeps
+    propagating — the finalization block AFTER the try is never executed. Without
+    this, a cancelled child leaves its ReviewRunItem in 'running' on a deleted
+    workspace with nothing to repair it.
+
+    LOCK ORDER: runs BEFORE items (normative — see pass_runner's matching notes).
+    """
+    ids = (
+        session.execute(
+            update(ReviewRun)
+            .where(
+                ReviewRun.workspace_id == workspace_id,
+                ReviewRun.status.in_(("queued", "running")),
+            )
+            .values(status="cancelled", completed_at=datetime.now(UTC))
+            .returning(ReviewRun.id)
+            .execution_options(synchronize_session=False)
+        )
+        .scalars()
+        .all()
+    )
+    if ids:
+        session.execute(
+            update(ReviewRunItem)
+            .where(
+                ReviewRunItem.review_run_id.in_(ids),
+                ReviewRunItem.status.in_(("queued", "running")),
+            )
+            .values(
+                status="cancelled",
+                error_message="cancelled: workspace deleted",
+                completed_at=datetime.now(UTC),
+            )
+            .execution_options(synchronize_session=False)
+        )
+    session.flush()
+    return len(ids)
 ```
 
-Child — wrap `_run_one_call`'s body from the prefix onward (same pre-prefix rule as Task 3: the entry must exist before the prefix), binding the adapter after it is built:
+Update the single caller (`workspaces.py:130`) and its import (`workspaces.py:33`). Keep the return value as the RUN count so existing assertions on it still hold.
+
+- [ ] **Step 6: Write the "a cancelled child leaves no running item" gate**
+
+```python
+def test_deleting_a_workspace_leaves_no_review_item_in_running(
+    client_authed_owner, pg_session_factory, current_user
+):
+    """The case change (e) exists for: a child ALREADY in 'running' when the DELETE
+    lands. Retirement cancels its task, so its finalization session never runs —
+    only the delete transaction can terminalize the item.
+
+    Mutation: revert cancel_review_runs_and_items_for_workspace to updating runs
+    only, and this must FAIL with the item still 'running'.
+    """
+```
+
+Seed a run with one item already `status="running"`, call the real `DELETE /api/workspaces/{id}` route, then assert the item's status is `cancelled`.
+
+- [ ] **Step 7: Track the parent and each child, both from their first line**
+
+Parent — `run_review_pass` gets the same tiny-lookup-then-track shape as Task 3, and its prefix gets the workspace guard:
+
+```python
+    # Tracked BEFORE the prefix: an entry that begins at the wave-1 semaphore is
+    # registered only after the prefix has created the item rows and committed
+    # draft_sha, which leaves review — alone among the four passes — exposed to the
+    # delete-snapshot race.
+    with session_factory() as s0:
+        run0 = s0.get(ReviewRun, run_id)
+        if run0 is None or run0.status != "running":
+            return
+        tracked_ws = run0.workspace_id
+
+    async with PASS_REGISTRY.track(tracked_ws):
+        # Task-only: run_review_pass owns NO adapter — every _run_one_call builds
+        # its own. Retirement cancels this task; there is nothing here to retire.
+        ...  # the entire existing body, indented one level
+```
+
+and inside that body's prefix session, immediately after the existing `run.status != "running"` check:
+
+```python
+        ws = s.get(Workspace, workspace_id, with_for_update=True)
+        if ws is None or ws.soft_deleted_at is not None:
+            return
+```
+
+replacing the existing unlocked `ws = s.get(Workspace, workspace_id)`.
+
+Child — wrap `_run_one_call`'s whole body, prefix included, binding the adapter after it is built:
 
 ```python
     async with PASS_REGISTRY.track(workspace_id) as _entry:
@@ -1086,15 +1360,18 @@ Child — wrap `_run_one_call`'s body from the prefix onward (same pre-prefix ru
         ...  # rest, INCLUDING the finalization session
 ```
 
-- [ ] **Step 7: Run; then prove all three gates discriminate**
+`_run_one_call` already receives `workspace_id` as a parameter, so it needs no lookup session of its own.
+
+- [ ] **Step 8: Run; then prove all four gates discriminate**
 
 1. Delete the child's `async with PASS_REGISTRY.track(...)` → fan-out test **FAILS** (peak < 2).
-2. Revert the child prefix to a bare `s.get(ReviewRun, run_id)` → race test **FAILS**.
-3. Restore finalization to item-then-run → deadlock test **FAILS** (40P01 or timeout).
+2. Revert the child prefix to a bare `s.get(ReviewRun, run_id)` → the blocked-prefix test **FAILS** (item observed as `running`, not `queued`, while the holder owns the run row).
+3. Restore finalization to item-then-run → the lock-order test **FAILS** (40P01, or a thread still alive at the join).
+4. Revert `cancel_review_runs_and_items_for_workspace` to updating runs only → the no-running-item test **FAILS**.
 
-Restore each, confirm PASS, and confirm `git diff` shows only the intended changes.
+Restore each, confirm PASS, and confirm `git diff` shows only the intended changes. **Four mutations, four recorded failures** — if any of them passes, the test is decorative and must be rebuilt before you continue.
 
-- [ ] **Step 8: Full gates and commit** — `"fix(review): track parent and children, lock the child prefix, fix the run/item order"`
+- [ ] **Step 9: Full gates and commit** — `"fix(review): track the whole runner, fix the run/item order, terminalize items on delete"`
 
 ---
 
@@ -1216,9 +1493,32 @@ def _drain_pass_future(fut, *, pass_name: str, timeout: float) -> None:
 
 Replace each tick's inline drain with a call to it, preserving each tick's existing timeout value.
 
-- [ ] **Step 5: Run; prove it discriminates** by removing the `except concurrent.futures.CancelledError` branch (expect FAIL); restore.
+- [ ] **Step 5: Prove all four ticks actually CALL the helper**
 
-- [ ] **Step 6: Full gates and commit** — `"fix(scheduler): a retired pass is not a tick failure"`
+Testing `_drain_pass_future` alone proves nothing about the four ticks — deleting the call from three of them would stay green. Add a wiring gate:
+
+```python
+@pytest.mark.parametrize(
+    "tick_name", ["coherence", "evaluator", "review", "uncited_claims"]
+)
+def test_every_pass_tick_drains_through_the_shared_helper(tick_name, monkeypatch):
+    """Mutation: restore the inline try/except in ANY ONE tick and its parameter
+    case must fail."""
+    calls: list[str] = []
+    monkeypatch.setattr(
+        scheduler_module,
+        "_drain_pass_future",
+        lambda fut, *, pass_name, timeout: calls.append(pass_name),
+    )
+    ...  # build the scheduler with a stub app_loop, fetch the tick by job id,
+         # invoke it with a queued job present, and assert calls == [tick_name]
+```
+
+Fill the `...` by following the construction the existing scheduler tests use — read them first. If a tick returns early because `drafting_enabled` is false, set it true for this test; the point is the drain path, not the gate.
+
+- [ ] **Step 6: Run; prove both gates discriminate** — remove the `except concurrent.futures.CancelledError` branch (the log test must FAIL); restore the inline drain in one tick (that tick's parameter case must FAIL); restore both.
+
+- [ ] **Step 7: Full gates and commit** — `"fix(scheduler): a retired pass is not a tick failure"`
 
 ---
 
@@ -1409,20 +1709,41 @@ def test_the_claim_cancel_does_not_wait_on_a_row_a_worker_holds(
         s.commit()
         ws_id = ws.id
 
+    # The cancel runs in a THREAD, with its own lock_timeout. Calling it inline
+    # while this test holds the conflicting row would, once skip_locked is removed,
+    # block forever BEFORE the finally that releases the holder — hanging the suite
+    # instead of failing. A mutation must fail, never hang.
+    result: dict[str, object] = {}
+    finished = threading.Event()
+
+    def _cancel():
+        try:
+            began = time.monotonic()
+            with pg_session_factory() as s:
+                s.execute(text("SET LOCAL lock_timeout = '3s'"))
+                result["n"] = cancel_claim_analysis_jobs_for_workspace(s, ws_id)
+                s.commit()
+            result["elapsed"] = time.monotonic() - began
+        except BaseException as exc:  # noqa: BLE001 — asserted after release
+            result["error"] = exc
+        finally:
+            finished.set()
+
     holder = pg_session_factory()
+    t = threading.Thread(target=_cancel)
     try:
         holder.query(ClaimAnalysisJob).filter_by(workspace_id=ws_id).with_for_update().one()
-        began = time.monotonic()
-        with pg_session_factory() as s:
-            n = cancel_claim_analysis_jobs_for_workspace(s, ws_id)
-            s.commit()
-        elapsed = time.monotonic() - began
+        t.start()
+        completed_while_locked = finished.wait(timeout=10)
     finally:
-        holder.rollback()
+        holder.rollback()          # ALWAYS released, whatever the cancel did
         holder.close()
+        t.join(timeout=15)
 
-    assert n == 0, "the held row should have been SKIPPED, not cancelled"
-    assert elapsed < 2.0, f"the cancel waited {elapsed:.1f}s on a held row"
+    assert completed_while_locked, "the cancel never returned while the row was held"
+    assert "error" not in result, f"the cancel raised instead of skipping: {result['error']!r}"
+    assert result["n"] == 0, "the held row should have been SKIPPED, not cancelled"
+    assert result["elapsed"] < 2.0, f"the cancel waited {result['elapsed']:.1f}s on a held row"
 ```
 
 - [ ] **Step 2: Run to verify all three fail.**
@@ -1699,23 +2020,56 @@ def test_the_delete_route_returns_within_the_barrier_with_a_worker_mid_job(
 
 - [ ] **Step 3: Make the failure path terminal for a deleted workspace**
 
-In `mark_failed`, before the `attempts < MAX_ATTEMPTS` requeue branch:
+A plain `SELECT soft_deleted_at` is **not** a linearization point and must not be used here. It can read "live", the DELETE can then commit while this transaction holds the claim-job row, the `"jobs"` hook `SKIP LOCKED`s past that held row, and this transaction finally commits the job back to `queued` — a resurrection that reconciliation only repairs later. Take the **workspace row lock** instead, before dirtying or locking the job row:
 
 ```python
-    # A job whose workspace was deleted must never return to 'queued'. Task 8's
-    # claim filter would never claim it again, so a requeue strands it non-terminal
-    # forever — and the delete already decided this job's fate.
-    deleted = session.scalar(
-        select(Workspace.soft_deleted_at).where(Workspace.id == job.workspace_id)
-    )
+    # LOCK ORDER: workspaces < claim_analysis_jobs (normative).
+    #
+    # FOR UPDATE, not a plain SELECT: a bare read is not a linearization point. It
+    # can see 'live' while a DELETE commits moments later — the jobs hook then SKIP
+    # LOCKEDs past this row because we hold it, and we commit the job back to
+    # 'queued'. Reconciliation would eventually repair that, but "never resurrect"
+    # would be false.
+    #
+    # no_autoflush because `job` is already dirty at this point: an autoflush here
+    # would emit the job UPDATE first, taking the job row BEFORE the workspace row
+    # and inverting the order this block exists to establish.
+    with session.no_autoflush:
+        deleted = session.scalar(
+            select(Workspace.soft_deleted_at)
+            .where(Workspace.id == job.workspace_id)
+            .with_for_update()
+        )
     if deleted is not None:
         job.status = "failed"
         return
 ```
 
-- [ ] **Step 4: Run both; prove the resurrection gate discriminates** by removing the new block (expect FAIL). Restore.
+- [ ] **Step 4: Add the synchronized race gate**
 
-- [ ] **Step 5: Final full gates and commit** — `"fix(analysis): a cancelled job goes terminal, and DELETE stays bounded"`
+The pre-set test above passes with a plain `SELECT` too. The lock is only proven by racing it:
+
+```python
+def test_a_delete_committing_mid_mark_failed_cannot_resurrect_the_job(
+    pg_session_factory, current_user
+):
+    """The window a plain SELECT leaves open: read 'live' -> DELETE commits -> we
+    commit 'queued'.
+
+    The delete side is paused until mark_failed has read the workspace, so the two
+    genuinely overlap. WITH the FOR UPDATE the delete blocks until mark_failed
+    commits and the job is terminal; WITHOUT it both proceed and the job comes back
+    as 'queued'.
+
+    Mutation: drop `.with_for_update()` and this must FAIL with status 'queued'.
+    """
+```
+
+Structure it as: thread A runs `mark_failed` on a **live** workspace with `attempts=1`, pausing (via a `monkeypatch`ed hook or an event set from a patched `select` call) after it has read the workspace but before commit; thread B stamps `soft_deleted_at` and commits; release A; join both with timeouts; assert the job's final status is not `queued`. Give both sessions `SET LOCAL lock_timeout = '10s'` so a mutation fails rather than hangs.
+
+- [ ] **Step 5: Run all three; prove both gates discriminate** — remove the new block entirely (the pre-set test FAILS); then restore it but drop `.with_for_update()` (the race test FAILS). Restore.
+
+- [ ] **Step 6: Final full gates and commit** — `"fix(analysis): a cancelled job goes terminal, and DELETE stays bounded"`
 
 ---
 
