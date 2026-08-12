@@ -108,22 +108,41 @@ def test_a_deleted_workspaces_job_is_never_claimed(pg_session_factory, current_u
 
 
 def test_the_hook_cancels_queued_and_running_setup_jobs(pg_session_factory, current_user):
+    """Both of the states the worker drives, as the name says — the 'queued' half
+    used to be fictional (the only row seeded was 'running'), so deleting
+    'queued' from _CANCELLABLE left the whole suite green.
+
+    'queued' is the COMMON case, not an edge one: create_workspace inserts the
+    job as 'queued' (workspaces.py) and PHASE0_TICK_SECONDS defaults to 30, so
+    a workspace deleted inside its first tick has exactly this row. Nothing else
+    would ever move it — claim_next_setup_job filters deleted workspaces out in
+    SQL and requeue_stuck_setup_jobs matches only 'running'.
+
+    Two workspaces because uq_workspace_setup_jobs_ws allows one job per
+    workspace; the queued one is soft-deleted, which is the real shape (the
+    hook runs after the delete commits).
+    """
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=current_user)
+        running_ws = make_workspace(s, owner=current_user)
+        queued_ws = make_workspace(s, owner=current_user)
+        queued_ws.soft_deleted_at = datetime.now(UTC)
         s.flush()
-        s.add(WorkspaceSetupJob(workspace_id=ws.id, status="running"))
+        s.add(WorkspaceSetupJob(workspace_id=running_ws.id, status="running"))
+        s.add(WorkspaceSetupJob(workspace_id=queued_ws.id, status="queued"))
         s.commit()
-        ws_id = ws.id
+        running_ws_id, queued_ws_id = running_ws.id, queued_ws.id
 
     hook = build_jobs_retirement_hook(pg_session_factory)
-    assert asyncio.run(hook(ws_id)) == 1
+    assert asyncio.run(hook(running_ws_id)) == 1
+    assert asyncio.run(hook(queued_ws_id)) == 1, "the hook did not cancel the queued job"
 
     with pg_session_factory() as s:
-        job = s.scalars(
-            select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws_id)
-        ).one()
-        assert job.status == "cancelled"
-        assert job.completed_at is not None
+        for label, ws_id in (("running", running_ws_id), ("queued", queued_ws_id)):
+            job = s.scalars(
+                select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws_id)
+            ).one()
+            assert job.status == "cancelled", f"the {label} job was left {job.status!r}"
+            assert job.completed_at is not None, f"the {label} job has no completed_at"
 
 
 def test_the_hook_cancels_a_job_waiting_for_rubric_review(pg_session_factory, current_user):
@@ -192,6 +211,61 @@ def test_reconcile_cancels_a_waiting_for_rubric_review_row_the_hook_skipped(
 
     with pg_session_factory() as s:
         assert reconcile_cancelled_jobs(s) == 1
+        s.commit()
+
+    with pg_session_factory() as s:
+        job = s.scalars(
+            select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws_id)
+        ).one()
+        assert job.status == "cancelled"
+        assert job.completed_at is not None
+
+
+def test_reconcile_cancels_a_queued_row_the_hook_skipped(pg_session_factory, current_user):
+    """The convergence half for 'queued' — the common case's second exit.
+
+    The hook SKIP LOCKED past the row (here: a concurrent holder), so
+    reconcile_cancelled_jobs is the only thing left that can terminalize it.
+    Without 'queued' in _CANCELLABLE the row survives BOTH passes and stays
+    live forever on a workspace nobody can reach.
+    """
+    import threading
+
+    from call_manager.proposal_assist.jobs_retirement import reconcile_cancelled_jobs
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        ws.soft_deleted_at = datetime.now(UTC)
+        s.flush()
+        s.add(WorkspaceSetupJob(workspace_id=ws.id, status="queued"))
+        s.commit()
+        ws_id = ws.id
+
+    holding = threading.Event()
+    release = threading.Event()
+
+    def _hold():
+        with pg_session_factory() as s:
+            s.scalars(
+                select(WorkspaceSetupJob)
+                .where(WorkspaceSetupJob.workspace_id == ws_id)
+                .with_for_update()
+            ).one()
+            holding.set()
+            release.wait(timeout=30)
+            s.rollback()
+
+    t = threading.Thread(target=_hold)
+    t.start()
+    try:
+        assert holding.wait(timeout=5)
+        assert asyncio.run(build_jobs_retirement_hook(pg_session_factory)(ws_id)) == 0
+    finally:
+        release.set()
+        t.join(timeout=30)
+
+    with pg_session_factory() as s:
+        assert reconcile_cancelled_jobs(s) == 1, "reconcile left the queued row live"
         s.commit()
 
     with pg_session_factory() as s:
