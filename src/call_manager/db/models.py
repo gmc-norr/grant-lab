@@ -778,6 +778,12 @@ class WorkspaceEvent(Base):
             "workspace_id",
             text("created_at DESC"),
         ),
+        Index(
+            "uq_workspace_events_rubric_initialized",
+            "workspace_id",
+            unique=True,
+            postgresql_where=text("kind = 'rubric_initialized'"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1376,7 +1382,8 @@ class WorkspaceSetupJob(Base):
     __table_args__ = (
         UniqueConstraint("workspace_id", name="uq_workspace_setup_jobs_ws"),
         CheckConstraint(
-            "status IN ('queued','running','waiting_for_rubric_review','done','failed')",
+            "status IN ('queued','running','waiting_for_rubric_review','done',"
+            "'failed','cancelled')",
             name="ck_workspace_setup_jobs_status",
         ),
     )

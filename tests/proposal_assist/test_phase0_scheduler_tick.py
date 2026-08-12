@@ -2,20 +2,67 @@
 The driver is sync (matches BackgroundScheduler's worker pool) and opens
 its own session per tick so APScheduler isn't holding a long-lived one."""
 
+import json
 from unittest.mock import Mock
 
 from sqlalchemy import select
 
 from call_manager.db.models import WorkspaceSetupJob
-from call_manager.proposal_assist.phases.setup import Phase0Worker, run_phase0_tick
+from call_manager.proposal_assist.extractors.sections import SECTION_NAMES
+from call_manager.proposal_assist.phases.setup import run_phase0_tick
 from tests.proposal_assist.conftest import make_call, make_workspace
+
+
+def _section_envelope() -> dict:
+    return {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps({s: f"section text for {s}" for s in SECTION_NAMES}),
+                }
+            }
+        ],
+        "model": "claude-opus-4-7",
+    }
+
+
+def _rubric_envelope() -> dict:
+    return {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps(
+                        {
+                            "criteria": [
+                                {
+                                    "name": "Excellence",
+                                    "description": "Scientific quality",
+                                    "weight": 1.0,
+                                    "scale_max": 5,
+                                }
+                            ],
+                            "funder_notes": "",
+                        }
+                    ),
+                }
+            }
+        ],
+        "model": "claude-opus-4-7",
+    }
 
 
 def test_run_phase0_tick_drains_one_queued_job(
     pg_session_factory,
     tmp_path,
-    monkeypatch,
 ):
+    """Post-Task-5, Phase0Worker no longer exposes a monkeypatchable
+    `_run_steps` seam — the milestones (_m1/_m2/_m3) each open their own
+    session. So this test drives the tick end-to-end with a real (stubbed)
+    LLM client and checks for concrete evidence the worker actually ran: the
+    job reaches the real interim-M3 terminal state, and the git repo the
+    worker's M1 creates exists on disk."""
     with pg_session_factory() as s:
         call = make_call(s)
         s.commit()
@@ -25,12 +72,7 @@ def test_run_phase0_tick_drains_one_queued_job(
         ws_id = ws.id
 
     client = Mock(model="claude-opus-4-7")
-    captured: dict = {}
-
-    def fake_run_steps(self, job):
-        captured["worker_seen"] = True
-
-    monkeypatch.setattr(Phase0Worker, "_run_steps", fake_run_steps)
+    client.chat.side_effect = [_section_envelope(), _rubric_envelope()]
 
     run_phase0_tick(
         session_factory=pg_session_factory,
@@ -42,8 +84,10 @@ def test_run_phase0_tick_drains_one_queued_job(
 
     with pg_session_factory() as s:
         job = s.scalar(select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws_id))
-        assert job.status == "done"
-        assert captured.get("worker_seen") is True
+        assert job.status == "waiting_for_rubric_review"
+        # Proves the worker actually ran M1 (not just that claim_next_setup_job
+        # flipped the row to 'running'): the on-disk repo M1 creates exists.
+        assert (tmp_path / "repos" / str(ws_id) / "repo" / ".git").is_dir()
 
 
 def test_run_phase0_tick_is_a_noop_when_queue_empty(

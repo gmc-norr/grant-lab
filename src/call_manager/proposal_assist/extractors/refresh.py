@@ -1,6 +1,6 @@
 """Freshness helpers — idempotent template seeding driven by source_text_hash
-+ extractor_version. Phase 0 calls these to guarantee both templates are
-up-to-date before snapshotting them into the workspace.
++ extractor_version. Phase 0 checks freshness, computes outside any
+transaction, then persists under a lock.
 """
 
 from __future__ import annotations
@@ -38,45 +38,47 @@ class LlmClient(Protocol):
     ) -> dict: ...
 
 
-def ensure_section_extracts_fresh(
-    *,
-    session: Session,
-    call: Call,
-    client: LlmClient,
-    extractor_version: str,
-) -> None:
-    """Idempotent: if all len(SECTION_NAMES) rows exist with matching `source_text_hash` AND
-    matching `extractor_version`, no LLM call is made. Otherwise the extractor
-    is run **first** (so a transient LLM failure cannot wipe cached rows),
-    then prior rows are deleted and len(SECTION_NAMES) fresh rows inserted in
-    the same unit of work.
-
-    Caller commits. If the extractor raises, the caller's session should
-    rollback — no destructive state has been written yet.
-    """
+def section_extracts_are_fresh(
+    *, session: Session, call: Call, extractor_version: str
+) -> bool:
+    """True when every section row matches the call's current text hash AND the
+    given extractor version — i.e. no LLM call is needed."""
     current_hash = source_text_hash(call.full_text or "")
-
     existing = session.scalars(
         select(CallSectionExtract).where(CallSectionExtract.call_id == call.id)
     ).all()
-
-    if (
+    return (
         len(existing) == len(SECTION_NAMES)
         and all(r.source_text_hash == current_hash for r in existing)
         and all(r.extractor_version == extractor_version for r in existing)
-    ):
-        return
+    )
 
-    # EXTRACT FIRST — if this raises, we haven't touched the DB yet.
-    sections = extract_sections(call_text=call.full_text or "", client=client)
 
-    # Now safe to mutate. Delete + insert happen in the same transaction;
-    # neither lands without the other because the caller commits once.
+def compute_section_extracts(*, call_text: str, client: LlmClient) -> dict[str, str]:
+    """Pure: one LLM round-trip, no session, no writes. Raising here can never
+    damage cached rows because nothing has been touched."""
+    return extract_sections(call_text=call_text, client=client)
+
+
+def persist_section_extracts(
+    *,
+    session: Session,
+    call: Call,
+    sections: dict[str, str],
+    model: str,
+    extractor_version: str,
+    source_hash: str,
+) -> None:
+    """Replace the call's section rows. No LLM. Caller commits."""
+    existing = session.scalars(
+        select(CallSectionExtract).where(CallSectionExtract.call_id == call.id)
+    ).all()
     if existing:
-        session.execute(delete(CallSectionExtract).where(CallSectionExtract.call_id == call.id))
+        session.execute(
+            delete(CallSectionExtract).where(CallSectionExtract.call_id == call.id)
+        )
         # Flush so the DELETE lands before our INSERTs hit the PK constraint.
         session.flush()
-        # `existing` is now stale (rows deleted from DB); do not read it below.
 
     now = datetime.now(UTC)
     for section_name in SECTION_NAMES:
@@ -86,40 +88,40 @@ def ensure_section_extracts_fresh(
                 section=section_name,
                 extract_text=sections[section_name],
                 extracted_at=now,
-                extracted_by_model=client.model,
+                extracted_by_model=model,
                 extractor_version=extractor_version,
-                source_text_hash=current_hash,
+                source_text_hash=source_hash,
             )
         )
 
 
-def ensure_rubric_fresh(
-    *,
-    session: Session,
-    call: Call,
-    client: LlmClient,
-    extractor_version: str,
-) -> None:
-    """Idempotent: if the row exists with matching hash + version, no LLM
-    call is made. Otherwise the extractor is run **first** (so a transient
-    LLM failure cannot mutate the cached row), then the row is upserted.
-
-    Caller commits. If the extractor raises, the caller's session should
-    rollback — no destructive state has been written yet.
-    """
+def rubric_is_fresh(*, session: Session, call: Call, extractor_version: str) -> bool:
     current_hash = source_text_hash(call.full_text or "")
     existing = session.get(CallRubric, call.id)
-    if (
+    return (
         existing is not None
         and existing.source_text_hash == current_hash
         and existing.extractor_version == extractor_version
-    ):
-        return
+    )
 
-    # EXTRACT FIRST — if this raises, the existing row is untouched.
-    payload = extract_rubric(call_text=call.full_text or "", client=client)
+
+def compute_rubric(*, call_text: str, client: LlmClient) -> dict:
+    """Pure: one LLM round-trip, no session, no writes."""
+    return extract_rubric(call_text=call_text, client=client)
+
+
+def persist_rubric(
+    *,
+    session: Session,
+    call: Call,
+    payload: dict,
+    model: str,
+    extractor_version: str,
+    source_hash: str,
+) -> None:
+    """Upsert the call's rubric row. No LLM. Caller commits."""
     now = datetime.now(UTC)
-
+    existing = session.get(CallRubric, call.id)
     if existing is None:
         session.add(
             CallRubric(
@@ -127,15 +129,15 @@ def ensure_rubric_fresh(
                 criteria=payload["criteria"],
                 funder_notes=payload["funder_notes"],
                 extracted_at=now,
-                extracted_by_model=client.model,
+                extracted_by_model=model,
                 extractor_version=extractor_version,
-                source_text_hash=current_hash,
+                source_text_hash=source_hash,
             )
         )
     else:
         existing.criteria = payload["criteria"]
         existing.funder_notes = payload["funder_notes"]
         existing.extracted_at = now
-        existing.extracted_by_model = client.model
+        existing.extracted_by_model = model
         existing.extractor_version = extractor_version
-        existing.source_text_hash = current_hash
+        existing.source_text_hash = source_hash

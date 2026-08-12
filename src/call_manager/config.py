@@ -149,6 +149,15 @@ class Settings(BaseSettings):
         "between workspace creation and rubric-review prompt; "
         "raising it reduces idle DB churn when the queue is empty.",
     )
+    jobs_reconcile_tick_seconds: int = Field(
+        default=60,
+        alias="JOBS_RECONCILE_TICK_SECONDS",
+        description=(
+            "How often to converge job rows the retirement hook skipped because a "
+            "live worker held them. Independent of DRAFTING_ENABLED — a deployment "
+            "with drafting off must still terminalize a deleted workspace's jobs."
+        ),
+    )
     profile_bootstrap_tick_seconds: int = Field(
         default=30,
         alias="PROFILE_BOOTSTRAP_TICK_SECONDS",

@@ -574,6 +574,26 @@ def build_scheduler(
         coalesce=True,
     )
 
+    # Jobs-retirement reconciliation. NOT gated on drafting_enabled or the
+    # Anthropic key: it needs no LLM client, and rows the "jobs" hook skipped
+    # would otherwise never converge on a deployment with drafting off.
+    def _jobs_reconcile_tick() -> None:
+        from call_manager.proposal_assist.jobs_retirement import reconcile_cancelled_jobs
+
+        with session_factory() as session:
+            n = reconcile_cancelled_jobs(session)
+            session.commit()
+        if n:
+            _logger.info("jobs retirement reconcile: %d row(s)", n)
+
+    sched.add_job(
+        _jobs_reconcile_tick,
+        trigger=IntervalTrigger(seconds=settings.jobs_reconcile_tick_seconds),
+        id="jobs_retirement_reconcile_tick",
+        max_instances=1,
+        coalesce=True,
+    )
+
     # Profile bootstrap worker: drains profile_bootstrap_jobs.
     def _profile_bootstrap_tick() -> None:
         from call_manager.profiles.bootstrap_worker import run_profile_bootstrap_tick

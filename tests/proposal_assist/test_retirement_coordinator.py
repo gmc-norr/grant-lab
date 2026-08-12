@@ -38,6 +38,7 @@ def test_the_barrier_exceeds_every_hooks_own_worst_case():
     any sub-bound fails here instead of silently eroding the barrier."""
     from call_manager.proposal_assist.collab import room as room_module
     from call_manager.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
+    from call_manager.proposal_assist.jobs_retirement import _JOBS_CANCEL_SECONDS
 
     # collab: the two artifact rooms retire CONCURRENTLY (see
     # test_collab_retire.test_both_artifact_rooms_retire_concurrently), so the hook's
@@ -49,18 +50,29 @@ def test_the_barrier_exceeds_every_hooks_own_worst_case():
     turns_worst = (
         params["disconnect_deadline_seconds"].default + params["reap_deadline_seconds"].default
     )
+    jobs_worst = _JOBS_CANCEL_SECONDS
 
-    assert max(collab_worst, turns_worst) < retirement._RETIREMENT_BARRIER_SECONDS, (
+    assert max(collab_worst, turns_worst, jobs_worst) < retirement._RETIREMENT_BARRIER_SECONDS, (
         f"barrier {retirement._RETIREMENT_BARRIER_SECONDS}s does not cover "
-        f"collab {collab_worst}s / turns {turns_worst}s"
+        f"collab {collab_worst}s / turns {turns_worst}s / jobs {jobs_worst}s"
     )
+
+
+def test_jobs_is_a_required_hook():
+    from call_manager.proposal_assist import retirement
+
+    assert "jobs" in retirement.REQUIRED_HOOKS
+    with pytest.raises(retirement.MissingRetirementHook):
+        retirement.WorkspaceRetirement(
+            hooks={"turns": _noop_hook(), "collab": _noop_hook()}  # no "jobs"
+        )
 
 
 def test_missing_required_hook_raises_at_construction():
     with pytest.raises(MissingRetirementHook):
-        WorkspaceRetirement(hooks={"turns": _noop_hook()})  # 'collab' missing
+        WorkspaceRetirement(hooks={"turns": _noop_hook()})  # 'collab' and 'jobs' missing
     with pytest.raises(MissingRetirementHook):
-        WorkspaceRetirement(hooks={})                        # both missing
+        WorkspaceRetirement(hooks={})                        # all missing
 
 
 @pytest.mark.asyncio
@@ -80,7 +92,7 @@ async def test_hooks_run_concurrently_and_in_isolation():
         a_can_finish.set()          # release hook_a → concurrency
         raise ValueError("boom")    # isolation: must NOT stop hook_a
 
-    coord = WorkspaceRetirement(hooks={"turns": hook_a, "collab": hook_b})
+    coord = WorkspaceRetirement(hooks={"turns": hook_a, "collab": hook_b, "jobs": _noop_hook()})
     await coord.retire(uuid.uuid4())   # must NOT raise despite hook_b
 
     assert "a-done" in order            # hook_a completed even though hook_b raised
@@ -95,7 +107,9 @@ async def test_return_values_are_ignored():
     async def collab_hook(_ws):
         return 3                       # int count (mirrors revoke_user_sockets)
 
-    coord = WorkspaceRetirement(hooks={"turns": turns_hook, "collab": collab_hook})
+    coord = WorkspaceRetirement(
+        hooks={"turns": turns_hook, "collab": collab_hook, "jobs": _noop_hook()}
+    )
     assert await coord.retire(uuid.uuid4()) is None
 
 
@@ -142,7 +156,9 @@ def test_bridge_runs_hooks_on_a_separate_thread_loop():
         seen["collab"] = ws
         ran.set()
 
-    coord = WorkspaceRetirement(hooks={"turns": turns_hook, "collab": collab_hook})
+    coord = WorkspaceRetirement(
+        hooks={"turns": turns_hook, "collab": collab_hook, "jobs": _noop_hook()}
+    )
     loop, t = _loop_on_thread()
     try:
         ws = uuid.uuid4()
@@ -167,7 +183,9 @@ def test_bridge_returns_at_the_bound_when_a_hook_hangs(monkeypatch):
     async def collab_hook(_ws):
         return None
 
-    coord = WorkspaceRetirement(hooks={"turns": turns_hook, "collab": collab_hook})
+    coord = WorkspaceRetirement(
+        hooks={"turns": turns_hook, "collab": collab_hook, "jobs": _noop_hook()}
+    )
     loop, t = _loop_on_thread()
     try:
         req = _FakeRequest(_FakeApp(loop=loop, coordinator=coord))
