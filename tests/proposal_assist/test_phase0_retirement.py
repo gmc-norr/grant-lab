@@ -126,6 +126,82 @@ def test_the_hook_cancels_queued_and_running_setup_jobs(pg_session_factory, curr
         assert job.completed_at is not None
 
 
+def test_the_hook_cancels_a_job_waiting_for_rubric_review(pg_session_factory, current_user):
+    """'waiting_for_rubric_review' is NON-terminal: no completed_at, and the job
+    is parked awaiting an owner action on a workspace that no longer exists.
+    Excluding it from _CANCELLABLE left such a row live forever — neither the
+    hook nor the reconcile tick would ever touch it again."""
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        ws.soft_deleted_at = datetime.now(UTC)
+        s.flush()
+        s.add(WorkspaceSetupJob(workspace_id=ws.id, status="waiting_for_rubric_review"))
+        s.commit()
+        ws_id = ws.id
+
+    hook = build_jobs_retirement_hook(pg_session_factory)
+    assert asyncio.run(hook(ws_id)) == 1
+
+    with pg_session_factory() as s:
+        job = s.scalars(
+            select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws_id)
+        ).one()
+        assert job.status == "cancelled"
+        assert job.completed_at is not None
+
+
+def test_reconcile_cancels_a_waiting_for_rubric_review_row_the_hook_skipped(
+    pg_session_factory, current_user
+):
+    """The convergence half for the same state: the hook SKIP LOCKED past the
+    row, so only reconcile_cancelled_jobs can terminalize it."""
+    import threading
+
+    from call_manager.proposal_assist.jobs_retirement import reconcile_cancelled_jobs
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        ws.soft_deleted_at = datetime.now(UTC)
+        s.flush()
+        s.add(WorkspaceSetupJob(workspace_id=ws.id, status="waiting_for_rubric_review"))
+        s.commit()
+        ws_id = ws.id
+
+    holding = threading.Event()
+    release = threading.Event()
+
+    def _hold():
+        with pg_session_factory() as s:
+            s.scalars(
+                select(WorkspaceSetupJob)
+                .where(WorkspaceSetupJob.workspace_id == ws_id)
+                .with_for_update()
+            ).one()
+            holding.set()
+            release.wait(timeout=30)
+            s.rollback()
+
+    t = threading.Thread(target=_hold)
+    t.start()
+    try:
+        assert holding.wait(timeout=5)
+        assert asyncio.run(build_jobs_retirement_hook(pg_session_factory)(ws_id)) == 0
+    finally:
+        release.set()
+        t.join(timeout=30)
+
+    with pg_session_factory() as s:
+        assert reconcile_cancelled_jobs(s) == 1
+        s.commit()
+
+    with pg_session_factory() as s:
+        job = s.scalars(
+            select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws_id)
+        ).one()
+        assert job.status == "cancelled"
+        assert job.completed_at is not None
+
+
 def test_a_locked_row_is_skipped_not_waited_on(pg_session_factory, current_user):
     """SKIP LOCKED is what bounds the hook: without it the hook inherits the
     worker's transaction lifetime and the DELETE route blocks behind it."""

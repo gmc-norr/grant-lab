@@ -1,5 +1,10 @@
 """The "jobs" retirement hook: terminalize a deleted workspace's job rows.
 
+"Terminalize" means every NON-TERMINAL state, not just the two the worker is
+actively driving — see _CANCELLABLE. A deleted workspace must leave no setup job
+that can still be waited on, including one parked in 'waiting_for_rubric_review'
+awaiting an owner who can no longer reach the workspace.
+
 A neutral home so main.py and scheduler.py can both reach it without importing
 the Phase-0 worker. This slice handles setup jobs; workspace-retirement Slice C
 extends BOTH the hook and reconcile_cancelled_jobs to claim-analysis.
@@ -31,7 +36,23 @@ logger = logging.getLogger(__name__)
 # below uses SKIP LOCKED, so this is a timeout for pathology, not for waiting.
 _JOBS_CANCEL_SECONDS = 1.0
 
-_CANCELLABLE = ("queued", "running")
+# Every NON-TERMINAL setup-job state. All three must be cancellable when the
+# workspace is deleted, because none of them ever reaches a terminal state on
+# its own once the workspace is gone:
+#   * 'queued'   — claim_next_setup_job filters deleted workspaces out in SQL, so
+#                  it would never be claimed again.
+#   * 'running'  — the worker's own liveness checks fail it, but only if a worker
+#                  is actually alive to notice.
+#   * 'waiting_for_rubric_review' — parked awaiting a HUMAN action on a workspace
+#                  that no longer exists. Nothing else in the system moves this
+#                  row: it has no completed_at, requeue_stuck_setup_jobs
+#                  deliberately never reaps it, and no worker will re-touch it.
+#                  Left out of this tuple it stayed live forever.
+# NB: _fail's already-terminal short-circuit in phases/setup.py also names
+# 'waiting_for_rubric_review', for the unrelated reason that a job which already
+# yielded to review must not be resurrected by a late failure. Different
+# question, deliberately not the same list.
+_CANCELLABLE = ("queued", "running", "waiting_for_rubric_review")
 
 
 def cancel_setup_jobs_for_workspace(session: Session, workspace_id: uuid.UUID) -> int:
