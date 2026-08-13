@@ -367,3 +367,36 @@ def test_an_aborted_job_is_terminalized_and_never_marked_done(
         job = s.get(ClaimAnalysisJob, job_id)
         assert job.status == "failed", f"aborted job ended as {job.status!r}"
         assert job.last_error == "cancelled: workspace deleted"
+
+
+def test_the_delete_route_returns_within_the_barrier_with_a_worker_mid_job(
+    client_authed_owner, pg_session_factory, current_user
+):
+    """A REGRESSION GUARD on end-to-end route latency, measured as wall-clock on the
+    route rather than 'the delete transaction committed'.
+
+    NOTE: this does NOT prove SKIP LOCKED. The hook's own 1.0s wait_for and the
+    coordinator's per-hook exception isolation keep the route fast even with a
+    blocking cancel — that property is proven directly in
+    test_the_claim_cancel_skips_a_row_a_worker_holds_without_waiting.
+    """
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        s.add(_job(ws.id, section_sha="a", status="running"))
+        s.commit()
+        ws_id = ws.id
+
+    holder = pg_session_factory()
+    try:
+        holder.query(ClaimAnalysisJob).filter_by(workspace_id=ws_id).with_for_update().one()
+        began = time.monotonic()
+        resp = client_authed_owner.delete(f"/api/workspaces/{ws_id}")
+        elapsed = time.monotonic() - began
+        assert resp.status_code == 204
+        assert elapsed < 6.0, (
+            f"DELETE took {elapsed:.1f}s with a claim-analysis worker holding its row"
+        )
+    finally:
+        holder.rollback()
+        holder.close()
