@@ -24,6 +24,7 @@ from call_manager.proposal_assist.drafting.locking import (
 )
 from call_manager.proposal_assist.row_locks import (
     SETUP_JOB_LOCK_TIMEOUT_SECONDS,
+    WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS,
     RowLockTimeout,
     bounded_lock_waits,
 )
@@ -175,8 +176,36 @@ def update_rubric(
             raise HTTPException(
                 status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
             ) from e
-        _apply_rubric(session, ws, user, criteria, body.funder_notes or "")
-        session.commit()
+        # The workspace-row wait is BOUNDED. _apply_rubric UPDATEs the
+        # `workspaces` row, and acquire_commit_mutex restores
+        # lock_timeout = DEFAULT on success (locking.py), so without this the
+        # route would wait indefinitely on that row WHILE HOLDING the commit
+        # mutex — and a concurrent DELETE, every collab-kernel save and every
+        # turn enqueue would 429 behind us after burning their full budget. The
+        # holder is real: the four pass prefixes take this row FOR UPDATE while
+        # holding NO mutex, so the mutex we hold does not exclude them.
+        # WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS, not SETUP_JOB_LOCK_TIMEOUT_SECONDS:
+        # this route never touches a WorkspaceSetupJob row.
+        #
+        # The bound wraps the WHOLE remainder including COMMIT — _apply_rubric's
+        # UPDATE flushes there — for the reason spelled out on activate below: a
+        # narrow wrap leaves the write bounded but UNtranslated, and 55P03
+        # escapes as a raw OperationalError -> 500 instead of this route's
+        # contracted 429.
+        try:
+            with bounded_lock_waits(
+                session,
+                timeout_seconds=WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS,
+                message="timed out waiting for a row lock in the rubric-update transaction",
+            ):
+                _apply_rubric(session, ws, user, criteria, body.funder_notes or "")
+                session.commit()
+        except RowLockTimeout as e:
+            raise HTTPException(
+                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
+            ) from e
+        # No SQL: make_session_factory sets expire_on_commit=False (db/session.py),
+        # so the commit does not expire `ws` and these are loaded attributes.
         return _rubric_out(ws)
 
 

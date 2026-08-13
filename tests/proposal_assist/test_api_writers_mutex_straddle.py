@@ -9,6 +9,20 @@ Two shapes per route:
   429-wedged: a holder takes the mutex and never releases it; the route must
     return 429 with Retry-After: 2, having written NOTHING.
 
+A third shape covers the hazard this slice CREATED. Once a route holds the commit
+mutex, `acquire_commit_mutex` has restored lock_timeout = DEFAULT, so every lock
+it waits on afterwards is unbounded — and it pins the mutex for the whole wait,
+which 429s the owner's DELETE and every other mutex-participating writer. So for
+each route that takes a row lock after the mutex:
+
+  429-row-held: a holder takes the ROW the route needs (and NO mutex), so the
+    route wins the mutex and blocks later; the route must COME BACK with the
+    same 429 + Retry-After: 2, having written NOTHING.
+
+  Asserted as "the request came back" (`not sender.is_alive()`), never as elapsed
+  time: without the bound the route does not return at all, so a live thread IS
+  the failure. An elapsed-time assertion can pass for the opposite reason.
+
 The holder stamps soft_deleted_at DIRECTLY rather than calling the delete route.
 The route would take this same mutex on the same thread and self-deadlock. Do not
 "simplify" that into a hang.
@@ -904,3 +918,210 @@ def test_activate_maps_a_post_job_lock_row_timeout_to_429_not_500(
         ws_after = s.get(Workspace, ws_id)
         assert ws_after.current_phase == "setup"
         assert ws_after.rubric_funder_notes == "original notes"
+
+
+def hold_workspace_row(pg_session_factory, ws_id, send, *, route: str):
+    """Hold the `workspaces` row FOR UPDATE — taking NO commit mutex — across the
+    whole of `send`, and assert the request CAME BACK. Returns its response.
+
+    The holder stands in for one of the four pass prefixes, which take this row
+    FOR UPDATE while holding no mutex and keep it across context assembly's
+    filesystem reads (row_locks.py:33-45). Taking no mutex is the point: the
+    route must WIN the mutex and then block on the row, which is the stretch
+    `acquire_commit_mutex`'s restore-to-DEFAULT leaves unbounded.
+
+    Liveness, not timing: without the route's bound the sender thread never
+    finishes, so `not sender.is_alive()` after a bounded join is the whole
+    assertion. Slice C1 learned that an elapsed-time assertion can pass for the
+    opposite reason.
+    """
+    holding = threading.Event()
+    release = threading.Event()
+    out: dict = {}
+
+    def _row_holder():
+        with pg_session_factory() as s:
+            s.get(Workspace, ws_id, with_for_update=True)
+            holding.set()
+            release.wait(timeout=30)
+            s.rollback()
+
+    def _sender():
+        # raise_server_exceptions=True on this client: an UNtranslated
+        # OperationalError propagates here instead of becoming a response, so
+        # `out` stays empty. The guard below names that outcome separately from
+        # a wedge, because they have different causes and different fixes.
+        holding.wait(timeout=10)
+        out["resp"] = send()
+
+    holder = threading.Thread(target=_row_holder)
+    sender = threading.Thread(target=_sender)
+    holder.start()
+    sender.start()
+    try:
+        assert holding.wait(timeout=5), "the holder never took the workspace row"
+        sender.join(timeout=15)
+        assert not sender.is_alive(), (
+            f"{route} was still blocked on the workspace row after 15s while holding "
+            "the commit mutex — the row wait is unbounded, so it pins the mutex and "
+            "the owner's DELETE 429s behind it after burning its whole budget"
+        )
+    finally:
+        release.set()
+        holder.join(timeout=30)
+        sender.join(timeout=30)
+
+    if "resp" not in out:
+        pytest.fail(
+            f"{route} raised instead of responding — the lock timeout fired OUTSIDE the "
+            "bounded_lock_waits body, so it was never translated to RowLockTimeout and "
+            "escaped as a raw OperationalError (500). The bound must enclose the row "
+            "work THROUGH session.commit()."
+        )
+    return out["resp"]
+
+
+def assert_busy_429(resp) -> None:
+    """The house busy contract, byte-identical to the CommitMutexTimeout answer:
+    429 + Retry-After: 2 + the SHARED message. BUSY_ERROR_MESSAGE is imported,
+    not re-typed, so a route that invents its own wording fails here."""
+    assert resp.status_code == 429, f"expected 429, got {resp.status_code}: {resp.text}"
+    assert resp.headers.get("Retry-After") == "2"
+    assert resp.json()["error"]["message"] == BUSY_ERROR_MESSAGE, (
+        f"429 body did not carry the shared busy message: {resp.text}"
+    )
+
+
+def test_update_settings_gives_up_on_a_held_workspace_row_instead_of_pinning_the_mutex(
+    client_authed_owner, current_user, pg_session_factory, monkeypatch
+):
+    """update_settings UPDATEs the `workspaces` row while holding the commit
+    mutex. That wait must be bounded and its 55P03 translated to the house 429."""
+    # Patch the name on the ROUTE module, not on row_locks. settings.py does
+    # `from ...row_locks import WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS`, which binds
+    # the value into settings' namespace at import time — patching row_locks
+    # would silently no-op and this gate would run at the production 2s, proving
+    # nothing about the bound.
+    import call_manager.web.api.settings as settings_api
+
+    monkeypatch.setattr(settings_api, "WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS", 1)
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        ws.title = "original title"
+        s.commit()
+        ws_id = ws.id
+
+    resp = hold_workspace_row(
+        pg_session_factory,
+        ws_id,
+        lambda: client_authed_owner.patch(
+            f"/api/workspaces/{ws_id}/settings",
+            json={
+                "title": "edited while the row was held",
+                "status": "drafting",
+                "deadline": None,
+                "citation_style": "vancouver",
+            },
+        ),
+        route="update_settings",
+    )
+
+    assert_busy_429(resp)
+    with pg_session_factory() as s:
+        assert s.get(Workspace, ws_id).title == "original title"
+
+
+def test_add_member_gives_up_on_a_held_workspace_row_instead_of_pinning_the_mutex(
+    client_authed_owner, current_user, pg_session_factory, monkeypatch
+):
+    """add_member never UPDATEs the workspace row, but its WorkspaceViewer and
+    WorkspaceEvent inserts take FOR KEY SHARE on it as their FK parent — which
+    conflicts with the holder's FOR UPDATE. Same hazard, same contract."""
+    import call_manager.web.api.settings as settings_api
+
+    monkeypatch.setattr(settings_api, "WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS", 1)
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        target = make_user(s, email="c2-add-rowheld@ki.se")
+        s.commit()
+        ws_id, target_id = ws.id, target.id
+
+    resp = hold_workspace_row(
+        pg_session_factory,
+        ws_id,
+        lambda: client_authed_owner.post(
+            f"/api/workspaces/{ws_id}/members", json={"email": "c2-add-rowheld@ki.se"}
+        ),
+        route="add_member",
+    )
+
+    assert_busy_429(resp)
+    with pg_session_factory() as s:
+        assert (
+            s.query(WorkspaceViewer).filter_by(workspace_id=ws_id, user_id=target_id).first()
+            is None
+        ), "add_member committed a WorkspaceViewer despite the lock timeout"
+
+
+def test_remove_member_gives_up_on_a_held_workspace_row_instead_of_pinning_the_mutex(
+    client_authed_owner, current_user, pg_session_factory, monkeypatch
+):
+    """The viewer DELETE itself takes no parent lock, but the WorkspaceEvent
+    insert that follows it does — so the transaction blocks at COMMIT, after the
+    DELETE has already been issued. The rollback must put the row back."""
+    import call_manager.web.api.settings as settings_api
+
+    monkeypatch.setattr(settings_api, "WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS", 1)
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        target = make_user(s, email="c2-rm-rowheld@ki.se")
+        s.flush()
+        s.add(WorkspaceViewer(workspace_id=ws.id, user_id=target.id))
+        s.commit()
+        ws_id, target_id = ws.id, target.id
+
+    resp = hold_workspace_row(
+        pg_session_factory,
+        ws_id,
+        lambda: client_authed_owner.delete(f"/api/workspaces/{ws_id}/members/{target_id}"),
+        route="remove_member",
+    )
+
+    assert_busy_429(resp)
+    with pg_session_factory() as s:
+        assert (
+            s.query(WorkspaceViewer).filter_by(workspace_id=ws_id, user_id=target_id).first()
+            is not None
+        ), "remove_member's viewer DELETE survived a transaction that timed out"
+
+
+def test_update_rubric_gives_up_on_a_held_workspace_row_instead_of_pinning_the_mutex(
+    client_authed_owner, current_user, pg_session_factory, monkeypatch
+):
+    """_apply_rubric UPDATEs the `workspaces` row while update_rubric holds the
+    commit mutex — the sibling of activate's post-job-lock case, minus the job
+    row (this route never takes one, which is why it reads its own
+    WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS)."""
+    import call_manager.web.api.rubric as rubric_api
+
+    monkeypatch.setattr(rubric_api, "WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS", 1)
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        ws.rubric_funder_notes = "original notes"
+        s.commit()
+        ws_id = ws.id
+
+    resp = hold_workspace_row(
+        pg_session_factory,
+        ws_id,
+        lambda: client_authed_owner.put(f"/api/workspaces/{ws_id}/rubric", json=_RUBRIC_BODY),
+        route="update_rubric",
+    )
+
+    assert_busy_429(resp)
+    with pg_session_factory() as s:
+        assert s.get(Workspace, ws_id).rubric_funder_notes == "original notes"

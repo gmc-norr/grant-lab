@@ -57,6 +57,30 @@ PASS_PREFIX_LOCK_TIMEOUT_SECONDS = 2
 # which is the same answer a wedged mutex already gives them.
 SETUP_JOB_LOCK_TIMEOUT_SECONDS = 2
 
+# The four owner-write routes that take the commit mutex and then write the
+# `workspaces` row ITSELF (settings.py's update_settings / add_member /
+# remove_member, rubric.py's update_rubric). Deliberately NOT
+# SETUP_JOB_LOCK_TIMEOUT_SECONDS: these routes never touch a WorkspaceSetupJob
+# row — update_settings and _apply_rubric UPDATE the workspace row directly, and
+# the member routes' WorkspaceViewer/WorkspaceEvent writes take FOR KEY SHARE on
+# it as their FK parent. Same value, different thing being waited on, so it gets
+# its own name rather than borrowing one whose comment describes a job row.
+#
+# As with the setup-job routes, acquire_commit_mutex restores
+# lock_timeout = DEFAULT on success (drafting/locking.py), so this wait is
+# otherwise unbounded — and it is taken while HOLDING the mutex. A real holder
+# exists: the four pass prefixes take the workspace row FOR UPDATE holding NO
+# mutex and keep it across context assembly's filesystem reads (see
+# PASS_PREFIX_LOCK_TIMEOUT_SECONDS above).
+#
+# Why 2 seconds: the same derivation as the two constants above — the DELETE
+# route's asserted budget is < 6.0s, so a writer's worst-case contribution to it
+# has to be a small fraction of that budget rather than a multiple of it. Losing
+# a race is cheap on this path: the route has mutated nothing (the transaction
+# aborts and rolls back) and the caller gets the house 429 with Retry-After,
+# which is the same answer a wedged mutex already gives them.
+WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS = 2
+
 
 class RowLockTimeout(RuntimeError):
     """A transaction's SET LOCAL lock_timeout fired while waiting on a lock.
