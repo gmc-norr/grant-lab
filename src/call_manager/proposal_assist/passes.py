@@ -78,6 +78,9 @@ class PassRegistry:
     def __init__(self) -> None:
         self._live: dict[uuid.UUID, set[Entry]] = {}
         self._unconfirmed: list[Entry] = []
+        # Constructed outside a running loop (PASS_REGISTRY is module-level); on
+        # 3.10+ an asyncio.Lock binds no loop until first acquired, so this is safe.
+        self._reconcile_lock = asyncio.Lock()
 
     @contextlib.asynccontextmanager
     async def track(self, workspace_id: uuid.UUID) -> AsyncIterator[Entry]:
@@ -147,24 +150,39 @@ class PassRegistry:
 
         A remediation ATTEMPT each tick, not a guarantee — a SIBLING of
         reconcile_live_clients, which covers a different population.
+
+        Two properties this method must not lose, both about entries that
+        track()'s `finally` appends WHILE a reconcile is in flight:
+
+          * the list is mutated IN PLACE, never rebound. Rebinding
+            (`self._unconfirmed = still`) publishes a list assembled from a
+            snapshot, so anything appended after the snapshot is silently
+            discarded and never retried again.
+          * runs are serialized by a lock. Overlap is reachable (the tick's
+            future is abandoned at a 30s timeout, freeing the max_instances=1
+            slot before a slow run finishes), and two overlapping runs would
+            otherwise call retire_unconfirmed() on the SAME adapter twice
+            concurrently.
         """
         if not self._unconfirmed:
             return 0
-        still: list[Entry] = []
-        acted = 0
-        for entry in self._unconfirmed:
-            acted += 1
-            try:
-                await entry.retire_adapter()
-            except Exception:
-                logger.exception(
-                    "passes.reconcile_retire_failed",
-                    extra={"workspace_id": str(entry.workspace_id)},
-                )
-            if entry.open_generations():
-                still.append(entry)
-        self._unconfirmed = still
-        return acted
+        async with self._reconcile_lock:
+            acted = 0
+            for entry in list(self._unconfirmed):
+                acted += 1
+                try:
+                    await entry.retire_adapter()
+                except Exception:
+                    logger.exception(
+                        "passes.reconcile_retire_failed",
+                        extra={"workspace_id": str(entry.workspace_id)},
+                    )
+                if not entry.open_generations():
+                    # Identity removal (Entry is eq=False), and suppressed because
+                    # a concurrent path may already have dropped it.
+                    with contextlib.suppress(ValueError):
+                        self._unconfirmed.remove(entry)
+            return acted
 
 
 async def _swallow(task: asyncio.Task) -> None:

@@ -151,3 +151,78 @@ async def test_reconcile_retries_and_drops_once_confirmed(registry):
 
     assert acted == 1
     assert registry.unconfirmed_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_an_entry_appended_during_an_overlapping_reconcile_is_not_dropped(registry):
+    """reconcile_unconfirmed must be re-entrant, and must never REBIND the list.
+
+    A run that assembles a survivor list from its own snapshot and publishes it
+    with `self._unconfirmed = still` overwrites everything track()'s `finally`
+    appended in the meantime — the entry is dropped for good and its leaked
+    generation is never retried again.
+
+    The interleaving driven here (each step deterministic, no sleeps):
+      1. one unconfirmed entry, whose retire_unconfirmed() blocks on a gate;
+      2. reconcile A starts and blocks in that call;
+      3. reconcile B starts (blocked on the lock with the fix; blocked on a
+         SECOND gated retire call without it);
+      4. gate A opens, A finishes and drops the now-confirmed entry;
+      5. a NEW unconfirmed entry arrives via track()'s ordinary exit path;
+      6. gate B opens and B finishes.
+
+    Against the rebinding version, B's rebind at step 6 publishes a list built
+    before step 5 and the newcomer vanishes — unconfirmed_count() == 0.
+    """
+    ws = uuid.uuid4()
+
+    class _GatedAdapter:
+        """Open generation, confirmed dead only once its per-call gate opens."""
+
+        def __init__(self) -> None:
+            self._open = [uuid.uuid4()]
+            self.calls = 0
+            self.gates = [asyncio.Event(), asyncio.Event()]
+
+        def unconfirmed_launch_ids(self):
+            return list(self._open)
+
+        async def retire_unconfirmed(self) -> int:
+            idx = self.calls
+            self.calls += 1
+            if idx < len(self.gates):
+                await self.gates[idx].wait()
+            self._open.clear()
+            return 1
+
+    gated = _GatedAdapter()
+    async with registry.track(ws) as first:
+        first.bind_adapter(gated)
+    assert registry.unconfirmed_count() == 1
+
+    async def _settle() -> None:
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+    run_a = asyncio.create_task(registry.reconcile_unconfirmed())
+    await _settle()
+    assert gated.calls == 1, "run A never reached the adapter"
+
+    run_b = asyncio.create_task(registry.reconcile_unconfirmed())
+    await _settle()
+
+    gated.gates[0].set()
+    await run_a
+
+    newcomer = _FakeAdapter(open_generations=1)
+    newcomer.confirm_on_retire = False
+    async with registry.track(ws) as second:
+        second.bind_adapter(newcomer)
+
+    gated.gates[1].set()
+    await run_b
+
+    assert registry.unconfirmed_count() == 1, (
+        "an entry appended while a reconcile was in flight was discarded — "
+        "the survivor list was rebound over it"
+    )

@@ -82,9 +82,15 @@ def test_the_passes_reconcile_tick_is_a_sync_callable_not_a_coroutine_function()
     `async def` directly hands it a coroutine nobody awaits — the unit test would
     pass while production reconciliation never runs.
 
-    Mutation: register PASS_REGISTRY.reconcile_unconfirmed directly and this fails.
+    Mutations, both of which must fail this test: register
+    PASS_REGISTRY.reconcile_unconfirmed directly (trips the name assertion), and
+    turn the tick itself into an `async def`.
+
+    Note on the source scan: `src.index(f"def {name}(")` matches INSIDE
+    "async def {name}(" too, so a `startswith("async def")` check on the sliced
+    body is true by construction and proves nothing. The definition site is
+    tested against the whole module source instead.
     """
-    import asyncio
     import inspect
 
     src = inspect.getsource(scheduler_module)
@@ -96,14 +102,12 @@ def test_the_passes_reconcile_tick_is_a_sync_callable_not_a_coroutine_function()
         f"the passes reconcile job is registered as {func_name!r}"
     )
 
+    assert f"async def {func_name}(" not in src, "registered an async def"
+
     body_start = src.index(f"def {func_name}(")
     body = src[body_start : src.index("sched.add_job(", body_start)]
-    assert not body.lstrip().startswith("async def"), "registered an async def"
     assert "run_coroutine_threadsafe" in body, (
         "the tick does not dispatch its coroutine onto app_loop"
-    )
-    assert not asyncio.iscoroutinefunction(
-        getattr(scheduler_module, func_name, lambda: None)
     )
 
 

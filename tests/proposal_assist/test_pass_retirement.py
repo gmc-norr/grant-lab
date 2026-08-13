@@ -408,18 +408,19 @@ async def test_every_review_child_is_tracked_as_its_own_entry(
         peak.append(PASS_REGISTRY.live_count(ws_id))
         return _stub_adapter_builder(**kwargs)
 
-    # Two children on the same workspace, concurrently.
+    # One child, running under a stand-in for the parent entry: what is asserted is
+    # that the child has an entry of its OWN, so the peak must be 2 and not 1.
+    # (A second concurrent child would need a second seeded ReviewRunItem — the
+    # per-child property is already decided by the first one.)
     async with PASS_REGISTRY.track(ws_id):          # stands in for the parent
-        await asyncio.gather(
-            _run_one_call(
-                kind="fit_check",
-                instruction="x",
-                run_id=run_id,
-                workspace_id=ws_id,
-                session_factory=pg_session_factory,
-                settings=Settings(),
-                adapter_builder=_sampling_builder,
-            ),
+        await _run_one_call(
+            kind="fit_check",
+            instruction="x",
+            run_id=run_id,
+            workspace_id=ws_id,
+            session_factory=pg_session_factory,
+            settings=Settings(),
+            adapter_builder=_sampling_builder,
         )
 
     assert peak, "the adapter was never built — the child did not run"

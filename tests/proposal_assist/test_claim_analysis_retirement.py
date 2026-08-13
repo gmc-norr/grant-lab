@@ -148,12 +148,24 @@ def test_a_delete_committing_mid_mark_failed_cannot_resurrect_the_job(
 ):
     """The resurrection window, driven end-to-end.
 
-    A TIMING assertion cannot see this. Measured directly, mark_failed takes ~2s
-    either way while the workspace row is held: WITH the lock it blocks at its
-    SELECT FOR UPDATE, WITHOUT it blocks at COMMIT instead (the job UPDATE needs a
-    key-share lock on its FK parent). Same wall-clock, opposite correctness.
+    A TIMING assertion cannot see this, so the discriminating observation is the
+    job's FINAL STATUS. What the lock changes is WHERE the requeue decision is
+    taken relative to the delete's commit, not how long the call takes:
 
-    The discriminating observation is the job's FINAL STATUS:
+      * WITH the lock, the workspace read blocks until the delete commits and
+        then, under READ COMMITTED, re-reads the newly committed row version —
+        so the decision is taken with soft_deleted_at visible.
+      * WITHOUT it, the read is an ordinary snapshot read: measured, it returns
+        soft_deleted_at=None instantly, and the requeue decision is already made
+        before the delete commits.
+
+    The unfixed call is not fast overall — measured, it still spends ~1s parked,
+    but at its job UPDATE (pg_locks shows a tuple lock on the workspaces row and
+    a wait on the deleter's transaction id, i.e. the FK check's row lock on the
+    parent), which is AFTER the decision. Wall-clock therefore looks similar in
+    both directions while the status does not.
+
+    Step by step:
       * the delete transaction stamps soft_deleted_at and holds the row,
       * mark_failed starts and (with the fix) blocks on it,
       * the delete COMMITS,
