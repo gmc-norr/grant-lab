@@ -22,12 +22,13 @@ from __future__ import annotations
 import functools
 import threading
 import time
+import uuid as uuidlib
 from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import text
 
-from call_manager.db.models import Workspace, WorkspaceViewer
+from call_manager.db.models import Workspace, WorkspaceSetupJob, WorkspaceViewer
 from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex, commit_mutex_key
 from tests.proposal_assist.conftest import make_user, make_workspace
 
@@ -403,3 +404,357 @@ def test_update_rubric_returns_429_when_the_commit_mutex_is_wedged(
     assert resp.headers.get("Retry-After") == "2"
     with pg_session_factory() as s:
         assert s.get(Workspace, ws_id).rubric_funder_notes == "original notes"
+
+
+def _setup_job(session, ws_id, status: str) -> uuidlib.UUID:
+    """Create a WorkspaceSetupJob in `status` for `ws_id` and return its id."""
+    job = WorkspaceSetupJob(workspace_id=ws_id, status=status)
+    session.add(job)
+    session.flush()
+    return job.id
+
+
+def test_retry_setup_straddled_by_a_delete_returns_404_and_writes_nothing(
+    client_authed_owner, current_user, pg_session_factory
+):
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.flush()
+        job_id = _setup_job(s, ws.id, "failed")
+        s.commit()
+        ws_id = ws.id
+
+    resp = straddle_delete(
+        pg_session_factory,
+        ws_id,
+        lambda: client_authed_owner.post(f"/api/workspaces/{ws_id}/setup/retry"),
+    )
+
+    assert resp.status_code == 404, f"expected 404, got {resp.status_code}: {resp.text}"
+    with pg_session_factory() as s:
+        assert s.get(WorkspaceSetupJob, job_id).status == "failed", (
+            "a blocked retry_setup re-queued a setup job for a deleted workspace"
+        )
+
+
+def test_retry_setup_returns_429_when_the_commit_mutex_is_wedged(
+    client_authed_owner, current_user, pg_session_factory, monkeypatch
+):
+    import call_manager.web.api.rubric as rubric_api
+
+    patch_route_mutex_timeout(monkeypatch, rubric_api, seconds=1)
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.flush()
+        job_id = _setup_job(s, ws.id, "failed")
+        s.commit()
+        ws_id = ws.id
+
+    resp = wedge_mutex(
+        pg_session_factory,
+        ws_id,
+        lambda: client_authed_owner.post(f"/api/workspaces/{ws_id}/setup/retry"),
+    )
+
+    assert resp.status_code == 429, f"expected 429, got {resp.status_code}: {resp.text}"
+    assert resp.headers.get("Retry-After") == "2"
+    with pg_session_factory() as s:
+        assert s.get(WorkspaceSetupJob, job_id).status == "failed"
+
+
+def test_activate_straddled_by_a_delete_returns_404_and_writes_nothing(
+    client_authed_owner, current_user, pg_session_factory
+):
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        ws.current_phase = "setup"
+        s.flush()
+        job_id = _setup_job(s, ws.id, "waiting_for_rubric_review")
+        s.commit()
+        ws_id = ws.id
+
+    resp = straddle_delete(
+        pg_session_factory,
+        ws_id,
+        lambda: client_authed_owner.post(f"/api/workspaces/{ws_id}/activate", json=_RUBRIC_BODY),
+    )
+
+    assert resp.status_code == 404, f"expected 404, got {resp.status_code}: {resp.text}"
+    with pg_session_factory() as s:
+        assert s.get(WorkspaceSetupJob, job_id).status == "waiting_for_rubric_review"
+        assert s.get(Workspace, ws_id).current_phase == "setup", (
+            "a blocked activate transitioned a deleted workspace to active"
+        )
+
+
+def test_activate_returns_429_when_the_commit_mutex_is_wedged(
+    client_authed_owner, current_user, pg_session_factory, monkeypatch
+):
+    import call_manager.web.api.rubric as rubric_api
+
+    patch_route_mutex_timeout(monkeypatch, rubric_api, seconds=1)
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        ws.current_phase = "setup"
+        s.flush()
+        job_id = _setup_job(s, ws.id, "waiting_for_rubric_review")
+        s.commit()
+        ws_id = ws.id
+
+    resp = wedge_mutex(
+        pg_session_factory,
+        ws_id,
+        lambda: client_authed_owner.post(f"/api/workspaces/{ws_id}/activate", json=_RUBRIC_BODY),
+    )
+
+    assert resp.status_code == 429, f"expected 429, got {resp.status_code}: {resp.text}"
+    assert resp.headers.get("Retry-After") == "2"
+    with pg_session_factory() as s:
+        assert s.get(WorkspaceSetupJob, job_id).status == "waiting_for_rubric_review"
+        assert s.get(Workspace, ws_id).current_phase == "setup"
+
+
+def _assert_hook_can_cancel_while_route_is_blocked(pg_session_factory, ws_id, job_id, send):
+    """THE lock-order gate.
+
+    A holder takes and KEEPS the commit mutex. The route queues behind it. While
+    the route is still blocked, we run the retirement hook's setup-job cancel —
+    which is FOR UPDATE SKIP LOCKED — in a third session.
+
+    Mutex-first: the route holds no row lock while it waits, so the cancel takes
+    the row and terminalizes it.
+    Job-first:   the route holds the setup-job row FOR UPDATE for the whole wait,
+                 so the cancel SKIPS it and the job stays non-terminal until the
+                 reconciliation tick (up to 60s later).
+
+    The assertion runs WHILE the route is still blocked. Sampling after the mutex
+    is released would let the route's own rollback free the row and repair the
+    very thing under test.
+    """
+    from call_manager.proposal_assist.jobs_retirement import cancel_setup_jobs_for_workspace
+
+    holding = threading.Event()
+    release = threading.Event()
+    out: dict = {}
+    cancelled = None  # assigned in the try; initialised so a failure there does
+    # not turn into a NameError that hides the real error below.
+
+    def _holder():
+        with pg_session_factory() as s:
+            acquire_commit_mutex(s, ws_id)
+            holding.set()
+            release.wait(timeout=30)
+            s.rollback()
+
+    def _sender():
+        holding.wait(timeout=10)
+        out["resp"] = send()
+
+    holder = threading.Thread(target=_holder)
+    sender = threading.Thread(target=_sender)
+    holder.start()
+    sender.start()
+    try:
+        assert holding.wait(timeout=5), "the holder never acquired the mutex"
+        _wait_until_blocked(pg_session_factory, ws_id, timeout=10)
+        # Stamp the deletion so the scenario is the real one — a delete that has
+        # committed while the route waits. cancel_setup_jobs_for_workspace itself
+        # has NO soft_deleted_at predicate (only reconcile_cancelled_jobs does),
+        # so this is not what makes the cancel fire; it is what makes the test
+        # describe a situation that can actually happen.
+        with pg_session_factory() as s:
+            s.get(Workspace, ws_id).soft_deleted_at = datetime.now(UTC)
+            s.commit()
+        with pg_session_factory() as s:
+            cancelled = cancel_setup_jobs_for_workspace(s, ws_id)
+            s.commit()
+    finally:
+        release.set()
+        holder.join(timeout=30)
+        sender.join(timeout=30)
+
+    assert cancelled == 1, (
+        "the retirement hook could not cancel the setup job while the route was "
+        "blocked on the mutex — the route is holding the job row, which means it "
+        "took the row lock BEFORE the mutex. SKIP LOCKED skipped it, so the delete "
+        "leaves the job non-terminal until the reconciliation tick."
+    )
+    with pg_session_factory() as s:
+        assert s.get(WorkspaceSetupJob, job_id).status == "cancelled"
+
+
+def test_retry_setup_does_not_hold_the_setup_job_row_while_it_waits_for_the_mutex(
+    client_authed_owner, current_user, pg_session_factory
+):
+    # SEED 'queued', NOT 'failed'. cancel_setup_jobs_for_workspace filters on
+    # _CANCELLABLE = ("queued", "running", "waiting_for_rubric_review")
+    # (jobs_retirement.py:55) BEFORE it ever consults a lock, and 'failed' is
+    # terminal — so with a 'failed' row the cancel returns 0 no matter who holds
+    # the row, and this gate would be red in BOTH lock orders. That makes the
+    # Step 5 mutation vacuous: mutated and unmutated look identical.
+    #
+    # The interference we sample is unchanged: retry_setup takes its row lock
+    # UNCONDITIONALLY before it inspects status. This gate never asserts the
+    # route's own status code, so the 409 a 'queued' job would earn is
+    # irrelevant here. The straddle and wedge gates above keep 'failed' — they
+    # DO need the happy path.
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.flush()
+        job_id = _setup_job(s, ws.id, "queued")
+        s.commit()
+        ws_id = ws.id
+
+    _assert_hook_can_cancel_while_route_is_blocked(
+        pg_session_factory,
+        ws_id,
+        job_id,
+        lambda: client_authed_owner.post(f"/api/workspaces/{ws_id}/setup/retry"),
+    )
+
+
+def test_activate_does_not_hold_the_setup_job_row_while_it_waits_for_the_mutex(
+    client_authed_owner, current_user, pg_session_factory
+):
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        ws.current_phase = "setup"
+        s.flush()
+        job_id = _setup_job(s, ws.id, "waiting_for_rubric_review")
+        s.commit()
+        ws_id = ws.id
+
+    _assert_hook_can_cancel_while_route_is_blocked(
+        pg_session_factory,
+        ws_id,
+        job_id,
+        lambda: client_authed_owner.post(f"/api/workspaces/{ws_id}/activate", json=_RUBRIC_BODY),
+    )
+
+
+def test_retry_setup_gives_up_on_a_held_setup_job_row_instead_of_pinning_the_mutex(
+    client_authed_owner, current_user, pg_session_factory, monkeypatch
+):
+    """The route takes the commit mutex and THEN the setup-job row. That second
+    wait must be bounded: acquire_commit_mutex restores lock_timeout = DEFAULT,
+    so an unbounded wait there holds the mutex indefinitely and a concurrent
+    DELETE 429s behind it after burning its whole budget.
+
+    Asserted as 'the request came back', not as elapsed time: without the bound
+    the route does not return at all while we hold the row, so a thread that is
+    still alive after the join IS the failure. Slice C1 learned that an elapsed-
+    time assertion can pass for the opposite reason."""
+    # Patch the name in the ROUTE module, not in row_locks. rubric.py does
+    # `from ...row_locks import SETUP_JOB_LOCK_TIMEOUT_SECONDS`, which binds the
+    # value into rubric's namespace at import time — patching row_locks would
+    # silently no-op and this test would pass at the production 2s instead of 1s,
+    # proving nothing about the bound.
+    import call_manager.web.api.rubric as rubric_api
+
+    monkeypatch.setattr(rubric_api, "SETUP_JOB_LOCK_TIMEOUT_SECONDS", 1)
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.flush()
+        job_id = _setup_job(s, ws.id, "failed")
+        s.commit()
+        ws_id = ws.id
+
+    holding = threading.Event()
+    release = threading.Event()
+    out: dict = {}
+
+    def _row_holder():
+        """Hold the setup-job row FOR UPDATE — and take NO mutex, so the route
+        reaches its job lock and waits there rather than at the mutex."""
+        with pg_session_factory() as s:
+            s.get(WorkspaceSetupJob, job_id, with_for_update=True)
+            holding.set()
+            release.wait(timeout=30)
+            s.rollback()
+
+    def _sender():
+        holding.wait(timeout=10)
+        out["resp"] = client_authed_owner.post(f"/api/workspaces/{ws_id}/setup/retry")
+
+    holder = threading.Thread(target=_row_holder)
+    sender = threading.Thread(target=_sender)
+    holder.start()
+    sender.start()
+    try:
+        assert holding.wait(timeout=5), "the holder never took the setup-job row"
+        sender.join(timeout=15)
+        assert not sender.is_alive(), (
+            "retry_setup was still waiting on the setup-job row after 15s while "
+            "holding the commit mutex — the row wait is unbounded"
+        )
+    finally:
+        release.set()
+        holder.join(timeout=30)
+        sender.join(timeout=30)
+
+    assert out["resp"].status_code == 429
+    assert out["resp"].headers.get("Retry-After") == "2"
+    with pg_session_factory() as s:
+        assert s.get(WorkspaceSetupJob, job_id).status == "failed"
+
+
+def test_activate_gives_up_on_a_held_setup_job_row_instead_of_pinning_the_mutex(
+    client_authed_owner, current_user, pg_session_factory, monkeypatch
+):
+    """activate's half of the bounded setup-row wait. Same hazard, same shape as
+    the retry_setup gate: the route holds the commit mutex across this row wait,
+    so an unbounded wait pins the mutex and a concurrent DELETE 429s behind it
+    after burning its whole budget."""
+    import call_manager.web.api.rubric as rubric_api
+
+    monkeypatch.setattr(rubric_api, "SETUP_JOB_LOCK_TIMEOUT_SECONDS", 1)
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        ws.current_phase = "setup"
+        s.flush()
+        job_id = _setup_job(s, ws.id, "waiting_for_rubric_review")
+        s.commit()
+        ws_id = ws.id
+
+    holding = threading.Event()
+    release = threading.Event()
+    out: dict = {}
+
+    def _row_holder():
+        with pg_session_factory() as s:
+            s.get(WorkspaceSetupJob, job_id, with_for_update=True)
+            holding.set()
+            release.wait(timeout=30)
+            s.rollback()
+
+    def _sender():
+        holding.wait(timeout=10)
+        out["resp"] = client_authed_owner.post(
+            f"/api/workspaces/{ws_id}/activate", json=_RUBRIC_BODY
+        )
+
+    holder = threading.Thread(target=_row_holder)
+    sender = threading.Thread(target=_sender)
+    holder.start()
+    sender.start()
+    try:
+        assert holding.wait(timeout=5), "the holder never took the setup-job row"
+        sender.join(timeout=15)
+        assert not sender.is_alive(), (
+            "activate was still waiting on the setup-job row after 15s while holding "
+            "the commit mutex — the row wait is unbounded"
+        )
+    finally:
+        release.set()
+        holder.join(timeout=30)
+        sender.join(timeout=30)
+
+    assert out["resp"].status_code == 429
+    assert out["resp"].headers.get("Retry-After") == "2"
+    with pg_session_factory() as s:
+        assert s.get(WorkspaceSetupJob, job_id).status == "waiting_for_rubric_review"
+        assert s.get(Workspace, ws_id).current_phase == "setup"

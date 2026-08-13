@@ -44,6 +44,19 @@ from sqlalchemy.orm import Session
 # reclaims it — a requeue, not a dead letter.
 PASS_PREFIX_LOCK_TIMEOUT_SECONDS = 2
 
+# The two setup-job routes (activate, retry_setup) take the commit mutex and then
+# the workspace's WorkspaceSetupJob row. acquire_commit_mutex restores
+# lock_timeout = DEFAULT on success, so that row wait is otherwise unbounded —
+# and it is taken while HOLDING the mutex, so an unbounded wait there blocks the
+# owner's DELETE for exactly that long and 429s every other mutex-participating
+# writer behind it.
+#
+# Why 2 seconds: same derivation as PASS_PREFIX_LOCK_TIMEOUT_SECONDS above — the
+# DELETE route's asserted budget is < 6.0s. Losing a race is cheap here: the
+# route has mutated nothing and the caller gets the house 429 with Retry-After,
+# which is the same answer a wedged mutex already gives them.
+SETUP_JOB_LOCK_TIMEOUT_SECONDS = 2
+
 
 class RowLockTimeout(RuntimeError):
     """A transaction's SET LOCAL lock_timeout fired while waiting on a lock.

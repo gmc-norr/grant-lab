@@ -22,6 +22,11 @@ from call_manager.proposal_assist.drafting.locking import (
     CommitMutexTimeout,
     acquire_commit_mutex_live,
 )
+from call_manager.proposal_assist.row_locks import (
+    SETUP_JOB_LOCK_TIMEOUT_SECONDS,
+    RowLockTimeout,
+    bounded_lock_waits,
+)
 from call_manager.proposal_assist.web._perms import require_member, require_owner
 
 router = APIRouter()
@@ -194,11 +199,51 @@ def retry_setup(
     (not yet permanently failed)."""
     with request.app.state.session_factory() as session:
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
-        job = session.scalar(
-            select(WorkspaceSetupJob)
-            .where(WorkspaceSetupJob.workspace_id == ws.id)
-            .with_for_update()
-        )
+        # Slice C2 lock-order rule: the live mutex immediately after require_owner
+        # and BEFORE the setup-job row lock below. Order matters here for a
+        # concrete reason: a route that took the job row first would hold it for
+        # the whole mutex wait, and the delete's retirement hook cancels setup
+        # jobs with FOR UPDATE SKIP LOCKED — so it would skip this row and leave
+        # the job non-terminal until the reconciliation tick. Taking the mutex
+        # first means we raise WorkspaceDeleted (-> main.py -> 404) without ever
+        # touching the row.
+        #
+        # This route also has its own resurrection shape, though a narrower one
+        # than it looks: it cannot revive a job the delete cancelled, because it
+        # refuses anything whose status is not exactly 'failed' (below) and the
+        # delete writes 'cancelled'. What it CAN do is re-queue a job that was
+        # already 'failed' when the workspace was deleted — 'failed' is terminal
+        # and therefore not in the hook's _CANCELLABLE list, so the delete leaves
+        # it alone. The under-mutex read is what stops that.
+        try:
+            acquire_commit_mutex_live(session, ws.id)
+        except CommitMutexTimeout as e:
+            raise HTTPException(
+                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
+            ) from e
+        # The job-row wait is BOUNDED. acquire_commit_mutex restores
+        # lock_timeout = DEFAULT on success (locking.py:204), so without this the
+        # route would hold the commit mutex while waiting indefinitely on a row
+        # that _m3, _fail or requeue_stuck_setup_jobs may hold — and a concurrent
+        # DELETE would 429 behind us after burning its whole 10s budget. That is
+        # the unbounded-wait class Slice C1 closed for the four pass prefixes;
+        # re-opening it here on the assumption "those holders are short" is
+        # exactly the unwritten assumption that produced it the first time.
+        try:
+            with bounded_lock_waits(
+                session,
+                timeout_seconds=SETUP_JOB_LOCK_TIMEOUT_SECONDS,
+                message="timed out waiting for the setup-job row",
+            ):
+                job = session.scalar(
+                    select(WorkspaceSetupJob)
+                    .where(WorkspaceSetupJob.workspace_id == ws.id)
+                    .with_for_update()
+                )
+        except RowLockTimeout as e:
+            raise HTTPException(
+                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
+            ) from e
         if job is None or job.status != "failed":
             if job is not None and job.status in ("queued", "running"):
                 raise HTTPException(
@@ -225,14 +270,42 @@ def activate(
     request: Request,
     user: User = Depends(get_current_user),  # noqa: B008
 ) -> RubricOut:
-    criteria = _validate_criteria(body.criteria)
     with request.app.state.session_factory() as session:
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
-        job = session.scalar(
-            select(WorkspaceSetupJob)
-            .where(WorkspaceSetupJob.workspace_id == ws.id)
-            .with_for_update()
-        )
+        # Semantic validation AFTER require_owner (see update_rubric's note): a
+        # non-owner with a malformed rubric gets 403, not a 400 confirming the
+        # body shape. Before the mutex, because it takes no lock.
+        criteria = _validate_criteria(body.criteria)
+        # Slice C2 lock-order rule: the live mutex immediately after require_owner
+        # and BEFORE the setup-job row lock below. Taking the job row first would
+        # hold it across the whole mutex wait, and the delete's retirement hook
+        # cancels setup jobs with FOR UPDATE SKIP LOCKED — it would skip this row
+        # and leave the job non-terminal until the reconciliation tick.
+        try:
+            acquire_commit_mutex_live(session, ws.id)
+        except CommitMutexTimeout as e:
+            raise HTTPException(
+                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
+            ) from e
+        # Bounded, for the same reason as retry_setup: acquire_commit_mutex
+        # restores lock_timeout = DEFAULT, so an unbounded row wait here would
+        # pin the commit mutex and make a concurrent DELETE 429 after its full
+        # budget. See row_locks.py's module docstring.
+        try:
+            with bounded_lock_waits(
+                session,
+                timeout_seconds=SETUP_JOB_LOCK_TIMEOUT_SECONDS,
+                message="timed out waiting for the setup-job row",
+            ):
+                job = session.scalar(
+                    select(WorkspaceSetupJob)
+                    .where(WorkspaceSetupJob.workspace_id == ws.id)
+                    .with_for_update()
+                )
+        except RowLockTimeout as e:
+            raise HTTPException(
+                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
+            ) from e
         if job is None or job.status != "waiting_for_rubric_review":
             raise HTTPException(status_code=409, detail="workspace is not awaiting rubric review")
         _apply_rubric(session, ws, user, criteria, body.funder_notes or "")
