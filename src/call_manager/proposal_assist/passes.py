@@ -133,7 +133,7 @@ class PassRegistry:
                 asyncio.gather(*waits, return_exceptions=True),
                 timeout=_PASS_RETIRE_SECONDS,
             )
-        except (TimeoutError, asyncio.TimeoutError):
+        except TimeoutError:  # asyncio.TimeoutError is an alias of this on 3.11+
             logger.warning(
                 "passes.retire_timeout",
                 extra={
