@@ -1,8 +1,17 @@
 # Workspace retirement — Slice C design
 
 Date: 2026-08-11
-Status: approved (design), revision 3 after two review rounds; implementation plan to follow
+Status: approved (design), revision 4 after two review rounds and one implementation correction (see Revisions); implementation plan to follow
 Predecessors: Slice A (`docs/superpowers/plans/2026-07-24-workspace-retirement-slice-a.md`, `7b16547`), Slice B-mutex (`docs/superpowers/plans/2026-07-24-workspace-retirement-slice-b-mutex.md`, `194d8ce`), Slice B-retire (`docs/superpowers/plans/2026-07-25-workspace-retirement-b-retire.md`, `245d7ba`, review fixes `01edf10`)
+
+## Revisions
+
+- revision 4 (2026-08-13, Slice C2): §8's lock-order rationale and §12 gate 11
+  replaced. The rule stands; the deadlock justifying it does not exist. Verified
+  against the merged tree at 53fa9fc — soft_delete_workspace_db never touches
+  WorkspaceSetupJob, and setup-job cancellation is post-commit and SKIP LOCKED.
+  The rule's real basis is convergence (a held row is skipped by the hook), and
+  C2 bounds the mutex→row wait it newly introduces.
 
 ## 1. Why this slice exists
 
@@ -387,12 +396,45 @@ the precedent at `web/api/workspaces.py:537`:
 | `retry_setup` | `rubric.py:168` | re-queues a setup job (a resurrection risk until the §1 slice lands) |
 
 **Lock-order rule (normative).** `acquire_commit_mutex_live` is taken
-**immediately after `require_owner`, before any other lock**. `activate` and
-`retry_setup` both currently take `WorkspaceSetupJob … FOR UPDATE`
-(`rubric.py:180`, `rubric.py:217`) as their first lock; once delete also
-cancels setup jobs, that order inverts against delete's mutex→job-row order and
-deadlocks. The rule is stated here because it is not locally obvious in either
-route.
+**immediately after `require_owner`, before any other lock**. Lock-free work may
+sit between the two — and semantic body validation specifically SHOULD, so that
+authorization decides before a validation error can answer a caller who has no
+access, and so a malformed body does not queue behind the mutex. What may not
+sit there is another lock. `activate` and `retry_setup` both currently take
+`WorkspaceSetupJob … FOR UPDATE` (`rubric.py:180`, `rubric.py:217`) as their
+first lock, and that order must change.
+
+Where the mutex is held across a subsequent row wait — as it now is in both
+setup-job routes — that wait must carry its own bound, for the reason
+`row_locks.py`'s module docstring gives: `acquire_commit_mutex` restores
+`lock_timeout = DEFAULT` on success, so an unbounded wait under the mutex pins
+it and blows the DELETE route's < 6.0s budget.
+
+The reason is not deadlock. As of the pre-C2 tree, no AB-BA cycle is reachable
+in either order: `soft_delete_workspace_db` never touches `WorkspaceSetupJob`
+(its mutex transaction locks the workspace row, the four pass-job tables and
+`TurnJob`), setup-job cancellation runs in a separate post-commit transaction
+with `FOR UPDATE SKIP LOCKED`, and every other setup-job acquisition is either
+`SKIP LOCKED` or mutexless — nothing held the mutex and then waited on a
+setup-job row. C2 introduces the first such edge itself, and bounds it (see
+below), so the property is maintained by construction rather than by luck.
+
+This does **not** license inverting `phases/setup.py`'s own documented order
+(`:498-503`, job → workspace → Call): that ordering answers a different,
+real 40P01 against `_m2`/`_m3`, and it is what `activate` matches.
+
+The reason is **convergence**. A route that takes the setup-job row before
+blocking on the mutex holds that row for the whole wait — up to
+`timeout_seconds`, default 10s. The delete's retirement hook cancels setup jobs
+with `SKIP LOCKED`, so it *skips* the held row and the job stays non-terminal
+until the reconciliation tick catches it (up to `jobs_reconcile_tick_seconds`,
+default 60s). With the mutex first, the route raises `WorkspaceDeleted` before
+touching the row, the hook finds it free, and cancellation is immediate.
+
+Because the mutex is now held across the setup-job row wait, that wait is
+bounded (`row_locks.SETUP_JOB_LOCK_TIMEOUT_SECONDS = 2`, → 429): an unbounded
+wait there would pin the mutex and blow the DELETE route's < 6.0s budget, which
+is the hazard §4 closed for the pass prefixes.
 
 **Error mapping is written per route, explicitly.** There is no app-level
 `CommitMutexTimeout` handler — every route returning 429 today does so with its
@@ -522,9 +564,26 @@ reverted.
     (simulating a crash, so the cooperative checkpoint cannot be what saves us)
     → a later reconciliation tick marks the row `failed`. Mutation: leave the
     tick handling setup jobs only and the row stays `running` forever.
-11. **Lock order.** For `activate` and `retry_setup`, a delete concurrent with
-    the route resolves without deadlock. Mutation: take the setup-job lock
-    first and the test must fail.
+11. **Lock order, and the bound on the wait it creates.** Two gates, both
+    required, for **each** of `activate` and `retry_setup`.
+
+    (a) *Order.* While the route is blocked on the commit mutex, the retirement
+    hook's `cancel_setup_jobs_for_workspace` must still be able to cancel the
+    setup job — proving the route holds no row lock while it waits. Mutation:
+    take the setup-job lock first and the test must fail (the `SKIP LOCKED`
+    cancel skips the held row and returns 0). Asserted *while* the route is
+    still blocked; sampling after the mutex is released lets the route's own
+    rollback repair the thing under test. Seed the job in a **cancellable**
+    status — `_CANCELLABLE` excludes terminal states, so a `'failed'` row makes
+    this gate red in both orders and its mutation vacuous.
+    Note: a "resolves without deadlock" gate would NOT discriminate — no AB-BA
+    cycle exists in either order. See §8.
+
+    (b) *Bound.* Because the mutex is held across the setup-job row wait, that
+    wait must be bounded (`row_locks.SETUP_JOB_LOCK_TIMEOUT_SECONDS`, → 429).
+    With the row held by another session, the request must RETURN rather than
+    block. Mutation: remove the bound from one route and that route's test must
+    fail. Asserted as "the request came back", not as elapsed time.
 12. **Budget invariant.** The extended barrier test fails if
     `_PASS_RETIRE_SECONDS` or `_JOBS_CANCEL_SECONDS` is raised past the
     headroom.
