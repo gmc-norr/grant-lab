@@ -5,7 +5,7 @@ from call_manager.config import Settings
 from call_manager.db.models import ReviewRun, ReviewRunItem, Workspace
 from call_manager.proposal_assist.review.jobs import (
     active_review_run,
-    cancel_review_runs_for_workspace,
+    cancel_review_runs_and_items_for_workspace,
     claim_next_review_run,
     enqueue_review_run,
     estimate_dollars,
@@ -39,7 +39,7 @@ def test_cancel_and_reap(review_workspace):
     session, ws_id, *_ = review_workspace
     enqueue_review_run(session, workspace_id=ws_id, draft_sha="a" * 64)
     session.flush()
-    assert cancel_review_runs_for_workspace(session, workspace_id=ws_id) == 1
+    assert cancel_review_runs_and_items_for_workspace(session, workspace_id=ws_id) == 1
     # a running run older than TTL is reaped
     r = ReviewRun(workspace_id=ws_id, status="running", draft_sha="a" * 64)
     session.add(r)

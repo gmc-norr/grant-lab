@@ -22,6 +22,8 @@ from call_manager.proposal_assist.coherence.jobs import (
     supersede_prior_coherence,
 )
 from call_manager.proposal_assist.drafting.contract import LaunchContext, TurnDoneEvent
+from call_manager.proposal_assist.passes import PASS_REGISTRY
+from call_manager.proposal_assist.row_locks import bounded_prefix_lock_waits
 
 logger = logging.getLogger(__name__)
 
@@ -42,110 +44,132 @@ async def run_coherence_pass(
     job left 'running'.
     """
     # 1. Read job + workspace state (lock, requested_by) in a short session.
-    with session_factory() as s:
-        job = s.get(CoherenceJob, job_id)
-        if job is None or job.status != "running":
+    # Tracked from the FIRST line, BEFORE the prefix: an entry registered
+    # only after the prefix is invisible to a DELETE that commits during it.
+    with session_factory() as s0:
+        job0 = s0.get(CoherenceJob, job_id)
+        if job0 is None or job0.status != "running":
             return
-        ws = s.get(Workspace, job.workspace_id)
-        workspace_id = job.workspace_id
-        requested_by = job.requested_by
-        locked = ws is not None and ws.spec_locked_at is not None
-        if coherence_cap_exceeded(s, workspace_id=workspace_id, settings=settings):
-            _fail(s, job, "daily coherence budget reached")
-            s.commit()
-            return
-        instruction = assemble_coherence_context(
-            session=s, workspace_id=workspace_id, workspaces_dir=settings.workspaces_dir
-        )
+        tracked_ws = job0.workspace_id
 
-    adapter = adapter_builder(
-        settings=settings,
-        session_factory=session_factory,
-        workspace_id=workspace_id,
-        requested_by=requested_by,
-        job_id=job_id,
-        locked=locked,
-    )
-    handle = None
-    done: TurnDoneEvent | None = None
-    try:
-
-        async def _run() -> TurnDoneEvent | None:
-            nonlocal handle
-            # launch is INSIDE the wait_for so a hung SDK connect is bounded too — not
-            # just the streaming turn. wait_for cancels this coroutine on timeout,
-            # raising CancelledError at whichever await is live (launch or the loop).
-            handle = await adapter.launch(LaunchContext(workspace_id=workspace_id))
-            last = None
-            async for event in adapter.send_turn(handle, instruction):
-                if isinstance(event, TurnDoneEvent):
-                    last = event
-            return last
-
-        done = await asyncio.wait_for(_run(), timeout=settings.coherence_pass_timeout_seconds)
-    except Exception as exc:  # noqa: BLE001 — terminal: fail the job, never propagate
-        logger.exception("coherence pass failed for job %s", job_id)
-        # Member-visible: surface only a sanitized, generic message (full detail
-        # already in the logs above); distinguish the expected timeout outcome.
-        message = (
-            "Coherence check timed out."
-            if isinstance(exc, (asyncio.TimeoutError, TimeoutError))
-            else "Coherence check failed."
-        )
-        with session_factory() as s:
-            # Lock the row + guard on status=='running': the separate reaper may
-            # have already failed this job during a hang; don't double-finalize.
-            job = s.get(CoherenceJob, job_id, with_for_update=True)
-            if job is not None and job.status == "running":
-                _fail(s, job, message)
-                supersede_own_coherence(s, workspace_id=workspace_id, job_id=job_id)
-            s.commit()
-        return
-    finally:
-        if handle is not None:
-            try:
-                # Bound cleanup too: a hung SDK disconnect must not leak the pass
-                # coroutine (the scheduler has already stopped awaiting it). Kept well
-                # under the scheduler's coherence_pass_timeout_seconds+60 future grace.
-                await asyncio.wait_for(
-                    adapter.terminate(handle),
-                    timeout=settings.coherence_terminate_timeout_seconds,
-                )
-            except Exception:  # noqa: BLE001
-                logger.exception("coherence adapter terminate failed for job %s", job_id)
-
-    # 2. Success: claim the terminal transition under a row lock; ONLY finalize if
-    #    the job is still 'running' (the reaper may have failed it during a hang —
-    #    in which case its own cleanup already ran and we must not resurrect it).
-    with session_factory() as s:
-        from sqlalchemy import func, select
-
-        from call_manager.db.models import ProposedChange
-
-        job = s.get(CoherenceJob, job_id, with_for_update=True)
-        if job is None or job.status != "running":
-            s.commit()
-            return
-        supersede_prior_coherence(s, workspace_id=workspace_id, job_id=job_id)
-        n = s.scalar(
-            select(func.count())
-            .select_from(ProposedChange)
-            .where(
-                ProposedChange.workspace_id == workspace_id,
-                ProposedChange.origin_job_id == job_id,
-                ProposedChange.status == "pending",
+    async with PASS_REGISTRY.track(tracked_ws) as _entry:
+        # bounded_prefix_lock_waits wraps the WHOLE prefix transaction, commit
+        # included: the workspace row is held from the acquisition below until this
+        # session ends, across context assembly's filesystem reads. Without the bound
+        # a stalled prefix pins the row against the owner's DELETE — which, past the
+        # commit mutex, waits with lock_timeout back at DEFAULT — for as long as the
+        # stall lasts. Giving up here costs a reaper requeue; not giving up blows the
+        # DELETE route's budget without limit.
+        with session_factory() as s, bounded_prefix_lock_waits(s):
+            job = s.get(CoherenceJob, job_id)
+            if job is None or job.status != "running":
+                return
+            # Workspace ROW LOCK held through this session's commit. It linearizes the
+            # prefix against a concurrent delete: the delete takes the same row to stamp
+            # soft_deleted_at, so either we commit and it waits briefly, or it wins and
+            # we abort having written nothing. Safe ONLY because this session is short.
+            ws = s.get(Workspace, job.workspace_id, with_for_update=True)
+            if ws is None or ws.soft_deleted_at is not None:
+                return
+            workspace_id = job.workspace_id
+            requested_by = job.requested_by
+            locked = ws.spec_locked_at is not None
+            if coherence_cap_exceeded(s, workspace_id=workspace_id, settings=settings):
+                _fail(s, job, "daily coherence budget reached")
+                s.commit()
+                return
+            instruction = assemble_coherence_context(
+                session=s, workspace_id=workspace_id, workspaces_dir=settings.workspaces_dir
             )
-        )
-        job.status = "completed"
-        job.completed_at = datetime.now(UTC)
-        job.n_proposals = int(n or 0)
-        if done is not None:
-            job.input_tokens = done.tokens_in or 0
-            job.output_tokens = done.tokens_out or 0
-            job.model = done.model
-            job.sdk_session_id = done.session_id
-        s.commit()
 
+        adapter = adapter_builder(
+            settings=settings,
+            session_factory=session_factory,
+            workspace_id=workspace_id,
+            requested_by=requested_by,
+            job_id=job_id,
+            locked=locked,
+        )
+        _entry.bind_adapter(adapter)
+        handle = None
+        done: TurnDoneEvent | None = None
+        try:
+
+            async def _run() -> TurnDoneEvent | None:
+                nonlocal handle
+                # launch is INSIDE the wait_for so a hung SDK connect is bounded too — not
+                # just the streaming turn. wait_for cancels this coroutine on timeout,
+                # raising CancelledError at whichever await is live (launch or the loop).
+                handle = await adapter.launch(LaunchContext(workspace_id=workspace_id))
+                last = None
+                async for event in adapter.send_turn(handle, instruction):
+                    if isinstance(event, TurnDoneEvent):
+                        last = event
+                return last
+
+            done = await asyncio.wait_for(_run(), timeout=settings.coherence_pass_timeout_seconds)
+        except Exception as exc:  # noqa: BLE001 — terminal: fail the job, never propagate
+            logger.exception("coherence pass failed for job %s", job_id)
+            # Member-visible: surface only a sanitized, generic message (full detail
+            # already in the logs above); distinguish the expected timeout outcome.
+            message = (
+                "Coherence check timed out."
+                if isinstance(exc, (asyncio.TimeoutError, TimeoutError))
+                else "Coherence check failed."
+            )
+            with session_factory() as s:
+                # Lock the row + guard on status=='running': the separate reaper may
+                # have already failed this job during a hang; don't double-finalize.
+                job = s.get(CoherenceJob, job_id, with_for_update=True)
+                if job is not None and job.status == "running":
+                    _fail(s, job, message)
+                    supersede_own_coherence(s, workspace_id=workspace_id, job_id=job_id)
+                s.commit()
+            return
+        finally:
+            if handle is not None:
+                try:
+                    # Bound cleanup too: a hung SDK disconnect must not leak the pass
+                    # coroutine (the scheduler has already stopped awaiting it). Kept well
+                    # under the scheduler's coherence_pass_timeout_seconds+60 future grace.
+                    await asyncio.wait_for(
+                        adapter.terminate(handle),
+                        timeout=settings.coherence_terminate_timeout_seconds,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("coherence adapter terminate failed for job %s", job_id)
+
+        # 2. Success: claim the terminal transition under a row lock; ONLY finalize if
+        #    the job is still 'running' (the reaper may have failed it during a hang —
+        #    in which case its own cleanup already ran and we must not resurrect it).
+        with session_factory() as s:
+            from sqlalchemy import func, select
+
+            from call_manager.db.models import ProposedChange
+
+            job = s.get(CoherenceJob, job_id, with_for_update=True)
+            if job is None or job.status != "running":
+                s.commit()
+                return
+            supersede_prior_coherence(s, workspace_id=workspace_id, job_id=job_id)
+            n = s.scalar(
+                select(func.count())
+                .select_from(ProposedChange)
+                .where(
+                    ProposedChange.workspace_id == workspace_id,
+                    ProposedChange.origin_job_id == job_id,
+                    ProposedChange.status == "pending",
+                )
+            )
+            job.status = "completed"
+            job.completed_at = datetime.now(UTC)
+            job.n_proposals = int(n or 0)
+            if done is not None:
+                job.input_tokens = done.tokens_in or 0
+                job.output_tokens = done.tokens_out or 0
+                job.model = done.model
+                job.sdk_session_id = done.session_id
+            s.commit()
 
 def _fail(session, job: CoherenceJob, message: str) -> None:
     job.status = "failed"

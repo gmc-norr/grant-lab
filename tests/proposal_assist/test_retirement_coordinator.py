@@ -92,7 +92,14 @@ async def test_hooks_run_concurrently_and_in_isolation():
         a_can_finish.set()          # release hook_a → concurrency
         raise ValueError("boom")    # isolation: must NOT stop hook_a
 
-    coord = WorkspaceRetirement(hooks={"turns": hook_a, "collab": hook_b, "jobs": _noop_hook()})
+    coord = WorkspaceRetirement(
+        hooks={
+            "turns": hook_a,
+            "collab": hook_b,
+            "jobs": _noop_hook(),
+            "passes": _noop_hook(),
+        }
+    )
     await coord.retire(uuid.uuid4())   # must NOT raise despite hook_b
 
     assert "a-done" in order            # hook_a completed even though hook_b raised
@@ -108,7 +115,12 @@ async def test_return_values_are_ignored():
         return 3                       # int count (mirrors revoke_user_sockets)
 
     coord = WorkspaceRetirement(
-        hooks={"turns": turns_hook, "collab": collab_hook, "jobs": _noop_hook()}
+        hooks={
+            "turns": turns_hook,
+            "collab": collab_hook,
+            "jobs": _noop_hook(),
+            "passes": _noop_hook(),
+        }
     )
     assert await coord.retire(uuid.uuid4()) is None
 
@@ -157,7 +169,12 @@ def test_bridge_runs_hooks_on_a_separate_thread_loop():
         ran.set()
 
     coord = WorkspaceRetirement(
-        hooks={"turns": turns_hook, "collab": collab_hook, "jobs": _noop_hook()}
+        hooks={
+            "turns": turns_hook,
+            "collab": collab_hook,
+            "jobs": _noop_hook(),
+            "passes": _noop_hook(),
+        }
     )
     loop, t = _loop_on_thread()
     try:
@@ -184,7 +201,12 @@ def test_bridge_returns_at_the_bound_when_a_hook_hangs(monkeypatch):
         return None
 
     coord = WorkspaceRetirement(
-        hooks={"turns": turns_hook, "collab": collab_hook, "jobs": _noop_hook()}
+        hooks={
+            "turns": turns_hook,
+            "collab": collab_hook,
+            "jobs": _noop_hook(),
+            "passes": _noop_hook(),
+        }
     )
     loop, t = _loop_on_thread()
     try:
@@ -205,3 +227,35 @@ def test_bridge_never_raises_without_a_loop():
     app.state.app_loop = None
     app.state.workspace_retirement = None
     signal_workspace_retirement(_FakeRequest(app), workspace_id=uuid.uuid4())  # no raise
+
+
+def test_passes_is_a_required_hook():
+    """Dropping the wiring must fail at BOOT, not silently skip teardown on every
+    delete. This structural guard is the one that previously caught an unwired
+    turns hook."""
+    with pytest.raises(MissingRetirementHook, match="passes"):
+        WorkspaceRetirement(
+            hooks={"turns": _noop_hook(), "collab": _noop_hook(), "jobs": _noop_hook()}
+        )
+
+
+def test_the_barrier_exceeds_every_hooks_own_worst_case_including_passes():
+    """Read from the LIVE constants, so raising any sub-bound fails loudly instead
+    of silently eroding the barrier."""
+    import inspect
+
+    from call_manager.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
+    from call_manager.proposal_assist.jobs_retirement import _JOBS_CANCEL_SECONDS
+    from call_manager.proposal_assist.passes import _PASS_RETIRE_SECONDS
+    from call_manager.proposal_assist.retirement import _RETIREMENT_BARRIER_SECONDS
+
+    sig = inspect.signature(ClaudeAgentSDKAdapter.__init__)
+    disconnect = sig.parameters["disconnect_deadline_seconds"].default
+    reap = sig.parameters["reap_deadline_seconds"].default
+
+    # The passes bound must clear the adapter's own internal worst case...
+    assert disconnect + reap < _PASS_RETIRE_SECONDS
+    # ...and every hook must fit under the barrier. Hooks run CONCURRENTLY, so the
+    # budget is the max, not the sum.
+    worst = max(3.0, disconnect + reap, _PASS_RETIRE_SECONDS, _JOBS_CANCEL_SECONDS)
+    assert worst < _RETIREMENT_BARRIER_SECONDS

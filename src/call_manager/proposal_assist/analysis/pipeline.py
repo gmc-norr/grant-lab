@@ -10,6 +10,7 @@ import hashlib
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import select
@@ -21,6 +22,7 @@ from call_manager.db.models import (
     Reference,
     ReferenceChunk,
     UserClaimAnnotation,
+    Workspace,
 )
 from call_manager.proposal_assist.analysis.queue import (
     claim_queued_jobs,
@@ -30,7 +32,10 @@ from call_manager.proposal_assist.analysis.queue import (
     requeue_stuck_running,
     touch_running_job,
 )
-from call_manager.proposal_assist.citations.audit import validate_citations_semantic
+from call_manager.proposal_assist.citations.audit import (
+    ClaimAnalysisAborted,
+    validate_citations_semantic,
+)
 from call_manager.proposal_assist.citations.claims import iter_proposal_sentences
 from call_manager.proposal_assist.citations.ledger import load_ledger
 from call_manager.proposal_assist.citations.markers import find_markers
@@ -332,6 +337,7 @@ def analyze_job(
     citation_service,
     embedder,
     workspaces_dir,
+    should_abort=None,
 ) -> None:
     repo = workspace_repo_dir(workspaces_dir, job.workspace_id)
     doc = _read_optional(repo / "proposal.md")
@@ -376,6 +382,7 @@ def analyze_job(
         # validate_citations_semantic.
         touch_running_job(session, job.id)
         semantic_issues = validate_citations_semantic(
+            should_abort=should_abort,
             proposal_text=doc,
             ledger=scoped_ledger,
             session=session,
@@ -409,6 +416,18 @@ def analyze_job(
     # --- UNCITED: cached classification + verified retrieval ------------- #
     uncited_results: dict[str, dict] = {}  # claim_sha -> {"outcome", ...}
     for occ in sentences:
+        # ABORT CHECK — top of the loop, BEFORE the row-shape filters, so it is
+        # consulted once per sentence regardless of whether that sentence costs an
+        # LLM call. Same per-row placement as the semantic audit's own check
+        # (citations/audit.py:599), for the same reason: one check per job is not
+        # "bounded by one LLM call" when the loop makes one classify (plus a
+        # retrieve-and-judge fan-out) per sentence.
+        #
+        # Without it this whole phase is unabortable, and a section with NO `ev:`
+        # markers never consults should_abort at all — the cited audit above is the
+        # only other call site and it is guarded by `if cited_evs`.
+        if should_abort is not None and should_abort():
+            raise ClaimAnalysisAborted("workspace deleted during uncited-claim analysis")
         if occ.ev_ids or not occ.text.strip():
             continue
         sha = _claim_sha(occ.text)
@@ -560,6 +579,17 @@ def drain_analysis_queue(
             job = s.get(ClaimAnalysisJob, jid)
             if job is None:
                 continue
+            def _should_abort(wid=job.workspace_id) -> bool:
+                # A SHORT INDEPENDENT session — never the worker's per-job session,
+                # whose row lock is held for the whole transaction.
+                with session_factory() as probe:
+                    return (
+                        probe.scalar(
+                            select(Workspace.soft_deleted_at).where(Workspace.id == wid)
+                        )
+                        is not None
+                    )
+
             try:
                 analyze_job(
                     job,
@@ -568,13 +598,49 @@ def drain_analysis_queue(
                     citation_service=citation_service,
                     embedder=embedder,
                     workspaces_dir=workspaces_dir,
+                    should_abort=_should_abort,
                 )
+                # Reads through to the ROW, not to a stale in-memory copy:
+                # mark_done expires this attribute when it declines to finalize,
+                # so a job the retirement hook terminalized under us reports the
+                # status it actually has.
                 status = job.status
                 s.commit()
                 if status == "done":
                     counts["done"] += 1
                 elif status == "superseded":
                     counts["superseded"] += 1
+                elif status == "failed":
+                    # mark_done declined: another writer (the jobs retirement
+                    # hook's cancel) reached the row first. The annotations this
+                    # session wrote still commit — they are findings for content
+                    # that WAS analyzed — but the job itself must not vanish from
+                    # the tick's accounting.
+                    counts["failed"] += 1
+            except ClaimAnalysisAborted:
+                # Discard this session's partial writes, then terminalize. Scope is
+                # exactly the per-job transaction: the annotation upserts and the
+                # heartbeat. It is NOT every write the job made — the two LLM-spend
+                # caches deliberately commit in their OWN short sessions
+                # (`store_verdict`, citations/audit.py:739; `_persist_classification`
+                # above) precisely so a rollback here cannot discard them, and they
+                # survive. That is intended: they are content-keyed caches, not
+                # findings, and no annotation ever becomes visible from them alone.
+                #
+                # Not routed through mark_failed: this is not a retryable failure and
+                # the job must never return to 'queued'.
+                s.rollback()
+                logger.info(
+                    "claim-analysis job %s aborted: workspace deleted mid-audit", jid
+                )
+                with session_factory() as s2:
+                    job2 = s2.get(ClaimAnalysisJob, jid)
+                    if job2 is not None:
+                        job2.status = "failed"
+                        job2.last_error = "cancelled: workspace deleted"
+                        job2.updated_at = datetime.now(UTC)
+                        s2.commit()
+                counts["failed"] += 1
             except Exception as exc:
                 s.rollback()
                 logger.exception("claim-analysis job %s failed", jid)

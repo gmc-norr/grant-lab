@@ -149,6 +149,15 @@ class Settings(BaseSettings):
         "between workspace creation and rubric-review prompt; "
         "raising it reduces idle DB churn when the queue is empty.",
     )
+    passes_reconcile_tick_seconds: int = Field(
+        default=60,
+        alias="PASSES_RECONCILE_TICK_SECONDS",
+        description=(
+            "How often to retry teardown for pass generations whose death was never "
+            "confirmed. A sibling of reconcile_live_clients for a population it does "
+            "not cover (one-shot per-pass adapters). Independent of DRAFTING_ENABLED."
+        ),
+    )
     jobs_reconcile_tick_seconds: int = Field(
         default=60,
         alias="JOBS_RECONCILE_TICK_SECONDS",

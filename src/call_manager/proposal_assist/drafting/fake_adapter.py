@@ -113,6 +113,15 @@ class FakeAgentAdapter:
     def retiring_count(self) -> int:
         return self._live.retiring_count()
 
+    def unconfirmed_launch_ids(self) -> list:
+        """The fake owns no subprocesses, so nothing is ever left unconfirmed.
+        Tests that want the unconfirmed path override this attribute explicitly, so
+        the default never hides it."""
+        return []
+
+    async def retire_unconfirmed(self) -> int:
+        return 0
+
     async def reconcile_live_clients(self, is_deleted) -> int:
         return 0  # the fake owns no subprocesses
 

@@ -164,6 +164,28 @@ class _Alerter(Protocol):
     def record_success(self, source_slug: str) -> None: ...
 
 
+def _drain_pass_future(fut, *, pass_name: str, timeout: float) -> None:
+    """Drain a pass tick's future, distinguishing a DELIBERATE retirement from a
+    failure.
+
+    concurrent.futures.CancelledError must be caught BEFORE `except Exception`,
+    because — unlike asyncio.CancelledError — it IS an Exception subclass. Without
+    this, a workspace delete cancelling a live pass is logged as a crashed tick with
+    a full traceback, training operators to ignore the line that matters.
+    """
+    import concurrent.futures
+
+    try:
+        fut.result(timeout=timeout)
+    except concurrent.futures.CancelledError:
+        _logger.info(
+            "%s tick pass retired (workspace deleted)",
+            pass_name,
+            extra={"event": "pass_tick_retired", "pass": pass_name},
+        )
+    except Exception:
+        _logger.exception("%s tick failed", pass_name)
+
 def build_scheduler(
     *,
     session_factory: sessionmaker,
@@ -594,6 +616,45 @@ def build_scheduler(
         coalesce=True,
     )
 
+    # Unconfirmed pass generations. A SIBLING of reconcile_live_clients, not an edit
+    # to it: that sweep covers the interactive registry's adapter, and these one-shot
+    # pass adapters are built per-pass, so nothing else owns them.
+    #
+    # A SYNC closure that dispatches onto app_loop — this is a BackgroundScheduler
+    # running sync callables, so registering an `async def` directly would hand it a
+    # coroutine nobody awaits: green unit test, dead production path.
+    #
+    # NOT gated on drafting_enabled or the Anthropic key: hiding it there would
+    # strand every unconfirmed generation on a deployment with drafting off.
+    def _passes_reconcile_tick() -> None:
+        import asyncio
+
+        from call_manager.proposal_assist.passes import PASS_REGISTRY
+
+        coro = PASS_REGISTRY.reconcile_unconfirmed()
+        if app_loop is None:
+            try:
+                asyncio.run(coro)
+            except Exception:
+                _logger.exception("passes reconcile tick failed")
+            return
+        fut = asyncio.run_coroutine_threadsafe(coro, app_loop)
+        try:
+            n = fut.result(timeout=30)
+        except Exception:
+            _logger.exception("passes reconcile tick failed")
+            return
+        if n:
+            _logger.info("passes reconcile: %d entry(ies)", n)
+
+    sched.add_job(
+        _passes_reconcile_tick,
+        trigger=IntervalTrigger(seconds=settings.passes_reconcile_tick_seconds),
+        id="passes_reconcile_tick",
+        max_instances=1,
+        coalesce=True,
+    )
+
     # Profile bootstrap worker: drains profile_bootstrap_jobs.
     def _profile_bootstrap_tick() -> None:
         from call_manager.profiles.bootstrap_worker import run_profile_bootstrap_tick
@@ -745,10 +806,9 @@ def build_scheduler(
                 _logger.exception("coherence tick failed")
             return
         fut = asyncio.run_coroutine_threadsafe(coro, app_loop)
-        try:
-            fut.result(timeout=settings.coherence_pass_timeout_seconds + 60)
-        except Exception:
-            _logger.exception("coherence tick failed")
+        _drain_pass_future(
+            fut, pass_name="coherence", timeout=settings.coherence_pass_timeout_seconds + 60
+        )
 
     sched.add_job(
         _coherence_tick,
@@ -808,10 +868,9 @@ def build_scheduler(
                 _logger.exception("evaluator tick failed")
             return
         fut = asyncio.run_coroutine_threadsafe(coro, app_loop)
-        try:
-            fut.result(timeout=settings.evaluator_pass_timeout_seconds + 60)
-        except Exception:
-            _logger.exception("evaluator tick failed")
+        _drain_pass_future(
+            fut, pass_name="evaluator", timeout=settings.evaluator_pass_timeout_seconds + 60
+        )
 
     sched.add_job(
         _evaluator_tick,
@@ -859,10 +918,9 @@ def build_scheduler(
                 _logger.exception("review tick failed")
             return
         fut = asyncio.run_coroutine_threadsafe(coro, app_loop)
-        try:
-            fut.result(timeout=settings.review_job_timeout_seconds + 60)
-        except Exception:
-            _logger.exception("review tick failed")
+        _drain_pass_future(
+            fut, pass_name="review", timeout=settings.review_job_timeout_seconds + 60
+        )
 
     sched.add_job(
         _review_tick,
@@ -908,10 +966,11 @@ def build_scheduler(
                 _logger.exception("uncited-claims tick failed")
             return
         fut = asyncio.run_coroutine_threadsafe(coro, app_loop)
-        try:
-            fut.result(timeout=settings.uncited_claims_pass_timeout_seconds + 60)
-        except Exception:
-            _logger.exception("uncited-claims tick failed")
+        _drain_pass_future(
+            fut,
+            pass_name="uncited_claims",
+            timeout=settings.uncited_claims_pass_timeout_seconds + 60,
+        )
 
     sched.add_job(
         _uncited_claims_tick,

@@ -16,12 +16,29 @@ from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from call_manager.db.models import ClaimAnalysisJob
+from call_manager.db.models import ClaimAnalysisJob, Workspace
 from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.row_locks import bounded_lock_waits
 
 MAX_ATTEMPTS = 3
+
+# mark_done's FOR UPDATE re-read runs in an APScheduler worker thread, and
+# PostgreSQL's lock_timeout is 0 (disabled) unless a transaction sets it — see
+# row_locks' module docstring. Unbounded, one stuck holder of the job row parks
+# that worker thread for as long as it holds it.
+#
+# The wait is expected to be ~0: every other writer of a 'running' row takes it
+# with SKIP LOCKED (claim_queued_jobs, requeue_stuck_running, and the jobs
+# retirement hook's cancel), so this bounds the UNEXPECTED — a holder outside
+# that set, or one added later — rather than the normal case.
+#
+# 2 seconds, the same value and the same reasoning as
+# row_locks.PASS_PREFIX_LOCK_TIMEOUT_SECONDS: giving up is cheap on this path
+# (drain_analysis_queue rolls the per-job transaction back and mark_failed
+# requeues the job for another attempt), and waiting is not.
+MARK_DONE_LOCK_TIMEOUT_SECONDS = 2
 
 logger = logging.getLogger(__name__)
 
@@ -171,9 +188,16 @@ def claim_queued_jobs(session: Session, *, limit: int = 5) -> list[ClaimAnalysis
     share queued_at (transaction-scoped now()), so id keeps the order
     deterministic.
     """
+    # Refuse to claim work for a deleted workspace — durable in SQL, so it survives
+    # restart, exactly like the four pass claim queries. WHERE ... IN (subquery) is
+    # not a join, so FOR UPDATE still locks only claim_analysis_jobs rows.
+    live_ws = select(Workspace.id).where(Workspace.soft_deleted_at.is_(None))
     rows = (
         session.query(ClaimAnalysisJob)
-        .filter(ClaimAnalysisJob.status == "queued")
+        .filter(
+            ClaimAnalysisJob.status == "queued",
+            ClaimAnalysisJob.workspace_id.in_(live_ws),
+        )
         .order_by(ClaimAnalysisJob.queued_at, ClaimAnalysisJob.id)
         .limit(limit)
         .with_for_update(skip_locked=True)
@@ -206,6 +230,46 @@ def touch_running_job(session: Session, job_id: int) -> None:
 
 
 def mark_done(session: Session, job: ClaimAnalysisJob) -> None:
+    """Terminalize a job as 'done' — but ONLY if the row is still 'running'.
+
+    FOR UPDATE re-read rather than a bare attribute write, because this is not the
+    only writer of the row. The "jobs" retirement hook terminalizes a deleted
+    workspace's claim-analysis rows to
+    status='failed'/last_error='cancelled: workspace deleted' in its own
+    transaction (jobs_retirement.py), and it SKIP LOCKEDs past only the rows a
+    worker is actually holding. A worker whose per-job session happens to hold no
+    lock on this row — every sentence a cache hit, so touch_running_job never ran —
+    would otherwise flush 'done' over the hook's 'failed' while leaving the
+    cancellation message behind: a lost update, and an incoherent row that reads
+    done-with-a-cancellation-error.
+
+    Same guard, same reason, as the four LLM pass runners
+    (coherence/pass_runner.py:142 "we must not resurrect it"). Returning without
+    writing is correct here: the row is already terminal, so there is nothing left
+    to finalize.
+
+    BOUNDED (MARK_DONE_LOCK_TIMEOUT_SECONDS): raises RowLockTimeout rather than
+    blocking a worker thread indefinitely on a lock nothing else bounds. The
+    caller's generic handler rolls the per-job transaction back and requeues.
+
+    Declining is NOT silent: the caller reads `job.status` to account for the
+    outcome, so the stale in-memory 'running' is expired and re-read from the row
+    this just locked. Left stale, a job terminalized under us is counted in no
+    bucket at all while its annotation writes still commit.
+    """
+    with bounded_lock_waits(
+        session,
+        timeout_seconds=MARK_DONE_LOCK_TIMEOUT_SECONDS,
+        message="timed out waiting for the claim-analysis job row",
+    ):
+        live = session.scalar(
+            select(ClaimAnalysisJob.status).where(ClaimAnalysisJob.id == job.id).with_for_update()
+        )
+    if live != "running":
+        # expire, not assignment: assigning would dirty the attribute and flush a
+        # redundant UPDATE writing back the value we just read.
+        session.expire(job, ["status"])
+        return
     job.status = "done"
     # Clear any error left over from earlier failed attempts — stale errors
     # mislead admin views.
@@ -226,6 +290,28 @@ def mark_failed(session: Session, job: ClaimAnalysisJob, *, error: str) -> None:
     job.last_error = error[:2000]
     job.updated_at = datetime.now(UTC)
     if job.attempts >= MAX_ATTEMPTS:
+        job.status = "failed"
+        return
+
+    # A job whose workspace was deleted must NEVER return to 'queued': the claim
+    # query filters deleted workspaces out, so a requeue strands it non-terminal
+    # forever.
+    #
+    # LOCK ORDER: workspaces < claim_analysis_jobs (normative).
+    #
+    # FOR UPDATE, not a plain SELECT: a bare read is not a linearization point. It
+    # can see 'live' while a DELETE commits moments later — the jobs hook then SKIP
+    # LOCKEDs past this row because we hold it, and we commit the job back to
+    # 'queued'. no_autoflush because `job` is already dirty here: an autoflush
+    # would emit the job UPDATE first, taking the job row BEFORE the workspace row
+    # and inverting the very order this block establishes.
+    with session.no_autoflush:
+        deleted = session.scalar(
+            select(Workspace.soft_deleted_at)
+            .where(Workspace.id == job.workspace_id)
+            .with_for_update()
+        )
+    if deleted is not None:
         job.status = "failed"
         return
     # READ COMMITTED snapshot: a concurrent enqueue can commit between this
