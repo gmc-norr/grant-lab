@@ -46,10 +46,16 @@ async def run_coherence_pass(
         job = s.get(CoherenceJob, job_id)
         if job is None or job.status != "running":
             return
-        ws = s.get(Workspace, job.workspace_id)
+        # Workspace ROW LOCK held through this session's commit. It linearizes the
+        # prefix against a concurrent delete: the delete takes the same row to stamp
+        # soft_deleted_at, so either we commit and it waits briefly, or it wins and
+        # we abort having written nothing. Safe ONLY because this session is short.
+        ws = s.get(Workspace, job.workspace_id, with_for_update=True)
+        if ws is None or ws.soft_deleted_at is not None:
+            return
         workspace_id = job.workspace_id
         requested_by = job.requested_by
-        locked = ws is not None and ws.spec_locked_at is not None
+        locked = ws.spec_locked_at is not None
         if coherence_cap_exceeded(s, workspace_id=workspace_id, settings=settings):
             _fail(s, job, "daily coherence budget reached")
             s.commit()
