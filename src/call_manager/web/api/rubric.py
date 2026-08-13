@@ -3,10 +3,6 @@
 GET rubric / activate / PUT rubric are OWNER-gated; GET setup-status is member-
 gated (last_error owner-only). Replaces the Jinja rubric-review + setup-status
 routes (deleted in this slice). No DB schema change.
-
-# NOTE: Task 2 appends the write endpoints (activate, PUT rubric) + _apply_rubric
-# and EXTENDS the imports below (HTTPException, WorkspaceEvent, datetime/UTC).
-# They are intentionally absent here so Task 1's `ruff check` stays F401-clean.
 """
 
 from __future__ import annotations
@@ -21,6 +17,11 @@ from sqlalchemy import select
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import User, WorkspaceEvent, WorkspaceSetupJob
 from call_manager.proposal_assist.collab.permissions import signal_from_request
+from call_manager.proposal_assist.drafting.locking import (
+    BUSY_ERROR_MESSAGE,
+    CommitMutexTimeout,
+    acquire_commit_mutex_live,
+)
 from call_manager.proposal_assist.web._perms import require_member, require_owner
 
 router = APIRouter()
@@ -152,9 +153,23 @@ def update_rubric(
     request: Request,
     user: User = Depends(get_current_user),  # noqa: B008
 ) -> RubricOut:
-    criteria = _validate_criteria(body.criteria)
     with request.app.state.session_factory() as session:
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        # Semantic validation runs AFTER require_owner. On master it ran before
+        # the session opened, so a non-owner posting a malformed rubric got 400 —
+        # telling someone with no access that their body shape was wrong.
+        # Authorization decides first. It stays BEFORE the mutex because it takes
+        # no lock: a malformed body must not queue behind the commit mutex.
+        criteria = _validate_criteria(body.criteria)
+        # Slice C2 lock-order rule: the live mutex immediately after
+        # require_owner and its lock-free validation, before any other lock.
+        # WorkspaceDeleted -> main.py -> 404.
+        try:
+            acquire_commit_mutex_live(session, ws.id)
+        except CommitMutexTimeout as e:
+            raise HTTPException(
+                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
+            ) from e
         _apply_rubric(session, ws, user, criteria, body.funder_notes or "")
         session.commit()
         return _rubric_out(ws)

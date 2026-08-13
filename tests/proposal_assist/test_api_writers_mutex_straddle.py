@@ -350,3 +350,56 @@ def test_remove_member_returns_429_when_the_commit_mutex_is_wedged(
             s.query(WorkspaceViewer).filter_by(workspace_id=ws_id, user_id=target_id).first()
             is not None
         )
+
+
+_RUBRIC_BODY = {
+    "criteria": [
+        {"name": "Impact", "description": "how much it matters", "weight": 1.0, "scale_max": 5}
+    ],
+    "funder_notes": "edited by a blocked writer",
+}
+
+
+def test_update_rubric_straddled_by_a_delete_returns_404_and_writes_nothing(
+    client_authed_owner, current_user, pg_session_factory
+):
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        ws.rubric_funder_notes = "original notes"
+        s.commit()
+        ws_id = ws.id
+
+    resp = straddle_delete(
+        pg_session_factory,
+        ws_id,
+        lambda: client_authed_owner.put(f"/api/workspaces/{ws_id}/rubric", json=_RUBRIC_BODY),
+    )
+
+    assert resp.status_code == 404, f"expected 404, got {resp.status_code}: {resp.text}"
+    with pg_session_factory() as s:
+        assert s.get(Workspace, ws_id).rubric_funder_notes == "original notes"
+
+
+def test_update_rubric_returns_429_when_the_commit_mutex_is_wedged(
+    client_authed_owner, current_user, pg_session_factory, monkeypatch
+):
+    import call_manager.web.api.rubric as rubric_api
+
+    patch_route_mutex_timeout(monkeypatch, rubric_api, seconds=1)
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        ws.rubric_funder_notes = "original notes"
+        s.commit()
+        ws_id = ws.id
+
+    resp = wedge_mutex(
+        pg_session_factory,
+        ws_id,
+        lambda: client_authed_owner.put(f"/api/workspaces/{ws_id}/rubric", json=_RUBRIC_BODY),
+    )
+
+    assert resp.status_code == 429, f"expected 429, got {resp.status_code}: {resp.text}"
+    assert resp.headers.get("Retry-After") == "2"
+    with pg_session_factory() as s:
+        assert s.get(Workspace, ws_id).rubric_funder_notes == "original notes"
