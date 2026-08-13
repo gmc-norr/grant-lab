@@ -75,3 +75,45 @@ def test_every_pass_tick_drains_through_the_shared_helper(pass_name):
     assert "fut.result(" not in body, (
         f"_{pass_name}_tick drains its future inline instead of via the helper"
     )
+
+
+def test_the_passes_reconcile_tick_is_a_sync_callable_not_a_coroutine_function():
+    """This is a BackgroundScheduler running SYNC callables. Registering an
+    `async def` directly hands it a coroutine nobody awaits — the unit test would
+    pass while production reconciliation never runs.
+
+    Mutation: register PASS_REGISTRY.reconcile_unconfirmed directly and this fails.
+    """
+    import asyncio
+    import inspect
+
+    src = inspect.getsource(scheduler_module)
+    start = src.index('        id="passes_reconcile_tick"')
+    reg = src[src.rindex("sched.add_job(", 0, start) : start]
+    func_name = reg.split("sched.add_job(")[1].strip().split(",")[0].strip()
+
+    assert func_name == "_passes_reconcile_tick", (
+        f"the passes reconcile job is registered as {func_name!r}"
+    )
+
+    body_start = src.index(f"def {func_name}(")
+    body = src[body_start : src.index("sched.add_job(", body_start)]
+    assert not body.lstrip().startswith("async def"), "registered an async def"
+    assert "run_coroutine_threadsafe" in body, (
+        "the tick does not dispatch its coroutine onto app_loop"
+    )
+    assert not asyncio.iscoroutinefunction(
+        getattr(scheduler_module, func_name, lambda: None)
+    )
+
+
+def test_the_passes_reconcile_tick_is_not_gated_on_drafting():
+    """Hiding reconciliation behind drafting_enabled would strand every unconfirmed
+    generation on a deployment with drafting off."""
+    import inspect
+
+    src = inspect.getsource(scheduler_module)
+    start = src.index("def _passes_reconcile_tick(")
+    body = src[start : src.index("sched.add_job(", start)]
+    assert "drafting_enabled" not in body
+    assert "anthropic_api_key" not in body

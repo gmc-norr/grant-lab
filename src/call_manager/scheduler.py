@@ -616,6 +616,45 @@ def build_scheduler(
         coalesce=True,
     )
 
+    # Unconfirmed pass generations. A SIBLING of reconcile_live_clients, not an edit
+    # to it: that sweep covers the interactive registry's adapter, and these one-shot
+    # pass adapters are built per-pass, so nothing else owns them.
+    #
+    # A SYNC closure that dispatches onto app_loop — this is a BackgroundScheduler
+    # running sync callables, so registering an `async def` directly would hand it a
+    # coroutine nobody awaits: green unit test, dead production path.
+    #
+    # NOT gated on drafting_enabled or the Anthropic key: hiding it there would
+    # strand every unconfirmed generation on a deployment with drafting off.
+    def _passes_reconcile_tick() -> None:
+        import asyncio
+
+        from call_manager.proposal_assist.passes import PASS_REGISTRY
+
+        coro = PASS_REGISTRY.reconcile_unconfirmed()
+        if app_loop is None:
+            try:
+                asyncio.run(coro)
+            except Exception:
+                _logger.exception("passes reconcile tick failed")
+            return
+        fut = asyncio.run_coroutine_threadsafe(coro, app_loop)
+        try:
+            n = fut.result(timeout=30)
+        except Exception:
+            _logger.exception("passes reconcile tick failed")
+            return
+        if n:
+            _logger.info("passes reconcile: %d entry(ies)", n)
+
+    sched.add_job(
+        _passes_reconcile_tick,
+        trigger=IntervalTrigger(seconds=settings.passes_reconcile_tick_seconds),
+        id="passes_reconcile_tick",
+        max_instances=1,
+        coalesce=True,
+    )
+
     # Profile bootstrap worker: drains profile_bootstrap_jobs.
     def _profile_bootstrap_tick() -> None:
         from call_manager.profiles.bootstrap_worker import run_profile_bootstrap_tick
