@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import threading
-import uuid
 import time
+import uuid
 from datetime import UTC, datetime
 
 import pytest

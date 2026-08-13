@@ -92,7 +92,14 @@ async def test_hooks_run_concurrently_and_in_isolation():
         a_can_finish.set()          # release hook_a → concurrency
         raise ValueError("boom")    # isolation: must NOT stop hook_a
 
-    coord = WorkspaceRetirement(hooks={"turns": hook_a, "collab": hook_b, "jobs": _noop_hook(), "passes": _noop_hook()})
+    coord = WorkspaceRetirement(
+        hooks={
+            "turns": hook_a,
+            "collab": hook_b,
+            "jobs": _noop_hook(),
+            "passes": _noop_hook(),
+        }
+    )
     await coord.retire(uuid.uuid4())   # must NOT raise despite hook_b
 
     assert "a-done" in order            # hook_a completed even though hook_b raised
@@ -247,7 +254,7 @@ def test_the_barrier_exceeds_every_hooks_own_worst_case_including_passes():
     reap = sig.parameters["reap_deadline_seconds"].default
 
     # The passes bound must clear the adapter's own internal worst case...
-    assert _PASS_RETIRE_SECONDS > disconnect + reap
+    assert disconnect + reap < _PASS_RETIRE_SECONDS
     # ...and every hook must fit under the barrier. Hooks run CONCURRENTLY, so the
     # budget is the max, not the sum.
     worst = max(3.0, disconnect + reap, _PASS_RETIRE_SECONDS, _JOBS_CANCEL_SECONDS)
