@@ -10,6 +10,7 @@ import hashlib
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import select
@@ -21,6 +22,7 @@ from call_manager.db.models import (
     Reference,
     ReferenceChunk,
     UserClaimAnnotation,
+    Workspace,
 )
 from call_manager.proposal_assist.analysis.queue import (
     claim_queued_jobs,
@@ -30,7 +32,10 @@ from call_manager.proposal_assist.analysis.queue import (
     requeue_stuck_running,
     touch_running_job,
 )
-from call_manager.proposal_assist.citations.audit import validate_citations_semantic
+from call_manager.proposal_assist.citations.audit import (
+    ClaimAnalysisAborted,
+    validate_citations_semantic,
+)
 from call_manager.proposal_assist.citations.claims import iter_proposal_sentences
 from call_manager.proposal_assist.citations.ledger import load_ledger
 from call_manager.proposal_assist.citations.markers import find_markers
@@ -332,6 +337,7 @@ def analyze_job(
     citation_service,
     embedder,
     workspaces_dir,
+    should_abort=None,
 ) -> None:
     repo = workspace_repo_dir(workspaces_dir, job.workspace_id)
     doc = _read_optional(repo / "proposal.md")
@@ -376,6 +382,7 @@ def analyze_job(
         # validate_citations_semantic.
         touch_running_job(session, job.id)
         semantic_issues = validate_citations_semantic(
+            should_abort=should_abort,
             proposal_text=doc,
             ledger=scoped_ledger,
             session=session,
@@ -560,6 +567,17 @@ def drain_analysis_queue(
             job = s.get(ClaimAnalysisJob, jid)
             if job is None:
                 continue
+            def _should_abort(wid=job.workspace_id) -> bool:
+                # A SHORT INDEPENDENT session — never the worker's per-job session,
+                # whose row lock is held for the whole transaction.
+                with session_factory() as probe:
+                    return (
+                        probe.scalar(
+                            select(Workspace.soft_deleted_at).where(Workspace.id == wid)
+                        )
+                        is not None
+                    )
+
             try:
                 analyze_job(
                     job,
@@ -568,6 +586,7 @@ def drain_analysis_queue(
                     citation_service=citation_service,
                     embedder=embedder,
                     workspaces_dir=workspaces_dir,
+                    should_abort=_should_abort,
                 )
                 status = job.status
                 s.commit()
@@ -575,6 +594,22 @@ def drain_analysis_queue(
                     counts["done"] += 1
                 elif status == "superseded":
                     counts["superseded"] += 1
+            except ClaimAnalysisAborted:
+                # Discard EVERY partial write from this job, then terminalize. Not
+                # routed through mark_failed: this is not a retryable failure and the
+                # job must never return to 'queued'.
+                s.rollback()
+                logger.info(
+                    "claim-analysis job %s aborted: workspace deleted mid-audit", jid
+                )
+                with session_factory() as s2:
+                    job2 = s2.get(ClaimAnalysisJob, jid)
+                    if job2 is not None:
+                        job2.status = "failed"
+                        job2.last_error = "cancelled: workspace deleted"
+                        job2.updated_at = datetime.now(UTC)
+                        s2.commit()
+                counts["failed"] += 1
             except Exception as exc:
                 s.rollback()
                 logger.exception("claim-analysis job %s failed", jid)

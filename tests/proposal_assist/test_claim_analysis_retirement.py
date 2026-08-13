@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import uuid
 import time
 from datetime import UTC, datetime
 
+import pytest
 from sqlalchemy import text
 
 from call_manager.db.models import ClaimAnalysisJob, Workspace
@@ -281,3 +283,87 @@ def test_reconcile_terminalizes_a_claim_row_on_a_workspace_with_no_setup_jobs(
 
     with pg_session_factory() as s:
         assert s.get(ClaimAnalysisJob, job_id).status == "failed"
+
+
+def test_the_abort_callback_is_checked_PER_ROW_not_once_per_job(pg_session_factory):
+    """One check per job is NOT 'bounded by one LLM call': the audit judges each
+    evidence row, so a 40-row job would spend 40 calls after the delete.
+
+    The check sits at the TOP of the per-row loop, before the row-shape filters, so
+    it fires for every row regardless of judgeability. should_abort here returns
+    False twice then True: with the check inside the loop it raises on the third
+    row; with it hoisted out of the loop it would be consulted ONCE, return False,
+    and never raise.
+
+    Mutation: move the check above `for row in evidence:` and this fails.
+    """
+    from call_manager.proposal_assist.citations.audit import (
+        ClaimAnalysisAborted,
+        validate_citations_semantic,
+    )
+
+    calls = {"n": 0}
+
+    def _should_abort() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 2
+
+    ledger = {"evidence": [{"id": f"ev{i}"} for i in range(5)]}
+
+    with pytest.raises(ClaimAnalysisAborted):
+        validate_citations_semantic(
+            proposal_text="",
+            ledger=ledger,
+            session=None,
+            session_factory=pg_session_factory,
+            workspace_id=uuid.uuid4(),
+            citation_service=None,
+            deterministic_issues=[],
+            should_abort=_should_abort,
+        )
+
+    assert calls["n"] == 3, (
+        f"should_abort was consulted {calls['n']} time(s) — it is not inside the "
+        "per-row loop"
+    )
+
+
+def test_an_aborted_job_is_terminalized_and_never_marked_done(
+    pg_session_factory, current_user, monkeypatch
+):
+    """The bug a `break` would have shipped: partial results, job marked done.
+
+    Drives the REAL drain loop with analyze_job raising the abort, so the handler
+    under test is production's.
+
+    Mutation: delete the `except ClaimAnalysisAborted` branch — the generic handler
+    then routes through mark_failed and (attempts < MAX) requeues it to 'queued'.
+    """
+    from call_manager.proposal_assist.analysis import pipeline as pl
+    from call_manager.proposal_assist.citations.audit import ClaimAnalysisAborted
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        job = _job(ws.id, section_sha="a", status="queued", attempts=0)
+        s.add(job)
+        s.commit()
+        job_id = job.id
+
+    def _boom(*args, **kwargs):
+        raise ClaimAnalysisAborted("workspace deleted mid-audit")
+
+    monkeypatch.setattr(pl, "analyze_job", _boom)
+
+    counts = pl.drain_analysis_queue(
+        session_factory=pg_session_factory,
+        citation_service=None,
+        embedder=None,
+        workspaces_dir="/tmp",
+    )
+
+    assert counts["failed"] == 1
+    with pg_session_factory() as s:
+        job = s.get(ClaimAnalysisJob, job_id)
+        assert job.status == "failed", f"aborted job ended as {job.status!r}"
+        assert job.last_error == "cancelled: workspace deleted"

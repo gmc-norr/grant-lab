@@ -542,6 +542,15 @@ _VERDICT_ISSUE = {
 }
 
 
+class ClaimAnalysisAborted(Exception):
+    """The workspace was deleted mid-audit.
+
+    Raised rather than returning partial results: analyze_job ends with an
+    UNCONDITIONAL mark_done, so a partial return would mark the job DONE on partial
+    data — a worse outcome than not aborting at all.
+    """
+
+
 def validate_citations_semantic(
     *,
     proposal_text: str,
@@ -552,6 +561,7 @@ def validate_citations_semantic(
     citation_service,
     deterministic_issues: list[dict],
     validator_version: str = VALIDATOR_VERSION,
+    should_abort=None,
 ) -> list[dict]:
     """LLM-judge each live, judgeable citation; cache verdicts by content.
 
@@ -582,6 +592,14 @@ def validate_citations_semantic(
 
     evidence = (ledger or {}).get("evidence") or []
     for row in evidence:
+        # Cooperative abort: claim-analysis is sync code in a thread pool with no
+        # cancellation primitive, so this callback is the ONLY thing that stops the
+        # remaining per-row LLM calls. Checked per ROW, not per job — one check per
+        # job would still spend 40 calls on a 40-row job after the delete.
+        if should_abort is not None and should_abort():
+            raise ClaimAnalysisAborted(
+                f"workspace {workspace_id} deleted during the semantic citation audit"
+            )
         if not isinstance(row, dict) or not row.get("id"):
             continue
         ev_id = row["id"]
