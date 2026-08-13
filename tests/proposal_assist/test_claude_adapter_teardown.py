@@ -174,3 +174,38 @@ async def test_reconcile_does_not_spawn_duplicate_teardowns(tmp_path):
 
     assert first is second  # one tracked task per record, reused
     first.cancel()
+
+
+# --- Slice C1 spike: the protocol PASS_REGISTRY depends on -------------------
+
+
+def test_unconfirmed_launch_ids_reports_the_real_inventory(tmp_path):
+    """'Still in the inventory' IS 'not confirmed dead' — confirm_dead pops the
+    record (live_clients.py:64), there is no flag to read.
+
+    PASS_REGISTRY calls this on the real adapter, so without a test here, deleting
+    the method would break production silently.
+    """
+    adapter = _adapter(tmp_path)
+    ws, launch_id, _ = _handle(adapter, _CleanClient())
+
+    assert launch_id in adapter.unconfirmed_launch_ids()
+
+    adapter._live.confirm_dead(launch_id)
+    assert adapter.unconfirmed_launch_ids() == []
+
+
+@pytest.mark.asyncio
+async def test_retire_unconfirmed_tears_down_every_open_generation(tmp_path):
+    """The reconciliation retry path, and the one retirement uses when no handle
+    was ever returned (cancellation during launch)."""
+    adapter = _adapter(tmp_path)
+    clients = [_CleanClient(), _CleanClient()]
+    for c in clients:
+        adapter._live.register(uuid.uuid4(), c)
+
+    n = await adapter.retire_unconfirmed()
+
+    assert n == 2
+    assert all(c.disconnected for c in clients)
+    assert adapter.unconfirmed_launch_ids() == []

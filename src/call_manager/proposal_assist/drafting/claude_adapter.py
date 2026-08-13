@@ -655,6 +655,27 @@ class ClaudeAgentSDKAdapter:
         ceiling by SubprocessRegistry."""
         return self._live.retiring_count()
 
+    def unconfirmed_launch_ids(self) -> list[uuid.UUID]:
+        """Every generation still in the inventory — i.e. death NOT confirmed.
+
+        confirm_dead POPS the record (live_clients.py:64), so presence is the
+        question and absence is the answer. Covers the generation registered before
+        connect() for which no handle was ever returned.
+        """
+        return [r.launch_id for r in self._live.records()]
+
+    async def retire_unconfirmed(self) -> int:
+        """Retry teardown for every generation still in the inventory.
+
+        Routes through _retire_generation, which is shared by retirement, capacity
+        eviction, idle sweep and reconciliation — so a concurrent caller JOINS the
+        single teardown task rather than spawning a second kill.
+        """
+        ids = self.unconfirmed_launch_ids()
+        for launch_id in ids:
+            await self._retire_generation(launch_id)
+        return len(ids)
+
     async def reconcile_live_clients(self, is_deleted) -> int:
         """Ensure a teardown is running for (a) every RETIRING generation — whose
         workspace may well be LIVE (capacity-eviction / idle-sweep orphans) — and
