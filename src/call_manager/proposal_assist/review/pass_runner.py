@@ -47,6 +47,7 @@ from call_manager.proposal_assist.review.personas import (
     REVIEW_KINDS,
     WAVE1_KINDS,
 )
+from call_manager.proposal_assist.row_locks import bounded_prefix_lock_waits
 
 logger = logging.getLogger(__name__)
 
@@ -218,7 +219,13 @@ async def run_review_pass(
     async with PASS_REGISTRY.track(tracked_ws):
         # 1. Short read session: guard running, pre-create the 6 items FIRST, pin context,
         #    set draft_sha, re-check caps.
-        with session_factory() as s:
+        # bounded_prefix_lock_waits wraps the WHOLE prefix transaction, commit included:
+        # the workspace row is held from the acquisition below until COMMIT, across
+        # context assembly's filesystem reads and the item-row INSERTs. Without the bound
+        # a stalled prefix pins the row against the owner's DELETE — which, past the
+        # commit mutex, waits with lock_timeout back at DEFAULT — for as long as the
+        # stall lasts. See proposal_assist/row_locks.py.
+        with session_factory() as s, bounded_prefix_lock_waits(s):
             run = s.get(ReviewRun, run_id)
             if run is None or run.status != "running":
                 return

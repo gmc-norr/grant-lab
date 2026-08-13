@@ -33,8 +33,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
-from sqlalchemy import select, text, update
-from sqlalchemy.exc import OperationalError
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from call_manager.db.models import (
@@ -60,6 +59,7 @@ from call_manager.proposal_assist.extractors.refresh import (
 )
 from call_manager.proposal_assist.extractors.sections import SECTION_NAMES
 from call_manager.proposal_assist.hashing import source_text_hash
+from call_manager.proposal_assist.row_locks import RowLockTimeout, bounded_lock_waits
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,7 @@ class WorkspaceGoneDuringSetup(RuntimeError):
     status rather than a requeue; see _fail's docstring."""
 
 
-class SetupRowLockTimeout(RuntimeError):
+class SetupRowLockTimeout(RowLockTimeout):
     """A persist transaction's SET LOCAL lock_timeout fired while waiting on a
     lock — the Call row an ingestion batch upsert holds for its whole loop
     (src/call_manager/ingestion/orchestrator.py), a cache row the persist DELETE
@@ -141,6 +141,12 @@ def _bounded_lock_waits(session: Session) -> Iterator[None]:
     """SET LOCAL lock_timeout over an ENTIRE persist transaction — every lock
     wait inside it, not just the `with_for_update` acquisitions.
 
+    The mechanism lives in proposal_assist/row_locks.py (shared with the four
+    pass prefixes, which need the identical bound for the identical reason); this
+    wrapper only binds Phase-0's own timeout and typed exception. It reads
+    _ROW_LOCK_TIMEOUT_SECONDS as a module global at call time, so a test can
+    shorten it with monkeypatch.
+
     Borrows acquire_commit_mutex's idiom (drafting/locking.py) for the SET LOCAL
     and the 55P03 (lock_not_available) → typed-exception translation, but
     deliberately NOT its restore-to-DEFAULT on the success path. That mutex
@@ -156,18 +162,16 @@ def _bounded_lock_waits(session: Session) -> Iterator[None]:
     caller's commit (or the rollback on `with self.session_factory()` exit, or
     the implicit abort a timeout causes) clears it either way.
     """
-    timeout_ms = int(_ROW_LOCK_TIMEOUT_SECONDS * 1000)
-    session.execute(text(f"SET LOCAL lock_timeout = '{timeout_ms}ms'"))
-    try:
+    with bounded_lock_waits(
+        session,
+        timeout_seconds=_ROW_LOCK_TIMEOUT_SECONDS,
+        error=SetupRowLockTimeout,
+        message=(
+            "timed out waiting for a row lock — likely the Call row, held "
+            "by a concurrent ingestion batch or another Phase-0 worker"
+        ),
+    ):
         yield
-    except OperationalError as exc:
-        sqlstate = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
-        if sqlstate == "55P03":
-            raise SetupRowLockTimeout(
-                "timed out waiting for a row lock — likely the Call row, held "
-                "by a concurrent ingestion batch or another Phase-0 worker"
-            ) from exc
-        raise
 
 
 def _git_env() -> dict[str, str]:

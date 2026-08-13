@@ -20,6 +20,7 @@ from call_manager.config import Settings
 from call_manager.db.models import UncitedClaimsJob, Workspace
 from call_manager.proposal_assist.drafting.contract import LaunchContext, TurnDoneEvent
 from call_manager.proposal_assist.passes import PASS_REGISTRY
+from call_manager.proposal_assist.row_locks import bounded_prefix_lock_waits
 from call_manager.proposal_assist.uncited_claims.agent import build_uncited_claims_adapter
 from call_manager.proposal_assist.uncited_claims.context import assemble_uncited_claims_context
 from call_manager.proposal_assist.uncited_claims.jobs import (
@@ -87,7 +88,13 @@ async def run_uncited_claims_pass(
         tracked_ws = job0.workspace_id
 
     async with PASS_REGISTRY.track(tracked_ws) as _entry:
-        with session_factory() as s:
+        # bounded_prefix_lock_waits wraps the WHOLE prefix transaction, commit
+        # included: the workspace row is held from the acquisition below until COMMIT,
+        # across context assembly's filesystem reads and the job-row UPDATE. Without
+        # the bound a stalled prefix pins the row against the owner's DELETE — which,
+        # past the commit mutex, waits with lock_timeout back at DEFAULT — for as long
+        # as the stall lasts. See proposal_assist/row_locks.py.
+        with session_factory() as s, bounded_prefix_lock_waits(s):
             job = s.get(UncitedClaimsJob, job_id)
             if job is None or job.status != "running":
                 return

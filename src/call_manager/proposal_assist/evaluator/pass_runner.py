@@ -23,6 +23,7 @@ from call_manager.proposal_assist.evaluator.jobs import (
     evaluator_cap_exceeded,
 )
 from call_manager.proposal_assist.passes import PASS_REGISTRY
+from call_manager.proposal_assist.row_locks import bounded_prefix_lock_waits
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +60,13 @@ async def run_evaluator_pass(
         tracked_ws = job0.workspace_id
 
     async with PASS_REGISTRY.track(tracked_ws) as _entry:
-        with session_factory() as s:
+        # bounded_prefix_lock_waits wraps the WHOLE prefix transaction, commit
+        # included: the workspace row is held from the acquisition below until COMMIT,
+        # across context assembly's filesystem reads and the job-row UPDATE. Without
+        # the bound a stalled prefix pins the row against the owner's DELETE — which,
+        # past the commit mutex, waits with lock_timeout back at DEFAULT — for as long
+        # as the stall lasts. See proposal_assist/row_locks.py.
+        with session_factory() as s, bounded_prefix_lock_waits(s):
             job = s.get(EvaluatorJob, job_id)
             if job is None or job.status != "running":
                 return
