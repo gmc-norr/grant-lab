@@ -8,6 +8,7 @@ import time
 import uuid
 from datetime import UTC, datetime
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
@@ -382,3 +383,48 @@ def test_finalization_takes_the_run_row_before_the_item_row(
         "that is the item-then-run order, which inverts against the prefix and "
         "the delete path"
     )
+
+
+@pytest.mark.asyncio
+async def test_every_review_child_is_tracked_as_its_own_entry(
+    pg_session_factory, current_user
+):
+    """Gate 6 — against the REAL _run_one_call.
+
+    An earlier version of this test used hand-rolled coroutines, so deleting the
+    tracking from production review could not have failed it. The peak live count
+    is sampled from inside the real adapter build, which only happens per child.
+
+    Mutation: delete the child's `async with PASS_REGISTRY.track(...)` and this
+    must FAIL.
+    """
+    from call_manager.proposal_assist.passes import PASS_REGISTRY
+    from call_manager.proposal_assist.review.pass_runner import _run_one_call
+
+    run_id, ws_id = _seed_review(pg_session_factory, current_user)
+    peak: list[int] = []
+
+    def _sampling_builder(**kwargs):
+        peak.append(PASS_REGISTRY.live_count(ws_id))
+        return _stub_adapter_builder(**kwargs)
+
+    # Two children on the same workspace, concurrently.
+    async with PASS_REGISTRY.track(ws_id):          # stands in for the parent
+        await asyncio.gather(
+            _run_one_call(
+                kind="fit_check",
+                instruction="x",
+                run_id=run_id,
+                workspace_id=ws_id,
+                session_factory=pg_session_factory,
+                settings=Settings(),
+                adapter_builder=_sampling_builder,
+            ),
+        )
+
+    assert peak, "the adapter was never built — the child did not run"
+    assert max(peak) >= 2, (
+        f"peak live entries was {max(peak)} — the child is not registering its own "
+        "entry (it would be 1: only the parent)"
+    )
+    assert PASS_REGISTRY.live_count(ws_id) == 0

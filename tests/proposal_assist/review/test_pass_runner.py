@@ -36,6 +36,12 @@ def make_fake_builder(outer_session_factory, behavior):
                     s.commit()
                 yield TurnDoneEvent(tokens_in=1000, tokens_out=500, model="claude-opus-4-7")
 
+            def unconfirmed_launch_ids(self):
+                return []
+
+            async def retire_unconfirmed(self) -> int:
+                return 0
+
             async def terminate(self, handle):
                 return None
 
@@ -164,6 +170,12 @@ async def test_subcall_skips_when_run_no_longer_running(review_active_workspace,
             async def send_turn(self, handle, instruction):
                 yield TurnDoneEvent(tokens_in=1, tokens_out=1, model="m")
 
+            def unconfirmed_launch_ids(self):
+                return []
+
+            async def retire_unconfirmed(self) -> int:
+                return 0
+
             async def terminate(self, handle):
                 return None
 
@@ -254,6 +266,12 @@ async def test_reaper_during_subcall_keeps_spend_and_does_not_resurrect(
                     reap_stuck_review_runs(s, timeout_seconds=10)
                     s.commit()
                 yield TurnDoneEvent(tokens_in=1000, tokens_out=500, model="claude-opus-4-7")
+
+            def unconfirmed_launch_ids(self):
+                return []
+
+            async def retire_unconfirmed(self) -> int:
+                return 0
 
             async def terminate(self, handle):
                 return None
