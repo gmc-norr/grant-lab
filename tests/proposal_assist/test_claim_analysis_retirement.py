@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import text
 
-from call_manager.db.models import ClaimAnalysisJob
+from call_manager.db.models import ClaimAnalysisJob, Workspace
 from tests.proposal_assist.conftest import make_workspace
 
 _SHA = "0" * 40
@@ -114,3 +114,82 @@ def test_the_claim_cancel_terminalizes_rows_nobody_holds(pg_session_factory, cur
             job = s.get(ClaimAnalysisJob, jid)
             assert job.status == "failed", f"job {jid} left in {job.status!r}"
             assert job.last_error == "cancelled: workspace deleted"
+
+
+def test_mark_failed_does_not_requeue_a_job_whose_workspace_is_deleted(
+    pg_session_factory, current_user
+):
+    """attempts=1 is deliberately well under MAX_ATTEMPTS so the requeue branch is
+    the one that WOULD run. At the cap this would pass without the fix."""
+    from call_manager.proposal_assist.analysis.queue import mark_failed
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        ws.soft_deleted_at = _now_utc()
+        job = _job(ws.id, section_sha="a", status="running", attempts=1)
+        s.add(job)
+        s.commit()
+        job_id = job.id
+
+    with pg_session_factory() as s:
+        mark_failed(s, s.get(ClaimAnalysisJob, job_id), error="workspace deleted mid-job")
+        s.commit()
+
+    with pg_session_factory() as s:
+        assert s.get(ClaimAnalysisJob, job_id).status == "failed"
+
+
+def test_mark_faileds_workspace_check_is_a_real_linearization_point(
+    pg_session_factory, current_user
+):
+    """The property the pre-set test above CANNOT prove: that the check holds the
+    workspace row while it decides.
+
+    Hold the workspace row from another connection, then run mark_failed in a
+    thread. WITH the FOR UPDATE it blocks (a delete in flight cannot be missed);
+    WITHOUT it, it reads straight through and commits 'queued' — exactly the
+    resurrection window.
+
+    Threaded + lock_timeout so the mutation FAILS rather than hanging.
+    """
+    from call_manager.proposal_assist.analysis.queue import mark_failed
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        job = _job(ws.id, section_sha="a", status="running", attempts=1)
+        s.add(job)
+        s.commit()
+        job_id, ws_id = job.id, ws.id
+
+    finished = threading.Event()
+    err: list[BaseException] = []
+
+    def _mark():
+        try:
+            with pg_session_factory() as s:
+                s.execute(text("SET LOCAL lock_timeout = '4s'"))
+                mark_failed(s, s.get(ClaimAnalysisJob, job_id), error="boom")
+                s.commit()
+        except BaseException as exc:  # noqa: BLE001
+            err.append(exc)
+        finally:
+            finished.set()
+
+    holder = pg_session_factory()
+    t = threading.Thread(target=_mark)
+    try:
+        holder.get(Workspace, ws_id, with_for_update=True)
+        t.start()
+        completed_while_workspace_held = finished.wait(timeout=2.0)
+    finally:
+        holder.rollback()
+        holder.close()
+        t.join(timeout=15)
+
+    assert not completed_while_workspace_held, (
+        "mark_failed decided the job's fate without holding the workspace row — "
+        "a DELETE committing right after its read would be missed"
+    )
+    assert not err, f"mark_failed raised: {err!r}"

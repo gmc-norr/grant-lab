@@ -16,7 +16,7 @@ from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from call_manager.db.models import ClaimAnalysisJob
+from call_manager.db.models import ClaimAnalysisJob, Workspace
 from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
@@ -226,6 +226,28 @@ def mark_failed(session: Session, job: ClaimAnalysisJob, *, error: str) -> None:
     job.last_error = error[:2000]
     job.updated_at = datetime.now(UTC)
     if job.attempts >= MAX_ATTEMPTS:
+        job.status = "failed"
+        return
+
+    # A job whose workspace was deleted must NEVER return to 'queued': the claim
+    # query filters deleted workspaces out, so a requeue strands it non-terminal
+    # forever.
+    #
+    # LOCK ORDER: workspaces < claim_analysis_jobs (normative).
+    #
+    # FOR UPDATE, not a plain SELECT: a bare read is not a linearization point. It
+    # can see 'live' while a DELETE commits moments later — the jobs hook then SKIP
+    # LOCKEDs past this row because we hold it, and we commit the job back to
+    # 'queued'. no_autoflush because `job` is already dirty here: an autoflush
+    # would emit the job UPDATE first, taking the job row BEFORE the workspace row
+    # and inverting the very order this block establishes.
+    with session.no_autoflush:
+        deleted = session.scalar(
+            select(Workspace.soft_deleted_at)
+            .where(Workspace.id == job.workspace_id)
+            .with_for_update()
+        )
+    if deleted is not None:
         job.status = "failed"
         return
     # READ COMMITTED snapshot: a concurrent enqueue can commit between this
