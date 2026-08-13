@@ -21,6 +21,11 @@ from call_manager.proposal_assist.citations.bibliography import (
     CITATION_STYLES as _CITATION_STYLES,
 )
 from call_manager.proposal_assist.collab.permissions import signal_from_request
+from call_manager.proposal_assist.drafting.locking import (
+    BUSY_ERROR_MESSAGE,
+    CommitMutexTimeout,
+    acquire_commit_mutex_live,
+)
 from call_manager.proposal_assist.web._perms import require_owner
 from call_manager.proposal_assist.web.workspace_meta import (
     _MAX_WORKSPACE_TITLE_LEN,
@@ -75,6 +80,11 @@ def update_settings(
 ) -> SettingsOut:
     with request.app.state.session_factory() as session:
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        # Body validation stays AFTER require_owner — hoisting it above would let
+        # a non-owner with a malformed body get 400 instead of 403/404, leaking
+        # that the request shape was wrong to someone with no access. It stays
+        # BEFORE the mutex because it takes no lock: a malformed body must not
+        # queue behind the commit mutex.
         if body.status not in _WORKSPACE_STATUSES:
             raise HTTPException(status_code=400, detail="invalid status")
         if body.citation_style not in _CITATION_STYLES:
@@ -82,9 +92,23 @@ def update_settings(
         title = body.title.strip()
         if not title or len(title) > _MAX_WORKSPACE_TITLE_LEN:
             raise HTTPException(status_code=400, detail="invalid title")
+        deadline = _parse_deadline_form(body.deadline)  # HTTPException(400) on malformed
+        # Slice C2 lock-order rule: the live mutex is taken immediately after
+        # require_owner and its lock-free validation, and before any other lock.
+        # soft_delete_workspace_db holds
+        # this same mutex for its whole transaction, so a deletion committing
+        # while we blocked here is observed the instant we win the lock —
+        # WorkspaceDeleted propagates to main.py's handler (404) and we have
+        # mutated nothing.
+        try:
+            acquire_commit_mutex_live(session, ws.id)
+        except CommitMutexTimeout as e:
+            raise HTTPException(
+                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
+            ) from e
         ws.title = title
         ws.status = body.status
-        ws.deadline = _parse_deadline_form(body.deadline)  # HTTPException(400) on malformed
+        ws.deadline = deadline
         ws.citation_style = body.citation_style
         session.commit()
         return _settings_out(ws)
