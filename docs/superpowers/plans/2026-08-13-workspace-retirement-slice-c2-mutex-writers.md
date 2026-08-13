@@ -325,7 +325,7 @@ def test_update_settings_straddled_by_a_delete_returns_404_and_writes_nothing(
             f"/api/workspaces/{ws_id}/settings",
             json={
                 "title": "edited by a blocked writer",
-                "status": "active",
+                "status": "drafting",
                 "deadline": None,
                 "citation_style": "vancouver",
             },
@@ -357,7 +357,7 @@ def test_update_settings_returns_429_when_the_commit_mutex_is_wedged(
             f"/api/workspaces/{ws_id}/settings",
             json={
                 "title": "edited under a wedged mutex",
-                "status": "active",
+                "status": "drafting",
                 "deadline": None,
                 "citation_style": "vancouver",
             },
@@ -381,7 +381,7 @@ from call_manager.proposal_assist.citations.bibliography import CITATION_STYLES
 print('statuses:', _WORKSPACE_STATUSES); print('styles:', CITATION_STYLES)"
 ```
 
-If `active` or `vancouver` are not in those sets, substitute real members in every test in this file. If `client_authed_owner` lives in a different conftest than `current_user`, import accordingly.
+`drafting` and `vancouver` are confirmed real members (they are the literals `tests/test_api_settings.py:120` already uses) — the command above is a guard against drift, not an open question. If `client_authed_owner` lives in a different conftest than `current_user`, import accordingly.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -491,12 +491,45 @@ md5sum $F   # back to the original
 
 Expected: with the mutation, **both** `update_settings` gates fail. After restoring, both pass.
 
+- [ ] **Step 5b: Add the authorization-precedence gate**
+
+Moving validation inside the session block changes an observable status code, so pin it. Append to `tests/test_api_settings.py` (which already has `_setup`, `build_app` and `authed_client`):
+
+```python
+def test_settings_patch_authorization_precedes_validation(
+    monkeypatch, pg_url, tmp_path, pg_session_factory
+):
+    """A non-owner sending a MALFORMED body must get 403, not 400.
+
+    Slice C2 moved this route's body validation inside the session block, after
+    require_owner. Validating first would answer someone with no access at all
+    that their body shape was wrong — an authorization decision leaking through
+    a validation error."""
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, _, member_id, _ = _setup(pg_session_factory)
+    r = authed_client(app, user_id=member_id).patch(
+        f"/api/workspaces/{ws_id}/settings",
+        # Invalid on three counts: bad status, bad citation_style, empty title.
+        json={"title": "", "status": "nonsense", "deadline": None, "citation_style": "nope"},
+    )
+    assert r.status_code == 403, (
+        f"expected 403 (authorization decides first), got {r.status_code}: {r.text}"
+    )
+```
+
+Prove it discriminates: hoist the four validation statements back above the `with request.app.state.session_factory()` line (md5 must change), run this test — it must fail with 400 — then restore.
+
+```bash
+cd /home/parlar_ai/dev/call-monitor/.worktrees/c2-mutex-writers
+.venv/bin/python -m pytest tests/test_api_settings.py -q
+```
+
 - [ ] **Step 6: Commit**
 
 ```bash
 cd /home/parlar_ai/dev/call-monitor/.worktrees/c2-mutex-writers
 .venv/bin/ruff check .
-git add tests/proposal_assist/test_api_writers_mutex_straddle.py src/call_manager/web/api/settings.py
+git add tests/proposal_assist/test_api_writers_mutex_straddle.py tests/test_api_settings.py src/call_manager/web/api/settings.py
 git commit -m "feat(api): update_settings under the live commit mutex, with the straddle harness"
 ```
 
@@ -843,11 +876,17 @@ def update_rubric(
     request: Request,
     user: User = Depends(get_current_user),  # noqa: B008
 ) -> RubricOut:
-    criteria = _validate_criteria(body.criteria)
     with request.app.state.session_factory() as session:
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        # Semantic validation runs AFTER require_owner. On master it ran before
+        # the session opened, so a non-owner posting a malformed rubric got 400 —
+        # telling someone with no access that their body shape was wrong.
+        # Authorization decides first. It stays BEFORE the mutex because it takes
+        # no lock: a malformed body must not queue behind the commit mutex.
+        criteria = _validate_criteria(body.criteria)
         # Slice C2 lock-order rule: the live mutex immediately after
-        # require_owner, before any other lock. WorkspaceDeleted -> main.py -> 404.
+        # require_owner and its lock-free validation, before any other lock.
+        # WorkspaceDeleted -> main.py -> 404.
         try:
             acquire_commit_mutex_live(session, ws.id)
         except CommitMutexTimeout as e:
@@ -911,12 +950,35 @@ md5sum $F
 
 Expected: with the mutation, both `update_rubric` gates fail. After restoring, both pass.
 
+- [ ] **Step 5b: Add the authorization-precedence gate**
+
+`update_rubric` called `_validate_criteria` before the session even opened on master, so a non-owner with an invalid rubric got 400. Task 3 moved it after `require_owner`; pin that. Append to `tests/test_api_rubric.py`:
+
+```python
+def test_put_rubric_authorization_precedes_validation(
+    monkeypatch, pg_url, tmp_path, pg_session_factory
+):
+    """A non-owner sending an INVALID rubric must get 403, not 400. Validating
+    first tells someone with no access that their body shape was wrong."""
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, _, member_id, _ = _setup(pg_session_factory, phase="active")
+    r = authed_client(app, user_id=member_id).put(
+        f"/api/workspaces/{ws_id}/rubric",
+        json={"criteria": [], "funder_notes": None},  # empty criteria -> 400 if validated first
+    )
+    assert r.status_code == 403, (
+        f"expected 403 (authorization decides first), got {r.status_code}: {r.text}"
+    )
+```
+
+Prove it discriminates: move `criteria = _validate_criteria(body.criteria)` back above the `with request.app.state.session_factory()` line (md5 must change), run it — must fail with 400 — restore.
+
 - [ ] **Step 6: Commit**
 
 ```bash
 cd /home/parlar_ai/dev/call-monitor/.worktrees/c2-mutex-writers
 .venv/bin/ruff check .
-git add tests/proposal_assist/test_api_writers_mutex_straddle.py src/call_manager/web/api/rubric.py
+git add tests/proposal_assist/test_api_writers_mutex_straddle.py tests/test_api_rubric.py src/call_manager/web/api/rubric.py
 git commit -m "feat(api): update_rubric under the live commit mutex"
 ```
 
@@ -925,8 +987,9 @@ git commit -m "feat(api): update_rubric under the live commit mutex"
 ## Task 4: `activate` and `retry_setup` — mutex BEFORE the setup-job lock
 
 **Files:**
+- Modify: `src/call_manager/proposal_assist/row_locks.py` (add `SETUP_JOB_LOCK_TIMEOUT_SECONDS`)
 - Modify: `src/call_manager/web/api/rubric.py` (`retry_setup` at line 168, `activate` at line 206)
-- Test: `tests/proposal_assist/test_api_writers_mutex_straddle.py`
+- Test: `tests/proposal_assist/test_api_writers_mutex_straddle.py`, `tests/test_api_rubric.py`
 
 **Interfaces:**
 - Consumes: `straddle_delete`, `wedge_mutex`, `patch_route_mutex_timeout`, `_wait_until_blocked` from Task 1; the `locking` imports Task 3 added to `rubric.py`.
@@ -1188,9 +1251,14 @@ def test_retry_setup_gives_up_on_a_held_setup_job_row_instead_of_pinning_the_mut
     the route does not return at all while we hold the row, so a thread that is
     still alive after the join IS the failure. Slice C1 learned that an elapsed-
     time assertion can pass for the opposite reason."""
-    import call_manager.proposal_assist.row_locks as row_locks
+    # Patch the name in the ROUTE module, not in row_locks. rubric.py does
+    # `from ...row_locks import SETUP_JOB_LOCK_TIMEOUT_SECONDS`, which binds the
+    # value into rubric's namespace at import time — patching row_locks would
+    # silently no-op and this test would pass at the production 2s instead of 1s,
+    # proving nothing about the bound.
+    import call_manager.web.api.rubric as rubric_api
 
-    monkeypatch.setattr(row_locks, "SETUP_JOB_LOCK_TIMEOUT_SECONDS", 1)
+    monkeypatch.setattr(rubric_api, "SETUP_JOB_LOCK_TIMEOUT_SECONDS", 1)
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
@@ -1238,7 +1306,89 @@ def test_retry_setup_gives_up_on_a_held_setup_job_row_instead_of_pinning_the_mut
         assert s.get(WorkspaceSetupJob, job_id).status == "failed"
 ```
 
-**Note on the monkeypatch:** `bounded_lock_waits` reads the timeout from its argument, and the route passes `SETUP_JOB_LOCK_TIMEOUT_SECONDS` **by value at call time** — so patching the attribute on `row_locks` only works if `rubric.py` reads it through the module. If you import the constant by name into `rubric.py` (as Step 3 shows), patch `call_manager.web.api.rubric.SETUP_JOB_LOCK_TIMEOUT_SECONDS` instead. Verify which one bites before trusting the test: run it once with the patch pointed at the wrong module and confirm it takes ~2s rather than ~1s.
+**Sanity check on the patch target, once:** run this test with the patch pointed at `row_locks` instead of `rubric_api` and confirm it takes ~2s rather than ~1s. That is the difference between a bound you proved and a bound you assumed. Then put it back.
+
+Then add the same gate for `activate` — the bound is on both routes, so it must be proved on both. Append to the same file:
+
+```python
+def test_activate_gives_up_on_a_held_setup_job_row_instead_of_pinning_the_mutex(
+    client_authed_owner, current_user, pg_session_factory, monkeypatch
+):
+    """activate's half of the bounded setup-row wait. Same hazard, same shape as
+    the retry_setup gate: the route holds the commit mutex across this row wait,
+    so an unbounded wait pins the mutex and a concurrent DELETE 429s behind it
+    after burning its whole budget."""
+    import call_manager.web.api.rubric as rubric_api
+
+    monkeypatch.setattr(rubric_api, "SETUP_JOB_LOCK_TIMEOUT_SECONDS", 1)
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        ws.current_phase = "setup"
+        s.flush()
+        job_id = _setup_job(s, ws.id, "waiting_for_rubric_review")
+        s.commit()
+        ws_id = ws.id
+
+    holding = threading.Event()
+    release = threading.Event()
+    out: dict = {}
+
+    def _row_holder():
+        with pg_session_factory() as s:
+            s.get(WorkspaceSetupJob, job_id, with_for_update=True)
+            holding.set()
+            release.wait(timeout=30)
+            s.rollback()
+
+    def _sender():
+        holding.wait(timeout=10)
+        out["resp"] = client_authed_owner.post(
+            f"/api/workspaces/{ws_id}/activate", json=_RUBRIC_BODY
+        )
+
+    holder = threading.Thread(target=_row_holder)
+    sender = threading.Thread(target=_sender)
+    holder.start()
+    sender.start()
+    try:
+        assert holding.wait(timeout=5), "the holder never took the setup-job row"
+        sender.join(timeout=15)
+        assert not sender.is_alive(), (
+            "activate was still waiting on the setup-job row after 15s while holding "
+            "the commit mutex — the row wait is unbounded"
+        )
+    finally:
+        release.set()
+        holder.join(timeout=30)
+        sender.join(timeout=30)
+
+    assert out["resp"].status_code == 429
+    assert out["resp"].headers.get("Retry-After") == "2"
+    with pg_session_factory() as s:
+        assert s.get(WorkspaceSetupJob, job_id).status == "waiting_for_rubric_review"
+        assert s.get(Workspace, ws_id).current_phase == "setup"
+```
+
+And `activate`'s authorization-precedence gate, in `tests/test_api_rubric.py` alongside Task 3's:
+
+```python
+def test_activate_authorization_precedes_validation(
+    monkeypatch, pg_url, tmp_path, pg_session_factory
+):
+    """A non-owner sending an INVALID rubric to activate must get 403, not 400."""
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, _, member_id, _ = _setup(pg_session_factory, phase="setup")
+    r = authed_client(app, user_id=member_id).post(
+        f"/api/workspaces/{ws_id}/activate",
+        json={"criteria": [], "funder_notes": None},  # empty criteria -> 400 if validated first
+    )
+    assert r.status_code == 403, (
+        f"expected 403 (authorization decides first), got {r.status_code}: {r.text}"
+    )
+```
+
+Check `_setup`'s signature in `tests/test_api_rubric.py` before using `phase="setup"` — Task 3's gate uses `phase="active"`, and the existing `test_activate_member_403` (line ~243) shows which phase activate's tests use. Match it.
 
 **Before running:** confirm `WorkspaceSetupJob` has no other NOT NULL columns without defaults. `ReviewRun.draft_sha` bit Slice C1 exactly this way.
 
@@ -1385,9 +1535,12 @@ def activate(
     request: Request,
     user: User = Depends(get_current_user),  # noqa: B008
 ) -> RubricOut:
-    criteria = _validate_criteria(body.criteria)
     with request.app.state.session_factory() as session:
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        # Semantic validation AFTER require_owner (see update_rubric's note): a
+        # non-owner with a malformed rubric gets 403, not a 400 confirming the
+        # body shape. Before the mutex, because it takes no lock.
+        criteria = _validate_criteria(body.criteria)
         # Slice C2 lock-order rule: the live mutex immediately after require_owner
         # and BEFORE the setup-job row lock below. Taking the job row first would
         # hold it across the whole mutex wait, and the delete's retirement hook
@@ -1444,7 +1597,7 @@ cd /home/parlar_ai/dev/call-monitor/.worktrees/c2-mutex-writers
 .venv/bin/python -m pytest tests/proposal_assist/test_api_writers_mutex_straddle.py tests/test_api_rubric.py -q
 ```
 
-Expected: PASS, all sixteen gates in the straddle file plus every pre-existing test in `tests/test_api_rubric.py`.
+Expected: PASS, all seventeen gates in the straddle file plus every pre-existing test in `tests/test_api_rubric.py`.
 
 - [ ] **Step 5: Prove the gates discriminate — including the lock ORDER**
 
@@ -1456,27 +1609,31 @@ F=src/call_manager/web/api/rubric.py
 cp $F /tmp/rubric4.bak
 md5sum $F
 # MUTATION: in retry_setup, take the setup-job row BEFORE the mutex (the order
-# the spec's rule forbids). The mutex still runs — only the ORDER changes.
+# the rule forbids). The mutex still runs and the bound stays — only the ORDER
+# changes. The two chunks are adjacent, so this swaps them by index rather than
+# by reproducing the long comment block verbatim, which would be fragile.
 .venv/bin/python - <<'PY'
 import pathlib
 p = pathlib.Path("src/call_manager/web/api/rubric.py")
 s = p.read_text()
-mutex = """        try:
+MUTEX = """        try:
             acquire_commit_mutex_live(session, ws.id)
         except CommitMutexTimeout as e:
             raise HTTPException(
                 status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
             ) from e
 """
-joblock = """        job = session.scalar(
-            select(WorkspaceSetupJob)
-            .where(WorkspaceSetupJob.workspace_id == ws.id)
-            .with_for_update()
-        )
-        if job is None or job.status != "failed":"""
-assert mutex + joblock in s, "ANCHOR DID NOT MATCH — fix the anchor before running tests"
-swapped = joblock.replace('        if job is None or job.status != "failed":', "") + mutex + '        if job is None or job.status != "failed":'
-p.write_text(s.replace(mutex + joblock, swapped, 1))
+# retry_setup is the only site where the mutex is followed by this comment.
+HEAD = MUTEX + "        # The job-row wait is BOUNDED."
+TAIL = '        if job is None or job.status != "failed":'
+assert s.count(HEAD) == 1, f"HEAD anchor not unique ({s.count(HEAD)}) — fix before running"
+assert s.count(TAIL) == 1, f"TAIL anchor not unique ({s.count(TAIL)}) — fix before running"
+i = s.index(HEAD)
+mutex_end = i + len(MUTEX)
+job_end = s.index(TAIL, mutex_end)
+job_chunk = s[mutex_end:job_end]          # comments + try/bounded_lock_waits/except
+assert "bounded_lock_waits" in job_chunk, "job chunk did not capture the bound"
+p.write_text(s[:i] + job_chunk + MUTEX + s[job_end:])
 PY
 md5sum $F   # MUST differ. If not, STOP — do not run the tests.
 .venv/bin/python -m pytest tests/proposal_assist/test_api_writers_mutex_straddle.py -q -k "retry_setup"
@@ -1485,9 +1642,9 @@ md5sum $F
 .venv/bin/python -m pytest tests/proposal_assist/test_api_writers_mutex_straddle.py -q
 ```
 
-Expected: with the order swapped, `test_retry_setup_does_not_hold_the_setup_job_row_while_it_waits_for_the_mutex` FAILS with the `cancelled == 1` assertion (it will be 0). The two straddle/wedge gates for `retry_setup` may still pass — that is correct and is the point: they test the mutex's *presence*, this gate tests its *position*. After restoring, all sixteen pass.
+Expected: with the order swapped, `test_retry_setup_does_not_hold_the_setup_job_row_while_it_waits_for_the_mutex` FAILS with the `cancelled == 1` assertion (it will be 0). The two straddle/wedge gates for `retry_setup` may still pass — that is correct and is the point: they test the mutex's *presence*, this gate tests its *position*. After restoring, all seventeen pass.
 
-Then repeat the same swap for `activate` (anchor on `if job is None or job.status != "waiting_for_rubric_review":`) and confirm only `test_activate_does_not_hold_the_setup_job_row_while_it_waits_for_the_mutex` fails. Restore.
+Then repeat the same swap for `activate`, changing two lines of the script: `HEAD = MUTEX + "        # Bounded, for the same reason as retry_setup:"` and `TAIL = '        if job is None or job.status != "waiting_for_rubric_review":'`. Both `count(...) == 1` assertions must still hold. Confirm only `test_activate_does_not_hold_the_setup_job_row_while_it_waits_for_the_mutex` fails. Restore.
 
 Finally, run the **removal** mutation on each of the two routes — and read this warning first.
 
@@ -1528,15 +1685,16 @@ md5sum $F
 
 Expected: `retry_setup`'s straddle and wedge gates fail; `update_rubric`'s and `activate`'s stay green. The `grep -c` is the real guard — it proves you removed exactly one of the three.
 
-Repeat for `activate`, anchoring on its own tail line (`        # Bounded, for the same reason as retry_setup:`), and confirm only `activate`'s two gates fail. Restore, then run the whole file and confirm all sixteen pass.
+Repeat for `activate`, anchoring on its own tail line (`        # Bounded, for the same reason as retry_setup:`), and confirm only `activate`'s two gates fail. Restore, then run the whole file and confirm all seventeen pass.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 cd /home/parlar_ai/dev/call-monitor/.worktrees/c2-mutex-writers
 .venv/bin/ruff check .
-git add tests/proposal_assist/test_api_writers_mutex_straddle.py src/call_manager/web/api/rubric.py
-git commit -m "feat(api): activate and retry_setup take the live mutex before their setup-job lock"
+git add src/call_manager/proposal_assist/row_locks.py src/call_manager/web/api/rubric.py \
+        tests/proposal_assist/test_api_writers_mutex_straddle.py tests/test_api_rubric.py
+git commit -m "feat(api): activate and retry_setup take the live mutex before their bounded setup-job lock"
 ```
 
 ---
@@ -1715,6 +1873,28 @@ Then fix the module docstring's first line (line 1), which still advertises the 
 
 The two log messages at lines ~196 and ~206 also say `soft_delete_workspace:` — update both to `scrub_workspace_bytes:`, which is the function they actually run in.
 
+**And fix `soft_delete_workspace_db`'s own docstring (lines ~93-97), which becomes false the moment the wrapper is gone.** It currently reads:
+
+```python
+    Split out of soft_delete_workspace (Slice B-retire) so the delete route can
+    interleave in-process retirement between the durable DB commit and the FS
+    scrub: DB commit -> retire -> scrub -> 204. Nothing about the DB behaviour
+    changed in the split; soft_delete_workspace is retained as a thin wrapper
+    over this plus scrub_workspace_bytes.
+```
+
+Replace it with:
+
+```python
+    The delete route interleaves in-process retirement between this durable DB
+    commit and the FS scrub: DB commit -> retire -> scrub -> 204. There is
+    deliberately no wrapper composing this with scrub_workspace_bytes — one
+    existed until Slice C2 and was deleted, because it looked like the entry
+    point for deleting a workspace while skipping retirement entirely.
+```
+
+A docstring that describes a symbol the same commit deletes is how the next reader concludes the wrapper still exists and goes looking for it.
+
 - [ ] **Step 6: Run the tests to verify they pass**
 
 ```bash
@@ -1772,10 +1952,19 @@ Replace lines 389-395 (the paragraph beginning **Lock-order rule (normative).**)
 
 ```markdown
 **Lock-order rule (normative).** `acquire_commit_mutex_live` is taken
-**immediately after `require_owner`, before any other lock**. `activate` and
-`retry_setup` both currently take `WorkspaceSetupJob … FOR UPDATE`
-(`rubric.py:180`, `rubric.py:217`) as their first lock, and that order must
-change.
+**immediately after `require_owner`, before any other lock**. Lock-free work may
+sit between the two — and semantic body validation specifically SHOULD, so that
+authorization decides before a validation error can answer a caller who has no
+access, and so a malformed body does not queue behind the mutex. What may not
+sit there is another lock. `activate` and `retry_setup` both currently take
+`WorkspaceSetupJob … FOR UPDATE` (`rubric.py:180`, `rubric.py:217`) as their
+first lock, and that order must change.
+
+Where the mutex is held across a subsequent row wait — as it now is in both
+setup-job routes — that wait must carry its own bound, for the reason
+`row_locks.py`'s module docstring gives: `acquire_commit_mutex` restores
+`lock_timeout = DEFAULT` on success, so an unbounded wait under the mutex pins
+it and blows the DELETE route's < 6.0s budget.
 
 The reason is not deadlock. As of the pre-C2 tree, no AB-BA cycle is reachable
 in either order: `soft_delete_workspace_db` never touches `WorkspaceSetupJob`
@@ -1809,15 +1998,26 @@ is the hazard §4 closed for the pass prefixes.
 Replace lines 525-527 (gate 11) with:
 
 ```markdown
-11. **Lock order.** For `activate` and `retry_setup`, while the route is blocked
-    on the commit mutex, the retirement hook's `cancel_setup_jobs_for_workspace`
-    must still be able to cancel the setup job — proving the route holds no row
-    lock while it waits. Mutation: take the setup-job lock first and the test
-    must fail (the `SKIP LOCKED` cancel skips the held row and returns 0).
-    Asserted *while* the route is still blocked; sampling after the mutex is
-    released lets the route's own rollback repair the thing under test.
+11. **Lock order, and the bound on the wait it creates.** Two gates, both
+    required, for **each** of `activate` and `retry_setup`.
+
+    (a) *Order.* While the route is blocked on the commit mutex, the retirement
+    hook's `cancel_setup_jobs_for_workspace` must still be able to cancel the
+    setup job — proving the route holds no row lock while it waits. Mutation:
+    take the setup-job lock first and the test must fail (the `SKIP LOCKED`
+    cancel skips the held row and returns 0). Asserted *while* the route is
+    still blocked; sampling after the mutex is released lets the route's own
+    rollback repair the thing under test. Seed the job in a **cancellable**
+    status — `_CANCELLABLE` excludes terminal states, so a `'failed'` row makes
+    this gate red in both orders and its mutation vacuous.
     Note: a "resolves without deadlock" gate would NOT discriminate — no AB-BA
     cycle exists in either order. See §8.
+
+    (b) *Bound.* Because the mutex is held across the setup-job row wait, that
+    wait must be bounded (`row_locks.SETUP_JOB_LOCK_TIMEOUT_SECONDS`, → 429).
+    With the row held by another session, the request must RETURN rather than
+    block. Mutation: remove the bound from one route and that route's test must
+    fail. Asserted as "the request came back", not as elapsed time.
 ```
 
 - [ ] **Step 2b: Record the revision**
@@ -1860,10 +2060,14 @@ git commit -m "docs(spec): correct Slice C's lock-order rationale — convergenc
 
 ```bash
 cd /home/parlar_ai/dev/call-monitor/.worktrees/c2-mutex-writers
+set -o pipefail
 .venv/bin/python -m pytest tests/ -q 2>&1 | tail -20
+echo "PYTEST_EXIT=${PIPESTATUS[0]}"
 ```
 
-Expected: the master baseline plus this slice's additions. Count them yourself rather than trusting a number written before execution: 16 tests in `test_api_writers_mutex_straddle.py` (1 probe self-test + 12 straddle/wedge + 2 lock-order + 1 lock-bound) and 1 severance guard = **+17**, against a master baseline of 3339 passed / 1 skipped. Assert the DELTA; if the absolute baseline has moved, that is a master change, not a C2 failure. A testcontainers "connection refused" is infrastructure — re-run the affected file individually before treating it as a failure.
+`set -o pipefail` plus `PIPESTATUS[0]` because a bare `pytest | tail` reports **tail's** exit status, which is always 0 — the pipe would hide a red suite behind a green-looking command. `PYTEST_EXIT=0` is the gate, not the absence of an error message.
+
+Expected: the master baseline plus this slice's additions. Count them yourself rather than trusting a number written before execution: **17** in `test_api_writers_mutex_straddle.py` (1 probe self-test + 12 straddle/wedge + 2 lock-order + 2 lock-bound), **3** authorization-precedence gates (1 in `test_api_settings.py`, 2 in `test_api_rubric.py`) and **1** severance guard = **+21**, against a master baseline of 3339 passed / 1 skipped. `test_split_halves_compose_to_the_wrapper` is renamed, not added. Assert the DELTA; if the absolute baseline has moved, that is a master change, not a C2 failure. A testcontainers "connection refused" is infrastructure — re-run the affected file individually before treating it as a failure.
 
 - [ ] **Step 2: Lint**
 
@@ -1881,7 +2085,7 @@ git -C /home/parlar_ai/dev/call-monitor/.worktrees/c2-mutex-writers diff --stat 
 git -C /home/parlar_ai/dev/call-monitor/.worktrees/c2-mutex-writers status --porcelain
 ```
 
-Expected: 8 files changed; a clean worktree.
+Expected: **9 files** changed — `row_locks.py`, `settings.py`, `rubric.py`, `workspaces.py`, the new straddle test file, the new test helper, `test_api_settings.py`, `test_api_rubric.py`, `test_workspaces_service.py`, `test_turns_processor.py` and the spec. (That is 11 paths; the count is whatever `--stat` prints — reconcile it against this list rather than against the number.) Worktree clean.
 
 - [ ] **Step 4: Finish**
 
