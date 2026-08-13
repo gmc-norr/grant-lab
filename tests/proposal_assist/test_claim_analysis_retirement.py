@@ -538,6 +538,137 @@ def test_mark_done_cannot_resurrect_a_job_the_retirement_hook_terminalized(
         )
 
 
+def test_mark_done_gives_up_on_the_job_row_instead_of_waiting_unboundedly(
+    pg_session_factory, current_user, monkeypatch
+):
+    """The re-read above is a BLOCKING lock wait in an APScheduler worker thread,
+    and PostgreSQL's lock_timeout is disabled by default — so without a bound one
+    stuck holder of the job row parks that thread for as long as it holds it.
+
+    Runs mark_done in a THREAD, for the reason
+    test_the_claim_cancel_skips_a_row_a_worker_holds_without_waiting gives: an
+    unbounded wait would otherwise hang the suite from inside the `with` that
+    holds the row, and a mutation must FAIL, never hang.
+
+    Mutation: drop the `bounded_lock_waits(...)` wrapper from
+    `analysis/queue.py:mark_done` — the thread is still blocked when the join
+    times out.
+    """
+    from call_manager.proposal_assist.analysis import queue as q
+    from call_manager.proposal_assist.row_locks import RowLockTimeout
+
+    monkeypatch.setattr(q, "MARK_DONE_LOCK_TIMEOUT_SECONDS", 0.25)
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        job = _job(ws.id, section_sha="a", status="running")
+        s.add(job)
+        s.commit()
+        job_id = job.id
+
+    result: dict[str, object] = {}
+
+    def _finalize():
+        try:
+            with pg_session_factory() as worker:
+                q.mark_done(worker, worker.get(ClaimAnalysisJob, job_id))
+                worker.commit()
+            result["outcome"] = "committed"
+        except BaseException as exc:  # noqa: BLE001 — asserted after release
+            result["outcome"] = exc
+
+    holder = pg_session_factory()
+    t = threading.Thread(target=_finalize)
+    try:
+        holder.query(ClaimAnalysisJob).filter_by(id=job_id).with_for_update().one()
+        began = time.monotonic()
+        t.start()
+        t.join(timeout=10)
+        still_waiting = t.is_alive()
+        elapsed = time.monotonic() - began
+    finally:
+        holder.rollback()  # ALWAYS released, whatever mark_done did
+        holder.close()
+        t.join(timeout=15)
+
+    assert not still_waiting, (
+        "mark_done was still waiting on the held job row after 10s — the FOR "
+        "UPDATE re-read is unbounded"
+    )
+    assert isinstance(result["outcome"], RowLockTimeout), (
+        f"expected a typed RowLockTimeout, got {result['outcome']!r}"
+    )
+    assert elapsed < 5.0, f"mark_done waited {elapsed:.1f}s on a held row"
+
+    with pg_session_factory() as s:
+        assert s.get(ClaimAnalysisJob, job_id).status == "running", (
+            "the job must be left non-terminal for the caller to requeue"
+        )
+
+
+def test_a_job_the_hook_terminalized_is_COUNTED_by_the_drain_not_silently_dropped(
+    pg_session_factory, current_user, monkeypatch
+):
+    """mark_done's guard makes the job row terminal-but-not-'done'; the tick's
+    accounting must say so.
+
+    Left stale, the caller's in-memory `job.status` still reads 'running' after
+    mark_done declines, so the job lands in NO bucket — done, superseded and
+    failed all stay 0 — while the session's annotation writes commit anyway. A
+    tick that cancelled work reports a completely empty result, and
+    `if any(out.values())` in the scheduler means it does not even log.
+
+    Mutations (either must fail this test):
+      * drop `session.expire(job, ["status"])` from
+        `analysis/queue.py:mark_done` — counts == {done: 0, failed: 0,
+        superseded: 0};
+      * drop the `elif status == "failed"` arm from drain_analysis_queue — same.
+    """
+    from call_manager.proposal_assist.analysis import pipeline as pl
+    from call_manager.proposal_assist.analysis.queue import mark_done
+    from call_manager.proposal_assist.jobs_retirement import build_jobs_retirement_hook
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        s.add(_job(ws.id, section_sha="a", status="queued"))
+        s.commit()
+        ws_id = ws.id
+
+    def _analyze(job, *, session, **kwargs):
+        """Stands in for a real pass whose workspace is deleted while it runs.
+
+        The delete and the cancel are production's — the REAL hook, as in
+        test_mark_done_cannot_resurrect_a_job_the_retirement_hook_terminalized —
+        and the tail is the real mark_done. The worker session holds no lock on
+        the job row here (no heartbeat ran), which is exactly the case the hook's
+        SKIP LOCKED does not shield.
+        """
+        with pg_session_factory() as s2:
+            s2.get(Workspace, ws_id).soft_deleted_at = _now_utc()
+            s2.commit()
+        assert asyncio.run(build_jobs_retirement_hook(pg_session_factory)(ws_id)) == 1
+        mark_done(session, job)
+
+    monkeypatch.setattr(pl, "analyze_job", _analyze)
+
+    counts = pl.drain_analysis_queue(
+        session_factory=pg_session_factory,
+        citation_service=None,
+        embedder=None,
+        workspaces_dir="/tmp",
+    )
+
+    assert counts == {"done": 0, "failed": 1, "superseded": 0}, (
+        f"a cancelled job was dropped from the tick's accounting: {counts}"
+    )
+    with pg_session_factory() as s:
+        row = s.query(ClaimAnalysisJob).filter_by(workspace_id=ws_id).one()
+        assert row.status == "failed"
+        assert row.last_error == "cancelled: workspace deleted"
+
+
 def test_the_abort_callback_is_actually_WIRED_INTO_the_cited_audit_call_site(
     pg_session_factory, current_user, tmp_path
 ):

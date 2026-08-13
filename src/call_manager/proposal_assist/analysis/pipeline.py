@@ -600,12 +600,23 @@ def drain_analysis_queue(
                     workspaces_dir=workspaces_dir,
                     should_abort=_should_abort,
                 )
+                # Reads through to the ROW, not to a stale in-memory copy:
+                # mark_done expires this attribute when it declines to finalize,
+                # so a job the retirement hook terminalized under us reports the
+                # status it actually has.
                 status = job.status
                 s.commit()
                 if status == "done":
                     counts["done"] += 1
                 elif status == "superseded":
                     counts["superseded"] += 1
+                elif status == "failed":
+                    # mark_done declined: another writer (the jobs retirement
+                    # hook's cancel) reached the row first. The annotations this
+                    # session wrote still commit — they are findings for content
+                    # that WAS analyzed — but the job itself must not vanish from
+                    # the tick's accounting.
+                    counts["failed"] += 1
             except ClaimAnalysisAborted:
                 # Discard this session's partial writes, then terminalize. Scope is
                 # exactly the per-job transaction: the annotation upserts and the

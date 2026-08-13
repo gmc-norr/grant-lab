@@ -20,8 +20,25 @@ from call_manager.db.models import ClaimAnalysisJob, Workspace
 from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.row_locks import bounded_lock_waits
 
 MAX_ATTEMPTS = 3
+
+# mark_done's FOR UPDATE re-read runs in an APScheduler worker thread, and
+# PostgreSQL's lock_timeout is 0 (disabled) unless a transaction sets it — see
+# row_locks' module docstring. Unbounded, one stuck holder of the job row parks
+# that worker thread for as long as it holds it.
+#
+# The wait is expected to be ~0: every other writer of a 'running' row takes it
+# with SKIP LOCKED (claim_queued_jobs, requeue_stuck_running, and the jobs
+# retirement hook's cancel), so this bounds the UNEXPECTED — a holder outside
+# that set, or one added later — rather than the normal case.
+#
+# 2 seconds, the same value and the same reasoning as
+# row_locks.PASS_PREFIX_LOCK_TIMEOUT_SECONDS: giving up is cheap on this path
+# (drain_analysis_queue rolls the per-job transaction back and mark_failed
+# requeues the job for another attempt), and waiting is not.
+MARK_DONE_LOCK_TIMEOUT_SECONDS = 2
 
 logger = logging.getLogger(__name__)
 
@@ -230,11 +247,28 @@ def mark_done(session: Session, job: ClaimAnalysisJob) -> None:
     (coherence/pass_runner.py:142 "we must not resurrect it"). Returning without
     writing is correct here: the row is already terminal, so there is nothing left
     to finalize.
+
+    BOUNDED (MARK_DONE_LOCK_TIMEOUT_SECONDS): raises RowLockTimeout rather than
+    blocking a worker thread indefinitely on a lock nothing else bounds. The
+    caller's generic handler rolls the per-job transaction back and requeues.
+
+    Declining is NOT silent: the caller reads `job.status` to account for the
+    outcome, so the stale in-memory 'running' is expired and re-read from the row
+    this just locked. Left stale, a job terminalized under us is counted in no
+    bucket at all while its annotation writes still commit.
     """
-    live = session.scalar(
-        select(ClaimAnalysisJob.status).where(ClaimAnalysisJob.id == job.id).with_for_update()
-    )
+    with bounded_lock_waits(
+        session,
+        timeout_seconds=MARK_DONE_LOCK_TIMEOUT_SECONDS,
+        message="timed out waiting for the claim-analysis job row",
+    ):
+        live = session.scalar(
+            select(ClaimAnalysisJob.status).where(ClaimAnalysisJob.id == job.id).with_for_update()
+        )
     if live != "running":
+        # expire, not assignment: assigning would dirty the attribute and flush a
+        # redundant UPDATE writing back the value we just read.
+        session.expire(job, ["status"])
         return
     job.status = "done"
     # Clear any error left over from earlier failed attempts — stale errors
