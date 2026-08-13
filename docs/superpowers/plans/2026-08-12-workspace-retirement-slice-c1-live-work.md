@@ -2,7 +2,32 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Revision 3.** Revision 2 was reviewed and rejected with five further blocking findings plus three on test quality — all verified against the code, all fixed here. Read these before the tasks; several are traps that look fine until you look twice:
+**Revision 4 — SPIKED.** Every hard gate in this plan has now been **built and proven against the real code** on branch `c1-test-spike` (worktree `.worktrees/c1-test-spike`, 8 commits off `master`). Each was watched red under its own mutation. Full suite on that branch: **1884 passed, 1 skipped**, `ruff` clean.
+
+**Read the spike branch before you write anything.** Where this plan and the branch disagree, the branch wins — it is the version that actually ran.
+
+| gate | file on the spike branch | mutation proven |
+|---|---|---|
+| adapter protocol | `test_claude_adapter_teardown.py` | rename `unconfirmed_launch_ids` → 2 fail |
+| coherence prefix guard + lock held/released | `test_pass_retirement.py` | remove the guard → both fail |
+| review child tracked separately | `test_pass_retirement.py` | remove child `track()` → fails |
+| child prefix blocks on the run row | `test_pass_retirement.py` | remove the prefix run lock → fails |
+| finalization takes run before item | `test_pass_retirement.py` | restore item-then-run → fails |
+| DELETE leaves no item in `running` | `test_pass_retirement.py` | revert to runs-only → fails |
+| claim cancel SKIP LOCKED | `test_claim_analysis_retirement.py` | drop `skip_locked` → fails in **6.9s, no hang** |
+| `mark_failed` linearization | `test_claim_analysis_retirement.py` | drop `with_for_update` → fails |
+
+**Seven things the spike found that no amount of desk-checking had:**
+
+1. **A timing assertion cannot prove the `mark_failed` lock.** Measured directly, it takes ~2s either way while the workspace row is held: *with* the lock it blocks at its `SELECT FOR UPDATE`; *without*, it blocks at **COMMIT** instead, because the job UPDATE needs a key-share lock on its FK parent. Same wall-clock, opposite correctness. The gate had to be rewritten to assert the job's **final status**. My first version passed under mutation.
+2. **A stubbed pass finishes too fast to race.** The finalization-order gate needs an adapter that *parks inside the turn* so the item row can be taken between prefix and finalization. With an instant stub the child is done before the test can interfere.
+3. **Removing the `getattr` fallback breaks six existing tests.** Calling the protocol directly (correctly) means every test fake flowing through a tracked runner must gain `unconfirmed_launch_ids` and `retire_unconfirmed`. Three fakes in `tests/proposal_assist/review/test_pass_runner.py`. This is required work, not an accident.
+4. **`ReviewRun.draft_sha` is NOT NULL.** Every `ReviewRun(...)` in a test needs it. Revisions 1-3 of this plan would have failed on the first run.
+5. **Renaming `cancel_review_runs_for_workspace` has a test call site** — `tests/proposal_assist/review/test_jobs.py`, 2 occurrences.
+6. **`git checkout <file>` to undo a mutation also reverts uncommitted implementation.** Commit the fix *before* mutating, always.
+7. **Wrapping `_run_one_call`'s body in `track()` trips `E501`** on the `elif error is None and ...` line once re-indented. Reflow it.
+
+**Revision 3** folded five blockers plus three test-quality findings from revision 2. Those fixes stand:
 
 - **Review now gets the same treatment as every other runner** — tracked from its first line and with a workspace row-lock guard on its parent prefix. R2 started the parent entry at the wave-1 semaphore, *after* the prefix had created item rows and committed `draft_sha`, so the delete-snapshot race survived for review alone.
 - **The delete now terminalizes review ITEMS, not just runs.** `cancel_review_runs_for_workspace` touches only `ReviewRun` (verified). That was survivable before — a cancelled child still reached its own finalization — but retirement cancellation propagates *past* the `finally`, so the finalization block after the `try` never runs and the item stays `running` forever.
