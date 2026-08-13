@@ -1,11 +1,21 @@
 # Workspace retirement — Slice C design
 
 Date: 2026-08-11
-Status: approved (design), revision 4 after two review rounds and one implementation correction (see Revisions); implementation plan to follow
+Status: approved (design), revision 5 after two review rounds and two implementation corrections (see Revisions); implementation plan to follow
 Predecessors: Slice A (`docs/superpowers/plans/2026-07-24-workspace-retirement-slice-a.md`, `7b16547`), Slice B-mutex (`docs/superpowers/plans/2026-07-24-workspace-retirement-slice-b-mutex.md`, `194d8ce`), Slice B-retire (`docs/superpowers/plans/2026-07-25-workspace-retirement-b-retire.md`, `245d7ba`, review fixes `01edf10`)
 
 ## Revisions
 
+- revision 5 (2026-08-13, Slice C2): §8's bound rule was wrong about its own
+  scope and, read literally, asserted an invariant the codebase does not have.
+  Its parenthetical named "both setup-job routes"; in fact all six routes hold
+  the mutex across a row wait, and C2 now bounds all six. The rule is restated
+  as a requirement on those six. §10 gains residual 8, naming the root cause —
+  the deliberate `SET LOCAL lock_timeout = DEFAULT` restore at
+  `drafting/locking.py:207` — which leaves the post-mutex tail unbounded at 27
+  call sites across 14 modules, of which this slice bounds 6, and why the
+  central fix is a design pass rather than a follow-up commit. §12 gate 11(b)
+  widened from two routes to six, gate 13 disambiguated from it, §14 updated.
 - revision 4 (2026-08-13, Slice C2): §8's lock-order rationale and §12 gate 11
   replaced. The rule stands; the deadlock justifying it does not exist. Verified
   against the merged tree at 53fa9fc — soft_delete_workspace_db never touches
@@ -404,44 +414,68 @@ sit there is another lock. `activate` and `retry_setup` both currently take
 `WorkspaceSetupJob … FOR UPDATE` (`rubric.py:180`, `rubric.py:217`) as their
 first lock, and that order must change.
 
-Where the mutex is held across a subsequent row wait — as it now is in both
-setup-job routes — that wait must carry its own bound, for the reason
-`row_locks.py`'s module docstring gives: `acquire_commit_mutex` restores
-`lock_timeout = DEFAULT` on success, so an unbounded wait under the mutex pins
-it and blows the DELETE route's < 6.0s budget.
-
-The reason is not deadlock. As of the pre-C2 tree, no AB-BA cycle is reachable
-in either order: `soft_delete_workspace_db` never touches `WorkspaceSetupJob`
+The lock-order rule's reason is not deadlock. As of the pre-C2 tree, no AB-BA
+cycle is reachable in either order: `soft_delete_workspace_db` never touches
+`WorkspaceSetupJob`
 (its mutex transaction locks the workspace row, the four pass-job tables and
 `TurnJob`), setup-job cancellation runs in a separate post-commit transaction
 with `FOR UPDATE SKIP LOCKED`, and every other setup-job acquisition is either
 `SKIP LOCKED` or mutexless — nothing held the mutex and then waited on a
-setup-job row. C2 introduces the first such edge itself, and bounds it (see
-below), so the property is maintained by construction rather than by luck.
+setup-job row. C2 introduces the first such edge itself, and bounds it (the
+bound rule below), so the property is maintained by construction rather than by
+luck.
 
 This does **not** license inverting `phases/setup.py`'s own documented order
 (`:498-503`, job → workspace → Call): that ordering answers a different,
 real 40P01 against `_m2`/`_m3`, and it is what `activate` matches.
 
-The reason is **convergence**. A route that takes the setup-job row before
-blocking on the mutex holds that row for the whole wait — up to
+The lock-order rule's reason is **convergence**. A route that takes the
+setup-job row before blocking on the mutex holds that row for the whole wait — up to
 `timeout_seconds`, default 10s. The delete's retirement hook cancels setup jobs
 with `SKIP LOCKED`, so it *skips* the held row and the job stays non-terminal
 until the reconciliation tick catches it (up to `jobs_reconcile_tick_seconds`,
 default 60s). With the mutex first, the route raises `WorkspaceDeleted` before
 touching the row, the hook finds it free, and cancellation is immediate.
 
-Because the mutex is now held across the setup-job row wait, that wait is
-bounded (`row_locks.SETUP_JOB_LOCK_TIMEOUT_SECONDS = 2`, → 429): an unbounded
-wait there would pin the mutex and blow the DELETE route's < 6.0s budget, which
-is the hazard §4 closed for the pass prefixes.
+**Bound rule (normative — a requirement on these six routes, not a property of
+the codebase).** Each of the six holds the mutex across a subsequent row wait,
+and each of those waits must carry its own bound. It is **not** only the two
+setup-job routes: `update_settings` and `update_rubric` (through `_apply_rubric`)
+UPDATE the `workspaces` row itself, `add_member` and `remove_member` take
+`FOR KEY SHARE` on it as the FK parent of their `WorkspaceViewer` /
+`WorkspaceEvent` inserts, `activate` waits on its `WorkspaceSetupJob` row *and*
+on the `workspaces` row through `_apply_rubric`, and `retry_setup` waits on its
+`WorkspaceSetupJob` row. The reason is the one `row_locks.py`'s module docstring
+gives: `acquire_commit_mutex` restores `lock_timeout = DEFAULT` on success
+(`drafting/locking.py:207`), so an unbounded wait under the mutex pins it and
+blows the DELETE route's < 6.0s budget
+(`tests/proposal_assist/test_phase0_transaction_boundaries.py:1155`) — the
+hazard §4 closed for the pass prefixes.
+
+Two constants carry it, both 2s and both in `row_locks.py`:
+`SETUP_JOB_LOCK_TIMEOUT_SECONDS` for the two setup-job routes and
+`WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS` for the four that wait on the workspace row
+directly. In every case the bound must wrap the remainder of the transaction
+**through `session.commit()`**, not merely the `with_for_update()`:
+`bounded_lock_waits` leaves the `SET LOCAL` in force on exit but translates
+55P03 → `RowLockTimeout` only inside its own body, so a narrow wrap leaves the
+flush bounded yet untranslated and answers 500 where the route contracts 429.
+
+Read this rule at exactly its stated scope. The restore at `locking.py:207`
+un-bounds the post-mutex tail at **every** call site in the tree, and this slice
+re-imposes a bound at six of them; the rest are untouched and stay unbounded.
+That is §10.8 — the single root cause, and why closing it centrally is a
+separate design pass rather than a wider edit here.
 
 **Error mapping is written per route, explicitly.** There is no app-level
 `CommitMutexTimeout` handler — every route returning 429 today does so with its
 own `except CommitMutexTimeout` (e.g. `web/api/workspaces.py:446`), and an
 uncaught one falls through to the generic 500 handler (`main.py:566`). Each of
 the six gets `except CommitMutexTimeout` → 429 with `BUSY_ERROR_MESSAGE` and
-`Retry-After: 2`; `WorkspaceDeleted` propagates to main.py's handler → 404.
+`Retry-After: 2`; `WorkspaceDeleted` propagates to main.py's handler → 404. The
+bound rule adds a second per-route catch on the same terms: `RowLockTimeout` →
+the identical 429, since "the mutex was wedged" and "the row was held" are the
+same answer to the caller — retry in 2s.
 
 **The claim is narrow.** This does *not* make every workspace writer
 linearized. A file-level survey shows twenty modules with mutating routes that
@@ -507,6 +541,75 @@ dropped. The production surface then offers only `soft_delete_workspace_db` and
    sweep as backstop, as documented on `WorkspaceRetired`.
 7. **Two unverified minor findings** from the B-retire review (fixed-sleep
    races in two collab tests) stay out of scope.
+8. **One line un-bounds the post-mutex tail everywhere; this slice bounds six of
+   the places it lands.** `acquire_commit_mutex` executes
+   `SET LOCAL lock_timeout = DEFAULT` after it wins the advisory lock
+   (`proposal_assist/drafting/locking.py:207`). That line is deliberate, not an
+   oversight: the restore arrived in the same commit as the `timeout_seconds`
+   bound itself (`63bd9cf`). That bound was written *for the acquisition* — so a
+   wedged holder cannot pin FastAPI workers indefinitely — and the restore keeps it
+   scoped there, so the caller's own later statements, which never asked for a
+   bound and carry no 55P03 translation, are not silently made failable. The
+   price is that from the acquisition onward the transaction runs at
+   `lock_timeout = 0` again.
+
+   `acquire_commit_mutex` / `acquire_commit_mutex_live` are called at **27 sites
+   across 14 modules**:
+
+   ```
+   grep -rn "acquire_commit_mutex_live(\|acquire_commit_mutex(" src --include=*.py \
+     | grep -v "def acquire_commit_mutex"
+   ```
+
+   returns 28 lines; the 28th is `acquire_commit_mutex_live` delegating to
+   `acquire_commit_mutex` (`locking.py:230`), not a caller. This slice
+   re-imposes a bound at **6** of the 27 (`web/api/settings.py` ×3,
+   `web/api/rubric.py` ×3, §8). The other 21 — `collab/kernel.py` ×5,
+   `tools/citations.py` ×4, `web/api/workspaces.py` ×3 (including the DELETE
+   route's own `soft_delete` write), `workspaces.py`, `editing/save.py`,
+   `turns/submit.py`, `citations/human_cite.py`, `analysis/insert.py`,
+   `collab/hydrate.py`, `collab/checkpoint.py`, `collab/flip.py`, and
+   `phases/setup.py`'s `_m1` — run their whole post-acquisition tail unbounded.
+   Whether each of those actually meets a contended lock today has not been
+   audited; the point of the residual is that nothing bounds them if it does.
+
+   **Why it matters.** A mutex holder blocked on a row pins the mutex. Every
+   other mutex-participating writer for that workspace then burns its own 10s
+   acquisition budget and gives up — 429 for the routes that map
+   `CommitMutexTimeout`, a tool error or a skipped tick elsewhere — and the
+   DELETE route's < 6.0s budget
+   (`tests/proposal_assist/test_phase0_transaction_boundaries.py:1155`) is blown
+   for as long as the block lasts. The holders are real rather than
+   hypothetical: the four pass prefixes take the `workspaces` row `FOR UPDATE`
+   while holding no mutex and keep it across context assembly's filesystem reads
+   (`row_locks.py`, `PASS_PREFIX_LOCK_TIMEOUT_SECONDS`).
+
+   **Why this is not a patch.** The obvious central fix — have
+   `acquire_commit_mutex` leave a bound in force instead of restoring DEFAULT —
+   converts a wait into a timeout at all 27 sites simultaneously, and a timeout
+   there surfaces as a raw `OperationalError` (55P03) → 500 unless every site
+   translates it, or unless an app-level handler maps it to 429. §8 records that
+   there is deliberately **no** app-level `CommitMutexTimeout` handler: each
+   route writes its own, and an uncaught one falls through to `main.py`'s
+   generic `Exception` handler. Adding one is a change to this codebase's
+   error-mapping architecture, with blast radius well past this slice. Two
+   further constraints any central fix must answer:
+
+   - The bound has to be re-imposed *after* the acquisition. An outer
+     `bounded_lock_waits` around a transaction that later takes the mutex has
+     its `SET LOCAL` wiped by the DEFAULT restore, so "wrap the transaction" is
+     not a safe generic remedy — the six routes here wrap *after* winning the
+     mutex for exactly this reason.
+   - Background and scheduler callers are affected differently from routes. A
+     route that starts raising returns 429 to a caller who can retry;
+     `phases/setup.py`'s `_m1` (the setup worker) and `collab/checkpoint.py`'s
+     scheduler tick (`scheduler.py:363`) today *wait* where a bound would make
+     them *raise*, converting contention into job failure and requeue. That is
+     a behaviour change to be designed, not discovered.
+
+   So this residual is one line and one architectural question, not a to-do list
+   of 21 call sites. It needs its own design pass; it is explicitly not a
+   follow-up commit on Slice C.
 
 ## 11. Non-goals
 
@@ -564,8 +667,9 @@ reverted.
     (simulating a crash, so the cooperative checkpoint cannot be what saves us)
     → a later reconciliation tick marks the row `failed`. Mutation: leave the
     tick handling setup jobs only and the row stays `running` forever.
-11. **Lock order, and the bound on the wait it creates.** Two gates, both
-    required, for **each** of `activate` and `retry_setup`.
+11. **Lock order, and the bound on the wait it creates.** Gate (a) applies to
+    `activate` and `retry_setup`; gate (b) applies to **all six** routes. Both
+    are required.
 
     (a) *Order.* While the route is blocked on the commit mutex, the retirement
     hook's `cancel_setup_jobs_for_workspace` must still be able to cancel the
@@ -579,17 +683,31 @@ reverted.
     Note: a "resolves without deadlock" gate would NOT discriminate — no AB-BA
     cycle exists in either order. See §8.
 
-    (b) *Bound.* Because the mutex is held across the setup-job row wait, that
-    wait must be bounded (`row_locks.SETUP_JOB_LOCK_TIMEOUT_SECONDS`, → 429).
-    With the row held by another session, the request must RETURN rather than
-    block. Mutation: remove the bound from one route and that route's test must
-    fail. Asserted as "the request came back", not as elapsed time.
+    (b) *Bound.* Every one of the six holds the mutex across a row wait (§8), so
+    each needs its own bounded case: `activate` and `retry_setup` against a held
+    `WorkspaceSetupJob` row (`row_locks.SETUP_JOB_LOCK_TIMEOUT_SECONDS`),
+    `update_settings`, `add_member`, `remove_member` and `update_rubric` against
+    a held `workspaces` row (`row_locks.WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS`).
+    In each case the holder takes the row and NO mutex, so the route wins the
+    mutex and blocks afterwards — which is the state under test. The request
+    must RETURN 429 rather than block. Mutation: remove the bound from one route
+    and that route's test must fail. Asserted as "the request came back", not as
+    elapsed time — an elapsed-time assertion can pass for the opposite reason.
+    A second mutation is required on at least one route: move `session.commit()`
+    outside the bound and the test must fail with an untranslated
+    `OperationalError` → 500 rather than the contracted 429 (§8's
+    "through `session.commit()`").
+    Note: the constant must be patched on the *route* module, not on
+    `row_locks`, or the patch is a no-op — the routes import the value by name.
 12. **Budget invariant.** The extended barrier test fails if
     `_PASS_RETIRE_SECONDS` or `_JOBS_CANCEL_SECONDS` is raised past the
     headroom.
 13. **Route straddles.** Each of the six routes: 404 with nothing written
-    against a workspace deleted under the mutex; 429 with `Retry-After: 2`
-    under a wedged mutex.
+    against a workspace deleted under the mutex; 429 with `Retry-After: 2` and
+    `BUSY_ERROR_MESSAGE` under a wedged mutex — the *acquisition* failure. The
+    second 429 path, where the route wins the mutex and then blocks on a row, is
+    gate 11(b); the two are separate failures with the same response, and a
+    suite that covers only this one passes with every bound removed.
 14. **DELETE route latency, end-to-end.** With a claim-analysis worker mid-job
     holding its row lock, the DELETE *request* must return within the barrier —
     measured as wall-clock on the route, not as "the delete transaction
@@ -629,8 +747,10 @@ in each of four prefixes plus review's child prefix; one explicit catch at the
 tick boundary; one claim-query filter; a `"jobs"` hook doing SKIP LOCKED cancels
 off the delete transaction; an abort callback threaded into BOTH per-row LLM
 loops (semantic audit and uncited classify); one failure-path special case and
-one success-path `mark_done` guard; six route changes with a normative lock
-order; one hook registration plus a second population added to **both** the
+one success-path `mark_done` guard; six route changes carrying a normative lock
+order plus a bounded post-mutex row wait through commit, and one new `row_locks`
+constant (`WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS`) for the four that wait on the
+`workspaces` row; one hook registration plus a second population added to **both** the
 inherited `"jobs"` hook **and** its reconciliation tick; the wrapper deletion
 plus its test helper; and the `retirement.py:35` comment correction. No schema
 migration — claim-analysis terminalizes to the existing `failed`.

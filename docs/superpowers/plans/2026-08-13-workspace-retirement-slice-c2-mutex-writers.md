@@ -2052,6 +2052,17 @@ git add docs/superpowers/specs/2026-08-11-workspace-retirement-slice-c-design.md
 git commit -m "docs(spec): correct Slice C's lock-order rationale — convergence, not deadlock"
 ```
 
+**Superseded in part (2026-08-13, spec revision 5).** The §8 replacement text
+above says the mutex is held across a row wait "as it now is in both setup-job
+routes". That parenthetical is false: **all six** routes hold the mutex across a
+row wait — `update_settings` and `update_rubric` UPDATE the `workspaces` row,
+`add_member`/`remove_member` take `FOR KEY SHARE` on it as their FK parent, and
+`activate` reaches it through `_apply_rubric` on top of its job-row wait. A later
+commit bounded those four (`WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS`), and spec
+revision 5 restates the rule scoped to the six, widens gate 11(b) to all six, and
+adds §10 residual 8 for the root cause. Read the spec's §8, not this block, for
+the current wording.
+
 ---
 
 ## Final verification
@@ -2104,5 +2115,7 @@ Stated so nobody reads the six-route change as more than it is:
 5. **Flake surface not established.** Nobody has run these gates. Three concurrent sessions per test against the testcontainers pool, TestClient's cross-thread portal, and the lifespan-started APScheduler's own 60s ticks are all unexercised together. The keyed probe (Task 1) removes the known interference, but "keyed" is a reasoned fix, not a measured one — if a gate flakes, suspect pool sizing first.
 
 6. **The SPA has no 429 story for these six routes.** `useUpdateSettings` (`frontend/src/api/settings.ts`) and its member/rubric siblings `unwrap(...)` into a generic error state; nothing reads `Retry-After` or shows the busy wording, so a wedged mutex surfaces to the owner as an unexplained save failure. The *type* is already there — `web/api/__init__.py` declares `responses={code: ApiError ...}` for every `STATUS_CODES` entry on the `/api` router, so `schema.gen.ts` carries a 429 `ApiError` shape for all six operations; only the client handling is missing. Deferred deliberately: frontend work this plan scoped out (carried from the Task 1 review, triaged in the minors sweep).
+
+7. **The post-mutex tail is unbounded everywhere this slice did not bound it — one line causes it.** `acquire_commit_mutex` restores `SET LOCAL lock_timeout = DEFAULT` after winning the advisory lock (`proposal_assist/drafting/locking.py:207`), deliberately: the `timeout_seconds` bound was written for the *acquisition* (so a wedged holder cannot pin FastAPI workers) and the restore keeps it scoped there, rather than silently making the caller's own later statements failable with a 55P03 nobody translates. The consequence is that `acquire_commit_mutex{,_live}`'s **27 call sites across 14 modules** each run their post-acquisition tail at `lock_timeout = 0`; this slice re-imposes a bound at **6** of them (the six routes), and the remaining 21 — including `collab/kernel.py` ×5, `tools/citations.py` ×4, `phases/setup.py`'s `_m1`, and the DELETE route's own `soft_delete` write — are unchanged. A holder blocked on a row there pins the mutex, so every other mutex-participating writer for that workspace 429s behind it and the DELETE route's < 6.0s budget is blown for as long as the block lasts. **Not fixable by a follow-up commit:** bounding centrally (leaving a bound in force instead of restoring DEFAULT) turns a wait into a raw `OperationalError` → 500 at all 27 sites unless each translates 55P03 or an app-level handler maps it — and the spec's §8 records that there is deliberately no app-level `CommitMutexTimeout` handler, so adding one is an error-mapping architecture decision with blast radius past this slice. It also changes behaviour asymmetrically: background and scheduler callers (`_m1`, `collab/checkpoint.py`'s tick) that today *wait* would start *raising*, converting contention into job failure and requeue. Full statement in the spec, §10 residual 8; it needs its own design pass.
 
 **Not verified by the plan review, flagged for triage during execution:** the review that hardened this plan capped adversarial verification at 10 of 32 findings. The 22 uncapped items were plausible and evidenced but unchecked; the ones judged material were folded in above. If a task behaves unexpectedly, re-read the review output at `/tmp/claude-1066/-home-parlar-ai-dev-call-monitor/5a1c57fc-1cd1-4a11-8aa9-70a02386ee07/tasks/wv0as1h5d.output` before debugging from scratch.
