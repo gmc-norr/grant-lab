@@ -171,9 +171,16 @@ def claim_queued_jobs(session: Session, *, limit: int = 5) -> list[ClaimAnalysis
     share queued_at (transaction-scoped now()), so id keeps the order
     deterministic.
     """
+    # Refuse to claim work for a deleted workspace — durable in SQL, so it survives
+    # restart, exactly like the four pass claim queries. WHERE ... IN (subquery) is
+    # not a join, so FOR UPDATE still locks only claim_analysis_jobs rows.
+    live_ws = select(Workspace.id).where(Workspace.soft_deleted_at.is_(None))
     rows = (
         session.query(ClaimAnalysisJob)
-        .filter(ClaimAnalysisJob.status == "queued")
+        .filter(
+            ClaimAnalysisJob.status == "queued",
+            ClaimAnalysisJob.workspace_id.in_(live_ws),
+        )
         .order_by(ClaimAnalysisJob.queued_at, ClaimAnalysisJob.id)
         .limit(limit)
         .with_for_update(skip_locked=True)

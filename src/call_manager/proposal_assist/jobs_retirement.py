@@ -130,6 +130,7 @@ def build_jobs_retirement_hook(
         def _work() -> int:
             with session_factory() as session:
                 n = cancel_setup_jobs_for_workspace(session, workspace_id)
+                n += cancel_claim_analysis_jobs_for_workspace(session, workspace_id)
                 session.commit()
                 return n
 
@@ -157,7 +158,9 @@ def reconcile_cancelled_jobs(session: Session) -> int:
     from call_manager.db.models import Workspace
 
     dead_ws = select(Workspace.id).where(Workspace.soft_deleted_at.is_not(None))
-    ids = session.scalars(
+    total = 0
+
+    setup_ids = session.scalars(
         select(WorkspaceSetupJob.id)
         .where(
             WorkspaceSetupJob.status.in_(_CANCELLABLE),
@@ -165,19 +168,43 @@ def reconcile_cancelled_jobs(session: Session) -> int:
         )
         .with_for_update(skip_locked=True)
     ).all()
-    if not ids:
-        return 0
-    session.execute(
-        update(WorkspaceSetupJob)
-        .where(WorkspaceSetupJob.id.in_(ids))
-        .values(
-            status="cancelled",
-            completed_at=datetime.now(UTC),
-            last_error="cancelled: workspace deleted (reconciled)",
+    if setup_ids:
+        session.execute(
+            update(WorkspaceSetupJob)
+            .where(WorkspaceSetupJob.id.in_(setup_ids))
+            .values(
+                status="cancelled",
+                completed_at=datetime.now(UTC),
+                last_error="cancelled: workspace deleted (reconciled)",
+            )
         )
-    )
-    logger.info(
-        "jobs_retirement.reconciled",
-        extra={"event": "jobs_retirement_reconciled", "rows": len(ids)},
-    )
-    return len(ids)
+        total += len(setup_ids)
+
+    # NOT an early return above: a workspace with no setup jobs at all must still
+    # have its claim-analysis rows reconciled.
+    claim_ids = session.scalars(
+        select(ClaimAnalysisJob.id)
+        .where(
+            ClaimAnalysisJob.status.in_(_CLAIM_ANALYSIS_CANCELLABLE),
+            ClaimAnalysisJob.workspace_id.in_(dead_ws),
+        )
+        .with_for_update(skip_locked=True)
+    ).all()
+    if claim_ids:
+        session.execute(
+            update(ClaimAnalysisJob)
+            .where(ClaimAnalysisJob.id.in_(claim_ids))
+            .values(
+                status="failed",
+                last_error="cancelled: workspace deleted (reconciled)",
+                updated_at=datetime.now(UTC),
+            )
+        )
+        total += len(claim_ids)
+
+    if total:
+        logger.info(
+            "jobs_retirement.reconciled",
+            extra={"event": "jobs_retirement_reconciled", "rows": total},
+        )
+    return total

@@ -5,6 +5,7 @@ These exist to prove the TESTS discriminate, not merely that the code works.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from datetime import UTC, datetime
@@ -12,7 +13,7 @@ from datetime import UTC, datetime
 from sqlalchemy import text
 
 from call_manager.db.models import ClaimAnalysisJob, Workspace
-from tests.proposal_assist.conftest import make_workspace
+from tests.proposal_assist.conftest import make_call, make_workspace
 
 _SHA = "0" * 40
 
@@ -206,3 +207,77 @@ def test_a_delete_committing_mid_mark_failed_cannot_resurrect_the_job(
         f"job came back as {status!r} after its workspace was deleted mid-call — "
         "the workspace check is not a linearization point"
     )
+
+
+def test_claim_skips_jobs_for_a_soft_deleted_workspace(pg_session_factory, current_user):
+    """The durable half — survives restart, like the four pass claim queries."""
+    from call_manager.proposal_assist.analysis.queue import claim_queued_jobs
+
+    with pg_session_factory() as s:
+        # Distinct external_ids: make_call defaults to EXT-1 and two workspaces
+        # with_call=True in one session collide on uq_calls_source_external.
+        live = make_workspace(
+            s, owner=current_user, call_id=make_call(s, external_id="EXT-LIVE").id
+        )
+        dead = make_workspace(
+            s, owner=current_user, call_id=make_call(s, external_id="EXT-DEAD").id
+        )
+        s.flush()
+        dead.soft_deleted_at = _now_utc()
+        s.add(_job(live.id, section_sha="a"))
+        s.add(_job(dead.id, section_sha="b"))
+        s.commit()
+        live_id, dead_id = live.id, dead.id
+
+    with pg_session_factory() as s:
+        claimed = claim_queued_jobs(s, limit=10)
+        s.commit()
+        ids = {j.workspace_id for j in claimed}
+
+    assert live_id in ids
+    assert dead_id not in ids
+
+
+def test_reconcile_terminalizes_a_claim_row_on_a_workspace_with_no_setup_jobs(
+    pg_session_factory, current_user
+):
+    """The early-return bug: this workspace has NO setup jobs, so a reconcile that
+    returns early when the setup query finds nothing never reaches claim-analysis.
+
+    Full path: a running job holds its row -> the hook's SKIP LOCKED cancel skips it
+    -> the worker's session ends WITHOUT terminalizing it (a crash, so the
+    cooperative checkpoint cannot be what saves us) -> a later reconcile marks it
+    failed.
+    """
+    from call_manager.proposal_assist.jobs_retirement import (
+        build_jobs_retirement_hook,
+        reconcile_cancelled_jobs,
+    )
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        ws.soft_deleted_at = _now_utc()
+        job = _job(ws.id, section_sha="a", status="running")
+        s.add(job)
+        s.commit()
+        job_id, ws_id = job.id, ws.id
+
+    holder = pg_session_factory()
+    try:
+        holder.query(ClaimAnalysisJob).filter_by(id=job_id).with_for_update().one()
+        asyncio.run(build_jobs_retirement_hook(pg_session_factory)(ws_id))
+        with pg_session_factory() as s:
+            assert s.get(ClaimAnalysisJob, job_id).status == "running", (
+                "the hook should have SKIPPED the locked row, not waited on it"
+            )
+    finally:
+        holder.rollback()  # the 'crash' — no terminal write from the worker
+        holder.close()
+
+    with pg_session_factory() as s:
+        reconcile_cancelled_jobs(s)
+        s.commit()
+
+    with pg_session_factory() as s:
+        assert s.get(ClaimAnalysisJob, job_id).status == "failed"
