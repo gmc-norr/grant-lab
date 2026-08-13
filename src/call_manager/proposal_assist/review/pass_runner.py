@@ -63,7 +63,13 @@ async def _run_one_call(
     """Run a single sub-call against its (already 'running') item. Records tokens +
     dollars and flips the item to done/failed. Never raises — failure is recorded."""
     with session_factory() as s:
-        run = s.get(ReviewRun, run_id)
+        # LOCK ORDER: review_runs < review_run_items (normative — see the matching
+        # note in the finalization session below). The bare read this replaces was a
+        # TOCTOU window: a DELETE cancels review runs through
+        # cancel_review_runs_and_items_for_workspace and could land between the
+        # status check and the `item.status = "running"` commit, stranding the item
+        # in 'running' on a deleted workspace.
+        run = s.get(ReviewRun, run_id, with_for_update=True)
         item = s.scalar(
             select(ReviewRunItem).where(
                 ReviewRunItem.review_run_id == run_id, ReviewRunItem.kind == kind
@@ -133,15 +139,15 @@ async def _run_one_call(
                 logger.exception("review adapter terminate failed (%s, run %s)", kind, run_id)
 
     with session_factory() as s:
+        # LOCK ORDER: review_runs < review_run_items (normative). The run is taken
+        # FIRST even though the item is what we came to write: the child prefix
+        # above takes run-then-item, and the original item-then-run order here was
+        # an AB-BA inversion against it (and against the delete path, which also
+        # takes runs then items).
+        run = s.get(ReviewRun, run_id, with_for_update=True)
         item = s.get(ReviewRunItem, item_id, with_for_update=True)
         if item is None:
             return
-        # Lock the parent run too: the "is the run still running?" check below and
-        # this write must be atomic w.r.t. a concurrent reaper/cancel. Otherwise a
-        # sub-call finishing just after the reaper failed the run would resurrect
-        # its item to done AND leave its tokens out of the run total (the reaper
-        # already rolled up without them), undercounting the daily dollar cap.
-        run = s.get(ReviewRun, run_id, with_for_update=True)
         item.completed_at = _now()
         if done is not None:
             item.input_tokens = done.tokens_in or 0

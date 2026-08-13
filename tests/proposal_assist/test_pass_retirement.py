@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 import uuid
 from datetime import UTC, datetime
 
@@ -193,3 +194,191 @@ def test_deleting_a_workspace_leaves_no_review_item_in_running(
             "child never reaches its own finalization"
         )
         assert s.get(ReviewRun, run_id).status == "cancelled"
+
+
+def _seed_review(pg_session_factory, current_user, *, item_status="queued"):
+    from call_manager.db.models import ReviewRun, ReviewRunItem
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        run = ReviewRun(workspace_id=ws.id, status="running", draft_sha="0" * 40)
+        s.add(run)
+        s.flush()
+        s.add(ReviewRunItem(review_run_id=run.id, kind="fit_check", status=item_status))
+        s.commit()
+        return run.id, ws.id
+
+
+def test_the_child_prefix_blocks_on_the_run_row_instead_of_committing_running(
+    pg_session_factory, current_user
+):
+    """Gate 6b — assert WHILE the interference is in force.
+
+    Asserting AFTER releasing the run lock proves nothing: finalization then sees
+    the cancelled run and moves the item off 'running' anyway, so it passes with or
+    without the prefix lock. The discriminating observation is made while the
+    holder still owns the run row: WITH the fix the child is blocked in its prefix
+    and the item is still 'queued'; WITHOUT it the child commits 'running'.
+    """
+    from call_manager.db.models import ReviewRunItem
+    from call_manager.proposal_assist.review.pass_runner import _run_one_call
+
+    run_id, ws_id = _seed_review(pg_session_factory, current_user)
+
+    from call_manager.db.models import ReviewRun
+
+    child_done = threading.Event()
+
+    def _child():
+        try:
+            asyncio.run(
+                _run_one_call(
+                    kind="fit_check",
+                    instruction="x",
+                    run_id=run_id,
+                    workspace_id=ws_id,
+                    session_factory=pg_session_factory,
+                    settings=Settings(),
+                    adapter_builder=_stub_adapter_builder,
+                )
+            )
+        finally:
+            child_done.set()
+
+    holder = pg_session_factory()
+    observed: list[str] = []
+    t = threading.Thread(target=_child)
+    try:
+        holder.get(ReviewRun, run_id, with_for_update=True)
+        t.start()
+        time.sleep(1.5)  # ample time for an UNGUARDED child to commit 'running'
+        with pg_session_factory() as probe:
+            observed.append(
+                probe.scalar(
+                    select(ReviewRunItem.status).where(
+                        ReviewRunItem.review_run_id == run_id
+                    )
+                )
+            )
+    finally:
+        holder.rollback()
+        holder.close()
+        assert child_done.wait(timeout=30), "the child never finished"
+        t.join(timeout=5)
+
+    assert observed == ["queued"], (
+        f"while the run row was held the item was {observed!r} — the child "
+        "committed without waiting for the run lock"
+    )
+
+
+def _pausing_adapter_builder(gate: threading.Event, entered: threading.Event):
+    """Adapter whose turn parks until `gate` is set, so the child can be held
+    BETWEEN its prefix and its finalization."""
+
+    def _build(**kwargs):
+        class _Stub:
+            async def launch(self, context):
+                handle = type("H", (), {})()
+                handle.state = {"launch_id": uuid.uuid4()}
+                handle.workspace_id = kwargs.get("workspace_id")
+                return handle
+
+            async def send_turn(self, handle, instruction):
+                entered.set()
+                await asyncio.get_running_loop().run_in_executor(None, gate.wait, 30)
+                return
+                yield  # pragma: no cover
+
+            async def terminate(self, handle) -> None:
+                return None
+
+            def unconfirmed_launch_ids(self):
+                return []
+
+            async def retire_unconfirmed(self) -> int:
+                return 0
+
+        return _Stub()
+
+    return _build
+
+
+def test_finalization_takes_the_run_row_before_the_item_row(
+    pg_session_factory, current_user
+):
+    """The normative order, proven by ACQUISITION rather than by inducing a
+    deadlock.
+
+    The child is parked inside its turn (after the prefix, before finalization) so
+    the ITEM row can be taken first. Finalization must then already HOLD the run row
+    while it blocks on the item — probed with FOR UPDATE NOWAIT from a third
+    connection. Under the old item-then-run order it would be blocked on the item
+    holding nothing, and the probe would succeed.
+
+    Mutation: restore finalization to item-then-run and this must FAIL.
+    """
+    from call_manager.db.models import ReviewRun, ReviewRunItem
+    from call_manager.proposal_assist.review.pass_runner import _run_one_call
+
+    run_id, ws_id = _seed_review(pg_session_factory, current_user, item_status="queued")
+    with pg_session_factory() as s:
+        item_id = s.scalar(
+            select(ReviewRunItem.id).where(ReviewRunItem.review_run_id == run_id)
+        )
+
+    def _run_row_is_locked() -> bool:
+        try:
+            with pg_session_factory() as probe:
+                probe.execute(
+                    select(ReviewRun).where(ReviewRun.id == run_id).with_for_update(nowait=True)
+                )
+                return False
+        except OperationalError:
+            return True
+
+    gate = threading.Event()
+    in_turn = threading.Event()
+    child_done = threading.Event()
+
+    def _child():
+        try:
+            asyncio.run(
+                _run_one_call(
+                    kind="fit_check",
+                    instruction="x",
+                    run_id=run_id,
+                    workspace_id=ws_id,
+                    session_factory=pg_session_factory,
+                    settings=Settings(),
+                    adapter_builder=_pausing_adapter_builder(gate, in_turn),
+                )
+            )
+        finally:
+            child_done.set()
+
+    holder = pg_session_factory()
+    locked_while_blocked: list[bool] = []
+    t = threading.Thread(target=_child)
+    try:
+        t.start()
+        assert in_turn.wait(timeout=15), "the child never reached its turn"
+        # The prefix has committed and released its run lock; take the ITEM so only
+        # FINALIZATION contends.
+        holder.get(ReviewRunItem, item_id, with_for_update=True)
+        gate.set()                      # child proceeds into finalization
+        time.sleep(1.5)                 # it is now blocked on the item row
+        locked_while_blocked.append(_run_row_is_locked())
+    finally:
+        gate.set()
+        holder.rollback()
+        holder.close()
+        assert child_done.wait(timeout=30), "the child never finished"
+        t.join(timeout=5)
+
+    assert locked_while_blocked == [True], (
+        "finalization was blocked on the item row without holding the run row — "
+        "that is the item-then-run order, which inverts against the prefix and "
+        "the delete path"
+    )
