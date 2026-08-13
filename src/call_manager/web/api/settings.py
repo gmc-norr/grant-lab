@@ -128,6 +128,14 @@ def add_member(
 ) -> MemberOut:
     with request.app.state.session_factory() as session:
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        # Slice C2 lock-order rule: the live mutex immediately after
+        # require_owner, before any other lock. WorkspaceDeleted -> main.py -> 404.
+        try:
+            acquire_commit_mutex_live(session, ws.id)
+        except CommitMutexTimeout as e:
+            raise HTTPException(
+                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
+            ) from e
         target = session.scalar(select(User).where(User.email == body.email))
         # Generic failure (no "no such user" oracle), mirroring the Jinja add_viewer.
         if target is None:
@@ -165,6 +173,14 @@ def remove_member(
 ) -> Response:
     with request.app.state.session_factory() as session:
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        # Slice C2 lock-order rule: the live mutex immediately after
+        # require_owner, before any other lock. WorkspaceDeleted -> main.py -> 404.
+        try:
+            acquire_commit_mutex_live(session, ws.id)
+        except CommitMutexTimeout as e:
+            raise HTTPException(
+                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
+            ) from e
         target = session.get(User, user_id)  # resolve email for the audit payload
         deleted = (
             session.query(WorkspaceViewer).filter_by(workspace_id=ws.id, user_id=user_id).delete()

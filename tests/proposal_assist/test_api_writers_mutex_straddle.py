@@ -27,9 +27,9 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import text
 
-from call_manager.db.models import Workspace
+from call_manager.db.models import Workspace, WorkspaceViewer
 from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex, commit_mutex_key
-from tests.proposal_assist.conftest import make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace
 
 
 def _advisory_waiters(session_factory, ws_id) -> int:
@@ -240,3 +240,113 @@ def test_update_settings_returns_429_when_the_commit_mutex_is_wedged(
     assert resp.headers.get("Retry-After") == "2"
     with pg_session_factory() as s:
         assert s.get(Workspace, ws_id).title == "original title"
+
+
+def test_add_member_straddled_by_a_delete_returns_404_and_writes_nothing(
+    client_authed_owner, current_user, pg_session_factory
+):
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        target = make_user(s, email="c2-add-straddle@ki.se")
+        s.commit()
+        ws_id, target_id = ws.id, target.id
+
+    resp = straddle_delete(
+        pg_session_factory,
+        ws_id,
+        lambda: client_authed_owner.post(
+            f"/api/workspaces/{ws_id}/members", json={"email": "c2-add-straddle@ki.se"}
+        ),
+    )
+
+    assert resp.status_code == 404, f"expected 404, got {resp.status_code}: {resp.text}"
+    with pg_session_factory() as s:
+        assert (
+            s.query(WorkspaceViewer).filter_by(workspace_id=ws_id, user_id=target_id).first()
+            is None
+        ), "a blocked add_member inserted a WorkspaceViewer for a deleted workspace"
+
+
+def test_add_member_returns_429_when_the_commit_mutex_is_wedged(
+    client_authed_owner, current_user, pg_session_factory, monkeypatch
+):
+    import call_manager.web.api.settings as settings_api
+
+    patch_route_mutex_timeout(monkeypatch, settings_api, seconds=1)
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        target = make_user(s, email="c2-add-wedged@ki.se")
+        s.commit()
+        ws_id, target_id = ws.id, target.id
+
+    resp = wedge_mutex(
+        pg_session_factory,
+        ws_id,
+        lambda: client_authed_owner.post(
+            f"/api/workspaces/{ws_id}/members", json={"email": "c2-add-wedged@ki.se"}
+        ),
+    )
+
+    assert resp.status_code == 429, f"expected 429, got {resp.status_code}: {resp.text}"
+    assert resp.headers.get("Retry-After") == "2"
+    with pg_session_factory() as s:
+        assert (
+            s.query(WorkspaceViewer).filter_by(workspace_id=ws_id, user_id=target_id).first()
+            is None
+        )
+
+
+def test_remove_member_straddled_by_a_delete_returns_404_and_writes_nothing(
+    client_authed_owner, current_user, pg_session_factory
+):
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        target = make_user(s, email="c2-rm-straddle@ki.se")
+        s.flush()
+        s.add(WorkspaceViewer(workspace_id=ws.id, user_id=target.id))
+        s.commit()
+        ws_id, target_id = ws.id, target.id
+
+    resp = straddle_delete(
+        pg_session_factory,
+        ws_id,
+        lambda: client_authed_owner.delete(f"/api/workspaces/{ws_id}/members/{target_id}"),
+    )
+
+    assert resp.status_code == 404, f"expected 404, got {resp.status_code}: {resp.text}"
+    with pg_session_factory() as s:
+        assert (
+            s.query(WorkspaceViewer).filter_by(workspace_id=ws_id, user_id=target_id).first()
+            is not None
+        ), "a blocked remove_member deleted a WorkspaceViewer for a deleted workspace"
+
+
+def test_remove_member_returns_429_when_the_commit_mutex_is_wedged(
+    client_authed_owner, current_user, pg_session_factory, monkeypatch
+):
+    import call_manager.web.api.settings as settings_api
+
+    patch_route_mutex_timeout(monkeypatch, settings_api, seconds=1)
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        target = make_user(s, email="c2-rm-wedged@ki.se")
+        s.flush()
+        s.add(WorkspaceViewer(workspace_id=ws.id, user_id=target.id))
+        s.commit()
+        ws_id, target_id = ws.id, target.id
+
+    resp = wedge_mutex(
+        pg_session_factory,
+        ws_id,
+        lambda: client_authed_owner.delete(f"/api/workspaces/{ws_id}/members/{target_id}"),
+    )
+
+    assert resp.status_code == 429, f"expected 429, got {resp.status_code}: {resp.text}"
+    assert resp.headers.get("Retry-After") == "2"
+    with pg_session_factory() as s:
+        assert (
+            s.query(WorkspaceViewer).filter_by(workspace_id=ws_id, user_id=target_id).first()
+            is not None
+        )
