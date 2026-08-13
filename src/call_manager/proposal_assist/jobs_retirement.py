@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
-from call_manager.db.models import WorkspaceSetupJob
+from call_manager.db.models import ClaimAnalysisJob, WorkspaceSetupJob
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,42 @@ _JOBS_CANCEL_SECONDS = 1.0
 # yielded to review must not be resurrected by a late failure. Different
 # question, deliberately not the same list.
 _CANCELLABLE = ("queued", "running", "waiting_for_rubric_review")
+
+# Non-terminal claim-analysis states. Terminalizes to 'failed', already allowed by
+# ck_claim_analysis_jobs_status — Slice C1 ships NO migration.
+_CLAIM_ANALYSIS_CANCELLABLE = ("queued", "running")
+
+
+def cancel_claim_analysis_jobs_for_workspace(
+    session: Session, workspace_id: uuid.UUID
+) -> int:
+    """Terminalize this workspace's active claim-analysis jobs. Caller commits.
+
+    SKIP LOCKED for the same reason as the setup-job cancel: touch_running_job
+    holds the job row for the worker's WHOLE per-job transaction, so waiting would
+    make this hook inherit that lifetime and stall DELETE. Skipped rows converge
+    via reconcile_cancelled_jobs.
+    """
+    ids = session.scalars(
+        select(ClaimAnalysisJob.id)
+        .where(
+            ClaimAnalysisJob.workspace_id == workspace_id,
+            ClaimAnalysisJob.status.in_(_CLAIM_ANALYSIS_CANCELLABLE),
+        )
+        .with_for_update(skip_locked=True)
+    ).all()
+    if not ids:
+        return 0
+    session.execute(
+        update(ClaimAnalysisJob)
+        .where(ClaimAnalysisJob.id.in_(ids))
+        .values(
+            status="failed",
+            last_error="cancelled: workspace deleted",
+            updated_at=datetime.now(UTC),
+        )
+    )
+    return len(ids)
 
 
 def cancel_setup_jobs_for_workspace(session: Session, workspace_id: uuid.UUID) -> int:
