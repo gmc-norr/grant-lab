@@ -30,7 +30,7 @@ from call_manager.proposal_assist.coherence.jobs import cancel_coherence_jobs_fo
 from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex_live
 from call_manager.proposal_assist.evaluator.jobs import cancel_evaluator_jobs_for_workspace
 from call_manager.proposal_assist.references.storage import ReferenceStorage
-from call_manager.proposal_assist.review.jobs import cancel_review_runs_for_workspace
+from call_manager.proposal_assist.review.jobs import cancel_review_runs_and_items_for_workspace
 from call_manager.proposal_assist.turns.outcomes import record_terminal_outcome
 from call_manager.proposal_assist.uncited_claims.jobs import (
     cancel_uncited_claims_jobs_for_workspace,
@@ -127,7 +127,7 @@ def soft_delete_workspace_db(
     # soft-deleted workspaces; this also unwedges the active-unique slot). Same txn.
     cancel_coherence_jobs_for_workspace(session, workspace_id=workspace_id)
     cancel_evaluator_jobs_for_workspace(session, workspace_id=workspace_id)
-    cancel_review_runs_for_workspace(session, workspace_id=workspace_id)
+    cancel_review_runs_and_items_for_workspace(session, workspace_id=workspace_id)
     cancel_uncited_claims_jobs_for_workspace(session, workspace_id=workspace_id)
     # Cancel any QUEUED turns so a deletion-race turn can't dispatch. Route through
     # the helper for audit parity (closes each cloud_turn_sent chain), but

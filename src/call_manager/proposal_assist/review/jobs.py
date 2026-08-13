@@ -77,9 +77,20 @@ def claim_next_review_run(session: Session) -> ReviewRun | None:
     return run
 
 
-def cancel_review_runs_for_workspace(session: Session, *, workspace_id: uuid.UUID) -> int:
-    """Cancel any active (queued|running) review run for a workspace (soft-delete
-    handler). ONE atomic UPDATE ... RETURNING — never an ORM load-then-write."""
+def cancel_review_runs_and_items_for_workspace(
+    session: Session, *, workspace_id: uuid.UUID
+) -> int:
+    """Cancel a workspace's active review runs AND their active items (soft-delete
+    handler). ONE atomic UPDATE ... RETURNING per table — never load-then-write.
+
+    Items are terminalized HERE, durably, because retirement cancellation does not
+    reach a child's finalization session: CancelledError propagates out of the
+    awaited turn, the `finally` runs the adapter terminate, and it keeps
+    propagating — the finalization block AFTER the try never executes. Without
+    this, a cancelled child leaves its ReviewRunItem in 'running' on a deleted
+    workspace with nothing to repair it.
+
+    LOCK ORDER: runs BEFORE items (normative)."""
     ids = (
         session.execute(
             update(ReviewRun)
@@ -94,6 +105,20 @@ def cancel_review_runs_for_workspace(session: Session, *, workspace_id: uuid.UUI
         .scalars()
         .all()
     )
+    if ids:
+        session.execute(
+            update(ReviewRunItem)
+            .where(
+                ReviewRunItem.review_run_id.in_(ids),
+                ReviewRunItem.status.in_(("queued", "running")),
+            )
+            .values(
+                status="cancelled",
+                error_message="cancelled: workspace deleted",
+                completed_at=datetime.now(UTC),
+            )
+            .execution_options(synchronize_session=False)
+        )
     session.flush()
     return len(ids)
 

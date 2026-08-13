@@ -156,3 +156,40 @@ def test_the_coherence_prefix_holds_the_workspace_row_then_releases_it(
     t.join(timeout=5)
     # (2) the lock is gone once the prefix's session has committed.
     assert not _row_is_locked(), "the prefix never released the workspace row"
+
+
+def test_deleting_a_workspace_leaves_no_review_item_in_running(
+    client_authed_owner, pg_session_factory, current_user
+):
+    """The case the item-terminalization exists for: a child ALREADY in 'running'
+    when the DELETE lands.
+
+    Retirement cancels the child's task, so its finalization session never runs —
+    CancelledError propagates past the `finally`, and the block after the `try` is
+    simply not executed. Only the delete transaction can terminalize the item.
+
+    Mutation: revert cancel_review_runs_and_items_for_workspace to updating runs
+    only, and this must FAIL with the item still 'running'.
+    """
+    from call_manager.db.models import ReviewRun, ReviewRunItem
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        run = ReviewRun(workspace_id=ws.id, status="running", draft_sha="0" * 40)
+        s.add(run)
+        s.flush()
+        s.add(ReviewRunItem(review_run_id=run.id, kind="fit_check", status="running"))
+        s.commit()
+        run_id, ws_id = run.id, ws.id
+
+    resp = client_authed_owner.delete(f"/api/workspaces/{ws_id}")
+    assert resp.status_code == 204
+
+    with pg_session_factory() as s:
+        item = s.scalar(select(ReviewRunItem).where(ReviewRunItem.review_run_id == run_id))
+        assert item.status == "cancelled", (
+            f"item left in {item.status!r} on a deleted workspace — a cancelled "
+            "child never reaches its own finalization"
+        )
+        assert s.get(ReviewRun, run_id).status == "cancelled"
