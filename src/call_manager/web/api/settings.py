@@ -136,6 +136,13 @@ def add_member(
             raise HTTPException(
                 status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
             ) from e
+        # This route's only validation is a DB read on THIS session, so unlike
+        # update_settings' body checks it cannot be hoisted above the mutex — a
+        # lookup before the lock would read a workspace a committing delete is
+        # about to remove. Consequence, deliberately accepted: with a wedged
+        # holder an unknown email answers 429 after the timeout rather than 400
+        # immediately (which also denies a straddling request a user-existence
+        # oracle). Do not "align" this with update_settings by hoisting it.
         target = session.scalar(select(User).where(User.email == body.email))
         # Generic failure (no "no such user" oracle), mirroring the Jinja add_viewer.
         if target is None:

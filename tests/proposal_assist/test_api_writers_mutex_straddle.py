@@ -29,7 +29,11 @@ import pytest
 from sqlalchemy import text
 
 from call_manager.db.models import Workspace, WorkspaceSetupJob, WorkspaceViewer
-from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex, commit_mutex_key
+from call_manager.proposal_assist.drafting.locking import (
+    BUSY_ERROR_MESSAGE,
+    acquire_commit_mutex,
+    commit_mutex_key,
+)
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
@@ -239,6 +243,12 @@ def test_update_settings_returns_429_when_the_commit_mutex_is_wedged(
 
     assert resp.status_code == 429, f"expected 429, got {resp.status_code}: {resp.text}"
     assert resp.headers.get("Retry-After") == "2"
+    # The contract is 429 + Retry-After: 2 + the SHARED message. BUSY_ERROR_MESSAGE
+    # is imported, not re-typed, so a route that invents its own busy wording fails
+    # here instead of silently diverging from the agent-facing message.
+    assert resp.json()["error"]["message"] == BUSY_ERROR_MESSAGE, (
+        f"429 body did not carry the shared busy message: {resp.text}"
+    )
     with pg_session_factory() as s:
         assert s.get(Workspace, ws_id).title == "original title"
 
@@ -291,6 +301,12 @@ def test_add_member_returns_429_when_the_commit_mutex_is_wedged(
 
     assert resp.status_code == 429, f"expected 429, got {resp.status_code}: {resp.text}"
     assert resp.headers.get("Retry-After") == "2"
+    # The contract is 429 + Retry-After: 2 + the SHARED message. BUSY_ERROR_MESSAGE
+    # is imported, not re-typed, so a route that invents its own busy wording fails
+    # here instead of silently diverging from the agent-facing message.
+    assert resp.json()["error"]["message"] == BUSY_ERROR_MESSAGE, (
+        f"429 body did not carry the shared busy message: {resp.text}"
+    )
     with pg_session_factory() as s:
         assert (
             s.query(WorkspaceViewer).filter_by(workspace_id=ws_id, user_id=target_id).first()
@@ -346,6 +362,12 @@ def test_remove_member_returns_429_when_the_commit_mutex_is_wedged(
 
     assert resp.status_code == 429, f"expected 429, got {resp.status_code}: {resp.text}"
     assert resp.headers.get("Retry-After") == "2"
+    # The contract is 429 + Retry-After: 2 + the SHARED message. BUSY_ERROR_MESSAGE
+    # is imported, not re-typed, so a route that invents its own busy wording fails
+    # here instead of silently diverging from the agent-facing message.
+    assert resp.json()["error"]["message"] == BUSY_ERROR_MESSAGE, (
+        f"429 body did not carry the shared busy message: {resp.text}"
+    )
     with pg_session_factory() as s:
         assert (
             s.query(WorkspaceViewer).filter_by(workspace_id=ws_id, user_id=target_id).first()
@@ -402,6 +424,12 @@ def test_update_rubric_returns_429_when_the_commit_mutex_is_wedged(
 
     assert resp.status_code == 429, f"expected 429, got {resp.status_code}: {resp.text}"
     assert resp.headers.get("Retry-After") == "2"
+    # The contract is 429 + Retry-After: 2 + the SHARED message. BUSY_ERROR_MESSAGE
+    # is imported, not re-typed, so a route that invents its own busy wording fails
+    # here instead of silently diverging from the agent-facing message.
+    assert resp.json()["error"]["message"] == BUSY_ERROR_MESSAGE, (
+        f"429 body did not carry the shared busy message: {resp.text}"
+    )
     with pg_session_factory() as s:
         assert s.get(Workspace, ws_id).rubric_funder_notes == "original notes"
 
@@ -459,6 +487,12 @@ def test_retry_setup_returns_429_when_the_commit_mutex_is_wedged(
 
     assert resp.status_code == 429, f"expected 429, got {resp.status_code}: {resp.text}"
     assert resp.headers.get("Retry-After") == "2"
+    # The contract is 429 + Retry-After: 2 + the SHARED message. BUSY_ERROR_MESSAGE
+    # is imported, not re-typed, so a route that invents its own busy wording fails
+    # here instead of silently diverging from the agent-facing message.
+    assert resp.json()["error"]["message"] == BUSY_ERROR_MESSAGE, (
+        f"429 body did not carry the shared busy message: {resp.text}"
+    )
     with pg_session_factory() as s:
         assert s.get(WorkspaceSetupJob, job_id).status == "failed"
 
@@ -511,6 +545,12 @@ def test_activate_returns_429_when_the_commit_mutex_is_wedged(
 
     assert resp.status_code == 429, f"expected 429, got {resp.status_code}: {resp.text}"
     assert resp.headers.get("Retry-After") == "2"
+    # The contract is 429 + Retry-After: 2 + the SHARED message. BUSY_ERROR_MESSAGE
+    # is imported, not re-typed, so a route that invents its own busy wording fails
+    # here instead of silently diverging from the agent-facing message.
+    assert resp.json()["error"]["message"] == BUSY_ERROR_MESSAGE, (
+        f"429 body did not carry the shared busy message: {resp.text}"
+    )
     with pg_session_factory() as s:
         assert s.get(WorkspaceSetupJob, job_id).status == "waiting_for_rubric_review"
         assert s.get(Workspace, ws_id).current_phase == "setup"
@@ -705,6 +745,9 @@ def test_retry_setup_gives_up_on_a_held_setup_job_row_instead_of_pinning_the_mut
 
     assert out["resp"].status_code == 429
     assert out["resp"].headers.get("Retry-After") == "2"
+    assert out["resp"].json()["error"]["message"] == BUSY_ERROR_MESSAGE, (
+        f"429 body did not carry the shared busy message: {out['resp'].text}"
+    )
     with pg_session_factory() as s:
         assert s.get(WorkspaceSetupJob, job_id).status == "failed"
 
@@ -763,6 +806,9 @@ def test_activate_gives_up_on_a_held_setup_job_row_instead_of_pinning_the_mutex(
 
     assert out["resp"].status_code == 429
     assert out["resp"].headers.get("Retry-After") == "2"
+    assert out["resp"].json()["error"]["message"] == BUSY_ERROR_MESSAGE, (
+        f"429 body did not carry the shared busy message: {out['resp'].text}"
+    )
     with pg_session_factory() as s:
         assert s.get(WorkspaceSetupJob, job_id).status == "waiting_for_rubric_review"
         assert s.get(Workspace, ws_id).current_phase == "setup"
@@ -850,6 +896,9 @@ def test_activate_maps_a_post_job_lock_row_timeout_to_429_not_500(
         f"expected 429, got {out['resp'].status_code}: {out['resp'].text}"
     )
     assert out["resp"].headers.get("Retry-After") == "2"
+    assert out["resp"].json()["error"]["message"] == BUSY_ERROR_MESSAGE, (
+        f"429 body did not carry the shared busy message: {out['resp'].text}"
+    )
     with pg_session_factory() as s:
         assert s.get(WorkspaceSetupJob, job_id).status == "waiting_for_rubric_review"
         ws_after = s.get(Workspace, ws_id)
