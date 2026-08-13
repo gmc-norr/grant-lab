@@ -400,3 +400,199 @@ def test_the_delete_route_returns_within_the_barrier_with_a_worker_mid_job(
     finally:
         holder.rollback()
         holder.close()
+
+
+def test_the_abort_fires_in_the_UNCITED_loop_for_a_section_with_no_ev_markers(
+    pg_session_factory, current_user, tmp_path
+):
+    """The gap the audit-loop callback does NOT cover.
+
+    `should_abort` reaches `validate_citations_semantic` only under
+    `if cited_evs:` — so a section with zero `ev:` markers consulted it ZERO
+    times, and the uncited classify/retrieve/judge loop (one classify plus a
+    retrieve-and-judge fan-out per sentence) ran to completion after the delete
+    committed. This drives the REAL `analyze_job` over a real repo whose section
+    has no markers at all.
+
+    Shaped like test_the_abort_callback_is_checked_PER_ROW_not_once_per_job: the
+    callback returns False twice then True, so a check at the TOP of
+    `for occ in sentences:` raises on the third sentence (n == 3) and the third
+    sentence never reaches the LLM (2 classify calls, not 3). Hoisted above the
+    loop it would be consulted ONCE, return False, and never raise.
+
+    Mutation: move the check above `for occ in sentences:` (pipeline.py:418) —
+    n == 1, no exception, job runs to completion.
+    """
+    from call_manager.proposal_assist.analysis.pipeline import analyze_job
+    from call_manager.proposal_assist.analysis.queue import claim_queued_jobs
+    from call_manager.proposal_assist.citations.audit import ClaimAnalysisAborted
+    from call_manager.proposal_assist.references.embed import FakeEmbedder
+    from tests.test_analysis_pipeline import (
+        FakeCitationService,
+        _enqueue_section,
+        _init_repo,
+    )
+
+    doc = (
+        "# T\nintro\n## Body\n"
+        "First factual claim here. Second factual claim here. Third factual claim here.\n"
+    )
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        repo = _init_repo(tmp_path, ws.id, doc)
+        _enqueue_section(s, ws.id, repo, 1)
+        s.commit()
+
+    calls = {"n": 0}
+
+    def _should_abort() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 2
+
+    svc = FakeCitationService()
+    with pg_session_factory() as s:
+        (job,) = claim_queued_jobs(s, limit=1)
+        s.commit()
+        with pytest.raises(ClaimAnalysisAborted):
+            analyze_job(
+                job,
+                session=s,
+                session_factory=pg_session_factory,
+                citation_service=svc,
+                embedder=FakeEmbedder(),
+                workspaces_dir=tmp_path,
+                should_abort=_should_abort,
+            )
+        s.rollback()
+
+    assert calls["n"] == 3, (
+        f"should_abort was consulted {calls['n']} time(s) for a 3-sentence section "
+        "with no ev: markers — it is not inside the uncited per-sentence loop"
+    )
+    assert svc.calls.count("user_claim_classify") == 2, (
+        f"{svc.calls.count('user_claim_classify')} classify calls — the aborting "
+        "sentence still spent tokens, so the check is not at the TOP of the loop"
+    )
+
+
+def test_mark_done_cannot_resurrect_a_job_the_retirement_hook_terminalized(
+    pg_session_factory, current_user
+):
+    """The lost update on the SUCCESS path.
+
+    The hook's cancel SKIP LOCKEDs past rows a worker holds — but a worker whose
+    per-job session holds no lock on its job row (every sentence a cache hit, so
+    `touch_running_job` never ran) does not shield it. The hook then wins the row
+    and writes status='failed' / last_error='cancelled: workspace deleted', and an
+    unconditional `mark_done` flushes 'done' back over it while leaving the
+    cancellation message behind: a resurrected job in an incoherent state.
+
+    Uses the REAL hook, not a hand-written UPDATE, so the terminal write under
+    test is production's.
+
+    Mutation: drop the FOR UPDATE re-read + status guard from
+    `analysis/queue.py:mark_done` — the row ends 'done' with last_error=None.
+    """
+    from call_manager.proposal_assist.analysis.queue import mark_done
+    from call_manager.proposal_assist.jobs_retirement import build_jobs_retirement_hook
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        job = _job(ws.id, section_sha="a", status="running")
+        s.add(job)
+        s.commit()
+        job_id, ws_id = job.id, ws.id
+
+    # The worker's per-job session: the job is loaded, but NO row lock is held.
+    with pg_session_factory() as worker:
+        job = worker.get(ClaimAnalysisJob, job_id)
+        assert job.status == "running"
+
+        with pg_session_factory() as s:
+            s.get(Workspace, ws_id).soft_deleted_at = _now_utc()
+            s.commit()
+        assert asyncio.run(build_jobs_retirement_hook(pg_session_factory)(ws_id)) == 1
+
+        mark_done(worker, job)
+        worker.commit()
+
+    with pg_session_factory() as s:
+        row = s.get(ClaimAnalysisJob, job_id)
+        assert row.status == "failed", f"mark_done resurrected a cancelled job as {row.status!r}"
+        assert row.last_error == "cancelled: workspace deleted", (
+            f"cancellation message lost: {row.last_error!r}"
+        )
+
+
+def test_the_abort_callback_is_actually_WIRED_INTO_the_cited_audit_call_site(
+    pg_session_factory, current_user, tmp_path
+):
+    """The threading itself, not just the loop it lands in.
+
+    `validate_citations_semantic`'s per-row check is pinned above — but by calling
+    that function DIRECTLY. Deleting `should_abort=should_abort` from analyze_job's
+    call site (pipeline.py:385) leaves every other test in this file green
+    (measured: 11 passed under exactly that mutation), because nothing else drives
+    the cited branch with a callback. This drives the real `analyze_job` over a
+    section that HAS an `ev:` marker.
+
+    Counting is not enough to discriminate: the uncited loop now checks per
+    sentence too, so an unwired audit still raises — one loop later. So this
+    asserts the raise came out of `citations/audit.py`, which only the wired call
+    site can produce.
+
+    Mutation: delete `should_abort=should_abort` at pipeline.py:385 — the abort
+    then surfaces from pipeline.py's uncited loop and no audit.py frame appears.
+    """
+    from call_manager.proposal_assist.analysis.pipeline import analyze_job
+    from call_manager.proposal_assist.analysis.queue import claim_queued_jobs
+    from call_manager.proposal_assist.citations.audit import ClaimAnalysisAborted
+    from call_manager.proposal_assist.references.embed import FakeEmbedder
+    from tests.test_analysis_pipeline import (
+        FakeCitationService,
+        _enqueue_section,
+        _init_repo,
+    )
+
+    ev = "ev-1111aaaa2222"
+    doc = f"# T\nintro\n## S\nCited sentence here[@k]<!-- ev:{ev} -->.\n"
+    citations = (
+        f'{{"version": 2, "evidence": [{{"id": "{ev}", "citekey": "k", "stance": "supports"}}]}}'
+    )
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        repo = _init_repo(tmp_path, ws.id, doc, citations_json=citations)
+        _enqueue_section(s, ws.id, repo, 1)
+        s.commit()
+
+    calls = {"n": 0}
+
+    def _should_abort() -> bool:
+        calls["n"] += 1
+        return True
+
+    with pg_session_factory() as s:
+        (job,) = claim_queued_jobs(s, limit=1)
+        s.commit()
+        with pytest.raises(ClaimAnalysisAborted) as excinfo:
+            analyze_job(
+                job,
+                session=s,
+                session_factory=pg_session_factory,
+                citation_service=FakeCitationService(),
+                embedder=FakeEmbedder(),
+                workspaces_dir=tmp_path,
+                should_abort=_should_abort,
+            )
+        s.rollback()
+
+    frames = [str(entry.path) for entry in excinfo.traceback]
+    assert any(f.endswith("citations/audit.py") for f in frames), (
+        "the abort did not come from the semantic audit — should_abort is not "
+        f"threaded into the validate_citations_semantic call. Frames: {frames}"
+    )
+    assert calls["n"] == 1

@@ -337,15 +337,24 @@ jobs, and extended here to claim-analysis — awaited alongside the others:
 Because a bounded delete transaction is not the same as a bounded route, gate 14
 measures **end-to-end DELETE latency** with a worker mid-job, not merely that
 the delete transaction committed.
-- **A callback inside the semantic-audit loop.** One checkpoint per job is not
-  "bounded by one LLM call": `validate_citations_semantic` iterates evidence
-  rows making per-row judgements (`citations/audit.py:583`), so the abort
-  callback must be threaded into that loop.
-- **The failure path must not resurrect a cancelled job.** `mark_failed`
+- **A callback inside EVERY per-row LLM loop — there are two.** One checkpoint
+  per job is not "bounded by one LLM call": `validate_citations_semantic`
+  iterates evidence rows making per-row judgements (`citations/audit.py:583`),
+  and `analyze_job`'s uncited phase makes a classify (plus a retrieve-and-judge
+  fan-out) per *sentence* (`pipeline.py:418`). The callback must be threaded
+  into both, at the top of each loop and before its row-shape filters. Threading
+  it into the semantic audit alone leaves a section with no `ev:` markers
+  consulting it zero times — the audit is guarded by `if cited_evs`.
+- **Neither terminal path may resurrect a cancelled job.** `mark_failed`
   returns a job to `queued` whenever `attempts < MAX_ATTEMPTS`
   (`queue.py:216-230`), so the generic handler at `pipeline.py:578` would
-  requeue a job the deletion just cancelled. The handler must detect the
-  deleted/cancelled case and write a terminal status instead.
+  requeue a job the deletion just cancelled: it must detect the
+  deleted/cancelled case and write a terminal status instead. The SUCCESS path
+  needs the mirror-image guard — the hook can win the job row whenever the
+  worker's session holds no lock on it (every sentence a cache hit, so
+  `touch_running_job` never ran), so `mark_done` re-reads the row FOR UPDATE and
+  returns unless it is still `running`. Without that, 'done' is flushed over the
+  hook's 'failed' while `last_error='cancelled: workspace deleted'` stays behind.
 
 ## 7. Phase-0 setup — carved out
 
@@ -432,7 +441,14 @@ dropped. The production surface then offers only `soft_delete_workspace_db` and
    subprocess's access to the repo. All three are larger than this slice, and
    naming them is the point — the residual has no cheap fix.
 2. **Claim-analysis cannot be cancelled mid-call.** Sync code in a thread pool.
-   §6 bounds the residual to the interval between abort callbacks.
+   §6 bounds the LLM-spend residual to the interval between abort callbacks —
+   one evidence row's judgement in the cited audit, or one sentence's classify
+   plus retrieve-and-judge in the uncited loop. Two caveats on that bound. The
+   annotation fan-out (`pipeline.py:501-553`) has no callback, but it makes no
+   LLM call, so it costs nothing beyond a short DB tail. And the abort's
+   `s.rollback()` discards only the per-job transaction: `store_verdict` and
+   `_persist_classification` commit their caches in independent sessions and
+   survive by design.
 3. **Phase-0 cannot stop a running extractor call**, for the same reason — it
    is sync code with no cancellation primitive. **DELETE does not wait for it:**
    the route returns, and the worker and its cloud spend continue until the
@@ -552,8 +568,9 @@ One new module and one new scheduler tick; a tracking wrapper in each of four
 runners plus review's task-only parent and per-child wrappers; a row-lock guard
 in each of four prefixes plus review's child prefix; one explicit catch at the
 tick boundary; one claim-query filter; a `"jobs"` hook doing SKIP LOCKED cancels
-off the delete transaction; an abort callback threaded into the semantic-audit
-loop; one failure-path special case; six route changes with a normative lock
+off the delete transaction; an abort callback threaded into BOTH per-row LLM
+loops (semantic audit and uncited classify); one failure-path special case and
+one success-path `mark_done` guard; six route changes with a normative lock
 order; one hook registration plus a second population added to **both** the
 inherited `"jobs"` hook **and** its reconciliation tick; the wrapper deletion
 plus its test helper; and the `retirement.py:35` comment correction. No schema

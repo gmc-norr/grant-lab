@@ -416,6 +416,18 @@ def analyze_job(
     # --- UNCITED: cached classification + verified retrieval ------------- #
     uncited_results: dict[str, dict] = {}  # claim_sha -> {"outcome", ...}
     for occ in sentences:
+        # ABORT CHECK — top of the loop, BEFORE the row-shape filters, so it is
+        # consulted once per sentence regardless of whether that sentence costs an
+        # LLM call. Same per-row placement as the semantic audit's own check
+        # (citations/audit.py:599), for the same reason: one check per job is not
+        # "bounded by one LLM call" when the loop makes one classify (plus a
+        # retrieve-and-judge fan-out) per sentence.
+        #
+        # Without it this whole phase is unabortable, and a section with NO `ev:`
+        # markers never consults should_abort at all — the cited audit above is the
+        # only other call site and it is guarded by `if cited_evs`.
+        if should_abort is not None and should_abort():
+            raise ClaimAnalysisAborted("workspace deleted during uncited-claim analysis")
         if occ.ev_ids or not occ.text.strip():
             continue
         sha = _claim_sha(occ.text)
@@ -595,9 +607,17 @@ def drain_analysis_queue(
                 elif status == "superseded":
                     counts["superseded"] += 1
             except ClaimAnalysisAborted:
-                # Discard EVERY partial write from this job, then terminalize. Not
-                # routed through mark_failed: this is not a retryable failure and the
-                # job must never return to 'queued'.
+                # Discard this session's partial writes, then terminalize. Scope is
+                # exactly the per-job transaction: the annotation upserts and the
+                # heartbeat. It is NOT every write the job made — the two LLM-spend
+                # caches deliberately commit in their OWN short sessions
+                # (`store_verdict`, citations/audit.py:739; `_persist_classification`
+                # above) precisely so a rollback here cannot discard them, and they
+                # survive. That is intended: they are content-keyed caches, not
+                # findings, and no annotation ever becomes visible from them alone.
+                #
+                # Not routed through mark_failed: this is not a retryable failure and
+                # the job must never return to 'queued'.
                 s.rollback()
                 logger.info(
                     "claim-analysis job %s aborted: workspace deleted mid-audit", jid

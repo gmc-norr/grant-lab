@@ -213,6 +213,29 @@ def touch_running_job(session: Session, job_id: int) -> None:
 
 
 def mark_done(session: Session, job: ClaimAnalysisJob) -> None:
+    """Terminalize a job as 'done' — but ONLY if the row is still 'running'.
+
+    FOR UPDATE re-read rather than a bare attribute write, because this is not the
+    only writer of the row. The "jobs" retirement hook terminalizes a deleted
+    workspace's claim-analysis rows to
+    status='failed'/last_error='cancelled: workspace deleted' in its own
+    transaction (jobs_retirement.py), and it SKIP LOCKEDs past only the rows a
+    worker is actually holding. A worker whose per-job session happens to hold no
+    lock on this row — every sentence a cache hit, so touch_running_job never ran —
+    would otherwise flush 'done' over the hook's 'failed' while leaving the
+    cancellation message behind: a lost update, and an incoherent row that reads
+    done-with-a-cancellation-error.
+
+    Same guard, same reason, as the four LLM pass runners
+    (coherence/pass_runner.py:142 "we must not resurrect it"). Returning without
+    writing is correct here: the row is already terminal, so there is nothing left
+    to finalize.
+    """
+    live = session.scalar(
+        select(ClaimAnalysisJob.status).where(ClaimAnalysisJob.id == job.id).with_for_update()
+    )
+    if live != "running":
+        return
     job.status = "done"
     # Clear any error left over from earlier failed attempts — stale errors
     # mislead admin views.
