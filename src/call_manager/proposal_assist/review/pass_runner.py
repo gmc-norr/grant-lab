@@ -206,145 +206,160 @@ async def run_review_pass(
     settings: Settings,
     adapter_builder=build_review_adapter,
 ) -> None:
-    # 1. Short read session: guard running, pre-create the 6 items FIRST, pin context,
-    #    set draft_sha, re-check caps.
-    with session_factory() as s:
-        run = s.get(ReviewRun, run_id)
-        if run is None or run.status != "running":
+    # Tracked from the FIRST line, BEFORE the prefix. Task-only: run_review_pass
+    # owns NO adapter — every _run_one_call builds its own — so retirement
+    # cancels this task and there is nothing here to retire.
+    with session_factory() as s0:
+        run0 = s0.get(ReviewRun, run_id)
+        if run0 is None or run0.status != "running":
             return
-        workspace_id = run.workspace_id
-        ws = s.get(Workspace, workspace_id)
-        existing = {
-            i.kind
-            for i in s.scalars(
-                select(ReviewRunItem).where(ReviewRunItem.review_run_id == run_id)
+        tracked_ws = run0.workspace_id
+
+    async with PASS_REGISTRY.track(tracked_ws):
+        # 1. Short read session: guard running, pre-create the 6 items FIRST, pin context,
+        #    set draft_sha, re-check caps.
+        with session_factory() as s:
+            run = s.get(ReviewRun, run_id)
+            if run is None or run.status != "running":
+                return
+            workspace_id = run.workspace_id
+            # Workspace ROW LOCK held through this session's commit — the same guard the
+            # other three runners have. This prefix commits DURABLE progress (the
+            # ReviewRunItem rows and run.draft_sha), so without it those are writes
+            # against a deleted workspace.
+            ws = s.get(Workspace, workspace_id, with_for_update=True)
+            if ws is None or ws.soft_deleted_at is not None:
+                return
+            existing = {
+                i.kind
+                for i in s.scalars(
+                    select(ReviewRunItem).where(ReviewRunItem.review_run_id == run_id)
+                )
+            }
+            for kind in REVIEW_KINDS:
+                if kind not in existing:
+                    s.add(ReviewRunItem(review_run_id=run_id, kind=kind, status="queued"))
+            ctx = assemble_review_context(
+                session=s, workspace_id=workspace_id, workspaces_dir=settings.workspaces_dir
             )
-        }
-        for kind in REVIEW_KINDS:
-            if kind not in existing:
-                s.add(ReviewRunItem(review_run_id=run_id, kind=kind, status="queued"))
-        ctx = assemble_review_context(
-            session=s, workspace_id=workspace_id, workspaces_dir=settings.workspaces_dir
-        )
-        run.draft_sha = ctx.draft_sha
-        # pass-start cap recheck (a long queue wait may have pushed the ws over budget)
-        over = (
-            review_runs_today(s, workspace_id=workspace_id) > review_run_cap(ws, settings)
-            or review_dollars_today(s, workspace_id=workspace_id)
-            >= review_dollar_cap(ws, settings)
-        )
-        if over:
-            for it in s.scalars(
-                select(ReviewRunItem).where(ReviewRunItem.review_run_id == run_id)
-            ):
-                it.status = "skipped"
-                if it.kind == "consolidation":
-                    it.error_message = "daily mock-panel budget reached"
-            run.status = "failed"
-            run.completed_at = _now()
+            run.draft_sha = ctx.draft_sha
+            # pass-start cap recheck (a long queue wait may have pushed the ws over budget)
+            over = (
+                review_runs_today(s, workspace_id=workspace_id) > review_run_cap(ws, settings)
+                or review_dollars_today(s, workspace_id=workspace_id)
+                >= review_dollar_cap(ws, settings)
+            )
+            if over:
+                for it in s.scalars(
+                    select(ReviewRunItem).where(ReviewRunItem.review_run_id == run_id)
+                ):
+                    it.status = "skipped"
+                    if it.kind == "consolidation":
+                        it.error_message = "daily mock-panel budget reached"
+                run.status = "failed"
+                run.completed_at = _now()
+                s.commit()
+                return
             s.commit()
-            return
-        s.commit()
 
-    # 2. Wave 1 — fit-check + 4 personas concurrently (semaphore-bounded).
-    sem = asyncio.Semaphore(settings.review_persona_concurrency)
+        # 2. Wave 1 — fit-check + 4 personas concurrently (semaphore-bounded).
+        sem = asyncio.Semaphore(settings.review_persona_concurrency)
 
-    async def _guarded(kind: str, instruction: str) -> None:
-        async with sem:
+        async def _guarded(kind: str, instruction: str) -> None:
+            async with sem:
+                await _run_one_call(
+                    kind=kind,
+                    instruction=instruction,
+                    run_id=run_id,
+                    workspace_id=workspace_id,
+                    session_factory=session_factory,
+                    settings=settings,
+                    adapter_builder=adapter_builder,
+                )
+
+        wave1 = [_guarded(kind, persona_instruction(kind, ctx)) for kind in WAVE1_KINDS]
+        await asyncio.gather(*wave1)  # each _run_one_call swallows its own failure
+
+        # 3. Wave 2 — consolidation over whatever personas succeeded.
+        with session_factory() as s:
+            persona_md = {k: _markdown_of(s, run_id, k) for k in PERSONA_KINDS}
+            persona_md = {k: v for k, v in persona_md.items() if v}
+            fit_md = _markdown_of(s, run_id, "fit_check")
+        if persona_md:
+            cons_instr = consolidation_instruction(ctx, persona_md, fit_md)
             await _run_one_call(
-                kind=kind,
-                instruction=instruction,
+                kind="consolidation",
+                instruction=cons_instr,
                 run_id=run_id,
                 workspace_id=workspace_id,
                 session_factory=session_factory,
                 settings=settings,
                 adapter_builder=adapter_builder,
             )
-
-    wave1 = [_guarded(kind, persona_instruction(kind, ctx)) for kind in WAVE1_KINDS]
-    await asyncio.gather(*wave1)  # each _run_one_call swallows its own failure
-
-    # 3. Wave 2 — consolidation over whatever personas succeeded.
-    with session_factory() as s:
-        persona_md = {k: _markdown_of(s, run_id, k) for k in PERSONA_KINDS}
-        persona_md = {k: v for k, v in persona_md.items() if v}
-        fit_md = _markdown_of(s, run_id, "fit_check")
-    if persona_md:
-        cons_instr = consolidation_instruction(ctx, persona_md, fit_md)
-        await _run_one_call(
-            kind="consolidation",
-            instruction=cons_instr,
-            run_id=run_id,
-            workspace_id=workspace_id,
-            session_factory=session_factory,
-            settings=settings,
-            adapter_builder=adapter_builder,
-        )
-    else:
-        with session_factory() as s:
-            it = s.scalar(
-                select(ReviewRunItem).where(
-                    ReviewRunItem.review_run_id == run_id,
-                    ReviewRunItem.kind == "consolidation",
-                )
-            )
-            it.status = "skipped"
-            it.error_message = "all personas failed"
-            it.completed_at = _now()
-            s.commit()
-
-    # 4. Write artifacts + finalize (row-locked, still-running guard).
-    repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
-    with session_factory() as s:
-        run = s.get(ReviewRun, run_id, with_for_update=True)
-        if run is None or run.status != "running":
-            s.commit()
-            return
-        items = {
-            i.kind: i
-            for i in s.scalars(
-                select(ReviewRunItem).where(ReviewRunItem.review_run_id == run_id)
-            )
-        }
-        fit_md = _markdown_of(s, run_id, "fit_check")
-        cons_md = _markdown_of(s, run_id, "consolidation")
-        files: dict[str, str] = {}
-        if fit_md:
-            files[_FIT_CHECK_FILE] = fit_md
-        if cons_md:
-            files[_RUBRIC_REVIEW_FILE] = cons_md
-        commit_failed = False
-        if files:
-            try:
-                write_and_commit_files(repo_dir, files, f"mock-panel review {run_id}")
-                if _FIT_CHECK_FILE in files:
-                    run.fit_check_sha = blob_sha(repo_dir, "HEAD", _FIT_CHECK_FILE)
-                if _RUBRIC_REVIEW_FILE in files:
-                    run.rubric_review_sha = blob_sha(repo_dir, "HEAD", _RUBRIC_REVIEW_FILE)
-            except GitCommitError:
-                # Don't let a git failure escape the finalize and wedge the active
-                # slot until the reaper TTL — fail the run NOW, surface it on the item.
-                logger.exception("review artifact commit failed for run %s", run_id)
-                commit_failed = True
-                cons = items.get("consolidation")
-                if cons is not None:
-                    cons.error_message = (
-                        (cons.error_message or "") + " [artifact commit failed]"
-                    ).strip()
-        rollup_run_totals(run, items.values())
-        all_done = all(items[k].status == "done" for k in REVIEW_KINDS if k in items)
-        cons_done = items.get("consolidation") and items["consolidation"].status == "done"
-        if commit_failed:
-            run.status = "failed"
-        elif all_done:
-            run.status = "done"
-        elif cons_done:
-            run.status = "partial"
         else:
-            run.status = "failed"
-        run.completed_at = _now()
-        s.commit()
+            with session_factory() as s:
+                it = s.scalar(
+                    select(ReviewRunItem).where(
+                        ReviewRunItem.review_run_id == run_id,
+                        ReviewRunItem.kind == "consolidation",
+                    )
+                )
+                it.status = "skipped"
+                it.error_message = "all personas failed"
+                it.completed_at = _now()
+                s.commit()
 
+        # 4. Write artifacts + finalize (row-locked, still-running guard).
+        repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
+        with session_factory() as s:
+            run = s.get(ReviewRun, run_id, with_for_update=True)
+            if run is None or run.status != "running":
+                s.commit()
+                return
+            items = {
+                i.kind: i
+                for i in s.scalars(
+                    select(ReviewRunItem).where(ReviewRunItem.review_run_id == run_id)
+                )
+            }
+            fit_md = _markdown_of(s, run_id, "fit_check")
+            cons_md = _markdown_of(s, run_id, "consolidation")
+            files: dict[str, str] = {}
+            if fit_md:
+                files[_FIT_CHECK_FILE] = fit_md
+            if cons_md:
+                files[_RUBRIC_REVIEW_FILE] = cons_md
+            commit_failed = False
+            if files:
+                try:
+                    write_and_commit_files(repo_dir, files, f"mock-panel review {run_id}")
+                    if _FIT_CHECK_FILE in files:
+                        run.fit_check_sha = blob_sha(repo_dir, "HEAD", _FIT_CHECK_FILE)
+                    if _RUBRIC_REVIEW_FILE in files:
+                        run.rubric_review_sha = blob_sha(repo_dir, "HEAD", _RUBRIC_REVIEW_FILE)
+                except GitCommitError:
+                    # Don't let a git failure escape the finalize and wedge the active
+                    # slot until the reaper TTL — fail the run NOW, surface it on the item.
+                    logger.exception("review artifact commit failed for run %s", run_id)
+                    commit_failed = True
+                    cons = items.get("consolidation")
+                    if cons is not None:
+                        cons.error_message = (
+                            (cons.error_message or "") + " [artifact commit failed]"
+                        ).strip()
+            rollup_run_totals(run, items.values())
+            all_done = all(items[k].status == "done" for k in REVIEW_KINDS if k in items)
+            cons_done = items.get("consolidation") and items["consolidation"].status == "done"
+            if commit_failed:
+                run.status = "failed"
+            elif all_done:
+                run.status = "done"
+            elif cons_done:
+                run.status = "partial"
+            else:
+                run.status = "failed"
+            run.completed_at = _now()
+            s.commit()
 
 async def drain_review_queue_tick(
     *,

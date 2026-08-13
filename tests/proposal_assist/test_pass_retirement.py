@@ -498,3 +498,39 @@ def test_the_uncited_prefix_writes_nothing_for_a_deleted_workspace(
 
     with pg_session_factory() as s:
         assert s.get(UncitedClaimsJob, job_id).evaluated_draft_sha is None
+
+
+def test_the_review_parent_prefix_writes_nothing_for_a_deleted_workspace(
+    pg_session_factory, current_user
+):
+    """Review's parent prefix commits the ReviewRunItem rows and run.draft_sha, so
+    it needs the same workspace guard as the other three runners."""
+    from call_manager.db.models import ReviewRun, ReviewRunItem
+    from call_manager.proposal_assist.review.pass_runner import run_review_pass
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        run = ReviewRun(workspace_id=ws.id, status="running", draft_sha="0" * 40)
+        s.add(run)
+        s.commit()
+        run_id, ws_id = run.id, ws.id
+
+    with pg_session_factory() as s:
+        s.get(Workspace, ws_id).soft_deleted_at = _now_utc()
+        s.commit()
+
+    asyncio.run(
+        run_review_pass(
+            run_id=run_id,
+            session_factory=pg_session_factory,
+            settings=Settings(),
+            adapter_builder=_never_called_adapter_builder,
+        )
+    )
+
+    with pg_session_factory() as s:
+        items = s.scalars(
+            select(ReviewRunItem).where(ReviewRunItem.review_run_id == run_id)
+        ).all()
+        assert items == [], "the prefix created item rows for a deleted workspace"
