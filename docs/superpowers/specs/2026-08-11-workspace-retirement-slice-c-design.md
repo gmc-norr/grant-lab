@@ -565,8 +565,11 @@ dropped. The production surface then offers only `soft_delete_workspace_db` and
    `acquire_commit_mutex` (`locking.py:230`), not a caller. This slice
    re-imposes a bound at **6** of the 27 (`web/api/settings.py` ×3,
    `web/api/rubric.py` ×3, §8). The other 21 — `collab/kernel.py` ×5,
-   `tools/citations.py` ×4, `web/api/workspaces.py` ×3 (including the DELETE
-   route's own `soft_delete` write), `workspaces.py`, `editing/save.py`,
+   `tools/citations.py` ×4, `web/api/workspaces.py` ×3 (the spec-artifact
+   routes `post_init_spec`/`post_lock_spec`/`post_unlock_spec` at `:537`,
+   `:648`, `:736` — *not* the DELETE route), `workspaces.py` (which is where
+   the DELETE's own `soft_delete_workspace_db` write lives, `:124`),
+   `editing/save.py`,
    `turns/submit.py`, `citations/human_cite.py`, `analysis/insert.py`,
    `collab/hydrate.py`, `collab/checkpoint.py`, `collab/flip.py`, and
    `phases/setup.py`'s `_m1` — run their whole post-acquisition tail unbounded.
