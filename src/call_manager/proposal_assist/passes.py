@@ -78,9 +78,6 @@ class PassRegistry:
     def __init__(self) -> None:
         self._live: dict[uuid.UUID, set[Entry]] = {}
         self._unconfirmed: list[Entry] = []
-        # Constructed outside a running loop (PASS_REGISTRY is module-level); on
-        # 3.10+ an asyncio.Lock binds no loop until first acquired, so this is safe.
-        self._reconcile_lock = asyncio.Lock()
 
     @contextlib.asynccontextmanager
     async def track(self, workspace_id: uuid.UUID) -> AsyncIterator[Entry]:
@@ -151,38 +148,46 @@ class PassRegistry:
         A remediation ATTEMPT each tick, not a guarantee — a SIBLING of
         reconcile_live_clients, which covers a different population.
 
-        Two properties this method must not lose, both about entries that
-        track()'s `finally` appends WHILE a reconcile is in flight:
+        Two properties this method must not lose:
 
           * the list is mutated IN PLACE, never rebound. Rebinding
             (`self._unconfirmed = still`) publishes a list assembled from a
-            snapshot, so anything appended after the snapshot is silently
-            discarded and never retried again.
-          * runs are serialized by a lock. Overlap is reachable (the tick's
-            future is abandoned at a 30s timeout, freeing the max_instances=1
-            slot before a slow run finishes), and two overlapping runs would
-            otherwise call retire_unconfirmed() on the SAME adapter twice
-            concurrently.
+            snapshot, so an entry that track()'s `finally` appends WHILE a
+            reconcile is in flight is silently discarded and never retried again.
+          * runs are deliberately NOT serialized — no lock here, of either
+            flavour. Overlap is reachable: scheduler.py's tick abandons its
+            future at `fut.result(timeout=30)` while the coroutine keeps running
+            on app_loop, so a retire_unconfirmed() that never returns is a state
+            this method can be left in. A lock taken by that run would never be
+            released, which turns one wedged run into a permanent outage of
+            reconciliation — every later tick either queues behind a lock nobody
+            will release or, as a try-lock, declines outright, and no unconfirmed
+            generation is ever retried again. Without one, each tick makes a
+            fresh attempt from the head of the list.
+
+            Concurrent runs are safe to allow: retire_unconfirmed routes through
+            the adapter's _retire_generation, so a second caller JOINS the single
+            teardown task rather than spawning a second kill
+            (claude_adapter.py:667), and the removal below is idempotent.
         """
         if not self._unconfirmed:
             return 0
-        async with self._reconcile_lock:
-            acted = 0
-            for entry in list(self._unconfirmed):
-                acted += 1
-                try:
-                    await entry.retire_adapter()
-                except Exception:
-                    logger.exception(
-                        "passes.reconcile_retire_failed",
-                        extra={"workspace_id": str(entry.workspace_id)},
-                    )
-                if not entry.open_generations():
-                    # Identity removal (Entry is eq=False), and suppressed because
-                    # a concurrent path may already have dropped it.
-                    with contextlib.suppress(ValueError):
-                        self._unconfirmed.remove(entry)
-            return acted
+        acted = 0
+        for entry in list(self._unconfirmed):
+            acted += 1
+            try:
+                await entry.retire_adapter()
+            except Exception:
+                logger.exception(
+                    "passes.reconcile_retire_failed",
+                    extra={"workspace_id": str(entry.workspace_id)},
+                )
+            if not entry.open_generations():
+                # Identity removal (Entry is eq=False), and suppressed because
+                # a concurrent path may already have dropped it.
+                with contextlib.suppress(ValueError):
+                    self._unconfirmed.remove(entry)
+        return acted
 
 
 async def _swallow(task: asyncio.Task) -> None:

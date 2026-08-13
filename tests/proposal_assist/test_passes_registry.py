@@ -8,6 +8,7 @@ across tests makes one test's leftover entry the next one's failed assertion.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 
 import pytest
@@ -155,18 +156,21 @@ async def test_reconcile_retries_and_drops_once_confirmed(registry):
 
 @pytest.mark.asyncio
 async def test_an_entry_appended_during_an_overlapping_reconcile_is_not_dropped(registry):
-    """reconcile_unconfirmed must be re-entrant, and must never REBIND the list.
+    """reconcile_unconfirmed must never REBIND the list.
 
     A run that assembles a survivor list from its own snapshot and publishes it
     with `self._unconfirmed = still` overwrites everything track()'s `finally`
     appended in the meantime — the entry is dropped for good and its leaked
     generation is never retried again.
 
+    Scope: this pins the REBIND half only. That two runs may overlap at all is a
+    separate property, pinned by
+    test_a_wedged_reconcile_does_not_stop_the_next_one_from_making_progress.
+
     The interleaving driven here (each step deterministic, no sleeps):
       1. one unconfirmed entry, whose retire_unconfirmed() blocks on a gate;
       2. reconcile A starts and blocks in that call;
-      3. reconcile B starts (blocked on the lock with the fix; blocked on a
-         SECOND gated retire call without it);
+      3. reconcile B starts and blocks in a SECOND gated retire call;
       4. gate A opens, A finishes and drops the now-confirmed entry;
       5. a NEW unconfirmed entry arrives via track()'s ordinary exit path;
       6. gate B opens and B finishes.
@@ -225,4 +229,80 @@ async def test_an_entry_appended_during_an_overlapping_reconcile_is_not_dropped(
     assert registry.unconfirmed_count() == 1, (
         "an entry appended while a reconcile was in flight was discarded — "
         "the survivor list was rebound over it"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_wedged_reconcile_does_not_stop_the_next_one_from_making_progress(registry):
+    """Runs must NOT be serialized — not by a held lock, and not by a try-lock.
+
+    A reconcile that never returns is reachable in production: scheduler.py's tick
+    abandons its future at `fut.result(timeout=30)` while the coroutine keeps
+    running on app_loop. A lock taken by that run is never released, so every
+    later tick either queues behind it forever or (as `if lock.locked(): return
+    0`) declines — and reconciliation is dead for the life of the process. The
+    entry here is retried by the SECOND run and confirmed dead while the first is
+    still stuck, which is exactly what a lock of either flavour would prevent.
+
+    Safe because the adapter's retire_unconfirmed routes through
+    _retire_generation, so the second call JOINS the single teardown task rather
+    than starting a second kill (claude_adapter.py:667).
+
+    Mutations (both must fail this test):
+      * `async with self._reconcile_lock:` around the body — run B never reaches
+        the adapter, so wait_for expires and the explicit fail fires.
+      * `if self._reconcile_lock.locked(): return 0` — run B returns at once
+        without calling the adapter; calls == 1 and the entry stays unconfirmed.
+    """
+    ws = uuid.uuid4()
+
+    class _WedgedFirstCall:
+        """First retirement attempt hangs forever; a later one succeeds."""
+
+        def __init__(self) -> None:
+            self._open = [uuid.uuid4()]
+            self.calls = 0
+            self.never_opens = asyncio.Event()
+
+        def unconfirmed_launch_ids(self):
+            return list(self._open)
+
+        async def retire_unconfirmed(self) -> int:
+            self.calls += 1
+            if self.calls == 1:
+                await self.never_opens.wait()
+            self._open.clear()
+            return 1
+
+    adapter = _WedgedFirstCall()
+    async with registry.track(ws) as entry:
+        entry.bind_adapter(adapter)
+    assert registry.unconfirmed_count() == 1
+
+    async def _settle() -> None:
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+    run_a = asyncio.create_task(registry.reconcile_unconfirmed())
+    await _settle()
+    assert adapter.calls == 1, "run A never reached the adapter"
+
+    run_b = asyncio.create_task(registry.reconcile_unconfirmed())
+    try:
+        # Bounded, because a serializing lock makes run B wait FOREVER — a
+        # mutation must fail, never hang the suite.
+        await asyncio.wait_for(run_b, timeout=2.0)
+    except TimeoutError:
+        pytest.fail("run B never finished — it is serialized behind a wedged run A")
+    finally:
+        run_a.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await run_a
+
+    assert adapter.calls == 2, (
+        "run B declined to touch the adapter while run A was in flight — a "
+        "wedged run must not disable reconciliation"
+    )
+    assert registry.unconfirmed_count() == 0, (
+        "the generation was never confirmed dead: the second attempt did not run"
     )
