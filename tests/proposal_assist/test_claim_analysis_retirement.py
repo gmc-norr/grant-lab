@@ -140,18 +140,26 @@ def test_mark_failed_does_not_requeue_a_job_whose_workspace_is_deleted(
         assert s.get(ClaimAnalysisJob, job_id).status == "failed"
 
 
-def test_mark_faileds_workspace_check_is_a_real_linearization_point(
+def test_a_delete_committing_mid_mark_failed_cannot_resurrect_the_job(
     pg_session_factory, current_user
 ):
-    """The property the pre-set test above CANNOT prove: that the check holds the
-    workspace row while it decides.
+    """The resurrection window, driven end-to-end.
 
-    Hold the workspace row from another connection, then run mark_failed in a
-    thread. WITH the FOR UPDATE it blocks (a delete in flight cannot be missed);
-    WITHOUT it, it reads straight through and commits 'queued' — exactly the
-    resurrection window.
+    A TIMING assertion cannot see this. Measured directly, mark_failed takes ~2s
+    either way while the workspace row is held: WITH the lock it blocks at its
+    SELECT FOR UPDATE, WITHOUT it blocks at COMMIT instead (the job UPDATE needs a
+    key-share lock on its FK parent). Same wall-clock, opposite correctness.
 
-    Threaded + lock_timeout so the mutation FAILS rather than hanging.
+    The discriminating observation is the job's FINAL STATUS:
+      * the delete transaction stamps soft_deleted_at and holds the row,
+      * mark_failed starts and (with the fix) blocks on it,
+      * the delete COMMITS,
+      * with the fix mark_failed's FOR UPDATE re-reads the new row version, sees
+        the workspace deleted, and writes 'failed';
+      * without it, mark_failed already read 'live' beforehand and writes 'queued'
+        — the resurrection.
+
+    Mutation: drop `.with_for_update()` and this must FAIL with status 'queued'.
     """
     from call_manager.proposal_assist.analysis.queue import mark_failed
 
@@ -169,27 +177,32 @@ def test_mark_faileds_workspace_check_is_a_real_linearization_point(
     def _mark():
         try:
             with pg_session_factory() as s:
-                s.execute(text("SET LOCAL lock_timeout = '4s'"))
+                s.execute(text("SET LOCAL lock_timeout = '15s'"))
                 mark_failed(s, s.get(ClaimAnalysisJob, job_id), error="boom")
                 s.commit()
-        except BaseException as exc:  # noqa: BLE001
+        except BaseException as exc:  # noqa: BLE001 — asserted after join
             err.append(exc)
         finally:
             finished.set()
 
-    holder = pg_session_factory()
+    deleter = pg_session_factory()
     t = threading.Thread(target=_mark)
     try:
-        holder.get(Workspace, ws_id, with_for_update=True)
+        # The delete transaction: stamp soft_deleted_at, hold, do NOT commit yet.
+        deleter.get(Workspace, ws_id, with_for_update=True).soft_deleted_at = _now_utc()
+        deleter.flush()
         t.start()
-        completed_while_workspace_held = finished.wait(timeout=2.0)
+        time.sleep(1.0)          # mark_failed is now past its read (or blocked on it)
+        deleter.commit()         # the delete lands
     finally:
-        holder.rollback()
-        holder.close()
-        t.join(timeout=15)
+        deleter.close()
+        assert finished.wait(timeout=20), "mark_failed never finished"
+        t.join(timeout=5)
 
-    assert not completed_while_workspace_held, (
-        "mark_failed decided the job's fate without holding the workspace row — "
-        "a DELETE committing right after its read would be missed"
-    )
     assert not err, f"mark_failed raised: {err!r}"
+    with pg_session_factory() as s:
+        status = s.get(ClaimAnalysisJob, job_id).status
+    assert status == "failed", (
+        f"job came back as {status!r} after its workspace was deleted mid-call — "
+        "the workspace check is not a linearization point"
+    )
