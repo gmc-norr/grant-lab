@@ -196,7 +196,9 @@ def retry_setup(
     Resets status='queued', attempts=0, clears started_at/completed_at/last_error
     so the next scheduler tick re-claims it. Returns 404 if no failed job exists
     for this workspace; returns 409 if the job is already queued or running
-    (not yet permanently failed)."""
+    (not yet permanently failed). 404 also if the workspace was deleted while
+    this request waited on the commit mutex; 429 if the mutex or the setup-job
+    row could not be taken in time."""
     with request.app.state.session_factory() as session:
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
         # Slice C2 lock-order rule: the live mutex immediately after require_owner
@@ -229,37 +231,47 @@ def retry_setup(
         # the unbounded-wait class Slice C1 closed for the four pass prefixes;
         # re-opening it here on the assumption "those holders are short" is
         # exactly the unwritten assumption that produced it the first time.
+        # The bound wraps the WHOLE remainder of the transaction, COMMIT included
+        # — not just the FOR UPDATE. bounded_lock_waits deliberately leaves
+        # SET LOCAL lock_timeout in force on exit (row_locks.py's module
+        # docstring: the bound "must extend past the acquisitions to the
+        # commit"), but its 55P03 -> RowLockTimeout translation only covers its
+        # own body. A narrow wrap would leave the job UPDATE and the commit
+        # bounded yet UNtranslated, so a lock wait there escapes as a raw
+        # OperationalError -> 500 instead of this route's contracted 429. The
+        # four pass runners and phases/setup.py wrap the whole transaction for
+        # exactly this reason.
         try:
             with bounded_lock_waits(
                 session,
                 timeout_seconds=SETUP_JOB_LOCK_TIMEOUT_SECONDS,
-                message="timed out waiting for the setup-job row",
+                message="timed out waiting for a row lock in the setup-retry transaction",
             ):
                 job = session.scalar(
                     select(WorkspaceSetupJob)
                     .where(WorkspaceSetupJob.workspace_id == ws.id)
                     .with_for_update()
                 )
+                if job is None or job.status != "failed":
+                    if job is not None and job.status in ("queued", "running"):
+                        raise HTTPException(
+                            status_code=409,
+                            detail="setup job is already queued or running",
+                        )
+                    raise HTTPException(
+                        status_code=404,
+                        detail="no failed setup job for this workspace",
+                    )
+                job.status = "queued"
+                job.attempts = 0
+                job.started_at = None
+                job.completed_at = None
+                job.last_error = None
+                session.commit()
         except RowLockTimeout as e:
             raise HTTPException(
                 status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
             ) from e
-        if job is None or job.status != "failed":
-            if job is not None and job.status in ("queued", "running"):
-                raise HTTPException(
-                    status_code=409,
-                    detail="setup job is already queued or running",
-                )
-            raise HTTPException(
-                status_code=404,
-                detail="no failed setup job for this workspace",
-            )
-        job.status = "queued"
-        job.attempts = 0
-        job.started_at = None
-        job.completed_at = None
-        job.last_error = None
-        session.commit()
         return SetupRetryOut(status=job.status, attempts=job.attempts)
 
 
@@ -291,33 +303,46 @@ def activate(
         # restores lock_timeout = DEFAULT, so an unbounded row wait here would
         # pin the commit mutex and make a concurrent DELETE 429 after its full
         # budget. See row_locks.py's module docstring.
+        #
+        # The bound wraps the WHOLE remainder of the transaction, COMMIT included
+        # — see retry_setup's note. It matters more here than there: _apply_rubric
+        # UPDATEs the `workspaces` row, and the four pass prefixes hold that row
+        # FOR UPDATE for up to PASS_PREFIX_LOCK_TIMEOUT_SECONDS while holding no
+        # mutex, so this transaction really can block after the job lock. With a
+        # narrow wrap that wait is still bounded but no longer translated, and
+        # the caller gets a 500 where this slice contracts for a 429.
         try:
             with bounded_lock_waits(
                 session,
                 timeout_seconds=SETUP_JOB_LOCK_TIMEOUT_SECONDS,
-                message="timed out waiting for the setup-job row",
+                message="timed out waiting for a row lock in the activate transaction",
             ):
                 job = session.scalar(
                     select(WorkspaceSetupJob)
                     .where(WorkspaceSetupJob.workspace_id == ws.id)
                     .with_for_update()
                 )
+                if job is None or job.status != "waiting_for_rubric_review":
+                    raise HTTPException(
+                        status_code=409, detail="workspace is not awaiting rubric review"
+                    )
+                _apply_rubric(session, ws, user, criteria, body.funder_notes or "")
+                job.status = "done"
+                job.completed_at = datetime.now(UTC)
+                ws.current_phase = "active"
+                session.add(
+                    WorkspaceEvent(
+                        workspace_id=ws.id,
+                        kind="workspace_activated",
+                        actor_id=user.id,
+                        payload={},
+                    )
+                )
+                session.commit()
         except RowLockTimeout as e:
             raise HTTPException(
                 status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
             ) from e
-        if job is None or job.status != "waiting_for_rubric_review":
-            raise HTTPException(status_code=409, detail="workspace is not awaiting rubric review")
-        _apply_rubric(session, ws, user, criteria, body.funder_notes or "")
-        job.status = "done"
-        job.completed_at = datetime.now(UTC)
-        ws.current_phase = "active"
-        session.add(
-            WorkspaceEvent(
-                workspace_id=ws.id, kind="workspace_activated", actor_id=user.id, payload={}
-            )
-        )
-        session.commit()
         result = _rubric_out(ws)   # build INSIDE the block (session still open)
     # setup gates BOTH artifacts to owner-only (resolve_access), so activating
     # lifts the write-gate for the draft AND an unlocked spec — reconcile both.

@@ -575,6 +575,14 @@ def _assert_hook_can_cancel_while_route_is_blocked(pg_session_factory, ws_id, jo
         holder.join(timeout=30)
         sender.join(timeout=30)
 
+    # Match straddle_delete's guard. Nothing above depends on the route's own
+    # response — _wait_until_blocked already proved it queued on the mutex — but
+    # a wedged route must fail HERE rather than leak a live thread holding an
+    # open DB session into whatever test runs next.
+    assert not sender.is_alive(), "the route thread never finished — it is wedged, not slow"
+    if "resp" not in out:
+        pytest.fail("the route never returned — it is wedged, not merely slow")
+
     assert cancelled == 1, (
         "the retirement hook could not cancel the setup job while the route was "
         "blocked on the mutex — the route is holding the job row, which means it "
@@ -758,3 +766,92 @@ def test_activate_gives_up_on_a_held_setup_job_row_instead_of_pinning_the_mutex(
     with pg_session_factory() as s:
         assert s.get(WorkspaceSetupJob, job_id).status == "waiting_for_rubric_review"
         assert s.get(Workspace, ws_id).current_phase == "setup"
+
+
+def test_activate_maps_a_post_job_lock_row_timeout_to_429_not_500(
+    client_authed_owner, current_user, pg_session_factory, monkeypatch
+):
+    """The bound outlives the acquisitions, so the TRANSLATION has to as well.
+
+    bounded_lock_waits deliberately leaves SET LOCAL lock_timeout in force to the
+    commit (row_locks.py's module docstring: the bound "must extend past the
+    acquisitions to the commit"), but 55P03 -> RowLockTimeout happens only inside
+    the context manager's body. Wrap the `with` narrowly around the setup-job
+    SELECT and every later statement is still BOUNDED but no longer TRANSLATED:
+    the 55P03 that `_apply_rubric`'s UPDATE fires at COMMIT escapes as a raw
+    sqlalchemy OperationalError, and the caller gets a 500 where this slice
+    contracts for 429 + Retry-After: 2.
+
+    Reachable, not hypothetical. The holder below stands in for one of the four
+    pass prefixes, which take the `workspaces` row FOR UPDATE and hold it across
+    context assembly while holding NO commit mutex (row_locks.py:33-45) — so the
+    mutex activate holds does not exclude them from that row.
+
+    Note WHICH row is held: the WORKSPACE row, not the setup-job row. The job row
+    must stay free so the route gets PAST its acquisition and blocks later, in
+    exactly the stretch a narrow wrap leaves untranslated. The sibling gate above
+    holds the job row and covers the acquisition itself.
+    """
+    import call_manager.web.api.rubric as rubric_api
+
+    monkeypatch.setattr(rubric_api, "SETUP_JOB_LOCK_TIMEOUT_SECONDS", 1)
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        ws.current_phase = "setup"
+        ws.rubric_funder_notes = "original notes"
+        s.flush()
+        job_id = _setup_job(s, ws.id, "waiting_for_rubric_review")
+        s.commit()
+        ws_id = ws.id
+
+    holding = threading.Event()
+    release = threading.Event()
+    out: dict = {}
+
+    def _row_holder():
+        with pg_session_factory() as s:
+            s.get(Workspace, ws_id, with_for_update=True)
+            holding.set()
+            release.wait(timeout=30)
+            s.rollback()
+
+    def _sender():
+        holding.wait(timeout=10)
+        # raise_server_exceptions=True on this client: an UNtranslated
+        # OperationalError propagates here instead of becoming a response, so
+        # out stays empty. Both outcomes are failures; the guard below names them.
+        out["resp"] = client_authed_owner.post(
+            f"/api/workspaces/{ws_id}/activate", json=_RUBRIC_BODY
+        )
+
+    holder = threading.Thread(target=_row_holder)
+    sender = threading.Thread(target=_sender)
+    holder.start()
+    sender.start()
+    try:
+        assert holding.wait(timeout=5), "the holder never took the workspace row"
+        sender.join(timeout=15)
+        assert not sender.is_alive(), (
+            "activate was still blocked on the workspace row after 15s while holding "
+            "the commit mutex — the bound does not reach past the job lock"
+        )
+    finally:
+        release.set()
+        holder.join(timeout=30)
+        sender.join(timeout=30)
+
+    if "resp" not in out:
+        pytest.fail(
+            "activate raised instead of responding — the lock timeout fired outside "
+            "the bounded_lock_waits body, so it was never translated to RowLockTimeout"
+        )
+    assert out["resp"].status_code == 429, (
+        f"expected 429, got {out['resp'].status_code}: {out['resp'].text}"
+    )
+    assert out["resp"].headers.get("Retry-After") == "2"
+    with pg_session_factory() as s:
+        assert s.get(WorkspaceSetupJob, job_id).status == "waiting_for_rubric_review"
+        ws_after = s.get(Workspace, ws_id)
+        assert ws_after.current_phase == "setup"
+        assert ws_after.rubric_funder_notes == "original notes"
