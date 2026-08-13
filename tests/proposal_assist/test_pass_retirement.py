@@ -428,3 +428,73 @@ async def test_every_review_child_is_tracked_as_its_own_entry(
         "entry (it would be 1: only the parent)"
     )
     assert PASS_REGISTRY.live_count(ws_id) == 0
+
+
+def test_the_evaluator_prefix_writes_nothing_for_a_deleted_workspace(
+    pg_session_factory, current_user
+):
+    """Unlike coherence, this prefix COMMITS progress — so a missing guard is a
+    durable write against a deleted workspace, not just wasted work."""
+    from call_manager.db.models import EvaluatorJob
+    from call_manager.proposal_assist.evaluator.pass_runner import run_evaluator_pass
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        job = EvaluatorJob(workspace_id=ws.id, status="running")
+        s.add(job)
+        s.commit()
+        job_id, ws_id = job.id, ws.id
+
+    with pg_session_factory() as s:
+        s.get(Workspace, ws_id).soft_deleted_at = _now_utc()
+        s.commit()
+
+    asyncio.run(
+        run_evaluator_pass(
+            job_id=job_id,
+            session_factory=pg_session_factory,
+            settings=Settings(),
+            adapter_builder=_never_called_adapter_builder,
+        )
+    )
+
+    with pg_session_factory() as s:
+        job = s.get(EvaluatorJob, job_id)
+        assert job.evaluated_draft_sha is None
+        assert job.evaluated_spec_sha is None
+        assert job.evaluated_rubric_updated_at is None
+
+
+def test_the_uncited_prefix_writes_nothing_for_a_deleted_workspace(
+    pg_session_factory, current_user
+):
+    """This prefix commits evaluated_draft_sha."""
+    from call_manager.db.models import UncitedClaimsJob
+    from call_manager.proposal_assist.uncited_claims.pass_runner import (
+        run_uncited_claims_pass,
+    )
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        job = UncitedClaimsJob(workspace_id=ws.id, status="running")
+        s.add(job)
+        s.commit()
+        job_id, ws_id = job.id, ws.id
+
+    with pg_session_factory() as s:
+        s.get(Workspace, ws_id).soft_deleted_at = _now_utc()
+        s.commit()
+
+    asyncio.run(
+        run_uncited_claims_pass(
+            job_id=job_id,
+            session_factory=pg_session_factory,
+            settings=Settings(),
+            adapter_builder=_never_called_adapter_builder,
+        )
+    )
+
+    with pg_session_factory() as s:
+        assert s.get(UncitedClaimsJob, job_id).evaluated_draft_sha is None
