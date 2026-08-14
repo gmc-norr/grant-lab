@@ -1,7 +1,23 @@
 # `workspace_write` consolidation — design
 
 Date: 2026-08-14
-Status: approved (design), revision 1
+Status: approved (design), revision 2 after one review round (see Revisions)
+
+## Revisions
+
+- revision 2 (2026-08-14, review): **§8's migration order could not keep the
+  suite green** — today's gate asserts `len(blocks) == 1` per route and fails
+  its module presence check the moment a listed route stops using
+  `bounded_lock_waits`, so the first migration turned it red, not the sixth.
+  §5 gains a transitional two-arm gate that lands before any route moves; §8 is
+  re-sequenced around it. §3 gains step 6: the manager rolls back on every
+  exceptional exit, so its "nothing is committed" promise is a property of the
+  manager rather than an accident of callers closing their session; §7.1 gains
+  the reuse-the-session test that can actually detect its absence. §6's pin is
+  corrected to *no new rows* — the already-a-member path is reachable only by
+  pre-seeding the very `WorkspaceViewer` row it detects, so "leaves no viewer"
+  was unsatisfiable. §4's field names corrected: `ws.rubric_criteria` and
+  `ws.rubric_funder_notes`; there is no `rubric_json` column.
 Predecessor: Slice C2 (`docs/superpowers/plans/2026-08-13-workspace-retirement-slice-c2-mutex-writers.md`, merged `eef35ed`)
 
 ## 1. Why
@@ -94,12 +110,37 @@ In order, it:
    message=f"timed out waiting for a row lock in the {what} transaction")`;
 3. yields to the route body;
 4. on a clean exit, calls `session.commit()` **inside** the bound;
-5. translates the resulting `RowLockTimeout` to the same 429.
+5. translates the resulting `RowLockTimeout` to the same 429;
+6. on **every** exceptional exit, calls `session.rollback()` before the
+   exception leaves the manager.
 
 `WorkspaceDeleted` propagates untouched to `main.py`'s handler, which answers
 404 — the documented re-delete/straddle contract. An `HTTPException` raised by
 the body also propagates untouched and **nothing is committed**, which is what
 preserves `retry_setup`'s 404/409 and `activate`'s 409.
+
+### The exceptional-exit contract, stated as a rule and not as an accident
+
+Step 6 is load-bearing and must not be dropped as redundant. Today the six
+routes each sit inside `with request.app.state.session_factory() as session:`,
+whose `__exit__` closes the session and discards the open transaction — so
+"nothing is committed" currently holds by accident of the caller, not by
+anything the manager does.
+
+That is not good enough for a unit whose whole purpose is to make the contract
+independent of the call site. Without an explicit rollback:
+
+- a caller that catches the exception and reuses the session would carry the
+  body's pending writes into its next `commit()`, persisting a write the route
+  decided against;
+- after either timeout the transaction is aborted (Postgres refuses further
+  statements), so any reuse fails with a confusing error far from its cause.
+
+Rollback on all four exceptional paths — `CommitMutexTimeout`,
+`WorkspaceDeleted`, a body exception, and `RowLockTimeout` — makes the manager
+a transaction scope in fact and not just in name. Note the rollback also clears
+the `SET LOCAL lock_timeout` the bound deliberately leaves in force, which is
+correct: the setting is scoped to the transaction being ended.
 
 ### What it deliberately does not do
 
@@ -173,9 +214,12 @@ whose correctness depends on being in the middle of it.
 The re-reads therefore stay in the route bodies, with their comments, where
 their position is visible. The distinction is also principled rather than
 accidental: a route needs the re-read when it reads **attributes of the `ws`
-instance loaded before the mutex**. `update_rubric` and `activate` diff against
-`ws.rubric_json`; `add_member` queries membership fresh inside the transaction
-and reads nothing cached, so it needs nothing.
+instance loaded before the mutex**. `update_rubric` and `activate` both route
+their write through `_apply_rubric`, which diffs the incoming payload against
+`ws.rubric_criteria` and `ws.rubric_funder_notes` to decide whether to stamp
+`rubric_updated_at` and emit a `rubric_edited` event; `add_member` queries
+membership fresh inside the transaction and reads nothing cached, so it needs
+nothing.
 
 ## 5. What replaces gate 16
 
@@ -189,6 +233,41 @@ the same six-route table:
 
 1. each of the six routes contains exactly one `with workspace_write(...)` block; and
 2. no route function in `settings.py` or `rubric.py` calls `session.commit()` at all.
+
+### The gate is replaced in two steps, not one
+
+The final rule cannot be the gate during the migration, and neither can the
+current one. Today's gate asserts `len(blocks) == 1` for the route's
+`bounded_lock_waits` blocks and fails the module-level presence check if a
+listed route no longer wraps its work in one. So the **first** migrated route
+turns it red — both its per-route case and its module's presence case — while
+five routes are still legacy. Equally, tightening straight to the final rule
+would leave those five unguarded until they move.
+
+So the gate is rewritten **once, before the first route migrates**, into a
+transitional form that accepts exactly two shapes and nothing else. For each of
+the six routes, the route must be either:
+
+- **legacy:** exactly one `with bounded_lock_waits(...)` block, with
+  `session.commit()` lexically inside it and no commit outside it — today's rule,
+  unchanged; or
+- **migrated:** exactly one `with workspace_write(...)` block, and no
+  `session.commit()` anywhere in the route.
+
+Anything else fails, naming the route and which of the two shapes it came
+closest to. A route that has a `workspace_write` block *and* a stray commit
+fails; so does a half-migrated route with both constructs; so does one with
+neither.
+
+After the sixth route lands, the gate is tightened to the final rule in §5 — the
+legacy arm is deleted, so re-introducing a hand-rolled `bounded_lock_waits` +
+commit in these modules fails from then on.
+
+Both forms carry the same mutation obligation. The transitional gate must be
+proven, when it lands, by mutations against the **legacy** shape (it is guarding
+six legacy routes at that moment): dedent a route's commit out of its bound and
+that route's case must fail. The final gate is proven by the six
+`workspace_write`-removal mutations.
 
 The old rule becomes unwriteable: a route cannot put its commit outside the
 bound, because it does not write a commit. Rule 2 is what keeps that true — it
@@ -236,9 +315,17 @@ an early-return path gets committed (visible, and greppable in the audit trail)
 rather than silently discarded behind a 200.
 
 Both paths write nothing today, so the observable delta is an empty commit.
-That is pinned by a new test asserting each of the two paths leaves **no
-`WorkspaceEvent` row and no `WorkspaceViewer` row**. If someone later adds a
-write above those returns, that test goes red and says so.
+That is pinned by a new test asserting each of the two paths **adds nothing**:
+no new `WorkspaceEvent` row, and no new `WorkspaceViewer` row.
+
+The assertion must be phrased as *no new rows*, not *no rows*. The
+already-a-member path is reachable only by pre-seeding exactly the
+`WorkspaceViewer` row it detects, so "leaves no `WorkspaceViewer`" is
+unsatisfiable there. Capture the viewer rows (count and the set of `user_id`s)
+and the workspace's event count before the request, and assert both are
+unchanged after. The owner path likewise starts with whatever rows the fixture
+created. If someone later adds a write above those returns, the counts move and
+the test says so.
 
 ## 7. Testing
 
@@ -254,9 +341,16 @@ New tests:
 
 1. **`workspace_write` itself**, DB-backed, direct rather than through a route:
    a wedged mutex raises `HTTPException` 429 with `Retry-After: 2` and
-   `BUSY_ERROR_MESSAGE`; a held row does the same; a clean exit commits; an
-   `HTTPException` from the body propagates and commits nothing; a workspace
-   deleted under the mutex raises `WorkspaceDeleted`.
+   `BUSY_ERROR_MESSAGE`; a held row does the same; a clean exit commits; a
+   workspace deleted under the mutex raises `WorkspaceDeleted`.
+
+   The exceptional-exit contract (§3) needs a test that could actually catch its
+   absence, which means the assertion cannot rely on the session being thrown
+   away. Catch the body's exception **outside** the `with`, then keep using the
+   same session — commit it — and assert the body's write is absent from the
+   database. Without step 6's rollback that write persists and the test fails.
+   Run the same shape for a timeout path, where the assertion is that the reused
+   session is usable at all rather than aborted.
 2. **The rewritten gate 16**, per §5, with its six mutations.
 3. **The `add_member` no-op pin**, per §6.
 
@@ -270,17 +364,36 @@ Full suite baseline on `eef35ed`: **3381 passed, 1 skipped**. It must end at
 
 ## 8. Migration order
 
-One route per commit, six commits, the suite green at each. The manager and its
-own tests land first, in their own commit, before any route moves. The gate
-rewrite lands with the **last** route — until then the old gate still guards the
-routes that have not moved yet, and rewriting it first would leave the
-un-migrated routes uncovered mid-slice.
+Eight commits, the full suite green at each:
+
+1. **The manager**, with its own tests (§7.1). No route changes.
+2. **The transitional gate** (§5), replacing today's gate 16 while all six
+   routes are still legacy — so it lands green, and is mutation-proven against
+   the legacy shape at that moment.
+3.–8. **One route per commit**, in the order `update_settings`, `add_member`,
+   `remove_member`, `update_rubric`, `retry_setup`, `activate`. Each commit
+   flips exactly one route from the transitional gate's legacy arm to its
+   migrated arm; the other five stay green on whichever arm they are on.
+
+Then a ninth commit tightens the gate to the final rule and deletes the legacy
+arm.
+
+`update_settings` goes first because it is the simplest body — four assignments,
+no early returns, no re-read. `activate` goes last because it carries both the
+M → J → W ordering and a re-read whose position is load-bearing (§4).
+
+An earlier draft of this section had the gate rewrite land with the **last**
+route. That is not viable: it would leave the suite red from the first
+migration through the fifth, which forfeits exactly the safety net this slice
+depends on.
 
 ## 9. Risks
 
 | Risk | Mitigation |
 | --- | --- |
-| The gate rewrite is vacuous — it passes whatever the routes do | Six per-route mutations, md5-confirmed, each failing only its own case |
+| Either gate rewrite is vacuous — it passes whatever the routes do | Per-route mutations, md5-confirmed, each failing only its own case: the transitional gate against the legacy shape when it lands, the final gate against `workspace_write` removal |
+| The transitional gate's legacy arm is never removed | The tightening is its own commit (§8, ninth) and success criterion 3 |
+| The manager leaves a body write pending for a caller that reuses the session | §3 step 6 rollback, proven by the reuse-the-session test in §7.1 |
 | `activate`'s M → J → W order is disturbed | The re-read stays in the body (§4); the straddle suite's lock-order gates are untouched and must pass |
 | A route's early return commits a future partial write | §6's pin; the failure mode is a visible commit, not silent loss |
 | The manager swallows an exception it should propagate | Explicit test that a body `HTTPException` propagates and commits nothing |
@@ -291,7 +404,10 @@ un-migrated routes uncovered mid-slice.
 1. All six routes use `workspace_write`; no route in the two modules calls
    `session.commit()`.
 2. `test_api_writers_mutex_straddle.py` passes **unedited**.
-3. The rewritten gate 16 fails under each of six per-route mutations.
-4. Full suite ≥ 3381 passed with nothing removed; `ruff` clean; OpenAPI drift clean.
-5. `update_settings`'s ceremony is gone: the route reads as validation, a `with`,
+3. The final gate fails under each of six per-route `workspace_write`-removal
+   mutations, and its legacy arm is gone.
+4. The manager rolls back on all four exceptional exits, proven by a test that
+   reuses and commits the same session after catching the exception.
+5. Full suite ≥ 3381 passed with nothing removed; `ruff` clean; OpenAPI drift clean.
+6. `update_settings`'s ceremony is gone: the route reads as validation, a `with`,
    four assignments, and a return.
