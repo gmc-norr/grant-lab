@@ -464,7 +464,15 @@ hazard §4 closed for the pass prefixes.
 Two constants carry it, both 2s and both in `row_locks.py`:
 `SETUP_JOB_LOCK_TIMEOUT_SECONDS` for the two setup-job routes and
 `WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS` for the four that wait on the workspace row
-directly. In every case the bound must wrap the remainder of the transaction
+directly. Read the guarantee at its real strength: `lock_timeout` caps each
+acquisition **individually**, so `activate` — which waits on its job row and then
+on the `workspaces` row — can stall up to 2 × 2s under the mutex, and a DELETE
+queued behind it waits that long before starting its own work. The constants
+prevent an unbounded pin; they do not compose into a transaction-wide deadline,
+and §10.8 records that gap. Their values (and that arithmetic) are pinned by
+`tests/proposal_assist/test_row_lock_ceilings.py` — every contention test
+monkeypatches them down to stay fast, so nothing else exercises the production
+numbers. In every case the bound must wrap the remainder of the transaction
 **through `session.commit()`**, not merely the `with_for_update()`:
 `bounded_lock_waits` leaves the `SET LOCAL` in force on exit but translates
 55P03 → `RowLockTimeout` only inside its own body, so a narrow wrap leaves the
@@ -624,9 +632,19 @@ dropped. The production surface then offers only `soft_delete_workspace_db` and
    audited; the point of the residual is that nothing bounds them if it does.
 
    **Why it matters.** A mutex holder blocked on a row pins the mutex. Every
-   other mutex-participating writer for that workspace then burns its own 10s
+   other mutex-participating writer for that workspace then burns its own
    acquisition budget and gives up — 429 for the routes that map
-   `CommitMutexTimeout`, a tool error or a skipped tick elsewhere — and the
+   `CommitMutexTimeout`, a tool error or a skipped tick elsewhere. That budget is
+   **not uniform**. Of the 27 sites, 24 take `acquire_commit_mutex`'s
+   `timeout_seconds` default of 10s implicitly; two pass their own **5s** —
+   `collab/flip.py:61` (`_FLIP_MUTEX_TIMEOUT_SECONDS`) and `collab/hydrate.py:56`
+   (`_HYDRATE_MUTEX_TIMEOUT_SECONDS`); and one, `workspaces.py:124`, forwards
+   `soft_delete_workspace_db`'s own `timeout_seconds` parameter
+   (`workspaces.py:88`), whose default is 10s and which its single caller — the
+   DELETE route at `web/api/workspaces.py:1508` — does not override. So the real
+   distribution is **25 × 10s and 2 × 5s**, and the DELETE is one of the 10s
+   ones: a pin long enough to exhaust it costs the owner the deletion outright —
+   and the
    DELETE route's < 6.0s budget
    (`tests/proposal_assist/test_phase0_transaction_boundaries.py:1155`) is blown
    for as long as the block lasts. The holders are real rather than
@@ -650,12 +668,21 @@ dropped. The production surface then offers only `soft_delete_workspace_db` and
      its `SET LOCAL` wiped by the DEFAULT restore, so "wrap the transaction" is
      not a safe generic remedy — the six routes here wrap *after* winning the
      mutex for exactly this reason.
-   - Background and scheduler callers are affected differently from routes. A
-     route that starts raising returns 429 to a caller who can retry;
-     `phases/setup.py`'s `_m1` (the setup worker) and `collab/checkpoint.py`'s
-     scheduler tick (`scheduler.py:363`) today *wait* where a bound would make
-     them *raise*, converting contention into job failure and requeue. That is
-     a behaviour change to be designed, not discovered.
+   - Background and scheduler callers are affected differently from routes, and
+     differently from each other. A route that starts raising returns 429 to a
+     caller who can retry. `phases/setup.py`'s `_m1` (the setup worker) and
+     `collab/checkpoint.py`'s scheduler tick (`scheduler.py:363`) today *wait*
+     where a bound would make them *raise* — but the raise lands in two different
+     places. `_m1` raises into `run_one`'s `except Exception` (`setup.py:335`),
+     which calls `_fail` and marks the job row `failed`; `requeue_stuck_setup_jobs`
+     then re-queues it up to `MAX_SETUP_ATTEMPTS`, so there contention really does
+     become job failure and requeue. `checkpoint_active_tails` has neither: it
+     catches generically per candidate (`checkpoint.py:223`), rolls back, logs
+     `collab_checkpoint_tail_failed` and moves on. There is no job row and no
+     requeue — the artifact simply stays a candidate and the next scan retries
+     it, so a persistently contended log would go on being skipped, silently
+     except for the warning, while its tail keeps growing. Two different
+     behaviour changes to be designed, not discovered.
 
    So this residual is one line and one architectural question, not a to-do list
    of 21 call sites. It needs its own design pass; it is explicitly not a
