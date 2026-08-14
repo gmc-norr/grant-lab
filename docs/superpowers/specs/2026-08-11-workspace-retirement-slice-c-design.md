@@ -1,11 +1,21 @@
 # Workspace retirement — Slice C design
 
 Date: 2026-08-11
-Status: approved (design), revision 5 after two review rounds and two implementation corrections (see Revisions); implementation plan to follow
+Status: approved (design), revision 7 after two review rounds and three implementation corrections (see Revisions); implementation plan to follow
 Predecessors: Slice A (`docs/superpowers/plans/2026-07-24-workspace-retirement-slice-a.md`, `7b16547`), Slice B-mutex (`docs/superpowers/plans/2026-07-24-workspace-retirement-slice-b-mutex.md`, `194d8ce`), Slice B-retire (`docs/superpowers/plans/2026-07-25-workspace-retirement-b-retire.md`, `245d7ba`, review fixes `01edf10`)
 
 ## Revisions
 
+- revision 7 (2026-08-14, Slice C2 review fixes): revision 6's freshness fix
+  **disarmed** gate 11(b)'s commit-mutation for the two rubric routes, silently.
+  The re-read takes the `workspaces` row `FOR UPDATE` as the first statement
+  inside the bound, so a holder's 55P03 now fires there — inside any plausible
+  narrow wrap — instead of at COMMIT, and dedenting `session.commit()` out of
+  the bound in either rubric route leaves all 50 tests in
+  `test_api_writers_mutex_straddle.py` + the rubric/settings API suites green.
+  §12 gains gate 16, a static AST check that re-arms §8's bound-through-COMMIT
+  rule for all six routes; 11(b)'s commit-mutation obligation moves there. The
+  runtime hazard those two routes retain is narrower but real — see §8.
 - revision 6 (2026-08-14, Slice C2 review fixes): §8 gains a third normative
   rule — **freshness**. Serializing the commit is not enough for a route whose
   write is a *diff*: `require_owner` loads the `Workspace` before the mutex,
@@ -478,6 +488,12 @@ numbers. In every case the bound must wrap the remainder of the transaction
 55P03 → `RowLockTimeout` only inside its own body, so a narrow wrap leaves the
 flush bounded yet untranslated and answers 500 where the route contracts 429.
 
+Because that is a *lexical* requirement — this statement inside that block — it
+is enforced lexically, by gate 16's AST check, and not only by interleaving
+tests. The freshness rule below is why: it made the interleaving tests stop
+discriminating for the two routes it touches (revision 7), and a rule whose only
+enforcement can be disarmed by an unrelated correct fix is not enforced.
+
 Read this rule at exactly its stated scope. The restore at `locking.py:207`
 un-bounds the post-mutex tail at **every** call site in the tree, and this slice
 re-imposes a bound at six of them; the rest are untouched and stay unbounded.
@@ -511,6 +527,25 @@ above: `update_rubric` is M → W, `activate` is M → J → W, which is
 `phases/setup.py` `_m3`'s documented order (job → workspace → Call). Both sit
 inside the route's `bounded_lock_waits`, so the new wait is bounded and its 55P03
 maps to the same 429 as every other wait in the transaction.
+
+**Side effect on the bound rule's coverage, stated because it cost a gate.**
+Holding the `workspaces` row from the re-read through COMMIT removes the
+*designed* slow holder — the four pass prefixes — from these two routes'
+commit-time waits, which is why dedenting their `session.commit()` out of the
+bound no longer fails anything at runtime. It does **not** make the bound
+decorative for them. What still waits at their COMMIT is the `WorkspaceEvent`
+insert's `actor_id` FK: it takes `FOR KEY SHARE` on a `users` row, and
+`FOR KEY SHARE` conflicts with `FOR UPDATE`, which
+`web/api/admin_users.py`'s `_lock_active_admin_count` takes over every active
+admin row. Measured, not reasoned — with that `users` row held and the commit
+dedented out of the bound, `PUT /api/workspaces/{id}/rubric` raises
+`OperationalError: canceling statement due to lock timeout / while locking tuple
+in relation "users" / SQL statement "SELECT 1 FROM ONLY users … FOR KEY SHARE"`
+(a 500); with the commit inside the bound the same interleaving answers 429. The
+holder is short-lived (a lock-and-count transaction, with `signal_user_revocation`
+and its 5s barrier outside the session), so this is a narrow hazard rather than
+the pass-prefix one — but it is a real 55P03 at COMMIT, and it is the reason the
+rule is re-armed rather than relaxed for these two routes.
 
 Mechanism, because the obvious spelling does not work: use
 `session.refresh(ws, with_for_update=True)`, **not**
@@ -774,6 +809,12 @@ reverted.
     outside the bound and the test must fail with an untranslated
     `OperationalError` → 500 rather than the contracted 429 (§8's
     "through `session.commit()`").
+    That second mutation still discriminates on `update_settings`, `add_member`,
+    `remove_member` and `retry_setup`, and **no longer** on `update_rubric` or
+    `activate`: gate 15's under-mutex re-read takes the `workspaces` row at the
+    top of their bound, so a holder's 55P03 fires there rather than at COMMIT
+    (revision 7, §8). Do not satisfy this obligation on a rubric route. Gate 16
+    carries it for all six.
     Note: the constant must be patched on the *route* module, not on
     `row_locks`, or the patch is a no-op — the routes import the value by name.
 12. **Budget invariant.** The extended barrier test fails if
@@ -809,6 +850,23 @@ reverted.
     case (a) would pass with the bug present. Mutations: remove the re-read and
     all four go red; replace it with
     `session.get(…, with_for_update=True)` and all four stay red (§8).
+
+16. **Bound-through-COMMIT, structurally (§8's bound rule).** A DB-free AST
+    check over the real source of `web/api/settings.py` and `web/api/rubric.py`:
+    for each of the six routes, the `session.commit()` call must sit lexically
+    inside the `with bounded_lock_waits(…)` block, with none outside it. Parsed,
+    never matched as text — this repo has already shipped a source-text
+    assertion that was a tautology (`src.index(f"def {name}(")` matches inside
+    `"async def …"`). The six names are asserted as an explicit set against what
+    the modules contain, in both directions, so a deleted or renamed route fails
+    instead of leaving the gate covering five, and a *new* bounded writer fails
+    until it is listed. Failure names the offending route and why. Mutations: six,
+    one per route — dedent that route's commit and exactly that route's case must
+    fail; plus a rename, which must fail the presence check.
+    Static rather than runtime deliberately: the rule is structural, so this is
+    its direct encoding, and unlike the interleaving gates it survives a change
+    to *where* contention happens to fire — which is precisely what revision 7
+    had to repair.
 
 Phase-0's gates (no long-held lock; a claimed setup job must not create a repo
 directory for a deleted workspace; a cancelled setup job is not requeued) move
