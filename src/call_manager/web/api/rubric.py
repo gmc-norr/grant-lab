@@ -17,16 +17,9 @@ from sqlalchemy import select
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import User, WorkspaceEvent, WorkspaceSetupJob
 from call_manager.proposal_assist.collab.permissions import signal_from_request
-from call_manager.proposal_assist.drafting.locking import (
-    BUSY_ERROR_MESSAGE,
-    CommitMutexTimeout,
-    acquire_commit_mutex_live,
-)
 from call_manager.proposal_assist.row_locks import (
     SETUP_JOB_LOCK_TIMEOUT_SECONDS,
     WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS,
-    RowLockTimeout,
-    bounded_lock_waits,
 )
 from call_manager.proposal_assist.web._perms import require_member, require_owner
 from call_manager.proposal_assist.web._writes import workspace_write
@@ -306,80 +299,64 @@ def activate(
         # non-owner with a malformed rubric gets 403, not a 400 confirming the
         # body shape. Before the mutex, because it takes no lock.
         criteria = _validate_criteria(body.criteria)
-        # Slice C2 lock-order rule: the live mutex immediately after require_owner
-        # and BEFORE the setup-job row lock below. Taking the job row first would
-        # hold it across the whole mutex wait, and the delete's retirement hook
-        # cancels setup jobs with FOR UPDATE SKIP LOCKED — it would skip this row
-        # and leave the job non-terminal until the reconciliation tick.
-        try:
-            acquire_commit_mutex_live(session, ws.id)
-        except CommitMutexTimeout as e:
-            raise HTTPException(
-                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
-            ) from e
-        # Bounded, for the same reason as retry_setup: acquire_commit_mutex
-        # restores lock_timeout = DEFAULT, so an unbounded row wait here would
-        # pin the commit mutex and make a concurrent DELETE 429 after its full
-        # budget. See row_locks.py's module docstring.
+        # Slice C2 lock-order rule: the write scope opens immediately after
+        # require_owner and BEFORE the setup-job row lock below. Taking the job
+        # row first would hold it across the whole mutex wait, and the delete's
+        # retirement hook cancels setup jobs with FOR UPDATE SKIP LOCKED — it
+        # would skip this row and leave the job non-terminal until the
+        # reconciliation tick.
         #
-        # The bound wraps the WHOLE remainder of the transaction, COMMIT included
-        # — see retry_setup's note. It matters more here than there: the
-        # under-mutex re-read below takes the `workspaces` row FOR UPDATE and
-        # _apply_rubric UPDATEs it, while the four pass prefixes hold that row
-        # FOR UPDATE for up to PASS_PREFIX_LOCK_TIMEOUT_SECONDS holding no
-        # mutex, so this transaction really can block after the job lock. With a
-        # narrow wrap that wait is still bounded but no longer translated, and
-        # the caller gets a 500 where this slice contracts for a 429.
-        try:
-            with bounded_lock_waits(
-                session,
-                timeout_seconds=SETUP_JOB_LOCK_TIMEOUT_SECONDS,
-                message="timed out waiting for a row lock in the activate transaction",
-            ):
-                job = session.scalar(
-                    select(WorkspaceSetupJob)
-                    .where(WorkspaceSetupJob.workspace_id == ws.id)
-                    .with_for_update()
+        # workspace_write bounds the WHOLE remainder including COMMIT. It matters
+        # more here than on retry_setup: the re-read below takes the `workspaces`
+        # row FOR UPDATE and _apply_rubric UPDATEs it, while the four pass
+        # prefixes hold that row FOR UPDATE for up to
+        # PASS_PREFIX_LOCK_TIMEOUT_SECONDS holding no mutex, so this transaction
+        # really can block after the job lock.
+        with workspace_write(
+            session,
+            ws.id,
+            timeout_seconds=SETUP_JOB_LOCK_TIMEOUT_SECONDS,
+            what="activate",
+        ):
+            job = session.scalar(
+                select(WorkspaceSetupJob)
+                .where(WorkspaceSetupJob.workspace_id == ws.id)
+                .with_for_update()
+            )
+            if job is None or job.status != "waiting_for_rubric_review":
+                raise HTTPException(
+                    status_code=409, detail="workspace is not awaiting rubric review"
                 )
-                if job is None or job.status != "waiting_for_rubric_review":
-                    raise HTTPException(
-                        status_code=409, detail="workspace is not awaiting rubric review"
-                    )
-                # Re-read the workspace row under the mutex before _apply_rubric
-                # reads it — same defect, same fix, full rationale on
-                # update_rubric above (including why session.refresh and not
-                # session.get(..., with_for_update=True)).
-                #
-                # It is worse on this route: phases/setup.py's _m3 WRITES the
-                # rubric while holding job -> workspace, so the rubric activate
-                # loaded at require_owner can have been replaced by the setup
-                # worker while activate queued on the mutex — the very transition
-                # this route is confirming.
-                #
-                # AFTER the job lock, deliberately. The normative order on this
-                # branch is M -> J -> W and it matches _m3's; hoisting this above
-                # the job SELECT would invert against _m3 and open a real deadlock
-                # shape (Postgres 40P01). Nothing is lost by taking it here: the
-                # 409 path above returns without ever needing the row.
-                session.refresh(ws, with_for_update=True)
-                _apply_rubric(session, ws, user, criteria, body.funder_notes or "")
-                job.status = "done"
-                job.completed_at = datetime.now(UTC)
-                ws.current_phase = "active"
-                session.add(
-                    WorkspaceEvent(
-                        workspace_id=ws.id,
-                        kind="workspace_activated",
-                        actor_id=user.id,
-                        payload={},
-                    )
+            # Re-read the workspace row under the mutex before _apply_rubric
+            # reads it — same defect, same fix, full rationale on
+            # update_rubric above (including why session.refresh and not
+            # session.get(..., with_for_update=True)).
+            #
+            # It is worse on this route: phases/setup.py's _m3 WRITES the
+            # rubric while holding job -> workspace, so the rubric activate
+            # loaded at require_owner can have been replaced by the setup
+            # worker while activate queued on the mutex — the very transition
+            # this route is confirming.
+            #
+            # AFTER the job lock, deliberately. The normative order is
+            # M -> J -> W and it matches _m3's; hoisting this above the job
+            # SELECT would invert against _m3 and open a real deadlock shape
+            # (Postgres 40P01). Nothing is lost by taking it here: the 409 path
+            # above returns without ever needing the row.
+            session.refresh(ws, with_for_update=True)
+            _apply_rubric(session, ws, user, criteria, body.funder_notes or "")
+            job.status = "done"
+            job.completed_at = datetime.now(UTC)
+            ws.current_phase = "active"
+            session.add(
+                WorkspaceEvent(
+                    workspace_id=ws.id,
+                    kind="workspace_activated",
+                    actor_id=user.id,
+                    payload={},
                 )
-                session.commit()
-        except RowLockTimeout as e:
-            raise HTTPException(
-                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
-            ) from e
-        result = _rubric_out(ws)   # build INSIDE the block (session still open)
+            )
+        result = _rubric_out(ws)  # build INSIDE the session block (still open)
     # setup gates BOTH artifacts to owner-only (resolve_access), so activating
     # lifts the write-gate for the draft AND an unlocked spec — reconcile both.
     signal_from_request(request, workspace_id=workspace_id, artifacts=["draft", "spec"])
