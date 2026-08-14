@@ -244,14 +244,14 @@ def retry_setup(
     row could not be taken in time."""
     with request.app.state.session_factory() as session:
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
-        # Slice C2 lock-order rule: the live mutex immediately after require_owner
-        # and BEFORE the setup-job row lock below. Order matters here for a
-        # concrete reason: a route that took the job row first would hold it for
-        # the whole mutex wait, and the delete's retirement hook cancels setup
-        # jobs with FOR UPDATE SKIP LOCKED — so it would skip this row and leave
-        # the job non-terminal until the reconciliation tick. Taking the mutex
-        # first means we raise WorkspaceDeleted (-> main.py -> 404) without ever
-        # touching the row.
+        # Slice C2 lock-order rule: the write scope opens immediately after
+        # require_owner and BEFORE the setup-job row lock below. Order matters
+        # here for a concrete reason: a route that took the job row first would
+        # hold it for the whole mutex wait, and the delete's retirement hook
+        # cancels setup jobs with FOR UPDATE SKIP LOCKED — so it would skip this
+        # row and leave the job non-terminal until the reconciliation tick.
+        # Opening the scope first means we raise WorkspaceDeleted (-> main.py ->
+        # 404) without ever touching the row.
         #
         # This route also has its own resurrection shape, though a narrower one
         # than it looks: it cannot revive a job the delete cancelled, because it
@@ -260,61 +260,36 @@ def retry_setup(
         # already 'failed' when the workspace was deleted — 'failed' is terminal
         # and therefore not in the hook's _CANCELLABLE list, so the delete leaves
         # it alone. The under-mutex read is what stops that.
-        try:
-            acquire_commit_mutex_live(session, ws.id)
-        except CommitMutexTimeout as e:
-            raise HTTPException(
-                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
-            ) from e
-        # The job-row wait is BOUNDED. acquire_commit_mutex restores
-        # lock_timeout = DEFAULT on success (locking.py:204), so without this the
-        # route would hold the commit mutex while waiting indefinitely on a row
-        # that _m3, _fail or requeue_stuck_setup_jobs may hold — and a concurrent
-        # DELETE would 429 behind us after burning its whole 10s budget. That is
-        # the unbounded-wait class Slice C1 closed for the four pass prefixes;
-        # re-opening it here on the assumption "those holders are short" is
-        # exactly the unwritten assumption that produced it the first time.
-        # The bound wraps the WHOLE remainder of the transaction, COMMIT included
-        # — not just the FOR UPDATE. bounded_lock_waits deliberately leaves
-        # SET LOCAL lock_timeout in force on exit (row_locks.py's module
-        # docstring: the bound "must extend past the acquisitions to the
-        # commit"), but its 55P03 -> RowLockTimeout translation only covers its
-        # own body. A narrow wrap would leave the job UPDATE and the commit
-        # bounded yet UNtranslated, so a lock wait there escapes as a raw
-        # OperationalError -> 500 instead of this route's contracted 429. The
-        # four pass runners and phases/setup.py wrap the whole transaction for
-        # exactly this reason.
-        try:
-            with bounded_lock_waits(
-                session,
-                timeout_seconds=SETUP_JOB_LOCK_TIMEOUT_SECONDS,
-                message="timed out waiting for a row lock in the setup-retry transaction",
-            ):
-                job = session.scalar(
-                    select(WorkspaceSetupJob)
-                    .where(WorkspaceSetupJob.workspace_id == ws.id)
-                    .with_for_update()
-                )
-                if job is None or job.status != "failed":
-                    if job is not None and job.status in ("queued", "running"):
-                        raise HTTPException(
-                            status_code=409,
-                            detail="setup job is already queued or running",
-                        )
+        #
+        # The 404 and 409 below are raised INSIDE the scope. workspace_write lets
+        # an HTTPException through untouched and commits nothing, so neither
+        # early exit writes.
+        with workspace_write(
+            session,
+            ws.id,
+            timeout_seconds=SETUP_JOB_LOCK_TIMEOUT_SECONDS,
+            what="setup-retry",
+        ):
+            job = session.scalar(
+                select(WorkspaceSetupJob)
+                .where(WorkspaceSetupJob.workspace_id == ws.id)
+                .with_for_update()
+            )
+            if job is None or job.status != "failed":
+                if job is not None and job.status in ("queued", "running"):
                     raise HTTPException(
-                        status_code=404,
-                        detail="no failed setup job for this workspace",
+                        status_code=409,
+                        detail="setup job is already queued or running",
                     )
-                job.status = "queued"
-                job.attempts = 0
-                job.started_at = None
-                job.completed_at = None
-                job.last_error = None
-                session.commit()
-        except RowLockTimeout as e:
-            raise HTTPException(
-                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
-            ) from e
+                raise HTTPException(
+                    status_code=404,
+                    detail="no failed setup job for this workspace",
+                )
+            job.status = "queued"
+            job.attempts = 0
+            job.started_at = None
+            job.completed_at = None
+            job.last_error = None
         return SetupRetryOut(status=job.status, attempts=job.attempts)
 
 
