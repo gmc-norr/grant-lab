@@ -52,15 +52,23 @@ The two ceilings, in decreasing hardness
    `lock_timeout` back at DEFAULT, because `acquire_commit_mutex` restores it —
    wait on the `workspaces` row for as long as the prefix's own cap allows.
 
-MAX_CONTENDED_ROWS = 2, derived from the code, per family
----------------------------------------------------------
-* PASS_PREFIX: the `workspaces` row `FOR UPDATE` plus that pass's own job row
-  (e.g. `coherence/pass_runner.py`), held to COMMIT.
-* SETUP_JOB: `rubric.py`'s `activate` takes the `WorkspaceSetupJob` row
-  `FOR UPDATE` and then re-reads the `workspaces` row `FOR UPDATE` — two.
+MAX_CONTENDED_ROWS = 2 — the MAXIMUM across the families, applied uniformly
+--------------------------------------------------------------------------
+It is one number, not a per-family table, and every cap below is multiplied by
+it. Read it as "no bounded transaction in these families contends for more than
+two rows", derived per family from the code:
+
+* PASS_PREFIX: TWO — the `workspaces` row `FOR UPDATE` plus that pass's own job
+  row (e.g. `coherence/pass_runner.py`), held to COMMIT.
+* SETUP_JOB: TWO — `rubric.py`'s `activate` takes the `WorkspaceSetupJob` row
+  `FOR UPDATE` and then re-reads the `workspaces` row `FOR UPDATE`.
   (`retry_setup` contends for one.)
-* WORKSPACE_ROW: one contended row, the `workspaces` row itself (the re-read,
-  the UPDATE and the member routes' `FOR KEY SHARE` all land on it).
+* WORKSPACE_ROW: ONE — the `workspaces` row itself (the re-read, the UPDATE and
+  the member routes' `FOR KEY SHARE` all land on it). Judged at the family
+  maximum of two anyway, so this cap carries a deliberate 2x margin rather than
+  a tight derivation. That is conservative in the safe direction: the ceilings
+  hold a cap to a SMALLER value than its own stack requires. Do not "correct" it
+  down to one — that weakens the assertion for the family this slice added.
 
 The member routes' inserts also take `FOR KEY SHARE` on their `users` FK
 parents; those are not counted, because nothing in this system holds a `users`
@@ -96,9 +104,11 @@ from pathlib import Path
 from call_manager.proposal_assist import retirement, row_locks
 from call_manager.workspaces import soft_delete_workspace_db
 
-# Maximum number of CONTENDED rows a single bounded transaction acquires — the
-# multiplier that turns a per-lock cap into that transaction's worst-case stall.
-# Derivation per family in the module docstring.
+# The LARGEST number of CONTENDED rows any single bounded transaction in these
+# families acquires — the multiplier that turns a per-lock cap into that
+# transaction's worst-case stall. Applied uniformly to every cap, so a family
+# with a shorter stack (WORKSPACE_ROW: one row) is held to a stricter bound than
+# its own derivation demands. Per-family derivation in the module docstring.
 MAX_CONTENDED_ROWS = 2
 
 # Share of the DELETE route's asserted budget that lock stalls may consume; the
@@ -154,7 +164,8 @@ def test_mutex_held_caps_stay_under_the_deletes_mutex_acquisition_timeout():
     for name, cap in _MUTEX_HELD_CAPS.items():
         worst_case = MAX_CONTENDED_ROWS * cap
         assert worst_case < acquire_timeout, (
-            f"{name}={cap}s x {MAX_CONTENDED_ROWS} contended rows = {worst_case}s, "
+            f"{name}={cap}s x {MAX_CONTENDED_ROWS} (the largest contended-row "
+            f"count across these families, applied to every cap) = {worst_case}s, "
             f"which is not under the {acquire_timeout}s the DELETE route spends "
             f"acquiring the same commit mutex (soft_delete_workspace_db). A writer "
             f"that slow makes the owner's DELETE time out on the mutex and return "
@@ -177,7 +188,8 @@ def test_every_cap_leaves_headroom_under_the_delete_route_budget():
     for name, cap in _ALL_CAPS.items():
         worst_case = MAX_CONTENDED_ROWS * cap
         assert worst_case <= stall_ceiling, (
-            f"{name}={cap}s x {MAX_CONTENDED_ROWS} contended rows = {worst_case}s, "
+            f"{name}={cap}s x {MAX_CONTENDED_ROWS} (the largest contended-row "
+            f"count across these families, applied to every cap) = {worst_case}s, "
             f"over the {stall_ceiling:.1f}s that lock stalls may take out of the "
             f"DELETE route's asserted {budget}s budget "
             f"(test_phase0_transaction_boundaries.py). The route still has its own "
