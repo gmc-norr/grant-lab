@@ -21,16 +21,7 @@ from call_manager.proposal_assist.citations.bibliography import (
     CITATION_STYLES as _CITATION_STYLES,
 )
 from call_manager.proposal_assist.collab.permissions import signal_from_request
-from call_manager.proposal_assist.drafting.locking import (
-    BUSY_ERROR_MESSAGE,
-    CommitMutexTimeout,
-    acquire_commit_mutex_live,
-)
-from call_manager.proposal_assist.row_locks import (
-    WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS,
-    RowLockTimeout,
-    bounded_lock_waits,
-)
+from call_manager.proposal_assist.row_locks import WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS
 from call_manager.proposal_assist.web._perms import require_owner
 from call_manager.proposal_assist.web._writes import workspace_write
 from call_manager.proposal_assist.web.workspace_meta import (
@@ -201,49 +192,34 @@ def remove_member(
 ) -> Response:
     with request.app.state.session_factory() as session:
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
-        # Slice C2 lock-order rule: the live mutex immediately after
+        # Slice C2 lock-order rule: the write scope opens immediately after
         # require_owner, before any other lock. WorkspaceDeleted -> main.py -> 404.
-        try:
-            acquire_commit_mutex_live(session, ws.id)
-        except CommitMutexTimeout as e:
-            raise HTTPException(
-                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
-            ) from e
-        # Bounded for the same reason as update_settings: the WorkspaceEvent
-        # insert takes FOR KEY SHARE on the `workspaces` row, so this
-        # transaction can block on a pass prefix's FOR UPDATE while holding the
-        # commit mutex. The bound spans the WHOLE remainder including COMMIT —
-        # the DELETE and the event insert both flush there — so the 55P03 is
-        # translated rather than escaping as a 500. See update_settings.
-        try:
-            with bounded_lock_waits(
-                session,
-                timeout_seconds=WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS,
-                message="timed out waiting for a row lock in the remove-member transaction",
-            ):
-                target = session.get(User, user_id)  # resolve email for the audit payload
-                deleted = (
-                    session.query(WorkspaceViewer)
-                    .filter_by(workspace_id=ws.id, user_id=user_id)
-                    .delete()
-                )
-                if deleted:
-                    session.add(
-                        WorkspaceEvent(
-                            workspace_id=ws.id,
-                            kind="member_removed",
-                            actor_id=user.id,
-                            payload={
-                                "target_user_id": user_id,
-                                "target_email": target.email if target else None,
-                            },
-                        )
+        # The bound reaches COMMIT because both the DELETE and the WorkspaceEvent
+        # insert flush there — see update_settings' note.
+        with workspace_write(
+            session,
+            ws.id,
+            timeout_seconds=WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS,
+            what="remove-member",
+        ):
+            target = session.get(User, user_id)  # resolve email for the audit payload
+            deleted = (
+                session.query(WorkspaceViewer)
+                .filter_by(workspace_id=ws.id, user_id=user_id)
+                .delete()
+            )
+            if deleted:
+                session.add(
+                    WorkspaceEvent(
+                        workspace_id=ws.id,
+                        kind="member_removed",
+                        actor_id=user.id,
+                        payload={
+                            "target_user_id": user_id,
+                            "target_email": target.email if target else None,
+                        },
                     )
-                session.commit()
-        except RowLockTimeout as e:
-            raise HTTPException(
-                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
-            ) from e
+                )
     # Stays OUTSIDE both the bound and the session/mutex scope: reconciling live
     # permissions is not part of this transaction and must not extend the stretch
     # that holds the commit mutex.
