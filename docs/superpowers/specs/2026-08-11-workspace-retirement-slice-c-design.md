@@ -857,16 +857,27 @@ reverted.
     outside the bound and the test must fail with an untranslated
     `OperationalError` → 500 rather than the contracted 429 (§8's
     "through `session.commit()`").
-    That second mutation discriminates on `update_settings`, `add_member`,
-    `remove_member` and `retry_setup` against the holder described above. It
-    does **not** on `update_rubric` or `activate`: gate 15's under-mutex re-read
-    takes the `workspaces` row at the TOP of their bound, so a holder's 55P03
-    fires there rather than at COMMIT (revision 7, §8). Those two need a
-    different holder — the acting user's `users` row, which their commit-time
-    `WorkspaceEvent` insert waits on through `actor_id`'s FK (§8) — and they
-    have one, so the mutation obligation is met at runtime for all six. Gate 16
-    carries the same rule structurally as well, because a static check cannot be
-    disarmed by a change to WHERE contention happens to fire.
+    That second mutation discriminates on `update_settings`, `add_member` and
+    `remove_member` against the holder described above. It does **not** on
+    `update_rubric` or `activate`: gate 15's under-mutex re-read takes the
+    `workspaces` row at the TOP of their bound, so a holder's 55P03 fires there
+    rather than at COMMIT (revision 7, §8). Those two need a different holder —
+    the acting user's `users` row, which their commit-time `WorkspaceEvent`
+    insert waits on through `actor_id`'s FK (§8) — and they have one.
+    It does **not** discriminate on `retry_setup` either, and there the
+    obligation is not merely unmet but UNMEETABLE. Its bound OPENS with the
+    setup-job row's `.with_for_update()`, so contention fires at the
+    acquisition; it writes no `WorkspaceEvent`, so it has no commit-time FK
+    check; and its only flush updates the job row it already holds. There is no
+    reachable interleaving in which its COMMIT contends for anything. Measured:
+    dedenting its `session.commit()` out of the bound leaves every runtime gate
+    green and fails only gate 16's static `[rubric-retry_setup]` case.
+    So the runtime obligation is met for **five** routes, and for `retry_setup`
+    gate 16 is the sole carrier. Gate 16 carries the rule structurally for all
+    six, because a static check cannot be disarmed by a change to WHERE
+    contention happens to fire — which is precisely what happened here twice:
+    once to the rubric pair (revision 7) and once, permanently, to
+    `retry_setup`.
     Note: the constant must be patched on the *route* module, not on
     `row_locks`, or the patch is a no-op — the routes import the value by name.
 12. **Budget invariant.** The extended barrier test fails if

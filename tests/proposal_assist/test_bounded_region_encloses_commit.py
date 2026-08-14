@@ -64,8 +64,17 @@ bound it answers 429. The interleaving is
 `test_activate_maps_a_commit_time_users_fk_wait_to_429_not_500` in
 `tests/proposal_assist/test_api_writers_mutex_straddle.py`. So the wrap is still
 load-bearing for these two routes — against a short holder rather than a slow
-one — and fully load-bearing for the other four, whose entire write reaches the
-row only at COMMIT.
+one — and fully load-bearing for the three `settings.py` routes, whose entire
+write reaches a contended row only at COMMIT.
+
+`retry_setup` is the exception in the other direction, and it is why this file
+exists. It takes its `WorkspaceSetupJob` row `.with_for_update()` at the TOP of
+its bound and writes no `WorkspaceEvent`, so its COMMIT has no FK check and no
+reachable contention: no runtime interleaving can distinguish the commit being
+inside the bound from outside it. Measured — dedenting its `session.commit()`
+out of the bound leaves every runtime gate green and fails only this file's
+`[rubric-retry_setup]` case. For that route this static check is not a second
+opinion, it is the only enforcement there is.
 
 Placement
 ---------
