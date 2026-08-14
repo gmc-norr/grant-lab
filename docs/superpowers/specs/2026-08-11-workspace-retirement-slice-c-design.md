@@ -6,6 +6,20 @@ Predecessors: Slice A (`docs/superpowers/plans/2026-07-24-workspace-retirement-s
 
 ## Revisions
 
+- revision 8 (2026-08-14, Slice C2 residual-8 audit): residual 8's account of
+  what happens when a bound makes `_m1` raise was wrong in both halves and
+  self-contradictory — a row marked `'failed'` is exactly the row
+  `requeue_stuck_setup_jobs` can never requeue. `_fail` IS the requeue
+  (`attempts + 1`, back to `'queued'`, dead-lettered to `'failed'` only at
+  `MAX_SETUP_ATTEMPTS`); `requeue_stuck_setup_jobs` filters `status ==
+  'running'` in both UPDATEs and is not on this path at all. The conclusion
+  (contention → bounded retry) survives, the mechanism is now named correctly.
+  Two smaller corrections from a full re-check of every claim in the residual:
+  the delegation line is not the 28th line of that grep's output, and
+  `soft_delete_workspace_db` has one *production* caller (tests override the
+  timeout via `functools.partial`). §8's `main.py` line reference for the
+  generic 500 handler corrected 566 → 570. Everything else in residual 8 was
+  re-verified against the tree and is accurate.
 - revision 7 (2026-08-14, Slice C2 review fixes): revision 6's freshness fix
   **disarmed** gate 11(b)'s commit-mutation for the two rubric routes, silently.
   The re-read takes the `workspaces` row `FOR UPDATE` as the first statement
@@ -560,7 +574,7 @@ four gate-15 tests red. `get` needs `populate_existing=True` to refresh.)
 **Error mapping is written per route, explicitly.** There is no app-level
 `CommitMutexTimeout` handler — every route returning 429 today does so with its
 own `except CommitMutexTimeout` (e.g. `web/api/workspaces.py:446`), and an
-uncaught one falls through to the generic 500 handler (`main.py:566`). Each of
+uncaught one falls through to the generic 500 handler (`main.py:570`). Each of
 the six gets `except CommitMutexTimeout` → 429 with `BUSY_ERROR_MESSAGE` and
 `Retry-After: 2`; `WorkspaceDeleted` propagates to main.py's handler → 404. The
 bound rule adds a second per-route catch on the same terms: `RowLockTimeout` →
@@ -651,8 +665,9 @@ dropped. The production surface then offers only `soft_delete_workspace_db` and
      | grep -v "def acquire_commit_mutex"
    ```
 
-   returns 28 lines; the 28th is `acquire_commit_mutex_live` delegating to
-   `acquire_commit_mutex` (`locking.py:230`), not a caller. This slice
+   returns 28 lines; one of them — `locking.py:230` — is
+   `acquire_commit_mutex_live` delegating to `acquire_commit_mutex`, not a
+   caller, which is where 28 lines becomes 27 sites. This slice
    re-imposes a bound at **6** of the 27 (`web/api/settings.py` ×3,
    `web/api/rubric.py` ×3, §8). The other 21 — `collab/kernel.py` ×5,
    `tools/citations.py` ×4, `web/api/workspaces.py` ×3 (the spec-artifact
@@ -675,8 +690,9 @@ dropped. The production surface then offers only `soft_delete_workspace_db` and
    `collab/flip.py:61` (`_FLIP_MUTEX_TIMEOUT_SECONDS`) and `collab/hydrate.py:56`
    (`_HYDRATE_MUTEX_TIMEOUT_SECONDS`); and one, `workspaces.py:124`, forwards
    `soft_delete_workspace_db`'s own `timeout_seconds` parameter
-   (`workspaces.py:88`), whose default is 10s and which its single caller — the
-   DELETE route at `web/api/workspaces.py:1508` — does not override. So the real
+   (`workspaces.py:88`), whose default is 10s and which its single production
+   caller — the DELETE route at `web/api/workspaces.py:1508` — does not override
+   (tests do, via `functools.partial`). So the real
    distribution is **25 × 10s and 2 × 5s**, and the DELETE is one of the 10s
    ones: a pin long enough to exhaust it costs the owner the deletion outright —
    and the
@@ -709,9 +725,17 @@ dropped. The production surface then offers only `soft_delete_workspace_db` and
      `collab/checkpoint.py`'s scheduler tick (`scheduler.py:363`) today *wait*
      where a bound would make them *raise* — but the raise lands in two different
      places. `_m1` raises into `run_one`'s `except Exception` (`setup.py:335`),
-     which calls `_fail` and marks the job row `failed`; `requeue_stuck_setup_jobs`
-     then re-queues it up to `MAX_SETUP_ATTEMPTS`, so there contention really does
-     become job failure and requeue. `checkpoint_active_tails` has neither: it
+     which calls `_fail` — and `_fail` is itself the requeue: on a non-terminal,
+     not-deleted job it increments `attempts` (`setup.py:606`) and sets the row
+     back to `'queued'` with `started_at = None` (`setup.py:633-634`),
+     dead-lettering to `'failed'` only once `attempts >= MAX_SETUP_ATTEMPTS`
+     (`setup.py:624-626`).
+     So contention there really does become requeue, bounded at 5 attempts — but
+     by that path, not by `requeue_stuck_setup_jobs`, which filters
+     `status == 'running'` in both of its UPDATEs (`setup.py:226`, `:241`) and so
+     can never touch a row `_fail` has already moved off `'running'`; `_fail`'s
+     own never-resurrect list treats `'failed'` as terminal too
+     (`setup.py:599`). `checkpoint_active_tails` has neither: it
      catches generically per candidate (`checkpoint.py:223`), rolls back, logs
      `collab_checkpoint_tail_failed` and moves on. There is no job row and no
      requeue — the artifact simply stays a candidate and the next scan retries
