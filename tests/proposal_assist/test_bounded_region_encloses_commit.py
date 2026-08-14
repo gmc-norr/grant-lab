@@ -3,16 +3,11 @@
 The rule (spec section 8, gate in section 12)
 ---------------------------------------------
 Each of the six mutex-held owner writers wraps its post-mutex work in
-`row_locks.bounded_lock_waits`, and that `with` block must ENCLOSE the
-transaction's `session.commit()` — not merely the row acquisitions.
+`workspace_write`, and that scope owns the `session.commit()` — the route calls
+no commit itself.
 
-TRANSITIONAL, for the duration of the workspace_write consolidation
-(docs/superpowers/specs/2026-08-14-workspace-write-consolidation-design.md §5).
-Each route must be exactly one of two shapes — legacy `bounded_lock_waits` with
-its commit inside, or migrated `workspace_write` with no route-level commit —
-because the routes migrate one commit at a time and this gate has to stay green
-throughout. The legacy arm is deleted in the slice's final commit, after which
-re-introducing a hand-rolled bound-plus-commit in these two modules fails.
+All six routes are migrated; the legacy arm is gone. Re-introducing a
+hand-rolled `bounded_lock_waits` + commit in these two modules now fails.
 
 The reason is exact. `bounded_lock_waits` issues `SET LOCAL lock_timeout` and
 deliberately leaves it in force when the `with` exits (see `row_locks.py`'s
@@ -120,14 +115,14 @@ from call_manager.web.api import settings as settings_api
 #
 # The table is also the gate's SCOPE, which is narrower than that sentence alone
 # suggests: the parametrize iterates these keys, so these two modules are all the
-# check ever reads. A `bounded_lock_waits` block added anywhere else in the tree —
-# `web/api/workspaces.py`, say — is invisible to it and may put its commit outside
-# the bound with this file still green. That is measured, not assumed. The limit
-# is deliberate: §8's bound rule is normative for these six routes and explicitly
-# not a property of the codebase (§10.8 records the wider gap, whose root cause is
-# `acquire_commit_mutex`'s restore-to-DEFAULT at every call site). If the rule is
-# ever extended to another module, extending this gate means adding that module
-# as a key here — not widening the walk.
+# check ever reads. A `workspace_write` scope added anywhere else in the tree —
+# `web/api/workspaces.py`, say — is invisible to it and may omit its commit from
+# the managed scope with this file still green. That is measured, not assumed.
+# The limit is deliberate: §8's bound rule is normative for these six routes and
+# explicitly not a property of the codebase (§10.8 records the wider gap, whose
+# root cause is `acquire_commit_mutex`'s restore-to-DEFAULT at every call site).
+# If the rule is ever extended to another module, extending this gate means adding
+# that module as a key here — not widening the walk.
 EXPECTED_BOUNDED_WRITERS: dict[str, frozenset[str]] = {
     "call_manager.web.api.settings": frozenset(
         {"update_settings", "add_member", "remove_member"}
@@ -205,13 +200,40 @@ def _session_commit_calls(node: ast.AST) -> list[ast.Call]:
 
 
 def _discovered_bounded_writers(module_name: str) -> set[str]:
-    """Routes taking EITHER shape: a legacy `bounded_lock_waits` bound, or a
-    migrated `workspace_write` scope. During the migration a module holds a mix,
-    and a route that has neither must still be reported as missing."""
+    """Routes taking EITHER shape: a migrated `workspace_write` scope, or a
+    legacy `bounded_lock_waits` bound if one is ever reintroduced. All six are
+    migrated now, so the second shape should never appear — the helper still
+    detects it so the `unlisted` presence arm catches a hand-rolled bound
+    reintroduced in these two modules. A route that has neither must still be
+    reported as missing."""
     return {
         name
         for name, fn in _module_level_functions(_parse(module_name)).items()
         if _bound_blocks(fn) or _managed_blocks(fn)
+    }
+
+
+def _is_router_decorated(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """True if any decorator is a `router.<method>(...)` call — i.e. this
+    function is an HTTP route, whether or not it is named in the table."""
+    for dec in fn.decorator_list:
+        if not isinstance(dec, ast.Call):
+            continue
+        func = dec.func
+        if (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "router"
+        ):
+            return True
+    return False
+
+
+def _router_functions(module_name: str) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    return {
+        name: fn
+        for name, fn in _module_level_functions(_parse(module_name)).items()
+        if _is_router_decorated(fn)
     }
 
 
@@ -251,77 +273,70 @@ def test_the_six_bounded_writers_are_all_present(module_name: str):
         for route in routes
     ),
 )
-def test_each_route_is_exactly_one_of_legacy_or_migrated(module_name: str, route: str):
-    """TRANSITIONAL (see this file's docstring). Each route must be exactly one of:
+def test_each_route_delegates_its_whole_write_to_workspace_write(module_name: str, route: str):
+    """Each route runs its write inside exactly one `with workspace_write(...)`
+    scope and calls `session.commit()` nowhere.
 
-      legacy:   one `with bounded_lock_waits(...)` block with `session.commit()`
-                lexically inside it and no commit outside it;
-      migrated: one `with workspace_write(...)` block and NO `session.commit()`
-                anywhere in the route.
+    This is the stronger successor to the bound-through-COMMIT rule. That rule
+    said the commit must sit inside the bound; this one removes the commit from
+    the route entirely, so the violation is unwriteable rather than merely
+    tested. Rule 2 — no route-level commit — is what keeps it that way: it fails
+    if someone re-introduces a hand-rolled transaction beside the managed one.
 
-    Both arms enforce the same rule — the transaction is committed inside the
-    bound — the migrated arm by making the alternative unwriteable. Anything
-    else fails: a half-migrated route holding both constructs, a route with
-    neither, or a migrated route that kept a stray commit.
-
-    The legacy arm is deleted once the last route migrates.
+    `retry_setup` deserves a specific note. Its scope opens with the setup-job
+    row's `.with_for_update()` and it writes no WorkspaceEvent, so its COMMIT has
+    no FK check and no reachable contention: no runtime interleaving can tell an
+    enclosed commit from an escaped one for that route. This static check is its
+    only enforcement.
     """
     fn = _module_level_functions(_parse(module_name)).get(route)
     assert fn is not None, (
-        f"{module_name}.{route} is not a module-level function any more — neither "
-        f"arm of this rule can be checked for it. See "
-        f"test_the_six_bounded_writers_are_all_present."
+        f"{module_name}.{route} is not a module-level function any more — this rule "
+        f"cannot be checked for it. See test_the_six_bounded_writers_are_all_present."
     )
 
+    managed = _managed_blocks(fn)
     legacy = _bound_blocks(fn)
-    migrated = _managed_blocks(fn)
     commits = _session_commit_calls(fn)
 
-    assert not (legacy and migrated), (
-        f"{module_name}.{route} has BOTH a `with bounded_lock_waits(...)` block and a "
-        f"`with workspace_write(...)` block. A half-migrated route is neither shape: "
-        f"finish the migration (drop the legacy bound, drop the commit) or revert it."
+    assert len(managed) == 1, (
+        f"{module_name}.{route} has {len(managed)} `with workspace_write(...)` blocks; "
+        f"every mutex-held write in these two modules runs inside exactly one. Without "
+        f"it nothing bounds the route's lock waits through COMMIT, and a contended row "
+        f"answers 500 with a raw OperationalError instead of the contracted "
+        f"429 + Retry-After: 2."
     )
-    assert legacy or migrated, (
-        f"{module_name}.{route} has neither a `with bounded_lock_waits(...)` block nor "
-        f"a `with workspace_write(...)` block, so nothing bounds its lock waits through "
-        f"COMMIT. A contended row makes it answer 500 with a raw OperationalError "
-        f"instead of the contracted 429 + Retry-After: 2."
+    assert not legacy, (
+        f"{module_name}.{route} re-introduces a hand-rolled "
+        f"`with bounded_lock_waits(...)` block at line {legacy[0].lineno}. That is the "
+        f"ceremony workspace_write replaced, and it was written wrongly at four of six "
+        f"sites before review caught it. Use workspace_write."
     )
-
-    if migrated:
-        assert len(migrated) == 1, (
-            f"{module_name}.{route} has {len(migrated)} `with workspace_write(...)` "
-            f"blocks; this gate is written for exactly one write scope per route."
-        )
-        assert not commits, (
-            f"{module_name}.{route} uses `workspace_write` but still calls "
-            f"session.commit() at line(s) {[c.lineno for c in commits]}. The manager "
-            f"owns the commit — a route-level commit either double-commits or commits "
-            f"outside the managed scope. Delete it."
-        )
-        return
-
-    assert len(legacy) == 1, (
-        f"{module_name}.{route} has {len(legacy)} `with bounded_lock_waits(...)` blocks; "
-        f"this gate is written for exactly one bounded region per route. If the route "
-        f"genuinely needs two, teach this check which commit belongs to which."
-    )
-    bound = legacy[0]
-    inside = {id(c) for c in _session_commit_calls(bound)}
-    outside = [c for c in commits if id(c) not in inside]
-    assert inside, (
-        f"{module_name}.{route}: session.commit() is NOT inside its "
-        f"`with bounded_lock_waits(...)` block (bound at line {bound.lineno}"
-        + (f", commit at line {outside[0].lineno}" if outside else "")
-        + "). bounded_lock_waits leaves SET LOCAL lock_timeout in force when the "
-        f"`with` exits but translates 55P03 -> RowLockTimeout only INSIDE its body, so "
-        f"a commit outside the bound is still bounded yet UNtranslated: a contended row "
-        f"makes {route} answer 500 with a raw OperationalError instead of the "
-        f"contracted 429 + Retry-After: 2. Move the commit back inside the `with`."
-    )
-    assert not outside, (
+    assert not commits, (
         f"{module_name}.{route} calls session.commit() at line(s) "
-        f"{[c.lineno for c in outside]}, outside its `with bounded_lock_waits(...)` "
-        f"block. Every commit in this route must sit inside the bound."
+        f"{[c.lineno for c in commits]}. workspace_write owns the commit — a "
+        f"route-level commit either double-commits or commits outside the managed scope."
+    )
+
+
+@pytest.mark.parametrize("module_name", sorted(EXPECTED_BOUNDED_WRITERS))
+def test_no_route_in_these_modules_calls_session_commit(module_name: str):
+    """Module-wide, NOT table-driven. The per-route rule above can only see
+    routes already listed; this arm sees every `router.<method>`-decorated
+    function in the module, so a NEW route that commits by hand fails here even
+    though it is in no table and takes neither context manager.
+
+    Read routes commit nothing, so the rule is simply: none of them.
+    """
+    offenders = {
+        name: [c.lineno for c in _session_commit_calls(fn)]
+        for name, fn in _router_functions(module_name).items()
+        if _session_commit_calls(fn)
+    }
+    assert not offenders, (
+        f"{module_name}: {offenders} call session.commit() directly. Every "
+        f"mutex-held write in these two modules runs inside `workspace_write`, "
+        f"which owns the commit; a hand-rolled commit is either unbounded or "
+        f"outside the managed scope, and answers 500 on a contended row where "
+        f"these routes contract for 429 + Retry-After: 2."
     )
