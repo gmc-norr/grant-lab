@@ -247,3 +247,24 @@ def test_members_delete_non_owner_403(monkeypatch, pg_url, tmp_path, pg_session_
         f"/api/workspaces/{ws_id}/members/{member_id}"
     )
     assert r.status_code == 403
+
+
+def test_settings_patch_authorization_precedes_validation(
+    monkeypatch, pg_url, tmp_path, pg_session_factory
+):
+    """A non-owner sending a MALFORMED body must get 403, not 400.
+
+    Slice C2 moved this route's body validation inside the session block, after
+    require_owner. Validating first would answer someone with no access at all
+    that their body shape was wrong — an authorization decision leaking through
+    a validation error."""
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, _, member_id, _ = _setup(pg_session_factory)
+    r = authed_client(app, user_id=member_id).patch(
+        f"/api/workspaces/{ws_id}/settings",
+        # Invalid on three counts: bad status, bad citation_style, empty title.
+        json={"title": "", "status": "nonsense", "deadline": None, "citation_style": "nope"},
+    )
+    assert r.status_code == 403, (
+        f"expected 403 (authorization decides first), got {r.status_code}: {r.text}"
+    )

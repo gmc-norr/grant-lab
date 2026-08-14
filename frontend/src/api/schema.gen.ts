@@ -1484,7 +1484,9 @@ export interface paths {
          *     Resets status='queued', attempts=0, clears started_at/completed_at/last_error
          *     so the next scheduler tick re-claims it. Returns 404 if no failed job exists
          *     for this workspace; returns 409 if the job is already queued or running
-         *     (not yet permanently failed).
+         *     (not yet permanently failed). 404 also if the workspace was deleted while
+         *     this request waited on the commit mutex; 429 if the mutex or the setup-job
+         *     row could not be taken in time.
          */
         post: operations["retry_setup_api_workspaces__workspace_id__setup_retry_post"];
         delete?: never;

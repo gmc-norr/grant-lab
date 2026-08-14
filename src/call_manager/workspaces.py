@@ -1,4 +1,5 @@
-"""Workspace lifecycle service functions: `create_workspace` and `soft_delete_workspace`.
+"""Workspace lifecycle service functions: `create_workspace`,
+`soft_delete_workspace_db` and `scrub_workspace_bytes`.
 
 `create_workspace` does three things in one
 unit of work:
@@ -90,11 +91,11 @@ def soft_delete_workspace_db(
     active background job + queued turn so none can burn cloud tokens after
     deletion, terminalize any RUNNING turn, and COMMIT.
 
-    Split out of soft_delete_workspace (Slice B-retire) so the delete route can
-    interleave in-process retirement between the durable DB commit and the FS
-    scrub: DB commit -> retire -> scrub -> 204. Nothing about the DB behaviour
-    changed in the split; soft_delete_workspace is retained as a thin wrapper
-    over this plus scrub_workspace_bytes.
+    The delete route interleaves in-process retirement between this durable DB
+    commit and the FS scrub: DB commit -> retire -> scrub -> 204. There is
+    deliberately no wrapper composing this with scrub_workspace_bytes — one
+    existed until Slice C2 and was deleted, because it looked like the entry
+    point for deleting a workspace while skipping retirement entirely.
 
     The caller resolves ownership (require_owner) before calling this.
 
@@ -193,7 +194,7 @@ def scrub_workspace_bytes(workspace_id: uuid.UUID, *, workspaces_dir: Path) -> N
         AttachmentStorage(root=workspaces_dir).delete_workspace(workspace_id=workspace_id)
     except OSError:
         logger.warning(
-            "soft_delete_workspace: attachment cleanup failed for workspace %s; "
+            "scrub_workspace_bytes: attachment cleanup failed for workspace %s; "
             "files will be collected by a future sweep",
             workspace_id,
             exc_info=True,
@@ -203,22 +204,8 @@ def scrub_workspace_bytes(workspace_id: uuid.UUID, *, workspaces_dir: Path) -> N
         ReferenceStorage(root=workspaces_dir).delete_workspace(workspace_id=workspace_id)
     except OSError:
         logger.warning(
-            "soft_delete_workspace: reference cleanup failed for workspace %s; "
+            "scrub_workspace_bytes: reference cleanup failed for workspace %s; "
             "files will be collected by a future sweep",
             workspace_id,
             exc_info=True,
         )
-
-
-def soft_delete_workspace(
-    session: Session,
-    *,
-    workspace_id: uuid.UUID,
-    workspaces_dir: Path,
-    timeout_seconds: int = 10,
-) -> None:
-    """Thin wrapper retained for existing callers: DB half then FS half, exactly
-    the pre-split behaviour. The delete route now calls the two halves directly so
-    it can interleave in-process retirement between them (Slice B-retire)."""
-    soft_delete_workspace_db(session, workspace_id=workspace_id, timeout_seconds=timeout_seconds)
-    scrub_workspace_bytes(workspace_id, workspaces_dir=workspaces_dir)

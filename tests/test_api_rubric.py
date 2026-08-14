@@ -251,3 +251,34 @@ def test_activate_member_403(monkeypatch, pg_url, tmp_path, pg_session_factory):
         },
     )
     assert r.status_code == 403
+
+
+def test_put_rubric_authorization_precedes_validation(
+    monkeypatch, pg_url, tmp_path, pg_session_factory
+):
+    """A non-owner sending an INVALID rubric must get 403, not 400. Validating
+    first tells someone with no access that their body shape was wrong."""
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, _, member_id, _ = _setup(pg_session_factory, phase="active")
+    r = authed_client(app, user_id=member_id).put(
+        f"/api/workspaces/{ws_id}/rubric",
+        json={"criteria": [], "funder_notes": None},  # empty criteria -> 400 if validated first
+    )
+    assert r.status_code == 403, (
+        f"expected 403 (authorization decides first), got {r.status_code}: {r.text}"
+    )
+
+
+def test_activate_authorization_precedes_validation(
+    monkeypatch, pg_url, tmp_path, pg_session_factory
+):
+    """A non-owner sending an INVALID rubric to activate must get 403, not 400."""
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, _, member_id, _ = _setup(pg_session_factory, phase="setup")
+    r = authed_client(app, user_id=member_id).post(
+        f"/api/workspaces/{ws_id}/activate",
+        json={"criteria": [], "funder_notes": None},  # empty criteria -> 400 if validated first
+    )
+    assert r.status_code == 403, (
+        f"expected 403 (authorization decides first), got {r.status_code}: {r.text}"
+    )

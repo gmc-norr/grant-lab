@@ -746,7 +746,7 @@ async def test_retired_before_send_finalizes_without_sending_and_keeps_estimate(
 ):
     """Deletion between claim and the post-claim launch: no send, row not left
     'running', and the retained estimate is NOT cleared (no usage was reported)."""
-    from call_manager.workspaces import soft_delete_workspace
+    from tests.workspace_delete_helper import soft_delete_workspace_for_test
 
     _wsid, job_id, controller, adapter = _build_controller_and_submit(
         pg_session_factory,
@@ -766,7 +766,9 @@ async def test_retired_before_send_finalizes_without_sending_and_keeps_estimate(
         if calls["n"] >= 2:
             with pg_session_factory() as s:
                 if s.get(Workspace, ws_id).soft_deleted_at is None:
-                    soft_delete_workspace(s, workspace_id=ws_id, workspaces_dir=tmp_path)
+                    soft_delete_workspace_for_test(
+                        s, workspace_id=ws_id, workspaces_dir=tmp_path
+                    )
         return await real_launch(ws_id)
 
     monkeypatch.setattr(controller, "launch", _launch)
@@ -845,7 +847,7 @@ async def test_delete_during_stream_reconciles_reported_usage(
     so the usage must be reconciled instead of lost."""
     from sqlalchemy import func
 
-    from call_manager.workspaces import soft_delete_workspace
+    from tests.workspace_delete_helper import soft_delete_workspace_for_test
 
     ws_id, job_id, controller, _adapter = _build_controller_and_submit(
         pg_session_factory,
@@ -864,7 +866,9 @@ async def test_delete_during_stream_reconciles_reported_usage(
 
         async def _gen(self):
             with pg_session_factory() as s:
-                soft_delete_workspace(s, workspace_id=self.ws_id, workspaces_dir=tmp_path)
+                soft_delete_workspace_for_test(
+                    s, workspace_id=self.ws_id, workspaces_dir=tmp_path
+                )
             yield TurnDoneEvent(tokens_in=700, tokens_out=90, model="m", session_id=None)
 
     controller.send_turn = lambda ws, msg: _DeletingStream(ws_id)

@@ -134,12 +134,15 @@ def commit_mutex_key(workspace_id: uuid.UUID) -> int:
 
 class CommitMutexTimeout(RuntimeError):
     """The per-workspace commit mutex could not be acquired within the
-    timeout — another writer is wedged or unusually slow. Web routes map
-    this to 503 'workspace is busy'."""
+    timeout — another writer is wedged or unusually slow. Web routes map this
+    to 429 'workspace is busy' with a ``Retry-After: 2`` header (the collab
+    checkpoint route in ``proposal_assist/web/collab_checkpoint.py`` is the
+    lone holdout, still answering 503)."""
 
 
-# Shared 503 detail string — imported by the tool modules and web routes so
-# the message the agent sees and the message the browser sees are byte-identical.
+# Shared busy detail string, served with 429 + Retry-After: 2 — imported by the
+# tool modules and web routes so the message the agent sees and the message the
+# browser sees are byte-identical.
 BUSY_ERROR_MESSAGE = "workspace is busy — try again in a moment"
 
 

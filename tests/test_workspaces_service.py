@@ -1,5 +1,6 @@
-"""Unit test for the extracted soft_delete_workspace service (shared by the
-JSON DELETE /api/workspaces/{id} endpoint and the doomed Jinja route)."""
+"""Unit tests for the workspace soft-delete service halves —
+`soft_delete_workspace_db` and `scrub_workspace_bytes` — behind the JSON
+DELETE /api/workspaces/{id} endpoint."""
 
 from __future__ import annotations
 
@@ -18,8 +19,8 @@ from call_manager.db.models import (
     Workspace,
     WorkspaceEvent,
 )
-from call_manager.workspaces import soft_delete_workspace
 from tests.proposal_assist.conftest import make_workspace
+from tests.workspace_delete_helper import soft_delete_workspace_for_test
 
 
 def test_soft_delete_workspace_cascades_and_scrubs(pg_session_factory, tmp_path):
@@ -53,7 +54,7 @@ def test_soft_delete_workspace_cascades_and_scrubs(pg_session_factory, tmp_path)
     (attach_dir / "blob.bin").write_bytes(b"x")
 
     with pg_session_factory() as s:
-        soft_delete_workspace(s, workspace_id=ws_id, workspaces_dir=tmp_path)
+        soft_delete_workspace_for_test(s, workspace_id=ws_id, workspaces_dir=tmp_path)
 
     with pg_session_factory() as s:
         assert s.get(Workspace, ws_id).soft_deleted_at is not None
@@ -93,8 +94,8 @@ def test_soft_delete_workspace_cascades_and_scrubs(pg_session_factory, tmp_path)
 def test_soft_delete_terminalizes_running_turn_and_finalize_is_noop(pg_session_factory, tmp_path):
     from call_manager.db.models import ChatTurn, TurnJob
     from call_manager.proposal_assist.turns.processor import _finalize_success
-    from call_manager.workspaces import soft_delete_workspace
     from tests.proposal_assist.conftest import make_chat_turn, make_workspace
+    from tests.workspace_delete_helper import soft_delete_workspace_for_test
 
     with pg_session_factory() as s:
         ws = make_workspace(s)
@@ -112,7 +113,7 @@ def test_soft_delete_terminalizes_running_turn_and_finalize_is_noop(pg_session_f
         ws_id, job_id, ut_id = ws.id, job.id, user_turn.id
 
     with pg_session_factory() as s:
-        soft_delete_workspace(s, workspace_id=ws_id, workspaces_dir=tmp_path)
+        soft_delete_workspace_for_test(s, workspace_id=ws_id, workspaces_dir=tmp_path)
 
     with pg_session_factory() as s:
         assert s.get(TurnJob, job_id).status != "running"  # terminalized in the delete txn
@@ -150,10 +151,10 @@ def test_soft_delete_refuses_a_second_deletion(pg_session_factory, tmp_path):
         ws_id = ws.id
 
     with pg_session_factory() as s:
-        soft_delete_workspace(s, workspace_id=ws_id, workspaces_dir=tmp_path)
+        soft_delete_workspace_for_test(s, workspace_id=ws_id, workspaces_dir=tmp_path)
     with pg_session_factory() as s:
         with pytest.raises(WorkspaceDeleted):
-            soft_delete_workspace(s, workspace_id=ws_id, workspaces_dir=tmp_path)
+            soft_delete_workspace_for_test(s, workspace_id=ws_id, workspaces_dir=tmp_path)
         s.rollback()
 
 
@@ -191,7 +192,7 @@ def test_soft_delete_propagates_commit_mutex_timeout_without_committing(
         holding.wait(timeout=5)
         with pg_session_factory() as s:
             with pytest.raises(CommitMutexTimeout):
-                soft_delete_workspace(
+                soft_delete_workspace_for_test(
                     s, workspace_id=ws_id, workspaces_dir=tmp_path, timeout_seconds=1
                 )
             s.rollback()
@@ -203,20 +204,19 @@ def test_soft_delete_propagates_commit_mutex_timeout_without_committing(
         assert s.get(Workspace, ws_id).soft_deleted_at is None  # nothing committed
 
 
-def test_split_halves_compose_to_the_wrapper(pg_session_factory, tmp_path):
-    """soft_delete_workspace_db + scrub_workspace_bytes must equal the retained
-    soft_delete_workspace wrapper: same soft_deleted_at stamp, same running-turn
-    terminalization, same idempotent WorkspaceDeleted-on-redelete. This pins the
-    split as behaviour-preserving."""
+def test_the_split_halves_stamp_terminalize_and_refuse_a_redelete(pg_session_factory, tmp_path):
+    """soft_delete_workspace_db + scrub_workspace_bytes: the soft_deleted_at
+    stamp, running-turn terminalization, and WorkspaceDeleted on a re-delete.
+
+    This used to compare the halves against the soft_delete_workspace wrapper.
+    Slice C2 §9 deleted that wrapper — it composed the halves while skipping
+    retirement entirely — so the comparison is gone and the assertions it made
+    about the halves stay here."""
     from call_manager.proposal_assist.drafting.locking import WorkspaceDeleted
-    from call_manager.workspaces import (
-        scrub_workspace_bytes,
-        soft_delete_workspace,
-        soft_delete_workspace_db,
-    )
+    from call_manager.workspaces import scrub_workspace_bytes, soft_delete_workspace_db
     from tests.proposal_assist.conftest import make_chat_turn, make_user, make_workspace
 
-    # (a) the split halves, run explicitly.
+    # The split halves, run explicitly.
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=make_user(s, email="split-a@ki.se"))
         ut = make_chat_turn(s, ws, role="user", content={"type": "text", "text": "q"},
@@ -235,26 +235,22 @@ def test_split_halves_compose_to_the_wrapper(pg_session_factory, tmp_path):
         assert s.get(Workspace, split_id).soft_deleted_at is not None
         assert s.get(TurnJob, job_id).status != "running"      # terminalized
         assert s.get(ChatTurn, ut_id).tokens_in == 1234        # estimate retained
-    # DB half is idempotent-refusing exactly like the wrapper.
+    # DB half is idempotent-refusing: a re-delete raises rather than re-stamping.
     with pg_session_factory() as s:
         with pytest.raises(WorkspaceDeleted):
             soft_delete_workspace_db(s, workspace_id=split_id)
         s.rollback()
 
-    # (b) the retained wrapper, run whole — same observable end state.
-    with pg_session_factory() as s:
-        ws2 = make_workspace(s, owner=make_user(s, email="split-b@ki.se"))
-        job2 = TurnJob(workspace_id=ws2.id, status="running",
-                       user_turn_id=make_chat_turn(
-                           s, ws2, role="user", content={"type": "text", "text": "q"}).id,
-                       submitted_by_user_id=ws2.owner_id)
-        s.add(job2)
-        s.commit()
-        wrap_id, job2_id = ws2.id, job2.id
 
-    with pg_session_factory() as s:
-        soft_delete_workspace(s, workspace_id=wrap_id, workspaces_dir=tmp_path)
+def test_the_production_soft_delete_wrapper_stays_deleted():
+    """Slice C2 §9. The wrapper composed the DB and FS halves WITHOUT retirement,
+    while looking exactly like the entry point you would reach for. If it comes
+    back, every caller silently skips pass, job and collab-room teardown."""
+    import call_manager.workspaces as ws_mod
 
-    with pg_session_factory() as s:
-        assert s.get(Workspace, wrap_id).soft_deleted_at is not None
-        assert s.get(TurnJob, job2_id).status != "running"
+    assert not hasattr(ws_mod, "soft_delete_workspace"), (
+        "soft_delete_workspace is back in production. It skips retirement. Use "
+        "tests.workspace_delete_helper.soft_delete_workspace_for_test in tests, or "
+        "call soft_delete_workspace_db and scrub_workspace_bytes directly with "
+        "retirement between them (see web/api/workspaces.py's delete route)."
+    )

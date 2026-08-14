@@ -1,8 +1,60 @@
 # Workspace retirement — Slice C design
 
 Date: 2026-08-11
-Status: approved (design), revision 3 after two review rounds; implementation plan to follow
+Status: approved (design), revision 7 after two review rounds and three implementation corrections (see Revisions); implementation plan to follow
 Predecessors: Slice A (`docs/superpowers/plans/2026-07-24-workspace-retirement-slice-a.md`, `7b16547`), Slice B-mutex (`docs/superpowers/plans/2026-07-24-workspace-retirement-slice-b-mutex.md`, `194d8ce`), Slice B-retire (`docs/superpowers/plans/2026-07-25-workspace-retirement-b-retire.md`, `245d7ba`, review fixes `01edf10`)
+
+## Revisions
+
+- revision 8 (2026-08-14, Slice C2 residual-8 audit): residual 8's account of
+  what happens when a bound makes `_m1` raise was wrong in both halves and
+  self-contradictory — a row marked `'failed'` is exactly the row
+  `requeue_stuck_setup_jobs` can never requeue. `_fail` IS the requeue
+  (`attempts + 1`, back to `'queued'`, dead-lettered to `'failed'` only at
+  `MAX_SETUP_ATTEMPTS`); `requeue_stuck_setup_jobs` filters `status ==
+  'running'` in both UPDATEs and is not on this path at all. The conclusion
+  (contention → bounded retry) survives, the mechanism is now named correctly.
+  Two smaller corrections from a full re-check of every claim in the residual:
+  the delegation line is not the 28th line of that grep's output, and
+  `soft_delete_workspace_db` has one *production* caller (tests override the
+  timeout via `functools.partial`). §8's `main.py` line reference for the
+  generic 500 handler corrected 566 → 570. Everything else in residual 8 was
+  re-verified against the tree and is accurate.
+- revision 7 (2026-08-14, Slice C2 review fixes): revision 6's freshness fix
+  **disarmed** gate 11(b)'s commit-mutation for the two rubric routes, silently.
+  The re-read takes the `workspaces` row `FOR UPDATE` as the first statement
+  inside the bound, so a holder's 55P03 now fires there — inside any plausible
+  narrow wrap — instead of at COMMIT, and dedenting `session.commit()` out of
+  the bound in either rubric route leaves all 50 tests in
+  `test_api_writers_mutex_straddle.py` + the rubric/settings API suites green.
+  §12 gains gate 16, a static AST check that re-arms §8's bound-through-COMMIT
+  rule for all six routes; 11(b)'s commit-mutation obligation moves there. The
+  runtime hazard those two routes retain is narrower but real — see §8.
+- revision 6 (2026-08-14, Slice C2 review fixes): §8 gains a third normative
+  rule — **freshness**. Serializing the commit is not enough for a route whose
+  write is a *diff*: `require_owner` loads the `Workspace` before the mutex,
+  `acquire_commit_mutex_live` refreshes `soft_deleted_at` and nothing else, and
+  `expire_on_commit=False` means nothing else expires it either — so
+  `_apply_rubric` was computing `content_changed` and the `rubric_edited` event's
+  `old_*` payload from state as old as the request. C2 is what made that window
+  large (a few milliseconds → the whole mutex wait), so C2 owns the fix. §12
+  gains gate 15.
+- revision 5 (2026-08-13, Slice C2): §8's bound rule was wrong about its own
+  scope and, read literally, asserted an invariant the codebase does not have.
+  Its parenthetical named "both setup-job routes"; in fact all six routes hold
+  the mutex across a row wait, and C2 now bounds all six. The rule is restated
+  as a requirement on those six. §10 gains residual 8, naming the root cause —
+  the deliberate `SET LOCAL lock_timeout = DEFAULT` restore at
+  `drafting/locking.py:207` — which leaves the post-mutex tail unbounded at 27
+  call sites across 14 modules, of which this slice bounds 6, and why the
+  central fix is a design pass rather than a follow-up commit. §12 gate 11(b)
+  widened from two routes to six, gate 13 disambiguated from it, §14 updated.
+- revision 4 (2026-08-13, Slice C2): §8's lock-order rationale and §12 gate 11
+  replaced. The rule stands; the deadlock justifying it does not exist. Verified
+  against the merged tree at 53fa9fc — soft_delete_workspace_db never touches
+  WorkspaceSetupJob, and setup-job cancellation is post-commit and SKIP LOCKED.
+  The rule's real basis is convergence (a held row is skipped by the hook), and
+  C2 bounds the mutex→row wait it newly introduces.
 
 ## 1. Why this slice exists
 
@@ -387,19 +439,171 @@ the precedent at `web/api/workspaces.py:537`:
 | `retry_setup` | `rubric.py:168` | re-queues a setup job (a resurrection risk until the §1 slice lands) |
 
 **Lock-order rule (normative).** `acquire_commit_mutex_live` is taken
-**immediately after `require_owner`, before any other lock**. `activate` and
-`retry_setup` both currently take `WorkspaceSetupJob … FOR UPDATE`
-(`rubric.py:180`, `rubric.py:217`) as their first lock; once delete also
-cancels setup jobs, that order inverts against delete's mutex→job-row order and
-deadlocks. The rule is stated here because it is not locally obvious in either
-route.
+**immediately after `require_owner`, before any other lock**. Lock-free work may
+sit between the two — and semantic body validation specifically SHOULD, so that
+authorization decides before a validation error can answer a caller who has no
+access, and so a malformed body does not queue behind the mutex. What may not
+sit there is another lock. `activate` and `retry_setup` both currently take
+`WorkspaceSetupJob … FOR UPDATE` (`rubric.py:180`, `rubric.py:217`) as their
+first lock, and that order must change.
+
+The lock-order rule's reason is not deadlock. As of the pre-C2 tree, no AB-BA
+cycle is reachable in either order: `soft_delete_workspace_db` never touches
+`WorkspaceSetupJob`
+(its mutex transaction locks the workspace row, the four pass-job tables and
+`TurnJob`), setup-job cancellation runs in a separate post-commit transaction
+with `FOR UPDATE SKIP LOCKED`, and every other setup-job acquisition is either
+`SKIP LOCKED` or mutexless — nothing held the mutex and then waited on a
+setup-job row. C2 introduces the first such edge itself, and bounds it (the
+bound rule below), so the property is maintained by construction rather than by
+luck.
+
+This does **not** license inverting `phases/setup.py`'s own documented order
+(`:498-503`, job → workspace → Call): that ordering answers a different,
+real 40P01 against `_m2`/`_m3`, and it is what `activate` matches.
+
+The lock-order rule's reason is **convergence**. A route that takes the
+setup-job row before blocking on the mutex holds that row for the whole wait — up to
+`timeout_seconds`, default 10s. The delete's retirement hook cancels setup jobs
+with `SKIP LOCKED`, so it *skips* the held row and the job stays non-terminal
+until the reconciliation tick catches it (up to `jobs_reconcile_tick_seconds`,
+default 60s). With the mutex first, the route raises `WorkspaceDeleted` before
+touching the row, the hook finds it free, and cancellation is immediate.
+
+**Bound rule (normative — a requirement on these six routes, not a property of
+the codebase).** Each of the six holds the mutex across a subsequent row wait,
+and each of those waits must carry its own bound. It is **not** only the two
+setup-job routes: `update_settings` and `update_rubric` (through `_apply_rubric`)
+UPDATE the `workspaces` row itself, `add_member` and `remove_member` take
+`FOR KEY SHARE` on it as the FK parent of their `WorkspaceViewer` /
+`WorkspaceEvent` inserts, `activate` waits on its `WorkspaceSetupJob` row *and*
+on the `workspaces` row through `_apply_rubric`, and `retry_setup` waits on its
+`WorkspaceSetupJob` row. The reason is the one `row_locks.py`'s module docstring
+gives: `acquire_commit_mutex` restores `lock_timeout = DEFAULT` on success
+(`drafting/locking.py:207`), so an unbounded wait under the mutex pins it and
+blows the DELETE route's < 6.0s budget
+(`tests/proposal_assist/test_phase0_transaction_boundaries.py:1155`) — the
+hazard §4 closed for the pass prefixes.
+
+Two constants carry it, both 2s and both in `row_locks.py`:
+`SETUP_JOB_LOCK_TIMEOUT_SECONDS` for the two setup-job routes and
+`WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS` for the four that wait on the workspace row
+directly. Read the guarantee at its real strength: `lock_timeout` caps each
+acquisition **individually**, so `activate` — which waits on its job row and then
+on the `workspaces` row — can stall up to 2 × 2s under the mutex, and a DELETE
+queued behind it waits that long before starting its own work. The constants
+prevent an unbounded pin; they do not compose into a transaction-wide deadline,
+and §10.8 records that gap. Their values (and that arithmetic) are pinned by
+`tests/proposal_assist/test_row_lock_ceilings.py` — every contention test
+monkeypatches them down to stay fast, so nothing else exercises the production
+numbers. In every case the bound must wrap the remainder of the transaction
+**through `session.commit()`**, not merely the `with_for_update()`:
+`bounded_lock_waits` leaves the `SET LOCAL` in force on exit but translates
+55P03 → `RowLockTimeout` only inside its own body, so a narrow wrap leaves the
+flush bounded yet untranslated and answers 500 where the route contracts 429.
+
+Because that is a *lexical* requirement — this statement inside that block — it
+is enforced lexically, by gate 16's AST check, and not only by interleaving
+tests. The freshness rule below is why: it made the interleaving tests stop
+discriminating for the two routes it touches (revision 7), and a rule whose only
+enforcement can be disarmed by an unrelated correct fix is not enforced.
+
+Read this rule at exactly its stated scope. The restore at `locking.py:207`
+un-bounds the post-mutex tail at **every** call site in the tree, and this slice
+re-imposes a bound at six of them; the rest are untouched and stay unbounded.
+That is §10.8 — the single root cause, and why closing it centrally is a
+separate design pass rather than a wider edit here.
+
+**Freshness rule (normative — for the routes whose write is a diff).** A route
+that decides *what* to write by comparing the request against current state must
+re-read that state **under the mutex**, before the comparison. Winning the mutex
+does not refresh anything: `require_owner` loads the `Workspace` instance before
+the mutex; `acquire_commit_mutex_live`'s guard is a scalar
+`select(Workspace.soft_deleted_at)` that deliberately round-trips the *column*
+and so repopulates no attribute; and `db/session.py` builds the sessionmaker with
+`expire_on_commit=False`. Everything except `soft_deleted_at` is therefore as old
+as the request — and as of C2, "as old as the request" means up to the mutex's
+full 10s wait.
+
+Of the six, only `update_rubric` and `activate` are exposed, and only through
+`_apply_rubric`'s change detection. `update_settings` writes absolute values from
+the body with no old-vs-new comparison; `add_member` and `remove_member` re-query
+the `WorkspaceViewer`/`User` rows they act on inside the transaction, and the one
+pre-mutex attribute they read, `ws.owner_id`, is never reassigned anywhere in the
+tree (workspace ownership cannot transfer). `_apply_rubric`'s own logic is
+correct and unchanged; only the freshness of its input was wrong. Symptoms of the
+stale read: an identical concurrent write records a *second* `rubric_edited`
+event for one edit, and a distinct one records `old_criteria` from a rubric two
+versions back, dropping the intervening revision out of the audit chain.
+
+The re-read goes **after** any lock the route already takes, preserving the order
+above: `update_rubric` is M → W, `activate` is M → J → W, which is
+`phases/setup.py` `_m3`'s documented order (job → workspace → Call). Both sit
+inside the route's `bounded_lock_waits`, so the new wait is bounded and its 55P03
+maps to the same 429 as every other wait in the transaction.
+
+**Side effect on the bound rule's coverage, stated because it cost a gate.**
+Holding the `workspaces` row from the re-read through COMMIT removes the
+*designed* slow holder — the four pass prefixes — from these two routes'
+commit-time waits, which is why dedenting their `session.commit()` out of the
+bound stopped failing the `hold_workspace_row` gates. It does **not** make the
+bound decorative for them. What still waits at their COMMIT is the
+`WorkspaceEvent` insert's `actor_id` FK: it takes `FOR KEY SHARE` on a `users`
+row, and `FOR KEY SHARE` conflicts with `FOR UPDATE`, which
+`web/api/admin_users.py`'s `_lock_active_admin_count` takes over every active
+admin row.
+
+Measured — and the measurement is now *in the tree*, which it was not when
+revision 7 first asserted it (that measurement came from a scratch test that was
+deleted, leaving the claim unreproduced). Hold the acting user's `users` row,
+dedent the commit out of the bound, and `PUT /api/workspaces/{id}/rubric` raises
+`OperationalError (psycopg.errors.LockNotAvailable): canceling statement due to
+lock timeout / CONTEXT: while locking tuple in relation "users" / SQL statement
+"SELECT 1 FROM ONLY public.users x WHERE id = $1 FOR KEY SHARE OF x"` — a 500.
+With the commit inside the bound the same interleaving answers 429.
+`tests/proposal_assist/test_api_writers_mutex_straddle.py`'s
+`test_update_rubric_maps_a_commit_time_users_fk_wait_to_429_not_500` and
+`test_activate_maps_a_commit_time_users_fk_wait_to_429_not_500` *are* that
+interleaving, so gate 11(b)'s runtime half is restored for the two routes the
+freshness rule disarmed — alongside gate 16's static check, not instead of it.
+
+The holder is short-lived: a lock-and-count transaction, with
+`signal_user_revocation` and its 5s barrier outside the session. So this is a
+narrow hazard rather than the pass-prefix one — but it is a real 55P03 at
+COMMIT, and it is the reason the rule is re-armed rather than relaxed for these
+two routes.
+
+Short-lived is also why `row_locks.py` and
+`tests/proposal_assist/test_row_lock_ceilings.py` leave `users` rows OUT of the
+contended-row count that turns a per-lock cap into a worst-case stall. That is
+not a contradiction of the paragraph above, and neither statement should be
+"corrected" against the other: they answer different questions about the same
+lock. *How long can this stall?* — not long enough to add another whole cap,
+because no holder keeps a `users` row across slow work the way a pass prefix
+keeps the `workspaces` row. *Can a 55P03 fire here at all?* — yes, at COMMIT,
+and untranslated it is a 500. The first governs the ceilings' arithmetic; the
+second governs the bound. If that 5s barrier ever moves inside the admin guard's
+session, the first answer changes and the row count has to change with it.
+
+Mechanism, because the obvious spelling does not work: use
+`session.refresh(ws, with_for_update=True)`, **not**
+`session.get(Workspace, id, with_for_update=True)`. A non-`None`
+`with_for_update` makes `Session.get` skip the identity lookup and emit the
+`SELECT … FOR UPDATE`, so the row lock is taken — but the loader does not
+overwrite attributes that are already populated, so the instance keeps its stale
+values and the bug survives with a lock around it. (Verified empirically against
+SQLAlchemy 2.0.49, and by mutation: swapping `refresh` for that `get` leaves all
+four gate-15 tests red. `get` needs `populate_existing=True` to refresh.)
 
 **Error mapping is written per route, explicitly.** There is no app-level
 `CommitMutexTimeout` handler — every route returning 429 today does so with its
 own `except CommitMutexTimeout` (e.g. `web/api/workspaces.py:446`), and an
-uncaught one falls through to the generic 500 handler (`main.py:566`). Each of
+uncaught one falls through to the generic 500 handler (`main.py:570`). Each of
 the six gets `except CommitMutexTimeout` → 429 with `BUSY_ERROR_MESSAGE` and
-`Retry-After: 2`; `WorkspaceDeleted` propagates to main.py's handler → 404.
+`Retry-After: 2`; `WorkspaceDeleted` propagates to main.py's handler → 404. The
+bound rule adds a second per-route catch on the same terms: `RowLockTimeout` →
+the identical 429, since "the mutex was wedged" and "the row was held" are the
+same answer to the caller — retry in 2s.
 
 **The claim is narrow.** This does *not* make every workspace writer
 linearized. A file-level survey shows twenty modules with mutating routes that
@@ -465,6 +669,107 @@ dropped. The production surface then offers only `soft_delete_workspace_db` and
    sweep as backstop, as documented on `WorkspaceRetired`.
 7. **Two unverified minor findings** from the B-retire review (fixed-sleep
    races in two collab tests) stay out of scope.
+8. **One line un-bounds the post-mutex tail everywhere; this slice bounds six of
+   the places it lands.** `acquire_commit_mutex` executes
+   `SET LOCAL lock_timeout = DEFAULT` after it wins the advisory lock
+   (`proposal_assist/drafting/locking.py:207`). That line is deliberate, not an
+   oversight: the restore arrived in the same commit as the `timeout_seconds`
+   bound itself (`63bd9cf`). That bound was written *for the acquisition* — so a
+   wedged holder cannot pin FastAPI workers indefinitely — and the restore keeps it
+   scoped there, so the caller's own later statements, which never asked for a
+   bound and carry no 55P03 translation, are not silently made failable. The
+   price is that from the acquisition onward the transaction runs at
+   `lock_timeout = 0` again.
+
+   `acquire_commit_mutex` / `acquire_commit_mutex_live` are called at **27 sites
+   across 14 modules**:
+
+   ```
+   grep -rn "acquire_commit_mutex_live(\|acquire_commit_mutex(" src --include=*.py \
+     | grep -v "def acquire_commit_mutex"
+   ```
+
+   returns 28 lines; one of them — `locking.py:230` — is
+   `acquire_commit_mutex_live` delegating to `acquire_commit_mutex`, not a
+   caller, which is where 28 lines becomes 27 sites. This slice
+   re-imposes a bound at **6** of the 27 (`web/api/settings.py` ×3,
+   `web/api/rubric.py` ×3, §8). The other 21 — `collab/kernel.py` ×5,
+   `tools/citations.py` ×4, `web/api/workspaces.py` ×3 (the spec-artifact
+   routes `post_init_spec`/`post_lock_spec`/`post_unlock_spec` at `:537`,
+   `:648`, `:736` — *not* the DELETE route), `workspaces.py` (which is where
+   the DELETE's own `soft_delete_workspace_db` write lives, `:124`),
+   `editing/save.py`,
+   `turns/submit.py`, `citations/human_cite.py`, `analysis/insert.py`,
+   `collab/hydrate.py`, `collab/checkpoint.py`, `collab/flip.py`, and
+   `phases/setup.py`'s `_m1` — run their whole post-acquisition tail unbounded.
+   Whether each of those actually meets a contended lock today has not been
+   audited; the point of the residual is that nothing bounds them if it does.
+
+   **Why it matters.** A mutex holder blocked on a row pins the mutex. Every
+   other mutex-participating writer for that workspace then burns its own
+   acquisition budget and gives up — 429 for the routes that map
+   `CommitMutexTimeout`, a tool error or a skipped tick elsewhere. That budget is
+   **not uniform**. Of the 27 sites, 24 take `acquire_commit_mutex`'s
+   `timeout_seconds` default of 10s implicitly; two pass their own **5s** —
+   `collab/flip.py:61` (`_FLIP_MUTEX_TIMEOUT_SECONDS`) and `collab/hydrate.py:56`
+   (`_HYDRATE_MUTEX_TIMEOUT_SECONDS`); and one, `workspaces.py:124`, forwards
+   `soft_delete_workspace_db`'s own `timeout_seconds` parameter
+   (`workspaces.py:88`), whose default is 10s and which its single production
+   caller — the DELETE route at `web/api/workspaces.py:1508` — does not override
+   (tests do, via `functools.partial`). So the real
+   distribution is **25 × 10s and 2 × 5s**, and the DELETE is one of the 10s
+   ones: a pin long enough to exhaust it costs the owner the deletion outright —
+   and the
+   DELETE route's < 6.0s budget
+   (`tests/proposal_assist/test_phase0_transaction_boundaries.py:1155`) is blown
+   for as long as the block lasts. The holders are real rather than
+   hypothetical: the four pass prefixes take the `workspaces` row `FOR UPDATE`
+   while holding no mutex and keep it across context assembly's filesystem reads
+   (`row_locks.py`, `PASS_PREFIX_LOCK_TIMEOUT_SECONDS`).
+
+   **Why this is not a patch.** The obvious central fix — have
+   `acquire_commit_mutex` leave a bound in force instead of restoring DEFAULT —
+   converts a wait into a timeout at all 27 sites simultaneously, and a timeout
+   there surfaces as a raw `OperationalError` (55P03) → 500 unless every site
+   translates it, or unless an app-level handler maps it to 429. §8 records that
+   there is deliberately **no** app-level `CommitMutexTimeout` handler: each
+   route writes its own, and an uncaught one falls through to `main.py`'s
+   generic `Exception` handler. Adding one is a change to this codebase's
+   error-mapping architecture, with blast radius well past this slice. Two
+   further constraints any central fix must answer:
+
+   - The bound has to be re-imposed *after* the acquisition. An outer
+     `bounded_lock_waits` around a transaction that later takes the mutex has
+     its `SET LOCAL` wiped by the DEFAULT restore, so "wrap the transaction" is
+     not a safe generic remedy — the six routes here wrap *after* winning the
+     mutex for exactly this reason.
+   - Background and scheduler callers are affected differently from routes, and
+     differently from each other. A route that starts raising returns 429 to a
+     caller who can retry. `phases/setup.py`'s `_m1` (the setup worker) and
+     `collab/checkpoint.py`'s scheduler tick (`scheduler.py:363`) today *wait*
+     where a bound would make them *raise* — but the raise lands in two different
+     places. `_m1` raises into `run_one`'s `except Exception` (`setup.py:335`),
+     which calls `_fail` — and `_fail` is itself the requeue: on a non-terminal,
+     not-deleted job it increments `attempts` (`setup.py:606`) and sets the row
+     back to `'queued'` with `started_at = None` (`setup.py:633-634`),
+     dead-lettering to `'failed'` only once `attempts >= MAX_SETUP_ATTEMPTS`
+     (`setup.py:624-626`).
+     So contention there really does become requeue, bounded at 5 attempts — but
+     by that path, not by `requeue_stuck_setup_jobs`, which filters
+     `status == 'running'` in both of its UPDATEs (`setup.py:226`, `:241`) and so
+     can never touch a row `_fail` has already moved off `'running'`; `_fail`'s
+     own never-resurrect list treats `'failed'` as terminal too
+     (`setup.py:599`). `checkpoint_active_tails` has neither: it
+     catches generically per candidate (`checkpoint.py:223`), rolls back, logs
+     `collab_checkpoint_tail_failed` and moves on. There is no job row and no
+     requeue — the artifact simply stays a candidate and the next scan retries
+     it, so a persistently contended log would go on being skipped, silently
+     except for the warning, while its tail keeps growing. Two different
+     behaviour changes to be designed, not discovered.
+
+   So this residual is one line and one architectural question, not a to-do list
+   of 21 call sites. It needs its own design pass; it is explicitly not a
+   follow-up commit on Slice C.
 
 ## 11. Non-goals
 
@@ -522,21 +827,117 @@ reverted.
     (simulating a crash, so the cooperative checkpoint cannot be what saves us)
     → a later reconciliation tick marks the row `failed`. Mutation: leave the
     tick handling setup jobs only and the row stays `running` forever.
-11. **Lock order.** For `activate` and `retry_setup`, a delete concurrent with
-    the route resolves without deadlock. Mutation: take the setup-job lock
-    first and the test must fail.
+11. **Lock order, and the bound on the wait it creates.** Gate (a) applies to
+    `activate` and `retry_setup`; gate (b) applies to **all six** routes. Both
+    are required.
+
+    (a) *Order.* While the route is blocked on the commit mutex, the retirement
+    hook's `cancel_setup_jobs_for_workspace` must still be able to cancel the
+    setup job — proving the route holds no row lock while it waits. Mutation:
+    take the setup-job lock first and the test must fail (the `SKIP LOCKED`
+    cancel skips the held row and returns 0). Asserted *while* the route is
+    still blocked; sampling after the mutex is released lets the route's own
+    rollback repair the thing under test. Seed the job in a **cancellable**
+    status — `_CANCELLABLE` excludes terminal states, so a `'failed'` row makes
+    this gate red in both orders and its mutation vacuous.
+    Note: a "resolves without deadlock" gate would NOT discriminate — no AB-BA
+    cycle exists in either order. See §8.
+
+    (b) *Bound.* Every one of the six holds the mutex across a row wait (§8), so
+    each needs its own bounded case: `activate` and `retry_setup` against a held
+    `WorkspaceSetupJob` row (`row_locks.SETUP_JOB_LOCK_TIMEOUT_SECONDS`),
+    `update_settings`, `add_member`, `remove_member` and `update_rubric` against
+    a held `workspaces` row (`row_locks.WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS`).
+    In each case the holder takes the row and NO mutex, so the route wins the
+    mutex and blocks afterwards — which is the state under test. The request
+    must RETURN 429 rather than block. Mutation: remove the bound from one route
+    and that route's test must fail. Asserted as "the request came back", not as
+    elapsed time — an elapsed-time assertion can pass for the opposite reason.
+    A second mutation is required on at least one route: move `session.commit()`
+    outside the bound and the test must fail with an untranslated
+    `OperationalError` → 500 rather than the contracted 429 (§8's
+    "through `session.commit()`").
+    That second mutation discriminates on `update_settings`, `add_member` and
+    `remove_member` against the holder described above. It does **not** on
+    `update_rubric` or `activate`: gate 15's under-mutex re-read takes the
+    `workspaces` row at the TOP of their bound, so a holder's 55P03 fires there
+    rather than at COMMIT (revision 7, §8). Those two need a different holder —
+    the acting user's `users` row, which their commit-time `WorkspaceEvent`
+    insert waits on through `actor_id`'s FK (§8) — and they have one.
+    It does **not** discriminate on `retry_setup` either, and there the
+    obligation is not merely unmet but UNMEETABLE. Its bound OPENS with the
+    setup-job row's `.with_for_update()`, so contention fires at the
+    acquisition; it writes no `WorkspaceEvent`, so it has no commit-time FK
+    check; and its only flush updates the job row it already holds. There is no
+    reachable interleaving in which its COMMIT contends for anything. Measured:
+    dedenting its `session.commit()` out of the bound leaves every runtime gate
+    green and fails only gate 16's static `[rubric-retry_setup]` case.
+    So the runtime obligation is met for **five** routes, and for `retry_setup`
+    gate 16 is the sole carrier. Gate 16 carries the rule structurally for all
+    six, because a static check cannot be disarmed by a change to WHERE
+    contention happens to fire — which is precisely what happened here twice:
+    once to the rubric pair (revision 7) and once, permanently, to
+    `retry_setup`.
+    Note: the constant must be patched on the *route* module, not on
+    `row_locks`, or the patch is a no-op — the routes import the value by name.
 12. **Budget invariant.** The extended barrier test fails if
     `_PASS_RETIRE_SECONDS` or `_JOBS_CANCEL_SECONDS` is raised past the
     headroom.
 13. **Route straddles.** Each of the six routes: 404 with nothing written
-    against a workspace deleted under the mutex; 429 with `Retry-After: 2`
-    under a wedged mutex.
+    against a workspace deleted under the mutex; 429 with `Retry-After: 2` and
+    `BUSY_ERROR_MESSAGE` under a wedged mutex — the *acquisition* failure. The
+    second 429 path, where the route wins the mutex and then blocks on a row, is
+    gate 11(b); the two are separate failures with the same response, and a
+    suite that covers only this one passes with every bound removed.
 14. **DELETE route latency, end-to-end.** With a claim-analysis worker mid-job
     holding its row lock, the DELETE *request* must return within the barrier —
     measured as wall-clock on the route, not as "the delete transaction
     committed". Mutation: drop `SKIP LOCKED` from the cancel and the test must
     fail. This is the gate that would have caught the unbounded wait round 3
     identified.
+
+15. **Under-mutex freshness of the rubric diff (§8's freshness rule).** For both
+    `update_rubric` and `activate`, two cases each. A holder takes the commit
+    mutex; the route queues behind it (established with the keyed `pg_locks`
+    probe, never a sleep, so the route's pre-mutex load provably precedes the
+    holder's write); the holder then commits a rubric edit R0 → R1 through the
+    route's own `_apply_rubric` and releases.
+    (a) *Identical.* The route submits the same R1 → exactly **one**
+    `rubric_edited` event exists, not two.
+    (b) *Distinct.* The route submits R2 → its event carries
+    `old_criteria == R1`, so the chain R0 → R1 → R2 is continuous.
+    The holder must be the mutex holder, not a second request: a second request
+    would queue *behind* the route, which arrived first, and the interleaving
+    could not be produced at all. The holder's payload is normalized through the
+    route's own `_validate_criteria`, or "identical" would compare shapes and
+    case (a) would pass with the bug present. Mutations: remove the re-read and
+    all four go red; replace it with
+    `session.get(…, with_for_update=True)` and all four stay red (§8).
+
+16. **Bound-through-COMMIT, structurally (§8's bound rule).** A DB-free AST
+    check over the real source of `web/api/settings.py` and `web/api/rubric.py`:
+    for each of the six routes, the `session.commit()` call must sit lexically
+    inside the `with bounded_lock_waits(…)` block, with none outside it. Parsed,
+    never matched as text — this repo has already shipped a source-text
+    assertion that was a tautology (`src.index(f"def {name}(")` matches inside
+    `"async def …"`). The six names are asserted as an explicit set against what
+    **those two modules** contain, in both directions, so a deleted or renamed
+    route fails instead of leaving the gate covering five, and a *new* bounded
+    writer **in one of those two modules** fails until it is listed. Failure
+    names the offending route and why. Mutations: six, one per route — dedent
+    that route's commit and exactly that route's case must fail; plus a rename,
+    which must fail the presence check.
+    Scope, stated because the gate's table is also its reach: those two modules
+    are all it reads. A `bounded_lock_waits` block added elsewhere in the tree
+    (`web/api/workspaces.py`, say) is invisible to it and may put its commit
+    outside the bound with the gate green — verified, not assumed. That matches
+    §8's bound rule, which is normative for these six routes and explicitly not a
+    property of the codebase; §10.8 carries the wider gap. Extending the rule to
+    another module means adding that module to this gate's table.
+    Static rather than runtime deliberately: the rule is structural, so this is
+    its direct encoding, and unlike the interleaving gates it survives a change
+    to *where* contention happens to fire — which is precisely what revision 7
+    had to repair.
 
 Phase-0's gates (no long-held lock; a claimed setup job must not create a repo
 directory for a deleted workspace; a cancelled setup job is not requeued) move
@@ -570,8 +971,10 @@ in each of four prefixes plus review's child prefix; one explicit catch at the
 tick boundary; one claim-query filter; a `"jobs"` hook doing SKIP LOCKED cancels
 off the delete transaction; an abort callback threaded into BOTH per-row LLM
 loops (semantic audit and uncited classify); one failure-path special case and
-one success-path `mark_done` guard; six route changes with a normative lock
-order; one hook registration plus a second population added to **both** the
+one success-path `mark_done` guard; six route changes carrying a normative lock
+order plus a bounded post-mutex row wait through commit, and one new `row_locks`
+constant (`WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS`) for the four that wait on the
+`workspaces` row; one hook registration plus a second population added to **both** the
 inherited `"jobs"` hook **and** its reconciliation tick; the wrapper deletion
 plus its test helper; and the `retirement.py:35` comment correction. No schema
 migration — claim-analysis terminalizes to the existing `failed`.
