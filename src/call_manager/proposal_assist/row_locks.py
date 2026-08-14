@@ -133,8 +133,13 @@ SETUP_JOB_LOCK_TIMEOUT_SECONDS = 2
 # `_lock_active_admin_count` (FOR UPDATE over every active admin row, on the
 # disable-last-admin and demote-last-admin paths), and it is a lock-and-count
 # transaction with no slow work in it — `signal_user_revocation` and its 5s
-# barrier run outside that session. Nothing holds a `users` row the way the pass
-# prefixes hold the `workspaces` row, across context assembly's file reads.
+# barrier run outside that session. Every OTHER users-row writer (web/api/auth.py
+# login and logout, web/api/me.py name and password, the rest of admin_users.py)
+# takes its lock implicitly when its UPDATE flushes and releases it at COMMIT a
+# moment later, with the argon2 hashing done BEFORE the flush and the revocation
+# barrier after the session block — so neither sits under the lock. Nothing holds
+# a `users` row the way the pass prefixes hold the `workspaces` row, across
+# context assembly's file reads.
 #
 # It does NOT answer the other question, "can a 55P03 fire on a `users` row at
 # all?" — it can, and it is the wait that matters most here. That FK check is the

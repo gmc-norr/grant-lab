@@ -82,8 +82,12 @@ one and then waits is `web/api/admin_users.py`'s `_lock_active_admin_count`
 (`FOR UPDATE` over every active admin row, on the disable-last-admin and
 demote-last-admin paths), and that is a lock-and-count transaction with no slow
 work inside it — `signal_user_revocation` and its 5s barrier run outside the
-session. Nothing holds a `users` row the way the pass prefixes hold the
-`workspaces` row.
+session. Every other users-row writer (`web/api/auth.py` login/logout,
+`web/api/me.py` name/password, the rest of `admin_users.py`) takes its lock
+implicitly when its UPDATE flushes and releases it at COMMIT a moment later, with
+the argon2 hashing before the flush and the revocation barrier after the session
+block, so neither sits under the lock. Nothing holds a `users` row the way the
+pass prefixes hold the `workspaces` row.
 
 The OTHER question — "can a 55P03 fire there at all?" — has the opposite answer,
 and it is not this file's business. It can: that FK check is the last wait
