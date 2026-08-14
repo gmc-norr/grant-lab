@@ -1,10 +1,26 @@
 # `workspace_write` consolidation — design
 
 Date: 2026-08-14
-Status: approved (design), revision 3 after one review round and one
+Status: approved (design), revision 4 after two review rounds and one
 plan-writing correction (see Revisions)
 
 ## Revisions
+
+- revision 4 (2026-08-14, second review): revision 3's `mutex_timeout_seconds`
+  **defeated the very harness edit it was introduced beside**. The manager passed
+  it explicitly on every call, and a call-time keyword overrides a
+  `functools.partial` keyword — so the patched partial's 1s was replaced by the
+  parameter's default 10s and the six migrated wedged-mutex tests would each have
+  waited the full production timeout. The parameter is removed: the manager calls
+  `acquire_commit_mutex_live(session, workspace_id)` with no keyword, so the
+  patched module global governs, and the manager's own tests monkeypatch
+  `_writes.acquire_commit_mutex_live` the same way. §7 also gains the two tests
+  that were missing — a held row (the `RowLockTimeout` → 429 path was entirely
+  unproven) and a body `HTTPException` — plus `not session.in_transaction()`
+  assertions, without which the rollback claim rests on the session being thrown
+  away. §5 gains a module-wide no-commit rule: the previous gate checked only the
+  six listed routes, so a new route with a raw `session.commit()` and neither
+  construct was invisible to the invariant it claims to enforce.
 
 - revision 3 (2026-08-14, found while writing the plan): §7's "must not be
   edited" acceptance criterion was **unachievable**. The straddle file's
@@ -12,7 +28,7 @@ plan-writing correction (see Revisions)
   *route module*, and this slice moves that call into `_writes.py`, so six
   wedged-mutex tests break on a name that is no longer there. §7 now permits
   exactly one harness edit — that helper and its import, patching `_writes` as
-  well — and forbids any other. The thirteen `*_LOCK_TIMEOUT_SECONDS` patches
+  well — and forbids any other. The nine `*_LOCK_TIMEOUT_SECONDS` patches
   are unaffected: a migrated route still reads those module globals to pass
   `timeout_seconds=`, so they keep working untouched. §3 gains
   `mutex_timeout_seconds` for the same reason: the manager's own tests need a
@@ -110,13 +126,17 @@ def workspace_write(
     *,
     timeout_seconds: float,
     what: str,
-    mutex_timeout_seconds: int = 10,
 ) -> Iterator[None]:
 ```
 
-`mutex_timeout_seconds` forwards `acquire_commit_mutex_live`'s own default and
-exists so the manager's own tests can force a mutex timeout without waiting ten
-seconds. No route passes it.
+**The manager must call `acquire_commit_mutex_live(session, workspace_id)` with
+no `timeout_seconds` keyword**, taking that helper's own 10s default. This is a
+requirement, not a style choice: the straddle harness and the manager's own tests
+both shorten the mutex wait by replacing the module global with
+`functools.partial(..., timeout_seconds=1)`, and a call-time keyword **overrides**
+a partial's keyword. Passing the value explicitly — even from a parameter
+defaulting to 10 — silently restores the production timeout and makes every
+wedged-mutex test wait ten seconds instead of one.
 
 In order, it:
 
@@ -248,8 +268,20 @@ in the routes, so the gate must change or it silently stops covering anything.
 It is replaced by a **stronger and simpler** invariant, in the same file, over
 the same six-route table:
 
-1. each of the six routes contains exactly one `with workspace_write(...)` block; and
-2. no route function in `settings.py` or `rubric.py` calls `session.commit()` at all.
+1. each of the six routes contains exactly one `with workspace_write(...)` block;
+2. none of the six calls `session.commit()`; and
+3. **no router-decorated function anywhere in either module calls
+   `session.commit()`** — checked module-wide, not against the six-route table.
+
+Rule 3 is what makes rule 2's stated invariant true. A check driven by the
+expected-route table can only see routes already in it, so a *new* route carrying
+a raw `session.commit()` and neither context manager is invisible to it: it fails
+no per-route case, and the presence check does not discover it either, because
+discovery keys on having one of the two constructs. The module-wide arm closes
+that: it walks every module-level function whose decorators include a
+`router.<method>(...)` call and asserts none of them commits. It carries its own
+mutation — add an unlisted router-decorated function containing
+`session.commit()` and this arm must fail.
 
 ### The gate is replaced in two steps, not one
 
@@ -301,8 +333,10 @@ Constraints carried over unchanged from gate 16, because they were earned:
 - **Scope stated honestly.** The walk covers only these two modules. That limit
   is measured and written down, not assumed.
 - **Proven per route.** Six mutations — remove the `workspace_write` wrap from
-  each route in turn — each must fail that route's own case and no other, with
-  the file's md5 confirmed changed before the run and restored after.
+  each route in turn — each must fail that route's own case **and its module's
+  presence arm** (removing the construct also removes it from discovery), and no
+  other route's case, with the file's md5 confirmed changed before the run and
+  restored after.
 
 `retry_setup` keeps its special status and it should be restated in the new
 gate's docstring: it has no reachable commit-time contention (its bound opens
@@ -355,7 +389,7 @@ right check on a refactor that claims to change none of it.
 
 **One harness edit is forced, and it is the only one permitted.** That file
 shortens waits by monkeypatching the *route module's* binding of the name being
-called. Thirteen of those patches target `WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS` or
+called. Nine of those patches target `WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS` or
 `SETUP_JOB_LOCK_TIMEOUT_SECONDS`, and they keep working untouched — a migrated
 route still reads those module globals to pass `timeout_seconds=`. But
 `patch_route_mutex_timeout` patches `acquire_commit_mutex_live` on the route
@@ -374,18 +408,29 @@ reconcile it.
 
 New tests:
 
-1. **`workspace_write` itself**, DB-backed, direct rather than through a route:
-   a wedged mutex raises `HTTPException` 429 with `Retry-After: 2` and
-   `BUSY_ERROR_MESSAGE`; a held row does the same; a clean exit commits; a
-   workspace deleted under the mutex raises `WorkspaceDeleted`.
+1. **`workspace_write` itself**, DB-backed, direct rather than through a route.
+   One test per exit, because the routes cannot cover these until they migrate
+   and the straddle suite never exercises the manager directly:
 
-   The exceptional-exit contract (§3) needs a test that could actually catch its
-   absence, which means the assertion cannot rely on the session being thrown
-   away. Catch the body's exception **outside** the `with`, then keep using the
-   same session — commit it — and assert the body's write is absent from the
-   database. Without step 6's rollback that write persists and the test fails.
-   Run the same shape for a timeout path, where the assertion is that the reused
-   session is usable at all rather than aborted.
+   - clean exit commits;
+   - **wedged mutex** → `HTTPException` 429 with `Retry-After: 2` and
+     `BUSY_ERROR_MESSAGE`;
+   - **held row** → the same 429. This is the `RowLockTimeout` arm, and without
+     it Task 1 can land with that translation broken and nothing to catch it —
+     no route uses the manager yet. The body takes the row itself
+     (`session.refresh(ws, with_for_update=True)`); the manager only bounds it;
+   - **workspace deleted under the mutex** → `WorkspaceDeleted` propagates;
+   - **body raises `HTTPException`** → propagates unchanged, nothing committed.
+     This is the exit `retry_setup` and `activate` depend on, so it must be
+     tested with the exception type they actually raise, not a stand-in.
+
+   Every exceptional case additionally asserts `not session.in_transaction()`.
+   Without that, "it rolled back" is indistinguishable from "the session was
+   thrown away", which is exactly the accident §3 exists to stop relying on.
+   Two cases go further and prove it against a **reused** session: after
+   catching the exception outside the `with`, keep using the same session,
+   commit it, and assert the body's write is absent — without the rollback that
+   write persists.
 2. **The rewritten gate 16**, per §5, with its six mutations.
 3. **The `add_member` no-op pin**, per §6.
 

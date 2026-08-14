@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.12, FastAPI, SQLAlchemy 2.x, PostgreSQL 16, pytest + testcontainers, `uv`, `ruff`.
 
-**Spec:** `docs/superpowers/specs/2026-08-14-workspace-write-consolidation-design.md` (revision 2). Read §3–§8 before Task 1.
+**Spec:** `docs/superpowers/specs/2026-08-14-workspace-write-consolidation-design.md` (revision 4). Read §3–§8 before Task 1.
 
 **Worktree:** create one at `.worktrees/workspace-write` off `master` (`eef35ed` or later). Per `CLAUDE.md`, `.worktrees/` is the project-local worktree directory and is gitignored.
 
@@ -18,7 +18,7 @@
 - **`tests/proposal_assist/test_api_writers_mutex_straddle.py`: exactly one edit is permitted, in Task 1, to the `patch_route_mutex_timeout` helper and its import.** Nothing else in that file may change — no test body, no scenario, no assertion. All 28 tests must pass at every commit. Needing any other change means behaviour moved: stop and escalate rather than reconciling it.
 - **Timeout values are unchanged:** `WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS = 2`, `SETUP_JOB_LOCK_TIMEOUT_SECONDS = 2`. Do not alter `src/call_manager/proposal_assist/row_locks.py`.
 - **No route docstring may change.** FastAPI publishes route docstrings as the OpenAPI operation description; `frontend/src/api/schema.gen.ts` is a hard CI gate.
-- **The full suite must be green at every commit.** Baseline on `master` (`eef35ed`): **3381 passed, 1 skipped**. Nothing may be removed.
+- **Each task runs the subset named in its own steps; the full suite runs at Tasks 1, 5, 8 and 9.** Those are the module-completion points (`settings.py` done, `rubric.py` done) plus the manager and the final gate — the places where a regression outside the named subsets is most likely. Baseline on `master` (`eef35ed`): **3381 passed, 1 skipped**. Nothing may be removed, and no task may leave its named subset red.
 - **AST gates never match source text.** No regex, no `in`, no `str.index` over source. This repository has shipped a source-text assertion that was a tautology.
 - **Every mutation you run must be md5-verified.** Hash the file before and after the edit, confirm the hash CHANGED, run the test, restore the file, confirm the hash matches the original. A mutation that silently no-ops proves nothing; that has happened twice in this project.
 - **`uv run pytest` and `uv run ruff check .`** from the worktree root. Capture pytest's exit status explicitly (`; echo "PYTEST_EXIT=$?"`) — piping through `tail` masks it.
@@ -67,12 +67,14 @@ do — most importantly, catching the exception and reusing the session.
 
 from __future__ import annotations
 
+import functools
 import threading
-import uuid as uuidlib
+from datetime import UTC, datetime
 
 import pytest
 from fastapi import HTTPException
 
+import call_manager.proposal_assist.web._writes as writes_module
 from call_manager.db.models import Workspace, WorkspaceEvent
 from call_manager.proposal_assist.drafting.locking import (
     BUSY_ERROR_MESSAGE,
@@ -103,6 +105,41 @@ def _hold_mutex(pg_session_factory, ws_id):
     return release, t
 
 
+def _hold_workspace_row(pg_session_factory, ws_id):
+    """Hold the `workspaces` row FOR UPDATE, taking NO mutex, until the returned
+    Event is set — so a manager-scoped body that takes the same row blocks and
+    its bound fires."""
+    holding = threading.Event()
+    release = threading.Event()
+
+    def _holder():
+        with pg_session_factory() as s:
+            s.get(Workspace, ws_id, with_for_update=True)
+            holding.set()
+            release.wait(timeout=30)
+            s.rollback()
+
+    t = threading.Thread(target=_holder)
+    t.start()
+    assert holding.wait(timeout=5), "the holder never took the workspaces row"
+    return release, t
+
+
+def _short_mutex_wait(monkeypatch, seconds: int = 1) -> None:
+    """Shorten the manager's mutex wait from the production 10s.
+
+    Patches the module global `workspace_write` looks up at call time. This only
+    works because the manager calls `acquire_commit_mutex_live(session, ws_id)`
+    with NO timeout_seconds keyword — a call-time keyword would override this
+    partial's and silently restore the 10s default (spec §3).
+    """
+    monkeypatch.setattr(
+        writes_module,
+        "acquire_commit_mutex_live",
+        functools.partial(writes_module.acquire_commit_mutex_live, timeout_seconds=seconds),
+    )
+
+
 def test_a_clean_exit_commits(pg_session_factory, current_user):
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
@@ -118,33 +155,97 @@ def test_a_clean_exit_commits(pg_session_factory, current_user):
         assert s.get(Workspace, ws_id).title == "written under the manager"
 
 
-def test_a_wedged_mutex_raises_the_contracted_429(pg_session_factory, current_user, monkeypatch):
-    import call_manager.proposal_assist.web._writes as writes
+def _assert_busy(exc: HTTPException) -> None:
+    assert exc.status_code == 429
+    assert exc.detail == BUSY_ERROR_MESSAGE
+    assert exc.headers == {"Retry-After": "2"}
 
+
+def test_a_wedged_mutex_raises_the_contracted_429(pg_session_factory, current_user, monkeypatch):
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
         s.commit()
         ws_id = ws.id
 
+    _short_mutex_wait(monkeypatch)
     release, t = _hold_mutex(pg_session_factory, ws_id)
     try:
         with pg_session_factory() as s:
             with pytest.raises(HTTPException) as exc:
-                with workspace_write(
-                    s, ws_id, timeout_seconds=2, what="test", mutex_timeout_seconds=1
-                ):
+                with workspace_write(s, ws_id, timeout_seconds=2, what="test"):
                     pytest.fail("the body must not run when the mutex is wedged")
-        assert exc.value.status_code == 429
-        assert exc.value.detail == BUSY_ERROR_MESSAGE
-        assert exc.value.headers == {"Retry-After": "2"}
+            _assert_busy(exc.value)
+            assert not s.in_transaction(), (
+                "workspace_write left the transaction open after a mutex timeout"
+            )
     finally:
         release.set()
         t.join(timeout=30)
 
 
-def test_a_deleted_workspace_raises_WorkspaceDeleted_not_a_429(pg_session_factory, current_user):
-    from datetime import UTC, datetime
+def test_a_held_row_raises_the_contracted_429(pg_session_factory, current_user):
+    """The RowLockTimeout arm. No route uses the manager yet, so if this
+    translation is broken nothing else in the suite catches it.
 
+    The manager does not take rows — the body does, exactly as the migrated
+    routes will. The manager's job is that the resulting 55P03 comes back as the
+    contracted 429 rather than escaping as a raw OperationalError (a 500).
+    """
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.commit()
+        ws_id = ws.id
+
+    release, t = _hold_workspace_row(pg_session_factory, ws_id)
+    try:
+        with pg_session_factory() as s:
+            ws = s.get(Workspace, ws_id)
+            with pytest.raises(HTTPException) as exc:
+                with workspace_write(s, ws_id, timeout_seconds=1, what="test"):
+                    # Blocks on the holder; the bound fires after 1s.
+                    s.refresh(ws, with_for_update=True)
+            _assert_busy(exc.value)
+            assert not s.in_transaction(), (
+                "workspace_write left the transaction open after a row-lock timeout — "
+                "a caller that reuses this session hits 'current transaction is aborted'"
+            )
+    finally:
+        release.set()
+        t.join(timeout=30)
+
+
+def test_a_body_HTTPException_propagates_unchanged_and_commits_nothing(
+    pg_session_factory, current_user
+):
+    """The exit `retry_setup` (404/409) and `activate` (409) depend on. Tested
+    with the exception type they actually raise, not a stand-in."""
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.commit()
+        ws_id = ws.id
+
+    with pg_session_factory() as s:
+        with pytest.raises(HTTPException) as exc:
+            with workspace_write(s, ws_id, timeout_seconds=2, what="test"):
+                s.add(
+                    WorkspaceEvent(
+                        workspace_id=ws_id,
+                        kind="should_never_land_409",
+                        actor_id=current_user.id,
+                        payload={},
+                    )
+                )
+                raise HTTPException(status_code=409, detail="not in that state")
+        assert exc.value.status_code == 409, "the manager must not rewrite a body HTTPException"
+        assert exc.value.detail == "not in that state"
+        assert not s.in_transaction()
+
+    with pg_session_factory() as s:
+        kinds = [e.kind for e in s.query(WorkspaceEvent).filter_by(workspace_id=ws_id).all()]
+    assert "should_never_land_409" not in kinds
+
+
+def test_a_deleted_workspace_raises_WorkspaceDeleted_not_a_429(pg_session_factory, current_user):
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
         ws.soft_deleted_at = datetime.now(UTC)
@@ -155,6 +256,9 @@ def test_a_deleted_workspace_raises_WorkspaceDeleted_not_a_429(pg_session_factor
         with pytest.raises(WorkspaceDeleted):
             with workspace_write(s, ws_id, timeout_seconds=2, what="test"):
                 pytest.fail("the body must not run for a deleted workspace")
+        assert not s.in_transaction(), (
+            "workspace_write left the transaction open after WorkspaceDeleted"
+        )
 
 
 def test_a_body_exception_propagates_and_rolls_back_for_a_REUSED_session(
@@ -201,7 +305,7 @@ def test_a_body_exception_propagates_and_rolls_back_for_a_REUSED_session(
 
 
 def test_a_timeout_leaves_the_session_usable_rather_than_aborted(
-    pg_session_factory, current_user
+    pg_session_factory, current_user, monkeypatch
 ):
     """After a 55P03 the Postgres transaction is aborted and refuses further
     statements. The manager's rollback is what clears it; without it a caller
@@ -212,13 +316,12 @@ def test_a_timeout_leaves_the_session_usable_rather_than_aborted(
         s.commit()
         ws_id = ws.id
 
+    _short_mutex_wait(monkeypatch)
     release, t = _hold_mutex(pg_session_factory, ws_id)
     try:
         with pg_session_factory() as s:
             with pytest.raises(HTTPException):
-                with workspace_write(
-                    s, ws_id, timeout_seconds=2, what="test", mutex_timeout_seconds=1
-                ):
+                with workspace_write(s, ws_id, timeout_seconds=2, what="test"):
                     pytest.fail("unreachable")
             # Must not raise "current transaction is aborted".
             assert s.get(Workspace, ws_id) is not None
@@ -298,7 +401,6 @@ def workspace_write(
     *,
     timeout_seconds: float,
     what: str,
-    mutex_timeout_seconds: int = 10,
 ) -> Iterator[None]:
     """Run the body as a mutex-held, fully bounded workspace write.
 
@@ -317,15 +419,18 @@ def workspace_write(
     the bound deliberately leaves in force, which is correct — that setting is
     scoped to the transaction being ended.
 
-    `mutex_timeout_seconds` exists only so a test can shorten the mutex wait; it
-    forwards `acquire_commit_mutex_live`'s own default of 10.
+    DO NOT pass `timeout_seconds` to `acquire_commit_mutex_live` below, not even
+    from a parameter defaulting to 10. Both the straddle harness and this
+    manager's own tests shorten the mutex wait by replacing the module global
+    with `functools.partial(..., timeout_seconds=1)`, and a call-time keyword
+    OVERRIDES a partial's keyword — so passing it explicitly silently restores
+    the production 10s and makes every wedged-mutex test wait ten seconds
+    instead of one. Spec §3 states this as a requirement.
     """
     committed = False
     try:
         try:
-            acquire_commit_mutex_live(
-                session, workspace_id, timeout_seconds=mutex_timeout_seconds
-            )
+            acquire_commit_mutex_live(session, workspace_id)
         except CommitMutexTimeout as e:
             raise _busy() from e
         with bounded_lock_waits(
@@ -350,25 +455,27 @@ uv run pytest tests/proposal_assist/test_workspace_write.py -q ; echo "PYTEST_EX
 uv run ruff check . ; echo "RUFF_EXIT=$?"
 ```
 
-Expected: 5 passed, `PYTEST_EXIT=0`, `RUFF_EXIT=0`.
+Expected: 7 passed, `PYTEST_EXIT=0`, `RUFF_EXIT=0`. A `ruff` F401 here means an import in the test file is unused — remove it rather than silencing it.
 
-- [ ] **Step 5: Prove the rollback test is not vacuous**
+Check the wall-clock too: the two mutex tests must take about a second each, not ten. Ten means `_short_mutex_wait` is not taking effect — almost certainly because the manager passed `timeout_seconds` explicitly and overrode the patched partial (spec §3).
 
-Delete the `finally:` block's two lines from `_writes.py` (md5 before/after; confirm changed), then:
+- [ ] **Step 5: Prove the rollback and both timeout arms are not vacuous**
 
-```bash
-uv run pytest tests/proposal_assist/test_workspace_write.py -q ; echo "PYTEST_EXIT=$?"
-```
+Three mutations, each md5-verified before and after and restored:
 
-Expected: `test_a_body_exception_propagates_and_rolls_back_for_a_REUSED_session` FAILS with the "the body's write survived a body exception" message, and `test_a_timeout_leaves_the_session_usable_rather_than_aborted` FAILS. Restore the file and confirm the md5 matches the original.
+**(a) Delete the `finally:` block's two lines.** Expected: `test_a_body_exception_propagates_unchanged_and_commits_nothing`… — specifically `test_a_body_exception_propagates_and_rolls_back_for_a_REUSED_session` FAILS on the surviving write, `test_a_timeout_leaves_the_session_usable_rather_than_aborted` FAILS, and every `not session.in_transaction()` assertion FAILS. If any of them still passes, that assertion is not testing the rollback — fix the test, not the implementation.
 
-If either test still passes without the rollback, it is not testing the rollback — fix the test, not the implementation.
+**(b) Change `except RowLockTimeout as e: raise _busy() from e` to `raise`.** Expected: `test_a_held_row_raises_the_contracted_429` FAILS with a raw `OperationalError`/`RowLockTimeout` instead of `HTTPException`. This is the arm no route can cover yet.
+
+**(c) Change `except CommitMutexTimeout as e: raise _busy() from e` to `raise`.** Expected: `test_a_wedged_mutex_raises_the_contracted_429` FAILS with `CommitMutexTimeout`.
+
+Record all three with the observed failure text.
 
 - [ ] **Step 6: Retarget the straddle harness's mutex-timeout patch**
 
 This is the one permitted edit to `tests/proposal_assist/test_api_writers_mutex_straddle.py` (Global Constraints). It must land **now**, before any route migrates, so the helper works throughout.
 
-Why it is forced: that helper shortens the mutex wait by patching `acquire_commit_mutex_live` **on the route module**. Tasks 3–8 move that call into `_writes.py`, so the name stops being present or called there and `monkeypatch.setattr` fails — breaking the six `*_returns_429_when_the_commit_mutex_is_wedged` tests. The thirteen `*_LOCK_TIMEOUT_SECONDS` patches in the same file are NOT affected and must not be touched: a migrated route still reads those module globals to pass `timeout_seconds=`.
+Why it is forced: that helper shortens the mutex wait by patching `acquire_commit_mutex_live` **on the route module**. Tasks 3–8 move that call into `_writes.py`, so the name stops being present or called there and `monkeypatch.setattr` fails — breaking the six `*_returns_429_when_the_commit_mutex_is_wedged` tests. The nine `*_LOCK_TIMEOUT_SECONDS` patches in the same file are NOT affected and must not be touched: a migrated route still reads those module globals to pass `timeout_seconds=`.
 
 Add to that file's imports:
 
@@ -408,7 +515,15 @@ uv run pytest tests/proposal_assist/test_api_writers_mutex_straddle.py -q ; echo
 
 Expected: the diff touches only the import and that helper; 28 passed, `PYTEST_EXIT=0` — the six wedged-mutex tests still complete quickly, because the route-module patch is still the live one at this point.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 7: Run the full suite**
+
+```bash
+uv run pytest tests/ -q ; echo "PYTEST_EXIT=$?"
+```
+
+Expected: **3381 + 7 = 3388 passed, 1 skipped**, `PYTEST_EXIT=0`. This is one of the four full-suite checkpoints (Global Constraints).
+
+- [ ] **Step 8: Commit**
 
 ```bash
 git add src/call_manager/proposal_assist/web/_writes.py \
@@ -916,6 +1031,16 @@ uv run ruff check . ; echo "RUFF_EXIT=$?"
 
 Expected: all pass, `RUFF_EXIT=0`. A ruff F401 here means an import was dropped that is still used, or one was left that is not.
 
+- [ ] **Step 3b: Run the full suite**
+
+`settings.py` is now fully migrated, so this is a module-completion checkpoint (Global Constraints).
+
+```bash
+uv run pytest tests/ -q ; echo "PYTEST_EXIT=$?"
+```
+
+Expected: **3388 passed, 1 skipped**, `PYTEST_EXIT=0` — the same count as Task 1, since Tasks 3–5 add no tests beyond Task 4's pin. If it is 3389, Task 4's pin is counted here; reconcile the arithmetic in your report rather than assuming.
+
 - [ ] **Step 4: Commit**
 
 ```bash
@@ -1116,7 +1241,7 @@ uv run pytest tests/proposal_assist/test_setup_retry.py -q \
   -k "no_job_at_all_returns_404 or queued_job_returns_409 or resets_failed_job" ; echo "PYTEST_EXIT=$?"
 ```
 
-Expected: 3 passed, `PYTEST_EXIT=0`. `test_setup_retry_queued_job_returns_409` is the one that would break if the manager swallowed the exception or committed anyway; `test_setup_retry_resets_failed_job` is the one that would break if the manager failed to commit the success path.
+Expected: 3 passed, `PYTEST_EXIT=0`. `test_setup_retry_queued_job_returns_409` proves the `HTTPException` **passthrough** — it does not prove the rollback, because that path has nothing pending to roll back. The rollback itself is proved directly in Task 1 by `test_a_body_HTTPException_propagates_unchanged_and_commits_nothing`, which stages a write before raising. `test_setup_retry_resets_failed_job` is the one that would break if the manager failed to commit the success path.
 
 - [ ] **Step 4: Commit**
 
@@ -1231,6 +1356,16 @@ uv run ruff check . ; echo "RUFF_EXIT=$?"
 
 Expected: all pass, `RUFF_EXIT=0`. `test_activate_maps_a_post_job_lock_row_timeout_to_429_not_500` and `test_activate_maps_a_commit_time_users_fk_wait_to_429_not_500` are the lock-order and bound-reach proofs for this route.
 
+- [ ] **Step 3b: Run the full suite**
+
+All six routes are now migrated — the second module-completion checkpoint (Global Constraints).
+
+```bash
+uv run pytest tests/ -q ; echo "PYTEST_EXIT=$?"
+```
+
+Expected: **3389 passed, 1 skipped**, `PYTEST_EXIT=0` (3381 baseline + 7 manager tests + Task 4's pin), with nothing removed.
+
 - [ ] **Step 4: Commit**
 
 ```bash
@@ -1310,6 +1445,65 @@ def test_each_route_delegates_its_whole_write_to_workspace_write(module_name: st
     )
 ```
 
+- [ ] **Step 1b: Add the module-wide no-commit arm**
+
+The per-route check above only ever looks at the six names in `EXPECTED_BOUNDED_WRITERS`, and `_discovered_bounded_writers` only discovers functions that already contain one of the two constructs. So a **new** route carrying a raw `session.commit()` and neither construct is invisible to both — while §5's stated invariant is that *no* route in these modules commits. Close it with an arm that walks the module rather than the table.
+
+Add these two helpers beside the others:
+
+```python
+def _is_router_decorated(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """True if any decorator is a `router.<method>(...)` call — i.e. this
+    function is an HTTP route, whether or not it is named in the table."""
+    for dec in fn.decorator_list:
+        if not isinstance(dec, ast.Call):
+            continue
+        func = dec.func
+        if (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "router"
+        ):
+            return True
+    return False
+
+
+def _router_functions(module_name: str) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    return {
+        name: fn
+        for name, fn in _module_level_functions(_parse(module_name)).items()
+        if _is_router_decorated(fn)
+    }
+```
+
+And this test:
+
+```python
+@pytest.mark.parametrize("module_name", sorted(EXPECTED_BOUNDED_WRITERS))
+def test_no_route_in_these_modules_calls_session_commit(module_name: str):
+    """Module-wide, NOT table-driven. The per-route rule above can only see
+    routes already listed; this arm sees every `router.<method>`-decorated
+    function in the module, so a NEW route that commits by hand fails here even
+    though it is in no table and takes neither context manager.
+
+    Read routes commit nothing, so the rule is simply: none of them.
+    """
+    offenders = {
+        name: [c.lineno for c in _session_commit_calls(fn)]
+        for name, fn in _router_functions(module_name).items()
+        if _session_commit_calls(fn)
+    }
+    assert not offenders, (
+        f"{module_name}: {offenders} call session.commit() directly. Every "
+        f"mutex-held write in these two modules runs inside `workspace_write`, "
+        f"which owns the commit; a hand-rolled commit is either unbounded or "
+        f"outside the managed scope, and answers 500 on a contended row where "
+        f"these routes contract for 429 + Retry-After: 2."
+    )
+```
+
+Prove it with its own mutation: append to `settings.py` a module-level function decorated `@router.get("/workspaces/{workspace_id}/_probe")` whose body calls `session.commit()`, listed in no table and using neither construct. Expected: **1 failure**, `test_no_route_in_these_modules_calls_session_commit[call_manager.web.api.settings]`, naming `_probe`. Confirm the six per-route cases and both presence cases still pass — that is the blind spot being demonstrated. Restore and confirm md5.
+
 - [ ] **Step 2: Update the docstring**
 
 Delete the TRANSITIONAL paragraph added in Task 2 and replace it with a sentence recording that all six routes are migrated and the legacy arm is gone.
@@ -1322,7 +1516,7 @@ Also update the `EXPECTED_BOUNDED_WRITERS` comment: it currently talks about `bo
 uv run pytest tests/proposal_assist/test_bounded_region_encloses_commit.py -q ; echo "PYTEST_EXIT=$?"
 ```
 
-Expected: 8 passed, `PYTEST_EXIT=0`.
+Expected: **10 passed** (8 as before, plus the two module-wide no-commit cases from Step 1b), `PYTEST_EXIT=0`.
 
 - [ ] **Step 4: Prove the final gate with six mutations**
 
@@ -1346,7 +1540,7 @@ git diff --exit-code -- frontend/src/api/schema.gen.ts ; echo "DRIFT_EXIT=$?"
 git status --short
 ```
 
-Expected: **≥ 3381 passed, 1 skipped** with nothing removed and `PYTEST_EXIT=0`; `RUFF_EXIT=0`; `DRIFT_EXIT=0`; `git status --short` empty.
+Expected: **3389 passed, 1 skipped** (3381 baseline + 7 manager tests + Task 4's pin) with nothing removed and `PYTEST_EXIT=0`; `RUFF_EXIT=0`; `DRIFT_EXIT=0`. `git status --short` shows exactly one modified file at this point — `tests/proposal_assist/test_bounded_region_encloses_commit.py`, this task's own uncommitted work. It must be empty only AFTER Step 7's commit; verify that there.
 
 - [ ] **Step 6: Verify the untouched-file constraint**
 
@@ -1361,9 +1555,12 @@ Expected: the ONLY changes are the `writes_module` import and the body of `patch
 ```bash
 git add tests/proposal_assist/test_bounded_region_encloses_commit.py
 git commit -F <message-file>
+git status --short
 ```
 
 Message subject: `test(gate): every route delegates its whole write to workspace_write`
+
+Expected: `git status --short` is now empty.
 
 ---
 
@@ -1371,7 +1568,7 @@ Message subject: `test(gate): every route delegates its whole write to workspace
 
 1. All six routes use `workspace_write`; no route in the two modules calls `session.commit()`.
 2. All 28 tests in `tests/proposal_assist/test_api_writers_mutex_straddle.py` pass, and that file's whole-branch diff is confined to the `patch_route_mutex_timeout` helper and its import — verified by Task 9 Step 6.
-3. The final gate fails under each of six per-route `workspace_write`-removal mutations, and its legacy arm is gone.
-4. The manager rolls back on all four exceptional exits, proven by a test that reuses and commits the same session after catching the exception.
-5. Full suite ≥ 3381 passed with nothing removed; `ruff` clean; OpenAPI drift clean.
+3. The final gate fails under each of six per-route `workspace_write`-removal mutations (each failing its own case plus its module's presence arm, and no other route's case), its module-wide no-commit arm fails under an unlisted router-decorated committer, and its legacy arm is gone.
+4. The manager rolls back on all four exceptional exits — mutex timeout, row timeout, body exception, `WorkspaceDeleted` — each asserting `not session.in_transaction()`, and two of them proving it against a reused, re-committed session.
+5. Full suite 3389 passed, 1 skipped, with nothing removed; `ruff` clean; OpenAPI drift clean.
 6. `update_settings`'s ceremony is gone: the route reads as validation, a `with`, four assignments, and a return.
