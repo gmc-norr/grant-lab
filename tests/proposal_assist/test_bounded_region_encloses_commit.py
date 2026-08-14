@@ -229,13 +229,15 @@ def test_the_six_bounded_writers_are_all_present(module_name: str):
     unlisted = sorted(discovered - expected)
     assert not missing, (
         f"{module_name}: no module-level function named {missing} wraps its work in "
-        f"bounded_lock_waits or workspace_write any more. If the route was renamed or moved, update "
+        f"bounded_lock_waits or workspace_write any more. If the route was renamed "
+        f"or moved, update "
         f"EXPECTED_BOUNDED_WRITERS in this file so it stays covered; if its bound was "
         f"removed, that is Slice C2's bound-through-COMMIT rule being dropped — see "
         f"this file's docstring."
     )
     assert not unlisted, (
-        f"{module_name}: {unlisted} take a bounded_lock_waits or workspace_write bound but are not listed "
+        f"{module_name}: {unlisted} take a bounded_lock_waits or workspace_write bound "
+        f"but are not listed "
         f"in EXPECTED_BOUNDED_WRITERS. A new mutex-held writer is subject to the same "
         f"bound-through-COMMIT rule — add it to the table so it is checked."
     )
