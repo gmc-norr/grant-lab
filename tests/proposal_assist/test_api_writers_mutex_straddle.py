@@ -43,6 +43,7 @@ import pytest
 from sqlalchemy import select, text
 
 from call_manager.db.models import (
+    User,
     Workspace,
     WorkspaceEvent,
     WorkspaceSetupJob,
@@ -1132,6 +1133,189 @@ def test_update_rubric_gives_up_on_a_held_workspace_row_instead_of_pinning_the_m
     assert_busy_429(resp)
     with pg_session_factory() as s:
         assert s.get(Workspace, ws_id).rubric_funder_notes == "original notes"
+
+
+# ---------------------------------------------------------------------------
+# The COMMIT-TIME gates for the two rubric routes: a held `users` row.
+#
+# Everything above holds the `workspaces` row. That stopped reaching COMMIT for
+# update_rubric and activate when the freshness fix (8817c33) made
+# `session.refresh(ws, with_for_update=True)` the FIRST statement inside their
+# bound: those routes now take the `workspaces` row EARLY, so a holder's 55P03
+# fires at the refresh — inside any plausible narrow wrap — and dedenting
+# `session.commit()` out of the bound leaves those two tests green. Gate 16
+# (test_bounded_region_encloses_commit.py) covers the rule structurally for that
+# reason; these two restore the RUNTIME half for the two routes that lost it.
+#
+# The interleaving that still discriminates is the one the routes never name.
+# `_apply_rubric`'s `rubric_edited` event — and activate's `workspace_activated`
+# — carry `actor_id`, an FK to `users` (db/models.py). Postgres validates it by
+# taking `FOR KEY SHARE` on the acting user's row, at the INSERT that only
+# happens when `session.commit()` flushes; `FOR KEY SHARE` conflicts with
+# `FOR UPDATE`. So a held `users` row puts the contended wait at exactly the
+# statement the bound has to cover, and nowhere earlier.
+#
+# Spec §8 (revision 7) asserts this as measured. It was — from a scratch test
+# that was deleted, leaving the claim unreproduced in the tree. These are it.
+# ---------------------------------------------------------------------------
+
+
+def hold_user_row(pg_session_factory, user_id, send, *, route: str):
+    """Hold the ACTING USER's `users` row FOR UPDATE — taking no commit mutex and
+    never touching the `workspaces` row — across the whole of `send`, and assert
+    the request CAME BACK. Returns its response.
+
+    The holder stands in for `web/api/admin_users.py`'s
+    `_lock_active_admin_count`, which takes `FOR UPDATE` over every active admin
+    row while it counts, on the disable-last-admin and demote-last-admin paths.
+    That transaction is SHORT — a lock-and-count, with `signal_user_revocation`
+    and its 5s barrier outside the session — which is why `users` rows are not
+    counted in test_row_lock_ceilings.py's contended-row arithmetic. Short is not
+    zero, and that arithmetic is about how LONG a stall can be, not about whether
+    one can happen: this wait is real, it is the last thing these two routes do,
+    and untranslated it is a 500.
+
+    Deliberately NOT the `workspaces` row (`hold_workspace_row` above): since the
+    freshness fix both rubric routes take that row at the TOP of their bound, so
+    its timeout fires at the refresh rather than at COMMIT.
+
+    Liveness, not timing, exactly as `hold_workspace_row`: without the route's
+    bound the sender thread never finishes, so `not sender.is_alive()` after a
+    bounded join is the assertion.
+    """
+    holding = threading.Event()
+    release = threading.Event()
+    out: dict = {}
+
+    def _row_holder():
+        with pg_session_factory() as s:
+            s.get(User, user_id, with_for_update=True)
+            holding.set()
+            release.wait(timeout=30)
+            s.rollback()
+
+    def _sender():
+        # raise_server_exceptions=True on this client: an UNtranslated
+        # OperationalError propagates out of the request instead of becoming a
+        # response. Captured rather than left to threading.excepthook so the
+        # guard below can NAME the error this gate is about — the distinction
+        # between "answered 500" and "wedged" is the whole point of the two
+        # separate failure messages.
+        holding.wait(timeout=10)
+        try:
+            out["resp"] = send()
+        except Exception as exc:
+            out["exc"] = exc
+
+    holder = threading.Thread(target=_row_holder)
+    sender = threading.Thread(target=_sender)
+    holder.start()
+    sender.start()
+    try:
+        assert holding.wait(timeout=5), "the holder never took the users row"
+        sender.join(timeout=15)
+        assert not sender.is_alive(), (
+            f"{route} was still blocked on the acting user's `users` row after 15s "
+            "while holding the commit mutex — the commit-time FK wait is unbounded, "
+            "so it pins the mutex and the owner's DELETE 429s behind it after "
+            "burning its whole budget"
+        )
+    finally:
+        release.set()
+        holder.join(timeout=30)
+        sender.join(timeout=30)
+
+    if "resp" not in out:
+        pytest.fail(
+            f"{route} raised instead of responding — the 55P03 from the "
+            "WorkspaceEvent insert's users-FK wait fired OUTSIDE the "
+            "bounded_lock_waits body, so it was never translated to RowLockTimeout "
+            "and escaped as a raw OperationalError (500) where this slice contracts "
+            f"for 429. The bound must enclose the transaction THROUGH "
+            f"session.commit(). Raised: {out.get('exc')!r}"
+        )
+    return out["resp"]
+
+
+def test_update_rubric_maps_a_commit_time_users_fk_wait_to_429_not_500(
+    client_authed_owner, current_user, pg_session_factory, monkeypatch
+):
+    """update_rubric's last lock wait is at COMMIT, on a row the route never
+    names: the `rubric_edited` event's `actor_id` FK takes `FOR KEY SHARE` on the
+    acting user. Bounded AND translated -> the house 429, nothing written."""
+    import call_manager.web.api.rubric as rubric_api
+
+    # WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS is the constant THIS route's bound reads
+    # (rubric.py's update_rubric); activate's reads SETUP_JOB_LOCK_TIMEOUT_SECONDS.
+    # Patched on the ROUTE module, not on row_locks: rubric.py imports the value by
+    # name, so patching row_locks would silently no-op and this gate would run at
+    # the production 2s, proving nothing about the bound.
+    monkeypatch.setattr(rubric_api, "WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS", 1)
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        ws.rubric_funder_notes = "original notes"
+        s.commit()
+        ws_id = ws.id
+
+    resp = hold_user_row(
+        pg_session_factory,
+        current_user.id,
+        lambda: client_authed_owner.put(f"/api/workspaces/{ws_id}/rubric", json=_RUBRIC_BODY),
+        route="update_rubric",
+    )
+
+    assert_busy_429(resp)
+    with pg_session_factory() as s:
+        assert s.get(Workspace, ws_id).rubric_funder_notes == "original notes"
+        assert (
+            s.query(WorkspaceEvent).filter_by(workspace_id=ws_id, kind="rubric_edited").first()
+            is None
+        ), "update_rubric committed a rubric_edited event despite the lock timeout"
+
+
+def test_activate_maps_a_commit_time_users_fk_wait_to_429_not_500(
+    client_authed_owner, current_user, pg_session_factory, monkeypatch
+):
+    """activate's sibling case. It writes TWO actor_id-bearing events
+    (`rubric_edited` through _apply_rubric, `workspace_activated` of its own), so
+    its commit takes the same `FOR KEY SHARE` on the acting user — after the job
+    row and the workspace re-read have both succeeded, which is what puts the
+    wait past every acquisition in its bound."""
+    import call_manager.web.api.rubric as rubric_api
+
+    # activate's bound reads SETUP_JOB_LOCK_TIMEOUT_SECONDS — it covers the whole
+    # transaction, job row included — so that is the name to patch here.
+    monkeypatch.setattr(rubric_api, "SETUP_JOB_LOCK_TIMEOUT_SECONDS", 1)
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        ws.current_phase = "setup"
+        ws.rubric_funder_notes = "original notes"
+        s.flush()
+        job_id = _setup_job(s, ws.id, "waiting_for_rubric_review")
+        s.commit()
+        ws_id = ws.id
+
+    resp = hold_user_row(
+        pg_session_factory,
+        current_user.id,
+        lambda: client_authed_owner.post(f"/api/workspaces/{ws_id}/activate", json=_RUBRIC_BODY),
+        route="activate",
+    )
+
+    assert_busy_429(resp)
+    with pg_session_factory() as s:
+        assert s.get(WorkspaceSetupJob, job_id).status == "waiting_for_rubric_review"
+        ws_after = s.get(Workspace, ws_id)
+        assert ws_after.current_phase == "setup"
+        assert ws_after.rubric_funder_notes == "original notes"
+        assert (
+            s.query(WorkspaceEvent)
+            .filter_by(workspace_id=ws_id, kind="workspace_activated")
+            .first()
+            is None
+        ), "activate committed a workspace_activated event despite the lock timeout"
 
 
 # ---------------------------------------------------------------------------

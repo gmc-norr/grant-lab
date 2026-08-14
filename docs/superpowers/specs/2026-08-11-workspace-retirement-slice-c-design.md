@@ -546,20 +546,32 @@ maps to the same 429 as every other wait in the transaction.
 Holding the `workspaces` row from the re-read through COMMIT removes the
 *designed* slow holder — the four pass prefixes — from these two routes'
 commit-time waits, which is why dedenting their `session.commit()` out of the
-bound no longer fails anything at runtime. It does **not** make the bound
-decorative for them. What still waits at their COMMIT is the `WorkspaceEvent`
-insert's `actor_id` FK: it takes `FOR KEY SHARE` on a `users` row, and
-`FOR KEY SHARE` conflicts with `FOR UPDATE`, which
+bound stopped failing the `hold_workspace_row` gates. It does **not** make the
+bound decorative for them. What still waits at their COMMIT is the
+`WorkspaceEvent` insert's `actor_id` FK: it takes `FOR KEY SHARE` on a `users`
+row, and `FOR KEY SHARE` conflicts with `FOR UPDATE`, which
 `web/api/admin_users.py`'s `_lock_active_admin_count` takes over every active
-admin row. Measured, not reasoned — with that `users` row held and the commit
-dedented out of the bound, `PUT /api/workspaces/{id}/rubric` raises
-`OperationalError: canceling statement due to lock timeout / while locking tuple
-in relation "users" / SQL statement "SELECT 1 FROM ONLY users … FOR KEY SHARE"`
-(a 500); with the commit inside the bound the same interleaving answers 429. The
-holder is short-lived (a lock-and-count transaction, with `signal_user_revocation`
-and its 5s barrier outside the session), so this is a narrow hazard rather than
-the pass-prefix one — but it is a real 55P03 at COMMIT, and it is the reason the
-rule is re-armed rather than relaxed for these two routes.
+admin row.
+
+Measured — and the measurement is now *in the tree*, which it was not when
+revision 7 first asserted it (that measurement came from a scratch test that was
+deleted, leaving the claim unreproduced). Hold the acting user's `users` row,
+dedent the commit out of the bound, and `PUT /api/workspaces/{id}/rubric` raises
+`OperationalError (psycopg.errors.LockNotAvailable): canceling statement due to
+lock timeout / CONTEXT: while locking tuple in relation "users" / SQL statement
+"SELECT 1 FROM ONLY public.users x WHERE id = $1 FOR KEY SHARE OF x"` — a 500.
+With the commit inside the bound the same interleaving answers 429.
+`tests/proposal_assist/test_api_writers_mutex_straddle.py`'s
+`test_update_rubric_maps_a_commit_time_users_fk_wait_to_429_not_500` and
+`test_activate_maps_a_commit_time_users_fk_wait_to_429_not_500` *are* that
+interleaving, so gate 11(b)'s runtime half is restored for the two routes the
+freshness rule disarmed — alongside gate 16's static check, not instead of it.
+
+The holder is short-lived: a lock-and-count transaction, with
+`signal_user_revocation` and its 5s barrier outside the session. So this is a
+narrow hazard rather than the pass-prefix one — but it is a real 55P03 at
+COMMIT, and it is the reason the rule is re-armed rather than relaxed for these
+two routes.
 
 Mechanism, because the obvious spelling does not work: use
 `session.refresh(ws, with_for_update=True)`, **not**
@@ -833,12 +845,16 @@ reverted.
     outside the bound and the test must fail with an untranslated
     `OperationalError` → 500 rather than the contracted 429 (§8's
     "through `session.commit()`").
-    That second mutation still discriminates on `update_settings`, `add_member`,
-    `remove_member` and `retry_setup`, and **no longer** on `update_rubric` or
-    `activate`: gate 15's under-mutex re-read takes the `workspaces` row at the
-    top of their bound, so a holder's 55P03 fires there rather than at COMMIT
-    (revision 7, §8). Do not satisfy this obligation on a rubric route. Gate 16
-    carries it for all six.
+    That second mutation discriminates on `update_settings`, `add_member`,
+    `remove_member` and `retry_setup` against the holder described above. It
+    does **not** on `update_rubric` or `activate`: gate 15's under-mutex re-read
+    takes the `workspaces` row at the TOP of their bound, so a holder's 55P03
+    fires there rather than at COMMIT (revision 7, §8). Those two need a
+    different holder — the acting user's `users` row, which their commit-time
+    `WorkspaceEvent` insert waits on through `actor_id`'s FK (§8) — and they
+    have one, so the mutation obligation is met at runtime for all six. Gate 16
+    carries the same rule structurally as well, because a static check cannot be
+    disarmed by a change to WHERE contention happens to fire.
     Note: the constant must be patched on the *route* module, not on
     `row_locks`, or the patch is a no-op — the routes import the value by name.
 12. **Budget invariant.** The extended barrier test fails if

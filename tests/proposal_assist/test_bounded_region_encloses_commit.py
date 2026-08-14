@@ -33,6 +33,12 @@ narrow wrap, instead of at COMMIT. Dedenting `session.commit()` out of the
 The same dedent still fails loudly on `settings.py` and on the pre-fix parent
 commit, which is what confirms the loss was specific to the refresh.
 
+(That runtime hole has since been closed for those two routes as well, by the
+`hold_user_row` pair described in the next section — a different holder, not a
+different mechanism. This gate is not redundant with them: they cover the two
+routes whose commit-time wait is a `users` FK, whereas this one covers all six
+regardless of which row any of them happens to contend for.)
+
 That is the honest argument for a static check: the rule IS structural — "this
 statement is lexically inside that block" — so an AST assertion is its direct
 encoding rather than a proxy for it, and it survives exactly the change that
@@ -48,12 +54,18 @@ those two routes' commit-time waits. What remains is the `WorkspaceEvent` insert
 that `_apply_rubric` (and `activate`'s `workspace_activated`) flushes at COMMIT:
 its `actor_id` FK takes `FOR KEY SHARE` on a `users` row, and `FOR KEY SHARE`
 conflicts with `FOR UPDATE`, which `admin_users.py`'s `_lock_active_admin_count`
-takes over every active admin row while it counts. Measured, not reasoned: with
-that `users` row held and the commit dedented out of the bound, `PUT
-/api/workspaces/{id}/rubric` raises `OperationalError` (500); with the commit
-inside the bound it answers 429. So the wrap is still load-bearing for these two
-routes — against a short holder rather than a slow one — and fully load-bearing
-for the other four, whose entire write reaches the row only at COMMIT.
+takes over every active admin row while it counts. Measured, and committed as a
+test rather than left as an assertion: with that `users` row held and the commit
+dedented out of the bound, `PUT /api/workspaces/{id}/rubric` raises
+`OperationalError (psycopg.errors.LockNotAvailable)` naming
+`while locking tuple in relation "users"` — a 500; with the commit inside the
+bound it answers 429. The interleaving is
+`test_update_rubric_maps_a_commit_time_users_fk_wait_to_429_not_500` and
+`test_activate_maps_a_commit_time_users_fk_wait_to_429_not_500` in
+`tests/proposal_assist/test_api_writers_mutex_straddle.py`. So the wrap is still
+load-bearing for these two routes — against a short holder rather than a slow
+one — and fully load-bearing for the other four, whose entire write reaches the
+row only at COMMIT.
 
 Placement
 ---------
