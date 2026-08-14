@@ -1,10 +1,22 @@
 # `workspace_write` consolidation — design
 
 Date: 2026-08-14
-Status: approved (design), revision 2 after one review round (see Revisions)
+Status: approved (design), revision 3 after one review round and one
+plan-writing correction (see Revisions)
 
 ## Revisions
 
+- revision 3 (2026-08-14, found while writing the plan): §7's "must not be
+  edited" acceptance criterion was **unachievable**. The straddle file's
+  `patch_route_mutex_timeout` monkeypatches `acquire_commit_mutex_live` on the
+  *route module*, and this slice moves that call into `_writes.py`, so six
+  wedged-mutex tests break on a name that is no longer there. §7 now permits
+  exactly one harness edit — that helper and its import, patching `_writes` as
+  well — and forbids any other. The thirteen `*_LOCK_TIMEOUT_SECONDS` patches
+  are unaffected: a migrated route still reads those module globals to pass
+  `timeout_seconds=`, so they keep working untouched. §3 gains
+  `mutex_timeout_seconds` for the same reason: the manager's own tests need a
+  short mutex wait and must not depend on the harness.
 - revision 2 (2026-08-14, review): **§8's migration order could not keep the
   suite green** — today's gate asserts `len(blocks) == 1` per route and fails
   its module presence check the moment a listed route stops using
@@ -98,8 +110,13 @@ def workspace_write(
     *,
     timeout_seconds: float,
     what: str,
+    mutex_timeout_seconds: int = 10,
 ) -> Iterator[None]:
 ```
+
+`mutex_timeout_seconds` forwards `acquire_commit_mutex_live`'s own default and
+exists so the manager's own tests can force a mutex timeout without waiting ten
+seconds. No route passes it.
 
 In order, it:
 
@@ -329,13 +346,31 @@ the test says so.
 
 ## 7. Testing
 
-**The acceptance criterion is that Slice C2's runtime gates pass untouched.**
-`tests/proposal_assist/test_api_writers_mutex_straddle.py` (28 tests) must not
-be edited by this slice: the six wedged-mutex 429 gates, the four
+**The acceptance criterion is that Slice C2's runtime gates pass with no change
+to a single test body.** `tests/proposal_assist/test_api_writers_mutex_straddle.py`
+(28 tests) is the net: the six wedged-mutex 429 gates, the four
 held-workspace-row gates, the setup-job-row gates, and the two commit-time
 users-FK gates all assert externally-visible behaviour, so they are exactly the
-right net for a refactor that claims to change none of it. An edit to that file
-during this slice is a signal that behaviour moved.
+right check on a refactor that claims to change none of it.
+
+**One harness edit is forced, and it is the only one permitted.** That file
+shortens waits by monkeypatching the *route module's* binding of the name being
+called. Thirteen of those patches target `WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS` or
+`SETUP_JOB_LOCK_TIMEOUT_SECONDS`, and they keep working untouched — a migrated
+route still reads those module globals to pass `timeout_seconds=`. But
+`patch_route_mutex_timeout` patches `acquire_commit_mutex_live` on the route
+module, and after migration that call lives in `_writes.py`; the name is neither
+present nor called there any more, so `monkeypatch.setattr` fails.
+
+The permitted edit is confined to that **one helper** plus its import: patch the
+name on `_writes` as well as the route module, tolerating its absence on either,
+so the helper works before, during and after the migration. It lands in the
+manager's own commit, before any route moves. Every test body, every scenario
+and every assertion in the file stays byte-identical, and the diff to it must
+touch nothing but that helper.
+
+Any other edit to that file is a signal that behaviour moved — stop rather than
+reconcile it.
 
 New tests:
 
@@ -403,7 +438,8 @@ depends on.
 
 1. All six routes use `workspace_write`; no route in the two modules calls
    `session.commit()`.
-2. `test_api_writers_mutex_straddle.py` passes **unedited**.
+2. All 28 tests in `test_api_writers_mutex_straddle.py` pass, and the diff to
+   that file is confined to `patch_route_mutex_timeout` and its import (§7).
 3. The final gate fails under each of six per-route `workspace_write`-removal
    mutations, and its legacy arm is gone.
 4. The manager rolls back on all four exceptional exits, proven by a test that
