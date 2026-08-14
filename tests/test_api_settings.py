@@ -268,3 +268,44 @@ def test_settings_patch_authorization_precedes_validation(
     assert r.status_code == 403, (
         f"expected 403 (authorization decides first), got {r.status_code}: {r.text}"
     )
+
+
+def test_add_member_no_op_paths_add_no_rows(monkeypatch, pg_url, tmp_path, pg_session_factory):
+    """spec §6. add_member returns early from inside its write scope on two
+    no-op paths, so `workspace_write` commits an empty transaction there.
+
+    Asserted as NO NEW ROWS, not "no rows": the already-a-member path is
+    reachable only by pre-seeding exactly the WorkspaceViewer row it detects, so
+    "leaves no viewer" is unsatisfiable. If someone later adds a write above
+    those returns, these counts move and this test says so.
+    """
+    from call_manager.db.models import WorkspaceEvent, WorkspaceViewer
+
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    with pg_session_factory() as s:
+        owner = make_user(s, email="noop-owner@ki.se")
+        member = make_user(s, email="already-a-member@example.test")
+        ws = make_workspace(s, owner=owner)
+        s.add(WorkspaceViewer(workspace_id=ws.id, user_id=member.id))
+        s.commit()
+        ws_id, owner_id, member_email = ws.id, owner.id, member.email
+        owner_email = owner.email
+
+    def snapshot():
+        with pg_session_factory() as s:
+            viewers = {
+                v.user_id
+                for v in s.query(WorkspaceViewer).filter_by(workspace_id=ws_id).all()
+            }
+            events = s.query(WorkspaceEvent).filter_by(workspace_id=ws_id).count()
+        return viewers, events
+
+    c = authed_client(app, user_id=owner_id)
+    for label, email in (("owner", owner_email), ("already-a-member", member_email)):
+        before = snapshot()
+        resp = c.post(f"/api/workspaces/{ws_id}/members", json={"email": email})
+        assert resp.status_code == 200, f"{label}: expected 200, got {resp.status_code}"
+        assert snapshot() == before, (
+            f"{label} is a no-op path but it changed the database: "
+            f"viewers/events went from {before} to {snapshot()}"
+        )
