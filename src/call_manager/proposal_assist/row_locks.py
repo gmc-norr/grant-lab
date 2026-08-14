@@ -119,13 +119,34 @@ SETUP_JOB_LOCK_TIMEOUT_SECONDS = 2
 # Why 2 seconds: the same per-acquisition judgement as the two constants above.
 # The stack here is the shortest of the three — ONE contended row, the
 # `workspaces` row itself (the re-read, the UPDATE and the member routes'
-# FOR KEY SHARE all land on it; the `users` FK parents are not counted, since
-# nothing in this system holds a users row across slow work) — so the worst case
-# is 2s of mutex pin, inside both the DELETE's 10s mutex-acquisition timeout and
-# a fraction of its asserted < 6.0s. Losing a race is cheap on this path: the
-# route has mutated nothing (the transaction aborts and rolls back) and the
-# caller gets the house 429 with Retry-After, which is the same answer a wedged
-# mutex already gives them.
+# FOR KEY SHARE all land on it) — so the worst case is 2s of mutex pin, inside
+# both the DELETE's 10s mutex-acquisition timeout and a fraction of its asserted
+# < 6.0s. Losing a race is cheap on this path: the route has mutated nothing (the
+# transaction aborts and rolls back) and the caller gets the house 429 with
+# Retry-After, which is the same answer a wedged mutex already gives them.
+#
+# The `users` rows these routes also touch — FOR KEY SHARE, taken by Postgres to
+# validate WorkspaceViewer.user_id and WorkspaceEvent.actor_id — are NOT in that
+# count, and the exclusion answers exactly one question: "can a holder pin one
+# long enough to add another whole cap to the worst case?" No. The only writer
+# that locks `users` rows and then waits is web/api/admin_users.py's
+# `_lock_active_admin_count` (FOR UPDATE over every active admin row, on the
+# disable-last-admin and demote-last-admin paths), and it is a lock-and-count
+# transaction with no slow work in it — `signal_user_revocation` and its 5s
+# barrier run outside that session. Nothing holds a `users` row the way the pass
+# prefixes hold the `workspaces` row, across context assembly's file reads.
+#
+# It does NOT answer the other question, "can a 55P03 fire on a `users` row at
+# all?" — it can, and it is the wait that matters most here. That FK check is the
+# LAST thing these transactions do, at COMMIT, so it is what keeps the
+# bound-through-COMMIT rule load-bearing for update_rubric and activate now that
+# they take the `workspaces` row at the top of their bound; untranslated it is a
+# 500 (tests/proposal_assist/test_api_writers_mutex_straddle.py's two
+# `..._commit_time_users_fk_wait_to_429_not_500` cases reproduce it; spec §8).
+# Short-but-real is precisely why the row is out of the ARITHMETIC and inside the
+# BOUND. If a `users` row ever comes to be held across slow work — moving that 5s
+# barrier inside the admin guard's session would do it — the row count above is
+# what has to change with it.
 WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS = 2
 
 

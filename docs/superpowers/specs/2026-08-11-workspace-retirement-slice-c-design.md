@@ -573,6 +573,18 @@ narrow hazard rather than the pass-prefix one — but it is a real 55P03 at
 COMMIT, and it is the reason the rule is re-armed rather than relaxed for these
 two routes.
 
+Short-lived is also why `row_locks.py` and
+`tests/proposal_assist/test_row_lock_ceilings.py` leave `users` rows OUT of the
+contended-row count that turns a per-lock cap into a worst-case stall. That is
+not a contradiction of the paragraph above, and neither statement should be
+"corrected" against the other: they answer different questions about the same
+lock. *How long can this stall?* — not long enough to add another whole cap,
+because no holder keeps a `users` row across slow work the way a pass prefix
+keeps the `workspaces` row. *Can a 55P03 fire here at all?* — yes, at COMMIT,
+and untranslated it is a 500. The first governs the ceilings' arithmetic; the
+second governs the bound. If that 5s barrier ever moves inside the admin guard's
+session, the first answer changes and the row count has to change with it.
+
 Mechanism, because the obvious spelling does not work: use
 `session.refresh(ws, with_for_update=True)`, **not**
 `session.get(Workspace, id, with_for_update=True)`. A non-`None`

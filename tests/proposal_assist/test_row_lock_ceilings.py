@@ -70,10 +70,32 @@ two rows", derived per family from the code:
   hold a cap to a SMALLER value than its own stack requires. Do not "correct" it
   down to one — that weakens the assertion for the family this slice added.
 
-The member routes' inserts also take `FOR KEY SHARE` on their `users` FK
-parents; those are not counted, because nothing in this system holds a `users`
-row across slow work, so they cannot be a contended wait. If that ever changes,
-this number is what has to change with it.
+The member routes' inserts also take `FOR KEY SHARE` on their `users` FK parents
+(`WorkspaceViewer.user_id`), and the rubric routes' `WorkspaceEvent.actor_id`
+does the same. Those are not counted — but read the exclusion at its exact
+strength, because `row_locks.py` and spec section 8 say something
+opposite-sounding about the same lock and both are true of different properties.
+
+THIS file's question is "how LONG can a stall be?", and for a `users` row the
+answer is: not long enough to add another whole cap. The only writer that locks
+one and then waits is `web/api/admin_users.py`'s `_lock_active_admin_count`
+(`FOR UPDATE` over every active admin row, on the disable-last-admin and
+demote-last-admin paths), and that is a lock-and-count transaction with no slow
+work inside it — `signal_user_revocation` and its 5s barrier run outside the
+session. Nothing holds a `users` row the way the pass prefixes hold the
+`workspaces` row.
+
+The OTHER question — "can a 55P03 fire there at all?" — has the opposite answer,
+and it is not this file's business. It can: that FK check is the last wait
+`update_rubric` and `activate` make, at COMMIT, and untranslated it is a 500.
+`test_api_writers_mutex_straddle.py`'s two
+`..._commit_time_users_fk_wait_to_429_not_500` cases reproduce exactly that. A
+short wait is still a wait — which is why the row sits outside this arithmetic
+and inside the bound-through-COMMIT rule (spec section 8, gate 16).
+
+If a `users` row ever comes to be held across slow work — moving that 5s barrier
+inside the admin guard's session would do it — this number is what has to change
+with it.
 
 Not proven here (the P3 residual, spec section 10)
 --------------------------------------------------
