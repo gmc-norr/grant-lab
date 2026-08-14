@@ -29,6 +29,7 @@ from call_manager.proposal_assist.row_locks import (
     bounded_lock_waits,
 )
 from call_manager.proposal_assist.web._perms import require_member, require_owner
+from call_manager.proposal_assist.web._writes import workspace_write
 
 router = APIRouter()
 
@@ -167,83 +168,56 @@ def update_rubric(
         # Authorization decides first. It stays BEFORE the mutex because it takes
         # no lock: a malformed body must not queue behind the commit mutex.
         criteria = _validate_criteria(body.criteria)
-        # Slice C2 lock-order rule: the live mutex immediately after
+        # Slice C2 lock-order rule: the write scope opens immediately after
         # require_owner and its lock-free validation, before any other lock.
-        # WorkspaceDeleted -> main.py -> 404.
-        try:
-            acquire_commit_mutex_live(session, ws.id)
-        except CommitMutexTimeout as e:
-            raise HTTPException(
-                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
-            ) from e
-        # The workspace-row wait is BOUNDED. _apply_rubric UPDATEs the
-        # `workspaces` row, and acquire_commit_mutex restores
-        # lock_timeout = DEFAULT on success (locking.py), so without this the
-        # route would wait indefinitely on that row WHILE HOLDING the commit
-        # mutex — and a concurrent DELETE, every collab-kernel save and every
-        # turn enqueue would 429 behind us after burning their full budget. The
-        # holder is real: the four pass prefixes take this row FOR UPDATE while
-        # holding NO mutex, so the mutex we hold does not exclude them.
+        # WorkspaceDeleted -> main.py -> 404. workspace_write bounds every lock
+        # wait in the rest of the transaction and commits inside that bound:
+        # _apply_rubric UPDATEs the `workspaces` row and the re-read below takes
+        # it explicitly, so a wait can land at either end, and an untranslated
+        # 55P03 would answer 500 where this route contracts for 429. The holder
+        # is real — the four pass prefixes take that row FOR UPDATE holding NO
+        # mutex, so the mutex we hold does not exclude them.
         # WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS, not SETUP_JOB_LOCK_TIMEOUT_SECONDS:
         # this route never touches a WorkspaceSetupJob row.
-        #
-        # The bound wraps the WHOLE remainder including COMMIT — the under-mutex
-        # re-read below takes this row explicitly and _apply_rubric's UPDATE
-        # flushes into it at commit, so a wait can land at either end — for the
-        # reason spelled out on activate below: a narrow wrap leaves the write
-        # bounded but UNtranslated, and 55P03 escapes as a raw OperationalError
-        # -> 500 instead of this route's contracted 429.
-        try:
-            with bounded_lock_waits(
-                session,
-                timeout_seconds=WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS,
-                message="timed out waiting for a row lock in the rubric-update transaction",
-            ):
-                # Re-read the workspace row UNDER the mutex, BEFORE _apply_rubric
-                # reads it. require_owner loaded `ws` before the mutex, and this
-                # request may then have waited up to 10s there while another
-                # writer changed the rubric and committed. Nothing refreshed the
-                # instance in the meantime: acquire_commit_mutex_live's freshness
-                # guard is a scalar SELECT of soft_deleted_at ONLY (it repopulates
-                # no attribute), and db/session.py builds the sessionmaker with
-                # expire_on_commit=False. The irony is worth stating plainly —
-                # that helper's own docstring names this exact hazard ("can return
-                # the identity-map instance the caller loaded before blocking on
-                # the mutex, which is precisely the stale state this guard exists
-                # to defeat") and then defeats it for one column, and these two
-                # routes walked into it on the others.
-                #
-                # It matters here because _apply_rubric derives content_changed
-                # and the rubric_edited event's old_criteria/old_funder_notes from
-                # these attributes. Stale, an identical concurrent write records a
-                # SECOND event for one edit, and a distinct one records old_* from
-                # a rubric two versions back, breaking the audit chain. Before this
-                # slice the read-to-write window was a few milliseconds; C2 made it
-                # the whole mutex wait, so this slice owns the fix.
-                #
-                # session.refresh, NOT session.get(..., with_for_update=True): with
-                # `get`, a non-None with_for_update skips the identity lookup and
-                # emits the SELECT ... FOR UPDATE, so the row lock is taken — but
-                # the loader does not overwrite attributes that are ALREADY
-                # populated, so the stale values survive the round trip (verified
-                # against SQLAlchemy 2.0.49; `get` needs populate_existing=True to
-                # refresh). Do not "simplify" this into that form; the two
-                # identical-concurrent-write gates in
-                # tests/proposal_assist/test_api_writers_mutex_straddle.py fail if
-                # you do.
-                #
-                # Lock order is unchanged (M -> W): _apply_rubric's UPDATE already
-                # took this row at flush; with_for_update only takes it earlier and
-                # explicitly. The wait sits inside the bound, so its 55P03 is
-                # translated to this route's contracted 429 like every other wait
-                # in this transaction.
-                session.refresh(ws, with_for_update=True)
-                _apply_rubric(session, ws, user, criteria, body.funder_notes or "")
-                session.commit()
-        except RowLockTimeout as e:
-            raise HTTPException(
-                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
-            ) from e
+        with workspace_write(
+            session,
+            ws.id,
+            timeout_seconds=WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS,
+            what="rubric-update",
+        ):
+            # Re-read the workspace row UNDER the mutex, BEFORE _apply_rubric
+            # reads it. require_owner loaded `ws` before the mutex, and this
+            # request may then have waited up to 10s there while another
+            # writer changed the rubric and committed. Nothing refreshed the
+            # instance in the meantime: acquire_commit_mutex_live's freshness
+            # guard is a scalar SELECT of soft_deleted_at ONLY (it repopulates
+            # no attribute), and db/session.py builds the sessionmaker with
+            # expire_on_commit=False.
+            #
+            # It matters here because _apply_rubric derives content_changed
+            # and the rubric_edited event's old_criteria/old_funder_notes from
+            # these attributes. Stale, an identical concurrent write records a
+            # SECOND event for one edit, and a distinct one records old_* from
+            # a rubric two versions back, breaking the audit chain.
+            #
+            # session.refresh, NOT session.get(..., with_for_update=True): with
+            # `get`, a non-None with_for_update skips the identity lookup and
+            # emits the SELECT ... FOR UPDATE, so the row lock is taken — but
+            # the loader does not overwrite attributes that are ALREADY
+            # populated, so the stale values survive the round trip (verified
+            # against SQLAlchemy 2.0.49; `get` needs populate_existing=True to
+            # refresh). Do not "simplify" this into that form; the two
+            # identical-concurrent-write gates in
+            # tests/proposal_assist/test_api_writers_mutex_straddle.py fail if
+            # you do.
+            #
+            # Lock order is unchanged (M -> W): _apply_rubric's UPDATE already
+            # took this row at flush; with_for_update only takes it earlier and
+            # explicitly. The wait sits inside the managed bound, so its 55P03
+            # is translated to this route's contracted 429 like every other wait
+            # in this transaction.
+            session.refresh(ws, with_for_update=True)
+            _apply_rubric(session, ws, user, criteria, body.funder_notes or "")
         # No SQL: make_session_factory sets expire_on_commit=False (db/session.py),
         # so the commit does not expire `ws` and these are loaded attributes.
         return _rubric_out(ws)
