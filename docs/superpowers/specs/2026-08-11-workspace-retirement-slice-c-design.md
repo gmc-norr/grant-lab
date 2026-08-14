@@ -6,6 +6,15 @@ Predecessors: Slice A (`docs/superpowers/plans/2026-07-24-workspace-retirement-s
 
 ## Revisions
 
+- revision 6 (2026-08-14, Slice C2 review fixes): §8 gains a third normative
+  rule — **freshness**. Serializing the commit is not enough for a route whose
+  write is a *diff*: `require_owner` loads the `Workspace` before the mutex,
+  `acquire_commit_mutex_live` refreshes `soft_deleted_at` and nothing else, and
+  `expire_on_commit=False` means nothing else expires it either — so
+  `_apply_rubric` was computing `content_changed` and the `rubric_edited` event's
+  `old_*` payload from state as old as the request. C2 is what made that window
+  large (a few milliseconds → the whole mutex wait), so C2 owns the fix. §12
+  gains gate 15.
 - revision 5 (2026-08-13, Slice C2): §8's bound rule was wrong about its own
   scope and, read literally, asserted an invariant the codebase does not have.
   Its parenthetical named "both setup-job routes"; in fact all six routes hold
@@ -467,6 +476,44 @@ re-imposes a bound at six of them; the rest are untouched and stay unbounded.
 That is §10.8 — the single root cause, and why closing it centrally is a
 separate design pass rather than a wider edit here.
 
+**Freshness rule (normative — for the routes whose write is a diff).** A route
+that decides *what* to write by comparing the request against current state must
+re-read that state **under the mutex**, before the comparison. Winning the mutex
+does not refresh anything: `require_owner` loads the `Workspace` instance before
+the mutex; `acquire_commit_mutex_live`'s guard is a scalar
+`select(Workspace.soft_deleted_at)` that deliberately round-trips the *column*
+and so repopulates no attribute; and `db/session.py` builds the sessionmaker with
+`expire_on_commit=False`. Everything except `soft_deleted_at` is therefore as old
+as the request — and as of C2, "as old as the request" means up to the mutex's
+full 10s wait.
+
+Of the six, only `update_rubric` and `activate` are exposed, and only through
+`_apply_rubric`'s change detection. `update_settings` writes absolute values from
+the body with no old-vs-new comparison; `add_member` and `remove_member` re-query
+the `WorkspaceViewer`/`User` rows they act on inside the transaction, and the one
+pre-mutex attribute they read, `ws.owner_id`, is never reassigned anywhere in the
+tree (workspace ownership cannot transfer). `_apply_rubric`'s own logic is
+correct and unchanged; only the freshness of its input was wrong. Symptoms of the
+stale read: an identical concurrent write records a *second* `rubric_edited`
+event for one edit, and a distinct one records `old_criteria` from a rubric two
+versions back, dropping the intervening revision out of the audit chain.
+
+The re-read goes **after** any lock the route already takes, preserving the order
+above: `update_rubric` is M → W, `activate` is M → J → W, which is
+`phases/setup.py` `_m3`'s documented order (job → workspace → Call). Both sit
+inside the route's `bounded_lock_waits`, so the new wait is bounded and its 55P03
+maps to the same 429 as every other wait in the transaction.
+
+Mechanism, because the obvious spelling does not work: use
+`session.refresh(ws, with_for_update=True)`, **not**
+`session.get(Workspace, id, with_for_update=True)`. A non-`None`
+`with_for_update` makes `Session.get` skip the identity lookup and emit the
+`SELECT … FOR UPDATE`, so the row lock is taken — but the loader does not
+overwrite attributes that are already populated, so the instance keeps its stale
+values and the bug survives with a lock around it. (Verified empirically against
+SQLAlchemy 2.0.49, and by mutation: swapping `refresh` for that `get` leaves all
+four gate-15 tests red. `get` needs `populate_existing=True` to refresh.)
+
 **Error mapping is written per route, explicitly.** There is no app-level
 `CommitMutexTimeout` handler — every route returning 429 today does so with its
 own `except CommitMutexTimeout` (e.g. `web/api/workspaces.py:446`), and an
@@ -717,6 +764,24 @@ reverted.
     committed". Mutation: drop `SKIP LOCKED` from the cancel and the test must
     fail. This is the gate that would have caught the unbounded wait round 3
     identified.
+
+15. **Under-mutex freshness of the rubric diff (§8's freshness rule).** For both
+    `update_rubric` and `activate`, two cases each. A holder takes the commit
+    mutex; the route queues behind it (established with the keyed `pg_locks`
+    probe, never a sleep, so the route's pre-mutex load provably precedes the
+    holder's write); the holder then commits a rubric edit R0 → R1 through the
+    route's own `_apply_rubric` and releases.
+    (a) *Identical.* The route submits the same R1 → exactly **one**
+    `rubric_edited` event exists, not two.
+    (b) *Distinct.* The route submits R2 → its event carries
+    `old_criteria == R1`, so the chain R0 → R1 → R2 is continuous.
+    The holder must be the mutex holder, not a second request: a second request
+    would queue *behind* the route, which arrived first, and the interleaving
+    could not be produced at all. The holder's payload is normalized through the
+    route's own `_validate_criteria`, or "identical" would compare shapes and
+    case (a) would pass with the bug present. Mutations: remove the re-read and
+    all four go red; replace it with
+    `session.get(…, with_for_update=True)` and all four stay red (§8).
 
 Phase-0's gates (no long-held lock; a claimed setup job must not create a repo
 directory for a deleted workspace; a cancelled setup job is not requeued) move
