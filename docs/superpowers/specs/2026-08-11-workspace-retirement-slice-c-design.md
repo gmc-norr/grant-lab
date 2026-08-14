@@ -910,11 +910,19 @@ reverted.
     never matched as text — this repo has already shipped a source-text
     assertion that was a tautology (`src.index(f"def {name}(")` matches inside
     `"async def …"`). The six names are asserted as an explicit set against what
-    the modules contain, in both directions, so a deleted or renamed route fails
-    instead of leaving the gate covering five, and a *new* bounded writer fails
-    until it is listed. Failure names the offending route and why. Mutations: six,
-    one per route — dedent that route's commit and exactly that route's case must
-    fail; plus a rename, which must fail the presence check.
+    **those two modules** contain, in both directions, so a deleted or renamed
+    route fails instead of leaving the gate covering five, and a *new* bounded
+    writer **in one of those two modules** fails until it is listed. Failure
+    names the offending route and why. Mutations: six, one per route — dedent
+    that route's commit and exactly that route's case must fail; plus a rename,
+    which must fail the presence check.
+    Scope, stated because the gate's table is also its reach: those two modules
+    are all it reads. A `bounded_lock_waits` block added elsewhere in the tree
+    (`web/api/workspaces.py`, say) is invisible to it and may put its commit
+    outside the bound with the gate green — verified, not assumed. That matches
+    §8's bound rule, which is normative for these six routes and explicitly not a
+    property of the codebase; §10.8 carries the wider gap. Extending the rule to
+    another module means adding that module to this gate's table.
     Static rather than runtime deliberately: the rule is structural, so this is
     its direct encoding, and unlike the interleaving gates it survives a change
     to *where* contention happens to fire — which is precisely what revision 7

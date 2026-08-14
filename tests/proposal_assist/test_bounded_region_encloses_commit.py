@@ -93,12 +93,24 @@ import pytest
 from call_manager.web.api import rubric as rubric_api
 from call_manager.web.api import settings as settings_api
 
-# The six routes, named explicitly. Deliberately NOT derived from the modules:
-# a list read out of the source would keep passing after a route was deleted or
-# renamed, covering five and reporting six. `test_the_six_bounded_writers_are_
-# all_present` asserts this set against what the modules actually contain, in
-# both directions, so a rename fails here and a NEW bounded writer added without
-# a line in this table fails too.
+# The six routes, named explicitly and keyed by the module that holds them.
+# Deliberately NOT derived from the modules: a list read out of the source would
+# keep passing after a route was deleted or renamed, covering five and reporting
+# six. `test_the_six_bounded_writers_are_all_present` asserts this set against
+# what those two modules actually contain, in both directions, so a rename fails
+# here and a NEW bounded writer added TO ONE OF THESE TWO MODULES without a line
+# in this table fails too.
+#
+# The table is also the gate's SCOPE, which is narrower than that sentence alone
+# suggests: the parametrize iterates these keys, so these two modules are all the
+# check ever reads. A `bounded_lock_waits` block added anywhere else in the tree —
+# `web/api/workspaces.py`, say — is invisible to it and may put its commit outside
+# the bound with this file still green. That is measured, not assumed. The limit
+# is deliberate: §8's bound rule is normative for these six routes and explicitly
+# not a property of the codebase (§10.8 records the wider gap, whose root cause is
+# `acquire_commit_mutex`'s restore-to-DEFAULT at every call site). If the rule is
+# ever extended to another module, extending this gate means adding that module
+# as a key here — not widening the walk.
 EXPECTED_BOUNDED_WRITERS: dict[str, frozenset[str]] = {
     "call_manager.web.api.settings": frozenset(
         {"update_settings", "add_member", "remove_member"}
