@@ -32,6 +32,7 @@ from call_manager.proposal_assist.row_locks import (
     bounded_lock_waits,
 )
 from call_manager.proposal_assist.web._perms import require_owner
+from call_manager.proposal_assist.web._writes import workspace_write
 from call_manager.proposal_assist.web.workspace_meta import (
     _MAX_WORKSPACE_TITLE_LEN,
     _WORKSPACE_STATUSES,
@@ -98,51 +99,25 @@ def update_settings(
         if not title or len(title) > _MAX_WORKSPACE_TITLE_LEN:
             raise HTTPException(status_code=400, detail="invalid title")
         deadline = _parse_deadline_form(body.deadline)  # HTTPException(400) on malformed
-        # Slice C2 lock-order rule: the live mutex is taken immediately after
+        # Slice C2 lock-order rule: the write scope opens immediately after
         # require_owner and its lock-free validation, and before any other lock.
-        # soft_delete_workspace_db holds
-        # this same mutex for its whole transaction, so a deletion committing
-        # while we blocked here is observed the instant we win the lock —
-        # WorkspaceDeleted propagates to main.py's handler (404) and we have
-        # mutated nothing.
-        try:
-            acquire_commit_mutex_live(session, ws.id)
-        except CommitMutexTimeout as e:
-            raise HTTPException(
-                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
-            ) from e
-        # The workspace-row wait is BOUNDED. acquire_commit_mutex restores
-        # lock_timeout = DEFAULT on success (drafting/locking.py), so without
-        # this the UPDATE below would wait indefinitely on the `workspaces` row
-        # WHILE HOLDING the commit mutex — and a concurrent DELETE, every
-        # collab-kernel save and every turn enqueue would 429 behind us after
-        # burning their whole 10s budget, blowing the DELETE route's asserted
-        # < 6.0s. A real holder exists: the four pass prefixes take this row FOR
-        # UPDATE holding NO mutex and keep it across context assembly.
-        #
-        # The bound wraps the WHOLE remainder of the transaction, COMMIT
-        # included — these attribute assignments emit no SQL of their own, so
-        # the 55P03 fires at the flush inside session.commit(). bounded_lock_waits
-        # deliberately leaves SET LOCAL lock_timeout in force on exit
-        # (row_locks.py's module docstring), but its 55P03 -> RowLockTimeout
-        # translation only covers its own body: a wrap that stopped short of the
-        # commit would leave the write bounded yet UNtranslated, and the caller
-        # would get a 500 where this slice contracts for a 429.
-        try:
-            with bounded_lock_waits(
-                session,
-                timeout_seconds=WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS,
-                message="timed out waiting for a row lock in the settings-update transaction",
-            ):
-                ws.title = title
-                ws.status = body.status
-                ws.deadline = deadline
-                ws.citation_style = body.citation_style
-                session.commit()
-        except RowLockTimeout as e:
-            raise HTTPException(
-                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
-            ) from e
+        # workspace_write takes the live commit mutex, bounds every lock wait in
+        # the rest of the transaction, and commits INSIDE that bound —
+        # soft_delete_workspace_db holds the same mutex for its whole
+        # transaction, so a deletion committing while we blocked is observed the
+        # instant we win it and WorkspaceDeleted propagates to main.py's 404
+        # handler with nothing mutated. Both timeout types become the contracted
+        # 429 + Retry-After: 2.
+        with workspace_write(
+            session,
+            ws.id,
+            timeout_seconds=WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS,
+            what="settings-update",
+        ):
+            ws.title = title
+            ws.status = body.status
+            ws.deadline = deadline
+            ws.citation_style = body.citation_style
         # Reads loaded attributes off `ws` and emits no SQL: make_session_factory
         # sets expire_on_commit=False (db/session.py), so the commit above does
         # not expire the instance. Kept outside the bound for that reason — a
