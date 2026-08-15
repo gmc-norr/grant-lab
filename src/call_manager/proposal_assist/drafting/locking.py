@@ -166,6 +166,23 @@ class WorkspaceDeleted(RuntimeError):
 DELETED_ERROR_MESSAGE = "workspace no longer exists"
 
 
+def is_lock_timeout(exc: BaseException) -> bool:
+    """True iff *exc* is a Postgres lock_not_available (SQLSTATE 55P03) — a
+    `SET LOCAL lock_timeout` that fired.
+
+    Since Slice C3 the mutex-held tail keeps a 2s cap in force, so 55P03 is the
+    routine "someone else holds a row I need" signal rather than a server fault.
+    Every site that must tell contention from a real database failure calls this,
+    so the SQLSTATE check exists exactly once.
+
+    psycopg exposes the code as `sqlstate`; older drivers use `pgcode`. Anything
+    that is not a DBAPI error at all (no `.orig`) is not a lock timeout.
+    """
+    orig = getattr(exc, "orig", None)
+    sqlstate = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+    return sqlstate == "55P03"
+
+
 def acquire_commit_mutex(
     session: Session, workspace_id: uuid.UUID, *, timeout_seconds: int = 10
 ) -> None:

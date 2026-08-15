@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.exc import OperationalError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import PlainTextResponse
@@ -30,8 +31,10 @@ from call_manager.proposal_assist.citations import build_citation_service
 from call_manager.proposal_assist.collab import state as collab_state
 from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
 from call_manager.proposal_assist.drafting.locking import (
+    BUSY_ERROR_MESSAGE,
     DELETED_ERROR_MESSAGE,
     WorkspaceDeleted,
+    is_lock_timeout,
 )
 from call_manager.proposal_assist.references.admission import IngestLimiter
 from call_manager.proposal_assist.web import collab_checkpoint, collab_ws
@@ -531,6 +534,39 @@ def create_app() -> FastAPI:
         if api_request(request):
             return api_error(404, "workspace_deleted", DELETED_ERROR_MESSAGE)
         return JSONResponse(status_code=404, content={"detail": DELETED_ERROR_MESSAGE})
+
+    @app.exception_handler(OperationalError)
+    async def _lock_timeout(request: Request, exc: OperationalError):
+        # SQLSTATE 55P03 = lock_not_available: a `SET LOCAL lock_timeout` fired.
+        # Since Slice C3, `acquire_commit_mutex` leaves a 2s cap in force for the
+        # WHOLE mutex-held transaction (drafting/locking.py), so an untranslated
+        # 55P03 reaching here is by definition a mutex-held tail giving up rather
+        # than pinning the mutex against every other writer. It maps to the same
+        # 429 the six `workspace_write` routes already emit, byte for byte.
+        #
+        # Registered centrally rather than per-route because a local `except` only
+        # covers what its `try` encloses, and two sites (`turns.py:197`,
+        # `proposals.py:145`) already commit OUTSIDE the relevant try — a local
+        # clause would miss commit-time timeouts there. See spec section 5.
+        #
+        # `collab_checkpoint.py:57` answers 503 for the ACQUISITION failure and
+        # keeps its own catch; that is CommitMutexTimeout, a different exception,
+        # so it resolves before this handler ever sees anything.
+        if not is_lock_timeout(exc):
+            # A real connection/server failure. Same shape as the catch-all below;
+            # deliberately NOT re-raised (see that handler's note on empty bodies).
+            if api_request(request):
+                return api_error(500, "internal_error", "internal server error")
+            return PlainTextResponse("Internal Server Error", status_code=500)
+        if api_request(request):
+            return api_error(
+                429, code_for(429), BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
+            )
+        return JSONResponse(
+            status_code=429,
+            content={"detail": BUSY_ERROR_MESSAGE},
+            headers={"Retry-After": "2"},
+        )
 
     @app.exception_handler(AccountInactive)
     async def _inactive_account(request: Request, exc: AccountInactive):
