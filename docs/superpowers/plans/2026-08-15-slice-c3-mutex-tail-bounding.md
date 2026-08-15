@@ -8,9 +8,9 @@
 
 **Tech Stack:** Python 3.12, FastAPI, SQLAlchemy 2.x, PostgreSQL 16, pytest + testcontainers, `uv`, `ruff`.
 
-**Spec:** `docs/superpowers/specs/2026-08-15-slice-c3-mutex-tail-bounding-design.md` (**revision 2** — read §3.1, §4, §4.1 and §5 before Task 1).
+**Spec:** `docs/superpowers/specs/2026-08-15-slice-c3-mutex-tail-bounding-design.md` (**revision 4** — read §3.1, §4, §4.1, §4.2, §5 and §7.1 before Task 1).
 
-**Worktree:** create one at `.worktrees/c3-tail-bound` off `master` (`582ce9a` or later). `.worktrees/` is the project-local worktree directory, gitignored.
+**Worktree:** create one at `.worktrees/c3-tail-bound` off `master` (`279bff9` or later). `.worktrees/` is the project-local worktree directory, gitignored.
 
 **Worktree venv:** `uv sync --python 3.12`. A bare `uv sync` picks the newest interpreter on the box (3.14) because `pyproject.toml` says only `requires-python = ">=3.12"` and there is no `.python-version`. Confirm `python -V` reports 3.12 before running anything.
 
