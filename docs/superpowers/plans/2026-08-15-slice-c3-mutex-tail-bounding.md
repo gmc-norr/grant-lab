@@ -1979,7 +1979,11 @@ fails with `FileNotFoundError` rather than `GitCommitError`. md5-verify, restore
 ```bash
 uv run pytest tests/ -q ; echo "PYTEST_EXIT=$?"
 uv run ruff check . ; echo "RUFF_EXIT=$?"
-EMBEDDING_MODEL=bge-m3 ./scripts/gen_openapi_types.sh
+# A fresh worktree has no frontend/node_modules, so the generator can fail while
+# DRIFT_EXIT still reads 0 — a FALSE PASS observed during execution (GEN_EXIT=254,
+# DRIFT_EXIT=0). Install first, and assert BOTH exit codes.
+(cd frontend && pnpm install --frozen-lockfile) > /dev/null
+EMBEDDING_MODEL=bge-m3 ./scripts/gen_openapi_types.sh ; echo "GEN_EXIT=$?"
 git diff --exit-code -- frontend/src/api/schema.gen.ts ; echo "DRIFT_EXIT=$?"
 git status --short
 ```
