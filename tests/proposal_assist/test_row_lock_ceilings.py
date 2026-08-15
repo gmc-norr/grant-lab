@@ -90,11 +90,13 @@ runs, inside ONE mutex-held transaction: the `workspaces` UPDATE, then
 `cancel_coherence_jobs_for_workspace`, `cancel_evaluator_jobs_for_workspace`,
 `cancel_review_runs_and_items_for_workspace`,
 `cancel_uncited_claims_jobs_for_workspace`, and a `turn_jobs` cancel — each an
-`UPDATE ... WHERE status IN (...)` taking those rows' locks, plus `ChatTurn`
-inserts taking FK parent locks on `users`. Six-plus distinct row families, each
-carrying its own 2s per-acquisition cap, so the true worst case is 12s+ and not
-the 4.0s the arithmetic below computes. `post_lock_spec`/`post_unlock_spec`
-reach three; `kernel_accept_prose` reaches four to five.
+`UPDATE ... WHERE status IN (...)` taking those rows' locks, plus the
+`WorkspaceEvent(actor_id=...)` insert each `record_terminal_outcome` call makes
+(`turns/outcomes.py`), taking a FK parent lock on `users`. Six-plus distinct row
+families, each carrying its own 2s per-acquisition cap, so the true worst case
+is 12s+ and not the 4.0s the arithmetic below computes.
+`post_lock_spec`/`post_unlock_spec` reach three; `kernel_accept_prose` reaches
+four to five.
 
 This is accepted, not overlooked. Every one of those waits was UNBOUNDED before
 Slice C3: a single wedged writer pinned the mutex-held transaction forever, and

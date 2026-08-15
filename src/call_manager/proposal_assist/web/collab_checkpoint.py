@@ -60,9 +60,14 @@ async def save_version(
                 #   * a bounded mutex-held TAIL giving up (55P03),
                 #     answered centrally by main.py's OperationalError
                 #     handler, which never sees this exception class   -> 429
-                # Both mean "another writer holds the workspace; retry", and both
-                # carry BUSY_ERROR_MESSAGE, so the body is identical and only the
-                # status differs.
+                # Both mean "another writer holds the workspace; retry" — but a
+                # caller cannot tell that from the response: this is an /api
+                # route, so main.py's StarletteHTTPException handler replaces
+                # the body of every >= 500 response with the fixed internal_error
+                # envelope, and BUSY_ERROR_MESSAGE never reaches the wire; the
+                # 429 carries {"code": "too_many_requests", "message":
+                # BUSY_ERROR_MESSAGE} plus Retry-After: 2. Status, envelope
+                # code, message AND Retry-After all differ.
                 #
                 # It exists because this route is the documented 503 holdout (see
                 # CommitMutexTimeout's docstring in drafting/locking.py — every

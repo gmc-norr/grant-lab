@@ -62,7 +62,11 @@ def run_kill_switch_handover(session_factory, *, workspaces_dir) -> int:
                 # retries" outcome as a mutex ACQUISITION timeout, or as a
                 # workspace deleted between the pre-screen above and the mutex.
                 # None of those is a fault, so none earns an ERROR + traceback
-                # on a path the scheduler re-runs while the switch stays engaged.
+                # on a path the scheduler re-runs while the switch stays engaged
+                # — or, with COLLAB_CHECKPOINT_SCAN_SECONDS=0, on the one-shot
+                # startup pass that is then the only attempt (scheduler.py adds
+                # no periodic job at 0; see config.py's description of that
+                # setting).
                 #
                 # ONE clause rather than sibling `except WorkspaceDeleted` /
                 # `except OperationalError` arms: a re-raise from a sibling
@@ -84,6 +88,7 @@ def run_kill_switch_handover(session_factory, *, workspaces_dir) -> int:
                             "event": "collab_kill_switch_handover_skipped",
                             "workspace_id": str(workspace_id),
                             "artifact": artifact,
+                            "reason": type(exc).__name__,
                         },
                     )
                 else:
@@ -96,7 +101,9 @@ def run_kill_switch_handover(session_factory, *, workspaces_dir) -> int:
                         },
                         exc_info=True,
                     )
-                # Outside the branch: a rolled-back session is required either
-                # way before the next candidate reuses this `with` block.
+                # Outside the branch: a rollback is required either way to end
+                # this aborted transaction before this session (opened fresh per
+                # candidate, inside the `for` loop above) closes and returns its
+                # connection to the pool.
                 s.rollback()
     return done

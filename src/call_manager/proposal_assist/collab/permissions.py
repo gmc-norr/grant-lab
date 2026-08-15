@@ -82,7 +82,8 @@ def make_checkpoint_on_evict(session_factory, workspaces_dir, workspace_id, arti
                         logger.warning(
                             "collab.checkpoint_on_evict_skipped",
                             extra={"event": "collab_checkpoint_on_evict_skipped",
-                                   "room": str((workspace_id, artifact))},
+                                   "room": str((workspace_id, artifact)),
+                                   "reason": type(exc).__name__},
                         )
                     else:
                         logger.error(
