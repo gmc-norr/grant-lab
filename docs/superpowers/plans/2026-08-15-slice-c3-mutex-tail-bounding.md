@@ -1621,6 +1621,191 @@ uv run pytest tests/proposal_assist/test_api_writers_mutex_straddle.py tests/pro
 
 Expected: pass, with the same counts as before this task.
 
+- [ ] **Step 2b: Rewire `row_locks.py`'s open-coded SQLSTATE check (success criterion 7)**
+
+Criterion 7 says there is exactly one definition of "this is a lock timeout" in the tree. There
+are two: `bounded_lock_waits` open-codes it at `src/call_manager/proposal_assist/row_locks.py:198-201`.
+That copy is pre-existing (it is byte-identical at the branch base), and Tasks 2 and 4 were both
+forbidden to touch this file, so it survived. This task owns the file.
+
+Replace:
+
+```python
+    except OperationalError as exc:
+        sqlstate = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
+        if sqlstate == "55P03":
+            raise error(message) from exc
+        raise
+```
+
+with:
+
+```python
+    except OperationalError as exc:
+        if is_lock_timeout(exc):
+            raise error(message) from exc
+        raise
+```
+
+Add `is_lock_timeout` to the existing import from `call_manager.proposal_assist.drafting.locking`
+if that import exists; otherwise add the import. Check for a circular-import problem first —
+`row_locks.py` and `drafting/locking.py` are both low-level. If importing it creates a cycle,
+STOP and report rather than working around it; the criterion can be amended instead.
+
+Behaviour must be identical: `is_lock_timeout` reads `.orig` via `getattr` with a `None` default
+where this read it directly, which is strictly more defensive and matches on every input this
+call site can produce.
+
+```bash
+uv run pytest tests/proposal_assist/test_row_lock_ceilings.py tests/proposal_assist/test_phase0_transaction_boundaries.py -q ; echo "PYTEST_EXIT=$?"
+grep -rn "55P03" src/ | grep -v "drafting/locking.py"
+```
+
+Expected: tests pass; the grep returns nothing (the only remaining literal `55P03` is inside
+`is_lock_timeout` itself).
+
+- [ ] **Step 2c: Disposition the 14th mutex site (`collab/permissions.py`)**
+
+The spec's site inventory was built by enumerating **direct** `acquire_commit_mutex*` call sites,
+so it missed every site that reaches the mutex indirectly. `make_checkpoint_on_evict`
+(`src/call_manager/proposal_assist/collab/permissions.py:61`) is one: it calls
+`checkpoint_artifact`, which takes the mutex.
+
+Its benign arm catches `(GitCommitError, CommitMutexTimeout, WorkspaceDeleted)` by type and logs
+a `collab.checkpoint_on_evict_skipped` WARNING. A bounded tail raises a raw `OperationalError`,
+which falls past it to `except Exception` and logs `collab.checkpoint_on_evict_error` at ERROR
+**with a traceback** — for ordinary row contention on room eviction. No corruption (both arms
+roll back and swallow), but routine contention becomes error-level noise, and this team reads
+its logs.
+
+This is not fixable by adding an `except OperationalError` arm: a `raise` from a sibling clause
+escapes the `try` entirely rather than falling into `except Exception`, which would change what a
+real database failure does here. Merge the two clauses instead. Replace both `except` blocks with:
+
+```python
+                except Exception as exc:
+                    # Slice C3: with the mutex-held tail bounded, routine row
+                    # contention inside checkpoint_artifact now RAISES
+                    # OperationalError(55P03) where it used to hang. That is the
+                    # same benign "someone else is writing; the durable log
+                    # survives and the next trigger retries" outcome as
+                    # CommitMutexTimeout, so it belongs on the WARNING arm — not
+                    # an ERROR with a traceback for ordinary contention.
+                    #
+                    # One clause rather than a new `except OperationalError`
+                    # arm: a re-raise from a sibling clause escapes the try
+                    # entirely instead of falling through to `except Exception`,
+                    # which would change what a REAL database failure does here.
+                    benign = isinstance(
+                        exc, (GitCommitError, CommitMutexTimeout, WorkspaceDeleted)
+                    ) or is_lock_timeout(exc)
+                    if benign:
+                        logger.warning(
+                            "collab.checkpoint_on_evict_skipped",
+                            extra={"event": "collab_checkpoint_on_evict_skipped",
+                                   "room": str((workspace_id, artifact))},
+                        )
+                    else:
+                        logger.error(
+                            "collab.checkpoint_on_evict_error",
+                            extra={"event": "collab_checkpoint_on_evict_error",
+                                   "room": str((workspace_id, artifact))},
+                            exc_info=True,
+                        )
+                    s.rollback()
+```
+
+Add `is_lock_timeout` to the existing
+`from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout, WorkspaceDeleted`
+line at `permissions.py:23`.
+
+Then append to `tests/proposal_assist/collab/test_collab_checkpoint_scan.py`, which already has
+`_mk` and the `_hold_state_row` helper Task 3 added (`asyncio_mode = "auto"` is set in
+`pyproject.toml`, so a bare `async def test_` works):
+
+```python
+async def test_a_bounded_eviction_checkpoint_logs_skipped_not_error(
+    pg_session_factory, tmp_path, caplog
+):
+    """make_checkpoint_on_evict reaches the commit mutex INDIRECTLY, through
+    checkpoint_artifact, which is why the slice's site inventory — built from
+    direct acquire_commit_mutex* call sites — missed it.
+
+    Its benign arm catches (GitCommitError, CommitMutexTimeout, WorkspaceDeleted)
+    by TYPE. A bounded tail raises a raw OperationalError, so before this fix
+    ordinary row contention on room eviction logged an ERROR with a full
+    traceback instead of the benign 'skipped' WARNING.
+
+    Contends the collab_artifact_state row advance_checkpoint updates — NOT the
+    workspace row, whose only reader here is a plain SELECT that takes no lock.
+    """
+    wid = _mk(pg_session_factory, tmp_path, "c3-evict@ki.se", "## Background\n\nedited.\n")
+    on_evict = make_checkpoint_on_evict(pg_session_factory, str(tmp_path), wid, "draft")
+
+    release, t = _hold_state_row(pg_session_factory, wid)
+    try:
+        with caplog.at_level(logging.WARNING):
+            await on_evict(None)
+    finally:
+        release.set()
+        t.join(timeout=30)
+
+    events = [r.__dict__.get("event") for r in caplog.records]
+    assert "collab_checkpoint_on_evict_skipped" in events, (
+        f"a bounded eviction checkpoint should log the benign skip; got {events}"
+    )
+    assert "collab_checkpoint_on_evict_error" not in events, (
+        "routine row contention logged an ERROR with a traceback — this is the "
+        "regression Slice C3 introduced at the 14th, indirect mutex site"
+    )
+```
+
+Add `import logging` and
+`from call_manager.proposal_assist.collab.permissions import make_checkpoint_on_evict`
+to that file's imports, at the top.
+
+**Mutation:** revert the merged clause to the original two clauses, md5-verified, and confirm the
+new test fails asserting the ERROR was logged. Restore and confirm the hash matches.
+
+```bash
+uv run pytest tests/proposal_assist/collab/test_collab_checkpoint_scan.py -q ; echo "PYTEST_EXIT=$?"
+```
+
+- [ ] **Step 2d: Sweep the false WebSocket claim, and pin the 503 detail**
+
+Task 4 established, and the controller verified in the installed Starlette source, that
+`starlette/_exception_handler.py`'s `wrap_app_handling_exceptions` does **not** branch on
+`scope["type"]` — it builds `conn` as a `Request` or a `WebSocket` and runs the registered
+handler either way. So the claim "a WebSocket has no status code / the app handler cannot reach
+a WebSocket" is false. What is true is that all the handler can emit there is a denial response
+on an already-accepted socket, which no browser client can see or retry on.
+
+Task 4 corrected the one comment it owned. Three more copies survive, plus the spec:
+
+| File | What to fix |
+| --- | --- |
+| `src/call_manager/proposal_assist/web/collab_ws.py:161` | the pre-existing `CommitMutexTimeout` comment, which now contradicts the corrected arm 11 lines above it |
+| `src/call_manager/proposal_assist/collab/hydrate.py:53` | same claim in the do-not-catch rationale |
+| `tests/proposal_assist/collab/test_collab_ws_retire_route.py:100` | the 1013 test's docstring, which contradicts its own sibling 30 lines below |
+| `docs/superpowers/specs/2026-08-15-slice-c3-mutex-tail-bounding-design.md` §4.2 | already corrected by the controller in spec revision 5 — verify, do not re-edit |
+
+Keep each argument intact; only the mechanism clause is wrong. "The app handler cannot reach it"
+becomes "the app handler reaches it but can only emit a denial response on an already-accepted
+socket, which the client cannot act on".
+
+Then pin the 503 holdout's detail. `test_the_collab_checkpoint_route_still_answers_503_not_the_new_429`
+asserts only `status_code == 503`, and that route has a **second** 503 (`GitCommitError`,
+`collab_checkpoint.py:62`). Unreachable in that test today, but the assertion should name which
+503 it means. Add, after the existing status assertion:
+
+```python
+    assert resp.json()["detail"] == BUSY_ERROR_MESSAGE, (
+        "this must be the MUTEX holdout's 503, not the route's GitCommitError 503"
+    )
+```
+
+`BUSY_ERROR_MESSAGE` is already imported in that test file — check before adding it.
+
 - [ ] **Step 3: Run the full acceptance set**
 
 ```bash

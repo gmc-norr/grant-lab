@@ -1,10 +1,20 @@
 # Slice C3 — bounding the mutex-held tail at the root
 
 Date: 2026-08-15
-Status: approved (design), revision 4
+Status: approved (design), revision 5
 
 ## Revisions
 
+- revision 5 (2026-08-15, found during execution): two corrections, both from things reviewers
+  and implementers caught that this spec asserted without checking. (a) 4.2 claimed the
+  app-level handler "cannot help: a WebSocket has no HTTP status". **False.** Starlette's
+  `_exception_handler.py` never branches on `scope["type"]` -- it builds `conn` as a `Request`
+  or a `WebSocket` and runs the registered handler either way, then awaits whatever response it
+  returns. The handler DOES run; what it emits on an already-accepted socket is a denial
+  response no browser client can see or act on. The conclusion (the route needs its own arm ->
+  1013) is unchanged and stronger. (b) The site inventory was built by enumerating **direct**
+  `acquire_commit_mutex*` call sites, so it was blind to every site that reaches the mutex
+  indirectly. `collab/permissions.py:61` is one -- see 4.3.
 - revision 4 (2026-08-15, user review of the plan): five corrections, all found by reading the
   code the plan pointed at. (a) 8's kernel bullet still described the behaviour revision 2
   withdrew. (b) The clean-list gate covered two lists; there are **three** -- it missed
@@ -194,8 +204,10 @@ INSERTs the hydration seed and COMMITs. That INSERT takes an FK parent lock on `
 a concurrent holder of that row now produces a 55P03 from inside hydration. It propagates out
 through `MANAGER.acquire`'s `load` callback to the WebSocket route, whose except list at
 `collab_ws.py:123-133` is `(WorkspaceRetired, WorkspaceDeleted)` and `CommitMutexTimeout` --
-none of which matches. The result today would be close code 1011 plus a traceback for routine
-contention, and 5's handler cannot help: a WebSocket has no HTTP status.
+none of which matches. And 5's handler, contrary to what revision 4 of this spec claimed,
+DOES run here -- Starlette dispatches registered handlers in the websocket scope exactly as in
+the http scope -- but all it can emit on an already-accepted socket is a denial response the
+browser client can neither read nor retry on. So the route must answer for itself.
 **Decision:** `collab_ws` gains an `OperationalError` arm that maps a lock timeout to the same
 1013 (try again later) its `CommitMutexTimeout` arm already uses, and re-raises anything else.
 Same animal, same answer.
@@ -207,7 +219,28 @@ app handler would turn a routine read into a 429, which is exactly what the defe
 prevent. **Decision:** `flip` catches it and defers identically.
 
 Both use one shared classifier, `is_lock_timeout(exc)`, added beside the mutex in `locking.py`
-so the SQLSTATE check is written once instead of a fourth and fifth time. `acquire_commit_mutex`
+so the SQLSTATE check is written once instead of a fourth and fifth time.
+
+### 4.3 The inventory missed every INDIRECT site
+
+The 13-site table above was produced by grepping for `acquire_commit_mutex*` call sites. That
+method cannot see a caller that reaches the mutex through something else, and at least one does:
+`make_checkpoint_on_evict` (`collab/permissions.py:61`) calls `checkpoint_artifact`, which takes
+the mutex.
+
+Its benign arm catches `(GitCommitError, CommitMutexTimeout, WorkspaceDeleted)` by type and logs
+a `collab.checkpoint_on_evict_skipped` WARNING. A bounded tail's raw `OperationalError` falls
+past it to `except Exception`, which logs at ERROR **with a traceback** -- for ordinary row
+contention during room eviction. Nothing corrupts (both arms roll back and swallow), but routine
+contention becomes error-level noise in a log this team actually reads.
+
+A sweep of all 23 `except CommitMutexTimeout` sites in `src/` confirms this is the only
+uncovered one: the HTTP routes are all answered by 5's handler, three of the
+`tools/citations.py` sites are deleted in 6, its fourth is retiring, and `flip`/`collab_ws`
+are handled in 4.2. **Decision:** merge the two `except` clauses into one that chooses WARNING
+vs ERROR via `is_lock_timeout`, rather than adding an `except OperationalError` arm -- a
+`raise` from a sibling clause escapes the `try` entirely instead of falling through, which would
+change what a real database failure does here. `acquire_commit_mutex`
 itself is rewired onto it, so there is exactly one definition of "this is a lock timeout" in the
 tree.
 
