@@ -22,9 +22,9 @@ class AnchorError(ValueError):
 #            but the regex floor is 6)
 MARKER_RE = re.compile(r"\[@(?P<citekey>[A-Za-z0-9_-]+)\]<!-- ev:(?P<ev_id>ev-[0-9a-f]{6,}) -->")
 
-# Anchored validators so callers can't create un-removable markers.
-# CITEKEY_RE is the single canonical citekey alphabet — exported so other modules
-# (e.g. the rename tool) validate against the SAME compiled pattern.
+# Anchored validators so callers can't create markers that MARKER_RE would then
+# fail to match (which would make them invisible to find_markers and to composed
+# export). CITEKEY_RE is the single canonical citekey alphabet.
 CITEKEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _EV_ID_RE = re.compile(r"^ev-[0-9a-f]{6,}$")
 
@@ -97,51 +97,6 @@ def insert_marker(text: str, anchor: str, citekey: str, ev_id: str) -> str:
         raise AnchorError(f"anchor is ambiguous (found {len(occurrences)} times)")
     idx = occurrences[0] + len(anchor)
     return text[:idx] + build_marker(citekey, ev_id) + text[idx:]
-
-
-def remove_marker(text: str, ev_id: str) -> tuple[str, bool]:
-    """Remove the marker whose ev id equals *ev_id*.
-
-    Returns ``(new_text, removed)`` where *removed* is ``True`` when the
-    marker was found and deleted, ``False`` when it was not present.
-    The marker is replaced with an empty string; surrounding whitespace in the
-    original text is left as-is (callers may normalise if needed).
-    """
-    removed = False
-
-    def _sub(m: re.Match) -> str:
-        nonlocal removed
-        if m.group("ev_id") == ev_id:
-            removed = True
-            return ""
-        return m.group(0)
-
-    new_text = MARKER_RE.sub(_sub, text)
-    return new_text, removed
-
-
-def rename_marker_citekey(text: str, old_citekey: str, new_citekey: str) -> tuple[str, int]:
-    """Rewrite the citekey of every marker whose citekey equals *old_citekey*.
-
-    Each marker's ev id is preserved. Returns ``(new_text, count_rewritten)``
-    where *count_rewritten* is 0 when *old_citekey* was not present.
-
-    Raises :class:`ValueError` if ``new_citekey`` does not match the allowed
-    citekey pattern (prevents creating un-removable markers).
-    """
-    if not CITEKEY_RE.match(new_citekey):
-        raise ValueError(f"invalid citekey {new_citekey!r}")
-    count = 0
-
-    def _sub(m: re.Match) -> str:
-        nonlocal count
-        if m.group("citekey") == old_citekey:
-            count += 1
-            return build_marker(new_citekey, m.group("ev_id"))
-        return m.group(0)
-
-    new_text = MARKER_RE.sub(_sub, text)
-    return new_text, count
 
 
 # A visible citekey marker NOT followed by the canonical ev-comment. Users

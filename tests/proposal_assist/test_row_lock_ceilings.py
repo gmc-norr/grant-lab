@@ -54,11 +54,13 @@ The two ceilings, in decreasing hardness
    up is a 429 with nothing deleted, which is why the prefix's cap still governs
    whether the owner's DELETE succeeds.
 
-MAX_CONTENDED_ROWS = 2 — the MAXIMUM across the families, applied uniformly
---------------------------------------------------------------------------
+MAX_CONTENDED_ROWS = 2 — derived for the row_locks families, a backstop for the rest
+-----------------------------------------------------------------------------------
 It is one number, not a per-family table, and every cap below is multiplied by
-it. Read it as "no bounded transaction in these families contends for more than
-two rows", derived per family from the code:
+it. For the three families it was derived from it reads as "no bounded
+transaction here contends for more than two rows"; for the mutex-tail family it
+is a generic backstop that UNDER-counts (see below). Derived per family from the
+code:
 
 * PASS_PREFIX: TWO — the `workspaces` row `FOR UPDATE` plus that pass's own job
   row (e.g. `coherence/pass_runner.py`), held to COMMIT.
@@ -71,6 +73,46 @@ two rows", derived per family from the code:
   a tight derivation. That is conservative in the safe direction: the ceilings
   hold a cap to a SMALLER value than its own stack requires. Do not "correct" it
   down to one — that weakens the assertion for the family this slice added.
+* MUTEX_TAIL: MORE THAN TWO, and the number is not derived. Read the paragraph
+  below before trusting `MAX_CONTENDED_ROWS x MUTEX_TAIL_LOCK_TIMEOUT_SECONDS`
+  as this family's worst case — it is a floor, not a bound.
+
+Where the multiplier UNDER-counts: the mutex tail
+-------------------------------------------------
+`MUTEX_TAIL_LOCK_TIMEOUT_SECONDS` (Slice C3) is the cap left in force for the
+REST of a mutex-held transaction, so its "family" is not one call site with a
+countable lock stack — it is every row every mutex-held writer touches after it
+wins the mutex. Two is a generic backstop reused from the `row_locks` families
+above; it was never derived for this one, and it does not hold.
+
+The DELETE route is the clearest counter-example. `soft_delete_workspace_db`
+runs, inside ONE mutex-held transaction: the `workspaces` UPDATE, then
+`cancel_coherence_jobs_for_workspace`, `cancel_evaluator_jobs_for_workspace`,
+`cancel_review_runs_and_items_for_workspace`,
+`cancel_uncited_claims_jobs_for_workspace`, and a `turn_jobs` cancel — each an
+`UPDATE ... WHERE status IN (...)` taking those rows' locks, plus the
+`WorkspaceEvent(actor_id=...)` insert each `record_terminal_outcome` call makes
+(`turns/outcomes.py`), taking a FK parent lock on `users`. Six-plus distinct row
+families, each carrying its own 2s per-acquisition cap, so the true worst case
+is 12s+ and not the 4.0s the arithmetic below computes.
+`post_lock_spec`/`post_unlock_spec` reach three; `kernel_accept_prose` reaches
+four to five.
+
+This is accepted, not overlooked. Every one of those waits was UNBOUNDED before
+Slice C3: a single wedged writer pinned the mutex-held transaction forever, and
+with it every other writer for that workspace. 12s+ of worst-case stall is
+strictly better arithmetic than no bound at all. What changed on this file is
+its COMPLETENESS, not its truth — the ceiling it enforces is still a real
+ceiling on the cap, it simply stopped covering a family's whole stack the moment
+it began governing that family.
+
+The real fix is the one already named under "Not proven here" below: a
+transaction-wide deadline, so a mutex-held transaction has ONE budget instead of
+N independent per-acquisition caps. That is a design change, out of scope here.
+Do NOT close the gap by lowering `MAX_CONTENDED_ROWS` or the tail cap — the caps
+are already the shortest thing that lets ordinary contention succeed, and
+shrinking them buys a tighter number on paper at the price of routine writes
+failing more often.
 
 The member routes' inserts also take `FOR KEY SHARE` on their `users` FK parents
 (`WorkspaceViewer.user_id`), and the rubric routes' `WorkspaceEvent.actor_id`

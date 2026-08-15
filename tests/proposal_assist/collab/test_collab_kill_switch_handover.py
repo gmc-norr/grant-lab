@@ -1,6 +1,7 @@
 """3b-5d.D4 §3.2: the drain-then-truncate handover makes git the SOLE canonical
 store while the kill-switch is engaged — closing BOTH clobber directions."""
 
+import logging
 import subprocess
 from pathlib import Path
 
@@ -173,6 +174,41 @@ def test_repoless_log_is_never_truncated(pg_session_factory, tmp_path):
     assert handover.run_kill_switch_handover(pg_session_factory, workspaces_dir=str(tmp_path)) == 0
     with pg_session_factory() as s:
         assert _log_len(s, wid) == 1
+
+
+def test_repoless_failure_logs_error_with_traceback(pg_session_factory, tmp_path, caplog):
+    """The non-benign arm (a real fault — here the repo-less RuntimeError raised
+    at handover.py:51) must still log `collab_kill_switch_handover_failed` at
+    ERROR with its traceback attached. `benign = isinstance(...) or
+    is_lock_timeout(exc)` is the only thing keeping a REAL failure (this one, or
+    a GitCommitError) off the WARNING arm meant for routine row contention; this
+    pins that a broken/degraded `benign` check (e.g. `benign = True`) cannot
+    silently downgrade every handover failure on the emergency-brake path whose
+    whole job is data integrity. `logging` stores a suppressed `exc_info` as
+    `False`, not `None`, so assert on truthiness rather than `is not None`."""
+    with pg_session_factory() as s:
+        o = make_user(s, email="ho-err@ki.se")
+        ws = make_workspace(s, owner=o)
+        state.enable_collab(s, workspace_id=ws.id, artifact="draft")
+        s.commit()
+        wid, oid = ws.id, o.id
+    _seed_room_edit(pg_session_factory, wid, oid, "## X\n\norphan edit.\n")  # NO repo on disk
+
+    with caplog.at_level(logging.WARNING):
+        n = handover.run_kill_switch_handover(pg_session_factory, workspaces_dir=str(tmp_path))
+    assert n == 0
+
+    events = [r.__dict__.get("event") for r in caplog.records]
+    failed = [
+        r for r in caplog.records if r.__dict__.get("event") == "collab_kill_switch_handover_failed"
+    ]
+    assert len(failed) == 1, f"expected exactly one ERROR handover-failed log; got events {events}"
+    rec = failed[0]
+    assert rec.levelno == logging.ERROR
+    assert rec.exc_info, "the non-benign arm must keep its traceback"
+    assert "collab_kill_switch_handover_skipped" not in events, (
+        "a real fault must not also log the benign WARNING"
+    )
 
 
 def test_handover_drains_table_to_bordered_gfm(pg_session_factory, tmp_path):

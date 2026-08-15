@@ -54,6 +54,30 @@ async def save_version(
                 )
                 s.commit()
             except CommitMutexTimeout as exc:
+                # TWO statuses for one user-visible condition on this one route,
+                # recorded here because nothing else records it:
+                #   * failing to ACQUIRE the mutex (this arm)          -> 503
+                #   * a bounded mutex-held TAIL giving up (55P03),
+                #     answered centrally by main.py's OperationalError
+                #     handler, which never sees this exception class   -> 429
+                # Both mean "another writer holds the workspace; retry" — but a
+                # caller cannot tell that from the response: this is an /api
+                # route, so main.py's StarletteHTTPException handler replaces
+                # the body of every >= 500 response with the fixed internal_error
+                # envelope, and BUSY_ERROR_MESSAGE never reaches the wire; the
+                # 429 carries {"code": "too_many_requests", "message":
+                # BUSY_ERROR_MESSAGE} plus Retry-After: 2. Status, envelope
+                # code, message AND Retry-After all differ.
+                #
+                # It exists because this route is the documented 503 holdout (see
+                # CommitMutexTimeout's docstring in drafting/locking.py — every
+                # other route answers 429 + Retry-After: 2) while the tail path
+                # was added centrally by Slice C3 and cannot know about the
+                # holdout. Left as-is deliberately: the 503 is pinned by
+                # tests/proposal_assist/test_mutex_tail_bound.py's
+                # test_the_collab_checkpoint_route_still_answers_503_not_the_new_429,
+                # so aligning the two is a behaviour change for its own slice —
+                # this comment only records that the split is known, not accidental.
                 raise HTTPException(status_code=503, detail=BUSY_ERROR_MESSAGE) from exc
             except GitCommitError as exc:
                 # A genuine git failure while committing (a repo-less workspace
