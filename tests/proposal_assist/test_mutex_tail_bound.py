@@ -131,3 +131,89 @@ def test_a_nested_acquire_does_not_wipe_the_bound(pg_session_factory, current_us
     finally:
         release.set()
         t.join(timeout=30)
+
+
+def test_acquire_commit_mutex_reapplies_the_tail_cap_after_the_advisory_lock():
+    """The DB gates prove the tail is BOUNDED; this proves it is bounded at OUR
+    constant.
+
+    Deleting the tail statement leaves both DB gates green, because the ACQUISITION
+    `SET LOCAL lock_timeout` (10s) is issued BEFORE pg_advisory_xact_lock and
+    persists for the transaction — a 10s wait still raises 55P03 inside the gates'
+    30s holder window. And the ceilings test is static arithmetic over the constant,
+    so it cannot notice the constant no longer being applied.
+
+    Structural on purpose: it asserts the DECISION (a second SET LOCAL, after the
+    lock, deriving from MUTEX_TAIL_LOCK_TIMEOUT_SECONDS) rather than a timing, so it
+    cannot go flaky and cannot be satisfied by the acquisition cap standing in.
+
+    AST nodes only — no regex or substring scan over source text. Reading a parsed
+    Constant's `.value` is node inspection; scanning the file's characters is not.
+    """
+    import ast
+    import inspect
+
+    from call_manager.proposal_assist.drafting import locking
+
+    tree = ast.parse(inspect.getsource(locking))
+    fn = next(
+        n for n in tree.body
+        if isinstance(n, ast.FunctionDef) and n.name == "acquire_commit_mutex"
+    )
+
+    def _literal_prefix(node):
+        """The leading literal text of a Constant or JoinedStr argument."""
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.JoinedStr):
+            parts = []
+            for v in node.values:
+                if isinstance(v, ast.Constant) and isinstance(v.value, str):
+                    parts.append(v.value)
+                else:
+                    break
+            return "".join(parts)
+        return ""
+
+    set_locals = []
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Call):
+            continue
+        if not (isinstance(node.func, ast.Attribute) and node.func.attr == "execute"):
+            continue
+        if not node.args:
+            continue
+        inner = node.args[0]
+        if not (
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Name)
+            and inner.func.id == "text"
+            and inner.args
+        ):
+            continue
+        if _literal_prefix(inner.args[0]).startswith("SET LOCAL lock_timeout"):
+            set_locals.append((node.lineno, inner.args[0]))
+
+    assert len(set_locals) == 2, (
+        f"expected exactly two `SET LOCAL lock_timeout` statements in "
+        f"acquire_commit_mutex (the acquisition cap, then the tail cap), found "
+        f"{len(set_locals)} at lines {[ln for ln, _ in set_locals]}. Deleting the "
+        f"tail statement leaves every DB gate green — the 10s acquisition cap "
+        f"stands in for it — so this count is the only thing guarding it."
+    )
+
+    try_node = next(n for n in fn.body if isinstance(n, ast.Try))
+    (first_line, _), (tail_line, tail_arg) = sorted(set_locals)
+    assert first_line < try_node.lineno < tail_line, (
+        "the tail cap must be re-applied AFTER the advisory-lock try block, not "
+        "before it — set before, it is just the acquisition cap under another name"
+    )
+
+    names = {n.id for n in ast.walk(tail_arg) if isinstance(n, ast.Name)}
+    assert "MUTEX_TAIL_LOCK_TIMEOUT_SECONDS" in names, (
+        f"the tail cap must derive from MUTEX_TAIL_LOCK_TIMEOUT_SECONDS, not from "
+        f"{sorted(names) or 'a hardcoded literal'}. Deriving it from "
+        f"timeout_seconds would silently make the tail cap follow each caller's "
+        f"ACQUISITION budget (10s, or 5s at flip/hydrate) instead of the 2s the "
+        f"ceilings test governs."
+    )
