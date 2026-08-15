@@ -128,6 +128,7 @@ import re
 from pathlib import Path
 
 from call_manager.proposal_assist import retirement, row_locks
+from call_manager.proposal_assist.drafting import locking
 from call_manager.workspaces import soft_delete_workspace_db
 
 # The LARGEST number of CONTENDED rows any single bounded transaction in these
@@ -150,6 +151,7 @@ _BUDGET_RE = re.compile(r"assert elapsed < ([0-9]+(?:\.[0-9]+)?)")
 _MUTEX_HELD_CAPS = {
     "SETUP_JOB_LOCK_TIMEOUT_SECONDS": row_locks.SETUP_JOB_LOCK_TIMEOUT_SECONDS,
     "WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS": row_locks.WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS,
+    "MUTEX_TAIL_LOCK_TIMEOUT_SECONDS": locking.MUTEX_TAIL_LOCK_TIMEOUT_SECONDS,
 }
 _ALL_CAPS = {
     **_MUTEX_HELD_CAPS,

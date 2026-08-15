@@ -8,10 +8,18 @@ file holds the gates for the fix.
 
 from __future__ import annotations
 
+import threading
+
+import pytest
 from fastapi import FastAPI
 from sqlalchemy.exc import OperationalError
 
-from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE
+from call_manager.db.models import Workspace
+from call_manager.proposal_assist.drafting.locking import (
+    BUSY_ERROR_MESSAGE,
+    acquire_commit_mutex_live,
+)
+from tests.proposal_assist.conftest import make_workspace
 
 
 class _Orig(Exception):
@@ -49,3 +57,77 @@ def test_a_non_lock_OperationalError_is_still_a_500(_app, client_authed_owner):
     resp = client_authed_owner.get("/api/_c3_probe")
     assert resp.status_code == 500, resp.text
     assert resp.json()["error"]["code"] == "internal_error"
+
+
+def _hold_workspace_row(pg_session_factory, ws_id):
+    """Hold the `workspaces` row FOR UPDATE taking NO mutex — the shape the four
+    background pass prefixes really have (row_locks.py:71-77)."""
+    holding, release = threading.Event(), threading.Event()
+
+    def _holder():
+        with pg_session_factory() as s:
+            s.get(Workspace, ws_id, with_for_update=True)
+            holding.set()
+            release.wait(timeout=30)
+            s.rollback()
+
+    t = threading.Thread(target=_holder)
+    t.start()
+    assert holding.wait(timeout=5), "the holder never took the workspaces row"
+    return release, t
+
+
+def test_the_tail_after_the_mutex_is_bounded(pg_session_factory, current_user):
+    """The core invariant. A transaction that has WON the mutex must not wait
+    forever on a row: before this slice `lock_timeout` was restored to DEFAULT
+    (disabled) at locking.py:207, so this call never returned.
+
+    Asserted as "it raised", never as elapsed time — without the bound the
+    statement does not return at all, so a hung thread IS the failure.
+    """
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.commit()
+        ws_id = ws.id
+
+    release, t = _hold_workspace_row(pg_session_factory, ws_id)
+    try:
+        with pg_session_factory() as s:
+            acquire_commit_mutex_live(s, ws_id)
+            with pytest.raises(OperationalError) as exc:
+                s.get(Workspace, ws_id, with_for_update=True)
+            sqlstate = getattr(exc.value.orig, "sqlstate", None)
+            assert sqlstate == "55P03", f"expected a lock timeout, got {sqlstate}"
+            s.rollback()
+    finally:
+        release.set()
+        t.join(timeout=30)
+
+
+def test_a_nested_acquire_does_not_wipe_the_bound(pg_session_factory, current_user):
+    """THE decisive gate. `checkpoint_artifact` re-acquires the same mutex
+    mid-tail (kernel.py:202-204 documents the re-entrancy), and the old code
+    re-ran `SET LOCAL lock_timeout = DEFAULT` there — erasing any bound its
+    caller had established. Ten call sites reach checkpoint_artifact.
+
+    If this test passes while `test_the_tail_after_the_mutex_is_bounded` also
+    passes, the fix survives nesting. Mutation: restore the DEFAULT line and this
+    must fail.
+    """
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.commit()
+        ws_id = ws.id
+
+    release, t = _hold_workspace_row(pg_session_factory, ws_id)
+    try:
+        with pg_session_factory() as s:
+            acquire_commit_mutex_live(s, ws_id)
+            acquire_commit_mutex_live(s, ws_id)  # re-entrant, as checkpoint does
+            with pytest.raises(OperationalError) as exc:
+                s.get(Workspace, ws_id, with_for_update=True)
+            assert getattr(exc.value.orig, "sqlstate", None) == "55P03"
+            s.rollback()
+    finally:
+        release.set()
+        t.join(timeout=30)

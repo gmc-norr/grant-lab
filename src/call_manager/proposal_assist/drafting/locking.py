@@ -146,6 +146,25 @@ class CommitMutexTimeout(RuntimeError):
 BUSY_ERROR_MESSAGE = "workspace is busy — try again in a moment"
 
 
+# The cap left in force for the REST of a mutex-held transaction, applied by
+# acquire_commit_mutex once it has won the lock. PostgreSQL's own default is 0 =
+# disabled, and this line used to restore exactly that — which is why every lock
+# wait after the mutex was unbounded while the transaction held the mutex every
+# other writer for that workspace needs.
+#
+# Why 2: `lock_timeout` is a PER-ACQUISITION cap, and a mutex-held transaction may
+# wait on up to MAX_CONTENDED_ROWS = 2 distinct rows, against the two-thirds of
+# the DELETE route's asserted 6.0s budget that lock stalls may consume (4.0s).
+# 2 x 2 = 4.0. tests/proposal_assist/test_row_lock_ceilings.py enforces that
+# arithmetic and parses the budget out of the DELETE test rather than restating
+# it, so this number cannot drift away from its derivation silently.
+#
+# It matches every other mutex-held cap in the tree (row_locks.py's three,
+# analysis/queue.py:41, phases/setup.py:136), so the six workspace_write routes
+# keep setting the same value they already set.
+MUTEX_TAIL_LOCK_TIMEOUT_SECONDS = 2
+
+
 class WorkspaceDeleted(RuntimeError):
     """The workspace was soft-deleted, observed UNDER the commit mutex.
 
@@ -214,14 +233,25 @@ def acquire_commit_mutex(
         # real connection/server problem — re-raise unchanged. No SET LOCAL
         # restore here: the transaction is already aborted; the caller's
         # rollback discards the LOCAL setting along with everything else.
-        sqlstate = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
-        if sqlstate == "55P03":
+        if is_lock_timeout(exc):
             raise CommitMutexTimeout(str(workspace_id)) from exc
         raise
-    # Restore the default for the rest of the transaction's statements (only
-    # reachable on success — after a timeout the txn is aborted and this
-    # statement would itself fail).
-    session.execute(text("SET LOCAL lock_timeout = DEFAULT"))
+    # Leave a BOUND in force for the rest of the transaction, rather than the
+    # DEFAULT (= 0 = disabled) this used to restore. Only reachable on success —
+    # after a timeout the txn is aborted and this statement would itself fail.
+    #
+    # This is Slice C3's entire mechanism. Restoring DEFAULT here un-bounded every
+    # lock wait at all 27 mutex call sites, while the transaction held the mutex
+    # every other writer for that workspace needs; one stuck row lock blocked the
+    # owner's DELETE indefinitely. Replacing rather than deleting the statement is
+    # what makes it nesting-proof: checkpoint_artifact re-acquires this same mutex
+    # mid-tail (a re-entrant no-op for the lock), and with a restore it wiped its
+    # caller's bound — with a re-applied cap there is nothing left to wipe.
+    #
+    # The resulting 55P03 is mapped to 429 + Retry-After: 2 by main.py's
+    # OperationalError handler, centrally, because two sites already commit
+    # outside their try block and a local clause would miss them.
+    session.execute(text(f"SET LOCAL lock_timeout = '{MUTEX_TAIL_LOCK_TIMEOUT_SECONDS * 1000}ms'"))
 
 
 def acquire_commit_mutex_live(
