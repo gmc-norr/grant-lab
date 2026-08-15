@@ -54,6 +54,7 @@ from call_manager.proposal_assist.drafting.locking import (
     acquire_commit_mutex,
     commit_mutex_key,
 )
+from call_manager.proposal_assist.web import _writes as writes_module
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
@@ -148,12 +149,21 @@ def test_the_blocking_probe_actually_observes_a_lock_wait(pg_session_factory, cu
 def patch_route_mutex_timeout(monkeypatch, module, seconds: int = 1) -> None:
     """Pin a short mutex timeout for one route module. We are exercising the
     route's error mapping, not the production timeout value, and the 10s default
-    would stall the suite."""
-    monkeypatch.setattr(
-        module,
-        "acquire_commit_mutex_live",
-        functools.partial(module.acquire_commit_mutex_live, timeout_seconds=seconds),
-    )
+    would stall the suite.
+
+    Patches BOTH the route module and `_writes`, tolerating the name's absence on
+    either, because the routes migrate one commit at a time: before a route moves
+    it calls `acquire_commit_mutex_live` itself; afterwards `workspace_write`
+    does. `module` is retained so each caller still names the module under test.
+    """
+    for target in (module, writes_module):
+        current = getattr(target, "acquire_commit_mutex_live", None)
+        if current is not None:
+            monkeypatch.setattr(
+                target,
+                "acquire_commit_mutex_live",
+                functools.partial(current, timeout_seconds=seconds),
+            )
 
 
 def straddle_delete(pg_session_factory, ws_id, send):
