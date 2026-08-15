@@ -9,6 +9,7 @@ file holds the gates for the fix.
 from __future__ import annotations
 
 import functools
+import logging
 import threading
 
 import pytest
@@ -42,25 +43,83 @@ def _probe_app(app: FastAPI, sqlstate: str) -> None:
         raise OperationalError("SELECT 1", {}, _Orig(sqlstate))
 
 
-def test_a_lock_timeout_becomes_the_same_429_envelope_the_routes_emit(_app, client_authed_owner):
+def _handler_records(caplog):
+    """Only the records this handler emitted. Filtering by logger name keeps an
+    unrelated WARNING from SQLAlchemy or httpx out of the counts below."""
+    return [r for r in caplog.records if r.name == "call_manager.main"]
+
+
+def test_a_lock_timeout_becomes_the_same_429_envelope_the_routes_emit(
+    _app, client_authed_owner, caplog
+):
     """Byte-parity with the routes' own 429: code `too_many_requests`, the shared
-    busy message, and Retry-After: 2."""
+    busy message, and Retry-After: 2.
+
+    Plus the discoverability half. This 429 is the only signal that the 2s tail cap
+    gave up — flip.py defers silently, collab_ws closes 1013 silently — so if the
+    cap proves too tight in production a log line is the only server-side way to
+    find out. It must be a WARNING (routine contention, not a fault) and must NOT
+    also log at ERROR, or every timeout pages someone.
+    """
     _probe_app(_app, "55P03")
-    resp = client_authed_owner.get("/api/_c3_probe")
+    with caplog.at_level(logging.WARNING, logger="call_manager.main"):
+        # The query string is deliberate: the handler must log the PATH and not
+        # the query string (nor the body), so this marker must not appear.
+        resp = client_authed_owner.get("/api/_c3_probe", params={"q": "MUST-NOT-BE-LOGGED"})
     assert resp.status_code == 429, resp.text
     assert resp.headers.get("Retry-After") == "2"
     body = resp.json()
     assert body["error"]["code"] == "too_many_requests"
     assert body["error"]["message"] == BUSY_ERROR_MESSAGE
 
+    records = _handler_records(caplog)
+    assert records, (
+        "the 429 arm logged nothing: nothing else in the tree records a mutex-tail "
+        "give-up, so a too-tight cap would be undiscoverable in production"
+    )
+    assert [r.levelno for r in records] == [logging.WARNING], (
+        f"routine contention must be exactly one WARNING, got {[r.levelname for r in records]}"
+    )
+    (rec,) = records
+    assert getattr(rec, "path", None) == "/api/_c3_probe", (
+        "the warning must name the request path — a 429 with no path is not actionable"
+    )
+    assert "MUST-NOT-BE-LOGGED" not in rec.getMessage() + repr(sorted(rec.__dict__.items())), (
+        "the handler logged the query string; log the path only"
+    )
 
-def test_a_non_lock_OperationalError_is_still_a_500(_app, client_authed_owner):
+
+def test_a_non_lock_OperationalError_is_still_a_500(_app, client_authed_owner, caplog):
     """The handler must not swallow real database failures. 08006 is
-    connection_failure — nothing to do with contention."""
+    connection_failure — nothing to do with contention.
+
+    "Not swallow" includes the TRACEBACK. Registering a handler for a class other
+    than `Exception` routes it through Starlette's ExceptionMiddleware, which does
+    not re-raise — and the catch-all's re-raise (via ServerErrorMiddleware) is what
+    made uvicorn print the traceback. So this handler must log it itself, with
+    exc_info, or a connection loss / restart / 40P01 deadlock / ENOSPC becomes a
+    500 with no trace anywhere.
+    """
     _probe_app(_app, "08006")
-    resp = client_authed_owner.get("/api/_c3_probe")
+    with caplog.at_level(logging.WARNING, logger="call_manager.main"):
+        resp = client_authed_owner.get("/api/_c3_probe")
     assert resp.status_code == 500, resp.text
     assert resp.json()["error"]["code"] == "internal_error"
+
+    errors = [r for r in _handler_records(caplog) if r.levelno >= logging.ERROR]
+    assert errors, (
+        "a real database failure returned 500 and logged NOTHING at ERROR — "
+        "this handler took the whole OperationalError class off the catch-all's "
+        "re-raise, which is what used to produce uvicorn's traceback"
+    )
+    assert len(errors) == 1, f"expected exactly one ERROR record, got {len(errors)}"
+    assert errors[0].exc_info is not None, (
+        "logged without exc_info: the message alone is not the traceback the "
+        "catch-all's re-raise used to provide"
+    )
+    assert errors[0].exc_info[0] is OperationalError
+    assert errors[0].exc_info[2] is not None, "exc_info carries no traceback object"
+    assert getattr(errors[0], "path", None) == "/api/_c3_probe"
 
 
 def _hold_workspace_row(pg_session_factory, ws_id):

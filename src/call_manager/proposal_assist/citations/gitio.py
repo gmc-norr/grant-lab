@@ -112,9 +112,16 @@ def write_and_commit_files(
     should treat this identically to the post-commit DB-failure path in
     proposal.py — reconciliation handles the drift (same atomicity model).
 
-    Every failure mode of the forward path — a non-zero git exit, a subprocess
-    timeout, or an ``OSError`` from the writes or from ``cwd=`` — runs the
-    rollback and surfaces as ``GitCommitError``. Nothing else escapes.
+    Once the write loop begins, every failure mode of the forward path — a
+    non-zero git exit, a subprocess timeout, or an ``OSError`` from the writes or
+    from ``cwd=`` — runs the rollback and surfaces as ``GitCommitError``.
+
+    Before that point two things can still raise something else, and both do so
+    with nothing yet modified, so there is nothing to roll back: the argument
+    guards raise ``TypeError``/``ValueError``, and the pre-write ``originals``
+    capture reads each existing file, so it can raise a raw ``OSError``. Callers
+    written against ``GitCommitError`` alone should read that as "the repo is
+    untouched", not as "cannot happen".
 
     Delete semantics (``None`` values) are explicitly out of scope; pass only
     ``str`` content.

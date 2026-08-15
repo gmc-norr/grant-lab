@@ -1,3 +1,4 @@
+import logging
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -73,6 +74,12 @@ from call_manager.web.routes import (
 from call_manager.web.spa_serving import mount_spa
 
 STATIC_DIR = Path(__file__).parent / "web" / "static"
+
+# Module-level, unlike the deferred `import logging as _logging` inside lifespan
+# (those are local to keep the lifespan's import graph lazy). The exception
+# handlers below run per REQUEST, so their logger is bound once here, the way
+# every sibling module does it (workspaces.py, scheduler.py, admin_bootstrap.py).
+_logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -555,9 +562,43 @@ def create_app() -> FastAPI:
         if not is_lock_timeout(exc):
             # A real connection/server failure. Same shape as the catch-all below;
             # deliberately NOT re-raised (see that handler's note on empty bodies).
+            #
+            # Logged HERE, with the traceback, because registering this handler is
+            # what took the whole OperationalError class OFF the logging path.
+            # Starlette routes a handler for `Exception` through
+            # ServerErrorMiddleware, which sends the response and then RE-RAISES —
+            # and that re-raise is precisely how uvicorn emits "Exception in ASGI
+            # application" with a full traceback. A handler for any other class goes
+            # to ExceptionMiddleware, which does not re-raise. So without this line a
+            # connection loss, a server restart, a 40P01 deadlock, a 40001 or ENOSPC
+            # would 500 with no traceback anywhere: this app registers no logging
+            # middleware, and nothing else on the path logs.
+            _logger.error(
+                "db.operational_error",
+                extra={
+                    "event": "db_operational_error",
+                    # Path only — never the query string or the request body.
+                    "path": request.url.path,
+                    "sqlstate": getattr(getattr(exc, "orig", None), "sqlstate", None),
+                },
+                exc_info=True,
+            )
             if api_request(request):
                 return api_error(500, "internal_error", "internal server error")
             return PlainTextResponse("Internal Server Error", status_code=500)
+        # Routine contention, so WARNING rather than ERROR — but it must be
+        # DISCOVERABLE. This 429 is the only signal that the 2s mutex-held tail cap
+        # gave up, and every other site that meets the same timeout is silent about
+        # it (flip.py defers, collab_ws closes 1013, the routes 429). If the cap
+        # proves too tight in production, this line is the server-side way to find
+        # out. Path only — never the query string or the request body.
+        _logger.warning(
+            "mutex_tail.lock_timeout",
+            extra={
+                "event": "mutex_tail_lock_timeout",
+                "path": request.url.path,
+            },
+        )
         if api_request(request):
             return api_error(
                 429, code_for(429), BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}

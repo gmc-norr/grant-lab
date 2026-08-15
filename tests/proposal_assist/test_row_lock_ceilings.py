@@ -125,6 +125,7 @@ deadline), not this arithmetic.
 
 from __future__ import annotations
 
+import importlib
 import inspect
 import re
 from pathlib import Path
@@ -160,26 +161,92 @@ _ALL_CAPS = {
     "PASS_PREFIX_LOCK_TIMEOUT_SECONDS": row_locks.PASS_PREFIX_LOCK_TIMEOUT_SECONDS,
 }
 
-# Deliberately NOT in _MUTEX_HELD_CAPS. gitio's subprocess bound is mutex-held time
-# too, but it is not a LOCK cap and it does not satisfy this file's ceilings: 2 x 30
+# Deliberately NOT in _MUTEX_HELD_CAPS. Both entries are subprocess bounds on git
+# commands that run while the commit mutex is held, so they ARE mutex-held time —
+# but neither is a LOCK cap, and neither satisfies this file's ceilings: 2 x 30
 # exceeds both the 10s acquisition cap and the 6.0s DELETE budget. Slice C3 accepted
 # that (see gitio.py's own comment) because the alternative was unbounded. Listed
-# here so the exclusion is a recorded decision rather than an oversight — if you are
+# here so each exclusion is a recorded decision rather than an oversight — if you are
 # adding a new mutex-held cap, this is the file that governs it.
+#
+# Dotted target -> (the value the exclusion was reasoned about, why it is excluded).
+# The value is kept HERE rather than in the test body so a second entry cannot be
+# added without stating what it is worth.
 _EXCLUDED_FROM_CEILINGS = {
-    "gitio._GIT_TIMEOUT_SECONDS": "subprocess time, not a lock cap; see gitio.py",
+    "call_manager.proposal_assist.citations.gitio._GIT_TIMEOUT_SECONDS": (
+        30.0,
+        "subprocess time, not a lock cap; see gitio.py",
+    ),
+    # setup.py's own copy, with identical exposure: _m1 takes the commit mutex
+    # (setup.py:363) and then runs up to four _run_git calls inside _init_repo while
+    # holding both that mutex and the `workspaces` row FOR UPDATE.
+    "call_manager.proposal_assist.phases.setup._GIT_TIMEOUT_SECONDS": (
+        30.0,
+        "M1's git subprocess time, not a lock cap; mutex-held, same trade as gitio",
+    ),
 }
 
 
 def test_the_ceilings_exclusion_list_is_honest():
     """An exclusion that names a constant which no longer exists is worse than no
-    exclusion at all — it reads as considered when it is stale."""
-    from call_manager.proposal_assist.citations import gitio
+    exclusion at all — it reads as considered when it is stale.
 
-    assert gitio._GIT_TIMEOUT_SECONDS == 30.0, (
-        "the excluded constant moved; re-derive whether the exclusion still holds "
-        "rather than updating this number"
+    Iterates `_EXCLUDED_FROM_CEILINGS` and resolves each entry by import rather than
+    hardcoding one of them: a hardcoded check leaves any LATER entry unguarded, and
+    lets the dict be deleted outright without a test noticing. An entry whose module
+    or attribute cannot be resolved fails here, loudly, as a stale exclusion.
+    """
+    assert _EXCLUDED_FROM_CEILINGS, (
+        "the exclusion list is empty — if every mutex-held cap is now governed by "
+        "the ceilings, say so in the docstring rather than leaving a dead dict"
     )
+    for dotted, (expected, why) in _EXCLUDED_FROM_CEILINGS.items():
+        module_name, _, attr = dotted.rpartition(".")
+        assert module_name and attr, f"exclusion key {dotted!r} is not a dotted target"
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError as exc:  # pragma: no cover - only on a stale exclusion
+            raise AssertionError(
+                f"exclusion {dotted!r} ({why}) names module {module_name!r}, which "
+                f"no longer imports: {exc}. Re-derive whether the exclusion still "
+                f"holds rather than deleting the line."
+            ) from exc
+        assert hasattr(module, attr), (
+            f"exclusion {dotted!r} ({why}) names a constant that no longer exists. "
+            f"Re-derive whether the exclusion still holds rather than deleting the "
+            f"line."
+        )
+        assert getattr(module, attr) == expected, (
+            f"exclusion {dotted!r} ({why}) moved from {expected} to "
+            f"{getattr(module, attr)}; re-derive whether the exclusion still holds "
+            f"rather than updating this number"
+        )
+
+
+def test_no_cap_is_zero_because_zero_is_postgres_for_disabled():
+    """Every cap must be strictly positive, and 0 is the value that matters.
+
+    `SET LOCAL lock_timeout = '0ms'` does not mean "give up immediately" — 0 is
+    PostgreSQL's DISABLED, i.e. wait forever, which is precisely the unbounded tail
+    this slice exists to remove. So a 0 is not a small number that the ceilings
+    above would catch as too large; it sails past both of them (0 x 2 is under every
+    budget) while restoring the exact bug. A reviewer set
+    MUTEX_TAIL_LOCK_TIMEOUT_SECONDS to 0, ran both ceilings tests and the AST gate,
+    and got four passes.
+
+    `acquire_commit_mutex` guards `timeout_ms <= 0` for its PARAMETER
+    (locking.py:222-224), and nothing guarded the constants. This is that guard, DB-
+    free, over every cap this file knows about.
+    """
+    for name, cap in _ALL_CAPS.items():
+        assert cap > 0, (
+            f"{name}={cap}. Zero is not a tight cap: PostgreSQL reads "
+            f"lock_timeout = '0ms' as DISABLED — an UNBOUNDED wait — so this value "
+            f"restores the unbounded mutex-held tail Slice C3 removed while passing "
+            f"every ceiling above (0 x {MAX_CONTENDED_ROWS} is under any budget). A "
+            f"negative is worse still: it fails at the SET LOCAL. If you need a "
+            f"shorter cap, the floor is 1."
+        )
 
 
 def _delete_route_budget_seconds() -> float:
