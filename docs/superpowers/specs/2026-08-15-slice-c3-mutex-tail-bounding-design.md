@@ -1,10 +1,23 @@
 # Slice C3 — bounding the mutex-held tail at the root
 
 Date: 2026-08-15
-Status: approved (design), revision 3
+Status: approved (design), revision 4
 
 ## Revisions
 
+- revision 4 (2026-08-15, user review of the plan): five corrections, all found by reading the
+  code the plan pointed at. (a) 8's kernel bullet still described the behaviour revision 2
+  withdrew. (b) The clean-list gate covered two lists; there are **three** -- it missed
+  `_CLEAN_INIT_SPEC_ERRORS` (`collab_cite.py:44`), which guards a path that commits after
+  mutating the doc. (c) 7's git timeouts had no exception translation:
+  `subprocess.TimeoutExpired` is a sibling of `CalledProcessError`, not a subclass, so adding
+  `timeout=` alone would bypass `write_and_commit_files`' entire restore-and-reset rollback and
+  leak raw out of the read helpers -- strictly worse than the stall it replaces. (d) 4's
+  "Collab, other" row said "verify both" when both in fact need code: a bounded tail raises a
+  raw `OperationalError`, which neither `collab_ws.py`'s close-code mapping nor `flip.py`'s
+  defer arm catches, and no HTTP handler can reach a WebSocket. (e) 8's background-absorption
+  bullet did not say which row to contend on; `acquire_commit_mutex_live`'s liveness read takes
+  no row lock, so the obvious choice does not stall a checkpoint at all.
 - revision 3 (2026-08-15, plan self-review): the constant was named
   `MUTEX_TAIL_LOCK_TIMEOUT_MS` but used in arithmetic denominated in seconds. Renamed to
   `MUTEX_TAIL_LOCK_TIMEOUT_SECONDS`, matching the ceilings test's units and every sibling
@@ -134,7 +147,7 @@ inventory establishes this per class rather than per site.
 | **Background, self-absorbing** | `checkpoint.py:90`, `phases/setup.py:361` | **Nothing.** Both already sit under `except Exception` → rollback + log, with a recovery path: `_fail` (`setup.py:584-641`) requeues to `status='queued'` and dead-letters only at `MAX_SETUP_ATTEMPTS = 5`; `find_checkpoint_candidates` (`store.py:101-127`) re-selects any tail it did not advance. A raise is a retry. |
 | **HTTP, already speaks 429** | `web/api/workspaces.py:648`, `:736`, `turns/submit.py:249`, `workspaces.py:124` | The app-level handler (§5) covers them. Verify each; add nothing local. |
 | **Collab kernel** | `kernel.py:136`, `:208`, `:325`, `:369`, `:443` | **Nothing** — the existing evict path is the correct outcome. See §4.1. |
-| **Collab, other** | `flip.py:60`, `hydrate.py:55` | `flip` already returns `False` on `CommitMutexTimeout`; `hydrate` deliberately refuses to swallow (`hydrate.py:48-54`). Verify both against the new type. |
+| **Collab, other** | `flip.py:60`, `hydrate.py:55` | **Both need code.** Each catches `CommitMutexTimeout` by type; a bounded tail raises a raw `OperationalError`, which walks straight past them. See 4.2. |
 | **Dead** | `tools/citations.py:921`, `:1053`, `:1233` | Deleted (§6). |
 | **Retiring** | `tools/citations.py:802`, `editing/save.py:180`, `citations/human_cite.py:102`, `analysis/insert.py:351`, `web/api/workspaces.py:537` | Flag-off-only; 409 once collab is on. Documented, not individually handled. |
 
@@ -148,6 +161,12 @@ clean, retryable refusal. **That is a correctness bug and is withdrawn.**
 Those lists mean one specific thing, stated at `kernel_accept.py:36-38`: these errors are
 *"raised BEFORE any fragment mutation … Every OTHER exception may have left room.doc mutated
 while the txn rolled back → evict to rebuild from the log."*
+
+There are **three** such lists, not two: `_CLEAN_ACCEPT_ERRORS` (`kernel_accept.py:43`),
+`_CLEAN_CITE_ERRORS` (`collab_cite.py:34`) and `_CLEAN_INIT_SPEC_ERRORS` (`collab_cite.py:44`).
+The third is easy to miss because it is defined ten lines below the second and guards a
+different path -- but its `except` at `collab_cite.py:142` wraps a body that commits after
+mutating the doc, so it is exactly as exposed as the other two. The gate covers all three.
 
 A tail lock timeout can fire on **either side** of the mutation — at `_load_scoped`'s
 `FOR UPDATE` (`kernel.py:210`, `:371`), which is clean, or at `checkpoint_artifact` or the
@@ -163,6 +182,34 @@ indefinitely while pinning the mutex for every other writer — a rebuild-from-l
 strictly better.
 
 The consequence for scope is that the five kernel sites are **verification only**.
+
+### 4.2 The two "collab, other" sites need code, not verification
+
+Both sit on the far side of the mutex and both catch by exception type, so the bounded tail's
+raw `OperationalError` walks past them. Neither is reachable by the app-level handler in the
+way that matters.
+
+**`hydrate.py:55`.** It acquires the live mutex and then calls `store.append_update`, which
+INSERTs the hydration seed and COMMITs. That INSERT takes an FK parent lock on `workspaces`, so
+a concurrent holder of that row now produces a 55P03 from inside hydration. It propagates out
+through `MANAGER.acquire`'s `load` callback to the WebSocket route, whose except list at
+`collab_ws.py:123-133` is `(WorkspaceRetired, WorkspaceDeleted)` and `CommitMutexTimeout` --
+none of which matches. The result today would be close code 1011 plus a traceback for routine
+contention, and 5's handler cannot help: a WebSocket has no HTTP status.
+**Decision:** `collab_ws` gains an `OperationalError` arm that maps a lock timeout to the same
+1013 (try again later) its `CommitMutexTimeout` arm already uses, and re-raises anything else.
+Same animal, same answer.
+
+**`flip.py:60`.** It catches `CommitMutexTimeout` around the acquisition and defers -- returns
+`False`, stays legacy, lets the next read retry. But `state.enable_collab` and its
+`session.commit()` run AFTER the mutex, and that commit can now raise 55P03. Escaping to the
+app handler would turn a routine read into a 429, which is exactly what the defer arm exists to
+prevent. **Decision:** `flip` catches it and defers identically.
+
+Both use one shared classifier, `is_lock_timeout(exc)`, added beside the mutex in `locking.py`
+so the SQLSTATE check is written once instead of a fourth and fifth time. `acquire_commit_mutex`
+itself is rewired onto it, so there is exactly one definition of "this is a lock timeout" in the
+tree.
 
 ## 5. The app-level handler
 
@@ -224,6 +271,29 @@ it. `gitio.py` gets the same treatment with its own constant. 30s is far above t
 because a git timeout is a genuine filesystem failure, not routine contention — it should be
 rare and loud, not a routine refusal.
 
+### 7.1 `timeout=` alone would make this worse
+
+`subprocess.TimeoutExpired` is a **sibling** of `CalledProcessError` under `SubprocessError`,
+not a subclass. Adding the keyword without handling the exception therefore breaks three
+contracts:
+
+- `write_and_commit_files` writes the working tree first, then runs `git add` (`:87`) and
+  `git commit` (`:113`). Its rollback lives in `except subprocess.CalledProcessError` at `:130`
+  and performs the per-file restore plus a scoped `git reset`. A `TimeoutExpired` on either
+  call would skip that block entirely, leaving the repo with modified files and a dirty index
+  while the DB transaction rolls back. That is a worse outcome than the unbounded stall.
+- The scoped `git reset` inside the rollback (`:148`) acquires a timeout of its own. If it
+  raises out of the handler it masks the original error and still leaves the tree dirty.
+- `current_head` (`:178`), `blob_sha` (`:198`) and `read_blob` (`:220`) catch only `OSError`
+  and document that they raise `GitCommitError`. A raw `TimeoutExpired` breaks that promise for
+  every caller.
+
+**Decision:** `write_and_commit_files` catches `(CalledProcessError, TimeoutExpired)` on one
+arm and formats both into the same `GitCommitError`; the rollback's `git reset` is wrapped so a
+timeout there is suppressed rather than masking; and the three read helpers translate
+`TimeoutExpired` to `GitCommitError` alongside `OSError`. Tests inject `TimeoutExpired`
+deliberately -- no test waits 30 seconds.
+
 ## 8. Testing
 
 1. **The ceilings test extends automatically.** `MUTEX_TAIL_LOCK_TIMEOUT_SECONDS` joins
@@ -242,10 +312,23 @@ rare and loud, not a routine refusal.
    assert the job is **requeued or re-selected** after a bounded failure — not merely that the
    exception was logged. A reaper that filters on a status the failure path never sets recovers
    nothing; this project has shipped that error twice in prose about these exact functions.
-5. **The kernel does not evict on a routine timeout.** Assert the room survives a bounded
-   failure and the client sees a retryable refusal rather than close code 1011.
+   The contended row must be one the path actually locks: `acquire_commit_mutex_live` takes the
+   advisory lock and then reads `soft_deleted_at` with a **plain** `SELECT`, so holding the
+   workspace row does not stall a checkpoint at all. Contend on what the path writes -- for
+   `checkpoint_artifact` that is the `collab_artifact_state` row `advance_checkpoint` updates.
+5. **The kernel's clean-error lists stay closed to the tail timeout.** Assert structurally
+   that none of the three lists in 4.1 admits a lock timeout. Per 4.1 the kernel MUST evict:
+   the timeout can fire on either side of the fragment mutation, so classifying it as "raised
+   before any mutation" would skip eviction after a real one and leave the live doc diverged
+   from the durable log. (Revision 1 of this spec asserted the opposite here; withdrawn.)
 6. **The 503 holdout still wins.** `collab_checkpoint` must still answer 503, not the handler's
-   429.
+   429. The test must enable collab on the artifact first -- the route screens for that and
+   returns 409 before it ever reaches the mutex.
+7. **The two `4.2` dispositions are proven, not assumed.** Contend the workspace row and assert
+   the WebSocket closes 1013 (not 1011), and that `maybe_auto_enable` returns `False` rather
+   than raising. Both contend via the FK parent lock their INSERT takes.
+8. **Git timeouts translate.** Inject `subprocess.TimeoutExpired` and assert `GitCommitError`
+   out of each helper, plus a clean working tree and index after a timed-out commit.
 7. Existing gates unchanged and green: the DELETE budget assertion, the two `_m1` gates in
    `test_phase0_transaction_boundaries.py:353` and `:398`, the 28 straddle tests, and the AST
    gate.
