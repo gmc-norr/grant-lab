@@ -12,6 +12,7 @@ import logging
 import uuid
 
 from fastapi import APIRouter, WebSocket
+from sqlalchemy.exc import OperationalError
 from starlette.concurrency import run_in_threadpool
 from starlette.websockets import WebSocketDisconnect
 
@@ -30,7 +31,11 @@ from call_manager.proposal_assist.collab.ws_auth import (
     resolve_ws_user,
 )
 from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
-from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout, WorkspaceDeleted
+from call_manager.proposal_assist.drafting.locking import (
+    CommitMutexTimeout,
+    WorkspaceDeleted,
+    is_lock_timeout,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +135,22 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
         # WITHOUT entering the try below (no client registered, nothing to release).
         with contextlib.suppress(Exception):
             await websocket.close(code=_WS_POLICY_VIOLATION)
+        return
+    except OperationalError as exc:
+        # Slice C3: load_or_hydrate persists the seed INSIDE the mutex-held tail
+        # (hydrate.py:55-60), and that INSERT takes an FK parent lock on
+        # `workspaces` — so with the tail bounded a concurrent holder of that row
+        # surfaces here as a raw 55P03. Same animal as CommitMutexTimeout below:
+        # contention on a cold room, not a refusal. main.py's handler cannot help:
+        # Starlette DOES run registered handlers in the WebSocket scope, but all it
+        # can emit there is a denial response on an already-accepted socket — not a
+        # status the browser client can see, let alone retry on. So map it to the
+        # same 1013. A non-lock OperationalError is a real database failure and
+        # keeps its existing propagation into that handler.
+        if not is_lock_timeout(exc):
+            raise
+        with contextlib.suppress(Exception):
+            await websocket.close(code=_WS_TRY_AGAIN_LATER)
         return
     except CommitMutexTimeout:
         # The OTHER exception the same hydration guard can raise, and a different

@@ -1,4 +1,3 @@
-import subprocess
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,20 +10,7 @@ from call_manager.proposal_assist.collab import checkpoint as cp
 from call_manager.proposal_assist.collab import state, store
 from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
 from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
-from tests.proposal_assist.conftest import make_user, make_workspace
-
-
-def _init_repo(repo: Path, content: str) -> None:
-    repo.mkdir(parents=True, exist_ok=True)
-    for args in (
-        ["git", "init", "-q", "-b", "main"],
-        ["git", "config", "user.email", "t@t"],
-        ["git", "config", "user.name", "t"],
-    ):
-        subprocess.run(args, cwd=repo, check=True)
-    (repo / PROPOSAL_FILENAME).write_text(content)
-    subprocess.run(["git", "add", PROPOSAL_FILENAME], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
+from tests.proposal_assist.conftest import init_workspace_repo, make_user, make_workspace
 
 
 def _seed_edit(pg_session_factory, wid, actor_id, md) -> None:
@@ -42,7 +28,7 @@ def _mk(pg_session_factory, tmp_path, email, md, *, soft_deleted=False):
         ws = make_workspace(s, owner=o)
         s.commit()
         wid, oid = ws.id, o.id
-    _init_repo(Path(tmp_path) / str(wid) / "repo", "## Background\noriginal.\n")
+    init_workspace_repo(Path(tmp_path) / str(wid) / "repo", "## Background\noriginal.\n")
     with pg_session_factory() as s:
         state.enable_collab(s, workspace_id=wid, artifact="draft")
         if soft_deleted:

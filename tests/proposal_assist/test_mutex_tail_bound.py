@@ -8,6 +8,7 @@ file holds the gates for the fix.
 
 from __future__ import annotations
 
+import functools
 import threading
 
 import pytest
@@ -18,6 +19,7 @@ from sqlalchemy.exc import OperationalError
 from call_manager.db.models import Workspace, WorkspaceSetupJob
 from call_manager.proposal_assist.drafting.locking import (
     BUSY_ERROR_MESSAGE,
+    acquire_commit_mutex,
     acquire_commit_mutex_live,
 )
 from tests.proposal_assist.conftest import make_workspace
@@ -293,3 +295,179 @@ def test_a_bounded_m1_failure_requeues_the_setup_job_rather_than_losing_it(
     )
     assert job.attempts == 1
     assert job.started_at is None
+
+
+def test_a_lock_timeout_is_not_on_any_kernel_clean_list():
+    """The kernel's clean-error lists mean exactly one thing (kernel_accept.py:36-38):
+    these errors are "raised BEFORE any fragment mutation", so the room doc is
+    untouched and does NOT need evicting. Every other exception may have left
+    room.doc mutated while the transaction rolled back, so it evicts.
+
+    A tail lock timeout can fire on either side of that line — at _load_scoped's
+    FOR UPDATE (clean) or at checkpoint/COMMIT (not) — and one exception type
+    cannot distinguish them. Listing it as clean would skip eviction in the case
+    where the doc WAS mutated and the transaction rolled back, diverging the live
+    in-memory doc from the durable log.
+
+    So the correct behaviour is to evict, and this gate exists to stop a future
+    change from "tidying" the timeout onto any of the lists. It is deliberately
+    structural: a room-driving test would prove today's behaviour, but this proves
+    the DECISION, and it cannot rot or go flaky.
+
+    THREE lists, not two. _CLEAN_INIT_SPEC_ERRORS is defined ten lines below
+    _CLEAN_CITE_ERRORS and is easy to miss, but its except at collab_cite.py:142
+    wraps a body that commits after mutating the doc — exactly as exposed.
+    """
+    from call_manager.proposal_assist.citations.collab_cite import (
+        _CLEAN_CITE_ERRORS,
+        _CLEAN_INIT_SPEC_ERRORS,
+    )
+    from call_manager.proposal_assist.proposals.kernel_accept import _CLEAN_ACCEPT_ERRORS
+
+    for name, clean in (
+        ("_CLEAN_ACCEPT_ERRORS", _CLEAN_ACCEPT_ERRORS),
+        ("_CLEAN_CITE_ERRORS", _CLEAN_CITE_ERRORS),
+        ("_CLEAN_INIT_SPEC_ERRORS", _CLEAN_INIT_SPEC_ERRORS),
+    ):
+        offenders = [e for e in clean if isinstance(e, type) and issubclass(OperationalError, e)]
+        assert not offenders, (
+            f"{name} lists {[e.__name__ for e in offenders]}, which would classify a "
+            f"mutex-tail lock timeout as raised-before-mutation. It can also fire AFTER "
+            f"the fragment mutation, and skipping the evict there leaves the live room "
+            f"doc diverged from the durable log. See spec section 4.1."
+        )
+
+
+def test_hydration_really_can_raise_a_lock_timeout_after_the_mutex(
+    pg_session_factory, current_user, tmp_path
+):
+    """The two close-code tests stub the raise, which proves the mapping but not
+    that hydration can produce it. This drives the real path: load_or_hydrate takes
+    the live mutex and THEN appends the seed (hydrate.py:55-60); that INSERT takes
+    an FK parent lock on `workspaces`, which conflicts with a held FOR UPDATE. With
+    the tail bounded the wait gives up after 2s with 55P03 instead of hanging.
+    """
+    from pathlib import Path
+
+    from call_manager.proposal_assist.collab import state as collab_state
+    from call_manager.proposal_assist.collab.hydrate import load_or_hydrate
+    from call_manager.proposal_assist.drafting.locking import is_lock_timeout
+    from tests.proposal_assist.conftest import init_workspace_repo
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, current_phase="active")
+        s.commit()
+        ws_id = ws.id
+
+    init_workspace_repo(Path(tmp_path) / str(ws_id) / "repo", "## Background\n\nseed.\n")
+    with pg_session_factory() as s:
+        collab_state.enable_collab(s, workspace_id=ws_id, artifact="draft")
+        s.commit()
+
+    release, t = _hold_workspace_row(pg_session_factory, ws_id)
+    try:
+        with pg_session_factory() as s, pytest.raises(OperationalError) as exc:
+            load_or_hydrate(s, workspace_id=ws_id, artifact="draft", workspaces_dir=str(tmp_path))
+    finally:
+        release.set()
+        t.join(timeout=30)
+
+    assert is_lock_timeout(exc.value), f"expected a 55P03 lock timeout, got {exc.value!r}"
+
+
+def test_a_bounded_flip_commit_defers_instead_of_erroring_the_read(
+    pg_session_factory, current_user
+):
+    """maybe_auto_enable is called on READ paths and its contract is to defer, not
+    fail: on CommitMutexTimeout it returns False and stays legacy so the next read
+    retries. Its enable_collab + commit run AFTER the mutex, so with the tail
+    bounded that commit can raise 55P03 — and escaping to the 429 handler would
+    defeat the defer arm. The row wait is real, not stubbed: the INSERT takes an FK
+    parent lock on `workspaces`.
+    """
+    from call_manager.proposal_assist.collab import state as collab_state
+    from call_manager.proposal_assist.collab.flip import maybe_auto_enable
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, current_phase="active")
+        s.commit()
+        ws_id = ws.id
+
+    release, t = _hold_workspace_row(pg_session_factory, ws_id)
+    try:
+        with pg_session_factory() as s:
+            assert maybe_auto_enable(s, workspace_id=ws_id, artifact="draft") is False
+    finally:
+        release.set()
+        t.join(timeout=30)
+
+    with pg_session_factory() as s:
+        assert collab_state.is_collab_enabled(s, workspace_id=ws_id, artifact="draft") is False, (
+            "the deferred flip committed anyway"
+        )
+
+
+def _wedge_mutex(pg_session_factory, ws_id):
+    """Hold the workspace commit mutex until released, so the next acquirer times
+    out. Returns (release_event, thread)."""
+    holding = threading.Event()
+    release = threading.Event()
+
+    def _holder():
+        with pg_session_factory() as s:
+            acquire_commit_mutex(s, ws_id)
+            holding.set()
+            release.wait(timeout=30)
+            s.rollback()
+
+    t = threading.Thread(target=_holder)
+    t.start()
+    assert holding.wait(timeout=5), "the holder never acquired the mutex"
+    return release, t
+
+
+def test_the_collab_checkpoint_route_still_answers_503_not_the_new_429(
+    client_authed_owner, current_user, pg_session_factory, monkeypatch
+):
+    """collab_checkpoint is the documented holdout: it maps CommitMutexTimeout to
+    503, not 429. That is the mutex ACQUISITION failure and a different exception
+    type, so Task 1's OperationalError handler must never see it — this asserts the
+    two mappings did not collapse into one.
+
+    Two things this test must get right, both of which a first draft got wrong.
+    The route screens `is_collab_enabled` BEFORE it reaches the mutex and returns
+    409 if the artifact is off (collab_checkpoint.py:43), so collab must be enabled
+    or the test never exercises anything. And the route does NOT import
+    acquire_commit_mutex_live — it reaches the mutex through checkpoint_artifact —
+    so the patch target is the `collab.checkpoint` module, with raising=True so a
+    future rename fails loudly instead of installing a dead attribute.
+    """
+    import call_manager.proposal_assist.collab.checkpoint as checkpoint_mod
+    from call_manager.proposal_assist.collab import state as collab_state
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, current_phase="active")
+        collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
+        s.commit()
+        ws_id = ws.id
+
+    # Shorten the acquisition wait from the production 10s. Pass NO call-time
+    # keyword at the call site — a call-time keyword overrides a partial's, which is
+    # how the consolidation slice's equivalent patch was silently defeated.
+    monkeypatch.setattr(
+        checkpoint_mod,
+        "acquire_commit_mutex_live",
+        functools.partial(checkpoint_mod.acquire_commit_mutex_live, timeout_seconds=1),
+        raising=True,
+    )
+
+    release, t = _wedge_mutex(pg_session_factory, ws_id)
+    try:
+        resp = client_authed_owner.post(f"/api/workspaces/{ws_id}/collab/draft/checkpoint")
+    finally:
+        release.set()
+        t.join(timeout=30)
+
+    assert resp.status_code == 503, (
+        f"expected the documented 503 holdout, got {resp.status_code}: {resp.text}"
+    )

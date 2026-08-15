@@ -3,6 +3,7 @@
 
 import json
 import socket
+import subprocess
 import uuid as _uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +15,7 @@ from sqlalchemy import select
 from call_manager.auth.session_cookie import SessionSigner
 from call_manager.db.models import Call, Source, User
 from call_manager.main import create_app
+from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
 
 # Hostnames that reference-fetch tests mock via pytest-httpx. The SSRF
 # resolver in fetcher.py validates via socket.getaddrinfo BEFORE httpx
@@ -298,6 +300,22 @@ def make_chat_summary(
     session.add(cs)
     session.flush()
     return cs
+
+
+def init_workspace_repo(repo: Path, content: str) -> None:
+    """Create a workspace git repo with one committed artifact file. Several
+    collab tests need a workspace whose git HEAD has content — hydration seeds
+    from it, and checkpoint no-ops without it."""
+    repo.mkdir(parents=True, exist_ok=True)
+    for args in (
+        ["git", "init", "-q", "-b", "main"],
+        ["git", "config", "user.email", "t@t"],
+        ["git", "config", "user.name", "t"],
+    ):
+        subprocess.run(args, cwd=repo, check=True)
+    (repo / PROPOSAL_FILENAME).write_text(content)
+    subprocess.run(["git", "add", PROPOSAL_FILENAME], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
 
 
 @pytest.fixture

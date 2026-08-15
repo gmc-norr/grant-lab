@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import uuid
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from call_manager.proposal_assist.collab import state
@@ -21,6 +21,7 @@ from call_manager.proposal_assist.drafting.locking import (
     CommitMutexTimeout,
     WorkspaceDeleted,
     acquire_commit_mutex_live,
+    is_lock_timeout,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,18 @@ def maybe_auto_enable(
         session.commit()  # releases the mutex
     except IntegrityError:
         session.rollback()  # concurrent first read won the insert — same outcome
+    except OperationalError as exc:
+        # Slice C3: enable_collab's INSERT commits INSIDE the mutex-held tail and
+        # takes an FK parent lock on `workspaces`, so this COMMIT can now fail on a
+        # bounded row wait. Defer exactly as the acquisition timeout above does —
+        # maybe_auto_enable runs on READ paths, and letting this reach main.py's
+        # handler would turn a routine read into a 429, which is the outcome the
+        # defer arm exists to prevent. A non-lock OperationalError is a real
+        # database failure and must propagate.
+        if not is_lock_timeout(exc):
+            raise
+        session.rollback()
+        return False
     logger.info(
         "collab.flip_enabled",
         extra={

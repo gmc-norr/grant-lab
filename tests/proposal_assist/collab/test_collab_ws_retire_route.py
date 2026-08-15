@@ -87,3 +87,99 @@ def test_hydration_mutex_timeout_closes_with_1013(_app, pg_session_factory, monk
         assert exc.value.code == 1013      # NOT 1011, NOT 1008 (retry is correct here)
     finally:
         client.__exit__(None, None, None)
+
+
+def test_a_bounded_hydration_lock_timeout_closes_with_1013_not_1011(
+    _app, pg_session_factory, monkeypatch
+):
+    """The 1013 mapping above covers CommitMutexTimeout, raised while ACQUIRING the
+    mutex. Slice C3 bounded the tail AFTER it, so the same cold-room hydration can
+    now fail with a raw OperationalError (55P03) from the seed's INSERT. That type
+    is not in the route's except list, so without this arm it would be 1011 plus a
+    traceback for ordinary contention — and unlike every HTTP site, main.py's
+    handler cannot reach a WebSocket.
+    """
+    from fastapi.testclient import TestClient
+    from sqlalchemy.exc import OperationalError
+
+    _app.state.session_factory = pg_session_factory
+    with pg_session_factory() as s:
+        owner = make_user(s, email="ws-tailbound@ki.se")
+        ws = make_workspace(s, owner=owner, current_phase="active")
+        collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
+        s.commit()
+        wid, oid = ws.id, owner.id
+
+    class _Orig(Exception):
+        sqlstate = "55P03"
+
+    def _boom(*a, **k):
+        raise OperationalError("INSERT INTO yjs_updates", {}, _Orig())
+
+    monkeypatch.setattr(collab_ws_module, "load_or_hydrate", _boom)
+
+    client = TestClient(_app)
+    client.__enter__()
+    try:
+        client.cookies.set("session", _cookie(_app, oid))
+        with pytest.raises(WebSocketDisconnect) as exc, client.websocket_connect(
+            f"/api/ws/workspaces/{wid}/draft"
+        ) as wsconn:
+            wsconn.receive_bytes()
+        assert exc.value.code == 1013      # NOT 1011
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_a_non_lock_operational_error_keeps_its_existing_propagation(
+    _app, pg_session_factory, monkeypatch
+):
+    """The arm must not swallow real database failures. 08006 is connection_failure.
+
+    It re-raises, so the outcome must stay byte-identical to having no arm at all —
+    which is NOT a 1011 close, as this test first assumed. Starlette runs registered
+    exception handlers in the WEBSOCKET scope too, so main.py's OperationalError
+    handler fires and emits its 500 `internal_error` envelope as a denial response.
+    That is exactly why the 55P03 case above cannot lean on that handler: a denial
+    response on an ALREADY-ACCEPTED socket is not a signal the browser client can
+    retry on (and is an ASGI protocol violation on a real server), so contention
+    needs the explicit 1013 close. Asserted as the concrete observed behaviour
+    rather than "not 1013", so a future change to that propagation is visible here.
+    """
+    from fastapi.testclient import TestClient
+    from sqlalchemy.exc import OperationalError
+    from starlette.testclient import WebSocketDenialResponse
+
+    _app.state.session_factory = pg_session_factory
+    with pg_session_factory() as s:
+        owner = make_user(s, email="ws-tailbound-real@ki.se")
+        ws = make_workspace(s, owner=owner, current_phase="active")
+        collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
+        s.commit()
+        wid, oid = ws.id, owner.id
+
+    class _Orig(Exception):
+        sqlstate = "08006"
+
+    def _boom(*a, **k):
+        raise OperationalError("SELECT 1", {}, _Orig())
+
+    monkeypatch.setattr(collab_ws_module, "load_or_hydrate", _boom)
+
+    client = TestClient(_app)
+    client.__enter__()
+    try:
+        client.cookies.set("session", _cookie(_app, oid))
+        with pytest.raises(WebSocketDisconnect) as exc, client.websocket_connect(
+            f"/api/ws/workspaces/{wid}/draft"
+        ) as wsconn:
+            wsconn.receive_bytes()
+        assert isinstance(exc.value, WebSocketDenialResponse), (
+            f"a real database failure must keep its existing propagation, not be "
+            f"absorbed by the arm; got {type(exc.value).__name__} "
+            f"code={getattr(exc.value, 'code', None)!r}"
+        )
+        assert exc.value.status_code == 500                 # NOT the 429 of a 55P03
+        assert exc.value.json()["error"]["code"] == "internal_error"
+    finally:
+        client.__exit__(None, None, None)
