@@ -234,10 +234,23 @@ past it to `except Exception`, which logs at ERROR **with a traceback** -- for o
 contention during room eviction. Nothing corrupts (both arms roll back and swallow), but routine
 contention becomes error-level noise in a log this team actually reads.
 
-A sweep of all 23 `except CommitMutexTimeout` sites in `src/` confirms this is the only
-uncovered one: the HTTP routes are all answered by 5's handler, three of the
-`tools/citations.py` sites are deleted in 6, its fourth is retiring, and `flip`/`collab_ws`
-are handled in 4.2. **Decision:** merge the two `except` clauses into one that chooses WARNING
+A sweep of all 23 `except CommitMutexTimeout` sites in `src/` found this one: the HTTP routes
+are all answered by 5's handler, three of the `tools/citations.py` sites are deleted in 6, its
+fourth is retiring, and `flip`/`collab_ws` are handled in 4.2.
+
+**That sweep is not a completeness proof, and this spec should not have implied it was.** It can
+only see sites that catch `CommitMutexTimeout` by name; a site that reaches the mutex indirectly
+and does NOT catch that type is invisible to it — which is the same blind spot, one level down,
+that hid `permissions.py` from the original inventory. A later transitive sweep found four
+non-HTTP mutex-reaching sites in total: `phases/setup.py:363`, `collab/checkpoint.py:209`,
+`collab/permissions.py:58`, and `collab/handover.py:36`.
+
+The two not dispositioned here are safe but noisy. `run_kill_switch_handover`
+(`handover.py:36`) and the scan loop in `checkpoint.py:209` both catch broadly and roll back, so
+a bounded tail cannot corrupt anything — but each logs a routine 55P03 with a traceback, which
+is exactly the noise 4.3 removed at `permissions.py`. Left as a follow-up rather than widened
+here, because the kill-switch handover path deserves its own reasoning about what a mid-handover
+refusal should do, and that is a larger question than this slice should answer on its way out. **Decision:** merge the two `except` clauses into one that chooses WARNING
 vs ERROR via `is_lock_timeout`, rather than adding an `except OperationalError` arm -- a
 `raise` from a sibling clause escapes the `try` entirely instead of falling through, which would
 change what a real database failure does here. `acquire_commit_mutex`
