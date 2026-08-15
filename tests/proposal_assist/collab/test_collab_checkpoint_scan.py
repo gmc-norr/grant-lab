@@ -1,10 +1,11 @@
 import subprocess
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import select
 
-from call_manager.db.models import ArtifactVersion, Workspace, WorkspaceEvent
+from call_manager.db.models import ArtifactVersion, CollabArtifactState, Workspace, WorkspaceEvent
 from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
 from call_manager.proposal_assist.collab import checkpoint as cp
 from call_manager.proposal_assist.collab import state, store
@@ -119,3 +120,78 @@ def test_checkpoint_active_tails_isolates_a_failing_artifact(
     assert "ok." in ok_disk
     bad_disk = (Path(tmp_path) / str(wid_bad) / "repo" / PROPOSAL_FILENAME).read_text()
     assert bad_disk == "## Background\noriginal.\n"      # failed one rolled back, uncommitted
+
+
+def _hold_state_row(pg_session_factory, wid, artifact="draft"):
+    """Park a FOR UPDATE on the collab_artifact_state row advance_checkpoint
+    updates; return (release_event, thread).
+
+    Deliberately NOT the workspace row — acquire_commit_mutex_live's liveness
+    re-read is a plain SELECT and takes no row lock, so holding the workspace row
+    would let the checkpoint sail straight through.
+    """
+    holding = threading.Event()
+    release = threading.Event()
+
+    def _holder():
+        with pg_session_factory() as s:
+            s.execute(
+                select(CollabArtifactState)
+                .where(
+                    CollabArtifactState.workspace_id == wid,
+                    CollabArtifactState.artifact == artifact,
+                )
+                .with_for_update()
+            ).first()
+            holding.set()
+            # 15s, not 60: with the tail bounded the waiter gives up after ~2s. If
+            # the bound is ever removed this must FAIL in a sane time rather than
+            # look like an infrastructure hang.
+            release.wait(timeout=15)
+            s.rollback()
+
+    t = threading.Thread(target=_holder)
+    t.start()
+    assert holding.wait(timeout=10), "the holder never took the state row"
+    return release, t
+
+
+def test_a_bounded_checkpoint_failure_leaves_the_tail_for_the_next_scan(
+    pg_session_factory, tmp_path
+):
+    """checkpoint_active_tails is a periodic scheduler job. With the tail bounded
+    its work can now raise; spec section 4 claims that is safe because a rolled-back
+    attempt never advances the watermark, so find_checkpoint_candidates re-selects
+    the same room on the next scan.
+
+    Asserted as "still a candidate, watermark unmoved" rather than "it logged" — a
+    job that logs and drops the work would satisfy the weaker claim just as well.
+    """
+    wid = _mk(pg_session_factory, tmp_path, "c3-absorb@ki.se", "## Background\n\nedited.\n")
+
+    with pg_session_factory() as s:
+        assert (wid, "draft") in store.find_checkpoint_candidates(s, min_tail=1)
+        before = state.get_checkpoint_watermark(s, workspace_id=wid, artifact="draft")
+
+    release, t = _hold_state_row(pg_session_factory, wid)
+    try:
+        # Must NOT raise out of the scan: errors are per-candidate and swallowed
+        # (checkpoint.py's `except Exception` in the scan loop). The bounded tail
+        # turns what was a hang into one of those.
+        done = cp.checkpoint_active_tails(
+            pg_session_factory, workspaces_dir=str(tmp_path), min_tail=1
+        )
+    finally:
+        release.set()
+        t.join(timeout=30)
+
+    assert done == 0, "a contended candidate must not be counted as checkpointed"
+
+    with pg_session_factory() as s:
+        assert (wid, "draft") in store.find_checkpoint_candidates(s, min_tail=1), (
+            "a failed checkpoint advanced the watermark anyway — the tail would now be "
+            "skipped forever instead of retried on the next scan"
+        )
+        assert state.get_checkpoint_watermark(s, workspace_id=wid, artifact="draft") == before, (
+            "the rolled-back attempt moved the watermark"
+        )

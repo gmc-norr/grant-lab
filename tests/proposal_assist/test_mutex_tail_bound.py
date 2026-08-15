@@ -12,9 +12,10 @@ import threading
 
 import pytest
 from fastapi import FastAPI
+from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
-from call_manager.db.models import Workspace
+from call_manager.db.models import Workspace, WorkspaceSetupJob
 from call_manager.proposal_assist.drafting.locking import (
     BUSY_ERROR_MESSAGE,
     acquire_commit_mutex_live,
@@ -238,3 +239,57 @@ def test_acquire_commit_mutex_reapplies_the_tail_cap_after_the_advisory_lock():
         f"ACQUISITION budget (10s, or 5s at flip/hydrate) instead of the 2s the "
         f"ceilings test governs."
     )
+
+
+def test_a_bounded_m1_failure_requeues_the_setup_job_rather_than_losing_it(
+    pg_session_factory, current_user, tmp_path
+):
+    """Phase-0's _m1 takes the workspace row FOR UPDATE right after the mutex
+    (setup.py:361-362). With the tail bounded that wait now RAISES instead of
+    pinning the mutex — which is only safe if _fail requeues.
+
+    Asserted on the job's STATUS, not on the exception: `_fail` sets
+    status='queued' and started_at=None for ordinary contention, and only
+    dead-letters at MAX_SETUP_ATTEMPTS. A test that merely asserts "it raised"
+    would pass just as happily if the job were lost.
+    """
+    from call_manager.proposal_assist.phases import setup as setup_mod
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user)
+        s.add(WorkspaceSetupJob(workspace_id=ws.id, status="queued"))
+        s.commit()
+        ws_id = ws.id
+
+    with pg_session_factory() as s:
+        job_id = s.scalar(
+            select(WorkspaceSetupJob.id).where(WorkspaceSetupJob.workspace_id == ws_id)
+        )
+
+    # `client` is never reached: _m1 raises on the row wait, long before any LLM
+    # call. The five fields are Phase0Worker's real signature (setup.py:314-318).
+    worker = setup_mod.Phase0Worker(
+        session_factory=pg_session_factory,
+        client=None,
+        extractor_version="v1",
+        rubric_extractor_version="v1",
+        workspaces_dir=str(tmp_path),
+    )
+
+    release, t = _hold_workspace_row(pg_session_factory, ws_id)
+    try:
+        # run_one() takes NO arguments — it claims the queued job itself
+        # (setup.py:320-324) and routes any exception through _fail at :335.
+        assert worker.run_one() is True, "the worker did not claim the queued job"
+    finally:
+        release.set()
+        t.join(timeout=30)
+
+    with pg_session_factory() as s:
+        job = s.get(WorkspaceSetupJob, job_id)
+    assert job.status == "queued", (
+        f"a contended _m1 left the setup job in {job.status!r}; ordinary contention "
+        f"must requeue (setup.py:633-634), not dead-letter"
+    )
+    assert job.attempts == 1
+    assert job.started_at is None
