@@ -1662,11 +1662,42 @@ call site can produce.
 
 ```bash
 uv run pytest tests/proposal_assist/test_row_lock_ceilings.py tests/proposal_assist/test_phase0_transaction_boundaries.py -q ; echo "PYTEST_EXIT=$?"
-grep -rn "55P03" src/ | grep -v "drafting/locking.py"
 ```
 
-Expected: tests pass; the grep returns nothing (the only remaining literal `55P03` is inside
-`is_lock_timeout` itself).
+Then verify criterion 7 **by AST, not by grep**. A plain `grep -rn "55P03" src/` is the wrong
+gate and cannot go clean: ten explanatory comments and docstrings legitimately name the SQLSTATE,
+including one this plan itself prescribes verbatim in Step 2c. What must be unique is the
+executable comparison.
+
+```bash
+uv run python - <<'PY'
+import ast, pathlib
+hits = []
+for f in pathlib.Path("src").rglob("*.py"):
+    src = f.read_text(encoding="utf-8")
+    if "55P03" not in src:
+        continue
+    tree = ast.parse(src)
+    docstrings = {
+        n.body[0].value
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and n.body and isinstance(n.body[0], ast.Expr)
+        and isinstance(n.body[0].value, ast.Constant)
+    }
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) \
+           and "55P03" in n.value and n not in docstrings:
+            hits.append(f"{f}:{n.lineno}")
+print("EXECUTABLE 55P03 occurrences:", hits)
+assert hits == ["src/call_manager/proposal_assist/drafting/locking.py:202"], hits
+print("criterion 7 OK")
+PY
+```
+
+Expected: tests pass, and the AST check prints `criterion 7 OK` — the sole executable
+comparison lives inside `is_lock_timeout`. If the line number has moved, update it; if a SECOND
+entry appears, criterion 7 is broken and that is a finding.
 
 - [ ] **Step 2c: Disposition the 14th mutex site (`collab/permissions.py`)**
 
@@ -1802,13 +1833,20 @@ asserts only `status_code == 503`, and that route has a **second** 503 (`GitComm
 `collab_checkpoint.py:62`). Unreachable in that test today, but the assertion should name which
 503 it means. Add, after the existing status assertion:
 
-```python
-    assert resp.json()["detail"] == BUSY_ERROR_MESSAGE, (
-        "this must be the MUTEX holdout's 503, not the route's GitCommitError 503"
-    )
-```
+> **Corrected during execution — the assertion as first written was unwritable.** It raises
+> `KeyError: 'detail'`. The route is under `/api`, and `main.py:490-492` discards `exc.detail`
+> for any status >= 500, substituting `{"error": {"code": "internal_error", "message":
+> "internal server error"}}`. So **both** of that route's 503s are byte-identical on the wire
+> and no response-body assertion can tell them apart. Verified in the handler source.
 
-`BUSY_ERROR_MESSAGE` is already imported in that test file — check before adding it.
+Pin the intent a different way: keep the status assertion, assert the scrubbed envelope that
+actually ships, and prove which exception produced it by recording what was raised. Wrap the
+already-patched `acquire_commit_mutex_live` in a recorder — preserving the no-call-time-kwarg
+discipline, since a call-time keyword would override the `functools.partial` the test installs —
+and assert `isinstance(raised[0], CommitMutexTimeout)`.
+
+That distinguishes the mutex holdout from the `GitCommitError` 503 at the only place the two are
+still distinguishable: the raise site.
 
 - [ ] **Step 2e: Close the four `gitio.py` follow-ups from Task 6's review**
 
@@ -1985,5 +2023,5 @@ Message subject: `docs(c3): mark the five flag-off-only mutex sites as retiring`
 4. Each of the 13 live sites has a verified disposition: absorbed (Task 3), mapped centrally (Task 1), asserted unchanged (Task 4 Step 1), or **newly handled** (Task 4 Steps 2 and 4 — `collab_ws.py` and `flip.py`, the two sites spec revision 4 found needed code rather than verification).
 5. The three dead sites are gone, along with the two test files exclusive to them — and `test_insert_citation_refuses` survives, because `_insert_citation_locked` is still live via `proposals/accepting.py:207` (Task 5 Step 3).
 6. `gitio.py`'s nine subprocess calls carry a timeout **and** a `TimeoutExpired` translates to `GitCommitError` without skipping the rollback (Task 6 Steps 3-5).
-7. There is exactly one definition of "this is a lock timeout" in the tree — `is_lock_timeout` — used by the app handler, `acquire_commit_mutex`, `collab_ws.py` and `flip.py` (Tasks 1, 2, 4).
+7. There is exactly one **executable** definition of "this is a lock timeout" in the tree — the `sqlstate == "55P03"` comparison inside `is_lock_timeout` — used by the app handler, `acquire_commit_mutex`, `collab_ws.py`, `flip.py`, `row_locks.py` and `permissions.py` (Tasks 1, 2, 4, 7). Verified by AST (Task 7 Step 2b), **not** by grep: ten comments and docstrings across `src/` name the SQLSTATE while explaining the mechanism, and stripping them to satisfy a text search would make the tree worse, not better. One of them is prescribed by this plan's own Step 2c.
 8. Full suite green with nothing removed beyond Task 5's counted deletions; `ruff` clean; OpenAPI drift clean.
