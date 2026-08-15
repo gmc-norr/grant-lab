@@ -72,6 +72,33 @@ def test_a_reset_timeout_does_not_mask_the_original_failure(tmp_path, monkeypatc
         write_and_commit_files(repo, {PROPOSAL_FILENAME: "rewritten\n"}, "msg")
 
 
+def test_a_reset_OSError_does_not_mask_the_original_failure(tmp_path, monkeypatch):
+    """The sibling above guards the reset against TimeoutExpired only, and that is
+    NOT the whole of Task 6's binding constraint — the reset must not be able to
+    raise out of the handler at all. A plain OSError is the live gap: once
+    scrub_workspace_bytes has removed repo_dir, this call's `cwd=` is invalid and
+    the rollback raises FileNotFoundError, which replaces the GitCommitError every
+    caller of write_and_commit_files is written to catch.
+    """
+    repo = tmp_path / "repo"
+    init_workspace_repo(repo, "original\n")
+
+    real_run = subprocess.run
+
+    def _run(args, **kw):
+        if args[:2] == ["git", "commit"]:
+            raise subprocess.TimeoutExpired(cmd=args, timeout=gitio._GIT_TIMEOUT_SECONDS)
+        if args[:2] == ["git", "reset"]:
+            # What an rmtree'd repo_dir produces on `cwd=`.
+            raise FileNotFoundError(2, "No such file or directory", str(repo))
+        return real_run(args, **kw)
+
+    monkeypatch.setattr(gitio.subprocess, "run", _run)
+
+    with pytest.raises(GitCommitError):
+        write_and_commit_files(repo, {PROPOSAL_FILENAME: "rewritten\n"}, "msg")
+
+
 def test_a_read_helper_timeout_is_a_GitCommitError(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     init_workspace_repo(repo, "original\n")

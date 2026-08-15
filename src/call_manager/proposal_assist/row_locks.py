@@ -55,6 +55,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from call_manager.proposal_assist.drafting.locking import is_lock_timeout
+
 # The four proposal-assist pass prefixes (coherence, evaluator, uncited-claims,
 # review) take the workspace row FOR UPDATE and hold it across context assembly —
 # which reads files out of workspaces_dir — and a job-row UPDATE, then commit.
@@ -196,8 +198,7 @@ def bounded_lock_waits(
     try:
         yield
     except OperationalError as exc:
-        sqlstate = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
-        if sqlstate == "55P03":
+        if is_lock_timeout(exc):
             raise error(message) from exc
         raise
 

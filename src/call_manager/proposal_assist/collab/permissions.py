@@ -20,7 +20,11 @@ from call_manager.proposal_assist.citations.gitio import GitCommitError
 from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
 from call_manager.proposal_assist.collab.room import MANAGER
 from call_manager.proposal_assist.collab.ws_auth import resolve_access
-from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout, WorkspaceDeleted
+from call_manager.proposal_assist.drafting.locking import (
+    CommitMutexTimeout,
+    WorkspaceDeleted,
+    is_lock_timeout,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,20 +62,35 @@ def make_checkpoint_on_evict(session_factory, workspaces_dir, workspace_id, arti
                         workspaces_dir=workspaces_dir,
                     )
                     s.commit()
-                except (GitCommitError, CommitMutexTimeout, WorkspaceDeleted):
-                    logger.warning(
-                        "collab.checkpoint_on_evict_skipped",
-                        extra={"event": "collab_checkpoint_on_evict_skipped",
-                               "room": str((workspace_id, artifact))},
-                    )
-                    s.rollback()
-                except Exception:
-                    logger.error(
-                        "collab.checkpoint_on_evict_error",
-                        extra={"event": "collab_checkpoint_on_evict_error",
-                               "room": str((workspace_id, artifact))},
-                        exc_info=True,
-                    )
+                except Exception as exc:
+                    # Slice C3: with the mutex-held tail bounded, routine row
+                    # contention inside checkpoint_artifact now RAISES
+                    # OperationalError(55P03) where it used to hang. That is the
+                    # same benign "someone else is writing; the durable log
+                    # survives and the next trigger retries" outcome as
+                    # CommitMutexTimeout, so it belongs on the WARNING arm — not
+                    # an ERROR with a traceback for ordinary contention.
+                    #
+                    # One clause rather than a new `except OperationalError`
+                    # arm: a re-raise from a sibling clause escapes the try
+                    # entirely instead of falling through to `except Exception`,
+                    # which would change what a REAL database failure does here.
+                    benign = isinstance(
+                        exc, (GitCommitError, CommitMutexTimeout, WorkspaceDeleted)
+                    ) or is_lock_timeout(exc)
+                    if benign:
+                        logger.warning(
+                            "collab.checkpoint_on_evict_skipped",
+                            extra={"event": "collab_checkpoint_on_evict_skipped",
+                                   "room": str((workspace_id, artifact))},
+                        )
+                    else:
+                        logger.error(
+                            "collab.checkpoint_on_evict_error",
+                            extra={"event": "collab_checkpoint_on_evict_error",
+                                   "room": str((workspace_id, artifact))},
+                            exc_info=True,
+                        )
                     s.rollback()
         await run_in_threadpool(_cp)
     return _on_evict

@@ -19,6 +19,7 @@ from sqlalchemy.exc import OperationalError
 from call_manager.db.models import Workspace, WorkspaceSetupJob
 from call_manager.proposal_assist.drafting.locking import (
     BUSY_ERROR_MESSAGE,
+    CommitMutexTimeout,
     acquire_commit_mutex,
     acquire_commit_mutex_live,
 )
@@ -454,10 +455,22 @@ def test_the_collab_checkpoint_route_still_answers_503_not_the_new_429(
     # Shorten the acquisition wait from the production 10s. Pass NO call-time
     # keyword at the call site — a call-time keyword overrides a partial's, which is
     # how the consolidation slice's equivalent patch was silently defeated.
+    shortened = functools.partial(checkpoint_mod.acquire_commit_mutex_live, timeout_seconds=1)
+    # Also record what the acquisition raised. See the pin below the status
+    # assertion for why the wire body cannot answer that question.
+    raised: list[BaseException] = []
+
+    def _recording_acquire(*args, **kwargs):
+        try:
+            return shortened(*args, **kwargs)
+        except BaseException as exc:
+            raised.append(exc)
+            raise
+
     monkeypatch.setattr(
         checkpoint_mod,
         "acquire_commit_mutex_live",
-        functools.partial(checkpoint_mod.acquire_commit_mutex_live, timeout_seconds=1),
+        _recording_acquire,
         raising=True,
     )
 
@@ -470,4 +483,18 @@ def test_the_collab_checkpoint_route_still_answers_503_not_the_new_429(
 
     assert resp.status_code == 503, (
         f"expected the documented 503 holdout, got {resp.status_code}: {resp.text}"
+    )
+    # This must be the MUTEX holdout's 503, not the route's GitCommitError 503
+    # (collab_checkpoint.py:62). The status code alone does not say which.
+    #
+    # It CANNOT be pinned on the wire, as first drafted: this is an /api route,
+    # and main.py's StarletteHTTPException handler replaces the body of every
+    # response >= 500 with a fixed {"error": {"code": "internal_error",
+    # "message": "internal server error"}} envelope — deliberately, so a 5xx
+    # leaks nothing. Both of this route's 503s are therefore byte-identical to a
+    # client, `detail` is not a key at all, and asserting on the body would
+    # KeyError rather than discriminate. Pin the arm at its source instead.
+    assert resp.json() == {"error": {"code": "internal_error", "message": "internal server error"}}
+    assert raised and isinstance(raised[0], CommitMutexTimeout), (
+        f"the 503 must come from the mutex ACQUISITION arm; acquire raised {raised!r}"
     )

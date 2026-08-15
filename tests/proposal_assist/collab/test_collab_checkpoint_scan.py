@@ -1,3 +1,4 @@
+import logging
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,6 +10,7 @@ from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
 from call_manager.proposal_assist.collab import checkpoint as cp
 from call_manager.proposal_assist.collab import state, store
 from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
+from call_manager.proposal_assist.collab.permissions import make_checkpoint_on_evict
 from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
 from tests.proposal_assist.conftest import init_workspace_repo, make_user, make_workspace
 
@@ -181,3 +183,39 @@ def test_a_bounded_checkpoint_failure_leaves_the_tail_for_the_next_scan(
         assert state.get_checkpoint_watermark(s, workspace_id=wid, artifact="draft") == before, (
             "the rolled-back attempt moved the watermark"
         )
+
+
+async def test_a_bounded_eviction_checkpoint_logs_skipped_not_error(
+    pg_session_factory, tmp_path, caplog
+):
+    """make_checkpoint_on_evict reaches the commit mutex INDIRECTLY, through
+    checkpoint_artifact, which is why the slice's site inventory — built from
+    direct acquire_commit_mutex* call sites — missed it.
+
+    Its benign arm catches (GitCommitError, CommitMutexTimeout, WorkspaceDeleted)
+    by TYPE. A bounded tail raises a raw OperationalError, so before this fix
+    ordinary row contention on room eviction logged an ERROR with a full
+    traceback instead of the benign 'skipped' WARNING.
+
+    Contends the collab_artifact_state row advance_checkpoint updates — NOT the
+    workspace row, whose only reader here is a plain SELECT that takes no lock.
+    """
+    wid = _mk(pg_session_factory, tmp_path, "c3-evict@ki.se", "## Background\n\nedited.\n")
+    on_evict = make_checkpoint_on_evict(pg_session_factory, str(tmp_path), wid, "draft")
+
+    release, t = _hold_state_row(pg_session_factory, wid)
+    try:
+        with caplog.at_level(logging.WARNING):
+            await on_evict(None)
+    finally:
+        release.set()
+        t.join(timeout=30)
+
+    events = [r.__dict__.get("event") for r in caplog.records]
+    assert "collab_checkpoint_on_evict_skipped" in events, (
+        f"a bounded eviction checkpoint should log the benign skip; got {events}"
+    )
+    assert "collab_checkpoint_on_evict_error" not in events, (
+        "routine row contention logged an ERROR with a traceback — this is the "
+        "regression Slice C3 introduced at the 14th, indirect mutex site"
+    )

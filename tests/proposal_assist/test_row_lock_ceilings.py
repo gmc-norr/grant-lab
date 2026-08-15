@@ -158,6 +158,27 @@ _ALL_CAPS = {
     "PASS_PREFIX_LOCK_TIMEOUT_SECONDS": row_locks.PASS_PREFIX_LOCK_TIMEOUT_SECONDS,
 }
 
+# Deliberately NOT in _MUTEX_HELD_CAPS. gitio's subprocess bound is mutex-held time
+# too, but it is not a LOCK cap and it does not satisfy this file's ceilings: 2 x 30
+# exceeds both the 10s acquisition cap and the 6.0s DELETE budget. Slice C3 accepted
+# that (see gitio.py's own comment) because the alternative was unbounded. Listed
+# here so the exclusion is a recorded decision rather than an oversight — if you are
+# adding a new mutex-held cap, this is the file that governs it.
+_EXCLUDED_FROM_CEILINGS = {
+    "gitio._GIT_TIMEOUT_SECONDS": "subprocess time, not a lock cap; see gitio.py",
+}
+
+
+def test_the_ceilings_exclusion_list_is_honest():
+    """An exclusion that names a constant which no longer exists is worse than no
+    exclusion at all — it reads as considered when it is stale."""
+    from call_manager.proposal_assist.citations import gitio
+
+    assert gitio._GIT_TIMEOUT_SECONDS == 30.0, (
+        "the excluded constant moved; re-derive whether the exclusion still holds "
+        "rather than updating this number"
+    )
+
 
 def _delete_route_budget_seconds() -> float:
     """The DELETE route's asserted end-to-end budget, read out of the test that

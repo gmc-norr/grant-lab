@@ -10,18 +10,25 @@ failed mutation leaves the working tree exactly as it was.
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import subprocess
 from pathlib import Path
 
-# Ceiling on any single git subprocess. write_and_commit_files runs inside a
-# mutex-held transaction (via checkpoint_artifact), so an untimed git call stalls
-# the mutex for every other writer exactly as an unbounded lock wait did before
-# Slice C3 — and no lock timeout can bound a subprocess.
+logger = logging.getLogger(__name__)
+
+# Ceiling on any SINGLE git subprocess (not on the function: write_and_commit_files
+# runs up to four of these serially plus one in its rollback, and checkpoint_artifact
+# calls current_head before it — so gitio can hold the commit mutex for ~180s in the
+# worst case).
 #
-# Far above the 2s lock cap on purpose: a git timeout is a genuine filesystem
-# failure, not routine contention, so it should be rare and loud rather than a
-# routine refusal. Matches phases/setup.py:108's _GIT_TIMEOUT_SECONDS.
+# 30s is deliberately far above the 2s lock cap because a git timeout means the
+# filesystem is broken, not that two writers collided. But be clear about what that
+# costs, because it is NOT consistent with the budgets the rest of Slice C3 derives
+# from: a git stall holds the mutex past the DELETE route's 10s acquisition cap, so
+# the owner's DELETE answers 429 having deleted nothing, and blows the 6.0s budget
+# that governs MAX_CONTENDED_ROWS. That is an accepted trade — unbounded became
+# finite, which is the whole point — but it is a trade, not an absence of one.
 _GIT_TIMEOUT_SECONDS = 30.0
 
 
@@ -32,6 +39,32 @@ def _git_env() -> dict[str, str]:
     env.setdefault("GIT_COMMITTER_NAME", "call-manager")
     env.setdefault("GIT_COMMITTER_EMAIL", "call-manager@local")
     return env
+
+
+def _log_if_timeout(exc: BaseException) -> None:
+    """Make a git timeout LOUD, which is what _GIT_TIMEOUT_SECONDS' comment
+    promises and what nothing here delivered.
+
+    A timeout funnels into GitCommitError, and several callers turn that into
+    silence: collab/checkpoint.py's _head_or_empty maps it to "" — which reads as
+    "this workspace has no repo yet" — and downstream that becomes a quiet
+    committed=False, or a 404 "no proposal-spec.md yet" on the spec-lock route,
+    for what is actually a filesystem stall. Deliberately NOT a GitTimeoutError
+    subclass: that would change what every one of those callers catches.
+
+    One helper rather than an inline branch at each site because the read helpers
+    catch (OSError, TimeoutExpired) together — a non-timeout OSError must not be
+    reported as a timeout, and that discrimination should exist once.
+    """
+    if isinstance(exc, subprocess.TimeoutExpired):
+        logger.warning(
+            "gitio.subprocess_timeout",
+            extra={
+                "event": "gitio_subprocess_timeout",
+                "cmd": str(exc.cmd),
+                "timeout_seconds": _GIT_TIMEOUT_SECONDS,
+            },
+        )
 
 
 class GitCommitError(RuntimeError):
@@ -160,10 +193,13 @@ def write_and_commit_files(
                     restore_exc = oe
                 # Continue restoring the remaining files regardless.
 
-        # A timeout HERE must not mask the original failure: the per-file restore
+        # A failure HERE must not mask the original one: the per-file restore
         # above has already run, and the caller needs the real error. check=False
-        # covers a non-zero exit; only the timeout needs catching.
-        with contextlib.suppress(subprocess.TimeoutExpired):
+        # covers a non-zero exit; the timeout and OSError need catching. OSError
+        # is not theoretical in this tree — scrub_workspace_bytes removing
+        # repo_dir makes this call's `cwd=` invalid, and a bare FileNotFoundError
+        # out of the handler replaces the GitCommitError every caller expects.
+        with contextlib.suppress(subprocess.TimeoutExpired, OSError):
             subprocess.run(
                 ["git", "reset", "HEAD", "--", *paths],
                 cwd=repo_dir,
@@ -174,8 +210,12 @@ def write_and_commit_files(
             )
         raw = getattr(e, "stderr", None) or b""
         stderr = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+        _log_if_timeout(e)
         if isinstance(e, subprocess.TimeoutExpired):
-            msg = f"atomic commit timed out after {_GIT_TIMEOUT_SECONDS}s: {stderr.strip()}"
+            msg = (
+                f"atomic commit timed out after {_GIT_TIMEOUT_SECONDS}s "
+                f"running {e.cmd}: {stderr.strip()}"
+            )
         else:
             msg = f"atomic commit failed: {stderr.strip()}"
         if restore_exc is not None:
@@ -205,6 +245,7 @@ def current_head(repo_dir: Path) -> str:
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         # OSError: FileNotFoundError, NotADirectoryError, PermissionError.
+        _log_if_timeout(exc)
         raise GitCommitError(f"rev-parse HEAD failed: {exc}") from exc
     if proc.returncode != 0:
         raise GitCommitError(f"rev-parse HEAD failed: {proc.stderr.strip()}")
@@ -226,6 +267,7 @@ def blob_sha(repo_dir: Path, ref: str, path: str) -> str:
             env=env,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
+        _log_if_timeout(exc)
         raise GitCommitError(f"rev-parse {ref}:{path} failed: {exc}") from exc
     if proc.returncode != 0:
         raise GitCommitError(f"rev-parse {ref}:{path} failed: {proc.stderr.strip()}")
@@ -248,6 +290,7 @@ def read_blob(repo_dir: Path, sha: str) -> str:
             env=env,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
+        _log_if_timeout(exc)
         raise GitCommitError(f"cat-file {sha} failed: {exc}") from exc
     if proc.returncode != 0:
         raise GitCommitError(
