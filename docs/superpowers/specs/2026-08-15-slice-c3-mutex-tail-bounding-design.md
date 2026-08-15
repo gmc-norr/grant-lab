@@ -1,0 +1,243 @@
+# Slice C3 — bounding the mutex-held tail at the root
+
+Date: 2026-08-15
+Status: approved (design), revision 1
+Predecessors: Slice C2 (`eef35ed`), `workspace_write` consolidation (`81ebaec`).
+Closes: spec §10 residual 8 of `docs/superpowers/specs/2026-08-11-workspace-retirement-slice-c-design.md`.
+
+## 1. Why
+
+`acquire_commit_mutex` (`src/call_manager/proposal_assist/drafting/locking.py`) sets
+`SET LOCAL lock_timeout`, takes `pg_advisory_xact_lock`, translates 55P03 to
+`CommitMutexTimeout` — and then, on success, executes at **line 207**:
+
+```python
+session.execute(text("SET LOCAL lock_timeout = DEFAULT"))
+```
+
+PostgreSQL's default is `0` — **disabled**. So from that statement onward, every lock wait in
+the transaction is unbounded, *while the transaction holds the advisory mutex every other
+writer for that workspace needs*. One stuck row lock blocks the owner's DELETE and every
+concurrent writer indefinitely.
+
+Slice C2 closed this at six route sites by wrapping the remainder in `bounded_lock_waits`; the
+consolidation slice moved that ceremony into `workspace_write`. **Twenty-one sites remain.**
+
+A 6-agent inventory of all 21, plus an adversarial refutation pass, established three things
+that change the shape of the fix:
+
+**(a) The blast radius is not per-workspace — it is app-wide.** Several of these sites sit in
+plain `def` FastAPI routes, which run on the shared anyio threadpool. No `total_tokens`
+override exists anywhere in `src/`, so the default of ~40 applies. Forty simultaneous
+unbounded stalls wedge **every sync route, for every user, in every workspace**. This is a
+global-availability failure mode, and it reverses the intuition that background sites are the
+dangerous ones: the HTTP sites are worse.
+
+**(b) Nesting wipes any bound applied from outside.** `checkpoint_artifact`
+(`collab/checkpoint.py:90`) re-acquires the same mutex mid-tail — a re-entrant no-op for the
+lock, but it re-runs both `SET LOCAL` statements, so it **resets `lock_timeout` to DEFAULT in
+the middle of a caller's bounded region**. Ten call sites reach `checkpoint_artifact`. Any
+per-caller bound at `kernel.py:136/208/325/369/443` is therefore erased before COMMIT.
+`kernel.py:202-204` documents the re-entrancy; nothing documents the reset.
+
+**(c) A third of the sites are dead or retiring.** Three have no production caller at all
+(`tools/citations.py:921`, `:1053`, `:1233` — the tool registry at `tools/registry.py:605-608`
+exports neither). Five more are flag-off-only paths that answer 409 once collab is enabled.
+
+## 2. Scope
+
+**In:**
+
+- Replace the restore at `locking.py:207` (§3) — this bounds the tail at **all** sites at once.
+- One app-level handler mapping the resulting lock timeout to 429 (§5).
+- Per-site verification that each of the **13 live** sites' failure path absorbs or maps the
+  new raise (§4). This is verification and, where needed, a small local change — not a
+  hand-written bound per site.
+- Delete the 3 unreachable sites; document the 5 retiring ones (§6).
+- Bound the nine `subprocess.run` git calls in `proposal_assist/citations/gitio.py` (§7).
+
+**Out:**
+
+- Any change to `bounded_lock_waits`, `workspace_write`, or the six routes already migrated.
+- Any change to the mutex **acquisition** timeouts (25 × 10s, 2 × 5s at `flip.py:32` and
+  `hydrate.py:23`). Only the post-acquisition tail changes.
+- `subprocess.run` calls outside `gitio.py` (`reconcile.py:54`, `tools/citations.py:152`,
+  `tools/history.py:63/98/123`) — none verified to sit inside a mutex-held tail. Residual (§9).
+
+## 3. The mechanism
+
+```python
+# locking.py:207
+-    session.execute(text("SET LOCAL lock_timeout = DEFAULT"))
++    session.execute(text(f"SET LOCAL lock_timeout = '{MUTEX_TAIL_LOCK_TIMEOUT_MS}ms'"))
+```
+
+The restore is **replaced**, not deleted. Deleting it would leave the tail at the acquisition's
+own timeout — 10s at most sites — and §3.1 shows why that fails.
+
+Three properties follow, and they are the whole argument for doing it here rather than at 13
+call sites:
+
+1. **It is nesting-proof by construction.** A nested acquire re-applies the same cap instead of
+   wiping it. Problem (b) disappears — there is no restore-to-DEFAULT left to run.
+2. **It covers sites nobody remembered.** The failure mode this slice exists to fix is a site
+   being missed; a root-cause change cannot miss one.
+3. **It is one line, not thirteen ceremonies.** The consolidation slice established that a
+   ceremony hand-written at N sites is wrong at some of them — it was wrong at four of six.
+
+`MUTEX_TAIL_LOCK_TIMEOUT_MS` is a new named constant in `locking.py`, derived in §3.1.
+
+### 3.1 Why 2 seconds, not 10
+
+`tests/proposal_assist/test_row_lock_ceilings.py` already encodes the arithmetic, and it parses
+its inputs out of the code rather than restating them:
+
+- the DELETE route's asserted budget is **6.0s**
+  (`tests/proposal_assist/test_phase0_transaction_boundaries.py:1155`);
+- `BUDGET_FRACTION_FOR_LOCK_STALLS` = two thirds → lock stalls may consume **4.0s**;
+- `MAX_CONTENDED_ROWS` = **2** — a transaction may wait on two distinct rows, and
+  `lock_timeout` is a **per-acquisition** cap, not a transaction deadline.
+
+So a mutex-held cap `c` must satisfy `2 × c ≤ 4.0`, giving **c = 2s**. At 10s the worst case is
+20s — five times the allowance, and the DELETE budget assertion would fail.
+
+2s also matches every mutex-held cap already in the tree
+(`WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS`, `SETUP_JOB_LOCK_TIMEOUT_SECONDS`,
+`PASS_PREFIX_LOCK_TIMEOUT_SECONDS`, `MARK_DONE_LOCK_TIMEOUT_SECONDS`, and
+`phases/setup.py:136`'s `_ROW_LOCK_TIMEOUT_SECONDS`), so the six `workspace_write` sites keep
+setting the same value they already set and nothing conflicts.
+
+`MUTEX_TAIL_LOCK_TIMEOUT_MS` joins `_MUTEX_HELD_CAPS` in the ceilings test, so the arithmetic
+stays enforced automatically if the budget or the row count ever moves.
+
+## 4. What the change means per site
+
+The bound applies everywhere at once. What differs per site is what the **raise** does, and the
+inventory establishes this per class rather than per site.
+
+| Class | Sites | What changes |
+| --- | --- | --- |
+| **Background, self-absorbing** | `checkpoint.py:90`, `phases/setup.py:361` | **Nothing.** Both already sit under `except Exception` → rollback + log, with a recovery path: `_fail` (`setup.py:584-641`) requeues to `status='queued'` and dead-letters only at `MAX_SETUP_ATTEMPTS = 5`; `find_checkpoint_candidates` (`store.py:101-127`) re-selects any tail it did not advance. A raise is a retry. |
+| **HTTP, already speaks 429** | `web/api/workspaces.py:648`, `:736`, `turns/submit.py:249`, `workspaces.py:124` | The app-level handler (§5) covers them. Verify each; add nothing local. |
+| **Collab kernel** | `kernel.py:136`, `:208`, `:325`, `:369`, `:443` | Their orchestrators classify exceptions against a clean list and **evict the room** on anything unrecognised (`kernel_accept.py:33-42`, `collab_cite.py:34-37`). A new lock timeout is not on those lists, so it would evict — closing every client with code 1011. Each list gains the new exception so it is treated as a clean, retryable refusal. |
+| **Collab, other** | `flip.py:60`, `hydrate.py:55` | `flip` already returns `False` on `CommitMutexTimeout`; `hydrate` deliberately refuses to swallow (`hydrate.py:48-54`). Verify both against the new type. |
+| **Dead** | `tools/citations.py:921`, `:1053`, `:1233` | Deleted (§6). |
+| **Retiring** | `tools/citations.py:802`, `editing/save.py:180`, `citations/human_cite.py:102`, `analysis/insert.py:351`, `web/api/workspaces.py:537` | Flag-off-only; 409 once collab is on. Documented, not individually handled. |
+
+The 13 live sites are the first four rows: 2 + 4 + 5 + 2.
+
+## 5. The app-level handler
+
+`main.py` already registers handlers for `WorkspaceDeleted` → 404 (`:501`) and
+`WorkspaceRetired` → 404 (`:512`) — exceptions from this same mutex family, raised at these
+same sites. A handler for the tail timeout is a **new member of an existing pattern**, not a new
+architecture. (An earlier draft of the Slice C residual claimed the absence of app-level
+mapping was deliberate; that was wrong.)
+
+It maps the tail's 55P03 to **429 + `Retry-After: 2` + `BUSY_ERROR_MESSAGE`**, matching what the
+six migrated routes already answer.
+
+**Why central rather than per-route.** A local `except` only catches what its `try` encloses,
+and the inventory found two sites whose `session.commit()` already sits **outside** the relevant
+try block — `turns.py:197` and `proposals.py:145`. A per-route clause would silently miss
+commit-time timeouts there. That is precisely the defect Slice C2 spent four review rounds
+chasing, pre-existing at two sites. A handler at the app level is immune to where the timeout
+fires.
+
+**One deliberate exception.** `web/collab_checkpoint.py:57` answers **503**, not 429, for
+`CommitMutexTimeout`. It keeps its local catch and must be verified to still win over the
+app-level handler.
+
+## 6. Dead and retiring code
+
+`tools/citations.py:921` (`_remove_citation_locked`), `:1053` (`_update_citation_locked`) and
+`:1233` (`_rename_citekey_locked`) have **no production caller**: `tools/registry.py:605-608`
+imports only `list_citations_impl` and `propose_citation_impl`, and a tree-wide grep finds no
+other entry point. Their own test file's docstring calls them MCP tools, which is stale.
+
+They are deleted, with their tests. Bounding code nothing reaches is waste, and leaving it
+implies a liveness it does not have.
+
+Verified independently of the inventory, because this is the one part of the slice that removes
+code: `registry.py:605-608` imports exactly `list_citations_impl` and `propose_citation_impl`
+and nothing else; a tree-wide grep for `remove_citation_impl`, `update_citation_impl`,
+`rename_citekey_impl` and their three `_*_locked` helpers returns **zero** hits outside
+`tools/citations.py` itself. The only other references are three test files, which go with them:
+`tests/proposal_assist/test_tools_citations_deleted.py`,
+`tests/proposal_assist/tools/test_citations_remove_update.py`,
+`tests/proposal_assist/tools/test_citations_rename.py`. The first of those is named for a
+deletion that was evidently started and never finished.
+
+The five retiring sites stay as they are and gain one comment each recording that they are
+flag-off-only and that the tail bound now applies to them regardless.
+
+## 7. Git subprocess timeouts
+
+`proposal_assist/citations/gitio.py` makes **nine** `subprocess.run` calls (lines 87, 96, 103,
+113, 120, 148, 178, 198, 220) and passes `timeout=` to **none** of them. `write_and_commit_files`
+runs inside `checkpoint_artifact`, i.e. inside a mutex-held tail. A stalled filesystem therefore
+stalls a mutex-held transaction with no ceiling, and no lock bound touches that.
+
+Without this, the slice's headline claim — that a mutex-held tail cannot stall indefinitely — is
+still false.
+
+Precedent exists in-tree: `phases/setup.py:108` defines `_GIT_TIMEOUT_SECONDS = 30.0` and passes
+it. `gitio.py` gets the same treatment with its own constant. 30s is far above the 2s lock cap
+because a git timeout is a genuine filesystem failure, not routine contention — it should be
+rare and loud, not a routine refusal.
+
+## 8. Testing
+
+1. **The ceilings test extends automatically.** `MUTEX_TAIL_LOCK_TIMEOUT_MS` joins
+   `_MUTEX_HELD_CAPS`; the existing assertion `MAX_CONTENDED_ROWS × cap ≤ allowance` then covers
+   it, with the budget still parsed out of the DELETE test rather than restated.
+2. **The tail is actually bounded.** Park a holder on a row a mutex-held transaction needs, with
+   no mutex of its own; the request must come back 429 rather than block. Asserted as "the
+   request returned", never as elapsed time — without the bound it does not return at all, so a
+   live thread IS the failure.
+3. **Nesting no longer wipes the bound.** The decisive gate. Drive a path that reaches
+   `checkpoint_artifact` from a caller that already holds the mutex, park a holder on a row the
+   checkpoint needs, and assert 429. Mutation: restore `SET LOCAL lock_timeout = DEFAULT` at
+   `locking.py:207` and this test must fail — that mutation is the whole slice, and if it does
+   not turn something red the slice is unproven.
+4. **Background absorption is real, not assumed.** For `setup.py:361` and `checkpoint.py:90`,
+   assert the job is **requeued or re-selected** after a bounded failure — not merely that the
+   exception was logged. A reaper that filters on a status the failure path never sets recovers
+   nothing; this project has shipped that error twice in prose about these exact functions.
+5. **The kernel does not evict on a routine timeout.** Assert the room survives a bounded
+   failure and the client sees a retryable refusal rather than close code 1011.
+6. **The 503 holdout still wins.** `collab_checkpoint` must still answer 503, not the handler's
+   429.
+7. Existing gates unchanged and green: the DELETE budget assertion, the two `_m1` gates in
+   `test_phase0_transaction_boundaries.py:353` and `:398`, the 28 straddle tests, and the AST
+   gate.
+
+Full suite baseline on `master` (`81ebaec`): **3391 passed, 1 skipped**.
+
+## 9. Residuals
+
+- `subprocess.run` in `reconcile.py:54`, `tools/citations.py:152`, `tools/history.py:63/98/123`
+  carry no timeout. None is verified to sit inside a mutex-held tail, so they are out of scope —
+  but they are unbounded subprocesses in a web process, which is its own (smaller) hazard.
+- A lock-order inversion exists between the two accept paths: `accepting.py:74` takes the
+  proposed-change row `FOR UPDATE` and *then* the mutex, while `kernel.py:210/371` take the
+  mutex then the row. The arms are normally mutually exclusive, but `proposals.py:157-168` reads
+  the flag in a separate session before forking, so enable-on-touch can interleave them. The
+  outcome is a 40P01 deadlock, which Postgres resolves — not an unbounded wait — so it is out of
+  scope here, but it contradicts `kernel.py:200-201`'s claim to pin one order everywhere.
+- The anyio threadpool has no configured size anywhere in `src/`, so the ~40 default governs the
+  app-wide blast radius described in §1(a). Bounding the tails removes the unbounded case; it
+  does not make the pool size a deliberate decision.
+
+## 10. Success criteria
+
+1. `locking.py:207` sets a bounded tail cap; no `SET LOCAL lock_timeout = DEFAULT` remains in
+   the tree.
+2. Restoring that statement turns at least one test red, and that test exercises the **nested**
+   case (§8.3).
+3. The ceilings test covers the new constant, with the budget still parsed from the DELETE test.
+4. Each of the 13 live sites has a verified disposition: absorbed, mapped by the handler, or
+   explicitly handled. No site is left to the catch-all 500 handler.
+5. The three dead sites and their tests are gone.
+6. `gitio.py`'s nine subprocess calls carry a timeout.
+7. Full suite ≥ 3391 passed with nothing removed; `ruff` clean; OpenAPI drift clean.
