@@ -59,56 +59,10 @@ def find_by_citekey(ledger: dict, citekey: str) -> list[dict]:
     return [e for e in ledger["evidence"] if e.get("citekey") == citekey]
 
 
-def citekeys_in_use(ledger: dict) -> set[str]:
-    return {e["citekey"] for e in ledger["evidence"] if e.get("citekey")}
-
-
 def append_evidence(ledger: dict, row: dict) -> dict:
     """Return a NEW ledger dict with row appended (does not mutate input)."""
     new = {"version": ledger.get("version", LEDGER_VERSION), "evidence": [*ledger["evidence"], row]}
     return new
-
-
-def remove_evidence(ledger: dict, ev_id: str) -> tuple[dict, bool]:
-    """Return (new_ledger, removed?). removed=False if ev_id not present."""
-    kept = [e for e in ledger["evidence"] if e.get("id") != ev_id]
-    removed = len(kept) != len(ledger["evidence"])
-    return {"version": ledger.get("version", LEDGER_VERSION), "evidence": kept}, removed
-
-
-def update_evidence(ledger: dict, ev_id: str, **fields) -> tuple[dict, bool]:
-    """Return (new_ledger, updated?). Shallow-merges `fields` into the matching row.
-    Does not mutate input rows."""
-    if "id" in fields:
-        raise ValueError("evidence 'id' is immutable")
-    updated = False
-    out = []
-    for e in ledger["evidence"]:
-        if e.get("id") == ev_id:
-            merged = {**e, **fields}
-            out.append(merged)
-            updated = True
-        else:
-            out.append(e)
-    return {"version": ledger.get("version", LEDGER_VERSION), "evidence": out}, updated
-
-
-def rename_citekey(
-    ledger: dict, old_citekey: str, new_citekey: str, updated_at: str
-) -> tuple[dict, int]:
-    """Return (new_ledger, count) with every row whose citekey == old_citekey
-    rewritten to new_citekey (and updated_at refreshed). Non-matching rows are
-    untouched and order is preserved. id and all other fields are preserved.
-    Pure — does not mutate the input."""
-    count = 0
-    out = []
-    for row in ledger["evidence"]:
-        if row.get("citekey") == old_citekey:
-            out.append({**row, "citekey": new_citekey, "updated_at": updated_at})
-            count += 1
-        else:
-            out.append(row)
-    return {"version": ledger.get("version", LEDGER_VERSION), "evidence": out}, count
 
 
 def build_evidence_row(

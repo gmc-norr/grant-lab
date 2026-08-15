@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import re
 import string
 import subprocess
 import uuid
@@ -91,9 +90,6 @@ _DELETED_ERROR = DELETED_ERROR_MESSAGE
 # Promoted to a module-level constant so accepting.py can import and branch on it
 # (transient git failure -> retryable, NOT terminal stale).
 _GIT_COMMIT_FAILED_ERROR = "failed to commit citation"
-
-# Evidence-row ids are minted as ev-<lowercase-hex> (see ledger.new_ev_id).
-EVIDENCE_ID_RE = re.compile(r"^ev-[0-9a-f]{6,}$")
 
 # Spec line 121: stance ∈ {supports, contradicts, background}.
 ALLOWED_STANCES = frozenset({"supports", "contradicts", "background"})
@@ -313,11 +309,11 @@ async def list_citations_impl(ctx: ToolContext, *, limit: int = 100) -> dict[str
     An absent ledger yields ``{"citations": [], "truncated": False}``.
 
     Each entry is a flat projection of an evidence row keyed for the agent:
-    ``ev_id`` (for remove_citation/update_citation), ``citekey`` (for
-    rename_citekey), plus the cited reference/chunk, stance, confidence, the
-    claim text, and the verbatim evidence quote. ``.get()`` is used throughout so
-    a hand-edited row can't crash the listing; a row with no ``id`` is skipped
-    (it cannot be acted on by ev-id anyway). Order = ledger/document order.
+    ``ev_id`` and ``citekey``, plus the cited reference/chunk, stance,
+    confidence, the claim text, and the verbatim evidence quote. ``.get()`` is
+    used throughout so a hand-edited row can't crash the listing; a row with no
+    ``id`` is skipped (it cannot be acted on by ev-id anyway). Order =
+    ledger/document order.
 
     ``limit`` caps how many rows are projected (default 100, hard cap 500) so a
     workspace with thousands of citations cannot blow up one MCP text block;

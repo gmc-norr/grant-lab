@@ -13,8 +13,6 @@ from call_manager.proposal_assist.citations.markers import (
     build_marker,
     find_markers,
     insert_marker,
-    remove_marker,
-    rename_marker_citekey,
 )
 
 # ---------------------------------------------------------------------------
@@ -50,21 +48,6 @@ def test_insert_marker_invalid_citekey_raises_no_mutation() -> None:
     text = "Some claim text."
     with pytest.raises(ValueError, match="invalid citekey"):
         insert_marker(text, "claim text", "bad]key", "ev-000000000001")
-
-
-# ---------------------------------------------------------------------------
-# rename_marker_citekey — new_citekey validation
-# ---------------------------------------------------------------------------
-
-
-def test_rename_marker_citekey_invalid_new_raises() -> None:
-    """A new_citekey containing ']' raises ValueError before any substitution."""
-    text = "Claim [@old]<!-- ev:ev-aaaaaaaaaaaa -->."
-    with pytest.raises(ValueError, match="invalid citekey"):
-        rename_marker_citekey(text, "old", "bad]new")
-
-    # Document unchanged: original marker still present.
-    assert "[@old]<!-- ev:ev-aaaaaaaaaaaa -->" in text
 
 
 # ---------------------------------------------------------------------------
@@ -240,135 +223,14 @@ def test_insert_marker_anchor_in_prose_and_unrelated_marker_substring() -> None:
 
 
 # ---------------------------------------------------------------------------
-# remove_marker
-# ---------------------------------------------------------------------------
-
-
-def test_remove_marker_removes_matching_ev_id() -> None:
-    text = "Fact [@smith2021]<!-- ev:ev-aaaaaaaaaaaa --> is established."
-    new_text, removed = remove_marker(text, "ev-aaaaaaaaaaaa")
-    assert removed is True
-    assert "[@smith2021]<!-- ev:ev-aaaaaaaaaaaa -->" not in new_text
-    # Double space is the expected, accepted artifact of replacing the marker
-    # with ""; callers normalise whitespace if they care.
-    assert new_text == "Fact  is established."
-
-
-def test_remove_marker_not_present_returns_false() -> None:
-    text = "No markers here."
-    new_text, removed = remove_marker(text, "ev-aaaaaaaaaaaa")
-    assert removed is False
-    assert new_text == text
-
-
-def test_remove_marker_leaves_other_markers_intact() -> None:
-    """Removing by ev id must not touch other markers, even with the same citekey."""
-    text = (
-        "Claim A [@smith2021]<!-- ev:ev-aaaaaaaaaaaa --> "
-        "and Claim B [@smith2021]<!-- ev:ev-bbbbbbbbbbbb -->."
-    )
-    new_text, removed = remove_marker(text, "ev-aaaaaaaaaaaa")
-    assert removed is True
-    assert "[@smith2021]<!-- ev:ev-aaaaaaaaaaaa -->" not in new_text
-    assert "[@smith2021]<!-- ev:ev-bbbbbbbbbbbb -->" in new_text
-
-
-def test_remove_marker_same_citekey_two_ev_ids_remove_one_leaves_other() -> None:
-    """Core per-occurrence-addressability test."""
-    ev1 = "ev-111111111111"
-    ev2 = "ev-222222222222"
-    m1 = build_marker("jones2020", ev1)
-    m2 = build_marker("jones2020", ev2)
-    text = f"First {m1} and second {m2} claims."
-
-    new_text, removed = remove_marker(text, ev1)
-
-    assert removed is True
-    assert m1 not in new_text
-    assert m2 in new_text
-    assert "First  and second" in new_text
-
-
-def test_remove_marker_ev_id_not_found_text_unchanged() -> None:
-    ev = "ev-aaaaaaaaaaaa"
-    marker = build_marker("smith2021", ev)
-    text = f"Claim {marker}."
-    new_text, removed = remove_marker(text, "ev-bbbbbbbbbbbb")
-    assert removed is False
-    assert new_text == text
-
-
-def test_remove_marker_immediately_before_comma() -> None:
-    """Removing a marker that sits directly before a comma leaves no stray space."""
-    text = "Fact[@k]<!-- ev:ev-aaaaaaaaaaaa -->, more."
-    new_text, removed = remove_marker(text, "ev-aaaaaaaaaaaa")
-    assert removed is True
-    assert new_text == "Fact, more."
-
-
-# ---------------------------------------------------------------------------
-# rename_marker_citekey
-# ---------------------------------------------------------------------------
-
-
-def test_rename_marker_citekey_rewrites_matching_citekey() -> None:
-    text = "Claim [@old]<!-- ev:ev-aaaaaaaaaaaa -->."
-    new_text, count = rename_marker_citekey(text, "old", "new_key")
-    assert count == 1
-    assert "[@new_key]<!-- ev:ev-aaaaaaaaaaaa -->" in new_text
-    assert "[@old]" not in new_text
-
-
-def test_rename_marker_citekey_preserves_ev_id() -> None:
-    ev_id = "ev-a13f2c91e0b4"
-    text = f"Claim [@smith2021]<!-- ev:{ev_id} -->."
-    new_text, count = rename_marker_citekey(text, "smith2021", "jones2022")
-    assert count == 1
-    assert f"ev:{ev_id}" in new_text
-
-
-def test_rename_marker_citekey_multiple_occurrences() -> None:
-    """All occurrences of old_citekey are renamed; each ev id preserved."""
-    ev1, ev2 = "ev-111111111111", "ev-222222222222"
-    text = f"A [@smith2021]<!-- ev:{ev1} --> B [@smith2021]<!-- ev:{ev2} -->."
-    new_text, count = rename_marker_citekey(text, "smith2021", "jones2022")
-    assert count == 2
-    assert f"[@jones2022]<!-- ev:{ev1} -->" in new_text
-    assert f"[@jones2022]<!-- ev:{ev2} -->" in new_text
-    assert "[@smith2021]" not in new_text
-
-
-def test_rename_marker_citekey_does_not_touch_other_citekeys() -> None:
-    ev1, ev2 = "ev-111111111111", "ev-222222222222"
-    text = f"A [@smith2021]<!-- ev:{ev1} --> B [@jones2020]<!-- ev:{ev2} -->."
-    new_text, count = rename_marker_citekey(text, "smith2021", "new_ref")
-    assert count == 1
-    assert "[@jones2020]<!-- ev:ev-222222222222 -->" in new_text
-
-
-def test_rename_marker_citekey_old_not_present_returns_zero() -> None:
-    text = "No markers here."
-    new_text, count = rename_marker_citekey(text, "ghost", "replacement")
-    assert count == 0
-    assert new_text == text
-
-
-def test_rename_marker_citekey_no_markers_at_all() -> None:
-    text = "Plain text with no citations."
-    new_text, count = rename_marker_citekey(text, "whatever", "other")
-    assert count == 0
-    assert new_text == text
-
-
-# ---------------------------------------------------------------------------
 # Round-trip test
 # ---------------------------------------------------------------------------
 
 
-def test_round_trip_insert_find_remove_rename() -> None:
-    """Insert two markers (same citekey, different ev ids) into a paragraph,
-    find_markers returns both, remove one by ev id, the other remains,
-    then rename the remaining one's citekey."""
+def test_round_trip_insert_and_find() -> None:
+    """Insert two markers (same citekey, different ev ids) into a paragraph;
+    find_markers returns both, in document order, each individually addressable
+    by its own ev id."""
     paragraph = (
         "The treatment significantly reduces recurrence. "
         "Moreover, survival rates improved markedly."
@@ -382,25 +244,8 @@ def test_round_trip_insert_find_remove_rename() -> None:
     # Insert second marker after second sentence anchor
     text = insert_marker(text, "improved markedly", citekey, ev2)
 
-    # Both markers present
+    # Both markers present, in document order, individually addressable by ev id
     markers = find_markers(text)
     assert len(markers) == 2
-    ev_ids = {m["ev_id"] for m in markers}
-    assert ev1 in ev_ids
-    assert ev2 in ev_ids
+    assert [m["ev_id"] for m in markers] == [ev1, ev2]
     assert all(m["citekey"] == citekey for m in markers)
-
-    # Remove first marker — second must survive
-    text, removed = remove_marker(text, ev1)
-    assert removed is True
-    markers = find_markers(text)
-    assert len(markers) == 1
-    assert markers[0]["ev_id"] == ev2
-
-    # Rename remaining marker's citekey
-    text, count = rename_marker_citekey(text, citekey, "jones2022")
-    assert count == 1
-    markers = find_markers(text)
-    assert len(markers) == 1
-    assert markers[0]["citekey"] == "jones2022"
-    assert markers[0]["ev_id"] == ev2

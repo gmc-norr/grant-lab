@@ -1,10 +1,9 @@
 """Tests for the read-only list_citations tool (citation provenance).
 
 list_citations surfaces the citations.json ledger so the agent can discover the
-`ev-...` evidence ids (needed by remove_citation/update_citation) and the
-citekeys (needed by rename_citekey). Exercises the *_impl directly (plain dict,
-no MCP envelope). Reuses the insert_citation fixtures so the ledger rows under
-test are produced by the real insert path.
+`ev-...` evidence ids and the citekeys of what is already cited. Exercises the
+*_impl directly (plain dict, no MCP envelope). Reuses the insert_citation
+fixtures so the ledger rows under test are produced by the real insert path.
 """
 
 import subprocess

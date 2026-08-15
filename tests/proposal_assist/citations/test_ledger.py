@@ -15,16 +15,12 @@ from call_manager.proposal_assist.citations.ledger import (
     LEDGER_VERSION,
     append_evidence,
     build_evidence_row,
-    citekeys_in_use,
     dump_ledger,
     empty_ledger,
     find_by_citekey,
     find_by_id,
     load_ledger,
     new_ev_id,
-    remove_evidence,
-    rename_citekey,
-    update_evidence,
 )
 
 # ---------------------------------------------------------------------------
@@ -183,89 +179,6 @@ def test_append_evidence_accumulates():
 
 
 # ---------------------------------------------------------------------------
-# remove_evidence — non-mutating
-# ---------------------------------------------------------------------------
-
-
-def test_remove_evidence_removes_by_id():
-    row = _make_row("ev-aabbccddeeff")
-    ledger = append_evidence(empty_ledger(), row)
-    new_ledger, removed = remove_evidence(ledger, "ev-aabbccddeeff")
-    assert removed is True
-    assert new_ledger["evidence"] == []
-
-
-def test_remove_evidence_missing_id_returns_false():
-    row = _make_row("ev-aabbccddeeff")
-    ledger = append_evidence(empty_ledger(), row)
-    new_ledger, removed = remove_evidence(ledger, "ev-nonexistent00")
-    assert removed is False
-    assert len(new_ledger["evidence"]) == 1
-
-
-def test_remove_evidence_does_not_mutate_input():
-    row = _make_row("ev-aabbccddeeff")
-    original = append_evidence(empty_ledger(), row)
-    original_len = len(original["evidence"])
-    remove_evidence(original, "ev-aabbccddeeff")
-    assert len(original["evidence"]) == original_len
-
-
-def test_remove_evidence_preserves_other_rows():
-    ledger = empty_ledger()
-    ledger = append_evidence(ledger, _make_row("ev-000000000001", "alpha"))
-    ledger = append_evidence(ledger, _make_row("ev-000000000002", "beta"))
-    new_ledger, removed = remove_evidence(ledger, "ev-000000000001")
-    assert removed is True
-    assert len(new_ledger["evidence"]) == 1
-    assert new_ledger["evidence"][0]["id"] == "ev-000000000002"
-
-
-# ---------------------------------------------------------------------------
-# update_evidence — non-mutating
-# ---------------------------------------------------------------------------
-
-
-def test_update_evidence_merges_fields():
-    row = _make_row("ev-aabbccddeeff")
-    ledger = append_evidence(empty_ledger(), row)
-    new_ledger, updated = update_evidence(
-        ledger, "ev-aabbccddeeff", stance="refutes", confidence="low"
-    )
-    assert updated is True
-    updated_row = find_by_id(new_ledger, "ev-aabbccddeeff")
-    assert updated_row["stance"] == "refutes"
-    assert updated_row["confidence"] == "low"
-    # Other fields preserved
-    assert updated_row["citekey"] == "smith2021"
-
-
-def test_update_evidence_absent_id_returns_false():
-    ledger = append_evidence(empty_ledger(), _make_row("ev-aabbccddeeff"))
-    new_ledger, updated = update_evidence(ledger, "ev-nonexistent00", stance="refutes")
-    assert updated is False
-    assert len(new_ledger["evidence"]) == 1
-
-
-def test_update_evidence_does_not_mutate_input_row():
-    row = _make_row("ev-aabbccddeeff")
-    ledger = append_evidence(empty_ledger(), row)
-    original_stance = ledger["evidence"][0]["stance"]
-    update_evidence(ledger, "ev-aabbccddeeff", stance="refutes")
-    # The row inside ledger["evidence"] must be unchanged
-    assert ledger["evidence"][0]["stance"] == original_stance
-
-
-def test_update_evidence_preserves_other_rows():
-    ledger = empty_ledger()
-    ledger = append_evidence(ledger, _make_row("ev-000000000001", "alpha"))
-    ledger = append_evidence(ledger, _make_row("ev-000000000002", "beta"))
-    new_ledger, _ = update_evidence(ledger, "ev-000000000001", confidence="medium")
-    unchanged = find_by_id(new_ledger, "ev-000000000002")
-    assert unchanged["confidence"] == "high"
-
-
-# ---------------------------------------------------------------------------
 # find_by_id
 # ---------------------------------------------------------------------------
 
@@ -304,100 +217,6 @@ def test_find_by_citekey_no_match_returns_empty_list():
 
 
 # ---------------------------------------------------------------------------
-# citekeys_in_use
-# ---------------------------------------------------------------------------
-
-
-def test_citekeys_in_use_returns_set():
-    ledger = empty_ledger()
-    ledger = append_evidence(ledger, _make_row("ev-000000000001", "alpha"))
-    ledger = append_evidence(ledger, _make_row("ev-000000000002", "alpha"))
-    ledger = append_evidence(ledger, _make_row("ev-000000000003", "beta"))
-    keys = citekeys_in_use(ledger)
-    assert keys == {"alpha", "beta"}
-
-
-def test_citekeys_in_use_empty_ledger():
-    assert citekeys_in_use(empty_ledger()) == set()
-
-
-def test_citekeys_in_use_ignores_rows_without_citekey():
-    ledger = empty_ledger()
-    # Row with citekey missing entirely
-    row_no_key = {k: v for k, v in _make_row("ev-000000000001", "alpha").items() if k != "citekey"}
-    ledger = append_evidence(ledger, row_no_key)
-    # Row with empty-string citekey (falsy) — should also be ignored
-    row_empty_key = {**_make_row("ev-000000000002", ""), "citekey": ""}
-    ledger = append_evidence(ledger, row_empty_key)
-    # Row with a real citekey
-    ledger = append_evidence(ledger, _make_row("ev-000000000003", "real2023"))
-    keys = citekeys_in_use(ledger)
-    assert keys == {"real2023"}
-
-
-# ---------------------------------------------------------------------------
-# rename_citekey — pure, non-mutating
-# ---------------------------------------------------------------------------
-
-
-def test_rename_citekey_renames_all_matching_and_returns_count():
-    ledger = empty_ledger()
-    ledger = append_evidence(ledger, _make_row("ev-000000000001", "old2021"))
-    ledger = append_evidence(ledger, _make_row("ev-000000000002", "old2021"))
-    new_ledger, count = rename_citekey(ledger, "old2021", "new2022", "2026-06-07T12:00:00Z")
-    assert count == 2
-    assert find_by_citekey(new_ledger, "old2021") == []
-    renamed = find_by_citekey(new_ledger, "new2022")
-    assert len(renamed) == 2
-    assert all(r["updated_at"] == "2026-06-07T12:00:00Z" for r in renamed)
-
-
-def test_rename_citekey_leaves_non_matching_untouched_and_preserves_order():
-    ledger = empty_ledger()
-    ledger = append_evidence(ledger, _make_row("ev-000000000001", "alpha"))
-    ledger = append_evidence(ledger, _make_row("ev-000000000002", "old2021"))
-    ledger = append_evidence(ledger, _make_row("ev-000000000003", "beta"))
-    new_ledger, count = rename_citekey(ledger, "old2021", "new2022", "2026-06-07T12:00:00Z")
-    assert count == 1
-    ids = [r["id"] for r in new_ledger["evidence"]]
-    assert ids == ["ev-000000000001", "ev-000000000002", "ev-000000000003"]
-    keys = [r["citekey"] for r in new_ledger["evidence"]]
-    assert keys == ["alpha", "new2022", "beta"]
-
-
-def test_rename_citekey_preserves_id_and_other_fields():
-    row = _make_row("ev-aabbccddeeff", "old2021")
-    ledger = append_evidence(empty_ledger(), row)
-    new_ledger, _ = rename_citekey(ledger, "old2021", "new2022", "2026-06-07T12:00:00Z")
-    renamed = new_ledger["evidence"][0]
-    assert renamed["id"] == "ev-aabbccddeeff"
-    assert renamed["citekey"] == "new2022"
-    assert renamed["updated_at"] == "2026-06-07T12:00:00Z"
-    # Every other field is preserved verbatim.
-    for key, value in row.items():
-        if key in ("citekey", "updated_at"):
-            continue
-        assert renamed[key] == value
-
-
-def test_rename_citekey_does_not_mutate_input():
-    row = _make_row("ev-aabbccddeeff", "old2021")
-    ledger = append_evidence(empty_ledger(), row)
-    original_updated_at = ledger["evidence"][0]["updated_at"]
-    rename_citekey(ledger, "old2021", "new2022", "2099-01-01T00:00:00Z")
-    assert ledger["evidence"][0]["citekey"] == "old2021"
-    assert ledger["evidence"][0]["updated_at"] == original_updated_at
-
-
-def test_rename_citekey_count_zero_when_old_absent():
-    ledger = append_evidence(empty_ledger(), _make_row("ev-000000000001", "present2021"))
-    new_ledger, count = rename_citekey(ledger, "absent9999", "new2022", "2026-06-07T12:00:00Z")
-    assert count == 0
-    assert find_by_citekey(new_ledger, "present2021")[0]["citekey"] == "present2021"
-    assert find_by_citekey(new_ledger, "new2022") == []
-
-
-# ---------------------------------------------------------------------------
 # round-trip with evidence row
 # ---------------------------------------------------------------------------
 
@@ -407,18 +226,6 @@ def test_round_trip_with_evidence_row():
     ledger = empty_ledger()
     ledger = append_evidence(ledger, _make_row("ev-aabbccddeeff", "smith2021"))
     assert load_ledger(dump_ledger(ledger)) == ledger
-
-
-# ---------------------------------------------------------------------------
-# update_evidence — id immutability guard
-# ---------------------------------------------------------------------------
-
-
-def test_update_evidence_id_immutable_raises():
-    row = _make_row("ev-aabbccddeeff")
-    ledger = append_evidence(empty_ledger(), row)
-    with pytest.raises(ValueError, match="immutable"):
-        update_evidence(ledger, "ev-aabbccddeeff", id="ev-other")
 
 
 # ---------------------------------------------------------------------------
