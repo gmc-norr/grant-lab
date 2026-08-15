@@ -26,6 +26,7 @@ from call_manager.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
 from call_manager.proposal_assist.drafting.locking import (
     WorkspaceDeleted,
     acquire_commit_mutex_live,
+    is_lock_timeout,
 )
 from call_manager.proposal_assist.paths import workspace_repo_dir
 
@@ -220,7 +221,7 @@ def checkpoint_active_tails(session_factory, *, workspaces_dir, min_tail: int) -
                 # not a failure: there is nothing to checkpoint and nothing to retry.
                 s.rollback()
                 continue
-            except Exception:  # noqa: BLE001 — best-effort; isolate per artifact
+            except Exception as exc:  # noqa: BLE001 — best-effort; isolate per artifact
                 s.rollback()
                 logger.warning(
                     "collab.checkpoint_tail_failed",
@@ -229,6 +230,14 @@ def checkpoint_active_tails(session_factory, *, workspaces_dir, min_tail: int) -
                         "workspace_id": str(workspace_id),
                         "artifact": artifact,
                     },
-                    exc_info=True,
+                    # Since Slice C3 bounded the mutex-held tail, routine row
+                    # contention arrives here as OperationalError(55P03). WARNING
+                    # stays right either way — the attempt rolled back, the
+                    # watermark did not move, and the next scan re-selects the
+                    # same tail — but a stack trace for ordinary contention is
+                    # noise on a job that ticks continuously. Everything else
+                    # keeps its traceback: a genuine failure on a best-effort
+                    # background path is only ever diagnosable from this log line.
+                    exc_info=not is_lock_timeout(exc),
                 )
     return done

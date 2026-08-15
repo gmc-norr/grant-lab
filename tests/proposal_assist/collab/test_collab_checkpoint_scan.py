@@ -8,7 +8,7 @@ from sqlalchemy import select
 from call_manager.db.models import ArtifactVersion, CollabArtifactState, Workspace, WorkspaceEvent
 from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
 from call_manager.proposal_assist.collab import checkpoint as cp
-from call_manager.proposal_assist.collab import state, store
+from call_manager.proposal_assist.collab import handover, state, store
 from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
 from call_manager.proposal_assist.collab.permissions import make_checkpoint_on_evict
 from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
@@ -219,3 +219,117 @@ async def test_a_bounded_eviction_checkpoint_logs_skipped_not_error(
         "routine row contention logged an ERROR with a traceback — this is the "
         "regression Slice C3 introduced at the 14th, indirect mutex site"
     )
+
+
+def _records(caplog, event):
+    return [r for r in caplog.records if r.__dict__.get("event") == event]
+
+
+def test_a_bounded_scan_checkpoint_logs_a_warning_without_a_traceback(
+    pg_session_factory, tmp_path, caplog
+):
+    """checkpoint_active_tails is a periodic scheduler job that ticks forever.
+    Since Slice C3 bounded the mutex-held tail, ordinary row contention reaches
+    its `except Exception` as a raw OperationalError(55P03) instead of hanging.
+
+    WARNING is the right level either way — the attempt rolled back and the tail
+    is re-selected next scan — but the traceback is not: an error-shaped stack
+    trace per tick for routine contention is exactly the noise that trains
+    operators to ignore this log line. Contends the collab_artifact_state row
+    advance_checkpoint writes; the workspace row would prove nothing, since
+    acquire_commit_mutex_live's liveness re-read is a plain SELECT.
+    """
+    wid = _mk(pg_session_factory, tmp_path, "c3-scanlog@ki.se", "## Background\n\nedited.\n")
+
+    release, t = _hold_state_row(pg_session_factory, wid)
+    try:
+        with caplog.at_level(logging.WARNING):
+            done = cp.checkpoint_active_tails(
+                pg_session_factory, workspaces_dir=str(tmp_path), min_tail=1
+            )
+    finally:
+        release.set()
+        t.join(timeout=30)
+
+    assert done == 0, "a contended candidate must not be counted as checkpointed"
+    recs = _records(caplog, "collab_checkpoint_tail_failed")
+    assert len(recs) == 1, (
+        "the contended candidate should log exactly one benign warning; got "
+        f"{[r.__dict__.get('event') for r in caplog.records]}"
+    )
+    assert recs[0].levelno == logging.WARNING
+    # `exc_info=False` records as False, not None — assert falsy so the check is
+    # about "no traceback attached", not about which falsy value logging stored.
+    assert not recs[0].exc_info, (
+        "routine bounded-tail contention emitted a full traceback from a job that "
+        "runs continuously"
+    )
+
+
+def test_a_real_scan_failure_keeps_its_traceback(pg_session_factory, tmp_path, monkeypatch, caplog):
+    """The other half of the contract above: suppressing the traceback is scoped
+    to is_lock_timeout ONLY. A genuine failure on this best-effort background
+    path is diagnosable from nothing but this log line, so it must keep exc_info.
+    """
+    wid = _mk(pg_session_factory, tmp_path, "c3-scanreal@ki.se", "## Background\n\nedited.\n")
+
+    def _boom(*a, **kw):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(cp, "checkpoint_artifact", _boom)
+
+    with caplog.at_level(logging.WARNING):
+        done = cp.checkpoint_active_tails(
+            pg_session_factory, workspaces_dir=str(tmp_path), min_tail=1
+        )
+
+    assert done == 0
+    recs = _records(caplog, "collab_checkpoint_tail_failed")
+    assert len(recs) == 1
+    assert recs[0].exc_info is not None, (
+        "a real failure lost its traceback — the suppression is meant to be scoped "
+        f"to lock timeouts (workspace {wid})"
+    )
+
+
+def test_a_bounded_handover_checkpoint_logs_skipped_not_error(
+    pg_session_factory, tmp_path, caplog
+):
+    """run_kill_switch_handover reaches the commit mutex INDIRECTLY, through
+    checkpoint_artifact — the same blind spot that hid make_checkpoint_on_evict
+    from the slice's direct-call-site inventory.
+
+    Its catch-all logged ERROR with a traceback, so once the tail was bounded the
+    kill-switch rollback path emitted an error-level stack trace for ordinary row
+    contention — on a pass the scheduler re-runs every tick while the switch is
+    engaged. Contention is benign here: the log is NOT truncated, so the next
+    tick retries.
+    """
+    wid = _mk(pg_session_factory, tmp_path, "c3-handover@ki.se", "## Background\n\nedited.\n")
+
+    release, t = _hold_state_row(pg_session_factory, wid)
+    try:
+        with caplog.at_level(logging.WARNING):
+            done = handover.run_kill_switch_handover(
+                pg_session_factory, workspaces_dir=str(tmp_path)
+            )
+    finally:
+        release.set()
+        t.join(timeout=30)
+
+    assert done == 0, "a contended artifact must not be counted as handed over"
+    events = [r.__dict__.get("event") for r in caplog.records]
+    assert "collab_kill_switch_handover_skipped" in events, (
+        f"a bounded handover checkpoint should log the benign skip; got {events}"
+    )
+    assert "collab_kill_switch_handover_failed" not in events, (
+        "routine row contention logged an ERROR with a traceback on the kill-switch "
+        "rollback path — the 15th, indirect mutex site"
+    )
+    rec = _records(caplog, "collab_kill_switch_handover_skipped")[0]
+    assert rec.levelno == logging.WARNING
+    assert rec.exc_info is None, "the benign arm must not carry a traceback"
+    with pg_session_factory() as s:
+        assert store.load_rows(s, workspace_id=wid, artifact="draft"), (
+            "the handover truncated the log despite failing to hand it over"
+        )

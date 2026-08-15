@@ -17,7 +17,11 @@ import logging
 from call_manager.db.models import Workspace
 from call_manager.proposal_assist.collab import state, store
 from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
-from call_manager.proposal_assist.drafting.locking import WorkspaceDeleted
+from call_manager.proposal_assist.drafting.locking import (
+    CommitMutexTimeout,
+    WorkspaceDeleted,
+    is_lock_timeout,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,20 +53,50 @@ def run_kill_switch_handover(session_factory, *, workspaces_dir) -> int:
                 state.reset_checkpoint(s, workspace_id=workspace_id, artifact=artifact)
                 s.commit()  # checkpoint rows + truncate + reset: ONE transaction
                 done += 1
-            except WorkspaceDeleted:
-                # Deleted between the pre-screen above and the mutex. Expected,
-                # not a failure: there is nothing to hand over.
+            except Exception as exc:  # noqa: BLE001 — isolate per artifact; scan retries
+                # This pass reaches the commit mutex INDIRECTLY, through
+                # checkpoint_artifact. Since Slice C3 bounded the mutex-held
+                # tail, routine row contention RAISES OperationalError(55P03)
+                # where it used to hang — the same benign "someone else is
+                # writing; the log survives untruncated and the next scan tick
+                # retries" outcome as a mutex ACQUISITION timeout, or as a
+                # workspace deleted between the pre-screen above and the mutex.
+                # None of those is a fault, so none earns an ERROR + traceback
+                # on a path the scheduler re-runs while the switch stays engaged.
+                #
+                # ONE clause rather than sibling `except WorkspaceDeleted` /
+                # `except OperationalError` arms: a re-raise from a sibling
+                # clause escapes the try entirely instead of falling through to
+                # `except Exception`, which would change what a REAL database
+                # failure does here. Mirrors permissions.make_checkpoint_on_evict.
+                #
+                # GitCommitError is deliberately NOT benign on this path: the
+                # whole point of the handover is getting the log INTO git, so a
+                # commit that fails is a real fault — as is the repo-less
+                # RuntimeError raised above.
+                benign = isinstance(
+                    exc, (CommitMutexTimeout, WorkspaceDeleted)
+                ) or is_lock_timeout(exc)
+                if benign:
+                    logger.warning(
+                        "collab.kill_switch_handover_skipped",
+                        extra={
+                            "event": "collab_kill_switch_handover_skipped",
+                            "workspace_id": str(workspace_id),
+                            "artifact": artifact,
+                        },
+                    )
+                else:
+                    logger.error(
+                        "collab.kill_switch_handover_failed",
+                        extra={
+                            "event": "collab_kill_switch_handover_failed",
+                            "workspace_id": str(workspace_id),
+                            "artifact": artifact,
+                        },
+                        exc_info=True,
+                    )
+                # Outside the branch: a rolled-back session is required either
+                # way before the next candidate reuses this `with` block.
                 s.rollback()
-                continue
-            except Exception:  # noqa: BLE001 — isolate per artifact; scan retries
-                s.rollback()
-                logger.error(
-                    "collab.kill_switch_handover_failed",
-                    extra={
-                        "event": "collab_kill_switch_handover_failed",
-                        "workspace_id": str(workspace_id),
-                        "artifact": artifact,
-                    },
-                    exc_info=True,
-                )
     return done

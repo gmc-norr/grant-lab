@@ -14,7 +14,10 @@ from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import CoherenceJob, ProposedChange
 from call_manager.proposal_assist.citations.gitio import GitCommitError
 from call_manager.proposal_assist.collab import state as collab_state
-from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
+from call_manager.proposal_assist.drafting.locking import (
+    BUSY_ERROR_MESSAGE,
+    CommitMutexTimeout,
+)
 from call_manager.proposal_assist.editing.save import SectionStructureError, SpecLockedError
 from call_manager.proposal_assist.proposals.accepting import (
     CitationAcceptBusy,
@@ -132,7 +135,7 @@ def _accept_git_first(session_factory, workspace_id, pc_id, user, workspaces_dir
         except CommitMutexTimeout as exc:
             session.rollback()
             raise HTTPException(
-                status_code=429, detail="workspace busy; retry", headers={"Retry-After": "2"}
+                status_code=429, detail=BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
             ) from exc
         except GitCommitError as exc:
             session.rollback()
@@ -193,7 +196,7 @@ async def accept(
         except CommitMutexTimeout as exc:
             raise HTTPException(
                 status_code=429,
-                detail="workspace busy; retry",
+                detail=BUSY_ERROR_MESSAGE,
                 headers={"Retry-After": "2"},
             ) from exc
         except RoomEvicted as exc:
