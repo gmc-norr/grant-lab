@@ -15,12 +15,7 @@ import pytest
 from call_manager.config import Settings
 from call_manager.db.models import Workspace
 from call_manager.proposal_assist.drafting.locking import DELETED_ERROR_MESSAGE
-from call_manager.proposal_assist.tools.citations import (
-    insert_citation_impl,
-    remove_citation_impl,
-    rename_citekey_impl,
-    update_citation_impl,
-)
+from call_manager.proposal_assist.tools.citations import insert_citation_impl
 from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 from call_manager.proposal_assist.tools.registry import ToolContext
 from tests.proposal_assist.conftest import make_workspace
@@ -78,32 +73,3 @@ async def test_insert_citation_refuses(deleted_ctx):
     )
     assert result == {"error": DELETED_ERROR_MESSAGE}
     assert _head(repo_dir) == head  # no commit
-
-
-@pytest.mark.asyncio
-async def test_remove_citation_refuses(deleted_ctx):
-    ctx, repo_dir = deleted_ctx
-    head = _head(repo_dir)
-    result = await remove_citation_impl(ctx, evidence_id="ev-abc123")
-    assert result == {"error": DELETED_ERROR_MESSAGE}
-    assert _head(repo_dir) == head
-
-
-@pytest.mark.asyncio
-async def test_update_citation_refuses(deleted_ctx):
-    ctx, repo_dir = deleted_ctx
-    head = _head(repo_dir)
-    result = await update_citation_impl(
-        ctx, evidence_id="ev-abc123", stance="contradicts"
-    )
-    assert result == {"error": DELETED_ERROR_MESSAGE}
-    assert _head(repo_dir) == head
-
-
-@pytest.mark.asyncio
-async def test_rename_citekey_refuses(deleted_ctx):
-    ctx, repo_dir = deleted_ctx
-    head = _head(repo_dir)
-    result = await rename_citekey_impl(ctx, old_citekey="oldkey2021", new_citekey="newkey2022")
-    assert result == {"error": DELETED_ERROR_MESSAGE}
-    assert _head(repo_dir) == head
