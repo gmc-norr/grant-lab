@@ -1409,6 +1409,15 @@ Add `import contextlib` at the top of the module if it is not already there.
 
 Create `tests/proposal_assist/test_gitio_timeouts.py`:
 
+> **Corrected after implementation.** This listing originally carried two defects, both
+> introduced by the tooling that wrote this plan rather than by its author's intent: raw
+> newlines inside string literals (invalid Python), and the filename key `"PROPOSAL.md"`
+> where `init_workspace_repo` actually seeds `PROPOSAL_FILENAME` — `proposal.md`, on a
+> case-sensitive filesystem — which would have made the rollback assertion raise
+> `FileNotFoundError` instead of verifying restored content. The block below is the code
+> as built and verified in commit 57ffcd1.
+
+
 ```python
 """Slice C3 — gitio's subprocesses are bounded, and a timeout is a GitCommitError.
 
@@ -1424,6 +1433,7 @@ import subprocess
 
 import pytest
 
+from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
 from call_manager.proposal_assist.citations import gitio
 from call_manager.proposal_assist.citations.gitio import (
     GitCommitError,
@@ -1437,8 +1447,7 @@ def test_a_timed_out_commit_is_a_GitCommitError_and_leaves_the_tree_clean(
     tmp_path, monkeypatch
 ):
     repo = tmp_path / "repo"
-    init_workspace_repo(repo, "original
-")
+    init_workspace_repo(repo, "original\n")
 
     real_run = subprocess.run
 
@@ -1452,13 +1461,11 @@ def test_a_timed_out_commit_is_a_GitCommitError_and_leaves_the_tree_clean(
     monkeypatch.setattr(gitio.subprocess, "run", _run)
 
     with pytest.raises(GitCommitError) as exc:
-        write_and_commit_files(repo, {"PROPOSAL.md": "rewritten
-"}, "msg")
+        write_and_commit_files(repo, {PROPOSAL_FILENAME: "rewritten\n"}, "msg")
     assert "timed out" in str(exc.value)
 
     # The rollback ran: file content restored and the index reset.
-    assert (repo / "PROPOSAL.md").read_text() == "original
-"
+    assert (repo / PROPOSAL_FILENAME).read_text() == "original\n"
     staged = real_run(
         ["git", "diff", "--cached", "--name-only"],
         cwd=repo,
@@ -1470,8 +1477,7 @@ def test_a_timed_out_commit_is_a_GitCommitError_and_leaves_the_tree_clean(
 
 def test_a_reset_timeout_does_not_mask_the_original_failure(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
-    init_workspace_repo(repo, "original
-")
+    init_workspace_repo(repo, "original\n")
 
     real_run = subprocess.run
 
@@ -1484,14 +1490,12 @@ def test_a_reset_timeout_does_not_mask_the_original_failure(tmp_path, monkeypatc
 
     # GitCommitError, NOT a bare TimeoutExpired from inside the handler.
     with pytest.raises(GitCommitError):
-        write_and_commit_files(repo, {"PROPOSAL.md": "rewritten
-"}, "msg")
+        write_and_commit_files(repo, {PROPOSAL_FILENAME: "rewritten\n"}, "msg")
 
 
 def test_a_read_helper_timeout_is_a_GitCommitError(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
-    init_workspace_repo(repo, "original
-")
+    init_workspace_repo(repo, "original\n")
 
     def _run(args, **kw):
         raise subprocess.TimeoutExpired(cmd=args, timeout=gitio._GIT_TIMEOUT_SECONDS)
