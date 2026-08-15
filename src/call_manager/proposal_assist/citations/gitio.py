@@ -9,7 +9,6 @@ failed mutation leaves the working tree exactly as it was.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import os
 import subprocess
@@ -41,6 +40,28 @@ def _git_env() -> dict[str, str]:
     return env
 
 
+def _cmd_head(cmd: object) -> str:
+    """Render only the first two argv elements ('git commit'), never the rest.
+
+    The tail of a git argv carries live document text: write_and_commit_files'
+    commit message interpolates a proposal section heading (editing/save.py) and
+    a citekey (tools/citations.py). This is an internal hospital tool with a
+    PII-conscious posture, and a section heading in a log line is content leaving
+    the place the user put it. The diagnostic value is entirely in WHICH command
+    died, not in its arguments.
+
+    ``TimeoutExpired.cmd`` is whatever was handed to ``run()``, so accept any
+    shape: a str command (shell=True) is split to its first two tokens rather
+    than rendered whole, and anything else degrades to its type name — no branch
+    may fall through to the full value.
+    """
+    if isinstance(cmd, (list, tuple)):
+        return str([str(part) for part in cmd[:2]])
+    if isinstance(cmd, str):
+        return " ".join(cmd.split()[:2])
+    return f"<{type(cmd).__name__}>"
+
+
 def _log_if_timeout(exc: BaseException) -> None:
     """Make a git timeout LOUD, which is what _GIT_TIMEOUT_SECONDS' comment
     promises and what nothing here delivered.
@@ -61,7 +82,7 @@ def _log_if_timeout(exc: BaseException) -> None:
             "gitio.subprocess_timeout",
             extra={
                 "event": "gitio_subprocess_timeout",
-                "cmd": str(exc.cmd),
+                "cmd": _cmd_head(exc.cmd),
                 "timeout_seconds": _GIT_TIMEOUT_SECONDS,
             },
         )
@@ -90,6 +111,10 @@ def write_and_commit_files(
     ``GitCommitError`` is raised but the commit still exists on disk. Callers
     should treat this identically to the post-commit DB-failure path in
     proposal.py — reconciliation handles the drift (same atomicity model).
+
+    Every failure mode of the forward path — a non-zero git exit, a subprocess
+    timeout, or an ``OSError`` from the writes or from ``cwd=`` — runs the
+    rollback and surfaces as ``GitCommitError``. Nothing else escapes.
 
     Delete semantics (``None`` values) are explicitly out of scope; pass only
     ``str`` content.
@@ -176,11 +201,21 @@ def write_and_commit_files(
         )
         return head.stdout.strip()
 
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
+        # OSError belongs here for the same reason the two subprocess errors do:
+        # every forward call above — the write_text loop, add, diff, commit,
+        # rev-parse — can raise one (ENOSPC or EIO mid-write, a permissions
+        # change, an unreadable cwd), and an OSError escaping RAW skips this
+        # whole rollback and leaves a half-written file on disk while the
+        # caller's DB transaction rolls back. It also replaces the
+        # GitCommitError all eight production callers are written against.
+        # current_head, blob_sha and read_blob already translate OSError; this
+        # was the one function that did not, and the only one with a rollback.
+        #
         # FIX 1: ROLLBACK — scoped to the touched paths only, NEVER --hard.
         # Each per-file restore is guarded so a disk/perms error can't prevent
         # the index reset from running and can't swallow the original error.
-        restore_exc: OSError | None = None
+        restore_exc: BaseException | None = None
         for rel, orig in originals.items():
             p = repo_dir / rel
             try:
@@ -195,11 +230,25 @@ def write_and_commit_files(
 
         # A failure HERE must not mask the original one: the per-file restore
         # above has already run, and the caller needs the real error. check=False
-        # covers a non-zero exit; the timeout and OSError need catching. OSError
-        # is not theoretical in this tree — scrub_workspace_bytes removing
-        # repo_dir makes this call's `cwd=` invalid, and a bare FileNotFoundError
-        # out of the handler replaces the GitCommitError every caller expects.
-        with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+        # covers a non-zero exit; the timeout and OSError need catching. The
+        # OSError triggers are the same ones that bring us into this handler at
+        # all — ENOSPC or EIO mid-write, a permissions change, or an external
+        # actor removing the directory in the window between a failing forward
+        # call and this reset — and a bare FileNotFoundError out of the handler
+        # would replace the GitCommitError every caller expects.
+        #
+        # (An earlier revision of this comment blamed scrub_workspace_bytes for
+        # removing repo_dir. It does not: workspaces.py drops only the
+        # attachments/ and references/ subtrees, and the docstring on
+        # ReferenceStorage.delete_workspace states that the sibling repo/ tree
+        # is untouched. The guard is still required — see the widened handler
+        # above — but not for that reason.)
+        #
+        # Suppressed, NOT silent: a swallowed reset error leaves a stale index
+        # and says nothing, which is precisely the scenario this guard exists
+        # for. Fold it into the same rollback diagnostic when nothing has
+        # claimed that slot, so it reaches the caller either way.
+        try:
             subprocess.run(
                 ["git", "reset", "HEAD", "--", *paths],
                 cwd=repo_dir,
@@ -208,14 +257,22 @@ def write_and_commit_files(
                 timeout=_GIT_TIMEOUT_SECONDS,
                 env=env,
             )
+        except (subprocess.TimeoutExpired, OSError) as reset_exc:
+            if restore_exc is None:
+                restore_exc = reset_exc
         raw = getattr(e, "stderr", None) or b""
         stderr = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
         _log_if_timeout(e)
         if isinstance(e, subprocess.TimeoutExpired):
             msg = (
                 f"atomic commit timed out after {_GIT_TIMEOUT_SECONDS}s "
-                f"running {e.cmd}: {stderr.strip()}"
+                f"running {_cmd_head(e.cmd)}: {stderr.strip()}"
             )
+        elif isinstance(e, OSError):
+            # Distinct wording from the timeout branch: this is a filesystem
+            # error on a forward call, not a stall. OSError carries no .stderr,
+            # so the exception itself is the whole diagnostic.
+            msg = f"atomic commit failed with {type(e).__name__}: {e}"
         else:
             msg = f"atomic commit failed: {stderr.strip()}"
         if restore_exc is not None:
