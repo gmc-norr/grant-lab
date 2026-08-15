@@ -9,9 +9,20 @@ failed mutation leaves the working tree exactly as it was.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 from pathlib import Path
+
+# Ceiling on any single git subprocess. write_and_commit_files runs inside a
+# mutex-held transaction (via checkpoint_artifact), so an untimed git call stalls
+# the mutex for every other writer exactly as an unbounded lock wait did before
+# Slice C3 — and no lock timeout can bound a subprocess.
+#
+# Far above the 2s lock cap on purpose: a git timeout is a genuine filesystem
+# failure, not routine contention, so it should be rare and loud rather than a
+# routine refusal. Matches phases/setup.py:108's _GIT_TIMEOUT_SECONDS.
+_GIT_TIMEOUT_SECONDS = 30.0
 
 
 def _git_env() -> dict[str, str]:
@@ -89,6 +100,7 @@ def write_and_commit_files(
             cwd=repo_dir,
             check=True,
             capture_output=True,
+            timeout=_GIT_TIMEOUT_SECONDS,
             env=env,
         )
 
@@ -97,6 +109,7 @@ def write_and_commit_files(
             ["git", "diff", "--cached", "--quiet"],
             cwd=repo_dir,
             capture_output=True,
+            timeout=_GIT_TIMEOUT_SECONDS,
             env=env,
         )
         if diff.returncode == 0:
@@ -106,6 +119,7 @@ def write_and_commit_files(
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=_GIT_TIMEOUT_SECONDS,
                 env=env,
             )
             return head.stdout.strip()
@@ -115,6 +129,7 @@ def write_and_commit_files(
             cwd=repo_dir,
             check=True,
             capture_output=True,
+            timeout=_GIT_TIMEOUT_SECONDS,
             env=env,
         )
         head = subprocess.run(
@@ -123,11 +138,12 @@ def write_and_commit_files(
             check=True,
             capture_output=True,
             text=True,
+            timeout=_GIT_TIMEOUT_SECONDS,
             env=env,
         )
         return head.stdout.strip()
 
-    except subprocess.CalledProcessError as e:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         # FIX 1: ROLLBACK — scoped to the touched paths only, NEVER --hard.
         # Each per-file restore is guarded so a disk/perms error can't prevent
         # the index reset from running and can't swallow the original error.
@@ -144,20 +160,24 @@ def write_and_commit_files(
                     restore_exc = oe
                 # Continue restoring the remaining files regardless.
 
-        # Always run the scoped reset, even if a restore raised.
-        subprocess.run(
-            ["git", "reset", "HEAD", "--", *paths],
-            cwd=repo_dir,
-            check=False,
-            capture_output=True,
-            env=env,
-        )
-        stderr = (
-            e.stderr.decode("utf-8", errors="replace")
-            if isinstance(e.stderr, bytes)
-            else (e.stderr or "")
-        )
-        msg = f"atomic commit failed: {stderr.strip()}"
+        # A timeout HERE must not mask the original failure: the per-file restore
+        # above has already run, and the caller needs the real error. check=False
+        # covers a non-zero exit; only the timeout needs catching.
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            subprocess.run(
+                ["git", "reset", "HEAD", "--", *paths],
+                cwd=repo_dir,
+                check=False,
+                capture_output=True,
+                timeout=_GIT_TIMEOUT_SECONDS,
+                env=env,
+            )
+        raw = getattr(e, "stderr", None) or b""
+        stderr = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+        if isinstance(e, subprocess.TimeoutExpired):
+            msg = f"atomic commit timed out after {_GIT_TIMEOUT_SECONDS}s: {stderr.strip()}"
+        else:
+            msg = f"atomic commit failed: {stderr.strip()}"
         if restore_exc is not None:
             msg += f"; additionally, rollback encountered a restore error: {restore_exc}"
         raise GitCommitError(msg) from e
@@ -180,9 +200,11 @@ def current_head(repo_dir: Path) -> str:
             cwd=Path(repo_dir),
             capture_output=True,
             text=True,
+            timeout=_GIT_TIMEOUT_SECONDS,
             env=env,
         )
-    except OSError as exc:  # FileNotFoundError, NotADirectoryError, PermissionError
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        # OSError: FileNotFoundError, NotADirectoryError, PermissionError.
         raise GitCommitError(f"rev-parse HEAD failed: {exc}") from exc
     if proc.returncode != 0:
         raise GitCommitError(f"rev-parse HEAD failed: {proc.stderr.strip()}")
@@ -200,9 +222,10 @@ def blob_sha(repo_dir: Path, ref: str, path: str) -> str:
             cwd=Path(repo_dir),
             capture_output=True,
             text=True,
+            timeout=_GIT_TIMEOUT_SECONDS,
             env=env,
         )
-    except OSError as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         raise GitCommitError(f"rev-parse {ref}:{path} failed: {exc}") from exc
     if proc.returncode != 0:
         raise GitCommitError(f"rev-parse {ref}:{path} failed: {proc.stderr.strip()}")
@@ -221,9 +244,10 @@ def read_blob(repo_dir: Path, sha: str) -> str:
             ["git", "cat-file", "-p", sha],
             cwd=Path(repo_dir),
             capture_output=True,  # bytes (NO text=True) so WE control decoding
+            timeout=_GIT_TIMEOUT_SECONDS,
             env=env,
         )
-    except OSError as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         raise GitCommitError(f"cat-file {sha} failed: {exc}") from exc
     if proc.returncode != 0:
         raise GitCommitError(
