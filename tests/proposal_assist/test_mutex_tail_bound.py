@@ -135,7 +135,7 @@ def test_a_nested_acquire_does_not_wipe_the_bound(pg_session_factory, current_us
 
 def test_acquire_commit_mutex_reapplies_the_tail_cap_after_the_advisory_lock():
     """The DB gates prove the tail is BOUNDED; this proves it is bounded at OUR
-    constant.
+    constant, unconditionally, on the path that actually runs.
 
     Deleting the tail statement leaves both DB gates green, because the ACQUISITION
     `SET LOCAL lock_timeout` (10s) is issued BEFORE pg_advisory_xact_lock and
@@ -147,6 +147,17 @@ def test_acquire_commit_mutex_reapplies_the_tail_cap_after_the_advisory_lock():
     lock, deriving from MUTEX_TAIL_LOCK_TIMEOUT_SECONDS) rather than a timing, so it
     cannot go flaky and cannot be satisfied by the acquisition cap standing in.
 
+    Only scans TOP-LEVEL statements of the function body (`fn.body`), not every
+    statement reachable via `ast.walk(fn)`. `ast.walk` descends into nested blocks,
+    so it would find a tail statement moved into the `except OperationalError`
+    handler and call the gate satisfied — even though that leaves the SUCCESS path
+    with no tail cap at all, exactly the bug this gate exists to catch. Restricting
+    to `fn.body` means what this proves is narrower and more honest: the tail cap
+    is an unconditional top-level statement of the function — not nested in a
+    branch, an exception handler, or reachable only after an early return — that
+    runs on the success path, is positioned after the advisory-lock `try`, and
+    derives from MUTEX_TAIL_LOCK_TIMEOUT_SECONDS.
+
     AST nodes only — no regex or substring scan over source text. Reading a parsed
     Constant's `.value` is node inspection; scanning the file's characters is not.
     """
@@ -157,8 +168,7 @@ def test_acquire_commit_mutex_reapplies_the_tail_cap_after_the_advisory_lock():
 
     tree = ast.parse(inspect.getsource(locking))
     fn = next(
-        n for n in tree.body
-        if isinstance(n, ast.FunctionDef) and n.name == "acquire_commit_mutex"
+        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "acquire_commit_mutex"
     )
 
     def _literal_prefix(node):
@@ -176,7 +186,10 @@ def test_acquire_commit_mutex_reapplies_the_tail_cap_after_the_advisory_lock():
         return ""
 
     set_locals = []
-    for node in ast.walk(fn):
+    for stmt in fn.body:
+        if not isinstance(stmt, ast.Expr):
+            continue
+        node = stmt.value
         if not isinstance(node, ast.Call):
             continue
         if not (isinstance(node.func, ast.Attribute) and node.func.attr == "execute"):
@@ -199,7 +212,15 @@ def test_acquire_commit_mutex_reapplies_the_tail_cap_after_the_advisory_lock():
         f"acquire_commit_mutex (the acquisition cap, then the tail cap), found "
         f"{len(set_locals)} at lines {[ln for ln, _ in set_locals]}. Deleting the "
         f"tail statement leaves every DB gate green — the 10s acquisition cap "
-        f"stands in for it — so this count is the only thing guarding it."
+        f"stands in for it — so this count is the only thing guarding it. Note "
+        f"this count can also drop to one for a reason that has nothing to do "
+        f"with deletion: if the tail statement's SQL is hoisted behind a name "
+        f"(e.g. a module constant passed to `text(...)`) rather than inlined as "
+        f'a string literal at the call site, `_literal_prefix` returns "" for '
+        f"it — an `ast.Name` is neither a Constant nor a JoinedStr — so it goes "
+        f"uncounted here even though the statement still runs. If that's your "
+        f"situation, inline the SQL at the call site or extend `_literal_prefix` "
+        f"to resolve the name; the statement was never deleted."
     )
 
     try_node = next(n for n in fn.body if isinstance(n, ast.Try))

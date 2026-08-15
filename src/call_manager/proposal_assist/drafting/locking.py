@@ -251,6 +251,16 @@ def acquire_commit_mutex(
     # The resulting 55P03 is mapped to 429 + Retry-After: 2 by main.py's
     # OperationalError handler, centrally, because two sites already commit
     # outside their try block and a local clause would miss them.
+    #
+    # Precedence when nested inside bounded_lock_waits (row_locks.py): the
+    # INNERMOST acquire_commit_mutex call always wins, because this statement
+    # re-applies MUTEX_TAIL_LOCK_TIMEOUT_SECONDS unconditionally rather than
+    # only when it would tighten the existing SET LOCAL. That can WIDEN a
+    # shorter enclosing bounded_lock_waits cap back to this constant (e.g. a
+    # 1s bounded_lock_waits scope containing a nested acquire ends up back at
+    # 2s for the rest of that scope). Harmless today, since every production
+    # bounded_lock_waits call already passes 2 — and strictly better than the
+    # old behaviour, which widened all the way to DEFAULT (disabled).
     session.execute(text(f"SET LOCAL lock_timeout = '{MUTEX_TAIL_LOCK_TIMEOUT_SECONDS * 1000}ms'"))
 
 
