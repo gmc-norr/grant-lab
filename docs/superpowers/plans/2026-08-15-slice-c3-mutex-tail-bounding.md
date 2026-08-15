@@ -461,6 +461,121 @@ Expected: `test_the_tail_after_the_mutex_is_bounded` AND `test_a_nested_acquire_
 
 **This mutation is the whole slice.** If it does not turn something red, stop and escalate — the gates are not testing the mechanism.
 
+- [ ] **Step 8b: Close the which-bound gap (added mid-execution)**
+
+Step 8's mutation restores `SET LOCAL lock_timeout = DEFAULT` and turns both DB gates red, which
+proves the tail is bounded. It does **not** prove the tail is bounded at
+`MUTEX_TAIL_LOCK_TIMEOUT_SECONDS`, and the difference is not theoretical. Run this third
+mutation to see it: **delete** the tail statement outright rather than restoring DEFAULT. Both
+DB gates stay GREEN.
+
+The reason is that `acquire_commit_mutex` issues its ACQUISITION `SET LOCAL lock_timeout`
+(`timeout_seconds`, 10s by default) *before* `pg_advisory_xact_lock`, and `SET LOCAL` persists
+for the rest of the transaction. With the tail statement gone, that 10s cap silently stands in
+as the tail cap — and since the gates' holder parks the row for 30s, a 10s wait still raises
+55P03 well inside the window. The gates cannot tell 2 from 10. The ceilings test cannot help
+either: it is static arithmetic over the constant and has no way to notice the constant stopped
+being applied.
+
+Add a structural gate. Append to `tests/proposal_assist/test_mutex_tail_bound.py`:
+
+```python
+def test_acquire_commit_mutex_reapplies_the_tail_cap_after_the_advisory_lock():
+    """The DB gates prove the tail is BOUNDED; this proves it is bounded at OUR
+    constant.
+
+    Deleting the tail statement leaves both DB gates green, because the ACQUISITION
+    `SET LOCAL lock_timeout` (10s) is issued BEFORE pg_advisory_xact_lock and
+    persists for the transaction — a 10s wait still raises 55P03 inside the gates'
+    30s holder window. And the ceilings test is static arithmetic over the constant,
+    so it cannot notice the constant no longer being applied.
+
+    Structural on purpose: it asserts the DECISION (a second SET LOCAL, after the
+    lock, deriving from MUTEX_TAIL_LOCK_TIMEOUT_SECONDS) rather than a timing, so it
+    cannot go flaky and cannot be satisfied by the acquisition cap standing in.
+
+    AST nodes only — no regex or substring scan over source text. Reading a parsed
+    Constant's `.value` is node inspection; scanning the file's characters is not.
+    """
+    import ast
+    import inspect
+
+    from call_manager.proposal_assist.drafting import locking
+
+    tree = ast.parse(inspect.getsource(locking))
+    fn = next(
+        n for n in tree.body
+        if isinstance(n, ast.FunctionDef) and n.name == "acquire_commit_mutex"
+    )
+
+    def _literal_prefix(node):
+        """The leading literal text of a Constant or JoinedStr argument."""
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.JoinedStr):
+            parts = []
+            for v in node.values:
+                if isinstance(v, ast.Constant) and isinstance(v.value, str):
+                    parts.append(v.value)
+                else:
+                    break
+            return "".join(parts)
+        return ""
+
+    set_locals = []
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Call):
+            continue
+        if not (isinstance(node.func, ast.Attribute) and node.func.attr == "execute"):
+            continue
+        if not node.args:
+            continue
+        inner = node.args[0]
+        if not (
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Name)
+            and inner.func.id == "text"
+            and inner.args
+        ):
+            continue
+        if _literal_prefix(inner.args[0]).startswith("SET LOCAL lock_timeout"):
+            set_locals.append((node.lineno, inner.args[0]))
+
+    assert len(set_locals) == 2, (
+        f"expected exactly two `SET LOCAL lock_timeout` statements in "
+        f"acquire_commit_mutex (the acquisition cap, then the tail cap), found "
+        f"{len(set_locals)} at lines {[ln for ln, _ in set_locals]}. Deleting the "
+        f"tail statement leaves every DB gate green — the 10s acquisition cap "
+        f"stands in for it — so this count is the only thing guarding it."
+    )
+
+    try_node = next(n for n in fn.body if isinstance(n, ast.Try))
+    (first_line, _), (tail_line, tail_arg) = sorted(set_locals)
+    assert first_line < try_node.lineno < tail_line, (
+        "the tail cap must be re-applied AFTER the advisory-lock try block, not "
+        "before it — set before, it is just the acquisition cap under another name"
+    )
+
+    names = {n.id for n in ast.walk(tail_arg) if isinstance(n, ast.Name)}
+    assert "MUTEX_TAIL_LOCK_TIMEOUT_SECONDS" in names, (
+        f"the tail cap must derive from MUTEX_TAIL_LOCK_TIMEOUT_SECONDS, not from "
+        f"{sorted(names) or 'a hardcoded literal'}. Deriving it from "
+        f"timeout_seconds would silently make the tail cap follow each caller's "
+        f"ACQUISITION budget (10s, or 5s at flip/hydrate) instead of the 2s the "
+        f"ceilings test governs."
+    )
+```
+
+Then run all three mutations against it, each md5-verified before and after:
+
+1. Delete the tail `session.execute(...)` statement → expect `expected exactly two ... found 1`.
+2. Change the tail statement to use `timeout_seconds` instead of the constant → expect the
+   `must derive from MUTEX_TAIL_LOCK_TIMEOUT_SECONDS` failure.
+3. Move the tail statement above the `try` → expect the `must be re-applied AFTER` failure.
+
+If any of the three leaves the gate green, the gate is decorative and you must report that
+rather than proceeding.
+
 - [ ] **Step 9: Run the full suite**
 
 ```bash
@@ -1421,8 +1536,7 @@ Message subject: `fix(gitio): bound the nine git subprocesses and translate thei
 
 **Files:**
 - Modify: `src/call_manager/proposal_assist/tools/citations.py`, `editing/save.py`, `citations/human_cite.py`, `analysis/insert.py`, `web/api/workspaces.py` (one comment each)
-- Modify: `src/call_manager/proposal_assist/row_locks.py` (three stale comments — Step 2)
-- Modify: `tests/proposal_assist/test_api_writers_mutex_straddle.py`, `tests/proposal_assist/test_phase0_transaction_boundaries.py` (four stale comments — Step 2)
+- Modify (stale prose — Step 2, verified footprint): `src/call_manager/proposal_assist/row_locks.py` (`:8`, `:83`, `:113`), `evaluator/pass_runner.py:67`, `phases/setup.py:117`, `coherence/pass_runner.py:60`, `review/pass_runner.py:226`, `uncited_claims/pass_runner.py:95`, `tests/proposal_assist/test_api_writers_mutex_straddle.py` (`:13`, `:719`), `tests/proposal_assist/test_phase0_transaction_boundaries.py` (`:412`, `:716`), `tests/proposal_assist/test_pass_retirement.py:615`, `tests/proposal_assist/test_row_lock_ceilings.py:52`
 
 **Interfaces:**
 - Consumes: everything above.
@@ -1441,18 +1555,41 @@ At `tools/citations.py:802`, `editing/save.py:180`, `citations/human_cite.py:102
 
 - [ ] **Step 2: Correct every comment that still describes the old restore**
 
-Seven comments across the tree state, as present-tense fact, that the mutex restores
-`lock_timeout` to `DEFAULT`. Task 2 made all seven false. They are also why the Step 3 grep
-below cannot pass while they stand — it matches comments as readily as SQL.
+**Thirteen** comments across **nine** files state, as present-tense fact, that the mutex leaves
+`lock_timeout` back at `DEFAULT`. Task 2 made all thirteen false. The footprint was verified
+mid-execution and is larger than this task's first draft assumed — the four `pass_runner.py`
+files and `phases/setup.py` were missed because they phrase it as "waits with lock_timeout back
+at DEFAULT" rather than naming the SQL.
 
-In `src/call_manager/proposal_assist/row_locks.py` at `:8`, `:83` and `:113`, and in
-`tests/proposal_assist/test_api_writers_mutex_straddle.py` at `:13` and `:719`, and in
-`tests/proposal_assist/test_phase0_transaction_boundaries.py` at `:412` and `:716`: read each
-comment and rewrite the clause so it describes the bound. The substance in every case is the
-same — "the mutex restores `lock_timeout = DEFAULT`, so this wait is otherwise unbounded"
-becomes "the mutex leaves `MUTEX_TAIL_LOCK_TIMEOUT_SECONDS` in force, so this wait is bounded at
-2s even without an explicit `bounded_lock_waits`" — but each sentence sits in a different
-argument, so adapt rather than paste.
+Rewrite the clause at each of these, adapting to the argument each sentence sits in rather than
+pasting one replacement:
+
+| File | Lines |
+| --- | --- |
+| `src/call_manager/proposal_assist/row_locks.py` | `:8`, `:83`, `:113` |
+| `src/call_manager/proposal_assist/evaluator/pass_runner.py` | `:67` |
+| `src/call_manager/proposal_assist/coherence/pass_runner.py` | `:60` |
+| `src/call_manager/proposal_assist/review/pass_runner.py` | `:226` |
+| `src/call_manager/proposal_assist/uncited_claims/pass_runner.py` | `:95` |
+| `src/call_manager/proposal_assist/phases/setup.py` | `:117` |
+| `tests/proposal_assist/test_api_writers_mutex_straddle.py` | `:13`, `:719` |
+| `tests/proposal_assist/test_phase0_transaction_boundaries.py` | `:412`, `:716` |
+| `tests/proposal_assist/test_pass_retirement.py` | `:615` |
+| `tests/proposal_assist/test_row_lock_ceilings.py` | `:52` |
+
+The substance is the same everywhere — "the mutex restores `lock_timeout = DEFAULT`, so this
+wait is otherwise unbounded" becomes "the mutex leaves `MUTEX_TAIL_LOCK_TIMEOUT_SECONDS` in
+force, so this wait is bounded at 2s even without an explicit `bounded_lock_waits`". Where the
+surrounding argument is "and that is why an explicit bound is needed here", the argument still
+holds: 2s is the backstop, and the explicit `bounded_lock_waits` is what makes the intent local
+and the message specific. Do not delete such reasoning — adjust it.
+
+**Two things that must NOT be rewritten**, both of which are still true:
+- `row_locks.py:5` — "PostgreSQL's `lock_timeout` defaults to 0". That is a fact about
+  PostgreSQL, not about the mutex.
+- `tests/proposal_assist/test_mutex_tail_bound.py` (`:3`, `:82`, `:110`) — Task 2's own file
+  describes the OLD behaviour in the past tense ("used to restore", "before this slice"). It is
+  correct as written and is why Step 4's grep is scoped to `src/`.
 
 These are comments only. Do not change a single assertion, timeout value, or test body; this is
 the one edit permitted to the straddle file, and its 28 tests must still pass unchanged.
@@ -1478,13 +1615,17 @@ Expected: exit 0 everywhere; drift clean; `git status --short` shows only this t
 - [ ] **Step 4: Verify no restore survives anywhere**
 
 ```bash
-grep -rn "SET LOCAL lock_timeout = DEFAULT" src/ tests/ || echo "none — good"
-grep -rn "lock_timeout = DEFAULT" src/ tests/ || echo "none — good"
+grep -rn "SET LOCAL lock_timeout = DEFAULT" src/ || echo "none — good"
+grep -rn "lock_timeout" src/ | grep -i "default" | grep -v "defaults to 0" || echo "none — good"
 ```
 
-Expected: `none — good` from both. The first is the executable SQL; the second is the wider net
-that also catches prose, and it only comes back clean once Step 2 is done. This is success
-criterion 1.
+Expected: `none — good` from both.
+
+Scoped to `src/` deliberately. `tests/proposal_assist/test_mutex_tail_bound.py` quotes the old
+SQL verbatim while explaining what the slice removed, in the past tense — that prose is correct
+and must survive, so a `tests/` arm here would be a gate that can only be satisfied by damaging
+a correct comment. The `defaults to 0` exclusion protects `row_locks.py:5`, which states a fact
+about PostgreSQL rather than about the mutex.
 
 - [ ] **Step 5: Commit**
 
@@ -1494,8 +1635,9 @@ Message subject: `docs(c3): mark the five flag-off-only mutex sites as retiring`
 
 ## Success criteria (spec §10)
 
-1. `locking.py` leaves a bounded tail cap in force; no `SET LOCAL lock_timeout = DEFAULT` remains in `src/` **or `tests/`**, in SQL or in prose (Task 7 Step 4).
+1. `locking.py` leaves a bounded tail cap in force; no `SET LOCAL lock_timeout = DEFAULT` remains anywhere in `src/`, in SQL or in prose (Task 7 Step 4). Correct past-tense prose in `tests/` survives by design.
 2. Restoring that statement turns at least one test red, and one of them exercises the **nested** case (Task 2 Step 8).
+2b. **Deleting** that statement also turns a test red (Task 2 Step 8b). Without this the gate set proves only that the tail is bounded, not that it is bounded at `MUTEX_TAIL_LOCK_TIMEOUT_SECONDS` — the 10s acquisition cap silently stands in, and every DB gate stays green.
 3. The ceilings test governs the new constant, with the budget still parsed from the DELETE test, and raising the cap to 3 fails it (Task 2 Step 7).
 4. Each of the 13 live sites has a verified disposition: absorbed (Task 3), mapped centrally (Task 1), asserted unchanged (Task 4 Step 1), or **newly handled** (Task 4 Steps 2 and 4 — `collab_ws.py` and `flip.py`, the two sites spec revision 4 found needed code rather than verification).
 5. The three dead sites are gone, along with the two test files exclusive to them — and `test_insert_citation_refuses` survives, because `_insert_citation_locked` is still live via `proposals/accepting.py:207` (Task 5 Step 3).
