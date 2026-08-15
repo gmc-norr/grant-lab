@@ -1,7 +1,19 @@
 # Slice C3 — bounding the mutex-held tail at the root
 
 Date: 2026-08-15
-Status: approved (design), revision 1
+Status: approved (design), revision 3
+
+## Revisions
+
+- revision 3 (2026-08-15, plan self-review): the constant was named
+  `MUTEX_TAIL_LOCK_TIMEOUT_MS` but used in arithmetic denominated in seconds. Renamed to
+  `MUTEX_TAIL_LOCK_TIMEOUT_SECONDS`, matching the ceilings test's units and every sibling
+  constant in the tree.
+- revision 2 (2026-08-15, found while writing the plan): §4's kernel row instructed the
+  implementer to add the tail timeout to the collab kernel's clean-error lists. That would have
+  **skipped room eviction after a mutation the transaction then rolled back**, diverging the
+  live in-memory doc from the durable log. Withdrawn and replaced by §4.1: the kernel sites need
+  no change, because evicting is the correct outcome and is the designed recovery path.
 Predecessors: Slice C2 (`eef35ed`), `workspace_write` consolidation (`81ebaec`).
 Closes: spec §10 residual 8 of `docs/superpowers/specs/2026-08-11-workspace-retirement-slice-c-design.md`.
 
@@ -69,7 +81,9 @@ exports neither). Five more are flag-off-only paths that answer 409 once collab 
 ```python
 # locking.py:207
 -    session.execute(text("SET LOCAL lock_timeout = DEFAULT"))
-+    session.execute(text(f"SET LOCAL lock_timeout = '{MUTEX_TAIL_LOCK_TIMEOUT_MS}ms'"))
++    session.execute(
++        text(f"SET LOCAL lock_timeout = '{MUTEX_TAIL_LOCK_TIMEOUT_SECONDS * 1000}ms'")
++    )
 ```
 
 The restore is **replaced**, not deleted. Deleting it would leave the tail at the acquisition's
@@ -85,7 +99,7 @@ call sites:
 3. **It is one line, not thirteen ceremonies.** The consolidation slice established that a
    ceremony hand-written at N sites is wrong at some of them — it was wrong at four of six.
 
-`MUTEX_TAIL_LOCK_TIMEOUT_MS` is a new named constant in `locking.py`, derived in §3.1.
+`MUTEX_TAIL_LOCK_TIMEOUT_SECONDS` is a new named constant in `locking.py`, derived in §3.1.
 
 ### 3.1 Why 2 seconds, not 10
 
@@ -107,7 +121,7 @@ So a mutex-held cap `c` must satisfy `2 × c ≤ 4.0`, giving **c = 2s**. At 10s
 `phases/setup.py:136`'s `_ROW_LOCK_TIMEOUT_SECONDS`), so the six `workspace_write` sites keep
 setting the same value they already set and nothing conflicts.
 
-`MUTEX_TAIL_LOCK_TIMEOUT_MS` joins `_MUTEX_HELD_CAPS` in the ceilings test, so the arithmetic
+`MUTEX_TAIL_LOCK_TIMEOUT_SECONDS` joins `_MUTEX_HELD_CAPS` in the ceilings test, so the arithmetic
 stays enforced automatically if the budget or the row count ever moves.
 
 ## 4. What the change means per site
@@ -119,12 +133,36 @@ inventory establishes this per class rather than per site.
 | --- | --- | --- |
 | **Background, self-absorbing** | `checkpoint.py:90`, `phases/setup.py:361` | **Nothing.** Both already sit under `except Exception` → rollback + log, with a recovery path: `_fail` (`setup.py:584-641`) requeues to `status='queued'` and dead-letters only at `MAX_SETUP_ATTEMPTS = 5`; `find_checkpoint_candidates` (`store.py:101-127`) re-selects any tail it did not advance. A raise is a retry. |
 | **HTTP, already speaks 429** | `web/api/workspaces.py:648`, `:736`, `turns/submit.py:249`, `workspaces.py:124` | The app-level handler (§5) covers them. Verify each; add nothing local. |
-| **Collab kernel** | `kernel.py:136`, `:208`, `:325`, `:369`, `:443` | Their orchestrators classify exceptions against a clean list and **evict the room** on anything unrecognised (`kernel_accept.py:33-42`, `collab_cite.py:34-37`). A new lock timeout is not on those lists, so it would evict — closing every client with code 1011. Each list gains the new exception so it is treated as a clean, retryable refusal. |
+| **Collab kernel** | `kernel.py:136`, `:208`, `:325`, `:369`, `:443` | **Nothing** — the existing evict path is the correct outcome. See §4.1. |
 | **Collab, other** | `flip.py:60`, `hydrate.py:55` | `flip` already returns `False` on `CommitMutexTimeout`; `hydrate` deliberately refuses to swallow (`hydrate.py:48-54`). Verify both against the new type. |
 | **Dead** | `tools/citations.py:921`, `:1053`, `:1233` | Deleted (§6). |
 | **Retiring** | `tools/citations.py:802`, `editing/save.py:180`, `citations/human_cite.py:102`, `analysis/insert.py:351`, `web/api/workspaces.py:537` | Flag-off-only; 409 once collab is on. Documented, not individually handled. |
 
 The 13 live sites are the first four rows: 2 + 4 + 5 + 2.
+
+### 4.1 Why the kernel's clean-error lists must NOT gain the new exception
+
+Revision 1 of this spec said each clean list should gain the tail timeout so it reads as a
+clean, retryable refusal. **That is a correctness bug and is withdrawn.**
+
+Those lists mean one specific thing, stated at `kernel_accept.py:36-38`: these errors are
+*"raised BEFORE any fragment mutation … Every OTHER exception may have left room.doc mutated
+while the txn rolled back → evict to rebuild from the log."*
+
+A tail lock timeout can fire on **either side** of the mutation — at `_load_scoped`'s
+`FOR UPDATE` (`kernel.py:210`, `:371`), which is clean, or at `checkpoint_artifact` or the
+COMMIT, which is not. One exception type cannot distinguish the two, so listing it as clean
+would skip eviction in the case where the room doc **was** mutated and the transaction rolled
+back, leaving the in-memory doc diverged from the durable log. Silent divergence in the live
+editor is far worse than a disconnect.
+
+So the kernel sites need no change. A tail timeout evicts, and eviction is the designed
+recovery, not a failure: `room.py:650-662` closes every client with code 1011 and "the next
+connection rebuilds cleanly from the durable log." Measured against today's behaviour — hanging
+indefinitely while pinning the mutex for every other writer — a rebuild-from-log blip is
+strictly better.
+
+The consequence for scope is that the five kernel sites are **verification only**.
 
 ## 5. The app-level handler
 
@@ -188,7 +226,7 @@ rare and loud, not a routine refusal.
 
 ## 8. Testing
 
-1. **The ceilings test extends automatically.** `MUTEX_TAIL_LOCK_TIMEOUT_MS` joins
+1. **The ceilings test extends automatically.** `MUTEX_TAIL_LOCK_TIMEOUT_SECONDS` joins
    `_MUTEX_HELD_CAPS`; the existing assertion `MAX_CONTENDED_ROWS × cap ≤ allowance` then covers
    it, with the budget still parsed out of the DELETE test rather than restated.
 2. **The tail is actually bounded.** Park a holder on a row a mutex-held transaction needs, with
