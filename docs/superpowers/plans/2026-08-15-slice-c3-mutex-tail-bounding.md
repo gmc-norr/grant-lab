@@ -1810,6 +1810,132 @@ asserts only `status_code == 503`, and that route has a **second** 503 (`GitComm
 
 `BUSY_ERROR_MESSAGE` is already imported in that test file — check before adding it.
 
+- [ ] **Step 2e: Close the four `gitio.py` follow-ups from Task 6's review**
+
+**(a) The rollback's `git reset` can still mask the original error, via `OSError`.** Task 6's
+binding constraint was that the reset must not be able to raise out of the handler. It is
+guarded against `TimeoutExpired` only. A reviewer demonstrated the gap: injecting
+`FileNotFoundError` on the reset makes `write_and_commit_files` raise `FileNotFoundError`
+instead of `GitCommitError`. The trigger is plausible in this tree — `scrub_workspace_bytes`
+removing `repo_dir` makes the `cwd=` invalid. Widen the suppression:
+
+```python
+        with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+```
+
+**(b) The timeout message does not name which git command died.** `e.cmd` is available. Change
+the timeout branch's message to include it, so a log line can tell `git add` from `git commit`:
+
+```python
+        if isinstance(e, subprocess.TimeoutExpired):
+            msg = (
+                f"atomic commit timed out after {_GIT_TIMEOUT_SECONDS}s "
+                f"running {e.cmd}: {stderr.strip()}"
+            )
+```
+
+Leave the `CalledProcessError` branch's message **byte-identical** — a reviewer proved the
+current construction matches the pre-Task-6 output across seven payload shapes, including the
+trailing-space form when stderr is empty. Do not disturb that.
+
+**(c) The constant promises "rare and loud" and is currently silent.** A timeout funnels into
+`GitCommitError`, which `_head_or_empty` (`collab/checkpoint.py:48-55`) catches and turns into
+`""` — indistinguishable from "this workspace has no repo yet". Downstream that becomes a silent
+`committed=False`, and on the spec-lock route a **404 "no proposal-spec.md yet"**
+(`web/api/workspaces.py:668-675`) for what is actually a filesystem stall. Same funnel at
+`analysis/invalidation.py:55`, `analysis/reconcile.py:46`, `tools/proposal.py:78/93`,
+`web/api/annotations.py:101`, `review/pass_runner.py:347`, `collab/permissions.py:61`.
+
+Do NOT introduce a `GitTimeoutError` subclass — that would change what every one of those
+callers catches, which is a bigger change than this slice should make on its way out. Add the
+loudness instead, at the timeout site in `write_and_commit_files` and in each of the three read
+helpers' timeout path:
+
+```python
+            logger.warning(
+                "gitio.subprocess_timeout",
+                extra={"event": "gitio_subprocess_timeout",
+                       "cmd": str(e.cmd), "timeout_seconds": _GIT_TIMEOUT_SECONDS},
+            )
+```
+
+`gitio.py` has no logger today — add `logger = logging.getLogger(__name__)` and `import logging`
+at module top, matching how sibling modules in `proposal_assist/` do it.
+
+**(d) State the budget collision instead of implying it away.** This is the Important finding,
+and the fix is honesty, not a number change. Verified by the reviewer:
+
+- A writer stalled in `write_and_commit_files` holds the commit mutex. `soft_delete_workspace_db`
+  takes that same mutex with a 10s acquire cap, so the owner's DELETE waits ≤10s and then answers
+  **429 having deleted nothing** — not 204, and `elapsed ≈ 10s` against a documented 6.0s budget.
+- Run 30.0 through `test_row_lock_ceilings.py`'s own arithmetic and both ceilings break:
+  `2 × 30 = 60 > 10` and `2 × 30 = 60 > 2/3 × 6.0 = 4.0`.
+- Nothing fails today only because `_MUTEX_HELD_CAPS` contains lock caps and has no term for
+  subprocess time — so this constant is unpinned by precisely the gate this slice built to stop
+  unpinned numbers drifting.
+- The real ceiling is worse than 30s, because the bound is **per subprocess**, not per function:
+  `write_and_commit_files` runs up to 4 bounded calls serially plus 1 in the rollback, and
+  `checkpoint_artifact` calls `current_head` before it — **≤180s of mutex-held time from gitio
+  alone**.
+
+Rewrite the comment above `_GIT_TIMEOUT_SECONDS` to say all of that plainly, replacing the
+current text that compares 30s only against the 2s lock cap:
+
+```python
+# Ceiling on any SINGLE git subprocess (not on the function: write_and_commit_files
+# runs up to four of these serially plus one in its rollback, and checkpoint_artifact
+# calls current_head before it — so gitio can hold the commit mutex for ~180s in the
+# worst case).
+#
+# 30s is deliberately far above the 2s lock cap because a git timeout means the
+# filesystem is broken, not that two writers collided. But be clear about what that
+# costs, because it is NOT consistent with the budgets the rest of Slice C3 derives
+# from: a git stall holds the mutex past the DELETE route's 10s acquisition cap, so
+# the owner's DELETE answers 429 having deleted nothing, and blows the 6.0s budget
+# that governs MAX_CONTENDED_ROWS. That is an accepted trade — unbounded became
+# finite, which is the whole point — but it is a trade, not an absence of one.
+_GIT_TIMEOUT_SECONDS = 30.0
+```
+
+Then make the exclusion visible so it cannot drift silently. In
+`tests/proposal_assist/test_row_lock_ceilings.py`, add an explicitly-excluded entry beside
+`_MUTEX_HELD_CAPS`:
+
+```python
+# Deliberately NOT in _MUTEX_HELD_CAPS. gitio's subprocess bound is mutex-held time
+# too, but it is not a LOCK cap and it does not satisfy this file's ceilings: 2 × 30
+# exceeds both the 10s acquisition cap and the 6.0s DELETE budget. Slice C3 accepted
+# that (see gitio.py's own comment) because the alternative was unbounded. Listed
+# here so the exclusion is a recorded decision rather than an oversight — if you are
+# adding a new mutex-held cap, this is the file that governs it.
+_EXCLUDED_FROM_CEILINGS = {
+    "gitio._GIT_TIMEOUT_SECONDS": "subprocess time, not a lock cap; see gitio.py",
+}
+
+
+def test_the_ceilings_exclusion_list_is_honest():
+    """An exclusion that names a constant which no longer exists is worse than no
+    exclusion at all — it reads as considered when it is stale."""
+    from call_manager.proposal_assist.citations import gitio
+
+    assert gitio._GIT_TIMEOUT_SECONDS == 30.0, (
+        "the excluded constant moved; re-derive whether the exclusion still holds "
+        "rather than updating this number"
+    )
+```
+
+Finally add a paragraph to spec §7 recording the same trade, so the design doc does not read as
+though 30s were free.
+
+```bash
+uv run pytest tests/proposal_assist/test_gitio_timeouts.py tests/proposal_assist/test_row_lock_ceilings.py -q ; echo "PYTEST_EXIT=$?"
+uv run ruff check . ; echo "RUFF_EXIT=$?"
+```
+
+**Mutation:** narrow `contextlib.suppress(subprocess.TimeoutExpired, OSError)` back to
+`TimeoutExpired` only, add a test that injects `FileNotFoundError` on the reset, and confirm it
+fails with `FileNotFoundError` rather than `GitCommitError`. md5-verify, restore.
+
 - [ ] **Step 3: Run the full acceptance set**
 
 ```bash

@@ -327,6 +327,28 @@ timeout there is suppressed rather than masking; and the three read helpers tran
 `TimeoutExpired` to `GitCommitError` alongside `OSError`. Tests inject `TimeoutExpired`
 deliberately -- no test waits 30 seconds.
 
+### 7.2 What 30 seconds costs, stated rather than implied
+
+30s is not consistent with the budgets the rest of this slice derives from, and the design should
+say so rather than let the comparison against the 2s lock cap imply otherwise.
+
+A writer stalled inside `write_and_commit_files` holds the commit mutex. `soft_delete_workspace_db`
+takes that same mutex with a 10s acquisition cap, so the owner's DELETE waits ten seconds and then
+answers **429 having deleted nothing** -- against a documented 6.0s budget. Run 30.0 through the
+ceilings test's own arithmetic and both of its ceilings break: `2 x 30 = 60 > 10`, and
+`2 x 30 = 60 > 2/3 x 6.0 = 4.0`. Nothing fails today only because `_MUTEX_HELD_CAPS` holds lock
+caps and has no term for subprocess time.
+
+And the true ceiling is higher than 30s, because the bound is **per subprocess, not per function**:
+`write_and_commit_files` runs up to four bounded calls serially plus one in its rollback, and
+`checkpoint_artifact` calls `current_head` before it -- roughly **180s** of mutex-held time from
+gitio alone in the worst case.
+
+This is an accepted trade: unbounded became finite, which is the entire point of 7, and a git
+timeout means the filesystem is broken rather than that two writers collided. But it is a trade.
+The constant is recorded as an explicit exclusion in the ceilings test so it cannot drift
+silently, and `gitio.py`'s own comment states the cost at the definition site.
+
 ## 8. Testing
 
 1. **The ceilings test extends automatically.** `MUTEX_TAIL_LOCK_TIMEOUT_SECONDS` joins
