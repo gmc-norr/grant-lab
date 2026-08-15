@@ -113,10 +113,12 @@ _GIT_TIMEOUT_SECONDS = 30.0
 # upsert holds every touched Call row for its whole loop; see
 # src/call_manager/ingestion/orchestrator.py), the cache rows the persist
 # DELETE has to take, a unique-index wait on CallRubric. Unlike the commit
-# mutex, a plain row lock has no timeout of its own, and a DELETE past the
-# commit mutex updates the workspace row with lock_timeout back at DEFAULT —
-# i.e. no bound at all — so an unbounded wait ANYWHERE in the transaction
-# pins the workspace row against a DELETE indefinitely.
+# mutex, a plain row lock has no timeout of its own, and M2/M3 hold no commit
+# mutex, so nothing else caps them — an unbounded wait ANYWHERE in the
+# transaction pins the workspace row against a DELETE for exactly that long.
+# (Since Slice C3 a DELETE past the commit mutex gives up on that row after 2s
+# and answers 429 having deleted nothing, rather than hanging — better, but
+# still a delete the owner asked for and did not get.)
 #
 # Why 2 seconds specifically — it is derived from the DELETE route's budget,
 # not borrowed from the commit mutex (M2/M3 don't hold that mutex, so its 10s
@@ -148,15 +150,15 @@ def _bounded_lock_waits(session: Session) -> Iterator[None]:
     shorten it with monkeypatch.
 
     Borrows acquire_commit_mutex's idiom (drafting/locking.py) for the SET LOCAL
-    and the 55P03 (lock_not_available) → typed-exception translation, but
-    deliberately NOT its restore-to-DEFAULT on the success path. That mutex
-    restores because it guards one `pg_advisory_xact_lock` call and its caller's
-    remaining statements are its own business. Here the caller's remaining
-    statements are the point: M2/M3 hold the workspace row from the first
-    acquisition to COMMIT, and their cache DML, flush, audit-event insert and
-    commit can all block on a row lock. Restoring DEFAULT after the acquisitions
-    left exactly that stretch unbounded — with the workspace row held — which is
-    what a concurrent DELETE cannot tolerate.
+    and the 55P03 (lock_not_available) → typed-exception translation, but sets
+    its own bound over the whole region rather than only around an acquisition.
+    Since Slice C3 that mutex leaves a 2s cap in force for the rest of its
+    caller's transaction; before it, it restored the server default (0 =
+    disabled), which left exactly this stretch uncapped. Either way the caller's
+    remaining statements are the point here: M2/M3 hold the workspace row from
+    the first acquisition to COMMIT, and their cache DML, flush, audit-event
+    insert and commit can all block on a row lock — and M2/M3 hold no mutex at
+    all, so this wrapper is the only thing bounding them.
 
     Nothing needs restoring: SET LOCAL is scoped to the transaction, so the
     caller's commit (or the rollback on `with self.session_factory()` exit, or

@@ -50,8 +50,11 @@ def load_or_hydrate(
     # above), and accept_via_kernel would then build an EMPTY room and apply a
     # section write to it. Both exceptions are already house contracts: on the HTTP
     # paths WorkspaceDeleted is a 404 (app-level handler) and CommitMutexTimeout the
-    # standard busy -> 429. The WEBSOCKET path has neither status code available, so
-    # collab_ws maps BOTH to a close frame — see its except around MANAGER.acquire.
+    # standard busy -> 429. On the WEBSOCKET path those handlers still RUN (Starlette
+    # dispatches them in the websocket scope too), but all they can emit on an
+    # already-accepted socket is a denial response the client cannot see or act on —
+    # so collab_ws maps BOTH to a close frame instead; see its except around
+    # MANAGER.acquire.
     acquire_commit_mutex_live(
         session, workspace_id, timeout_seconds=_HYDRATE_MUTEX_TIMEOUT_SECONDS
     )

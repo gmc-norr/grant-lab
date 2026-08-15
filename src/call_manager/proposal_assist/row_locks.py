@@ -4,19 +4,27 @@ it against a concurrent DELETE.
 
 Why this has to exist at all: PostgreSQL's `lock_timeout` defaults to 0
 (disabled) and `db/session.py` passes no `connect_args`, so a plain row-lock wait
-is unbounded. A DELETE that has already won the per-workspace commit mutex
-executes `SET LOCAL lock_timeout = DEFAULT` (drafting/locking.py) before it
-stamps `soft_deleted_at`, so there is no bound on the delete's side either: an
-unbounded wait ANYWHERE inside a transaction that holds the workspace row blocks
-the owner's DELETE for exactly that long, while the DELETE holds the advisory
-mutex and every other mutex-participating writer for that workspace 429s behind
-it — and the route's asserted budget (< 6.0s) is blown without limit.
+is unbounded. Most regions below are entered holding NO commit mutex — the four
+pass prefixes take the `workspaces` row FOR UPDATE with nothing acquired above
+them — so nothing else caps them at all. And an unbounded wait ANYWHERE inside a
+transaction that holds the workspace row blocks the owner's DELETE for exactly
+that long, while the DELETE holds the advisory mutex and every other
+mutex-participating writer for that workspace 429s behind it — and the route's
+asserted budget (< 6.0s) is blown without limit.
+
+Since Slice C3 a transaction that HAS won the per-workspace commit mutex carries
+a 2s per-acquisition cap for the rest of its life (drafting/locking.py applies
+MUTEX_TAIL_LOCK_TIMEOUT_SECONDS once it wins), so the mutex-held regions below
+are no longer the only thing standing between a stuck holder and an indefinite
+pin. They stay because that cap is a generic backstop: an explicit region here
+keeps the intent local, names the row being waited on, and raises the caller's
+own typed error rather than a bare 55P03.
 
 The implementation is the idiom `acquire_commit_mutex` uses (SET LOCAL plus the
-55P03 → typed-exception translation), minus its restore-to-DEFAULT: the callers
-here hold rows from their first acquisition until COMMIT, and their DML, flush
-and commit can each block on a lock, so restoring DEFAULT after the acquisitions
-would leave exactly the stretch that matters unbounded. Nothing needs restoring —
+55P03 → typed-exception translation, through the shared `is_lock_timeout`), with
+the bound set ONCE for the whole region: the callers here hold rows from their
+first acquisition until COMMIT, and their DML, flush and commit can each block on
+a lock, so the cap has to outlive the acquisitions. Nothing needs restoring —
 SET LOCAL is scoped to the transaction, so a commit, a rollback or the implicit
 abort a timeout causes all clear it.
 
@@ -66,9 +74,11 @@ from call_manager.proposal_assist.drafting.locking import is_lock_timeout
 # DELETE's budget — see the module docstring. A prefix contends for TWO rows (the
 # `workspaces` row FOR UPDATE, then its own job row), so its worst case is
 # 2 × 2s = 4s, and that is what a DELETE can spend waiting on the `workspaces`
-# row behind it — past the commit mutex the DELETE runs with lock_timeout back at
-# DEFAULT (drafting/locking.py restores it), so this constant is the ONLY thing
-# bounding that wait. 2s keeps that worst case a fraction of the DELETE route's
+# row behind it — the prefix holding that row holds NO mutex, so nothing on its
+# side is capped and this constant is what bounds the wait. (Since Slice C3 the
+# DELETE's own acquisitions past the commit mutex are capped at 2s each by
+# drafting/locking.py, but that bounds the waiter, not the holder in front of
+# it.) 2s keeps that worst case a fraction of the DELETE route's
 # asserted < 6.0s rather than a multiple of it; it does not guarantee the budget,
 # because the route's own transaction, retirement barrier and scrub also have to
 # fit inside it. Losing a race to contention is cheap on this path: the prefix has
@@ -81,11 +91,12 @@ from call_manager.proposal_assist.drafting.locking import is_lock_timeout
 PASS_PREFIX_LOCK_TIMEOUT_SECONDS = 2
 
 # The two setup-job routes (activate, retry_setup) take the commit mutex and then
-# the workspace's WorkspaceSetupJob row. acquire_commit_mutex restores
-# lock_timeout = DEFAULT on success, so that row wait is otherwise unbounded —
-# and it is taken while HOLDING the mutex, so an unbounded wait there blocks the
-# owner's DELETE for exactly that long and 429s every other mutex-participating
-# writer behind it.
+# the workspace's WorkspaceSetupJob row. Since Slice C3 acquire_commit_mutex
+# leaves a 2s cap in force on success, so that row wait has a backstop even
+# without this constant — but it is taken while HOLDING the mutex, where a long
+# wait blocks the owner's DELETE for exactly that long and 429s every other
+# mutex-participating writer behind it. So the bound is stated explicitly here:
+# it keeps the intent local and raises RowLockTimeout rather than a bare 55P03.
 #
 # Why 2 seconds: the same per-acquisition judgement as
 # PASS_PREFIX_LOCK_TIMEOUT_SECONDS above, with a different stack. `activate`
@@ -111,10 +122,11 @@ SETUP_JOB_LOCK_TIMEOUT_SECONDS = 2
 # it as their FK parent. Same value, different thing being waited on, so it gets
 # its own name rather than borrowing one whose comment describes a job row.
 #
-# As with the setup-job routes, acquire_commit_mutex restores
-# lock_timeout = DEFAULT on success (drafting/locking.py), so this wait is
-# otherwise unbounded — and it is taken while HOLDING the mutex. A real holder
-# exists: the four pass prefixes take the workspace row FOR UPDATE holding NO
+# As with the setup-job routes, acquire_commit_mutex leaves a 2s cap in force on
+# success (drafting/locking.py, Slice C3), so this wait has a backstop even
+# without this constant — and it is taken while HOLDING the mutex, so the bound
+# is stated explicitly here anyway. A real holder exists: the four pass prefixes
+# take the workspace row FOR UPDATE holding NO
 # mutex and keep it across context assembly's filesystem reads (see
 # PASS_PREFIX_LOCK_TIMEOUT_SECONDS above).
 #

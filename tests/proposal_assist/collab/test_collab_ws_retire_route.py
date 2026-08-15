@@ -97,7 +97,10 @@ def test_a_bounded_hydration_lock_timeout_closes_with_1013_not_1011(
     now fail with a raw OperationalError (55P03) from the seed's INSERT. That type
     is not in the route's except list, so without this arm it would be 1011 plus a
     traceback for ordinary contention — and unlike every HTTP site, main.py's
-    handler cannot reach a WebSocket.
+    handler cannot rescue it: the handler DOES run in the websocket scope (see
+    test_a_non_lock_operational_error_keeps_its_existing_propagation below), but a
+    denial response on an already-accepted socket is not something the browser
+    client can see or retry on.
     """
     from fastapi.testclient import TestClient
     from sqlalchemy.exc import OperationalError

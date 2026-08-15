@@ -611,11 +611,12 @@ def test_a_prefix_gives_up_instead_of_pinning_a_workspace_row_it_cannot_get(
     default of 0 (disabled), that wait is unbounded.
 
     Unbounded is not survivable here: the owner's DELETE takes the SAME row to
-    stamp soft_deleted_at, and by then it holds the per-workspace advisory mutex
-    and has put its own lock_timeout back to DEFAULT (drafting/locking.py), so a
-    stalled prefix blocks the DELETE for as long as the stall lasts, 429s every
-    mutex-participating writer behind it, and blows the route's < 6.0s budget
-    without limit. The prefix must give up instead — a reaper requeue is cheap.
+    stamp soft_deleted_at, and by then it holds the per-workspace advisory mutex,
+    so a stalled prefix blocks the DELETE, 429s every mutex-participating writer
+    behind it, and eats into the route's < 6.0s budget. Since Slice C3 the
+    DELETE's own wait on that row is capped at 2s (drafting/locking.py), so it
+    gives up rather than hanging — and answers 429 having deleted nothing. The
+    prefix must give up instead — a reaper requeue is cheap.
 
     The timeout is shortened via row_locks.PASS_PREFIX_LOCK_TIMEOUT_SECONDS
     (bounded_prefix_lock_waits reads it as a module global at call time) purely

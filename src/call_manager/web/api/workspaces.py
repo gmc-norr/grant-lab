@@ -534,6 +534,11 @@ async def post_init_spec(
             if not spec.exists():
                 raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
             try:
+                # Flag-off-only path: with collab enabled the severance recheck immediately below
+                # raises CollabSeveranceConflict, which the route maps to 409, so this path is
+                # retiring rather than maintained. Slice C3 bounds its tail anyway — the 2s cap now
+                # left in force by acquire_commit_mutex applies at every site, including this one,
+                # with nothing needed here.
                 acquire_commit_mutex_live(session, ws.id)
                 # Severance recheck UNDER the mutex (3b-5d.D4 Item 2b): the _route()
                 # fork read the flag as False, but enable-on-touch may have flipped

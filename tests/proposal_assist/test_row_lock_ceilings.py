@@ -48,9 +48,11 @@ The two ceilings, in decreasing hardness
 
    `PASS_PREFIX_LOCK_TIMEOUT_SECONDS` is bound by ceiling 2 ONLY. The four pass
    prefixes hold NO mutex, so an over-long prefix cannot deny the DELETE the
-   mutex; what it does is make the DELETE — which past the mutex runs with
-   `lock_timeout` back at DEFAULT, because `acquire_commit_mutex` restores it —
-   wait on the `workspaces` row for as long as the prefix's own cap allows.
+   mutex; what it does is make the DELETE wait on the `workspaces` row for as
+   long as the prefix's own cap allows. Since Slice C3 that wait is itself capped
+   at 2s past the mutex, so the DELETE gives up rather than hanging — but giving
+   up is a 429 with nothing deleted, which is why the prefix's cap still governs
+   whether the owner's DELETE succeeds.
 
 MAX_CONTENDED_ROWS = 2 — the MAXIMUM across the families, applied uniformly
 --------------------------------------------------------------------------

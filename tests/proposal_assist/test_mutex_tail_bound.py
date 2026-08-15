@@ -65,7 +65,8 @@ def test_a_non_lock_OperationalError_is_still_a_500(_app, client_authed_owner):
 
 def _hold_workspace_row(pg_session_factory, ws_id):
     """Hold the `workspaces` row FOR UPDATE taking NO mutex — the shape the four
-    background pass prefixes really have (row_locks.py:71-77)."""
+    background pass prefixes really have (see
+    row_locks.PASS_PREFIX_LOCK_TIMEOUT_SECONDS)."""
     holding, release = threading.Event(), threading.Event()
 
     def _holder():

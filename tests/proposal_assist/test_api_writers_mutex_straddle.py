@@ -10,10 +10,13 @@ Two shapes per route:
     return 429 with Retry-After: 2, having written NOTHING.
 
 A third shape covers the hazard this slice CREATED. Once a route holds the commit
-mutex, `acquire_commit_mutex` has restored lock_timeout = DEFAULT, so every lock
-it waits on afterwards is unbounded — and it pins the mutex for the whole wait,
-which 429s the owner's DELETE and every other mutex-participating writer. So for
-each route that takes a row lock after the mutex:
+mutex it pins that mutex for every lock it waits on afterwards, which 429s the
+owner's DELETE and every other mutex-participating writer. Slice C3 made
+`acquire_commit_mutex` leave a 2s cap in force for that tail — it used to hand the
+tail back to the server default, i.e. no cap at all — so a backstop now exists.
+Each route still states its own bound: that is what keeps the wait's intent local
+and makes its 429 specific rather than a bare 55P03. So for each route that takes
+a row lock after the mutex:
 
   429-row-held: a holder takes the ROW the route needs (and NO mutex), so the
     route wins the mutex and blocks later; the route must COME BACK with the
@@ -716,9 +719,11 @@ def test_retry_setup_gives_up_on_a_held_setup_job_row_instead_of_pinning_the_mut
     client_authed_owner, current_user, pg_session_factory, monkeypatch
 ):
     """The route takes the commit mutex and THEN the setup-job row. That second
-    wait must be bounded: acquire_commit_mutex restores lock_timeout = DEFAULT,
-    so an unbounded wait there holds the mutex indefinitely and a concurrent
-    DELETE 429s behind it after burning its whole budget.
+    wait must be bounded: an unbounded wait there holds the mutex indefinitely and
+    a concurrent DELETE 429s behind it after burning its whole budget. Since Slice
+    C3 acquire_commit_mutex leaves a 2s cap in force for that tail, so the route
+    has a backstop — what this test pins is the route's OWN bound, which gives the
+    wait a specific timeout and a typed 429.
 
     Asserted as 'the request came back', not as elapsed time: without the bound
     the route does not return at all while we hold the row, so a thread that is
@@ -861,7 +866,8 @@ def test_activate_maps_a_post_job_lock_row_timeout_to_429_not_500(
 
     Reachable, not hypothetical. The holder below stands in for one of the four
     pass prefixes, which take the `workspaces` row FOR UPDATE and hold it across
-    context assembly while holding NO commit mutex (row_locks.py:33-45) — so the
+    context assembly while holding NO commit mutex (see row_locks.
+    PASS_PREFIX_LOCK_TIMEOUT_SECONDS) — so the
     mutex activate holds does not exclude them from that row.
 
     Note WHICH row is held: the WORKSPACE row, not the setup-job row. The job row
@@ -943,9 +949,10 @@ def hold_workspace_row(pg_session_factory, ws_id, send, *, route: str):
 
     The holder stands in for one of the four pass prefixes, which take this row
     FOR UPDATE while holding no mutex and keep it across context assembly's
-    filesystem reads (row_locks.py:33-45). Taking no mutex is the point: the
-    route must WIN the mutex and then block on the row, which is the stretch
-    `acquire_commit_mutex`'s restore-to-DEFAULT leaves unbounded.
+    filesystem reads (see row_locks.PASS_PREFIX_LOCK_TIMEOUT_SECONDS). Taking no
+    mutex is the point: the route must WIN the mutex and then block on the row —
+    the mutex-held tail, which Slice C3 capped at 2s and which the route's own
+    bound tightens and names.
 
     Liveness, not timing: without the route's bound the sender thread never
     finishes, so `not sender.is_alive()` after a bounded join is the whole

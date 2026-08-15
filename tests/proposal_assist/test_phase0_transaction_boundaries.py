@@ -408,9 +408,9 @@ def test_m1_acquires_the_mutex_before_the_workspace_row_lock(
     it mutates anything. Mutex-then-row means a concurrent DELETE blocks at
     the mutex and times out (429) without ever touching the row lock.
     Row-then-mutex means a DELETE can win the mutex and then block on M1's row
-    lock, which by then has no timeout at all — the delete path resets
-    lock_timeout to DEFAULT — i.e. an unbounded hang, the exact bug this slice
-    exists to prevent.
+    lock — which Slice C3 now caps at 2s rather than leaving uncapped, so the
+    DELETE gives up instead of hanging. Bounded or not, it comes back 429 having
+    deleted nothing: the exact bug this acquisition order exists to prevent.
     """
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
@@ -713,8 +713,8 @@ def test_m2_times_out_on_a_held_cache_row_rather_than_pinning_the_workspace(
     The uncovered case is a wait raised by the persist DML itself, AFTER the
     acquisitions have returned: `persist_section_extracts` issues
     `DELETE FROM call_section_extracts WHERE call_id = :id`, which must take a
-    row lock on every cache row for that Call. Restoring lock_timeout to DEFAULT
-    on the acquisition success path left that DELETE unbounded — and _m2 is
+    row lock on every cache row for that Call. A bound that covered only the
+    acquisition success path would leave that DELETE outside it — and _m2 is
     holding the workspace row while it waits, which is exactly what pins the row
     against a concurrent DELETE.
 
@@ -952,8 +952,9 @@ def test_m3_times_out_on_a_held_rubric_row_rather_than_pinning_the_workspace(
     `persist_rubric` mutates the existing call_rubrics row, so the following
     `s.flush()` issues an UPDATE that must take that row's lock. Without the
     bound that UPDATE waits forever while _m3 pins both rows against a DELETE
-    that has already won the commit mutex and whose own lock_timeout is back at
-    DEFAULT — i.e. no bound on either side.
+    that has already won the commit mutex — and although Slice C3 caps that
+    DELETE's own wait at 2s, it spends the cap and answers 429 having deleted
+    nothing.
 
     Holding the CallRubric row rather than the Call row is deliberate: a wait on
     the Call row is a wait on an acquisition, which sits inside the bound either

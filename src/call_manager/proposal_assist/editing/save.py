@@ -177,6 +177,10 @@ def save_section(
     the first resulting chunk; the reconcile tick covers any remainder.
     """
     # 1. Serialize against every other git mutation of this workspace.
+    # Flag-off-only path: with collab enabled the step-1b severance recheck below raises
+    # CollabSeveranceConflict, which the route maps to 409, so this path is retiring rather than
+    # maintained. Slice C3 bounds its tail anyway — the 2s cap now left in force by
+    # acquire_commit_mutex applies at every site, including this one, with nothing needed here.
     acquire_commit_mutex_live(session, workspace.id)
 
     artifact = Artifact(artifact)  # normalize a stringly-typed caller

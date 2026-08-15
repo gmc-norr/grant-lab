@@ -348,6 +348,10 @@ def insert_from_annotation(
     # 1. Serialize against every other git mutation of this workspace, and refuse
     # outright if it was deleted while we blocked. Both propagate — the web layer
     # maps them to 429 and 404 respectively.
+    # Flag-off-only path: with collab enabled the step-1b severance recheck below raises
+    # CollabSeveranceConflict, which the route maps to 409, so this path is retiring rather than
+    # maintained. Slice C3 bounds its tail anyway — the 2s cap now left in force by
+    # acquire_commit_mutex applies at every site, including this one, with nothing needed here.
     acquire_commit_mutex_live(session, workspace.id)
 
     # 1b. Severance recheck UNDER the mutex (3b-5d.D4 Item 2b): enable-on-touch may

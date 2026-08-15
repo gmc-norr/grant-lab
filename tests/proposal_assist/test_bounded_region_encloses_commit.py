@@ -120,7 +120,9 @@ from call_manager.web.api import settings as settings_api
 # the managed scope with this file still green. That is measured, not assumed.
 # The limit is deliberate: §8's bound rule is normative for these six routes and
 # explicitly not a property of the codebase (§10.8 records the wider gap, whose
-# root cause is `acquire_commit_mutex`'s restore-to-DEFAULT at every call site).
+# root cause was `acquire_commit_mutex`'s restore-to-DEFAULT at every call site;
+# Slice C3 replaced that restore with a 2s cap, which bounds the gap rather than
+# closing it).
 # If the rule is ever extended to another module, extending this gate means adding
 # that module as a key here — not widening the walk.
 EXPECTED_BOUNDED_WRITERS: dict[str, frozenset[str]] = {

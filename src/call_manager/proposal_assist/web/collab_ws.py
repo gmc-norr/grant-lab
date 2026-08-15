@@ -158,7 +158,10 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
         # open of a room (load_or_hydrate takes the live commit mutex to persist the
         # seed) and it means "someone else holds the workspace mutex right now" —
         # the artifact still exists and the client SHOULD come back. On HTTP this is
-        # the house 429; a WebSocket has no status code, so map it to 1013 (try again
+        # the house 429. On a WebSocket main.py's handler still RUNS — Starlette
+        # dispatches registered handlers in the websocket scope exactly as in the HTTP
+        # one — but all it can emit on an already-accepted socket is a denial response
+        # the browser client cannot see or retry on. So map it to 1013 (try again
         # later), which the client provider retries with backoff. Falling through to
         # the route's own `raise` would give 1011 + a traceback for a routine,
         # expected collision.

@@ -56,10 +56,11 @@ async def run_coherence_pass(
         # bounded_prefix_lock_waits wraps the WHOLE prefix transaction, commit
         # included: the workspace row is held from the acquisition below until this
         # session ends, across context assembly's filesystem reads. Without the bound
-        # a stalled prefix pins the row against the owner's DELETE — which, past the
-        # commit mutex, waits with lock_timeout back at DEFAULT — for as long as the
-        # stall lasts. Giving up here costs a reaper requeue; not giving up blows the
-        # DELETE route's budget without limit.
+        # a stalled prefix pins the row against the owner's DELETE for as long as the
+        # stall lasts — and that DELETE, past the commit mutex, now gives up on the row
+        # after 2s and answers 429 having deleted nothing rather than hanging (Slice
+        # C3). Giving up here costs a reaper requeue; not giving up costs the owner a
+        # DELETE that fails outright.
         with session_factory() as s, bounded_prefix_lock_waits(s):
             job = s.get(CoherenceJob, job_id)
             if job is None or job.status != "running":
