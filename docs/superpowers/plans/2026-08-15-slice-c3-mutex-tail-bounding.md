@@ -1555,14 +1555,41 @@ At `tools/citations.py:802`, `editing/save.py:180`, `citations/human_cite.py:102
 
 - [ ] **Step 2: Correct every comment that still describes the old restore**
 
-**Thirteen** comments across **nine** files state, as present-tense fact, that the mutex leaves
-`lock_timeout` back at `DEFAULT`. Task 2 made all thirteen false. The footprint was verified
-mid-execution and is larger than this task's first draft assumed — the four `pass_runner.py`
-files and `phases/setup.py` were missed because they phrase it as "waits with lock_timeout back
-at DEFAULT" rather than naming the SQL.
+Comments across the tree state, as present-tense fact, that the mutex leaves `lock_timeout`
+back at `DEFAULT`. Task 2 made them false.
 
-Rewrite the clause at each of these, adapting to the argument each sentence sits in rather than
-pasting one replacement:
+**Do not trust a count.** This task's first draft said seven; a mid-execution sweep said
+thirteen; a reviewer counted fourteen; the actual candidate set is **fifteen lines across eleven
+files**. Every one of those numbers was produced by someone confident. So work from the
+regenerated list and the decision rule below, and record your verdict per line.
+
+Regenerate the candidate list yourself first — do not take the table below as complete:
+
+```bash
+grep -rn "lock_timeout" src/ tests/ | grep -i default
+```
+
+**The decision rule.** A line is stale iff it claims *the commit mutex* leaves `lock_timeout`
+unbounded, disabled, or at `DEFAULT` after acquisition. A line that states *PostgreSQL's own*
+default is still true and must be left alone — the server default really is `0`, and Task 2
+changed nothing about that. Some lines carry both claims in one sentence; rewrite only the
+mutex half.
+
+Two lines are known-true and must NOT be rewritten:
+- `src/call_manager/proposal_assist/row_locks.py:5` — "PostgreSQL's `lock_timeout` defaults to 0".
+- `tests/proposal_assist/test_mutex_tail_bound.py` (`:3`, `:82`, `:110`) — Task 2's own file
+  describes the OLD behaviour in the past tense ("used to restore", "before this slice"). Correct
+  as written, and the reason Step 4's greps carve it out.
+
+One line needs a judgement you must actually make rather than assume:
+- `tests/proposal_assist/test_claim_analysis_retirement.py:545` — "PostgreSQL's lock_timeout is
+  disabled by default — so without a bound one stuck holder of the job row parks that thread".
+  The first clause is true. Whether the second is still true depends on whether that path runs
+  inside a mutex-held tail. **Check whether it takes `acquire_commit_mutex*`**, and rewrite only
+  if it does. Record which you found.
+
+The candidate lines as of this writing, for cross-checking your regenerated list — if yours
+differs, yours wins and you must say so in your report:
 
 | File | Lines |
 | --- | --- |
@@ -1576,6 +1603,7 @@ pasting one replacement:
 | `tests/proposal_assist/test_phase0_transaction_boundaries.py` | `:412`, `:716` |
 | `tests/proposal_assist/test_pass_retirement.py` | `:615` |
 | `tests/proposal_assist/test_row_lock_ceilings.py` | `:52` |
+| `tests/proposal_assist/test_claim_analysis_retirement.py` | `:545` (judge by the rule) |
 
 The substance is the same everywhere — "the mutex restores `lock_timeout = DEFAULT`, so this
 wait is otherwise unbounded" becomes "the mutex leaves `MUTEX_TAIL_LOCK_TIMEOUT_SECONDS` in
@@ -1583,13 +1611,6 @@ force, so this wait is bounded at 2s even without an explicit `bounded_lock_wait
 surrounding argument is "and that is why an explicit bound is needed here", the argument still
 holds: 2s is the backstop, and the explicit `bounded_lock_waits` is what makes the intent local
 and the message specific. Do not delete such reasoning — adjust it.
-
-**Two things that must NOT be rewritten**, both of which are still true:
-- `row_locks.py:5` — "PostgreSQL's `lock_timeout` defaults to 0". That is a fact about
-  PostgreSQL, not about the mutex.
-- `tests/proposal_assist/test_mutex_tail_bound.py` (`:3`, `:82`, `:110`) — Task 2's own file
-  describes the OLD behaviour in the past tense ("used to restore", "before this slice"). It is
-  correct as written and is why Step 4's grep is scoped to `src/`.
 
 These are comments only. Do not change a single assertion, timeout value, or test body; this is
 the one edit permitted to the straddle file, and its 28 tests must still pass unchanged.
@@ -1617,15 +1638,22 @@ Expected: exit 0 everywhere; drift clean; `git status --short` shows only this t
 ```bash
 grep -rn "SET LOCAL lock_timeout = DEFAULT" src/ || echo "none — good"
 grep -rn "lock_timeout" src/ | grep -i "default" | grep -v "defaults to 0" || echo "none — good"
+grep -rn "lock_timeout" tests/ | grep -i "default" | grep -v "test_mutex_tail_bound" || echo "none — good"
 ```
 
-Expected: `none — good` from both.
+Expected: `none — good` from all three.
 
-Scoped to `src/` deliberately. `tests/proposal_assist/test_mutex_tail_bound.py` quotes the old
-SQL verbatim while explaining what the slice removed, in the past tense — that prose is correct
-and must survive, so a `tests/` arm here would be a gate that can only be satisfied by damaging
-a correct comment. The `defaults to 0` exclusion protects `row_locks.py:5`, which states a fact
-about PostgreSQL rather than about the mutex.
+The third arm exists because scoping the gate to `src/` alone would leave this task's seven
+test-side rewrites verified by nothing but the table — and the table has been wrong three times.
+Its carve-out is `test_mutex_tail_bound.py`, which quotes the old SQL verbatim while explaining
+in the past tense what the slice removed: correct prose that a blunter gate could only be
+satisfied by damaging. The `defaults to 0` exclusion on the second arm protects `row_locks.py:5`
+for the same reason.
+
+If your Step 2 judgement was that `test_claim_analysis_retirement.py:545` is still true and
+needs no rewrite, the third arm will still match it. In that case add a targeted exclusion for
+that one file AND record the justification in your commit message — do not silently widen the
+carve-out.
 
 - [ ] **Step 5: Commit**
 
