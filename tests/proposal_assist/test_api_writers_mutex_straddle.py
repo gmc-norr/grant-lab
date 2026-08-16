@@ -641,7 +641,9 @@ def _assert_hook_can_cancel_while_route_is_blocked(pg_session_factory, ws_id, jo
             s.get(Workspace, ws_id).soft_deleted_at = datetime.now(UTC)
             s.commit()
         with pg_session_factory() as s:
-            cancelled = cancel_setup_jobs_for_workspace(s, ws_id)
+            cancelled = cancel_setup_jobs_for_workspace(
+                s, ws_id, s.get(Workspace, ws_id).lifecycle_generation
+            )
             s.commit()
     finally:
         release.set()

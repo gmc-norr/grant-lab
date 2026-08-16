@@ -129,6 +129,8 @@ def test_the_hook_cancels_queued_and_running_setup_jobs(pg_session_factory, curr
         s.flush()
         s.add(WorkspaceSetupJob(workspace_id=running_ws.id, status="running"))
         s.add(WorkspaceSetupJob(workspace_id=queued_ws.id, status="queued"))
+        running_ws.lifecycle_generation = 1
+        queued_ws.lifecycle_generation = 1
         s.commit()
         running_ws_id, queued_ws_id = running_ws.id, queued_ws.id
 
@@ -153,6 +155,7 @@ def test_the_hook_cancels_a_job_waiting_for_rubric_review(pg_session_factory, cu
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
         ws.soft_deleted_at = datetime.now(UTC)
+        ws.lifecycle_generation = 1
         s.flush()
         s.add(WorkspaceSetupJob(workspace_id=ws.id, status="waiting_for_rubric_review"))
         s.commit()
@@ -181,6 +184,7 @@ def test_reconcile_cancels_a_waiting_for_rubric_review_row_the_hook_skipped(
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
         ws.soft_deleted_at = datetime.now(UTC)
+        ws.lifecycle_generation = 1
         s.flush()
         s.add(WorkspaceSetupJob(workspace_id=ws.id, status="waiting_for_rubric_review"))
         s.commit()
@@ -236,6 +240,7 @@ def test_reconcile_cancels_a_queued_row_the_hook_skipped(pg_session_factory, cur
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
         ws.soft_deleted_at = datetime.now(UTC)
+        ws.lifecycle_generation = 1
         s.flush()
         s.add(WorkspaceSetupJob(workspace_id=ws.id, status="queued"))
         s.commit()
@@ -283,6 +288,7 @@ def test_a_locked_row_is_skipped_not_waited_on(pg_session_factory, current_user)
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
+        ws.lifecycle_generation = 1
         s.flush()
         s.add(WorkspaceSetupJob(workspace_id=ws.id, status="running"))
         s.commit()
@@ -318,7 +324,7 @@ def test_the_hook_is_bounded_by_wait_for(pg_session_factory, current_user, monke
     """Declaring a constant bounds nothing; the wait_for is the bound."""
     import call_manager.proposal_assist.jobs_retirement as jr
 
-    def _never_returns(session, workspace_id):
+    def _never_returns(session, workspace_id, generation):
         # NOTE: kept short (not 30s) deliberately. asyncio.run()'s cleanup
         # (Runner.close() -> loop.shutdown_default_executor()) blocks until any
         # orphaned to_thread thread actually finishes, even after wait_for has
@@ -375,6 +381,7 @@ def test_a_row_the_hook_skipped_is_converged_by_the_tick(pg_session_factory, cur
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
         ws.soft_deleted_at = datetime.now(UTC)
+        ws.lifecycle_generation = 1
         s.flush()
         s.add(WorkspaceSetupJob(workspace_id=ws.id, status="running"))
         s.commit()

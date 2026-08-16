@@ -66,7 +66,9 @@ def test_the_claim_cancel_skips_a_row_a_worker_holds_without_waiting(
             began = time.monotonic()
             with pg_session_factory() as s:
                 s.execute(text("SET LOCAL lock_timeout = '3s'"))
-                result["n"] = cancel_claim_analysis_jobs_for_workspace(s, ws_id)
+                result["n"] = cancel_claim_analysis_jobs_for_workspace(
+                    s, ws_id, s.get(Workspace, ws_id).lifecycle_generation
+                )
                 s.commit()
             result["elapsed"] = time.monotonic() - began
         except BaseException as exc:  # noqa: BLE001 — asserted after release
@@ -108,7 +110,9 @@ def test_the_claim_cancel_terminalizes_rows_nobody_holds(pg_session_factory, cur
         queued_id, running_id, ws_id = queued.id, running.id, ws.id
 
     with pg_session_factory() as s:
-        n = cancel_claim_analysis_jobs_for_workspace(s, ws_id)
+        n = cancel_claim_analysis_jobs_for_workspace(
+            s, ws_id, s.get(Workspace, ws_id).lifecycle_generation
+        )
         s.commit()
 
     assert n == 2
@@ -272,6 +276,7 @@ def test_reconcile_terminalizes_a_claim_row_on_a_workspace_with_no_setup_jobs(
         ws = make_workspace(s, owner=current_user, with_call=True)
         s.flush()
         ws.soft_deleted_at = _now_utc()
+        ws.lifecycle_generation = 1
         job = _job(ws.id, section_sha="a", status="running")
         s.add(job)
         s.commit()
@@ -511,6 +516,7 @@ def test_mark_done_cannot_resurrect_a_job_the_retirement_hook_terminalized(
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
+        ws.lifecycle_generation = 1
         s.flush()
         job = _job(ws.id, section_sha="a", status="running")
         s.add(job)
@@ -631,6 +637,7 @@ def test_a_job_the_hook_terminalized_is_COUNTED_by_the_drain_not_silently_droppe
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
+        ws.lifecycle_generation = 1
         s.flush()
         s.add(_job(ws.id, section_sha="a", status="queued"))
         s.commit()

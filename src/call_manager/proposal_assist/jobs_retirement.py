@@ -24,10 +24,10 @@ import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import exists, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
-from call_manager.db.models import ClaimAnalysisJob, WorkspaceSetupJob
+from call_manager.db.models import ClaimAnalysisJob, Workspace, WorkspaceSetupJob
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +60,7 @@ _CLAIM_ANALYSIS_CANCELLABLE = ("queued", "running")
 
 
 def cancel_claim_analysis_jobs_for_workspace(
-    session: Session, workspace_id: uuid.UUID
+    session: Session, workspace_id: uuid.UUID, generation: int
 ) -> int:
     """Terminalize this workspace's active claim-analysis jobs. Caller commits.
 
@@ -74,6 +74,16 @@ def cancel_claim_analysis_jobs_for_workspace(
         .where(
             ClaimAnalysisJob.workspace_id == workspace_id,
             ClaimAnalysisJob.status.in_(_CLAIM_ANALYSIS_CANCELLABLE),
+            # The linearization point. This runs on an ORPHANED thread whenever the
+            # hook's wait_for timed out (that bound cancels the await, not the
+            # thread), and the thread escapes the coordinator's lifecycle lock the
+            # same way — so "was the workspace still at my generation when I
+            # started" is not a question anyone can answer outside the statement.
+            # Ask it here, atomically with the write.
+            exists().where(
+                Workspace.id == workspace_id,
+                Workspace.lifecycle_generation == generation,
+            ),
         )
         .with_for_update(skip_locked=True)
     ).all()
@@ -91,7 +101,9 @@ def cancel_claim_analysis_jobs_for_workspace(
     return len(ids)
 
 
-def cancel_setup_jobs_for_workspace(session: Session, workspace_id: uuid.UUID) -> int:
+def cancel_setup_jobs_for_workspace(
+    session: Session, workspace_id: uuid.UUID, generation: int
+) -> int:
     """Mark this workspace's active setup jobs 'cancelled'. Caller commits.
 
     SKIP LOCKED: a row a live worker holds is SKIPPED, never waited on, so this
@@ -103,6 +115,16 @@ def cancel_setup_jobs_for_workspace(session: Session, workspace_id: uuid.UUID) -
         .where(
             WorkspaceSetupJob.workspace_id == workspace_id,
             WorkspaceSetupJob.status.in_(_CANCELLABLE),
+            # The linearization point. This runs on an ORPHANED thread whenever the
+            # hook's wait_for timed out (that bound cancels the await, not the
+            # thread), and the thread escapes the coordinator's lifecycle lock the
+            # same way — so "was the workspace still at my generation when I
+            # started" is not a question anyone can answer outside the statement.
+            # Ask it here, atomically with the write.
+            exists().where(
+                Workspace.id == workspace_id,
+                Workspace.lifecycle_generation == generation,
+            ),
         )
         .with_for_update(skip_locked=True)
     ).all()
@@ -126,16 +148,19 @@ def build_jobs_retirement_hook(
     """Build the coordinator hook. The coordinator is async and these are sync DB
     writes, so the work runs in a thread — bounded by wait_for.
 
-    *generation* is accepted for uniformity; Task 4 will thread it into the SQL
-    predicate so rows skipped by this hook's SKIP LOCKED can be reconciled with
-    a generation guard.
+    *generation* is threaded into the SQL predicate so the hook is
+    generation-conditional in SQL: an orphaned thread (one where the wait_for
+    timed out, cancelling the await but not the thread) that resumes after a later
+    transition has moved the generation will update ZERO rows.
     """
 
     async def _hook(workspace_id: uuid.UUID, generation: int) -> int:
         def _work() -> int:
             with session_factory() as session:
-                n = cancel_setup_jobs_for_workspace(session, workspace_id)
-                n += cancel_claim_analysis_jobs_for_workspace(session, workspace_id)
+                n = cancel_setup_jobs_for_workspace(session, workspace_id, generation)
+                n += cancel_claim_analysis_jobs_for_workspace(
+                    session, workspace_id, generation
+                )
                 session.commit()
                 return n
 
@@ -160,8 +185,6 @@ def reconcile_cancelled_jobs(session: Session) -> int:
 
     Returns rows touched. Caller commits.
     """
-    from call_manager.db.models import Workspace
-
     dead_ws = select(Workspace.id).where(Workspace.soft_deleted_at.is_not(None))
     total = 0
 
