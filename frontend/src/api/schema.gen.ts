@@ -277,6 +277,71 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/workspaces/deleted": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Deleted Workspaces
+         * @description List soft-deleted workspaces, newest deletion first.
+         *
+         *     Paginated because this grows without bound on a long-lived instance: every
+         *     workspace ever deleted stays here, since nothing removes them.
+         */
+        get: operations["list_deleted_workspaces_api_admin_workspaces_deleted_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/workspaces/deleted/{workspace_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Inspect Deleted Workspace
+         * @description Read a soft-deleted workspace's surviving proposal text and history.
+         *
+         *     Liveness is checked TWICE, deliberately:
+         *
+         *     1. Pre-lock: a missing or live workspace 404s immediately, WITHOUT taking
+         *        its commit mutex. Taking the mutex first would contend with that
+         *        workspace's real writers (turn commits, collab checkpoints,
+         *        editing/save.py) for a workspace this route is about to refuse anyway,
+         *        and — if the mutex happened to be held — would pin a FastAPI worker for
+         *        the full `acquire_commit_mutex` default of `timeout_seconds=10`
+         *        (drafting/locking.py:206) just to answer a 404.
+         *     2. Post-lock, with a fresh scalar SELECT (never the identity-mapped row
+         *        from step 1 — same pattern as `acquire_commit_mutex_live`,
+         *        drafting/locking.py:288-292): the workspace can be restored in the
+         *        window between step 1 and winning the mutex, and the git read below
+         *        must never proceed against a workspace that is live again.
+         *
+         *     Holds the per-workspace commit mutex for the git read. That is the plain
+         *     `acquire_commit_mutex`, NOT `acquire_commit_mutex_live` — the live variant
+         *     re-reads liveness and raises WorkspaceDeleted, which would refuse every
+         *     workspace this endpoint exists to serve.
+         *
+         *     The audit event is committed BEFORE any content is returned.
+         */
+        get: operations["inspect_deleted_workspace_api_admin_workspaces_deleted__workspace_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/auth/config": {
         parameters: {
             query?: never;
@@ -2363,6 +2428,18 @@ export interface components {
             /** Workspace Title */
             workspace_title: string;
         };
+        /** CommitOut */
+        CommitOut: {
+            /**
+             * Authored At
+             * Format: date-time
+             */
+            authored_at: string;
+            /** Sha */
+            sha: string;
+            /** Subject */
+            subject: string;
+        };
         /** CriterionIn */
         CriterionIn: {
             /** Description */
@@ -2430,6 +2507,55 @@ export interface components {
         DeleteResultOut: {
             /** Outcome */
             outcome: string;
+        };
+        /** DeletedWorkspaceDetailOut */
+        DeletedWorkspaceDetailOut: {
+            /** Commits */
+            commits: components["schemas"]["CommitOut"][];
+            /** History Truncated */
+            history_truncated: boolean;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Owner Email */
+            owner_email: string | null;
+            /** Proposal Markdown */
+            proposal_markdown: string | null;
+            /** Repository Available */
+            repository_available: boolean;
+            /**
+             * Soft Deleted At
+             * Format: date-time
+             */
+            soft_deleted_at: string;
+            /** Title */
+            title: string;
+        };
+        /** DeletedWorkspaceListOut */
+        DeletedWorkspaceListOut: {
+            /** Items */
+            items: components["schemas"]["DeletedWorkspaceRow"][];
+            /** Total */
+            total: number;
+        };
+        /** DeletedWorkspaceRow */
+        DeletedWorkspaceRow: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Owner Email */
+            owner_email: string | null;
+            /**
+             * Soft Deleted At
+             * Format: date-time
+             */
+            soft_deleted_at: string;
+            /** Title */
+            title: string;
         };
         /** DigestPanelOut */
         DigestPanelOut: {
@@ -5427,6 +5553,231 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AdminActionOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    list_deleted_workspaces_api_admin_workspaces_deleted_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeletedWorkspaceListOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    inspect_deleted_workspace_api_admin_workspaces_deleted__workspace_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeletedWorkspaceDetailOut"];
                 };
             };
             /** @description Bad Request */

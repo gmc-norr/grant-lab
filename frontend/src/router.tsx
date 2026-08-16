@@ -31,6 +31,12 @@ import { AppShell } from "./shell/AppShell";
 const Cockpit = lazy(() => import("./routes/Cockpit").then((m) => ({ default: m.Cockpit })));
 const AdminLayout = lazy(() => import("./routes/AdminLayout").then((m) => ({ default: m.AdminLayout })));
 const AdminDashboard = lazy(() => import("./routes/AdminDashboard").then((m) => ({ default: m.AdminDashboard })));
+const AdminDeletedWorkspaces = lazy(() =>
+  import("./routes/AdminDeletedWorkspaces").then((m) => ({ default: m.AdminDeletedWorkspaces })),
+);
+const AdminDeletedWorkspaceDetail = lazy(() =>
+  import("./routes/AdminDeletedWorkspaceDetail").then((m) => ({ default: m.AdminDeletedWorkspaceDetail })),
+);
 const AdminDrafting = lazy(() => import("./routes/AdminDrafting").then((m) => ({ default: m.AdminDrafting })));
 const AdminGoldenSet = lazy(() => import("./routes/AdminGoldenSet").then((m) => ({ default: m.AdminGoldenSet })));
 const AdminPendingUsers = lazy(() => import("./routes/AdminPendingUsers").then((m) => ({ default: m.AdminPendingUsers })));
@@ -118,6 +124,22 @@ export const router = createBrowserRouter([
             element: (
               <Suspense fallback={<RouteSpinner />}>
                 <AdminPendingUsers />
+              </Suspense>
+            ),
+          },
+          {
+            path: "deleted-workspaces",
+            element: (
+              <Suspense fallback={<RouteSpinner />}>
+                <AdminDeletedWorkspaces />
+              </Suspense>
+            ),
+          },
+          {
+            path: "deleted-workspaces/:workspaceId",
+            element: (
+              <Suspense fallback={<RouteSpinner />}>
+                <AdminDeletedWorkspaceDetail />
               </Suspense>
             ),
           },

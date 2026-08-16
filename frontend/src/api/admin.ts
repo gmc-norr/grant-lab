@@ -5,6 +5,8 @@ import type { components } from "./schema.gen";
 
 export type AdminUser = components["schemas"]["AdminUserOut"];
 export type AdminPendingUser = components["schemas"]["AdminPendingUserOut"];
+export type DeletedWorkspaceRow = components["schemas"]["DeletedWorkspaceRow"];
+export type DeletedWorkspaceDetail = components["schemas"]["DeletedWorkspaceDetailOut"];
 
 export function useAdminUsers(page: number) {
   return useQuery({
@@ -19,6 +21,37 @@ export function useAdminPendingUsers(page: number) {
     queryKey: ["admin-pending", page],
     queryFn: async () =>
       unwrap(await api.GET("/api/admin/users/pending", { params: { query: { page } } })),
+    retry: false,
+  });
+}
+
+export const DELETED_PER_PAGE = 50;
+
+export function useAdminDeletedWorkspaces(page: number) {
+  return useQuery({
+    // page is in the key, or page 2 renders page 1's cache
+    queryKey: ["admin-deleted-workspaces", page],
+    queryFn: async () =>
+      unwrap(
+        await api.GET("/api/admin/workspaces/deleted", {
+          params: {
+            query: { limit: DELETED_PER_PAGE, offset: (page - 1) * DELETED_PER_PAGE },
+          },
+        }),
+      ),
+    retry: false,
+  });
+}
+
+export function useAdminDeletedWorkspace(workspaceId: string) {
+  return useQuery({
+    queryKey: ["admin-deleted-workspace", workspaceId],
+    queryFn: async () =>
+      unwrap(
+        await api.GET("/api/admin/workspaces/deleted/{workspace_id}", {
+          params: { path: { workspace_id: workspaceId } },
+        }),
+      ),
     retry: false,
   });
 }

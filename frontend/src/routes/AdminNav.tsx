@@ -8,6 +8,7 @@ const LINKS: { to: string; label: string }[] = [
   { to: "/admin/golden-set", label: "Golden set" },
   { to: "/admin/users", label: "Users" },
   { to: "/admin/users/pending", label: "Pending" },
+  { to: "/admin/deleted-workspaces", label: "Deleted workspaces" },
 ];
 
 export function AdminNav() {
