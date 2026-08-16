@@ -1,7 +1,8 @@
 # Admin retention surface for deleted workspaces — design
 
 **Date:** 2026-08-16
-**Status:** revision 4 — delete becomes **freeze-only**, and **restore is back in scope**.
+**Status:** revision 5 — **Slice C (restore) designed** (section 4). Slices A and B have shipped
+(`ef8ccb3`, `991e7a7`). Partial-restore detection is dropped, with the reason recorded in 0.3.
 **Goal:** Deleting a workspace freezes it and destroys nothing. An admin can then inspect it,
 restore it intact, or purge it for real.
 
@@ -19,7 +20,7 @@ it is simply where the line happened to land — and it is what made restore imp
 |---|---|---|
 | **A** | **Freeze-only delete** — stop destroying bytes on delete | scoped in 2; **ship first, see 0.1** |
 | **B** | Admin inspection surface — list, read, audit | planned: `docs/superpowers/plans/2026-08-16-admin-inspection-surface.md` |
-| **C** | Restore | scoped in 9.3 |
+| **C** | Restore | designed in 4 |
 | **D** | Workspace filesystem-activity barrier | deferred, scoped in 9.1 |
 | **E** | Purge, built on D | deferred, scoped in 9.2 |
 
@@ -49,10 +50,19 @@ contents remain until an administrator removes them.
 
 ### 0.3 Workspaces deleted before Slice A
 
-Their reference and attachment bytes are already gone. Restore (Slice C) will bring the row and
-the proposal history back, but those files cannot return. Slice C must detect this — reference
-and attachment rows whose files are missing — and tell the admin which workspaces are only
-partially restorable, rather than restoring them silently into a broken state.
+Their reference and attachment bytes are already gone: those deletions really did scrub. A
+restore would bring the row and the proposal history back, but not those files.
+
+**Revision 5 drops the partial-restore machinery.** Earlier revisions required Slice C to detect
+reference and attachment rows whose files are missing and report which workspaces are only
+partially restorable. The system is under development and no real workspaces exist, so the
+population that could be partially restorable is **empty** — and it can never grow, because
+Slice A shipped and deletion now destroys nothing. Building detection for a set that is empty by
+construction is work with no reachable consumer.
+
+Recorded here so it reads as a decision rather than an omission: if this ever ships to an
+instance carrying pre-Slice-A deletions, that detection becomes required again before restore is
+exposed there.
 
 ## 1. Background
 
@@ -78,8 +88,8 @@ list references whose files no longer exist — broken in a way that reads as a 
 consequence of deletion.
 
 That objection was about **how deletion behaved**, not about restore. Once deletion stops
-destroying bytes (Slice A), restore is lossless and the objection disappears. The one residual is
-0.3's pre-existing deletions, which are partially restorable and must say so.
+destroying bytes (Slice A), restore is lossless and the objection disappears. The one residual —
+0.3's pre-existing deletions — is empty in practice and is dropped there.
 
 ## 2. Slice A — freeze-only delete
 
@@ -199,6 +209,139 @@ markdown and its (possibly truncated) commit history.
 No purge control. The page states that deleted workspaces are retained on disk, so an admin is not
 left wondering whether inspection is all there will ever be.
 
+## 4. Slice C — restore
+
+Un-deletes a workspace: clears `soft_deleted_at` so every liveness gate passes again. Admin-only,
+audited like inspection.
+
+### 4.1 What restore is, and is not
+
+**Restore returns a usable workspace, not an interrupted session.** Jobs, queued turns and running
+turns were cancelled at delete time and stay cancelled. Nothing resurrects them. The owner picks
+up from the restored content.
+
+**Restore is lossless for anything deleted after Slice A**, because that deletion destroyed
+nothing. See 0.3 for why the pre-Slice-A case is not handled.
+
+**The owner is not notified.** Restore is an administrative act with an administrative trace. A
+restored workspace simply reappears. (Considered and rejected for this slice: an owner-visible
+activity event. `activity/feed.py` drops unmapped event kinds fail-safe, so the audit kind
+introduced here cannot leak into the owner's feed by accident.)
+
+**Restore will be blocked on a purged workspace** — there is nothing to restore. Slice E does not
+exist, so `purged_at` does not exist and there is nothing to check yet. When E lands,
+`purged_at IS NOT NULL` makes restore a 409.
+
+### 4.2 The tombstones — the part that is not obvious
+
+Deletion runs four retirement hooks (`main.py:198`). Two of them leave **in-memory tombstones that
+nothing ever clears**:
+
+| Hook | State | Cleared by? |
+|---|---|---|
+| `collab` | `MANAGER._retired_ws` — a `set` on the process-global room manager (`collab/room.py:475`) | **No.** Only `.add`, at `:681` |
+| `turns` | `registry._retired` (`drafting/registry.py:85`) | **No.** Only `.add`, at `:217` |
+| `jobs` | DB rows only | n/a — nothing in memory |
+| `passes` | cancels live entries; keeps no per-workspace set | n/a |
+
+A restore that only clears `soft_deleted_at` therefore produces a **zombie**: live in the
+database, and permanently refused by collab (`WorkspaceRetired`) and by every new turn launch,
+for the life of the process. Collab is the live editor in production, so that is the whole
+workspace.
+
+**Restore must clear both sets.** Neither has an un-retire method today; this slice adds them.
+
+### 4.3 Ordering, and why
+
+```
+acquire_commit_mutex        (plain, NOT _live — see 4.4)
+  re-read soft_deleted_at   → 409 if already live
+  clear soft_deleted_at
+  write the audit event
+  COMMIT                    ← one transaction: no restore without its audit
+clear the two tombstones    ← only after the commit succeeds
+return
+```
+
+**Tombstones are cleared last, deliberately.** Clearing them first and then failing the commit
+would un-poison a workspace that is still deleted — a live editing surface on a deleted
+workspace, which is strictly worse than the alternative.
+
+The alternative's cost is a window between COMMIT and the clear where a restored workspace still
+refuses collab. That window is a few microseconds of straight-line code, it **fails closed**, and
+it resolves as soon as the clear runs.
+
+The residual is a crash inside that window, which would leave a live workspace poisoned. It
+repairs itself: the tombstones are in-memory only, so the restart that necessarily follows a
+crash clears every one of them. The failure mode is undone by the event that causes it.
+
+### 4.4 The mutex
+
+The plain `acquire_commit_mutex` (`drafting/locking.py:205`), never `acquire_commit_mutex_live`
+(`:267`) — the `_live` variant re-reads liveness and raises `WorkspaceDeleted`, so it would refuse
+every workspace restore exists to serve. Identical trap to inspection (3.2), identical answer.
+
+It returns `None` and is not a context manager. It is taken **after** the pre-lock 404, so a
+restore attempt on a live or missing workspace never contends for a mutex it will refuse anyway —
+the same ordering inspection settled on.
+
+Restore is the one path that makes the mutex genuinely load-bearing rather than defensive: it
+**flips** the liveness flag that every other writer re-reads under that same mutex, so taking it
+makes the flip a linearization point rather than a race.
+
+### 4.5 API surface
+
+| Route | Purpose |
+|---|---|
+| `POST /api/admin/workspaces/deleted/{workspace_id}/restore` | Clear `soft_deleted_at`; 204 |
+
+- `require_admin` (`auth/dependencies.py:50`); a non-admin gets 403.
+- 404 unless the workspace exists **and** `soft_deleted_at IS NOT NULL` — a live workspace and a
+  missing one are indistinguishable, as in 3.1.
+- 409 if it went live between the pre-lock read and the mutex (the fresh re-read).
+- `CommitMutexTimeout` → 429 + `Retry-After: 2` + `BUSY_ERROR_MESSAGE`, matching every other
+  mutex caller.
+- No response body. A POST needs no `Cache-Control`.
+
+### 4.6 Audit
+
+One event kind on `WorkspaceEvent`, with the acting admin as `actor_id`:
+
+| Kind | Payload |
+|---|---|
+| `admin_deleted_workspace_restored` | `workspace_id`, `admin_user_id` |
+
+Committed in the **same transaction** as the flag clear. Unlike inspection — where the audit must
+commit *before* the response because the response carries content — here the audit and the
+mutation are the same fact, so atomicity is the requirement, not ordering.
+
+### 4.7 UI, and the copy this invalidates
+
+A **Restore** button on the admin deleted-workspace detail page, with a confirmation. On success
+the workspace is no longer deleted, so the page navigates back to the list.
+
+Restore makes one existing string **false**. `WorkspaceSettingsModal.tsx` tells the owner
+deletion cannot be undone — written that way in Slice A because it was true. It must now say the
+owner cannot undo it and an administrator can restore it. Slice A deliberately refused to promise
+this before it existed; the same rule applies in reverse now that it does.
+
+### 4.8 Acceptance
+
+1. An admin restores a deleted workspace; it disappears from the deleted list and its owner can
+   open it again.
+2. A live workspace and a missing one both 404. A non-admin gets 403.
+3. Restore writes exactly one `admin_deleted_workspace_restored` event naming the acting admin,
+   in the same transaction as the flag clear — a failed commit leaves neither.
+4. **Both tombstones are cleared.** Proven by deleting a workspace, restoring it, and exercising
+   collab and a turn launch — not by asserting the sets directly, which would pass even if
+   restore cleared the wrong workspace's entry.
+5. A restore whose commit fails leaves the tombstones set — the workspace stays refused, not
+   half-restored.
+6. Cancelled jobs and turns stay cancelled.
+7. Swapping in `acquire_commit_mutex_live` turns the happy-path test red.
+8. The delete-confirmation copy no longer claims the deletion cannot be undone at all.
+9. No migration, no `rmtree`, nothing removed anywhere.
+
 ## 7. Risks
 
 | Risk | Handling |
@@ -208,6 +351,8 @@ left wondering whether inspection is all there will ever be.
 | Unbounded list or history response | Paginated and capped, truncation stated (3.1) |
 | Content served without an audit record | Audit commits before the response (5) |
 | Inspection accidentally mutating a deleted workspace | Acceptance tests 4 and 5 assert no new commit and no collab room |
+| Restore produces a zombie: live row, permanently refused by collab and turns | Both in-memory tombstones cleared after the commit (4.2, 4.3); acceptance 4 exercises the subsystems rather than the sets |
+| Tombstones cleared for a workspace whose restore then fails | Cleared only after COMMIT succeeds (4.3); acceptance 5 |
 
 ## 8. Acceptance
 
@@ -312,21 +457,7 @@ Requires Slice D. Settled design points:
 
 ### 9.3 Slice C — restore
 
-Un-deletes a workspace: clears `soft_deleted_at` so every liveness gate passes again. Admin-only,
-audited like inspection.
-
-Settled points:
-
-- **Restore does not resurrect work.** Jobs, queued turns and running turns were cancelled at
-  delete time and stay cancelled. Restore returns a usable workspace, not an interrupted session.
-  The owner starts again from the restored content.
-- **Partial restores must be visible** (0.3). A workspace deleted before Slice A has lost its
-  reference and attachment bytes. Restore must detect rows whose files are missing and report
-  which ones, rather than restoring silently into a state that looks broken.
-- **Restore is blocked on a purged workspace** — there is nothing to restore. Once Slice E
-  exists, `purged_at IS NOT NULL` makes restore a 409.
-- Restore takes the same plain `acquire_commit_mutex` as inspection, for the same reason: it must
-  work on a workspace that is currently deleted, so `acquire_commit_mutex_live` would refuse it.
+Promoted out of this section in revision 5. See **4**.
 
 ### 9.4 The false-sweep docstring — fixed in Slice A, not deferred
 
