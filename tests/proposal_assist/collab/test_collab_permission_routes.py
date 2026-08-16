@@ -171,7 +171,7 @@ def test_soft_delete_route_signals_both_artifacts(
     monkeypatch.setattr(
         wsmod,
         "signal_workspace_retirement",
-        lambda request, *, workspace_id: retire_calls.append(workspace_id),
+        lambda request, *, workspace_id, generation: retire_calls.append(workspace_id),
     )
 
     c = _client(app, owner_id)

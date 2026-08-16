@@ -1510,7 +1510,7 @@ def soft_delete_workspace_api(
         # DB half commits internally (mutex acquire + soft_deleted_at + job/turn
         # cancellation) — do not add a second commit here.
         try:
-            soft_delete_workspace_db(session, workspace_id=ws.id)
+            generation = soft_delete_workspace_db(session, workspace_id=ws.id)
         except CommitMutexTimeout as e:
             # Deletion participates in the commit mutex (so live writers can
             # linearize against it). A wedged writer means nothing was committed —
@@ -1533,5 +1533,5 @@ def soft_delete_workspace_api(
     # not. Byte removal moves to the admin purge (Slice E). Users are already
     # locked out by the liveness gates and the room eviction above — keeping the
     # bytes changes what can be recovered later, not who can reach them now.
-    signal_workspace_retirement(request, workspace_id=workspace_id)
+    signal_workspace_retirement(request, workspace_id=workspace_id, generation=generation)
     return Response(status_code=204)

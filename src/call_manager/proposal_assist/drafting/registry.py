@@ -194,7 +194,7 @@ class SubprocessRegistry:
                 raise exc
         return (True, None)
 
-    async def retire_workspace(self, workspace_id: uuid.UUID) -> None:
+    async def retire_workspace(self, workspace_id: uuid.UUID, generation: int) -> None:
         """Turns retirement hook (coordinator-invoked). Two effects, in order:
 
         1. Tombstone the workspace in _retired so no NEW launch can install:
@@ -212,6 +212,11 @@ class SubprocessRegistry:
         between any precheck and an in-flight streaming client.query, so this
         does NOT prove the subprocess died — Slice A's reconciliation sweep
         remains the retry.
+
+        *generation* is unused here: the coordinator gates the whole fan-out on
+        this generation while holding the lifecycle lock, so this hook is never
+        invoked for a superseded transition and must not re-check (and could not:
+        taking the lock here deadlocks).
         """
         async with self._lock:
             self._retired.add(workspace_id)

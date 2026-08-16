@@ -114,10 +114,15 @@ class PassRegistry:
     def unconfirmed_count(self) -> int:
         return len(self._unconfirmed)
 
-    async def retire_workspace(self, workspace_id: uuid.UUID) -> int:
+    async def retire_workspace(self, workspace_id: uuid.UUID, generation: int) -> int:
         """Cancel every live pass for this workspace, CONCURRENTLY.
 
         Concurrency keeps the hook's cost independent of entry count.
+
+        *generation* is unused here: the coordinator gates the whole fan-out on
+        this generation while holding the lifecycle lock, so this hook is never
+        invoked for a superseded transition and must not re-check (and could not:
+        taking the lock here deadlocks).
         """
         entries = list(self._live.get(workspace_id, ()))
         if not entries:

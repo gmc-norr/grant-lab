@@ -122,11 +122,16 @@ def cancel_setup_jobs_for_workspace(session: Session, workspace_id: uuid.UUID) -
 
 def build_jobs_retirement_hook(
     session_factory: sessionmaker,
-) -> Callable[[uuid.UUID], Awaitable[int]]:
+) -> Callable[[uuid.UUID, int], Awaitable[int]]:
     """Build the coordinator hook. The coordinator is async and these are sync DB
-    writes, so the work runs in a thread — bounded by wait_for."""
+    writes, so the work runs in a thread — bounded by wait_for.
 
-    async def _hook(workspace_id: uuid.UUID) -> int:
+    *generation* is accepted for uniformity; Task 4 will thread it into the SQL
+    predicate so rows skipped by this hook's SKIP LOCKED can be reconciled with
+    a generation guard.
+    """
+
+    async def _hook(workspace_id: uuid.UUID, generation: int) -> int:
         def _work() -> int:
             with session_factory() as session:
                 n = cancel_setup_jobs_for_workspace(session, workspace_id)

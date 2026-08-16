@@ -6,6 +6,12 @@ each other: the app wires each subsystem's teardown as a hook at startup
 deleted. The bridge mirrors collab.permissions.signal_user_revocation — the
 SYNC delete route reaches the async coordinator via the app loop, bounded so a
 hanging hook can never wedge the route.
+
+Hooks now receive the generation their retirement allocated (Slice C0). `jobs`
+is the only one that uses it, because its work escapes the coordinator's gate
+(Task 4 wires the SQL predicate). The remaining hooks ignore the parameter —
+the coordinator's own gate (inside `transition`) ensures they are never invoked
+for a superseded retirement.
 """
 
 from __future__ import annotations
@@ -16,12 +22,16 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 
+from call_manager.proposal_assist.lifecycle import WorkspaceLifecycle
+
 logger = logging.getLogger(__name__)
 
-# A retirement hook: given a workspace_id, tear that subsystem's live state down.
-# Return value is IGNORED (RoomManager.retire_workspace returns an int count for
-# testability; the coordinator discards it).
-RetirementHook = Callable[[uuid.UUID], Awaitable[object]]
+# A retirement hook: given a workspace_id and the generation its transaction
+# allocated, tear that subsystem's live state down. Return value is IGNORED
+# (RoomManager.retire_workspace returns an int count for testability; the
+# coordinator discards it). `jobs` is the only hook that uses the generation;
+# the others ignore it because the coordinator's gate covers them.
+RetirementHook = Callable[[uuid.UUID, int], Awaitable[object]]
 
 # Hooks that MUST be registered or the app must not boot: a missing one would
 # mean a delete silently fails to stop that subsystem. Enforced at construction.
@@ -67,52 +77,97 @@ class MissingRetirementHook(RuntimeError):
 class WorkspaceRetirement:
     """Fans a workspace deletion out to every registered subsystem hook.
 
-    Construction validates REQUIRED_HOOKS; retire() runs all hooks concurrently
-    and in isolation and never raises."""
+    Construction validates REQUIRED_HOOKS; retire() applies the lifecycle
+    transition and — only if it took effect — runs all hooks concurrently and
+    in isolation, never raising."""
 
-    def __init__(self, hooks: dict[str, RetirementHook]) -> None:
+    def __init__(
+        self, hooks: dict[str, RetirementHook], *, lifecycle: WorkspaceLifecycle
+    ) -> None:
         missing = [name for name in REQUIRED_HOOKS if name not in hooks]
         if missing:
             raise MissingRetirementHook(
                 f"missing required retirement hook(s): {', '.join(missing)}"
             )
         self._hooks = dict(hooks)
+        self._lifecycle = lifecycle
 
-    async def retire(self, workspace_id: uuid.UUID) -> None:
-        """Run EVERY registered hook concurrently, each isolated in its own
-        try/except so one hook's failure never suppresses another's teardown.
-        Never raises; return values are discarded."""
+    async def retire(self, workspace_id: uuid.UUID, generation: int) -> None:
+        """Apply the retirement to the lifecycle authority, and — only if it is
+        still current — run EVERY registered hook concurrently, each isolated in
+        its own try/except so one hook's failure never suppresses another's.
 
-        async def _run(name: str, hook: RetirementHook) -> None:
-            try:
-                await hook(workspace_id)
-            except Exception:
-                logger.warning(
-                    "retirement.hook_failed",
+        *generation* is the one the deleting transaction ALLOCATED, passed down
+        untouched. Nothing here may re-read it: a generation read at this point
+        would be the one current when teardown ran, not the one this teardown
+        belongs to, so a transition that landed in between would look like this
+        one (spec 4.4).
+
+        The gate is HERE rather than in the hooks for two reasons. All four
+        hooks carry the same generation, so a per-hook check would let the first
+        win and leave the workspace half torn down. And the lifecycle lock is
+        held across the whole fan-out — so a hook that took it would deadlock
+        against its own caller. Inside this block, `is_retired` (lock-free) is
+        the only lifecycle call that is legal.
+
+        Holding the lock for the fan-out bounds nothing new: the hooks are
+        individually bounded by the same budgets _RETIREMENT_BARRIER_SECONDS is
+        derived from above (max 5.5s, passes), and test_retirement_coordinator.py
+        asserts that inequality against the live constants.
+
+        Never raises; return values are discarded.
+        """
+        async with self._lifecycle.transition(
+            workspace_id, generation=generation, retired=True
+        ) as took_effect:
+            if not took_effect:
+                logger.info(
+                    "retirement.superseded",
                     extra={
-                        "event": "retirement_hook_failed",
-                        "hook": name,
+                        "event": "retirement_superseded",
                         "workspace_id": str(workspace_id),
+                        "generation": generation,
                     },
-                    exc_info=True,
                 )
+                return
 
-        await asyncio.gather(*(_run(name, hook) for name, hook in self._hooks.items()))
+            async def _run(name: str, hook: RetirementHook) -> None:
+                try:
+                    await hook(workspace_id, generation)
+                except Exception:
+                    logger.warning(
+                        "retirement.hook_failed",
+                        extra={
+                            "event": "retirement_hook_failed",
+                            "hook": name,
+                            "workspace_id": str(workspace_id),
+                        },
+                        exc_info=True,
+                    )
+
+            await asyncio.gather(*(_run(name, hook) for name, hook in self._hooks.items()))
 
 
-def signal_workspace_retirement(request, *, workspace_id: uuid.UUID) -> None:
+def signal_workspace_retirement(
+    request, *, workspace_id: uuid.UUID, generation: int
+) -> None:
     """Route-side (SYNC): schedule WorkspaceRetirement.retire on the app loop and
     BLOCK (bounded) until it returns. Mirrors signal_user_revocation. NEVER raises
     into the route: a missing loop/coordinator, a schedule failure, a timeout, or
     a coordinator error all degrade to a logged warning — the DB soft-delete has
     already committed, so a delete must not fail because retirement could not be
-    scheduled."""
+    scheduled.
+
+    *generation* is the value the deleting transaction allocated and the caller
+    supplies. This function must NEVER read a generation: the row's current value
+    at this point could reflect a restore that landed between the commit and this
+    signal, making this delete's teardown look current (spec 4.4)."""
     try:
         loop = getattr(request.app.state, "app_loop", None)
         coordinator = getattr(request.app.state, "workspace_retirement", None)
         if loop is None or coordinator is None:
             return
-        coro = coordinator.retire(workspace_id)
+        coro = coordinator.retire(workspace_id, generation)
         try:
             fut = asyncio.run_coroutine_threadsafe(coro, loop)
         except Exception:

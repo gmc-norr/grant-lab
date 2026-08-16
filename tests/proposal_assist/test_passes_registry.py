@@ -84,7 +84,7 @@ async def test_retire_cancels_the_task_and_retires_the_adapter(registry):
 
     task = asyncio.create_task(_pass())
     await started.wait()
-    retired = await registry.retire_workspace(ws)
+    retired = await registry.retire_workspace(ws, 1)
 
     assert retired == 1
     assert task.done()
@@ -112,7 +112,7 @@ async def test_entries_retire_concurrently_not_serially(registry):
 
     loop = asyncio.get_running_loop()
     began = loop.time()
-    await registry.retire_workspace(ws)
+    await registry.retire_workspace(ws, 1)
     elapsed = loop.time() - began
 
     assert elapsed < 1.0, f"retirement took {elapsed:.2f}s — serialized, not concurrent"

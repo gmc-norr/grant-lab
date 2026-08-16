@@ -280,7 +280,7 @@ def test_reconcile_terminalizes_a_claim_row_on_a_workspace_with_no_setup_jobs(
     holder = pg_session_factory()
     try:
         holder.query(ClaimAnalysisJob).filter_by(id=job_id).with_for_update().one()
-        asyncio.run(build_jobs_retirement_hook(pg_session_factory)(ws_id))
+        asyncio.run(build_jobs_retirement_hook(pg_session_factory)(ws_id, 1))
         with pg_session_factory() as s:
             assert s.get(ClaimAnalysisJob, job_id).status == "running", (
                 "the hook should have SKIPPED the locked row, not waited on it"
@@ -525,7 +525,7 @@ def test_mark_done_cannot_resurrect_a_job_the_retirement_hook_terminalized(
         with pg_session_factory() as s:
             s.get(Workspace, ws_id).soft_deleted_at = _now_utc()
             s.commit()
-        assert asyncio.run(build_jobs_retirement_hook(pg_session_factory)(ws_id)) == 1
+        assert asyncio.run(build_jobs_retirement_hook(pg_session_factory)(ws_id, 1)) == 1
 
         mark_done(worker, job)
         worker.commit()
@@ -648,7 +648,7 @@ def test_a_job_the_hook_terminalized_is_COUNTED_by_the_drain_not_silently_droppe
         with pg_session_factory() as s2:
             s2.get(Workspace, ws_id).soft_deleted_at = _now_utc()
             s2.commit()
-        assert asyncio.run(build_jobs_retirement_hook(pg_session_factory)(ws_id)) == 1
+        assert asyncio.run(build_jobs_retirement_hook(pg_session_factory)(ws_id, 1)) == 1
         mark_done(session, job)
 
     monkeypatch.setattr(pl, "analyze_job", _analyze)

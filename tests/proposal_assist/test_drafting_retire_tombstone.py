@@ -37,7 +37,7 @@ async def test_retire_workspace_makes_claim_reject_before_the_cached_entry():
     installed = await reg.fulfill_pending_launch(ws, handle, lock_session=None)
     assert installed is True
 
-    await reg.retire_workspace(ws)
+    await reg.retire_workspace(ws, 1)
 
     # (b) the live entry is POPPED AND TORN DOWN, not merely shadowed by the
     # tombstone. FakeAgentAdapter records terminations in `adapter.terminations`
@@ -61,7 +61,7 @@ async def test_retire_workspace_tears_down_a_live_entry_mid_turn():
     assert await reg.fulfill_pending_launch(ws, handle, lock_session=None) is True
     await reg.increment_in_flight(ws)          # the suite's public busy marker
 
-    await reg.retire_workspace(ws)
+    await reg.retire_workspace(ws, 1)
 
     assert adapter.terminations == [handle]                # torn down anyway
     assert ws not in reg._entries
@@ -82,7 +82,7 @@ async def test_fulfill_pending_launch_refuses_to_install_and_resolves_a_real_wai
     am_launcher2, waiter = await reg.claim_launch_or_wait(ws)
     assert am_launcher2 is False and waiter is not None
 
-    await reg.retire_workspace(ws)                        # retire lands mid-launch
+    await reg.retire_workspace(ws, 1)                        # retire lands mid-launch
 
     installed = await reg.fulfill_pending_launch(ws, object(), lock_session=None)
     assert installed is False
@@ -100,8 +100,8 @@ async def test_fulfill_pending_launch_refuses_to_install_and_resolves_a_real_wai
 async def test_retire_workspace_is_idempotent():
     reg = SubprocessRegistry(adapter=FakeAgentAdapter(), idle_seconds=600)
     ws = uuid.uuid4()
-    await reg.retire_workspace(ws)
-    await reg.retire_workspace(ws)                        # no raise
+    await reg.retire_workspace(ws, 1)
+    await reg.retire_workspace(ws, 1)                        # no raise
     with pytest.raises(WorkspaceRetired):
         await reg.claim_launch_or_wait(ws)
 
@@ -149,7 +149,7 @@ async def test_controller_launch_tears_down_the_fresh_handle_when_install_refuse
     # adapter.launch, holding the pending future.
     await asyncio.wait_for(adapter.entered.wait(), timeout=5)
 
-    await registry.retire_workspace(ws_id)                # retire lands MID-LAUNCH
+    await registry.retire_workspace(ws_id, 1)              # retire lands MID-LAUNCH
     adapter.release.set()                                 # resume into fulfill_...
 
     with pytest.raises(WorkspaceRetired):

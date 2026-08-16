@@ -14,6 +14,7 @@ import uuid
 import pytest
 
 from call_manager.proposal_assist import retirement
+from call_manager.proposal_assist.lifecycle import WorkspaceLifecycle
 from call_manager.proposal_assist.retirement import (
     MissingRetirementHook,
     WorkspaceRetirement,
@@ -22,7 +23,7 @@ from call_manager.proposal_assist.retirement import (
 
 
 def _noop_hook():
-    async def _h(_ws):
+    async def _h(_ws, _gen):
         return None
     return _h
 
@@ -66,15 +67,18 @@ def test_jobs_is_a_required_hook():
     assert "jobs" in retirement.REQUIRED_HOOKS
     with pytest.raises(retirement.MissingRetirementHook):
         retirement.WorkspaceRetirement(
-            hooks={"turns": _noop_hook(), "collab": _noop_hook()}  # no "jobs"
+            hooks={"turns": _noop_hook(), "collab": _noop_hook()},  # no "jobs"
+            lifecycle=WorkspaceLifecycle(),
         )
 
 
 def test_missing_required_hook_raises_at_construction():
     with pytest.raises(MissingRetirementHook):
-        WorkspaceRetirement(hooks={"turns": _noop_hook()})  # 'collab' and 'jobs' missing
+        WorkspaceRetirement(
+            hooks={"turns": _noop_hook()}, lifecycle=WorkspaceLifecycle()
+        )  # 'collab' and 'jobs' missing
     with pytest.raises(MissingRetirementHook):
-        WorkspaceRetirement(hooks={})                        # all missing
+        WorkspaceRetirement(hooks={}, lifecycle=WorkspaceLifecycle())  # all missing
 
 
 @pytest.mark.asyncio
@@ -82,14 +86,14 @@ async def test_hooks_run_concurrently_and_in_isolation():
     order: list[str] = []
     a_can_finish = asyncio.Event()
 
-    async def hook_a(_ws):
+    async def hook_a(_ws, _gen):
         order.append("a-start")
         # If the hooks ran sequentially (a before b) this would deadlock, since
         # only hook_b sets the event — reaching "a-done" proves they overlap.
         await asyncio.wait_for(a_can_finish.wait(), timeout=5)
         order.append("a-done")
 
-    async def hook_b(_ws):
+    async def hook_b(_ws, _gen):
         order.append("b-start")
         a_can_finish.set()          # release hook_a → concurrency
         raise ValueError("boom")    # isolation: must NOT stop hook_a
@@ -100,9 +104,10 @@ async def test_hooks_run_concurrently_and_in_isolation():
             "collab": hook_b,
             "jobs": _noop_hook(),
             "passes": _noop_hook(),
-        }
+        },
+        lifecycle=WorkspaceLifecycle(),
     )
-    await coord.retire(uuid.uuid4())   # must NOT raise despite hook_b
+    await coord.retire(uuid.uuid4(), generation=1)   # must NOT raise despite hook_b
 
     assert "a-done" in order            # hook_a completed even though hook_b raised
     assert "b-start" in order
@@ -110,10 +115,10 @@ async def test_hooks_run_concurrently_and_in_isolation():
 
 @pytest.mark.asyncio
 async def test_return_values_are_ignored():
-    async def turns_hook(_ws):
+    async def turns_hook(_ws, _gen):
         return None
 
-    async def collab_hook(_ws):
+    async def collab_hook(_ws, _gen):
         return 3                       # int count (mirrors revoke_user_sockets)
 
     coord = WorkspaceRetirement(
@@ -122,9 +127,10 @@ async def test_return_values_are_ignored():
             "collab": collab_hook,
             "jobs": _noop_hook(),
             "passes": _noop_hook(),
-        }
+        },
+        lifecycle=WorkspaceLifecycle(),
     )
-    assert await coord.retire(uuid.uuid4()) is None
+    assert await coord.retire(uuid.uuid4(), generation=1) is None
 
 
 class _FakeState:
@@ -163,10 +169,10 @@ def test_bridge_runs_hooks_on_a_separate_thread_loop():
     seen: dict = {}
     ran = threading.Event()
 
-    async def turns_hook(ws):
+    async def turns_hook(ws, _gen):
         seen["turns"] = ws
 
-    async def collab_hook(ws):
+    async def collab_hook(ws, _gen):
         seen["collab"] = ws
         ran.set()
 
@@ -176,13 +182,15 @@ def test_bridge_runs_hooks_on_a_separate_thread_loop():
             "collab": collab_hook,
             "jobs": _noop_hook(),
             "passes": _noop_hook(),
-        }
+        },
+        lifecycle=WorkspaceLifecycle(),
     )
     loop, t = _loop_on_thread()
     try:
         ws = uuid.uuid4()
         req = _FakeRequest(_FakeApp(loop=loop, coordinator=coord))
-        signal_workspace_retirement(req, workspace_id=ws)   # blocks until retire returns
+        # blocks until retire returns
+        signal_workspace_retirement(req, workspace_id=ws, generation=1)
         assert ran.wait(timeout=5)
         assert seen == {"turns": ws, "collab": ws}
     finally:
@@ -195,11 +203,11 @@ def test_bridge_returns_at_the_bound_when_a_hook_hangs(monkeypatch):
     monkeypatch.setattr(retirement, "_RETIREMENT_BARRIER_SECONDS", 0.2)
     started = threading.Event()
 
-    async def turns_hook(_ws):
+    async def turns_hook(_ws, _gen):
         started.set()
         await asyncio.sleep(3600)      # hang well past the bound
 
-    async def collab_hook(_ws):
+    async def collab_hook(_ws, _gen):
         return None
 
     coord = WorkspaceRetirement(
@@ -208,12 +216,14 @@ def test_bridge_returns_at_the_bound_when_a_hook_hangs(monkeypatch):
             "collab": collab_hook,
             "jobs": _noop_hook(),
             "passes": _noop_hook(),
-        }
+        },
+        lifecycle=WorkspaceLifecycle(),
     )
     loop, t = _loop_on_thread()
     try:
         req = _FakeRequest(_FakeApp(loop=loop, coordinator=coord))
-        signal_workspace_retirement(req, workspace_id=uuid.uuid4())  # must return ~0.2s
+        # must return ~0.2s
+        signal_workspace_retirement(req, workspace_id=uuid.uuid4(), generation=1)
         assert started.wait(timeout=5)           # the hook really started
     finally:
         _stop_loop(loop, t)
@@ -228,7 +238,8 @@ def test_bridge_never_raises_without_a_loop():
     app.state = _FakeState()
     app.state.app_loop = None
     app.state.workspace_retirement = None
-    signal_workspace_retirement(_FakeRequest(app), workspace_id=uuid.uuid4())  # no raise
+    # no raise
+    signal_workspace_retirement(_FakeRequest(app), workspace_id=uuid.uuid4(), generation=1)
 
 
 def test_passes_is_a_required_hook():
@@ -237,7 +248,8 @@ def test_passes_is_a_required_hook():
     turns hook."""
     with pytest.raises(MissingRetirementHook, match="passes"):
         WorkspaceRetirement(
-            hooks={"turns": _noop_hook(), "collab": _noop_hook(), "jobs": _noop_hook()}
+            hooks={"turns": _noop_hook(), "collab": _noop_hook(), "jobs": _noop_hook()},
+            lifecycle=WorkspaceLifecycle(),
         )
 
 

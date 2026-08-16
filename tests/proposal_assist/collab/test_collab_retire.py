@@ -63,7 +63,7 @@ async def test_retire_evicts_both_rooms_and_closes_clients_1008():
     await mgr.acquire(spec, load=_empty_load, client=cs,
                       state=ClientState(user_id=1, can_write=True))
 
-    n = await mgr.retire_workspace(ws)
+    n = await mgr.retire_workspace(ws, 1)
 
     assert n == 2
     assert cd.closed == 1008 and cs.closed == 1008   # policy violation, NOT 1011
@@ -101,7 +101,7 @@ async def test_both_artifact_rooms_retire_concurrently(monkeypatch):
 
     monkeypatch.setattr(room_module, "_set_evicted_under_lock", _instrumented)
 
-    n = await asyncio.wait_for(mgr.retire_workspace(ws), timeout=10)
+    n = await asyncio.wait_for(mgr.retire_workspace(ws, 1), timeout=10)
 
     assert n == 2                      # both sockets still closed
     assert len(completed) == 2         # serial teardown would leave 1
@@ -131,7 +131,7 @@ async def test_one_rooms_failure_does_not_abandon_the_other(monkeypatch):
 
     monkeypatch.setattr(room_module, "_set_evicted_under_lock", _boom_on_draft)
 
-    closed = await asyncio.wait_for(mgr.retire_workspace(ws), timeout=10)
+    closed = await asyncio.wait_for(mgr.retire_workspace(ws, 1), timeout=10)
 
     assert closed == 1                                  # only spec's socket counted
     assert clients["spec"].closed == 1008               # ...but it WAS closed
@@ -172,7 +172,7 @@ async def test_retire_does_not_run_the_deferred_checkpoint_callback():
 
     room._pending_on_evict = _on_evict       # what a last-leave checkpoint installs
 
-    await mgr.retire_workspace(ws)
+    await mgr.retire_workspace(ws, 1)
 
     assert ran == []                          # never invoked
     assert room._pending_on_evict is _on_evict   # nor consumed and silently dropped
@@ -215,7 +215,7 @@ async def test_acquire_rejects_when_retirement_lands_during_another_creators_loa
     await asyncio.sleep(0.05)                                # let B reach the key lock
     assert not b.done()
 
-    await mgr.retire_workspace(ws)                           # retirement lands mid-load
+    await mgr.retire_workspace(ws, 1)                           # retirement lands mid-load
     allow_load_finish.set()
 
     with pytest.raises(WorkspaceRetired):
@@ -231,7 +231,7 @@ async def test_retire_flips_can_write_false_before_closing():
     ws = uuid.uuid4()
     st = ClientState(user_id=1, can_write=True)
     await mgr.acquire((ws, "draft"), load=_empty_load, client=FakeClient(), state=st)
-    await mgr.retire_workspace(ws)
+    await mgr.retire_workspace(ws, 1)
     assert st.can_write is False
 
 
@@ -239,7 +239,7 @@ async def test_retire_flips_can_write_false_before_closing():
 async def test_acquire_rejects_a_retired_workspace():
     mgr = RoomManager()
     ws = uuid.uuid4()
-    await mgr.retire_workspace(ws)
+    await mgr.retire_workspace(ws, 1)
     with pytest.raises(WorkspaceRetired):
         await mgr.acquire((ws, "draft"), load=_empty_load, client=FakeClient(),
                           state=ClientState(user_id=1, can_write=True))
@@ -249,7 +249,7 @@ async def test_acquire_rejects_a_retired_workspace():
 async def test_operate_rejects_a_retired_workspace():
     mgr = RoomManager()
     ws = uuid.uuid4()
-    await mgr.retire_workspace(ws)
+    await mgr.retire_workspace(ws, 1)
     with pytest.raises(WorkspaceRetired):
         async with mgr.operate((ws, "draft"), load=_empty_load):
             pass
@@ -276,7 +276,7 @@ async def test_operate_rejects_when_retirement_lands_during_load():
 
     op_task = asyncio.ensure_future(_op())
     await asyncio.wait_for(load_entered.wait(), timeout=5)   # operate is inside load()
-    await mgr.retire_workspace(ws)                           # retirement lands mid-load
+    await mgr.retire_workspace(ws, 1)                           # retirement lands mid-load
     allow_load_finish.set()                                  # let load() return
 
     with pytest.raises(WorkspaceRetired):
@@ -304,7 +304,7 @@ async def test_retire_drains_in_flight_ops():
     await asyncio.wait_for(inside.wait(), timeout=5)
 
     async def _retire_then_flag():
-        await mgr.retire_workspace(ws)
+        await mgr.retire_workspace(ws, 1)
         return "retired"
 
     retire_task = asyncio.ensure_future(_retire_then_flag())
@@ -344,7 +344,7 @@ async def test_retire_waits_for_an_in_flight_client_persist_and_stops_later_ones
     )
     await asyncio.wait_for(in_persist.wait(), timeout=5)
 
-    retire_task = asyncio.ensure_future(mgr.retire_workspace(ws))
+    retire_task = asyncio.ensure_future(mgr.retire_workspace(ws, 1))
     await asyncio.sleep(0.05)
     assert not retire_task.done()            # blocked on room.lock — the whole point
 

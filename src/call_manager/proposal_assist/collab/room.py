@@ -661,7 +661,7 @@ class RoomManager:
             with suppress(Exception):
                 await client.close(code=_WS_INTERNAL_ERROR)
 
-    async def retire_workspace(self, workspace_id: uuid.UUID) -> int:
+    async def retire_workspace(self, workspace_id: uuid.UUID, generation: int) -> int:
         """Collab retirement hook (coordinator-invoked). Tombstone the workspace so
         acquire/operate refuse it, then tear down BOTH artifact rooms: pop each,
         tombstone it (room.evicted, flipped UNDER room.lock so it linearizes
@@ -671,6 +671,11 @@ class RoomManager:
         refuse it under the mutex anyway); this is drop_client semantics for the
         whole room. Idempotent. Returns the number of sockets closed (tests/logging;
         the coordinator discards it).
+
+        *generation* is unused here: the coordinator gates the whole fan-out on
+        this generation while holding the lifecycle lock, so this hook is never
+        invoked for a superseded transition and must not re-check (and could not:
+        taking the lock here deadlocks).
 
         The two artifact rooms are torn down CONCURRENTLY. They share nothing but
         self._lock (held only across the pop), so serialising them merely doubled

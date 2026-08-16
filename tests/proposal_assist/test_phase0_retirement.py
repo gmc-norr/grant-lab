@@ -133,8 +133,8 @@ def test_the_hook_cancels_queued_and_running_setup_jobs(pg_session_factory, curr
         running_ws_id, queued_ws_id = running_ws.id, queued_ws.id
 
     hook = build_jobs_retirement_hook(pg_session_factory)
-    assert asyncio.run(hook(running_ws_id)) == 1
-    assert asyncio.run(hook(queued_ws_id)) == 1, "the hook did not cancel the queued job"
+    assert asyncio.run(hook(running_ws_id, 1)) == 1
+    assert asyncio.run(hook(queued_ws_id, 1)) == 1, "the hook did not cancel the queued job"
 
     with pg_session_factory() as s:
         for label, ws_id in (("running", running_ws_id), ("queued", queued_ws_id)):
@@ -159,7 +159,7 @@ def test_the_hook_cancels_a_job_waiting_for_rubric_review(pg_session_factory, cu
         ws_id = ws.id
 
     hook = build_jobs_retirement_hook(pg_session_factory)
-    assert asyncio.run(hook(ws_id)) == 1
+    assert asyncio.run(hook(ws_id, 1)) == 1
 
     with pg_session_factory() as s:
         job = s.scalars(
@@ -204,7 +204,7 @@ def test_reconcile_cancels_a_waiting_for_rubric_review_row_the_hook_skipped(
     t.start()
     try:
         assert holding.wait(timeout=5)
-        assert asyncio.run(build_jobs_retirement_hook(pg_session_factory)(ws_id)) == 0
+        assert asyncio.run(build_jobs_retirement_hook(pg_session_factory)(ws_id, 1)) == 0
     finally:
         release.set()
         t.join(timeout=30)
@@ -259,7 +259,7 @@ def test_reconcile_cancels_a_queued_row_the_hook_skipped(pg_session_factory, cur
     t.start()
     try:
         assert holding.wait(timeout=5)
-        assert asyncio.run(build_jobs_retirement_hook(pg_session_factory)(ws_id)) == 0
+        assert asyncio.run(build_jobs_retirement_hook(pg_session_factory)(ws_id, 1)) == 0
     finally:
         release.set()
         t.join(timeout=30)
@@ -307,7 +307,7 @@ def test_a_locked_row_is_skipped_not_waited_on(pg_session_factory, current_user)
     try:
         assert holding.wait(timeout=5)
         started = time.monotonic()
-        assert asyncio.run(build_jobs_retirement_hook(pg_session_factory)(ws_id)) == 0
+        assert asyncio.run(build_jobs_retirement_hook(pg_session_factory)(ws_id, 1)) == 0
         assert time.monotonic() - started < _JOBS_CANCEL_SECONDS + 1
     finally:
         release.set()
@@ -337,7 +337,7 @@ def test_the_hook_is_bounded_by_wait_for(pg_session_factory, current_user, monke
 
     started = time.monotonic()
     with pytest.raises(asyncio.TimeoutError):
-        asyncio.run(jr.build_jobs_retirement_hook(pg_session_factory)(uuid.uuid4()))
+        asyncio.run(jr.build_jobs_retirement_hook(pg_session_factory)(uuid.uuid4(), 1))
     assert time.monotonic() - started < 5
 
 
@@ -398,7 +398,7 @@ def test_a_row_the_hook_skipped_is_converged_by_the_tick(pg_session_factory, cur
     t.start()
     try:
         assert holding.wait(timeout=5)
-        assert asyncio.run(build_jobs_retirement_hook(pg_session_factory)(ws_id)) == 0
+        assert asyncio.run(build_jobs_retirement_hook(pg_session_factory)(ws_id, 1)) == 0
     finally:
         release.set()
         t.join(timeout=30)
