@@ -21,7 +21,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from call_manager.db.models import TurnJob, Workspace, WorkspaceEvent, WorkspaceSetupJob
@@ -78,15 +78,39 @@ def create_workspace(
     return ws
 
 
+def bump_lifecycle_generation(session: Session, *, workspace_id: uuid.UUID) -> int:
+    """Allocate the next lifecycle generation for *workspace_id* and return it.
+
+    Computed as `lifecycle_generation + 1` IN THE DATABASE, never from a value
+    read into Python first: two transitions that both read the old value would
+    otherwise write the same new one, and two transitions sharing a generation
+    makes staleness undetectable — which is the whole mechanism.
+
+    Does NOT commit. The caller must already hold the commit mutex on this
+    workspace, so that the mutex is what orders generations (spec 4.4).
+    """
+    return session.execute(
+        update(Workspace)
+        .where(Workspace.id == workspace_id)
+        .values(lifecycle_generation=Workspace.lifecycle_generation + 1)
+        .returning(Workspace.lifecycle_generation)
+    ).scalar_one()
+
+
 def soft_delete_workspace_db(
     session: Session,
     *,
     workspace_id: uuid.UUID,
     timeout_seconds: int = 10,
-) -> None:
+) -> int:
     """The DB half of a soft-delete: mark the workspace deleted, cancel every
     active background job + queued turn so none can burn cloud tokens after
     deletion, terminalize any RUNNING turn, and COMMIT.
+
+    Returns the lifecycle_generation allocated for this transition — the value
+    bumped inside the same transaction as the state change, under the commit
+    mutex (spec 4.4). Do NOT re-read it after commit: the return value is bound
+    to this transition, not to when the sampler ran.
 
     The delete route interleaves in-process retirement after this durable DB
     commit: DB commit -> retire -> 204. There is deliberately no wrapper
@@ -172,7 +196,9 @@ def soft_delete_workspace_db(
             emit_chat=False,
             usage_unknown=True,
         )
+    generation = bump_lifecycle_generation(session, workspace_id=workspace_id)
     session.commit()
+    return generation
 
 
 def scrub_workspace_bytes(workspace_id: uuid.UUID, *, workspaces_dir: Path) -> None:

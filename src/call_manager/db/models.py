@@ -690,6 +690,16 @@ class Workspace(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+    # Retention Slice C0. Incremented by EVERY lifecycle transition (delete
+    # today, restore in C1) inside that transition's own transaction, under the
+    # commit mutex — so the mutex totally orders generations and a transition's
+    # teardown can be recognised as belonging to a superseded one. Never read
+    # and re-written from Python: see bump_lifecycle_generation.
+    lifecycle_generation: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+    )
     current_phase: Mapped[str] = mapped_column(
         Text,
         nullable=False,
