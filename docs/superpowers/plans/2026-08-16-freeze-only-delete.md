@@ -449,11 +449,28 @@ pnpm exec tsc --noEmit > /tmp/a3-tsc.log 2>&1; echo "TSC_EXIT=$?"
 
 Expected: both exits 0.
 
+- [ ] **Step 4b: Correct the test-count tripwire in `CLAUDE.md`**
+
+This slice added a test, which makes `CLAUDE.md:25-26` actively misleading rather than merely stale. It currently reads:
+
+> Expected result is **`3357 passed, 1 skipped`**. If you have `ANTHROPIC_API_KEY` exported you will instead see `3358 passed` …
+
+**`3358 passed` is now the normal count with no API key.** So the document's stated signal for "you have a key exported" is exactly the number a developer without one will see. Someone would conclude they had a key set, or that a live API call ran when none did.
+
+Re-derive both numbers rather than assuming — run the suite and read the count, then state it:
+
+```bash
+cd /home/parlar_ai/dev/call-monitor
+uv run pytest -n 16 --dist loadfile -q > /tmp/a3-count.log 2>&1; echo "PYTEST_EXIT=$?"; tail -2 /tmp/a3-count.log
+```
+
+Update both numbers in `CLAUDE.md` so the no-key count and the with-key count are each correct and remain one apart. Keep the surrounding explanation — the skip is still gated on `ANTHROPIC_API_KEY` and still makes a live call; only the arithmetic changed.
+
 - [ ] **Step 5: Commit**
 
 ```bash
 cd /home/parlar_ai/dev/call-monitor
-git add frontend/src/cockpit/WorkspaceSettingsModal.tsx frontend/src/cockpit/WorkspaceSettingsModal.test.tsx
+git add CLAUDE.md frontend/src/cockpit/WorkspaceSettingsModal.tsx frontend/src/cockpit/WorkspaceSettingsModal.test.tsx
 git status --short   # confirm nothing unrelated is staged
 git commit -m "fix(ui): delete no longer scrubs files, so stop saying it does
 
