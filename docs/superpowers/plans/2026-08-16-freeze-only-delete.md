@@ -268,12 +268,19 @@ Task 1 changed the behaviour. Six places still describe the old behaviour, and o
 
 ```bash
 cd /home/parlar_ai/dev/call-monitor
-grep -rn "scrub" src/ | grep -v "def scrub_workspace_bytes" > /tmp/a2-scrub.txt
-grep -rn "future sweep" src/ >> /tmp/a2-scrub.txt
+grep -rn "scrub" src/ tests/ | grep -v "def scrub_workspace_bytes" > /tmp/a2-scrub.txt
+grep -rn "future sweep" src/ tests/ >> /tmp/a2-scrub.txt
 cat /tmp/a2-scrub.txt
 ```
 
+**Search `tests/` as well as `src/`.** Task 1's review found a stale statement in a test docstring — `tests/proposal_assist/test_workspaces_delete_route.py:217` still describes "the route's db/retire/scrub ORDER" — which a `src/`-only sweep would have missed entirely. A test that documents a contract the route no longer has is exactly as misleading as a wrong docstring in production code.
+
 Every line is either a statement that must change or a deliberate reference to the retained function. Classify each in your report — do not silently skip any.
+
+Three are already known and must appear in your classification, each flagged by Task 1's reviewer:
+- `src/call_manager/proposal_assist/row_locks.py:83` — lists "scrub" among the consumers of the DELETE route's time budget. The route runs no scrub, so it contributes nothing to that budget.
+- `src/call_manager/proposal_assist/retirement.py:38` — justifies the retirement barrier's duration partly by the hazard of "scrub_workspace_bytes starting to delete files while teardown is still in flight". Task 1's implementer judged this still valid as forward-looking guidance; its reviewer disagreed, on the grounds that the sentence is phrased as a justification for the barrier's duration *in the DELETE route*, a call site that no longer scrubs at all. **Decide this yourself on the merits and say which reading you took and why** — do not simply adopt either verdict.
+- `tests/proposal_assist/test_workspaces_delete_route.py:217` — the test docstring above.
 
 - [ ] **Step 2: Correct the route docstring**
 
