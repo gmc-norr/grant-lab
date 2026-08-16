@@ -17,6 +17,7 @@ Five hazards, one test each:
 """
 
 import subprocess
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -108,7 +109,7 @@ def test_reads_a_deleted_workspace(monkeypatch, pg_url, pg_session_factory, tmp_
     body = r.json()
     assert "Body text." in body["proposal_markdown"]
     assert body["repository_available"] is True
-    assert len(body["commits"]) >= 1
+    assert len(body["commits"]) == 1
 
 
 def test_a_contended_mutex_is_429_with_retry_after(
@@ -165,6 +166,50 @@ def test_live_workspace_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path
     ws_id = _seed(pg_session_factory, tmp_path, content="# Live\n")
     r = admin.get(f"/api/admin/workspaces/deleted/{ws_id}")
     assert r.status_code == 404
+    # This route's own 404 carries "not_found" (web/api/errors.py's
+    # code_for(404)). The global WorkspaceDeleted handler (main.py:511) carries
+    # "workspace_deleted" instead — asserting the code, not just the status,
+    # is what tells the two apart and pins which guard actually fired.
+    assert r.json()["error"]["code"] == "not_found"
+
+
+def test_live_workspace_404s_without_waiting_on_the_mutex(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """Important 2: the route must not take the commit mutex of a live
+    workspace it is about to refuse to serve. Before the fix, a live
+    workspace whose mutex was held elsewhere pinned the request for the full
+    10s `acquire_commit_mutex` acquisition timeout and then answered 429 —
+    contending with that workspace's real writers and letting an admin
+    distinguish "exists and busy" from "does not exist" for a workspace this
+    route has no mandate over.
+
+    Proven here by holding the commit mutex from a separate session for the
+    whole request: the pre-lock liveness check must 404 immediately without
+    ever trying to acquire it.
+    """
+    from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
+
+    app = _setup(monkeypatch, pg_url, tmp_path)
+    admin, _ = _client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    ws_id = _seed(pg_session_factory, tmp_path, content="# Live\n")
+
+    holder = pg_session_factory()
+    acquire_commit_mutex(holder, ws_id)
+    try:
+        start = time.monotonic()
+        r = admin.get(f"/api/admin/workspaces/deleted/{ws_id}")
+        elapsed = time.monotonic() - start
+    finally:
+        holder.rollback()
+        holder.close()
+
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
+    # Generous bound, well under the 10s acquisition timeout, so this isn't
+    # flaky on a loaded machine — the point is "did not wait on the mutex",
+    # not "was instantaneous".
+    assert elapsed < 2.0, f"blocked on the mutex for {elapsed:.1f}s"
 
 
 def test_non_admin_is_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
@@ -292,6 +337,44 @@ def test_no_content_is_served_when_the_audit_write_fails(
         admin.get(f"/api/admin/workspaces/deleted/{ws_id}")
 
 
+def test_the_audit_write_precedes_response_construction(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """Important 1: `test_no_content_is_served_when_the_audit_write_fails`
+    above proves the route calls `_record_inspection` and propagates its
+    exception — it stays green even under a refactor that HOISTS the entire
+    response body (proposal markdown + every CommitOut) to be BUILT before
+    `_record_inspection` runs, then simply returns it; that mutation was
+    verified to keep all other tests green too. This test asserts the actual
+    ORDER of the two operations, not just that a failure of one propagates."""
+    from call_manager.web.api import admin_retention
+
+    app = _setup(monkeypatch, pg_url, tmp_path)
+    admin, _ = _client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    ws_id = _seed(pg_session_factory, tmp_path, content="# Draft\n")
+    with pg_session_factory() as s:
+        _delete(s, ws_id)
+
+    order: list[str] = []
+    real = admin_retention._record_inspection
+    monkeypatch.setattr(
+        admin_retention,
+        "_record_inspection",
+        lambda *a, **k: (order.append("audit"), real(*a, **k))[1],
+    )
+
+    class _Spy(admin_retention.DeletedWorkspaceDetailOut):
+        def __init__(self, **kw):
+            order.append("body")
+            super().__init__(**kw)
+
+    monkeypatch.setattr(admin_retention, "DeletedWorkspaceDetailOut", _Spy)
+
+    r = admin.get(f"/api/admin/workspaces/deleted/{ws_id}")
+    assert r.status_code == 200, r.text
+    assert order == ["audit", "body"]
+
+
 def test_inspection_starts_no_collab_room(
     monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
@@ -356,3 +439,81 @@ def test_inspection_creates_no_commit(monkeypatch, pg_url, pg_session_factory, t
     before = current_head(repo)
     admin.get(f"/api/admin/workspaces/deleted/{ws_id}")
     assert current_head(repo) == before
+
+
+def test_missing_draft_does_not_erase_a_real_history(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """Important 3: `current_head` -> `blob_sha` -> `read_blob` and
+    `list_commits` used to share one `try`, so ANY failure reading
+    proposal.md at HEAD discarded the entire commit history too — a repo with
+    3 real commits but no proposal.md at HEAD used to come back
+    `repository_available: False, commits: []`, hiding surviving history from
+    the admin. A repository can reach that exact state via a crash between
+    `git init` and the first commit (`_init_repo`'s own docstring,
+    phases/setup.py:388, names this as a recovery scenario) followed by
+    commits that never happen to touch proposal.md.
+
+    Built directly (not via `_seed`, which always writes proposal.md) so no
+    commit here ever creates that file.
+    """
+    app = _setup(monkeypatch, pg_url, tmp_path)
+    admin, _ = _client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    with pg_session_factory() as s:
+        owner = make_user(s, email=f"o-{uuid.uuid4().hex[:8]}@ki.se")
+        ws = make_workspace(s, owner=owner, title="No draft at HEAD")
+        s.commit()
+        ws_id = ws.id
+    repo = workspace_repo_dir(Path(tmp_path), ws_id)
+    repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "."], cwd=repo, check=True)
+    for i in range(3):
+        (repo / "notes.md").write_text(f"note {i}\n")
+        _commit(repo, f"commit {i}")
+    with pg_session_factory() as s:
+        _delete(s, ws_id)
+
+    r = admin.get(f"/api/admin/workspaces/deleted/{ws_id}")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["repository_available"] is True, "3 real commits must count as available"
+    assert len(body["commits"]) == 3
+    assert body["proposal_markdown"] is None
+
+    with pg_session_factory() as s:
+        events = (
+            s.query(WorkspaceEvent)
+            .filter_by(workspace_id=ws_id, kind="admin_deleted_workspace_inspected")
+            .all()
+        )
+    assert len(events) == 1
+    assert events[0].payload["commit_count"] == 3, "the audit must not lie about the history either"
+    assert events[0].payload["content_served"] is False
+
+
+def test_an_empty_draft_is_not_reported_as_served(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """Minor 6: `content_served` should mean "the admin saw a draft", not
+    merely "the read succeeded". An empty proposal.md at HEAD is technically
+    readable but is not a draft."""
+    app = _setup(monkeypatch, pg_url, tmp_path)
+    admin, _ = _client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    ws_id = _seed(pg_session_factory, tmp_path, content="")
+    with pg_session_factory() as s:
+        _delete(s, ws_id)
+
+    r = admin.get(f"/api/admin/workspaces/deleted/{ws_id}")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["repository_available"] is True
+    assert body["proposal_markdown"] == ""
+
+    with pg_session_factory() as s:
+        events = (
+            s.query(WorkspaceEvent)
+            .filter_by(workspace_id=ws_id, kind="admin_deleted_workspace_inspected")
+            .all()
+        )
+    assert len(events) == 1
+    assert events[0].payload["content_served"] is False

@@ -160,10 +160,25 @@ def inspect_deleted_workspace(
 ) -> DeletedWorkspaceDetailOut:
     """Read a soft-deleted workspace's surviving proposal text and history.
 
-    Holds the per-workspace commit mutex for the whole git read. That is the
-    plain `acquire_commit_mutex`, NOT `acquire_commit_mutex_live` — the live
-    variant re-reads liveness and raises WorkspaceDeleted, which would refuse
-    every workspace this endpoint exists to serve.
+    Liveness is checked TWICE, deliberately:
+
+    1. Pre-lock: a missing or live workspace 404s immediately, WITHOUT taking
+       its commit mutex. Taking the mutex first would contend with that
+       workspace's real writers (turn commits, collab checkpoints,
+       editing/save.py) for a workspace this route is about to refuse anyway,
+       and — if the mutex happened to be held — would pin a FastAPI worker for
+       the full `acquire_commit_mutex` default of `timeout_seconds=10`
+       (drafting/locking.py:206) just to answer a 404.
+    2. Post-lock, with a fresh scalar SELECT (never the identity-mapped row
+       from step 1 — same pattern as `acquire_commit_mutex_live`,
+       drafting/locking.py:288-292): the workspace can be restored in the
+       window between step 1 and winning the mutex, and the git read below
+       must never proceed against a workspace that is live again.
+
+    Holds the per-workspace commit mutex for the git read. That is the plain
+    `acquire_commit_mutex`, NOT `acquire_commit_mutex_live` — the live variant
+    re-reads liveness and raises WorkspaceDeleted, which would refuse every
+    workspace this endpoint exists to serve.
 
     The audit event is committed BEFORE any content is returned.
     """
@@ -171,6 +186,15 @@ def inspect_deleted_workspace(
     workspaces_dir = Path(request.app.state.settings.workspaces_dir)
 
     with sf() as session:
+        row = session.execute(
+            select(Workspace, User.email)
+            .outerjoin(User, User.id == Workspace.owner_id)
+            .where(Workspace.id == workspace_id)
+        ).one_or_none()
+        if row is None or row[0].soft_deleted_at is None:
+            raise HTTPException(status_code=404, detail="not found")
+        ws, owner_email = row
+
         # NOT a context manager. acquire_commit_mutex returns None
         # (drafting/locking.py:205); the advisory lock is held for the rest of
         # the transaction and released by COMMIT or ROLLBACK. `with acquire_...`
@@ -190,16 +214,34 @@ def inspect_deleted_workspace(
                 headers={"Retry-After": "2"},
             ) from e
 
-        row = session.execute(
-            select(Workspace, User.email)
-            .outerjoin(User, User.id == Workspace.owner_id)
-            .where(Workspace.id == workspace_id)
-        ).one_or_none()
-        if row is None or row[0].soft_deleted_at is None:
+        # Fresh re-read under the lock. `ws.soft_deleted_at` above was read
+        # before the mutex and can be stale: a restore (Slice C) could have
+        # landed in the window between that read and winning the lock. A
+        # scalar SELECT always round-trips to Postgres; session.get() could
+        # instead hand back the identity-mapped instance loaded in step 1.
+        still_deleted = session.execute(
+            select(Workspace.soft_deleted_at).where(Workspace.id == workspace_id)
+        ).scalar_one_or_none()
+        if still_deleted is None:
             raise HTTPException(status_code=404, detail="not found")
-        ws, owner_email = row
 
         repo = workspace_repo_dir(workspaces_dir, workspace_id)
+
+        # Two SEPARATE try blocks. A workspace can have a real, readable commit
+        # history but no proposal.md at HEAD (e.g. a crash between `git init`
+        # and the first commit — phases/setup.py's own _init_repo docstring
+        # names this as a recovery scenario). One shared try would let a
+        # failure reading the draft blob discard commit history git can still
+        # produce, and the audit would then record a false commit_count too.
+        try:
+            commits, truncated = list_commits(repo, limit=_HISTORY_LIMIT)
+            available = True
+        except (OSError, GitCommitError):
+            # Legitimate: the workspace can be deleted before setup ever
+            # created a repository, or the repository exists but has no
+            # commits yet. Report it as a state, not a crash.
+            commits, truncated, available = [], False, False
+
         try:
             # At HEAD, not the working tree. Spec 3.2 says "proposal markdown at
             # HEAD", and a workspace can be deleted with uncommitted bytes on
@@ -207,19 +249,20 @@ def inspect_deleted_workspace(
             # would serve content the commit list beside it does not explain.
             head = current_head(repo)
             markdown = read_blob(repo, blob_sha(repo, head, PROPOSAL_FILENAME))
-            commits, truncated = list_commits(repo, limit=_HISTORY_LIMIT)
-            available = True
         except (OSError, GitCommitError):
-            # Legitimate: the workspace can be deleted before setup ever
-            # created a repository, or before proposal.md was first committed.
-            # Report it as a state, not a crash.
-            markdown, commits, truncated, available = None, [], False, False
+            # Legitimate: no repository, no commits yet, or a commit exists
+            # that never touched proposal.md.
+            markdown = None
+
+        # "content_served" means the admin actually saw a draft — an empty
+        # proposal.md at HEAD is readable but is not a draft.
+        served = markdown is not None and markdown != ""
 
         _record_inspection(
             session,
             workspace_id=workspace_id,
             admin_id=admin.id,
-            served=available,
+            served=served,
             commit_count=len(commits),
             truncated=truncated,
         )
