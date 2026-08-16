@@ -16,6 +16,7 @@ import pytest
 from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
 from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
 from call_manager.proposal_assist.drafting.registry import SubprocessRegistry
+from call_manager.proposal_assist.lifecycle import LIFECYCLE
 
 
 @pytest.mark.asyncio
@@ -37,6 +38,8 @@ async def test_retire_workspace_makes_claim_reject_before_the_cached_entry():
     installed = await reg.fulfill_pending_launch(ws, handle, lock_session=None)
     assert installed is True
 
+    # Coordinator applies transition before invoking hooks; mirror that here.
+    await LIFECYCLE.apply(ws, generation=1, retired=True)
     await reg.retire_workspace(ws, 1)
 
     # (b) the live entry is POPPED AND TORN DOWN, not merely shadowed by the
@@ -44,7 +47,7 @@ async def test_retire_workspace_makes_claim_reject_before_the_cached_entry():
     # (NOT `terminated` — verified against fake_adapter.py:35).
     assert adapter.terminations == [handle]
     with pytest.raises(WorkspaceRetired):
-        await reg.claim_launch_or_wait(ws)     # tombstone still refuses
+        await reg.claim_launch_or_wait(ws)     # authority still refuses
 
 
 @pytest.mark.asyncio
@@ -61,6 +64,8 @@ async def test_retire_workspace_tears_down_a_live_entry_mid_turn():
     assert await reg.fulfill_pending_launch(ws, handle, lock_session=None) is True
     await reg.increment_in_flight(ws)          # the suite's public busy marker
 
+    # Coordinator applies transition before invoking hooks; mirror that here.
+    await LIFECYCLE.apply(ws, generation=1, retired=True)
     await reg.retire_workspace(ws, 1)
 
     assert adapter.terminations == [handle]                # torn down anyway
@@ -82,6 +87,8 @@ async def test_fulfill_pending_launch_refuses_to_install_and_resolves_a_real_wai
     am_launcher2, waiter = await reg.claim_launch_or_wait(ws)
     assert am_launcher2 is False and waiter is not None
 
+    # Coordinator applies transition before invoking hooks; mirror that here.
+    await LIFECYCLE.apply(ws, generation=1, retired=True)
     await reg.retire_workspace(ws, 1)                        # retire lands mid-launch
 
     installed = await reg.fulfill_pending_launch(ws, object(), lock_session=None)
@@ -100,6 +107,8 @@ async def test_fulfill_pending_launch_refuses_to_install_and_resolves_a_real_wai
 async def test_retire_workspace_is_idempotent():
     reg = SubprocessRegistry(adapter=FakeAgentAdapter(), idle_seconds=600)
     ws = uuid.uuid4()
+    # Coordinator applies transition before invoking hooks; mirror that here.
+    await LIFECYCLE.apply(ws, generation=1, retired=True)
     await reg.retire_workspace(ws, 1)
     await reg.retire_workspace(ws, 1)                        # no raise
     with pytest.raises(WorkspaceRetired):
@@ -149,6 +158,8 @@ async def test_controller_launch_tears_down_the_fresh_handle_when_install_refuse
     # adapter.launch, holding the pending future.
     await asyncio.wait_for(adapter.entered.wait(), timeout=5)
 
+    # Coordinator applies transition before invoking hooks; mirror that here.
+    await LIFECYCLE.apply(ws_id, generation=1, retired=True)
     await registry.retire_workspace(ws_id, 1)              # retire lands MID-LAUNCH
     adapter.release.set()                                 # resume into fulfill_...
 

@@ -16,6 +16,7 @@ from call_manager.proposal_assist.collab import protocol as P
 from call_manager.proposal_assist.collab import room as room_module
 from call_manager.proposal_assist.collab.room import ClientState, RoomManager
 from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
+from call_manager.proposal_assist.lifecycle import LIFECYCLE
 
 
 @pytest.fixture
@@ -131,13 +132,15 @@ async def test_one_rooms_failure_does_not_abandon_the_other(monkeypatch):
 
     monkeypatch.setattr(room_module, "_set_evicted_under_lock", _boom_on_draft)
 
+    # Coordinator applies transition before invoking hooks; mirror that here.
+    await LIFECYCLE.apply(ws, generation=1, retired=True)
     closed = await asyncio.wait_for(mgr.retire_workspace(ws, 1), timeout=10)
 
     assert closed == 1                                  # only spec's socket counted
     assert clients["spec"].closed == 1008               # ...but it WAS closed
     # Both rooms are gone either way: the pop happens before the flip.
     assert mgr.get((ws, "draft")) is None and mgr.get((ws, "spec")) is None
-    with pytest.raises(WorkspaceRetired):               # tombstone still applied
+    with pytest.raises(WorkspaceRetired):               # authority still refuses
         await mgr.acquire((ws, "draft"), load=_empty_load, client=FakeClient(),
                           state=ClientState(user_id=1, can_write=True))
 
@@ -215,6 +218,8 @@ async def test_acquire_rejects_when_retirement_lands_during_another_creators_loa
     await asyncio.sleep(0.05)                                # let B reach the key lock
     assert not b.done()
 
+    # Coordinator applies transition before invoking hooks; mirror that here.
+    await LIFECYCLE.apply(ws, generation=1, retired=True)
     await mgr.retire_workspace(ws, 1)                           # retirement lands mid-load
     allow_load_finish.set()
 
@@ -239,6 +244,8 @@ async def test_retire_flips_can_write_false_before_closing():
 async def test_acquire_rejects_a_retired_workspace():
     mgr = RoomManager()
     ws = uuid.uuid4()
+    # Coordinator applies transition before invoking hooks; mirror that here.
+    await LIFECYCLE.apply(ws, generation=1, retired=True)
     await mgr.retire_workspace(ws, 1)
     with pytest.raises(WorkspaceRetired):
         await mgr.acquire((ws, "draft"), load=_empty_load, client=FakeClient(),
@@ -249,6 +256,8 @@ async def test_acquire_rejects_a_retired_workspace():
 async def test_operate_rejects_a_retired_workspace():
     mgr = RoomManager()
     ws = uuid.uuid4()
+    # Coordinator applies transition before invoking hooks; mirror that here.
+    await LIFECYCLE.apply(ws, generation=1, retired=True)
     await mgr.retire_workspace(ws, 1)
     with pytest.raises(WorkspaceRetired):
         async with mgr.operate((ws, "draft"), load=_empty_load):
@@ -276,6 +285,8 @@ async def test_operate_rejects_when_retirement_lands_during_load():
 
     op_task = asyncio.ensure_future(_op())
     await asyncio.wait_for(load_entered.wait(), timeout=5)   # operate is inside load()
+    # Coordinator applies transition before invoking hooks; mirror that here.
+    await LIFECYCLE.apply(ws, generation=1, retired=True)
     await mgr.retire_workspace(ws, 1)                           # retirement lands mid-load
     allow_load_finish.set()                                  # let load() return
 

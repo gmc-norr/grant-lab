@@ -1110,8 +1110,6 @@ def test_delete_route_returns_promptly_while_phase0_runs_its_extractors(
     (or a silent success, meaning the delete never landed) would be swallowed
     exactly the same way while this test stayed green.
     """
-    from call_manager.proposal_assist.collab.room import MANAGER
-
     started = threading.Event()
     release = threading.Event()
 
@@ -1157,7 +1155,7 @@ def test_delete_route_returns_promptly_while_phase0_runs_its_extractors(
     finally:
         release.set()
         t.join(timeout=30)
-        MANAGER._retired_ws.discard(ws_id)
+        # lifecycle authority uses unique UUIDs; no cleanup needed
 
     # The worker must have observed the deletion and refused — exactly that, not
     # some other failure and not a silent success.

@@ -17,6 +17,7 @@ from call_manager.proposal_assist.drafting.controller import (
 )
 from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
 from call_manager.proposal_assist.drafting.registry import SubprocessRegistry
+from call_manager.proposal_assist.lifecycle import LIFECYCLE
 
 
 def build_workspace_controller(
@@ -40,6 +41,7 @@ def build_workspace_controller(
         adapter=adapter,
         idle_seconds=settings.workspace_idle_timeout_seconds,
         max_live=settings.drafting_max_live_subprocesses,
+        lifecycle=LIFECYCLE,
     )
     if lock_session_factory is None:
         drafting_engine = make_drafting_engine(

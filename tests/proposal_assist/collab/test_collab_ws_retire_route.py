@@ -8,7 +8,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from call_manager.auth.session_cookie import SessionSigner
 from call_manager.proposal_assist.collab import state as collab_state
-from call_manager.proposal_assist.collab.room import MANAGER
+from call_manager.proposal_assist.lifecycle import LIFECYCLE
 from call_manager.proposal_assist.web import collab_ws as collab_ws_module
 from tests.proposal_assist.conftest import make_user, make_workspace
 
@@ -35,11 +35,12 @@ def test_retired_acquire_closes_with_1008(_app, pg_session_factory):
     client = TestClient(_app)
     client.__enter__()
     client.cookies.set("session", _cookie(_app, oid))
-    # Force the in-process tombstone directly (deterministic; avoids threading the
-    # async retire through the sync test client). MANAGER is the same module-global
-    # the route uses. Discard in finally so it cannot leak into other tests sharing
-    # the process-global MANAGER.
-    MANAGER._retired_ws.add(wid)
+    # Force the in-process tombstone via the lifecycle authority (Slice C0).
+    # MANAGER consults LIFECYCLE.is_retired(), so applying here is equivalent to
+    # the coordinator having run the transition. wid is a unique UUID per test,
+    # so no cleanup is needed — the authority's state never collides across tests.
+    import asyncio
+    asyncio.run(LIFECYCLE.apply(wid, generation=1, retired=True))
     try:
         with pytest.raises(WebSocketDisconnect) as exc, client.websocket_connect(
             f"/api/ws/workspaces/{wid}/draft"
@@ -47,7 +48,6 @@ def test_retired_acquire_closes_with_1008(_app, pg_session_factory):
             wsconn.receive_bytes()
         assert exc.value.code == 1008      # NOT 1011, NOT 1006
     finally:
-        MANAGER._retired_ws.discard(wid)
         client.__exit__(None, None, None)
 
 

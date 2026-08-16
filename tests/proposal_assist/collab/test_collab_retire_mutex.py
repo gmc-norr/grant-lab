@@ -27,6 +27,7 @@ from call_manager.proposal_assist.collab.markdown_bridge import pm_to_markdown
 from call_manager.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
 from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout, WorkspaceDeleted
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.lifecycle import LIFECYCLE
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
@@ -110,7 +111,6 @@ async def test_accept_via_kernel_lets_workspace_retired_reach_the_route(
 
     Nothing is mutated on the way out: no git commit, proposal still pending.
     """
-    from call_manager.proposal_assist.collab.room import MANAGER
     from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
     from call_manager.proposal_assist.proposals.kernel_accept import accept_via_kernel
 
@@ -124,23 +124,22 @@ async def test_accept_via_kernel_lets_workspace_retired_reach_the_route(
             kind="prose_edit", payload={"new_text": "## Background\nnew.\n"},
         )
 
-    # Set the in-process tombstone directly (deterministic, and MANAGER is the same
-    # module-global the writer uses). Discarded in finally: MANAGER is process-global.
-    MANAGER._retired_ws.add(wid)
-    try:
-        with pg_session_factory() as s:
-            approver = s.get(User, oid)
-            with pytest.raises(WorkspaceRetired):
-                await accept_via_kernel(
-                    session_factory=pg_session_factory,
-                    workspaces_dir=str(tmp_path),
-                    workspace_id=wid,
-                    pc_id=pc_id,
-                    approver=approver,
-                    artifact="draft",
-                )
-    finally:
-        MANAGER._retired_ws.discard(wid)
+    # Set the in-process tombstone via the lifecycle authority (Slice C0).
+    # MANAGER.operate consults LIFECYCLE.is_retired(), so applying here is
+    # equivalent to the coordinator having run the transition. wid is a unique
+    # UUID per test, so no cleanup is needed.
+    await LIFECYCLE.apply(wid, generation=1, retired=True)
+    with pg_session_factory() as s:
+        approver = s.get(User, oid)
+        with pytest.raises(WorkspaceRetired):
+            await accept_via_kernel(
+                session_factory=pg_session_factory,
+                workspaces_dir=str(tmp_path),
+                workspace_id=wid,
+                pc_id=pc_id,
+                approver=approver,
+                artifact="draft",
+            )
 
     assert _git_head(repo) == head                       # no commit
     with pg_session_factory() as s:

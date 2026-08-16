@@ -18,6 +18,7 @@ from call_manager.proposal_assist.drafting.contract import (
     StreamEvent,
     WorkspaceRetired,
 )
+from call_manager.proposal_assist.lifecycle import LIFECYCLE, WorkspaceLifecycle
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -51,6 +52,7 @@ class SubprocessRegistry:
         adapter: DraftingAgent,
         idle_seconds: int,
         max_live: int | None = None,
+        lifecycle: WorkspaceLifecycle | None = None,
     ) -> None:
         self._adapter = adapter
         self._idle_seconds = idle_seconds
@@ -74,15 +76,10 @@ class SubprocessRegistry:
         # and fulfill_pending_launch() / fail_pending_launch().
         self._pending_launches: dict[uuid.UUID, asyncio.Future[AgentHandle]] = {}
         self._lock = asyncio.Lock()
-        # Retirement tombstone (Slice B-retire). Populated by retire_workspace when
-        # a workspace is deleted; claim_launch_or_wait rejects it FIRST and
-        # fulfill_pending_launch refuses to install for it.
-        # A linearization point for INSTALL, not for an in-flight streaming query.
-        # The DURABLE floor is soft_deleted_at (controller.launch checks it); this
-        # set is only a promptness optimisation, so pruning it would be safe.
-        # Unbounded: one UUID per workspace deleted per process lifetime — a
-        # Slice-C eviction candidate, not built now (YAGNI).
-        self._retired: set[uuid.UUID] = set()
+        # Single authority for workspace retirement (Slice C0). Guards call
+        # self._lifecycle.is_retired() instead of a local set, so a restore
+        # written to the authority is visible here without a separate clear.
+        self._lifecycle = lifecycle if lifecycle is not None else LIFECYCLE
 
     # ------------------------------------------------------------------
     # Pending-launch coordination (Pattern B)
@@ -126,11 +123,10 @@ class SubprocessRegistry:
         victim: _Entry | None = None
         victim_id: uuid.UUID | None = None
         async with self._lock:
-            # Retirement tombstone (B-retire): refuse a retired workspace BEFORE the
-            # cached-entry check, or a cached handle would be handed straight back
-            # for a workspace that is being deleted. Nothing has been mutated yet,
-            # so raising here is clean.
-            if workspace_id in self._retired:
+            # is_retired is lock-free and that is load-bearing — this can run
+            # inside a hook the coordinator invokes while holding the lifecycle lock
+            # (so it must NOT take that lock).
+            if self._lifecycle.is_retired(workspace_id):
                 raise WorkspaceRetired(workspace_id)
             # Already cached — wrap the handle in a resolved future.
             existing = self._entries.get(workspace_id)
@@ -195,15 +191,15 @@ class SubprocessRegistry:
         return (True, None)
 
     async def retire_workspace(self, workspace_id: uuid.UUID, generation: int) -> None:
-        """Turns retirement hook (coordinator-invoked). Two effects, in order:
+        """Turns retirement hook (coordinator-invoked). Tears down an already-live
+        entry best-effort, so a running subprocess is interrupted now rather than at
+        the next idle sweep (WORKSPACE_IDLE_SWEEP_SECONDS, default 60). This is the
+        design's "prompt interrupt->terminate (B2) ... Best-effort" guarantee.
 
-        1. Tombstone the workspace in _retired so no NEW launch can install:
-           claim_launch_or_wait rejects it first, and an in-flight
-           fulfill_pending_launch refuses to install.
-        2. Pop an already-live entry and tear it down best-effort, so a running
-           subprocess is interrupted now rather than at the next idle sweep
-           (WORKSPACE_IDLE_SWEEP_SECONDS, default 60). This is the design's
-           "prompt interrupt->terminate (B2) ... Best-effort" guarantee.
+        The workspace retirement transition is applied by the coordinator BEFORE this
+        hook is invoked — the coordinator holds the lifecycle lock across the whole
+        fan-out, so the tombstone is set when this runs. This hook must NOT tombstone
+        again (that would deadlock on the lock its caller holds); it is ONLY teardown.
 
         Idempotent (a second call finds no entry). Never raises: _teardown_entry
         swallows and logs both the adapter.terminate and the lock-release paths.
@@ -219,7 +215,6 @@ class SubprocessRegistry:
         taking the lock here deadlocks).
         """
         async with self._lock:
-            self._retired.add(workspace_id)
             entry = self._entries.pop(workspace_id, None)
         if entry is not None:
             # Popped REGARDLESS of in_flight — a running turn on a deleted
@@ -320,7 +315,7 @@ class SubprocessRegistry:
         """
         async with self._lock:
             future = self._pending_launches.pop(workspace_id, None)
-            if workspace_id in self._retired:
+            if self._lifecycle.is_retired(workspace_id):
                 # Retired mid-launch: do NOT install. Resolve the waiter (if any)
                 # with WorkspaceRetired so a caller awaiting the pending future
                 # raises rather than hanging on a handle we are about to discard.

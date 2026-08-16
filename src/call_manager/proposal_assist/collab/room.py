@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pycrdt import Doc
 
 from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
+from call_manager.proposal_assist.lifecycle import LIFECYCLE, WorkspaceLifecycle
 
 from . import protocol as P
 
@@ -460,7 +461,7 @@ class Room:
 
 
 class RoomManager:
-    def __init__(self) -> None:
+    def __init__(self, lifecycle: WorkspaceLifecycle | None = None) -> None:
         self._rooms: dict[RoomKey, Room] = {}
         self._lock = asyncio.Lock()
         # Per-key creation locks so cold-start hydration is serialized only
@@ -468,11 +469,10 @@ class RoomManager:
         # number of distinct rooms — tiny for this app); not popped, because a
         # concurrent acquirer may still hold a reference.
         self._keylocks: dict[RoomKey, asyncio.Lock] = {}
-        # Retirement tombstone (Slice B-retire): a soft-deleted workspace's rooms
-        # are torn down and no new room may be created for it. acquire/operate
-        # reject membership; retire_workspace populates it. Unbounded (one UUID per
-        # deleted workspace per process) — a Slice-C eviction candidate.
-        self._retired_ws: set[uuid.UUID] = set()
+        # Single authority for workspace retirement (Slice C0). Guards call
+        # self._lifecycle.is_retired() instead of a local set, so a restore
+        # written to the authority is visible here without a separate clear.
+        self._lifecycle = lifecycle if lifecycle is not None else LIFECYCLE
 
     def has_room(self, key: RoomKey) -> bool:
         return key in self._rooms
@@ -492,7 +492,10 @@ class RoomManager:
         """
         workspace_id = key[0]
         async with self._lock:
-            if workspace_id in self._retired_ws:
+            # is_retired is lock-free and that is load-bearing — this can run
+            # inside a hook the coordinator invokes while holding the lifecycle lock
+            # (so it must NOT take that lock).
+            if self._lifecycle.is_retired(workspace_id):
                 raise WorkspaceRetired(workspace_id)
             room = self._rooms.get(key)
             if room is not None:
@@ -507,7 +510,7 @@ class RoomManager:
             # gap between fetch and client-add (Codex H1 — the ops-refcount eviction
             # now makes this window reachable; keep register atomic with the fetch).
             async with self._lock:
-                if workspace_id in self._retired_ws:
+                if self._lifecycle.is_retired(workspace_id):
                     raise WorkspaceRetired(workspace_id)
                 room = self._rooms.get(key)
                 if room is not None:
@@ -520,7 +523,7 @@ class RoomManager:
                     # Re-check AFTER the out-of-lock load(): retirement may have
                     # landed while we hydrated. Publishing now would resurrect a
                     # room for a deleted workspace that retirement already swept.
-                    if workspace_id in self._retired_ws:
+                    if self._lifecycle.is_retired(workspace_id):
                         raise WorkspaceRetired(workspace_id)
                     self._rooms[key] = room
                     room.clients[client] = state
@@ -539,7 +542,10 @@ class RoomManager:
         rides."""
         workspace_id = key[0]
         async with self._lock:
-            if workspace_id in self._retired_ws:
+            # is_retired is lock-free and that is load-bearing — this can run
+            # inside a hook the coordinator invokes while holding the lifecycle lock
+            # (so it must NOT take that lock).
+            if self._lifecycle.is_retired(workspace_id):
                 raise WorkspaceRetired(workspace_id)
             room = self._rooms.get(key)
             if room is not None:
@@ -554,7 +560,7 @@ class RoomManager:
                 # invariant this refcount adds (never evict while an op is live)
                 # and hand back a zombie room detached from the registry.
                 async with self._lock:
-                    if workspace_id in self._retired_ws:
+                    if self._lifecycle.is_retired(workspace_id):
                         raise WorkspaceRetired(workspace_id)
                     room = self._rooms.get(key)
                     if room is not None:
@@ -568,7 +574,7 @@ class RoomManager:
                         # we hydrated. Publishing now would resurrect a room that
                         # retirement already swept, and this op would then write
                         # to a deleted workspace.
-                        if workspace_id in self._retired_ws:
+                        if self._lifecycle.is_retired(workspace_id):
                             raise WorkspaceRetired(workspace_id)
                         self._rooms[key] = room
                         room.ops += 1
@@ -662,15 +668,19 @@ class RoomManager:
                 await client.close(code=_WS_INTERNAL_ERROR)
 
     async def retire_workspace(self, workspace_id: uuid.UUID, generation: int) -> int:
-        """Collab retirement hook (coordinator-invoked). Tombstone the workspace so
-        acquire/operate refuse it, then tear down BOTH artifact rooms: pop each,
-        tombstone it (room.evicted, flipped UNDER room.lock so it linearizes
+        """Collab retirement hook (coordinator-invoked). Tears down BOTH artifact rooms:
+        pop each, tombstone it (room.evicted, flipped UNDER room.lock so it linearizes
         against in-flight client persists), close every editor with 1008, and drain
         any in-flight server op. NEVER checkpoints — the workspace is soft-deleted,
         so a last-leave checkpoint would write to a dead workspace (and B4 would
         refuse it under the mutex anyway); this is drop_client semantics for the
         whole room. Idempotent. Returns the number of sockets closed (tests/logging;
         the coordinator discards it).
+
+        The workspace retirement transition is applied by the coordinator BEFORE this
+        hook is invoked — the coordinator holds the lifecycle lock across the whole
+        fan-out, so the tombstone is set when this runs. This hook must NOT tombstone
+        again (that would deadlock on the lock its caller holds); it is ONLY teardown.
 
         *generation* is unused here: the coordinator gates the whole fan-out on
         this generation while holding the lifecycle lock, so this hook is never
@@ -683,7 +693,6 @@ class RoomManager:
         SECONDS) = 6.0s — past the retirement barrier the sync delete route blocks
         on. Concurrent, the worst case is one room's 3.0s. See
         retirement._RETIREMENT_BARRIER_SECONDS, whose budget this feeds."""
-        self._retired_ws.add(workspace_id)
         # return_exceptions=True keeps "tear down BOTH rooms" a guarantee rather
         # than an accident: a bare gather would propagate the first failure while
         # the sibling task ran on detached, and a second failure would then surface
@@ -778,4 +787,4 @@ async def _set_evicted_under_lock(room: Room) -> None:
 
 
 # Module-global registry (single-instance backend).
-MANAGER = RoomManager()
+MANAGER = RoomManager(lifecycle=LIFECYCLE)

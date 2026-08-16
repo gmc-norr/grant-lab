@@ -350,8 +350,6 @@ def test_the_hook_is_bounded_by_wait_for(pg_session_factory, current_user, monke
 def test_delete_reaches_the_jobs_hook(client_authed_owner, current_user, pg_session_factory):
     """Layer tests do not prove wiring: replacing main.py's "jobs" hook with a
     no-op must fail HERE. This is the mutation that went undetected for turns."""
-    from call_manager.proposal_assist.collab.room import MANAGER
-
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
         s.flush()
@@ -360,14 +358,11 @@ def test_delete_reaches_the_jobs_hook(client_authed_owner, current_user, pg_sess
         ws_id = ws.id
 
     assert client_authed_owner.delete(f"/api/workspaces/{ws_id}").status_code == 204
-    try:
-        with pg_session_factory() as s:
-            job = s.scalars(
-                select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws_id)
-            ).one()
-            assert job.status == "cancelled"
-    finally:
-        MANAGER._retired_ws.discard(ws_id)  # process-global; release even on failure
+    with pg_session_factory() as s:
+        job = s.scalars(
+            select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws_id)
+        ).one()
+        assert job.status == "cancelled"
 
 
 def test_a_row_the_hook_skipped_is_converged_by_the_tick(pg_session_factory, current_user):

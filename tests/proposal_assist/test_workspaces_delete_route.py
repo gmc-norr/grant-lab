@@ -57,7 +57,7 @@ def test_delete_returns_429_when_the_commit_mutex_is_held(
     # a contended delete must not tombstone the workspace in-process either.
     from call_manager.proposal_assist.collab.room import MANAGER
 
-    assert ws_id not in MANAGER._retired_ws
+    assert not MANAGER._lifecycle.is_retired(ws_id)
 
 
 def test_delete_still_returns_204_uncontended(
@@ -106,15 +106,12 @@ def test_delete_returns_204_and_retires(
 
     assert client_authed_owner.delete(f"/api/workspaces/{ws_id}").status_code == 204
 
-    try:
-        with pg_session_factory() as s:
-            assert s.get(Workspace, ws_id).soft_deleted_at is not None  # DB committed
-        # signal_workspace_retirement ran the collab hook, which tombstones the ws.
-        assert ws_id in MANAGER._retired_ws
-    finally:
-        # try/finally, not a bare trailing call: MANAGER is process-GLOBAL, so if an
-        # assertion above fails the tombstone leaks into every later test in the run.
-        MANAGER._retired_ws.discard(ws_id)
+    with pg_session_factory() as s:
+        assert s.get(Workspace, ws_id).soft_deleted_at is not None  # DB committed
+    # signal_workspace_retirement ran the coordinator, which tombstones the ws
+    # via the lifecycle authority (Slice C0). No cleanup needed — the authority
+    # uses unique UUIDs per test, so this ws_id cannot pollute other tests.
+    assert MANAGER._lifecycle.is_retired(ws_id)
 
 
 def test_delete_runs_db_then_retire_then_204_in_that_order(
@@ -129,7 +126,6 @@ def test_delete_runs_db_then_retire_then_204_in_that_order(
     patching call_manager.workspaces.soft_delete_workspace_db would not affect it.
     """
     import call_manager.web.api.workspaces as ws_api
-    from call_manager.proposal_assist.collab.room import MANAGER
 
     calls: list[str] = []
     real_db = ws_api.soft_delete_workspace_db
@@ -157,13 +153,10 @@ def test_delete_runs_db_then_retire_then_204_in_that_order(
         ws_id = ws.id
 
     assert client_authed_owner.delete(f"/api/workspaces/{ws_id}").status_code == 204
-    try:
-        # then 204. That no FS step follows is pinned by
-        # test_delete_keeps_every_byte_on_disk, not here — the scrub is no longer
-        # patched onto ws_api, so this probe could not see it either way.
-        assert calls == ["db", "retire"]
-    finally:
-        MANAGER._retired_ws.discard(ws_id)      # process-global; release even on failure
+    # then 204. That no FS step follows is pinned by
+    # test_delete_keeps_every_byte_on_disk, not here — the scrub is no longer
+    # patched onto ws_api, so this probe could not see it either way.
+    assert calls == ["db", "retire"]
 
 
 def test_no_new_turn_dispatches_after_delete_and_row_is_terminal(
@@ -173,7 +166,6 @@ def test_no_new_turn_dispatches_after_delete_and_row_is_terminal(
     terminal. We do NOT assert 'no send after the response' — that contradicts the
     conceded in-flight query race the design documents."""
     from call_manager.db.models import TurnJob
-    from call_manager.proposal_assist.collab.room import MANAGER
     from tests.proposal_assist.conftest import make_chat_turn  # conftest.py:247
 
     with pg_session_factory() as s:
@@ -202,11 +194,8 @@ def test_no_new_turn_dispatches_after_delete_and_row_is_terminal(
     # NOTE: this is Slice A's DB read, NOT B-retire's in-process turns tombstone.
     # test_delete_reaches_the_turns_registry_tombstone below covers that half —
     # without it the whole turns hook could be unwired and this test would not care.
-    try:
-        controller = client_authed_owner.app.state.workspace_controller
-        assert controller._workspace_is_deleted(ws_id) is True
-    finally:
-        MANAGER._retired_ws.discard(ws_id)
+    controller = client_authed_owner.app.state.workspace_controller
+    assert controller._workspace_is_deleted(ws_id) is True
 
 
 def test_delete_reaches_the_turns_registry_tombstone(
@@ -229,7 +218,6 @@ def test_delete_reaches_the_turns_registry_tombstone(
     """
     import asyncio
 
-    from call_manager.proposal_assist.collab.room import MANAGER
     from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
 
     with pg_session_factory() as s:
@@ -239,24 +227,21 @@ def test_delete_reaches_the_turns_registry_tombstone(
 
     app = client_authed_owner.app
     registry = app.state.workspace_controller.registry
-    assert ws_id not in registry._retired          # precondition: nothing pre-tombstoned
+    assert not registry._lifecycle.is_retired(ws_id)  # precondition: nothing pre-tombstoned
 
     assert client_authed_owner.delete(f"/api/workspaces/{ws_id}").status_code == 204
 
+    assert registry._lifecycle.is_retired(ws_id)  # the turns hook actually ran
+    # ...and the tombstone REFUSES, rather than merely being recorded.
+    fut = asyncio.run_coroutine_threadsafe(
+        registry.claim_launch_or_wait(ws_id), app.state.app_loop
+    )
     try:
-        assert ws_id in registry._retired          # the turns hook actually ran
-        # ...and the tombstone REFUSES, rather than merely being recorded.
-        fut = asyncio.run_coroutine_threadsafe(
-            registry.claim_launch_or_wait(ws_id), app.state.app_loop
-        )
-        try:
-            fut.result(timeout=5)
-        except WorkspaceRetired:
-            pass                                   # expected
-        else:
-            raise AssertionError("claim_launch_or_wait did not refuse a retired workspace")
-    finally:
-        MANAGER._retired_ws.discard(ws_id)
+        fut.result(timeout=5)
+    except WorkspaceRetired:
+        pass                                   # expected
+    else:
+        raise AssertionError("claim_launch_or_wait did not refuse a retired workspace")
 
 
 def test_the_route_signals_retirement_with_the_generation_it_committed(
