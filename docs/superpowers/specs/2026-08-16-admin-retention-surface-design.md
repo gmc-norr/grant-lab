@@ -1,9 +1,11 @@
 # Admin retention surface for deleted workspaces — design
 
 **Date:** 2026-08-16
-**Status:** revision 6 — Slice C **splits into C0 (lifecycle generation) and C1 (restore)** after
-a review found three blockers in revision 5. Slices A and B have shipped (`ef8ccb3`, `991e7a7`).
-Partial-restore detection is dropped, with the reason recorded in 0.3.
+**Status:** revision 7 — C0's generation is **bound to the database transition** (4.4) after a
+review showed revision 6's in-memory sampling failed its own race test; the four retirement
+tombstones collapse into one authority (4.5); the jobs hook is made generation-conditional in SQL
+(4.6); and C1 gains an explicit failure contract (5.4) and setup-state mapping (5.2). Slices A and
+B have shipped (`ef8ccb3`, `991e7a7`). Partial-restore detection is dropped, per 0.3.
 **Goal:** Deleting a workspace freezes it and destroys nothing. An admin can then inspect it,
 restore it intact, or purge it for real.
 
@@ -291,48 +293,130 @@ Revision 5 said restore would "clear both tombstones" after committing. Three pr
 **Clearing N sets across M subsystems is inherently partial-failure-prone. Do not make it
 retryable — make it a single operation.**
 
-### 4.4 The mechanism: a per-workspace generation
+### 4.4 The mechanism: a generation bound to the database transition
 
-One object on the app loop, `WorkspaceLifecycle`, owns a per-workspace **generation**: a
-monotonically increasing integer, starting at 0, held in memory beside the subsystems it governs.
+Revision 6 put the generation in memory and had `signal_workspace_retirement` **read** it. That is
+broken, and it fails revision 6's own acceptance test:
 
-- **Retirement is stamped.** `signal_workspace_retirement` reads the current generation and passes
-  it to `retire(workspace_id, generation)`. Each hook records "retired at generation N" instead of
-  "retired".
-- **A subsystem is poisoned iff its recorded generation equals the current one.** A tombstone from
-  generation 3 does not poison a workspace now at generation 4.
-- **Reactivation is one atomic bump.** `generation += 1` un-poisons every subsystem at once. There
-  is no second subsystem to fail on, so 4.3's partial-clear class does not exist.
-- **Stale retirement no-ops.** A retirement scheduled for generation 3 that runs after a bump to 4
-  finds its generation stale and returns without touching anything. That closes 4.1 completely,
-  including retirement still running after the route's barrier timed out.
+```
+DELETE:  commit (deleted), then pause
+RESTORE: commit (live), bump 0 → 1
+DELETE:  resume → signal_workspace_retirement READS generation = 1
+         → its retirement is "current", not stale → re-poisons a live workspace
+```
 
-The generation is **in-memory, not persisted**. It is a within-process serialization token, and the
-process is single-instance by hard constraint (APScheduler). A restart resets every generation to 0
-and every tombstone with it — which is correct, because the tombstones it governs are in-memory too.
+Sampling the generation after the commit binds it to *when the signal ran*, not to *which
+transition it belongs to*. The reverse order fails too: a restore that commits at generation 1 and
+bumps afterwards can invalidate the retirement of a **newer** delete that committed at generation
+2, un-poisoning a workspace that is now deleted.
 
-### 4.5 Serialization
+**The generation must be allocated by the transition itself, inside the transaction, while the
+commit mutex still orders it.** It then travels with the operation and is never re-read.
 
-`WorkspaceLifecycle` holds a per-workspace `asyncio.Lock`. Retirement and reactivation both acquire
-it, so they cannot interleave; the generation decides which one is stale. Both run on the app loop.
+```sql
+ALTER TABLE workspaces ADD COLUMN lifecycle_generation INT NOT NULL DEFAULT 0;
+```
 
-Ordering is still **commit-then-bump** — see 4.2 for why bumping first is unsafe. But the bump is
-now a single in-memory operation behind a lock, not a fan-out, so "it half-worked" is not a
-reachable state. What remains reachable is "it did not happen at all", which 5.4 makes retryable.
+Every lifecycle transition — today: delete and restore — runs under the commit mutex and, in the
+same transaction as its state change, does `lifecycle_generation = lifecycle_generation + 1`. The
+mutex therefore totally orders generations, and the generation a transition produced is the one
+its teardown or reactivation carries.
 
-### 4.6 Acceptance
+C0 owns this column and its migration. (Revision 6 claimed C0 needed no migration. That followed
+from the broken in-memory design and is withdrawn.)
 
-1. A retirement stamped with a stale generation no-ops: it does not re-add a tombstone, does not
-   cancel jobs, and does not touch passes.
-2. **The 4.1 race, run as a test.** Pause a delete between its DB commit and
-   `signal_workspace_retirement`; run a restore to completion; release the delete. The workspace is
-   live and usable — collab accepts a write and a turn launches. Restore wins last.
+### 4.5 One authority, not four tombstones
+
+`WorkspaceLifecycle` lives on the app loop and holds, per workspace:
+
+| Field | Meaning |
+|---|---|
+| `applied_generation` | the highest generation whose effect has been applied in this process |
+| `state` | `active` or `retired`, as of that generation |
+
+Its only mutator is monotonic:
+
+```
+apply(workspace_id, generation, state):
+    if generation <= applied_generation:  return      # stale or duplicate — ignore
+    applied_generation, state = generation, state
+```
+
+**Subsystems ask this object instead of keeping their own sets.** `MANAGER._retired_ws` and
+`registry._retired` are replaced by `lifecycle.is_retired(workspace_id)`. That is the point: with
+one authority there is no fan-out to half-apply, so revision 6's partial-clear class and its
+"retryable clearing" contract both stop existing rather than needing to be specified.
+
+Monotonicity makes arrival order irrelevant, which is what closes 4.4's two races:
+
+- delete@5 `retired` arriving **after** restore@6 `active` → `5 <= 6` → ignored;
+- restore@6 `active` arriving **after** delete@7 `retired` → `6 <= 7` → ignored.
+
+Neither needs to know the other exists.
+
+**Teardown is separate from the guard.** Closing sockets and terminating subprocesses is not the
+same act as marking a workspace refused. Teardown stays where it is, and each hook checks the
+generation it was given is still current before acting — a late teardown for a superseded
+generation does nothing.
+
+### 4.6 The jobs hook is not contained by any lock
+
+`build_jobs_retirement_hook` runs its DB work as `wait_for(to_thread(...))`
+(`jobs_retirement.py:137`). **The timeout cancels the await, not the thread** — the codebase says
+so in a test written for exactly this (`test_phase0_retirement.py:317`, "the wait_for is the
+bound"). So:
+
+```
+retirement times out → the lifecycle operation returns → restore transitions to generation 6
+                     → the orphaned thread wakes up and cancels setup and claim-analysis jobs
+```
+
+Holding a lifecycle lock cannot help: the thread is outside it, and a stale check *before* the
+thread starts proves nothing about when it runs.
+
+**The mutation is therefore generation-conditional at its own linearization point — in SQL:**
+
+```sql
+UPDATE workspace_setup_jobs SET ...
+ WHERE workspace_id = :ws
+   AND status IN ('queued','running','waiting_for_rubric_review')
+   AND EXISTS (SELECT 1 FROM workspaces w
+                WHERE w.id = :ws AND w.lifecycle_generation = :generation)
+```
+
+An orphaned thread that resumes after any later transition updates **zero rows**. The same
+predicate guards the claim-analysis cancellation. This is the pattern the codebase already uses
+for mutex-participating writers — re-read liveness at the point of mutation — extended from
+"is it deleted" to "is it still the same generation".
+
+### 4.7 Serialization
+
+`WorkspaceLifecycle` holds a per-workspace `asyncio.Lock` so a teardown and a reactivation cannot
+interleave on the loop. The lock is a convenience, not the correctness argument: **monotonic
+`apply` and the SQL predicate are what make the design correct**, and both hold even when work
+escapes the lock — which 4.6 proves it can.
+
+Ordering remains commit-then-apply, for 4.2's reason: for collab client-writes and cold hydration
+the tombstone is the guard, so applying `active` before the database says live would open a real
+hole.
+
+### 4.8 Acceptance
+
+1. **The forward race.** Pause a delete between its DB commit and `signal_workspace_retirement`;
+   run a restore to completion; release the delete. The workspace is live and usable — collab
+   accepts a write and a turn launches. The delete's retirement carried its own generation and
+   no-ops.
+2. **The reverse race.** Pause a restore between its commit and its apply; commit a new delete;
+   release the restore. The workspace stays deleted. The late `active` is ignored.
 3. **The post-timeout case.** Force `signal_workspace_retirement` to time out while its coroutine
-   keeps running, restore, then let retirement finish. Same result.
-4. One bump un-poisons both subsystems. Proven by exercising collab and a turn launch, not by
-   reading the sets — reading them would pass even if the bump touched the wrong workspace.
-5. Generations are per workspace: bumping A does not un-poison B.
-6. No migration in C0. No `rmtree`. Nothing removed.
+   keeps running; restore; then let retirement finish. Same result as 1.
+4. **The orphaned jobs thread.** Release the jobs thread only *after* a restore has committed.
+   It updates zero rows: the setup job is untouched. Asserted on the row, not on the call.
+5. `apply` is monotonic: a lower generation never overwrites a higher one, in either direction.
+6. Generations are per workspace: a transition on A does not affect B.
+7. The guard has one authority — `MANAGER._retired_ws` and `registry._retired` no longer exist.
+   Proven by exercising collab and a turn launch after a transition, not by reading state.
+8. No `rmtree`. Nothing removed. The only schema change is 4.4's column.
 
 ## 5. Slice C1 — restore
 
@@ -361,68 +445,139 @@ exist and there is nothing to check yet.
 
 ### 5.2 The setup job — why "cancelled stays cancelled" does not apply
 
-Every workspace is created with a `WorkspaceSetupJob` in `queued` (`workspaces.py:72`). Retirement
+Every workspace is created with a `WorkspaceSetupJob` in `queued` (`workspaces.py:72`). Deletion
 cancels it from any of three non-terminal states — `queued`, `running`,
-`waiting_for_rubric_review` (`jobs_retirement.py:39`).
+`waiting_for_rubric_review`.
 
-`cancelled` is a **dead end**:
+`cancelled` is a **dead end**: the retry endpoint requires `failed` and returns 404 otherwise
+(`rubric.py:271`), and `WorkspaceSetup.tsx` branches only on `failed` and `done`, so every other
+status renders "Setting up…" — forever. A workspace deleted during setup and then restored is
+permanently stuck, which makes "returns a usable workspace" false.
 
-- the retry endpoint requires `failed` and returns **404** for anything else (`rubric.py:271`);
-- `WorkspaceSetup.tsx` branches only on `failed` and `done`, so every other status renders
-  "Setting up…" — forever;
-- the repository may not exist yet, a state 3.2 already recognises.
+**Decision: restore puts the setup job back into a state that actually progresses.** A cancelled
+setup job is not user work being resurrected — it is the workspace's own construction, unfinished.
+The principle in 5.1 is about not resuming someone's interrupted session; this is not that.
 
-So a workspace deleted during setup and then restored is permanently stuck. That makes "returns a
-usable workspace" false.
+#### 5.2.1 The mapping
 
-**Decision: restore puts the setup job back to the state it was cancelled from.** A cancelled setup
-job is not user work being resurrected — it is the workspace's own construction, unfinished. The
-principle in 5.1 is about not resuming someone's interrupted session, and that is not this.
+| Cancelled from | Restored to | Why |
+|---|---|---|
+| `queued` | `queued` | Never started. |
+| `running` | **`queued`** | **Not `running`.** The worker that owned it died with the deletion, and nothing recreates it: the claim path takes only the oldest **queued** job, and `requeue_stuck_setup_jobs` will not touch it for `STUCK_SETUP_AFTER` = 30 minutes (`phases/setup.py:103`). Restoring it to `running` reproduces the stuck state this section exists to prevent, for half an hour. |
+| `waiting_for_rubric_review` | `waiting_for_rubric_review` | Sections and rubric are already extracted and a human is the next actor. Re-queueing would re-run extraction over completed work. |
 
-Restoring all three states to `queued` would be wrong: a job parked at
-`waiting_for_rubric_review` has already extracted its sections and rubric and is waiting on a
-human, and re-queueing it would re-run extraction over work already done.
+`running → queued` is safe because Phase-0 extraction is restartable from the beginning; it is
+`waiting_for_rubric_review` that must not be re-queued, and it is the one state preserved exactly.
 
-**C1 therefore carries a migration**: a nullable `cancelled_from` column on `workspace_setup_jobs`,
-written by the retirement hook when it cancels and consumed by restore. Null means "not cancelled
-by retirement" — a job cancelled any other way, or never cancelled, is left alone.
+#### 5.2.2 Recording the source state
+
+**C1 carries a migration**: a nullable `cancelled_from` on `workspace_setup_jobs`, plus
+
+```sql
+CHECK (cancelled_from IS NULL
+       OR cancelled_from IN ('queued','running','waiting_for_rubric_review'))
+```
+
+so the mapping cannot be fed a state it has no row for. Null means "not cancelled by a deletion" —
+a job cancelled any other way, or never cancelled, is left alone by restore.
+
+**Every deletion-cancellation path must write it**, not only the retirement hook. There are three,
+and a restore that misses one silently produces the stuck workspace anyway:
+
+| Path | Site |
+|---|---|
+| the retirement hook | `jobs_retirement.py` (the `_CANCELLABLE` update) |
+| deletion reconciliation | `jobs_retirement.py:173` |
+| the running worker cancelling itself on `WorkspaceDeleted` / `WorkspaceGoneDuringSetup` | `phases/setup.py:615` |
+
+#### 5.2.3 What restore writes
+
+Restoring the status alone leaves a row that contradicts itself — a `queued` job carrying a
+`completed_at` and a deletion error. Restore sets:
+
+- `status` per 5.2.1;
+- `cancelled_from` → `NULL` (consumed);
+- `completed_at` → `NULL`;
+- `last_error` → `NULL` (it holds "cancelled: workspace deleted");
+- `started_at` → `NULL` **when the target is `queued`**, so the row is not born looking stuck.
+  Left untouched for `waiting_for_rubric_review`, whose run genuinely started.
+
+`attempts` is **not** reset: a job that had already burned retries before the deletion should not
+get a fresh budget for having been deleted and restored.
 
 ### 5.3 Ordering
 
 ```
-pre-lock read           → 404 if missing; see 5.4 for live
-acquire_commit_mutex      (plain, NOT _live — see 5.5)
-  re-read soft_deleted_at (fresh, under the lock)
+pre-lock read → 404 if the workspace does not exist
+              → if LIVE: skip the mutex entirely; apply(current generation, active); 204
+
+acquire_commit_mutex        (plain, NOT _live — see 5.5)
+  re-read soft_deleted_at   (fresh, under the lock — it can have gone live since)
+      if now live: release; apply(current generation, active); 204
   clear soft_deleted_at
-  restore the setup job from cancelled_from, if set
+  lifecycle_generation += 1            ← 4.4: allocated HERE, inside the transaction
+  restore the setup job (5.2)
   write the audit event
-  COMMIT                  ← one transaction: no restore without its audit
-bump the generation       ← after the commit; 4.2 says why not before
+  COMMIT                               ← one transaction: no restore without its audit
+
+apply(workspace_id, generation, active)  ← after the commit; 4.2 and 4.7 say why
 204
 ```
 
-### 5.4 Idempotence — the retryable contract
+**The live path never takes the mutex.** Slice B's review found the mirror of this on inspection:
+acquiring a live workspace's commit mutex before deciding to refuse it contends with that
+workspace's real writers — turn commits, collab checkpoints, `editing/save.py` — and can block for
+the full 10-second acquisition timeout to answer a request that touches no database state. The live
+path here writes nothing, so it needs no mutex at all.
 
-The bump can fail to happen at all: the bridge to the app loop can fail to schedule, or time out.
-The DB then says live while the generation still says poisoned.
+The generation the apply carries is the one this transaction produced. It is never re-read, which
+is the whole of 4.4.
 
-**Restore is therefore idempotent on the generation.** A POST against a workspace that is already
-live but whose generation is still stale performs the bump alone and returns 204. It does not 404.
+### 5.4 The failure contract
 
-That gives three cases:
+`apply` crosses the same `run_coroutine_threadsafe` bridge retirement uses, and can fail to
+schedule or time out. Revision 6 said "restore is idempotent, so retry" without saying what the
+first caller sees, and its retry could collide with the original attempt. Both are specified here.
+
+**`apply` is monotonic (4.5), so it is safe to call any number of times, in any order.** That is
+what makes everything below work.
+
+| Outcome of the bridge | Response | Why |
+|---|---|---|
+| applied within the bound | **204** | Done. |
+| **timed out** | **503**, `Retry-After: 2` | The database transition committed; reactivation is unconfirmed. Returning 204 would promise something unverified. |
+| failed to schedule | **503**, `Retry-After: 2` | Same. |
+
+**A timed-out apply is NOT cancelled.** Like retirement, it keeps running on the loop and may land
+later. This is safe precisely because `apply` is monotonic: the late one and any retry converge on
+the same state, and whichever arrives second is ignored.
+
+**Retries coalesce by construction.** N applies of the same generation equal one. No joining,
+no de-duplication, no in-flight registry.
+
+#### 5.4.1 Status codes
 
 | Workspace state | Response |
 |---|---|
-| Deleted | Full restore: clear, setup job, audit, commit, bump → 204 |
-| Live, generation stale (a previous bump did not land) | Bump only → 204 |
-| Live, generation current | 409 — nothing to do |
 | Missing | 404 |
+| Deleted | full restore → 204 (or 503 per the table above) |
+| Live | `apply(current generation, active)` only; no DB write, no audit → **204** |
 
-The second row is what makes the operation retryable, and it is the whole answer to "the commit
-landed and the bump did not". An admin retries the same button.
+**A live workspace returns 204, not 409.** Revision 6 returned 409 for "live and current", which
+breaks the recovery path it promised: a retry that races the original apply finds the workspace
+live and current and would be told 409 — the failure code — for the attempt that succeeded. Since
+`apply` is idempotent, answering 204 whenever the end state holds is both simpler and correct.
 
-The audit is written only in the first case: the second changes no database state, and an audit row
-per retry would misreport how many times the workspace was restored.
+The cost is that restoring a workspace that was never deleted also returns 204. That is accepted
+deliberately: distinguishing "never deleted" from "restored a moment ago" is exactly the race that
+made 409 wrong, and the operation is a no-op in both cases. **The audit distinguishes them** — it
+is written only when a transition actually occurred.
+
+#### 5.4.2 A lost response
+
+If the response never reaches the admin, they retry: the workspace is live, the retry re-applies
+and returns 204, and no second audit row is written. The end state is the same whether the
+original landed or not.
 
 ### 5.5 The mutex
 
@@ -430,8 +585,9 @@ The plain `acquire_commit_mutex` (`drafting/locking.py:205`), never `acquire_com
 (`:267`) — the `_live` variant re-reads liveness and raises `WorkspaceDeleted`, so it would refuse
 every workspace restore exists to serve. Identical trap to inspection (3.2), identical answer.
 
-It returns `None` and is not a context manager. It is taken **after** the pre-lock 404, so an
-attempt against a missing workspace never contends for a mutex it will refuse anyway.
+It returns `None` and is not a context manager. It is taken **only on the deleted path**, after
+the pre-lock read — so neither a missing workspace nor a live one contends for a mutex the request
+does not need (5.3).
 
 Restore is the one path that makes the mutex load-bearing rather than defensive: it **flips** the
 liveness flag every other writer re-reads under that same mutex, making the flip a linearization
@@ -446,8 +602,8 @@ C0's job.
 |---|---|
 | `POST /api/admin/workspaces/deleted/{workspace_id}/restore` | Clear `soft_deleted_at`, restore the setup job, bump the generation; 204 |
 
-`require_admin` (`auth/dependencies.py:50`); a non-admin gets 403. Status codes per 5.4. No
-response body; a POST needs no `Cache-Control`.
+`require_admin` (`auth/dependencies.py:50`); a non-admin gets 403. Status codes per 5.4.1;
+`CommitMutexTimeout` → 429 per 5.5. No response body; a POST needs no `Cache-Control`.
 
 ### 5.7 Audit
 
@@ -476,26 +632,35 @@ existed; the same rule applies in reverse now that it does.
 ### 5.9 Acceptance
 
 1. An admin restores a deleted workspace; it leaves the deleted list and its owner can open it.
-2. A missing workspace 404s; a live, current one 409s; a non-admin gets 403.
+2. A missing workspace 404s; a non-admin gets 403; a live workspace 204s without writing an audit
+   row.
 3. Exactly one `admin_deleted_workspace_restored` event, naming the acting admin, in the same
    transaction as the flag clear — a failed commit leaves neither.
-4. **Setup, all three states.** A workspace deleted while `queued`, while `running`, and while
-   `waiting_for_rubric_review` restores to that same state — and the `waiting_for_rubric_review`
-   case does not re-run extraction.
-5. **Fault injection: the bump does not land.** Force the bridge to fail after the commit. The
-   workspace is live and poisoned; a second POST returns 204 and makes it usable; no second audit
-   row is written.
-6. Cancelled turns stay cancelled.
-7. Swapping in `acquire_commit_mutex_live` turns the happy-path test red.
-8. The list is invalidated: after a restore the admin returns to a list that no longer shows it.
-9. The delete-confirmation copy no longer claims deletion cannot be undone at all.
-10. No `rmtree`. Nothing removed. The only schema change is 5.2's nullable column.
+4. **Setup, all three states.** Deleted while `queued` → restored `queued`; while `running` →
+   restored **`queued`**, and a worker actually claims it without waiting out `STUCK_SETUP_AFTER`;
+   while `waiting_for_rubric_review` → restored to that state, **and extraction does not re-run**.
+5. **All three cancellation paths set `cancelled_from`** — the retirement hook, deletion
+   reconciliation, and the worker cancelling itself. A test per path, asserting the column.
+6. The restored row carries no contradiction: `cancelled_from`, `completed_at` and `last_error`
+   are cleared, `started_at` is cleared for a `queued` target and kept for
+   `waiting_for_rubric_review`, and `attempts` is unchanged.
+7. The `CHECK` rejects a `cancelled_from` outside the three source states.
+8. **Fault injection: the apply times out.** The route returns 503 with `Retry-After`. A retry
+   returns 204 and the workspace is usable. Exactly one audit row exists across both calls.
+9. **The timed-out apply lands late.** Let the original apply complete after the retry has already
+   succeeded; the workspace stays live. Monotonicity, exercised end to end.
+10. Cancelled turns stay cancelled.
+11. Swapping in `acquire_commit_mutex_live` turns the happy-path test red.
+12. After a restore the admin returns to a list that no longer shows the workspace
+    (`["admin-deleted-workspaces"]` invalidated).
+13. The delete-confirmation copy no longer claims deletion cannot be undone at all.
+14. No `rmtree`. Nothing removed. The only schema change is 5.2.2's column and its `CHECK`.
 
 ## 7. Risks
 
 | Risk | Handling |
 |---|---|
-| Admin surface becomes a back door to live workspaces | Both routes 404 unless `soft_deleted_at IS NOT NULL` |
+| Admin surface becomes a back door to live workspaces | The two **read** routes (3.1) 404 unless `soft_deleted_at IS NOT NULL`. Restore is deliberately different: it answers 204 for a live workspace because it must stay idempotent (5.4.1). It exposes nothing — no body, no state change, and no audit row — so it is not a read path into live data. |
 | Using the `_live` mutex variant, which refuses deleted workspaces | Called out explicitly in 3.2 (inspection) and 5.5 (restore); acceptance 8.6 and 5.9.7 pin it |
 | Unbounded list or history response | Paginated and capped, truncation stated (3.1) |
 | Content served without an audit record | Audit commits before the response (3.3) |
