@@ -12,6 +12,8 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -361,3 +363,98 @@ def read_blob(repo_dir: Path, sha: str) -> str:
             f"cat-file {sha} failed: {proc.stderr.decode(errors='replace').strip()}"
         )
     return proc.stdout.decode(errors="replace")
+
+
+@dataclass(frozen=True)
+class CommitInfo:
+    """One entry of a workspace repository's history."""
+
+    sha: str
+    authored_at: datetime
+    subject: str
+
+
+# NUL framing. Commit subjects are user-controlled, and git stores ASCII control
+# bytes in them verbatim — RS (0x1e) and US (0x1f) included, verified against a
+# real `git commit`. Framing on either lets a crafted subject split one commit
+# into two rows or shift every field one place left. NUL is the ONLY byte git
+# refuses ("error: a NUL byte in commit log message not allowed"), so it is the
+# only safe separator. `%x00` emits it from the format string, so no module
+# constant is needed — do not reintroduce one for a byte used inline once.
+
+
+def list_commits(repo_dir: Path, *, limit: int) -> tuple[list[CommitInfo], bool]:
+    """Return (commits newest-first, truncated).
+
+    Bounded at the source: asks git for `limit + 1` and reports `truncated`
+    when that extra row comes back, so a caller can tell a capped list from a
+    complete one without a second call.
+
+    Raises GitCommitError if the repository is missing, is not a repository, or
+    has no commits (an unborn HEAD).
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "git",
+                "log",
+                f"--max-count={limit + 1}",
+                # -z terminates each commit with NUL; %x00 separates the three
+                # fields within one. Both are the same byte, so the stream is a
+                # flat run of NUL-separated fields, parsed three at a time below.
+                "-z",
+                "--format=%H%x00%aI%x00%s",
+            ],
+            cwd=repo_dir,
+            env=_list_commits_env(repo_dir),
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
+        _log_if_timeout(e)
+        stderr = getattr(e, "stderr", "") or ""
+        raise GitCommitError(
+            f"cannot list commits in {repo_dir}: {stderr.strip()}"
+        ) from e
+
+    # git -z emits a trailing NUL, so the final split yields an empty tail.
+    # Drop ONLY that tail — do not filter on truthiness, which would silently
+    # swallow an empty subject and shift every field after it.
+    fields = proc.stdout.split("\x00")
+    if fields and fields[-1] == "":
+        fields.pop()
+    if len(fields) % 3 != 0:
+        raise GitCommitError(
+            f"malformed git log output for {repo_dir}: {len(fields)} NUL-separated "
+            f"fields is not a multiple of 3"
+        )
+    records = [tuple(fields[i : i + 3]) for i in range(0, len(fields), 3)]
+    truncated = len(records) > limit
+    commits: list[CommitInfo] = []
+    for sha, authored, subject in records[:limit]:
+        commits.append(
+            CommitInfo(
+                sha=sha,
+                # %aI is strict ISO-8601 with an offset; fromisoformat handles it
+                # on 3.12. A parse failure means the framing shifted — fail loudly
+                # rather than storing a garbage timestamp.
+                authored_at=datetime.fromisoformat(authored),
+                subject=subject,
+            )
+        )
+    return commits, truncated
+
+
+def _list_commits_env(repo_dir: Path) -> dict[str, str]:
+    """`_git_env()` plus a discovery ceiling.
+
+    `_git_env()` (gitio.py:34) sets only author/committer identity. It does NOT
+    pin repository discovery, so `git log` in a plain directory walks up and
+    reports an enclosing repository's history. `current_head` (gitio.py:290)
+    already guards this; `list_commits` reads the same directories and needs the
+    same guard, or a workspace whose repo was never created shows an admin the
+    project's own commits.
+    """
+    return dict(_git_env(), GIT_CEILING_DIRECTORIES=str(Path(repo_dir).resolve().parent))
