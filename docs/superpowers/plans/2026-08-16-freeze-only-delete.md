@@ -466,11 +466,19 @@ uv run pytest -n 16 --dist loadfile -q > /tmp/a3-count.log 2>&1; echo "PYTEST_EX
 
 Update both numbers in `CLAUDE.md` so the no-key count and the with-key count are each correct and remain one apart. Keep the surrounding explanation — the skip is still gated on `ANTHROPIC_API_KEY` and still makes a live call; only the arithmetic changed.
 
+- [ ] **Step 4c: Two leftovers Task 2's review found**
+
+Both are one-line prose fixes in files Task 2 did not touch, flagged by its reviewer as the same genre of drift that task existed to close.
+
+**`tests/test_workspaces_service.py:1-3`** — the module docstring describes both service halves as sitting "behind the JSON `DELETE /api/workspaces/{id}` endpoint". That is now only true of `soft_delete_workspace_db`. `scrub_workspace_bytes` is exercised directly by one test in that file and is reached by no route at all. Reword so it does not imply the scrub is part of that endpoint.
+
+**`src/call_manager/proposal_assist/retirement.py:46-47`** — the prose reads "headroom. headroom.", a duplicated word. Pre-existing, unrelated to this slice, and a two-second fix while the file is open.
+
 - [ ] **Step 5: Commit**
 
 ```bash
 cd /home/parlar_ai/dev/call-monitor
-git add CLAUDE.md frontend/src/cockpit/WorkspaceSettingsModal.tsx frontend/src/cockpit/WorkspaceSettingsModal.test.tsx
+git add CLAUDE.md tests/test_workspaces_service.py src/call_manager/proposal_assist/retirement.py frontend/src/cockpit/WorkspaceSettingsModal.tsx frontend/src/cockpit/WorkspaceSettingsModal.test.tsx
 git status --short   # confirm nothing unrelated is staged
 git commit -m "fix(ui): delete no longer scrubs files, so stop saying it does
 
