@@ -23,7 +23,7 @@ from tests.proposal_assist.conftest import make_workspace
 from tests.workspace_delete_helper import soft_delete_workspace_for_test
 
 
-def test_soft_delete_workspace_cascades_and_scrubs(pg_session_factory, tmp_path):
+def test_soft_delete_cascades_and_keeps_bytes(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
         ws = make_workspace(s)
         s.flush()
@@ -54,7 +54,7 @@ def test_soft_delete_workspace_cascades_and_scrubs(pg_session_factory, tmp_path)
     (attach_dir / "blob.bin").write_bytes(b"x")
 
     with pg_session_factory() as s:
-        soft_delete_workspace_for_test(s, workspace_id=ws_id, workspaces_dir=tmp_path)
+        soft_delete_workspace_for_test(s, workspace_id=ws_id)
 
     with pg_session_factory() as s:
         assert s.get(Workspace, ws_id).soft_deleted_at is not None
@@ -88,10 +88,13 @@ def test_soft_delete_workspace_cascades_and_scrubs(pg_session_factory, tmp_path)
             is not None
         )
         assert s.scalar(select(ChatTurn).where(ChatTurn.role == "system")) is None
-    assert not attach_dir.exists()  # bytes scrubbed
+    assert attach_dir.exists(), (
+        "Slice A: deleting a workspace FREEZES it and destroys nothing, so a "
+        "later restore is lossless. Only an admin purge removes bytes."
+    )
 
 
-def test_soft_delete_terminalizes_running_turn_and_finalize_is_noop(pg_session_factory, tmp_path):
+def test_soft_delete_terminalizes_running_turn_and_finalize_is_noop(pg_session_factory):
     from call_manager.db.models import ChatTurn, TurnJob
     from call_manager.proposal_assist.turns.processor import _finalize_success
     from tests.proposal_assist.conftest import make_chat_turn, make_workspace
@@ -113,7 +116,7 @@ def test_soft_delete_terminalizes_running_turn_and_finalize_is_noop(pg_session_f
         ws_id, job_id, ut_id = ws.id, job.id, user_turn.id
 
     with pg_session_factory() as s:
-        soft_delete_workspace_for_test(s, workspace_id=ws_id, workspaces_dir=tmp_path)
+        soft_delete_workspace_for_test(s, workspace_id=ws_id)
 
     with pg_session_factory() as s:
         assert s.get(TurnJob, job_id).status != "running"  # terminalized in the delete txn
@@ -137,7 +140,7 @@ def test_soft_delete_terminalizes_running_turn_and_finalize_is_noop(pg_session_f
         assert s.get(TurnJob, job_id).status != "completed"  # never resurrected
 
 
-def test_soft_delete_refuses_a_second_deletion(pg_session_factory, tmp_path):
+def test_soft_delete_refuses_a_second_deletion(pg_session_factory):
     """The delete's own under-mutex liveness read: `ws` is loaded BEFORE we can
     block on the mutex, so a concurrent deletion that committed while we waited
     would be invisible to it. Sequential here; the concurrent form is the route
@@ -151,15 +154,15 @@ def test_soft_delete_refuses_a_second_deletion(pg_session_factory, tmp_path):
         ws_id = ws.id
 
     with pg_session_factory() as s:
-        soft_delete_workspace_for_test(s, workspace_id=ws_id, workspaces_dir=tmp_path)
+        soft_delete_workspace_for_test(s, workspace_id=ws_id)
     with pg_session_factory() as s:
         with pytest.raises(WorkspaceDeleted):
-            soft_delete_workspace_for_test(s, workspace_id=ws_id, workspaces_dir=tmp_path)
+            soft_delete_workspace_for_test(s, workspace_id=ws_id)
         s.rollback()
 
 
 def test_soft_delete_propagates_commit_mutex_timeout_without_committing(
-    pg_session_factory, tmp_path
+    pg_session_factory,
 ):
     """A wedged writer holding the mutex must make the delete FAIL cleanly, not
     half-apply: nothing committed, the workspace still live."""
@@ -193,7 +196,7 @@ def test_soft_delete_propagates_commit_mutex_timeout_without_committing(
         with pg_session_factory() as s:
             with pytest.raises(CommitMutexTimeout):
                 soft_delete_workspace_for_test(
-                    s, workspace_id=ws_id, workspaces_dir=tmp_path, timeout_seconds=1
+                    s, workspace_id=ws_id, timeout_seconds=1
                 )
             s.rollback()
     finally:

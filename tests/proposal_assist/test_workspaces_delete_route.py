@@ -96,7 +96,7 @@ def test_delete_returns_204_and_retires(
     """End state of a successful delete: 204, the row is soft-deleted, and the
     retirement bridge actually ran (the workspace is tombstoned in the
     process-global room manager). ORDERING is asserted separately, by
-    test_delete_runs_db_then_retire_then_scrub_in_that_order below."""
+    test_delete_runs_db_then_retire_then_204_in_that_order below."""
     from call_manager.proposal_assist.collab.room import MANAGER
 
     with pg_session_factory() as s:
@@ -117,16 +117,16 @@ def test_delete_returns_204_and_retires(
         MANAGER._retired_ws.discard(ws_id)
 
 
-def test_delete_runs_db_then_retire_then_scrub_in_that_order(
+def test_delete_runs_db_then_retire_then_204_in_that_order(
     client_authed_owner, current_user, pg_session_factory, monkeypatch
 ):
-    """Route ORDER is the whole B5 contract, so assert it directly instead of
-    inferring it from end state. Wrap all three route-module calls; each probe
-    asserts the invariant that must ALREADY hold by the time it runs.
+    """Route ORDER is the contract, so assert it directly instead of inferring
+    it from end state. Wrap both route-module calls; each probe asserts the
+    invariant that must ALREADY hold by the time it runs.
 
-    NOTE: all three names are patched ON THE ROUTE MODULE (ws_api.<name>), not on
+    NOTE: both names are patched ON THE ROUTE MODULE (ws_api.<name>), not on
     their defining modules — the route imported them by value at module load, so
-    patching call_manager.workspaces.scrub_workspace_bytes would not affect it.
+    patching call_manager.workspaces.soft_delete_workspace_db would not affect it.
     """
     import call_manager.web.api.workspaces as ws_api
     from call_manager.proposal_assist.collab.room import MANAGER
@@ -134,7 +134,6 @@ def test_delete_runs_db_then_retire_then_scrub_in_that_order(
     calls: list[str] = []
     real_db = ws_api.soft_delete_workspace_db
     real_signal = ws_api.signal_workspace_retirement
-    real_scrub = ws_api.scrub_workspace_bytes
 
     def _db(session, **kw):
         calls.append("db")
@@ -149,14 +148,8 @@ def test_delete_runs_db_then_retire_then_scrub_in_that_order(
             assert s2.get(Workspace, workspace_id).soft_deleted_at is not None
         return real_signal(request, workspace_id=workspace_id)
 
-    def _scrub(workspace_id, **kw):
-        calls.append("scrub")
-        assert "retire" in calls          # bytes are never scrubbed before retirement
-        return real_scrub(workspace_id, **kw)
-
     monkeypatch.setattr(ws_api, "soft_delete_workspace_db", _db)
     monkeypatch.setattr(ws_api, "signal_workspace_retirement", _signal)
-    monkeypatch.setattr(ws_api, "scrub_workspace_bytes", _scrub)
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
@@ -165,7 +158,7 @@ def test_delete_runs_db_then_retire_then_scrub_in_that_order(
 
     assert client_authed_owner.delete(f"/api/workspaces/{ws_id}").status_code == 204
     try:
-        assert calls == ["db", "retire", "scrub"]
+        assert calls == ["db", "retire"]      # then 204, with no third FS step
     finally:
         MANAGER._retired_ws.discard(ws_id)      # process-global; release even on failure
 

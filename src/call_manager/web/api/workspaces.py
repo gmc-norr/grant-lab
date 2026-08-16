@@ -11,7 +11,6 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import UTC, datetime
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
@@ -79,7 +78,6 @@ from call_manager.proposal_assist.retirement import signal_workspace_retirement
 from call_manager.proposal_assist.web._perms import require_member, require_owner
 from call_manager.workspaces import (
     create_workspace,
-    scrub_workspace_bytes,
     soft_delete_workspace_db,
 )
 
@@ -1503,7 +1501,6 @@ def soft_delete_workspace_api(
     Jinja route — not idempotent, by design.
 
     The ORDER is the contract (spec B5): DB commit → retire → scrub → 204."""
-    settings = request.app.state.settings
     sf = request.app.state.session_factory
     with sf() as session:
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
@@ -1525,7 +1522,13 @@ def soft_delete_workspace_api(
     # tombstone the turns registry so no new subprocess installs and tear down any
     # live one, and tear down both collab rooms (close editors 1008, no
     # checkpoint). This SUBSUMES the old signal_from_request permission
-    # reconciliation — the rooms are gone. THEN scrub bytes, THEN 204.
+    # reconciliation — the rooms are gone. THEN 204.
+    #
+    # Slice A: deletion FREEZES a workspace and destroys nothing on disk. It used
+    # to scrub attachment and reference bytes here; that removal is what made a
+    # later restore impossible, because the rows survived while their files did
+    # not. Byte removal moves to the admin purge (Slice E). Users are already
+    # locked out by the liveness gates and the room eviction above — keeping the
+    # bytes changes what can be recovered later, not who can reach them now.
     signal_workspace_retirement(request, workspace_id=workspace_id)
-    scrub_workspace_bytes(workspace_id, workspaces_dir=Path(settings.workspaces_dir))
     return Response(status_code=204)

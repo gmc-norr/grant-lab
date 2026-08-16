@@ -14,22 +14,25 @@ reaches for it in production by mistake.
 from __future__ import annotations
 
 import uuid
-from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from call_manager.workspaces import scrub_workspace_bytes, soft_delete_workspace_db
+from call_manager.workspaces import soft_delete_workspace_db
 
 
 def soft_delete_workspace_for_test(
     session: Session,
     *,
     workspace_id: uuid.UUID,
-    workspaces_dir: Path,
     timeout_seconds: int = 10,
 ) -> None:
-    """DB half then FS half, exactly the pre-split behaviour — and no retirement."""
+    """The DB half of a delete, with no retirement — what production does minus
+    the in-process teardown.
+
+    Slice A: this no longer scrubs bytes, because production no longer does. A
+    test that specifically wants byte removal should call `scrub_workspace_bytes`
+    directly and say why in a comment.
+    """
     soft_delete_workspace_db(
         session, workspace_id=workspace_id, timeout_seconds=timeout_seconds
     )
-    scrub_workspace_bytes(workspace_id, workspaces_dir=workspaces_dir)

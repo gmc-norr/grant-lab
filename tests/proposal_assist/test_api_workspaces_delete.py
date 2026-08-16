@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 
 from sqlalchemy import select
 
@@ -15,10 +16,93 @@ from call_manager.db.models import (
     WorkspaceEvent,
     WorkspaceViewer,
 )
+from call_manager.proposal_assist.attachments.storage import AttachmentStorage
+from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.references.storage import ReferenceStorage
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
-def test_owner_delete_204_cascades_and_scrubs(
+def _seed_workspace_with_bytes(
+    pg_session_factory,
+    owner,
+    tmp_path: Path,
+    *,
+    attachment: bytes,
+    reference: bytes,
+    proposal: str,
+) -> uuid.UUID:
+    """Create a workspace owned by `owner` and place one real attachment, one
+    real reference and a proposal document at the paths production actually
+    uses — via AttachmentStorage/ReferenceStorage, not paths we invented."""
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=owner)
+        s.commit()
+        ws_id = ws.id
+
+    AttachmentStorage(root=tmp_path).write_atomic(
+        workspace_id=ws_id,
+        attachment_id=uuid.uuid4(),
+        suffix=".png",
+        data=attachment,
+    )
+    ReferenceStorage(root=tmp_path).write_atomic(
+        workspace_id=ws_id,
+        reference_id=uuid.uuid4(),
+        suffix=".txt",
+        data=reference,
+    )
+    repo = workspace_repo_dir(tmp_path, ws_id)
+    repo.mkdir(parents=True)
+    (repo / "proposal.md").write_text(proposal, encoding="utf-8")
+
+    return ws_id
+
+
+def _attachment_path(tmp_path: Path, ws_id: uuid.UUID) -> Path:
+    return next((tmp_path / str(ws_id) / "attachments").glob("*"))
+
+
+def _reference_path(tmp_path: Path, ws_id: uuid.UUID) -> Path:
+    return next((tmp_path / str(ws_id) / "references").glob("*/original*"))
+
+
+def _proposal_path(tmp_path: Path, ws_id: uuid.UUID) -> Path:
+    return workspace_repo_dir(tmp_path, ws_id) / "proposal.md"
+
+
+def test_delete_keeps_every_byte_on_disk(
+    client_authed_owner, _app, current_user, pg_session_factory, tmp_path
+):
+    """Slice A: deletion FREEZES a workspace. Attachment, reference and repository
+    bytes must all survive byte-identical, so a later restore is lossless.
+
+    Contents, not existence: a scrub that emptied a directory without removing it
+    would satisfy an exists() check while destroying exactly what restore needs.
+    """
+    _app.state.settings.workspaces_dir = str(tmp_path)
+    ws_id = _seed_workspace_with_bytes(
+        pg_session_factory,
+        current_user,
+        tmp_path,
+        attachment=b"ATTACHMENT SENTINEL",
+        reference=b"REFERENCE SENTINEL",
+        proposal="# PROPOSAL SENTINEL\n",
+    )
+
+    attach = _attachment_path(tmp_path, ws_id)
+    ref = _reference_path(tmp_path, ws_id)
+    repo_doc = _proposal_path(tmp_path, ws_id)
+    before = (attach.read_bytes(), ref.read_bytes(), repo_doc.read_text(encoding="utf-8"))
+
+    r = client_authed_owner.delete(f"/api/workspaces/{ws_id}")
+    assert r.status_code == 204
+
+    assert attach.read_bytes() == before[0], "attachment bytes were destroyed"
+    assert ref.read_bytes() == before[1], "reference bytes were destroyed"
+    assert repo_doc.read_text(encoding="utf-8") == before[2], "proposal was destroyed"
+
+
+def test_owner_delete_204_cascades_and_keeps_bytes(
     client_authed_owner, _app, current_user, pg_session_factory, tmp_path
 ):
     _app.state.settings.workspaces_dir = str(tmp_path)
@@ -65,7 +149,10 @@ def test_owner_delete_204_cascades_and_scrubs(
             is not None
         )
         assert s.scalar(select(ChatTurn).where(ChatTurn.role == "system")) is None
-    assert not attach_dir.exists()
+    assert attach_dir.exists(), (
+        "Slice A: deleting a workspace FREEZES it and destroys nothing, so a "
+        "later restore is lossless. Only an admin purge removes bytes."
+    )
 
 
 def test_non_owner_delete_403(client_authed_owner, current_user, pg_session_factory):

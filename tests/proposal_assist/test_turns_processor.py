@@ -741,7 +741,6 @@ def _set_user_turn_estimate(pg_session_factory, job_id, tokens_in):
 async def test_retired_before_send_finalizes_without_sending_and_keeps_estimate(
     pg_session_factory,
     _settings_env,
-    tmp_path,
     monkeypatch,
 ):
     """Deletion between claim and the post-claim launch: no send, row not left
@@ -766,9 +765,7 @@ async def test_retired_before_send_finalizes_without_sending_and_keeps_estimate(
         if calls["n"] >= 2:
             with pg_session_factory() as s:
                 if s.get(Workspace, ws_id).soft_deleted_at is None:
-                    soft_delete_workspace_for_test(
-                        s, workspace_id=ws_id, workspaces_dir=tmp_path
-                    )
+                    soft_delete_workspace_for_test(s, workspace_id=ws_id)
         return await real_launch(ws_id)
 
     monkeypatch.setattr(controller, "launch", _launch)
@@ -840,7 +837,6 @@ async def test_retired_before_claim_cancels_the_queued_turn_instead_of_looping(
 async def test_delete_during_stream_reconciles_reported_usage(
     pg_session_factory,
     _settings_env,
-    tmp_path,
 ):
     """The real race: deletion terminalizes the row WHILE streaming. TurnDoneEvent
     arrives normally, _finalize_success loses the row and rolls back its stamp —
@@ -866,9 +862,7 @@ async def test_delete_during_stream_reconciles_reported_usage(
 
         async def _gen(self):
             with pg_session_factory() as s:
-                soft_delete_workspace_for_test(
-                    s, workspace_id=self.ws_id, workspaces_dir=tmp_path
-                )
+                soft_delete_workspace_for_test(s, workspace_id=self.ws_id)
             yield TurnDoneEvent(tokens_in=700, tokens_out=90, model="m", session_id=None)
 
     controller.send_turn = lambda ws, msg: _DeletingStream(ws_id)
