@@ -37,6 +37,10 @@ Slice B is more visible and its plan is already written, but nothing is lost by 
 Slice A is a one-line removal at `web/api/workspaces.py:1530` plus test updates, and it stops an
 ongoing, irreversible loss. That asymmetry decides the order.
 
+**Settled: A shipped (`ef8ccb3`), then B (`991e7a7`).** This section is kept as the record of why
+that order was chosen. It does NOT impose partial-restore handling on Slice C — the set of
+workspaces this paragraph is about turned out to be empty; see 0.3.
+
 ### 0.2 What this changes about deletion, stated plainly
 
 Before: deleting a workspace removed uploaded attachments and reference files from disk.
