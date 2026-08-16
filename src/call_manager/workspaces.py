@@ -17,7 +17,6 @@ no partial state lands.
 
 from __future__ import annotations
 
-import logging
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,8 +35,6 @@ from call_manager.proposal_assist.turns.outcomes import record_terminal_outcome
 from call_manager.proposal_assist.uncited_claims.jobs import (
     cancel_uncited_claims_jobs_for_workspace,
 )
-
-logger = logging.getLogger(__name__)
 
 
 def create_workspace(
@@ -179,7 +176,7 @@ def soft_delete_workspace_db(
 
 
 def scrub_workspace_bytes(workspace_id: uuid.UUID, *, workspaces_dir: Path) -> None:
-    """Best-effort removal of attachment and reference bytes from disk.
+    """Remove a workspace's attachment and reference bytes from disk.
 
     NOT called by the delete path. Slice A made deletion freeze-only: it destroys
     nothing, so a later restore is lossless. This function is retained for Slice
@@ -188,29 +185,24 @@ def scrub_workspace_bytes(workspace_id: uuid.UUID, *, workspaces_dir: Path) -> N
     tree rather than these two subtrees.
 
     It therefore has NO production caller today. That is intentional; deleting it
-    would mean re-deriving this logic from git history nobody will think to search.
+    would mean re-deriving the on-disk layout from git history nobody will think
+    to search.
+
+    **Raises OSError.** Until Slice A this was best-effort and swallowed every
+    OSError, because it ran inside the DELETE route where a failed cleanup must
+    not block the 204. That caller is gone, and its only intended caller needs
+    the opposite: the retention spec (§9, Slice E) requires a partial removal to
+    surface as a controlled retryable failure that commits NO tombstone and NO
+    audit event, so a purge can never report success over leftover bytes. A
+    swallowed error would make "purged" unfalsifiable.
+
+    Retry-safe: both subtree deletes are idempotent no-ops when the target is
+    already absent, so re-running after a partial failure removes the remainder.
 
     Attachment and reference DB rows are never touched here — they are the audit
-    trail. Never raises on OSError: a failed cleanup leaves orphaned bytes that
-    nothing reads and nothing collects. There is no sweep.
+    trail.
     """
-    # Scrub attachment bytes (DB rows remain — audit trail). Best-effort.
-    try:
-        AttachmentStorage(root=workspaces_dir).delete_workspace(workspace_id=workspace_id)
-    except OSError:
-        logger.warning(
-            "scrub_workspace_bytes: attachment cleanup failed for workspace %s; "
-            "bytes are left in place and are only removed by an admin purge",
-            workspace_id,
-            exc_info=True,
-        )
-    # Scrub reference bytes (original files + extracted text.txt). Best-effort.
-    try:
-        ReferenceStorage(root=workspaces_dir).delete_workspace(workspace_id=workspace_id)
-    except OSError:
-        logger.warning(
-            "scrub_workspace_bytes: reference cleanup failed for workspace %s; "
-            "bytes are left in place and are only removed by an admin purge",
-            workspace_id,
-            exc_info=True,
-        )
+    # Attachment bytes (DB rows remain — audit trail).
+    AttachmentStorage(root=workspaces_dir).delete_workspace(workspace_id=workspace_id)
+    # Reference bytes (original files + extracted text.txt).
+    ReferenceStorage(root=workspaces_dir).delete_workspace(workspace_id=workspace_id)

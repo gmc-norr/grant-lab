@@ -216,7 +216,7 @@ left wondering whether inspection is all there will ever be.
    a git error.
 8. The list is paginated and its cap enforced; history truncation is reported when it occurs.
 9. No inspection response carrying content is observable before its audit event is committed.
-10. Full suite green: `uv run pytest -n 16 --dist loadfile` → `3360 passed, 1 skipped` plus this
+10. Full suite green: `uv run pytest -n 16 --dist loadfile` → `3361 passed, 1 skipped` plus this
     slice's new tests.
 
 ## 9. Deferred slices — the analysis, so it is not re-derived

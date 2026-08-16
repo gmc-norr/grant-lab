@@ -288,15 +288,48 @@ def test_scrub_removes_uploads_and_leaves_the_repo_alone(tmp_path):
     assert (tmp_path / str(other_id) / "attachments" / "blob.bin").read_bytes() == b"real bytes"
 
 
-def test_scrub_swallows_oserror_rather_than_raising(tmp_path, monkeypatch):
-    """Documented contract: "Never raises on OSError". A purge that aborts halfway
-    through would leave the admin with no way to finish it."""
+def test_scrub_propagates_oserror_so_a_partial_removal_cannot_look_like_success(
+    tmp_path, monkeypatch
+):
+    """Retention spec §9 (Slice E): a partial removal must surface as a controlled
+    retryable failure committing no tombstone and no audit event. If this swallowed
+    the error, a purge would stamp "purged" over bytes still on disk and nothing
+    downstream could tell the difference. Pinned here because Slice E is the only
+    intended caller and it does not exist yet."""
     ws_id = uuid.uuid4()
 
     def boom(self, *, workspace_id):
         raise OSError("permission denied")
 
-    monkeypatch.setattr(AttachmentStorage, "delete_workspace", boom)
     monkeypatch.setattr(ReferenceStorage, "delete_workspace", boom)
+    attach_dir = tmp_path / str(ws_id) / "attachments"
+    attach_dir.mkdir(parents=True)
+    (attach_dir / "blob.bin").write_bytes(b"real bytes")
 
-    scrub_workspace_bytes(ws_id, workspaces_dir=tmp_path)  # must not raise
+    with pytest.raises(OSError, match="permission denied"):
+        scrub_workspace_bytes(ws_id, workspaces_dir=tmp_path)
+
+    # Partial: the first subtree is already gone. A retry must finish the job,
+    # which it can only do because each subtree delete no-ops when absent.
+    assert not attach_dir.exists()
+    monkeypatch.undo()
+    scrub_workspace_bytes(ws_id, workspaces_dir=tmp_path)
+
+
+def test_scrub_raises_before_the_second_subtree_when_the_first_fails(tmp_path, monkeypatch):
+    """Ordering matters for the retry contract: the reference subtree must survive
+    an attachment failure rather than being removed by a half-finished pass."""
+    ws_id = uuid.uuid4()
+    ref_dir = tmp_path / str(ws_id) / "references"
+    ref_dir.mkdir(parents=True)
+    (ref_dir / "paper.pdf").write_bytes(b"real bytes")
+
+    def boom(self, *, workspace_id):
+        raise OSError("disk error")
+
+    monkeypatch.setattr(AttachmentStorage, "delete_workspace", boom)
+
+    with pytest.raises(OSError, match="disk error"):
+        scrub_workspace_bytes(ws_id, workspaces_dir=tmp_path)
+
+    assert (ref_dir / "paper.pdf").read_bytes() == b"real bytes"
