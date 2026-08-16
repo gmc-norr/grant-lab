@@ -482,17 +482,28 @@ def test_returns_total_count_and_honours_offset(
     assert not ({r["id"] for r in first["items"]} & {r["id"] for r in second["items"]})
 
 
-def test_the_envelope_matches_the_rest_of_the_api(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+def test_the_route_is_documented_with_the_shared_error_envelope(
+    monkeypatch, pg_url, tmp_path
 ):
     """These routes must go through web/api/__init__.py's router, which declares
-    the {error: {code, message}} envelope on every documented status. Mounting
-    them directly on the app instead would advertise FastAPI's stock
-    HTTPValidationError and break the OpenAPI -> TS codegen."""
+    responses={code: ApiError} for every status the /api surface emits. Mounting
+    them directly on the app instead advertises FastAPI's stock
+    HTTPValidationError for the 422 and breaks the OpenAPI -> TS codegen.
+
+    This asserts the SCHEMA, not a runtime body, and that distinction matters:
+    the runtime envelope comes from app-level exception handlers gated on
+    is_api_path() (main.py:637), so a directly-mounted route still RETURNS the
+    envelope. Only the generated document tells the two mountings apart —
+    verified: /api/admin/users documents $ref ApiError and has 11 documented
+    statuses, while a directly-mounted route documents HTTPValidationError and
+    has 2."""
     app = _setup(monkeypatch, pg_url, tmp_path)
-    admin, _ = _client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
-    body = admin.get("/api/admin/workspaces/deleted?limit=5000").json()
-    assert "error" in body and set(body["error"]) >= {"code", "message"}, body
+    responses = app.openapi()["paths"]["/api/admin/workspaces/deleted"]["get"]["responses"]
+    ref = responses["422"]["content"]["application/json"]["schema"]["$ref"]
+    assert ref == "#/components/schemas/ApiError", (
+        f"422 documents {ref} — the router is mounted outside web/api/__init__.py"
+    )
+    assert {"401", "403", "404", "429"} <= set(responses)
 ```
 
 **Scaffolding note — read this before writing the file.** There are no
