@@ -111,6 +111,10 @@ class DeletedWorkspaceDetailOut(BaseModel):
     title: str
     owner_email: str | None
     soft_deleted_at: datetime
+    # True when the repository yielded something: a readable commit history, or
+    # a readable proposal.md at HEAD. NOT a filesystem predicate — a directory
+    # that exists with an unborn HEAD reports False, because nothing in it can
+    # be shown.
     repository_available: bool
     proposal_markdown: str | None
     commits: list[CommitOut]
@@ -253,6 +257,14 @@ def inspect_deleted_workspace(
             # Legitimate: no repository, no commits yet, or a commit exists
             # that never touched proposal.md.
             markdown = None
+
+        # Splitting the try blocks made one new combination reachable that the
+        # shared block could not produce: git log fails (a timeout, or the
+        # malformed-output branch) while rev-parse and cat-file still work. That
+        # would answer "there is no repository" while handing the admin that
+        # repository's draft. Serving content is itself proof the repository is
+        # there, so say so.
+        available = available or markdown is not None
 
         # "content_served" means the admin actually saw a draft — an empty
         # proposal.md at HEAD is readable but is not a draft.

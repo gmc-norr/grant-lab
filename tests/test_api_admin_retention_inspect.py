@@ -194,15 +194,18 @@ def test_live_workspace_404s_without_waiting_on_the_mutex(
     admin, _ = _client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, content="# Live\n")
 
-    holder = pg_session_factory()
-    acquire_commit_mutex(holder, ws_id)
-    try:
-        start = time.monotonic()
-        r = admin.get(f"/api/admin/workspaces/deleted/{ws_id}")
-        elapsed = time.monotonic() - start
-    finally:
-        holder.rollback()
-        holder.close()
+    # `with`, not a bare call: if acquire_commit_mutex raised, a plain
+    # `holder = pg_session_factory()` above the try would never be closed and
+    # the advisory xact lock would survive on a checked-out connection —
+    # blocking every later test in this file that touches the same workspace.
+    with pg_session_factory() as holder:
+        acquire_commit_mutex(holder, ws_id)
+        try:
+            start = time.monotonic()
+            r = admin.get(f"/api/admin/workspaces/deleted/{ws_id}")
+            elapsed = time.monotonic() - start
+        finally:
+            holder.rollback()
 
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "not_found"
@@ -210,6 +213,78 @@ def test_live_workspace_404s_without_waiting_on_the_mutex(
     # flaky on a loaded machine — the point is "did not wait on the mutex",
     # not "was instantaneous".
     assert elapsed < 2.0, f"blocked on the mutex for {elapsed:.1f}s"
+
+
+def test_a_restore_in_the_mutex_window_is_seen_by_the_fresh_reread(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """The route checks liveness twice. The SECOND check — a fresh scalar SELECT
+    taken after winning the mutex — exists because a workspace can be restored
+    in the window between the pre-lock read and the acquire, and the git read
+    must never proceed against a workspace that is live again.
+
+    Nothing else pins it: deleting the whole block leaves every other test in
+    this file green, because no restore path exists in src/ yet. Slice C ships
+    one, and by then nobody would notice the guard had been dropped as a
+    redundant-looking duplicate of the pre-lock check.
+    """
+    from call_manager.web.api import admin_retention
+
+    app = _setup(monkeypatch, pg_url, tmp_path)
+    admin, _ = _client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    ws_id = _seed(pg_session_factory, tmp_path, content="# Secret draft\n")
+    with pg_session_factory() as s:
+        _delete(s, ws_id)
+
+    real = admin_retention.acquire_commit_mutex
+
+    def _restore_then_acquire(session, workspace_id, **kw):
+        real(session, workspace_id, **kw)
+        # Separate connection, real COMMIT: the route's session must observe it
+        # only if it genuinely re-reads. READ COMMITTED gives each statement a
+        # fresh snapshot, and a column-only select() bypasses the identity map.
+        with pg_session_factory() as other:
+            other.get(Workspace, workspace_id).soft_deleted_at = None
+            other.commit()
+
+    monkeypatch.setattr(admin_retention, "acquire_commit_mutex", _restore_then_acquire)
+
+    r = admin.get(f"/api/admin/workspaces/deleted/{ws_id}")
+    assert r.status_code == 404, r.text
+    assert r.json()["error"]["code"] == "not_found"
+    assert "Secret draft" not in r.text
+    with pg_session_factory() as s:
+        n = (
+            s.query(WorkspaceEvent)
+            .filter_by(workspace_id=ws_id, kind="admin_deleted_workspace_inspected")
+            .count()
+        )
+    assert n == 0, "a workspace restored under the lock was still read and audited"
+
+
+def test_the_restore_probe_itself_does_not_break_the_route(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """Negative control for the test above. Same wrapper around the mutex, no
+    restore — so a 404 there cannot be the wrapper's fault."""
+    from call_manager.web.api import admin_retention
+
+    app = _setup(monkeypatch, pg_url, tmp_path)
+    admin, _ = _client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    ws_id = _seed(pg_session_factory, tmp_path, content="# Secret draft\n")
+    with pg_session_factory() as s:
+        _delete(s, ws_id)
+
+    real = admin_retention.acquire_commit_mutex
+    monkeypatch.setattr(
+        admin_retention,
+        "acquire_commit_mutex",
+        lambda session, workspace_id, **kw: real(session, workspace_id, **kw),
+    )
+
+    r = admin.get(f"/api/admin/workspaces/deleted/{ws_id}")
+    assert r.status_code == 200, r.text
+    assert "Secret draft" in r.json()["proposal_markdown"]
 
 
 def test_non_admin_is_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
