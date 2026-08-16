@@ -68,6 +68,30 @@ def test_lists_only_deleted_workspaces(monkeypatch, pg_url, pg_session_factory, 
         "a live workspace reachable through the admin retention surface would "
         "make it a back door around ownership"
     )
+    # `total` comes from a SEPARATE count query carrying its own filter, and it
+    # is an int — so unlike `items` it survives serialization and catches the
+    # filter being dropped from the count alone.
+    assert r.json()["total"] == 1
+
+
+def test_the_row_model_keeps_soft_deleted_at_required(monkeypatch, pg_url, tmp_path):
+    """Today a live workspace cannot even be serialized by this route: its
+    soft_deleted_at is NULL and DeletedWorkspaceRow declares the field required,
+    so dropping the WHERE filter produces a 500 rather than a leak.
+
+    That is a real second guard, but an accidental one — relaxing the annotation
+    to `datetime | None` (an easy thing to do when Task 3's detail model is
+    written beside it) would silently remove it and leave only the filter. Pin
+    it, so removing the guard is a decision rather than a side effect.
+    """
+    from call_manager.web.api.admin_retention import DeletedWorkspaceRow
+
+    field = DeletedWorkspaceRow.model_fields["soft_deleted_at"]
+    assert field.is_required(), (
+        "soft_deleted_at became optional; a live workspace can now serialize "
+        "through this route, so the WHERE filter is the only thing excluding it"
+    )
+    assert field.annotation is datetime
 
 
 def test_non_admin_is_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
