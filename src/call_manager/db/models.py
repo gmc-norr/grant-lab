@@ -96,7 +96,21 @@ class User(Base):
     # Set during first-run value loop: the profile the user most recently
     # bootstrapped or selected as their default. SET NULL on profile delete.
     default_profile_id: Mapped[int | None] = mapped_column(
-        BigInteger, ForeignKey("profiles.id", ondelete="SET NULL"), nullable=True
+        BigInteger,
+        # use_alter: `users` and `profiles` reference each other (this column,
+        # and profiles.created_by -> users.id), so SQLAlchemy cannot order the
+        # two for whole-metadata DDL. Deferring THIS side to a post-create
+        # ALTER breaks the cycle; it has to be this side because it is the
+        # nullable one — profiles.created_by is NOT NULL and cannot wait.
+        # The name matches alembic 0046's create_foreign_key, so the model and
+        # the database agree and no migration is needed.
+        ForeignKey(
+            "profiles.id",
+            ondelete="SET NULL",
+            name="fk_users_default_profile_id",
+            use_alter=True,
+        ),
+        nullable=True,
     )
 
 
