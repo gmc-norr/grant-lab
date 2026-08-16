@@ -45,6 +45,7 @@ dev = [
     "reportlab>=4.0",
     "pytest-httpx>=0.36.2",
     "pip-audit>=2.7",
+    "pytest-xdist>=3.8.0",
 ]
 
 [build-system]
@@ -129,6 +130,7 @@ no-build-package = [
     "docker",
     "docstring-parser",
     "et-xmlfile",
+    "execnet",
     "fastapi",
     "filelock",
     "greenlet",
@@ -186,6 +188,7 @@ no-build-package = [
     "pytest",
     "pytest-asyncio",
     "pytest-httpx",
+    "pytest-xdist",
     "python-dateutil",
     "python-docx",
     "python-dotenv",
