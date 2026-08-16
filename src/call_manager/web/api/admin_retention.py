@@ -81,7 +81,10 @@ def list_deleted_workspaces(
             select(Workspace, User.email)
             .outerjoin(User, User.id == Workspace.owner_id)
             .where(Workspace.soft_deleted_at.is_not(None))
-            .order_by(Workspace.soft_deleted_at.desc())
+            # id as tiebreak: two workspaces deleted in the same instant would
+            # otherwise have an undefined relative order, and limit/offset paging
+            # over an unstable sort can repeat or skip a row across pages.
+            .order_by(Workspace.soft_deleted_at.desc(), Workspace.id.desc())
             .limit(limit)
             .offset(offset)
         ).all()

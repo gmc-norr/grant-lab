@@ -141,3 +141,77 @@ def test_a_plain_directory_does_not_inherit_an_enclosing_repository(tmp_path):
     )
     with pytest.raises(GitCommitError):
         list_commits(outer / "inner", limit=10)
+
+def test_a_non_utf8_subject_does_not_escape_as_unicodedecodeerror(tmp_path):
+    """git stores commit-message bytes verbatim, and an imported or damaged
+    repository is exactly the population the admin retention surface exists to
+    inspect.
+
+    With `text=True` the decode happens inside subprocess.run and raises
+    UnicodeDecodeError, which is neither OSError nor GitCommitError. It would
+    escape every caller's except clause and surface as a 500, where the spec
+    requires a deliberate "no readable repository" state. Decoding here with
+    errors="replace" mirrors read_blob, which carries the same guarantee.
+
+    The commit is written as a raw object with an `encoding UTF-8` header over a
+    body that is not UTF-8. That combination matters: with no header (or a
+    truthful one) git transcodes on output and Python never sees the bad bytes,
+    so a test built with `commit-tree` alone passes whether the fix is present
+    or not. Verified: this construction does produce undecodable stdout.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "."], cwd=repo, check=True)
+    tree = subprocess.run(
+        ["git", "write-tree"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    raw = (
+        f"tree {tree}\n".encode()
+        + b"author t <t@t> 1700000000 +0000\n"
+        + b"committer t <t@t> 1700000000 +0000\n"
+        + b"encoding UTF-8\n"
+        + b"\n\xff\xfe raw invalid\n"
+    )
+    sha = (
+        subprocess.run(
+            ["git", "hash-object", "-t", "commit", "-w", "--stdin"],
+            cwd=repo,
+            input=raw,
+            capture_output=True,
+            check=True,
+        )
+        .stdout.decode()
+        .strip()
+    )
+    subprocess.run(["git", "update-ref", "HEAD", sha], cwd=repo, check=True)
+
+    commits, truncated = list_commits(repo, limit=10)
+
+    assert len(commits) == 1
+    assert commits[0].sha == sha
+    assert truncated is False
+    # U+FFFD replacement chars, not a raised exception.
+    assert "\ufffd" in commits[0].subject
+    assert "raw invalid" in commits[0].subject
+
+
+def test_an_unparseable_author_date_raises_gitcommiterror_not_valueerror(tmp_path, monkeypatch):
+    """Same reasoning one layer down: datetime.fromisoformat raises ValueError,
+    which also escapes callers' except clauses. Framing can only shift on a
+    malformed stream, but when it does the caller must still see the handled
+    error type."""
+    repo = _repo(tmp_path, 1)
+
+    real = subprocess.run
+
+    def _garbled(cmd, **kw):
+        proc = real(cmd, **kw)
+        if isinstance(cmd, list) and "log" in cmd:
+            proc.stdout = b"a" * 40 + b"\x00not-a-date\x00subject\x00"
+        return proc
+
+    monkeypatch.setattr(subprocess, "run", _garbled)
+
+    with pytest.raises(GitCommitError, match="unparseable author date"):
+        list_commits(repo, limit=10)
+

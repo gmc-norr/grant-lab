@@ -1,9 +1,14 @@
-import { screen, waitFor } from "@testing-library/react";
+import { MantineProvider } from "@mantine/core";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactNode } from "react";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 
 import * as clientMod from "../api/client";
 import { renderWithProviders } from "../test-utils";
+import { theme } from "../theme/theme";
 import { AdminDeletedWorkspaces } from "./AdminDeletedWorkspaces";
 import { AdminDeletedWorkspaceDetail } from "./AdminDeletedWorkspaceDetail";
 
@@ -78,10 +83,12 @@ it("does not offer a next page when everything already fits", async () => {
 
 // ---- detail page ----
 
+const WS_ID = "11111111-1111-1111-1111-111111111111";
+
 function mockDetail(overrides: Record<string, unknown> = {}) {
   return vi.spyOn(clientMod.api, "GET").mockResolvedValue({
     data: {
-      id: "11111111-1111-1111-1111-111111111111",
+      id: WS_ID,
       title: "Retired grant draft",
       owner_email: "owner@ki.se",
       soft_deleted_at: "2026-08-01T10:00:00Z",
@@ -130,4 +137,36 @@ it("says when the history was truncated", async () => {
   mockDetail({ history_truncated: true });
   renderWithProviders(<AdminDeletedWorkspaceDetail />);
   expect(await screen.findByText(/most recent 200/i)).toBeInTheDocument();
+});
+
+it("re-requests the draft on every open, so each read leaves an audit row", async () => {
+  // The backend writes one audit event PER READ and deliberately does not
+  // de-duplicate (test_a_second_read_appends_a_second_event). The app-wide
+  // client sets staleTime: 20_000 (App.tsx:16), so without a per-query
+  // override the second open inside 20s is served from cache: no request, and
+  // therefore no second audit row. That would undo a privacy guarantee the
+  // backend is careful to make, from the client side.
+  //
+  // renderWithProviders builds a FRESH QueryClient per call, so it cannot see
+  // this at all — the wrapper below reuses one client with the real defaults.
+  const get = mockDetail();
+  const qc = new QueryClient({
+    defaultOptions: { queries: { staleTime: 20_000, refetchOnWindowFocus: false } },
+  });
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>{children}</MemoryRouter>
+      </QueryClientProvider>
+    </MantineProvider>
+  );
+
+  const first = render(<AdminDeletedWorkspaceDetail workspaceId={WS_ID} />, { wrapper });
+  await screen.findByText(/Body text\./);
+  expect(get).toHaveBeenCalledTimes(1);
+  first.unmount();
+
+  render(<AdminDeletedWorkspaceDetail workspaceId={WS_ID} />, { wrapper });
+  await screen.findByText(/Body text\./);
+  expect(get).toHaveBeenCalledTimes(2);
 });

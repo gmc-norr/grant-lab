@@ -407,8 +407,7 @@ def list_commits(repo_dir: Path, *, limit: int) -> tuple[list[CommitInfo], bool]
             ],
             cwd=repo_dir,
             env=_list_commits_env(repo_dir),
-            capture_output=True,
-            text=True,
+            capture_output=True,  # bytes (NO text=True) so WE control decoding
             check=True,
             timeout=_GIT_TIMEOUT_SECONDS,
         )
@@ -423,10 +422,19 @@ def list_commits(repo_dir: Path, *, limit: int) -> tuple[list[CommitInfo], bool]
             f"cannot list commits in {repo_dir}: {detail}"
         ) from e
 
+    # errors="replace", mirroring read_blob: a commit subject is not guaranteed
+    # valid UTF-8 (git stores message bytes verbatim, and an imported or damaged
+    # repository is exactly the population this reader exists to inspect). With
+    # text=True the decode happens inside subprocess.run and raises
+    # UnicodeDecodeError, which is neither OSError nor GitCommitError — it would
+    # escape every caller's except clause and surface as a 500 instead of the
+    # deliberate "no readable repository" state.
+    stdout = proc.stdout.decode("utf-8", errors="replace")
+
     # git -z emits a trailing NUL, so the final split yields an empty tail.
     # Drop ONLY that tail — do not filter on truthiness, which would silently
     # swallow an empty subject and shift every field after it.
-    fields = proc.stdout.split("\x00")
+    fields = stdout.split("\x00")
     if fields and fields[-1] == "":
         fields.pop()
     if len(fields) % 3 != 0:
@@ -438,16 +446,17 @@ def list_commits(repo_dir: Path, *, limit: int) -> tuple[list[CommitInfo], bool]
     truncated = len(records) > limit
     commits: list[CommitInfo] = []
     for sha, authored, subject in records[:limit]:
-        commits.append(
-            CommitInfo(
-                sha=sha,
-                # %aI is strict ISO-8601 with an offset; fromisoformat handles it
-                # on 3.12. A parse failure means the framing shifted — fail loudly
-                # rather than storing a garbage timestamp.
-                authored_at=datetime.fromisoformat(authored),
-                subject=subject,
-            )
-        )
+        try:
+            # %aI is strict ISO-8601 with an offset; fromisoformat handles it on
+            # 3.12. A parse failure means the framing shifted — fail loudly, but
+            # as GitCommitError: a bare ValueError escapes every caller's except
+            # clause and becomes a 500 rather than a handled state.
+            authored_at = datetime.fromisoformat(authored)
+        except ValueError as e:
+            raise GitCommitError(
+                f"unparseable author date in {repo_dir}: {authored!r}"
+            ) from e
+        commits.append(CommitInfo(sha=sha, authored_at=authored_at, subject=subject))
     return commits, truncated
 
 

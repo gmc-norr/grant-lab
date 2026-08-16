@@ -52,6 +52,15 @@ export function useAdminDeletedWorkspace(workspaceId: string) {
           params: { path: { workspace_id: workspaceId } },
         }),
       ),
+    // Never cached. The backend writes one audit event PER READ -- an admin
+    // reading someone's deleted draft is a privacy-adjacent act and the trace
+    // is deliberately not de-duplicated (see test_a_second_read_appends_a_
+    // second_event). The app-wide staleTime of 20s would serve the second open
+    // from cache with no request and therefore no second audit row, silently
+    // undoing that guarantee from the client side.
+    staleTime: 0,
+    gcTime: 0,
+    refetchOnMount: "always",
     retry: false,
   });
 }

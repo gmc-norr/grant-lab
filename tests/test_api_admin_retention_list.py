@@ -94,6 +94,59 @@ def test_the_row_model_keeps_soft_deleted_at_required(monkeypatch, pg_url, tmp_p
     assert field.annotation is datetime
 
 
+def test_newest_deletion_first(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """Spec 3.1.1 mandates "newest `soft_deleted_at` first". The final review
+    found this was the one spec-mandated constraint in the slice with zero
+    coverage: flipping .desc() to .asc() left all 25 retention tests green.
+
+    Distinct timestamps, set explicitly rather than by wall-clock, so the
+    assertion cannot pass by accident on a fast machine."""
+    app = _setup(monkeypatch, pg_url, tmp_path)
+    admin, _ = _client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    with pg_session_factory() as s:
+        owner = make_user(s, email="ord@ki.se")
+        made = [make_workspace(s, owner=owner, title=f"w{i}") for i in range(3)]
+        s.commit()
+        ids = [w.id for w in made]
+        # w0 oldest, w2 newest — deliberately NOT the insertion order of the ids.
+        for wid, day in zip(ids, (1, 3, 2), strict=True):
+            ws = s.get(Workspace, wid)
+            ws.soft_deleted_at = datetime(2026, 8, day, 12, 0, tzinfo=UTC)
+        s.commit()
+
+    items = admin.get("/api/admin/workspaces/deleted").json()["items"]
+    titles = [row["title"] for row in items]
+    assert titles == ["w1", "w2", "w0"], (
+        "the list must be newest-deletion-first; an admin scanning for what was "
+        "just deleted would otherwise have to page to the end"
+    )
+
+
+def test_equal_deletion_times_still_page_without_repeating_a_row(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """limit/offset over an unstable sort can repeat or skip rows between pages.
+    Two workspaces deleted in the same instant is the case that exposes it, so
+    the query carries an id tiebreak."""
+    app = _setup(monkeypatch, pg_url, tmp_path)
+    admin, _ = _client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    same = datetime(2026, 8, 5, 9, 0, tzinfo=UTC)
+    with pg_session_factory() as s:
+        owner = make_user(s, email="tie@ki.se")
+        made = [make_workspace(s, owner=owner, title=f"t{i}") for i in range(4)]
+        s.commit()
+        for w in made:
+            s.get(Workspace, w.id).soft_deleted_at = same
+        s.commit()
+
+    seen = []
+    for offset in (0, 2):
+        page = admin.get(f"/api/admin/workspaces/deleted?limit=2&offset={offset}").json()
+        seen += [row["id"] for row in page["items"]]
+    assert len(seen) == 4
+    assert len(set(seen)) == 4, "a row appeared on two pages, or one was skipped"
+
+
 def test_non_admin_is_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
     app = _setup(monkeypatch, pg_url, tmp_path)
     member, _ = _client_for(app, pg_session_factory, email="member@ki.se", is_admin=False)
