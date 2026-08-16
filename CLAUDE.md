@@ -13,6 +13,19 @@ The v1 design spec (`docs/superpowers/specs/2026-04-14-call-monitor-design.md`) 
 ## Stack
 
 - Python 3.12 — `uv` for packages, `ruff` for lint/format, `pytest` (+ testcontainers Postgres) for tests.
+- **Fast local test runs:** `uv run pytest -n 16 --dist loadfile` (~1m vs ~11m serial).
+  Each xdist worker starts its own testcontainers Postgres, so workers cannot see each
+  other's data. `--dist loadfile` keeps every file's tests on one worker — do **not**
+  switch to `--dist loadgroup`, which scatters all unmarked tests per-test.
+  Deliberately NOT in `addopts`: CI runs on a 2-4 core runner where this is slower.
+  - **`-n 16` is tuned to the 72-thread dev box** — it means 16 pytest processes AND 16
+    Postgres containers. Scale down on a smaller machine; `-n 4` is the measured floor
+    (still ~3m). Never use `-n auto`: `psutil` is not installed here, so xdist falls
+    through to `sched_getaffinity` and resolves it to **72** workers.
+  - Expected result is **`3357 passed, 1 skipped`**. If you have `ANTHROPIC_API_KEY`
+    exported you will instead see `3358 passed` — the one skip is a real-SDK test gated
+    on that variable (`tests/proposal_assist/test_drafting_claude_adapter.py`), and it
+    makes a live API call. Neither count means the suite is broken.
 - FastAPI backend. PostgreSQL 16 + SQLAlchemy 2.x + Alembic, with `pgvector` for embeddings.
 - APScheduler, in-process — **single-instance hard constraint** (the scheduler must not run on more than one process).
 - **Frontend is mid-migration to a React SPA.** The calls dashboard is a React 18 + Vite SPA (react-router, TanStack Query, `openapi-fetch` against types generated from the FastAPI OpenAPI schema; `pnpm`). The proposal-assist workspace, admin, auth, and profile pages are still server-rendered **Jinja2 + HTMX**.
