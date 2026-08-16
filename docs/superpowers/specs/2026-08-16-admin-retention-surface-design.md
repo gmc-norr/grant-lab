@@ -93,6 +93,13 @@ logic (extended to the whole tree), and re-deriving it later from a git history 
 to search is worse than leaving a documented, unused-for-now function in place. Its docstring
 must say it is no longer on the delete path and name the slice that will call it.
 
+Slice A also **inverts its error contract**: it raised nothing and swallowed every `OSError`,
+because inside the DELETE route a failed cleanup must not block the 204. With that caller gone,
+its only intended caller needs the opposite — see §9's Slice E bullet requiring a partial removal
+to surface as a controlled retryable failure committing no tombstone and no audit event. Doing it
+now, while the function has no production caller, is free; leaving it would hand Slice E a
+best-effort primitive it must notice and undo before it can honour that requirement.
+
 The tests asserting deletion removes bytes (`tests/test_workspaces_service.py:208` and
 neighbours) invert: they must now assert the bytes **survive** a delete. That inversion is the
 slice's real deliverable — a test that still passes unchanged would mean the behaviour did not
