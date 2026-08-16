@@ -321,9 +321,13 @@ Settled points:
 - Restore takes the same plain `acquire_commit_mutex` as inspection, for the same reason: it must
   work on a workspace that is currently deleted, so `acquire_commit_mutex_live` would refuse it.
 
-### 9.4 Incidental fix, deferred to Slice E
+### 9.4 The false-sweep docstring — fixed in Slice A, not deferred
 
 `scrub_workspace_bytes`'s docstring claims a failed cleanup's files "will be collected by a future
-sweep". No sweep exists. It is left alone in Slice 1 rather than half-corrected: with Slice 3's
-whole-tree purge the honest replacement is that orphaned bytes persist until an admin purges the
-workspace, and that sentence can only be written once that is true.
+sweep". No sweep exists anywhere in the codebase.
+
+Revision 3 deferred this to the purge slice on the grounds that the honest replacement could only
+be written once purge existed. **Revision 4 supersedes that:** Slice A takes the function off the
+delete path entirely, so its docstring is being rewritten regardless — it can no longer describe
+itself as "the FS half of a soft-delete". Leaving one verified-false sentence inside a docstring
+being rewritten for other reasons would be deliberate, not incidental.
