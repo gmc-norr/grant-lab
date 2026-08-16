@@ -13,6 +13,11 @@ The v1 design spec (`docs/superpowers/specs/2026-04-14-call-monitor-design.md`) 
 ## Stack
 
 - Python 3.12 — `uv` for packages, `ruff` for lint/format, `pytest` (+ testcontainers Postgres) for tests.
+- **Fast local test runs:** `uv run pytest -n 16 --dist loadfile` (~1m vs ~11m serial).
+  Each xdist worker starts its own testcontainers Postgres, so workers cannot see each
+  other's data. `--dist loadfile` keeps every file's tests on one worker — do **not**
+  switch to `--dist loadgroup`, which scatters all unmarked tests per-test.
+  Deliberately NOT in `addopts`: CI runs on a 2-4 core runner where this is slower.
 - FastAPI backend. PostgreSQL 16 + SQLAlchemy 2.x + Alembic, with `pgvector` for embeddings.
 - APScheduler, in-process — **single-instance hard constraint** (the scheduler must not run on more than one process).
 - **Frontend is mid-migration to a React SPA.** The calls dashboard is a React 18 + Vite SPA (react-router, TanStack Query, `openapi-fetch` against types generated from the FastAPI OpenAPI schema; `pnpm`). The proposal-assist workspace, admin, auth, and profile pages are still server-rendered **Jinja2 + HTMX**.
