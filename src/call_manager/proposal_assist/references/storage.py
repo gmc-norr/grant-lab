@@ -110,9 +110,10 @@ class ReferenceStorage:
         Mirrors ``AttachmentStorage.delete_workspace``. Only this subdir
         is removed; sibling ``repo/`` (B5) and ``attachments/`` (B7) trees
         are untouched. No-op if the subdir doesn't exist (covers
-        workspaces that never had any references). Called from the
-        workspace soft-delete handler so reference bytes don't survive the
-        compliance scrub."""
+        workspaces that never had any references). Called from
+        ``scrub_workspace_bytes``, which is NOT part of the delete path
+        (Slice A froze delete instead) — it is retained for Slice E's
+        admin purge, the actual removal of a deleted workspace's bytes."""
         target = self.root / str(workspace_id) / "references"
         if target.exists():
             shutil.rmtree(target)

@@ -29,9 +29,11 @@ def _noop_hook():
 
 def test_the_barrier_exceeds_every_hooks_own_worst_case():
     """The barrier is a BOUND, not a hope. If a hook's own timeouts can exceed it,
-    the delete route routinely logs retirement.barrier_timeout and returns to run
-    scrub_workspace_bytes while teardown is still in flight — deleting files a live
-    subprocess may still be reading. Hooks run concurrently (asyncio.gather), so the
+    the delete route routinely logs retirement.barrier_timeout and returns before
+    retirement has actually finished tearing down live state. That is harmless
+    today — the independent backstops documented next to
+    _RETIREMENT_BARRIER_SECONDS are what actually keep things correct — just a
+    needless degrade-to-eventual. Hooks run concurrently (asyncio.gather), so the
     budget is the MAX of the hooks, not the sum.
 
     Reads the LIVE constants (and the adapter's real signature defaults) so raising

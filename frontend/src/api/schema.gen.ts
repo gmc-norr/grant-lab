@@ -614,12 +614,15 @@ export interface paths {
         post?: never;
         /**
          * Soft Delete Workspace Api
-         * @description Owner-only soft-delete. Cascades active jobs + queued turns, retires the
-         *     workspace in-process, and scrubs file bytes. Re-delete of an already-soft-
-         *     deleted workspace → 404 (require_owner filters soft_deleted_at), matching the
-         *     Jinja route — not idempotent, by design.
+         * @description Owner-only soft-delete. Cascades active jobs + queued turns and retires the
+         *     workspace in-process. Re-delete of an already-soft-deleted workspace → 404
+         *     (require_owner filters soft_deleted_at) — not idempotent, by design.
          *
-         *     The ORDER is the contract (spec B5): DB commit → retire → scrub → 204.
+         *     Destroys nothing on disk (Slice A): the workspace is frozen, not erased, so
+         *     its contents remain for a later admin purge. Users are locked out by the
+         *     liveness gates and the room eviction, not by byte removal.
+         *
+         *     The ORDER is the contract: DB commit → retire → 204.
          */
         delete: operations["soft_delete_workspace_api_api_workspaces__workspace_id__delete"];
         options?: never;

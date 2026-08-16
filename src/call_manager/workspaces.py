@@ -91,11 +91,11 @@ def soft_delete_workspace_db(
     active background job + queued turn so none can burn cloud tokens after
     deletion, terminalize any RUNNING turn, and COMMIT.
 
-    The delete route interleaves in-process retirement between this durable DB
-    commit and the FS scrub: DB commit -> retire -> scrub -> 204. There is
-    deliberately no wrapper composing this with scrub_workspace_bytes — one
-    existed until Slice C2 and was deleted, because it looked like the entry
-    point for deleting a workspace while skipping retirement entirely.
+    The delete route interleaves in-process retirement after this durable DB
+    commit: DB commit -> retire -> 204. There is deliberately no wrapper
+    composing this with scrub_workspace_bytes — one existed until Slice C2 and
+    was deleted, because it looked like the entry point for deleting a
+    workspace while skipping retirement entirely.
 
     The caller resolves ownership (require_owner) before calling this.
 
@@ -179,15 +179,20 @@ def soft_delete_workspace_db(
 
 
 def scrub_workspace_bytes(workspace_id: uuid.UUID, *, workspaces_dir: Path) -> None:
-    """The FS half of a soft-delete: best-effort removal of attachment and
-    reference bytes from disk.
+    """Best-effort removal of attachment and reference bytes from disk.
 
-    Runs AFTER the DB commit (a prior Codex-finding fix): the user-visible
-    'deleted' state is durable first, THEN the bytes go. A cleanup failure leaves
-    the workspace soft-deleted with harmless orphan files — no code reads them
-    (the row-source-of-truth lookup gates serving on a live DB row) and a future
-    sweep collects them. Attachment/reference DB rows are intentionally preserved
-    for the audit trail; only the on-disk bytes go. Never raises on OSError.
+    NOT called by the delete path. Slice A made deletion freeze-only: it destroys
+    nothing, so a later restore is lossless. This function is retained for Slice
+    E's admin purge, which is the deliberate act that removes a deleted
+    workspace's files for real — and which will extend it to the whole workspace
+    tree rather than these two subtrees.
+
+    It therefore has NO production caller today. That is intentional; deleting it
+    would mean re-deriving this logic from git history nobody will think to search.
+
+    Attachment and reference DB rows are never touched here — they are the audit
+    trail. Never raises on OSError: a failed cleanup leaves orphaned bytes that
+    nothing reads and nothing collects. There is no sweep.
     """
     # Scrub attachment bytes (DB rows remain — audit trail). Best-effort.
     try:
@@ -195,7 +200,7 @@ def scrub_workspace_bytes(workspace_id: uuid.UUID, *, workspaces_dir: Path) -> N
     except OSError:
         logger.warning(
             "scrub_workspace_bytes: attachment cleanup failed for workspace %s; "
-            "files will be collected by a future sweep",
+            "bytes are left in place and are only removed by an admin purge",
             workspace_id,
             exc_info=True,
         )
@@ -205,7 +210,7 @@ def scrub_workspace_bytes(workspace_id: uuid.UUID, *, workspaces_dir: Path) -> N
     except OSError:
         logger.warning(
             "scrub_workspace_bytes: reference cleanup failed for workspace %s; "
-            "files will be collected by a future sweep",
+            "bytes are left in place and are only removed by an admin purge",
             workspace_id,
             exc_info=True,
         )

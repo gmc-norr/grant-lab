@@ -80,8 +80,8 @@ from call_manager.proposal_assist.drafting.locking import is_lock_timeout
 # drafting/locking.py, but that bounds the waiter, not the holder in front of
 # it.) 2s keeps that worst case a fraction of the DELETE route's
 # asserted < 6.0s rather than a multiple of it; it does not guarantee the budget,
-# because the route's own transaction, retirement barrier and scrub also have to
-# fit inside it. Losing a race to contention is cheap on this path: the prefix has
+# because the route's own transaction and retirement barrier also have to fit
+# inside it. Losing a race to contention is cheap on this path: the prefix has
 # already claimed a job row that stays 'running', and the per-pass reaper
 # reclaims it — a requeue, not a dead letter.
 #

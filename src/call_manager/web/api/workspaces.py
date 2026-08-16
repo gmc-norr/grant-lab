@@ -1495,12 +1495,15 @@ def soft_delete_workspace_api(
     request: Request,
     user: User = Depends(get_current_user),  # noqa: B008
 ) -> Response:
-    """Owner-only soft-delete. Cascades active jobs + queued turns, retires the
-    workspace in-process, and scrubs file bytes. Re-delete of an already-soft-
-    deleted workspace → 404 (require_owner filters soft_deleted_at), matching the
-    Jinja route — not idempotent, by design.
+    """Owner-only soft-delete. Cascades active jobs + queued turns and retires the
+    workspace in-process. Re-delete of an already-soft-deleted workspace → 404
+    (require_owner filters soft_deleted_at) — not idempotent, by design.
 
-    The ORDER is the contract (spec B5): DB commit → retire → scrub → 204."""
+    Destroys nothing on disk (Slice A): the workspace is frozen, not erased, so
+    its contents remain for a later admin purge. Users are locked out by the
+    liveness gates and the room eviction, not by byte removal.
+
+    The ORDER is the contract: DB commit → retire → 204."""
     sf = request.app.state.session_factory
     with sf() as session:
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)

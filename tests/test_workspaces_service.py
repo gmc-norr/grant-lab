@@ -48,7 +48,7 @@ def test_soft_delete_cascades_and_keeps_bytes(pg_session_factory, tmp_path):
         s.commit()
         ws_id = ws.id
 
-    # Seed an on-disk attachment byte tree so we can assert it is scrubbed.
+    # Seed an on-disk attachment byte tree so we can assert delete leaves it alone.
     attach_dir = tmp_path / str(ws_id) / "attachments"
     attach_dir.mkdir(parents=True)
     (attach_dir / "blob.bin").write_bytes(b"x")
@@ -254,6 +254,7 @@ def test_the_production_soft_delete_wrapper_stays_deleted():
     assert not hasattr(ws_mod, "soft_delete_workspace"), (
         "soft_delete_workspace is back in production. It skips retirement. Use "
         "tests.workspace_delete_helper.soft_delete_workspace_for_test in tests, or "
-        "call soft_delete_workspace_db and scrub_workspace_bytes directly with "
-        "retirement between them (see web/api/workspaces.py's delete route)."
+        "call soft_delete_workspace_db with retirement after it (see "
+        "web/api/workspaces.py's delete route) — scrub_workspace_bytes is not "
+        "part of that composition; production has no caller for it today."
     )

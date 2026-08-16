@@ -35,8 +35,15 @@ REQUIRED_HOOKS = ("turns", "collab", "jobs", "passes")
 # room.lock tombstone and load_or_hydrate's mutex), NOT by B4.
 #
 # MUST EXCEED every hook's own worst case, or the barrier fires on healthy-but-slow
-# deletes and scrub_workspace_bytes starts deleting files while teardown is still in
-# flight. Hooks run concurrently, so the budget is the MAX, not the sum:
+# deletes and the route returns 204 before retirement has actually finished tearing
+# down live state — harmless today (the backstops above are what actually keep
+# things correct), just a needless degrade-to-eventual. The budget was originally
+# sized against a sharper hazard — scrub_workspace_bytes starting to delete files
+# while this same teardown was still in flight — but Slice A's freeze-only delete
+# no longer calls scrub_workspace_bytes on this path, so that race is gone here.
+# It returns in Slice E's admin purge, where the barrier will have to be PROVEN
+# against it rather than assumed the way this one is. Hooks run concurrently, so
+# the budget is the MAX, not the sum:
 #   collab: max over the two rooms (they retire concurrently) of
 #           _RETIRE_LOCK_WAIT_SECONDS (1.0) + _RETIRE_OPS_DRAIN_SECONDS (2.0) = 3.0
 #   turns:  adapter disconnect_deadline_seconds (3.0) + reap_deadline_seconds (2.0) = 5.0

@@ -40,9 +40,9 @@ The two ceilings, in decreasing hardness
    restated here). A lock stall is only ONE term of that route's time: it also
    runs its own cancel-everything transaction, then blocks on the retirement
    barrier (`retirement._RETIREMENT_BARRIER_SECONDS` — imported below, and large
-   enough that the barrier alone can exhaust the budget), then scrubs bytes. So
-   the stall a cap may contribute has to be a FRACTION of the budget, not the
-   budget. `BUDGET_FRACTION_FOR_LOCK_STALLS` fixes that fraction at two thirds,
+   enough that the barrier alone can exhaust the budget). So the stall a cap may
+   contribute has to be a FRACTION of the budget, not the budget.
+   `BUDGET_FRACTION_FOR_LOCK_STALLS` fixes that fraction at two thirds,
    leaving a third for the route's own work. The fraction is arguable; the
    direction is not — raise a cap and the DELETE's worst case grows in lockstep.
 
@@ -184,7 +184,7 @@ from call_manager.workspaces import soft_delete_workspace_db
 MAX_CONTENDED_ROWS = 2
 
 # Share of the DELETE route's asserted budget that lock stalls may consume; the
-# remainder is the route's own transaction, retirement barrier and scrub.
+# remainder is the route's own transaction and retirement barrier.
 BUDGET_FRACTION_FOR_LOCK_STALLS = 2 / 3
 
 _BUDGET_TEST = Path(__file__).with_name("test_phase0_transaction_boundaries.py")
@@ -336,8 +336,7 @@ def test_mutex_held_caps_stay_under_the_deletes_mutex_acquisition_timeout():
 def test_every_cap_leaves_headroom_under_the_delete_route_budget():
     """Ceiling 2 (budgetary). Each cap's worst-case stall must stay inside the
     share of the DELETE route's asserted budget that lock waits may claim — the
-    rest belongs to the route's own transaction, its retirement barrier and the
-    scrub.
+    rest belongs to the route's own transaction and its retirement barrier.
     """
     budget = _delete_route_budget_seconds()
     stall_ceiling = budget * BUDGET_FRACTION_FOR_LOCK_STALLS
@@ -353,7 +352,7 @@ def test_every_cap_leaves_headroom_under_the_delete_route_budget():
             f"over the {stall_ceiling:.1f}s that lock stalls may take out of the "
             f"DELETE route's asserted {budget}s budget "
             f"(test_phase0_transaction_boundaries.py). The route still has its own "
-            f"cancel transaction, a retirement barrier bounded at "
-            f"{retirement._RETIREMENT_BARRIER_SECONDS}s and the byte scrub to do "
-            f"inside that budget. Lower the cap; do not raise this ceiling."
+            f"cancel transaction and a retirement barrier bounded at "
+            f"{retirement._RETIREMENT_BARRIER_SECONDS}s to fit inside that budget. "
+            f"Lower the cap; do not raise this ceiling."
         )

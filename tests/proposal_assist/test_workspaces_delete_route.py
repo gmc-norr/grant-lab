@@ -214,7 +214,7 @@ def test_delete_reaches_the_turns_registry_tombstone(
 
     Every layer was already covered in isolation (the registry in
     test_drafting_retire_tombstone, the coordinator in test_retirement_coordinator,
-    the route's db/retire/scrub ORDER with the bridge stubbed out) — but nothing
+    the route's db/retire ORDER with the bridge stubbed out) — but nothing
     joined them, so replacing main.py's `"turns": ...registry.retire_workspace`
     hook with a no-op left the entire proposal_assist suite green (1827 passed).
     A silently unwired hook means deleting a workspace never stops its turns, which
