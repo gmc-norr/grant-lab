@@ -22,14 +22,19 @@
 
 ## Environment notes (read before running anything)
 
-- **The full suite takes ~11 minutes and the Bash tool caps a foreground command at 10 minutes.** Run it detached and poll:
+- **The full suite takes ~11 minutes and the Bash tool caps a foreground command at 10 minutes.** Run it detached and poll **the specific PID**:
   ```bash
   cd /home/parlar_ai/dev/call-monitor
   nohup uv run pytest -q > /tmp/suite-<label>.log 2>&1 &
-  # then poll until the process is gone:
-  until ! pgrep -f "bin/pytest" > /dev/null 2>&1; do sleep 20; done; tail -3 /tmp/suite-<label>.log
+  SUITE_PID=$!
+  while kill -0 "$SUITE_PID" 2>/dev/null; do sleep 20; done; tail -3 /tmp/suite-<label>.log
   ```
-  Note `pgrep -q` does **not** exist on Linux — it errors and the loop exits immediately. Use `> /dev/null` as above.
+  **Never poll by process name here.** Task 1 proved a name-matching poll hangs forever: the
+  polling loop's own wrapping shell carries the pytest path in its command line, so the pattern
+  matches the poller itself and the condition can never become false. Two loops were found stuck
+  exactly that way on this host. Name matching would also catch an unrelated user's pytest on
+  this shared machine. Separately, `pgrep -q` does not exist on Linux — it errors, and a loop
+  built on it exits instantly, reporting a still-running suite as finished.
 - **Never pipe a suite run through `tail` to get its exit code** — the pipeline's status is `tail`'s (always 0). Redirect to a file, then `echo $?`.
 - **`pytest` exits 4 on "no tests ran."** A path typo reads as success to any check that only inspects the exit code. Always confirm a nonzero collected count.
 
@@ -74,7 +79,7 @@ Do not trust the number in this plan — re-derive it, because the plan may be o
 ```bash
 cd /home/parlar_ai/dev/call-monitor
 nohup uv run pytest -q > /tmp/suite-serial-baseline.log 2>&1 &
-until ! pgrep -f "bin/pytest" > /dev/null 2>&1; do sleep 20; done
+SUITE_PID=$!; while kill -0 "$SUITE_PID" 2>/dev/null; do sleep 20; done
 tail -2 /tmp/suite-serial-baseline.log
 ```
 
@@ -132,7 +137,7 @@ This is discovery, not a pass/fail gate. `-n 8` is a probe, not the adopted valu
 ```bash
 cd /home/parlar_ai/dev/call-monitor
 nohup uv run pytest -n 8 --dist loadfile -q > /tmp/suite-shakeout.log 2>&1 &
-until ! pgrep -f "bin/pytest" > /dev/null 2>&1; do sleep 20; done
+SUITE_PID=$!; while kill -0 "$SUITE_PID" 2>/dev/null; do sleep 20; done
 tail -5 /tmp/suite-shakeout.log
 grep -E "^(FAILED|ERROR)" /tmp/suite-shakeout.log | sort -u
 ```
@@ -223,7 +228,7 @@ If you hit a case where making the test self-sufficient is genuinely impractical
 ```bash
 cd /home/parlar_ai/dev/call-monitor
 nohup uv run pytest -n 8 --dist loadfile -q > /tmp/suite-parallel-verify.log 2>&1 &
-until ! pgrep -f "bin/pytest" > /dev/null 2>&1; do sleep 20; done
+SUITE_PID=$!; while kill -0 "$SUITE_PID" 2>/dev/null; do sleep 20; done
 tail -3 /tmp/suite-parallel-verify.log
 ```
 
@@ -236,7 +241,7 @@ The fixes must not have broken the invocation CI uses.
 ```bash
 cd /home/parlar_ai/dev/call-monitor
 nohup uv run pytest -q > /tmp/suite-serial-recheck.log 2>&1 &
-until ! pgrep -f "bin/pytest" > /dev/null 2>&1; do sleep 20; done
+SUITE_PID=$!; while kill -0 "$SUITE_PID" 2>/dev/null; do sleep 20; done
 tail -3 /tmp/suite-serial-recheck.log
 uv run ruff check . ; echo "RUFF_EXIT=$?"
 ```
@@ -274,7 +279,7 @@ Each is a full suite run (~1-4 minutes each once parallel). Run them one at a ti
 cd /home/parlar_ai/dev/call-monitor
 for N in 4 8 16; do
   nohup uv run pytest -n $N --dist loadfile -q > /tmp/suite-n$N.log 2>&1 &
-  until ! pgrep -f "bin/pytest" > /dev/null 2>&1; do sleep 10; done
+  SUITE_PID=$!; while kill -0 "$SUITE_PID" 2>/dev/null; do sleep 10; done
   echo "=== -n $N ==="; tail -2 /tmp/suite-n$N.log
 done
 ```
@@ -310,7 +315,7 @@ Parallel failures are frequently intermittent, so one green run is not evidence.
 cd /home/parlar_ai/dev/call-monitor
 for i in 1 2 3; do
   nohup uv run pytest -n <ADOPTED_N> --dist loadfile -q > /tmp/suite-accept-$i.log 2>&1 &
-  until ! pgrep -f "bin/pytest" > /dev/null 2>&1; do sleep 10; done
+  SUITE_PID=$!; while kill -0 "$SUITE_PID" 2>/dev/null; do sleep 10; done
   echo "=== run $i ==="; tail -2 /tmp/suite-accept-$i.log
 done
 ```
@@ -323,7 +328,7 @@ Expected: all three report `3357 passed, 1 skipped`. **Any variation between run
 cd /home/parlar_ai/dev/call-monitor
 grep -n "addopts" pyproject.toml || echo "no addopts — correct"
 nohup uv run pytest -q > /tmp/suite-serial-final.log 2>&1 &
-until ! pgrep -f "bin/pytest" > /dev/null 2>&1; do sleep 20; done
+SUITE_PID=$!; while kill -0 "$SUITE_PID" 2>/dev/null; do sleep 20; done
 tail -2 /tmp/suite-serial-final.log
 ```
 
