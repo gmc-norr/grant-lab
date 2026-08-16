@@ -1,27 +1,58 @@
 # Admin retention surface for deleted workspaces — design
 
 **Date:** 2026-08-16
-**Status:** revision 3 — **Slice 1 (inspection) approved for planning.** Slices 2 and 3 deferred,
-scoped in section 9.
-**Goal (Slice 1):** Let an admin see what survives inside a deleted workspace, with every read
-audited. Removes nothing.
+**Status:** revision 4 — delete becomes **freeze-only**, and **restore is back in scope**.
+**Goal:** Deleting a workspace freezes it and destroys nothing. An admin can then inspect it,
+restore it intact, or purge it for real.
 
-## 0. Why this is now three slices
+## 0. The model, and the slices
 
-Revisions 1 and 2 tried to specify inspection *and* purge together. Two review rounds
-established that safe purge needs a subsystem this project does not have, so the work was split
-on 2026-08-16:
+**Deleting a workspace freezes it. It destroys nothing.** Users are evicted and cannot get back
+in; in-flight work is stopped; every byte stays. An admin then decides the outcome: restore it
+intact, or purge it for real.
+
+This replaces the model revisions 1-3 assumed, in which deletion itself destroyed reference and
+attachment bytes while keeping the proposal and its history. That split was never principled —
+it is simply where the line happened to land — and it is what made restore impossible.
 
 | Slice | Content | Status |
 |---|---|---|
-| **1** | Admin inspection surface — list, read, audit | **this spec** |
-| **2** | Workspace filesystem-activity barrier | deferred, scoped in 9.1 |
-| **3** | Purge, built on Slice 2 | deferred, scoped in 9.2 |
+| **A** | **Freeze-only delete** — stop destroying bytes on delete | scoped in 2; **ship first, see 0.1** |
+| **B** | Admin inspection surface — list, read, audit | planned: `docs/superpowers/plans/2026-08-16-admin-inspection-surface.md` |
+| **C** | Restore | scoped in 9.3 |
+| **D** | Workspace filesystem-activity barrier | deferred, scoped in 9.1 |
+| **E** | Purge, built on D | deferred, scoped in 9.2 |
 
-Slice 1 is separable precisely because **it removes nothing**. Every hazard the reviews found —
-proving quiescence, racing an `rmtree`, late writes recreating a purged tree — exists only for
-an operation that deletes. An inspection surface delivers the "admin accessible" half of the
-2026-08-12 policy with no destructive machinery behind it.
+A, B and C are all safe: none of them removes anything. Every hazard the reviews found — proving
+quiescence, racing an `rmtree`, late writes recreating a purged tree — belongs to E alone.
+
+### 0.1 Why freeze-only ships first
+
+**Every deletion between now and Slice A permanently destroys data that Slice C could otherwise
+restore.** Reference and attachment bytes removed today cannot come back; the workspaces they
+belonged to will only ever be partially restorable, no matter what is built later.
+
+Slice B is more visible and its plan is already written, but nothing is lost by it waiting a day.
+Slice A is a one-line removal at `web/api/workspaces.py:1530` plus test updates, and it stops an
+ongoing, irreversible loss. That asymmetry decides the order.
+
+### 0.2 What this changes about deletion, stated plainly
+
+Before: deleting a workspace removed uploaded attachments and reference files from disk.
+After: deleting a workspace removes nothing; the files persist until an admin purges.
+
+This is a deliberate policy shift, consistent with the 2026-08-12 decision that deleted
+workspaces stay on disk — but it is broader than that decision's letter, which concerned `repo/`.
+A user deleting a workspace may reasonably expect their uploads to be gone. **The delete
+confirmation must say what deletion now does**: the workspace is frozen and hidden, and its
+contents remain until an administrator removes them.
+
+### 0.3 Workspaces deleted before Slice A
+
+Their reference and attachment bytes are already gone. Restore (Slice C) will bring the row and
+the proposal history back, but those files cannot return. Slice C must detect this — reference
+and attachment rows whose files are missing — and tell the admin which workspaces are only
+partially restorable, rather than restoring them silently into a broken state.
 
 ## 1. Background
 
@@ -39,14 +70,37 @@ admin**, and an admin can **delete them completely**. Follow-ups settled 2026-08
 is **inspection only** (no restore), and purge — when it lands in Slice 3 — removes bytes while
 **leaving a tombstone**, never DB rows.
 
-### 1.1 Why not restore
+### 1.1 Restore: rejected in revisions 1-3, reinstated in revision 4
 
-Rejected on a factual ground, not taste: soft delete has already destroyed reference and
-attachment **bytes** while keeping their **rows**. A restored workspace would list references
-whose files no longer exist — broken in a way that reads as a bug rather than a consequence of
-deletion.
+Earlier revisions rejected restore on a factual ground: soft delete had already destroyed
+reference and attachment **bytes** while keeping their **rows**, so a restored workspace would
+list references whose files no longer exist — broken in a way that reads as a bug rather than a
+consequence of deletion.
 
-## 2. Scope of Slice 1
+That objection was about **how deletion behaved**, not about restore. Once deletion stops
+destroying bytes (Slice A), restore is lossless and the objection disappears. The one residual is
+0.3's pre-existing deletions, which are partially restorable and must say so.
+
+## 2. Slice A — freeze-only delete
+
+The whole change is to stop calling the scrubber. `scrub_workspace_bytes` has exactly one caller,
+`web/api/workspaces.py:1530`, which runs it after the DB commit. Delete keeps everything else it
+does: marking `soft_deleted_at`, cancelling jobs and queued turns, terminalizing running turns,
+evicting collab rooms, and running the retirement coordinator. It simply stops removing files.
+
+`scrub_workspace_bytes` itself is **kept, not deleted** — Slice E's purge needs exactly this
+logic (extended to the whole tree), and re-deriving it later from a git history nobody will think
+to search is worse than leaving a documented, unused-for-now function in place. Its docstring
+must say it is no longer on the delete path and name the slice that will call it.
+
+The tests asserting deletion removes bytes (`tests/test_workspaces_service.py:208` and
+neighbours) invert: they must now assert the bytes **survive** a delete. That inversion is the
+slice's real deliverable — a test that still passes unchanged would mean the behaviour did not
+actually change.
+
+The delete confirmation copy changes per 0.2.
+
+## 3. Slice B scope (inspection)
 
 **In scope:** an admin-only paginated list of soft-deleted workspaces; read-only inspection of the
 surviving repository (proposal markdown at `HEAD` plus bounded commit history); an audit event
@@ -57,7 +111,7 @@ schema change; any change to the owner-facing delete route.
 
 **Slice 1 adds no migration.** The tombstone columns belong to purge and are specified in 9.2.
 
-## 3. API surface
+### 3.1 API surface
 
 Two admin-only routes, both requiring `require_admin` (`auth/dependencies.py:50`), both returning
 404 unless the workspace has `soft_deleted_at IS NOT NULL`:
@@ -71,7 +125,7 @@ These are **new routes, not relaxations of the owner routes**. The owner routes 
 row; widening them would put the deleted case on the same code path as the live case, where a
 future edit could leak one into the other.
 
-### 3.1 Bounding
+#### 3.1.1 Bounding
 
 Both responses are unbounded by nature — a long-lived instance accumulates deleted workspaces, and
 history grows with every save.
@@ -81,7 +135,7 @@ history grows with every save.
 - Commit history is capped at the most recent 200 commits, and the response states explicitly
   when it was truncated.
 
-## 4. Inspection
+### 3.2 Inspection
 
 Reads the surviving repository: proposal markdown at `HEAD`, plus the bounded commit list. No new
 storage, no indexing, nothing written.
@@ -105,14 +159,14 @@ easiest mistake to make in Slice 1.
 Inspection stays read-only with respect to git and collab: it must not create a commit and must
 not start a collab room. A deleted workspace has no live room and must not acquire one.
 
-### 4.1 Missing or invalid repository
+#### 3.2.1 Missing or invalid repository
 
 A soft-deleted workspace may legitimately have no usable repository — it can be deleted before
 setup ever creates one. Inspection returns a deliberate **`repository_unavailable`** state rather
 than surfacing a raw git error, so an admin sees "this workspace has no readable repository"
 instead of something that looks like a defect.
 
-## 5. Audit
+### 3.3 Audit
 
 One event kind on `WorkspaceEvent`, with the acting admin as `actor_id`:
 
@@ -129,7 +183,7 @@ Inspection is audited deliberately: an admin reading another user's deleted prop
 privacy-adjacent act in a hospital setting, and it should leave a trace even though it changes
 nothing.
 
-## 6. UI
+### 3.4 UI
 
 One new page under the existing admin shell (`AdminLayout` + `AdminNav`, matching `AdminUsers.tsx`
 and siblings): a paginated table of deleted workspaces, and a detail view rendering the proposal
@@ -170,7 +224,7 @@ left wondering whether inspection is all there will ever be.
 Two review rounds established the following. It is recorded here in full because rediscovering it
 would be expensive.
 
-### 9.1 Slice 2 — workspace filesystem-activity barrier
+### 9.1 Slice D — workspace filesystem-activity barrier
 
 **The problem:** nothing in this codebase can currently answer "is anything still reading or
 writing this workspace's directory?"
@@ -214,9 +268,9 @@ additionally re-check liveness under the commit mutex immediately before creatin
 Alternatively `reconcile_analysis_coverage` takes the commit mutex per workspace in a fresh
 transaction.
 
-### 9.2 Slice 3 — purge
+### 9.2 Slice E — purge
 
-Requires Slice 2. Settled design points:
+Requires Slice D. Settled design points:
 
 - **Removes the whole validated `<workspaces_dir>/<workspace_uuid>/` tree**, not just `repo/`.
   Repo-only would neither "delete completely" nor collect the orphaned attachment/reference bytes
@@ -249,7 +303,25 @@ Requires Slice 2. Settled design points:
   the delayed-consumer races from 9.1 (delayed reference ingestion, delayed `FileResponse`,
   delayed draft read, and the reconciliation reader).
 
-### 9.3 Incidental fix, deferred to Slice 3
+### 9.3 Slice C — restore
+
+Un-deletes a workspace: clears `soft_deleted_at` so every liveness gate passes again. Admin-only,
+audited like inspection.
+
+Settled points:
+
+- **Restore does not resurrect work.** Jobs, queued turns and running turns were cancelled at
+  delete time and stay cancelled. Restore returns a usable workspace, not an interrupted session.
+  The owner starts again from the restored content.
+- **Partial restores must be visible** (0.3). A workspace deleted before Slice A has lost its
+  reference and attachment bytes. Restore must detect rows whose files are missing and report
+  which ones, rather than restoring silently into a state that looks broken.
+- **Restore is blocked on a purged workspace** — there is nothing to restore. Once Slice E
+  exists, `purged_at IS NOT NULL` makes restore a 409.
+- Restore takes the same plain `acquire_commit_mutex` as inspection, for the same reason: it must
+  work on a workspace that is currently deleted, so `acquire_commit_mutex_live` would refuse it.
+
+### 9.4 Incidental fix, deferred to Slice E
 
 `scrub_workspace_bytes`'s docstring claims a failed cleanup's files "will be collected by a future
 sweep". No sweep exists. It is left alone in Slice 1 rather than half-corrected: with Slice 3's
