@@ -63,7 +63,8 @@ Adding a dependency to this repo touches three CI gates that have nothing to do 
 ```bash
 cd /home/parlar_ai/dev/call-monitor
 git checkout -b test-parallelization
-git log --oneline -1   # expect: 2d68f15 Merge branch 'fix-circular-fk' ...
+git log --oneline -1   # expect: 265d2bd docs(plan): implementation plan for test-suite parallelization
+                       # (if master has moved on, that is fine — re-derive the baseline in Step 2)
 ```
 
 - [ ] **Step 2: Establish the serial baseline on THIS commit**
