@@ -56,7 +56,15 @@ export function AdminDeletedWorkspaceDetail({ workspaceId: workspaceIdProp }: Pr
           Showing only the most recent 200 commits.
         </Text>
       )}
-      {d.commits.length === 0 ? (
+      {/* An unreadable history is not an empty one. Saying "No commits." when
+          git log failed tells an admin checking what survived that the history
+          is gone — and if a draft rendered above, it provably is not. */}
+      {!d.history_available ? (
+        <Text c="dimmed">
+          The commit history could not be read. This does not mean it is gone — nothing on
+          disk is removed when a workspace is deleted.
+        </Text>
+      ) : d.commits.length === 0 ? (
         <Text c="dimmed">No commits.</Text>
       ) : (
         <Table horizontalSpacing="sm" verticalSpacing="xs" fz="sm">

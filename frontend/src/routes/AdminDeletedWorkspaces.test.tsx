@@ -93,6 +93,7 @@ function mockDetail(overrides: Record<string, unknown> = {}) {
       owner_email: "owner@ki.se",
       soft_deleted_at: "2026-08-01T10:00:00Z",
       repository_available: true,
+      history_available: true,
       proposal_markdown: "# Draft\n\nBody text.\n",
       commits: [
         { sha: "a".repeat(40), authored_at: "2026-07-30T09:00:00Z", subject: "first" },
@@ -169,4 +170,21 @@ it("re-requests the draft on every open, so each read leaves an audit row", asyn
   render(<AdminDeletedWorkspaceDetail workspaceId={WS_ID} />, { wrapper });
   await screen.findByText(/Body text\./);
   expect(get).toHaveBeenCalledTimes(2);
+});
+
+it("says an unreadable history is unreadable, not empty", async () => {
+  // A readable draft proves at least one commit exists, so "No commits." beside
+  // one is provably false. The backend distinguishes the two with
+  // history_available; the page has to render the difference or the distinction
+  // is pointless.
+  mockDetail({ history_available: false, commits: [], history_truncated: false });
+  renderWithProviders(<AdminDeletedWorkspaceDetail workspaceId={WS_ID} />);
+  expect(await screen.findByText(/history could not be read/i)).toBeInTheDocument();
+  expect(screen.queryByText("No commits.")).toBeNull();
+});
+
+it("still says 'No commits.' for a readable but empty history", async () => {
+  mockDetail({ history_available: true, commits: [], history_truncated: false });
+  renderWithProviders(<AdminDeletedWorkspaceDetail workspaceId={WS_ID} />);
+  expect(await screen.findByText("No commits.")).toBeInTheDocument();
 });

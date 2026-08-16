@@ -11,6 +11,8 @@ from pathlib import Path
 import pytest
 
 from call_manager.proposal_assist.citations.gitio import (
+    _MAX_SUBJECT_CHARS,
+    _SUBJECT_TRUNCATION_MARKER,
     GitCommitError,
     list_commits,
 )
@@ -196,22 +198,133 @@ def test_a_non_utf8_subject_does_not_escape_as_unicodedecodeerror(tmp_path):
 
 
 def test_an_unparseable_author_date_raises_gitcommiterror_not_valueerror(tmp_path, monkeypatch):
-    """Same reasoning one layer down: datetime.fromisoformat raises ValueError,
-    which also escapes callers' except clauses. Framing can only shift on a
-    malformed stream, but when it does the caller must still see the handled
-    error type."""
+    """Same reasoning as the decode test one layer down: datetime.fromisoformat
+    raises ValueError, which is neither OSError nor GitCommitError and so
+    escapes callers' except clauses. Framing can only shift on a malformed
+    stream, but when it does the caller must still see the handled type."""
+    from call_manager.proposal_assist.citations import gitio
+
     repo = _repo(tmp_path, 1)
-
-    real = subprocess.run
-
-    def _garbled(cmd, **kw):
-        proc = real(cmd, **kw)
-        if isinstance(cmd, list) and "log" in cmd:
-            proc.stdout = b"a" * 40 + b"\x00not-a-date\x00subject\x00"
-        return proc
-
-    monkeypatch.setattr(subprocess, "run", _garbled)
+    monkeypatch.setattr(
+        gitio,
+        "_read_capped_fields",
+        lambda stream, **kw: [b"a" * 40, b"not-a-date", b"subject"],
+    )
 
     with pytest.raises(GitCommitError, match="unparseable author date"):
         list_commits(repo, limit=10)
 
+
+def test_an_oversized_subject_is_truncated_and_cannot_blow_up_the_read(tmp_path):
+    """A commit subject carries a user-controlled section heading
+    (editing/save.py:275) with no length bound on the way in; the only ceiling
+    is the 64 MiB request-body cap. Counting commits does not bound bytes, so
+    without a byte cap one inspection of a hostile repository would buffer
+    gigabytes before decoding and the JSON copy.
+
+    Verifies both halves: individual subjects are truncated, and the whole read
+    stays near the cap rather than near the repository's real size."""
+    repo = _repo(tmp_path, 1)
+    # -F, not -m: a message this long as an argv element exceeds Linux's
+    # MAX_ARG_STRLEN (~128 KiB), so `git commit -m` — which is how this app
+    # writes commits (gitio.py:195) — cannot itself produce one. A repository
+    # imported or built by other tools can, and imported repositories are part
+    # of the population this reader exists to inspect.
+    msg = repo / "msg.txt"
+    msg.write_text("edit: " + "H" * (2 * 1024 * 1024), encoding="utf-8")
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-q", "--allow-empty", "-F", str(msg)],
+        cwd=repo,
+        check=True,
+    )
+
+    commits, truncated = list_commits(repo, limit=10)
+
+    assert commits, "the oversized subject must not empty the result"
+    biggest = max(len(c.subject) for c in commits)
+    assert biggest <= _MAX_SUBJECT_CHARS + len(_SUBJECT_TRUNCATION_MARKER)
+    assert commits[0].subject.endswith(_SUBJECT_TRUNCATION_MARKER)
+    assert commits[0].subject.startswith("edit: HHH")
+    # Ordinary subjects are NOT padded or marked — git's own %<(N,trunc) pads
+    # to width, which is why the truncation happens here instead.
+    assert commits[-1].subject == "commit 0"
+    assert len(commits) == 2, "the oversized subject must not starve its neighbour"
+    assert truncated is False, (
+        "the repository has 2 commits and the limit is 10; an oversized subject "
+        "is not a truncated history"
+    )
+
+
+def test_a_repository_of_oversized_subjects_reports_truncated_not_everything(tmp_path):
+    """When the byte cap IS reached the caller must learn that more history
+    exists, exactly as it would from the count cap — otherwise a partial list
+    is presented as the whole one."""
+    repo = _repo(tmp_path, 1)
+    msg = repo / "msg.txt"
+    for i in range(6):
+        msg.write_text(f"e{i}: " + "H" * (600 * 1024), encoding="utf-8")
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "--allow-empty", "-F", str(msg)],
+            cwd=repo,
+            check=True,
+        )
+
+    commits, truncated = list_commits(repo, limit=3)
+
+    cap = _MAX_SUBJECT_CHARS + len(_SUBJECT_TRUNCATION_MARKER)
+    # Every requested record still comes back. Capping per FIELD rather than
+    # over the whole stream is what makes this true: a single whole-output
+    # budget would be spent by the first hostile subject, and the admin would
+    # silently see one commit instead of three.
+    assert len(commits) == 3
+    assert truncated is True, "more history exists than was returned"
+    assert all(len(c.subject) <= cap for c in commits)
+    assert all(len(c.sha) == 40 for c in commits), "a half-read record leaked into sha"
+    assert [c.subject[:2] for c in commits] == ["e5", "e4", "e3"], "records shifted"
+
+
+def test_the_reader_caps_each_field_before_it_is_buffered():
+    """The point of P1c is the MEMORY bound, and the subject-truncation tests
+    above do NOT pin it: they assert on the final CommitInfo, which is clipped to
+    _MAX_SUBJECT_CHARS in Python afterwards either way. Raising _MAX_FIELD_BYTES
+    to 64 MiB leaves every one of them green — verified — while restoring the
+    unbounded buffering the bound exists to prevent.
+
+    So assert the reader directly: what comes back per field is capped, and the
+    oversized remainder was consumed and dropped rather than accumulated.
+    """
+    import io as _io
+
+    from call_manager.proposal_assist.citations.gitio import (
+        _MAX_FIELD_BYTES,
+        _read_capped_fields,
+    )
+
+    oversized = b"X" * (8 * 1024 * 1024)
+    stream = _io.BytesIO(b"sha\x00date\x00" + oversized + b"\x00")
+
+    fields = _read_capped_fields(stream, max_fields=3, repo_dir=Path("/nonexistent"))
+
+    assert [f[:4] for f in fields[:2]] == [b"sha", b"date"]
+    assert len(fields[2]) == _MAX_FIELD_BYTES, (
+        "the oversized field was buffered whole instead of being capped as it "
+        "streamed — one hostile commit subject can then size the read"
+    )
+    assert sum(len(f) for f in fields) <= 3 * _MAX_FIELD_BYTES
+
+
+def test_the_reader_refuses_a_pathological_stream_rather_than_reading_forever():
+    """The per-field cap drops bytes but still has to scan to the next NUL. The
+    total scan budget is the backstop, and it surfaces as GitCommitError, which
+    the inspect route renders as "the history could not be read" — a state, not
+    a crash."""
+    import io as _io
+
+    from call_manager.proposal_assist.citations.gitio import _MAX_SCAN_BYTES, _read_capped_fields
+
+    stream = _io.BytesIO(b"X" * (_MAX_SCAN_BYTES + 1024))
+
+    with pytest.raises(GitCommitError, match="exceeded"):
+        _read_capped_fields(stream, max_fields=3, repo_dir=Path("/nonexistent"))

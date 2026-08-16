@@ -2512,6 +2512,8 @@ export interface components {
         DeletedWorkspaceDetailOut: {
             /** Commits */
             commits: components["schemas"]["CommitOut"][];
+            /** History Available */
+            history_available: boolean;
             /** History Truncated */
             history_truncated: boolean;
             /**

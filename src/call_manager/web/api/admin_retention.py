@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import func, select
 
@@ -119,6 +119,13 @@ class DeletedWorkspaceDetailOut(BaseModel):
     # that exists with an unborn HEAD reports False, because nothing in it can
     # be shown.
     repository_available: bool
+    # Whether `commits` is an ANSWER or an ABSENCE. Without it, a history that
+    # could not be read is indistinguishable from a repository with no commits:
+    # both are `commits: []`. Those are not the same fact, and the difference is
+    # visible — a readable draft at HEAD proves at least one commit exists, so
+    # `repository_available: true` beside an empty history is a contradiction
+    # rather than a state.
+    history_available: bool
     proposal_markdown: str | None
     commits: list[CommitOut]
     history_truncated: bool
@@ -163,6 +170,7 @@ def _record_inspection(
 def inspect_deleted_workspace(
     workspace_id: uuid.UUID,
     request: Request,
+    response: Response,
     admin: User = Depends(require_admin),  # noqa: B008
 ) -> DeletedWorkspaceDetailOut:
     """Read a soft-deleted workspace's surviving proposal text and history.
@@ -189,6 +197,14 @@ def inspect_deleted_workspace(
 
     The audit event is committed BEFORE any content is returned.
     """
+    # Every read of this endpoint writes an audit row, and that is only true of
+    # reads that actually reach this handler. A browser or intermediary cache
+    # replaying the response would show an admin someone's deleted draft with no
+    # trace — the same hole the client-side query cache had, one layer down and
+    # outside our control. no-store forbids writing it to any cache at all;
+    # private additionally forbids shared caches from holding it.
+    response.headers["Cache-Control"] = "private, no-store"
+
     sf = request.app.state.session_factory
     workspaces_dir = Path(request.app.state.settings.workspaces_dir)
 
@@ -242,12 +258,12 @@ def inspect_deleted_workspace(
         # produce, and the audit would then record a false commit_count too.
         try:
             commits, truncated = list_commits(repo, limit=_HISTORY_LIMIT)
-            available = True
+            history_available = True
         except (OSError, GitCommitError):
             # Legitimate: the workspace can be deleted before setup ever
             # created a repository, or the repository exists but has no
             # commits yet. Report it as a state, not a crash.
-            commits, truncated, available = [], False, False
+            commits, truncated, history_available = [], False, False
 
         try:
             # At HEAD, not the working tree. Spec 3.2 says "proposal markdown at
@@ -266,8 +282,11 @@ def inspect_deleted_workspace(
         # malformed-output branch) while rev-parse and cat-file still work. That
         # would answer "there is no repository" while handing the admin that
         # repository's draft. Serving content is itself proof the repository is
-        # there, so say so.
-        available = available or markdown is not None
+        # there, so say so — and `history_available` above then carries why the
+        # commit list is empty, which `commits: []` alone cannot: a readable
+        # blob at HEAD PROVES at least one commit exists, so an empty history
+        # next to a served draft is never "this workspace has no commits".
+        available = history_available or markdown is not None
 
         # "content_served" means the admin actually saw a draft — an empty
         # proposal.md at HEAD is readable but is not a draft.
@@ -288,6 +307,7 @@ def inspect_deleted_workspace(
             owner_email=owner_email,
             soft_deleted_at=ws.soft_deleted_at,
             repository_available=available,
+            history_available=history_available,
             proposal_markdown=markdown,
             commits=[
                 CommitOut(sha=c.sha, authored_at=c.authored_at, subject=c.subject)

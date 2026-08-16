@@ -27,6 +27,7 @@ from fastapi.testclient import TestClient
 
 from call_manager.db.models import User, Workspace, WorkspaceEvent
 from call_manager.main import create_app
+from call_manager.proposal_assist.citations.gitio import GitCommitError
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from tests.proposal_assist.conftest import make_user, make_workspace
 
@@ -285,6 +286,79 @@ def test_the_restore_probe_itself_does_not_break_the_route(
     r = admin.get(f"/api/admin/workspaces/deleted/{ws_id}")
     assert r.status_code == 200, r.text
     assert "Secret draft" in r.json()["proposal_markdown"]
+
+
+def test_an_unreadable_history_is_not_reported_as_an_empty_one(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """If list_commits fails while the draft at HEAD still reads, the response
+    used to say `commits: [], history_truncated: false` beside a served draft.
+    That is not a state — it is a contradiction: a readable blob at HEAD PROVES
+    at least one commit exists, so "no commits" cannot be true. An admin
+    checking what survived would conclude the history was gone.
+
+    `history_available` carries the difference; `commits: []` alone cannot.
+    """
+    from call_manager.web.api import admin_retention
+
+    app = _setup(monkeypatch, pg_url, tmp_path)
+    admin, admin_id = _client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    ws_id = _seed(pg_session_factory, tmp_path, content="# Draft\n\nBody text.\n", n_commits=3)
+    with pg_session_factory() as s:
+        _delete(s, ws_id)
+
+    def _boom(repo_dir, *, limit):
+        raise GitCommitError("git log exploded")
+
+    monkeypatch.setattr(admin_retention, "list_commits", _boom)
+
+    body = admin.get(f"/api/admin/workspaces/deleted/{ws_id}").json()
+
+    assert body["proposal_markdown"] == "# Draft\n\nBody text.\n"
+    assert body["repository_available"] is True
+    assert body["history_available"] is False, (
+        "an unreadable history must be distinguishable from a repository that "
+        "genuinely has no commits"
+    )
+    assert body["commits"] == []
+    assert body["history_truncated"] is False
+
+
+def test_a_readable_history_says_so(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """Negative control: history_available must not be hardcoded False."""
+    app = _setup(monkeypatch, pg_url, tmp_path)
+    admin, _ = _client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    ws_id = _seed(pg_session_factory, tmp_path, n_commits=2)
+    with pg_session_factory() as s:
+        _delete(s, ws_id)
+
+    body = admin.get(f"/api/admin/workspaces/deleted/{ws_id}").json()
+    assert body["history_available"] is True
+    assert len(body["commits"]) == 2
+
+
+def test_the_audited_response_forbids_http_caching(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """Every read of this endpoint writes an audit row — but only reads that
+    reach the handler do. A browser or intermediary cache replaying the response
+    would show an admin someone's deleted draft with no trace, which is the
+    client-side cache hole one layer down and outside our control.
+
+    no-store forbids storing the response in any cache; private additionally
+    keeps shared caches out.
+    """
+    app = _setup(monkeypatch, pg_url, tmp_path)
+    admin, _ = _client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    ws_id = _seed(pg_session_factory, tmp_path)
+    with pg_session_factory() as s:
+        _delete(s, ws_id)
+
+    r = admin.get(f"/api/admin/workspaces/deleted/{ws_id}")
+    assert r.status_code == 200
+    cc = r.headers.get("Cache-Control", "")
+    assert "no-store" in cc, f"audited content is cacheable: Cache-Control={cc!r}"
+    assert "private" in cc, f"audited content may be held by a shared cache: {cc!r}"
 
 
 def test_non_admin_is_403(monkeypatch, pg_url, pg_session_factory, tmp_path):

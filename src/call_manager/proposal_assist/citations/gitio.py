@@ -383,41 +383,147 @@ class CommitInfo:
 # constant is needed — do not reintroduce one for a byte used inline once.
 
 
+# A commit subject carries a user-controlled section heading
+# (editing/save.py:275: "user {artifact} edit: {heading} (user:{user_id})") and
+# nothing bounds a heading's length on the way in. Counting commits is therefore
+# not a bound on BYTES: `capture_output=True` buffers the whole stream before we
+# ever look at it.
+#
+# How large can one subject actually get? This app writes messages with
+# `git commit -m` (gitio.py:195), so argv caps a subject it creates at Linux's
+# MAX_ARG_STRLEN, ~128 KiB — about 25 MiB across 201 records, not the gigabytes
+# the request-body limit alone would suggest. But an imported or externally
+# built repository has no such ceiling, and imported repositories are exactly
+# the population this reader exists to inspect.
+#
+# Truncating in the format string is not an option: git's `%<(N,trunc)` PADS
+# shorter subjects to width with spaces (verified), corrupting every ordinary
+# subject. So the bound lives here, applied as the stream is consumed:
+#
+#   * each FIELD keeps at most _MAX_FIELD_BYTES; the rest is discarded as it
+#     arrives, so one hostile subject cannot starve the other records the way a
+#     single whole-output budget would, and
+#   * a total scan budget backstops the discard loop, so a pathological stream
+#     is refused outright rather than read forever. It surfaces as
+#     GitCommitError, which the inspect route already renders as "the history
+#     could not be read" — a state, not a crash.
+_MAX_SUBJECT_CHARS = 500
+_SUBJECT_TRUNCATION_MARKER = "… [truncated]"
+# x4: a UTF-8 character is up to 4 bytes, so this is the byte budget that can
+# never lose a character we intend to keep.
+_MAX_FIELD_BYTES = _MAX_SUBJECT_CHARS * 4
+_MAX_SCAN_BYTES = 32 * 1024 * 1024
+_READ_CHUNK_BYTES = 64 * 1024
+
+
+def _read_capped_fields(stream, *, max_fields: int, repo_dir: Path) -> list[bytes]:
+    """Read NUL-separated fields, keeping at most _MAX_FIELD_BYTES of each.
+
+    Bytes beyond a field's cap are consumed and dropped rather than buffered, so
+    peak memory is max_fields * _MAX_FIELD_BYTES regardless of what git emits.
+    Stops at max_fields, at EOF, or by raising GitCommitError once the total
+    scanned exceeds _MAX_SCAN_BYTES.
+    """
+    fields: list[bytes] = []
+    current = bytearray()
+    scanned = 0
+
+    def _close_field() -> None:
+        fields.append(bytes(current))
+        current.clear()
+
+    while len(fields) < max_fields:
+        chunk = stream.read(_READ_CHUNK_BYTES)
+        if not chunk:
+            break
+        scanned += len(chunk)
+        if scanned > _MAX_SCAN_BYTES:
+            raise GitCommitError(
+                f"git log output for {repo_dir} exceeded {_MAX_SCAN_BYTES} bytes; "
+                f"refusing to read further"
+            )
+        pos = 0
+        while len(fields) < max_fields:
+            nul = chunk.find(b"\x00", pos)
+            segment = chunk[pos:] if nul == -1 else chunk[pos:nul]
+            keep = _MAX_FIELD_BYTES - len(current)
+            if keep > 0:
+                current += segment[:keep]
+            if nul == -1:
+                break
+            _close_field()
+            pos = nul + 1
+    if current and len(fields) < max_fields:
+        # No trailing NUL (git was killed, or the stream ended mid-field).
+        _close_field()
+    return fields
+
+
 def list_commits(repo_dir: Path, *, limit: int) -> tuple[list[CommitInfo], bool]:
     """Return (commits newest-first, truncated).
 
-    Bounded at the source: asks git for `limit + 1` and reports `truncated`
-    when that extra row comes back, so a caller can tell a capped list from a
-    complete one without a second call.
+    Bounded at the source twice over: asks git for `limit + 1` and reports
+    `truncated` when that extra row comes back, AND stops reading git's output
+    after a byte cap derived from `limit`, so a single hostile commit subject
+    cannot make one call buffer gigabytes. Hitting the byte cap also reports
+    `truncated` — more history exists than was returned, which is exactly what
+    the flag means.
+
+    Individual subjects are truncated to `_MAX_SUBJECT_CHARS` with a visible
+    marker.
 
     Raises GitCommitError if the repository is missing, is not a repository, or
     has no commits (an unborn HEAD).
     """
+    argv = [
+        "git",
+        "log",
+        f"--max-count={limit + 1}",
+        # -z terminates each commit with NUL; %x00 separates the three
+        # fields within one. Both are the same byte, so the stream is a
+        # flat run of NUL-separated fields, parsed three at a time below.
+        "-z",
+        "--format=%H%x00%aI%x00%s",
+    ]
+    # Three fields per record, and git emits a trailing NUL after the last one.
+    max_fields = 3 * (limit + 1)
     try:
-        proc = subprocess.run(
-            [
-                "git",
-                "log",
-                f"--max-count={limit + 1}",
-                # -z terminates each commit with NUL; %x00 separates the three
-                # fields within one. Both are the same byte, so the stream is a
-                # flat run of NUL-separated fields, parsed three at a time below.
-                "-z",
-                "--format=%H%x00%aI%x00%s",
-            ],
+        with subprocess.Popen(
+            argv,
             cwd=repo_dir,
             env=_list_commits_env(repo_dir),
-            capture_output=True,  # bytes (NO text=True) so WE control decoding
-            check=True,
-            timeout=_GIT_TIMEOUT_SECONDS,
-        )
+            stdout=subprocess.PIPE,  # bytes (NO text=True) so WE control decoding
+            stderr=subprocess.PIPE,
+        ) as proc:
+            try:
+                raw_fields = _read_capped_fields(
+                    proc.stdout, max_fields=max_fields, repo_dir=repo_dir
+                )
+                complete = len(raw_fields) < max_fields
+                if complete:
+                    stderr_bytes = proc.stderr.read() if proc.stderr else b""
+                    if proc.wait(timeout=_GIT_TIMEOUT_SECONDS) != 0:
+                        raise subprocess.CalledProcessError(
+                            proc.returncode, argv, b"", stderr_bytes
+                        )
+                else:
+                    # We stopped reading at max_fields; git may still be writing.
+                    # Its exit status is meaningless after a kill, so don't check
+                    # it — we already have every record we asked for.
+                    proc.kill()
+            except BaseException:
+                proc.kill()
+                raise
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
         _log_if_timeout(e)
         # OSError (FileNotFoundError on a missing repo_dir — the case this
         # function's contract names) carries no .stderr, so falling back to the
         # exception keeps the OS-level text in the message rather than emitting
         # a bare "cannot list commits in /path: ". Mirrors current_head.
-        detail = (getattr(e, "stderr", "") or "").strip() or str(e)
+        raw_err = getattr(e, "stderr", b"") or b""
+        if isinstance(raw_err, bytes):
+            raw_err = raw_err.decode("utf-8", errors="replace")
+        detail = raw_err.strip() or str(e)
         raise GitCommitError(
             f"cannot list commits in {repo_dir}: {detail}"
         ) from e
@@ -429,12 +535,14 @@ def list_commits(repo_dir: Path, *, limit: int) -> tuple[list[CommitInfo], bool]
     # UnicodeDecodeError, which is neither OSError nor GitCommitError — it would
     # escape every caller's except clause and surface as a 500 instead of the
     # deliberate "no readable repository" state.
-    stdout = proc.stdout.decode("utf-8", errors="replace")
+    #
+    # A field capped mid-character yields one U+FFFD at the seam; harmless, and
+    # the subject is about to be marked truncated anyway.
+    fields = [f.decode("utf-8", errors="replace") for f in raw_fields]
 
-    # git -z emits a trailing NUL, so the final split yields an empty tail.
+    # git -z emits a trailing NUL, so a fully-read stream ends in an empty tail.
     # Drop ONLY that tail — do not filter on truthiness, which would silently
     # swallow an empty subject and shift every field after it.
-    fields = stdout.split("\x00")
     if fields and fields[-1] == "":
         fields.pop()
     if len(fields) % 3 != 0:
@@ -456,6 +564,10 @@ def list_commits(repo_dir: Path, *, limit: int) -> tuple[list[CommitInfo], bool]
             raise GitCommitError(
                 f"unparseable author date in {repo_dir}: {authored!r}"
             ) from e
+        if len(subject) > _MAX_SUBJECT_CHARS:
+            # Marked, not silently clipped: an admin reading a retention record
+            # must be able to tell a short subject from a shortened one.
+            subject = subject[:_MAX_SUBJECT_CHARS] + _SUBJECT_TRUNCATION_MARKER
         commits.append(CommitInfo(sha=sha, authored_at=authored_at, subject=subject))
     return commits, truncated
 
