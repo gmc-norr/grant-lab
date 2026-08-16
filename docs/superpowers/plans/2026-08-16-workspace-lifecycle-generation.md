@@ -4,7 +4,7 @@
 
 **Goal:** Make a workspace's lifecycle transitions totally ordered and their effects order-independent, so a delete's teardown can never undo a restore (and vice versa).
 
-**Architecture:** Every lifecycle transition allocates a `lifecycle_generation` inside its own transaction, under the commit mutex, so the mutex totally orders generations. The generation travels with the operation and is never re-read. One app-loop object, `WorkspaceLifecycle`, holds the authoritative `(applied_generation, state)` per workspace with a **monotonic** mutator, so a late effect from a superseded generation is ignored rather than applied. The collab and turns tombstone sets are replaced by that one authority. The jobs hook, whose work escapes every lock, is made generation-conditional in SQL instead.
+**Architecture:** Every lifecycle transition allocates a `lifecycle_generation` inside its own transaction, under the commit mutex, so the mutex totally orders generations. The generation travels with the operation and is never re-read. One app-wide object, `WorkspaceLifecycle`, holds the authoritative `(applied_generation, retired)` per workspace behind a per-workspace lock, with a **monotonic** mutator. The retirement coordinator applies the transition **once**, and holds that lock across the whole hook fan-out — so a superseded retirement runs **no teardown at all**, rather than tearing down a workspace a later transition has already brought back. The collab and turns tombstone sets are replaced by that one authority. The jobs hook, whose DB work provably escapes every lock this process holds, is made generation-conditional in SQL instead.
 
 **Tech Stack:** Python 3.12, FastAPI, SQLAlchemy 2.x, Alembic, asyncio, pytest (+ testcontainers Postgres).
 
@@ -14,10 +14,12 @@
 
 - **C0 adds no route, no UI, and no restore.** It builds the mechanism C1 will use. The only user-visible behaviour change is that deleting a workspace increments a column.
 - **Nothing is removed.** No `rmtree`, no purge, no data deletion. The only schema change is Task 1's column.
-- **The generation is allocated INSIDE the transaction that performs the transition, under the commit mutex, and travels with the operation.** It is never sampled after the commit. This is the entire point of the slice — spec 4.4.
-- **`WorkspaceLifecycle.apply` is monotonic:** `if generation <= applied_generation: return`. Correctness rests on this, not on the lock (spec 4.5, 4.7).
+- **The generation is allocated INSIDE the transaction that performs the transition, under the commit mutex, and travels with the operation.** It is never sampled after the commit. This is spec 4.4, and half the point of the slice.
+- **A superseded transition has NO effect — not a partial one.** The gate lives in `WorkspaceRetirement.retire`, upstream of every hook. It is not a per-hook check: all four hooks carry the same generation, so a per-hook gate would let the first hook win and the other three no-op, which is neither of the two states we are allowed to be in. This is spec 4.5's requirement that stale teardown do nothing, and it is the other half of the slice.
+- **`WorkspaceLifecycle` is monotonic:** `if generation <= applied_generation`, the transition yields "no effect". Correctness rests on this, not on the lock (spec 4.5, 4.7).
+- **No retirement hook, and no guard, may call `apply` or `transition`.** The coordinator holds the per-workspace lifecycle lock across the fan-out, so a hook that took it would deadlock against its own caller. `is_retired()` — synchronous and lock-free — is the ONLY lifecycle call legal inside a hook or a guard. Say so in a comment at every guard you write.
 - **Ordering is commit-then-apply.** Applying `active` before the database says live opens a real hole: for collab client-writes and cold hydration the tombstone IS the guard, not a belt over the DB flag (`retirement.py:32-35`).
-- **The jobs hook's DB mutation must be generation-conditional in SQL** — `wait_for(to_thread(...))` cancels the await, not the thread (`jobs_retirement.py:137`; the codebase documents this at `tests/proposal_assist/test_phase0_retirement.py:317`). A stale check before the thread starts proves nothing.
+- **The jobs hook's DB mutation must be generation-conditional in SQL** — `wait_for(to_thread(...))` cancels the await, not the thread (`jobs_retirement.py:137`; the codebase documents this at `tests/proposal_assist/test_phase0_retirement.py:317`). Its thread escapes the coordinator's lock as easily as it escapes the timeout, so the coordinator's gate does not cover it. A stale check before the thread starts proves nothing.
 - Work on a branch. Never commit to `master`. All Python through `uv run`.
 
 ## Environment notes
@@ -26,6 +28,7 @@
 - **Never pipe a test command into `tail`/`head`** — the pipeline's exit status becomes the pager's, so a failing suite reports success. Use `cmd > /tmp/out.log 2>&1; echo "EXIT=$?"; tail -40 /tmp/out.log`.
 - **`pytest` exits 4 on "no tests ran"** — a path typo reads as success. Always confirm a nonzero collected count.
 - **`uv run ruff check .` is the gate. `ruff format --check` is NOT** — 185 files are already unformatted on master. Do not reformat anything.
+- **ruff's lint select is `["E", "F", "I", "B", "UP", "SIM"]` (`pyproject.toml:236`).** `F` means an unused import fails the gate: import `pytest` only in the test modules that actually call it.
 - **Baseline on master: `3405 passed, 1 skipped`.** Re-derive it from a real run before comparing; it moves every slice.
 - **Alembic head is `0061`.** A new migration sets `down_revision = "0061"`.
 - Route docstrings become OpenAPI descriptions, so `frontend/src/api/schema.gen.ts` is a CI gate. **C0 changes no route signature or docstring**, so no regeneration should be needed — but verify with `git diff --exit-code` rather than assuming.
@@ -37,14 +40,15 @@
 | `alembic/versions/0062_workspace_lifecycle_generation.py` | **create** — the column |
 | `src/call_manager/db/models.py` | add `Workspace.lifecycle_generation` |
 | `src/call_manager/workspaces.py` | `bump_lifecycle_generation()`; `soft_delete_workspace_db` uses it and returns the new generation |
-| `src/call_manager/proposal_assist/lifecycle.py` | **create** — `WorkspaceLifecycle`, the single authority |
-| `src/call_manager/proposal_assist/retirement.py` | hooks and `retire()` carry a generation; `signal_workspace_retirement` takes one |
+| `src/call_manager/proposal_assist/lifecycle.py` | **create** — `WorkspaceLifecycle` + the process-wide `LIFECYCLE` singleton |
+| `src/call_manager/proposal_assist/retirement.py` | the coordinator applies the transition once and gates the fan-out on it |
 | `src/call_manager/proposal_assist/jobs_retirement.py` | generation-conditional SQL |
-| `src/call_manager/proposal_assist/collab/room.py` | `_retired_ws` → `lifecycle.is_retired` |
-| `src/call_manager/proposal_assist/drafting/registry.py` | `_retired` → `lifecycle.is_retired` |
-| `src/call_manager/proposal_assist/passes.py` | hook accepts a generation |
+| `src/call_manager/proposal_assist/collab/room.py` | `_retired_ws` → `lifecycle.is_retired`; stops setting a tombstone |
+| `src/call_manager/proposal_assist/drafting/registry.py` | `_retired` → `lifecycle.is_retired`; stops setting a tombstone |
+| `src/call_manager/proposal_assist/drafting/factory.py` | production construction injects `LIFECYCLE` explicitly |
+| `src/call_manager/proposal_assist/passes.py` | hook signature only — keeps no per-workspace state |
 | `src/call_manager/web/api/workspaces.py` | delete route threads the generation through |
-| `src/call_manager/main.py` | construct `WorkspaceLifecycle`, inject it |
+| `src/call_manager/main.py` | `app.state.workspace_lifecycle`; coordinator takes the lifecycle |
 
 ---
 
@@ -78,14 +82,14 @@ column replaces.
 
 from __future__ import annotations
 
-import pytest
-
 from call_manager.db.models import Workspace
 from call_manager.workspaces import bump_lifecycle_generation, soft_delete_workspace_db
 from tests.proposal_assist.conftest import make_workspace
 
 
 def test_a_new_workspace_starts_at_generation_zero(pg_session_factory):
+    """0 is reserved for "no transition has ever happened": every transition
+    allocates >= 1, so a generation of 0 can never collide with a real one."""
     with pg_session_factory() as s:
         ws = make_workspace(s)
         s.commit()
@@ -320,11 +324,15 @@ Write the message to `/tmp/msg-t1.txt` first — backticks in an inline `-m` are
 
 **Interfaces:**
 - Consumes: nothing from Task 1 (this object never touches the database).
-- Produces: `WorkspaceLifecycle` with
-  - `is_retired(workspace_id: uuid.UUID) -> bool` — **synchronous**, called from hot guard paths.
-  - `async apply(workspace_id: uuid.UUID, *, generation: int, retired: bool) -> bool` — returns whether it took effect.
-  - `async lock(workspace_id: uuid.UUID)` — an async context manager over a per-workspace `asyncio.Lock`.
-  - `applied_generation(workspace_id: uuid.UUID) -> int` — for tests and diagnostics.
+- Produces:
+  - `WorkspaceLifecycle` with
+    - `is_retired(workspace_id: uuid.UUID) -> bool` — **synchronous**, lock-free, called from hot guard paths.
+    - `applied_generation(workspace_id: uuid.UUID) -> int` — 0 for a workspace no transition has touched.
+    - `transition(workspace_id, *, generation: int, retired: bool)` — an **async context manager** that holds the per-workspace lock for the whole body and yields `True` if the transition took effect, `False` if it was superseded. THE mutator.
+    - `async apply(workspace_id, *, generation: int, retired: bool) -> bool` — convenience for callers with no contained work, implemented in terms of `transition`.
+  - `LIFECYCLE: WorkspaceLifecycle` — the process-wide singleton, mirroring `MANAGER` (`collab/room.py:776`) and `PASS_REGISTRY` (`passes.py:200`).
+
+`transition` is a context manager rather than a plain setter because the coordinator must hold the lock **across its hook fan-out** (Task 3). A setter that released immediately would let a restore land between the retirement's decision and its teardown, and the teardown would then destroy a live workspace — the exact defect this slice exists to close.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -344,22 +352,35 @@ from __future__ import annotations
 import asyncio
 import uuid
 
-import pytest
-
 from call_manager.proposal_assist.lifecycle import WorkspaceLifecycle
 
 
 def test_an_unknown_workspace_is_not_retired():
     lc = WorkspaceLifecycle()
     assert lc.is_retired(uuid.uuid4()) is False
+    assert lc.applied_generation(uuid.uuid4()) == 0
 
 
-async def test_apply_sets_the_state():
+async def test_a_transition_that_takes_effect_yields_true_and_sets_the_state():
     lc = WorkspaceLifecycle()
     ws = uuid.uuid4()
-    assert await lc.apply(ws, generation=1, retired=True) is True
+    async with lc.transition(ws, generation=1, retired=True) as took_effect:
+        assert took_effect is True
     assert lc.is_retired(ws) is True
     assert lc.applied_generation(ws) == 1
+
+
+async def test_a_superseded_transition_yields_false_and_changes_nothing():
+    """The gate the coordinator branches on. Yielding False rather than raising
+    is deliberate: a superseded retirement is a NORMAL outcome of two racing
+    transitions, not an error, and the caller's job is to skip its work."""
+    lc = WorkspaceLifecycle()
+    ws = uuid.uuid4()
+    await lc.apply(ws, generation=6, retired=False)
+    async with lc.transition(ws, generation=5, retired=True) as took_effect:
+        assert took_effect is False
+    assert lc.is_retired(ws) is False
+    assert lc.applied_generation(ws) == 6
 
 
 async def test_a_lower_generation_is_ignored_in_both_directions():
@@ -372,7 +393,6 @@ async def test_a_lower_generation_is_ignored_in_both_directions():
     await lc.apply(ws, generation=6, retired=False)
     assert await lc.apply(ws, generation=5, retired=True) is False
     assert lc.is_retired(ws) is False
-    assert lc.applied_generation(ws) == 6
 
     # restore@6 arriving AFTER delete@7
     await lc.apply(ws, generation=7, retired=True)
@@ -382,8 +402,9 @@ async def test_a_lower_generation_is_ignored_in_both_directions():
 
 
 async def test_the_same_generation_applied_twice_is_a_no_op():
-    """Retries coalesce by construction (spec 5.4): N applies == 1 apply. If a
-    repeat took effect, a duplicate delivery could flip state back."""
+    """Retries coalesce by construction (spec 5.4): N applies == 1 apply. `<=`,
+    not `<`: if a repeat took effect, a duplicate delivery of one transition
+    could flip state back after a later one had landed."""
     lc = WorkspaceLifecycle()
     ws = uuid.uuid4()
     assert await lc.apply(ws, generation=3, retired=True) is True
@@ -401,33 +422,50 @@ async def test_state_is_per_workspace():
 
 
 async def test_concurrent_applies_converge_on_the_highest_generation():
-    """Order-independence, exercised rather than asserted: the same set of
-    effects delivered concurrently must land on the same state every time."""
+    """Order-independence, exercised rather than asserted.
+
+    The HIGHEST generation is delivered FIRST and the rest scramble behind it.
+    Ascending delivery would be worthless here: last-write-wins would also end
+    on 20, so the test would pass with monotonicity deleted.
+    """
     lc = WorkspaceLifecycle()
     ws = uuid.uuid4()
-    effects = [(g, g % 2 == 1) for g in range(1, 21)]
+    await lc.apply(ws, generation=20, retired=False)
     await asyncio.gather(
-        *(lc.apply(ws, generation=g, retired=r) for g, r in effects)
+        *(lc.apply(ws, generation=g, retired=(g % 2 == 1)) for g in range(1, 20))
     )
-    assert lc.applied_generation(ws) == 20
-    assert lc.is_retired(ws) is False   # generation 20 is even -> not retired
+    assert lc.applied_generation(ws) == 20, (
+        "a superseded transition overwrote a newer one"
+    )
+    assert lc.is_retired(ws) is False   # generation 20 was retired=False
 
 
-async def test_the_per_workspace_lock_excludes_and_does_not_block_siblings():
+async def test_the_lock_is_held_for_the_whole_body_even_when_superseded():
+    """Two properties in one exercise:
+
+    1. Two transitions on the SAME workspace never overlap — this is what lets
+       the coordinator run its teardown inside the body without a restore
+       landing underneath it.
+    2. The lock is held even for a SUPERSEDED transition. If it were released
+       early on the stale path, a stale retirement could observe "superseded"
+       and then interleave anyway.
+    """
     lc = WorkspaceLifecycle()
     a, b = uuid.uuid4(), uuid.uuid4()
     order: list[str] = []
 
-    async def hold(ws, tag, delay):
-        async with lc.lock(ws):
+    async def hold(ws, tag, generation, delay):
+        async with lc.transition(ws, generation=generation, retired=True):
             order.append(f"{tag}-in")
             await asyncio.sleep(delay)
             order.append(f"{tag}-out")
 
-    await asyncio.gather(hold(a, "a1", 0.05), hold(a, "a2", 0), hold(b, "b", 0))
+    # a2 carries the LOWER generation, so whichever order they arrive in, one of
+    # the two bodies runs superseded.
+    await asyncio.gather(
+        hold(a, "a1", 9, 0.05), hold(a, "a2", 1, 0.0), hold(b, "b", 1, 0.0)
+    )
 
-    # No `or`: assert the property directly. Two holders of the SAME workspace
-    # must never be inside at once, whichever wins the race.
     depth = 0
     for ev in [e for e in order if e.startswith("a")]:
         depth += 1 if ev.endswith("-in") else -1
@@ -435,7 +473,7 @@ async def test_the_per_workspace_lock_excludes_and_does_not_block_siblings():
     assert order.count("b-in") == 1, "a sibling workspace was serialised behind it"
 ```
 
-`pyproject.toml:241` sets `asyncio_mode = "auto"`, so a bare `async def test_...` runs without any decorator. Some older files still carry `@pytest.mark.asyncio`; do not copy that — it is redundant here.
+`pyproject.toml:241` sets `asyncio_mode = "auto"`, so a bare `async def test_...` runs without any decorator. Some older files still carry `@pytest.mark.asyncio`; do not copy that — it is redundant here. This module never calls `pytest.*`, so it must not import `pytest` (ruff `F401`).
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -458,14 +496,25 @@ their own in-memory tombstone and a reactivation had to clear every one of
 them — a fan-out that can half-succeed, which is why revision 6's design needed
 a "retryable clearing" contract it could not honour.
 
-One authority removes that class. `apply` is MONOTONIC: an effect from a
-generation at or below the one already applied is ignored. That is what makes
+One authority removes that class. `transition` is MONOTONIC: an effect from a
+generation at or below the one already applied is refused. That is what makes
 arrival order irrelevant, and arrival order genuinely is out of our control —
 the jobs hook's work escapes every lock this process holds (spec 4.6).
 
-Lives on the app loop. `is_retired` is deliberately synchronous: it is called
-from guard paths on every collab write, and making those await a lock would put
-a scheduling point in the hot path for a dictionary lookup.
+`transition` is a context manager because its caller's WORK has to happen inside
+the decision. WorkspaceRetirement holds it across the whole hook fan-out, so a
+restore cannot land between "this retirement is current" and the teardown that
+conclusion authorises. The consequence, which every hook and guard depends on:
+NOTHING called from inside that body may take this lock again — `is_retired` is
+lock-free precisely so guards can be called from there.
+
+`is_retired` is also synchronous because it is called on every collab write;
+making those await a lock would put a scheduling point in the hot path for a
+dictionary lookup.
+
+Growth: one entry per workspace transitioned per process, the same footprint as
+the two tombstone sets it replaces. Eviction stays a later candidate (it was one
+before this slice too), not built here.
 """
 
 from __future__ import annotations
@@ -489,45 +538,67 @@ class WorkspaceLifecycle:
 
     def is_retired(self, workspace_id: uuid.UUID) -> bool:
         """Synchronous, and safe without the lock: a dict read of a single
-        reference under the GIL. A caller can observe the state either side of
-        a concurrent `apply`, which is exactly as true of any lock-free guard —
-        the durable backstop is the under-mutex re-read of soft_deleted_at."""
+        reference under the GIL. A caller can observe the state either side of a
+        concurrent transition, which is exactly as true of any lock-free guard —
+        the durable backstop is the under-mutex re-read of soft_deleted_at.
+
+        Lock-free is also a REQUIREMENT, not just an optimisation: guards run
+        inside hooks that the coordinator invokes while holding this lock."""
         s = self._state.get(workspace_id)
         return s.retired if s is not None else False
 
     def applied_generation(self, workspace_id: uuid.UUID) -> int:
+        """0 means no transition has ever been applied. Every transition
+        allocates >= 1, so 0 can never collide with a real generation."""
         s = self._state.get(workspace_id)
         return s.generation if s is not None else 0
 
-    async def apply(
-        self, workspace_id: uuid.UUID, *, generation: int, retired: bool
-    ) -> bool:
-        """Record the effect of the transition that produced *generation*.
-
-        Returns True if it took effect, False if it was stale or a duplicate.
-        `<=`, not `<`: re-delivering the SAME generation must not flip state,
-        or a duplicate delivery could undo its own transition.
-        """
-        async with self.lock(workspace_id):
-            current = self._state.get(workspace_id)
-            if current is not None and generation <= current.generation:
-                return False
-            self._state[workspace_id] = _State(generation=generation, retired=retired)
-            return True
-
     @contextlib.asynccontextmanager
-    async def lock(self, workspace_id: uuid.UUID):
-        """Per-workspace mutual exclusion for a transition's effects.
+    async def transition(
+        self, workspace_id: uuid.UUID, *, generation: int, retired: bool
+    ):
+        """Decide whether the transition that allocated *generation* is current,
+        and hold this workspace's lock for the caller's whole body either way.
 
-        A convenience, NOT the correctness argument — monotonic `apply` and the
-        SQL predicate in jobs_retirement are what make the design correct, and
-        both hold when work escapes this lock, which spec 4.6 proves it does.
+        Yields True if it took effect, False if it was superseded. `<=`, not
+        `<`: re-delivering the SAME generation must not flip state, or a
+        duplicate delivery could undo its own transition.
+
+        The lock is held on BOTH paths. Releasing early on the superseded path
+        would let a stale caller interleave its work with a live transition's,
+        which is the whole thing this serialises.
         """
         lock = self._locks.get(workspace_id)
         if lock is None:
             lock = self._locks[workspace_id] = asyncio.Lock()
         async with lock:
-            yield
+            current = self._state.get(workspace_id)
+            if current is not None and generation <= current.generation:
+                yield False
+                return
+            self._state[workspace_id] = _State(generation=generation, retired=retired)
+            yield True
+
+    async def apply(
+        self, workspace_id: uuid.UUID, *, generation: int, retired: bool
+    ) -> bool:
+        """`transition` with an empty body, for callers with no contained work
+        (C1's restore, and tests). Deliberately delegates rather than repeating
+        the check: one mutator, one place monotonicity lives."""
+        async with self.transition(
+            workspace_id, generation=generation, retired=retired
+        ) as took_effect:
+            return took_effect
+
+
+# The process-wide authority. A module singleton for the same reason MANAGER and
+# PASS_REGISTRY are: the subsystems that consult it are themselves module
+# singletons constructed at import. Production construction sites inject this
+# object EXPLICITLY (main.py, collab/room.py, drafting/factory.py) so the wiring
+# is readable; it is also the constructor DEFAULT, so that a construction site
+# someone forgets to update binds to the one authority rather than quietly
+# minting a second one. Tests that want isolation pass their own instance.
+LIFECYCLE = WorkspaceLifecycle()
 ```
 
 - [ ] **Step 4: Run to verify they pass**
@@ -538,17 +609,24 @@ uv run pytest tests/proposal_assist/test_workspace_lifecycle.py -q > /tmp/t2.log
 uv run ruff check . ; echo "RUFF_EXIT=$?"
 ```
 
-Expected: 7 passed, `RUFF_EXIT=0`.
+Expected: 8 passed, `RUFF_EXIT=0`.
 
 - [ ] **Step 5: Prove monotonicity is not vacuous**
 
-Change `if current is not None and generation <= current.generation:` to `if False:` and re-run. `test_a_lower_generation_is_ignored_in_both_directions`, `test_the_same_generation_applied_twice_is_a_no_op` and `test_concurrent_applies_converge_on_the_highest_generation` must all fail. Restore, re-run, confirm green. **Report both outcomes and confirm `git status` is clean.**
+Change `if current is not None and generation <= current.generation:` to `if False:` and re-run. These four must fail:
+
+- `test_a_superseded_transition_yields_false_and_changes_nothing`
+- `test_a_lower_generation_is_ignored_in_both_directions`
+- `test_the_same_generation_applied_twice_is_a_no_op`
+- `test_concurrent_applies_converge_on_the_highest_generation`
+
+Restore, re-run, confirm green. **Report the exact list that went red and confirm `git status` is clean.** If `test_concurrent_applies_converge_on_the_highest_generation` survives the mutation, the delivery order is wrong — the highest generation must land first — and the test is worthless until it fails here.
 
 - [ ] **Step 6: Commit** (message in a file, as Task 1).
 
 ---
 
-### Task 3: Thread the generation through retirement
+### Task 3: The coordinator applies the transition, once, and gates on it
 
 **Files:**
 - Modify: `src/call_manager/proposal_assist/retirement.py`
@@ -556,49 +634,65 @@ Change `if current is not None and generation <= current.generation:` to `if Fal
 - Modify: `src/call_manager/proposal_assist/drafting/registry.py` (signature only)
 - Modify: `src/call_manager/proposal_assist/passes.py` (signature only)
 - Modify: `src/call_manager/proposal_assist/jobs_retirement.py` (signature only — Task 4 owns the SQL)
-- Modify: `src/call_manager/web/api/workspaces.py` (the delete route, ~:1536)
+- Modify: `src/call_manager/main.py` (the coordinator gains `lifecycle=`)
+- Modify: `src/call_manager/web/api/workspaces.py` (the delete route, :1536)
 - Test: `tests/proposal_assist/test_retirement_generation.py` (create)
 
 **Interfaces:**
-- Consumes: `soft_delete_workspace_db(...) -> int` from Task 1.
+- Consumes: `soft_delete_workspace_db(...) -> int` (Task 1); `WorkspaceLifecycle`, `LIFECYCLE` (Task 2).
 - Produces:
   - `RetirementHook = Callable[[uuid.UUID, int], Awaitable[object]]` — every hook now takes `(workspace_id, generation)`.
+  - `WorkspaceRetirement(hooks=..., lifecycle=...)` — `lifecycle` is a **required** keyword argument. There are 9 construction sites in the repo; a required argument is what makes "which authority is this coordinator gating on" unanswerable-by-accident.
   - `WorkspaceRetirement.retire(workspace_id: uuid.UUID, generation: int)`.
   - `signal_workspace_retirement(request, *, workspace_id: uuid.UUID, generation: int)`.
+
+**Why the gate is here and not in the hooks.** All four hooks receive the same generation, so a per-hook `apply` gate would return True for whichever hook won and False for the other three: the workspace would be half torn down. Worse, a hook that called `apply` would deadlock — the coordinator holds that workspace's lifecycle lock across the fan-out. One decision, upstream, holding the lock across the work it authorises.
+
+**Why the hooks still take a generation they mostly ignore.** `jobs` needs it: its DB work runs on a thread that outlives both the timeout and the lock, so its guard has to be in the SQL (Task 4). The parameter is uniform because the coordinator's fan-out is uniform. `collab`, `turns` and `passes` ignore it and must say so in a comment naming the coordinator's gate as their reason.
 
 - [ ] **Step 1: Write the failing tests**
 
 Create `tests/proposal_assist/test_retirement_generation.py`:
 
 ```python
-"""Retirement carries the generation its transition allocated.
+"""Retirement carries — and is gated on — the generation its transition allocated.
 
-Retention Slice C0 (spec 4.4). The defect being closed: revision 6 had
-signal_workspace_retirement READ the current generation, which happens after
-the delete commits — so a restore that committed in between made the delete's
-own teardown look current, and it re-poisoned a live workspace.
+Retention Slice C0 (spec 4.4, 4.5). Two defects are closed here:
+
+  * revision 6 had signal_workspace_retirement READ the current generation,
+    which happens after the delete commits — so a restore that committed in
+    between made the delete's own teardown look current;
+  * forwarding a generation that nothing branches on leaves a stale retirement
+    just as destructive as before. The coordinator must run NO hook when its
+    transition has been superseded.
 """
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
-import pytest
-
+from call_manager.proposal_assist.lifecycle import WorkspaceLifecycle
 from call_manager.proposal_assist.retirement import WorkspaceRetirement
 
 
-async def test_every_hook_receives_the_generation():
+def _coordinator(lifecycle, **hooks):
+    """Build a coordinator with the four REQUIRED hook names, defaulting any the
+    caller did not supply to a recording no-op."""
     seen: dict[str, tuple[uuid.UUID, int]] = {}
 
-    def _hook(name):
+    def _recorder(name):
         async def _h(workspace_id, generation):
             seen[name] = (workspace_id, generation)
         return _h
 
-    coordinator = WorkspaceRetirement(
-        hooks={n: _hook(n) for n in ("turns", "collab", "jobs", "passes")}
-    )
+    built = {n: hooks.get(n) or _recorder(n) for n in ("turns", "collab", "jobs", "passes")}
+    return WorkspaceRetirement(hooks=built, lifecycle=lifecycle), seen
+
+
+async def test_every_hook_receives_the_generation():
+    lc = WorkspaceLifecycle()
+    coordinator, seen = _coordinator(lc)
     ws = uuid.uuid4()
     await coordinator.retire(ws, generation=7)
 
@@ -606,26 +700,78 @@ async def test_every_hook_receives_the_generation():
     assert all(v == (ws, 7) for v in seen.values())
 
 
+async def test_the_coordinator_applies_the_transition_itself():
+    """The hooks do not tombstone any more — the coordinator does, once, before
+    any of them runs. Anything that consults is_retired must therefore see the
+    workspace retired from inside the very first hook."""
+    lc = WorkspaceLifecycle()
+    observed: list[bool] = []
+
+    async def _observe(workspace_id, generation):
+        observed.append(lc.is_retired(workspace_id))
+
+    coordinator, _ = _coordinator(lc, collab=_observe)
+    ws = uuid.uuid4()
+    await coordinator.retire(ws, generation=1)
+
+    assert observed == [True], "a hook ran before the workspace was marked retired"
+    assert lc.is_retired(ws) is True
+    assert lc.applied_generation(ws) == 1
+
+
+async def test_a_superseded_retirement_runs_NO_hook():
+    """Spec 4.5. This is the finding that revision 1 of this plan missed: a
+    coordinator that forwards the generation but fans out anyway still evicts
+    rooms, closes sockets, pops subprocesses and cancels passes on a workspace a
+    later transition brought back."""
+    lc = WorkspaceLifecycle()
+    coordinator, seen = _coordinator(lc)
+    ws = uuid.uuid4()
+
+    await lc.apply(ws, generation=2, retired=False)   # a restore got there first
+    await coordinator.retire(ws, generation=1)
+
+    assert seen == {}, f"a superseded retirement tore down a live workspace: {seen}"
+    assert lc.is_retired(ws) is False
+    assert lc.applied_generation(ws) == 2
+
+
+async def test_the_lifecycle_lock_is_held_across_the_fan_out():
+    """A transition landing DURING the teardown must wait for it, or it would
+    un-retire a workspace whose rooms are still being evicted."""
+    lc = WorkspaceLifecycle()
+    started = asyncio.Event()
+    order: list[str] = []
+
+    async def _slow(workspace_id, generation):
+        started.set()
+        await asyncio.sleep(0.05)
+        order.append("hook-done")
+
+    coordinator, _ = _coordinator(lc, collab=_slow)
+    ws = uuid.uuid4()
+
+    task = asyncio.ensure_future(coordinator.retire(ws, generation=1))
+    await started.wait()
+
+    await lc.apply(ws, generation=2, retired=False)
+    order.append("restore-applied")
+    await task
+
+    assert order == ["hook-done", "restore-applied"], (
+        "a later transition landed while the teardown it supersedes was still "
+        f"running: {order}"
+    )
+
+
 async def test_one_hook_failing_does_not_stop_the_others_receiving_it():
-    """The existing isolation guarantee must survive the signature change."""
-    seen: list[str] = []
+    """The existing isolation guarantee must survive both changes."""
+    lc = WorkspaceLifecycle()
 
     async def _boom(workspace_id, generation):
         raise RuntimeError("hook exploded")
 
-    def _ok(name):
-        async def _h(workspace_id, generation):
-            seen.append(name)
-        return _h
-
-    coordinator = WorkspaceRetirement(
-        hooks={
-            "turns": _boom,
-            "collab": _ok("collab"),
-            "jobs": _ok("jobs"),
-            "passes": _ok("passes"),
-        }
-    )
+    coordinator, seen = _coordinator(lc, turns=_boom)
     await coordinator.retire(uuid.uuid4(), generation=1)
     assert sorted(seen) == ["collab", "jobs", "passes"]
 ```
@@ -668,16 +814,16 @@ def test_the_route_signals_retirement_with_the_generation_it_committed(
     )
 ```
 
-Follow that file's existing fixtures and imports — read it before writing; do not invent fixture names.
+`signal_workspace_retirement` is imported module-level at `web/api/workspaces.py:77`, and that test file already monkeypatches it the same way at :152 — follow the surrounding fixtures and imports rather than inventing names.
 
 - [ ] **Step 2: Run to verify they fail**
 
 ```bash
 cd /home/parlar_ai/dev/call-monitor
-uv run pytest tests/proposal_assist/test_retirement_generation.py tests/proposal_assist/test_workspaces_delete_route.py -q > /tmp/t3.log 2>&1; echo "EXIT=$?"; tail -20 /tmp/t3.log
+uv run pytest tests/proposal_assist/test_retirement_generation.py -q > /tmp/t3.log 2>&1; echo "EXIT=$?"; tail -20 /tmp/t3.log
 ```
 
-Expected: FAIL — `retire()` takes no `generation`.
+Expected: FAIL — `WorkspaceRetirement()` takes no `lifecycle`.
 
 - [ ] **Step 3: Change the coordinator**
 
@@ -687,27 +833,72 @@ In `src/call_manager/proposal_assist/retirement.py`:
 RetirementHook = Callable[[uuid.UUID, int], Awaitable[object]]
 ```
 
-and
+Update the module comment above it: hooks now receive the generation their retirement allocated; `jobs` is the only one that uses it, because its work escapes the coordinator's gate.
+
+Constructor gains a required keyword:
+
+```python
+    def __init__(
+        self, hooks: dict[str, RetirementHook], *, lifecycle: WorkspaceLifecycle
+    ) -> None:
+        ...
+        self._lifecycle = lifecycle
+```
+
+and `retire`:
 
 ```python
     async def retire(self, workspace_id: uuid.UUID, generation: int) -> None:
-        """Run EVERY registered hook concurrently, each isolated in its own
-        try/except so one hook's failure never suppresses another's teardown.
+        """Apply the retirement to the lifecycle authority, and — only if it is
+        still current — run EVERY registered hook concurrently, each isolated in
+        its own try/except so one hook's failure never suppresses another's.
 
         *generation* is the one the deleting transaction ALLOCATED, passed down
-        untouched. No hook may re-read it: a generation read here would be the
-        one current when teardown ran, not the one this teardown belongs to,
-        and a transition that landed in between would then look like this one
-        (spec 4.4).
-        """
+        untouched. Nothing here may re-read it: a generation read at this point
+        would be the one current when teardown ran, not the one this teardown
+        belongs to, so a transition that landed in between would look like this
+        one (spec 4.4).
 
-        async def _run(name: str, hook: RetirementHook) -> None:
-            try:
-                await hook(workspace_id, generation)
-            ...
+        The gate is HERE rather than in the hooks for two reasons. All four
+        hooks carry the same generation, so a per-hook check would let the first
+        win and leave the workspace half torn down. And the lifecycle lock is
+        held across the whole fan-out — so a hook that took it would deadlock
+        against its own caller. Inside this block, `is_retired` (lock-free) is
+        the only lifecycle call that is legal.
+
+        Holding the lock for the fan-out bounds nothing new: the hooks are
+        individually bounded by the same budgets _RETIREMENT_BARRIER_SECONDS is
+        derived from above (max 5.5s, passes), and test_retirement_coordinator.py
+        asserts that inequality against the live constants.
+
+        Never raises; return values are discarded.
+        """
+        async with self._lifecycle.transition(
+            workspace_id, generation=generation, retired=True
+        ) as took_effect:
+            if not took_effect:
+                logger.info(
+                    "retirement.superseded",
+                    extra={
+                        "event": "retirement_superseded",
+                        "workspace_id": str(workspace_id),
+                        "generation": generation,
+                    },
+                )
+                return
+
+            async def _run(name: str, hook: RetirementHook) -> None:
+                try:
+                    await hook(workspace_id, generation)
+                except Exception:
+                    ...   # keep the existing logging block verbatim
+
+            await asyncio.gather(
+                *(_run(name, hook) for name, hook in self._hooks.items())
+            )
 ```
 
-Keep the existing logging and `asyncio.gather` structure exactly; only the call gains an argument.
+Keep the existing logging and `asyncio.gather` structure exactly; only the gate and the extra argument are new.
 
 Then `signal_workspace_retirement`:
 
@@ -721,25 +912,43 @@ with `coro = coordinator.retire(workspace_id, generation)`. Extend its docstring
 
 - [ ] **Step 4: Update the four hook signatures**
 
-Each hook gains `generation: int`. In this task they may ignore it — Task 4 uses it in `jobs`, Task 5 in `collab` and `turns`. `passes` ignores it permanently (it keeps no per-workspace state; say so in a comment).
+Each hook gains `generation: int`.
 
 - `collab/room.py:664` → `async def retire_workspace(self, workspace_id: uuid.UUID, generation: int) -> int:`
 - `drafting/registry.py:197` → same shape, `-> None`
 - `passes.py:117` → same shape, `-> int`
 - `jobs_retirement.py` → the built `_hook(workspace_id, generation)`
 
+In `collab`, `turns` and `passes`, add a comment on the unused parameter: the coordinator gates the whole fan-out on this generation while holding the lifecycle lock, so this hook is never invoked for a superseded transition and must not re-check (and could not: taking the lock here deadlocks).
+
 **Find every caller and every test double** before you finish:
 
 ```bash
 cd /home/parlar_ai/dev/call-monitor
-grep -rn "retire_workspace\|signal_workspace_retirement\|\.retire(" --include="*.py" src/ tests/
+grep -rn "retire_workspace\|signal_workspace_retirement\|WorkspaceRetirement(\|\.retire(" --include="*.py" src/ tests/
 ```
 
-Classify each hit: production caller, test double, or assertion. A test double with the old arity will fail loudly, which is what you want — fix each one rather than making the parameter optional. **An optional `generation` would let a caller silently omit it and get a wrong-but-plausible default, which is the defect this slice exists to remove.**
+Classify each hit: production caller, test double, or assertion. A test double with the old arity fails loudly, which is what you want — fix each rather than making the parameter optional. **An optional `generation` would let a caller silently omit it and get a wrong-but-plausible default, which is the defect this slice exists to remove.** Known sites that must change: `tests/proposal_assist/test_retirement_coordinator.py` (8 constructions plus 3 bridge calls at :185, :216, :231) and `main.py:197`.
 
-- [ ] **Step 5: Thread it through the delete route**
+- [ ] **Step 5: Wire the lifecycle into the coordinator**
 
-In `src/call_manager/web/api/workspaces.py`, capture the return value of `soft_delete_workspace_db` and pass it on:
+In `main.py`, import the singleton and pass it, next to the existing local imports in the lifespan:
+
+```python
+    from call_manager.proposal_assist.lifecycle import LIFECYCLE
+
+    app.state.workspace_lifecycle = LIFECYCLE
+    app.state.workspace_retirement = WorkspaceRetirement(
+        hooks={...},          # unchanged
+        lifecycle=LIFECYCLE,
+    )
+```
+
+Task 5 wires the same object into collab and turns and adds the identity test.
+
+- [ ] **Step 6: Thread it through the delete route**
+
+In `src/call_manager/web/api/workspaces.py` (:1536), capture the return value and pass it on:
 
 ```python
     generation = soft_delete_workspace_db(session, workspace_id=workspace_id)
@@ -749,11 +958,11 @@ In `src/call_manager/web/api/workspaces.py`, capture the return value of `soft_d
 
 Read the surrounding code first — the call sits inside a `try/except CommitMutexTimeout` block, and the variable must be in scope at the signal site.
 
-- [ ] **Step 6: Run the tests and the gates**
+- [ ] **Step 7: Run the tests and the gates**
 
 ```bash
 cd /home/parlar_ai/dev/call-monitor
-uv run pytest tests/proposal_assist/test_retirement_generation.py -q > /tmp/t3.log 2>&1; echo "EXIT=$?"; tail -10 /tmp/t3.log
+uv run pytest tests/proposal_assist/test_retirement_generation.py tests/proposal_assist/test_retirement_coordinator.py tests/proposal_assist/test_workspaces_delete_route.py -q > /tmp/t3.log 2>&1; echo "EXIT=$?"; tail -20 /tmp/t3.log
 uv run pytest -n 16 --dist loadfile -q > /tmp/t3-full.log 2>&1; echo "FULL_EXIT=$?"; tail -3 /tmp/t3-full.log
 uv run ruff check . ; echo "RUFF_EXIT=$?"
 git diff --exit-code -- frontend/src/api/schema.gen.ts ; echo "DRIFT_EXIT=$?"
@@ -761,7 +970,11 @@ git diff --exit-code -- frontend/src/api/schema.gen.ts ; echo "DRIFT_EXIT=$?"
 
 Expected: all green, `DRIFT_EXIT=0` (no route signature or docstring changed in a way OpenAPI sees — if it did, regenerate with `EMBEDDING_MODEL=bge-m3 bash scripts/gen_openapi_types.sh` and say so in your report).
 
-- [ ] **Step 7: Commit** (message in a file).
+- [ ] **Step 8: Prove the gate is load-bearing**
+
+Temporarily change the coordinator to ignore `took_effect` (fan out unconditionally). `test_a_superseded_retirement_runs_NO_hook` must fail. Restore, re-run, confirm green. Report both outcomes and that `git status` is clean.
+
+- [ ] **Step 9: Commit** (message in a file).
 
 ---
 
@@ -773,9 +986,9 @@ Expected: all green, `DRIFT_EXIT=0` (no route signature or docstring changed in 
 
 **Interfaces:**
 - Consumes: the `generation` parameter from Task 3; `Workspace.lifecycle_generation` from Task 1.
-- Produces: no new symbols. The two cancellation updates gain a generation predicate.
+- Produces: `cancel_setup_jobs_for_workspace(session, workspace_id, generation)` and `cancel_claim_analysis_jobs_for_workspace(session, workspace_id, generation)` — **both gain a third positional parameter**, and both statements gain a generation predicate.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
 Create `tests/proposal_assist/test_jobs_retirement_generation.py`:
 
@@ -784,142 +997,124 @@ Create `tests/proposal_assist/test_jobs_retirement_generation.py`:
 
 Retention Slice C0 (spec 4.6). build_jobs_retirement_hook runs its DB work as
 wait_for(to_thread(...)), and the timeout cancels the AWAIT, not the thread —
-this repo documents that in tests/proposal_assist/test_phase0_retirement.py:317.
-So an orphaned thread can wake up long after a later transition committed. A
-stale check before the thread starts proves nothing about when it runs; the
-predicate has to be in the statement itself.
+this repo documents that at tests/proposal_assist/test_phase0_retirement.py:317.
+The thread therefore escapes the coordinator's lifecycle lock exactly as it
+escapes the timeout, so the coordinator's gate does NOT cover this hook: an
+orphaned thread can wake up long after a later transition committed. A stale
+check before the thread starts proves nothing about when it runs; the predicate
+has to be in the statement itself.
 """
 
 from __future__ import annotations
 
+import asyncio
+import threading
+
 import pytest
 
+import call_manager.proposal_assist.jobs_retirement as jr
 from call_manager.db.models import Workspace, WorkspaceSetupJob
 from call_manager.proposal_assist.jobs_retirement import build_jobs_retirement_hook
 from tests.proposal_assist.conftest import make_workspace
 
 
-async def test_the_hook_cancels_at_its_own_generation(pg_session_factory):
+def _seed(pg_session_factory, *, generation: int):
     with pg_session_factory() as s:
         ws = make_workspace(s)
         s.flush()
         s.add(WorkspaceSetupJob(workspace_id=ws.id, status="queued"))
         s.commit()
         ws_id = ws.id
-        s.get(Workspace, ws_id).lifecycle_generation = 1
+        s.get(Workspace, ws_id).lifecycle_generation = generation
         s.commit()
+    return ws_id
 
-    hook = build_jobs_retirement_hook(pg_session_factory)
-    await hook(ws_id, 1)
 
+def _status(pg_session_factory, ws_id):
     with pg_session_factory() as s:
-        job = s.query(WorkspaceSetupJob).filter_by(workspace_id=ws_id).one()
-        assert job.status == "cancelled"
+        return s.query(WorkspaceSetupJob).filter_by(workspace_id=ws_id).one().status
+
+
+async def test_the_hook_cancels_at_its_own_generation(pg_session_factory):
+    ws_id = _seed(pg_session_factory, generation=1)
+    await build_jobs_retirement_hook(pg_session_factory)(ws_id, 1)
+    assert _status(pg_session_factory, ws_id) == "cancelled"
 
 
 async def test_a_stale_generation_cancels_nothing(pg_session_factory):
     """The orphaned-thread case, reduced: the hook runs with generation 1 while
     the row has already moved to 2. It must update ZERO rows — asserted on the
     row, not on whether the hook was called."""
-    with pg_session_factory() as s:
-        ws = make_workspace(s)
-        s.flush()
-        s.add(WorkspaceSetupJob(workspace_id=ws.id, status="queued"))
-        s.commit()
-        ws_id = ws.id
-        s.get(Workspace, ws_id).lifecycle_generation = 2
-        s.commit()
-
-    hook = build_jobs_retirement_hook(pg_session_factory)
-    await hook(ws_id, 1)
-
-    with pg_session_factory() as s:
-        job = s.query(WorkspaceSetupJob).filter_by(workspace_id=ws_id).one()
-        assert job.status == "queued", (
-            "a superseded retirement cancelled a setup job that a later "
-            "transition had brought back"
-        )
+    ws_id = _seed(pg_session_factory, generation=2)
+    await build_jobs_retirement_hook(pg_session_factory)(ws_id, 1)
+    assert _status(pg_session_factory, ws_id) == "queued", (
+        "a superseded retirement cancelled a setup job that a later transition "
+        "had brought back"
+    )
 
 
-async def test_the_thread_released_after_a_later_transition_changes_nothing(
+async def test_a_thread_orphaned_by_the_timeout_changes_nothing(
     pg_session_factory, monkeypatch
 ):
-    """The real shape of spec 4.6: hold the hook's DB work open, move the
-    generation on underneath it, then release it.
+    """The real shape of spec 4.6, in the real order:
 
-    `cancel_setup_jobs_for_workspace` is the seam because it is what the hook's
-    thread actually calls (jobs_retirement.py:94). Wrapping it — rather than
-    replacing it — keeps the real statement, and therefore the real predicate,
-    under test.
+      1. park the hook's DB thread and WAIT until it is genuinely parked;
+      2. let the hook's own wait_for bound (_JOBS_CANCEL_SECONDS = 1.0) expire,
+         so the thread is orphaned rather than merely slow;
+      3. commit a later generation;
+      4. release the orphan and wait for it to finish its transaction.
+
+    Step 1 is what makes this different from the previous test. Scheduling the
+    hook and then doing synchronous work never yields to the loop, so the hook
+    would not have started at all — the thread would find the release already
+    set and the test would silently degrade into a duplicate of the one above.
     """
-    import asyncio
-    import threading
+    ws_id = _seed(pg_session_factory, generation=1)
 
-    import call_manager.proposal_assist.jobs_retirement as jr
-
-    with pg_session_factory() as s:
-        ws = make_workspace(s)
-        s.flush()
-        s.add(WorkspaceSetupJob(workspace_id=ws.id, status="queued"))
-        s.commit()
-        ws_id = ws.id
-        s.get(Workspace, ws_id).lifecycle_generation = 1
-        s.commit()
-
+    entered = threading.Event()
     release = threading.Event()
     real = jr.cancel_setup_jobs_for_workspace
 
     def _blocking(session, workspace_id, generation):
-        release.wait(timeout=10)
+        entered.set()
+        release.wait(timeout=30)   # bounded, so a failing test cannot hang the suite
         return real(session, workspace_id, generation)
 
     monkeypatch.setattr(jr, "cancel_setup_jobs_for_workspace", _blocking)
 
-    hook = build_jobs_retirement_hook(pg_session_factory)
-    task = asyncio.ensure_future(hook(ws_id, 1))
+    task = asyncio.ensure_future(build_jobs_retirement_hook(pg_session_factory)(ws_id, 1))
 
-    # A later transition commits while the hook's thread is parked.
+    for _ in range(1000):          # wait for the CONDITION, not for a duration
+        if entered.is_set():
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("the hook's DB thread never parked; this test proves nothing")
+
+    with pytest.raises(TimeoutError):   # asyncio.TimeoutError is this on 3.11+
+        await task
+
     with pg_session_factory() as s:
         s.get(Workspace, ws_id).lifecycle_generation = 2
         s.commit()
 
     release.set()
-    # The hook's own wait_for may already have timed out; that IS the scenario,
-    # not a failure. What matters is what the released thread then writes, so
-    # this must wait for that thread deterministically — see the note below.
-    with contextlib.suppress(asyncio.TimeoutError):
-        await task
-    await _join_the_orphaned_thread()
+    # to_thread gives no handle on its thread. This is the only boundary that
+    # includes _work()'s COMMIT: an Event set by the wrapper fires before the
+    # commit, and the assertion below would race it.
+    await asyncio.get_running_loop().shutdown_default_executor()
 
-    with pg_session_factory() as s:
-        job = s.query(WorkspaceSetupJob).filter_by(workspace_id=ws_id).one()
-        assert job.status == "queued", (
-            "an orphaned retirement thread cancelled a setup job after a later "
-            "transition had moved the generation on"
-        )
+    assert _status(pg_session_factory, ws_id) == "queued", (
+        "an orphaned retirement thread cancelled a setup job after a later "
+        "transition had moved the generation on"
+    )
 ```
 
-`_join_the_orphaned_thread()` is the one piece this plan does not hand you,
-because it depends on a fact worth establishing rather than guessing: **`to_thread`
-gives no handle on its thread.** Two honest options, and you must pick one and
-say which in your report:
+Notes the implementer needs, all verified against the module rather than guessed:
 
-- `await asyncio.get_running_loop().shutdown_default_executor()` — waits for the
-  default executor's threads to finish. Note this repo already documents that
-  `asyncio.run()`'s cleanup does exactly this, at
-  `tests/proposal_assist/test_phase0_retirement.py:321`.
-- Have the wrapper signal completion on a second `threading.Event` and wait on
-  that, which is deterministic and does not depend on executor internals.
-
-**Do not `await asyncio.sleep(...)` and hope.** A test that merely usually wins
-the race is flaky, and a flaky test on this slice's central guarantee certifies
-something it did not check.
-
-**Names above are verified, not guessed:** `jobs_retirement.py` defines
-`cancel_claim_analysis_jobs_for_workspace` (:62), `cancel_setup_jobs_for_workspace` (:94),
-`build_jobs_retirement_hook` (:123) and `_CANCELLABLE = ("queued","running","waiting_for_rubric_review")` (:55).
-Both cancellation helpers currently take `(session, workspace_id)` and gain `generation` in Step 3.
-Add `import contextlib` to the test module.
+- `jobs_retirement.py` defines `cancel_claim_analysis_jobs_for_workspace` (:62), `cancel_setup_jobs_for_workspace` (:94), `build_jobs_retirement_hook` (:123), `_CANCELLABLE` (:55) and `_JOBS_CANCEL_SECONDS = 1.0` (:37). `_work()` calls both helpers by module-global name and then commits, which is why `monkeypatch.setattr` on the module attribute reaches it.
+- `shutdown_default_executor()` must be the LAST use of a worker thread in that test — the loop's default executor does not come back.
+- The parked thread holds one pooled connection while the test opens another. If the suite reports pool exhaustion here, raise it in your report rather than reducing the test to a single connection: the two-connection shape is the scenario.
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -928,21 +1123,22 @@ cd /home/parlar_ai/dev/call-monitor
 uv run pytest tests/proposal_assist/test_jobs_retirement_generation.py -q > /tmp/t4.log 2>&1; echo "EXIT=$?"; tail -20 /tmp/t4.log
 ```
 
-Expected: FAIL — the second test cancels the job, because nothing consults the generation yet.
+Expected: FAIL — the helpers take no `generation`.
 
 - [ ] **Step 3: Add the predicate**
 
-Both cancellation statements gain the same guard. Shape:
+Both cancellation statements gain the same guard, and both helpers gain the parameter. Shape, on the setup-job select:
 
 ```python
     .where(
         WorkspaceSetupJob.workspace_id == workspace_id,
         WorkspaceSetupJob.status.in_(_CANCELLABLE),
         # The linearization point. This runs on an ORPHANED thread whenever the
-        # hook's wait_for timed out (jobs_retirement.py's own bound cancels the
-        # await, not the thread), so "was the workspace still at my generation
-        # when I started" is not a question anyone can answer outside the
-        # statement. Ask it here, atomically with the write.
+        # hook's wait_for timed out (that bound cancels the await, not the
+        # thread), and the thread escapes the coordinator's lifecycle lock the
+        # same way — so "was the workspace still at my generation when I
+        # started" is not a question anyone can answer outside the statement.
+        # Ask it here, atomically with the write.
         exists().where(
             Workspace.id == workspace_id,
             Workspace.lifecycle_generation == generation,
@@ -950,37 +1146,47 @@ Both cancellation statements gain the same guard. Shape:
     )
 ```
 
-Apply it to the claim-analysis cancellation too. Thread `generation` down from `_hook` to both.
+`exists` comes from `sqlalchemy`; `Workspace` must be imported at module level (the module currently imports it lazily inside `reconcile_cancelled_jobs` — move it up rather than adding a second local import). Thread `generation` from `_hook` into both helpers.
 
-- [ ] **Step 4: Run to verify they pass**
+- [ ] **Step 4: Fix the three test files that call the helpers directly**
 
 ```bash
 cd /home/parlar_ai/dev/call-monitor
-uv run pytest tests/proposal_assist/test_jobs_retirement_generation.py tests/proposal_assist/test_phase0_retirement.py -q > /tmp/t4.log 2>&1; echo "EXIT=$?"; tail -10 /tmp/t4.log
+grep -rn "cancel_setup_jobs_for_workspace\|cancel_claim_analysis_jobs_for_workspace" --include="*.py" tests/
+```
+
+`test_phase0_retirement.py` (:335), `test_api_writers_mutex_straddle.py` (:644) and `test_claim_analysis_retirement.py` (:69, :111) call them with two arguments. Each must pass the generation **that workspace's row actually holds** — read it, or use the value its own delete allocated. **Do not pass 0 blindly:** a workspace that has been deleted in the test sits at 1, and 0 would silently make the call a no-op, turning a real assertion into a vacuous one.
+
+- [ ] **Step 5: Run to verify they pass**
+
+```bash
+cd /home/parlar_ai/dev/call-monitor
+uv run pytest tests/proposal_assist/test_jobs_retirement_generation.py tests/proposal_assist/test_phase0_retirement.py tests/proposal_assist/test_claim_analysis_retirement.py tests/proposal_assist/test_api_writers_mutex_straddle.py -q > /tmp/t4.log 2>&1; echo "EXIT=$?"; tail -10 /tmp/t4.log
 uv run ruff check . ; echo "RUFF_EXIT=$?"
 ```
 
-Expected: all green. `test_phase0_retirement.py` is included because it owns the existing bounds behaviour.
+- [ ] **Step 6: Prove the predicate is load-bearing**
 
-- [ ] **Step 5: Prove the predicate is load-bearing**
+Delete the `exists()` clause from the setup-job statement only, re-run, and confirm both `test_a_stale_generation_cancels_nothing` **and** `test_a_thread_orphaned_by_the_timeout_changes_nothing` fail. Restore, re-run, confirm green. Report both outcomes and confirm `git status` is clean.
 
-Delete the `exists()` clause from the setup-job statement only, re-run, and confirm `test_a_stale_generation_cancels_nothing` **and** `test_the_thread_released_after_a_later_transition_changes_nothing` fail. Restore, re-run, confirm green. Report both outcomes and confirm `git status` is clean.
-
-- [ ] **Step 6: Commit** (message in a file).
+- [ ] **Step 7: Commit** (message in a file).
 
 ---
 
 ### Task 5: One authority — collab and turns stop keeping their own sets
 
 **Files:**
-- Modify: `src/call_manager/proposal_assist/collab/room.py` (7 guard sites + the add at :681)
-- Modify: `src/call_manager/proposal_assist/drafting/registry.py` (2 guard sites + the add at :217)
-- Modify: `src/call_manager/main.py` (construct and inject `WorkspaceLifecycle`)
+- Modify: `src/call_manager/proposal_assist/collab/room.py` (6 guard checks, the tombstone add at :681, the ctor at :475, the singleton at :776)
+- Modify: `src/call_manager/proposal_assist/drafting/registry.py` (2 guard checks at :133 and :318, the tombstone add at :217, the ctor at :85)
+- Modify: `src/call_manager/proposal_assist/drafting/factory.py` (:39 — inject `LIFECYCLE`)
+- Modify: `tests/proposal_assist/collab/test_collab_retire.py`, `tests/proposal_assist/test_drafting_retire_tombstone.py` (they call the hooks directly)
 - Test: `tests/proposal_assist/test_lifecycle_authority.py` (create)
 
 **Interfaces:**
-- Consumes: `WorkspaceLifecycle` from Task 2; the `generation` parameter from Task 3.
-- Produces: `app.state.workspace_lifecycle`. `MANAGER._retired_ws` and `registry._retired` **cease to exist**.
+- Consumes: `WorkspaceLifecycle`, `LIFECYCLE` (Task 2); the coordinator's gate (Task 3).
+- Produces: `RoomManager(lifecycle=...)` and `SubprocessRegistry(..., lifecycle=...)` — keyword, defaulting to `LIFECYCLE`; `app.state.workspace_lifecycle`. `MANAGER._retired_ws` and `registry._retired` **cease to exist**.
+
+**On the constructor default.** Production sites inject explicitly (`room.py:776`, `factory.py:39`, `main.py`). The default exists for the 25 `RoomManager(...)` and 67 `SubprocessRegistry(...)` construction sites in tests, and it is `LIFECYCLE` — the same object — precisely so that a site nobody updates cannot mint a second authority. A private per-instance default would do exactly that, which is why this plan does not use one. Step 4's identity test is what proves the production wiring, and it is the reason a default is safe rather than a hiding place.
 
 - [ ] **Step 1: Survey every site**
 
@@ -989,11 +1195,11 @@ cd /home/parlar_ai/dev/call-monitor
 grep -rn "_retired_ws\|_retired\b" --include="*.py" src/ tests/
 ```
 
-Classify every hit: guard, add, test assertion, or unrelated. **Report the full list in your report** — the two sets have 7 and 2 guard sites respectively in production, and a missed guard is a workspace that stays refused after a restore.
+Classify every hit: guard check, tombstone add, test assertion, comment, or unrelated. **Report the full list.** In production there are 6 guard checks in `room.py` (:495, :510, :523, :542, :557, :571) and 2 in `registry.py` (:133, :318); a missed guard is a workspace that stays refused after a restore.
 
 - [ ] **Step 2: Write the failing test**
 
-Create `tests/proposal_assist/test_lifecycle_authority.py`. It must prove the guards read the **authority**, not a local set — by driving the authority and observing the subsystems:
+Create `tests/proposal_assist/test_lifecycle_authority.py`. It must prove the guards read the **authority** — by driving the authority and observing the subsystems:
 
 ```python
 """collab and turns consult WorkspaceLifecycle, not their own sets.
@@ -1009,25 +1215,57 @@ consulted a stale local set.
 
 Write, at minimum:
 
-1. after `apply(ws, generation=1, retired=True)`, a collab operation raises `WorkspaceRetired` and a turn launch is refused;
-2. after `apply(ws, generation=2, retired=False)`, **the same two operations succeed** — this is the un-poisoning that revision 6 could not do reliably;
-3. `apply(ws, generation=1, retired=True)` arriving late (after generation 2) leaves both subsystems accepting.
+1. after `apply(ws, generation=1, retired=True)`, a collab `acquire` raises `WorkspaceRetired` and a turn launch is refused — **without anyone having called `retire_workspace`**, which is what proves the guard reads the authority rather than a set the hook populates;
+2. after `apply(ws, generation=2, retired=False)`, **the same two operations succeed** — this is the un-poisoning revision 6 could not do reliably;
+3. `apply(ws, generation=1, retired=True)` arriving late (after generation 2) leaves both subsystems accepting;
+4. a `WorkspaceLifecycle` passed to `RoomManager(lifecycle=...)` is the one its guards consult — construct two managers on two different lifecycles and show they do not see each other's state.
 
-Read `tests/proposal_assist/test_workspaces_delete_route.py` and the collab tests for how to reach `MANAGER` and the drafting registry, and follow those patterns.
+Read `tests/proposal_assist/collab/test_collab_retire.py` and `tests/proposal_assist/test_drafting_retire_tombstone.py` for how to reach a manager and the drafting registry, and follow those patterns.
 
 - [ ] **Step 3: Replace the sets**
 
-In `room.py`, every `if workspace_id in self._retired_ws:` becomes `if self._lifecycle.is_retired(workspace_id):`, and `self._retired_ws.add(workspace_id)` at :681 becomes an `await self._lifecycle.apply(workspace_id, generation=generation, retired=True)`. Delete `self._retired_ws`. Same shape in `registry.py`.
+In `room.py`: the constructor takes `lifecycle: WorkspaceLifecycle | None = None` and stores `lifecycle if lifecycle is not None else LIFECYCLE`; every `if workspace_id in self._retired_ws:` becomes `if self._lifecycle.is_retired(workspace_id):`; `self._retired_ws` is deleted; `MANAGER = RoomManager(lifecycle=LIFECYCLE)`. Same shape in `registry.py`, and `factory.py:39` passes `lifecycle=LIFECYCLE`.
 
-The manager and registry need a reference. Follow the construction each already uses — if `MANAGER` is a module-level singleton constructed with no arguments, add a setter called from `main.py` at startup rather than changing every construction site, and make the default a private `WorkspaceLifecycle()` so a unit test that constructs one directly still works.
+At one guard in each file, add the comment the Global Constraints require: `is_retired` is lock-free and that is load-bearing — this can run inside a hook the coordinator invokes while holding the lifecycle lock.
 
-**Do not leave a fallback that silently tolerates a missing lifecycle.** If it is unset at guard time that is a startup wiring bug and must be loud.
+**`retire_workspace` stops tombstoning.** Delete `self._retired_ws.add(workspace_id)` (`room.py:681`) and `self._retired.add(workspace_id)` (`registry.py:217`). The coordinator applies the transition before any hook runs (Task 3), so the tombstone is already set; a hook that applied it again would deadlock on the lock its caller holds. Update both docstrings: they currently promise "tombstone, then tear down" and now promise only the teardown, with the tombstone named as the coordinator's.
 
-- [ ] **Step 4: Wire it in `main.py`**
+- [ ] **Step 4: Wire it, and prove the wiring**
 
-Construct one `WorkspaceLifecycle` in the lifespan, before the retirement coordinator (it is a dependency of the hooks), assign `app.state.workspace_lifecycle`, and inject it into `MANAGER` and the drafting registry.
+`main.py` already sets `app.state.workspace_lifecycle = LIFECYCLE` and passes it to the coordinator (Task 3, Step 5). Add a lifespan-level test asserting all four are the **same object**:
 
-- [ ] **Step 5: Run the tests and the gates**
+```python
+assert app.state.workspace_lifecycle is LIFECYCLE
+assert MANAGER._lifecycle is app.state.workspace_lifecycle
+assert workspace_controller.registry._lifecycle is app.state.workspace_lifecycle
+assert app.state.workspace_retirement._lifecycle is app.state.workspace_lifecycle
+```
+
+Follow `tests/proposal_assist/test_pass_registry_wiring.py` for how this repo builds an app through its lifespan. Reading `_lifecycle` is deliberate and confined to this test: it asserts wiring identity, which has no public surface, and a public accessor added only to be asserted on would be worse.
+
+- [ ] **Step 5: Fix the tests that call the hooks directly**
+
+```bash
+cd /home/parlar_ai/dev/call-monitor
+grep -rn "retire_workspace" --include="*.py" tests/
+```
+
+Roughly 19 sites — `test_collab_retire.py` (13) and `test_drafting_retire_tombstone.py` (6) — call `retire_workspace` directly and some of them then assert the workspace is refused. That assertion now belongs to the authority. For each site, decide which of the two it is testing:
+
+- **teardown** (rooms popped, sockets closed, entry torn down, in-flight op drained): the call gains its second argument and nothing else changes.
+- **the tombstone/guard** ("after retiring, `acquire` raises"): drive the authority the way the coordinator does, then call the hook:
+
+```python
+    lifecycle = WorkspaceLifecycle()
+    mgr = RoomManager(lifecycle=lifecycle)
+    ...
+    await lifecycle.apply(ws, generation=1, retired=True)   # what the coordinator does first
+    await mgr.retire_workspace(ws, 1)
+```
+
+**Do not delete a test because the refactor made it inconvenient.** If a test no longer has a home, say so in your report and leave it failing for the review to adjudicate.
+
+- [ ] **Step 6: Run the tests and the gates**
 
 ```bash
 cd /home/parlar_ai/dev/call-monitor
@@ -1036,16 +1274,17 @@ uv run pytest -n 16 --dist loadfile -q > /tmp/t5-full.log 2>&1; echo "FULL_EXIT=
 uv run ruff check . ; echo "RUFF_EXIT=$?"
 ```
 
-- [ ] **Step 6: Prove the sets are gone**
+- [ ] **Step 7: Prove the sets are gone**
 
 ```bash
 cd /home/parlar_ai/dev/call-monitor
 grep -rn "_retired_ws" --include="*.py" src/ ; echo "COLLAB_SET_HITS=$?"
+grep -rn "self\._retired\b" --include="*.py" src/ ; echo "TURNS_SET_HITS=$?"
 ```
 
-Expected: no hits in `src/` (grep exits 1). A surviving reference means a guard was missed.
+Expected: no hits for either (grep exits 1 both times). `_retired_ws` alone does not cover the turns set — `\b` after `_retired` is what separates them.
 
-- [ ] **Step 7: Commit** (message in a file).
+- [ ] **Step 8: Commit** (message in a file).
 
 ---
 
@@ -1058,17 +1297,19 @@ Expected: no hits in `src/` (grep exits 1). A surviving reference means a guard 
 - Consumes: everything from Tasks 1-5.
 - Produces: nothing. This task is the slice's proof.
 
-There is no restore route yet (that is C1). Drive the `active` side with the real primitives — `bump_lifecycle_generation` plus clearing `soft_deleted_at` in one transaction, then `apply(..., retired=False)`. **Do not write a test-only helper that re-implements the transition**; call the same functions C1 will call, so this test keeps its meaning once the route exists.
+There is no restore route yet (that is C1). Drive the `active` side with the real primitives — `bump_lifecycle_generation` plus clearing `soft_deleted_at` in one transaction, then `apply(..., retired=False)`. **Do not write a test-only helper that re-implements the transition**; call the same functions C1 will call, so these tests keep their meaning once the route exists.
+
+**Assert on resources that already exist, not on replacements.** "A new collab room can be opened afterwards" is far too weak: an unguarded teardown evicts the room, closes the sockets and pops the subprocess entry, and you can still open a fresh one afterwards. Each race must create its live resources **after** the reactivation and then assert **those** survived — `mgr.has_room(key)` is still True, the socket was not closed, the registry entry is still present.
 
 - [ ] **Step 1: Write the tests**
 
 Create `tests/proposal_assist/test_lifecycle_races.py` covering spec 4.8:
 
-1. **Forward race.** Pause a delete between its DB commit and `signal_workspace_retirement`; perform a full reactivation (bump + clear + apply); release the delete. Assert the workspace is live **and usable** — a collab operation succeeds and a turn launch is accepted.
-2. **Reverse race.** Pause a reactivation between its commit and its apply; commit a new delete (bump + flag + apply retired); release the reactivation. Assert the workspace stays **retired** — the late `active` was ignored.
-3. **Post-timeout.** Force `signal_workspace_retirement` to exceed its barrier while the coroutine keeps running; reactivate; then let retirement finish. Same assertion as 1.
-4. **Orphaned jobs thread**, end to end: as Task 4's third test but driven through the real delete route.
-5. **Per-workspace isolation**: a transition on A leaves B's subsystems untouched.
+1. **Forward race.** Pause a delete between its DB commit and `signal_workspace_retirement`; reactivate fully (bump + clear + apply); open a collab room and install a turn-registry entry; release the delete. Assert the room and the entry are **still there** and no socket was closed.
+2. **Reverse race.** Pause a reactivation between its commit and its apply; commit a new delete (bump + flag + retire); release the reactivation. Assert the workspace stays **retired** — the late `active` was ignored.
+3. **Post-timeout.** Force `signal_workspace_retirement` to exceed its barrier while the coroutine keeps running; reactivate; create the resources; then let retirement finish. Same assertion as 1.
+4. **Orphaned jobs thread**, end to end: Task 4's third test driven through the real delete route.
+5. **Per-workspace isolation**: a transition on A leaves B's room and B's registry entry untouched.
 
 Each must assert on **observable subsystem behaviour**, not on `applied_generation`. Reading the counter would pass even if a guard still consulted a stale set.
 
@@ -1079,11 +1320,17 @@ cd /home/parlar_ai/dev/call-monitor
 uv run pytest tests/proposal_assist/test_lifecycle_races.py -q > /tmp/t6.log 2>&1; echo "EXIT=$?"; tail -20 /tmp/t6.log
 ```
 
-- [ ] **Step 3: Prove each race test fails against the pre-slice behaviour**
+- [ ] **Step 3: Prove races 1-4 fail against the pre-slice behaviour**
 
-For race 1, temporarily make `retire()` ignore its `generation` argument (treat every retirement as current). Race 1 and 3 must fail. Restore.
+Three mutations, each restored before the next:
 
-For race 2, temporarily change `apply`'s guard to `<` instead of `<=`... **no** — that is a different mutation. Use: make `apply` unconditional (drop the monotonicity check). Race 2 must fail. Restore.
+| Mutation | Must go red |
+|---|---|
+| `WorkspaceRetirement.retire` ignores `took_effect` and fans out unconditionally | races 1 and 3 |
+| `WorkspaceLifecycle.transition` always yields True (drop the `<=` check) | race 2 |
+| drop the `exists()` predicate from the setup-job cancel | race 4 |
+
+**Race 5 is deliberately exempt.** Per-workspace isolation held before this slice — both tombstone sets were already keyed by workspace — so no mutation of C0's mechanism can make it fail. It is a scope regression check: it catches a future change that makes a transition process-wide. Say this in your report rather than inventing a mutation for it.
 
 Report each mutation, which tests went red, and that `git status` is clean afterwards. **A race test that cannot fail is worse than no race test**, because it certifies the thing it does not check.
 
@@ -1103,9 +1350,15 @@ git diff --exit-code -- frontend/src/api/schema.gen.ts ; echo "DRIFT_EXIT=$?"
 ## Done when
 
 - Every lifecycle transition allocates its generation inside its own transaction, under the commit mutex, and the delete route passes **that** value to retirement — pinned by a test where the row's generation is changed between the commit and the signal.
-- `WorkspaceLifecycle.apply` is monotonic in both directions, and duplicates are no-ops. Proven by mutation.
-- `MANAGER._retired_ws` and `registry._retired` no longer exist; `grep -rn "_retired_ws" src/` is empty.
-- The jobs hook's cancellations carry a generation predicate in SQL, and a thread released after a later transition updates **zero rows** — asserted on the row.
-- All five race scenarios in spec 4.8 pass, and each was shown to fail against the pre-slice behaviour.
+- A superseded retirement runs **no hook at all**, and the lifecycle lock is held across the fan-out so a transition cannot land mid-teardown. Both proven by mutation.
+- `WorkspaceLifecycle` is monotonic in both directions, duplicates are no-ops, and the concurrent-convergence test delivers the highest generation FIRST so that deleting the check makes it fail.
+- `MANAGER._retired_ws` and `registry._retired` no longer exist: `grep -rn "_retired_ws" src/` and `grep -rn "self\._retired\b" src/` are both empty. Collab, turns, the coordinator and `app.state.workspace_lifecycle` are proven to be the **same** object.
+- The jobs hook's cancellations carry a generation predicate in SQL, and a thread that the hook's own timeout orphaned updates **zero rows** — with the test proving the thread was actually parked before the generation moved.
+- All five race scenarios in spec 4.8 pass. Races 1-4 were each shown to fail against the pre-slice behaviour; race 5 is recorded as a scope regression check that no C0 mutation can falsify.
 - `uv run pytest -n 16 --dist loadfile` green at the re-derived baseline plus this slice's tests; `uv run ruff check .` clean; `schema.gen.ts` shows no drift.
 - One migration (`0062`), no `rmtree`, nothing removed, **no restore route and no UI** — those are C1.
+
+## Handed to C1
+
+- Restore's live path calls `lifecycle.apply(ws, generation=..., retired=False)` after its own commit. That call may block for as long as a concurrent retirement's fan-out (bounded by the per-hook budgets `_RETIREMENT_BARRIER_SECONDS` is derived from — 5.5s worst case). That wait IS the serialization: it is what makes a restore land after the teardown it supersedes rather than underneath it. C1's route must be able to afford it.
+- Nothing un-retires a workspace in C0. `apply(..., retired=False)` exists and is tested, but no production caller reaches it until C1.
