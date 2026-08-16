@@ -335,7 +335,7 @@ uv run pytest tests/proposal_assist/citations/test_gitio_list_commits.py -q > /t
 uv run ruff check . ; echo "RUFF_EXIT=$?"
 ```
 
-Expected: 6 passed, `RUFF_EXIT=0`.
+Expected: 8 passed, `RUFF_EXIT=0`.
 
 - [ ] **Step 5: Prove the truncation flag is not vacuous**
 

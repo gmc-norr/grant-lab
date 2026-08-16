@@ -414,9 +414,13 @@ def list_commits(repo_dir: Path, *, limit: int) -> tuple[list[CommitInfo], bool]
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
         _log_if_timeout(e)
-        stderr = getattr(e, "stderr", "") or ""
+        # OSError (FileNotFoundError on a missing repo_dir — the case this
+        # function's contract names) carries no .stderr, so falling back to the
+        # exception keeps the OS-level text in the message rather than emitting
+        # a bare "cannot list commits in /path: ". Mirrors current_head.
+        detail = (getattr(e, "stderr", "") or "").strip() or str(e)
         raise GitCommitError(
-            f"cannot list commits in {repo_dir}: {stderr.strip()}"
+            f"cannot list commits in {repo_dir}: {detail}"
         ) from e
 
     # git -z emits a trailing NUL, so the final split yields an empty tail.
