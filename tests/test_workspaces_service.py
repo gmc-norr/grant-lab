@@ -2,11 +2,12 @@
 
 `soft_delete_workspace_db` backs the JSON DELETE /api/workspaces/{id} endpoint.
 `scrub_workspace_bytes` is reached by no route — Slice A's freeze-only delete
-stopped calling it — and is exercised here directly, pending Slice E's admin
-purge."""
+stopped calling it — so this file is its only coverage until Slice E's admin
+purge gives it a caller again."""
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 
 import pytest
@@ -22,6 +23,9 @@ from call_manager.db.models import (
     Workspace,
     WorkspaceEvent,
 )
+from call_manager.proposal_assist.attachments.storage import AttachmentStorage
+from call_manager.proposal_assist.references.storage import ReferenceStorage
+from call_manager.workspaces import scrub_workspace_bytes
 from tests.proposal_assist.conftest import make_workspace
 from tests.workspace_delete_helper import soft_delete_workspace_for_test
 
@@ -210,19 +214,19 @@ def test_soft_delete_propagates_commit_mutex_timeout_without_committing(
         assert s.get(Workspace, ws_id).soft_deleted_at is None  # nothing committed
 
 
-def test_the_split_halves_stamp_terminalize_and_refuse_a_redelete(pg_session_factory, tmp_path):
-    """soft_delete_workspace_db + scrub_workspace_bytes: the soft_deleted_at
-    stamp, running-turn terminalization, and WorkspaceDeleted on a re-delete.
+def test_the_db_half_stamps_terminalizes_and_refuses_a_redelete(pg_session_factory):
+    """soft_delete_workspace_db alone: the soft_deleted_at stamp, running-turn
+    terminalization, and WorkspaceDeleted on a re-delete.
 
     This used to compare the halves against the soft_delete_workspace wrapper.
     Slice C2 §9 deleted that wrapper — it composed the halves while skipping
     retirement entirely — so the comparison is gone and the assertions it made
     about the halves stay here."""
     from call_manager.proposal_assist.drafting.locking import WorkspaceDeleted
-    from call_manager.workspaces import scrub_workspace_bytes, soft_delete_workspace_db
+    from call_manager.workspaces import soft_delete_workspace_db
     from tests.proposal_assist.conftest import make_chat_turn, make_user, make_workspace
 
-    # The split halves, run explicitly.
+    # The DB half, run explicitly — no route calls it in isolation.
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=make_user(s, email="split-a@ki.se"))
         ut = make_chat_turn(s, ws, role="user", content={"type": "text", "text": "q"},
@@ -234,8 +238,7 @@ def test_the_split_halves_stamp_terminalize_and_refuse_a_redelete(pg_session_fac
         split_id, job_id, ut_id = ws.id, job.id, ut.id
 
     with pg_session_factory() as s:
-        soft_delete_workspace_db(s, workspace_id=split_id)     # DB half only
-    scrub_workspace_bytes(split_id, workspaces_dir=tmp_path)   # FS half only
+        soft_delete_workspace_db(s, workspace_id=split_id)
 
     with pg_session_factory() as s:
         assert s.get(Workspace, split_id).soft_deleted_at is not None
@@ -261,3 +264,39 @@ def test_the_production_soft_delete_wrapper_stays_deleted():
         "web/api/workspaces.py's delete route) — scrub_workspace_bytes is not "
         "part of that composition; production has no caller for it today."
     )
+
+
+def test_scrub_removes_uploads_and_leaves_the_repo_alone(tmp_path):
+    """`scrub_workspace_bytes` has no production caller — Slice E's purge will be
+    the first. Pin the composition here so it cannot rot in the meantime: both
+    upload subtrees go, `repo/` stays, and a sibling workspace is untouched."""
+    ws_id, other_id = uuid.uuid4(), uuid.uuid4()
+    for wid in (ws_id, other_id):
+        tree = (("attachments", "blob.bin"), ("references", "paper.pdf"), ("repo", "draft.md"))
+        for sub, name in tree:
+            d = tmp_path / str(wid) / sub
+            d.mkdir(parents=True)
+            (d / name).write_bytes(b"real bytes")
+
+    scrub_workspace_bytes(ws_id, workspaces_dir=tmp_path)
+
+    assert not (tmp_path / str(ws_id) / "attachments").exists()
+    assert not (tmp_path / str(ws_id) / "references").exists()
+    # The git-backed draft is NOT an upload — purge scope must not widen by accident.
+    assert (tmp_path / str(ws_id) / "repo" / "draft.md").read_bytes() == b"real bytes"
+    # Scoped to one workspace.
+    assert (tmp_path / str(other_id) / "attachments" / "blob.bin").read_bytes() == b"real bytes"
+
+
+def test_scrub_swallows_oserror_rather_than_raising(tmp_path, monkeypatch):
+    """Documented contract: "Never raises on OSError". A purge that aborts halfway
+    through would leave the admin with no way to finish it."""
+    ws_id = uuid.uuid4()
+
+    def boom(self, *, workspace_id):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(AttachmentStorage, "delete_workspace", boom)
+    monkeypatch.setattr(ReferenceStorage, "delete_workspace", boom)
+
+    scrub_workspace_bytes(ws_id, workspaces_dir=tmp_path)  # must not raise

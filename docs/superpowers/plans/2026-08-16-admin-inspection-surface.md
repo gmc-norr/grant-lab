@@ -818,7 +818,7 @@ cd /home/parlar_ai/dev/call-monitor
 uv run pytest -n 16 --dist loadfile -q > /tmp/t3-full.log 2>&1; echo "EXIT=$?"; tail -3 /tmp/t3-full.log
 ```
 
-Expected: `3357 passed, 1 skipped` plus this slice's new tests, exit 0.
+Expected: `3360 passed, 1 skipped` plus this slice's new tests, exit 0.
 
 - [ ] **Step 7: Commit**
 
@@ -979,5 +979,5 @@ carries SPA prefixes and /admin already covers these."
 - Every inspection writes exactly one `admin_deleted_workspace_inspected` event, committed before content is returned.
 - Inspection leaves `HEAD` unchanged.
 - The mutex mutation in Task 3 Step 5 was performed and reported: swapping to `acquire_commit_mutex_live` turns `test_reads_a_deleted_workspace` red.
-- `uv run pytest -n 16 --dist loadfile` → `3357 passed, 1 skipped` plus this slice's tests; `uv run ruff check .` clean; frontend `pnpm run test` and `tsc --noEmit` clean; `schema.gen.ts` shows no drift.
+- `uv run pytest -n 16 --dist loadfile` → `3360 passed, 1 skipped` plus this slice's tests; `uv run ruff check .` clean; frontend `pnpm run test` and `tsc --noEmit` clean; `schema.gen.ts` shows no drift.
 - No migration was added, no `rmtree` exists anywhere in the diff, and `frontend/routes.json` is unchanged.

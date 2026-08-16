@@ -502,5 +502,5 @@ because today it is still true."
 - The DELETE route's OpenAPI description no longer mentions scrubbing, and `schema.gen.ts` was regenerated with both exit codes 0.
 - `tests/workspace_delete_helper.py` no longer scrubs, and `workspaces_dir` is gone from its signature and every call site.
 - The delete copy says contents are kept and still says the owner cannot undo it; it promises no admin capability.
-- `uv run pytest -n 16 --dist loadfile` → `3357 passed, 1 skipped`; `ruff check` clean; frontend tests and `tsc --noEmit` clean.
+- `uv run pytest -n 16 --dist loadfile` → `3360 passed, 1 skipped`; `ruff check` clean; frontend tests and `tsc --noEmit` clean.
 - Every commit was staged file-by-file, with `git status --short` checked before committing.

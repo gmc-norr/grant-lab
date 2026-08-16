@@ -158,7 +158,10 @@ def test_delete_runs_db_then_retire_then_204_in_that_order(
 
     assert client_authed_owner.delete(f"/api/workspaces/{ws_id}").status_code == 204
     try:
-        assert calls == ["db", "retire"]      # then 204, with no third FS step
+        # then 204. That no FS step follows is pinned by
+        # test_delete_keeps_every_byte_on_disk, not here — the scrub is no longer
+        # patched onto ws_api, so this probe could not see it either way.
+        assert calls == ["db", "retire"]
     finally:
         MANAGER._retired_ws.discard(ws_id)      # process-global; release even on failure
 
