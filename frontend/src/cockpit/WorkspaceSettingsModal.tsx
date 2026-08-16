@@ -77,8 +77,9 @@ export function WorkspaceSettingsModal({
       </Button>
       <div style={{ marginTop: "1.5rem", borderTop: "1px solid var(--mantine-color-red-9)", paddingTop: "0.75rem" }}>
         <p style={{ fontSize: "0.85rem", opacity: 0.8 }}>
-          Soft-deletes the workspace and scrubs uploaded file bytes. Audit rows are kept. This
-          cannot be undone.
+          Deletes the workspace: it disappears for everyone, collaborators lose access, and any
+          running work stops. Its contents are kept on the server rather than erased. You cannot
+          undo this.
         </p>
         {del.isError ? <Text c="red" size="sm">Could not delete workspace.</Text> : null}
         <Button
@@ -87,7 +88,12 @@ export function WorkspaceSettingsModal({
           disabled={del.isPending}
           onClick={() => {
             const name = settings.data?.title ?? "";
-            if (window.confirm(`Delete "${name}"? This scrubs all uploaded file bytes and cannot be undone.`)) {
+            if (
+              window.confirm(
+                `Delete "${name}"? Everyone loses access immediately and you cannot undo this. ` +
+                  `The contents are kept on the server rather than erased.`,
+              )
+            ) {
               del.mutate(undefined, {
                 onSuccess: () => {
                   onClose();

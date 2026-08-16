@@ -52,7 +52,7 @@ REQUIRED_HOOKS = ("turns", "collab", "jobs", "passes")
 #   passes: _PASS_RETIRE_SECONDS (5.5) — INDEPENDENT of entry count, because
 #           PassRegistry.retire_workspace gathers its entries concurrently. If
 #           it ever retired serially this budget would become N x 5.5.
-# => 5.5 worst case (passes), so 5.0 would be a coin flip. 6.0 keeps headroom;
+# => 5.5 worst case (passes), so 5.0 would be a coin flip. 6.0 keeps
 # headroom. test_retirement_coordinator.py asserts this inequality against the live
 # constants so raising any sub-bound fails loudly instead of silently eroding it.
 _RETIREMENT_BARRIER_SECONDS = 6.0

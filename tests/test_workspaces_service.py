@@ -1,6 +1,9 @@
-"""Unit tests for the workspace soft-delete service halves —
-`soft_delete_workspace_db` and `scrub_workspace_bytes` — behind the JSON
-DELETE /api/workspaces/{id} endpoint."""
+"""Unit tests for the two workspace service functions.
+
+`soft_delete_workspace_db` backs the JSON DELETE /api/workspaces/{id} endpoint.
+`scrub_workspace_bytes` is reached by no route — Slice A's freeze-only delete
+stopped calling it — and is exercised here directly, pending Slice E's admin
+purge."""
 
 from __future__ import annotations
 

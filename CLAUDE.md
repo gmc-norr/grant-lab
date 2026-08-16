@@ -22,8 +22,8 @@ The v1 design spec (`docs/superpowers/specs/2026-04-14-call-monitor-design.md`) 
     Postgres containers. Scale down on a smaller machine; `-n 4` is the measured floor
     (still ~3m). Never use `-n auto`: `psutil` is not installed here, so xdist falls
     through to `sched_getaffinity` and resolves it to **72** workers.
-  - Expected result is **`3357 passed, 1 skipped`**. If you have `ANTHROPIC_API_KEY`
-    exported you will instead see `3358 passed` — the one skip is a real-SDK test gated
+  - Expected result is **`3358 passed, 1 skipped`**. If you have `ANTHROPIC_API_KEY`
+    exported you will instead see `3359 passed` — the one skip is a real-SDK test gated
     on that variable (`tests/proposal_assist/test_drafting_claude_adapter.py`), and it
     makes a live API call. Neither count means the suite is broken.
 - FastAPI backend. PostgreSQL 16 + SQLAlchemy 2.x + Alembic, with `pgvector` for embeddings.

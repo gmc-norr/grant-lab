@@ -63,4 +63,20 @@ describe("WorkspaceSettingsModal", () => {
     expect(await screen.findByText(/could not delete workspace/i)).toBeInTheDocument();
     expect(h.navigate).not.toHaveBeenCalled();
   });
+
+  it("does not claim deleting removes uploaded files", async () => {
+    renderWithProviders(<WorkspaceSettingsModal id="ws1" opened onClose={vi.fn()} />);
+    const body = await screen.findByText(/deletes the workspace/i);
+    expect(body.textContent).not.toMatch(/scrub/i);
+    expect(body.textContent).toMatch(/kept|retained|remain/i);
+  });
+
+  it("the confirmation prompt says the same thing as the description", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    renderWithProviders(<WorkspaceSettingsModal id="ws1" opened onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /delete workspace/i }));
+    const prompt = confirmSpy.mock.calls[0][0] as string;
+    expect(prompt).not.toMatch(/scrub/i);
+    expect(prompt).toMatch(/kept|retained|remain/i);
+  });
 });
