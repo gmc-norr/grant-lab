@@ -1,8 +1,9 @@
 # Admin retention surface for deleted workspaces — design
 
 **Date:** 2026-08-16
-**Status:** revision 5 — **Slice C (restore) designed** (section 4). Slices A and B have shipped
-(`ef8ccb3`, `991e7a7`). Partial-restore detection is dropped, with the reason recorded in 0.3.
+**Status:** revision 6 — Slice C **splits into C0 (lifecycle generation) and C1 (restore)** after
+a review found three blockers in revision 5. Slices A and B have shipped (`ef8ccb3`, `991e7a7`).
+Partial-restore detection is dropped, with the reason recorded in 0.3.
 **Goal:** Deleting a workspace freezes it and destroys nothing. An admin can then inspect it,
 restore it intact, or purge it for real.
 
@@ -18,14 +19,20 @@ it is simply where the line happened to land — and it is what made restore imp
 
 | Slice | Content | Status |
 |---|---|---|
-| **A** | **Freeze-only delete** — stop destroying bytes on delete | scoped in 2; **ship first, see 0.1** |
-| **B** | Admin inspection surface — list, read, audit | planned: `docs/superpowers/plans/2026-08-16-admin-inspection-surface.md` |
-| **C** | Restore | designed in 4 |
+| **A** | **Freeze-only delete** — stop destroying bytes on delete | **SHIPPED** `ef8ccb3` |
+| **B** | Admin inspection surface — list, read, audit | **SHIPPED** `991e7a7` |
+| **C0** | Workspace lifecycle generation — the prerequisite C1 needs | designed in 4 |
+| **C1** | Restore | designed in 5 |
 | **D** | Workspace filesystem-activity barrier | deferred, scoped in 9.1 |
 | **E** | Purge, built on D | deferred, scoped in 9.2 |
 
-A, B and C are all safe: none of them removes anything. Every hazard the reviews found — proving
-quiescence, racing an `rmtree`, late writes recreating a purged tree — belongs to E alone.
+None of A, B, C0 or C1 removes anything. Every hazard the reviews found — proving quiescence,
+racing an `rmtree`, late writes recreating a purged tree — belongs to E alone.
+
+**C splits in revision 6.** Revision 5 designed restore as one slice. A review showed that cannot
+be built safely: nothing serializes a delete's retirement against a restore, and the mechanism
+that fixes it is a separate piece of machinery with its own tests. C1 depends on C0 the way E
+depends on D.
 
 ### 0.1 Why freeze-only ships first
 
@@ -70,10 +77,15 @@ exposed there.
 
 ## 1. Background
 
-Deleting a workspace is a soft delete: the row is marked `soft_deleted_at`, jobs and turns are
+> **Historical.** This section describes the system as it was when this document was written,
+> before Slice A. It is kept because the later sections argue against it. For what deletion does
+> **today**, see 0.2 and 2.
+
+Deleting a workspace was a soft delete: the row is marked `soft_deleted_at`, jobs and turns are
 cancelled, collab rooms evicted, and `scrub_workspace_bytes` (`src/call_manager/workspaces.py:181`)
-removes attachment and reference **bytes** while deliberately keeping their DB rows for the audit
-trail.
+removed attachment and reference **bytes** while deliberately keeping their DB rows for the audit
+trail. **Slice A removed that last step** (`ef8ccb3`): deletion now destroys nothing, and
+`scrub_workspace_bytes` has no production caller.
 
 **`repo/` is never removed by anything.** The drafted proposal markdown and its full git history
 survive indefinitely. There is no retention job, purge, or reaper in the codebase — which is
@@ -213,152 +225,289 @@ markdown and its (possibly truncated) commit history.
 No purge control. The page states that deleted workspaces are retained on disk, so an admin is not
 left wondering whether inspection is all there will ever be.
 
-## 4. Slice C — restore
+## 4. Slice C0 — workspace lifecycle generation
 
-Un-deletes a workspace: clears `soft_deleted_at` so every liveness gate passes again. Admin-only,
-audited like inspection.
+C1 cannot be built without this. The reasoning is in 4.1-4.3; the mechanism is 4.4.
 
-### 4.1 What restore is, and is not
+### 4.1 Deletion's teardown is not serialized with anything
 
-**Restore returns a usable workspace, not an interrupted session.** Jobs, queued turns and running
-turns were cancelled at delete time and stay cancelled. Nothing resurrects them. The owner picks
-up from the restored content.
+`DELETE /api/workspaces/{id}` does two things in sequence:
 
-**Restore is lossless for anything deleted after Slice A**, because that deletion destroyed
-nothing. See 0.3 for why the pre-Slice-A case is not handled.
+1. `soft_delete_workspace_db` marks the row and **commits** (`workspaces.py:175`). The commit
+   releases the commit mutex.
+2. The route then calls `signal_workspace_retirement` (`web/api/workspaces.py:1536`), which
+   schedules `WorkspaceRetirement.retire` on the app loop and blocks on it for a bounded time.
 
-**The owner is not notified.** Restore is an administrative act with an administrative trace. A
-restored workspace simply reappears. (Considered and rejected for this slice: an owner-visible
-activity event. `activity/feed.py` drops unmapped event kinds fail-safe, so the audit kind
-introduced here cannot leak into the owner's feed by accident.)
+Step 2 runs **outside any mutex**, and none of the four retirement hooks takes one. So the commit
+mutex — which serializes writers to a workspace's repository — says nothing about retirement.
 
-**Restore will be blocked on a purged workspace** — there is nothing to restore. Slice E does not
-exist, so `purged_at` does not exist and there is nothing to check yet. When E lands,
-`purged_at IS NOT NULL` makes restore a 409.
+Worse, the barrier is a bound on *waiting*, not on *running*: on timeout
+`signal_workspace_retirement` logs and returns while **the coroutine keeps running on the loop**
+(`retirement.py:123`, "retirement continues on the loop; degrade to eventual"). Retirement can
+therefore still be in flight after the DELETE has returned 204.
 
-### 4.2 The tombstones — the part that is not obvious
+A restore in that window is silently undone:
 
-Deletion runs four retirement hooks (`main.py:198`). Two of them leave **in-memory tombstones that
-nothing ever clears**:
+```
+DELETE:  soft_delete_workspace_db  → COMMIT           (mutex released)
+RESTORE:                             clear flag, COMMIT, un-poison
+DELETE:  signal_workspace_retirement → hooks run      ← re-poisons a LIVE workspace
+```
+
+The result is a workspace that is live in the database and refused by collab and by every new
+turn launch, with no error anywhere: every hook did exactly what it was told.
+
+### 4.2 The tombstones
+
+Deletion runs four retirement hooks (`main.py:198`). Two leave **in-memory state that nothing ever
+clears**:
 
 | Hook | State | Cleared by? |
 |---|---|---|
 | `collab` | `MANAGER._retired_ws` — a `set` on the process-global room manager (`collab/room.py:475`) | **No.** Only `.add`, at `:681` |
 | `turns` | `registry._retired` (`drafting/registry.py:85`) | **No.** Only `.add`, at `:217` |
-| `jobs` | DB rows only | n/a — nothing in memory |
+| `jobs` | DB rows only | n/a |
 | `passes` | cancels live entries; keeps no per-workspace set | n/a |
 
-A restore that only clears `soft_deleted_at` therefore produces a **zombie**: live in the
-database, and permanently refused by collab (`WorkspaceRetired`) and by every new turn launch,
-for the life of the process. Collab is the live editor in production, so that is the whole
-workspace.
+These are not merely defence in depth. For **mutex-participating** writers the under-mutex re-read
+of `soft_deleted_at` is the durable backstop — but the collab **client-write** and **cold
+hydration** paths are guarded by the room tombstone itself (`retirement.py:32-35`). Un-poisoning
+before the DB says "live" would therefore open a real hole, not merely remove a redundant check.
+This fixes the ordering in 5.3.
 
-**Restore must clear both sets.** Neither has an un-retire method today; this slice adds them.
+### 4.3 Why clearing the sets is the wrong primitive
 
-### 4.3 Ordering, and why
+Revision 5 said restore would "clear both tombstones" after committing. Three problems:
+
+- **It is not straight-line code.** Both live in async, lock-protected subsystems on the app loop.
+  A synchronous HTTP worker must cross the same `run_coroutine_threadsafe` bridge retirement uses,
+  with the same failure modes: schedule failure, timeout, or an exception between the two clears.
+- **It has no recoverable failure contract.** If the commit succeeds and the bridge then fails or
+  clears only one subsystem, the workspace is live in the database and still poisoned — and
+  revision 5's route rejected live workspaces, so a retry got 404.
+- **Revision 5's answer to that was wrong.** It argued a crash repairs itself, because the sets are
+  in-memory and a restart clears them. But nothing crashes in this scenario. There is no restart.
+
+**Clearing N sets across M subsystems is inherently partial-failure-prone. Do not make it
+retryable — make it a single operation.**
+
+### 4.4 The mechanism: a per-workspace generation
+
+One object on the app loop, `WorkspaceLifecycle`, owns a per-workspace **generation**: a
+monotonically increasing integer, starting at 0, held in memory beside the subsystems it governs.
+
+- **Retirement is stamped.** `signal_workspace_retirement` reads the current generation and passes
+  it to `retire(workspace_id, generation)`. Each hook records "retired at generation N" instead of
+  "retired".
+- **A subsystem is poisoned iff its recorded generation equals the current one.** A tombstone from
+  generation 3 does not poison a workspace now at generation 4.
+- **Reactivation is one atomic bump.** `generation += 1` un-poisons every subsystem at once. There
+  is no second subsystem to fail on, so 4.3's partial-clear class does not exist.
+- **Stale retirement no-ops.** A retirement scheduled for generation 3 that runs after a bump to 4
+  finds its generation stale and returns without touching anything. That closes 4.1 completely,
+  including retirement still running after the route's barrier timed out.
+
+The generation is **in-memory, not persisted**. It is a within-process serialization token, and the
+process is single-instance by hard constraint (APScheduler). A restart resets every generation to 0
+and every tombstone with it — which is correct, because the tombstones it governs are in-memory too.
+
+### 4.5 Serialization
+
+`WorkspaceLifecycle` holds a per-workspace `asyncio.Lock`. Retirement and reactivation both acquire
+it, so they cannot interleave; the generation decides which one is stale. Both run on the app loop.
+
+Ordering is still **commit-then-bump** — see 4.2 for why bumping first is unsafe. But the bump is
+now a single in-memory operation behind a lock, not a fan-out, so "it half-worked" is not a
+reachable state. What remains reachable is "it did not happen at all", which 5.4 makes retryable.
+
+### 4.6 Acceptance
+
+1. A retirement stamped with a stale generation no-ops: it does not re-add a tombstone, does not
+   cancel jobs, and does not touch passes.
+2. **The 4.1 race, run as a test.** Pause a delete between its DB commit and
+   `signal_workspace_retirement`; run a restore to completion; release the delete. The workspace is
+   live and usable — collab accepts a write and a turn launches. Restore wins last.
+3. **The post-timeout case.** Force `signal_workspace_retirement` to time out while its coroutine
+   keeps running, restore, then let retirement finish. Same result.
+4. One bump un-poisons both subsystems. Proven by exercising collab and a turn launch, not by
+   reading the sets — reading them would pass even if the bump touched the wrong workspace.
+5. Generations are per workspace: bumping A does not un-poison B.
+6. No migration in C0. No `rmtree`. Nothing removed.
+
+## 5. Slice C1 — restore
+
+Un-deletes a workspace: clears `soft_deleted_at` so every liveness gate passes again, and bumps the
+generation from 4.4 so every subsystem accepts it again. Admin-only, audited like inspection.
+**Depends on C0.**
+
+### 5.1 What restore is, and is not
+
+**Restore returns a usable workspace, not an interrupted session.** Turns that were running or
+queued at delete time stay cancelled. Nothing resurrects them; the owner picks up from the restored
+content.
+
+**Setup is the exception, and it is not an exception to the principle** — see 5.2.
+
+**Restore is lossless for anything deleted after Slice A**, because that deletion destroyed
+nothing. See 0.3 for why the pre-Slice-A case is not handled.
+
+**The owner is not notified.** Restore is an administrative act with an administrative trace; a
+restored workspace simply reappears. Verified safe rather than assumed: `activity/feed.py:172`
+drops unmapped event kinds fail-safe, so the audit kind introduced here cannot reach the owner's
+feed.
+
+**Restore will be blocked on a purged workspace.** Slice E does not exist, so `purged_at` does not
+exist and there is nothing to check yet.
+
+### 5.2 The setup job — why "cancelled stays cancelled" does not apply
+
+Every workspace is created with a `WorkspaceSetupJob` in `queued` (`workspaces.py:72`). Retirement
+cancels it from any of three non-terminal states — `queued`, `running`,
+`waiting_for_rubric_review` (`jobs_retirement.py:39`).
+
+`cancelled` is a **dead end**:
+
+- the retry endpoint requires `failed` and returns **404** for anything else (`rubric.py:271`);
+- `WorkspaceSetup.tsx` branches only on `failed` and `done`, so every other status renders
+  "Setting up…" — forever;
+- the repository may not exist yet, a state 3.2 already recognises.
+
+So a workspace deleted during setup and then restored is permanently stuck. That makes "returns a
+usable workspace" false.
+
+**Decision: restore puts the setup job back to the state it was cancelled from.** A cancelled setup
+job is not user work being resurrected — it is the workspace's own construction, unfinished. The
+principle in 5.1 is about not resuming someone's interrupted session, and that is not this.
+
+Restoring all three states to `queued` would be wrong: a job parked at
+`waiting_for_rubric_review` has already extracted its sections and rubric and is waiting on a
+human, and re-queueing it would re-run extraction over work already done.
+
+**C1 therefore carries a migration**: a nullable `cancelled_from` column on `workspace_setup_jobs`,
+written by the retirement hook when it cancels and consumed by restore. Null means "not cancelled
+by retirement" — a job cancelled any other way, or never cancelled, is left alone.
+
+### 5.3 Ordering
 
 ```
-acquire_commit_mutex        (plain, NOT _live — see 4.4)
-  re-read soft_deleted_at   → 409 if already live
+pre-lock read           → 404 if missing; see 5.4 for live
+acquire_commit_mutex      (plain, NOT _live — see 5.5)
+  re-read soft_deleted_at (fresh, under the lock)
   clear soft_deleted_at
+  restore the setup job from cancelled_from, if set
   write the audit event
-  COMMIT                    ← one transaction: no restore without its audit
-clear the two tombstones    ← only after the commit succeeds
-return
+  COMMIT                  ← one transaction: no restore without its audit
+bump the generation       ← after the commit; 4.2 says why not before
+204
 ```
 
-**Tombstones are cleared last, deliberately.** Clearing them first and then failing the commit
-would un-poison a workspace that is still deleted — a live editing surface on a deleted
-workspace, which is strictly worse than the alternative.
+### 5.4 Idempotence — the retryable contract
 
-The alternative's cost is a window between COMMIT and the clear where a restored workspace still
-refuses collab. That window is a few microseconds of straight-line code, it **fails closed**, and
-it resolves as soon as the clear runs.
+The bump can fail to happen at all: the bridge to the app loop can fail to schedule, or time out.
+The DB then says live while the generation still says poisoned.
 
-The residual is a crash inside that window, which would leave a live workspace poisoned. It
-repairs itself: the tombstones are in-memory only, so the restart that necessarily follows a
-crash clears every one of them. The failure mode is undone by the event that causes it.
+**Restore is therefore idempotent on the generation.** A POST against a workspace that is already
+live but whose generation is still stale performs the bump alone and returns 204. It does not 404.
 
-### 4.4 The mutex
+That gives three cases:
+
+| Workspace state | Response |
+|---|---|
+| Deleted | Full restore: clear, setup job, audit, commit, bump → 204 |
+| Live, generation stale (a previous bump did not land) | Bump only → 204 |
+| Live, generation current | 409 — nothing to do |
+| Missing | 404 |
+
+The second row is what makes the operation retryable, and it is the whole answer to "the commit
+landed and the bump did not". An admin retries the same button.
+
+The audit is written only in the first case: the second changes no database state, and an audit row
+per retry would misreport how many times the workspace was restored.
+
+### 5.5 The mutex
 
 The plain `acquire_commit_mutex` (`drafting/locking.py:205`), never `acquire_commit_mutex_live`
 (`:267`) — the `_live` variant re-reads liveness and raises `WorkspaceDeleted`, so it would refuse
 every workspace restore exists to serve. Identical trap to inspection (3.2), identical answer.
 
-It returns `None` and is not a context manager. It is taken **after** the pre-lock 404, so a
-restore attempt on a live or missing workspace never contends for a mutex it will refuse anyway —
-the same ordering inspection settled on.
+It returns `None` and is not a context manager. It is taken **after** the pre-lock 404, so an
+attempt against a missing workspace never contends for a mutex it will refuse anyway.
 
-Restore is the one path that makes the mutex genuinely load-bearing rather than defensive: it
-**flips** the liveness flag that every other writer re-reads under that same mutex, so taking it
-makes the flip a linearization point rather than a race.
+Restore is the one path that makes the mutex load-bearing rather than defensive: it **flips** the
+liveness flag every other writer re-reads under that same mutex, making the flip a linearization
+point. It does **not** serialize against retirement — nothing about the mutex can, per 4.1. That is
+C0's job.
 
-### 4.5 API surface
+`CommitMutexTimeout` → 429 + `Retry-After: 2` + `BUSY_ERROR_MESSAGE`, matching every other caller.
+
+### 5.6 API surface
 
 | Route | Purpose |
 |---|---|
-| `POST /api/admin/workspaces/deleted/{workspace_id}/restore` | Clear `soft_deleted_at`; 204 |
+| `POST /api/admin/workspaces/deleted/{workspace_id}/restore` | Clear `soft_deleted_at`, restore the setup job, bump the generation; 204 |
 
-- `require_admin` (`auth/dependencies.py:50`); a non-admin gets 403.
-- 404 unless the workspace exists **and** `soft_deleted_at IS NOT NULL` — a live workspace and a
-  missing one are indistinguishable, as in 3.1.
-- 409 if it went live between the pre-lock read and the mutex (the fresh re-read).
-- `CommitMutexTimeout` → 429 + `Retry-After: 2` + `BUSY_ERROR_MESSAGE`, matching every other
-  mutex caller.
-- No response body. A POST needs no `Cache-Control`.
+`require_admin` (`auth/dependencies.py:50`); a non-admin gets 403. Status codes per 5.4. No
+response body; a POST needs no `Cache-Control`.
 
-### 4.6 Audit
-
-One event kind on `WorkspaceEvent`, with the acting admin as `actor_id`:
+### 5.7 Audit
 
 | Kind | Payload |
 |---|---|
-| `admin_deleted_workspace_restored` | `workspace_id`, `admin_user_id` |
+| `admin_deleted_workspace_restored` | `workspace_id`, `admin_user_id`, `setup_job_restored_to` (null when there was nothing to restore) |
 
 Committed in the **same transaction** as the flag clear. Unlike inspection — where the audit must
-commit *before* the response because the response carries content — here the audit and the
-mutation are the same fact, so atomicity is the requirement, not ordering.
+commit *before* the response because the response carries content — here the audit and the mutation
+are the same fact, so atomicity is the requirement, not ordering.
 
-### 4.7 UI, and the copy this invalidates
+### 5.8 UI
 
-A **Restore** button on the admin deleted-workspace detail page, with a confirmation. On success
-the workspace is no longer deleted, so the page navigates back to the list.
+A **Restore** button with a confirmation on the admin deleted-workspace detail page. On success the
+workspace is no longer deleted, so the page navigates back to the list.
 
-Restore makes one existing string **false**. `WorkspaceSettingsModal.tsx` tells the owner
-deletion cannot be undone — written that way in Slice A because it was true. It must now say the
-owner cannot undo it and an administrator can restore it. Slice A deliberately refused to promise
-this before it existed; the same rule applies in reverse now that it does.
+**The mutation must invalidate `["admin-deleted-workspaces"]` before navigating.** The list query
+inherits the app-wide 20-second freshness window (`App.tsx:13`), so without invalidation the
+restored row is still on screen when the admin arrives back at the list.
 
-### 4.8 Acceptance
+**Restore makes one existing string false.** `WorkspaceSettingsModal.tsx` tells the owner deletion
+cannot be undone — written that way in Slice A because it was true. It must now say the owner
+cannot undo it and an administrator can restore it. Slice A refused to promise this before it
+existed; the same rule applies in reverse now that it does.
 
-1. An admin restores a deleted workspace; it disappears from the deleted list and its owner can
-   open it again.
-2. A live workspace and a missing one both 404. A non-admin gets 403.
-3. Restore writes exactly one `admin_deleted_workspace_restored` event naming the acting admin,
-   in the same transaction as the flag clear — a failed commit leaves neither.
-4. **Both tombstones are cleared.** Proven by deleting a workspace, restoring it, and exercising
-   collab and a turn launch — not by asserting the sets directly, which would pass even if
-   restore cleared the wrong workspace's entry.
-5. A restore whose commit fails leaves the tombstones set — the workspace stays refused, not
-   half-restored.
-6. Cancelled jobs and turns stay cancelled.
+### 5.9 Acceptance
+
+1. An admin restores a deleted workspace; it leaves the deleted list and its owner can open it.
+2. A missing workspace 404s; a live, current one 409s; a non-admin gets 403.
+3. Exactly one `admin_deleted_workspace_restored` event, naming the acting admin, in the same
+   transaction as the flag clear — a failed commit leaves neither.
+4. **Setup, all three states.** A workspace deleted while `queued`, while `running`, and while
+   `waiting_for_rubric_review` restores to that same state — and the `waiting_for_rubric_review`
+   case does not re-run extraction.
+5. **Fault injection: the bump does not land.** Force the bridge to fail after the commit. The
+   workspace is live and poisoned; a second POST returns 204 and makes it usable; no second audit
+   row is written.
+6. Cancelled turns stay cancelled.
 7. Swapping in `acquire_commit_mutex_live` turns the happy-path test red.
-8. The delete-confirmation copy no longer claims the deletion cannot be undone at all.
-9. No migration, no `rmtree`, nothing removed anywhere.
+8. The list is invalidated: after a restore the admin returns to a list that no longer shows it.
+9. The delete-confirmation copy no longer claims deletion cannot be undone at all.
+10. No `rmtree`. Nothing removed. The only schema change is 5.2's nullable column.
 
 ## 7. Risks
 
 | Risk | Handling |
 |---|---|
 | Admin surface becomes a back door to live workspaces | Both routes 404 unless `soft_deleted_at IS NOT NULL` |
-| Using the `_live` mutex variant, which refuses deleted workspaces | Called out explicitly in section 4; acceptance test 6 pins it |
+| Using the `_live` mutex variant, which refuses deleted workspaces | Called out explicitly in 3.2 (inspection) and 5.5 (restore); acceptance 8.6 and 5.9.7 pin it |
 | Unbounded list or history response | Paginated and capped, truncation stated (3.1) |
-| Content served without an audit record | Audit commits before the response (5) |
+| Content served without an audit record | Audit commits before the response (3.3) |
 | Inspection accidentally mutating a deleted workspace | Acceptance tests 4 and 5 assert no new commit and no collab room |
-| Restore produces a zombie: live row, permanently refused by collab and turns | Both in-memory tombstones cleared after the commit (4.2, 4.3); acceptance 4 exercises the subsystems rather than the sets |
-| Tombstones cleared for a workspace whose restore then fails | Cleared only after COMMIT succeeds (4.3); acceptance 5 |
+| Restore produces a zombie: live row, permanently refused by collab and turns | Generation bump un-poisons every subsystem at once (4.4); C0 acceptance 4 exercises the subsystems, not the sets |
+| A delete's retirement lands after a restore and re-poisons a live workspace | Retirement is stamped with a generation and no-ops when stale (4.4); C0 acceptance 2 and 3 |
+| The commit lands and the generation bump does not | Restore is idempotent on the generation (5.4); C1 acceptance 5 injects exactly this |
+| A workspace deleted mid-setup restores into a permanent "Setting up…" | Setup job restored from `cancelled_from` (5.2); C1 acceptance 4 covers all three states |
 
-## 8. Acceptance
+## 8. Acceptance — Slice B
+
+C0 and C1 have their own acceptance lists, at 4.6 and 5.9.
 
 1. An admin can list soft-deleted workspaces; live workspaces are never visible through either
    route.
@@ -461,7 +610,8 @@ Requires Slice D. Settled design points:
 
 ### 9.3 Slice C — restore
 
-Promoted out of this section in revision 5. See **4**.
+Promoted out of this section in revision 5, and split in revision 6. See **4** (C0, the
+lifecycle generation) and **5** (C1, restore itself).
 
 ### 9.4 The false-sweep docstring — fixed in Slice A, not deferred
 
