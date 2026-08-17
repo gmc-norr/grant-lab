@@ -25,6 +25,9 @@ def test_lifecycle_generation_column_present_at_head(migrated_engine):
     assert "lifecycle_generation" in cols, "lifecycle_generation column missing from workspaces"
     col = cols["lifecycle_generation"]
     assert not col["nullable"], "lifecycle_generation must be NOT NULL"
+    assert col["default"] is not None and "0" in str(col["default"]), (
+        f"lifecycle_generation must default to 0, got {col['default']!r}"
+    )
 
 
 def test_migration_0062_round_trips(pg_url):

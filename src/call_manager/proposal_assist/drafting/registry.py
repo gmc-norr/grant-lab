@@ -315,6 +315,9 @@ class SubprocessRegistry:
         """
         async with self._lock:
             future = self._pending_launches.pop(workspace_id, None)
+            # is_retired is lock-free and that is load-bearing — this can run
+            # inside a hook the coordinator invokes while holding the lifecycle lock
+            # (so it must NOT take that lock).
             if self._lifecycle.is_retired(workspace_id):
                 # Retired mid-launch: do NOT install. Resolve the waiter (if any)
                 # with WorkspaceRetired so a caller awaiting the pending future
