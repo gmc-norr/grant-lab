@@ -12,7 +12,7 @@ Two layers:
   paths, cancelled turns, and the one test that checks the thing the feature is
   actually for: the OWNER can open the workspace again.
 
-  Interleaving (7–10) — the substance. 1–6 all pass against a restore with the
+  Interleaving (7–11) — the substance. 1–6 all pass against a restore with the
   concurrency hole; only these expose it. Each drives a concurrent writer
   against an *uncommitted* restore using the `before_cursor_execute` seam from
   Task 1 (tests/proposal_assist/test_jobs_retirement_generation.py), and asserts
@@ -51,6 +51,7 @@ from call_manager.db.models import (
     ChatTurn,
     TurnJob,
     Workspace,
+    WorkspaceEvent,
     WorkspaceSetupJob,
 )
 from call_manager.proposal_assist.lifecycle import (
@@ -488,8 +489,9 @@ def test_the_retirement_hook_racing_the_restore_cannot_leave_it_cancelled(
     UPDATE, so at the instant the hook fires restore holds the job lock and the
     hook's SKIP LOCKED passes over it. Seed an UNCANCELLED `queued` job so
     restore's repair is a no-op (queued → queued writes nothing), which is what
-    makes a dropped `.with_for_update()` — and the M → W → J inversion — leave a
-    surviving cancel for this test to catch.
+    makes a dropped `.with_for_update()` leave a surviving cancel for this test
+    to catch. The M → W → J inversion does NOT — it is equivalent for this
+    property; see the module docstring.
     """
     ws_id, admin_id, job_id = _seed_deleted_with_setup_job(
         pg_session_factory, status="queued"
@@ -642,3 +644,93 @@ def test_a_late_fail_after_restore_does_not_re_cancel(pg_session_factory, tmp_pa
     )
     assert job.cancelled_from is None
     assert job.attempts == attempts_before, "the stale exception charged an attempt"
+
+
+# ---------------------------------------------------------------------------
+# 11. A restore that loses the mutex race must return the WINNER's generation.
+# ---------------------------------------------------------------------------
+
+
+def _restore_from_another_connection(pg_session_factory, ws_id, admin_id):
+    """Run a COMPLETE restore on a SEPARATE connection and commit it. Returns
+    the generation it allocated."""
+    with pg_session_factory() as other:
+        return restore_workspace_db(other, workspace_id=ws_id, admin_id=admin_id).generation
+
+
+def test_a_restore_that_loses_the_mutex_race_returns_the_winners_generation(
+    pg_session_factory, migrated_engine
+):
+    """Interleaving. Two admins restore the same deleted workspace. B reads the
+    row while it is still DELETED, then blocks on the commit mutex; A wins,
+    commits generation G+1 and goes live; B finally takes the mutex, sees LIVE
+    and takes the idempotent path.
+
+    The generation B returns must be A's G+1, not the G cached on the instance
+    it loaded before the mutex. It is the caller's fault line, not a cosmetic
+    one: the route hands this straight to signal_workspace_restored, the
+    lifecycle authority rejects a superseded generation as already-retired, and
+    the route answers 204 either way — so a stale G leaves the database live
+    while in-process access stays retired, with nothing on screen saying so.
+
+    The seam fires on `pg_advisory_xact_lock`, i.e. after B's pre-mutex load and
+    before B holds the mutex — the only window in which A can win. B holds no
+    locks at that instant, so A acquires the same mutex, commits and releases it
+    inside the callback without deadlocking.
+    """
+    ws_id, admin_id, job_id = _seed_deleted_with_setup_job(
+        pg_session_factory, status="queued"
+    )
+    with pg_session_factory() as s:
+        del_gen = s.execute(
+            select(Workspace.lifecycle_generation).where(Workspace.id == ws_id)
+        ).scalar_one()
+
+    state: dict = {"fired": False, "winner_gen": None}
+
+    def _before(conn, cursor, statement, parameters, context, executemany):
+        # A's own restore runs the same statement; the `fired` latch keeps this
+        # from recursing.
+        if state["fired"] or "pg_advisory_xact_lock" not in statement:
+            return
+        state["fired"] = True
+        state["winner_gen"] = _restore_from_another_connection(
+            pg_session_factory, ws_id, admin_id
+        )
+
+    event.listen(migrated_engine, "before_cursor_execute", _before)
+    try:
+        with pg_session_factory() as s:
+            outcome = restore_workspace_db(s, workspace_id=ws_id, admin_id=admin_id)
+    finally:
+        event.remove(migrated_engine, "before_cursor_execute", _before)
+
+    assert state["fired"], "the trigger never matched — this test proved nothing"
+    winner_gen = state["winner_gen"]
+    # Without this the assertion below could pass on two equal numbers.
+    assert winner_gen > del_gen, (
+        f"the winning restore did not advance the generation "
+        f"({winner_gen} vs deleted-state {del_gen}) — the seam fired too late"
+    )
+
+    assert outcome.transitioned is False, (
+        "B wrote a transition even though A had already made the workspace live"
+    )
+    assert outcome.generation == winner_gen, (
+        f"the losing restore returned generation {outcome.generation} "
+        f"(the value cached before the mutex) instead of the winner's "
+        f"{winner_gen}; applying it would be rejected as superseded while the "
+        f"route still answered 204"
+    )
+
+    # A did the real work: live, audited once, job progressing.
+    with pg_session_factory() as s:
+        assert s.get(Workspace, ws_id).soft_deleted_at is None
+        assert s.get(WorkspaceSetupJob, job_id).status == "queued"
+        events = s.execute(
+            select(WorkspaceEvent).where(
+                WorkspaceEvent.workspace_id == ws_id,
+                WorkspaceEvent.kind == "admin_deleted_workspace_restored",
+            )
+        ).scalars().all()
+    assert len(events) == 1, f"expected exactly one restore audit row, got {len(events)}"

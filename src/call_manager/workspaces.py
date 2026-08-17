@@ -248,7 +248,11 @@ def restore_workspace_db(
 
     Raises CommitMutexTimeout (route -> 429) having committed nothing.
 
-    The returned generation is the one THIS transaction allocated. The caller
+    On a genuine transition the returned generation is the one THIS transaction
+    allocated. On the idempotent path (already live) there is no transition to
+    allocate against, so it is READ — but read fresh UNDER THE MUTEX, never from
+    the pre-mutex instance, or a restore that won the mutex first would leave us
+    returning a generation it has already superseded. Either way the caller
     passes it to signal_workspace_restored untouched and must never re-read one
     (spec 4.4).
     """
@@ -262,18 +266,39 @@ def restore_workspace_db(
     # function exists to serve). acquire_commit_mutex returns None.
     acquire_commit_mutex(session, workspace_id, timeout_seconds=timeout_seconds)
 
-    # Step 3: Fresh under-mutex read of soft_deleted_at (plain SELECT, no FOR
-    # UPDATE — we are not locking the workspace row yet; that comes in step 5).
-    current_deleted_at = session.execute(
-        select(Workspace.soft_deleted_at).where(Workspace.id == workspace_id)
-    ).scalar_one_or_none()
+    # Step 3: Fresh under-mutex read of soft_deleted_at AND lifecycle_generation
+    # (plain SELECT, no FOR UPDATE — we are not locking the workspace row yet;
+    # that comes in step 5).
+    #
+    # BOTH columns must come from THIS query. The `ws` instance was loaded in
+    # step 1, BEFORE the mutex; a concurrent restore that won the mutex ahead of
+    # us has since committed a HIGHER generation, and nothing expires that
+    # instance's cached attributes. Returning the cached generation on the
+    # idempotent path below would hand the route a generation the lifecycle
+    # authority has already superseded: the authority rejects the apply as stale
+    # while the route still answers 204, leaving the database live and
+    # in-process access retired.
+    row = session.execute(
+        select(Workspace.soft_deleted_at, Workspace.lifecycle_generation).where(
+            Workspace.id == workspace_id
+        )
+    ).one_or_none()
+    if row is None:
+        # The row vanished between step 1 and here. Unreachable in Slice C1 —
+        # nothing hard-deletes a workspace until Slice E — and the same failure
+        # as step 1's missing row, so it raises the same way rather than falling
+        # through the `soft_deleted_at IS NULL` branch as "already live".
+        raise ValueError(f"workspace not found: {workspace_id}")
+    current_deleted_at, current_generation = row
 
     if current_deleted_at is None:
-        # Already live — idempotent path. Read generation from the
-        # identity-mapped instance (loaded in step 1) before rollback.
-        gen = ws.lifecycle_generation
+        # Already live — idempotent path. The generation is whatever the winning
+        # restore committed, read fresh above; ordering against the rollback no
+        # longer matters because it is already a plain int.
         session.rollback()
-        return RestoreOutcome(generation=gen, setup_job_restored_to=None, transitioned=False)
+        return RestoreOutcome(
+            generation=current_generation, setup_job_restored_to=None, transitioned=False
+        )
 
     # Step 4: Lock and repair the setup job BEFORE mutating the workspace row.
     # Lock order: mutex (M) → setup job (J) → workspace (W).
