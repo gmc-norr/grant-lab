@@ -152,6 +152,7 @@ def cancel_setup_jobs_for_workspace(
         )
         .values(
             status="cancelled",
+            cancelled_from=WorkspaceSetupJob.status,   # the column's value NOW
             completed_at=datetime.now(UTC),
             last_error="cancelled: workspace deleted",
         )
@@ -227,6 +228,7 @@ def reconcile_cancelled_jobs(session: Session) -> int:
         )
         .values(
             status="cancelled",
+            cancelled_from=WorkspaceSetupJob.status,   # the column's value NOW
             completed_at=datetime.now(UTC),
             last_error="cancelled: workspace deleted (reconciled)",
         )

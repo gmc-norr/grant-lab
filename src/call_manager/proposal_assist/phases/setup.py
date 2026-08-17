@@ -601,9 +601,31 @@ class Phase0Worker:
             if job.status in ("cancelled", "failed", "done", "waiting_for_rubric_review"):
                 return  # already terminal (or already yielded) — never resurrect
 
-            deleted = s.scalar(
-                select(Workspace.soft_deleted_at).where(Workspace.id == job.workspace_id)
-            )
+            row = s.execute(
+                select(Workspace.id, Workspace.soft_deleted_at).where(
+                    Workspace.id == job.workspace_id
+                )
+            ).one_or_none()
+            gone = row is None
+            deleted = None if gone else row.soft_deleted_at
+
+            # Slice C1: the FRESH read decides, not the exception. A
+            # WorkspaceGoneDuringSetup / WorkspaceDeleted raised while the
+            # workspace was deleted is STALE once a restore has superseded it,
+            # and restore has already put this job into a state that progresses.
+            #
+            # Return rather than falling through to the generic retry path:
+            # that path runs `attempts += 1` below and dead-letters to 'failed'
+            # at MAX_SETUP_ATTEMPTS (5). Charging the job an attempt — possibly
+            # its last — for an exception the restore already answered is a
+            # second bug, not a recovery.
+            #
+            # `gone` is separated from `deleted` because a NULL soft_deleted_at
+            # means "live" OR "no such row", and only the first may return here.
+            if not gone and deleted is None and isinstance(
+                exc, (WorkspaceGoneDuringSetup, WorkspaceDeleted)
+            ):
+                return
 
             job.attempts += 1
             job.last_error = f"{type(exc).__name__}: {exc}"
@@ -612,7 +634,12 @@ class Phase0Worker:
             # acquire_commit_mutex_live before anything is mutated);
             # WorkspaceGoneDuringSetup is _m2/_m3's. Both mean the same thing
             # here — route terminal, not just the locally-defined exception.
-            if deleted is not None or isinstance(exc, (WorkspaceGoneDuringSetup, WorkspaceDeleted)):
+            if gone or deleted is not None:
+                # Record the state we are cancelling FROM before overwriting it
+                # (Slice C1, spec 5.2.2). The guard above already returned for
+                # every terminal status, so this is one of the three the CHECK
+                # allows.
+                job.cancelled_from = job.status
                 job.status = "cancelled"
                 job.completed_at = now
                 logger.info(
