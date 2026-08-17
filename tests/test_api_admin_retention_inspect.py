@@ -30,6 +30,19 @@ from tests.admin_retention_helpers import client_for, setup_app, soft_delete
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
+@pytest.fixture(autouse=True)
+def _enable_retention_inspection(monkeypatch):
+    """Every test in this module exercises the inspect endpoint, which is OFF by
+    default (RETENTION_INSPECTION_ENABLED, config.py). Enabling it per-module
+    keeps the production default honest — the disabled path has its own tests
+    below, which set the env back to false BEFORE building their app.
+
+    Autouse rather than a setup_app argument: the fixture runs before the test
+    body, so it is already in the environment when create_app() reads Settings.
+    """
+    monkeypatch.setenv("RETENTION_INSPECTION_ENABLED", "true")
+
+
 def _commit(repo: Path, message: str) -> None:
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
     subprocess.run(
@@ -631,3 +644,128 @@ def test_an_empty_draft_is_not_reported_as_served(
         )
     assert len(events) == 1
     assert events[0].payload["content_served"] is False
+
+
+# ---------------------------------------------------------------------------
+# The capability gate (RETENTION_INSPECTION_ENABLED, default False).
+#
+# These set the env back to false BEFORE building the app, overriding the
+# module's autouse fixture — the fixture runs first, so a setenv in the test
+# body wins.
+# ---------------------------------------------------------------------------
+
+
+def _disabled_app(monkeypatch, pg_url, tmp_path):
+    monkeypatch.setenv("RETENTION_INSPECTION_ENABLED", "false")
+    return setup_app(monkeypatch, pg_url, tmp_path)
+
+
+def test_inspection_is_refused_when_the_capability_is_disabled(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """403, not 404: the workspace exists and the admin can see it in the list
+    beside this call, so "not found" would contradict that list and send an
+    operator hunting for a missing row instead of an unset env var."""
+    app = _disabled_app(monkeypatch, pg_url, tmp_path)
+    sf = app.state.session_factory
+    ws_id = _seed(sf, tmp_path)
+    with sf() as s:
+        soft_delete(s, ws_id)
+    c, _ = client_for(app, sf, email="admin@ki.se", is_admin=True)
+
+    r = c.get(f"/api/admin/workspaces/deleted/{ws_id}")
+
+    assert r.status_code == 403
+    # The /api envelope, not a bare {"detail": ...} — web/api/errors.envelope_dict.
+    assert "RETENTION_INSPECTION_ENABLED" in r.json()["error"]["message"], (
+        "the refusal must name the switch, or an operator cannot act on it"
+    )
+
+
+def test_a_refused_inspection_serves_no_content(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """The whole point of the gate. Asserted on the BODY, not just the status:
+    a 403 that still carried the draft would pass a status-only test."""
+    app = _disabled_app(monkeypatch, pg_url, tmp_path)
+    sf = app.state.session_factory
+    ws_id = _seed(sf, tmp_path, content="# Secret draft\n\nUnpublished.\n")
+    with sf() as s:
+        soft_delete(s, ws_id)
+    c, _ = client_for(app, sf, email="admin@ki.se", is_admin=True)
+
+    body = c.get(f"/api/admin/workspaces/deleted/{ws_id}").text
+
+    assert "Secret draft" not in body
+    assert "Unpublished" not in body
+
+
+def test_a_refused_inspection_writes_no_audit_row(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """The audit trail records CONTENT SERVED. Nothing was served, so nothing is
+    recorded — matching the existing 404 paths. If refused-attempt logging is
+    ever wanted it is a different feature with a different event kind, and this
+    test is what will make that change deliberate rather than accidental."""
+    app = _disabled_app(monkeypatch, pg_url, tmp_path)
+    sf = app.state.session_factory
+    ws_id = _seed(sf, tmp_path)
+    with sf() as s:
+        soft_delete(s, ws_id)
+    c, _ = client_for(app, sf, email="admin@ki.se", is_admin=True)
+
+    c.get(f"/api/admin/workspaces/deleted/{ws_id}")
+
+    with sf() as s:
+        events = (
+            s.query(WorkspaceEvent)
+            .filter_by(workspace_id=ws_id, kind="admin_deleted_workspace_inspected")
+            .all()
+        )
+    assert events == []
+
+
+def test_the_list_stays_available_when_inspection_is_disabled(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """The split the default exists to create: an admin can still see WHAT was
+    deleted — which is what retention management and Slice E's purge decisions
+    need — without being able to read it. Gating the list too would make the
+    retention surface useless rather than private."""
+    app = _disabled_app(monkeypatch, pg_url, tmp_path)
+    sf = app.state.session_factory
+    ws_id = _seed(sf, tmp_path)
+    with sf() as s:
+        soft_delete(s, ws_id)
+    c, _ = client_for(app, sf, email="admin@ki.se", is_admin=True)
+
+    r = c.get("/api/admin/workspaces/deleted")
+
+    assert r.status_code == 200
+    assert [row["id"] for row in r.json()["items"]] == [str(ws_id)]
+
+
+def test_the_capability_is_reported_to_the_client_both_ways(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """/api/me drives whether the UI offers the door at all. A door that 403s is
+    worse than no door, so this must track the setting rather than assume it."""
+    off = _disabled_app(monkeypatch, pg_url, tmp_path)
+    c_off, _ = client_for(off, off.state.session_factory, email="a@ki.se", is_admin=True)
+    assert c_off.get("/api/me").json()["capabilities"]["retention_inspection"] is False
+
+    monkeypatch.setenv("RETENTION_INSPECTION_ENABLED", "true")
+    on = setup_app(monkeypatch, pg_url, tmp_path)
+    c_on, _ = client_for(on, on.state.session_factory, email="b@ki.se", is_admin=True)
+    assert c_on.get("/api/me").json()["capabilities"]["retention_inspection"] is True
+
+
+def test_a_non_admin_never_gets_the_capability_even_when_enabled(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """The capability answers "can THIS user do it", so the deployment switch
+    must not hand it to someone who fails the role check."""
+    monkeypatch.setenv("RETENTION_INSPECTION_ENABLED", "true")
+    app = setup_app(monkeypatch, pg_url, tmp_path)
+    c, _ = client_for(app, app.state.session_factory, email="user@ki.se", is_admin=False)
+    assert c.get("/api/me").json()["capabilities"]["retention_inspection"] is False

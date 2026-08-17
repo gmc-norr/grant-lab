@@ -42,7 +42,11 @@ def test_me_returns_user(monkeypatch, pg_url, pg_session_factory):
     assert body["user"]["id"] == uid
     assert body["user"]["email"] == "u@ki.se"
     assert body["user"]["status"] == "active"
-    assert body["capabilities"] == {"admin": False}
+    # Exact match on purpose: capabilities is a free-form dict, so an equality
+    # check is what catches a new key being exposed to every client by accident.
+    # retention_inspection is False here on BOTH counts — not an admin, and
+    # RETENTION_INSPECTION_ENABLED defaults off.
+    assert body["capabilities"] == {"admin": False, "retention_inspection": False}
 
 
 def test_me_admin_capability(monkeypatch, pg_url, pg_session_factory):
@@ -56,7 +60,10 @@ def test_me_admin_capability(monkeypatch, pg_url, pg_session_factory):
     c.cookies.set("session", app.state.session_signer.make(user_id=uid))
     r = c.get("/api/me")
     assert r.status_code == 200
-    assert r.json()["capabilities"] == {"admin": True}
+    # retention_inspection stays False: this app is built without
+    # RETENTION_INSPECTION_ENABLED, and admin alone does not grant it. Its
+    # both-ways coverage lives in test_api_admin_retention_inspect.py.
+    assert r.json()["capabilities"] == {"admin": True, "retention_inspection": False}
 
 
 def test_me_exposes_user_name(monkeypatch, pg_url, pg_session_factory):

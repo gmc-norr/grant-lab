@@ -4,16 +4,25 @@ import { Link } from "react-router-dom";
 
 import type { DeletedWorkspaceRow } from "../api/admin";
 import { DELETED_PER_PAGE, useAdminDeletedWorkspaces } from "../api/admin";
+import { useSession } from "../api/session";
 
 const fmtDt = (s: string) => new Date(s).toLocaleString();
 
-function Row({ w }: { w: DeletedWorkspaceRow }) {
+function Row({ w, canInspect }: { w: DeletedWorkspaceRow; canInspect: boolean }) {
   return (
     <Table.Tr>
       <Table.Td>
-        <Anchor component={Link} to={`/admin/deleted-workspaces/${w.id}`}>
-          {w.title}
-        </Anchor>
+        {/* No link when reading content is disabled: the detail route 403s, and
+            a door that refuses is worse than no door. The row itself stays —
+            seeing WHAT was deleted is the half of this surface that is never
+            gated. */}
+        {canInspect ? (
+          <Anchor component={Link} to={`/admin/deleted-workspaces/${w.id}`}>
+            {w.title}
+          </Anchor>
+        ) : (
+          w.title
+        )}
       </Table.Td>
       <Table.Td>{w.owner_email ?? "—"}</Table.Td>
       <Table.Td>{fmtDt(w.soft_deleted_at)}</Table.Td>
@@ -24,6 +33,8 @@ function Row({ w }: { w: DeletedWorkspaceRow }) {
 export function AdminDeletedWorkspaces() {
   const [page, setPage] = useState(1);
   const { data, isLoading, isError } = useAdminDeletedWorkspaces(page);
+  const session = useSession();
+  const canInspect = session.data?.capabilities.retention_inspection === true;
   if (isLoading) return <Text p="md">Loading…</Text>;
   if (isError || !data)
     return (
@@ -39,6 +50,16 @@ export function AdminDeletedWorkspaces() {
         Deletion freezes a workspace but keeps its content on disk. This view is
         read-only — nothing here can be restored, changed, or removed.
       </Text>
+      {!canInspect && (
+        <Text c="dimmed" size="sm" mb="md">
+          Reading a deleted workspace's draft is disabled on this deployment, so
+          titles here do not open. An administrator can enable it with{" "}
+          <Text span ff="monospace">
+            RETENTION_INSPECTION_ENABLED
+          </Text>
+          .
+        </Text>
+      )}
       {items.length === 0 ? (
         <Text c="dimmed">No deleted workspaces.</Text>
       ) : (
@@ -52,7 +73,7 @@ export function AdminDeletedWorkspaces() {
           </Table.Thead>
           <Table.Tbody>
             {items.map((w) => (
-              <Row key={w.id} w={w} />
+              <Row key={w.id} w={w} canInspect={canInspect} />
             ))}
           </Table.Tbody>
         </Table>

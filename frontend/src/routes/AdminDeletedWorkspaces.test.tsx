@@ -25,10 +25,28 @@ function row(i: number) {
   };
 }
 
-function mockList(items: unknown[], total = items.length) {
-  return vi
-    .spyOn(clientMod.api, "GET")
-    .mockResolvedValue({ data: { items, total }, error: undefined } as never);
+// The list page reads BOTH the listing and /api/me (for the retention_inspection
+// capability), so the mock has to dispatch on path -- a single mockResolvedValue
+// would hand the session payload to the table and vice versa.
+function mockList(items: unknown[], total = items.length, { canInspect = true } = {}) {
+  return vi.spyOn(clientMod.api, "GET").mockImplementation((async (path: string) => {
+    if (path === "/api/me") {
+      return {
+        data: {
+          user: { id: 1, email: "a@ki.se", status: "active", default_profile_id: null },
+          capabilities: { admin: true, retention_inspection: canInspect },
+        },
+        error: undefined,
+      };
+    }
+    return { data: { items, total }, error: undefined };
+  }) as never);
+}
+
+// Calls to the LISTING endpoint only. The session read is interleaved and its
+// ordering is not something these tests should depend on.
+function listCalls(get: ReturnType<typeof mockList>) {
+  return get.mock.calls.filter((c) => c[0] !== "/api/me");
 }
 
 // openapi-fetch's mocked call signature resolves to `never` under vitest's mock
@@ -56,7 +74,7 @@ it("requests the first page with an explicit offset", async () => {
   await screen.findByText("Retired grant draft 0");
   // Assert the REQUEST, not just the render: a component that renders page 1
   // correctly while never sending offset looks identical until you click Next.
-  const params = (get.mock.calls[0][1] as ListCall)?.params?.query;
+  const params = (listCalls(get)[0][1] as ListCall)?.params?.query;
   expect(params).toMatchObject({ offset: 0 });
   expect(params.limit).toBeGreaterThan(0);
 });
@@ -65,12 +83,12 @@ it("advances the offset when the admin goes to the next page", async () => {
   const get = mockList([row(0)], 120);
   renderWithProviders(<AdminDeletedWorkspaces />);
   await screen.findByText("Retired grant draft 0");
-  const limit = (get.mock.calls[0][1] as ListCall).params.query.limit;
+  const limit = (listCalls(get)[0][1] as ListCall).params.query.limit;
 
   await userEvent.click(screen.getByRole("button", { name: /next/i }));
 
-  await waitFor(() => expect(get.mock.calls.length).toBeGreaterThan(1));
-  const latest = (get.mock.calls.at(-1)![1] as ListCall).params.query;
+  await waitFor(() => expect(listCalls(get).length).toBeGreaterThan(1));
+  const latest = (listCalls(get).at(-1)![1] as ListCall).params.query;
   expect(latest.offset).toBe(limit);
 });
 
@@ -192,4 +210,28 @@ it("still says 'No commits.' for a readable but empty history", async () => {
   mockDetail({ history_available: true, commits: [], history_truncated: false });
   renderWithProviders(<AdminDeletedWorkspaceDetail workspaceId={WS_ID} />);
   expect(await screen.findByText("No commits.")).toBeInTheDocument();
+});
+
+
+it("does not link a title when reading deleted content is disabled", async () => {
+  // The row stays -- seeing WHAT was deleted is never gated -- but the title is
+  // not a link, because the detail route would 403 and a door that refuses is
+  // worse than no door.
+  mockList([row(0)], 1, { canInspect: false });
+  renderWithProviders(<AdminDeletedWorkspaces />);
+
+  expect(await screen.findByText("Retired grant draft 0")).toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "Retired grant draft 0" })).toBeNull();
+  expect(screen.getByText(/RETENTION_INSPECTION_ENABLED/)).toBeInTheDocument();
+});
+
+it("links the title when the capability is granted", async () => {
+  // The other half of the pair: without this, deleting the link unconditionally
+  // would still pass the test above.
+  mockList([row(0)], 1, { canInspect: true });
+  renderWithProviders(<AdminDeletedWorkspaces />);
+
+  const link = await screen.findByRole("link", { name: "Retired grant draft 0" });
+  expect(link).toHaveAttribute("href", expect.stringContaining("/admin/deleted-workspaces/"));
+  expect(screen.queryByText(/RETENTION_INSPECTION_ENABLED/)).toBeNull();
 });

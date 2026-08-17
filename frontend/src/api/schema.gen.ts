@@ -331,6 +331,8 @@ export interface paths {
          *     re-reads liveness and raises WorkspaceDeleted, which would refuse every
          *     workspace this endpoint exists to serve.
          *
+         *     Refuses with 403 when RETENTION_INSPECTION_ENABLED is false (the default).
+         *
          *     The audit event is committed BEFORE any content is returned.
          */
         get: operations["inspect_deleted_workspace_api_admin_workspaces_deleted__workspace_id__get"];

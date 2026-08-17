@@ -266,6 +266,22 @@ class Settings(BaseSettings):
             "the socket drain. enabled_at rows are never cleared."
         ),
     )
+    retention_inspection_enabled: bool = Field(
+        default=False,
+        alias="RETENTION_INSPECTION_ENABLED",
+        description=(
+            "Whether an admin may READ a soft-deleted workspace's surviving "
+            "draft text and commit history (GET /api/admin/workspaces/deleted/"
+            "{id}). Default False: that content is a researcher's unpublished "
+            "proposal, deletion is the signal they wanted it gone, and no "
+            "deployment should expose it because nobody chose otherwise. "
+            "Deliberately does NOT gate the LIST endpoint — titles, owners and "
+            "deletion times are what an admin needs to manage retention and to "
+            "decide what to purge, and gating those would make the retention "
+            "surface useless rather than private. The split is the point: see "
+            "what exists without reading it."
+        ),
+    )
     daily_token_cap_input: int = Field(
         default=500_000,
         alias="DAILY_TOKEN_CAP_INPUT",

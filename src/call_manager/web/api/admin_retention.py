@@ -200,8 +200,32 @@ def inspect_deleted_workspace(
     re-reads liveness and raises WorkspaceDeleted, which would refuse every
     workspace this endpoint exists to serve.
 
+    Refuses with 403 when RETENTION_INSPECTION_ENABLED is false (the default).
+
     The audit event is committed BEFORE any content is returned.
     """
+    # Capability gate, FIRST: before the workspace lookup, before the commit
+    # mutex, before the audit row. A refused request must cost nothing and leave
+    # nothing — taking the mutex would contend with a live workspace's real
+    # writers on behalf of a request that is going to be refused anyway.
+    #
+    # 403, not 404. The workspace is genuinely there and the admin can already
+    # see it in the list beside this call; answering "not found" would
+    # contradict that list and send an operator hunting for a missing row
+    # instead of an unset env var. Nothing is concealed by lying here — the
+    # list endpoint is deliberately ungated.
+    #
+    # No audit row on this path, matching the existing 404s: the audit trail
+    # records CONTENT SERVED, and nothing was. A record of refused attempts is a
+    # different feature (access-attempt logging) and is not built here.
+    if not request.app.state.settings.retention_inspection_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Reading deleted workspace content is disabled on this "
+                "deployment (RETENTION_INSPECTION_ENABLED)."
+            ),
+        )
     # Every read of this endpoint writes an audit row, and that is only true of
     # reads that actually reach this handler. A browser or intermediary cache
     # replaying the response would show an admin someone's deleted draft with no

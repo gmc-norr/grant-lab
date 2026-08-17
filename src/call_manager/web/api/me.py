@@ -30,7 +30,7 @@ class MeOut(BaseModel):
 
 
 @router.get("/me", response_model=MeOut)
-def get_me(user: User = Depends(get_current_user)):  # noqa: B008
+def get_me(request: Request, user: User = Depends(get_current_user)):  # noqa: B008
     return MeOut(
         user=UserOut(
             id=user.id,
@@ -39,7 +39,17 @@ def get_me(user: User = Depends(get_current_user)):  # noqa: B008
             status=user.status,
             default_profile_id=user.default_profile_id,
         ),
-        capabilities={"admin": user.is_admin},
+        capabilities={
+            "admin": user.is_admin,
+            # Whether THIS user can read deleted-workspace content: admin AND the
+            # deployment allows it. One boolean because that is the question the
+            # UI asks — it decides whether to offer the door, and a door that
+            # 403s is worse than no door. The route re-checks the setting; this
+            # is presentation, never the guard.
+            "retention_inspection": (
+                user.is_admin and request.app.state.settings.retention_inspection_enabled
+            ),
+        },
     )
 
 
