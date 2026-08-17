@@ -59,6 +59,39 @@ _CANCELLABLE = ("queued", "running", "waiting_for_rubric_review")
 _CLAIM_ANALYSIS_CANCELLABLE = ("queued", "running")
 
 
+def _still_at_generation(workspace_id: uuid.UUID, generation: int):
+    """The linearization point: "is this workspace STILL at the generation my
+    retirement allocated?", expressed so it governs the WRITE.
+
+    This runs on an ORPHANED thread whenever the hook's wait_for timed out (that
+    bound cancels the await, not the thread), and the thread escapes the
+    coordinator's lifecycle lock the same way — so "was the workspace at my
+    generation when I started" is not a question anyone can answer outside the
+    statement that writes.
+
+    It belongs on the UPDATE, not on the SELECT that picks candidates. Both
+    statements run in one READ COMMITTED transaction, and each takes a FRESH
+    snapshot: a restore committing between them is invisible to a SELECT that
+    already ran, while an UPDATE filtering only on the collected ids happily
+    terminalizes rows the restore just brought back. The candidate SELECT is
+    folded into a CTE so the whole cancel is ONE statement and that gap does not
+    exist. The CTE keeps FOR UPDATE SKIP LOCKED: a row a live worker holds is
+    still skipped, never waited on, so this can never inherit that worker's
+    transaction lifetime.
+
+    The guarantee this buys, stated exactly: once a later generation has
+    COMMITTED, no statement carrying a superseded generation can terminalize a
+    row. It is NOT full serialization — a restore committing while this statement
+    is already executing still loses to it, because this hook holds no lock a
+    restore would wait on. That is by design (spec 4.6); restoring a workspace
+    re-queues its jobs.
+    """
+    return exists().where(
+        Workspace.id == workspace_id,
+        Workspace.lifecycle_generation == generation,
+    )
+
+
 def cancel_claim_analysis_jobs_for_workspace(
     session: Session, workspace_id: uuid.UUID, generation: int
 ) -> int:
@@ -69,36 +102,28 @@ def cancel_claim_analysis_jobs_for_workspace(
     make this hook inherit that lifetime and stall DELETE. Skipped rows converge
     via reconcile_cancelled_jobs.
     """
-    ids = session.scalars(
+    candidates = (
         select(ClaimAnalysisJob.id)
         .where(
             ClaimAnalysisJob.workspace_id == workspace_id,
             ClaimAnalysisJob.status.in_(_CLAIM_ANALYSIS_CANCELLABLE),
-            # The linearization point. This runs on an ORPHANED thread whenever the
-            # hook's wait_for timed out (that bound cancels the await, not the
-            # thread), and the thread escapes the coordinator's lifecycle lock the
-            # same way — so "was the workspace still at my generation when I
-            # started" is not a question anyone can answer outside the statement.
-            # Ask it here, atomically with the write.
-            exists().where(
-                Workspace.id == workspace_id,
-                Workspace.lifecycle_generation == generation,
-            ),
         )
         .with_for_update(skip_locked=True)
-    ).all()
-    if not ids:
-        return 0
-    session.execute(
+        .cte("cancellable_claim_analysis_jobs")
+    )
+    return session.execute(
         update(ClaimAnalysisJob)
-        .where(ClaimAnalysisJob.id.in_(ids))
+        .where(
+            ClaimAnalysisJob.id.in_(select(candidates.c.id)),
+            _still_at_generation(workspace_id, generation),
+        )
         .values(
             status="failed",
             last_error="cancelled: workspace deleted",
             updated_at=datetime.now(UTC),
         )
-    )
-    return len(ids)
+        .execution_options(synchronize_session=False)
+    ).rowcount
 
 
 def cancel_setup_jobs_for_workspace(
@@ -110,36 +135,28 @@ def cancel_setup_jobs_for_workspace(
     can never inherit that worker's transaction lifetime. Skipped rows converge
     via reconcile_cancelled_jobs.
     """
-    ids = session.scalars(
+    candidates = (
         select(WorkspaceSetupJob.id)
         .where(
             WorkspaceSetupJob.workspace_id == workspace_id,
             WorkspaceSetupJob.status.in_(_CANCELLABLE),
-            # The linearization point. This runs on an ORPHANED thread whenever the
-            # hook's wait_for timed out (that bound cancels the await, not the
-            # thread), and the thread escapes the coordinator's lifecycle lock the
-            # same way — so "was the workspace still at my generation when I
-            # started" is not a question anyone can answer outside the statement.
-            # Ask it here, atomically with the write.
-            exists().where(
-                Workspace.id == workspace_id,
-                Workspace.lifecycle_generation == generation,
-            ),
         )
         .with_for_update(skip_locked=True)
-    ).all()
-    if not ids:
-        return 0
-    session.execute(
+        .cte("cancellable_setup_jobs")
+    )
+    return session.execute(
         update(WorkspaceSetupJob)
-        .where(WorkspaceSetupJob.id.in_(ids))
+        .where(
+            WorkspaceSetupJob.id.in_(select(candidates.c.id)),
+            _still_at_generation(workspace_id, generation),
+        )
         .values(
             status="cancelled",
             completed_at=datetime.now(UTC),
             last_error="cancelled: workspace deleted",
         )
-    )
-    return len(ids)
+        .execution_options(synchronize_session=False)
+    ).rowcount
 
 
 def build_jobs_retirement_hook(

@@ -16,9 +16,10 @@ import asyncio
 import threading
 
 import pytest
+from sqlalchemy import event
 
 import call_manager.proposal_assist.jobs_retirement as jr
-from call_manager.db.models import Workspace, WorkspaceSetupJob
+from call_manager.db.models import ClaimAnalysisJob, Workspace, WorkspaceSetupJob
 from call_manager.proposal_assist.jobs_retirement import build_jobs_retirement_hook
 from tests.proposal_assist.conftest import make_workspace
 
@@ -112,4 +113,142 @@ async def test_a_thread_orphaned_by_the_timeout_changes_nothing(
     assert _status(pg_session_factory, ws_id) == "queued", (
         "an orphaned retirement thread cancelled a setup job after a later "
         "transition had moved the generation on"
+    )
+
+
+def _bump_generation_from_another_connection(pg_session_factory, ws_id, generation):
+    """Commit a new lifecycle_generation on a SEPARATE connection.
+
+    The helper under test locks only JOB rows (FOR UPDATE SKIP LOCKED), never the
+    workspaces row, so this commit cannot block behind it — which is exactly why
+    the window it opens is real.
+    """
+    with pg_session_factory() as other:
+        other.get(Workspace, ws_id).lifecycle_generation = generation
+        other.commit()
+
+
+def _commit_generation_just_before_the_write(
+    migrated_engine, pg_session_factory, ws_id, *, table: str, generation: int
+):
+    """Install a one-shot hook that commits *generation* immediately BEFORE the
+    statement that WRITES to *table* executes.
+
+    The match is `UPDATE <table>`, not the bare table name. Matching the table
+    alone fires on the candidate SELECT instead, so the bump lands BEFORE that
+    read — where the existing predicate already catches it — and the test passes
+    against the very defect it is meant to catch. `FOR UPDATE` in the locking
+    SELECT is why matching bare "UPDATE" does not work either.
+
+    This targets the seam the mutation must not have. With the cancel split into
+    SELECT-then-UPDATE, the bump lands in the gap between them and the UPDATE —
+    which filters only on the id list — still terminalizes rows belonging to a
+    superseded generation. With the cancel written as ONE statement, the write IS
+    the only statement, so the bump commits before its snapshot is taken and the
+    generation predicate excludes every row.
+
+    Returns (state, remove) — state["fired"] records whether the hook ran at all,
+    so a test can never silently pass because its trigger never matched, and
+    remove() detaches the listener. The listener must NOT remove itself from
+    inside the callback: SQLAlchemy is iterating its listener collection at that
+    moment and mutating it raises "deque mutated during iteration". The engine is
+    shared across the module's tests, so detaching in a finally is not optional.
+    """
+    state = {"fired": False}
+
+    def _before(conn, cursor, statement, parameters, context, executemany):
+        if state["fired"] or f"UPDATE {table}" not in statement:
+            return
+        state["fired"] = True
+        _bump_generation_from_another_connection(pg_session_factory, ws_id, generation)
+
+    event.listen(migrated_engine, "before_cursor_execute", _before)
+
+    def _remove():
+        event.remove(migrated_engine, "before_cursor_execute", _before)
+
+    return state, _remove
+
+
+async def test_a_generation_committed_before_the_mutation_cancels_nothing(
+    pg_session_factory, migrated_engine
+):
+    """A restore that commits between candidate selection and the write.
+
+    The orphaned-thread tests above pause BEFORE the helper begins, so its
+    predicate already sees the new generation and they cannot observe this
+    window. Here the generation moves while the helper is mid-flight — which is
+    the far likelier shape, because the helper holds its own transaction open
+    across both statements.
+
+    The requirement: once the later generation has COMMITTED, no statement
+    carrying a superseded generation may terminalize a row. Full serialization is
+    NOT the bar and never was — this hook's thread escapes every lock the process
+    holds. Reaching that bar needs the predicate to govern the MUTATION, not just
+    the read that feeds it.
+    """
+    ws_id = _seed(pg_session_factory, generation=1)
+    fired, remove = _commit_generation_just_before_the_write(
+        migrated_engine,
+        pg_session_factory,
+        ws_id,
+        table="workspace_setup_jobs",
+        generation=2,
+    )
+    try:
+        await build_jobs_retirement_hook(pg_session_factory)(ws_id, 1)
+    finally:
+        remove()
+
+    assert fired["fired"], "the trigger never matched — this test proved nothing"
+    assert _status(pg_session_factory, ws_id) == "queued", (
+        "a superseded generation terminalized a setup job because the generation "
+        "predicate governed the candidate SELECT, not the UPDATE that wrote"
+    )
+
+
+async def test_claim_analysis_also_gates_the_mutation_not_just_the_read(
+    pg_session_factory, migrated_engine
+):
+    """The claim-analysis helper carries the identical shape and needs the
+    identical guarantee — asserted separately so a fix to one cannot be mistaken
+    for a fix to both."""
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.flush()
+        # section_index and commit_sha are NOT NULL with no server default.
+        s.add(
+            ClaimAnalysisJob(
+                workspace_id=ws.id,
+                section_index=0,
+                section_sha="a" * 40,
+                commit_sha="b" * 40,
+                status="queued",
+            )
+        )
+        s.commit()
+        ws_id = ws.id
+        s.get(Workspace, ws_id).lifecycle_generation = 1
+        s.commit()
+
+    fired, remove = _commit_generation_just_before_the_write(
+        migrated_engine,
+        pg_session_factory,
+        ws_id,
+        table="claim_analysis_jobs",
+        generation=2,
+    )
+    try:
+        with pg_session_factory() as s:
+            jr.cancel_claim_analysis_jobs_for_workspace(s, ws_id, 1)
+            s.commit()
+    finally:
+        remove()
+
+    assert fired["fired"], "the trigger never matched — this test proved nothing"
+    with pg_session_factory() as s:
+        job = s.query(ClaimAnalysisJob).filter_by(workspace_id=ws_id).one()
+    assert job.status == "queued", (
+        "a superseded generation terminalized a claim-analysis job because the "
+        "generation predicate governed the candidate SELECT, not the UPDATE"
     )
