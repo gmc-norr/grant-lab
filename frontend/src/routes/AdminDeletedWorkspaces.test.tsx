@@ -12,8 +12,16 @@ import { theme } from "../theme/theme";
 import { AdminDeletedWorkspaces } from "./AdminDeletedWorkspaces";
 import { AdminDeletedWorkspaceDetail } from "./AdminDeletedWorkspaceDetail";
 
+// Shared navigate spy — vi.mock runs before imports so we hoist it.
+const h = vi.hoisted(() => ({ navigate: vi.fn() }));
+vi.mock("react-router-dom", async (orig) => ({
+  ...(await orig<typeof import("react-router-dom")>()),
+  useNavigate: () => h.navigate,
+}));
+
 afterEach(() => {
   vi.restoreAllMocks();
+  h.navigate.mockReset();
 });
 
 function row(i: number) {
@@ -234,4 +242,120 @@ it("links the title when the capability is granted", async () => {
   const link = await screen.findByRole("link", { name: "Retired grant draft 0" });
   expect(link).toHaveAttribute("href", expect.stringContaining("/admin/deleted-workspaces/"));
   expect(screen.queryByText(/RETENTION_INSPECTION_ENABLED/)).toBeNull();
+});
+
+// ---- restore action ----
+
+function mockPost(ok = true) {
+  if (ok) {
+    return vi
+      .spyOn(clientMod.api, "POST")
+      .mockResolvedValue({ data: undefined, error: undefined } as never);
+  }
+  return vi
+    .spyOn(clientMod.api, "POST")
+    .mockResolvedValue({ data: undefined, error: { detail: "Service unavailable" } } as never);
+}
+
+// Render the detail page with a caller-supplied QueryClient so we can spy on
+// invalidateQueries and track call order.
+function renderDetail(qc: QueryClient) {
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>{children}</MemoryRouter>
+      </QueryClientProvider>
+    </MantineProvider>
+  );
+  render(<AdminDeletedWorkspaceDetail workspaceId={WS_ID} />, { wrapper });
+}
+
+it("clicking Restore and confirming POSTs to the restore path", async () => {
+  mockDetail();
+  const post = mockPost();
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  renderWithProviders(<AdminDeletedWorkspaceDetail workspaceId={WS_ID} />);
+  await userEvent.click(await screen.findByRole("button", { name: /restore workspace/i }));
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith(
+      "/api/admin/workspaces/deleted/{workspace_id}/restore",
+      { params: { path: { workspace_id: WS_ID } } },
+    ),
+  );
+});
+
+it("declining the confirm does not POST", async () => {
+  mockDetail();
+  const post = mockPost();
+  vi.spyOn(window, "confirm").mockReturnValue(false);
+  renderWithProviders(<AdminDeletedWorkspaceDetail workspaceId={WS_ID} />);
+  await userEvent.click(await screen.findByRole("button", { name: /restore workspace/i }));
+  expect(post).not.toHaveBeenCalled();
+});
+
+it("a failed restore shows an error and does not navigate", async () => {
+  mockDetail();
+  mockPost(false);
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  renderWithProviders(<AdminDeletedWorkspaceDetail workspaceId={WS_ID} />);
+  await userEvent.click(await screen.findByRole("button", { name: /restore workspace/i }));
+  expect(await screen.findByRole("alert")).toBeInTheDocument();
+  expect(h.navigate).not.toHaveBeenCalled();
+});
+
+it("on success invalidates admin-deleted-workspaces BEFORE navigating", async () => {
+  // This test exists to prove the ordering contract: the list inherits a 20s
+  // freshness window (App.tsx), so if navigate fires before invalidation the
+  // restored row is still on screen when the admin lands back on the list.
+  // Remove the invalidateQueries call and this test must go red; if it stays
+  // green the test is decorative and the task is failed.
+  mockDetail();
+  mockPost();
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+
+  const qc = new QueryClient();
+  const callOrder: string[] = [];
+  vi.spyOn(qc, "invalidateQueries").mockImplementation(async () => {
+    callOrder.push("invalidate");
+  });
+  h.navigate.mockImplementation(() => {
+    callOrder.push("navigate");
+  });
+
+  renderDetail(qc);
+  await userEvent.click(await screen.findByRole("button", { name: /restore workspace/i }));
+  await waitFor(() => expect(callOrder).toContain("navigate"));
+  expect(callOrder).toEqual(["invalidate", "navigate"]);
+});
+
+it("Restore works with canInspect: false — regression for ungating", async () => {
+  // The list-page Restore must be reachable when RETENTION_INSPECTION_ENABLED
+  // is unset (the default). With inspection off the detail page 403s and its
+  // link is suppressed — so a button living ONLY on the detail page would be
+  // unreachable on every default deployment. This test confirms the list row
+  // carries its own Restore control and that it fires the POST.
+  mockList([row(0)], 1, { canInspect: false });
+  const post = mockPost();
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  renderWithProviders(<AdminDeletedWorkspaces />);
+  // The title is NOT a link when canInspect is false, but Restore must still
+  // be present and functional.
+  await screen.findByText("Retired grant draft 0");
+  await userEvent.click(screen.getByRole("button", { name: /^restore$/i }));
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith(
+      "/api/admin/workspaces/deleted/{workspace_id}/restore",
+      { params: { path: { workspace_id: row(0).id } } },
+    ),
+  );
+});
+
+it("the list page no longer claims nothing here can be restored", async () => {
+  mockList([row(0)], 1);
+  renderWithProviders(<AdminDeletedWorkspaces />);
+  await screen.findByText("Retired grant draft 0");
+  // The old false copy — must be gone.
+  expect(screen.queryByText(/nothing here can be restored/i)).toBeNull();
+  // The replacement — content cannot be edited, restore is the only action.
+  expect(screen.getByText(/restore is the only action/i)).toBeInTheDocument();
 });

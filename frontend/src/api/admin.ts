@@ -65,6 +65,22 @@ export function useAdminDeletedWorkspace(workspaceId: string) {
   });
 }
 
+export function useRestoreWorkspace(workspaceId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async () =>
+      unwrap(
+        await api.POST("/api/admin/workspaces/deleted/{workspace_id}/restore", {
+          params: { path: { workspace_id: workspaceId } },
+        }),
+      ),
+    // The list inherits the app-wide 20 s freshness window (App.tsx:16), so
+    // without invalidation the restored row is still on screen when the admin
+    // arrives back at the list. Await it in the caller BEFORE navigating.
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["admin-deleted-workspaces"] }),
+  });
+}
+
 export function useApproveUser() {
   const qc = useQueryClient();
   return useMutation({

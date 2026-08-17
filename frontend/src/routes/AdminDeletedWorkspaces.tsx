@@ -3,30 +3,60 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import type { DeletedWorkspaceRow } from "../api/admin";
-import { DELETED_PER_PAGE, useAdminDeletedWorkspaces } from "../api/admin";
+import { DELETED_PER_PAGE, useAdminDeletedWorkspaces, useRestoreWorkspace } from "../api/admin";
 import { useSession } from "../api/session";
 
 const fmtDt = (s: string) => new Date(s).toLocaleString();
 
 function Row({ w, canInspect }: { w: DeletedWorkspaceRow; canInspect: boolean }) {
+  const restore = useRestoreWorkspace(w.id);
   return (
-    <Table.Tr>
-      <Table.Td>
-        {/* No link when reading content is disabled: the detail route 403s, and
-            a door that refuses is worse than no door. The row itself stays —
-            seeing WHAT was deleted is the half of this surface that is never
-            gated. */}
-        {canInspect ? (
-          <Anchor component={Link} to={`/admin/deleted-workspaces/${w.id}`}>
-            {w.title}
-          </Anchor>
-        ) : (
-          w.title
-        )}
-      </Table.Td>
-      <Table.Td>{w.owner_email ?? "—"}</Table.Td>
-      <Table.Td>{fmtDt(w.soft_deleted_at)}</Table.Td>
-    </Table.Tr>
+    <>
+      <Table.Tr>
+        <Table.Td>
+          {/* No link when reading content is disabled: the detail route 403s, and
+              a door that refuses is worse than no door. The row itself stays —
+              seeing WHAT was deleted is the half of this surface that is never
+              gated. */}
+          {canInspect ? (
+            <Anchor component={Link} to={`/admin/deleted-workspaces/${w.id}`}>
+              {w.title}
+            </Anchor>
+          ) : (
+            w.title
+          )}
+        </Table.Td>
+        <Table.Td>{w.owner_email ?? "—"}</Table.Td>
+        <Table.Td>{fmtDt(w.soft_deleted_at)}</Table.Td>
+        <Table.Td>
+          <Button
+            size="xs"
+            variant="outline"
+            disabled={restore.isPending}
+            onClick={async () => {
+              if (
+                window.confirm(
+                  `Restore "${w.title}"? The workspace will become active again and the owner will regain access.`,
+                )
+              ) {
+                restore.mutate();
+              }
+            }}
+          >
+            Restore
+          </Button>
+        </Table.Td>
+      </Table.Tr>
+      {restore.isError && (
+        <Table.Tr>
+          <Table.Td colSpan={4}>
+            <Text c="red" size="sm" role="alert">
+              Could not restore workspace — the server returned an error. Please try again.
+            </Text>
+          </Table.Td>
+        </Table.Tr>
+      )}
+    </>
   );
 }
 
@@ -47,8 +77,8 @@ export function AdminDeletedWorkspaces() {
     <Box component="main" maw="60rem" mx="auto" px="xs" pt="md" pb="xl">
       <Title order={1}>Deleted workspaces</Title>
       <Text c="dimmed" size="sm" mb="md">
-        Deletion freezes a workspace but keeps its content on disk. This view is
-        read-only — nothing here can be restored, changed, or removed.
+        Deletion freezes a workspace but keeps its content on disk. The content
+        cannot be edited here — restore is the only action available.
       </Text>
       {!canInspect && (
         <Text c="dimmed" size="sm" mb="md">
@@ -69,6 +99,7 @@ export function AdminDeletedWorkspaces() {
               <Table.Th>Title</Table.Th>
               <Table.Th>Owner</Table.Th>
               <Table.Th>Deleted</Table.Th>
+              <Table.Th>Actions</Table.Th>
             </Table.Tr>
           </Table.Thead>
           <Table.Tbody>
