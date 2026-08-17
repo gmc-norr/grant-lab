@@ -463,30 +463,46 @@ The naive fix (drop the `isinstance` half) is **wrong**: `s.scalar(select(Worksp
             deleted = None if gone else row.soft_deleted_at
 ```
 
-then
+then, **before `job.attempts += 1`**, return without writing anything:
 
 ```python
             # Slice C1: the FRESH read decides, not the exception. A
-            # WorkspaceGoneDuringSetup raised before a restore is stale by the
-            # time it lands, and cancelling on it would undo the job repair the
-            # restore just did. `gone` is separated from `deleted` because a
-            # NULL soft_deleted_at means "live" OR "no such row", and only the
-            # first of those should fall through.
+            # WorkspaceGoneDuringSetup / WorkspaceDeleted raised while the
+            # workspace was deleted is STALE once a restore has superseded it,
+            # and restore has already put this job into a state that progresses.
+            #
+            # Return rather than falling through to the generic retry path:
+            # that path runs `attempts += 1` below and dead-letters to 'failed'
+            # at MAX_SETUP_ATTEMPTS (5). Charging the job an attempt — possibly
+            # its last — for an exception the restore already answered is a
+            # second bug, not a recovery.
+            #
+            # `gone` is separated from `deleted` because a NULL soft_deleted_at
+            # means "live" OR "no such row", and only the first may return here.
+            if not gone and deleted is None and isinstance(
+                exc, (WorkspaceGoneDuringSetup, WorkspaceDeleted)
+            ):
+                return
+
+            job.attempts += 1
+            ...
             if gone or deleted is not None:
                 job.cancelled_from = job.status
                 job.status = "cancelled"
                 job.completed_at = now
 ```
 
-A stale gone-exception on a live workspace then falls through to the existing `else` branch, which already does exactly the right thing — `status = "queued"`, `started_at = None`. No new code path.
+Revision 2 of this plan claimed the existing `else` branch "already does exactly the right thing". It does not: it sets `queued` and clears `started_at`, but only after `job.attempts += 1` at `setup.py:607`, so a job near the limit would be dead-lettered by a stale exception.
 
 Add tests for this path in `tests/proposal_assist/test_phase0_retirement.py` (it owns the worker-cancellation coverage). Read that file for its harness, then cover all three:
 
 1. `_fail` with `WorkspaceGoneDuringSetup` on a `running` job of a **deleted** workspace → `cancelled`, `cancelled_from == "running"`;
-2. the same exception on a **live** workspace (the post-restore case) → **not** cancelled: `queued` with `started_at` cleared;
+2. the same exception on a **live** workspace (the post-restore case) → the job is **untouched**: not cancelled, and `attempts` **unchanged**. Seed `attempts = MAX_SETUP_ATTEMPTS - 1` so a stray increment dead-letters the job to `failed` and the test says so loudly. A default-zero fixture would pass even if the early return were missing, because the generic path's `queued` looks like success;
 3. the same exception when the workspace row is **absent** → still `cancelled`, so the fix does not trade one hole for another.
 
 Test 2 is the one that fails against today's code. Without test 3, "use the fresh read" would look correct while quietly breaking the missing-row case.
+
+**Test 3 must use a mocked session, not a real one.** `WorkspaceSetupJob.workspace_id` is `ForeignKey("workspaces.id", ondelete="CASCADE")` (`models.py:1420`), so deleting the workspace row takes its setup jobs with it: a real database cannot hold a setup job whose workspace is absent. Do not burn time building that fixture — stub the session's workspace lookup to return `None` and assert the branch. Say in your report that the state is unreachable in production today and the branch is defence for a schema that stops cascading.
 
 **Verify the guard's claim before relying on it.** Line 601 returns early for `("cancelled","failed","done","waiting_for_rubric_review")` — which means `waiting_for_rubric_review` can NEVER reach this branch, so this path can only ever record `queued` or `running`. Say so in your report. That is not a defect (the hook and reconcile cover the parked-for-review case), but a reader who assumes all three states flow through here will write a test that cannot fail.
 
@@ -772,7 +788,21 @@ Restoring only rows with `cancelled_from IS NOT NULL` leaves that job exactly as
 
 **Lock the setup-job row.** Without `FOR UPDATE`, a concurrent retirement hook or reconciliation still sees the *committed* (deleted) workspace state and can cancel the job after restore has read it and before restore commits — leaving a live workspace with a cancelled job, which is the stuck state again by a different route. With the row locked for the duration of restore's transaction, both of those writers hit `SKIP LOCKED` and pass over it; after restore commits, their own predicates see a live workspace and match nothing (that is what Task 1 guarantees).
 
-**Lock order:** take the workspace row first, then the job — matching `soft_delete_workspace_db` and the normative `workspaces < *_jobs` recorded at `analysis/queue.py:300`. (A review of this plan suggested job-then-workspace; the codebase's documented direction is the other way, and matching delete means restore introduces no new ordering to reason about. Restore and delete are in any case fully serialized by the commit mutex they both take before any row lock, and the hook and reconciliation take only job locks.)
+**Lock order: mutex → setup job → workspace. This is normative and already written down twice.**
+
+- `phases/setup.py:500` (M3): *"Lock order: job (workspace_setup_jobs) THEN workspace THEN Call. Job first because the web `activate` route (rubric.py) locks workspace_setup_jobs before it flushes its workspace-row update — locking workspace before job here would invert against that route and open a real deadlock shape (Postgres 40P01)."*
+- `web/api/rubric.py:341` (activate): *"The normative order is M → J → W and it matches _m3's; hoisting this above the job SELECT would invert against _m3 and open a real deadlock shape (Postgres 40P01)."*
+
+So restore must:
+
+1. take the commit mutex;
+2. do its fresh liveness re-read with a **plain** `SELECT` — no `FOR UPDATE`, so the workspace row is not locked yet;
+3. lock the setup job (`FOR UPDATE`);
+4. only then mutate the workspace row (clear the flag, bump the generation).
+
+**Revision 2 of this plan had this backwards and argued for it.** It cited `analysis/queue.py:300`'s `workspaces < claim_analysis_jobs` — a rule scoped to a *different table* — and claimed `soft_delete_workspace_db` set a workspace→job precedent. It does not: `setup.py:500` says in as many words that *"The delete path never locks setup-job rows, so putting job first costs delete nothing."* Delete establishes no order here because it takes no setup-job lock at all. With workspace-then-job, M3 can hold the job while waiting for the workspace exactly as restore holds the workspace while waiting for the job — a real 40P01 cycle, and the commit mutex does not prevent it because M3 does not take that mutex before locking the job.
+
+Put the citation in the code comment. The next person to touch this will have the same instinct.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -835,12 +865,16 @@ def test_the_setup_job_is_restored_to_a_state_that_progresses(
 Cover, in addition:
 
 1. a deleted workspace comes back: `soft_deleted_at IS NULL`, generation incremented by exactly 1, `transitioned is True`;
-4. a job with `cancelled_from IS NULL` is left completely alone, and `setup_job_restored_to` is `None`;
+4. a **`cancelled`** job with `cancelled_from IS NULL` is left completely alone, and `setup_job_restored_to` is `None`. Stated precisely because the blanket version — "a job with `cancelled_from IS NULL` is left alone" — is now false and contradicts the interrupted-source rule above: an *active* row with `cancelled_from IS NULL` is exactly what restore must normalize;
 5. exactly one `admin_deleted_workspace_restored` event, naming the admin, in the same transaction — assert the event and the cleared flag are both present after commit;
 6. **a failed commit leaves NOTHING** (spec 5.9.3). Force the commit to raise (patch `session.commit` to raise once, or violate a constraint inside the transaction) and assert afterwards that `soft_deleted_at` is still set, no audit row exists, **the generation is unchanged, and the setup job is still `cancelled` with its `cancelled_from` intact**. "Same transaction" is a claim about atomicity across all four writes; checking only the flag and the audit row would pass a partial rollback of the other two;
 7. `transitioned=False` when the workspace is already live under the mutex: nothing written, no audit row, and the returned generation is the row's current one;
 8. **cancelled turns stay cancelled** (spec 5.9.10) — seed a cancelled `TurnJob`, restore, assert it is untouched;
-9. **the generation is allocated inside the transaction and never re-read.** Mutating the row *after* `restore_workspace_db` has returned proves nothing — a service that re-read the row immediately before returning would produce the same value and pass. Advance the row from a second session **while the transaction is still open**, using the same `before_cursor_execute` technique Task 1 uses: fire on the statement that clears `soft_deleted_at`, bump the row's `lifecycle_generation` from another connection, and assert the returned generation is the one this transaction's `RETURNING` produced. If the interleave proves impractical against the mutex, say so and fall back to asserting `bump_lifecycle_generation` is called exactly once and its return value is what surfaces — but state plainly in your report which of the two you shipped, because they are not equally strong.
+9. **the returned generation is the one `bump_lifecycle_generation` produced.** Wrap or mock it to return a distinct sentinel (say `4242`) and assert that exact value surfaces in the `RestoreOutcome`.
+
+    An interleave cannot do this job, in either direction, and revision 2 asked for one anyway. Advancing the row *before* the workspace update merely changes the input to `bump_lifecycle_generation` — its `RETURNING` value and any later re-read agree, so both a correct and a re-reading implementation pass. Advancing it *after* blocks on the workspace row lock restore now holds. Neither discriminates, so use the sentinel and stop pretending otherwise.
+
+    What the sentinel does not cover — that the real bump is atomic with the rest — is covered by test 6, which asserts the generation is unchanged after a failed commit. Between them the property is pinned; neither alone does it.
 
 Assert on the returned `RestoreOutcome` **and** on the database, not one or the other: the caller's audit payload comes from the return value, and a correct DB write with a wrong return value produces a lying audit row.
 
@@ -893,10 +927,8 @@ Body, in order:
 
 1. `session.get(Workspace, workspace_id)`; `None` → raise `ValueError` (the route resolves existence first, so a miss means the contract was bypassed — same shape as `soft_delete_workspace_db`).
 2. `acquire_commit_mutex(session, workspace_id, timeout_seconds=timeout_seconds)`.
-3. **Fresh re-read under the lock** of `soft_deleted_at` via a scalar `SELECT` — never the identity-mapped instance from step 1, which was loaded before we could block on the mutex. If it is already NULL: `session.rollback()` and return `RestoreOutcome(generation=<current>, setup_job_restored_to=None, transitioned=False)`. The route turns that into a 204 with no audit row.
-4. `ws.soft_deleted_at = None`.
-5. `generation = bump_lifecycle_generation(session, workspace_id=workspace_id)`.
-6. Setup job: select this workspace's jobs **`.with_for_update()`** — the lock is load-bearing, see above. For each, derive the source state:
+3. **Fresh re-read under the mutex** of `soft_deleted_at` via a scalar `SELECT` — never the identity-mapped instance from step 1, which was loaded before we could block on the mutex. **Plain `SELECT`, no `FOR UPDATE`:** locking the workspace row here would put W before J and invert the normative M → J → W order. If it is already NULL: `session.rollback()` and return `RestoreOutcome(generation=<current>, setup_job_restored_to=None, transitioned=False)`. The route turns that into a 204 with no audit row.
+4. Setup job **first**, before any workspace mutation: select this workspace's jobs **`.with_for_update()`** — the lock is load-bearing, see above. For each, derive the source state:
 
 ```python
         source = job.cancelled_from if job.status == "cancelled" else job.status
@@ -909,6 +941,9 @@ Body, in order:
 then clear the cancellation evidence: `cancelled_from = None`, `completed_at = None`, `last_error = None`, and `started_at = None` **only when the target is `queued`**. Do **not** touch `attempts` — a job that burned retries before the deletion does not get a fresh budget for having been deleted.
 
 Note what the `continue` covers: a job that is `cancelled` with `cancelled_from IS NULL` was cancelled by something other than a deletion (or before migration 0063 existed), and restore leaves it alone. That is the same not-restorable outcome spec 0.3 accepts for pre-Slice-A deletions.
+
+5. **Only now** mutate the workspace row: `ws.soft_deleted_at = None`.
+6. `generation = bump_lifecycle_generation(session, workspace_id=workspace_id)` — the second write to the workspace row, and still after the job lock.
 7. `WorkspaceEvent(kind="admin_deleted_workspace_restored", ...)` with payload `{"workspace_id": str(...), "admin_user_id": admin_id, "setup_job_restored_to": <target or None>}`, `actor_id=admin_id`. Follow `_record_inspection` in `admin_retention.py` for the payload idiom.
 8. `session.commit()` and return.
 
@@ -1030,9 +1065,12 @@ Full suite, `ruff`, and report the numbers.
 
 **Files:**
 - Modify: `frontend/src/api/admin.ts`
+- Modify: `frontend/src/routes/AdminDeletedWorkspaces.tsx` — the list gains the Restore action **and its page copy stops being false**: line 49 currently reads *"This view is read-only — nothing here can be restored, changed, or removed."* Restore lands on this page, so that sentence must go. Say what remains true: the content cannot be edited, and restore is the only action here.
 - Modify: `frontend/src/routes/AdminDeletedWorkspaceDetail.tsx`
 - Modify: `frontend/src/cockpit/WorkspaceSettingsModal.tsx`
 - Test: `frontend/src/routes/AdminDeletedWorkspaces.test.tsx` (extend)
+
+**Two false sentences, not one.** This slice makes both the owner-facing delete copy and the admin-facing list copy untrue, for the same reason: each was written when restore did not exist. Slice A refused to promise a restore before it shipped; the same discipline in reverse means both must change now that it does.
 
 **Interfaces:**
 - Consumes: the route from Task 5, via the regenerated `schema.gen.ts`.
@@ -1084,6 +1122,8 @@ Extend `AdminDeletedWorkspaces.test.tsx` (its `mockDetail` already exists; note 
 4. on success `["admin-deleted-workspaces"]` is invalidated **before** navigating — spy on `invalidateQueries`, and assert order rather than mere occurrence, because the whole point is the stale row;
 5. **Restore works with `canInspect: false`** — `mockList([row(0)], 1, { canInspect: false })`, then find and click the row's Restore control and assert the POST. This is the regression test for the P1 above; without it, someone re-gating the control on `canInspect` would break restore on every default deployment with the suite still green.
 
+6. the list page no longer claims nothing here can be restored.
+
 Add a cockpit test asserting the settings copy no longer claims deletion cannot be undone at all. Find the existing `WorkspaceSettingsModal` test file first; if none exists, say so in your report and put the assertion in the nearest cockpit test module rather than creating a file for one string.
 
 - [ ] **Step 5: Frontend gates**
@@ -1117,8 +1157,13 @@ This task adds no production code. It is the slice's proof, and every test here 
 
 **Interleaving tests — these are the ones the sequential tests above cannot expose.** Each drives a concurrent writer against an *uncommitted* restore, using the `before_cursor_execute` technique from Task 1 to fire at the right instant:
 
-7. **The retirement hook races the restore.** Fire when restore clears `soft_deleted_at`; from another connection run `cancel_setup_jobs_for_workspace` (which still sees the committed, deleted state). Assert that after both commit the workspace is live **and** the setup job is in a progressing state — not `cancelled`.
-8. **Reconciliation races the restore.** Same shape, running `reconcile_cancelled_jobs`.
+7. **The retirement hook races the restore.** From another connection run `cancel_setup_jobs_for_workspace` (which still sees the committed, deleted state) **after restore has locked the job and before it commits**. Assert that after both commit the workspace is live **and** the setup job is in a progressing state — not `cancelled`.
+
+    **The seam matters more than the test.** Firing on the statement that clears `soft_deleted_at` only works because of the M → J → W reordering above: the workspace update now happens *after* the job `SELECT ... FOR UPDATE`, so the hook arrives while restore holds the job lock. Under revision 2's ordering the same trigger fired *before* the job was ever read, the cancellation landed first, restore merely observed and repaired it — and dropping `.with_for_update()` stayed green. If you change the statement order, re-derive the seam; an `after_cursor_execute` hook on the job `SELECT` is the other reliable anchor.
+
+    **Seed an uncancelled `queued` job**, not a cancelled one. A cancelled job makes restore emit its own `UPDATE workspace_setup_jobs`, which a naive trigger can match instead of the intended statement — the test then fires at the wrong instant and proves something else.
+
+8. **Reconciliation races the restore.** Same shape and same seam, running `reconcile_cancelled_jobs`.
 9. **An uncancelled `running` job is normalized.** Restore a workspace whose setup job is still `running` with `cancelled_from IS NULL` (the hook's `SKIP LOCKED` passed over it) and assert it comes back `queued` and is claimable — not left `running` for `STUCK_SETUP_AFTER`.
 10. **A late `_fail` after restore does not re-cancel.** Restore, then run `_fail` with a `WorkspaceGoneDuringSetup` raised while the workspace was deleted; assert the job ends `queued`, not `cancelled`.
 
@@ -1132,9 +1177,10 @@ Tests 7–10 are the substance of this task. 1–6 would all pass against a rest
 | restore also re-queues `waiting_for_rubric_review` | 2 |
 | the bridge cancels its future on timeout | 3 |
 | the worker's `cancelled_from` write removed | 4's worker case |
-| drop `.with_for_update()` from restore's setup-job select | 6 (hook) and 7 (reconciliation) |
-| restore only maps rows with `cancelled_from IS NOT NULL` | 8 |
-| `_fail` back to `deleted is not None or isinstance(...)` | 9 |
+| drop `.with_for_update()` from restore's setup-job select | **7** (hook) and **8** (reconciliation) |
+| restore only maps rows with `cancelled_from IS NOT NULL` | **9** (uncancelled `running` normalization) |
+| `_fail` back to `deleted is not None or isinstance(...)` | **10** (late `_fail`) |
+| restore mutates the workspace row BEFORE locking the job (M → W → J) | 7 and 8 — and if they stay green, the seam is wrong, not the code |
 
 Report which tests reddened against which mutation, compared with this table. **A test that cannot fail is worse than no test**, because it certifies the thing it did not check. If one does not redden, that is a failed task — diagnose whether the mutation was equivalent or the test is decorative, and say which.
 
@@ -1161,7 +1207,8 @@ git diff --exit-code -- frontend/src/api/schema.gen.ts ; echo "DRIFT_EXIT=$?"
 - **All three setup states restore correctly**, `running → queued` is claimable immediately, and `waiting_for_rubric_review` does not re-run extraction. All three cancellation paths record `cancelled_from`, and the `CHECK` rejects anything else.
 - The restored row carries no contradiction: `cancelled_from`, `completed_at`, `last_error` cleared; `started_at` cleared only for a `queued` target; `attempts` unchanged.
 - A timed-out apply returns **503 + Retry-After**, the retry returns 204, exactly one audit row exists across both, and the late apply landing afterwards leaves the workspace live.
-- **A concurrent hook, reconciliation, or late `_fail` cannot leave a restored workspace with a cancelled or stuck setup job.** The setup-job row is locked for restore's transaction; an uncancelled active status is treated as the interrupted source; and `_fail` cancels on its FRESH liveness read, not on a stale exception — while still cancelling when the workspace row is genuinely absent.
+- **A concurrent hook, reconciliation, or late `_fail` cannot leave a restored workspace with a cancelled or stuck setup job.** The setup-job row is locked for restore's transaction; an uncancelled active status is treated as the interrupted source; and `_fail` returns without a write when its FRESH read says live — while still cancelling when the workspace row is genuinely absent, and without charging the job an attempt.
+- **Restore takes its locks in the normative M → J → W order** (`phases/setup.py:500`, `web/api/rubric.py:341`), so it cannot deadlock against M3 or the activate route. The fresh liveness read is a plain `SELECT`; the workspace row is not touched until after the job is locked.
 - **Restore is reachable with `RETENTION_INSPECTION_ENABLED` unset** — the control is on the list page and is not gated on `canInspect`, with a test that fails if it is re-gated.
 - The route advertises **204** in the OpenAPI schema, not merely at runtime.
 - Swapping in `acquire_commit_mutex_live` turns the happy path red; `_SETUP_RESTORE_MAP["running"] = "running"` turns the claimability test red; dropping `.with_for_update()` turns the interleaving tests red; removing `invalidateQueries` turns the ordering test red.
