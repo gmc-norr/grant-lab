@@ -152,6 +152,7 @@ def cancel_setup_jobs_for_workspace(
         )
         .values(
             status="cancelled",
+            cancelled_from=WorkspaceSetupJob.status,   # the column's value NOW
             completed_at=datetime.now(UTC),
             last_error="cancelled: workspace deleted",
         )
@@ -205,47 +206,60 @@ def reconcile_cancelled_jobs(session: Session) -> int:
     dead_ws = select(Workspace.id).where(Workspace.soft_deleted_at.is_not(None))
     total = 0
 
-    setup_ids = session.scalars(
+    setup_candidates = (
         select(WorkspaceSetupJob.id)
         .where(
             WorkspaceSetupJob.status.in_(_CANCELLABLE),
             WorkspaceSetupJob.workspace_id.in_(dead_ws),
         )
         .with_for_update(skip_locked=True)
-    ).all()
-    if setup_ids:
-        session.execute(
-            update(WorkspaceSetupJob)
-            .where(WorkspaceSetupJob.id.in_(setup_ids))
-            .values(
-                status="cancelled",
-                completed_at=datetime.now(UTC),
-                last_error="cancelled: workspace deleted (reconciled)",
-            )
+        .cte("reconcilable_setup_jobs")
+    )
+    total += session.execute(
+        update(WorkspaceSetupJob)
+        .where(
+            WorkspaceSetupJob.id.in_(select(setup_candidates.c.id)),
+            # The predicate must govern the WRITE. Selecting ids under one
+            # snapshot and updating under the next is what let a restore land in
+            # the gap; one statement means one snapshot. The CTE keeps FOR
+            # UPDATE SKIP LOCKED, so a row a live worker holds is still skipped
+            # rather than waited on.
+            WorkspaceSetupJob.workspace_id.in_(dead_ws),
         )
-        total += len(setup_ids)
+        .values(
+            status="cancelled",
+            cancelled_from=WorkspaceSetupJob.status,   # the column's value NOW
+            completed_at=datetime.now(UTC),
+            last_error="cancelled: workspace deleted (reconciled)",
+        )
+        .execution_options(synchronize_session=False)
+    ).rowcount
 
     # NOT an early return above: a workspace with no setup jobs at all must still
     # have its claim-analysis rows reconciled.
-    claim_ids = session.scalars(
+    claim_candidates = (
         select(ClaimAnalysisJob.id)
         .where(
             ClaimAnalysisJob.status.in_(_CLAIM_ANALYSIS_CANCELLABLE),
             ClaimAnalysisJob.workspace_id.in_(dead_ws),
         )
         .with_for_update(skip_locked=True)
-    ).all()
-    if claim_ids:
-        session.execute(
-            update(ClaimAnalysisJob)
-            .where(ClaimAnalysisJob.id.in_(claim_ids))
-            .values(
-                status="failed",
-                last_error="cancelled: workspace deleted (reconciled)",
-                updated_at=datetime.now(UTC),
-            )
+        .cte("reconcilable_claim_analysis_jobs")
+    )
+    total += session.execute(
+        update(ClaimAnalysisJob)
+        .where(
+            ClaimAnalysisJob.id.in_(select(claim_candidates.c.id)),
+            # Same single-statement guarantee as the setup half above.
+            ClaimAnalysisJob.workspace_id.in_(dead_ws),
         )
-        total += len(claim_ids)
+        .values(
+            status="failed",
+            last_error="cancelled: workspace deleted (reconciled)",
+            updated_at=datetime.now(UTC),
+        )
+        .execution_options(synchronize_session=False)
+    ).rowcount
 
     if total:
         logger.info(

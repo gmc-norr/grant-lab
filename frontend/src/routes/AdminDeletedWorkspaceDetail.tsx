@@ -1,7 +1,7 @@
-import { Anchor, Box, Code, Table, Text, Title } from "@mantine/core";
-import { Link, useParams } from "react-router-dom";
+import { Anchor, Box, Button, Code, Table, Text, Title } from "@mantine/core";
+import { Link, useNavigate, useParams } from "react-router-dom";
 
-import { useAdminDeletedWorkspace } from "../api/admin";
+import { useAdminDeletedWorkspace, useRestoreWorkspace } from "../api/admin";
 
 const fmtDt = (s: string) => new Date(s).toLocaleString();
 
@@ -15,6 +15,8 @@ export function AdminDeletedWorkspaceDetail({ workspaceId: workspaceIdProp }: Pr
   const { workspaceId: workspaceIdParam } = useParams();
   const workspaceId = workspaceIdProp ?? workspaceIdParam ?? "";
   const { data, isLoading, isError } = useAdminDeletedWorkspace(workspaceId);
+  const restore = useRestoreWorkspace(workspaceId);
+  const navigate = useNavigate();
   if (isLoading) return <Text p="md">Loading…</Text>;
   if (isError || !data)
     return (
@@ -34,6 +36,34 @@ export function AdminDeletedWorkspaceDetail({ workspaceId: workspaceIdProp }: Pr
       <Text c="dimmed" size="sm">
         Owner: {d.owner_email ?? "—"} · Deleted {fmtDt(d.soft_deleted_at)}
       </Text>
+      <Button
+        variant="outline"
+        mt="sm"
+        disabled={restore.isPending}
+        onClick={async () => {
+          if (
+            window.confirm(
+              `Restore "${d.title}"? The workspace will become active again and the owner will regain access.`,
+            )
+          ) {
+            try {
+              await restore.mutateAsync();
+              navigate("/admin/deleted-workspaces");
+            } catch {
+              // restore.isError is set by TanStack Query; the error banner below
+              // tells the admin to retry. No re-throw: the unhandled-promise
+              // path produces a spurious test error (and a console error in prod).
+            }
+          }
+        }}
+      >
+        Restore workspace
+      </Button>
+      {restore.isError && (
+        <Text c="red" size="sm" mt="xs" role="alert">
+          Could not restore workspace — the server returned an error. Please try again.
+        </Text>
+      )}
 
       <Title order={2} size="h5" mt="md" mb="sm">
         Proposal draft (at HEAD)

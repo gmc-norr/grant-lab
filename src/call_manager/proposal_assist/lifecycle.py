@@ -29,9 +29,13 @@ before this slice too), not built here.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
+import logging
 import uuid
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -108,3 +112,79 @@ class WorkspaceLifecycle:
 # someone forgets to update binds to the one authority rather than quietly
 # minting a second one. Tests that want isolation pass their own instance.
 LIFECYCLE = WorkspaceLifecycle()
+
+
+# Upper bound on how long the sync restore route blocks waiting for the apply.
+#
+# MUST NOT be smaller than retirement._RETIREMENT_BARRIER_SECONDS. A restore
+# racing a retirement waits for the per-workspace lifecycle lock, which the
+# retirement coordinator holds across its ENTIRE hook fan-out (C0). A tighter
+# bound here would turn that ordinary race into a 503 for the admin.
+# test_restore_bridge.py asserts the inequality against the live constants.
+_RESTORE_BARRIER_SECONDS = 6.0
+
+
+def signal_workspace_restored(request, *, workspace_id: uuid.UUID, generation: int) -> bool:
+    """Route-side (SYNC): apply `active` on the app loop and BLOCK (bounded).
+
+    Returns True if the apply landed within the bound, False if it could not be
+    scheduled or timed out. The MIRROR of retirement.signal_workspace_retirement,
+    with the opposite failure policy on purpose: retirement swallows everything
+    because its delete has already committed and must not fail late, while
+    restore's caller must answer 503 rather than promise a reactivation it could
+    not confirm (spec 5.4).
+
+    A timed-out apply is NOT cancelled. It keeps running on the loop and may land
+    later, which is safe precisely because apply is monotonic: the late one, the
+    retry, and any duplicate converge on the same state and whichever arrives
+    second is ignored. That is also why there is no in-flight registry here.
+
+    *generation* is the one the restoring transaction ALLOCATED. Never re-read
+    one here (spec 4.4).
+    """
+    loop = getattr(request.app.state, "app_loop", None)
+    lifecycle = getattr(request.app.state, "workspace_lifecycle", None)
+    if loop is None or lifecycle is None:
+        logger.warning(
+            "restore.bridge_unavailable",
+            extra={
+                "event": "restore_bridge_unavailable",
+                "workspace_id": str(workspace_id),
+            },
+        )
+        return False
+
+    coro = lifecycle.apply(workspace_id, generation=generation, retired=False)
+    try:
+        fut = asyncio.run_coroutine_threadsafe(coro, loop)
+    except Exception:
+        coro.close()   # never-awaited coroutine -> close it before reporting
+        logger.warning(
+            "restore.schedule_failed",
+            extra={
+                "event": "restore_schedule_failed",
+                "workspace_id": str(workspace_id),
+            },
+            exc_info=True,
+        )
+        return False
+    try:
+        fut.result(timeout=_RESTORE_BARRIER_SECONDS)
+    except concurrent.futures.TimeoutError:
+        logger.warning(
+            "restore.barrier_timeout",
+            extra={
+                "event": "restore_barrier_timeout",
+                "workspace_id": str(workspace_id),
+                "generation": generation,
+            },
+        )   # deliberately NOT cancelled — see the docstring
+        return False
+    except Exception:
+        logger.warning(
+            "restore.apply_failed",
+            extra={"event": "restore_apply_failed", "workspace_id": str(workspace_id)},
+            exc_info=True,
+        )
+        return False
+    return True

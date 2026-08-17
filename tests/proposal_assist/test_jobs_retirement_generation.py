@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import event
@@ -251,4 +252,112 @@ async def test_claim_analysis_also_gates_the_mutation_not_just_the_read(
     assert job.status == "queued", (
         "a superseded generation terminalized a claim-analysis job because the "
         "generation predicate governed the candidate SELECT, not the UPDATE"
+    )
+
+
+def _restore_from_another_connection(pg_session_factory, ws_id):
+    """Clear soft_deleted_at on a SEPARATE connection, exactly as the restore
+    route's transaction will. reconcile locks only JOB rows, never the
+    workspaces row, so this cannot block behind it — which is why the window is
+    real."""
+    with pg_session_factory() as other:
+        other.get(Workspace, ws_id).soft_deleted_at = None
+        other.commit()
+
+
+def _setup_status(pg_session_factory, ws_id):
+    with pg_session_factory() as s:
+        return s.query(WorkspaceSetupJob).filter_by(workspace_id=ws_id).one().status
+
+
+def _claim_status(pg_session_factory, ws_id):
+    with pg_session_factory() as s:
+        return s.query(ClaimAnalysisJob).filter_by(workspace_id=ws_id).one().status
+
+
+def test_reconcile_does_not_cancel_a_workspace_restored_mid_statement(
+    pg_session_factory, migrated_engine
+):
+    """The same defect 28abbc4 fixed in the cancel helpers, in the last place it
+    survived. Inert until C1 ships a restore; this test is what stops it being
+    live the moment it does.
+    """
+    ws_id = _seed(pg_session_factory, generation=1)
+    with pg_session_factory() as s:
+        s.get(Workspace, ws_id).soft_deleted_at = datetime.now(UTC)
+        s.commit()
+
+    state = {"fired": False}
+
+    def _before(conn, cursor, statement, parameters, context, executemany):
+        # `UPDATE <table>`, not the bare name: the locking select contains
+        # "FOR UPDATE", so a bare match fires on the READ and the bump lands
+        # where the predicate already catches it — passing against the defect.
+        if state["fired"] or "UPDATE workspace_setup_jobs" not in statement:
+            return
+        state["fired"] = True
+        _restore_from_another_connection(pg_session_factory, ws_id)
+
+    event.listen(migrated_engine, "before_cursor_execute", _before)
+    try:
+        with pg_session_factory() as s:
+            jr.reconcile_cancelled_jobs(s)
+            s.commit()
+    finally:
+        # NOT from inside the callback: SQLAlchemy is iterating its listener
+        # collection there and mutating it raises "deque mutated during
+        # iteration". The engine is shared across this module's tests.
+        event.remove(migrated_engine, "before_cursor_execute", _before)
+
+    assert state["fired"], "the trigger never matched — this test proved nothing"
+    assert _setup_status(pg_session_factory, ws_id) == "queued", (
+        "reconcile cancelled a setup job belonging to a workspace that had "
+        "already been restored"
+    )
+
+
+def test_reconcile_claim_analysis_does_not_cancel_a_workspace_restored_mid_statement(
+    pg_session_factory, migrated_engine
+):
+    """The claim-analysis half of reconcile_cancelled_jobs carries the identical
+    two-statement defect as the setup half. Asserted separately so a fix to one
+    cannot be mistaken for a fix to both.
+    """
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.flush()
+        s.add(
+            ClaimAnalysisJob(
+                workspace_id=ws.id,
+                section_index=0,
+                section_sha="a" * 40,
+                commit_sha="b" * 40,
+                status="queued",
+            )
+        )
+        s.commit()
+        ws_id = ws.id
+        s.get(Workspace, ws_id).soft_deleted_at = datetime.now(UTC)
+        s.commit()
+
+    state = {"fired": False}
+
+    def _before(conn, cursor, statement, parameters, context, executemany):
+        if state["fired"] or "UPDATE claim_analysis_jobs" not in statement:
+            return
+        state["fired"] = True
+        _restore_from_another_connection(pg_session_factory, ws_id)
+
+    event.listen(migrated_engine, "before_cursor_execute", _before)
+    try:
+        with pg_session_factory() as s:
+            jr.reconcile_cancelled_jobs(s)
+            s.commit()
+    finally:
+        event.remove(migrated_engine, "before_cursor_execute", _before)
+
+    assert state["fired"], "the trigger never matched — this test proved nothing"
+    assert _claim_status(pg_session_factory, ws_id) == "queued", (
+        "reconcile cancelled a claim-analysis job belonging to a workspace that "
+        "had already been restored"
     )

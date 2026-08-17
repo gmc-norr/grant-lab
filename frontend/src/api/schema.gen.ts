@@ -344,6 +344,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/workspaces/deleted/{workspace_id}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Restore Deleted Workspace
+         * @description Restore a soft-deleted workspace.
+         *
+         *     NOT gated by RETENTION_INSPECTION_ENABLED. That switch governs READING a
+         *     deleted workspace's content; restore returns 204 with no body and reads
+         *     nothing back to the caller. An admin who may not inspect a draft may still
+         *     put a workspace back. The neighbouring GET IS gated, so this asymmetry is
+         *     intentional, not an oversight.
+         *
+         *     Ordering (spec 5.3):
+         *
+         *     1. Pre-lock read:
+         *        - missing            → 404
+         *        - LIVE               → apply(current generation, active) + 204
+         *                               [no mutex, no DB write, no audit]
+         *     2. restore_workspace_db → mutex, flag, generation, setup job, audit, COMMIT
+         *        - transitioned=False → it went live while waiting for the mutex;
+         *                               nothing written, no audit row.
+         *                               Still apply the generation it returned, then 204.
+         *     3. signal_workspace_restored → after the commit
+         *        - True  → 204
+         *        - False → 503 + Retry-After: 2
+         *
+         *     The two LIVE paths (pre-lock and transitioned=False) return 204 REGARDLESS
+         *     of the bridge's bool: a live workspace is unconditionally 204 (spec 5.4.1).
+         *     A bridge miss on the live paths is not a promised-but-unconfirmed transition.
+         *     Only the genuine transition (transitioned=True) can leave the DB ahead of
+         *     the in-memory authority in a way the admin must be told about.
+         *
+         *     The live path applies the CURRENT generation — the one place a generation is
+         *     READ rather than allocated. This is safe because nothing is transitioning, so
+         *     there is no transition to bind to, and monotonicity makes the read safe in
+         *     both directions: a delete that already applied a higher generation ignores
+         *     this; a delete that applies later wins.
+         */
+        post: operations["restore_deleted_workspace_api_admin_workspaces_deleted__workspace_id__restore_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/auth/config": {
         parameters: {
             query?: never;
@@ -5785,6 +5837,116 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["DeletedWorkspaceDetailOut"];
                 };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    restore_deleted_workspace_api_admin_workspaces_deleted__workspace_id__restore_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Bad Request */
             400: {

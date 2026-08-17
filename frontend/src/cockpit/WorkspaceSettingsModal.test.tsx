@@ -79,4 +79,24 @@ describe("WorkspaceSettingsModal", () => {
     expect(prompt).not.toMatch(/scrub/i);
     expect(prompt).toMatch(/kept|retained|remain/i);
   });
+
+  it("body copy and confirm dialog say an admin can restore — deletion is not a permanent loss", async () => {
+    // Slice A wrote "you cannot undo this" when restore did not exist. Now that
+    // restore is live, both strings must tell the owner that an administrator
+    // can restore it — without this test, reverting the copy change would leave
+    // the suite green while silently reinstating a false guarantee.
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    renderWithProviders(<WorkspaceSettingsModal id="ws1" opened onClose={vi.fn()} />);
+    const body = await screen.findByText(/deletes the workspace/i);
+    // The old absolute claim must be gone from the body.
+    expect(body.textContent).not.toMatch(/you cannot undo this\./i);
+    // The replacement must say an admin can restore.
+    expect(body.textContent).toMatch(/administrator can restore/i);
+
+    // Same check on the confirm dialog.
+    fireEvent.click(await screen.findByRole("button", { name: /delete workspace/i }));
+    const prompt = confirmSpy.mock.calls[0][0] as string;
+    expect(prompt).not.toMatch(/you cannot undo this\./i);
+    expect(prompt).toMatch(/administrator can restore/i);
+  });
 });

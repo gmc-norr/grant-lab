@@ -1410,6 +1410,11 @@ class WorkspaceSetupJob(Base):
             "'failed','cancelled')",
             name="ck_workspace_setup_jobs_status",
         ),
+        CheckConstraint(
+            "cancelled_from IS NULL OR cancelled_from IN "
+            "('queued','running','waiting_for_rubric_review')",
+            name="ck_workspace_setup_jobs_cancelled_from",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1429,6 +1434,11 @@ class WorkspaceSetupJob(Base):
         server_default=text("0"),
     )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Retention Slice C1 (spec 5.2.2). The non-terminal state this job was
+    # cancelled FROM when its workspace was deleted, so restore can map it back
+    # to a state that progresses. NULL means "not cancelled by a deletion" —
+    # restore leaves those alone. Consumed (set back to NULL) by restore.
+    cancelled_from: Mapped[str | None] = mapped_column(Text, nullable=True)
     queued_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

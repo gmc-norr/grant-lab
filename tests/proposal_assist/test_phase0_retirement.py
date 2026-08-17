@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import pytest
 from alembic.config import Config
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from alembic import command
 from call_manager.db.models import WorkspaceEvent, WorkspaceSetupJob
@@ -15,7 +15,12 @@ from call_manager.proposal_assist.jobs_retirement import (
     _JOBS_CANCEL_SECONDS,
     build_jobs_retirement_hook,
 )
-from call_manager.proposal_assist.phases.setup import claim_next_setup_job
+from call_manager.proposal_assist.phases.setup import (
+    MAX_SETUP_ATTEMPTS,
+    Phase0Worker,
+    WorkspaceGoneDuringSetup,
+    claim_next_setup_job,
+)
 from tests.proposal_assist.conftest import make_workspace
 
 
@@ -76,7 +81,14 @@ def test_downgrade_converts_cancelled_rows_before_restoring_the_constraint(
     try:
         command.downgrade(cfg, "0060")
         with pg_session_factory() as s:
-            assert s.get(WorkspaceSetupJob, job_id).status == "failed"
+            # Raw SQL, not the ORM: inside a downgraded window the head model
+            # carries columns the schema does not have yet, and s.get() selects
+            # all of them. Name only what exists at this revision.
+            status = s.execute(
+                text("SELECT status FROM workspace_setup_jobs WHERE id = :id"),
+                {"id": job_id},
+            ).scalar_one()
+            assert status == "failed"
     finally:
         command.upgrade(cfg, "head")
 
@@ -516,3 +528,143 @@ def test_the_reconcile_tick_is_registered_without_an_llm_client(monkeypatch, pg_
             sched.shutdown(wait=False)
     finally:
         engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Worker self-cancel: _fail records cancelled_from (Slice C1, spec 5.2.2)
+# ---------------------------------------------------------------------------
+
+def _make_worker(pg_session_factory, tmp_path):
+    from unittest.mock import Mock
+
+    return Phase0Worker(
+        session_factory=pg_session_factory,
+        client=Mock(model="m"),
+        extractor_version="sections-v1",
+        rubric_extractor_version="rubric-v1",
+        workspaces_dir=str(tmp_path / "repos"),
+    )
+
+
+def test_worker_fail_on_deleted_workspace_records_cancelled_from(
+    pg_session_factory, tmp_path
+):
+    """_fail with WorkspaceGoneDuringSetup on a 'running' job of a DELETED
+    workspace → cancelled, cancelled_from == 'running'.
+
+    This is the happy path for the worker self-cancel: the workspace is gone,
+    the exception is correct, and the job should be cancelled with the source
+    state recorded.
+    """
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.flush()
+        ws_id = ws.id
+        job = WorkspaceSetupJob(workspace_id=ws_id, status="running")
+        s.add(job)
+        s.commit()
+        job_id = job.id
+        # Soft-delete the workspace
+        ws_row = s.get(type(ws), ws_id)
+        ws_row.soft_deleted_at = datetime.now(UTC)
+        s.commit()
+
+    worker = _make_worker(pg_session_factory, tmp_path)
+    worker._fail(job_id, WorkspaceGoneDuringSetup("workspace deleted"))
+
+    with pg_session_factory() as s:
+        j = s.get(WorkspaceSetupJob, job_id)
+        assert j.status == "cancelled"
+        assert j.cancelled_from == "running"
+
+
+def test_worker_fail_on_live_workspace_leaves_job_untouched(
+    pg_session_factory, tmp_path
+):
+    """_fail with WorkspaceGoneDuringSetup on a LIVE workspace leaves the job
+    completely untouched — attempts UNCHANGED.
+
+    This is the post-restore case: the exception was raised while the workspace
+    was deleted, but a restore has since brought it back. The FRESH read sees
+    the workspace as live and returns without writing anything.
+
+    We seed attempts = MAX_SETUP_ATTEMPTS - 1 so that a stray `attempts += 1`
+    would dead-letter the job to 'failed', making the failure loud rather than
+    silent.
+    """
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.flush()
+        ws_id = ws.id
+        job = WorkspaceSetupJob(
+            workspace_id=ws_id,
+            status="queued",
+            attempts=MAX_SETUP_ATTEMPTS - 1,
+        )
+        s.add(job)
+        s.commit()
+        job_id = job.id
+        # workspace is LIVE (soft_deleted_at IS NULL)
+
+    worker = _make_worker(pg_session_factory, tmp_path)
+    worker._fail(job_id, WorkspaceGoneDuringSetup("stale exception from before restore"))
+
+    with pg_session_factory() as s:
+        j = s.get(WorkspaceSetupJob, job_id)
+        assert j.status == "queued", (
+            f"live-workspace stale exception should leave status unchanged, got {j.status!r}"
+        )
+        assert j.attempts == MAX_SETUP_ATTEMPTS - 1, (
+            f"attempts must not be incremented for a stale exception, "
+            f"got {j.attempts} (would be dead-lettered to 'failed' at {MAX_SETUP_ATTEMPTS})"
+        )
+        assert j.cancelled_from is None
+
+
+def test_worker_fail_when_workspace_row_absent_still_cancels(
+    pg_session_factory, tmp_path, monkeypatch
+):
+    """_fail when the workspace row is ABSENT → job is cancelled.
+
+    In production today WorkspaceSetupJob.workspace_id has
+    ForeignKey('workspaces.id', ondelete='CASCADE'), so deleting the workspace
+    row takes its setup jobs with it — a real DB cannot hold a setup job whose
+    workspace is absent. This branch is defence for a future schema that stops
+    cascading. We use a mocked session so we can return a present job but an
+    absent workspace row without violating the FK.
+
+    The fix must NOT trade one hole for another: "use the fresh read" is only
+    correct if it still cancels the gone-workspace case.
+    """
+    from unittest.mock import MagicMock
+
+    job_id = uuid.uuid4()
+    ws_id = uuid.uuid4()
+
+    # Build a mock job whose status is 'running' and not in the terminal set.
+    mock_job = MagicMock()
+    mock_job.id = job_id
+    mock_job.workspace_id = ws_id
+    mock_job.status = "running"
+
+    # The mock session: get() returns the job, execute() for the workspace
+    # lookup returns None (workspace row absent).
+    mock_session = MagicMock()
+    mock_session.get.return_value = mock_job
+    mock_session.execute.return_value.one_or_none.return_value = None
+    # Ensure context manager protocol works.
+    mock_session.__enter__ = lambda self: self
+    mock_session.__exit__ = MagicMock(return_value=False)
+
+    mock_factory = MagicMock(return_value=mock_session)
+
+    worker = _make_worker(pg_session_factory, tmp_path)
+    # Replace the session factory with our mock.
+    worker.session_factory = mock_factory
+
+    worker._fail(job_id, WorkspaceGoneDuringSetup("workspace gone entirely"))
+
+    # The mock_job attributes should have been set to 'cancelled'.
+    assert mock_job.cancelled_from == "running"
+    assert mock_job.status == "cancelled"
+    assert mock_job.completed_at is not None

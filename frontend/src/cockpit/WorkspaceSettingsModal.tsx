@@ -79,7 +79,7 @@ export function WorkspaceSettingsModal({
         <p style={{ fontSize: "0.85rem", opacity: 0.8 }}>
           Deletes the workspace: it disappears for everyone, collaborators lose access, and any
           running work stops. Its contents are kept on the server rather than erased. You cannot
-          undo this.
+          undo this yourself — an administrator can restore it.
         </p>
         {del.isError ? <Text c="red" size="sm">Could not delete workspace.</Text> : null}
         <Button
@@ -90,7 +90,7 @@ export function WorkspaceSettingsModal({
             const name = settings.data?.title ?? "";
             if (
               window.confirm(
-                `Delete "${name}"? Everyone loses access immediately and you cannot undo this. ` +
+                `Delete "${name}"? Everyone loses access immediately and you cannot undo this yourself — an administrator can restore it. ` +
                   `The contents are kept on the server rather than erased.`,
               )
             ) {
