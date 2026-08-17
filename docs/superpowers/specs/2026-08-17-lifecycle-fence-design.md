@@ -1,8 +1,8 @@
 # Epoch-Fenced Semantic Effects — design
 
-**Status:** revision 2, 2026-08-17. Revision 1 was reviewed and found incomplete;
-the effect inventory was built from the wrong audit unit and four further defects
-were identified. See §11 for the changelog.
+**Status:** revision 3, 2026-08-17. Revision 1 was reviewed and found incomplete;
+revision 2 corrected the audit unit and four further defects; revision 3 settles
+the read-revocation contract. See §12 for the changelog.
 
 **Step 1 of a four-step sequence** (fence → prove → remove → relax). This
 document specifies step 1 only.
@@ -151,7 +151,7 @@ fixed in `701fbb7`: an instance loaded before the mutex carries a pre-mutex
 generation.
 
 A **new function**, not an optional parameter on `_live`: it is greppable for the
-coverage gate (§8), and `web/_writes.py` documents a live trap where a call-time
+coverage gate (§9), and `web/_writes.py` documents a live trap where a call-time
 keyword overrides a `functools.partial` keyword used by the straddle tests.
 
 ### 3.3 `WorkspaceGenerationStale`
@@ -281,7 +281,7 @@ or 2 instead — not reorder the delete path.
 
 ---
 
-## 6. Read revocation *(rewritten in rev 2)*
+## 6. Read revocation *(rewritten in rev 2, contract settled in rev 3)*
 
 Revision 1 specified the read fence as a comparison against "a value refreshed by
 the same mechanism that drives eviction." That is a second in-memory authority —
@@ -293,26 +293,53 @@ Instantaneous durable read revocation is also not achievable: bytes already
 rendered in a browser cannot be recalled, and a disconnected tab cannot be
 reached at all.
 
-**The honest contract, and what step 1 commits to:**
+**The contract, confirmed 2026-08-17.** Postgres is checked at every boundary
+where checking it is affordable, and open sockets hold a short lease instead:
 
 1. Postgres is authoritative for authorization and mutations.
 2. A workspace past its epoch cannot produce another **durable semantic write**.
    Unconditional, immediate, enforced by §3.
-3. Every **durable read** — hydration, artifact fetch, export, citation source —
-   takes a real Postgres generation check. No new durable read leaks.
-4. Connected clients are notified promptly and switched to a deleted-state
-   screen, with an explicit websocket close. **Stated maximum lag: 5 seconds**,
-   monitored, degrading to close-on-next-interaction if the notification path is
-   down.
-5. The next server interaction or reconnect is **always** refused, whatever the
-   client believes.
+3. Every **durable read** — every HTTP read, every WebSocket **handshake**,
+   hydration, artifact fetch, export, citation source — takes a real Postgres
+   generation check. No new durable read leaks.
+4. **Every new HTTP request and every reconnect is refused**, whatever the client
+   believes. Established sockets are revoked within five seconds (point 5).
+   These are deliberately different sentences: a blanket "the next server
+   interaction is always refused" would implicitly require a per-frame database
+   check, which is the cost this contract exists to avoid.
+5. An **established socket is revoked within 5 seconds**, as a real bound, not a
+   healthy-path target. See §6.1.
 6. Already-delivered bytes are not revocable. Stated, not engineered around.
 
-This is weaker than "the editor goes dark the moment someone deletes", which was
-the option chosen on 2026-08-17 against revision 1's description. That option was
-not achievable as described. Point 4 is the strongest achievable version and the
-decision should be re-confirmed against this text rather than against the
-withdrawn one.
+### 6.1 The lease, and why the sweep alone is not enough
+
+The fast path stays as it is: the existing retirement signal reaches rooms
+immediately. It is an accelerator, and it may fail silently — which is why it
+cannot be the contract.
+
+The durable backstop is a **batched Postgres sweep**, at least every 5 seconds:
+one query over the open rooms' workspaces, comparing each room's **captured
+generation** against `workspaces.lifecycle_generation`. Exact-equality, not
+`soft_deleted_at` — so a delete→restore cycle closes the old room, which a
+liveness comparison would leave open on a workspace that is live again.
+
+**The fail-closed half must be enforced by the room, not by the sweep.** A sweep
+that dies closes nothing; a design that relies on the sweep to disconnect fails
+*open* in exactly the case that motivates it. So the sweep does not disconnect —
+it **renews a lease**. Each room holds a `valid_until`; the sweep extends it on
+successful revalidation; a room whose lease expires disconnects itself. Expiry is
+the default and renewal is the exception, which is what makes "within 5 seconds"
+a bound rather than a hope.
+
+This also removes a threading problem. The sweep is a periodic DB job on the
+scheduler — the same shape as the tail-bounding checkpoint job (Slice 3b-5c),
+which deliberately never touches the asyncio room manager. Lease **renewal** is a
+data write the scheduler can make safely; lease **expiry** is enforced inside the
+event loop by the room itself. Neither side reaches across.
+
+Monitoring: sweep lag and the count of lease-expiry disconnects are the two
+signals that say whether the fast path is healthy. A rising expiry count means
+the signal is failing and the backstop is carrying the contract.
 
 ---
 
@@ -406,7 +433,8 @@ Best-effort cancellation keeps a legitimate role as an optimization inside step
 | **F5** | Setup (Phase 0) — separate, because it carries M→J→W and the `cancelled_from` machinery. |
 | **F6** | Turn jobs. |
 | **F7** | Collab write path: `Room` generation, `kernel.py`, `hydrate.py`, `checkpoint.py`. |
-| **F8** | Durable read checks (§6 points 3 and 5) and the revocation path (point 4). |
+| **F8** | Durable read checks (§6 point 3: HTTP reads + WebSocket handshake) and refuse-on-reconnect (point 4). |
+| **F9** | The room lease and the batched revalidation sweep (§6.1), plus its two monitoring signals. Separate from F8 because it is the only part with a scheduler component and an in-loop expiry path. |
 
 F1 is the only slice with a migration. F3 precedes the job families deliberately:
 it fences the effects that are reachable *today*, where the job-family fences
@@ -415,6 +443,27 @@ guard defects that only become reachable once step 3 removes cancellation.
 ---
 
 ## 12. Changelog
+
+**Revision 3** — read-revocation contract settled. Changes:
+
+- **"Maximum lag 5 s, degrading to close-on-next-interaction" was not a maximum.**
+  The signal it depended on can fail silently, so the stated bound was
+  unenforceable. Replaced with a batched Postgres revalidation sweep and a real
+  bound (§6.1).
+- **Fail-closed moved from the sweep to the room.** A sweep that dies disconnects
+  nothing, so a sweep-side design fails *open* in precisely the case that
+  motivates it. Rooms hold a `valid_until` lease that the sweep renews; expiry is
+  the default. This also keeps the scheduler out of the asyncio room manager —
+  renewal is a data write, expiry is enforced in-loop.
+- **Sweep compares exact generations**, not `soft_deleted_at`, so delete→restore
+  closes the old room rather than leaving it open against a live workspace.
+- **Split point 4 into two sentences.** "The next server interaction is always
+  refused" contradicted allowing an established socket a 5-second window, and
+  implied the per-frame database check this contract exists to avoid. Now: every
+  new HTTP request and reconnect is refused; established sockets are revoked
+  within five seconds.
+- **WebSocket handshake** named explicitly as a durable read check.
+- New slice **F9** for the lease and sweep.
 
 **Revision 2** — after review. Changes:
 
