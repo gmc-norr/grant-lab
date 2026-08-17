@@ -909,6 +909,13 @@ class TurnJob(Base):
         index=True,
     )
     status: Mapped[str] = mapped_column(Text, nullable=False)
+    # Fence F1 (spec 2026-08-17 §3.3). The workspaces.lifecycle_generation this
+    # actor observed AT CLAIM TIME. Every semantic effect it later produces is
+    # fenced against this value, so work belonging to an epoch the workspace has
+    # left cannot commit. NULL = legacy row, claimed before the fence existed;
+    # those fall back to the liveness check. NOT defaulted to 0 — 0 is a real
+    # generation. Set by the claim statement in F4-F7; unused in F1.
+    claimed_at_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     queued_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -957,6 +964,13 @@ class CoherenceJob(Base):
         UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
     )
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="queued")
+    # Fence F1 (spec 2026-08-17 §3.3). The workspaces.lifecycle_generation this
+    # actor observed AT CLAIM TIME. Every semantic effect it later produces is
+    # fenced against this value, so work belonging to an epoch the workspace has
+    # left cannot commit. NULL = legacy row, claimed before the fence existed;
+    # those fall back to the liveness check. NOT defaulted to 0 — 0 is a real
+    # generation. Set by the claim statement in F4-F7; unused in F1.
+    claimed_at_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
     requested_by: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
@@ -997,6 +1011,13 @@ class EvaluatorJob(Base):
         UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
     )
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="queued")
+    # Fence F1 (spec 2026-08-17 §3.3). The workspaces.lifecycle_generation this
+    # actor observed AT CLAIM TIME. Every semantic effect it later produces is
+    # fenced against this value, so work belonging to an epoch the workspace has
+    # left cannot commit. NULL = legacy row, claimed before the fence existed;
+    # those fall back to the liveness check. NOT defaulted to 0 — 0 is a real
+    # generation. Set by the claim statement in F4-F7; unused in F1.
+    claimed_at_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
     requested_by: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
@@ -1046,6 +1067,13 @@ class UncitedClaimsJob(Base):
         UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
     )
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="queued")
+    # Fence F1 (spec 2026-08-17 §3.3). The workspaces.lifecycle_generation this
+    # actor observed AT CLAIM TIME. Every semantic effect it later produces is
+    # fenced against this value, so work belonging to an epoch the workspace has
+    # left cannot commit. NULL = legacy row, claimed before the fence existed;
+    # those fall back to the liveness check. NOT defaulted to 0 — 0 is a real
+    # generation. Set by the claim statement in F4-F7; unused in F1.
+    claimed_at_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
     requested_by: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
@@ -1428,6 +1456,13 @@ class WorkspaceSetupJob(Base):
         nullable=False,
     )
     status: Mapped[str] = mapped_column(Text, nullable=False)
+    # Fence F1 (spec 2026-08-17 §3.3). The workspaces.lifecycle_generation this
+    # actor observed AT CLAIM TIME. Every semantic effect it later produces is
+    # fenced against this value, so work belonging to an epoch the workspace has
+    # left cannot commit. NULL = legacy row, claimed before the fence existed;
+    # those fall back to the liveness check. NOT defaulted to 0 — 0 is a real
+    # generation. Set by the claim statement in F4-F7; unused in F1.
+    claimed_at_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
     attempts: Mapped[int] = mapped_column(
         SmallInteger,
         nullable=False,
@@ -1513,6 +1548,13 @@ class ReviewRun(Base):
         nullable=False,
     )
     status: Mapped[str] = mapped_column(Text, nullable=False)
+    # Fence F1 (spec 2026-08-17 §3.3). The workspaces.lifecycle_generation this
+    # actor observed AT CLAIM TIME. Every semantic effect it later produces is
+    # fenced against this value, so work belonging to an epoch the workspace has
+    # left cannot commit. NULL = legacy row, claimed before the fence existed;
+    # those fall back to the liveness check. NOT defaulted to 0 — 0 is a real
+    # generation. Set by the claim statement in F4-F7; unused in F1.
+    claimed_at_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
     triggered_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -1830,6 +1872,13 @@ class ClaimAnalysisJob(Base):
     section_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     commit_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="queued")
+    # Fence F1 (spec 2026-08-17 §3.3). The workspaces.lifecycle_generation this
+    # actor observed AT CLAIM TIME. Every semantic effect it later produces is
+    # fenced against this value, so work belonging to an epoch the workspace has
+    # left cannot commit. NULL = legacy row, claimed before the fence existed;
+    # those fall back to the liveness check. NOT defaulted to 0 — 0 is a real
+    # generation. Set by the claim statement in F4-F7; unused in F1.
+    claimed_at_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     queued_at: Mapped[datetime] = mapped_column(
