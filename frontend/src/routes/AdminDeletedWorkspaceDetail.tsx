@@ -53,7 +53,7 @@ export function AdminDeletedWorkspaceDetail({ workspaceId: workspaceIdProp }: Pr
       </Title>
       {d.history_truncated && (
         <Text c="dimmed" size="sm" mb="xs">
-          Showing only the most recent 200 commits.
+          Showing only the most recent {d.history_limit} commits.
         </Text>
       )}
       {/* An unreadable history is not an empty one. Saying "No commits." when

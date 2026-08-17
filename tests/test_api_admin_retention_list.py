@@ -5,60 +5,21 @@ Retention Slice B. Reads only; this endpoint can remove nothing.
 
 from datetime import UTC, datetime
 
-from fastapi.testclient import TestClient
-
-from call_manager.db.models import User, Workspace
-from call_manager.main import create_app
+from call_manager.db.models import Workspace
+from tests.admin_retention_helpers import client_for, setup_app, soft_delete
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
-def _setup(monkeypatch, pg_url, tmp_path):
-    """Same shape as tests/test_api_admin_users.py:_setup, plus a workspaces_dir.
-
-    Task 3 reads files under it; setting it here too keeps both test modules
-    identical rather than having one silently point at the real configured
-    directory."""
-    for k, v in {
-        "DATABASE_URL": pg_url,
-        "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
-        "APP_BASE_URL": "http://testserver",
-    }.items():
-        monkeypatch.setenv(k, v)
-    app = create_app()
-    app.state.settings.workspaces_dir = str(tmp_path)
-    return app
-
-
-def _client_for(app, sf, *, email, is_admin):
-    """Cookie-authenticated TestClient, matching test_api_admin_users.py:_admin."""
-    with sf() as s:
-        u = User(email=email, status="active", is_admin=is_admin)
-        s.add(u)
-        s.commit()
-        s.refresh(u)
-        uid = u.id
-    c = TestClient(app)
-    c.cookies.set("session", app.state.session_signer.make(user_id=uid))
-    return c, uid
-
-
-def _delete(session, workspace_id):
-    ws = session.get(Workspace, workspace_id)
-    ws.soft_deleted_at = datetime.now(UTC)
-    session.commit()
-
-
 def test_lists_only_deleted_workspaces(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _setup(monkeypatch, pg_url, tmp_path)
-    admin, _ = _client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    app = setup_app(monkeypatch, pg_url, tmp_path)
+    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
     with pg_session_factory() as s:
         owner = make_user(s, email="o@ki.se")
         live = make_workspace(s, owner=owner, title="still here")
         dead = make_workspace(s, owner=owner, title="gone")
         s.commit()
         live_id, dead_id = live.id, dead.id
-        _delete(s, dead_id)
+        soft_delete(s, dead_id)
 
     r = admin.get("/api/admin/workspaces/deleted")
     assert r.status_code == 200
@@ -101,8 +62,8 @@ def test_newest_deletion_first(monkeypatch, pg_url, pg_session_factory, tmp_path
 
     Distinct timestamps, set explicitly rather than by wall-clock, so the
     assertion cannot pass by accident on a fast machine."""
-    app = _setup(monkeypatch, pg_url, tmp_path)
-    admin, _ = _client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    app = setup_app(monkeypatch, pg_url, tmp_path)
+    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
     with pg_session_factory() as s:
         owner = make_user(s, email="ord@ki.se")
         made = [make_workspace(s, owner=owner, title=f"w{i}") for i in range(3)]
@@ -128,8 +89,8 @@ def test_equal_deletion_times_still_page_without_repeating_a_row(
     """limit/offset over an unstable sort can repeat or skip rows between pages.
     Two workspaces deleted in the same instant is the case that exposes it, so
     the query carries an id tiebreak."""
-    app = _setup(monkeypatch, pg_url, tmp_path)
-    admin, _ = _client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    app = setup_app(monkeypatch, pg_url, tmp_path)
+    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
     same = datetime(2026, 8, 5, 9, 0, tzinfo=UTC)
     with pg_session_factory() as s:
         owner = make_user(s, email="tie@ki.se")
@@ -148,15 +109,15 @@ def test_equal_deletion_times_still_page_without_repeating_a_row(
 
 
 def test_non_admin_is_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _setup(monkeypatch, pg_url, tmp_path)
-    member, _ = _client_for(app, pg_session_factory, email="member@ki.se", is_admin=False)
+    app = setup_app(monkeypatch, pg_url, tmp_path)
+    member, _ = client_for(app, pg_session_factory, email="member@ki.se", is_admin=False)
     r = member.get("/api/admin/workspaces/deleted")
     assert r.status_code == 403
 
 
 def test_pagination_caps_the_limit(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    app = _setup(monkeypatch, pg_url, tmp_path)
-    admin, _ = _client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    app = setup_app(monkeypatch, pg_url, tmp_path)
+    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
     r = admin.get("/api/admin/workspaces/deleted?limit=5000")
     assert r.status_code == 422, "an uncapped limit lets one request read the whole table"
 
@@ -164,15 +125,15 @@ def test_pagination_caps_the_limit(monkeypatch, pg_url, pg_session_factory, tmp_
 def test_returns_total_count_and_honours_offset(
     monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
-    app = _setup(monkeypatch, pg_url, tmp_path)
-    admin, _ = _client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    app = setup_app(monkeypatch, pg_url, tmp_path)
+    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
     with pg_session_factory() as s:
         owner = make_user(s, email="o2@ki.se")
         made = [make_workspace(s, owner=owner, title=f"w{i}") for i in range(3)]
         s.commit()
         ids = [w.id for w in made]
         for wid in ids:
-            _delete(s, wid)
+            soft_delete(s, wid)
 
     first = admin.get("/api/admin/workspaces/deleted?limit=2&offset=0").json()
     second = admin.get("/api/admin/workspaces/deleted?limit=2&offset=2").json()
@@ -199,7 +160,7 @@ def test_the_route_is_documented_with_the_shared_error_envelope(
     verified: /api/admin/users documents $ref ApiError and has 11 documented
     statuses, while a directly-mounted route documents HTTPValidationError and
     has 2."""
-    app = _setup(monkeypatch, pg_url, tmp_path)
+    app = setup_app(monkeypatch, pg_url, tmp_path)
     responses = app.openapi()["paths"]["/api/admin/workspaces/deleted"]["get"]["responses"]
     ref = responses["422"]["content"]["application/json"]["schema"]["$ref"]
     assert ref == "#/components/schemas/ApiError", (

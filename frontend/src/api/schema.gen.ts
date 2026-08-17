@@ -2514,6 +2514,8 @@ export interface components {
             commits: components["schemas"]["CommitOut"][];
             /** History Available */
             history_available: boolean;
+            /** History Limit */
+            history_limit: number;
             /** History Truncated */
             history_truncated: boolean;
             /**

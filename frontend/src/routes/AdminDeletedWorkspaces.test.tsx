@@ -99,6 +99,7 @@ function mockDetail(overrides: Record<string, unknown> = {}) {
         { sha: "a".repeat(40), authored_at: "2026-07-30T09:00:00Z", subject: "first" },
       ],
       history_truncated: false,
+      history_limit: 200,
       ...overrides,
     },
     error: undefined,
@@ -134,10 +135,14 @@ it("states that no repository is readable instead of showing an empty document",
   expect(await screen.findByText(/no readable repository/i)).toBeInTheDocument();
 });
 
-it("says when the history was truncated", async () => {
-  mockDetail({ history_truncated: true });
+it("says when the history was truncated, using the cap the SERVER sent", async () => {
+  // Deliberately not 200: the copy used to hardcode the server's limit, so a
+  // change to _HISTORY_LIMIT turned the sentence into a lie with every test
+  // still green. A value that is not the real default fails if the number is
+  // ever baked into the bundle again.
+  mockDetail({ history_truncated: true, history_limit: 37 });
   renderWithProviders(<AdminDeletedWorkspaceDetail />);
-  expect(await screen.findByText(/most recent 200/i)).toBeInTheDocument();
+  expect(await screen.findByText(/most recent 37/i)).toBeInTheDocument();
 });
 
 it("re-requests the draft on every open, so each read leaves an audit row", async () => {

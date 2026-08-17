@@ -129,6 +129,11 @@ class DeletedWorkspaceDetailOut(BaseModel):
     proposal_markdown: str | None
     commits: list[CommitOut]
     history_truncated: bool
+    # The server's cap, sent so the UI can state it instead of hardcoding a
+    # number that silently becomes a lie the moment _HISTORY_LIMIT changes.
+    # Always present, not only when truncated: a client that renders the cap
+    # should not have to know which responses carry it.
+    history_limit: int
 
 
 def _record_inspection(
@@ -313,5 +318,6 @@ def inspect_deleted_workspace(
                 CommitOut(sha=c.sha, authored_at=c.authored_at, subject=c.subject)
                 for c in commits
             ],
+            history_limit=_HISTORY_LIMIT,
             history_truncated=truncated,
         )
