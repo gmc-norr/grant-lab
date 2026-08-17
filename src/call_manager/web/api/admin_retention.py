@@ -33,7 +33,9 @@ from call_manager.proposal_assist.drafting.locking import (
     CommitMutexTimeout,
     acquire_commit_mutex,
 )
+from call_manager.proposal_assist.lifecycle import signal_workspace_restored
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.workspaces import restore_workspace_db
 
 # NO prefix: web/api/__init__.py's router adds /api and the shared error-envelope
 # responses. Paths below are written relative to that.
@@ -345,3 +347,126 @@ def inspect_deleted_workspace(
             history_limit=_HISTORY_LIMIT,
             history_truncated=truncated,
         )
+
+
+@router.post(
+    "/admin/workspaces/deleted/{workspace_id}/restore",
+    status_code=204,
+)
+def restore_deleted_workspace(
+    workspace_id: uuid.UUID,
+    request: Request,
+    admin: User = Depends(require_admin),  # noqa: B008
+) -> Response:
+    """Restore a soft-deleted workspace.
+
+    NOT gated by RETENTION_INSPECTION_ENABLED. That switch governs READING a
+    deleted workspace's content; restore returns 204 with no body and reads
+    nothing back to the caller. An admin who may not inspect a draft may still
+    put a workspace back. The neighbouring GET IS gated, so this asymmetry is
+    intentional, not an oversight.
+
+    Ordering (spec 5.3):
+
+    1. Pre-lock read:
+       - missing            → 404
+       - LIVE               → apply(current generation, active) + 204
+                              [no mutex, no DB write, no audit]
+    2. restore_workspace_db → mutex, flag, generation, setup job, audit, COMMIT
+       - transitioned=False → it went live while waiting for the mutex;
+                              nothing written, no audit row.
+                              Still apply the generation it returned, then 204.
+    3. signal_workspace_restored → after the commit
+       - True  → 204
+       - False → 503 + Retry-After: 2
+
+    The two LIVE paths (pre-lock and transitioned=False) return 204 REGARDLESS
+    of the bridge's bool: a live workspace is unconditionally 204 (spec 5.4.1).
+    A bridge miss on the live paths is not a promised-but-unconfirmed transition.
+    Only the genuine transition (transitioned=True) can leave the DB ahead of
+    the in-memory authority in a way the admin must be told about.
+
+    The live path applies the CURRENT generation — the one place a generation is
+    READ rather than allocated. This is safe because nothing is transitioning, so
+    there is no transition to bind to, and monotonicity makes the read safe in
+    both directions: a delete that already applied a higher generation ignores
+    this; a delete that applies later wins.
+    """
+    sf = request.app.state.session_factory
+
+    # Step 1: Pre-lock read — check whether the workspace exists and its
+    # current state, WITHOUT taking the commit mutex. Taking the mutex first
+    # would contend with live writers for a workspace we may be about to
+    # refuse anyway.
+    live_gen: int | None = None  # non-None means the workspace was already LIVE
+    with sf() as session:
+        ws = session.get(Workspace, workspace_id)
+        if ws is None:
+            raise HTTPException(status_code=404, detail="not found")
+
+        if ws.soft_deleted_at is None:
+            # Already LIVE. Capture the current generation (monotonic; read is
+            # safe — see docstring) and defer the apply until the session is
+            # properly closed (exiting the with block).
+            live_gen = ws.lifecycle_generation
+
+    if live_gen is not None:
+        # No mutex, no DB write, no audit.
+        signal_workspace_restored(
+            request, workspace_id=workspace_id, generation=live_gen
+        )
+        return Response(status_code=204)
+
+    # Step 2: Call restore_workspace_db. It acquires the plain commit mutex
+    # (NEVER acquire_commit_mutex_live — _live raises WorkspaceDeleted, which
+    # would refuse every workspace this route exists to serve), flips
+    # soft_deleted_at, allocates the lifecycle generation, repairs the setup
+    # job, writes the audit event, and COMMITS — all in one transaction.
+    #
+    # Plain acquire_commit_mutex here: this route never touches the mutex
+    # itself; the mutex lives entirely inside restore_workspace_db.
+    with sf() as session:
+        try:
+            outcome = restore_workspace_db(
+                session,
+                workspace_id=workspace_id,
+                admin_id=admin.id,
+            )
+        except CommitMutexTimeout as e:
+            session.rollback()
+            raise HTTPException(
+                status_code=429,
+                detail=BUSY_ERROR_MESSAGE,
+                headers={"Retry-After": "2"},
+            ) from e
+
+    # Step 3: After the commit — apply in-memory then respond.
+    #
+    # transitioned=False: the workspace went live in the window between the
+    # pre-lock read and winning the mutex. Nothing was written and no audit row
+    # exists. Still apply — skipping it would leave the in-memory authority
+    # behind the DB on the hardest interleaving. Then 204 unconditionally (a
+    # live workspace is never told the failure code for the attempt that
+    # succeeded, spec 5.4.1).
+    if not outcome.transitioned:
+        signal_workspace_restored(
+            request, workspace_id=workspace_id, generation=outcome.generation
+        )
+        return Response(status_code=204)
+
+    # Genuine transition (transitioned=True): the DB committed. Apply the
+    # in-memory authority. If the bridge misses, answer 503 — the DB is ahead
+    # of the authority and the admin must be told.
+    ok = signal_workspace_restored(
+        request, workspace_id=workspace_id, generation=outcome.generation
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Workspace restored in database but in-process state could not"
+                " be updated. Retry."
+            ),
+            headers={"Retry-After": "2"},
+        )
+    return Response(status_code=204)
