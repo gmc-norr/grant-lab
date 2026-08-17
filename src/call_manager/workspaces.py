@@ -20,6 +20,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import NamedTuple
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
@@ -27,7 +28,10 @@ from sqlalchemy.orm import Session
 from call_manager.db.models import TurnJob, Workspace, WorkspaceEvent, WorkspaceSetupJob
 from call_manager.proposal_assist.attachments.storage import AttachmentStorage
 from call_manager.proposal_assist.coherence.jobs import cancel_coherence_jobs_for_workspace
-from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex_live
+from call_manager.proposal_assist.drafting.locking import (
+    acquire_commit_mutex,
+    acquire_commit_mutex_live,
+)
 from call_manager.proposal_assist.evaluator.jobs import cancel_evaluator_jobs_for_workspace
 from call_manager.proposal_assist.references.storage import ReferenceStorage
 from call_manager.proposal_assist.review.jobs import cancel_review_runs_and_items_for_workspace
@@ -35,6 +39,30 @@ from call_manager.proposal_assist.turns.outcomes import record_terminal_outcome
 from call_manager.proposal_assist.uncited_claims.jobs import (
     cancel_uncited_claims_jobs_for_workspace,
 )
+
+
+class RestoreOutcome(NamedTuple):
+    generation: int
+    setup_job_restored_to: str | None
+    transitioned: bool  # False when the workspace was already live
+
+
+# Lock order: mutex (M) → setup job (J) → workspace (W).
+# See phases/setup.py:500 and web/api/rubric.py:341 for the canonical order.
+_SETUP_RESTORE_MAP = {
+    "queued": "queued",
+    # NOT 'running'. See spec 5.2.1: the worker that owned it died with the
+    # deletion, nothing recreates it, and requeue_stuck_setup_jobs will not
+    # touch a 'running' row for STUCK_SETUP_AFTER (30 minutes). Restoring to
+    # 'running' reproduces the stuck state. The residual double-claim: accepted
+    # because the workspace WAS deleted, so any live worker has already failed
+    # its liveness check or will at its next milestone — and with Task 2's _fail
+    # fix that worker now re-queues rather than cancelling.
+    "running": "queued",
+    # Preserved exactly: extraction is DONE and a human is the next actor.
+    # Re-queueing re-runs extraction over completed work.
+    "waiting_for_rubric_review": "waiting_for_rubric_review",
+}
 
 
 def create_workspace(
@@ -199,6 +227,103 @@ def soft_delete_workspace_db(
     generation = bump_lifecycle_generation(session, workspace_id=workspace_id)
     session.commit()
     return generation
+
+
+def restore_workspace_db(
+    session: Session,
+    *,
+    workspace_id: uuid.UUID,
+    admin_id: int,
+    timeout_seconds: int = 10,
+) -> RestoreOutcome:
+    """Clear soft_deleted_at, allocate the lifecycle generation, repair the setup
+    job and write the audit event — all in ONE transaction, then COMMIT.
+
+    Takes the plain commit mutex for the whole transaction, NEVER
+    acquire_commit_mutex_live: the _live variant re-reads liveness and raises
+    WorkspaceDeleted, which would refuse every workspace this function exists to
+    serve. Restore is the one path that makes the mutex load-bearing rather than
+    defensive — it FLIPS the liveness flag every other writer re-reads under that
+    same mutex, which is what makes the flip a linearization point.
+
+    Raises CommitMutexTimeout (route -> 429) having committed nothing.
+
+    The returned generation is the one THIS transaction allocated. The caller
+    passes it to signal_workspace_restored untouched and must never re-read one
+    (spec 4.4).
+    """
+    # Step 1: Load the workspace row.
+    ws = session.get(Workspace, workspace_id)
+    if ws is None:
+        raise ValueError(f"workspace not found: {workspace_id}")
+
+    # Step 2: Acquire the plain commit mutex (NOT _live — _live raises
+    # WorkspaceDeleted on deleted workspaces, which is every workspace this
+    # function exists to serve). acquire_commit_mutex returns None.
+    acquire_commit_mutex(session, workspace_id, timeout_seconds=timeout_seconds)
+
+    # Step 3: Fresh under-mutex read of soft_deleted_at (plain SELECT, no FOR
+    # UPDATE — we are not locking the workspace row yet; that comes in step 5).
+    current_deleted_at = session.execute(
+        select(Workspace.soft_deleted_at).where(Workspace.id == workspace_id)
+    ).scalar_one_or_none()
+
+    if current_deleted_at is None:
+        # Already live — idempotent path. Read generation from the
+        # identity-mapped instance (loaded in step 1) before rollback.
+        gen = ws.lifecycle_generation
+        session.rollback()
+        return RestoreOutcome(generation=gen, setup_job_restored_to=None, transitioned=False)
+
+    # Step 4: Lock and repair the setup job BEFORE mutating the workspace row.
+    # Lock order: mutex (M) → setup job (J) → workspace (W).
+    # See phases/setup.py:500 and web/api/rubric.py:341.
+    jobs = session.execute(
+        select(WorkspaceSetupJob)
+        .where(WorkspaceSetupJob.workspace_id == workspace_id)
+        .with_for_update()
+    ).scalars().all()
+
+    restored_to: str | None = None
+    for job in jobs:
+        source = job.cancelled_from if job.status == "cancelled" else job.status
+        if source not in _SETUP_RESTORE_MAP:
+            continue  # terminal (done/failed), or cancelled by something that
+                      # was not a deletion (cancelled_from IS NULL) — not ours
+        job.status = _SETUP_RESTORE_MAP[source]
+        restored_to = job.status  # only one row should match, per multiplicity audit
+        job.cancelled_from = None
+        job.completed_at = None
+        job.last_error = None
+        if job.status == "queued":
+            job.started_at = None
+        # Do NOT touch job.attempts
+
+    # Step 5: Only now mutate the workspace row.
+    ws.soft_deleted_at = None
+
+    # Step 6: Allocate the lifecycle generation inside this transaction.
+    generation = bump_lifecycle_generation(session, workspace_id=workspace_id)
+
+    # Step 7: Write the audit event.
+    session.add(
+        WorkspaceEvent(
+            workspace_id=workspace_id,
+            kind="admin_deleted_workspace_restored",
+            actor_id=admin_id,
+            payload={
+                "workspace_id": str(workspace_id),
+                "admin_user_id": admin_id,
+                "setup_job_restored_to": restored_to,
+            },
+        )
+    )
+
+    # Step 8: Commit everything atomically.
+    session.commit()
+    return RestoreOutcome(
+        generation=generation, setup_job_restored_to=restored_to, transitioned=True
+    )
 
 
 def scrub_workspace_bytes(workspace_id: uuid.UUID, *, workspaces_dir: Path) -> None:
