@@ -31,9 +31,14 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import exists
+from sqlalchemy import exists, select
+from sqlalchemy.orm import Session
 
 from call_manager.db.models import Workspace
+from call_manager.proposal_assist.drafting.locking import (
+    WorkspaceDeleted,
+    acquire_commit_mutex,
+)
 
 
 class WorkspaceGenerationStale(RuntimeError):
@@ -95,3 +100,56 @@ def live_at_generation(workspace_id: uuid.UUID, generation: int):
         Workspace.soft_deleted_at.is_(None),
         Workspace.lifecycle_generation == generation,
     )
+
+
+def acquire_commit_mutex_at_generation(
+    session: Session,
+    workspace_id: uuid.UUID,
+    *,
+    generation: int,
+    timeout_seconds: int = 10,
+) -> None:
+    """Primitive B. Acquire the commit mutex, then refuse a workspace that is
+    deleted or has moved past *generation*.
+
+    For effects spanning git, the filesystem, or multiple rows that must move
+    together. For DB-only effects prefer `live_at_generation`, which takes no
+    lock and therefore cannot create a lock-order problem.
+
+    LOCK ORDER: this acquires the mutex (M). It must be called BEFORE any setup
+    job (J) or workspace (W) row lock, preserving the normative M -> J -> W
+    (phases/setup.py:500, web/api/rubric.py:341). Calling it after a job or
+    workspace row lock inverts the order against the delete path and opens a
+    real Postgres 40P01. Where the caller ALREADY holds the workspace row under
+    FOR UPDATE, do not call this at all — assert the generation on that
+    already-locked row.
+
+    Never hold this across context assembly or an LLM call.
+
+    Both columns come from ONE statement, and it is a scalar SELECT rather than
+    `session.get()`. `session.get()` can return the identity-map instance the
+    caller loaded BEFORE blocking on the mutex, which carries the pre-race
+    generation — precisely the staleness this guard exists to defeat. That
+    defect shipped in Slice C1 and was fixed in 701fbb7.
+
+    Raises CommitMutexTimeout exactly as acquire_commit_mutex does,
+    WorkspaceDeleted if the workspace is gone or deleted, or
+    WorkspaceGenerationStale if it is live at a different generation. Mutates
+    nothing in every case; the caller rolls back.
+
+    Deleted takes precedence over stale: a deletion also bumps the generation, so
+    both conditions hold at once, and callers map them to different outcomes
+    (404 versus a quiet abandon-with-accounting).
+    """
+    acquire_commit_mutex(session, workspace_id, timeout_seconds=timeout_seconds)
+    row = session.execute(
+        select(Workspace.soft_deleted_at, Workspace.lifecycle_generation).where(
+            Workspace.id == workspace_id
+        )
+    ).first()
+    if row is None or row[0] is not None:
+        raise WorkspaceDeleted(workspace_id)
+    if row[1] != generation:
+        raise WorkspaceGenerationStale(
+            workspace_id, expected=generation, actual=row[1]
+        )
