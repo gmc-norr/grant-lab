@@ -196,6 +196,8 @@ def test_route_forwards_the_generation_it_received_not_a_re_read(
 
     def _restore_then_move_the_row(session, **kw):
         outcome = real_restore(session, **kw)
+        # Stash the generation the service returned BEFORE bumping the row.
+        captured["expected_generation"] = outcome.generation
         # Bump the row to 99 AFTER the real transaction committed but BEFORE the
         # route reads the outcome — any re-read from here on yields 99.
         with pg_session_factory() as other:
@@ -216,6 +218,8 @@ def test_route_forwards_the_generation_it_received_not_a_re_read(
     assert "generation" in captured
     # Must NOT be 99 (the re-read value); must be what the service returned
     assert captured["generation"] != 99
+    # Must be the EXACT generation the service returned (positive check)
+    assert captured["generation"] == captured["expected_generation"]
 
 
 # ---------------------------------------------------------------------------
