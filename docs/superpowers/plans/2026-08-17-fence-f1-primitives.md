@@ -229,6 +229,53 @@ def test_generation_stale_is_not_a_workspace_deleted():
     assert not isinstance(exc, WorkspaceDeleted)
     with pytest.raises(WorkspaceGenerationStale):
         raise exc
+
+
+def test_the_retirement_predicate_and_the_fence_predicate_are_opposites(
+    pg_session_factory,
+):
+    """THE ANTI-MERGE PIN, behavioural (Global Constraint 2).
+
+    On ONE deleted workspace at generation G, held at the SAME generation so
+    liveness is the only variable:
+
+        live_at_generation(ws, G)     -> False   (fence: refuse deleted)
+        _still_at_generation(ws, G)   -> True    (retirement: act on deleted)
+
+    They are not duplicates. They are opposites. `_still_at_generation` runs
+    during the delete fan-out, when soft_deleted_at is ALREADY stamped, so
+    giving it a liveness clause — or rewriting its body as
+    `return live_at_generation(...)` — makes every cancel a no-op and disarms
+    the retirement fan-out.
+
+    This test is BEHAVIOURAL on purpose. A structural check that greps the
+    function body for "soft_deleted_at" is defeated by exactly the refactor it
+    is meant to stop, because `return live_at_generation(...)` contains no such
+    text. It also lives HERE rather than in test_fencing_inertness.py, because
+    F2 deletes that file and this invariant is permanent.
+
+    Importing a private helper is deliberate: this test exists to pin that
+    private's contract against the public one.
+    """
+    from call_manager.proposal_assist.jobs_retirement import _still_at_generation
+
+    ws_id = _seed(pg_session_factory)
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, ws_id)
+        gen = ws.lifecycle_generation
+        ws.soft_deleted_at = datetime.now(UTC)
+        s.commit()
+
+    with pg_session_factory() as s:
+        fence = bool(s.execute(select(live_at_generation(ws_id, gen))).scalar())
+        retire = bool(s.execute(select(_still_at_generation(ws_id, gen))).scalar())
+
+    assert fence is False, "the fence predicate must REFUSE a deleted workspace"
+    assert retire is True, (
+        "the retirement predicate must MATCH a deleted workspace — it runs "
+        "during the delete fan-out. If this is False, someone gave it a "
+        "liveness clause and every cancel is now a no-op."
+    )
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -349,7 +396,7 @@ Run:
 ```bash
 uv run pytest tests/proposal_assist/test_fencing.py -q > /tmp/f1t1.log 2>&1; echo "EXIT=$?"; tail -20 /tmp/f1t1.log
 ```
-Expected: `8 passed`. Confirm the collected count is 8 — pytest exits 4, not 1, when a path typo means nothing ran.
+Expected: `9 passed`. Confirm the collected count is 9 — pytest exits 4, not 1, when a path typo means nothing ran.
 
 - [ ] **Step 5: Mutation — remove the liveness clause**
 
@@ -362,12 +409,14 @@ Edit `live_at_generation` to drop `Workspace.soft_deleted_at.is_(None)`:
     )
 ```
 
-Run the file again. **Required outcome:** exactly
-`test_does_not_match_a_deleted_workspace_even_at_the_same_generation` goes RED.
-If it stays green the anti-merge pin is decorative and the task is FAILED —
-fix the test, not the report.
+Run the file again. **Required outcome:** exactly TWO tests go RED —
+`test_does_not_match_a_deleted_workspace_even_at_the_same_generation` and
+`test_the_retirement_predicate_and_the_fence_predicate_are_opposites`. Both hold
+the generation equal, so the liveness clause is the only thing either can be
+measuring. If either stays green it is decorative and the task is FAILED — fix
+the test, not the report.
 
-Revert the mutation. Re-run and confirm `8 passed`. Confirm `git status` is clean
+Revert the mutation. Re-run and confirm `9 passed`. Confirm `git status` is clean
 of the mutation.
 
 - [ ] **Step 6: Mutation — relax equality to `>=`**
@@ -377,7 +426,42 @@ Edit `live_at_generation` to use `Workspace.lifecycle_generation >= generation`.
 Run the file again. **Required outcome:** exactly
 `test_does_not_match_a_generation_below_the_current_one` goes RED.
 
-Revert. Re-run and confirm `8 passed`. Confirm `git status` is clean.
+Revert. Re-run and confirm `9 passed`. Confirm `git status` is clean.
+
+- [ ] **Step 6b: Mutation — rewrite the retirement predicate in terms of the fence**
+
+This is the refactor a structural grep cannot see, and the one most likely to be
+proposed in good faith. In `jobs_retirement.py`, replace `_still_at_generation`'s
+body with:
+
+```python
+    from call_manager.proposal_assist.fencing import live_at_generation
+
+    return live_at_generation(workspace_id, generation)
+```
+
+Run:
+```bash
+uv run pytest tests/proposal_assist/test_fencing.py -q > /tmp/f1t1b.log 2>&1; echo "EXIT=$?"; tail -20 /tmp/f1t1b.log
+```
+**Required outcome:** exactly
+`test_the_retirement_predicate_and_the_fence_predicate_are_opposites` goes RED,
+on its second assertion.
+
+Then, still with the mutation applied, confirm the second line of defence:
+```bash
+uv run pytest tests/proposal_assist/test_phase0_retirement.py -q > /tmp/f1t1c.log 2>&1; echo "EXIT=$?"; tail -20 /tmp/f1t1c.log
+```
+**Required outcome:** RED. `test_the_hook_cancels_queued_and_running_setup_jobs`
+and `test_the_hook_cancels_a_job_waiting_for_rubric_review` both seed a workspace
+with `soft_deleted_at` set and a NON-terminal job, and assert
+`job.status == "cancelled"` — a no-op cancel leaves the job in its seeded state
+and fails them. Report the exact list. If that suite stays GREEN, say so
+prominently: it would mean the retirement suite has a hole and the new pin is the
+only protection.
+
+Revert the mutation. Re-run both commands and confirm green. Confirm
+`git diff --stat` no longer lists `jobs_retirement.py`.
 
 - [ ] **Step 7: Verify the retirement predicate was not touched**
 
@@ -392,10 +476,12 @@ If it does, Global Constraint 2 was violated; revert that file entirely.
 - [ ] **Step 8: Run lint and commit**
 
 ```bash
-uv run ruff check . 2>&1 | tail -3
+uv run ruff check . > /tmp/f1ruff.log 2>&1; echo "RUFF_EXIT=$?"; tail -5 /tmp/f1ruff.log
 git add src/call_manager/proposal_assist/fencing.py tests/proposal_assist/test_fencing.py
 git commit -m "feat(fencing): Primitive A + WorkspaceGenerationStale (F1 Task 1)"
 ```
+Expected: `RUFF_EXIT=0`. Read the exit code, not the output — piping into `tail`
+reports the pager's status, the same trap Global Constraint 9 names.
 
 ---
 
@@ -439,10 +525,13 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import event, select
+from sqlalchemy import event, select, update
 
 from call_manager.db.models import Workspace
-from call_manager.proposal_assist.drafting.locking import WorkspaceDeleted
+from call_manager.proposal_assist.drafting.locking import (
+    WorkspaceDeleted,
+    acquire_commit_mutex,
+)
 from call_manager.proposal_assist.fencing import (
     WorkspaceGenerationStale,
     acquire_commit_mutex_at_generation,
@@ -492,12 +581,22 @@ def test_raises_stale_when_the_carried_generation_is_higher(pg_session_factory):
 
 
 def test_raises_deleted_not_stale_for_a_deleted_workspace(pg_session_factory):
-    """A deleted workspace is WorkspaceDeleted even though its generation also
-    moved: callers map the two to different outcomes (404 vs quiet abandon)."""
+    """Deleted takes PRECEDENCE over stale, and the test must model reality to
+    prove it.
+
+    A real deletion (`soft_delete_workspace_db`) both stamps `soft_deleted_at`
+    AND bumps the generation, so after one, BOTH conditions hold at once. This
+    test therefore sets both. Setting only `soft_deleted_at` — leaving the
+    generation equal — would make the test unfalsifiable: an implementation that
+    checked generation first would still pass it, then raise
+    WorkspaceGenerationStale after every real deletion and send callers down the
+    quiet-abandon path instead of the 404 path.
+    """
     ws_id, gen = _seed(pg_session_factory)
     with pg_session_factory() as s:
         ws = s.get(Workspace, ws_id)
         ws.soft_deleted_at = datetime.now(UTC)
+        ws.lifecycle_generation = gen + 1  # what a real delete does
         s.commit()
 
     with pg_session_factory() as s:
@@ -527,9 +626,16 @@ def test_the_generation_is_read_UNDER_the_mutex_not_before_it(
 
     The seam fires on `pg_advisory_xact_lock` — after the caller's pre-mutex
     load, before it holds the mutex. That is the only window in which the
-    concurrent bump can land. The caller holds no locks at that instant, so the
-    other transaction acquires the same mutex, commits and releases it inside
-    the callback without deadlocking.
+    concurrent transition can land. The caller holds no locks at that instant,
+    so the competing session takes the same mutex, commits and releases it
+    inside the callback without deadlocking.
+
+    The competing session takes the mutex FOR REAL, because that is what a real
+    lifecycle transition does — `bump_lifecycle_generation` requires its caller
+    to hold it, which is what makes the mutex the total order over generations.
+    A plain UPDATE here would still exercise fresh-read ordering, but it would
+    NOT exercise the serialization the docstring claims, and the two are
+    different properties.
 
     Same seam and same shape as
     tests/test_workspace_restore_acceptance.py's test 11, which caught the
@@ -539,9 +645,15 @@ def test_the_generation_is_read_UNDER_the_mutex_not_before_it(
     state = {"fired": False}
 
     def _bump_from_another_connection():
+        # Mutex-held, exactly as a real transition is. The latch below keeps
+        # this session's own pg_advisory_xact_lock from re-entering the seam.
         with pg_session_factory() as other:
-            ws = other.get(Workspace, ws_id)
-            ws.lifecycle_generation = gen + 1
+            acquire_commit_mutex(other, ws_id)
+            other.execute(
+                update(Workspace)
+                .where(Workspace.id == ws_id)
+                .values(lifecycle_generation=Workspace.lifecycle_generation + 1)
+            )
             other.commit()
 
     def _before(conn, cursor, statement, parameters, context, executemany):
@@ -728,10 +840,41 @@ Run the file again. **Required outcome:** exactly
 
 Revert. Re-run and confirm `7 passed`. Confirm `git status` is clean.
 
+- [ ] **Step 6b: Mutation — check the generation BEFORE liveness**
+
+Swap the two guards so the generation check runs first:
+
+```python
+    if row is None:
+        raise WorkspaceDeleted(workspace_id)
+    if row[1] != generation:
+        raise WorkspaceGenerationStale(
+            workspace_id, expected=generation, actual=row[1]
+        )
+    if row[0] is not None:
+        raise WorkspaceDeleted(workspace_id)
+```
+
+Run the file again. **Required outcome:**
+`test_raises_deleted_not_stale_for_a_deleted_workspace` goes RED with
+`DID NOT RAISE`/`WorkspaceGenerationStale` — because a real deletion bumps the
+generation too, so the reordered check reaches the stale branch first.
+
+If it stays GREEN, that test is still setting only `soft_deleted_at` and the
+precedence contract is unproven. Fix the test.
+
+Revert. Re-run and confirm `7 passed`. Confirm `git status` is clean.
+
 - [ ] **Step 7: Run lint and commit**
 
 ```bash
-uv run ruff check . 2>&1 | tail -3
+uv run ruff check . > /tmp/f1ruff.log 2>&1; echo "RUFF_EXIT=$?"; tail -5 /tmp/f1ruff.log
+```
+Expected: `RUFF_EXIT=0` and `All checks passed!`. Read the exit code, not the
+output — `ruff check . | tail` reports the pager's status, exactly the trap
+Global Constraint 9 names for test commands.
+
+```bash
 git add src/call_manager/proposal_assist/fencing.py tests/proposal_assist/test_fencing_mutex.py
 git commit -m "feat(fencing): Primitive B, mutex + under-mutex generation re-read (F1 Task 2)"
 ```
@@ -777,7 +920,7 @@ the dead AttachmentJob table is NOT touched, and that the migration round-trips.
 from __future__ import annotations
 
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import Integer, create_engine, inspect, text
 
 from alembic import command
 
@@ -831,38 +974,141 @@ def test_the_dead_attachment_jobs_table_is_not_touched(migrated_engine):
     )
 
 
-def test_migration_0064_round_trips(pg_url):
-    """0064 applies, rolls back, and re-applies without schema corruption, with
-    an existing row present throughout."""
+def test_every_model_declares_the_column_matching_the_migration():
+    """ORM/migration agreement. NOTHING ELSE IN THIS REPO CHECKS THIS.
+
+    There is no metadata-vs-schema comparison anywhere in the suite —
+    test_alembic_v2_round_trip.py round-trips 0005-0008 and asserts specific
+    named columns; it does not diff Base.metadata against head. So an
+    implementation that adds all seven DATABASE columns and zero MODEL
+    properties passes every other test in this plan, and the drift only surfaces
+    in F4-F7 when a claim path tries to set an attribute that does not exist.
+
+    Reads the mapped columns directly, so it needs no database.
+    """
+    from call_manager.db.models import (
+        AttachmentJob,
+        ClaimAnalysisJob,
+        CoherenceJob,
+        EvaluatorJob,
+        ReviewRun,
+        TurnJob,
+        UncitedClaimsJob,
+        WorkspaceSetupJob,
+    )
+
+    fenced_models = [
+        TurnJob,
+        CoherenceJob,
+        EvaluatorJob,
+        UncitedClaimsJob,
+        WorkspaceSetupJob,
+        ReviewRun,
+        ClaimAnalysisJob,
+    ]
+    assert {m.__tablename__ for m in fenced_models} == set(FENCED_TABLES), (
+        "the models checked here and the tables in the migration have drifted"
+    )
+
+    for model in fenced_models:
+        col = model.__table__.c.get("claimed_at_generation")
+        assert col is not None, (
+            f"{model.__name__} has no claimed_at_generation property — the "
+            f"migration adds the column but the ORM cannot see it"
+        )
+        assert col.nullable, f"{model.__name__}.claimed_at_generation must be nullable"
+        assert col.server_default is None, (
+            f"{model.__name__}.claimed_at_generation must have NO server_default "
+            f"— 0 is a real generation"
+        )
+        assert isinstance(col.type, Integer), (
+            f"{model.__name__}.claimed_at_generation must be Integer, got "
+            f"{col.type!r}"
+        )
+
+    assert AttachmentJob.__table__.c.get("claimed_at_generation") is None, (
+        "AttachmentJob must NOT declare claimed_at_generation — dead schema"
+    )
+
+
+def _cols(conn, table: str) -> set[str]:
+    return {
+        r[0]
+        for r in conn.execute(
+            text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = :t"
+            ),
+            {"t": table},
+        )
+    }
+
+
+def test_migration_0064_round_trips(pg_url, pg_session_factory):
+    """0064 applies over a row that predates it, rolls back, and re-applies.
+
+    `pg_session_factory` is requested SOLELY for its teardown. The testcontainer
+    database is SESSION-scoped and shared by the whole suite; that fixture's
+    teardown is the only thing that TRUNCATEs. Without it this test leaks a live
+    `queued` workspace_setup_jobs row that a later test's claim_next_setup_job
+    can pick up.
+
+    The seeding order matters and is the point: downgrade FIRST, insert at 0063,
+    then upgrade — so the row genuinely predates the column. Seeding at head and
+    calling the row "pre-existing" would prove nothing about existing data.
+
+    Every step after the first downgrade is wrapped so the shared database is
+    restored to head even on failure. Stranding it at 0063 would leave the next
+    test's TRUNCATE and every ORM query facing a schema the models do not match,
+    surfacing as opaque unrelated failures. Same precedent and same reasoning as
+    test_alembic_v2_round_trip.py's try/finally.
+    """
     cfg = _cfg(pg_url)
-    command.upgrade(cfg, "head")
     eng = create_engine(pg_url)
     try:
-        with eng.begin() as c:
-            c.execute(text("INSERT INTO users (email) VALUES ('mig64@ki.se')"))
-            uid = c.execute(
-                text("SELECT id FROM users WHERE email='mig64@ki.se'")
-            ).scalar_one()
-            c.execute(
-                text(
-                    "INSERT INTO workspaces (id, title, owner_id, status, current_phase) "
-                    "VALUES (gen_random_uuid(), 'W64', :u, 'drafting', 'setup')"
-                ),
-                {"u": uid},
-            )
-            ws_id = c.execute(
-                text("SELECT id FROM workspaces WHERE title='W64'")
-            ).scalar_one()
-            c.execute(
-                text(
-                    "INSERT INTO workspace_setup_jobs (id, workspace_id, status) "
-                    "VALUES (gen_random_uuid(), :w, 'queued')"
-                ),
-                {"w": ws_id},
-            )
+        command.upgrade(cfg, "head")
+        command.downgrade(cfg, "0063")
+        try:
+            # Seed AT 0063 — before the column exists.
+            with eng.begin() as c:
+                c.execute(text("INSERT INTO users (email) VALUES ('mig64@ki.se')"))
+                uid = c.execute(
+                    text("SELECT id FROM users WHERE email='mig64@ki.se'")
+                ).scalar_one()
+                c.execute(
+                    text(
+                        "INSERT INTO workspaces (id, title, owner_id, status, "
+                        "current_phase) VALUES (gen_random_uuid(), 'W64', :u, "
+                        "'drafting', 'setup')"
+                    ),
+                    {"u": uid},
+                )
+                ws_id = c.execute(
+                    text("SELECT id FROM workspaces WHERE title='W64'")
+                ).scalar_one()
+                c.execute(
+                    text(
+                        "INSERT INTO workspace_setup_jobs (id, workspace_id, status) "
+                        "VALUES (gen_random_uuid(), :w, 'queued')"
+                    ),
+                    {"w": ws_id},
+                )
 
-        # A pre-existing row reads NULL, not 0.
+            with eng.connect() as c:
+                for table in FENCED_TABLES:
+                    assert "claimed_at_generation" not in _cols(c, table), (
+                        f"downgrade left claimed_at_generation on {table}"
+                    )
+        finally:
+            command.upgrade(cfg, "head")
+
         with eng.connect() as c:
+            for table in FENCED_TABLES:
+                assert "claimed_at_generation" in _cols(c, table), (
+                    f"re-upgrade did not restore claimed_at_generation on {table}"
+                )
+            # The row that predates the column survived, identified by ITS OWN id
+            # — a global count would be hostage to any other row in the shared DB.
             got = c.execute(
                 text(
                     "SELECT claimed_at_generation FROM workspace_setup_jobs "
@@ -871,50 +1117,10 @@ def test_migration_0064_round_trips(pg_url):
                 {"w": ws_id},
             ).scalar_one()
         assert got is None, (
-            f"a legacy row must read NULL (unfenced), got {got!r} — a "
-            f"server_default would make this 0, which is a real generation"
+            f"a row that predates the column must read NULL (legacy, unfenced), "
+            f"got {got!r} — a server_default would make this 0, which is a real "
+            f"generation and would fence the row against a real epoch"
         )
-
-        command.downgrade(cfg, "0063")
-        with eng.connect() as c:
-            for table in FENCED_TABLES:
-                cols = {
-                    r[0]
-                    for r in c.execute(
-                        text(
-                            "SELECT column_name FROM information_schema.columns "
-                            "WHERE table_name = :t"
-                        ),
-                        {"t": table},
-                    )
-                }
-                assert "claimed_at_generation" not in cols, (
-                    f"downgrade left claimed_at_generation on {table}"
-                )
-            # The seeded row survived the downgrade.
-            assert (
-                c.execute(
-                    text("SELECT count(*) FROM workspace_setup_jobs")
-                ).scalar_one()
-                == 1
-            )
-
-        command.upgrade(cfg, "head")
-        with eng.connect() as c:
-            for table in FENCED_TABLES:
-                cols = {
-                    r[0]
-                    for r in c.execute(
-                        text(
-                            "SELECT column_name FROM information_schema.columns "
-                            "WHERE table_name = :t"
-                        ),
-                        {"t": table},
-                    )
-                }
-                assert "claimed_at_generation" in cols, (
-                    f"re-upgrade did not restore claimed_at_generation on {table}"
-                )
     finally:
         eng.dispose()
 ```
@@ -1014,20 +1220,23 @@ Run:
 ```bash
 uv run pytest tests/test_migration_0064_claimed_at_generation.py -q > /tmp/f1t3.log 2>&1; echo "EXIT=$?"; tail -20 /tmp/f1t3.log
 ```
-Expected: `3 passed`.
+Expected: `4 passed`.
 
-- [ ] **Step 6: Verify the model and the migration agree**
-
-A model column with no migration (or the reverse) is a drift bug that only
-surfaces in production. Run the full suite — it includes
-`tests/test_alembic_v2_round_trip.py`, which compares metadata against head:
+- [ ] **Step 6: Run the full suite**
 
 ```bash
 uv run pytest -n 16 --dist loadfile -q > /tmp/f1full.log 2>&1; echo "EXIT=$?"; tail -5 /tmp/f1full.log
 ```
-Expected: `3519 passed, 1 skipped` (baseline 3501 + 8 from Task 1 + 7 from Task 2
-+ 3 from Task 3). The `1 skipped` must still be exactly 1. Any other total means
+Expected: `3521 passed, 1 skipped` (baseline 3501 + 9 from Task 1 + 7 from Task 2
++ 4 from Task 3). The `1 skipped` must still be exactly 1. Any other total means
 something beyond this plan changed — investigate before continuing.
+
+Note what this run does NOT prove: nothing in the existing suite compares
+`Base.metadata` against the migrated schema. `test_alembic_v2_round_trip.py`
+round-trips 0005–0008 and asserts specific named columns; it does not diff
+metadata. `test_every_model_declares_the_column_matching_the_migration` (Step 1)
+is the only thing standing between this slice and a schema/ORM split, which is
+why Step 9 mutates against it specifically.
 
 - [ ] **Step 7: Mutation — give the column a server_default of 0**
 
@@ -1044,7 +1253,7 @@ assertion) and `test_migration_0064_round_trips` (the legacy row reads NULL
 assertion) go RED. Two tests, because this is the one mistake with two distinct
 consequences — a wrong schema and a wrong value for existing rows.
 
-Revert. Re-run and confirm `3 passed`. Confirm `git status` is clean.
+Revert. Re-run and confirm `4 passed`. Confirm `git status` is clean.
 
 - [ ] **Step 8: Mutation — add attachment_jobs to the table list**
 
@@ -1053,12 +1262,43 @@ Add `"attachment_jobs"` to `FENCED_TABLES` in the **migration only** (not the te
 Run the test file. **Required outcome:** exactly
 `test_the_dead_attachment_jobs_table_is_not_touched` goes RED.
 
-Revert. Re-run and confirm `3 passed`. Confirm `git status` is clean.
+Revert. Re-run and confirm `4 passed`. Confirm `git status` is clean.
 
-- [ ] **Step 9: Run lint and commit**
+- [ ] **Step 9: Mutation — drop ONE model's column, keeping all 7 in the migration**
+
+Remove the `claimed_at_generation` block from `ReviewRun` (:1485) only. The
+migration keeps all seven tables, so the database is correct and only the ORM is
+blind — the exact split no other test in this repo can see.
+
+Run:
+```bash
+uv run pytest tests/test_migration_0064_claimed_at_generation.py -q > /tmp/f1t3b.log 2>&1; echo "EXIT=$?"; tail -20 /tmp/f1t3b.log
+```
+**Required outcome:** exactly
+`test_every_model_declares_the_column_matching_the_migration` goes RED, naming
+`ReviewRun`. The two `inspect()`-based tests must stay GREEN — they read the
+database, which is still correct, and that contrast is the whole point of adding
+this test.
+
+Then confirm the gap is real by running the full suite with the mutation still
+applied:
+```bash
+uv run pytest -n 16 --dist loadfile -q > /tmp/f1t3c.log 2>&1; echo "EXIT=$?"; tail -5 /tmp/f1t3c.log
+```
+**Expected:** exactly one failure — the test above. Report the number. If
+anything else fails, say so: it means the repo had drift protection after all,
+somewhere this plan did not find.
+
+Revert. Re-run and confirm `4 passed`. Confirm `git status` is clean.
+
+- [ ] **Step 10: Run lint and commit**
 
 ```bash
-uv run ruff check . 2>&1 | tail -3
+uv run ruff check . > /tmp/f1ruff.log 2>&1; echo "RUFF_EXIT=$?"; tail -5 /tmp/f1ruff.log
+```
+Expected: `RUFF_EXIT=0` and `All checks passed!`.
+
+```bash
 git add alembic/versions/0064_claimed_at_generation.py src/call_manager/db/models.py tests/test_migration_0064_claimed_at_generation.py
 git commit -m "feat(fencing): claimed_at_generation on the 7 live job tables (F1 Task 3)"
 ```
@@ -1080,6 +1320,10 @@ That is the property that makes this branch safe to merge into a system with col
 live in production, and it is exactly the kind of claim that quietly stops being
 true. It gets its own reviewer gate. It is also the seed of F2's coverage gate,
 which inverts it once conversion begins.
+
+This task is **transient by design** — F2 deletes this file. Nothing permanent may
+depend on it. That is why the anti-merge invariant lives in Task 1's
+`test_fencing.py` instead.
 
 - [ ] **Step 1: Write the test**
 
@@ -1172,34 +1416,15 @@ def test_nothing_reads_or_writes_claimed_at_generation_yet():
         "F1 adds the column but wires nothing (Global Constraint 1); these "
         "modules reference claimed_at_generation:\n  " + "\n  ".join(offenders)
     )
-
-
-def test_the_retirement_predicate_still_has_no_liveness_clause():
-    """Global Constraint 2, pinned structurally.
-
-    jobs_retirement._still_at_generation runs during the delete fan-out, when
-    soft_deleted_at is ALREADY stamped, so it must match a DELETED workspace.
-    Adding a liveness clause — the obvious 'DRY it with live_at_generation' move
-    — would make every cancel a no-op and silently disarm the entire retirement
-    fan-out. No existing test would fail, because every retirement test asserts
-    a cancel HAPPENED and a no-op cancel leaves the row in its prior state only
-    when the row was already terminal.
-    """
-    src = (SRC / "proposal_assist" / "jobs_retirement.py").read_text(encoding="utf-8")
-    tree = ast.parse(src)
-    fn = next(
-        n
-        for n in ast.walk(tree)
-        if isinstance(n, ast.FunctionDef) and n.name == "_still_at_generation"
-    )
-    body = ast.get_source_segment(src, fn) or ""
-    assert "soft_deleted_at" not in body, (
-        "_still_at_generation must NOT check soft_deleted_at: it runs during the "
-        "delete fan-out when the workspace is ALREADY deleted, so a liveness "
-        "clause makes every cancel a no-op. It is NOT a duplicate of "
-        "live_at_generation — the two are opposites (Global Constraint 2)."
-    )
 ```
+
+**Not in this file:** the anti-merge pin. It lives in `test_fencing.py` (Task 1,
+`test_the_retirement_predicate_and_the_fence_predicate_are_opposites`) and is
+**behavioural**, not structural. A structural version that greps
+`_still_at_generation` for the text `soft_deleted_at` is defeated by the very
+refactor it exists to stop, because `return live_at_generation(...)` contains no
+such text — and it would die with this file when F2 replaces it, while the
+invariant is permanent.
 
 - [ ] **Step 2: Run the test to verify it passes**
 
@@ -1207,10 +1432,10 @@ Run:
 ```bash
 uv run pytest tests/proposal_assist/test_fencing_inertness.py -q > /tmp/f1t4.log 2>&1; echo "EXIT=$?"; tail -20 /tmp/f1t4.log
 ```
-Expected: `4 passed`. If any fails now, a previous task converted a call site —
+Expected: `3 passed`. If any fails now, a previous task converted a call site —
 find it and revert that change before continuing.
 
-- [ ] **Step 3: Mutation — wire a primitive into a caller**
+- [ ] **Step 3: Mutation — wire a primitive into a caller by import**
 
 In `src/call_manager/proposal_assist/jobs_retirement.py`, add at the top of the
 imports:
@@ -1222,45 +1447,59 @@ from call_manager.proposal_assist.fencing import live_at_generation  # noqa: F40
 Run the test file. **Required outcome:** exactly
 `test_no_production_module_imports_the_fencing_primitives_yet` goes RED.
 
-Revert. Re-run and confirm `4 passed`.
+Revert. Re-run and confirm `3 passed`.
 
-- [ ] **Step 4: Mutation — add the liveness clause to the retirement predicate**
+- [ ] **Step 4: Mutation — wire a primitive in via a module alias**
 
-In `jobs_retirement.py`, add `Workspace.soft_deleted_at.is_(None),` to
-`_still_at_generation`'s `exists().where(...)`.
+The import test alone would miss a call reached through a module alias. In
+`jobs_retirement.py`:
 
-Run:
-```bash
-uv run pytest tests/proposal_assist/test_fencing_inertness.py -q > /tmp/f1t4.log 2>&1; echo "EXIT=$?"; tail -20 /tmp/f1t4.log
-```
-**Required outcome:** exactly `test_the_retirement_predicate_still_has_no_liveness_clause`
-goes RED.
-
-Then, still with the mutation applied, run the retirement suites to record what the
-existing tests do about it:
-
-```bash
-uv run pytest tests/proposal_assist/test_phase0_retirement.py tests/proposal_assist/test_jobs_retirement_generation.py -q > /tmp/f1t4b.log 2>&1; echo "EXIT=$?"; tail -20 /tmp/f1t4b.log
+```python
+from call_manager.proposal_assist import fencing as _f  # noqa: F401
 ```
 
-Report the result in the task report either way. This measures how much protection
-the structural pin is actually adding: if those suites go red too, the pin is a
-second line of defence; if they stay green, the pin is the ONLY thing standing
-between a plausible refactor and a silently disarmed retirement path.
+and inside `cancel_setup_jobs_for_workspace`, before the `return`, add:
 
-Revert the mutation. Re-run both commands and confirm green.
+```python
+    _ = _f.live_at_generation(workspace_id, generation)
+```
 
-- [ ] **Step 5: Run the full suite, lint, and commit**
+Run the test file. **Required outcome:** BOTH
+`test_no_production_module_imports_the_fencing_primitives_yet` and
+`test_no_production_module_calls_the_fencing_primitives_yet` go RED — the second
+is the one that matters, since it is what catches an aliased call the first would
+also have caught here only by luck of the module path.
+
+Revert. Re-run and confirm `3 passed`. Confirm `git diff --stat` no longer lists
+`jobs_retirement.py`.
+
+- [ ] **Step 5: Mutation — reference the column from a claim path**
+
+In `src/call_manager/proposal_assist/phases/setup.py`, inside
+`claim_next_setup_job` (:279), add after the job is flipped to running:
+
+```python
+    job.claimed_at_generation = 0
+```
+
+Run the test file. **Required outcome:** exactly
+`test_nothing_reads_or_writes_claimed_at_generation_yet` goes RED, naming
+`setup.py`.
+
+Revert. Re-run and confirm `3 passed`. Confirm `git diff --stat` no longer lists
+`setup.py`.
+
+- [ ] **Step 6: Run the full suite, lint, and commit**
 
 ```bash
 uv run pytest -n 16 --dist loadfile -q > /tmp/f1full.log 2>&1; echo "EXIT=$?"; tail -5 /tmp/f1full.log
-uv run ruff check . 2>&1 | tail -3
+uv run ruff check . > /tmp/f1ruff.log 2>&1; echo "RUFF_EXIT=$?"; tail -5 /tmp/f1ruff.log
 ```
-Expected: `3523 passed, 1 skipped` (3501 baseline + 8 + 7 + 3 + 4), ruff clean.
+Expected: `3524 passed, 1 skipped` (3501 baseline + 9 + 7 + 4 + 3), `RUFF_EXIT=0`.
 
 ```bash
 git add tests/proposal_assist/test_fencing_inertness.py
-git commit -m "test(fencing): pin F1 inertness and the anti-merge invariant (F1 Task 4)"
+git commit -m "test(fencing): pin F1 inertness structurally (F1 Task 4)"
 ```
 
 ---
@@ -1269,9 +1508,12 @@ git commit -m "test(fencing): pin F1 inertness and the anti-merge invariant (F1 
 
 Before calling F1 done:
 
-- [ ] `uv run pytest -n 16 --dist loadfile` → `3523 passed, 1 skipped`
-- [ ] `uv run ruff check .` → `All checks passed!`
+- [ ] `uv run pytest -n 16 --dist loadfile` → `3524 passed, 1 skipped`
+- [ ] `uv run ruff check .` (redirected, exit code read) → `All checks passed!`
 - [ ] `uv run alembic heads` → `0064`
+- [ ] The suite leaves the shared testcontainer database at head — run the
+      migration test file twice in a row and confirm both runs pass. A stranded
+      0063 shows up as unrelated failures in whatever runs next.
 - [ ] `git diff --stat bc1bdec..HEAD` touches only: `fencing.py`, `models.py`,
       `alembic/versions/0064_claimed_at_generation.py`, and the four new test files
 - [ ] No frontend change, no OpenAPI change, no route change — F1 adds no HTTP surface
