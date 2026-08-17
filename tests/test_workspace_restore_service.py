@@ -74,19 +74,20 @@ def test_restore_clears_soft_deleted_at_and_increments_generation(pg_session_fac
 
 
 @pytest.mark.parametrize(
-    "cancelled_from, expected_status, should_restore",
+    "cancelled_from, expected_status, started_at_cleared",
     [
         ("queued", "queued", True),
         ("running", "queued", True),
-        ("waiting_for_rubric_review", "waiting_for_rubric_review", True),
+        ("waiting_for_rubric_review", "waiting_for_rubric_review", False),
     ],
 )
 def test_the_setup_job_is_restored_to_a_state_that_progresses(
-    pg_session_factory, cancelled_from, expected_status, should_restore
+    pg_session_factory, cancelled_from, expected_status, started_at_cleared
 ):
     """_SETUP_RESTORE_MAP: each deletion-cancelled job is restored to a state
     that progresses. 'running' must map to 'queued' (not 'running'), because no
     worker will own it after restore — see spec 5.2.1."""
+    started = datetime(2026, 8, 1, 9, 0, tzinfo=UTC)
     with pg_session_factory() as s:
         owner = make_user(s)
         ws = make_workspace(s, owner=owner)
@@ -94,12 +95,16 @@ def test_the_setup_job_is_restored_to_a_state_that_progresses(
         ws_id = ws.id
         admin_id = owner.id
         # Create a setup job pre-cancelled as if the retirement hook ran.
+        # attempts=2: burned retries must survive the restore (spec 5.2.1).
+        # started_at=started: preserved for waiting_for_rubric_review, cleared for queued.
         job = WorkspaceSetupJob(
             workspace_id=ws_id,
             status="cancelled",
             cancelled_from=cancelled_from,
             completed_at=datetime.now(UTC),
             last_error="cancelled: workspace deleted",
+            started_at=started,
+            attempts=2,
         )
         s.add(job)
         s.commit()
@@ -113,8 +118,7 @@ def test_the_setup_job_is_restored_to_a_state_that_progresses(
         outcome = restore_workspace_db(s, workspace_id=ws_id, admin_id=admin_id)
 
     assert outcome.transitioned is True
-    if should_restore:
-        assert outcome.setup_job_restored_to == expected_status
+    assert outcome.setup_job_restored_to == expected_status
 
     with pg_session_factory() as s:
         job_row = s.get(WorkspaceSetupJob, job_id)
@@ -122,8 +126,10 @@ def test_the_setup_job_is_restored_to_a_state_that_progresses(
         assert job_row.cancelled_from is None
         assert job_row.completed_at is None
         assert job_row.last_error is None
-        if expected_status == "queued":
-            assert job_row.started_at is None
+        assert (job_row.started_at is None) is started_at_cleared
+        # NOT reset: a job that burned retries before the deletion does not get
+        # a fresh budget for having been deleted and restored.
+        assert job_row.attempts == 2
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +169,52 @@ def test_cancelled_job_with_no_cancelled_from_is_left_alone(pg_session_factory):
         job_row = s.get(WorkspaceSetupJob, job_id)
         assert job_row.status == "cancelled"
         assert job_row.cancelled_from is None
+
+
+# ---------------------------------------------------------------------------
+# Test 3b: Uncancelled running job (SKIP LOCKED survivor) is normalized to queued
+# ---------------------------------------------------------------------------
+
+
+def test_uncancelled_running_job_is_normalized_to_queued(pg_session_factory):
+    """A setup job still 'running' with cancelled_from=None is an interrupted
+    source: the retirement hook's SKIP LOCKED passed over a row a live worker held,
+    and that worker died with the deletion. Restore treats it the same as a
+    cancelled-from-running job: normalized to 'queued'.
+    This is distinct from a *cancelled* job with cancelled_from=None, which is
+    left alone (covered by test_cancelled_job_with_no_cancelled_from_is_left_alone).
+    """
+    with pg_session_factory() as s:
+        owner = make_user(s)
+        ws = make_workspace(s, owner=owner)
+        s.flush()
+        ws_id = ws.id
+        admin_id = owner.id
+        job = WorkspaceSetupJob(
+            workspace_id=ws_id,
+            status="running",
+            cancelled_from=None,
+        )
+        s.add(job)
+        s.commit()
+        job_id = job.id
+
+    with pg_session_factory() as s:
+        soft_delete_workspace_for_test(s, workspace_id=ws_id)
+
+    with pg_session_factory() as s:
+        outcome = restore_workspace_db(s, workspace_id=ws_id, admin_id=admin_id)
+
+    assert outcome.transitioned is True
+    assert outcome.setup_job_restored_to == "queued"
+
+    with pg_session_factory() as s:
+        job_row = s.get(WorkspaceSetupJob, job_id)
+        assert job_row.status == "queued"
+        assert job_row.cancelled_from is None
+        assert job_row.completed_at is None
+        assert job_row.last_error is None
+        assert job_row.started_at is None
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +258,7 @@ def test_audit_event_committed_in_same_transaction(pg_session_factory):
 
 
 # ---------------------------------------------------------------------------
-# Test 5: Failed commit leaves nothing committed
+# Test 6: Failed commit leaves nothing committed
 # ---------------------------------------------------------------------------
 
 
@@ -273,7 +325,7 @@ def test_failed_commit_leaves_nothing(pg_session_factory):
 
 
 # ---------------------------------------------------------------------------
-# Test 6: Already-live workspace returns transitioned=False
+# Test 7: Already-live workspace returns transitioned=False
 # ---------------------------------------------------------------------------
 
 
@@ -319,7 +371,7 @@ def test_already_live_workspace_returns_transitioned_false(pg_session_factory):
 
 
 # ---------------------------------------------------------------------------
-# Test 7: Cancelled TurnJobs stay cancelled after restore
+# Test 8: Cancelled TurnJobs stay cancelled after restore
 # ---------------------------------------------------------------------------
 
 
