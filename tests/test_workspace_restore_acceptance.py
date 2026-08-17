@@ -21,14 +21,20 @@ Two layers:
   collection inside the callback raises "deque mutated during iteration".
 
 The seam for 7 and 8 fires on the statement that clears `soft_deleted_at`
-(`UPDATE workspaces`). That only works because restore takes its locks in the
-normative M → J → W order: the workspace UPDATE happens AFTER the setup-job
-`SELECT ... FOR UPDATE`, so the racing writer arrives while restore holds the job
-lock and its `SKIP LOCKED` passes over the row. Under the M → W → J inversion the
-job is still unlocked when the seam fires, so the racing cancel lands and is not
-repaired — which is exactly what those tests must catch. Seed an UNCANCELLED
-`queued` job (not a cancelled one): a cancelled job makes restore emit its own
-`UPDATE workspace_setup_jobs`, which the trigger would match at the wrong instant.
+(`UPDATE workspaces`). What these tests actually prove is that restore's
+`SELECT ... FOR UPDATE` on the setup-job row prevents a concurrent retirement hook
+or reconciliation from leaving the job `cancelled`: dropping `.with_for_update()`
+reddens BOTH tests. Cancel-survival holds under BOTH statement orderings — under
+the shipped M → J → W the racing cancel hits the job lock and SKIP LOCKED skips
+it; under M → W → J the racing cancel commits first and restore's FOR UPDATE
+re-read reads it and repairs it via the `cancelled_from` mapping (cancelled →
+queued). Inverting to M → W → J therefore stays GREEN — it is an equivalent
+mutation for this cancel-survival property. The M → J → W order IS still
+normative, but for a reason these single-racer seams cannot observe: deadlock
+avoidance (Postgres 40P01) against the setup worker and the activate route,
+enforced by the lock-order documentation. Seed an UNCANCELLED `queued` job (not a
+cancelled one): a cancelled job makes restore emit its own `UPDATE
+workspace_setup_jobs`, which the trigger would match at the wrong instant.
 """
 
 from __future__ import annotations
