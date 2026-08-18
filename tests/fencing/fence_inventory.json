@@ -12,7 +12,7 @@
     "path": "src/call_manager/proposal_assist/coherence/jobs.py",
     "symbol": "claim_next_coherence_job",
     "category": "semantic",
-    "fenced": false,
+    "fenced": true,
     "slice": "F3a"
   },
   {
@@ -20,7 +20,7 @@
     "path": "src/call_manager/proposal_assist/evaluator/jobs.py",
     "symbol": "claim_next_evaluator_job",
     "category": "semantic",
-    "fenced": false,
+    "fenced": true,
     "slice": "F3a"
   },
   {
@@ -36,7 +36,7 @@
     "path": "src/call_manager/proposal_assist/review/jobs.py",
     "symbol": "claim_next_review_run",
     "category": "semantic",
-    "fenced": false,
+    "fenced": true,
     "slice": "F3a"
   },
   {
@@ -44,7 +44,7 @@
     "path": "src/call_manager/proposal_assist/uncited_claims/jobs.py",
     "symbol": "claim_next_uncited_claims_job",
     "category": "semantic",
-    "fenced": false,
+    "fenced": true,
     "slice": "F3a"
   },
   {
@@ -125,7 +125,7 @@
     "path": "src/call_manager/proposal_assist/coherence/agent.py",
     "symbol": "build_keeper_adapter.tools_factory",
     "category": "semantic",
-    "fenced": false,
+    "fenced": true,
     "slice": "F3a",
     "ctx_lifetime": "one_shot"
   },
@@ -134,7 +134,7 @@
     "path": "src/call_manager/proposal_assist/drafting/factory.py",
     "symbol": "_build_adapter.tools_factory",
     "category": "semantic",
-    "fenced": false,
+    "fenced": true,
     "slice": "F3a",
     "ctx_lifetime": "retained"
   },
@@ -143,7 +143,7 @@
     "path": "src/call_manager/proposal_assist/evaluator/agent.py",
     "symbol": "build_evaluator_adapter.tools_factory",
     "category": "semantic",
-    "fenced": false,
+    "fenced": true,
     "slice": "F3a",
     "ctx_lifetime": "one_shot"
   },
@@ -152,7 +152,7 @@
     "path": "src/call_manager/proposal_assist/review/agent.py",
     "symbol": "build_review_adapter.tools_factory",
     "category": "semantic",
-    "fenced": false,
+    "fenced": true,
     "slice": "F3a",
     "ctx_lifetime": "one_shot"
   },
@@ -161,7 +161,7 @@
     "path": "src/call_manager/proposal_assist/uncited_claims/agent.py",
     "symbol": "build_uncited_claims_adapter.tools_factory",
     "category": "semantic",
-    "fenced": false,
+    "fenced": true,
     "slice": "F3a",
     "ctx_lifetime": "one_shot"
   }

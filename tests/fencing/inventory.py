@@ -62,7 +62,7 @@ RETAINED_PINS = {
 #: F3 is split into sub-slices (see the F3 mechanism spec §7); F4-F9 keep the
 #: meanings the architecture spec gives them.
 SLICE_STATUS = {
-    "F3a": "pending",   # claim identity for every tool-originating actor
+    "F3a": "complete",  # claim identity for every tool-originating actor
     "F3b": "pending",   # the ports
     "F3c": "pending",   # the import gate
     "F3d": "pending",   # convert the tool sites
