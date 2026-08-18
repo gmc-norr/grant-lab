@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 
 import pytest
@@ -157,3 +158,51 @@ def test_every_background_claim_captures_the_generation(
         assert job is not None
         assert job.claimed_at_generation == 4
         s.commit()
+
+
+def test_a_one_shot_context_carries_the_generation_at_construction(tmp_path, monkeypatch):
+    """One-shot contexts KNOW their generation when they are built, so they must
+    carry it then. Only the retained interactive context may omit it, because
+    launch precedes the claim."""
+    from call_manager.proposal_assist.evaluator import agent as evaluator_agent
+
+    captured: dict = {}
+
+    # tools_factory returns build_proposal_assist_mcp_server(ctx) — an MCP
+    # server config, NOT the ToolContext. Capture the factory's INPUT.
+    import call_manager.proposal_assist.evaluator.agent as agent_mod
+
+    def _capture(ctx):
+        captured["ctx"] = ctx
+        return object()
+
+    monkeypatch.setattr(agent_mod, "build_proposal_assist_mcp_server", _capture)
+
+    class _FakeSDK:
+        def __init__(self, *, tools_factory=None, **kwargs):
+            tools_factory(tmp_path, uuid.uuid4())
+
+    evaluator_agent.build_evaluator_adapter(
+        settings=None,
+        session_factory=lambda: None,
+        workspace_id=uuid.uuid4(),
+        requested_by=1,
+        job_id=uuid.uuid4(),
+        draft_section_count=0,
+        spec_section_count=0,
+        rubric_criteria=[],
+        lifecycle_generation=11,
+        _sdk_factory=_FakeSDK,
+    )
+    assert captured["ctx"].lifecycle_generation == 11
+
+
+def test_a_one_shot_builder_REQUIRES_the_generation():
+    """A default would let a caller silently build a context with no belief,
+    which is the failure F3b cannot detect and the fence cannot survive."""
+    import inspect
+
+    from call_manager.proposal_assist.evaluator.agent import build_evaluator_adapter
+
+    param = inspect.signature(build_evaluator_adapter).parameters["lifecycle_generation"]
+    assert param.default is inspect.Parameter.empty

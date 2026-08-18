@@ -67,6 +67,7 @@ async def test_success_records_tokens_supersedes_prior_and_completes(
 
     await run_coherence_pass(
         job_id=job_id,
+        claimed_generation=0,
         session_factory=pg_session_factory,
         settings=settings,
         adapter_builder=lambda **kw: fake,
@@ -122,6 +123,7 @@ async def test_failure_marks_failed_and_supersedes_own_partial(
     fake = _Boom()
     await run_coherence_pass(
         job_id=job_id,
+        claimed_generation=0,
         session_factory=pg_session_factory,
         settings=settings,
         adapter_builder=lambda **kw: fake,
@@ -158,6 +160,7 @@ async def test_in_pass_timeout_fails_and_terminates(tmp_path, pg_session_factory
     fake = _Hang()
     await run_coherence_pass(
         job_id=job_id,
+        claimed_generation=0,
         session_factory=pg_session_factory,
         settings=settings,
         adapter_builder=lambda **kw: fake,
@@ -194,6 +197,7 @@ async def test_in_pass_timeout_on_launch_fails(tmp_path, pg_session_factory, _se
     fake = _HangLaunch()
     await run_coherence_pass(
         job_id=job_id,
+        claimed_generation=0,
         session_factory=pg_session_factory,
         settings=settings,
         adapter_builder=lambda **kw: fake,

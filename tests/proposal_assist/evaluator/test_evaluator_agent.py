@@ -21,6 +21,7 @@ def test_adapter_builds_with_pinned_section_counts(_settings_env):
         draft_section_count=3,
         spec_section_count=2,
         rubric_criteria=[{"name": "Quality", "weight": 1.0}],
+        lifecycle_generation=0,
     )
     assert adapter._allowed_tools == ["submit_scorecard"]
     # tools_factory stamps evaluator provenance + the pinned counts on the ToolContext.

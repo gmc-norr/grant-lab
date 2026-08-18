@@ -74,6 +74,7 @@ def _finalize_claims(raw: list[dict], section_texts: dict[int, str]) -> list[dic
 async def run_uncited_claims_pass(
     *,
     job_id: uuid.UUID,
+    claimed_generation: int,
     session_factory: sessionmaker,
     settings: Settings,
     adapter_builder=build_uncited_claims_adapter,
@@ -128,6 +129,7 @@ async def run_uncited_claims_pass(
             requested_by=requested_by,
             job_id=job_id,
             draft_section_count=draft_n,
+            lifecycle_generation=claimed_generation,
         )
         _entry.bind_adapter(adapter)
         handle = None
@@ -215,10 +217,12 @@ async def drain_uncited_claims_queue_tick(
         job = claim_next_uncited_claims_job(s)
         s.commit()
         job_id = job.id if job is not None else None
+        claimed_generation = job.claimed_at_generation if job is not None else None
     if job_id is None:
         return
     await run_uncited_claims_pass(
         job_id=job_id,
+        claimed_generation=claimed_generation,
         session_factory=session_factory,
         settings=settings,
         adapter_builder=adapter_builder,

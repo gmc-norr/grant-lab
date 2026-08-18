@@ -50,6 +50,7 @@ async def test_success_requires_scorecard_then_completes(
 
     await run_evaluator_pass(
         job_id=job_id,
+        claimed_generation=0,
         session_factory=pg_session_factory,
         settings=settings,
         adapter_builder=lambda **kw: _Adapter(),
@@ -77,6 +78,7 @@ async def test_no_scorecard_fails(tmp_path, pg_session_factory, _settings_env):
     fake.script_next_turn([TurnDoneEvent(tokens_in=1, tokens_out=1, model="m", session_id="s")])
     await run_evaluator_pass(
         job_id=job_id,
+        claimed_generation=0,
         session_factory=pg_session_factory,
         settings=settings,
         adapter_builder=lambda **kw: fake,
@@ -106,6 +108,7 @@ async def test_timeout_on_launch_fails(tmp_path, pg_session_factory, _settings_e
 
     await run_evaluator_pass(
         job_id=job_id,
+        claimed_generation=0,
         session_factory=pg_session_factory,
         settings=settings,
         adapter_builder=lambda **kw: _HangLaunch(),
@@ -141,6 +144,7 @@ async def test_cancelled_before_launch_skips_the_llm(tmp_path, pg_session_factor
 
     await run_evaluator_pass(
         job_id=job_id,
+        claimed_generation=0,
         session_factory=pg_session_factory,
         settings=settings,
         adapter_builder=builder,

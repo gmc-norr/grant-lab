@@ -91,6 +91,20 @@ class ToolContext:
     origin_kind: str = field(default="interactive_turn")
     origin_job_id: uuid.UUID | None = field(default=None)
 
+    # F3a: the generation this actor CLAIMED at — its belief for the whole run.
+    # One-shot contexts (the four background agents) receive it at construction.
+    # The retained interactive context cannot: it is built during
+    # controller.launch(), which deliberately precedes the claim
+    # (turns/processor.py — the orphan sweep must run first), so the value does
+    # not exist yet. It is stamped per turn by set_turn_provenance instead, and
+    # snapshotted per INVOCATION by the dispatcher (see Invocation).
+    lifecycle_generation: int | None = field(default=None)
+    # F3a: the turn job that owns THIS turn's tool calls, for owner-bound
+    # accounting. NOT origin_job_id — that is deliberately None for interactive
+    # contexts (see the origin_kind comment above) and is copied into durable
+    # provenance by the propose_* tools, so reusing it would change stored data.
+    active_turn_job_id: uuid.UUID | None = field(default=None)
+
     # SP2b-3a: the evaluator pass pins the section counts of the artifacts it
     # assembled into the instruction (captured at run start), so submit_scorecard
     # validates deep_link.section_index against the SAME HEAD it evaluated.

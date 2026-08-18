@@ -77,6 +77,7 @@ def test_the_coherence_prefix_aborts_for_a_workspace_deleted_under_it(
     asyncio.run(
         run_coherence_pass(
             job_id=job_id,
+            claimed_generation=0,
             session_factory=pg_session_factory,
             settings=Settings(),
             adapter_builder=_never_called_adapter_builder,
@@ -134,6 +135,7 @@ def test_the_coherence_prefix_holds_the_workspace_row_then_releases_it(
             asyncio.run(
                 run_coherence_pass(
                     job_id=job_id,
+                    claimed_generation=0,
                     session_factory=pg_session_factory,
                     settings=Settings(),
                     adapter_builder=_stub_adapter_builder,
@@ -242,6 +244,7 @@ def test_the_child_prefix_blocks_on_the_run_row_instead_of_committing_running(
                     session_factory=pg_session_factory,
                     settings=Settings(),
                     adapter_builder=_stub_adapter_builder,
+                    lifecycle_generation=0,
                 )
             )
         finally:
@@ -354,6 +357,7 @@ def test_finalization_takes_the_run_row_before_the_item_row(
                     session_factory=pg_session_factory,
                     settings=Settings(),
                     adapter_builder=_pausing_adapter_builder(gate, in_turn),
+                    lifecycle_generation=0,
                 )
             )
         finally:
@@ -421,6 +425,7 @@ async def test_every_review_child_is_tracked_as_its_own_entry(
             session_factory=pg_session_factory,
             settings=Settings(),
             adapter_builder=_sampling_builder,
+            lifecycle_generation=0,
         )
 
     assert peak, "the adapter was never built — the child did not run"
@@ -454,6 +459,7 @@ def test_the_evaluator_prefix_writes_nothing_for_a_deleted_workspace(
     asyncio.run(
         run_evaluator_pass(
             job_id=job_id,
+            claimed_generation=0,
             session_factory=pg_session_factory,
             settings=Settings(),
             adapter_builder=_never_called_adapter_builder,
@@ -491,6 +497,7 @@ def test_the_uncited_prefix_writes_nothing_for_a_deleted_workspace(
     asyncio.run(
         run_uncited_claims_pass(
             job_id=job_id,
+            claimed_generation=0,
             session_factory=pg_session_factory,
             settings=Settings(),
             adapter_builder=_never_called_adapter_builder,
@@ -524,6 +531,7 @@ def test_the_review_parent_prefix_writes_nothing_for_a_deleted_workspace(
     asyncio.run(
         run_review_pass(
             run_id=run_id,
+            claimed_generation=0,
             session_factory=pg_session_factory,
             settings=Settings(),
             adapter_builder=_never_called_adapter_builder,
@@ -645,6 +653,7 @@ def test_a_prefix_gives_up_instead_of_pinning_a_workspace_row_it_cannot_get(
                     session_factory=pg_session_factory,
                     settings=Settings(),
                     adapter_builder=_stub_adapter_builder,
+                    claimed_generation=0,
                     **{id_kwarg: row_id},
                 )
             )
@@ -710,6 +719,7 @@ def test_a_prefix_holds_the_workspace_row_then_releases_it(
                     session_factory=pg_session_factory,
                     settings=Settings(),
                     adapter_builder=_stub_adapter_builder,
+                    claimed_generation=0,
                     **{id_kwarg: row_id},
                 )
             )

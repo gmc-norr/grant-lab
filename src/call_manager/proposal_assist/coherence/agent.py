@@ -37,6 +37,7 @@ def build_keeper_adapter(
     requested_by: int | None,
     job_id: uuid.UUID,
     locked: bool,
+    lifecycle_generation: int,
 ) -> ClaudeAgentSDKAdapter:
     def tools_factory(repo_dir: Path, ws_id: uuid.UUID):
         ctx = ToolContext(
@@ -47,6 +48,7 @@ def build_keeper_adapter(
             origin_kind="coherence_session",
             origin_job_id=job_id,
             created_by=requested_by,
+            lifecycle_generation=lifecycle_generation,
         )
         return build_proposal_assist_mcp_server(ctx)
 

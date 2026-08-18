@@ -20,7 +20,8 @@ class _Handle:
 
 
 def make_fake_builder(outer_session_factory, behavior):
-    def builder(*, settings, session_factory, workspace_id, review_run_id, item_id, kind):
+    def builder(*, settings, session_factory, workspace_id, review_run_id, item_id, kind,
+                lifecycle_generation):
         class _Fake:
             async def launch(self, ctx):
                 return _Handle(workspace_id)
@@ -66,6 +67,7 @@ async def test_happy_path_all_done(review_active_workspace, _settings_env):
     settings.workspaces_dir = str(wdir)
     await run_review_pass(
         run_id=run_id,
+        claimed_generation=0,
         session_factory=session_factory,
         settings=settings,
         adapter_builder=make_fake_builder(session_factory, {}),
@@ -87,6 +89,7 @@ async def test_one_persona_fails_is_partial(review_active_workspace, _settings_e
     settings.workspaces_dir = str(wdir)
     await run_review_pass(
         run_id=run_id,
+        claimed_generation=0,
         session_factory=session_factory,
         settings=settings,
         adapter_builder=make_fake_builder(session_factory, {"persona_domain_skeptic": "fail"}),
@@ -105,6 +108,7 @@ async def test_fit_check_fail_with_consolidation_is_partial(review_active_worksp
     settings.workspaces_dir = str(wdir)
     await run_review_pass(
         run_id=run_id,
+        claimed_generation=0,
         session_factory=session_factory,
         settings=settings,
         adapter_builder=make_fake_builder(session_factory, {"fit_check": "fail"}),
@@ -132,6 +136,7 @@ async def test_all_personas_fail_is_failed(review_active_workspace, _settings_en
     settings.workspaces_dir = str(wdir)
     await run_review_pass(
         run_id=run_id,
+        claimed_generation=0,
         session_factory=session_factory,
         settings=settings,
         adapter_builder=make_fake_builder(session_factory, behavior),
@@ -161,7 +166,8 @@ async def test_subcall_skips_when_run_no_longer_running(review_active_workspace,
 
     launched = {"v": False}
 
-    def builder(*, settings, session_factory, workspace_id, review_run_id, item_id, kind):
+    def builder(*, settings, session_factory, workspace_id, review_run_id, item_id, kind,
+                lifecycle_generation):
         class _Fake:
             async def launch(self, ctx):
                 launched["v"] = True
@@ -191,6 +197,7 @@ async def test_subcall_skips_when_run_no_longer_running(review_active_workspace,
         session_factory=session_factory,
         settings=settings,
         adapter_builder=builder,
+        lifecycle_generation=0,
     )
     assert launched["v"] is False
     with session_factory() as s:
@@ -218,6 +225,7 @@ async def test_artifact_commit_failure_fails_run(
     settings.workspaces_dir = str(wdir)
     await run_review_pass(
         run_id=run_id,
+        claimed_generation=0,
         session_factory=session_factory,
         settings=settings,
         adapter_builder=make_fake_builder(session_factory, {}),
@@ -244,7 +252,8 @@ async def test_reaper_during_subcall_keeps_spend_and_does_not_resurrect(
         s.commit()
         run_id = run.id
 
-    def builder(*, settings, session_factory, workspace_id, review_run_id, item_id, kind):
+    def builder(*, settings, session_factory, workspace_id, review_run_id, item_id, kind,
+                lifecycle_generation):
         class _Fake:
             async def launch(self, ctx):
                 return _Handle(workspace_id)
@@ -286,6 +295,7 @@ async def test_reaper_during_subcall_keeps_spend_and_does_not_resurrect(
         session_factory=session_factory,
         settings=settings,
         adapter_builder=builder,
+        lifecycle_generation=0,
     )
 
     with session_factory() as s:

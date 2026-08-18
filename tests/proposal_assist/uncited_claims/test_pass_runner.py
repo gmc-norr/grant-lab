@@ -50,7 +50,7 @@ async def test_success_filters_hashes_and_dedupes(tmp_path, pg_session_factory, 
             yield TurnDoneEvent(tokens_in=10, tokens_out=5, model="m", session_id="s")
 
     await run_uncited_claims_pass(
-        job_id=job_id, session_factory=pg_session_factory, settings=settings,
+        job_id=job_id, claimed_generation=0, session_factory=pg_session_factory, settings=settings,
         adapter_builder=lambda **kw: _Adapter(),
     )
     with pg_session_factory() as s:
@@ -83,7 +83,7 @@ async def test_empty_submission_completes_with_no_rows(tmp_path, pg_session_fact
             yield TurnDoneEvent(tokens_in=1, tokens_out=1, model="m", session_id="s")
 
     await run_uncited_claims_pass(
-        job_id=job_id, session_factory=pg_session_factory, settings=settings,
+        job_id=job_id, claimed_generation=0, session_factory=pg_session_factory, settings=settings,
         adapter_builder=lambda **kw: _Adapter(),
     )
     with pg_session_factory() as s:
@@ -106,7 +106,7 @@ async def test_no_submission_fails(tmp_path, pg_session_factory, _settings_env):
     fake = FakeAgentAdapter()
     fake.script_next_turn([TurnDoneEvent(tokens_in=1, tokens_out=1, model="m", session_id="s")])
     await run_uncited_claims_pass(
-        job_id=job_id, session_factory=pg_session_factory, settings=settings,
+        job_id=job_id, claimed_generation=0, session_factory=pg_session_factory, settings=settings,
         adapter_builder=lambda **kw: fake,
     )
     with pg_session_factory() as s:
@@ -142,7 +142,7 @@ async def test_late_finalize_records_tokens_without_resurrecting(
             yield TurnDoneEvent(tokens_in=42, tokens_out=7, model="m", session_id="s")
 
     await run_uncited_claims_pass(
-        job_id=job_id, session_factory=pg_session_factory, settings=settings,
+        job_id=job_id, claimed_generation=0, session_factory=pg_session_factory, settings=settings,
         adapter_builder=lambda **kw: _Adapter(),
     )
     with pg_session_factory() as s:
@@ -170,7 +170,7 @@ async def test_timeout_on_launch_fails(tmp_path, pg_session_factory, _settings_e
             return await super().launch(context)
 
     await run_uncited_claims_pass(
-        job_id=job_id, session_factory=pg_session_factory, settings=settings,
+        job_id=job_id, claimed_generation=0, session_factory=pg_session_factory, settings=settings,
         adapter_builder=lambda **kw: _HangLaunch(),
     )
     with pg_session_factory() as s:
@@ -200,7 +200,7 @@ async def test_cancelled_before_launch_skips_the_llm(tmp_path, pg_session_factor
         return fake
 
     await run_uncited_claims_pass(
-        job_id=job_id, session_factory=pg_session_factory, settings=settings,
+        job_id=job_id, claimed_generation=0, session_factory=pg_session_factory, settings=settings,
         adapter_builder=builder,
     )
     assert fake.launches == []  # pre-launch recheck short-circuited — no LLM spend
