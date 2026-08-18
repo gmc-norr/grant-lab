@@ -1,6 +1,6 @@
 # Fence F3 — Ports, not Handles
 
-**Status:** agreed 2026-08-18 (revision 5). Mechanism spec for sub-slices F3a–F3f.
+**Status:** agreed 2026-08-18 (revision 7). Mechanism spec for sub-slices F3a–F3f.
 
 **Companion:** `2026-08-17-lifecycle-fence-design.md` is the architecture — why a
 fence exists, what the invariant is, and the F1–F9 slice breakdown. This document
@@ -159,17 +159,52 @@ and a delete/restore fits between them. That is the defect F1's Global Constrain
 names and that shipped here twice (`28abbc4`, `701fbb7`). There is no
 `require_live_generation` primitive and this design does not invent one.
 
-**Every effect operation declares one of four mechanisms, and its test proves that
-one:**
+**The predicate alone is not enough.** `live_at_generation` is an `exists()`
+subquery (`fencing.py:100`). It takes **no lock on the workspace row**, so under
+READ COMMITTED it evaluates against the statement's snapshot and a delete/restore
+committing after that snapshot is invisible to it. Reproduced on PostgreSQL 16: a
+generation-G `INSERT … SELECT … WHERE live_at_generation(...)` qualifies, pauses
+inside the statement, a second connection commits G+2, and the G effect lands
+durably against a workspace now at G+2.
+
+For an `UPDATE` this is masked today — PostgreSQL re-checks the `WHERE` against the
+updated row version when a concurrent transaction touches the **same target row**,
+which cancel-on-delete does. **That is compensation the architecture removes in
+step 3**, so the masking is temporary. An `INSERT` has no target row and is exposed
+now.
+
+**So every effect takes a shared lease on the workspace mutex key:**
+
+```python
+# effects — concurrent with each other, exclusive against lifecycle
+SELECT pg_advisory_xact_lock_shared(<workspace mutex key>)
+...effect statement, still carrying live_at_generation(...) in its WHERE...
+
+# delete / restore / any lifecycle transition — the EXISTING exclusive lock
+SELECT pg_advisory_xact_lock(<workspace mutex key>)
+```
+
+Shared locks do not conflict with one another, so effects stay concurrent. A
+lifecycle transition needs the exclusive lock, so it either waits for in-flight
+effects to commit or the effect waits and then observes the new generation. The
+predicate remains — it is what turns "I waited" into "I checked."
+
+**Every effect operation declares which mechanism it uses:**
 
 | Effect shape | Mechanism |
 |---|---|
-| DB `UPDATE` / `DELETE` | `live_at_generation(...)` **in the statement's `WHERE`**; inspect `rowcount` / `RETURNING`. One statement. |
-| DB `INSERT` | `INSERT … SELECT … WHERE live_at_generation(...)`. One statement. |
-| The txn already holds the target row `FOR UPDATE` | Assert on **that row**, not the mutex. `2026-08-17` §3.1 already requires this; `scorecard.py:93`, `uncited_claims.py:43` and `review_submit.py` all take `with_for_update=True` today. |
-| Git, filesystem, or multiple rows moving together | `acquire_commit_mutex_at_generation()` **before the first effect**, held through the transaction. |
+| DB `UPDATE` / `DELETE` | shared lease **+** `live_at_generation(...)` in the statement's `WHERE`; inspect `rowcount` / `RETURNING`. |
+| DB `INSERT` | shared lease **+** `INSERT … SELECT … WHERE live_at_generation(...)`. |
+| The txn already holds the **`Workspace`** row `FOR UPDATE` | assert on that row; no further lock. **Only the Workspace row qualifies** — see below. |
+| Git, filesystem, or multiple rows moving together | `acquire_commit_mutex_at_generation()` (the **exclusive** mutex) before the first effect, held through the transaction. |
 
-The fourth is the only one that takes a lock, and it is the only one where the
+**Mechanism 3 is restricted to the `Workspace` row, as `2026-08-17` §3.1 states.**
+Revision 6 widened it to any already-locked target row — an `EvaluatorJob`, an
+`UncitedClaimsJob`, a review item. Those rows do not carry the workspace's
+lifecycle state, so locking one proves nothing about the generation; what makes it
+appear safe today is, again, cancel-on-delete touching the same row.
+
+The fourth is the only one that takes the EXCLUSIVE lock, and it is the only one where the
 generation check and the effect are separated in time — which is precisely why it
 holds the mutex across the gap, and why `2026-08-17` §5's lock ordering binds it.
 
@@ -195,16 +230,18 @@ The worker-thread shape is real: `tools/references.py:527` uses
 `run_in_threadpool`, and a Python thread cannot be interrupted.
 
 So dispatch builds an immutable `Invocation` carrying the stamp and the
-authority-bearing provenance, and the tool receives that. A mutable context is a
+authority-bearing provenance, and the tool receives that. **The production
+signature is exact and F3a states it:** `_safe_tool` currently calls
+`impl(*args, **kwargs)` while its callers pass the mutable `ctx`. F3a changes that
+call to construct the `Invocation` at dispatch and pass it in `ctx`'s place, and
+**the overlapping-invocation test must drive that real dispatcher** — a test that
+snapshots at the helper level passes while production still hands over mutable
+context. A mutable context is a
 belief that can be overwritten while someone is still acting on it.
 
 `active_turn_job_id` cannot reuse `origin_job_id`: `registry.py:87` leaves that
 field `None` for interactive contexts *by design*, and `tools/proposal.py:169`
 copies it into durable provenance, so populating it would change stored data.
-
-**It cannot reuse `origin_job_id`.** `registry.py:87` leaves that field `None` for
-interactive contexts *by design*, and `tools/proposal.py:169` copies it into durable
-provenance — populating it would silently change stored data.
 
 ## 4. The gate
 
@@ -260,18 +297,6 @@ privatisation problem disappears rather than being solved.
 **Adding a new effect requires a reviewed implementation, a declared mechanism
 (§3.5), and a straddle test (§9).** The cost falls on adding authority, not on
 using it.
-
-### 4.1 What the boundary also fixes
-
-- **Injected sessions.** `proposals/accepting.py:207` passes its own request-owned
-  session into `_insert_citation_locked` under `tools/`. That helper moves into the
-  effects layer, where both callers reach it as an operation. `caller_fenced`
-  disappears as a category.
-- **Capability holders.** `ctx.citation_service` owns a session factory and commits
-  usage records (`citations/service.py:114`); `tools/audit.py:90` hands the factory
-  to the audit engine, which reaches `citations/verdict_cache.py::store_verdict`.
-  Each receives a narrow port instead — a `UsageRecorder` and a `VerdictCache` —
-  rather than a factory.
 
 ### 4.2 The F2 inventory becomes a checklist
 
@@ -355,13 +380,20 @@ two *unconditional* inertness guards — `test_nothing_imports_the_fencing_primi
 (`:191`). The moment a claim writes `claimed_at_generation`, the second goes red. So
 F3a must, in the same slice:
 
-- split `SLICE_STATUS` into `F3a…F3f` and reassign row ownership (§7 migration table);
+- split `SLICE_STATUS` into `F3a…F3f` and reassign row ownership as follows —
+  4 × `claim_fn` (the tool-originating background claims) → **F3a**;
+  6 × `claim_fn` remainder (`queue.py::claim_queued_jobs` → **F4**,
+  `setup.py::claim_next_setup_job` → **F5**); 5 × `tool_context` → **F3a**;
+  7 × `tool_commit` (5 semantic + 2 accounting) → **F3d**;
+  `_write_citekey_cache` → **F3d** (moves with its ancestor);
+  `_do_fetch_and_ingest` → **F3e**;
 - replace both inertness guards with **scoped per-sub-slice obligations** — "nothing
   outside F3a's identities writes the column yet" — rather than "nothing does";
 - leave `queue.py::claim_queued_jobs` and `setup.py::claim_next_setup_job` in F4/F5.
 
-F3c then installs a **ratchet** against the violations that still exist (a
-baseline count that may only decrease), and **F3f** brings it to zero and activates
+F3c then installs a **ratchet** against the violations that still exist — the
+**exact checked-in set** of remaining violating identities, not a count. A count
+lets one old violation disappear while a new one is introduced, and **F3f** brings it to zero and activates
 the permanent boundary. A gate that must pass green at every sub-slice boundary is
 otherwise impossible: F3d cannot satisfy a live import rule while ingest and the
 capability holders deliberately remain.
@@ -380,8 +412,12 @@ invocation, and prove it still presents G (§3.4).
 ### F3b — the ports *(additive; no caller converted)*
 
 `ports/queries.py`, `ports/effects.py`, `ports/accounting.py`, the DTOs and
-commands, `FenceStamp`, and `require_live_generation` over F1's primitives. Each
-operation gets its stale-generation test on arrival. No tool changes, so the branch
+commands, `FenceStamp`, the shared-lease helper of §3.5, and the exclusive
+`acquire_commit_mutex_at_generation` from F1. **There is no
+`require_live_generation`** — §3.5 explains why a bare pre-check cannot exist.
+
+**F3b ships a table naming every effect operation and the mechanism it uses**, and
+each operation arrives with the straddle test for *that* mechanism (§9). No tool changes, so the branch
 is inert in the F1 sense.
 
 ### F3c — the gate, and the inventory demotion
@@ -482,13 +518,16 @@ broken two-statement implementation of §3.5 passes it. The test must land the
 delete/restore **in the gap**:
 
 ```python
-# pause the operation after its validation point, before its effect commits
-with straddle(op_under_test):          # test seam, one per mechanism
-    delete_and_restore(workspace_id)   # generation advances here
+# The pause must be INSIDE the SQL, after the predicate qualifies — a Python
+# pause before execute() cannot expose the MVCC-snapshot race of §3.5.
+with straddle_in_sql(op_under_test):   # e.g. a slow function in the statement
+    delete_and_restore(workspace_id)   # commits G+2 in the gap
 assert_nothing_landed()
 ```
 
-At least one straddle test per mechanism in §3.5's table.
+At least one straddle test per mechanism in §3.5's table. **The INSERT case is the
+one that must be written first** — it has no target row, so no READ COMMITTED
+re-check masks the race, and it is the shape that reproduced on PostgreSQL 16.
 
 **And the assertion must name the field, not the row count.** Three of the five
 semantic sites *update an existing row* — `scorecard.py:92` writes a JSONB field,
@@ -510,9 +549,13 @@ tests.
 generation G, delete and restore, start a new turn at G+1, and assert the old
 actor's refund does not touch the new turn's row.
 
-**The gate is proven by negative fixtures** (F3c): a module under `tools/`
-importing `Session`, `sessionmaker`, `Engine`, a model, or `sqlalchemy` at all must
-fail, each as its own fixture.
+**The gate is proven against the ALLOWLIST, not a blacklist** (F3c). Fixtures that
+only import `Session`, `sessionmaker`, `Engine`, a model or `sqlalchemy` would pass
+against a forbidden-name implementation, which is not the rule §4 states. So the
+decisive fixture imports a **plausible but unapproved internal helper** — something
+with no SQLAlchemy in its own module — and must fail. Plus the recursive DTO
+contract test of §4.2, and a fixture reaching a resource locator
+(`ctx.repo_dir`) once locators are removed.
 
 ## 10. Risks
 
@@ -548,6 +591,54 @@ fail, each as its own fixture.
   design work that no boundary dissolves.
 
 ## 11. Changelog
+
+**Revision 7 (2026-08-18).** A seventh review kept the architecture and found one
+fundamental concurrency defect plus five corrections.
+
+- **Primitive A does not serialize against a lifecycle change.**
+  `live_at_generation` is an `exists()` subquery that takes **no lock on the
+  workspace row**, so under READ COMMITTED it reads the statement's snapshot and a
+  delete/restore committing after it is invisible. Reproduced on PostgreSQL 16 with
+  an `INSERT … SELECT … WHERE live_at_generation(...)` paused inside the statement.
+  For `UPDATE` this is masked only because cancel-on-delete touches the same target
+  row and triggers PostgreSQL's re-check — **compensation the architecture removes
+  in step 3**, so the masking expires. Every effect now takes
+  `pg_advisory_xact_lock_shared` on the workspace mutex key, against which
+  lifecycle transitions hold the existing exclusive lock; effects stay concurrent
+  with each other. The predicate remains, because it is what turns "I waited" into
+  "I checked" (§3.5).
+
+  **This is a defect in merged F1, not only in this spec.** F1 is inert — no
+  production caller — so nothing is broken today, and the fix lands as a companion
+  primitive in F3b rather than as a change to `fencing.py`'s existing surface.
+  `jobs_retirement._still_at_generation` has the same shape but a different failure
+  mode: a missed *cancel*, which the reaper catches, not a stale semantic effect.
+
+- **Mechanism 3 was too wide.** Revision 6 allowed asserting on any already-locked
+  target row. An `EvaluatorJob` or `UncitedClaimsJob` carries no lifecycle state, so
+  locking one proves nothing about the generation — and what makes it look safe is
+  once more cancel-on-delete. Restricted to the `Workspace` row, as `2026-08-17`
+  §3.1 always said.
+
+- **F3b still specified `require_live_generation`**, which §3.5 and revision 6's own
+  changelog say cannot exist. Removed, and F3b now ships the per-operation mechanism
+  table §3.5 requires.
+
+- **Two gate proofs were decorative.** A count-only ratchet lets one violation be
+  swapped for another — it now pins the exact set. And the negative fixtures tested
+  forbidden names, so a blacklist implementation would pass every one; the decisive
+  fixture now imports a plausible *unapproved internal helper*.
+
+- **The straddle test must pause inside the SQL**, after the predicate qualifies. A
+  Python pause before `execute()` cannot expose an MVCC-snapshot race. The `INSERT`
+  case is written first, being the one with no re-check to mask it.
+
+- **The dispatcher signature is now exact.** `_safe_tool` calls
+  `impl(*args, **kwargs)` with the mutable `ctx`; F3a changes that call site, and
+  the overlapping-invocation test must drive the real dispatcher.
+
+Also: the header said revision 5, §4.1/§4.2 were duplicated, `origin_job_id` was
+explained twice, and the F3a migration table was referenced but missing. All fixed.
 
 **Revision 6 (2026-08-18).** A sixth review kept the architecture and found seven
 targeted defects. Its verdict — *"another wholesale redesign is not warranted"* — is
