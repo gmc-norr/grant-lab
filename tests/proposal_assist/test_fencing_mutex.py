@@ -173,12 +173,28 @@ def test_a_deleted_workspace_observed_only_under_the_mutex_still_raises(
     pg_session_factory, migrated_engine
 ):
     """Same seam, deletion instead of a bump: the liveness half of the re-read
-    must also happen under the mutex, not off the pre-mutex instance."""
+    must also happen under the mutex, not off the pre-mutex instance.
+
+    The competing session takes the mutex, symmetrically with the bump test
+    above, because that is what a real deletion does —
+    `soft_delete_workspace_db` holds `acquire_commit_mutex_live` across the
+    whole transaction, and that is what makes the flip a linearization point
+    rather than a hope. A plain UPDATE here would still exercise fresh-read
+    ordering but not the serialization, and those are different properties.
+
+    Taking the mutex here does NOT deadlock, and any comment claiming otherwise
+    is wrong: the seam fires BEFORE the caller's own `pg_advisory_xact_lock`, so
+    the caller holds no lock at that instant and this session acquires, commits
+    and releases inside the callback. Measured: the file passes in ~4s.
+    """
     ws_id, gen = _seed(pg_session_factory)
     state = {"fired": False}
 
     def _delete_from_another_connection():
+        # Mutex-held, exactly as soft_delete_workspace_db is. The latch below
+        # keeps this session's own pg_advisory_xact_lock out of the seam.
         with pg_session_factory() as other:
+            acquire_commit_mutex(other, ws_id)
             ws = other.get(Workspace, ws_id)
             ws.soft_deleted_at = datetime.now(UTC)
             other.commit()
