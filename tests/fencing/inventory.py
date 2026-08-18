@@ -34,6 +34,36 @@ CATEGORIES_BY_KIND = {
 }
 CATEGORIES = frozenset().union(*CATEGORIES_BY_KIND.values())
 
+#: EXEMPTION PINS. `accounting` and `caller_fenced` short-circuit the semantic
+#: rule, and `retained` waives the construction-time generation. Each is a hole
+#: in the gate, so each is pinned to the exact identity a human reviewed. A new
+#: site cannot take an exemption by declaring one — it takes a diff here, which
+#: is the point.
+NON_SEMANTIC_PINS = {
+    ("tool_commit", "src/call_manager/proposal_assist/tools/citations.py",
+     "_write_citekey_cache"): "caller_fenced",
+    ("tool_commit", "src/call_manager/proposal_assist/tools/references.py",
+     "fetch_reference_impl"): "accounting",
+    ("tool_commit", "src/call_manager/proposal_assist/tools/references.py",
+     "fetch_reference_impl._refund_fetch_slot"): "accounting",
+}
+
+#: The ONE context built before its claim exists. `drafting/factory.py` runs
+#: inside `controller.launch(...)`, and launch deliberately precedes the claim
+#: (turns/processor.py:159 — the orphan sweep must run first). Every other
+#: context knows its generation at construction and must carry it.
+RETAINED_PINS = {
+    ("src/call_manager/proposal_assist/drafting/factory.py",
+     "_build_adapter.tools_factory"),
+}
+
+#: Per-slice activation. `pending` = that slice has not converted its sites, so
+#: every row must be `fenced: false`. `complete` = every row must be `true`.
+#: This is what makes the `slice` field load-bearing, and it is the successor to
+#: `test_f2_fences_nothing`: F3 flips its entry in the SAME commit it converts,
+#: and a forgotten flag fails the gate instead of passing silently.
+SLICE_STATUS = {"F3": "pending", "F4": "pending"}
+
 #: Extra declared keys, preserved verbatim across regeneration — they are what
 #: the verifier reads.
 OPTIONAL_KEYS = ("fenced_by", "ctx_lifetime")

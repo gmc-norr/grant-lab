@@ -7,7 +7,10 @@ import ast
 from tests.fencing.detectors import KIND_TOOL_CONTEXT, Site, qualified_defs
 from tests.fencing.inventory import (
     CATEGORIES_BY_KIND,
+    NON_SEMANTIC_PINS,
     REPO,
+    RETAINED_PINS,
+    SLICE_STATUS,
     SRC,
     UNCLASSIFIED,
     load_inventory,
@@ -95,16 +98,71 @@ def test_caller_fenced_entries_name_a_resolvable_ancestor():
         )
 
 
-def test_f2_fences_nothing():
-    """Global Constraint 1.
+def test_each_slice_matches_its_declared_status():
+    """Successor to F2's `test_f2_fences_nothing`, and permanent.
 
-    DELETE THIS TEST IN F3, in the same commit that flips the first entry — not
-    before, and never as a drive-by fix when it starts failing.
+    While a slice is `pending` every one of its rows must be `fenced: false`;
+    once it is `complete` every row must be `true`. F3 flips its entry in the
+    SAME commit it converts its sites, so a forgotten flag fails here instead of
+    leaving a semantic site unverified with green tests. This is also what makes
+    the `slice` field load-bearing — it was required but never read.
     """
-    fenced = [r for r in load_inventory() if r["fenced"]]
-    assert not fenced, (
-        "F2 must fence nothing; these are marked fenced:\n  "
-        + "\n  ".join(f"{r['kind']} {r['path']}::{r['symbol']}" for r in fenced)
+    problems = []
+    for row in load_inventory():
+        status = SLICE_STATUS.get(row["slice"])
+        assert status in {"pending", "complete"}, (
+            f"{row['slice']!r} has no entry in SLICE_STATUS: {row}"
+        )
+        want = status == "complete"
+        if row["fenced"] is not want:
+            problems.append(
+                f"{row['kind']} {row['path']}::{row['symbol']} is fenced="
+                f"{row['fenced']} but slice {row['slice']} is {status}"
+            )
+    assert not problems, (
+        "slice status and fenced flags disagree:\n  " + "\n  ".join(problems)
+    )
+
+
+def test_only_pinned_sites_take_a_non_semantic_category():
+    """`accounting` and `caller_fenced` short-circuit the semantic rule.
+
+    Without this pin, relabelling a semantic site `accounting` is a legal
+    inventory edit that silently stops verifying it — confirmed reachable: the
+    unfenced fixture passes `verify()` the moment its category changes. Taking
+    an exemption must cost a diff in NON_SEMANTIC_PINS, which a human reads.
+    """
+    problems = []
+    for row in load_inventory():
+        ident = (row["kind"], row["path"], row["symbol"])
+        pinned = NON_SEMANTIC_PINS.get(ident)
+        if row["category"] == "semantic":
+            if pinned is not None:
+                problems.append(f"{ident} is pinned {pinned!r} but declares semantic")
+        elif row["category"] != pinned:
+            problems.append(
+                f"{ident} declares {row['category']!r}; NON_SEMANTIC_PINS says "
+                f"{pinned!r}"
+            )
+    assert not problems, "unpinned exemption:\n  " + "\n  ".join(problems)
+
+
+def test_only_the_pinned_context_may_be_retained():
+    """`retained` waives the construction-time generation entirely.
+
+    It is correct for exactly one identity — the interactive context built
+    during launch, which precedes the claim. Relabelling a one-shot background
+    context `retained` lets it omit the generation with every test green.
+    """
+    problems = [
+        f"{row['path']}::{row['symbol']}"
+        for row in load_inventory()
+        if row.get("ctx_lifetime") == "retained"
+        and (row["path"], row["symbol"]) not in RETAINED_PINS
+    ]
+    assert not problems, (
+        "unpinned retained context — it may omit the generation at "
+        "construction, so it must be reviewed:\n  " + "\n  ".join(problems)
     )
 
 
