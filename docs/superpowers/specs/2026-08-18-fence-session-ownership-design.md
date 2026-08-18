@@ -366,6 +366,18 @@ fail, each as its own fixture.
 
 ## 10. Risks
 
+- **A fenced operation can hold the mutex for ~180 seconds.** `citations/gitio.py:21`
+  documents its own worst case: `write_and_commit_files` runs up to four git
+  subprocesses serially plus one in rollback, so *"gitio can hold the commit mutex
+  for ~180s in the worst case."* Any effect operation that wraps a git write
+  inherits that. Slice C3's 2s `lock_timeout` cap does **not** bound it — the cap is
+  installed *after* acquisition, and initial acquisition defaults to 10s
+  (`drafting/locking.py:205`). Multi-resource operations (§3.2) must treat this as a
+  known cost, and F3d should measure it rather than assume it.
+- **Not every write currently takes the mutex, and one is not even in `tools/`.**
+  `review/pass_runner.py:344` writes git with zero mutex acquisitions. The import
+  boundary does not reach it, because it is not a tool — it is a pass runner. It
+  needs an effect operation of its own, and `2026-08-17` F4 is where that lands.
 - **The ceremony must stay affordable.** Every new effect needs an operation, a
   command, a DTO and a test. If that becomes onerous, the pressure will be to add a
   generic escape — `effects.execute(stmt)` — which reinstates ambient authority

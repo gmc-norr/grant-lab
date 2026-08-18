@@ -1,7 +1,48 @@
 # Delete as Quiesce-and-Seal
 
-**Status:** proposed 2026-08-18. Alternative to the epoch-fence sequence for the
-delete / disable / restore problem.
+**Status: REJECTED 2026-08-18**, the day it was written. The safety theorem in §2.3
+is sound and every premise it rests on is false in this execution model. Kept for
+the record, and because §5 and §9 hold independently.
+
+**Why it fails** — each verified against the tree:
+
+1. **"Confirmed death" is not achievable.** `tools/references.py:527` moves
+   ingestion into a worker thread via `run_in_threadpool`, which commits at `:580`.
+   **A Python thread cannot be force-terminated.** Waiting for it makes delete
+   unbounded; not waiting makes the seal non-final. Current confirmation
+   (`claude_adapter.py:635`) waits only on the SDK child.
+2. **"The mutex is the drain" is false.** `review/pass_runner.py:344` writes git
+   with zero mutex acquisitions.
+3. **"The bound is milliseconds" is false.** `citations/gitio.py:21` documents its
+   own worst case: *"gitio can hold the commit mutex for ~180s."* Initial
+   acquisition defaults to 10s (`drafting/locking.py:205`), not the 2s C3 cap,
+   which is only installed *after* acquisition.
+4. **"F2 enumerates actors" is false.** The detector matches two function-name
+   prefixes. The interactive turn claim is an inline UPDATE
+   (`turns/processor.py:215`), collab rooms claim no job, and worker threads claim
+   nothing. The proposed registry gate would have been green with real actors
+   absent — decorative, in the precise sense this project uses the word.
+5. **"The seal captures what was committed" is false.** A git commit does not
+   capture `_propose_artifact_edit_impl`'s DB-only `ProposedChange`
+   (`tools/proposal.py:159`) or ingest's rows and blob storage.
+6. **Admit-stop must commit to be observable** (`workspaces.py:228` already does),
+   so a failure after it leaves the workspace deleted with the sequence
+   half-run — which needs a durable `active → quiescing → sealed` state machine and
+   an idempotent completer. That is the reconciliation machinery §6 claimed to
+   delete.
+
+**The general form:** kill-as-proof requires every actor and all nested work to run
+in supervised, force-terminable processes. This application is coroutines,
+scheduler threads, worker threads, blocking DB calls and child git processes.
+
+**Superseded by** `2026-08-18-fence-session-ownership-design.md` (revision 5).
+Quiescing survives as an **operational optimisation** — stop admissions, cancel
+promptly, mark where possible — never as the correctness mechanism.
+
+---
+
+**Original status:** proposed 2026-08-18. Alternative to the epoch-fence sequence
+for the delete / disable / restore problem.
 
 **Supersedes, if adopted:** `2026-08-18-fence-session-ownership-design.md` (the
 ports design) and sub-slices F3a–F3f. It does **not** supersede
