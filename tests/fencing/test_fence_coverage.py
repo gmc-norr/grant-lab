@@ -144,3 +144,21 @@ def test_nothing_reads_or_writes_claimed_at_generation_yet():
     assert not offenders, (
         "claimed_at_generation is wired before F4:\n  " + "\n  ".join(offenders)
     )
+
+
+def test_every_fenced_entry_really_fences():
+    """Has no live data at F2 — every entry is `fenced: false`. Its logic is
+    proven against fixtures in test_verifiers.py; this wires it to the tree so
+    F3's first flip is checked the moment it lands."""
+    from tests.fencing.verifiers import verify
+
+    problems = []
+    for row in load_inventory():
+        if not row["fenced"]:
+            continue
+        src = (REPO / row["path"]).read_text(encoding="utf-8")
+        for reason in verify(row, src):
+            problems.append(f"{row['path']}::{row['symbol']}: {reason}")
+    assert not problems, (
+        "entries marked fenced that are not properly fenced:\n  " + "\n  ".join(problems)
+    )
