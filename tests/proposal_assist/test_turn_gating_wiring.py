@@ -39,7 +39,8 @@ async def test_adapter_set_turn_provenance_stamps_allowlist(adapter_with_ctx):
     adapter, ctx, ws = adapter_with_ctx  # ctx is the retained ToolContext
     await adapter.set_turn_provenance(
         ws, triggering_turn_id=None, triggering_prompt=None, created_by=None,
-        origin_session_id=None, allowed_tool_names=set(READ_ONLY_TOOLS),
+        origin_session_id=None, lifecycle_generation=1, active_turn_job_id=uuid.uuid4(),
+        allowed_tool_names=set(READ_ONLY_TOOLS),
         turn_selection={"anchor": "x", "from_offset": 0, "to_offset": 1, "section_index": 2},
     )
     assert ctx.allowed_tool_names == set(READ_ONLY_TOOLS)
@@ -52,7 +53,8 @@ async def test_adapter_clears_allowlist_for_plain_turn(adapter_with_ctx):
     ctx.allowed_tool_names = set(READ_ONLY_TOOLS)
     await adapter.set_turn_provenance(
         ws, triggering_turn_id=None, triggering_prompt=None, created_by=None,
-        origin_session_id=None, allowed_tool_names=None, turn_selection=None,
+        origin_session_id=None, lifecycle_generation=1, active_turn_job_id=uuid.uuid4(),
+        allowed_tool_names=None, turn_selection=None,
     )
     assert ctx.allowed_tool_names is None  # full list restored for normal chat
 
@@ -91,6 +93,8 @@ async def test_controller_forwards_gating_through_registry_to_fake():
         triggering_prompt=None,
         created_by=None,
         origin_session_id=None,
+        lifecycle_generation=1,
+        active_turn_job_id=uuid.uuid4(),
         allowed_tool_names={"read_proposal"},
         turn_selection=selection,
     )

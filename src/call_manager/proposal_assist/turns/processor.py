@@ -264,7 +264,7 @@ async def process_turn_once(
     workspace_id = claimed.workspace_id
     user_turn_id = claimed.user_turn_id
     submitted_by_user_id = claimed.submitted_by_user_id
-    claimed_generation = claimed.claimed_at_generation  # noqa: F841 — threaded in F3b
+    claimed_generation = claimed.claimed_at_generation
 
     with session_factory() as s:
         user_turn = s.scalar(select(ChatTurn).where(ChatTurn.id == user_turn_id))
@@ -360,6 +360,8 @@ async def process_turn_once(
             triggering_prompt=_extract_triggering_prompt(raw_turn_content),
             created_by=submitted_by_user_id,
             origin_session_id=ws_session_id,
+            lifecycle_generation=claimed_generation,
+            active_turn_job_id=turn_job_id,
             allowed_tool_names=allowed_tools_for_content(raw_turn_content),
             turn_selection=selection_from_content(raw_turn_content),
         )

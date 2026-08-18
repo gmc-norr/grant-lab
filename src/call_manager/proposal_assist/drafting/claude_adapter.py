@@ -730,6 +730,8 @@ class ClaudeAgentSDKAdapter:
         triggering_prompt: str | None,
         created_by: int | None,
         origin_session_id: str | None,
+        lifecycle_generation: int,
+        active_turn_job_id: uuid.UUID,
         allowed_tool_names: set[str] | None = None,
         turn_selection: dict | None = None,
     ) -> None:
@@ -743,6 +745,12 @@ class ClaudeAgentSDKAdapter:
         ctx.triggering_prompt = triggering_prompt
         ctx.created_by = created_by
         ctx.origin_session_id = origin_session_id
+        # F3a: stamped UNCONDITIONALLY every turn for the same reason the
+        # provenance fields are — the subprocess and this ctx are reused across
+        # turns, so a missed stamp leaks the PREVIOUS turn's generation, and a
+        # stale belief wearing the fence's uniform is worse than none.
+        ctx.lifecycle_generation = lifecycle_generation
+        ctx.active_turn_job_id = active_turn_job_id
         ctx.allowed_tool_names = allowed_tool_names   # None => no per-turn gate (full list)
         ctx.turn_selection = turn_selection
 

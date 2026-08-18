@@ -112,6 +112,8 @@ async def test_fake_adapter_records_set_turn_provenance():
         triggering_prompt="hello agent",
         created_by=7,
         origin_session_id="sess-1",
+        lifecycle_generation=1,
+        active_turn_job_id=_uuid.uuid4(),
     )
     assert fake.provenance == [
         (wsid, ttid, "hello agent", 7, "sess-1"),

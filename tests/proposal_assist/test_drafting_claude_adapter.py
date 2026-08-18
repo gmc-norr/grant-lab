@@ -532,6 +532,8 @@ async def test_set_turn_provenance_stamps_retained_ctx_after_launch():
         triggering_prompt="cold",
         created_by=1,
         origin_session_id=None,
+        lifecycle_generation=0,
+        active_turn_job_id=_uuid.uuid4(),
     )
     assert wsid not in sink
 
@@ -547,6 +549,8 @@ async def test_set_turn_provenance_stamps_retained_ctx_after_launch():
         triggering_prompt="hello agent",
         created_by=7,
         origin_session_id="sess-1",
+        lifecycle_generation=1,
+        active_turn_job_id=_uuid.uuid4(),
     )
     stamped = captured["ctx"]
     assert stamped.triggering_turn_id == ttid

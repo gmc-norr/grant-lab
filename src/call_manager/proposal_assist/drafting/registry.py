@@ -531,6 +531,8 @@ class SubprocessRegistry:
         triggering_prompt: str | None,
         created_by: int | None,
         origin_session_id: str | None,
+        lifecycle_generation: int,
+        active_turn_job_id: uuid.UUID,
         allowed_tool_names: set[str] | None = None,
         turn_selection: dict | None = None,
     ) -> None:
@@ -542,6 +544,8 @@ class SubprocessRegistry:
             triggering_prompt=triggering_prompt,
             created_by=created_by,
             origin_session_id=origin_session_id,
+            lifecycle_generation=lifecycle_generation,
+            active_turn_job_id=active_turn_job_id,
             allowed_tool_names=allowed_tool_names,
             turn_selection=turn_selection,
         )
