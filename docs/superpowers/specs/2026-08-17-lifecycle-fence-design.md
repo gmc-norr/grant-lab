@@ -480,6 +480,83 @@ That risk is highest while sites are being converted, not after.
 
 ---
 
+### 9.1 What F2 actually delivers, and what it does not *(new in rev 5)*
+
+**F2 is an inventory plus a verifier for a form nothing yet uses. It is not an
+enforcement gate.** An external review found five reachable bypasses, each
+reproduced against the merged verifier. The honest statement of coverage:
+
+**What F2 does prove.** The classification of all 20 sites is correct and
+mechanically re-derivable (9 `tool_commit` / 6 `claim_fn` / 5 `tool_context`,
+matching an independent hand count). A site cannot silently vanish, be renamed
+away, be left unclassified, take an exemption it was not pinned for, or have its
+slice flag forgotten. The verifier's containment rule is right for the shapes it
+sees, and every one of its rules has a negative fixture proven non-decorative by
+mutation.
+
+**What F2 does not prove — F3's first obligation, before it converts any site.**
+
+1. **The detector is calibrated to the pre-conversion world, and goes blind as
+   conversion proceeds.** It emits a `tool_commit` site only where it sees a
+   literal `.commit()` under `tools/`. The canonical form of §3.4 *removes* that
+   commit — `fenced_write` owns it, and `fenced_execute` needs none. A correctly
+   converted function therefore stops being detectable, and a *newly written*
+   canonical-form function is never detected at all. Confirmed: a function using
+   `with ctx.session_factory.begin()` yields zero sites. (Converting an
+   *existing* site is caught — the inventory's identity goes stale and the gate
+   fails — but new code has no stale entry to trip.) **A gate that gets greener
+   the more converted the codebase is inverts its own purpose**, and Global
+   Constraint 5 of the F2 plan names exactly this failure: a gate that cannot
+   fail is worse than no gate.
+
+2. **`_is_effect` recognises an open set incompletely.** It sees `.commit()`,
+   `.add()`, and `execute(update|insert|delete(...))` written inline. It does not
+   see `session.execute(stmt)` where `stmt` was built earlier, `flush`,
+   `add_all`, `delete`, `merge`, bulk operations, `sessionmaker.begin()`,
+   `engine.begin()`, raw connections, filesystem or git helpers, or any effectful
+   helper in another module. Each was confirmed to pass verification while the
+   write lands outside the fence.
+
+3. **Cross-module transactions cannot be proven by lexical containment at the
+   caller — and one already exists on a semantic path.**
+   `tools/references.py::_do_fetch_and_ingest` calls `ingest_bytes(...)`, which
+   commits the caller's session at `references/ingest.py:389` and then commits
+   six more times on *fresh* sessions. The first of those commits also releases
+   the transaction-scoped advisory mutex. So the plausible conversion —
+
+   ```python
+   ingest_result = ingest_bytes(...)          # durable writes already landed
+   with fenced_write(s, ws, generation=gen):
+       s.commit()                             # documented as a harmless no-op
+   ```
+
+   passes the gate with every semantic write outside the fence, and moving
+   `ingest_bytes` inside the block does not fix it. F3 must fence those internal
+   transactions explicitly or restructure the path.
+
+4. **`caller_fenced` proves the helper is enclosed, not the critical section.**
+   The rule requires the named ancestor to contain a call to the site inside a
+   fenced region. It does not require the fence to enclose the ancestor's *whole*
+   semantic critical section, so a fence placed *after* the real effect passes —
+   confirmed against the shape `_insert_citation_locked` actually has, where the
+   git write at `tools/citations.py:844` precedes the cache helper. The ancestor's
+   call is also matched by bare name, so `obj._write_citekey_cache()` would
+   satisfy a declaration naming the module-level function. Not reachable today
+   (all three call sites are bare), but not excluded either.
+
+**The direction of the fix, and the constraint it must respect.** §3.4 exists
+because proving arbitrary Python is fenced is not decidable in a maintainable
+form; the answer to a shape containment cannot catch is to **narrow the accepted
+syntax, never to widen the analysis**. Enumerating effects is an open set that
+must be complete to be sound, and it cannot be. The sound version inverts it:
+make the session **unobtainable outside a fence**, so there is nothing to contain
+because there is no unfenced handle to write through. That is `workspace_write()`
+carried all the way, and it also dissolves finding 3 — `ingest_bytes` takes a
+`session_factory`, so its fresh sessions become visible violations rather than
+invisible ones.
+
+Until F3 does that work, no slice may be marked `complete` in `SLICE_STATUS`.
+
 ## 10. Where the principle stops
 
 **`rm -rf` cannot be fenced.** No DB predicate stops a holder mid-write. Purge
@@ -515,6 +592,16 @@ guard defects that only become reachable once step 3 removes cancellation.
 ---
 
 ## 12. Changelog
+
+**Revision 5 (2026-08-18).** Added §9.1 after an external review found five
+reachable bypasses in the merged F2 gate, each reproduced against the verifier.
+F2 is demoted from "coverage gate" to "inventory plus a verifier for a form
+nothing yet uses". The root cause is that the detector keys on `.commit()` while
+the canonical form removes it, so the gate goes blind exactly as conversion
+proceeds. F3 must redesign detection — toward making the session unobtainable
+outside a fence — before converting any site. The two silent-downgrade holes
+(unpinned exemptions, unread `slice` field) were closed on the F2 branch.
+
 
 **Revision 4** — F2 research findings folded in. Changes:
 
