@@ -163,7 +163,16 @@ It never reaches a user as a 5xx.
 
 It does **not** mean "write nothing" — see §7.
 
-### 3.4 Canonical form *(introduced in F3)*
+### 3.4 Canonical form *(SUPERSEDED — see the F3 mechanism spec)*
+
+> **Superseded 2026-08-18 by `2026-08-18-fence-session-ownership-design.md`
+> (revision 5).** The containment approach below was attempted in four forms and
+> defeated empirically each time: a `Session` is ambient authority, so no wrapper
+> around one can guarantee its transaction. Tools now receive narrow query, effect
+> and accounting **ports** and never a session handle, each operation owning its
+> own predicate, transaction and commit. The coverage gate became an import check.
+> The section is kept for the record of what was tried.
+
 
 The two primitives are reached through two wrapper forms, defined in F3:
 
