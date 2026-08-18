@@ -43,89 +43,170 @@ one level down, to the handle itself.
 
 ## 3. The three forms
 
-`src/call_manager/proposal_assist/fencing.py` gains three context managers that
+`src/call_manager/proposal_assist/fencing.py` gains the four forms below. They
 **acquire** the session rather than wrapping one the caller already holds. F1's
 `live_at_generation` and `acquire_commit_mutex_at_generation` remain as the
 primitives underneath, unchanged.
 
 ```python
 # Primitive B — mutex + generation. Git, filesystem, or multiple rows that
-# must move together. Commits on clean exit; rolls back on exception.
-with fenced_write(ctx, workspace_id, generation=gen) as session:
-    session.add(ProposedChange(...))
+# must move together. The fence identity comes from ctx; there is no
+# caller-supplied generation to get wrong.
+with fenced_write(ctx) as w:
+    w.add(ProposedChange(...))          # commits on clean exit
+    w.execute(update(Artifact)...)      # no commit(), rollback() or begin()
 
 # Primitive A — ONE conditional statement, DB-only. No lock, so no lock-order
-# risk. Opens its own short session, applies live_at_generation INSIDE the
-# statement, commits.
-fenced_execute(ctx, update(TurnJob).values(fetch_count=...),
-               workspace_id=ws, generation=gen)
+# risk. Applies live_at_generation INSIDE the statement.
+fenced_execute(ctx, update(Artifact).where(...).values(...))
 
-# Accounting — a durable write that is REQUIRED to land on a stale
-# generation. Takes no generation because checking one would be wrong.
-with accounting_write(ctx, workspace_id) as session:
-    job.fetch_count += 1
+# Accounting — ONE conditional statement that is REQUIRED to land on a stale
+# generation, and so carries NO generation predicate. It must instead bind to
+# the identity that originated it (§3.1).
+accounting_execute(ctx, update(TurnJob).where(
+    TurnJob.id == ctx.origin_job_id, TurnJob.status == "running",
+    TurnJob.fetch_count < 3).values(fetch_count=TurnJob.fetch_count + 1))
 
-# Reads — READ ONLY at the database level. A write on this session raises.
-with ctx.read_session() as session:
-    row = session.get(Workspace, ws)
+# Reads — a read-only capability. No transaction-boundary methods, so the
+# READ ONLY transaction it opens is the only one it can ever have.
+with ctx.read_session() as r:
+    row = r.get(Workspace, ws)
 ```
 
-Both fenced forms raise `WorkspaceGenerationStale` (F1) when the workspace is not
-live at `generation`.
+### 3.1 Why accounting is a STATEMENT, not a session
 
-### 3.1 Why there are three write forms and not one
+`2026-08-17` §2 permits and §7 *requires* accounting writes to land on a stale
+generation: freeing an active-unique slot and refunding an admission slot must
+happen even when the workspace has moved on. Fencing them would strand jobs and
+destroy the deliberate late token accounting at `review/pass_runner.py:164`.
 
-`accounting_write` exists because `2026-08-17` §2 *permits* and §7 *requires*
-accounting writes to land on a stale generation: freeing an active-unique slot and
-refunding an admission slot must happen even when the workspace has moved on.
-Fencing them would strand jobs and destroy the deliberate late token accounting at
-`review/pass_runner.py:164`. Handing them the raw factory instead would reopen the
-hole this whole design closes, so they get a form of their own — conspicuously
-named, and pinned: **the gate requires a site using `accounting_write` to be
-classified `accounting` in the inventory, and every `accounting` site to use it.**
+But "exempt from the generation check" is not "exempt from atomicity." The
+architecture requires stale cleanup via **conditional writes only**, and a general
+writable session cannot enforce that — it would happily accept
+`job.fetch_count += 1`, a non-atomic read-modify-write. That defect has shipped
+here twice (`28abbc4`, `701fbb7`) and is Global Constraint 3 of the F1 plan. So
+accounting gets a **statement** form, not a session form.
+
+**The predicate must bind to the originating identity, not to "whichever job is
+running."** Today `tools/references.py:463` and `:499` target
+`TurnJob.workspace_id == ctx.workspace_id AND status == "running"`. That is atomic
+but not owned: after delete → restore → a new turn starts, an actor from the old
+generation reserves or refunds **the new turn's** slot. Since it carries no
+generation predicate by design, ownership is the only thing that can bound it. F3
+narrows both statements to the originating job identity.
+
+**Two-way pin.** The gate requires a site using `accounting_execute` to be
+classified `accounting` in the inventory, and every `accounting` site to use it.
 Neither direction is optional, so the exemption cannot spread by imitation.
 
-### 3.2 `read_session` is read-only at the database level
+### 3.2 The yielded object is a capability, not a `Session`
 
-`read_session` issues `SET TRANSACTION READ ONLY`. A write attempted on it raises
-from Postgres.
+`fenced_write` and `read_session` yield a **restricted proxy** that forwards
+`add`, `add_all`, `execute`, `get`, `flush`, `delete`, `merge` and query methods,
+and does **not** expose `commit`, `rollback`, `begin`, `close`, or the underlying
+`Session`. The context manager owns the transaction boundary; the body cannot end
+it.
 
-This matters more than it looks. Without it, `read_session` would be a writable
-handle obtained outside a fence — the exact thing §2 abolishes — and the only way
-to police it would be to ask "does this scope contain a write?", which is the
-effect model coming back in through the side door. Enforcing it at the database
-costs one statement and keeps the rule free of analysis.
+Without this the whole design leaks, in two ways:
 
-So: a writable session is obtainable from `fenced_write` and `accounting_write`,
-and from nowhere else.
+- **`fenced_write` would release its own mutex.** The advisory lock is
+  transaction-scoped. A helper that commits the session it was handed ends the
+  transaction, drops the lock, and any further work autobegins a **new, unfenced**
+  transaction inside a Python block that still looks fenced. This is not
+  hypothetical: `tools/citations.py:744` takes `owns_txn: bool` precisely because
+  committing a received session is an established pattern here.
+- **`read_session` would stop being read-only.** `SET TRANSACTION READ ONLY`
+  applies to the current transaction only. A `commit()` inside the block ends it,
+  and the next statement autobegins an ordinary read-write transaction. Read-only
+  must hold for the capability's whole lifetime, which it does when the lifetime
+  is exactly one transaction the body cannot end.
+
+So a writable capability is obtainable from `fenced_write` alone, it lasts exactly
+one transaction, and that transaction is the fenced one.
+
+### 3.3 The fence identity comes from `ctx`, never from the caller
+
+All four forms take `ctx` and derive `workspace_id` and the generation from it.
+None accepts a caller-supplied generation.
+
+A wrapper that accepted one would let a stale actor write
+`fenced_write(ctx, ws, generation=freshly_read_generation)` — canonical shape,
+passes any containment gate, and fences against the world's current state instead
+of against the belief the actor formed. That is the same failure this architecture
+names for the retained `ToolContext`: **a generation obtained at the moment of
+writing is a stale belief wearing the fence's uniform.** An API that accepts one
+as a parameter invites it.
+
+The generation therefore lives on `ToolContext`, stamped per turn, and the fence
+reads it. Passing one explicitly is not merely discouraged — the parameter does
+not exist.
 
 `fenced_execute` keeps Primitive A's defining property: it takes **no lock**.
 Where a finalizer already holds the job or workspace row `FOR UPDATE`, forcing it
 through the mutex would create the J→M and W→M inversions `2026-08-17` §5
 documents. This is why there are two forms and not one.
 
-## 4. The gate rule
+## 4. Making the handle unobtainable
 
-**One rule, closed and one grep wide:**
+**`ToolContext` stores the factory privately.** The constructor keyword stays
+`session_factory=` — via `InitVar` / a custom `__init__` that assigns
+`self._session_factory` — so all 7 source constructions and all 52 test
+constructions across 31 files are untouched. But `ctx.session_factory` raises
+`AttributeError`.
 
-> Outside `fencing.py` and `ToolContext.read_session`, the attribute
-> `ctx.session_factory` is never read.
+This reverses an earlier decision in this design, and the reversal matters. The
+earlier version enforced privacy with an AST rule forbidding the attribute read,
+on the stated grounds that a rename would cost ~60 files. That reasoning was
+wrong twice over. An AST rule does not make a resource unavailable —
+`getattr(ctx, "session_factory")` walks straight past it, and `getattr(ctx, ...)`
+is already how this codebase reaches optional context capabilities
+(`tools/references.py:529`). And the choice was never rename-or-gate: `InitVar`
+buys runtime enforcement at zero churn.
 
-The **constructor keyword** `ToolContext(session_factory=sf)` stays legal and
-unchanged — it is `ast.keyword`, a different node from the `ast.Attribute` the
-rule forbids. All 7 source constructions and all 52 test constructions across 31
-files are untouched.
+**The gate remains, demoted to a second line.** No module under `tools/` may
+import a `sessionmaker` or `Engine`. The interpreter enforces the first line; the
+gate catches the way around it.
 
-An unfenced write is therefore caught by the gate, not by the interpreter. A
-rename to `_session_factory` would upgrade that to an `AttributeError` at the cost
-of ~60 files of mechanical churn inside the slice whose point is the fence. It is
-explicitly **not** done, and is not deferred work — it is declined.
+### 4.1 What the closed set actually contains — and what it does not
 
-### 4.1 What this deletes
+The claim "a writable session is obtainable only from a fence" is true **for
+sessions a tool acquires directly.** It is not true of the whole subsystem today,
+and the spec states the boundary rather than overreaching:
 
-`tests/fencing/verifiers.py::_is_effect` and every rule built on it are removed.
-The detector stops looking for `.commit()`. The inventory's `caller_fenced`
-category is removed with its single entry (see §5).
+- **Sessions injected by callers outside `tools/`.** `proposals/accepting.py:207`
+  passes its own request-owned session into `_insert_citation_locked`. So a helper
+  under `tools/` that *receives* a session has **not** necessarily received a
+  fenced one, and §5's earlier claim to the contrary was false in the live tree.
+  Such helpers keep an inventory entry, classified by what their callers can be,
+  and `caller_fenced` is retained for exactly this — but rewritten to require the
+  fence to enclose the ancestor's whole critical section (`2026-08-17` §9.1 gap 4).
+- **Service-owned factories.** `ctx.citation_service` holds its own
+  `_session_factory` and commits usage records (`citations/service.py:114`).
+  `tools/audit.py:90` passes `ctx.session_factory` into the semantic audit engine,
+  which reaches `citations/verdict_cache.py::store_verdict` — a durable cache
+  write on a fresh session.
+
+These are **capability holders**: objects that legitimately own a write path.
+Each gets a classified inventory entry and its own slice. They are not covered by
+F3 and F3 does not claim they are.
+
+### 4.2 Staging: how an absolute rule ships with known violations present
+
+The rule of §4 is absolute in its final state, but F3 lands with `ingest_bytes`
+and the audit path still holding raw factories. The two are reconciled by the
+inventory, not by weakening the rule:
+
+- A raw acquisition is legal **only** if it is an inventory entry whose slice is
+  still `pending` in `SLICE_STATUS`. Those identities are pinned, and there are
+  exactly three at F3: `references.py::_do_fetch_and_ingest` (F3b),
+  `audit.py::validate_citations_impl` (F3c), and the `citation_service`
+  capability (F3c).
+- **A raw acquisition that is not a pinned pending identity fails immediately** —
+  it arrives as a new site, unclassified, and the gate refuses unclassified sites.
+- When a slice flips to `complete`, its identities lose the exemption, and
+  `SLICE_STATUS` already fails any row whose flag disagrees.
+
+So the exemption is enumerated, expiring, and cannot be taken by new code.
 
 ## 5. What dissolves, and what does not
 
@@ -133,10 +214,11 @@ category is removed with its single entry (see §5).
 |---|---|
 | **1.** Detector blind to the canonical form | **Dissolved.** The detector looks for *acquisitions*. The canonical form **is** an acquisition, so converted code is *more* visible, not less. The perverse incentive inverts. |
 | **2.** `_is_effect` enumerates an open set | **Dissolved.** There is no effect model to be incomplete. |
-| **4.** `caller_fenced` proves the wrong thing | **Dissolved.** A helper that *receives* a session never acquires one, so it is not a site at all. Its caller could only have obtained that session from a fence. `tools/citations.py::_write_citekey_cache` stops being an inventory entry. |
+| **4.** `caller_fenced` proves the wrong thing | **Not dissolved — narrowed.** The first draft claimed a helper receiving a session "could only have obtained it from a fence." False: `proposals/accepting.py:207` injects a request-owned session into `_insert_citation_locked`. `caller_fenced` is kept and rewritten to require the fence to enclose the ancestor's *whole* critical section, not merely the helper call. |
 | **3.** `ingest_bytes` cross-module commits | **Not dissolved — made visible.** `ingest_bytes(session_factory=ctx.session_factory, ...)` becomes an attribute read, so the rule rejects it. F3b addresses it. |
 
-Three of four go away because the open set was never necessary.
+Two of four go away because the open set was never necessary. The third is
+narrowed rather than removed, and the fourth is made visible.
 
 ## 6. Reads are not fenced
 
@@ -178,9 +260,11 @@ plan must name the test that pins it.
    - `tools/scorecard.py::submit_scorecard_impl`
    - `tools/uncited_claims.py::submit_uncited_claims_impl`
 4. The two `accounting` sites in `tools/references.py` — `fetch_reference_impl`
-   and its `_refund_fetch_slot` — move to `accounting_write` (§3.1). They are
-   permitted, and for the refund *required*, to run on a stale generation; what
-   they may not do is read the raw handle.
+   (`:463`) and its `_refund_fetch_slot` (`:499`) — move to `accounting_execute`,
+   and **their predicates narrow from "whichever turn is running" to the
+   originating job identity** (§3.1). They are permitted, and for the refund
+   required, to run on a stale generation; carrying no generation predicate is
+   exactly why ownership must bound them instead.
 5. Every remaining acquisition under `tools/` moves to `read_session`.
 6. **The runtime two-turn re-stamp test F2 owes.** Drive two turns through one
    retained `ToolContext` across a generation change and assert the second carries
@@ -218,6 +302,8 @@ work, not a decision taken here.
 
 - **Does not touch `ingest_bytes`.** Its entry stays in the inventory, classified
   and explicitly **not** fenced, and `SLICE_STATUS["F3b"]` stays `pending`.
+- **Does not touch the citation-audit write path or the `citation_service`
+  capability** (§4.1). Both are classified, pinned, and deferred to F3c.
 - **Does not fence reads** (§6).
 - **Does not rename `session_factory`** (§4).
 - **Does not touch the job families, setup, turn finalizers, or collab rooms** —
@@ -242,30 +328,75 @@ that exposed the decorative tests in C1.
 -risk silent failure in the architecture and it is the one thing F2 could not
 observe at all.
 
+**The capability proxy is proven by attempted escape.** Tests assert that
+`commit`, `rollback`, `begin` and `close` are absent from both the write and read
+capabilities, that a write through the read capability raises, and — the one that
+matters — that the advisory lock is **still held** at the end of a fenced block
+whose body called every method the proxy does expose.
+
+**The accounting ownership predicate is proven by the interleaving it exists for:**
+reserve a slot as generation G, delete and restore the workspace, start a new turn
+at G+1, and assert the old actor's refund does not touch the new turn's row.
+
 **Every new rule carries negative fixtures.** A rule with only passing examples is
 a decorative test one level up — the failure F2 shipped.
 
 ## 11. Risks
 
-- **The acquisition set must stay closed.** The rule catches
-  `ctx.session_factory`. A tool that imports a `sessionmaker` directly, or is
-  handed a `Session` by a caller outside `tools/`, is outside the rule. F3 must
-  add a companion check that no module under `tools/` imports a sessionmaker or
-  engine, so the closed set stays closed.
+- **The capability proxy must not grow an escape hatch.** The first request for
+  "just expose the real session for this one case" reopens §3.2 entirely. If a
+  case genuinely needs it, it needs a new pinned form, not an accessor.
+- **Injected sessions remain the soft edge** (§4.1). The interpreter closes direct
+  acquisition; nothing closes a caller outside `tools/` handing a session in. That
+  is what `caller_fenced` is for, and its rewritten rule is the only thing
+  standing there.
 - **`fenced_write` must not become a long-held lock.** It takes the commit mutex.
   Anything slow — network, embedding, LLM calls — must happen outside it. This is
   the same discipline Slice C3 (`df437b4`) bounded with `lock_timeout`, and the
   new form makes it easy to write a long fence by accident.
 - **`read_session` is a new default.** It will be reached for reflexively, which
-  is fine — it is read-only at the database level (§3.2), so the worst case is a
-  runtime error, not a silent unfenced write.
-- **`accounting_write` is the one form that can spread.** It is a legitimate
+  is fine — it is a read-only capability for its whole
+  lifetime (§3.2), so the worst case is a runtime error, not a silent unfenced
+  write.
+- **`accounting_execute` is the one form that can spread.** It is a legitimate
   unfenced write, so mistaking it for "the easy one" is the failure mode. The
   two-way pin in §3.1 is what stops that, and it must be mutation-proven in both
   directions: an `accounting` site that stops using the form, and a `semantic`
   site that starts.
 
 ## 12. Changelog
+
+**Revision 2 (2026-08-18).** A review found five blocking holes in revision 1,
+each confirmed against the tree. Four were the same mistake in different places —
+**treating a permission as a mechanism.**
+
+- **The yielded `Session` could leave the fenced transaction.** `commit()` inside
+  the block drops the transaction-scoped advisory lock and the next statement
+  autobegins an unfenced one, inside a Python block that still looks fenced. The
+  same defect made `read_session` writable, because `SET TRANSACTION READ ONLY`
+  binds to one transaction. Now a restricted capability with no
+  transaction-boundary methods (§3.2).
+- **The handle stayed public.** An AST rule cannot make a resource unavailable:
+  `getattr(ctx, "session_factory")` walks past it, and that idiom is already in
+  the tree. `InitVar` gives runtime enforcement at zero churn, so the earlier
+  rename-versus-gate trade-off was a false choice (§4).
+- **Accounting got a writable session.** "Exempt from the generation check" is not
+  "exempt from atomicity". Revision 1's own example, `job.fetch_count += 1`, would
+  have *replaced* the correct conditional UPDATE at `references.py:463` with the
+  non-atomic read-modify-write that shipped as a defect twice. Now a statement
+  form — and its predicate binds to the originating job, since with no generation
+  predicate ownership is the only available bound (§3.1).
+- **The fences took a caller-supplied generation.** That lets a stale actor fence
+  against a freshly read value in perfectly canonical shape. Identity now comes
+  from `ctx` and the parameter does not exist (§3.3).
+- **The closed set was not closed, and one dissolution claim was false.**
+  `accepting.py:207` injects a request-owned session into a `tools/` helper, so
+  "its caller could only have obtained that session from a fence" is untrue;
+  `caller_fenced` is kept and narrowed rather than deleted. `audit.py:90` and
+  `citation_service` are capability holders needing their own slice (§4.1).
+- **Staging was contradictory** — an absolute rule shipping with known violations
+  present. Resolved by making the exemption an enumerated, expiring property of
+  the inventory (§4.2).
 
 **Revision 1 (2026-08-18).** Written after the F2 review. Establishes session
 ownership as the fence mechanism, deletes the effect model, splits ingest into
@@ -277,7 +408,7 @@ same shape — a session obtainable outside a fence:
 - **Accounting writes had nowhere to go.** They must land on a stale generation,
   so `fenced_write` is wrong for them and `read_session` cannot serve them.
   The draft said they would use "`read_session` or `fenced_execute` as their
-  category dictates", which is not a mechanism. Added `accounting_write` (§3.1)
+  category dictates", which is not a mechanism. Added `accounting_execute` (§3.1)
   with a two-way pin to the inventory.
 - **`read_session` was writable.** Nothing stopped `session.add(); commit()` on
   it, and policing that would have required asking "does this scope contain a
