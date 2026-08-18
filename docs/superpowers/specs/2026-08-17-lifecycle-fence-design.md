@@ -1,8 +1,9 @@
 # Epoch-Fenced Semantic Effects — design
 
-**Status:** revision 3, 2026-08-17. Revision 1 was reviewed and found incomplete;
+**Status:** revision 4, 2026-08-17. Revision 1 was reviewed and found incomplete;
 revision 2 corrected the audit unit and four further defects; revision 3 settles
-the read-revocation contract. See §12 for the changelog.
+the read-revocation contract; revision 4 folds in the F2 research findings: canonical
+form, classified inventory, and ToolContext lifetime split. See §12 for the changelog.
 
 **Step 1 of a four-step sequence** (fence → prove → remove → relax). This
 document specifies step 1 only.
@@ -72,7 +73,7 @@ its central error.
 | Category | Examples | Rule |
 |---|---|---|
 | **Semantic effect** | proposed-change insert, claim classification, artifact/git write, job → `done`, chat message | **Fenced.** Prohibited on a stale generation. |
-| **Cleanup / accounting** | token totals, `estimated_dollars`, job → `cancelled`, freeing an active-unique slot | **Permitted** on a stale generation, via conditional (CAS) writes only. |
+| **Cleanup / accounting** | token totals, `estimated_dollars`, job → `cancelled`, reserving or releasing an admission slot | **Permitted** on a stale generation, via conditional (CAS) writes only. |
 | **Delivered reads** | bytes already rendered in a browser | **Unrecoverable.** Not a fence problem. §6. |
 
 The generation fence is strictly stronger than a liveness check: it rejects a
@@ -162,41 +163,104 @@ It never reaches a user as a 5xx.
 
 It does **not** mean "write nothing" — see §7.
 
+### 3.4 Canonical form *(introduced in F3)*
+
+The two primitives are reached through two wrapper forms, defined in F3:
+
+- **`fenced_write(...)`** — wraps Primitive B (mutex + generation). Used for effects
+  that span git, the filesystem, or multiple rows that must move together.
+- **`fenced_execute(...)`** — wraps Primitive A (conditional write, DB-only). Used
+  for pure DB effects where no lock is held.
+
+A fenced site **must** be written in one of these two forms. The reason is the same
+one `web/_writes.py` gives for `workspace_write()`: a rule that cannot be written
+wrongly beats a checker that tries to prove arbitrary code correct. Requiring the
+canonical form means containment is structural — a site outside the form is
+syntactically absent, not subtly wrong.
+
+F2's gate verifies **containment**: every classified semantic site in
+`tests/fencing/fence_inventory.json` is checked to reside inside one of the two
+canonical wrappers (or inside its own `caller_fenced` ancestor). F2 does NOT
+attempt dataflow analysis of arbitrary call sequences — containment is sufficient
+because the form itself enforces the generation check.
+
+`fenced_write` and `fenced_execute` do not exist yet. F3 creates them and converts
+every semantic site into the canonical form in the same commit.
+
 ---
 
 ## 4. Effect inventory
 
 Organised by originating actor, not by file.
 
-### 4.1 Effects inside long-running actors, before any finalizer *(new in rev 2)*
+### 4.1 Effects inside long-running actors, before any finalizer *(new in rev 2; inventory classified in F2)*
 
 This class was **missing from revision 1** and is the largest gap. These effects
 commit on their own sessions, during agent execution, with no mutex, no liveness
 check, and no reference to the originating job. Fencing the eventual finalizer
 cannot retract them.
 
-| Site | Effect |
-|---|---|
-| `tools/proposal.py` `_propose_artifact_edit_impl` | inserts a pending `ProposedChange` on its own `ctx.session_factory()` session |
-| evaluator / review / uncited-claims tools | commit during execution, same shape |
-| `analysis/pipeline.py:320` `_upsert_classification` | independent per-sentence commit, one session per sentence |
+The canonical list lives in `tests/fencing/fence_inventory.json`; the table below
+is a narrative summary that the gate keeps honest. Nine committing sites were
+identified by the F2 research and source-verified by the gate:
 
-**Requirement:** the generation travels in `ToolContext`
-(`tools/registry.py:43`) and every semantic tool write fences on it — Primitive A
-for the DB-only ones.
+| Qualified symbol | Category | Why |
+|---|---|---|
+| `citations.py::propose_citation_impl` | `semantic` | inserts a `ProposedChange` |
+| `citations.py::_write_citekey_cache` | `caller_fenced` | best-effort citekey cache; caller `_insert_citation_locked` holds the critical section |
+| `proposal.py::_propose_artifact_edit_impl` | `semantic` | inserts a `ProposedChange` |
+| `references.py::fetch_reference_impl` | `accounting` | atomic cap-check + increment of `TurnJob.fetch_count` — reserves an admission slot, produces no result |
+| `references.py::fetch_reference_impl._refund_fetch_slot` | `accounting` | refunds that slot when the fetch fails |
+| `references.py::fetch_reference_impl._do_fetch_and_ingest` | `semantic` | ingests a reference — durable content plus embeddings |
+| `review_submit.py::submit_review_impl` | `semantic` | writes the review result |
+| `scorecard.py::submit_scorecard_impl` | `semantic` | writes the scorecard |
+| `uncited_claims.py::submit_uncited_claims_impl` | `semantic` | writes the findings |
 
-**Requirement, non-obvious:** `ToolContext` is built once per workspace launch and
-**reused across turns**. `registry.py:80` already documents this trap for
-provenance: *"Stamped UNCONDITIONALLY every turn because the subprocess (and this
-ctx) is reused across turns — a missed stamp would leak the prior turn's
-provenance."* The generation has the identical failure mode and must be
-re-stamped by the same mechanism (`set_turn_provenance` / the background
-`tools_factory`), unconditionally, every turn. A generation stamped once at launch
-is a stale belief wearing the fence's uniform.
+Six semantic, two accounting, one caller_fenced. `references.py` and `scorecard.py`
+appeared nowhere in the revision 2 hand inventory. The accounting sites
+(`fetch_reference_impl` and `_refund_fetch_slot`) must run on a stale generation —
+they are slot bookkeeping, not semantic production — which is why the accounting
+category is widened in §2 and deliberately separated here.
 
-That this trap is already documented for a neighbouring field is the strongest
-available evidence the risk is real rather than theoretical, and it is why the
-coverage gate moves earlier (§9).
+**Requirement:** the generation travels in `ToolContext` (`tools/registry.py:43`)
+and every `semantic` tool write fences on it — Primitive A for the DB-only ones
+(reached via `fenced_execute` in F3). `accounting` sites must NOT fence; they use
+CAS writes only.
+
+#### ToolContext lifetimes *(F2 finding)*
+
+Seven `ToolContext(...)` constructions exist in the codebase; five are in scope.
+Two pass `session_factory=None` and are excluded — they cannot originate a tool
+commit:
+
+- `proposals/accepting.py` — request-driven, holds its own session.
+- `tools/registry.py::collect_mcp_tool_names` — static tool-name collector, no
+  session or generation.
+
+Two consequences follow from this classification:
+
+1. **The generation is a property of the ctx, not the tool.** Each tool receives
+   the generation via its ctx; there is no per-tool stamp.
+
+2. **The five in-scope constructions split by lifetime:**
+
+   - **`one_shot`** (coherence, review, evaluator, uncited-claims background
+     agents): the generation is known at construction and required there. The gate
+     verifies construction-time propagation for these.
+
+   - **`retained`** (`drafting/factory.py::tools_factory`, the interactive ctx
+     built during `controller.launch(...)`): launch deliberately runs *before* the
+     claim (`turns/processor.py:159` — the orphan sweep must run first), so it
+     cannot carry a generation at construction; requiring one would bless a
+     placeholder. Instead, it is stamped unconditionally at `set_turn_provenance`
+     each turn, mirroring the identical provenance trap already documented at
+     `registry.py:80`. A generation stamped once at launch is a stale belief
+     wearing the fence's uniform.
+
+     **F3's runtime two-turn test is authoritative for the retained ctx.** Drive
+     two turns through one retained ctx across a generation change and assert the
+     second carries the new generation. A static gate cannot verify per-turn
+     re-stamps; see §9.
 
 ### 4.2 Background job families (6)
 
@@ -395,10 +459,18 @@ compensation. If the test passes with the fence removed, it is measuring the
 compensation. This is the technique that exposed the decorative tests in C1.
 
 **Coverage, mechanically.** An AST gate asserting that every claim function
-records a generation, every belief-carrying semantic write fences, and every
-`ToolContext` construction site stamps the generation per turn. Slice C2
-established this pattern after a correct fix silently disarmed the runtime gate
-proving the rule it fixed.
+records a generation, every belief-carrying semantic write is contained inside the
+canonical fenced form (§3.4), and every in-scope `ToolContext` construction site
+carries a generation at construction. Slice C2 established this pattern after a
+correct fix silently disarmed the runtime gate proving the rule it fixed.
+
+F2 verifies **construction-time propagation for one-shot contexts only**. A static
+gate cannot observe a per-turn re-stamp: the retained interactive ctx is built
+before the generation is known (launch precedes the claim by design), so its
+construction cannot carry a real generation. The per-turn re-stamp at
+`set_turn_provenance` is **F3's runtime obligation**, not F2's static obligation.
+F3 must prove it with a runtime test: drive two turns through one retained ctx
+across a generation change and assert the second carries the new generation.
 
 **The coverage gate moves early** — revision 1 scheduled it last. Generation
 propagation through `ToolContext`, rooms and nested worker sessions has a silent
@@ -407,6 +479,83 @@ failure mode identical to the provenance trap already documented at
 That risk is highest while sites are being converted, not after.
 
 ---
+
+### 9.1 What F2 actually delivers, and what it does not *(new in rev 5)*
+
+**F2 is an inventory plus a verifier for a form nothing yet uses. It is not an
+enforcement gate.** An external review found five reachable bypasses, each
+reproduced against the merged verifier. The honest statement of coverage:
+
+**What F2 does prove.** The classification of all 20 sites is correct and
+mechanically re-derivable (9 `tool_commit` / 6 `claim_fn` / 5 `tool_context`,
+matching an independent hand count). A site cannot silently vanish, be renamed
+away, be left unclassified, take an exemption it was not pinned for, or have its
+slice flag forgotten. The verifier's containment rule is right for the shapes it
+sees, and every one of its rules has a negative fixture proven non-decorative by
+mutation.
+
+**What F2 does not prove — F3's first obligation, before it converts any site.**
+
+1. **The detector is calibrated to the pre-conversion world, and goes blind as
+   conversion proceeds.** It emits a `tool_commit` site only where it sees a
+   literal `.commit()` under `tools/`. The canonical form of §3.4 *removes* that
+   commit — `fenced_write` owns it, and `fenced_execute` needs none. A correctly
+   converted function therefore stops being detectable, and a *newly written*
+   canonical-form function is never detected at all. Confirmed: a function using
+   `with ctx.session_factory.begin()` yields zero sites. (Converting an
+   *existing* site is caught — the inventory's identity goes stale and the gate
+   fails — but new code has no stale entry to trip.) **A gate that gets greener
+   the more converted the codebase is inverts its own purpose**, and Global
+   Constraint 5 of the F2 plan names exactly this failure: a gate that cannot
+   fail is worse than no gate.
+
+2. **`_is_effect` recognises an open set incompletely.** It sees `.commit()`,
+   `.add()`, and `execute(update|insert|delete(...))` written inline. It does not
+   see `session.execute(stmt)` where `stmt` was built earlier, `flush`,
+   `add_all`, `delete`, `merge`, bulk operations, `sessionmaker.begin()`,
+   `engine.begin()`, raw connections, filesystem or git helpers, or any effectful
+   helper in another module. Each was confirmed to pass verification while the
+   write lands outside the fence.
+
+3. **Cross-module transactions cannot be proven by lexical containment at the
+   caller — and one already exists on a semantic path.**
+   `tools/references.py::_do_fetch_and_ingest` calls `ingest_bytes(...)`, which
+   commits the caller's session at `references/ingest.py:389` and then commits
+   six more times on *fresh* sessions. The first of those commits also releases
+   the transaction-scoped advisory mutex. So the plausible conversion —
+
+   ```python
+   ingest_result = ingest_bytes(...)          # durable writes already landed
+   with fenced_write(s, ws, generation=gen):
+       s.commit()                             # documented as a harmless no-op
+   ```
+
+   passes the gate with every semantic write outside the fence, and moving
+   `ingest_bytes` inside the block does not fix it. F3 must fence those internal
+   transactions explicitly or restructure the path.
+
+4. **`caller_fenced` proves the helper is enclosed, not the critical section.**
+   The rule requires the named ancestor to contain a call to the site inside a
+   fenced region. It does not require the fence to enclose the ancestor's *whole*
+   semantic critical section, so a fence placed *after* the real effect passes —
+   confirmed against the shape `_insert_citation_locked` actually has, where the
+   git write at `tools/citations.py:844` precedes the cache helper. The ancestor's
+   call is also matched by bare name, so `obj._write_citekey_cache()` would
+   satisfy a declaration naming the module-level function. Not reachable today
+   (all three call sites are bare), but not excluded either.
+
+**The direction of the fix, and the constraint it must respect.** §3.4 exists
+because proving arbitrary Python is fenced is not decidable in a maintainable
+form; the answer to a shape containment cannot catch is to **narrow the accepted
+syntax, never to widen the analysis**. Enumerating effects is an open set that
+must be complete to be sound, and it cannot be. The sound version inverts it:
+make the session **unobtainable outside a fence**, so there is nothing to contain
+because there is no unfenced handle to write through. That is `workspace_write()`
+carried all the way, and it also dissolves finding 3 — `ingest_bytes` takes a
+`session_factory`, so its fresh sessions become visible violations rather than
+invisible ones.
+
+Until F3 does that work, no slice may be marked `complete` in `SLICE_STATUS`.
 
 ## 10. Where the principle stops
 
@@ -443,6 +592,39 @@ guard defects that only become reachable once step 3 removes cancellation.
 ---
 
 ## 12. Changelog
+
+**Revision 5 (2026-08-18).** Added §9.1 after an external review found five
+reachable bypasses in the merged F2 gate, each reproduced against the verifier.
+F2 is demoted from "coverage gate" to "inventory plus a verifier for a form
+nothing yet uses". The root cause is that the detector keys on `.commit()` while
+the canonical form removes it, so the gate goes blind exactly as conversion
+proceeds. F3 must redesign detection — toward making the session unobtainable
+outside a fence — before converting any site. The two silent-downgrade holes
+(unpinned exemptions, unread `slice` field) were closed on the F2 branch.
+
+
+**Revision 4** — F2 research findings folded in. Changes:
+
+- **Audit unit corrected a second time.** The revision 2 hand inventory of §4.1
+  was wrong in three places: `references.py` (two accounting + one semantic) and
+  `scorecard.py` (one semantic) were absent; the old generic rows for "evaluator /
+  review / uncited-claims tools" were not individually verified. F2's mechanical
+  gate identified nine classified sites; the inventory is now in that form, with the
+  canonical list in `tests/fencing/fence_inventory.json`.
+- **Canonical form decided and why recorded (§3.4).** F3 introduces
+  `fenced_write(...)` and `fenced_execute(...)` as the required form for fenced
+  sites. A rule that cannot be written wrongly beats a checker that tries to prove
+  arbitrary code correct. F2's gate verifies containment — not dataflow analysis.
+- **Accounting category widened (§2).** "Freeing an active-unique slot" did not
+  cover the slot-reservation side (`references.py::fetch_reference_impl`). Widened
+  to "reserving or releasing an admission slot". No fourth category invented.
+- **ToolContext lifetime split recorded (§4.1, §9).** Seven constructions, five in
+  scope; two excluded (`proposals/accepting.py` and
+  `tools/registry.py::collect_mcp_tool_names`, both `session_factory=None`).
+  Consequence: the generation is a property of the ctx, not the tool. The five
+  split into `one_shot` (construction-time generation required and verified by F2)
+  and `retained` (`drafting/factory.py::tools_factory`, stamped per-turn at
+  `set_turn_provenance`; F3's runtime two-turn test is authoritative).
 
 **Revision 3** — read-revocation contract settled. Changes:
 
