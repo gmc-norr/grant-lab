@@ -1,6 +1,6 @@
 # Fence F3 — Ports, not Handles
 
-**Status:** agreed 2026-08-18 (revision 7). Mechanism spec for sub-slices F3a–F3f.
+**Status:** agreed 2026-08-18 (revision 8). Mechanism spec for sub-slices F3a–F3f.
 
 **Companion:** `2026-08-17-lifecycle-fence-design.md` is the architecture — why a
 fence exists, what the invariant is, and the F1–F9 slice breakdown. This document
@@ -61,6 +61,9 @@ effects.submit_scorecard(invocation.stamp, SubmitScorecard(...))
 # separate pre-check.
 def submit_scorecard(stamp: FenceStamp, cmd: SubmitScorecard) -> None:
     with _sessions.begin() as session:
+        # DB-only path: shared lease, THEN the predicate-bearing write (§3.5).
+        # Never shared-then-exclusive — that is the one deadlock shape.
+        acquire_shared_lease(session, stamp.workspace_id)
         row_count = session.execute(
             update(EvaluatorJob)
             .where(
@@ -173,7 +176,20 @@ which cancel-on-delete does. **That is compensation the architecture removes in
 step 3**, so the masking is temporary. An `INSERT` has no target row and is exposed
 now.
 
-**So every effect takes a shared lease on the workspace mutex key:**
+**Each operation selects exactly ONE path and never upgrades between them:**
+
+| Path | Lock |
+|---|---|
+| DB-only effect | `pg_advisory_xact_lock_shared`, then the predicate-bearing write |
+| Multi-resource (git / filesystem / multi-row) | the **exclusive** mutex directly — never shared first |
+| Transaction already holds the `Workspace` row `FOR UPDATE` | no advisory lock |
+
+Taking shared and later attempting to upgrade to exclusive is the one deadlock
+shape this protocol has: two operations each holding shared, each waiting for the
+other to release before either can upgrade. An operation that will touch git or the
+filesystem takes the exclusive lock **first**, before its first effect of any kind.
+
+**The DB-only path:**
 
 ```python
 # effects — concurrent with each other, exclusive against lifecycle
@@ -298,7 +314,7 @@ privatisation problem disappears rather than being solved.
 (§3.5), and a straddle test (§9).** The cost falls on adding authority, not on
 using it.
 
-### 4.2 The F2 inventory becomes a checklist
+### 4.4 The F2 inventory becomes a checklist
 
 `tests/fencing/` was built to *prove* coverage by analysis. Under an import
 boundary it does not need to, and cannot usefully: the proof is the import check.
@@ -381,9 +397,8 @@ two *unconditional* inertness guards — `test_nothing_imports_the_fencing_primi
 F3a must, in the same slice:
 
 - split `SLICE_STATUS` into `F3a…F3f` and reassign row ownership as follows —
-  4 × `claim_fn` (the tool-originating background claims) → **F3a**;
-  6 × `claim_fn` remainder (`queue.py::claim_queued_jobs` → **F4**,
-  `setup.py::claim_next_setup_job` → **F5**); 5 × `tool_context` → **F3a**;
+  of the **6** `claim_fn` rows: the 4 tool-originating background claims → **F3a**,
+  `queue.py::claim_queued_jobs` → **F4**, `setup.py::claim_next_setup_job` → **F5**; 5 × `tool_context` → **F3a**;
   7 × `tool_commit` (5 semantic + 2 accounting) → **F3d**;
   `_write_citekey_cache` → **F3d** (moves with its ancestor);
   `_do_fetch_and_ingest` → **F3e**;
@@ -417,7 +432,18 @@ commands, `FenceStamp`, the shared-lease helper of §3.5, and the exclusive
 `require_live_generation`** — §3.5 explains why a bare pre-check cannot exist.
 
 **F3b ships a table naming every effect operation and the mechanism it uses**, and
-each operation arrives with the straddle test for *that* mechanism (§9). No tool changes, so the branch
+each operation arrives with the two ordered lock cases for *that* mechanism (§9).
+
+**F3b also owns correcting three surfaces that currently document the predicate-only
+form as correct**, and their tests. No production caller uses them, so this is
+documentation and test debt rather than a behaviour change — but all three read as
+authoritative and would be followed:
+
+- `2026-08-17` §3.1, which presents predicate-only as the default and states it adds
+  no lock;
+- `live_at_generation`'s docstring (`fencing.py:67`), which shows exactly that usage;
+- `acquire_commit_mutex_at_generation`'s docstring, which recommends the predicate
+  for DB-only effects. No tool changes, so the branch
 is inert in the F1 sense.
 
 ### F3c — the gate, and the inventory demotion
@@ -512,22 +538,35 @@ across a generation change; the second must carry the new value. No static check
 can observe a per-turn re-stamp, and `registry.py:80` documents the identical trap
 for provenance, where a stamp missed once leaks the previous turn's value.
 
-**Every effect operation is proven by a STRADDLE test** (F3b, F3d–F3f). Calling an
-operation with an already-stale stamp proves only that a pre-check exists — the
-broken two-statement implementation of §3.5 passes it. The test must land the
-delete/restore **in the gap**:
+**Every effect operation is proven by TWO ORDERED LOCK CASES** (F3b, F3d–F3f).
+
+Revision 7 prescribed a straddle: pause the effect mid-flight, commit a
+delete/restore in the gap. **That test deadlocks a correct implementation** — the
+paused effect holds the shared lease, delete needs the exclusive lock, and each
+waits for the other. A test that can only pass against a broken build is worse than
+no test, and this one was written into the spec as the primary proof.
+
+The lease protocol is proven by which side wins the lock, both directions:
 
 ```python
-# The pause must be INSIDE the SQL, after the predicate qualifies — a Python
-# pause before execute() cannot expose the MVCC-snapshot race of §3.5.
-with straddle_in_sql(op_under_test):   # e.g. a slow function in the statement
-    delete_and_restore(workspace_id)   # commits G+2 in the gap
-assert_nothing_landed()
+# CASE A — effect acquires shared first
+#   lifecycle blocks until the effect commits, then transitions.
+#   The effect's write LANDS, and that is correct: it was live when it ran.
+
+# CASE B — lifecycle acquires exclusive first
+#   the effect blocks; after the transition it acquires shared, evaluates its
+#   predicate against the NEW generation, and lands NOTHING.
+assert_effect_did_not_land()
 ```
 
-At least one straddle test per mechanism in §3.5's table. **The INSERT case is the
-one that must be written first** — it has no target row, so no READ COMMITTED
-re-check masks the race, and it is the shape that reproduced on PostgreSQL 16.
+Case B is the one that matters, and both must be asserted — Case A proves the fence
+does not simply refuse everything.
+
+**The inside-SQL pause moves to a predicate-only regression test.** It is no longer
+a proof of the operation; it is the demonstration of *what happens when the shared
+lease is removed*, and it belongs with the mutation that removes it. Written as an
+`INSERT`, which has no target row and therefore no READ COMMITTED re-check to mask
+the race — the shape reproduced on PostgreSQL 16.
 
 **And the assertion must name the field, not the row count.** Three of the five
 semantic sites *update an existing row* — `scorecard.py:92` writes a JSONB field,
@@ -591,6 +630,32 @@ contract test of §4.2, and a fixture reaching a resource locator
   design work that no boundary dissolves.
 
 ## 11. Changelog
+
+**Revision 8 (2026-08-18).** An eighth review independently reproduced all three
+lock states on PostgreSQL 16 and confirmed the protocol. Five defects remained, and
+the first was in the proof rather than the design.
+
+- **The prescribed straddle test deadlocks a CORRECT implementation.** It paused the
+  effect while it held the shared lease and then waited for delete/restore to
+  commit — but delete needs the exclusive lock, which the paused effect is holding.
+  A test that can only pass against a broken build was standing as this design's
+  primary proof. Replaced by two ordered lock cases: effect-first (blocks lifecycle,
+  write lands, correctly) and lifecycle-first (blocks effect, predicate then sees
+  the new generation, nothing lands). The inside-SQL pause survives only as the
+  regression test showing what the removal of the shared lease costs (§9).
+- **The canonical example still had no lease.** §3.5 was corrected in revision 7 and
+  §2's headline block was not, so the design's most-read code was, again, exactly the
+  implementation the surrounding text rejects (§2).
+- **"Every effect takes a shared lease" contradicted the exclusive mechanism.** Taken
+  literally, a multi-resource operation would take shared and then upgrade — two such
+  operations deadlock. Each operation now selects exactly one path and never
+  upgrades; git and filesystem work takes the exclusive lock first (§3.5).
+- **F3b now owns correcting three authoritative-but-wrong surfaces**: `2026-08-17`
+  §3.1, `live_at_generation`'s docstring, and
+  `acquire_commit_mutex_at_generation`'s. All present predicate-only as correct, and
+  all would be followed. No production caller, so it is documentation and test debt.
+- The migration table said "6 × claim_fn remainder" when 6 is the total (4 → F3a,
+  1 → F4, 1 → F5), and a second §4.2 heading remained. Both fixed.
 
 **Revision 7 (2026-08-18).** A seventh review kept the architecture and found one
 fundamental concurrency defect plus five corrections.
