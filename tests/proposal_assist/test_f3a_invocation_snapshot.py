@@ -78,3 +78,66 @@ async def test_the_stamp_is_unconditional_even_when_the_generation_repeats():
         )
 
     assert ctx.active_turn_job_id == job_b, "the second turn's job id was dropped"
+
+
+@pytest.mark.asyncio
+async def test_an_in_flight_invocation_keeps_its_generation_across_a_restamp():
+    """THE test for this slice. A tool blocked in run_in_threadpool must not
+    observe a generation stamped after it started: its write would then be
+    fenced perfectly against the WRONG epoch, which is worse than unfenced
+    because it looks correct."""
+    import asyncio
+
+    from call_manager.proposal_assist.tools.registry import _safe_tool
+
+    ctx = _ctx()
+    ctx.lifecycle_generation = 3
+    ctx.active_turn_job_id = uuid.uuid4()
+    ctx.triggering_prompt = "turn one"
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    seen: dict = {}
+
+    async def slow_impl(_ctx, *, invocation):
+        entered.set()
+        await release.wait()                 # the restamp happens in this gap
+        seen["generation"] = invocation.lifecycle_generation
+        seen["prompt"] = invocation.triggering_prompt
+        return {"ok": True}
+
+    task = asyncio.create_task(
+        _safe_tool("read_proposal", ctx, slow_impl, ctx, pass_invocation=True)
+    )
+    await entered.wait()
+
+    ctx.lifecycle_generation = 5             # what set_turn_provenance does
+    ctx.triggering_prompt = "turn two"
+    release.set()
+    await task
+
+    assert seen["generation"] == 3
+    assert seen["prompt"] == "turn one", (
+        "the invocation read provenance LATE and would stamp turn two's prompt "
+        "onto a proposed change made during turn one"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_snapshot_survives_run_in_threadpool():
+    from starlette.concurrency import run_in_threadpool
+
+    from call_manager.proposal_assist.tools.registry import _safe_tool
+
+    ctx = _ctx()
+    ctx.lifecycle_generation = 3
+    seen: dict = {}
+
+    async def impl(_ctx, *, invocation):
+        def in_thread():
+            return invocation.lifecycle_generation
+        seen["generation"] = await run_in_threadpool(in_thread)
+        return {"ok": True}
+
+    await _safe_tool("read_proposal", ctx, impl, ctx, pass_invocation=True)
+    assert seen["generation"] == 3

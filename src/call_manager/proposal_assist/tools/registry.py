@@ -153,6 +153,48 @@ class ToolContext:
     turn_selection: dict | None = field(default=None)
 
 
+@dataclass(frozen=True)
+class Invocation:
+    """One tool call's immutable identity and per-turn provenance.
+
+    Snapshotted at DISPATCH, before any await or thread handoff. It exists
+    because ToolContext is MUTABLE and shared: set_turn_provenance restamps the
+    retained context every turn, so a tool reading these values when its effect
+    happens can read a LATER turn's. A stale generation paired with a newer
+    turn's prompt is worse than either alone.
+
+    Every mutable per-turn field an effect consumes belongs here. The provenance
+    fields are copied into durable proposed-change rows by the propose_* tools
+    (tools/proposal.py), so a late read misattributes stored data.
+    """
+
+    workspace_id: uuid.UUID
+    lifecycle_generation: int | None
+    active_turn_job_id: uuid.UUID | None
+    origin_kind: str
+    origin_job_id: uuid.UUID | None
+    triggering_turn_id: uuid.UUID | None
+    triggering_prompt: str | None
+    created_by: int | None
+    origin_session_id: str | None
+    turn_selection: dict | None
+
+    @classmethod
+    def snapshot(cls, ctx: ToolContext) -> Invocation:
+        return cls(
+            workspace_id=ctx.workspace_id,
+            lifecycle_generation=ctx.lifecycle_generation,
+            active_turn_job_id=ctx.active_turn_job_id,
+            origin_kind=ctx.origin_kind,
+            origin_job_id=ctx.origin_job_id,
+            triggering_turn_id=ctx.triggering_turn_id,
+            triggering_prompt=ctx.triggering_prompt,
+            created_by=ctx.created_by,
+            origin_session_id=ctx.origin_session_id,
+            turn_selection=ctx.turn_selection,
+        )
+
+
 def _mcp_ok(data: dict[str, Any]) -> dict[str, Any]:
     """Wrap a plain-dict tool result in the MCP content-block envelope.
 
@@ -225,6 +267,7 @@ async def _safe_tool(
     ctx: ToolContext,
     impl: Callable[..., Awaitable[dict[str, Any]]],
     *args: Any,
+    pass_invocation: bool = False,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Run an *_impl and wrap its result, catching UNEXPECTED exceptions.
@@ -236,12 +279,25 @@ async def _safe_tool(
     it here, log it (type + tool + workspace, with a stack trace via
     logger.exception), and return a GENERIC error envelope so no secret /
     quote / reference text reaches the user-facing message.
+
+    F3a Task 6: when pass_invocation=True, a frozen Invocation snapshot is
+    taken at DISPATCH (before any await or thread handoff, and before the
+    deny check so a denied call cannot leave a half-built identity anywhere)
+    and passed to the impl as the keyword argument ``invocation``. No
+    production call site sets pass_invocation=True in F3a; F3d flips it
+    per tool as effect sites are converted.
     """
+    # Snapshot BEFORE the deny check: a denied call must not leave a
+    # half-built identity anywhere (functionally moot in F3a, but the
+    # ordering is the contract).
+    if pass_invocation:
+        kwargs["invocation"] = Invocation.snapshot(ctx)
     denied = _deny_if_out_of_turn(tool_name, ctx)
     if denied is not None:
         return denied
     try:
-        return _wrap(await impl(*args, **kwargs))
+        result = await impl(*args, **kwargs)
+        return _wrap(result)
     except Exception:  # noqa: BLE001 — catch-all is the whole point here
         logger.exception(
             "tool %s raised an unexpected exception for workspace %s",
