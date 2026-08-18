@@ -58,24 +58,37 @@ def enqueue_uncited_claims_run(
 
 def claim_next_uncited_claims_job(session: Session) -> UncitedClaimsJob | None:
     """Claim the oldest queued job whose workspace is LIVE and has no running job.
-    FOR UPDATE SKIP LOCKED. Soft-deleted workspaces excluded (no post-delete spend)."""
+    FOR UPDATE SKIP LOCKED. Soft-deleted workspaces excluded (no post-delete spend).
+
+    The join captures lifecycle_generation IN THE SAME STATEMENT as the FOR UPDATE
+    lock (Global Constraint 2). A separate SELECT would reopen the delete/restore
+    race the fence exists to close.
+
+    `of=UncitedClaimsJob` keeps the lock on the job row only. Without `of=`, PostgreSQL
+    also locks the joined Workspace row, putting this claim in the delete path's way
+    and inverting the lock order the architecture spec fixes in §5."""
     running_ws = select(UncitedClaimsJob.workspace_id).where(UncitedClaimsJob.status == "running")
-    live_ws = select(Workspace.id).where(Workspace.soft_deleted_at.is_(None))
-    job = session.scalar(
-        select(UncitedClaimsJob)
+    row = session.execute(
+        select(UncitedClaimsJob, Workspace.lifecycle_generation)
+        .join(Workspace, Workspace.id == UncitedClaimsJob.workspace_id)
         .where(
             UncitedClaimsJob.status == "queued",
             UncitedClaimsJob.workspace_id.not_in(running_ws),
-            UncitedClaimsJob.workspace_id.in_(live_ws),
+            Workspace.soft_deleted_at.is_(None),
         )
         .order_by(UncitedClaimsJob.queued_at)
         .limit(1)
-        .with_for_update(skip_locked=True)
-    )
-    if job is None:
+        # `of=` keeps FOR UPDATE on the JOB only. Without it PostgreSQL would
+        # also lock the Workspace row, putting this claim in the delete path's
+        # way and inverting the lock order the architecture spec fixes in §5.
+        .with_for_update(of=UncitedClaimsJob, skip_locked=True)
+    ).first()
+    if row is None:
         return None
+    job, generation = row
     job.status = "running"
     job.started_at = datetime.now(UTC)
+    job.claimed_at_generation = generation
     session.flush()
     return job
 

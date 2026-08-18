@@ -4,9 +4,22 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
 from sqlalchemy import select, update
 
-from call_manager.db.models import ChatTurn, TurnJob, Workspace
+from call_manager.db.models import (
+    ChatTurn,
+    CoherenceJob,
+    EvaluatorJob,
+    ReviewRun,
+    TurnJob,
+    UncitedClaimsJob,
+    Workspace,
+)
+from call_manager.proposal_assist.coherence.jobs import claim_next_coherence_job
+from call_manager.proposal_assist.evaluator.jobs import claim_next_evaluator_job
+from call_manager.proposal_assist.review.jobs import claim_next_review_run
+from call_manager.proposal_assist.uncited_claims.jobs import claim_next_uncited_claims_job
 from tests.proposal_assist.conftest import make_workspace
 
 
@@ -92,3 +105,55 @@ def test_the_claim_writes_the_generation_in_ONE_statement(pg_session_factory):
     assert len(writes) == 1, f"expected one claim statement, got {len(writes)}"
     assert writes[0].startswith("UPDATE TURN_JOBS"), writes[0]
     assert "RETURNING" in writes[0]
+
+
+#: ReviewRun.draft_sha is NOT NULL with no server_default — the other three need
+#: only workspace_id and status. Constructors verified against the canonical seed
+#: at tests/test_workspaces_service.py:37-42.
+_BACKGROUND_CLAIMS = [
+    (
+        "coherence",
+        lambda ws_id: CoherenceJob(workspace_id=ws_id, status="queued"),
+        claim_next_coherence_job,
+    ),
+    (
+        "evaluator",
+        lambda ws_id: EvaluatorJob(workspace_id=ws_id, status="queued"),
+        claim_next_evaluator_job,
+    ),
+    (
+        "review",
+        lambda ws_id: ReviewRun(workspace_id=ws_id, status="queued", draft_sha="a" * 64),
+        claim_next_review_run,
+    ),
+    (
+        "uncited",
+        lambda ws_id: UncitedClaimsJob(workspace_id=ws_id, status="queued"),
+        claim_next_uncited_claims_job,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "name,make_job,claim_fn", _BACKGROUND_CLAIMS, ids=[c[0] for c in _BACKGROUND_CLAIMS]
+)
+def test_every_background_claim_captures_the_generation(
+    pg_session_factory, name, make_job, claim_fn
+):
+    """All four build a ToolContext and therefore originate tool calls. A
+    context without a generation cannot be fenced by F3b, so the claim is where
+    the value has to come from."""
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.flush()
+        s.execute(
+            update(Workspace).where(Workspace.id == ws.id).values(lifecycle_generation=4)
+        )
+        s.add(make_job(ws.id))
+        s.commit()
+
+    with pg_session_factory() as s:
+        job = claim_fn(s)
+        assert job is not None
+        assert job.claimed_at_generation == 4
+        s.commit()
