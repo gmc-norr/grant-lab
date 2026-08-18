@@ -54,13 +54,24 @@ tool
 
 ```python
 # In the tool — no session, no model, no statement.
-effects.submit_scorecard(ctx.fence_stamp, SubmitScorecard(...))
+effects.submit_scorecard(invocation.stamp, SubmitScorecard(...))
 
 # In the operation — fixed, reviewed, and the caller never sees this.
+# The generation predicate governs the WRITE (§3.5). It is never a
+# separate pre-check.
 def submit_scorecard(stamp: FenceStamp, cmd: SubmitScorecard) -> None:
-    with _session_factory.begin() as session:
-        require_live_generation(session, stamp)     # F1's primitive
-        session.add(Scorecard(...))
+    with _sessions.begin() as session:
+        row_count = session.execute(
+            update(EvaluatorJob)
+            .where(
+                EvaluatorJob.id == stamp.origin_job_id,
+                EvaluatorJob.status == "running",
+                live_at_generation(stamp.workspace_id, stamp.generation),
+            )
+            .values(scorecard=cmd.scorecard)
+        ).rowcount
+    if row_count == 0:
+        raise WorkspaceGenerationStale(...)
 ```
 
 This is the same argument as `web/_writes.py::workspace_write()` — *"exists so the
@@ -140,10 +151,56 @@ generation reserves or refunds **the new turn's** slot.
 A non-atomic `job.fetch_count += 1` is prohibited here as everywhere — that defect
 shipped twice (`28abbc4`, `701fbb7`) and is Global Constraint 3 of the F1 plan.
 
+### 3.5 Each operation states WHICH atomic mechanism it uses
+
+A named port does not make its internal fence atomic. Revision 5's example checked
+the generation and then wrote — two statements, two snapshots under READ COMMITTED,
+and a delete/restore fits between them. That is the defect F1's Global Constraint 3
+names and that shipped here twice (`28abbc4`, `701fbb7`). There is no
+`require_live_generation` primitive and this design does not invent one.
+
+**Every effect operation declares one of four mechanisms, and its test proves that
+one:**
+
+| Effect shape | Mechanism |
+|---|---|
+| DB `UPDATE` / `DELETE` | `live_at_generation(...)` **in the statement's `WHERE`**; inspect `rowcount` / `RETURNING`. One statement. |
+| DB `INSERT` | `INSERT … SELECT … WHERE live_at_generation(...)`. One statement. |
+| The txn already holds the target row `FOR UPDATE` | Assert on **that row**, not the mutex. `2026-08-17` §3.1 already requires this; `scorecard.py:93`, `uncited_claims.py:43` and `review_submit.py` all take `with_for_update=True` today. |
+| Git, filesystem, or multiple rows moving together | `acquire_commit_mutex_at_generation()` **before the first effect**, held through the transaction. |
+
+The fourth is the only one that takes a lock, and it is the only one where the
+generation check and the effect are separated in time — which is precisely why it
+holds the mutex across the gap, and why `2026-08-17` §5's lock ordering binds it.
+
 ### 3.4 `FenceStamp`
 
-A frozen `(workspace_id, generation)` pair, plus `active_turn_job_id` for
-accounting. It is the actor's belief, captured at claim time and never refreshed.
+A frozen `(workspace_id, generation, active_turn_job_id, origin_job_id)` record.
+
+**It is snapshotted per tool INVOCATION, at dispatch, before any `await` or thread
+handoff — never read from the retained context at the moment of the effect.**
+
+The retained interactive `ToolContext` is *mutated* every turn by
+`set_turn_provenance`, so reading the generation late reads a **newer** one:
+
+```
+1. a tool invocation at generation G begins, and blocks in run_in_threadpool
+2. delete + restore advance the workspace to G+2
+3. the retained context is restamped G+2 for the next turn
+4. the blocked worker wakes, reads ctx.fence_stamp, and submits its effect as G+2
+```
+
+The stale actor's write is then perfectly fenced — against the wrong generation.
+The worker-thread shape is real: `tools/references.py:527` uses
+`run_in_threadpool`, and a Python thread cannot be interrupted.
+
+So dispatch builds an immutable `Invocation` carrying the stamp and the
+authority-bearing provenance, and the tool receives that. A mutable context is a
+belief that can be overwritten while someone is still acting on it.
+
+`active_turn_job_id` cannot reuse `origin_job_id`: `registry.py:87` leaves that
+field `None` for interactive contexts *by design*, and `tools/proposal.py:169`
+copies it into durable provenance, so populating it would change stored data.
 
 **It cannot reuse `origin_job_id`.** `registry.py:87` leaves that field `None` for
 interactive contexts *by design*, and `tools/proposal.py:169` copies it into durable
@@ -151,25 +208,58 @@ provenance — populating it would silently change stored data.
 
 ## 4. The gate
 
-> **`tools/` may not import SQLAlchemy, `db.models`, `Session`, `Engine`, or a
-> session factory. It may import only the approved query, effect and accounting
-> ports and their DTOs and commands.**
+> **`tools/` may import only from a positive allowlist: the query, effect and
+> accounting ports, their DTOs and commands, and the standard library. Not
+> SQLAlchemy, not `db.models`, not `Session`, `Engine` or a session factory — and
+> not any project module outside the allowlist.**
 
-That is the whole rule. It is an import check: closed, decidable, and one grep
-wide. A tool that cannot name a table cannot write to one.
+A forbidden-name list is not enough. A tool can reach an effectful project helper
+that exposes no SQLAlchemy in the tool's own module, so the rule is stated
+positively: anything not on the list is a violation, and adding to the list is a
+reviewed diff.
 
-Everything F2's verifier struggled with — the open effect set, the acquisition
-set, containment, `caller_fenced` — was downstream of tools holding a handle they
-should not have had. None of it survives the boundary.
+### 4.1 The boundary must also remove resource locators
+
+Closing database imports alone does not close semantic authority. `ToolContext`
+exposes `repo_dir` (`registry.py:42`), so this passes every import fixture:
+
+```python
+(ctx.repo_dir / "proposal.md").write_text(new_text)
+```
+
+And `tools/history.py:63` legitimately imports `subprocess` for read-only git.
+
+So: **`repo_dir`, `workspaces_dir` and every other resource locator leave the
+tool-facing context**, and filesystem and git *reads* go behind query ports too.
+A tool holds names of operations, not paths.
+
+### 4.2 What this boundary is, and what it is not
+
+It is **architectural hygiene for trusted code**: it makes the wrong thing hard to
+write and easy to spot in review, and it makes coverage a CI check rather than a
+memory. It is **not adversarial containment** — that would need a process, OS or
+database-privilege boundary, and this design does not claim one.
+
+Revision 5 claimed "a tool that cannot name a table cannot write to one." That is
+false in one specific way worth keeping in view: a query port that accidentally
+returns an **attached** ORM instance hands the tool `object_session(instance)`
+without the tool importing anything. So the DTO rule needs its own contract test —
+**every query result is recursively free of ORM instances** — not just a naming
+convention.
+
+### 4.3 Port construction
+
+Ports are an injected bundle, built by the adapter factories and satisfying a
+`Protocol`, with implementations in a package `tools/` may not import. **Not a
+module global** — `effects._session_factory` would be reachable from any module
+that can import `effects`, which is every tool.
 
 **`ToolContext` stops carrying `session_factory` altogether**, so revisions 1–4's
-privatisation problem disappears rather than being solved: there is no attribute to
-make private, no `getattr` spelling to police, and no `AttributeError`-in-production
-staging hazard.
+privatisation problem disappears rather than being solved.
 
-**Adding a new effect requires a reviewed implementation and a stale-generation
-test.** That is the point of the ceremony: the cost falls on adding authority, not
-on using it.
+**Adding a new effect requires a reviewed implementation, a declared mechanism
+(§3.5), and a straddle test (§9).** The cost falls on adding authority, not on
+using it.
 
 ### 4.1 What the boundary also fixes
 
@@ -259,8 +349,33 @@ stamped unconditionally every turn.
 Reading it afterwards reopens the exact race the fence closes: delete → restore
 lands between claim and read, and the old actor adopts G+1 as its own belief.
 
+**F3a owns the F2 gate migration, and cannot land without it.** The merged gate has
+two *unconditional* inertness guards — `test_nothing_imports_the_fencing_primitives_yet`
+(`test_fence_coverage.py:169`) and `test_nothing_reads_or_writes_claimed_at_generation_yet`
+(`:191`). The moment a claim writes `claimed_at_generation`, the second goes red. So
+F3a must, in the same slice:
+
+- split `SLICE_STATUS` into `F3a…F3f` and reassign row ownership (§7 migration table);
+- replace both inertness guards with **scoped per-sub-slice obligations** — "nothing
+  outside F3a's identities writes the column yet" — rather than "nothing does";
+- leave `queue.py::claim_queued_jobs` and `setup.py::claim_next_setup_job` in F4/F5.
+
+F3c then installs a **ratchet** against the violations that still exist (a
+baseline count that may only decrease), and **F3f** brings it to zero and activates
+the permanent boundary. A gate that must pass green at every sub-slice boundary is
+otherwise impossible: F3d cannot satisfy a live import rule while ingest and the
+capability holders deliberately remain.
+
+**The claim generation needs plumbing that does not exist.** The drains discard
+everything but the job: `coherence/pass_runner.py:189` is
+`job = claim_next_coherence_job(s); s.commit()` and returns `None`. F3a threads the
+returned generation through each `drain_* → run_* → adapter_builder` chain.
+
 F3a also lands the runtime two-turn test F2 owes: two turns through one retained
-context across a generation change, the second carrying the new value.
+context across a generation change, the second carrying the new value — **plus the
+overlapping-invocation test**, which is the one that matters: block a tool
+invocation at G, restamp the retained context to G+2, release the blocked
+invocation, and prove it still presents G (§3.4).
 
 ### F3b — the ports *(additive; no caller converted)*
 
@@ -278,12 +393,24 @@ data.
 
 ### F3d — convert the tool sites
 
+**This is a module-level dependency migration, not five site conversions.** Moving
+only the inventory identities leaves `tools/citations.py` importing SQLAlchemy and
+models, so the boundary stays red. Other session/model-dependent helpers live there
+and are consumed by analysis, human-cite, collab and accepting:
+`_resolve_citekey_for_ref` takes a `Session` and `Reference` (`citations.py:250`),
+`compute_citation_insert` takes a session, queries models and returns an **attached**
+`Reference` (`:567`), and the unregistered `insert_citation_impl` obtains a session.
+
+So F3d moves the whole session/model-dependent citation core out of `tools/` into
+the effects/domain layer and updates **every non-tool consumer** — then converts
 `propose_citation_impl`, `_propose_artifact_edit_impl`, `submit_review_impl`,
-`submit_scorecard_impl`, `submit_uncited_claims_impl` to effect operations; the two
-`references.py` accounting sites to owner-bound operations; `_write_citekey_cache`
-and `_insert_citation_locked` into the effects layer, which retires `caller_fenced`
-and the `accepting.py` injection with them. Every read under `tools/` becomes a
-query port returning DTOs.
+`submit_scorecard_impl` and `submit_uncited_claims_impl` to effect operations, the
+two `references.py` accounting sites to owner-bound operations, and every remaining
+read to a query port returning DTOs. `caller_fenced` and the `accepting.py`
+injection retire with the move.
+
+The attached-instance requirement in `compute_citation_insert` is legitimate — it
+just belongs *inside* the relocated core, never across the tool boundary.
 
 ### F3e — the ingest pipeline
 
@@ -297,6 +424,12 @@ embedding would pin the commit mutex for its duration — the failure `2026-08-1
 exists to prevent, and why `2026-08-17` §10 says *fence what is frequent, barrier what
 is destructive*.
 
+**Ingest also writes the filesystem before its rows.** Original bytes land at
+`ingest.py:360` before the `Reference` row commits, and extracted text before its
+status commit. F3e's operations and their proofs must name those filesystem effects
+explicitly — a proof that only inspects rows would pass while bytes were written on
+a stale generation.
+
 So ingest becomes **phased, idempotent operations**, each re-checking at its own
 boundary, and F3e answers a question no earlier sub-slice raises: **what does a
 stale generation mean for a half-ingested reference?** The row exists, text may be
@@ -306,8 +439,13 @@ transition that is itself an accounting operation, but that is F3e's design work
 
 ### F3f — capability holders, then the handle
 
-`tools/audit.py` and the citation-audit write path receive a `VerdictCache` port;
-`citation_service` receives a `UsageRecorder`. **`session_factory` is removed from
+`tools/audit.py` and the citation-audit write path receive a `VerdictCache` port.
+
+`citation_service` needs **more than a `UsageRecorder`**: it uses its factory for
+two capabilities, not one — it *reads* caps via `check_citation_caps`
+(`service.py:73`) as well as recording usage (`:114`). A write-only recorder cannot
+preserve `complete_json`. It receives either a `CitationUsageStore` with
+`check_caps` and `record`, or a separate `CapReader` and `UsageRecorder`. **`session_factory` is removed from
 `ToolContext` in this sub-slice's final commit**, once nothing reaches for it.
 
 ## 8. What this design does not do
@@ -338,18 +476,30 @@ across a generation change; the second must carry the new value. No static check
 can observe a per-turn re-stamp, and `registry.py:80` documents the identical trap
 for provenance, where a stamp missed once leaks the previous turn's value.
 
-**Every effect operation is proven by the effect that must not land** (F3b, F3d–F3f)
-— not by an exception type:
+**Every effect operation is proven by a STRADDLE test** (F3b, F3d–F3f). Calling an
+operation with an already-stale stamp proves only that a pre-check exists — the
+broken two-statement implementation of §3.5 passes it. The test must land the
+delete/restore **in the gap**:
 
 ```python
-op_under_test(stale_stamp, command)          # raises, or does not
-assert count_of(Model) == before             # THE assertion
-assert git_head(repo) == head_before
+# pause the operation after its validation point, before its effect commits
+with straddle(op_under_test):          # test seam, one per mechanism
+    delete_and_restore(workspace_id)   # generation advances here
+assert_nothing_landed()
 ```
 
-Revisions 1–4 proposed tests asserting that *some exception eventually occurred*.
-That is satisfied by a design which commits and then complains. The assertion is
-that nothing landed.
+At least one straddle test per mechanism in §3.5's table.
+
+**And the assertion must name the field, not the row count.** Three of the five
+semantic sites *update an existing row* — `scorecard.py:92` writes a JSONB field,
+`review_submit.py:19` writes `raw_response_json`, `uncited_claims.py:43` writes
+`claims`. A stale write lands with the row count unchanged, so revision 5's stated
+bar would have passed a broken implementation. Compare the affected fields, or a
+full row snapshot.
+
+**For git and filesystem effects, an unchanged HEAD is not enough** — a stale
+implementation can dirty the working tree without committing. Assert HEAD,
+worktree cleanliness and content, and the relevant storage paths (§7, F3e).
 
 **The compensation must be disabled for each per-site test** (F3d–F3f), per
 `2026-08-17` §9: a conversion test that passes with the fence removed is measuring
@@ -378,6 +528,8 @@ fail, each as its own fixture.
   `review/pass_runner.py:344` writes git with zero mutex acquisitions. The import
   boundary does not reach it, because it is not a tool — it is a pass runner. It
   needs an effect operation of its own, and `2026-08-17` F4 is where that lands.
+  **Its operation must take the mutex BEFORE loading the locked `ReviewRun` row** —
+  wrapping the present block as-is creates the J→M inversion `2026-08-17` §5 names.
 - **The ceremony must stay affordable.** Every new effect needs an operation, a
   command, a DTO and a test. If that becomes onerous, the pressure will be to add a
   generic escape — `effects.execute(stmt)` — which reinstates ambient authority
@@ -396,6 +548,46 @@ fail, each as its own fixture.
   design work that no boundary dissolves.
 
 ## 11. Changelog
+
+**Revision 6 (2026-08-18).** A sixth review kept the architecture and found seven
+targeted defects. Its verdict — *"another wholesale redesign is not warranted"* — is
+why this is a revision and not a rewrite.
+
+- **The headline example was the two-statement race.** It checked the generation and
+  then wrote; under READ COMMITTED a delete/restore fits between the statements.
+  That is F1's Global Constraint 3 and the defect that shipped here twice
+  (`28abbc4`, `701fbb7`), written into this design's most-read code block. There is
+  now a table of four concrete atomic mechanisms, each operation declares which one
+  it uses, and the invented `require_live_generation` is gone (§3.5).
+- **The retained stamp was mutable across invocations.** `set_turn_provenance`
+  restamps the retained context every turn, so a tool blocked in
+  `run_in_threadpool` wakes and reads a *newer* generation — its stale write then
+  fences perfectly against the wrong epoch. The stamp is now snapshotted per
+  invocation at dispatch, and the overlapping-invocation test is the proof (§3.4).
+- **The import boundary was not closed.** `ctx.repo_dir` lets a tool write
+  `proposal.md` directly while passing every import fixture, and `tools/history.py`
+  legitimately imports `subprocess`. The rule is now a positive allowlist, resource
+  locators leave the tool-facing context, and the claim is stated honestly:
+  architectural hygiene for trusted code, not adversarial containment (§4).
+- **F3a–F3c could not land green.** F2's two *unconditional* inertness guards go red
+  the moment a claim writes the column or a port imports the primitives. F3a now
+  owns the gate migration, F3c installs a ratchet, F3f reaches zero (§7).
+- **F3d was a module migration, not five conversions.** `tools/citations.py` holds
+  other session/model-dependent helpers consumed by four non-tool paths; moving two
+  identities leaves the module importing SQLAlchemy (§7).
+- **A `UsageRecorder` was insufficient** — the citation service also *reads* caps at
+  `service.py:73`. And port construction is now specified as an injected bundle,
+  since a module global would make `effects._session_factory` reachable from every
+  tool (§4.3, §7).
+- **Two proofs were decorative.** A stale-stamp call proves only that a pre-check
+  exists; the tests must straddle. And row counts are unchanged for the three sites
+  that *update* a JSONB field, so the assertion must name the field (§9).
+
+Also corrected: eight directly-imported model classes, not ten; ingest writes
+original bytes at `ingest.py:360` before its row commit, so F3e's proofs must cover
+filesystem effects; and `pass_runner`'s eventual operation must take the mutex
+before loading its locked row, or it creates a J→M inversion.
+
 
 **Revision 5 (2026-08-18).** Redesigned after a fifth review. Revisions 1–4 each
 tried to hand tool code a `Session` while guaranteeing its transaction could not be
