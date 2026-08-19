@@ -63,7 +63,7 @@ RETAINED_PINS = {
 #: meanings the architecture spec gives them.
 SLICE_STATUS = {
     "F3a": "complete",  # claim identity for every tool-originating actor
-    "F3b": "pending",   # the ports
+    "F3b": "complete",  # the ports — no inventory row of its own; F3d converts callers
     "F3c": "pending",   # the import gate
     "F3d": "pending",   # convert the tool sites
     "F3e": "pending",   # the ingest pipeline

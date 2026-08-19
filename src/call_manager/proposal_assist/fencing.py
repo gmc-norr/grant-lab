@@ -1,6 +1,6 @@
 """Epoch fencing — the three primitives every belief-carrying actor uses.
 
-Spec: docs/superpowers/specs/2026-08-17-lifecycle-fence-design.md (revision 4),
+Spec: docs/superpowers/specs/2026-08-17-lifecycle-fence-design.md (revision 6),
 and docs/superpowers/specs/2026-08-18-fence-session-ownership-design.md (revision
 8) for the mechanism table that says which primitives an effect combines.
 
@@ -73,8 +73,13 @@ def live_at_generation(workspace_id: uuid.UUID, generation: int):
     """Primitive A. "Is this workspace LIVE and STILL at *generation*?", as a
     predicate that governs the WRITE.
 
-    Use it INSIDE the statement that performs the effect:
+    NOT SUFFICIENT ALONE. This is an exists() subquery and it takes NO LOCK on the
+    workspace row, so under READ COMMITTED it evaluates against the statement's
+    snapshot and a transition committing after that snapshot is invisible to it.
+    Pair it with `acquire_shared_lease` (Primitive C), which must be acquired
+    FIRST, in the same transaction:
 
+        acquire_shared_lease(session, ws_id)
         session.execute(
             update(SomeJob)
             .where(SomeJob.id == job_id, live_at_generation(ws_id, gen))
@@ -118,8 +123,14 @@ def acquire_commit_mutex_at_generation(
     deleted or has moved past *generation*.
 
     For effects spanning git, the filesystem, or multiple rows that must move
-    together. For DB-only effects prefer `live_at_generation`, which takes no
-    lock and therefore cannot create a lock-order problem.
+    together — and for those it is MANDATORY, taken before the first effect of
+    any kind. For DB-only effects use `acquire_shared_lease` plus
+    `live_at_generation` instead: those stay concurrent with each other, while
+    this mutex serializes every writer for the workspace.
+
+    Never call this while already holding the shared lease for the same
+    workspace. Two operations each holding shared and each waiting to upgrade is
+    the one deadlock shape this protocol has.
 
     LOCK ORDER: this acquires the mutex (M). It must be called BEFORE any setup
     job (J) or workspace (W) row lock, preserving the normative M -> J -> W
