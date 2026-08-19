@@ -70,7 +70,6 @@ _LEASE_ISSUE_TIMEOUT = 5.0
 _PROV = Provenance(
     origin_kind="interactive_turn",
     origin_session_id=None,
-    origin_job_id=None,
     triggering_turn_id=None,
     triggering_prompt=None,
     created_by=None,

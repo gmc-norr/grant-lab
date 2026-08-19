@@ -234,11 +234,15 @@ class Invocation:
         )
 
     def provenance(self) -> Provenance:
-        """The provenance the propose_* effects copy into durable rows."""
+        """The provenance the propose_* effects copy into durable rows.
+
+        origin_job_id is NOT here: it is on the stamp instead (FenceStamp is
+        built from this same Invocation, from the same self.origin_job_id), so
+        there is exactly one value to disagree with itself.
+        """
         return Provenance(
             origin_kind=self.origin_kind,
             origin_session_id=self.origin_session_id,
-            origin_job_id=self.origin_job_id,
             triggering_turn_id=self.triggering_turn_id,
             triggering_prompt=self.triggering_prompt,
             created_by=self.created_by,

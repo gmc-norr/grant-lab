@@ -65,8 +65,10 @@ def test_the_stamp_is_frozen():
 
 
 def test_provenance_carries_the_row_data_the_stamp_deliberately_does_not():
-    """origin_job_id appears in BOTH: the stamp uses it to target the actor's own
-    job row, and provenance copies it into durable proposed-change rows."""
+    """origin_job_id is NOT here: it lives on the stamp alone (see
+    test_stamp_carries_the_four_identity_fields), because a propose_* effect
+    writes proposed_changes.origin_job_id from the stamp, not from this
+    record — one field, not two that could disagree."""
     turn_id, origin_job = uuid.uuid4(), uuid.uuid4()
     ctx = _ctx(
         lifecycle_generation=3,
@@ -80,7 +82,6 @@ def test_provenance_carries_the_row_data_the_stamp_deliberately_does_not():
     assert Invocation.snapshot(ctx).provenance() == Provenance(
         origin_kind="coherence_session",
         origin_session_id="sess-1",
-        origin_job_id=origin_job,
         triggering_turn_id=turn_id,
         triggering_prompt="do the thing",
         created_by=42,

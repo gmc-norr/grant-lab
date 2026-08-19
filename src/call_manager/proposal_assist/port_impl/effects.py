@@ -277,7 +277,13 @@ class SqlEffects:
                         literal(payload, type_=JSONB),
                         literal(provenance.origin_kind),
                         literal(provenance.origin_session_id),
-                        literal(provenance.origin_job_id),
+                        # From the stamp, not from provenance: stamp.origin_job_id
+                        # is the SAME field the live_at_generation predicate above
+                        # authorizes this INSERT against, so the actor this row is
+                        # attributed to is provably the actor the fence checked.
+                        # Provenance carries no origin_job_id of its own — see
+                        # FenceStamp's and Provenance's docstrings in ports/stamp.py.
+                        literal(stamp.origin_job_id),
                         literal(provenance.triggering_turn_id),
                         literal(provenance.triggering_prompt),
                         literal(provenance.created_by),
