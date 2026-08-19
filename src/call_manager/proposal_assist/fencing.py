@@ -22,9 +22,10 @@ neither: assert the generation on that already-locked row. Acquiring the mutex
 afterwards inverts the normative M -> J -> W order and opens a real Postgres
 40P01 against the delete path (spec 5).
 
-`WorkspaceGenerationStale` lives here rather than beside `WorkspaceDeleted` in
-drafting/locking.py because it is raised only by fencing code, and F2's coverage
-gate keys on this module. The asymmetry is deliberate.
+`WorkspaceGenerationStale` is DEFINED in ports/errors.py and re-exported here.
+It moved in F3b: a tool has to be able to CATCH it, and this module imports
+sqlalchemy and db.models, so under the F3c import boundary no tool could name it.
+Every pre-F3b import site keeps working through the re-export.
 """
 
 from __future__ import annotations
@@ -39,29 +40,13 @@ from call_manager.proposal_assist.drafting.locking import (
     WorkspaceDeleted,
     acquire_commit_mutex,
 )
+from call_manager.proposal_assist.ports.errors import WorkspaceGenerationStale
 
-
-class WorkspaceGenerationStale(RuntimeError):
-    """The workspace has moved past the generation the caller carried.
-
-    NOT an error condition. It means "your epoch is over; produce no further
-    semantic effect." It never reaches a user as a 5xx.
-
-    It does NOT mean "write nothing". An actor that catches this must still
-    record cleanup and accounting — tokens, dollars, terminal status, releasing
-    an active-unique slot — via conditional writes only (spec 7). Abandoning
-    silently strands the job holding its slot and destroys deliberate late token
-    accounting (see review/pass_runner.py, which keeps the tokens a cancelled
-    run's sub-call spent on purpose).
-    """
-
-    def __init__(self, workspace_id: uuid.UUID, *, expected: int, actual: int) -> None:
-        super().__init__(
-            f"workspace {workspace_id} moved from generation {expected} to {actual}"
-        )
-        self.workspace_id = workspace_id
-        self.expected = expected
-        self.actual = actual
+__all__ = [
+    "WorkspaceGenerationStale",
+    "acquire_commit_mutex_at_generation",
+    "live_at_generation",
+]
 
 
 def live_at_generation(workspace_id: uuid.UUID, generation: int):

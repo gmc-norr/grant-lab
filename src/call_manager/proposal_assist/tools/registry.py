@@ -30,6 +30,9 @@ from typing import TYPE_CHECKING, Any
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
+from call_manager.proposal_assist.ports.errors import UnfencedInvocation
+from call_manager.proposal_assist.ports.stamp import FenceStamp, Provenance
+
 if TYPE_CHECKING:
     from claude_agent_sdk.types import McpSdkServerConfig
     from sqlalchemy.orm import sessionmaker
@@ -210,6 +213,35 @@ class Invocation:
             created_by=ctx.created_by,
             origin_session_id=ctx.origin_session_id,
             turn_selection=cls._freeze(ctx.turn_selection),
+        )
+
+    def stamp(self) -> FenceStamp:
+        """This invocation's fencing identity.
+
+        Raises UnfencedInvocation rather than defaulting: an actor with no
+        claimed generation has no belief to fence against, and defaulting would
+        submit an effect against a generation nobody claimed. Generation 0 is
+        REAL (Workspace.lifecycle_generation has server_default 0), so this
+        tests for None, never for falsiness.
+        """
+        if self.lifecycle_generation is None:
+            raise UnfencedInvocation(self.workspace_id)
+        return FenceStamp(
+            workspace_id=self.workspace_id,
+            generation=self.lifecycle_generation,
+            active_turn_job_id=self.active_turn_job_id,
+            origin_job_id=self.origin_job_id,
+        )
+
+    def provenance(self) -> Provenance:
+        """The provenance the propose_* effects copy into durable rows."""
+        return Provenance(
+            origin_kind=self.origin_kind,
+            origin_session_id=self.origin_session_id,
+            origin_job_id=self.origin_job_id,
+            triggering_turn_id=self.triggering_turn_id,
+            triggering_prompt=self.triggering_prompt,
+            created_by=self.created_by,
         )
 
 
