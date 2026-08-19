@@ -1,9 +1,12 @@
 # Epoch-Fenced Semantic Effects — design
 
-**Status:** revision 4, 2026-08-17. Revision 1 was reviewed and found incomplete;
+**Status:** revision 6, 2026-08-19. Revision 1 was reviewed and found incomplete;
 revision 2 corrected the audit unit and four further defects; revision 3 settles
 the read-revocation contract; revision 4 folds in the F2 research findings: canonical
-form, classified inventory, and ToolContext lifetime split. See §12 for the changelog.
+form, classified inventory, and ToolContext lifetime split; revision 5 demoted F2
+from a coverage gate to an inventory; revision 6 corrects §3 — the conditional-write
+predicate is not a fence on its own and pairs with the shared lease (F3b). See §12
+for the changelog.
 
 **Step 1 of a four-step sequence** (fence → prove → remove → relax). This
 document specifies step 1 only.
@@ -101,15 +104,18 @@ never the mutex call site. Revision 1 got this wrong in both directions.
 
 ---
 
-## 3. Two fence primitives
+## 3. Three fence primitives
 
 Forcing every fence through the mutex would introduce contention and — as §5
-shows — real deadlocks. Two mechanisms, chosen by what the effect touches.
+shows — real deadlocks. Three mechanisms, and which ones an effect uses is
+decided ONCE per operation and never changed mid-flight. The mechanism table
+lives in `2026-08-18-fence-session-ownership-design.md` §3.5; this section
+describes the primitives themselves.
 
 ### 3.1 Primitive A — conditional write (DB-only effects)
 
 For an effect that is purely one or more DB rows, the fence is a predicate on the
-**write statement itself**, with no new lock:
+**write statement itself**:
 
 ```sql
 UPDATE/INSERT ... WHERE EXISTS (
@@ -123,8 +129,31 @@ One statement. This is the rule established in `28abbc4` and re-proved in
 statement does not guard the write, because each statement takes a fresh
 READ COMMITTED snapshot.
 
-Primitive A adds no lock and therefore **cannot** create a lock-order problem.
-It is the default. Prefer it wherever the effect is DB-only.
+**Primitive A is NOT sufficient on its own.** It is an `exists()` subquery and it
+takes **no lock on the workspace row**, so under READ COMMITTED it evaluates
+against the statement's snapshot — and a lifecycle transition committing after
+that snapshot is invisible to it. Reproduced on PostgreSQL 16: a generation-G
+`INSERT … SELECT … WHERE EXISTS(...)` qualifies, pauses inside the statement, a
+second connection commits G+2, and the G-era row lands durably against a
+workspace now at G+2. For an `UPDATE` the race is masked only because PostgreSQL
+re-checks the `WHERE` against the updated row version when a concurrent
+transaction touches the same target row, which cancel-on-delete does — and that
+compensation is removed in step 3.
+
+### 3.1a Primitive C — the shared lease
+
+So a DB-only effect pairs Primitive A with `acquire_shared_lease` (F3b), acquired
+**first**, in the same transaction: take the workspace's commit-mutex key in
+SHARED mode, then perform the predicate-bearing write. Shared locks do not
+conflict, so effects stay concurrent with each other; a lifecycle transition
+needs the key exclusively, so it either waits for in-flight effects or wins first
+and leaves the effect's predicate to fail. The predicate remains — it is what
+turns "I waited" into "I checked".
+
+Never take the shared lease and then attempt the exclusive mutex. Two operations
+each holding shared and each waiting to upgrade is the one deadlock shape this
+protocol has; an effect that will touch git or the filesystem takes Primitive B
+first, before its first effect of any kind.
 
 ### 3.2 Primitive B — mutex + generation
 
@@ -232,9 +261,9 @@ they are slot bookkeeping, not semantic production — which is why the accounti
 category is widened in §2 and deliberately separated here.
 
 **Requirement:** the generation travels in `ToolContext` (`tools/registry.py:43`)
-and every `semantic` tool write fences on it — Primitive A for the DB-only ones
-(reached via `fenced_execute` in F3). `accounting` sites must NOT fence; they use
-CAS writes only.
+and every `semantic` tool write fences on it — Primitive A paired with Primitive C
+for the DB-only ones (reached via the effect ports, F3b; §3.1a). `accounting`
+sites must NOT fence; they use CAS writes only.
 
 #### ToolContext lifetimes *(F2 finding)*
 
@@ -340,8 +369,19 @@ deadlocks:
    not acquire the mutex. Assert the generation **on that already-locked row**.
    The lock that makes the assertion sound is already held; adding M buys nothing
    and inverts an order.
-2. Where the effect is DB-only and no workspace row lock is held, use
-   Primitive A. No lock, no ordering.
+2. Where the effect is DB-only and no workspace row lock is held, acquire
+   Primitive C (`acquire_shared_lease`) and then carry Primitive A in the WHERE
+   of the single statement that performs the effect. Primitive A alone is **not**
+   sufficient: it takes no lock on the workspace row, so it evaluates against its
+   own statement's READ COMMITTED snapshot, and a transition committing after
+   that snapshot is invisible to it (§3.1).
+
+   Primitive C takes the **same key** as the mutex, in SHARED mode, so it carries
+   the same ordering obligation as Primitive B: acquire it **first**, before any
+   job or workspace row lock, preserving **M → J → W**. And never upgrade — a
+   transaction holding C must not go on to acquire the exclusive mutex for the
+   same workspace. Two transactions each holding shared and each waiting to
+   upgrade is the one deadlock shape this protocol has.
 3. Where Primitive B is genuinely required (git / filesystem / multi-row), the
    mutex is acquired **first**, before any job or workspace row lock, preserving
    the established **M → J → W** order (`phases/setup.py:500`,
@@ -584,7 +624,7 @@ Best-effort cancellation keeps a legitimate role as an optimization inside step
 
 | Slice | Content |
 |---|---|
-| **F1** | Both primitives (§3.1, §3.2), `WorkspaceGenerationStale`, migration adding `claimed_at_generation` to the **7** live job tables. No call sites converted. |
+| **F1** | Primitive A and Primitive B (§3.1, §3.2), `WorkspaceGenerationStale`, migration adding `claimed_at_generation` to the **7** live job tables. No call sites converted. Primitive C (§3.1a) was added in revision 6 and is delivered by F3b, not F1. |
 | **F2** | The coverage gate skeleton (§9), asserting nothing yet — so every later slice lands against a gate that already exists. |
 | **F3** | `ToolContext` generation propagation + per-turn re-stamp, and the tool-write fences (§4.1). The largest slice and the one revision 1 omitted. |
 | **F4** | The 5 non-setup background job families, with the per-family lock ordering of §5. |
@@ -601,6 +641,25 @@ guard defects that only become reachable once step 3 removes cancellation.
 ---
 
 ## 12. Changelog
+
+**Revision 6 (2026-08-19).** §3 rewritten: three primitives, not two. Primitive A
+was documented as the default and as adding no lock. It is an `exists()` subquery
+taking no lock on the workspace row, so under READ COMMITTED it evaluates against
+the statement's snapshot — reproduced on PostgreSQL 16 with an `INSERT`, which has
+no target row and therefore no re-check to mask it. DB-only effects now pair it
+with Primitive C, `acquire_shared_lease` (§3.1a), acquired first, and an effect
+never upgrades from the shared lease to the exclusive mutex. This revision also
+brings the status line into line with revision 5, which the changelog recorded and
+the header did not.
+
+A review of this revision found the same corrected claim still standing in §5's
+own normative rules: rule 2 told DB-only effects to use Primitive A alone, "no
+lock, no ordering" — the exact position §3 was just rewritten to reject. Rule 2
+now requires Primitive C first, with Primitive A carried in the same statement,
+and states the ordering obligation that comes with taking C: same key as the
+mutex, acquired first, never upgraded to the exclusive lock. The same stale
+claim had also survived into §4.1's tool-write requirement and the F1 row of
+§11's slice table; both are corrected to name Primitive C alongside Primitive A.
 
 **Revision 5 (2026-08-18).** Added §9.1 after an external review found five
 reachable bypasses in the merged F2 gate, each reproduced against the verifier.
