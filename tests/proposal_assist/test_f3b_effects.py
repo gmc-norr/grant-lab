@@ -189,6 +189,33 @@ def test_submit_scorecard_refuses_a_job_that_is_no_longer_running(pg_session_fac
         assert s.get(EvaluatorJob, job_id).scorecard is None
 
 
+def test_a_finished_scorecard_job_reports_the_target_not_the_resubmit(pg_session_factory):
+    """REGRESSION on classifier ORDERING, the scorecard twin of
+    test_a_foreign_item_that_already_has_a_review_still_reports_the_run.
+
+    scorecard.py checks "is this THIS workspace's still-running job" BEFORE it
+    checks exactly-once, so a job that has both finished AND already been
+    submitted reports the target. Classifying exactly-once first changes the
+    string the agent sees for a stale ctx pointing at a long-finished run."""
+    with pg_session_factory() as s:
+        ws_id = seed_workspace(s, generation=1)
+        job_id = seed_evaluator_job(s, ws_id, generation=1)
+        job = s.get(EvaluatorJob, job_id)
+        job.scorecard = _CARD
+        job.status = "completed"
+        s.commit()
+
+    with pytest.raises(EffectRejected) as e:
+        SqlEffects(pg_session_factory).submit_scorecard(
+            _stamp(ws_id, generation=1, origin_job_id=job_id),
+            SubmitScorecard(scorecard={"overall_band": "gap"}),
+        )
+    assert e.value.reason == "scorecard target is not an active evaluator run for this workspace"
+
+    with pg_session_factory() as s:
+        assert s.get(EvaluatorJob, job_id).scorecard == _CARD
+
+
 # -------------------------------------------------------------- submit_review
 
 
@@ -365,6 +392,29 @@ def test_submit_uncited_claims_accepts_an_empty_list_exactly_once(pg_session_fac
     with pytest.raises(EffectRejected) as e:
         effects.submit_uncited_claims(stamp, SubmitUncitedClaims(claims=[]))
     assert e.value.reason == "claims have already been submitted for this run"
+
+
+def test_a_finished_claims_job_reports_the_target_not_the_resubmit(pg_session_factory):
+    """REGRESSION on classifier ORDERING — the uncited-claims twin of
+    test_a_finished_scorecard_job_reports_the_target_not_the_resubmit.
+    uncited_claims.py checks the target before exactly-once; so must this."""
+    with pg_session_factory() as s:
+        ws_id = seed_workspace(s, generation=1)
+        job_id = seed_uncited_job(s, ws_id, generation=1)
+        job = s.get(UncitedClaimsJob, job_id)
+        job.claims = []
+        job.status = "completed"
+        s.commit()
+
+    with pytest.raises(EffectRejected) as e:
+        SqlEffects(pg_session_factory).submit_uncited_claims(
+            _stamp(ws_id, generation=1, origin_job_id=job_id),
+            SubmitUncitedClaims(claims=[{"claim_text": "x", "section_index": 0, "reason": "y"}]),
+        )
+    assert e.value.reason == "target is not an active uncited-claims run for this workspace"
+
+    with pg_session_factory() as s:
+        assert s.get(UncitedClaimsJob, job_id).claims == []
 
 
 def test_generation_zero_is_fenced_like_any_other(pg_session_factory):

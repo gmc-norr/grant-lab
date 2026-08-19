@@ -123,10 +123,23 @@ class SqlEffects:
                 .returning(EvaluatorJob.id)
             ).first()
             if landed is None:
+                # ORDER MATTERS and it mirrors scorecard.py's today: the target
+                # first, exactly-once SECOND. scorecard.py returns the target
+                # message for a job that is not this workspace's running job,
+                # whatever its scorecard column holds; classifying the resubmit
+                # first would answer a stale ctx pointing at a long-finished run
+                # with "already submitted" — a different string, from a state the
+                # caller has no live claim on.
+                job_is_claimable = exists().where(
+                    EvaluatorJob.id == stamp.origin_job_id,
+                    EvaluatorJob.workspace_id == stamp.workspace_id,
+                    EvaluatorJob.status == "running",
+                )
                 _explain_refusal(
                     session,
                     stamp,
                     checks=(
+                        (~job_is_claimable, _SCORECARD_TARGET),
                         (
                             exists().where(
                                 EvaluatorJob.id == stamp.origin_job_id,
@@ -205,10 +218,19 @@ class SqlEffects:
                 .returning(UncitedClaimsJob.id)
             ).first()
             if landed is None:
+                # ORDER MATTERS — same rule as submit_scorecard above, and it
+                # mirrors uncited_claims.py's today: target first, exactly-once
+                # second.
+                job_is_claimable = exists().where(
+                    UncitedClaimsJob.id == stamp.origin_job_id,
+                    UncitedClaimsJob.workspace_id == stamp.workspace_id,
+                    UncitedClaimsJob.status == "running",
+                )
                 _explain_refusal(
                     session,
                     stamp,
                     checks=(
+                        (~job_is_claimable, _CLAIMS_TARGET),
                         (
                             exists().where(
                                 UncitedClaimsJob.id == stamp.origin_job_id,

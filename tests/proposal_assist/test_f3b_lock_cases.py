@@ -34,6 +34,7 @@ from call_manager.db.models import (
 from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
 from call_manager.proposal_assist.port_impl.effects import SqlEffects
 from call_manager.proposal_assist.ports.effects import (
+    EFFECT_MECHANISMS,
     ProposeArtifactEdit,
     ProposeCitationInsert,
     SubmitReview,
@@ -82,6 +83,21 @@ EFFECT_NAMES = [
     "propose_artifact_edit",
     "propose_citation_insert",
 ]
+
+
+def test_every_effect_has_lock_cases():
+    """An effect missing from EFFECT_NAMES has NO lock-ordering proof, and the
+    omission is invisible: EFFECT_NAMES parametrizes both cases below, so a
+    forgotten effect makes them run one time fewer — all green.
+
+    EFFECT_MECHANISMS is itself pinned to the Effects Protocol by
+    test_every_effect_declares_its_mechanism (test_f3b_effects.py), so pinning
+    to it pins these cases to the Protocol.
+    """
+    assert set(EFFECT_NAMES) == set(EFFECT_MECHANISMS), (
+        f"no lock cases for: {sorted(set(EFFECT_MECHANISMS) - set(EFFECT_NAMES))}; "
+        f"no such effect: {sorted(set(EFFECT_NAMES) - set(EFFECT_MECHANISMS))}"
+    )
 
 
 def _in_thread(
