@@ -22,9 +22,10 @@ import asyncio
 import json
 import logging
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
@@ -177,7 +178,24 @@ class Invocation:
     triggering_prompt: str | None
     created_by: int | None
     origin_session_id: str | None
-    turn_selection: dict | None
+    #: A READ-ONLY view over a deep copy. `frozen=True` freezes the dataclass's
+    #: own attributes, not the objects they point at — a plain dict here stays
+    #: aliased to ctx.turn_selection, so mutating the source would change this
+    #: "immutable" snapshot. It happens to be safe today only because
+    #: set_turn_provenance REPLACES the dict rather than mutating it, and an
+    #: immutability guarantee must not rest on that.
+    turn_selection: Mapping[str, Any] | None
+
+    @staticmethod
+    def _freeze(value):
+        """Deep read-only view. turn_selection is copied into durable
+        proposed-change provenance (tools/proposal.py), so a late mutation would
+        misattribute stored data."""
+        if isinstance(value, Mapping):
+            return MappingProxyType({k: Invocation._freeze(v) for k, v in value.items()})
+        if isinstance(value, (list, tuple)):
+            return tuple(Invocation._freeze(v) for v in value)
+        return value
 
     @classmethod
     def snapshot(cls, ctx: ToolContext) -> Invocation:
@@ -191,7 +209,7 @@ class Invocation:
             triggering_prompt=ctx.triggering_prompt,
             created_by=ctx.created_by,
             origin_session_id=ctx.origin_session_id,
-            turn_selection=ctx.turn_selection,
+            turn_selection=cls._freeze(ctx.turn_selection),
         )
 
 

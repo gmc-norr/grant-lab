@@ -86,6 +86,10 @@ async def test_controller_forwards_gating_through_registry_to_fake():
 
     ws_id = uuid.uuid4()
     selection = {"anchor": "x", "from_offset": 0, "to_offset": 1, "section_index": 2}
+    # Sentinels, not placeholders: a layer that dropped, defaulted or swapped
+    # these would still pass if both sides were 0 / a fresh uuid4().
+    fence_generation = 4242
+    fence_job_id = uuid.uuid4()
 
     await controller.set_turn_provenance(
         ws_id,
@@ -93,8 +97,8 @@ async def test_controller_forwards_gating_through_registry_to_fake():
         triggering_prompt=None,
         created_by=None,
         origin_session_id=None,
-        lifecycle_generation=1,
-        active_turn_job_id=uuid.uuid4(),
+        lifecycle_generation=fence_generation,
+        active_turn_job_id=fence_job_id,
         allowed_tool_names={"read_proposal"},
         turn_selection=selection,
     )
@@ -105,6 +109,12 @@ async def test_controller_forwards_gating_through_registry_to_fake():
     assert gating_ws == ws_id
     assert gating_tools == {"read_proposal"}
     assert gating_sel == selection
+
+    # F3a: the generation identity survived controller -> registry -> adapter.
+    # The fake has always RECORDED this; nothing asserted it, so a layer that
+    # dropped or swapped either value passed the suite.
+    assert len(fake.provenance_generation) == 1
+    assert fake.provenance_generation[-1] == (ws_id, fence_generation, fence_job_id)
 
     # The existing 5-tuple provenance record is still intact (no regression).
     assert len(fake.provenance) == 1

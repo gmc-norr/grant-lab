@@ -141,3 +141,30 @@ async def test_the_snapshot_survives_run_in_threadpool():
 
     await _safe_tool("read_proposal", ctx, impl, ctx, pass_invocation=True)
     assert seen["generation"] == 3
+
+
+def test_the_snapshot_is_immune_to_a_mutation_of_the_SOURCE_selection():
+    """`frozen=True` freezes the dataclass's own attributes, not the objects they
+    point at. A plain dict here stays ALIASED to ctx.turn_selection, so mutating
+    the source changes the supposedly immutable snapshot — and turn_selection is
+    copied into durable proposed-change provenance (tools/proposal.py), so a late
+    mutation misattributes stored data.
+
+    This is safe today only because set_turn_provenance REPLACES the dict rather
+    than mutating it. An immutability guarantee must not rest on that.
+    """
+    from call_manager.proposal_assist.tools.registry import Invocation
+
+    ctx = _ctx()
+    ctx.turn_selection = {"kind": "turn one", "nested": {"n": 1}}
+
+    inv = Invocation.snapshot(ctx)
+
+    ctx.turn_selection["kind"] = "turn two"
+    ctx.turn_selection["nested"]["n"] = 2
+
+    assert inv.turn_selection["kind"] == "turn one"
+    assert inv.turn_selection["nested"]["n"] == 1, "nested values must be frozen too"
+
+    with pytest.raises(TypeError):
+        inv.turn_selection["kind"] = "written through the snapshot"

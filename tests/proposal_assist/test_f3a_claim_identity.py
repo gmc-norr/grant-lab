@@ -206,3 +206,126 @@ def test_a_one_shot_builder_REQUIRES_the_generation():
 
     param = inspect.signature(build_evaluator_adapter).parameters["lifecycle_generation"]
     assert param.default is inspect.Parameter.empty
+
+
+# ---------------------------------------------------------------------------
+# The deterministic interleaving regression. This is the check that actually
+# proves Global Constraint 2, and it covers all FIVE claims.
+#
+# The value-only tests above pass against the REJECTED implementation (claim the
+# job, then read the generation in a second statement) because a single-threaded
+# test never lets a transition land in the gap. The statement-shape test above is
+# also weaker than its name: an unsafe claim could UPDATE status first, SELECT the
+# generation second, then issue a SECOND `UPDATE ... claimed_at_generation ...
+# RETURNING` — only that one statement mentions the column, so it passes.
+#
+# This test creates the gap on purpose. A second connection advances the
+# workspace to generation 99 the moment the claim's locking statement returns.
+# A one-statement claim already holds its value and stores the original; a
+# claim-then-read implementation reads 99 and stores an epoch it never claimed at.
+# ---------------------------------------------------------------------------
+
+_ADVANCED_TO = 99
+
+
+def _advance_generation_on_another_connection(engine, workspace_id) -> None:
+    """Runs on its OWN connection, so it is a genuinely concurrent transition.
+    It does not block: the claim holds FOR UPDATE OF the JOB table only, and this
+    updates `workspaces` — which is exactly why the job row's lock cannot protect
+    the generation."""
+    with engine.begin() as conn:
+        conn.execute(
+            update(Workspace)
+            .where(Workspace.id == workspace_id)
+            .values(lifecycle_generation=_ADVANCED_TO)
+        )
+
+
+def test_the_interactive_claim_is_immune_to_a_generation_advance_mid_claim(
+    pg_session_factory,
+):
+    from sqlalchemy import event
+
+    from call_manager.proposal_assist.turns.processor import claim_turn_job
+
+    with pg_session_factory() as s:
+        job_id = _seed_queued_turn(s, generation=5)
+        ws_id = s.scalar(select(TurnJob.workspace_id).where(TurnJob.id == job_id))
+
+    engine = pg_session_factory.kw["bind"]
+    fired: list[bool] = []
+
+    @event.listens_for(engine, "after_cursor_execute")
+    def _advance(conn, cursor, statement, params, context, executemany):
+        if fired or "turn_jobs" not in statement.lower():
+            return
+        fired.append(True)
+        _advance_generation_on_another_connection(engine, ws_id)
+
+    try:
+        claimed = claim_turn_job(pg_session_factory, job_id)
+    finally:
+        event.remove(engine, "after_cursor_execute", _advance)
+
+    assert fired, "the probe never fired — it is not testing the interleaving"
+    assert claimed is not None
+    with pg_session_factory() as s:
+        stored = s.scalar(select(TurnJob.claimed_at_generation).where(TurnJob.id == job_id))
+        live = s.scalar(select(Workspace.lifecycle_generation).where(Workspace.id == ws_id))
+    assert live == _ADVANCED_TO, "the probe did not actually advance the workspace"
+    assert stored == 5, (
+        f"the claim stored generation {stored} — it read the workspace AFTER the "
+        "transition and adopted an epoch it never claimed at"
+    )
+
+
+@pytest.mark.parametrize(
+    "name,make_job,claim_fn", _BACKGROUND_CLAIMS, ids=[c[0] for c in _BACKGROUND_CLAIMS]
+)
+def test_every_background_claim_is_immune_to_a_generation_advance_mid_claim(
+    pg_session_factory, name, make_job, claim_fn
+):
+    from sqlalchemy import event
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        s.flush()
+        s.execute(
+            update(Workspace).where(Workspace.id == ws.id).values(lifecycle_generation=6)
+        )
+        s.add(make_job(ws.id))
+        s.commit()
+        ws_id = ws.id
+
+    engine = pg_session_factory.kw["bind"]
+    fired: list[bool] = []
+
+    @event.listens_for(engine, "after_cursor_execute")
+    def _advance(conn, cursor, statement, params, context, executemany):
+        # Fire the instant the locking claim SELECT returns — the exact window a
+        # second statement would read in.
+        if fired or "FOR UPDATE OF" not in statement.upper():
+            return
+        fired.append(True)
+        _advance_generation_on_another_connection(engine, ws_id)
+
+    try:
+        with pg_session_factory() as s:
+            job = claim_fn(s)
+            assert job is not None
+            s.commit()
+            job_id = job.id
+    finally:
+        event.remove(engine, "after_cursor_execute", _advance)
+
+    assert fired, "the probe never fired — no FOR UPDATE OF statement was seen"
+    with pg_session_factory() as s:
+        stored = s.scalar(
+            select(type(job).claimed_at_generation).where(type(job).id == job_id)
+        )
+        live = s.scalar(select(Workspace.lifecycle_generation).where(Workspace.id == ws_id))
+    assert live == _ADVANCED_TO, "the probe did not actually advance the workspace"
+    assert stored == 6, (
+        f"{name} stored generation {stored} — it read the workspace AFTER the "
+        "transition and adopted an epoch it never claimed at"
+    )
