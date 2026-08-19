@@ -17,6 +17,34 @@ inventory learns to say which of the three slices owns each row.
 
 **Tech Stack:** Python 3.12, SQLAlchemy 2.x, pytest.
 
+**Revision 1 (2026-08-20).** Three agents executed revision 0 verbatim — Tasks 1-5 and
+Tasks 6-7 in separate throwaway worktrees, plus an independent document audit. The slice
+DOES execute end to end and the arithmetic held (3715 baseline, +20, +2 → 3737), but 26
+findings came back, 3 of them blocking. Every fix below is folded in:
+
+- **Task 3 named three of `Invocation`'s four members.** `provenance()` (`registry.py:236-249`)
+  was in neither the move list nor the stay list, and the import block omitted
+  `Provenance`. Both readings fail: move the class and `ruff` reports `F821` — the exact
+  failure GC-2 is built on; move only the enumerated members and `test_f3b_stamp.py`
+  raises `AttributeError`.
+- **Task 3 Step 4 put the re-export where the class was** (`E402`) and left four imports
+  orphaned (`Mapping`, `MappingProxyType`, `UnfencedInvocation`, `FenceStamp`/`Provenance`
+  → four `F401`s). `ruff check .` at Step 7 fails.
+- **Task 5's third assertion was false by construction.** `assert "error" not in str(result)`
+  can never hold: the success envelope is `{"content": [...], "is_error": False}`.
+- **Three mutation steps proved something other than what they claimed.** Task 2's leaves
+  `test_collab_retire_mutex.py` fully green; Task 3's creates a circular import and dies
+  at `PYTEST_EXIT=4` before the test runs; Task 6's fails identically with or without the
+  key split, so it is invariant to the thing it justifies. All three replaced, and the
+  claims they rested on (GC-3, GC-4) corrected.
+- **`_DEFAULT_SLICE = "F3d"` survived the key split**, so the first regeneration after
+  this slice would stamp a dead slice name.
+- **A fourth `CITATIONS_FILENAME` literal** lives in `editing/save.py:41` and is the copy
+  eight modules import. Task 1 now repoints it.
+
+Both load-bearing premises were independently confirmed: GC-2's `F821` reproduces, and
+Task 6 IS necessary — proved by the counterfactual the revised Step 5 now runs.
+
 **Spec:** `docs/superpowers/specs/2026-08-18-fence-session-ownership-design.md` (revision
 8) — §7's F3d paragraph is the charter for all three slices; §3 is the port design; §4 the
 gate. This slice implements no §7 conversion: it is the prerequisite the spec's F3d
@@ -43,20 +71,37 @@ Every task's requirements implicitly include this section.
   fresh interpreter. Anything moved into `ports/` must import nothing but the standard
   library and other `ports/` modules. `StrEnum`, `uuid`, `dataclasses`, `MappingProxyType`
   are all fine; `sqlalchemy`, `db.models` and any project module are not.
+  Know the gate's actual reach: it greps `sys.modules` for
+  `{'sqlalchemy','psycopg','alembic'}` and flags source names containing `port_impl`
+  or starting `sqlalchemy`/`psycopg`. A ports module importing a stdlib-clean project
+  module (`proposal_assist.paths`, say) passes both checks. The RULE is stdlib-only;
+  the TEST catches the database coupling. Do not claim the test enforces the rule.
 - **GC-4 — A relocation keeps ONE source of truth and re-exports from the old home.**
   Every existing import site must keep working untouched, and the moved object must remain
   the *same object* — `is`, not `==`. This is the pattern F3b used for
-  `WorkspaceGenerationStale` and it is why `assert CommitMutexTimeout in clean`
-  (`tests/proposal_assist/collab/test_collab_retire_mutex.py:287`) keeps passing.
+  `WorkspaceGenerationStale`.
+  Do NOT justify this with `assert CommitMutexTimeout in clean`
+  (`tests/proposal_assist/collab/test_collab_retire_mutex.py:287`). That assertion is
+  blind to the relocation: the test (line 28) and the production list it checks
+  (`proposals/kernel_accept.py:19`) BOTH resolve the name through `drafting.locking`,
+  so forking the class rebinds every participant together and membership still holds.
+  It passes with or without identity. The `is` check in Task 2 is the ONLY thing that
+  catches a fork — which is precisely why it has to be written.
   `ruff` flags an unused re-export, so use the redundant-alias form
   (`from x import Y as Y`) or add the name to `__all__`.
 - **GC-5 — Two `ToolContext` constructions must NOT gain `ports=`.**
   `tools/registry.py:293` (`collect_mcp_tool_names`) and
   `proposals/accepting.py:195` build a context with `session_factory=None`.
   `tests/fencing/detectors.py:92-100` keys on that literal to classify them **inert** and
-  exclude them from the inventory scan. Passing `ports=` there — or removing the
-  `session_factory=None` literal — makes two new `tool_context` rows appear and
-  `test_the_inventory_matches_the_tree_exactly` goes red.
+  exclude them from the inventory scan. Be precise about the mechanism: the detector
+  tests `any(kw.arg == "session_factory" and ... is None)` and IGNORES every other
+  keyword, so adding `ports=None` beside it leaves `tests/fencing` at 82 passed — only
+  REMOVING the `session_factory=None` literal makes two `tool_context` rows appear.
+  The instruction stands anyway, for the real reason: there is no `session_factory` at
+  either site to build a bundle from, so there is nothing to pass.
+  Note the line drifts inside this slice: the registry site is `:293` on entry and
+  `:228` after Task 3 deletes the `Invocation` class. Do not write `:293` into a
+  docstring in Task 4.
 - **GC-6 — `SLICE_STATUS` has no partial state.**
   `test_each_slice_matches_its_declared_status` (`tests/fencing/test_fence_coverage.py:103`)
   fails on any row that is `fenced: true` while its slice is `pending`. A three-way cut
@@ -67,6 +112,9 @@ Every task's requirements implicitly include this section.
   branch: **3715 passed, 1 skipped** (`71c0493`). The `1 skipped` is an
   `ANTHROPIC_API_KEY`-gated test — read it as the signal, not the total.
   `tests/fencing` alone is 82 tests in ~3.5s with no database: run it after every task.
+  The paired `test_f3b_ports_boundary.py` is NOT database-free — four of its six tests
+  take `pg_session_factory` and start a testcontainers Postgres, so the combined
+  commands in Tasks 1-3 Step 6 are slower than "3.5s" suggests.
 - **GC-7a — If you work in a worktree, `uv run` is a trap.** A fresh worktree has no
   `.venv`, so `uv run` builds one and resolves it to Python 3.14. Either
   `uv sync --python 3.12` in the worktree first, or substitute the main tree's
@@ -104,7 +152,8 @@ Every task's requirements implicitly include this section.
 | `src/call_manager/proposal_assist/artifacts.py` | Re-exports the filenames from `ports/artifacts.py`. Keeps `SPEC_SKELETON`, which is page content, not a locator. |
 | `src/call_manager/proposal_assist/ports/errors.py` | Gains `CommitMutexTimeout`, `BUSY_ERROR_MESSAGE`, `DELETED_ERROR_MESSAGE`. |
 | `src/call_manager/proposal_assist/drafting/locking.py` | Re-exports those three. |
-| `src/call_manager/proposal_assist/references/deletion.py`, `reconcile.py` | Import `CITATIONS_FILENAME` instead of redefining it. |
+| `src/call_manager/proposal_assist/ports/effects.py` | The `Effects` Protocol docstring stops saying `CommitMutexTimeout` is outside `ports/` (Task 2 Step 5). |
+| `proposal_assist/references/deletion.py`, `proposal_assist/reconcile.py`, `proposal_assist/editing/save.py` | Import `CITATIONS_FILENAME` instead of redefining it. (Note: `proposal_assist/reconcile.py`, NOT `references/reconcile.py` — and there is a second `analysis/reconcile.py` that is not this.) |
 | `src/call_manager/proposal_assist/tools/registry.py` | Imports `Invocation` from `ports/`, keeps `snapshot_invocation(ctx)`; `ToolContext` gains `ports`; `_safe_tool` gains `pass_ports`. |
 | `coherence/agent.py`, `evaluator/agent.py`, `review/agent.py`, `uncited_claims/agent.py`, `drafting/factory.py` | Each passes `ports=build_ports(session_factory)`. |
 | `tests/fencing/inventory.py` | `SLICE_STATUS` splits `F3d` into `F3d1/F3d2/F3d3`; gains `F3D_IDENTITIES`. |
@@ -136,6 +185,7 @@ into `ports/`, and the old module keeps working by re-export.
 - Modify: `src/call_manager/proposal_assist/artifacts.py`
 - Modify: `src/call_manager/proposal_assist/references/deletion.py:38`
 - Modify: `src/call_manager/proposal_assist/reconcile.py:36`
+- Modify: `src/call_manager/proposal_assist/editing/save.py:41`
 
 **Interfaces:**
 - Consumes: nothing.
@@ -196,16 +246,23 @@ def test_spec_skeleton_stays_out_of_ports():
 
 
 def test_no_module_redefines_the_citations_filename_except_the_unconverted_tool():
-    """CITATIONS_FILENAME was written out four times. Three now import it; the
-    fourth is tools/citations.py, which F3d3 converts — until then this test is what
-    stops the two copies drifting apart."""
+    """CITATIONS_FILENAME was written out FOUR times: references/deletion.py:38,
+    reconcile.py:36, editing/save.py:41 and tools/citations.py:80. Three now import
+    it. editing/save.py is included even though the plan's narrative is about tools
+    — it is the copy eight other modules import (export.py, human_cite.py,
+    collab/kernel.py, analysis/insert.py, web/api/workspaces.py,
+    web/api/citation_audit.py, problems/aggregate.py), so leaving it out would leave
+    the widest-blast-radius literal unguarded. The fourth is tools/citations.py,
+    which F3d3 converts — until then this test is what stops the copies drifting."""
     from call_manager.proposal_assist import reconcile
+    from call_manager.proposal_assist.editing import save
     from call_manager.proposal_assist.ports.artifacts import CITATIONS_FILENAME
     from call_manager.proposal_assist.references import deletion
     from call_manager.proposal_assist.tools import citations
 
     assert reconcile.CITATIONS_FILENAME is CITATIONS_FILENAME
     assert deletion.CITATIONS_FILENAME is CITATIONS_FILENAME
+    assert save.CITATIONS_FILENAME is CITATIONS_FILENAME
     assert citations.CITATIONS_FILENAME == CITATIONS_FILENAME
 ```
 
@@ -226,8 +283,8 @@ Create `src/call_manager/proposal_assist/ports/artifacts.py`:
 
 A converted tool may import the standard library and this package, and nothing
 else. It still has to say "proposal.md", so the names live here. The old home,
-`proposal_assist/artifacts.py`, re-exports every one of these, so the ten-odd
-existing importers outside tools/ are unchanged.
+`proposal_assist/artifacts.py`, re-exports every one of these, so the 22 existing
+importers under src/ are unchanged.
 
 `Artifact`'s string values MUST match the `ProposedChange.target_artifact` CHECK
 ('draft','spec') in db/models.py and the files seeded by phases/setup.py.
@@ -239,7 +296,7 @@ from enum import StrEnum
 
 
 class Artifact(StrEnum):
-    DRAFT = "draft"  # values MUST match ProposedChange.target_artifact (db/models.py:958)
+    DRAFT = "draft"  # MUST match ck_proposed_changes_target_artifact (db/models.py:1181)
     SPEC = "spec"
 
 
@@ -256,9 +313,10 @@ def filename_for(artifact: Artifact) -> str:
 PROPOSAL_FILENAME = filename_for(Artifact.DRAFT)
 SPEC_FILENAME = filename_for(Artifact.SPEC)
 
-#: The per-workspace citation ledger. Written out as a literal in four places
-#: before F3d1; three of them now import it, and tools/citations.py is the fourth
-#: — it keeps its own copy until F3d3 converts that module.
+#: The per-workspace citation ledger. Written out as a literal in FOUR places
+#: before F3d1 — references/deletion.py, reconcile.py, editing/save.py and
+#: tools/citations.py. The first three now import it. tools/citations.py keeps its
+#: own copy until F3d3 converts that module.
 CITATIONS_FILENAME = "citations.json"
 ```
 
@@ -291,7 +349,7 @@ from call_manager.proposal_assist.ports.artifacts import filename_for as filenam
 The redundant-alias form is deliberate: `ruff`'s F401 flags a plain unused import,
 and this file's whole job is now to re-export.
 
-- [ ] **Step 5: Point the two other definitions at it**
+- [ ] **Step 5: Point the three other definitions at it**
 
 In `src/call_manager/proposal_assist/references/deletion.py`, delete the
 `CITATIONS_FILENAME = "citations.json"` literal at line 38 and add to the imports:
@@ -300,7 +358,14 @@ In `src/call_manager/proposal_assist/references/deletion.py`, delete the
 from call_manager.proposal_assist.ports.artifacts import CITATIONS_FILENAME
 ```
 
-Do exactly the same in `src/call_manager/proposal_assist/reconcile.py` (line 36).
+Do exactly the same in `src/call_manager/proposal_assist/reconcile.py` (line 36) and
+in `src/call_manager/proposal_assist/editing/save.py` (line 41). `save.py` is the one
+easiest to overlook and the one that matters most: eight modules import
+`CITATIONS_FILENAME` from it (`export.py`, `citations/human_cite.py`,
+`collab/kernel.py`, `analysis/insert.py`, `web/api/workspaces.py`,
+`web/api/citation_audit.py`, `problems/aggregate.py` and two test files), so leaving
+its literal in place would mean the busiest path is the one with no drift guard.
+`ports/artifacts.py` is stdlib-only, so importing it introduces no cycle.
 
 Leave `tools/citations.py:80` alone. It is a tool module and F3d3 owns it; changing
 it now is a conversion, which GC-1 forbids.
@@ -312,15 +377,15 @@ Run:
 uv run pytest tests/proposal_assist/test_f3d1_spine.py -q > /tmp/f3d1-1.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d1-1.txt
 uv run pytest tests/proposal_assist/test_f3b_ports_boundary.py tests/fencing -q > /tmp/f3d1-1b.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -5 /tmp/f3d1-1b.txt
 ```
-Expected: `PYTEST_EXIT=0` and 4 passed for the first; `PYTEST_EXIT=0` and 82 passed
-plus the boundary file for the second. The boundary test is the one that proves
+Expected: `PYTEST_EXIT=0` and 4 passed for the first; `PYTEST_EXIT=0` and 88 passed
+for the second (82 fencing + 6 boundary). The boundary test is the one that proves
 `ports/` is still stdlib-only after the move.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 uv run ruff check .
-git add src/call_manager/proposal_assist/ports/artifacts.py src/call_manager/proposal_assist/artifacts.py src/call_manager/proposal_assist/references/deletion.py src/call_manager/proposal_assist/reconcile.py tests/proposal_assist/test_f3d1_spine.py
+git add src/call_manager/proposal_assist/ports/artifacts.py src/call_manager/proposal_assist/artifacts.py src/call_manager/proposal_assist/references/deletion.py src/call_manager/proposal_assist/reconcile.py src/call_manager/proposal_assist/editing/save.py tests/proposal_assist/test_f3d1_spine.py
 git commit -m "feat(ports): the artifact filenames a converted tool can name (F3d1 Task 1)"
 ```
 
@@ -474,7 +539,10 @@ derivation comment are NOT part of this move.
 `src/call_manager/proposal_assist/ports/effects.py`'s `Effects` docstring currently
 says F3d owns the decision of how a tool names `CommitMutexTimeout`, and that
 `ports/` cannot simply hold the class because `BUSY_ERROR_MESSAGE` lives beside it.
-Both have now happened. Replace that paragraph with:
+Both have now happened. Replace BOTH of those paragraphs — the one beginning
+"A THIRD exception escapes and it is NOT in ports/errors.py" AND the one beginning
+"A converter that catches only the two errors above" — with the single block below.
+Replacing only the first leaves the docstring contradicting itself.
 
 ```python
     A THIRD exception escapes, and since F3d1 it lives in `ports/errors.py` beside
@@ -518,9 +586,16 @@ Run:
 ```bash
 uv run pytest tests/proposal_assist/test_f3d1_spine.py tests/proposal_assist/collab/test_collab_retire_mutex.py -q > /tmp/f3d1-2m.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -30 /tmp/f3d1-2m.txt
 ```
-Expected: FAIL on `test_locking_re_exports_the_identical_error_class` AND on
-`test_collab_retire_mutex.py`'s clean-error invariant. Two files, one cause — which
-is what makes an `is` check worth writing instead of an `==`.
+Expected: `2 failed`, and BOTH failures are in the spine file —
+`test_locking_re_exports_the_identical_error_class` and
+`test_an_existing_raise_site_is_still_caught_by_the_ports_class`.
+
+`test_collab_retire_mutex.py` stays FULLY GREEN (11 passed). Do not read that as a
+failed restore. It imports `CommitMutexTimeout` from `drafting.locking` (line 28) and
+so does the production list it checks (`proposals/kernel_accept.py:19`), so a fork
+inside `locking.py` moves both sides together and the membership assertion cannot see
+it. That is the point: the retire-mutex test is NOT a net for this, which is exactly
+why the `is` check in Step 1 has to exist. See GC-4.
 
 ```bash
 git checkout src/call_manager/proposal_assist/drafting/locking.py
@@ -542,7 +617,7 @@ context. That factory stays in `registry.py`, where its only production caller l
 
 **Files:**
 - Create: `src/call_manager/proposal_assist/ports/invocation.py`
-- Modify: `src/call_manager/proposal_assist/tools/registry.py:160-235`
+- Modify: `src/call_manager/proposal_assist/tools/registry.py:160-249`
 - Modify: `tests/proposal_assist/test_f3a_invocation_snapshot.py:156-161`
 - Modify: `tests/proposal_assist/test_f3b_stamp.py`
 - Modify: `tests/proposal_assist/test_f3d1_spine.py`
@@ -551,7 +626,8 @@ context. That factory stays in `registry.py`, where its only production caller l
 - Consumes: `FenceStamp` and `UnfencedInvocation` from `ports/` (F3b).
 - Produces:
   - `Invocation` in `call_manager.proposal_assist.ports.invocation` — the frozen
-    dataclass, `_freeze`, and `stamp() -> FenceStamp`. No `snapshot`.
+    dataclass and THREE members: `_freeze`, `stamp() -> FenceStamp` and
+    `provenance() -> Provenance` (`registry.py:236-249`). No `snapshot`.
   - `snapshot_invocation(ctx: ToolContext) -> Invocation` in `tools/registry.py`.
   - `Invocation` stays importable from `tools/registry.py` (re-export).
 
@@ -628,9 +704,12 @@ Expected: `PYTEST_EXIT=1`, `ModuleNotFoundError: No module named 'call_manager.p
 - [ ] **Step 3: Create the ports module**
 
 Create `src/call_manager/proposal_assist/ports/invocation.py` by moving the
-`Invocation` dataclass out of `tools/registry.py` — every field, the class docstring,
-`_freeze` and `stamp` VERBATIM, with `snapshot` left behind — under this module
-docstring:
+`Invocation` dataclass out of `tools/registry.py`. The class is `registry.py:160-249`
+and it has FOUR members, not three: every field, the class docstring, `_freeze`,
+`stamp` and `provenance` move VERBATIM; only `snapshot` stays behind. `provenance()`
+returns a `Provenance`, so that name must be imported too — miss it and `ruff check`
+reports `F821 Undefined name \`Provenance\``, which is the exact failure mode GC-2 is
+built on. Put it under this module docstring:
 
 ```python
 """One tool call's frozen identity — stdlib only.
@@ -650,18 +729,36 @@ from types import MappingProxyType
 from typing import Any
 
 from call_manager.proposal_assist.ports.errors import UnfencedInvocation
-from call_manager.proposal_assist.ports.stamp import FenceStamp
+from call_manager.proposal_assist.ports.stamp import FenceStamp, Provenance
 ```
 
 - [ ] **Step 4: Leave the factory behind**
 
 In `src/call_manager/proposal_assist/tools/registry.py`, delete the `Invocation`
-class and add, in its place:
+class (lines 160-249).
+
+The re-export import goes in the TOP import block, immediately after
+`from call_manager.proposal_assist.ports.errors import UnfencedInvocation` — NOT where
+the class was. Placing it at line 160 is `E402 Module level import not at top of file`
+and `ruff check .` at Step 7 fails.
 
 ```python
 from call_manager.proposal_assist.ports.invocation import Invocation as Invocation
+```
 
+The class took four imports with it, and they are now dead. Delete them or Step 7
+fails with four `F401`s:
+- `Mapping` from `from collections.abc import Awaitable, Callable, Mapping` (line 25)
+  — keep `Awaitable, Callable`, they are still used
+- the whole `from types import MappingProxyType` line (28)
+- the whole `from call_manager.proposal_assist.ports.errors import UnfencedInvocation`
+  line (33) — and therefore put the new import where it stood
+- the whole `from call_manager.proposal_assist.ports.stamp import FenceStamp,
+  Provenance` line (34)
 
+Then, where the class used to be, add:
+
+```python
 def snapshot_invocation(ctx: ToolContext) -> Invocation:
     """Freeze one tool call's identity, at DISPATCH.
 
@@ -692,7 +789,10 @@ deny check — exactly where it is, and leave the comment explaining why.
 - [ ] **Step 5: Repoint the two test files**
 
 In `tests/proposal_assist/test_f3a_invocation_snapshot.py` (line ~156) and
-`tests/proposal_assist/test_f3b_stamp.py` (lines 16, 36, 48, 57, 62), import
+`tests/proposal_assist/test_f3b_stamp.py` (lines 16, 36, 48, 57, 62 **and 82** — line
+82 is `assert Invocation.snapshot(ctx).provenance() == Provenance(...)`, and an
+implementer following the list rather than the sentence leaves it calling a method the
+class no longer has), import
 `snapshot_invocation` from `call_manager.proposal_assist.tools.registry` and replace
 every `Invocation.snapshot(ctx)` with `snapshot_invocation(ctx)`. Do not change what
 any of those tests assert — they pin F3a and F3b behaviour that this task must not
@@ -718,16 +818,27 @@ git commit -m "feat(ports): Invocation moves to ports so a converted tool can na
 - [ ] **Step 8: Prove the boundary test would catch a bad move**
 
 In `src/call_manager/proposal_assist/ports/invocation.py`, add
-`from call_manager.proposal_assist.tools.registry import ToolContext` at the top and
-annotate nothing with it.
+`from call_manager.db.models import Workspace as Workspace` at the top.
+
+Do NOT use `from ...tools.registry import ToolContext` for this. After Step 4 the
+registry imports `ports.invocation`, so that mutation is a CIRCULAR import: the run
+dies at `PYTEST_EXIT=4` with `ImportError while loading conftest ... cannot import
+name 'ToolContext' from partially initialized module`, and the boundary test never
+executes at all. A collection error is not a demonstration.
 
 Run:
 ```bash
 uv run pytest tests/proposal_assist/test_f3b_ports_boundary.py -q > /tmp/f3d1-3m.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -30 /tmp/f3d1-3m.txt
 ```
-Expected: FAIL — `ports/` reaching a project module outside itself is exactly what
-that test walks the import graph to find. This is the check that stops a future
-edit from quietly re-coupling the package.
+Expected: FAIL on `test_importing_the_ports_package_pulls_in_no_sqlalchemy` —
+`AssertionError: the ports package reached the database layer: ['sqlalchemy', ...]`.
+
+Know what this does and does not prove. That test imports every ports module in a
+subprocess and greps `sys.modules` for `{'sqlalchemy','psycopg','alembic'}`; its
+sibling flags source-level names containing `port_impl` or starting `sqlalchemy`/
+`psycopg`. A ports module importing a stdlib-clean project module — say
+`proposal_assist.paths` — passes both. The guard catches the coupling that MATTERS
+(the database), not every coupling. Do not write a docstring claiming otherwise.
 
 ```bash
 git checkout src/call_manager/proposal_assist/ports/invocation.py
@@ -889,10 +1000,12 @@ def test_every_tool_surface_construction_injects_ports():
 
 
 def test_a_context_without_ports_is_still_constructible():
-    """GC-5. tools/registry.py:293 and proposals/accepting.py:195 build a context with
-    session_factory=None, and tests/fencing/detectors.py keys on exactly that literal
-    to classify them INERT and keep them out of the inventory. They must not gain a
-    ports argument, so the field has to default."""
+    """GC-5. collect_mcp_tool_names in tools/registry.py and the shim in
+    proposals/accepting.py build a context with session_factory=None, and
+    tests/fencing/detectors.py keys on exactly that literal to classify them INERT and
+    keep them out of the inventory. They must not gain a ports argument (there is no
+    session_factory there to build a bundle from), so the field has to default.
+    No line numbers here on purpose: Task 3 already moved the registry site."""
     from call_manager.proposal_assist.tools.registry import ToolContext
 
     ctx = ToolContext(
@@ -922,8 +1035,9 @@ Run:
 ```bash
 uv run pytest tests/proposal_assist/test_f3d1_spine.py -q -k "ports_bundle or without_ports" > /tmp/f3d1-4.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d1-4.txt
 ```
-Expected: FAIL — `AttributeError: 'ToolContext' object has no attribute 'ports'`, five
-times, plus the same for the defaulting test.
+Expected: FAIL — `AttributeError: 'ToolContext' object has no attribute 'ports'`,
+**5 failures total**: four parametrisations (the list has four entries; the fifth
+factory is covered by the AST test, not this one) plus the defaulting test.
 
 - [ ] **Step 3: Add the field**
 
@@ -961,9 +1075,12 @@ and to each module's imports:
 from call_manager.proposal_assist.port_impl import build_ports
 ```
 
-`registry.py` importing `port_impl` is allowed even though it is skipped by the gate:
-`check_composition_root` forbids it the `call_manager.db` package and runtime
-`sqlalchemy`, and `port_impl` is neither name. Do not "fix" that.
+These five modules are NOT under `tools/`, so the import gate never runs on them at
+all (`check_composition_root` is scoped to `tools/`, `inventory.py:215`). There is no
+constraint here to satisfy and nothing to "fix" — do not go looking for one.
+
+For the record, since a careful reader will ask: `registry.py` itself imports
+`ports`, not `port_impl` (Step 3), and it is in `GATE_SKIPS` regardless.
 
 - [ ] **Step 5: Run the tests**
 
@@ -1091,7 +1208,12 @@ async def test_an_unconverted_tool_is_dispatched_exactly_as_before():
 
     result = await _safe_tool("t", ctx, _impl, ctx)
     assert seen["called"] is True
-    assert "error" not in str(result)
+    # NOT `"error" not in str(result)`: the success envelope is
+    # {"content": [...], "is_error": False}, so the substring "error" is always
+    # present inside the KEY. That assertion is false by construction, before and
+    # after this task.
+    assert result["is_error"] is False
+    assert "ports" not in seen
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -1100,9 +1222,14 @@ Run:
 ```bash
 uv run pytest tests/proposal_assist/test_f3d1_spine.py -q -k "threads_the_ports or fails_loudly or exactly_as_before" > /tmp/f3d1-5.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d1-5.txt
 ```
-Expected: FAIL — `_safe_tool() got an unexpected keyword argument 'pass_ports'` for
-the first two. The third passes already, which is correct: it is the regression guard
-for the path this task must not change.
+Expected: FAIL for the first two, but NOT with a `_safe_tool()` TypeError —
+`_safe_tool` already ends in `**kwargs: Any`, so `pass_ports=True` is absorbed and
+forwarded to the impl, and the TypeError it raises there is swallowed by the
+`except Exception` catch-all and returned as an "internal error" envelope. The real
+failures are `KeyError: 'ports'` and `Failed: DID NOT RAISE <class 'RuntimeError'>`.
+
+The third passes already, which is correct: it is the regression guard for the path
+this task must not change.
 
 - [ ] **Step 3: Add the parameter**
 
@@ -1202,6 +1329,19 @@ In `tests/fencing/inventory.py`, replace the single `F3d` line in `SLICE_STATUS`
     "F3d3": "pending",  # the citation core relocation, and the propose_* sites
 ```
 
+Then, in the SAME file, fix the merge default at `tests/fencing/inventory.py:21`:
+
+```python
+_DEFAULT_SLICE = "F3d2"                   # was "F3d", split in F3d1
+```
+
+This is not optional bookkeeping. `_DEFAULT_SLICE` is what
+`regenerate_inventory` stamps on a newly-detected site, and after Step 1 the key it
+names no longer exists. Measured: add one commit site under `tools/`, regenerate, and
+the new row reads `"slice": "F3d"` — `pytest tests/fencing` then gives **5 failed**
+with `'F3d' has no entry in SLICE_STATUS`. It fails loudly rather than silently, so it
+is not a safety hole, but F3d2 and F3d3 both regenerate and both would hit it.
+
 - [ ] **Step 2: Reassign the eight rows**
 
 In `tests/fencing/fence_inventory.json`, change the `slice` field of each F3d row:
@@ -1221,6 +1361,13 @@ No row is assigned `F3d1`: the spine converts nothing, and an empty slice key is
 exactly as `F3c`'s is. Leave every other field on every row untouched — in particular
 `fenced` stays `false` on all eight (GC-1).
 
+Then close the prose drift this creates. `docs/superpowers/specs/2026-08-18-fence-session-ownership-design.md:399`
+still says "split `SLICE_STATUS` into `F3a…F3f`" and assigns the 7 `tool_commit` rows
+plus `_write_citekey_cache` to a single **F3d**. Change that passage to name
+`F3a…F3f` with F3d cut three ways, and say which of the eight rows go to `F3d2` and
+which to `F3d3`. No gate reads the spec, which is exactly why it rots unless a slice
+schedules it.
+
 - [ ] **Step 3: Run the fencing suite**
 
 Run:
@@ -1234,26 +1381,39 @@ is the one that catches a typo in any of the three new keys.
 
 ```bash
 uv run ruff check .
-git add tests/fencing/inventory.py tests/fencing/fence_inventory.json
+git add tests/fencing/inventory.py tests/fencing/fence_inventory.json docs/superpowers/specs/2026-08-18-fence-session-ownership-design.md
 git commit -m "test(fencing): F3d is three slices, and SLICE_STATUS has to say so (F3d1 Task 6)"
 ```
 
 - [ ] **Step 5: Prove the split was necessary**
 
-Set `"fenced": true` on the `submit_scorecard_impl` row in
-`tests/fencing/fence_inventory.json`.
+The obvious mutation — flip one F3d2 row to `fenced: true` — does NOT prove this.
+It fails identically against an unsplit `F3d` key (same message, different slice
+name), so it is invariant to the thing it is supposed to justify. Run the mutation
+that discriminates instead: **the complete direction.**
+
+In `tests/fencing/fence_inventory.json`, set `"fenced": true` on all FIVE `F3d2`
+rows, and in `tests/fencing/inventory.py` set `"F3d2": "complete"`.
 
 Run:
 ```bash
-uv run pytest tests/fencing -q -k declared_status > /tmp/f3d1-6m.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d1-6m.txt
+uv run pytest tests/fencing -q -k declared_status > /tmp/f3d1-6m.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -30 /tmp/f3d1-6m.txt
 ```
-Expected: FAIL — `submit_scorecard_impl is fenced=True but slice F3d2 is pending`.
-That is the exact failure F3d2 would have hit against an unsplit `F3d` key, and it is
-why this task cannot be deferred into F3d2.
+Expected: `PYTEST_EXIT=0`. This is the state F3d2 has to be able to reach, and with
+three keys it reaches it cleanly.
+
+Now the counterfactual, which is the actual proof. Restore, then edit
+`inventory.py` back to a SINGLE `"F3d": "complete"` key, put `"slice": "F3d"` on all
+eight rows, and set `fenced: true` on the five submitter rows only.
+
+Expected: FAIL — the three citation/proposal rows go red as
+`fenced=False but slice F3d is complete`. **No ordering of F3d2's work can avoid
+that**, because one key cannot describe five converted rows and three unconverted
+ones. That is why the split has to happen in THIS slice.
 
 ```bash
-git checkout tests/fencing/fence_inventory.json
-git diff --exit-code HEAD -- tests/fencing/fence_inventory.json
+git checkout tests/fencing/fence_inventory.json tests/fencing/inventory.py
+git diff --exit-code HEAD -- tests/fencing/fence_inventory.json tests/fencing/inventory.py
 ```
 
 ---
@@ -1261,9 +1421,10 @@ git diff --exit-code HEAD -- tests/fencing/fence_inventory.json
 ### Task 7: The eight identities can no longer vanish quietly
 
 The checklist erases itself. `tests/fencing/detectors.py:83-90` records a `tool_commit`
-only when `/proposal_assist/tools/` is in the path, and `FencedSiteVanished`
-(`inventory.py:283-285`) is raised **only for rows already `fenced: true`**. Every F3d row
-is `fenced: false` today.
+only when `/proposal_assist/tools/` is in the path, and `FencedSiteVanished` is raised
+**only for rows already `fenced: true`**. Every F3d row is `fenced: false` today.
+(That block is `inventory.py:283-285` on entry and `:288-290` after Task 6 adds five
+lines to the same file — so the docstring in Step 1 names neither.)
 
 So when F3d3 moves the citation core out of `tools/`, `propose_citation_impl` and
 `_write_citekey_cache` disappear from the scan **with no exception raised**. If every
@@ -1280,6 +1441,10 @@ slice before.
 - Consumes: `SLICE_STATUS` (Task 6).
 - Produces: `F3D_IDENTITIES: frozenset[tuple[str, str, str]]` — `(slice, kind, symbol)`.
 
+When you extend `test_fence_coverage.py`'s import from `tests.fencing.inventory`, put
+`F3D_IDENTITIES` between `F3A_COLUMN_FILES` and `FENCING_IMPORT_FILES`. Appending it at
+the end of the list is `I001` and Step 5's `ruff check .` fails.
+
 - [ ] **Step 1: Write the failing test**
 
 Append to `tests/fencing/test_fence_coverage.py`:
@@ -1288,8 +1453,8 @@ Append to `tests/fencing/test_fence_coverage.py`:
 def test_every_f3d_identity_is_still_in_the_inventory():
     """ANTI-VACUITY. The scan only records a tool_commit while the code is under
     tools/ (detectors.py:83-90), and FencedSiteVanished only fires for rows already
-    fenced=True (inventory.py:283-285) — so relocating an UNFENCED site deletes its
-    row silently, and a slice can reach `complete` over an empty set.
+    fenced=True — so relocating an UNFENCED site deletes its row silently, and a
+    slice can reach `complete` over an empty set.
 
     This is the ratchet that makes that impossible. If a row here has vanished, the
     fix is not to edit this set: flip the row `fenced: true` BEFORE moving its code,
@@ -1306,8 +1471,14 @@ def test_every_f3d_identity_is_still_in_the_inventory():
 
 
 def test_a_complete_f3d_slice_has_every_one_of_its_identities_fenced():
-    """The other direction. `complete` must mean every identity the slice owns is
-    proven, not merely that nothing red is left in the scan."""
+    """`complete` must mean every identity the slice owns is proven, not merely that
+    nothing red is left in the scan.
+
+    Known and accepted: this is not an independent falsifier. Its red set is a subset
+    of the union of test_every_f3d_identity_is_still_in_the_inventory (row relocated)
+    and test_each_slice_matches_its_declared_status (row present but unfenced). It is
+    kept for the message it produces, which names the identity rather than the row.
+    """
     by_id = {(r["slice"], r["kind"], r["symbol"]): r for r in load_inventory()}
     unproven = []
     for identity in sorted(F3D_IDENTITIES):
@@ -1380,17 +1551,34 @@ git commit -m "test(fencing): F3d's eight identities cannot vanish quietly (F3d1
 
 - [ ] **Step 6: Prove the guard catches the real failure**
 
-Delete the whole `propose_citation_impl` row from `tests/fencing/fence_inventory.json`
-— this is exactly what regenerating the inventory after F3d3's relocation would do.
+The mutation must reproduce the RELOCATION, not just a missing row. Deleting a row
+while its code still sits under `tools/` is a different failure — the scan still finds
+the site, so `test_the_inventory_matches_the_tree_exactly` reports it "unlisted" and
+`test_inventory_merge.py::test_regeneration_preserves_every_human_slice_assignment`
+reports a slice-map mismatch. Three reds, none of them the new guard.
 
-Run:
+Do this instead. Move `propose_citation_impl` out of `tools/` — rename
+`src/call_manager/proposal_assist/tools/citations.py` to
+`src/call_manager/proposal_assist/citations/_relocated_probe.py` — then regenerate:
+
 ```bash
-uv run pytest tests/fencing -q > /tmp/f3d1-7m.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -30 /tmp/f3d1-7m.txt
+uv run python -m tests.fencing.regenerate_inventory
+uv run pytest tests/fencing -q > /tmp/f3d1-7m.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -40 /tmp/f3d1-7m.txt
 ```
 Expected: FAIL on `test_every_f3d_identity_is_still_in_the_inventory`, naming
-`F3d3 tool_commit propose_citation_impl`. Check the rest of the output too: if any
-OTHER fencing test also fails, say so in your report — the interesting claim is that
-without this guard, none of them would.
+`F3d3 tool_commit propose_citation_impl`. That is the silent-erasure path: the scan
+stops recording the site, `FencedSiteVanished` stays quiet because the row is
+`fenced: false`, and regeneration legitimately drops it.
+
+Report every other red you see. Expect one: `test_inventory_merge.py:108`'s
+hard-coded `assert len(after) == 20` also catches a vanished row today. That does not
+make the guard redundant — it makes it the ONLY thing left once F3d3 updates that
+literal, which F3d3 must do. **Write that consequence into the F3d3 plan**: the moment
+`== 20` is hand-edited to match a smaller inventory, the count ratchet stops covering
+this at all and `F3D_IDENTITIES` is the whole net.
+
+Restore with `git checkout` AND undo the rename, then regenerate again to confirm the
+inventory is byte-identical.
 
 ```bash
 git checkout tests/fencing/fence_inventory.json
@@ -1407,7 +1595,8 @@ Expected: `PYTEST_EXIT=0` and **3737 passed, 1 skipped**. That total is determin
 the master baseline of 3715, plus 20 tests added in Tasks 1-5 (4 + 3 + 4 + 6 + 3, where
 Task 4's six are four parametrisations plus two singles) and 2 in Task 7. If your
 number differs, work out WHICH term is wrong before touching anything — do not adjust
-the expectation to match the run. **Read the `1 skipped` as the signal, not the
+the expectation to match the run. (If you are executing Tasks 6-7 in isolation, the
+20 from Tasks 1-5 are simply not in your tree and the number is **3717**.) **Read the `1 skipped` as the signal, not the
 total**: it is the `ANTHROPIC_API_KEY`-gated test, and anything else skipped means
 something got disabled.
 
