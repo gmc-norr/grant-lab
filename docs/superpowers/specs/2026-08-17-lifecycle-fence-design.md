@@ -261,9 +261,9 @@ they are slot bookkeeping, not semantic production — which is why the accounti
 category is widened in §2 and deliberately separated here.
 
 **Requirement:** the generation travels in `ToolContext` (`tools/registry.py:43`)
-and every `semantic` tool write fences on it — Primitive A for the DB-only ones
-(reached via `fenced_execute` in F3). `accounting` sites must NOT fence; they use
-CAS writes only.
+and every `semantic` tool write fences on it — Primitive A paired with Primitive C
+for the DB-only ones (reached via `fenced_execute` in F3; §3.1a). `accounting`
+sites must NOT fence; they use CAS writes only.
 
 #### ToolContext lifetimes *(F2 finding)*
 
@@ -369,8 +369,19 @@ deadlocks:
    not acquire the mutex. Assert the generation **on that already-locked row**.
    The lock that makes the assertion sound is already held; adding M buys nothing
    and inverts an order.
-2. Where the effect is DB-only and no workspace row lock is held, use
-   Primitive A. No lock, no ordering.
+2. Where the effect is DB-only and no workspace row lock is held, acquire
+   Primitive C (`acquire_shared_lease`) and then carry Primitive A in the WHERE
+   of the single statement that performs the effect. Primitive A alone is **not**
+   sufficient: it takes no lock on the workspace row, so it evaluates against its
+   own statement's READ COMMITTED snapshot, and a transition committing after
+   that snapshot is invisible to it (§3.1).
+
+   Primitive C takes the **same key** as the mutex, in SHARED mode, so it carries
+   the same ordering obligation as Primitive B: acquire it **first**, before any
+   job or workspace row lock, preserving **M → J → W**. And never upgrade — a
+   transaction holding C must not go on to acquire the exclusive mutex for the
+   same workspace. Two transactions each holding shared and each waiting to
+   upgrade is the one deadlock shape this protocol has.
 3. Where Primitive B is genuinely required (git / filesystem / multi-row), the
    mutex is acquired **first**, before any job or workspace row lock, preserving
    the established **M → J → W** order (`phases/setup.py:500`,
@@ -613,7 +624,7 @@ Best-effort cancellation keeps a legitimate role as an optimization inside step
 
 | Slice | Content |
 |---|---|
-| **F1** | Both primitives (§3.1, §3.2), `WorkspaceGenerationStale`, migration adding `claimed_at_generation` to the **7** live job tables. No call sites converted. |
+| **F1** | Primitive A and Primitive B (§3.1, §3.2), `WorkspaceGenerationStale`, migration adding `claimed_at_generation` to the **7** live job tables. No call sites converted. Primitive C (§3.1a) was added in revision 6 and is delivered by F3b, not F1. |
 | **F2** | The coverage gate skeleton (§9), asserting nothing yet — so every later slice lands against a gate that already exists. |
 | **F3** | `ToolContext` generation propagation + per-turn re-stamp, and the tool-write fences (§4.1). The largest slice and the one revision 1 omitted. |
 | **F4** | The 5 non-setup background job families, with the per-family lock ordering of §5. |
@@ -640,6 +651,15 @@ with Primitive C, `acquire_shared_lease` (§3.1a), acquired first, and an effect
 never upgrades from the shared lease to the exclusive mutex. This revision also
 brings the status line into line with revision 5, which the changelog recorded and
 the header did not.
+
+A review of this revision found the same corrected claim still standing in §5's
+own normative rules: rule 2 told DB-only effects to use Primitive A alone, "no
+lock, no ordering" — the exact position §3 was just rewritten to reject. Rule 2
+now requires Primitive C first, with Primitive A carried in the same statement,
+and states the ordering obligation that comes with taking C: same key as the
+mutex, acquired first, never upgraded to the exclusive lock. The same stale
+claim had also survived into §4.1's tool-write requirement and the F1 row of
+§11's slice table; both are corrected to name Primitive C alongside Primitive A.
 
 **Revision 5 (2026-08-18).** Added §9.1 after an external review found five
 reachable bypasses in the merged F2 gate, each reproduced against the verifier.
