@@ -89,12 +89,15 @@ F3A_COLUMN_FILES = frozenset({
     "db/models.py",
 })
 
-#: A SEPARATE, EXACT set for importing the F1 fencing primitives. It is EMPTY
-#: through F3a — nothing imports them yet — and F3b adds precisely its own port
-#: implementation files. Sharing one list with the column check would both permit
-#: premature fencing imports across all of F3a's files and block F3b's ports,
-#: which live in neither.
-FENCING_IMPORT_FILES: frozenset[str] = frozenset()
+#: A SEPARATE, EXACT set for importing the F1 fencing primitives. Empty through
+#: F3a — nothing imported them yet. F3b adds precisely its own port
+#: implementation, which is the only place a fence may now be expressed: the
+#: whole point of the ports is that no tool, route or pass runner writes one.
+#: Sharing one list with the column check would both permit premature fencing
+#: imports across all of F3a's files and block the ports, which live in neither.
+FENCING_IMPORT_FILES: frozenset[str] = frozenset({
+    "proposal_assist/port_impl/effects.py",
+})
 
 #: Extra declared keys, preserved verbatim across regeneration — they are what
 #: the verifier reads.
