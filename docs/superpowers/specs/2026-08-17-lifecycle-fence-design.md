@@ -1,11 +1,12 @@
 # Epoch-Fenced Semantic Effects — design
 
-**Status:** revision 6, 2026-08-19. Revision 1 was reviewed and found incomplete;
+**Status:** revision 7, 2026-08-19. Revision 1 was reviewed and found incomplete;
 revision 2 corrected the audit unit and four further defects; revision 3 settles
 the read-revocation contract; revision 4 folds in the F2 research findings: canonical
 form, classified inventory, and ToolContext lifetime split; revision 5 demoted F2
 from a coverage gate to an inventory; revision 6 corrects §3 — the conditional-write
-predicate is not a fence on its own and pairs with the shared lease (F3b). See §12
+predicate is not a fence on its own and pairs with the shared lease (F3b); revision 7 records that F2's containment machinery is deleted and the import
+boundary replaces it. See §12
 for the changelog.
 
 **Step 1 of a four-step sequence** (fence → prove → remove → relax). This
@@ -604,7 +605,21 @@ carried all the way, and it also dissolves finding 3 — `ingest_bytes` takes a
 `session_factory`, so its fresh sessions become visible violations rather than
 invisible ones.
 
-Until F3 does that work, no slice may be marked `complete` in `SLICE_STATUS`.
+**Completed in F3c.** `verifiers.py` and its tests are deleted; the inventory is a
+migration checklist and nothing more. The proof is the import boundary
+(`tests/fencing/import_gate.py`): `tools/` may import only the standard library and
+`call_manager.proposal_assist.ports`, and may not name a resource locator. Every tool
+module is exempted by name until its slice converts it, with the violations it
+already has pinned to that name: an exemption that stops being true is a red test, and
+so is a dirty module acquiring a violation its pin does not cover — the list can only
+shrink, and so can each entry. What the boundary cannot see,
+the DTO contract test covers: a query port returning an attached ORM instance hands
+back `object_session(instance)` without the tool importing anything.
+
+F3a, F3b and F3c did that work: the ports exist, the shared lease is proven, and the
+import boundary is a CI check. Slices are marked `complete` in `SLICE_STATUS` as they
+land. What remains unfenced is not hidden by that — it is the inventory's own
+`fenced: false` rows, which F3d and F3e convert.
 
 ## 10. Where the principle stops
 
@@ -641,6 +656,14 @@ guard defects that only become reachable once step 3 removes cancellation.
 ---
 
 ## 12. Changelog
+
+**Revision 7 (2026-08-19).** §9.1 completed: F2's analysis machinery is deleted and
+the F3c import boundary replaces it. The old detector keyed on `.commit()`, which the
+port form removes, so it went blinder as conversion proceeded; an import allowlist
+does the opposite. `tools/` may import only the standard library and the ports, may
+not name a resource locator, and every unconverted module is exempted by name —
+pinned to the violations it already has, so it cannot drift further — until its slice
+deletes the entry.
 
 **Revision 6 (2026-08-19).** §3 rewritten: three primitives, not two. Primitive A
 was documented as the default and as adding no lock. It is an `exists()` subquery
