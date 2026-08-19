@@ -3,13 +3,17 @@ and commit; the tool that will call it holds no session at all."""
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
-from call_manager.db.models import EvaluatorJob, ReviewRunItem, UncitedClaimsJob
+from call_manager.db.models import EvaluatorJob, ProposedChange, ReviewRunItem, UncitedClaimsJob
 from call_manager.proposal_assist.port_impl.effects import SqlEffects
 from call_manager.proposal_assist.ports.effects import (
     EFFECT_MECHANISMS,
     Effects,
+    ProposeArtifactEdit,
+    ProposeCitationInsert,
     SubmitReview,
     SubmitScorecard,
     SubmitUncitedClaims,
@@ -18,7 +22,7 @@ from call_manager.proposal_assist.ports.errors import (
     EffectRejected,
     WorkspaceGenerationStale,
 )
-from call_manager.proposal_assist.ports.stamp import FenceStamp
+from call_manager.proposal_assist.ports.stamp import FenceStamp, Provenance
 from tests.proposal_assist.f3b_seeds import (
     bump_generation,
     seed_evaluator_job,
@@ -373,3 +377,197 @@ def test_generation_zero_is_fenced_like_any_other(pg_session_factory):
 
     with pg_session_factory() as s:
         assert s.get(UncitedClaimsJob, job_id).claims is None
+
+
+# ------------------------------------------------------- the propose_* inserts
+
+_PROV = Provenance(
+    origin_kind="interactive_turn",
+    origin_session_id="sess-9",
+    origin_job_id=None,
+    triggering_turn_id=None,
+    triggering_prompt="tighten the aims",
+    created_by=None,
+)
+
+
+def _edit(**over) -> ProposeArtifactEdit:
+    base = dict(
+        target_artifact="draft",
+        section_index=1,
+        new_text="new prose",
+        base_commit_sha="a" * 40,
+        base_section_sha="b" * 64,
+        provenance=_PROV,
+    )
+    return ProposeArtifactEdit(**{**base, **over})
+
+
+def test_propose_artifact_edit_inserts_a_pending_row(pg_session_factory):
+    with pg_session_factory() as s:
+        ws_id = seed_workspace(s, generation=5)
+
+    pc_id = SqlEffects(pg_session_factory).propose_artifact_edit(
+        _stamp(ws_id, generation=5), _edit()
+    )
+
+    with pg_session_factory() as s:
+        pc = s.get(ProposedChange, pc_id)
+        assert (pc.workspace_id, pc.status, pc.kind) == (ws_id, "pending", "prose_edit")
+        assert (pc.target_artifact, pc.section_index) == ("draft", 1)
+        assert (pc.base_commit_sha, pc.base_section_sha) == ("a" * 40, "b" * 64)
+        assert pc.payload == {"new_text": "new prose"}
+        assert pc.created_at is not None
+
+
+def test_propose_artifact_edit_copies_the_provenance_verbatim(pg_session_factory):
+    """These fields are durable attribution. A snapshot taken late — or dropped
+    on the way through the port — misattributes stored data."""
+    with pg_session_factory() as s:
+        ws_id = seed_workspace(s, generation=1)
+
+    pc_id = SqlEffects(pg_session_factory).propose_artifact_edit(
+        _stamp(ws_id, generation=1), _edit()
+    )
+
+    with pg_session_factory() as s:
+        pc = s.get(ProposedChange, pc_id)
+        assert pc.origin_kind == "interactive_turn"
+        assert pc.origin_session_id == "sess-9"
+        assert pc.triggering_prompt == "tighten the aims"
+        assert pc.origin_job_id is None
+        assert pc.created_by is None
+
+
+def test_a_draft_edit_folds_the_selection_into_the_payload(pg_session_factory):
+    with pg_session_factory() as s:
+        ws_id = seed_workspace(s, generation=1)
+
+    pc_id = SqlEffects(pg_session_factory).propose_artifact_edit(
+        _stamp(ws_id, generation=1),
+        _edit(selection={"anchor": "aims", "from_offset": 10, "to_offset": 20}),
+    )
+
+    with pg_session_factory() as s:
+        assert s.get(ProposedChange, pc_id).payload == {
+            "new_text": "new prose",
+            "selection_anchor": "aims",
+            "selection_from": 10,
+            "selection_to": 20,
+        }
+
+
+def test_a_spec_edit_ignores_the_selection(pg_session_factory):
+    """Selection provenance is a draft-editor concept; the spec editor has none."""
+    with pg_session_factory() as s:
+        ws_id = seed_workspace(s, generation=1)
+
+    pc_id = SqlEffects(pg_session_factory).propose_artifact_edit(
+        _stamp(ws_id, generation=1),
+        _edit(target_artifact="spec", selection={"anchor": "x", "from_offset": 1, "to_offset": 2}),
+    )
+
+    with pg_session_factory() as s:
+        assert s.get(ProposedChange, pc_id).payload == {"new_text": "new prose"}
+
+
+def test_propose_artifact_edit_refuses_a_stale_generation(pg_session_factory):
+    """The INSERT case, which has no target row and therefore no READ COMMITTED
+    re-check to mask a missing fence."""
+    with pg_session_factory() as s:
+        ws_id = seed_workspace(s, generation=5)
+        bump_generation(s, ws_id, to=7)
+        s.commit()
+
+    with pytest.raises(WorkspaceGenerationStale) as e:
+        SqlEffects(pg_session_factory).propose_artifact_edit(
+            _stamp(ws_id, generation=5), _edit()
+        )
+    assert (e.value.expected, e.value.actual) == (5, 7)
+
+    with pg_session_factory() as s:
+        assert s.query(ProposedChange).count() == 0
+
+
+def test_propose_artifact_edit_refuses_a_soft_deleted_workspace(pg_session_factory):
+    from datetime import UTC, datetime
+
+    from call_manager.db.models import Workspace
+
+    with pg_session_factory() as s:
+        ws_id = seed_workspace(s, generation=5)
+        s.get(Workspace, ws_id).soft_deleted_at = datetime.now(UTC)
+        s.commit()
+
+    with pytest.raises(WorkspaceGenerationStale):
+        SqlEffects(pg_session_factory).propose_artifact_edit(
+            _stamp(ws_id, generation=5), _edit()
+        )
+    with pg_session_factory() as s:
+        assert s.query(ProposedChange).count() == 0
+
+
+def test_propose_citation_insert_writes_the_accept_time_payload(pg_session_factory):
+    """ev_id / citekey / offsets are minted authoritatively at ACCEPT time, not
+    stored here — the payload mirrors the tool's arguments and nothing more."""
+    ref_id = uuid.uuid4()
+    with pg_session_factory() as s:
+        ws_id = seed_workspace(s, generation=2)
+
+    pc_id = SqlEffects(pg_session_factory).propose_citation_insert(
+        _stamp(ws_id, generation=2),
+        ProposeCitationInsert(
+            section_index=3,
+            base_commit_sha="c" * 40,
+            base_section_sha="d" * 64,
+            reference_id=ref_id,
+            anchor="as shown",
+            chunk_index=4,
+            evidence_quote="the quote",
+            stance="supports",
+            confidence=None,
+            provenance=_PROV,
+        ),
+    )
+
+    with pg_session_factory() as s:
+        pc = s.get(ProposedChange, pc_id)
+        assert (pc.kind, pc.target_artifact, pc.status) == (
+            "citation_insert",
+            "draft",
+            "pending",
+        )
+        assert pc.payload == {
+            "reference_id": str(ref_id),
+            "anchor": "as shown",
+            "chunk_index": 4,
+            "evidence_quote": "the quote",
+            "stance": "supports",
+            "confidence": None,
+        }
+
+
+def test_propose_citation_insert_refuses_a_stale_generation(pg_session_factory):
+    with pg_session_factory() as s:
+        ws_id = seed_workspace(s, generation=2)
+        bump_generation(s, ws_id, to=3)
+        s.commit()
+
+    with pytest.raises(WorkspaceGenerationStale):
+        SqlEffects(pg_session_factory).propose_citation_insert(
+            _stamp(ws_id, generation=2),
+            ProposeCitationInsert(
+                section_index=0,
+                base_commit_sha="c" * 40,
+                base_section_sha="d" * 64,
+                reference_id=uuid.uuid4(),
+                anchor="a",
+                chunk_index=0,
+                evidence_quote="q",
+                stance="supports",
+                confidence=None,
+                provenance=_PROV,
+            ),
+        )
+    with pg_session_factory() as s:
+        assert s.query(ProposedChange).count() == 0

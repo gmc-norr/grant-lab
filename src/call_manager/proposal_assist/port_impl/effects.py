@@ -14,13 +14,16 @@ Two rules govern every method and neither is negotiable:
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, NoReturn
 
-from sqlalchemy import exists, select, update
+from sqlalchemy import exists, insert, literal, select, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session, sessionmaker
 
 from call_manager.db.models import (
     EvaluatorJob,
+    ProposedChange,
     ReviewRun,
     ReviewRunItem,
     UncitedClaimsJob,
@@ -28,6 +31,8 @@ from call_manager.db.models import (
 )
 from call_manager.proposal_assist.fencing import acquire_shared_lease, live_at_generation
 from call_manager.proposal_assist.ports.effects import (
+    ProposeArtifactEdit,
+    ProposeCitationInsert,
     SubmitReview,
     SubmitScorecard,
     SubmitUncitedClaims,
@@ -36,7 +41,7 @@ from call_manager.proposal_assist.ports.errors import (
     EffectRejected,
     WorkspaceGenerationStale,
 )
-from call_manager.proposal_assist.ports.stamp import FenceStamp
+from call_manager.proposal_assist.ports.stamp import FenceStamp, Provenance
 
 _SCORECARD_TWICE = "a scorecard has already been submitted for this run"
 _SCORECARD_TARGET = "scorecard target is not an active evaluator run for this workspace"
@@ -45,6 +50,7 @@ _REVIEW_RUN = "submit_review target run is not active for this workspace"
 _REVIEW_ITEM = "submit_review target is not a running item for this run"
 _CLAIMS_TWICE = "claims have already been submitted for this run"
 _CLAIMS_TARGET = "target is not an active uncited-claims run for this workspace"
+_PROPOSE_TARGET = "this workspace is no longer accepting proposed changes"
 
 
 def _explain_refusal(
@@ -197,3 +203,111 @@ class SqlEffects:
                     ),
                     fallback=_CLAIMS_TARGET,
                 )
+
+    def _insert_proposed_change(
+        self,
+        stamp: FenceStamp,
+        *,
+        kind: str,
+        target_artifact: str,
+        section_index: int,
+        base_commit_sha: str,
+        base_section_sha: str,
+        payload: dict[str, Any],
+        provenance: Provenance,
+    ) -> uuid.UUID:
+        """The shared INSERT for both propose_* effects.
+
+        INSERT … SELECT … WHERE, never INSERT … VALUES after a check: an INSERT
+        has no target row, so there is no READ COMMITTED re-check to mask a
+        missing fence, and the check-then-insert shape is the exact race
+        reproduced on PostgreSQL 16.
+
+        `id` is supplied explicitly because FROM SELECT does not apply
+        Python-side column defaults. `status` and `created_at` are SERVER
+        defaults and are correctly left out.
+        """
+        pc_id = uuid.uuid4()
+        with self._sessions.begin() as session:
+            acquire_shared_lease(session, stamp.workspace_id)
+            landed = session.execute(
+                insert(ProposedChange)
+                .from_select(
+                    [
+                        "id",
+                        "workspace_id",
+                        "target_artifact",
+                        "section_index",
+                        "base_commit_sha",
+                        "base_section_sha",
+                        "kind",
+                        "payload",
+                        "origin_kind",
+                        "origin_session_id",
+                        "origin_job_id",
+                        "triggering_turn_id",
+                        "triggering_prompt",
+                        "created_by",
+                    ],
+                    select(
+                        literal(pc_id),
+                        literal(stamp.workspace_id),
+                        literal(target_artifact),
+                        literal(section_index),
+                        literal(base_commit_sha),
+                        literal(base_section_sha),
+                        literal(kind),
+                        literal(payload, type_=JSONB),
+                        literal(provenance.origin_kind),
+                        literal(provenance.origin_session_id),
+                        literal(provenance.origin_job_id),
+                        literal(provenance.triggering_turn_id),
+                        literal(provenance.triggering_prompt),
+                        literal(provenance.created_by),
+                    ).where(live_at_generation(stamp.workspace_id, stamp.generation)),
+                )
+                .returning(ProposedChange.id)
+            ).first()
+            if landed is None:
+                _explain_refusal(session, stamp, checks=(), fallback=_PROPOSE_TARGET)
+            return landed[0]
+
+    def propose_artifact_edit(self, stamp: FenceStamp, cmd: ProposeArtifactEdit) -> uuid.UUID:
+        payload: dict[str, Any] = {"new_text": cmd.new_text}
+        if cmd.target_artifact == "draft" and cmd.selection:
+            payload |= {
+                "selection_anchor": cmd.selection.get("anchor"),
+                "selection_from": cmd.selection.get("from_offset"),
+                "selection_to": cmd.selection.get("to_offset"),
+            }
+        return self._insert_proposed_change(
+            stamp,
+            kind="prose_edit",
+            target_artifact=cmd.target_artifact,
+            section_index=cmd.section_index,
+            base_commit_sha=cmd.base_commit_sha,
+            base_section_sha=cmd.base_section_sha,
+            payload=payload,
+            provenance=cmd.provenance,
+        )
+
+    def propose_citation_insert(
+        self, stamp: FenceStamp, cmd: ProposeCitationInsert
+    ) -> uuid.UUID:
+        return self._insert_proposed_change(
+            stamp,
+            kind="citation_insert",
+            target_artifact="draft",
+            section_index=cmd.section_index,
+            base_commit_sha=cmd.base_commit_sha,
+            base_section_sha=cmd.base_section_sha,
+            payload={
+                "reference_id": str(cmd.reference_id),
+                "anchor": cmd.anchor,
+                "chunk_index": cmd.chunk_index,
+                "evidence_quote": cmd.evidence_quote,
+                "stance": cmd.stance,
+                "confidence": cmd.confidence,
+            },
+            provenance=cmd.provenance,
+        )

@@ -14,11 +14,11 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
-from call_manager.proposal_assist.ports.stamp import FenceStamp
+from call_manager.proposal_assist.ports.stamp import FenceStamp, Provenance
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +37,43 @@ class SubmitUncitedClaims:
     claims: list[dict[str, Any]]
 
 
+@dataclass(frozen=True, slots=True)
+class ProposeArtifactEdit:
+    """A pending full-text replacement of ONE section.
+
+    base_commit_sha / base_section_sha come from the agent's READ-TIME snapshot
+    and are passed in by the caller. They must never be recomputed live: a human
+    edit landed since the read would silently become the base, and accept would
+    then clobber it.
+    """
+
+    target_artifact: str
+    section_index: int
+    new_text: str
+    base_commit_sha: str
+    base_section_sha: str
+    provenance: Provenance
+    #: Draft only. Folded into the payload as selection_anchor/_from/_to.
+    selection: Mapping[str, Any] | None = field(default=None)
+
+
+@dataclass(frozen=True, slots=True)
+class ProposeCitationInsert:
+    """A pending citation insert. ev_id, citekey and offsets are minted
+    authoritatively at ACCEPT time, not stored here."""
+
+    section_index: int
+    base_commit_sha: str
+    base_section_sha: str
+    reference_id: uuid.UUID
+    anchor: str
+    chunk_index: int
+    evidence_quote: str
+    stance: str
+    confidence: str | None
+    provenance: Provenance
+
+
 @runtime_checkable
 class Effects(Protocol):
     """Every method raises WorkspaceGenerationStale when the workspace has moved
@@ -51,6 +88,14 @@ class Effects(Protocol):
         self, stamp: FenceStamp, cmd: SubmitUncitedClaims
     ) -> None: ...
 
+    def propose_artifact_edit(
+        self, stamp: FenceStamp, cmd: ProposeArtifactEdit
+    ) -> uuid.UUID: ...
+
+    def propose_citation_insert(
+        self, stamp: FenceStamp, cmd: ProposeCitationInsert
+    ) -> uuid.UUID: ...
+
 
 #: Spec 3.5 — every effect operation and the ONE mechanism it uses. A named port
 #: does not make its internal fence atomic, so each operation declares its
@@ -64,5 +109,7 @@ EFFECT_MECHANISMS: Mapping[str, str] = MappingProxyType(
         "submit_scorecard": "shared lease + live_at_generation in the UPDATE",
         "submit_review": "shared lease + live_at_generation in the UPDATE",
         "submit_uncited_claims": "shared lease + live_at_generation in the UPDATE",
+        "propose_artifact_edit": "shared lease + INSERT … SELECT … WHERE live_at_generation",
+        "propose_citation_insert": "shared lease + INSERT … SELECT … WHERE live_at_generation",
     }
 )
