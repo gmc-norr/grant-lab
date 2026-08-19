@@ -6,6 +6,8 @@ import dataclasses
 import uuid
 from datetime import UTC, datetime
 
+from sqlalchemy import inspect as sa_inspect
+
 from call_manager.db.models import Reference, ReferenceChunk
 from call_manager.proposal_assist.port_impl.queries import SqlQueries
 from call_manager.proposal_assist.ports.queries import (
@@ -110,19 +112,54 @@ def test_a_missing_chunk_is_none(pg_session_factory):
     assert SqlQueries(pg_session_factory).get_reference_chunk(ws_id, ref_id, 99) is None
 
 
+def test_get_reference_chunk_scopes_to_the_workspace(pg_session_factory):
+    """Same guarantee as test_get_reference_scopes_to_the_workspace, for the
+    chunk read: the WHERE scopes on the caller's workspace_id itself, rather
+    than trusting the caller to compare it afterwards, so a regression that
+    dropped ReferenceChunk.workspace_id == workspace_id from the predicate
+    would leak another workspace's chunk instead of failing loudly."""
+    with pg_session_factory() as s:
+        mine = seed_workspace(s, generation=0)
+        theirs = seed_workspace(s, generation=0)
+        their_ref = _seed_reference(s, theirs)
+
+    assert SqlQueries(pg_session_factory).get_reference_chunk(mine, their_ref, 0) is None
+
+
+def _assert_detached(value: object, path: str) -> None:
+    """Recursively assert that no ORM instance carrying a live Session hides
+    anywhere inside `value`. Walks nested dataclasses, lists, tuples, sets, and
+    dicts (keys and values) — not just a DTO's own top-level fields, so a
+    collection field holding raw ORM instances cannot pass through untouched."""
+    assert sa_inspect(value, raiseerr=False) is None, (
+        f"{path}: {type(value).__name__} is an ORM-mapped object"
+    )
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        for field in dataclasses.fields(value):
+            _assert_detached(getattr(value, field.name), f"{path}.{field.name}")
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            _assert_detached(key, f"{path}.key({key!r})")
+            _assert_detached(item, f"{path}[{key!r}]")
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for index, item in enumerate(value):
+            _assert_detached(item, f"{path}[{index}]")
+
+
 def test_no_query_result_carries_a_live_session(pg_session_factory):
     """GC-5. object_session() on an attached instance IS the full Session — the
-    leak that defeated the forwarding-proxy design. A DTO carries data."""
-    from sqlalchemy import inspect as sa_inspect
+    leak that defeated the forwarding-proxy design. A DTO carries data.
 
+    Recursive (_assert_detached): walks lists, tuples, sets, and dicts (keys and
+    values) as well as nested dataclasses, not just each result's own top-level
+    fields, so a collection field holding raw ORM instances cannot pass through
+    untouched. Both current DTOs are flat scalars, so this only exercises the
+    top level today — it is the template a later slice extends to richer
+    results."""
     with pg_session_factory() as s:
         ws_id = seed_workspace(s, generation=0)
         ref_id = _seed_reference(s, ws_id)
 
     q = SqlQueries(pg_session_factory)
     for result in (q.get_reference(ws_id, ref_id), q.get_reference_chunk(ws_id, ref_id, 0)):
-        assert sa_inspect(result, raiseerr=False) is None, (
-            f"{type(result).__name__} is an ORM-mapped object"
-        )
-        for value in dataclasses.asdict(result).values():
-            assert sa_inspect(value, raiseerr=False) is None
+        _assert_detached(result, type(result).__name__)
