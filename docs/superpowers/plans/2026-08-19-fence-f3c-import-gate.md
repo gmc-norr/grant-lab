@@ -19,8 +19,8 @@ coverage by inspecting writes — is deleted, because the import check is now th
 **Tech Stack:** Python 3.12 (`ast`, `sys.stdlib_module_names`), pytest.
 
 **Spec:** `docs/superpowers/specs/2026-08-18-fence-session-ownership-design.md`
-(revision 8) — §4 the gate, §4.1 resource locators, §4.2 what this boundary is and the
-inventory demotion, §7 F3c, §9 how the gate is proven.
+(revision 8) — §4 the gate, §4.1 resource locators, §4.2 what this boundary is and is
+not, §4.4 the inventory demotion, §7 F3c, §9 how the gate is proven.
 
 ## Global Constraints
 
@@ -33,8 +33,11 @@ Every task's requirements implicitly include this section.
 - **GC-2 — The allowlist is exactly two things:** modules whose top-level name is in
   `sys.stdlib_module_names`, and `call_manager.proposal_assist.ports` with its
   submodules. Nothing else. **Every relative import is a violation** — inside `tools/`
-  a relative import can only resolve to another `tools/` module, which is how
-  `audit.py` reaches `citations._read_proposal_and_ledger` today.
+  a relative import can only resolve to another `tools/` module, and it carries no
+  dotted name for the allowlist to test, so it is refused outright rather than
+  resolved. There are none in `tools/` today: `audit.py:41` reaches
+  `citations._read_proposal_and_ledger` by ABSOLUTE import, which the allowlist
+  already rejects. The rule closes the re-spelling, not a current hole.
 - **GC-3 — Closing imports alone does not close authority (§4.1).** `ToolContext`
   exposes `repo_dir`, so `(ctx.repo_dir / "proposal.md").write_text(...)` passes every
   import check. The gate therefore also forbids naming a resource locator —
@@ -61,13 +64,31 @@ Every task's requirements implicitly include this section.
 - **GC-7 — Additive and test-only.** No file under `src/` changes behaviour in this
   slice. No caller is converted, no tool is rewritten, no resource locator is actually
   removed from `ToolContext` — F3d/F3e/F3f do that, and the gate is what tells them
-  when they are done.
+  when they are done. The mutation steps are the one exception and they are not a
+  real one: several create or edit files under `src/` on purpose, and every one is
+  restored under GC-10 before the task ends. If a mutation's restore is ever left
+  unverified, GC-7 has been broken, not bent.
 - **GC-8 — Test command.** `uv run pytest -n 16 --dist loadfile`. Never `-n auto`
   (resolves to 72 here) and never `--dist loadgroup`. Baseline on master before this
   branch: **3688 passed, 1 skipped** (measured on `7e5a5e2`; the F3b review follow-ups
   added three tests after this plan was first written, so an older `3685` anywhere is
   stale). The `1 skipped` is an `ANTHROPIC_API_KEY`-gated test — read it as the
   signal, not the total.
+- **GC-8a — If you work in a worktree, `uv run` is a trap.** This repo's convention is
+  `.worktrees/`, and a fresh worktree has no `.venv`, so `uv run` builds one and
+  resolves it to Python 3.14 — not this project. Either `uv sync --python 3.12` in the
+  worktree first, or substitute the main tree's interpreter for every `uv run` command
+  in this plan:
+
+  ```bash
+  PYTHONPATH="$(pwd)/src" /home/parlar_ai/dev/call-monitor/.venv/bin/python -m pytest <args>
+  ```
+
+  `PYTHONPATH` is not optional there: without it the editable install resolves
+  `call_manager` to the MAIN tree, and every mutation you make under `src/` in the
+  worktree has no effect while the tests still pass. Prove it once before trusting any
+  result: `python -c "import call_manager; print(call_manager.__file__)"` must print a
+  path inside your worktree.
 - **GC-9 — `ruff check .` is the lint gate. `ruff format` is NOT** — do not run it and
   do not reformat files to satisfy it.
 - **GC-10 — Mutation testing happens AFTER the task's commit, never before, and the
@@ -85,6 +106,14 @@ Every task's requirements implicitly include this section.
   this worktree carries an unrelated untracked note that would make "empty"
   unreachable anyway.
 
+  This is also why each task COMMITS before it mutates: `git checkout` can only
+  restore a tracked file. Run a mutation step against a file the task has not yet
+  committed and the checkout fails, `git diff --exit-code HEAD` then reports the file
+  as clean because git has never heard of it, and the mutation ships. Both are true
+  of every new file in Tasks 2-5, so the commit steps are prerequisites, not
+  bookkeeping. A mutation on an untracked file needs a byte-for-byte backup and a
+  `diff` instead.
+
 ## Two decisions taken before planning
 
 Both were open in the spec and would have produced materially different work.
@@ -100,10 +129,11 @@ gate to the exact identity a human reviewed.
 
 **`tools/registry.py` and `tools/__init__.py` are permanently exempt, by name, with
 their own narrower rule.** `registry.py` is the composition root: it defines
-`ToolContext`, builds the MCP server, and is imported by eleven non-tool modules. It
-necessarily names things a tool may not. `tools/__init__.py` re-exports from it.
-Moving them out of the package was the alternative; it is cleaner but costs an import
-update across eleven modules in a slice that otherwise changes no production
+`ToolContext`, builds the MCP server, and is imported from outside `tools/` by seven
+non-tool `src/` modules and thirty test modules. It necessarily names things a tool
+may not. `tools/__init__.py` re-exports from it. Moving them out of the package was
+the alternative; it is cleaner but costs an import update across 47 sites (7 non-tool
+`src/`, 10 inside `tools/`, 30 tests) in a slice that otherwise changes no production
 behaviour. The exemption is not unconditional: both files are still forbidden to
 import the `call_manager.db` package or `sqlalchemy`, checked separately, so the
 exemption cannot become where violations hide.
@@ -124,7 +154,7 @@ exemption cannot become where violations hide.
 
 | File | Change |
 |---|---|
-| `tests/fencing/inventory.py` | Gains `TOOLS_NOT_YET_CONVERTED` and `GATE_SKIPS`. Everything else unchanged. |
+| `tests/fencing/inventory.py` | Gains `TOOLS_NOT_YET_CONVERTED` and `GATE_SKIPS` (Task 4), and its `SLICE_STATUS["F3c"]` flips `pending` -> `complete` (Task 6). Nothing else changes. |
 | `tests/fencing/test_fence_coverage.py` | `test_every_fenced_entry_really_fences` deleted with its import. |
 | `tests/proposal_assist/test_f3b_queries.py` | Uses the shared `assert_detached` instead of its private copy. |
 | `docs/superpowers/specs/2026-08-17-lifecycle-fence-design.md` | §9.1 records that the machinery is now deleted; status line and §12 changelog. |
@@ -133,7 +163,7 @@ exemption cannot become where violations hide.
 
 | File | Why |
 |---|---|
-| `tests/fencing/verifiers.py` | §4.2: the analysis machinery the import check replaces. Its detector keys on `.commit()`, which the ports remove — it goes blinder the more converted the tree is. |
+| `tests/fencing/verifiers.py` | §4.4: the analysis machinery the import check replaces. Its detector keys on `.commit()`, which the ports remove — it goes blinder the more converted the tree is. |
 | `tests/fencing/test_verifiers.py` | Tests for the above. |
 
 **Deliberately kept:** `detectors.py`, `fence_inventory.json`, `regenerate_inventory.py`,
@@ -150,7 +180,7 @@ gets detected and forced onto the list.
 F2 shipped a gate asking "is every write inside a fence?" Writes are an open set, so
 the enumeration could never be complete, and a review found five reachable bypasses.
 Worse, its detector keys on `.commit()` — which the canonical port form removes — so
-it gets *greener the more converted the codebase is*. §4.2 records the demotion; this
+it gets *greener the more converted the codebase is*. §4.4 records the demotion; this
 task completes it.
 
 **Files:**
@@ -166,7 +196,7 @@ task completes it.
 
 The probe must name the MODULE, not the word `verify(`. `signer.verify(...)` and
 `_ph.verify(...)` are the session-cookie and argon2 APIs: an unscoped
-`grep -rn "verifiers\|verify("` matches 20 lines across nine files, six of them
+`grep -rn "verifiers\|verify("` matches 20 lines across ten files, six of them
 unrelated (`auth/passwords.py`, `auth/session_cookie.py`, `auth/dependencies.py`,
 `web/api/auth.py`, `collab/ws_auth.py`, `tests/test_auth_session_cookie.py`) — which
 would send you to BLOCKED on a false positive at the plan's very first step.
@@ -183,10 +213,13 @@ list in this task is then incomplete.
 grep -rln "verify(" tests/fencing --include=*.py
 ```
 Expected: exactly four files — `verifiers.py`, `test_verifiers.py`,
-`test_fence_coverage.py` and `inventory.py`. The last two are PROSE, not consumers:
-`inventory.py:28` and `test_fence_coverage.py:57,134` mention `verify()` in comments
-on tests this task keeps. Leave them — they explain why `CATEGORIES_BY_KIND` and
-`NON_SEMANTIC_PINS` exist, which is still true.
+`test_fence_coverage.py` and `inventory.py`.
+
+In `test_fence_coverage.py` the hits split three ways: lines 57 and 134 are PROSE, in
+comments on tests this task KEEPS — leave them, they explain why `CATEGORIES_BY_KIND`
+and `NON_SEMANTIC_PINS` exist, which is still true. Line 248 is a REAL call, and it
+sits inside `test_every_fenced_entry_really_fences`, which Step 3 deletes whole, so it
+goes with the function. `inventory.py:28` is prose only.
 
 - [ ] **Step 2: Delete the two files**
 
@@ -463,9 +496,12 @@ def check_source(source: str, *, path: str) -> list[str]:
                     violations.append(f"{path}:{node.lineno}: import {alias.name}")
         elif isinstance(node, ast.ImportFrom):
             if node.level:
-                # A relative import inside tools/ can only resolve to another
-                # tools/ module — which is how audit.py reaches a private helper
-                # in citations.py today. There is no legitimate form of this.
+                # A relative import inside tools/ can only resolve to another tools/
+                # module, and it carries no dotted name to test against the allowlist,
+                # so it is refused outright rather than resolved. None exists today —
+                # audit.py reaches a private helper in citations.py by ABSOLUTE
+                # import, which the allowlist already rejects. This closes the
+                # re-spelling, not a current hole.
                 shown = "." * node.level + (node.module or "")
                 violations.append(
                     f"{path}:{node.lineno}: relative import from {shown}"
@@ -540,7 +576,7 @@ that are what a clean tool and a dirty one actually look like.
 - Create: `tests/fencing/fixtures/laundered_locator.py`
 
 **Interfaces:**
-- Consumes: `check_source`, `LOCATOR_NAMES`, `PORTS_PREFIX` (Task 2).
+- Consumes: `check_source` and `LOCATOR_NAMES` (Task 2).
 - Produces:
   - `check_source(source, *, path)` now also reports locator access.
   - `check_file(path: pathlib.Path) -> list[str]`
@@ -667,7 +703,9 @@ Run:
 ```bash
 uv run pytest tests/fencing/test_import_gate.py -q > /tmp/f3c3.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3c3.txt
 ```
-Expected: collection error — `ImportError: cannot import name 'check_file'`
+Expected: collection error — `ImportError: cannot import name 'FIXTURES'`. CPython
+reports the FIRST unresolvable name in the import list, and Step 1's line asks for
+`FIXTURES, check_file, check_source`; both new names arrive together in Step 3.
 
 - [ ] **Step 3: Add the locator rule and the file entry point**
 
@@ -826,10 +864,14 @@ Expected: `PYTEST_EXIT=0`, 30 passed.
 Also confirm the fixtures are not collected and do not trip the linter:
 
 ```bash
-uv run pytest tests/fencing --collect-only -q 2>&1 | grep -c fixtures
+! uv run pytest tests/fencing --collect-only -q 2>&1 | grep fixtures
 uv run ruff check .
 ```
-Expected: `0` collected items from `fixtures`, and `All checks passed!`.
+Expected: both exit 0, and `All checks passed!`. The leading `!` is load-bearing:
+`grep -c` prints `0` but EXITS 1 when it matches nothing, so the plain form reports
+the plan-satisfying result as a failure — and under `set -e`, or joined with `&&`,
+the `ruff check` after it never runs. Inverted, the command succeeds silently when
+nothing is collected and prints the offending lines when something is.
 
 - [ ] **Step 6: Commit**
 
@@ -907,8 +949,8 @@ same under either reading.
 
 `registry.py` and `__init__.py` are **permanently skipped**: `registry.py` is the
 composition root — it defines `ToolContext`, builds the MCP server, imports every tool
-module to wire it, and is imported by eleven non-tool modules. It necessarily names
-things a tool may not. `__init__.py` re-exports from it. The skip is not
+module to wire it, and is imported from outside `tools/` by seven non-tool `src/`
+modules and thirty test modules. It necessarily names things a tool may not. `__init__.py` re-exports from it. The skip is not
 unconditional: both are still forbidden to import the `call_manager.db` package at
 all, or `sqlalchemy` outside an `if TYPE_CHECKING:` block, so the exemption cannot
 become where violations hide. The ban is on the PACKAGE, not on `db.models` alone:
@@ -1019,7 +1061,11 @@ def test_the_composition_root_may_not_reach_the_database():
         if key not in GATE_SKIPS:
             continue
         seen.add(key)
-        problems.extend(check_composition_root(path.read_text(encoding="utf-8"), path=key))
+        # The repo-relative path, not the bare key: a failure must name something a
+        # human can open, which is what test_check_file_reports_a_readable_path pins
+        # for the other rule.
+        shown = str(path.resolve().relative_to(REPO))
+        problems.extend(check_composition_root(path.read_text(encoding="utf-8"), path=shown))
     assert not problems, "\n  ".join(problems)
     assert seen == set(GATE_SKIPS), (
         f"GATE_SKIPS names a module that is not in tools/: {sorted(GATE_SKIPS - seen)}"
@@ -1070,10 +1116,13 @@ def test_the_composition_root_rule_rejects_models_even_under_type_checking():
 
 
 def test_the_composition_root_rule_sees_models_imported_as_a_submodule():
-    """`from call_manager.db import models` binds the models MODULE, but
-    `node.module` names only the package — the aliases have to be inspected too, or
-    the most natural spelling of the forbidden import is invisible. The codebase
-    itself writes this form, at `src/call_manager/db/__init__.py:7`."""
+    """The most natural spelling of the forbidden import — the one the codebase
+    itself writes, at `src/call_manager/db/__init__.py:7`.
+
+    This one is caught by `node.module` alone, because the ban is on the PACKAGE and
+    `node.module` here IS `call_manager.db`. It pins the spelling, not the alias
+    join; `test_the_composition_root_rule_rejects_the_db_package_itself` is what
+    proves that."""
     plain = "from call_manager.db import models\n"
     assert len(check_composition_root(plain, path="registry.py")) == 1
     aliased = "from call_manager.db import models as m\n"
@@ -1083,7 +1132,12 @@ def test_the_composition_root_rule_sees_models_imported_as_a_submodule():
 def test_the_composition_root_rule_rejects_the_db_package_itself():
     """The ban is on the PACKAGE. `src/call_manager/db/__init__.py:7` re-exports
     models as a side effect its own comment explains, so importing the package hands
-    you `db.models.Workspace` without naming the models module at all."""
+    you `db.models.Workspace` without naming the models module at all.
+
+    The FIRST assertion is the only thing in this file that proves `_imported_names`:
+    in `from call_manager import db` the package arrives as an ALIAS, so `node.module`
+    is just `call_manager` and reading it alone misses this entirely. The second
+    assertion is an `ast.Import`, where the dotted name is already on the alias."""
     assert len(check_composition_root("from call_manager import db\n", path="registry.py")) == 1
     assert len(check_composition_root("import call_manager.db\n", path="registry.py")) == 1
 
@@ -1132,6 +1186,7 @@ and extend the imports at the top of the file:
 ```python
 from tests.fencing.import_gate import (
     FIXTURES,
+    REPO,
     TOOLS_DIR,
     check_composition_root,
     check_file,
@@ -1256,9 +1311,9 @@ TOOLS_NOT_YET_CONVERTED: dict[str, frozenset[str]] = {
 }
 
 #: PERMANENTLY outside the gate, by name. `registry.py` is the composition root:
-#: it defines ToolContext, builds the MCP server, imports every tool module to
-#: wire it, and eleven non-tool modules import it. It necessarily names things a
-#: tool may not. `__init__.py` re-exports from it.
+#: it defines ToolContext, builds the MCP server, imports every tool module to wire
+#: it, and 47 sites import it — 7 non-tool src modules, 10 inside tools/, 30 tests.
+#: It necessarily names things a tool may not. `__init__.py` re-exports from it.
 #:
 #: The skip is narrow, not unconditional — `check_composition_root` still forbids
 #: both from importing the `call_manager.db` package at all (importing it hands you
@@ -1514,10 +1569,16 @@ Run:
 ```bash
 uv run pytest tests/fencing/test_import_gate.py -q -k composition_root > /tmp/f3c4f.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3c4f.txt
 ```
-Expected: FAIL on `test_the_composition_root_rule_sees_models_imported_as_a_submodule`
-and `test_the_composition_root_rule_rejects_the_db_package_itself` — reading only
-`node.module` misses `from call_manager.db import models`, which is the spelling the
-codebase itself uses at `db/__init__.py:7`.
+Expected: FAIL on `test_the_composition_root_rule_rejects_the_db_package_itself`, and
+on that test's FIRST assertion — `1 failed, 8 passed`.
+
+`test_the_composition_root_rule_sees_models_imported_as_a_submodule` still PASSES
+under this mutation, and that is correct, not a broken checker: the ban is on the
+package, so `from call_manager.db import models` has `node.module ==
+"call_manager.db"` and the pre-fix one-liner already catches it. What the pre-fix
+code misses is `from call_manager import db`, where the package arrives as an alias
+and `node.module` is only `call_manager`. If BOTH tests fail, or NEITHER does,
+something else is wrong — stop and report it.
 
 ```bash
 git checkout tests/fencing/import_gate.py
@@ -1546,7 +1607,8 @@ outgrown silently.
 - Modify: `tests/proposal_assist/test_f3b_queries.py`
 
 **Interfaces:**
-- Consumes: `SqlQueries`, `Queries`, `ReferenceView`, `ReferenceChunkView` (F3b);
+- Consumes: `SqlQueries` and `Queries` (F3b); `Reference` and `ReferenceChunk` from
+  `call_manager.db.models` — a TEST may name a model, only `tools/` may not;
   `seed_workspace` from `tests/proposal_assist/f3b_seeds.py`.
 - Produces: `assert_detached(value: object, path: str) -> None` in
   `tests/proposal_assist/dto_contract.py`.
@@ -1749,9 +1811,11 @@ from sqlalchemy import inspect as sa_inspect
 #: be a Session, so there is nothing inside one to walk. Anything that is neither
 #: listed here nor a supported container is a hard failure — see the `else` at the
 #: bottom of assert_detached. Extending this tuple is a deliberate act; the two
-#: shipped DTOs need only NoneType, bool, int, str and uuid.UUID. The datetime
-#: family, Decimal and Enum are here because the next DTO with a `created_at` will
-#: need them and they are provably inert, not because anything uses them today.
+#: shipped DTOs need only NoneType, bool, int, str and uuid.UUID — measured, field by
+#: field. float, bytes, the datetime family, Decimal and Enum are here because they
+#: are provably inert and the next DTO will want them, NOT because anything uses them
+#: today. That is the whole justification; if a type does not fit it, leave it out and
+#: let the `else` fire.
 INERT_SCALARS = (
     type(None),
     bool,
@@ -1817,11 +1881,17 @@ mapped instance.
 - [ ] **Step 4: Point the F3b test at the shared walker**
 
 In `tests/proposal_assist/test_f3b_queries.py`, delete the private
-`_assert_detached` function, add
-`from tests.proposal_assist.dto_contract import assert_detached` to the imports, and
-change the two call sites in `test_no_query_result_carries_a_live_session` to call
-`assert_detached`. Remove the now-unused `dataclasses` / `sa_inspect` imports if
-`ruff` reports them.
+`_assert_detached` function and add
+`from tests.proposal_assist.dto_contract import assert_detached` to the imports.
+
+`test_no_query_result_carries_a_live_session` has exactly ONE call site (it loops over
+two results and calls once, at line 165) — repoint it, and repoint the docstring line
+above it that names `_assert_detached`, or the file documents a function it no longer
+has.
+
+Then run `ruff check` and remove only what it reports: that is `sa_inspect` alone.
+`dataclasses` is NOT unused — `test_get_reference_returns_a_frozen_dto` still calls
+`dataclasses.is_dataclass(view)` at line 67, and deleting the import NameErrors it.
 
 - [ ] **Step 5: Run both files**
 
@@ -1871,7 +1941,9 @@ git diff --exit-code HEAD -- tests/proposal_assist/test_ports_dto_contract.py
 ```
 
 Mutation 3 — in `tests/proposal_assist/dto_contract.py`, delete the final `else:`
-branch of `assert_detached` (the four-line `raise AssertionError`).
+branch of `assert_detached` — the `else:` line and the `raise AssertionError(...)`
+statement it guards, six physical lines in total. Deleting only four leaves a
+SyntaxError, which proves nothing.
 
 Run:
 ```bash
@@ -1896,11 +1968,15 @@ git diff --exit-code HEAD -- tests/proposal_assist/dto_contract.py
 
 - [ ] **Step 1: Mark the slice complete**
 
-In `tests/fencing/inventory.py`:
+In `tests/fencing/inventory.py`, REPLACE the existing line 67,
+`    "F3c": "pending",   # the import gate`, with:
 
 ```python
     "F3c": "complete",  # the import gate — no inventory row of its own
 ```
+
+This is an edit, not an append: a second `"F3c"` key would silently win or lose
+depending on order.
 
 The inventory carries no `F3c` row: the sites it will serve are sliced `F3d` and
 `F3e` and stay `fenced: false` until those slices convert them, so the status/flag
@@ -1923,6 +1999,24 @@ so is a dirty module acquiring a violation its pin does not cover — the list c
 shrink, and so can each entry. What the boundary cannot see,
 the DTO contract test covers: a query port returning an attached ORM instance hands
 back `object_session(instance)` without the tool importing anything.
+```
+
+- [ ] **Step 2b: Retract the sentence this task contradicts**
+
+§9.1 currently ends:
+
+> Until F3 does that work, no slice may be marked `complete` in `SLICE_STATUS`.
+
+Task 6 Step 1 marks F3c complete, and F3a and F3b are already `complete` in
+`inventory.py`, so the sentence is stale before this slice touches it — leaving it
+there makes the spec forbid what the same section now records. Replace that one line
+with:
+
+```markdown
+F3a, F3b and F3c did that work: the ports exist, the shared lease is proven, and the
+import boundary is a CI check. Slices are marked `complete` in `SLICE_STATUS` as they
+land. What remains unfenced is not hidden by that — it is the inventory's own
+`fenced: false` rows, which F3d and F3e convert.
 ```
 
 - [ ] **Step 3: Bump the spec revision**
@@ -1955,9 +2049,12 @@ Run:
 ```bash
 uv run pytest -n 16 --dist loadfile > /tmp/f3c-full.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -3 /tmp/f3c-full.txt
 ```
-Expected: `PYTEST_EXIT=0`. The total will be the master baseline of **3688** minus the
-tests deleted in Task 1, plus the tests added in Tasks 2-5. **Read the `1 skipped` as
-the signal, not the total** — it is an `ANTHROPIC_API_KEY`-gated test, and anything
+Expected: `PYTEST_EXIT=0` and **3709 passed, 1 skipped**. That total is fully
+determined: the master baseline of 3688, minus 31 deleted in Task 1 (the 30 tests in
+`test_verifiers.py` plus `test_every_fenced_entry_really_fences`), plus 45 added
+across Tasks 2-4 and 7 added in Task 5. If your number differs, work out WHICH term is
+wrong before touching anything — do not adjust the expectation to match the run.
+**Read the `1 skipped` as the signal, not the total** — it is an `ANTHROPIC_API_KEY`-gated test, and anything
 else skipped means something got disabled. Report the result line verbatim.
 
 - [ ] **Step 5: Commit**
@@ -1986,9 +2083,9 @@ Named so a reviewer does not read them as gaps:
   gate allows it while the locator rule rejects the `ctx.repo_dir` it operates on.
   That tension is deliberate and is F3d's problem to resolve.
 - **`registry.py` is not moved out of `tools/`.** Considered and rejected during
-  planning: it would cost an import update across eleven modules in a slice that
-  otherwise changes no production behaviour. It is skipped by name, under a narrower
-  rule of its own.
+  planning: it would cost an import update across 47 sites (7 non-tool `src/` modules,
+  10 inside `tools/`, 30 tests) in a slice that otherwise changes no production
+  behaviour. It is skipped by name, under a narrower rule of its own.
 - **The gate is not adversarial containment (§4.2).** It makes the wrong thing hard to
   write and easy to spot in review. Real containment would need a process, OS or
   database-privilege boundary, and this design does not claim one.
