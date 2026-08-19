@@ -60,6 +60,15 @@ Every task's requirements implicitly include this section.
 - **GC-8 — Additive only.** No production caller is converted. No site sets
   `pass_invocation=True`. No existing tool module changes behaviour. The branch is
   inert in production.
+- **GC-10 — Mutation testing happens AFTER the task's commit, never before.**
+  `git checkout <path>` on a file the task itself created fails with
+  `pathspec … did not match any file(s) known to git` — the mutation survives,
+  and if the command was piped the non-zero exit is masked. Reverting to the
+  *previous* commit is worse: it silently discards the current task's
+  implementation. So every task commits its green implementation first, then
+  mutates, then restores with `git checkout` and confirms
+  `git status --porcelain` is empty before moving on.
+
 - **GC-9 — Test command.** `uv run pytest -n 16 --dist loadfile`. Never `-n auto`
   (resolves to 72 here) and never `--dist loadgroup`. Baseline on master before this
   branch: **3608 passed, 1 skipped**. The `1 skipped` is a real-SDK test gated on
@@ -428,6 +437,26 @@ __all__ = [
 The `__all__` is load-bearing: without it `ruff` reports the re-export as an
 unused import (F401) and a later cleanup would delete it.
 
+- [ ] **Step 4b: Correct the paragraph that says the exception lives in `fencing.py`**
+
+The module docstring's closing paragraph documents the location Step 4 just
+changed. Replace it:
+
+```python
+`WorkspaceGenerationStale` lives here rather than beside `WorkspaceDeleted` in
+drafting/locking.py because it is raised only by fencing code, and F2's coverage
+gate keys on this module. The asymmetry is deliberate.
+```
+
+with:
+
+```python
+`WorkspaceGenerationStale` is DEFINED in ports/errors.py and re-exported here.
+It moved in F3b: a tool has to be able to CATCH it, and this module imports
+sqlalchemy and db.models, so under the F3c import boundary no tool could name it.
+Every pre-F3b import site keeps working through the re-export.
+```
+
 - [ ] **Step 5: Add the two methods to `Invocation`**
 
 In `src/call_manager/proposal_assist/tools/registry.py`, add to the `Invocation`
@@ -757,6 +786,43 @@ def acquire_shared_lease(
 Add `from sqlalchemy import exists, select, text` and
 `from sqlalchemy.exc import OperationalError` to the module's imports, and add
 `"acquire_shared_lease"` to `__all__`.
+
+- [ ] **Step 3b: Correct the module docstring — there are three primitives now**
+
+The header still says "Two primitives" and calls Primitive A "the default", which
+is the claim this task disproves. Replace the block from `Two primitives, chosen
+by what the effect touches:` down to the end of the `40P01 against the delete
+path (spec 5).` paragraph with:
+
+```python
+Three primitives. Which ones an effect uses is decided ONCE per operation and
+never changed mid-flight (2026-08-18 spec 3.5):
+
+  A. `live_at_generation` — a PREDICATE, no lock. Goes in the WHERE of the
+     statement that performs the effect, so the fence and the write are ONE
+     statement. NOT SUFFICIENT ALONE: it takes no lock on the workspace row, so
+     under READ COMMITTED it evaluates against the statement's snapshot and a
+     transition committing after that snapshot is invisible to it.
+
+  C. `acquire_shared_lease` — the workspace's commit-mutex key in SHARED mode.
+     Pairs with A for every DB-only effect, acquired FIRST. Shared locks do not
+     conflict, so effects stay concurrent with each other; a lifecycle
+     transition needs the key exclusively, so it either waits for in-flight
+     effects or wins first and leaves A to fail.
+
+  B. `acquire_commit_mutex_at_generation` — the EXCLUSIVE mutex plus an
+     under-mutex re-read. For effects spanning git, the filesystem, or multiple
+     rows that must move together, taken before the first effect of any kind.
+
+NEVER take C and then B for the same workspace. Two operations each holding
+shared and each waiting to upgrade is the one deadlock shape this protocol has.
+
+Where a transaction ALREADY holds the WORKSPACE row under FOR UPDATE, use none
+of them: assert the generation on that already-locked row. Only the workspace row
+qualifies — a job row carries no lifecycle state, so locking one proves nothing.
+Acquiring the mutex afterwards inverts the normative M -> J -> W order and opens
+a real Postgres 40P01 against the delete path (spec 5).
+```
 
 - [ ] **Step 4: Run the tests**
 
@@ -1158,6 +1224,31 @@ def test_submit_review_is_exactly_once(pg_session_factory):
         assert s.get(ReviewRunItem, item_id).raw_response_json == {"markdown": "first"}
 
 
+
+def test_a_foreign_item_that_already_has_a_review_still_reports_the_run(
+    pg_session_factory,
+):
+    """REGRESSION on classifier ORDERING. Checking raw_response_json before the
+    parent run's ownership would confirm, to a caller holding another
+    workspace's item id, that a review already exists there — and would change
+    the message review_submit.py returns today."""
+    with pg_session_factory() as s:
+        mine = seed_workspace(s, generation=1)
+        theirs = seed_workspace(s, generation=1)
+        their_run, their_item = seed_review_item(s, theirs, generation=1)
+        s.get(ReviewRunItem, their_item).raw_response_json = {"markdown": "theirs"}
+        s.commit()
+
+    with pytest.raises(EffectRejected) as e:
+        SqlEffects(pg_session_factory).submit_review(
+            _stamp(mine, generation=1, origin_job_id=their_run),
+            SubmitReview(review_run_item_id=their_item, markdown="x"),
+        )
+    assert e.value.reason == "submit_review target run is not active for this workspace"
+
+    with pg_session_factory() as s:
+        assert s.get(ReviewRunItem, their_item).raw_response_json == {"markdown": "theirs"}
+
 # ------------------------------------------------------- submit_uncited_claims
 
 
@@ -1464,10 +1555,22 @@ class SqlEffects:
                 .returning(ReviewRunItem.id)
             ).first()
             if landed is None:
+                # ORDER MATTERS and it mirrors review_submit.py's today: item
+                # identity/status, THEN the parent run's ownership, THEN
+                # exactly-once. Checking the response first would tell a caller
+                # holding a foreign item's id that a review already exists there
+                # — cross-workspace state, and a changed message besides.
+                item_is_claimable = exists().where(
+                    ReviewRunItem.id == cmd.review_run_item_id,
+                    ReviewRunItem.review_run_id == stamp.origin_job_id,
+                    ReviewRunItem.status == "running",
+                )
                 _explain_refusal(
                     session,
                     stamp,
                     checks=(
+                        (~item_is_claimable, _REVIEW_ITEM),
+                        (~run_is_active, _REVIEW_RUN),
                         (
                             exists().where(
                                 ReviewRunItem.id == cmd.review_run_item_id,
@@ -1476,7 +1579,6 @@ class SqlEffects:
                             ),
                             _REVIEW_TWICE,
                         ),
-                        (~run_is_active, _REVIEW_RUN),
                     ),
                     fallback=_REVIEW_ITEM,
                 )
@@ -1539,10 +1641,21 @@ FENCING_IMPORT_FILES: frozenset[str] = frozenset({
 Run: `uv run pytest tests/proposal_assist/test_f3b_effects.py tests/fencing -q`
 Expected: `test_f3b_effects.py` all pass; `tests/fencing` all pass.
 
-- [ ] **Step 8: Prove the fence is load-bearing, by mutation**
+- [ ] **Step 8: Commit the green implementation**
 
-Verify by hand that the tests fail when the fence is removed, then restore. Run
-each mutation, confirm the named failure, then `git checkout` the file.
+Commit BEFORE mutating (GC-10): `port_impl/effects.py` does not exist in git yet,
+so a `git checkout` of it would fail and leave the mutation in the tree.
+
+```bash
+uv run ruff check .
+git add src/call_manager/proposal_assist/ports src/call_manager/proposal_assist/port_impl tests/proposal_assist/f3b_seeds.py tests/proposal_assist/test_f3b_effects.py tests/fencing/inventory.py
+git commit -m "feat(ports): the three single-row UPDATE effects (F3b Task 3)"
+```
+
+- [ ] **Step 9: Prove the fence is load-bearing, by mutation**
+
+Run each mutation, confirm the named failure, then restore and confirm the tree
+is clean.
 
 Mutation 1 — drop the predicate from `submit_scorecard`'s `WHERE`
 (delete the `live_at_generation(...)` line):
@@ -1550,6 +1663,11 @@ Mutation 1 — drop the predicate from `submit_scorecard`'s `WHERE`
 Run: `uv run pytest tests/proposal_assist/test_f3b_effects.py -q -k scorecard`
 Expected: FAIL `test_submit_scorecard_refuses_a_stale_generation` — a stale
 scorecard lands.
+
+```bash
+git checkout src/call_manager/proposal_assist/port_impl/effects.py
+git status --porcelain   # MUST be empty — see GC-10
+```
 
 Mutation 2 — split the predicate out of the write (the shape GC-2 forbids):
 replace the `live_at_generation(...)` line in `submit_uncited_claims` with a
@@ -1562,14 +1680,7 @@ pre-check reads the CURRENT generation and refuses nothing.
 
 ```bash
 git checkout src/call_manager/proposal_assist/port_impl/effects.py
-```
-
-- [ ] **Step 9: Commit**
-
-```bash
-uv run ruff check .
-git add src/call_manager/proposal_assist/ports src/call_manager/proposal_assist/port_impl tests/proposal_assist/f3b_seeds.py tests/proposal_assist/test_f3b_effects.py tests/fencing/inventory.py
-git commit -m "feat(ports): the three single-row UPDATE effects (F3b Task 3)"
+git status --porcelain   # MUST be empty — see GC-10
 ```
 
 ---
@@ -2029,7 +2140,18 @@ _PROPOSE_TARGET = "this workspace is no longer accepting proposed changes"
 Run: `uv run pytest tests/proposal_assist/test_f3b_effects.py -q`
 Expected: all pass (23 tests).
 
-- [ ] **Step 6: Prove the INSERT fence is load-bearing**
+- [ ] **Step 6: Commit the green implementation**
+
+Before mutating (GC-10). A `git checkout` here without this commit would restore
+Task 3's version of the file and silently delete all of Task 4's work.
+
+```bash
+uv run ruff check .
+git add src/call_manager/proposal_assist/ports/effects.py src/call_manager/proposal_assist/port_impl/effects.py tests/proposal_assist/test_f3b_effects.py
+git commit -m "feat(ports): the two propose_* INSERT effects (F3b Task 4)"
+```
+
+- [ ] **Step 7: Prove the INSERT fence is load-bearing**
 
 Delete the `.where(live_at_generation(...))` clause from `_insert_proposed_change`.
 
@@ -2039,14 +2161,7 @@ Expected: FAIL `test_propose_artifact_edit_refuses_a_stale_generation` and
 
 ```bash
 git checkout src/call_manager/proposal_assist/port_impl/effects.py
-```
-
-- [ ] **Step 7: Commit**
-
-```bash
-uv run ruff check .
-git add src/call_manager/proposal_assist/ports/effects.py src/call_manager/proposal_assist/port_impl/effects.py tests/proposal_assist/test_f3b_effects.py
-git commit -m "feat(ports): the two propose_* INSERT effects (F3b Task 4)"
+git status --porcelain   # MUST be empty — see GC-10
 ```
 
 ---
@@ -2403,7 +2518,17 @@ If Case A hangs rather than failing, the effect is upgrading the lease to the
 exclusive mutex — GC-3's forbidden shape. Read the operation, do not raise the
 join timeouts.
 
-- [ ] **Step 3: Prove Case B fails without the lease**
+- [ ] **Step 3: Commit the green tests**
+
+Before mutating (GC-10), so the restore below is a real revert.
+
+```bash
+uv run ruff check .
+git add tests/proposal_assist/test_f3b_lock_cases.py
+git commit -m "test(ports): the two ordered lock cases and the predicate-only regression (F3b Task 5)"
+```
+
+- [ ] **Step 4: Prove Case B fails without the lease**
 
 Remove the `acquire_shared_lease(session, stamp.workspace_id)` line from
 `submit_scorecard` in `port_impl/effects.py`.
@@ -2415,14 +2540,7 @@ behind the transition. This is the assertion that makes Case B a proof of the
 
 ```bash
 git checkout src/call_manager/proposal_assist/port_impl/effects.py
-```
-
-- [ ] **Step 4: Commit**
-
-```bash
-uv run ruff check .
-git add tests/proposal_assist/test_f3b_lock_cases.py
-git commit -m "test(ports): the two ordered lock cases and the predicate-only regression (F3b Task 5)"
+git status --porcelain   # MUST be empty — see GC-10
 ```
 
 ---
@@ -2682,11 +2800,22 @@ class SqlAccounting:
 Run: `uv run pytest tests/proposal_assist/test_f3b_accounting.py -q`
 Expected: `7 passed`
 
-- [ ] **Step 6: Prove the ownership binding is load-bearing**
+- [ ] **Step 6: Commit the green implementation**
+
+Before mutating (GC-10): `port_impl/accounting.py` is new in this task, so a
+`git checkout` of it would fail and leave the mutation in place.
+
+```bash
+uv run ruff check .
+git add src/call_manager/proposal_assist/ports/accounting.py src/call_manager/proposal_assist/port_impl/accounting.py tests/proposal_assist/test_f3b_accounting.py
+git commit -m "feat(ports): owner-bound, deliberately unfenced accounting (F3b Task 6)"
+```
+
+- [ ] **Step 7: Prove the ownership binding is load-bearing**
 
 In `port_impl/accounting.py`, replace `TurnJob.id == active_turn_job_id` in
 **`refund_fetch_slot`** with the shape `references.py` uses today. To do that the
-method needs the workspace, so temporarily add a join through the id:
+method needs the workspace, so temporarily resolve it from the id:
 
 ```python
                     TurnJob.workspace_id == select(TurnJob.workspace_id)
@@ -2701,14 +2830,7 @@ Expected: FAIL — `the stale actor's accounting reached the NEW turn's row`
 
 ```bash
 git checkout src/call_manager/proposal_assist/port_impl/accounting.py
-```
-
-- [ ] **Step 7: Commit**
-
-```bash
-uv run ruff check .
-git add src/call_manager/proposal_assist/ports/accounting.py src/call_manager/proposal_assist/port_impl/accounting.py tests/proposal_assist/test_f3b_accounting.py
-git commit -m "feat(ports): owner-bound, deliberately unfenced accounting (F3b Task 6)"
+git status --porcelain   # MUST be empty — see GC-10
 ```
 
 ---
@@ -2767,7 +2889,7 @@ def _seed_reference(session, ws_id, *, tombstoned=False) -> uuid.UUID:
     ref = Reference(
         workspace_id=ws_id,
         kind="paper",
-        source_type="upload",
+        source_type="uploaded",  # ck_references_source_type: uploaded|crossref|pubmed|arxiv|web
         filename="p.pdf",
         storage_path=f"{ws_id}/p.pdf",
         mime_type="application/pdf",
@@ -3249,7 +3371,18 @@ def build_ports(session_factory: sessionmaker) -> Ports:
 Run: `uv run pytest tests/proposal_assist/test_f3b_ports_boundary.py -q`
 Expected: `6 passed`
 
-- [ ] **Step 6: Prove the boundary test bites**
+- [ ] **Step 6: Commit the green implementation**
+
+Before mutating (GC-10): `ports/__init__.py` gains its bundle in this task, and
+`port_impl/__init__.py` its factory.
+
+```bash
+uv run ruff check .
+git add src/call_manager/proposal_assist/ports/__init__.py src/call_manager/proposal_assist/port_impl/__init__.py tests/proposal_assist/test_f3b_ports_boundary.py
+git commit -m "feat(ports): the injected Ports bundle and its boundary test (F3b Task 8)"
+```
+
+- [ ] **Step 7: Prove the boundary test bites**
 
 Add `from sqlalchemy import select  # noqa: F401` to
 `src/call_manager/proposal_assist/ports/queries.py`.
@@ -3262,35 +3395,62 @@ before continuing, because it is the one that catches transitive leaks.
 
 ```bash
 git checkout src/call_manager/proposal_assist/ports/queries.py
-```
-
-- [ ] **Step 7: Commit**
-
-```bash
-uv run ruff check .
-git add src/call_manager/proposal_assist/ports/__init__.py src/call_manager/proposal_assist/port_impl/__init__.py tests/proposal_assist/test_f3b_ports_boundary.py
-git commit -m "feat(ports): the injected Ports bundle and its boundary test (F3b Task 8)"
+git status --porcelain   # MUST be empty — see GC-10
 ```
 
 ---
 
-### Task 9: Correct the three surfaces that document predicate-only as correct
+### Task 9: Correct the surfaces that document predicate-only as correct
 
 No production caller uses them, so this is documentation and test debt rather than a
-behaviour change — but all three read as authoritative and would be followed.
+behaviour change — but they read as authoritative and would be followed.
+
+**Two of the corrections already landed**, with the change that made them true:
+Task 1 fixed the paragraph claiming `WorkspaceGenerationStale` lives in
+`fencing.py`, and Task 2 rewrote the module header's "Two primitives … this is
+the default". This task takes the rest.
+
+**Scope note:** correcting only the "One statement" paragraph of the architecture
+spec is not enough — the section header, its lead-in and §3.1's own opening line
+each restate the claim, directly above it. Step 1 replaces the whole run.
 
 **Files:**
-- Modify: `docs/superpowers/specs/2026-08-17-lifecycle-fence-design.md` (§3.1)
-- Modify: `src/call_manager/proposal_assist/fencing.py` (two docstrings)
+- Modify: `docs/superpowers/specs/2026-08-17-lifecycle-fence-design.md` (§3 header through §3.1)
+- Modify: `src/call_manager/proposal_assist/fencing.py` (the two function docstrings)
 - Modify: `tests/fencing/inventory.py` (`SLICE_STATUS`)
 
-- [ ] **Step 1: Correct the architecture spec §3.1**
+- [ ] **Step 1: Correct the architecture spec — the whole of §3 and §3.1**
 
-Replace the paragraph beginning "One statement. This is the rule established in
-`28abbc4`…" through "…It is the default. Prefer it wherever the effect is DB-only."
-with:
+Replacing only the "One statement" paragraph leaves the section header saying
+**"Two fence primitives"**, the lead-in saying **"Two mechanisms"**, and §3.1's
+own opening saying **"with no new lock"** — three authoritative statements of the
+thing being corrected, sitting directly above the correction.
 
-```markdown
+In `docs/superpowers/specs/2026-08-17-lifecycle-fence-design.md`, replace
+everything from the line `## 3. Two fence primitives` down to (and including) the
+line `It is the default. Prefer it wherever the effect is DB-only.` with:
+
+````markdown
+## 3. Three fence primitives
+
+Forcing every fence through the mutex would introduce contention and — as §5
+shows — real deadlocks. Three mechanisms, and which ones an effect uses is
+decided ONCE per operation and never changed mid-flight. The mechanism table
+lives in `2026-08-18-fence-session-ownership-design.md` §3.5; this section
+describes the primitives themselves.
+
+### 3.1 Primitive A — conditional write (DB-only effects)
+
+For an effect that is purely one or more DB rows, the fence is a predicate on the
+**write statement itself**:
+
+```sql
+UPDATE/INSERT ... WHERE EXISTS (
+    SELECT 1 FROM workspaces
+    WHERE id = :ws AND soft_deleted_at IS NULL AND lifecycle_generation = :gen
+)
+```
+
 One statement. This is the rule established in `28abbc4` and re-proved in
 `701fbb7`: a predicate on a candidate SELECT with the write in a separate
 statement does not guard the write, because each statement takes a fresh
@@ -3307,21 +3467,24 @@ re-checks the `WHERE` against the updated row version when a concurrent
 transaction touches the same target row, which cancel-on-delete does — and that
 compensation is removed in step 3.
 
-So a DB-only effect pairs Primitive A with **Primitive C**, the shared lease
-(`acquire_shared_lease`, F3b): take the workspace's commit-mutex key in SHARED
-mode, then perform the predicate-bearing write. Shared locks do not conflict, so
-effects stay concurrent with each other; a lifecycle transition needs the key
-exclusively, so it either waits for in-flight effects or wins first and leaves
-the effect's predicate to fail. The predicate remains — it is what turns
-"I waited" into "I checked".
+### 3.1a Primitive C — the shared lease
+
+So a DB-only effect pairs Primitive A with `acquire_shared_lease` (F3b), acquired
+**first**, in the same transaction: take the workspace's commit-mutex key in
+SHARED mode, then perform the predicate-bearing write. Shared locks do not
+conflict, so effects stay concurrent with each other; a lifecycle transition
+needs the key exclusively, so it either waits for in-flight effects or wins first
+and leaves the effect's predicate to fail. The predicate remains — it is what
+turns "I waited" into "I checked".
 
 Never take the shared lease and then attempt the exclusive mutex. Two operations
 each holding shared and each waiting to upgrade is the one deadlock shape this
 protocol has; an effect that will touch git or the filesystem takes Primitive B
-first, before its first effect of any kind. The mechanism is chosen once per
-operation and never changed mid-flight — see
-`2026-08-18-fence-session-ownership-design.md` §3.5.
-```
+first, before its first effect of any kind.
+````
+
+The `### 3.2 Primitive B — mutex + generation` heading and everything after it
+stay exactly as they are.
 
 - [ ] **Step 2: Correct `live_at_generation`'s docstring**
 
@@ -3445,7 +3608,7 @@ Checked against spec §7's F3b paragraph:
 | the exclusive `acquire_commit_mutex_at_generation` from F1 | already shipped in F1; Task 9 corrects its docstring |
 | a table naming every effect operation and the mechanism it uses | 3 (`EFFECT_MECHANISMS` + its drift test) |
 | each operation arrives with the two ordered lock cases | 5 |
-| the three surfaces documenting predicate-only as correct | 9 |
+| the three surfaces documenting predicate-only as correct | 1 (the exception's home), 2 (the module header), 9 (the spec section + both function docstrings) |
 
 Two spec items are answered rather than implemented, and both are recorded above:
 `acquire_commit_mutex_at_generation` already exists (F1, `7de5342`), and the
