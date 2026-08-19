@@ -168,10 +168,14 @@ def test_submit_scorecard_refuses_a_job_that_is_no_longer_running(pg_session_fac
         s.get(EvaluatorJob, job_id).status = "completed"
         s.commit()
 
-    with pytest.raises(EffectRejected):
+    with pytest.raises(EffectRejected) as e:
         SqlEffects(pg_session_factory).submit_scorecard(
             _stamp(ws_id, generation=1, origin_job_id=job_id), SubmitScorecard(scorecard=_CARD)
         )
+    assert e.value.reason == "scorecard target is not an active evaluator run for this workspace"
+
+    with pg_session_factory() as s:
+        assert s.get(EvaluatorJob, job_id).scorecard is None
 
 
 # -------------------------------------------------------------- submit_review
@@ -223,6 +227,27 @@ def test_submit_review_refuses_an_item_from_another_workspaces_run(pg_session_fa
     assert e.value.reason == "submit_review target run is not active for this workspace"
     with pg_session_factory() as s:
         assert s.get(ReviewRunItem, their_item).raw_response_json is None
+
+
+def test_submit_review_refuses_an_item_that_is_not_running(pg_session_factory):
+    """The item exists under the correct, active run for this workspace, but its
+    own status has already moved past "running" — ck_review_run_items_status
+    permits 'done' as a legal non-running value."""
+    with pg_session_factory() as s:
+        ws_id = seed_workspace(s, generation=1)
+        run_id, item_id = seed_review_item(s, ws_id, generation=1)
+        s.get(ReviewRunItem, item_id).status = "done"
+        s.commit()
+
+    with pytest.raises(EffectRejected) as e:
+        SqlEffects(pg_session_factory).submit_review(
+            _stamp(ws_id, generation=1, origin_job_id=run_id),
+            SubmitReview(review_run_item_id=item_id, markdown="x"),
+        )
+    assert e.value.reason == "submit_review target is not a running item for this run"
+
+    with pg_session_factory() as s:
+        assert s.get(ReviewRunItem, item_id).raw_response_json is None
 
 
 def test_submit_review_is_exactly_once(pg_session_factory):
@@ -298,6 +323,22 @@ def test_submit_uncited_claims_refuses_a_stale_generation(pg_session_factory):
         assert s.get(UncitedClaimsJob, job_id).claims is None
 
 
+def test_submit_uncited_claims_refuses_another_workspaces_job(pg_session_factory):
+    with pg_session_factory() as s:
+        mine = seed_workspace(s, generation=1)
+        theirs = seed_workspace(s, generation=1)
+        their_job = seed_uncited_job(s, theirs, generation=1)
+
+    with pytest.raises(EffectRejected) as e:
+        SqlEffects(pg_session_factory).submit_uncited_claims(
+            _stamp(mine, generation=1, origin_job_id=their_job),
+            SubmitUncitedClaims(claims=[]),
+        )
+    assert e.value.reason == "target is not an active uncited-claims run for this workspace"
+    with pg_session_factory() as s:
+        assert s.get(UncitedClaimsJob, their_job).claims is None
+
+
 def test_submit_uncited_claims_accepts_an_empty_list_exactly_once(pg_session_factory):
     """An empty list is a real result — "I found nothing" — and must not be
     confused with "not submitted yet"."""
@@ -329,3 +370,6 @@ def test_generation_zero_is_fenced_like_any_other(pg_session_factory):
             _stamp(ws_id, generation=0, origin_job_id=job_id), SubmitUncitedClaims(claims=[])
         )
     assert (e.value.expected, e.value.actual) == (0, 1)
+
+    with pg_session_factory() as s:
+        assert s.get(UncitedClaimsJob, job_id).claims is None

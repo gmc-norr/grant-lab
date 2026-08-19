@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Any, NoReturn
 
 from sqlalchemy import exists, select, update
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
 from call_manager.db.models import (
     EvaluatorJob,
@@ -48,7 +48,7 @@ _CLAIMS_TARGET = "target is not an active uncited-claims run for this workspace"
 
 
 def _explain_refusal(
-    session,
+    session: Session,
     stamp: FenceStamp,
     *,
     checks: tuple[tuple[Any, str], ...],
