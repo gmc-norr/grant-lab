@@ -2204,6 +2204,22 @@ git diff --exit-code HEAD -- src/call_manager/proposal_assist/port_impl/effects.
 
 ### Task 5: The two ordered lock cases, and the predicate-only regression
 
+> **What shipped differs from the code below, and the difference is the point.**
+> Case B's `assert waited >= 0.4` could not fail: for `call()` to raise at all it
+> must read the workspaces row after the lifecycle's commit, so the duration held
+> whether the effect blocked or merely started late. It was replaced during review
+> by an ordering proof — `before_cursor_execute`/`after_cursor_execute` stamps on
+> the lease statement plus a stamp taken immediately before the lifecycle's commit,
+> asserting `lease_issued < lifecycle_commit < lease_granted`. The load-bearing half
+> is `lease_granted > lifecycle_commit`: a shared lock cannot be granted while an
+> exclusive holder is uncommitted. Case A likewise discarded the result of
+> `lease_held.wait(...)`, so if the hook never fired all five Case A tests passed
+> deterministically while proving nothing; the flag is now asserted. Before those
+> fixes, deleting the lease from all five operations still left 6 of 11 tests
+> green — afterwards, 10 of 11 fail. See `tests/proposal_assist/test_f3b_lock_cases.py`
+> for what is actually in the tree.
+
+
 This is F3b's primary proof (spec §9). **Do not** write the straddle test revision 7
 prescribed — pausing an effect mid-flight and committing a delete in the gap
 **deadlocks a correct implementation**: the paused effect holds the shared lease, the
@@ -2570,9 +2586,16 @@ Remove the `acquire_shared_lease(session, stamp.workspace_id)` line from
 `submit_scorecard` in `port_impl/effects.py`.
 
 Run: `uv run pytest tests/proposal_assist/test_f3b_lock_cases.py -q -k "case_b and scorecard"`
-Expected: FAIL on `assert waited >= 0.4` — with no lease the effect never queues
-behind the transition. This is the assertion that makes Case B a proof of the
-*lease* rather than of the predicate alone.
+Expected: FAIL with `DID NOT RAISE WorkspaceGenerationStale`.
+
+Not on `assert waited >= 0.4` — that line sits AFTER the `pytest.raises` block, so
+under this mutation it is never reached. The failure is stronger than a timing
+assertion anyway: with no lease the effect does not queue at all, its
+`live_at_generation` evaluates against a snapshot in which the transition's bump
+is still uncommitted, and **the stale write lands durably**. That is what makes
+Case B a proof of the *lease* and not of the predicate alone. The `waited`
+assertion still earns its place on the passing path, where it catches a lease
+that raises `WorkspaceGenerationStale` without ever having blocked.
 
 ```bash
 git checkout src/call_manager/proposal_assist/port_impl/effects.py
