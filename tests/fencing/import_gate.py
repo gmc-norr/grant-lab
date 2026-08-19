@@ -23,6 +23,7 @@ express a forbidden import at all.
 from __future__ import annotations
 
 import ast
+import pathlib
 import sys
 
 #: The one project package a tool may name. Submodules included.
@@ -80,4 +81,21 @@ def check_source(source: str, *, path: str) -> list[str]:
                 )
             elif node.module is not None and not _module_is_allowed(node.module):
                 violations.append(f"{path}:{node.lineno}: from {node.module} import ...")
+        elif isinstance(node, ast.Attribute) and node.attr in LOCATOR_NAMES:
+            violations.append(f"{path}:{node.lineno}: names the resource locator {node.attr}")
+        elif isinstance(node, ast.Name) and node.id in LOCATOR_NAMES:
+            violations.append(f"{path}:{node.lineno}: names the resource locator {node.id}")
+        elif isinstance(node, ast.arg) and node.arg in LOCATOR_NAMES:
+            violations.append(f"{path}:{node.lineno}: names the resource locator {node.arg}")
     return violations
+
+
+REPO = pathlib.Path(__file__).resolve().parents[2]
+FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures"
+
+
+def check_file(path: pathlib.Path) -> list[str]:
+    """Check one source file. Violations name the repo-relative path, so a failure
+    names something a human can open."""
+    shown = str(path.resolve().relative_to(REPO))
+    return check_source(path.read_text(encoding="utf-8"), path=shown)

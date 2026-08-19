@@ -7,7 +7,7 @@ project helper that exposes no SQLAlchemy in the tool's own module.
 
 from __future__ import annotations
 
-from tests.fencing.import_gate import check_source
+from tests.fencing.import_gate import FIXTURES, check_file, check_source
 
 
 def _check(src: str) -> list[str]:
@@ -137,3 +137,101 @@ def test_a_type_checking_only_import_is_still_checked():
         "    from sqlalchemy.orm import sessionmaker\n"
     )
     assert len(_check(src)) == 1
+
+
+# --------------------------------------------------------- resource locators
+
+
+def test_reaching_the_repo_directory_is_rejected():
+    """Spec 4.1. The import list is clean here — this is exactly the hole a
+    forbidden-import rule alone leaves open."""
+    src = 'def f(ctx):\n    (ctx.repo_dir / "proposal.md").write_text("x")\n'
+    violations = _check(src)
+    assert len(violations) == 1
+    assert "repo_dir" in violations[0]
+
+
+def test_reaching_the_session_factory_is_rejected():
+    src = "def f(ctx):\n    with ctx.session_factory() as s:\n        return s\n"
+    assert len(_check(src)) == 1
+
+
+def test_reaching_settings_is_rejected():
+    """`ctx.settings` carries workspaces_dir, the ollama url and the embedding
+    model — it is an authority handle, not a value."""
+    src = "def f(ctx):\n    return ctx.settings.ollama_url\n"
+    assert len(_check(src)) == 1
+
+
+def test_a_chained_locator_reports_each_hop():
+    """`ctx.settings.workspaces_dir` names two locators; both are reported so a
+    partial fix cannot look complete."""
+    src = "def f(ctx):\n    return ctx.settings.workspaces_dir\n"
+    assert len(_check(src)) == 2
+
+
+def test_a_locator_named_on_any_object_is_rejected():
+    """The rule is on the NAME, not on `ctx` specifically — rebinding the context
+    to another variable must not launder it."""
+    src = "def f(anything):\n    return anything.repo_dir\n"
+    assert len(_check(src)) == 1
+
+
+def test_an_unrelated_attribute_is_fine():
+    src = "def f(ctx):\n    return ctx.workspace_id\n"
+    assert _check(src) == []
+
+
+def test_a_locator_arriving_as_a_parameter_is_rejected():
+    """Spec 4.1, the laundering case. Nothing here is an attribute: the composition
+    root passes `ctx.repo_dir` in and the tool never writes `ctx` at all. An
+    attribute-only rule waves this through, and `registry.py` — the module that would
+    do the passing — is permanently skipped, so nothing else would catch it. The
+    parameter and its one use are both reported. `citations.py:135` is this shape in
+    production today."""
+    src = 'def f(repo_dir, text):\n    (repo_dir / "proposal.md").write_text(text)\n'
+    violations = _check(src)
+    assert len(violations) == 2
+    assert all("repo_dir" in v for v in violations)
+
+
+def test_a_locator_bound_to_a_local_name_is_rejected():
+    """A locator pulled out of `**kwargs` never touches an attribute either."""
+    src = (
+        "def f(**kw):\n"
+        '    session_factory = kw["session_factory"]\n'
+        "    return session_factory()\n"
+    )
+    assert len(_check(src)) == 2
+
+
+# ------------------------------------------------------------ reading a file
+
+
+def test_the_clean_fixture_passes():
+    assert check_file(FIXTURES / "clean_tool.py") == []
+
+
+def test_the_helper_reaching_fixture_fails():
+    violations = check_file(FIXTURES / "reaches_a_helper.py")
+    assert len(violations) == 1
+    assert "sectionizer" in violations[0]
+
+
+def test_the_locator_reaching_fixture_fails():
+    violations = check_file(FIXTURES / "reaches_a_locator.py")
+    assert violations, "the locator fixture stopped violating — fix the fixture"
+    assert any("repo_dir" in v for v in violations)
+
+
+def test_the_laundered_locator_fixture_fails():
+    """Clean imports AND no attribute access, and still a repo write."""
+    violations = check_file(FIXTURES / "laundered_locator.py")
+    assert violations, "the parameter fixture stopped violating — fix the fixture"
+    assert any("repo_dir" in v for v in violations)
+
+
+def test_check_file_reports_a_readable_path():
+    """A violation must name a path a human can open, not an absolute temp path."""
+    violation = check_file(FIXTURES / "reaches_a_helper.py")[0]
+    assert violation.startswith("tests/fencing/fixtures/reaches_a_helper.py:")
