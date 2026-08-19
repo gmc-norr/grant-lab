@@ -22,18 +22,31 @@ PORTS_DIR = (
 PORT_IMPL_DIR = PORTS_DIR.parent / "port_impl"
 
 
+def _ports_module_names() -> list[str]:
+    """Every importable module under ports/, discovered from the filesystem so
+    this check cannot go stale as modules are added — a hand-maintained list
+    would silently stop covering a new module like ports/errors.py."""
+    names = []
+    for path in sorted(PORTS_DIR.rglob("*.py")):
+        parts = list(path.relative_to(PORTS_DIR.parent).with_suffix("").parts)
+        if parts[-1] == "__init__":
+            parts.pop()
+        names.append("call_manager.proposal_assist." + ".".join(parts))
+    return names
+
+
 def test_importing_the_ports_package_pulls_in_no_sqlalchemy():
     """Transitive, and therefore run in a FRESH interpreter. A source-level scan
     would miss a stdlib-looking project helper that imports a session two hops
     down; sys.modules cannot be fooled that way."""
+    modules = _ports_module_names()
+    assert modules, "discovered zero modules under ports/ — the walk itself is broken"
+    import_statements = "; ".join(f"import {name}" for name in modules)
     result = subprocess.run(
         [
             sys.executable,
             "-c",
-            "import call_manager.proposal_assist.ports as _p; "
-            "import call_manager.proposal_assist.ports.effects; "
-            "import call_manager.proposal_assist.ports.queries; "
-            "import call_manager.proposal_assist.ports.accounting; "
+            f"{import_statements}; "
             "import sys; print(sorted(m for m in sys.modules if m.split('.')[0] "
             "in {'sqlalchemy', 'psycopg', 'alembic'}))",
         ],
@@ -41,6 +54,10 @@ def test_importing_the_ports_package_pulls_in_no_sqlalchemy():
         text=True,
         check=True,
     )
+    # check=True already turns an import failure (module dies before printing)
+    # into a raised CalledProcessError. The strict "[]" comparison below also
+    # rejects an empty stdout on its own: "" != "[]", so a child that produced
+    # no output cannot be misread as a pass.
     assert result.stdout.strip() == "[]", (
         f"the ports package reached the database layer: {result.stdout.strip()}"
     )
@@ -48,14 +65,20 @@ def test_importing_the_ports_package_pulls_in_no_sqlalchemy():
 
 def test_the_ports_package_never_names_the_implementation_package():
     """The dependency runs one way. A ports module importing port_impl would let
-    a tool reach every session in the tree through a stdlib-looking name."""
+    a tool reach every session in the tree through a stdlib-looking name.
+
+    A bare relative import — `from .. import port_impl` — carries the name in
+    node.names, not node.module: node.module is None for that form, so a check
+    that requires node.module to be truthy never looks at it. `from ..port_impl
+    import x` is unaffected (node.module == "port_impl" there), but is covered
+    explicitly below rather than assumed."""
     offenders = []
     for path in sorted(PORTS_DIR.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             names = []
-            if isinstance(node, ast.ImportFrom) and node.module:
-                names = [node.module]
+            if isinstance(node, ast.ImportFrom):
+                names = [node.module] if node.module else [a.name for a in node.names]
             elif isinstance(node, ast.Import):
                 names = [a.name for a in node.names]
             for name in names:
