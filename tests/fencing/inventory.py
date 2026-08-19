@@ -104,6 +104,117 @@ FENCING_IMPORT_FILES: frozenset[str] = frozenset({
 OPTIONAL_KEYS = ("fenced_by", "ctx_lifetime")
 
 
+#: Tool modules that do not yet satisfy the F3c import boundary, each PINNED to
+#: the violations it is allowed to still have. Every entry is MIGRATION DEBT, not
+#: a permission: F3d/F3e/F3f delete it as they convert the module,
+#: `test_no_exemption_is_stale` goes red if a converted module is left here, and
+#: `test_no_exempt_module_acquires_a_new_violation` goes red if a module on this
+#: list reaches something new. Adding an entry and widening one are both reviewed
+#: diffs — the cost falls on staying dirty.
+#:
+#: Violations are NORMALIZED (no path, no line number), so a pin survives an
+#: unrelated edit; and the check is a SUBSET, so a REMOVED violation never fails.
+#: Cleaning up is free, and both the list and each entry can only shrink.
+TOOLS_NOT_YET_CONVERTED: dict[str, frozenset[str]] = {
+    "audit.py": frozenset({
+        "from call_manager.db.models import ...",
+        "from call_manager.proposal_assist.citations.audit import ...",
+        "from call_manager.proposal_assist.citations.bibliography import ...",
+        "from call_manager.proposal_assist.citations.claims import ...",
+        "from call_manager.proposal_assist.citations.markers import ...",
+        "from call_manager.proposal_assist.tools.citations import ...",
+        "from call_manager.proposal_assist.tools.registry import ...",
+        "names the resource locator repo_dir",
+        "names the resource locator session_factory",
+    }),
+    "citations.py": frozenset({
+        "from call_manager.db.models import ...",
+        "from call_manager.proposal_assist.citations import ...",
+        "from call_manager.proposal_assist.citations.audit import ...",
+        "from call_manager.proposal_assist.citations.gitio import ...",
+        "from call_manager.proposal_assist.citations.ledger import ...",
+        "from call_manager.proposal_assist.citations.markers import ...",
+        "from call_manager.proposal_assist.citations.quotes import ...",
+        "from call_manager.proposal_assist.collab import ...",
+        "from call_manager.proposal_assist.collab.state import ...",
+        "from call_manager.proposal_assist.drafting.locking import ...",
+        "from call_manager.proposal_assist.editing.sectionizer import ...",
+        "from call_manager.proposal_assist.proposals.proposing import ...",
+        "from call_manager.proposal_assist.references.csl import ...",
+        "from call_manager.proposal_assist.tools.proposal import ...",
+        "from call_manager.proposal_assist.tools.registry import ...",
+        "from sqlalchemy import ...",
+        "from sqlalchemy.orm import ...",
+        "names the resource locator repo_dir",
+        "names the resource locator session_factory",
+    }),
+    "context.py": frozenset({
+        "from call_manager.db.models import ...",
+        "from call_manager.proposal_assist.tools.registry import ...",
+        "from sqlalchemy import ...",
+        "names the resource locator session_factory",
+    }),
+    "history.py": frozenset({
+        "from call_manager.proposal_assist.tools.proposal import ...",
+        "from call_manager.proposal_assist.tools.registry import ...",
+        "names the resource locator repo_dir",
+    }),
+    "proposal.py": frozenset({
+        "from call_manager.proposal_assist.artifacts import ...",
+        "from call_manager.proposal_assist.citations.gitio import ...",
+        "from call_manager.proposal_assist.collab import ...",
+        "from call_manager.proposal_assist.collab.state import ...",
+        "from call_manager.proposal_assist.editing.sectionizer import ...",
+        "from call_manager.proposal_assist.proposals.proposing import ...",
+        "from call_manager.proposal_assist.tools.registry import ...",
+        "names the resource locator repo_dir",
+        "names the resource locator session_factory",
+    }),
+    "references.py": frozenset({
+        "from call_manager.db.models import ...",
+        "from call_manager.embeddings.client import ...",
+        "from call_manager.proposal_assist.references.dispatcher import ...",
+        "from call_manager.proposal_assist.references.embed import ...",
+        "from call_manager.proposal_assist.references.fetcher import ...",
+        "from call_manager.proposal_assist.references.ingest import ...",
+        "from call_manager.proposal_assist.references.storage import ...",
+        "from call_manager.proposal_assist.tools.registry import ...",
+        "from sqlalchemy import ...",
+        "from starlette.concurrency import ...",
+        "names the resource locator session_factory",
+        "names the resource locator settings",
+        "names the resource locator workspaces_dir",
+    }),
+    "review_submit.py": frozenset({
+        "from call_manager.db.models import ...",
+        "from call_manager.proposal_assist.tools.registry import ...",
+        "names the resource locator session_factory",
+    }),
+    "scorecard.py": frozenset({
+        "from call_manager.db.models import ...",
+        "from call_manager.proposal_assist.evaluator.scoring import ...",
+        "from call_manager.proposal_assist.tools.registry import ...",
+        "names the resource locator session_factory",
+    }),
+    "uncited_claims.py": frozenset({
+        "from call_manager.db.models import ...",
+        "from call_manager.proposal_assist.tools.registry import ...",
+        "names the resource locator session_factory",
+    }),
+}
+
+#: PERMANENTLY outside the gate, by name. `registry.py` is the composition root:
+#: it defines ToolContext, builds the MCP server, imports every tool module to wire
+#: it, and 47 sites import it — 7 non-tool src modules, 10 inside tools/, 30 tests.
+#: It necessarily names things a tool may not. `__init__.py` re-exports from it.
+#:
+#: The skip is narrow, not unconditional — `check_composition_root` still forbids
+#: both from importing the `call_manager.db` package at all (importing it hands you
+#: `db.models`, see db/__init__.py:7), or sqlalchemy outside a REAL `if TYPE_CHECKING`,
+#: so this cannot become where violations hide.
+GATE_SKIPS: frozenset[str] = frozenset({"registry.py", "__init__.py"})
+
+
 class FencedSiteVanished(RuntimeError):
     """A previously FENCED identity is missing from the new scan.
 
