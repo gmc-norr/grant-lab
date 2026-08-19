@@ -29,6 +29,10 @@ class SubmitScorecard:
 @dataclass(frozen=True, slots=True)
 class SubmitReview:
     review_run_item_id: uuid.UUID
+    #: Stored verbatim (`port_impl/effects.py::SqlEffects.submit_review`) — this
+    #: layer does NOT strip or reject an empty result. That is the tool
+    #: boundary's job (`tools/review_submit.py:16-18`): a converter that drops
+    #: the tool's strip-and-reject step loses it silently.
     markdown: str
 
 

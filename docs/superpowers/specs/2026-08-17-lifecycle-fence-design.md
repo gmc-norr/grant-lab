@@ -262,7 +262,7 @@ category is widened in §2 and deliberately separated here.
 
 **Requirement:** the generation travels in `ToolContext` (`tools/registry.py:43`)
 and every `semantic` tool write fences on it — Primitive A paired with Primitive C
-for the DB-only ones (reached via `fenced_execute` in F3; §3.1a). `accounting`
+for the DB-only ones (reached via the effect ports, F3b; §3.1a). `accounting`
 sites must NOT fence; they use CAS writes only.
 
 #### ToolContext lifetimes *(F2 finding)*

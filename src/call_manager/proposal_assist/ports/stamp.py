@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class FenceStamp:
     """What an effect needs to fence itself and find its own target row.
 
@@ -28,7 +28,7 @@ class FenceStamp:
     origin_job_id: uuid.UUID | None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Provenance:
     """Row data, not identity: copied verbatim into durable proposed_changes."""
 

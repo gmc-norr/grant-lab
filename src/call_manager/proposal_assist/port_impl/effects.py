@@ -10,6 +10,23 @@ Two rules govern every method and neither is negotiable:
      snapshots. That defect shipped twice (28abbc4, 701fbb7).
   2. The lease is taken BEFORE the write and never upgraded to the exclusive
      mutex. Shared-then-exclusive is the one deadlock shape this protocol has.
+
+Call these operations with no other transaction open for the same workspace.
+Each method opens its own session via `session_factory()`, so calling one from
+inside an already-open transaction runs it on a second, separate connection.
+Today's three write tools each hold their target row under
+`with_for_update=True` in an enclosing `ctx.session_factory()` session
+(`tools/scorecard.py:93`, `tools/uncited_claims.py:44`,
+`tools/review_submit.py:20`). A conversion that swaps only the write call for
+one of these operations, while leaving that outer session open, leaves
+connection A holding the job row while connection B — this module's own
+`session_factory()` call — waits on the shared lease for the same workspace's
+mutex key. That is the M → J inversion §5 rule 3 forbids, but split across two
+connections it evades detection: neither the spec's per-transaction lock-
+ordering rules nor PostgreSQL's deadlock detector sees a single-transaction
+violation, because each connection is merely blocked, not part of a cycle
+visible to the server. Under load it surfaces as a `CommitMutexTimeout`, not a
+deadlock — commit (or roll back) the outer transaction first.
 """
 
 from __future__ import annotations

@@ -189,6 +189,10 @@ def acquire_shared_lease(
     locks do not conflict, so effects stay concurrent with each other, while a
     lifecycle transition needs the key EXCLUSIVELY and therefore either waits for
     in-flight effects or wins first and leaves the effect's predicate to fail.
+    That concurrency holds only while no lifecycle transition is pending:
+    PostgreSQL's anti-starvation queueing puts a new shared request behind an
+    already-waiting exclusive one, so once a transition is queued, further
+    effects queue behind it too rather than passing it.
 
     NEVER upgrade: an operation holding this lease must not go on to call
     acquire_commit_mutex* for the same workspace. Two operations each holding

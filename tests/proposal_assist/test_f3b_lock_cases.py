@@ -139,7 +139,12 @@ def _build_case(session, effects: SqlEffects, name: str):
 
     if name == "submit_scorecard":
         job_id = seed_evaluator_job(session, ws_id, generation=_G)
-        stamp = FenceStamp(ws_id, _G, None, job_id)
+        stamp = FenceStamp(
+            workspace_id=ws_id,
+            generation=_G,
+            active_turn_job_id=None,
+            origin_job_id=job_id,
+        )
 
         def call():
             effects.submit_scorecard(stamp, SubmitScorecard(scorecard={"ok": 1}))
@@ -149,7 +154,12 @@ def _build_case(session, effects: SqlEffects, name: str):
 
     elif name == "submit_review":
         run_id, item_id = seed_review_item(session, ws_id, generation=_G)
-        stamp = FenceStamp(ws_id, _G, None, run_id)
+        stamp = FenceStamp(
+            workspace_id=ws_id,
+            generation=_G,
+            active_turn_job_id=None,
+            origin_job_id=run_id,
+        )
 
         def call():
             effects.submit_review(
@@ -161,7 +171,12 @@ def _build_case(session, effects: SqlEffects, name: str):
 
     elif name == "submit_uncited_claims":
         job_id = seed_uncited_job(session, ws_id, generation=_G)
-        stamp = FenceStamp(ws_id, _G, None, job_id)
+        stamp = FenceStamp(
+            workspace_id=ws_id,
+            generation=_G,
+            active_turn_job_id=None,
+            origin_job_id=job_id,
+        )
 
         def call():
             effects.submit_uncited_claims(stamp, SubmitUncitedClaims(claims=[]))
@@ -170,7 +185,12 @@ def _build_case(session, effects: SqlEffects, name: str):
             return s.get(UncitedClaimsJob, job_id).claims is not None
 
     elif name == "propose_artifact_edit":
-        stamp = FenceStamp(ws_id, _G, None, None)
+        stamp = FenceStamp(
+            workspace_id=ws_id,
+            generation=_G,
+            active_turn_job_id=None,
+            origin_job_id=None,
+        )
         inserted: list[uuid.UUID] = []
 
         def call():
@@ -192,7 +212,12 @@ def _build_case(session, effects: SqlEffects, name: str):
             return _proposed_change_landed(s, ws_id, inserted)
 
     elif name == "propose_citation_insert":
-        stamp = FenceStamp(ws_id, _G, None, None)
+        stamp = FenceStamp(
+            workspace_id=ws_id,
+            generation=_G,
+            active_turn_job_id=None,
+            origin_job_id=None,
+        )
         inserted = []
 
         def call():
@@ -323,7 +348,7 @@ def test_case_a_effect_first_the_write_lands_and_lifecycle_waits(
         "thread never queued behind a lease — it just waited out its timeout and "
         "this case proves nothing about lock ordering"
     )
-    assert observed["effect_visible_when_lifecycle_won"] is True
+    assert observed.get("effect_visible_when_lifecycle_won") is True
     with pg_session_factory() as s:
         assert landed(s) is True
         assert s.get(Workspace, ws_id).lifecycle_generation == _NEXT

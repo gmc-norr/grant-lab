@@ -168,9 +168,10 @@ def make_call(
 
 
 def make_user(session, *, email: str = "owner@ki.se") -> "User":  # noqa: F821
-    """Build a User row. Each call uses a unique email by default so multiple
-    callers in the same test don't UNIQUE-collide. Callers that care about a
-    specific email pass it explicitly."""
+    """Build a User row. The default email is the fixed literal "owner@ki.se",
+    NOT unique per call: a second call in the same test/session with no
+    explicit `email` collides on `uq_users_email`. Callers that need more than
+    one user must pass a distinct `email` themselves."""
     from call_manager.db.models import User
 
     u = User(status="active", email=email)

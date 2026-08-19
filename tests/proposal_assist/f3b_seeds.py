@@ -25,10 +25,10 @@ from tests.proposal_assist.conftest import make_user, make_workspace
 
 def seed_workspace(session, *, generation: int = 0) -> uuid.UUID:
     # make_workspace(session) with no owner falls back to make_user's HARDCODED
-    # default email ("owner@ki.se" — its docstring claims per-call uniqueness,
-    # the implementation does not deliver it), so two seed_workspace calls in
-    # one test/session collide on uq_users_email. A fresh, uniquely-emailed
-    # owner per call is what the mine/theirs test pattern actually needs.
+    # default email ("owner@ki.se", not unique per call), so two seed_workspace
+    # calls in one test/session would collide on uq_users_email. A fresh,
+    # uniquely-emailed owner per call is what the mine/theirs test pattern
+    # actually needs.
     owner = make_user(session, email=f"f3b-seed-{uuid.uuid4()}@ki.se")
     ws = make_workspace(session, owner=owner)
     session.flush()
@@ -46,6 +46,10 @@ def bump_generation(session, workspace_id: uuid.UUID, *, to: int) -> None:
 
 
 def seed_evaluator_job(session, workspace_id: uuid.UUID, *, generation: int) -> uuid.UUID:
+    """`generation` seeds the actor's own claim record (`claimed_at_generation`),
+    realistic row data for a running job. It is NOT what the fence reads: no
+    `port_impl` code names that column (the F3a gate forbids it) — the fence
+    reads the workspace's `lifecycle_generation`, set by `seed_workspace`."""
     job = EvaluatorJob(
         workspace_id=workspace_id,
         status="running",
@@ -58,6 +62,10 @@ def seed_evaluator_job(session, workspace_id: uuid.UUID, *, generation: int) -> 
 
 
 def seed_uncited_job(session, workspace_id: uuid.UUID, *, generation: int) -> uuid.UUID:
+    """`generation` seeds the actor's own claim record (`claimed_at_generation`),
+    realistic row data for a running job. It is NOT what the fence reads: no
+    `port_impl` code names that column (the F3a gate forbids it) — the fence
+    reads the workspace's `lifecycle_generation`, set by `seed_workspace`."""
     job = UncitedClaimsJob(
         workspace_id=workspace_id,
         status="running",
@@ -72,7 +80,12 @@ def seed_uncited_job(session, workspace_id: uuid.UUID, *, generation: int) -> uu
 def seed_review_item(
     session, workspace_id: uuid.UUID, *, generation: int
 ) -> tuple[uuid.UUID, uuid.UUID]:
-    """Returns (review_run_id, review_run_item_id). ReviewRun requires draft_sha."""
+    """Returns (review_run_id, review_run_item_id). ReviewRun requires draft_sha.
+
+    `generation` seeds the actor's own claim record (`claimed_at_generation`),
+    realistic row data for a running run. It is NOT what the fence reads: no
+    `port_impl` code names that column (the F3a gate forbids it) — the fence
+    reads the workspace's `lifecycle_generation`, set by `seed_workspace`."""
     run = ReviewRun(
         workspace_id=workspace_id,
         status="running",

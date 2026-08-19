@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 
 import pytest
@@ -59,7 +60,7 @@ def test_an_invocation_without_a_claimed_generation_cannot_produce_a_stamp():
 
 def test_the_stamp_is_frozen():
     stamp = Invocation.snapshot(_ctx(lifecycle_generation=1)).stamp()
-    with pytest.raises(Exception):  # noqa: B017
+    with pytest.raises(dataclasses.FrozenInstanceError):
         stamp.generation = 2  # type: ignore[misc]
 
 
