@@ -38,6 +38,7 @@ def _fail(session, job: EvaluatorJob, message: str) -> None:
 async def run_evaluator_pass(
     *,
     job_id: uuid.UUID,
+    claimed_generation: int,
     session_factory: sessionmaker,
     settings: Settings,
     adapter_builder=build_evaluator_adapter,
@@ -107,6 +108,7 @@ async def run_evaluator_pass(
             draft_section_count=draft_n,
             spec_section_count=spec_n,
             rubric_criteria=rubric_snapshot,
+            lifecycle_generation=claimed_generation,
         )
         _entry.bind_adapter(adapter)
         handle = None
@@ -196,10 +198,12 @@ async def drain_evaluator_queue_tick(
         job = claim_next_evaluator_job(s)
         s.commit()
         job_id = job.id if job is not None else None
+        claimed_generation = job.claimed_at_generation if job is not None else None
     if job_id is None:
         return
     await run_evaluator_pass(
         job_id=job_id,
+        claimed_generation=claimed_generation,
         session_factory=session_factory,
         settings=settings,
         adapter_builder=adapter_builder,

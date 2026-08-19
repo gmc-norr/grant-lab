@@ -32,6 +32,7 @@ def build_review_adapter(
     review_run_id: uuid.UUID,
     item_id: uuid.UUID,
     kind: str,
+    lifecycle_generation: int,
 ) -> ClaudeAgentSDKAdapter:
     def tools_factory(repo_dir: Path, ws_id: uuid.UUID):
         ctx = ToolContext(
@@ -42,6 +43,7 @@ def build_review_adapter(
             origin_kind="review_session",
             origin_job_id=review_run_id,
             review_run_item_id=item_id,
+            lifecycle_generation=lifecycle_generation,
         )
         return build_proposal_assist_mcp_server(ctx)
 

@@ -28,6 +28,7 @@ def test_keeper_adapter_uses_lock_aware_allowlist(tmp_path, pg_session_factory, 
         requested_by=1,
         job_id=job_id,
         locked=True,
+        lifecycle_generation=0,
     )
     kwargs = adapter._build_options_kwargs(LaunchContext(workspace_id=ws_id))
     assert "propose_spec_edit" not in kwargs["allowed_tools"]

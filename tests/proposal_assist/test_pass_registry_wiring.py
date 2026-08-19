@@ -187,15 +187,16 @@ def _invoke(site, *, row_id, ws_id, session_factory, settings, adapter_builder):
         "adapter_builder": adapter_builder,
     }
     if site == "coherence":
-        return m.run_coherence_pass(job_id=row_id, **common)
+        return m.run_coherence_pass(job_id=row_id, claimed_generation=0, **common)
     if site == "evaluator":
-        return m.run_evaluator_pass(job_id=row_id, **common)
+        return m.run_evaluator_pass(job_id=row_id, claimed_generation=0, **common)
     if site == "uncited":
-        return m.run_uncited_claims_pass(job_id=row_id, **common)
+        return m.run_uncited_claims_pass(job_id=row_id, claimed_generation=0, **common)
     if site == "review_parent":
-        return m.run_review_pass(run_id=row_id, **common)
+        return m.run_review_pass(run_id=row_id, claimed_generation=0, **common)
     return m._run_one_call(
-        kind="fit_check", instruction="x", run_id=row_id, workspace_id=ws_id, **common
+        kind="fit_check", instruction="x", run_id=row_id, workspace_id=ws_id,
+        lifecycle_generation=0, **common
     )
 
 

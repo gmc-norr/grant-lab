@@ -36,6 +36,8 @@ def build_evaluator_adapter(
     draft_section_count: int,
     spec_section_count: int,
     rubric_criteria: list[dict],
+    lifecycle_generation: int,
+    _sdk_factory=ClaudeAgentSDKAdapter,
 ) -> ClaudeAgentSDKAdapter:
     def tools_factory(repo_dir: Path, ws_id: uuid.UUID):
         ctx = ToolContext(
@@ -49,12 +51,13 @@ def build_evaluator_adapter(
             eval_draft_section_count=draft_section_count,
             eval_spec_section_count=spec_section_count,
             eval_rubric_criteria=rubric_criteria,
+            lifecycle_generation=lifecycle_generation,
         )
         return build_proposal_assist_mcp_server(ctx)
 
-    return ClaudeAgentSDKAdapter(
-        model=settings.proposal_assist_llm_model,
-        workspaces_dir=settings.workspaces_dir,
+    return _sdk_factory(
+        model=settings.proposal_assist_llm_model if settings is not None else None,
+        workspaces_dir=settings.workspaces_dir if settings is not None else None,
         tools_factory=tools_factory,
         allowed_tools=evaluator_allowed_tools(),
     )

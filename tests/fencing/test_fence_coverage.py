@@ -7,6 +7,8 @@ import ast
 from tests.fencing.detectors import KIND_TOOL_CONTEXT, Site, qualified_defs
 from tests.fencing.inventory import (
     CATEGORIES_BY_KIND,
+    F3A_COLUMN_FILES,
+    FENCING_IMPORT_FILES,
     NON_SEMANTIC_PINS,
     REPO,
     RETAINED_PINS,
@@ -166,13 +168,16 @@ def test_only_the_pinned_context_may_be_retained():
     )
 
 
-def test_nothing_imports_the_fencing_primitives_yet():
-    """Direct successor to F1's inertness check, catching BOTH import spellings.
-    F1's matched only `node.module.endswith("proposal_assist.fencing")`, so
-    `from call_manager.proposal_assist import fencing` slipped past it."""
+def test_only_f3a_identities_import_the_fencing_primitives():
+    """Scoped successor to F2's unconditional guard, on its OWN exact set.
+    F3A_COLUMN_FILES is the wrong list here in both directions: it would permit a
+    premature fencing import anywhere in F3a's files, and it would block F3b's
+    ports, which live in neither set."""
     offenders = []
     for p in sorted(SRC.rglob("*.py")):
         if "__pycache__" in p.parts or p.name == "fencing.py":
+            continue
+        if str(p.relative_to(SRC)) in FENCING_IMPORT_FILES:
             continue
         tree = ast.parse(p.read_text(encoding="utf-8"), filename=str(p))
         for node in ast.walk(tree):
@@ -185,23 +190,48 @@ def test_nothing_imports_the_fencing_primitives_yet():
                 for alias in node.names:
                     if alias.name.endswith("proposal_assist.fencing"):
                         offenders.append(f"{p}: import {alias.name}")
-    assert not offenders, "the fencing primitives are wired:\n  " + "\n  ".join(offenders)
+    assert not offenders, (
+        "fencing primitives imported outside F3a's identities:\n  " + "\n  ".join(offenders)
+    )
 
 
-def test_nothing_reads_or_writes_claimed_at_generation_yet():
-    """Direct successor to F1's third inertness check. NOT subsumed by the
-    `fenced` flag: setting `job.claimed_at_generation = 0` while leaving the
-    entry `false` changes no DETECTED site and passes every other check here."""
+def test_only_f3a_identities_touch_claimed_at_generation():
+    """Scoped successor to F2's unconditional guard, which forbade the column
+    everywhere and therefore goes red the moment F3a's first claim writes it.
+    The obligation it carried is real and is kept: a file outside F3a's
+    identities reaching for the column is wiring F4-F9 early."""
     offenders = [
-        str(p)
+        str(p.relative_to(SRC))
         for p in sorted(SRC.rglob("*.py"))
         if "__pycache__" not in p.parts
-        and p.name != "models.py"
+        and str(p.relative_to(SRC)) not in F3A_COLUMN_FILES
         and "claimed_at_generation" in p.read_text(encoding="utf-8")
     ]
     assert not offenders, (
-        "claimed_at_generation is wired before F4:\n  " + "\n  ".join(offenders)
+        "claimed_at_generation outside F3a's identities:\n  " + "\n  ".join(offenders)
     )
+
+
+def test_every_slice_in_the_inventory_is_known():
+    """A row naming a slice SLICE_STATUS does not know is unreachable: no gate
+    would ever require it to be fenced."""
+    unknown = sorted({r["slice"] for r in load_inventory()} - set(SLICE_STATUS))
+    assert not unknown, f"inventory names slices with no status: {unknown}"
+
+
+def test_the_four_tool_originating_claims_are_f3a():
+    """Analysis and setup build no ToolContext and originate no tool call, so
+    they stay with their architecture slices. Pulling them into F3a would
+    demand a generation for actors that never call a tool."""
+    by_symbol = {r["symbol"]: r["slice"] for r in load_inventory() if r["kind"] == "claim_fn"}
+    assert by_symbol == {
+        "claim_next_coherence_job": "F3a",
+        "claim_next_evaluator_job": "F3a",
+        "claim_next_review_run": "F3a",
+        "claim_next_uncited_claims_job": "F3a",
+        "claim_queued_jobs": "F4",
+        "claim_next_setup_job": "F5",
+    }
 
 
 def test_every_fenced_entry_really_fences():

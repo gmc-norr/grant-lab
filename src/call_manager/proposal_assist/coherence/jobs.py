@@ -65,24 +65,37 @@ def claim_next_coherence_job(session: Session) -> CoherenceJob | None:
     """Claim the oldest queued job whose workspace is LIVE and has no running job.
     Flips it to running + stamps started_at. FOR UPDATE SKIP LOCKED so parallel
     ticks don't fight. Soft-deleted workspaces are excluded so a pass can't burn
-    tokens after deletion (the delete handler also cancels existing jobs)."""
+    tokens after deletion (the delete handler also cancels existing jobs).
+
+    The join captures lifecycle_generation IN THE SAME STATEMENT as the FOR UPDATE
+    lock (Global Constraint 2). A separate SELECT would reopen the delete/restore
+    race the fence exists to close.
+
+    `of=CoherenceJob` keeps the lock on the job row only. Without `of=`, PostgreSQL
+    also locks the joined Workspace row, putting this claim in the delete path's way
+    and inverting the lock order the architecture spec fixes in §5."""
     running_ws = select(CoherenceJob.workspace_id).where(CoherenceJob.status == "running")
-    live_ws = select(Workspace.id).where(Workspace.soft_deleted_at.is_(None))
-    job = session.scalar(
-        select(CoherenceJob)
+    row = session.execute(
+        select(CoherenceJob, Workspace.lifecycle_generation)
+        .join(Workspace, Workspace.id == CoherenceJob.workspace_id)
         .where(
             CoherenceJob.status == "queued",
             CoherenceJob.workspace_id.not_in(running_ws),
-            CoherenceJob.workspace_id.in_(live_ws),
+            Workspace.soft_deleted_at.is_(None),
         )
         .order_by(CoherenceJob.queued_at)
         .limit(1)
-        .with_for_update(skip_locked=True)
-    )
-    if job is None:
+        # `of=` keeps FOR UPDATE on the JOB only. Without it PostgreSQL would
+        # also lock the Workspace row, putting this claim in the delete path's
+        # way and inverting the lock order the architecture spec fixes in §5.
+        .with_for_update(of=CoherenceJob, skip_locked=True)
+    ).first()
+    if row is None:
         return None
+    job, generation = row
     job.status = "running"
     job.started_at = datetime.now(UTC)
+    job.claimed_at_generation = generation
     session.flush()
     return job
 

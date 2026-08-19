@@ -9,7 +9,13 @@ from __future__ import annotations
 import pytest
 
 from tests.fencing.detectors import KIND_TOOL_COMMIT, Site
-from tests.fencing.inventory import BadRenameMap, FencedSiteVanished, merge
+from tests.fencing.inventory import (
+    BadRenameMap,
+    FencedSiteVanished,
+    load_inventory,
+    merge,
+    scan_tree,
+)
 
 P = "src/call_manager/proposal_assist/tools/a.py"
 
@@ -89,3 +95,14 @@ def test_a_rename_whose_OLD_identity_is_unknown_is_a_typo():
 def test_output_is_sorted_for_a_stable_diff():
     out = merge([], {_site("zeta"), _site("alpha")}, None)
     assert [r["symbol"] for r in out] == ["alpha", "zeta"]
+
+
+def test_regeneration_preserves_every_human_slice_assignment():
+    """merge() rebuilt `slice` from the kind defaults, so a regeneration would
+    silently revert F3a's claims to F4, setup to F5's row to F4, the contexts to
+    F3d and ingest to F3d — with every other gate still green."""
+    before = {(r["kind"], r["path"], r["symbol"]): r["slice"] for r in load_inventory()}
+    merged = merge(load_inventory(), scan_tree(), renames={})
+    after = {(r["kind"], r["path"], r["symbol"]): r["slice"] for r in merged}
+    assert after == before, "regeneration changed a human slice assignment"
+    assert len(after) == 20

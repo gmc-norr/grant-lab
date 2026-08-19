@@ -17,8 +17,8 @@ REPO = pathlib.Path(__file__).resolve().parents[2]
 SRC = REPO / "src" / "call_manager"
 INVENTORY = pathlib.Path(__file__).resolve().parent / "fence_inventory.json"
 
-_SLICE_FOR_KIND = {KIND_CLAIM_FN: "F4"}
-_DEFAULT_SLICE = "F3"
+_SLICE_FOR_KIND = {KIND_CLAIM_FN: "F4"}   # a NEW claim fn still defaults to F4
+_DEFAULT_SLICE = "F3d"                    # was "F3"
 
 #: A site no human has classified yet. The gate REFUSES these, so a regeneration
 #: cannot quietly admit an unreviewed effect site.
@@ -59,10 +59,42 @@ RETAINED_PINS = {
 
 #: Per-slice activation. `pending` = that slice has not converted its sites, so
 #: every row must be `fenced: false`. `complete` = every row must be `true`.
-#: This is what makes the `slice` field load-bearing, and it is the successor to
-#: `test_f2_fences_nothing`: F3 flips its entry in the SAME commit it converts,
-#: and a forgotten flag fails the gate instead of passing silently.
-SLICE_STATUS = {"F3": "pending", "F4": "pending"}
+#: F3 is split into sub-slices (see the F3 mechanism spec §7); F4-F9 keep the
+#: meanings the architecture spec gives them.
+SLICE_STATUS = {
+    "F3a": "complete",  # claim identity for every tool-originating actor
+    "F3b": "pending",   # the ports
+    "F3c": "pending",   # the import gate
+    "F3d": "pending",   # convert the tool sites
+    "F3e": "pending",   # the ingest pipeline
+    "F3f": "pending",   # capability holders, then the handle
+    "F4": "pending",    # background job families
+    "F5": "pending",    # setup (Phase 0)
+}
+
+#: The ONLY files that may name `claimed_at_generation`. Scoped successor to F2's
+#: unconditional guard, which forbade it everywhere and therefore goes red the
+#: moment F3a's first claim writes it. Every path is an F3a identity or the
+#: plumbing that carries its value.
+F3A_COLUMN_FILES = frozenset({
+    "proposal_assist/turns/processor.py",
+    "proposal_assist/coherence/jobs.py",
+    "proposal_assist/coherence/pass_runner.py",
+    "proposal_assist/evaluator/jobs.py",
+    "proposal_assist/evaluator/pass_runner.py",
+    "proposal_assist/review/jobs.py",
+    "proposal_assist/review/pass_runner.py",
+    "proposal_assist/uncited_claims/jobs.py",
+    "proposal_assist/uncited_claims/pass_runner.py",
+    "db/models.py",
+})
+
+#: A SEPARATE, EXACT set for importing the F1 fencing primitives. It is EMPTY
+#: through F3a — nothing imports them yet — and F3b adds precisely its own port
+#: implementation files. Sharing one list with the column check would both permit
+#: premature fencing imports across all of F3a's files and block F3b's ports,
+#: which live in neither.
+FENCING_IMPORT_FILES: frozenset[str] = frozenset()
 
 #: Extra declared keys, preserved verbatim across regeneration — they are what
 #: the verifier reads.
@@ -147,7 +179,10 @@ def merge(
             "symbol": s.symbol,
             "category": prev["category"] if prev else UNCLASSIFIED,
             "fenced": prev["fenced"] if prev else False,
-            "slice": _SLICE_FOR_KIND.get(s.kind, _DEFAULT_SLICE),
+            "slice": (
+                prev["slice"] if prev is not None
+                else _SLICE_FOR_KIND.get(s.kind, _DEFAULT_SLICE)
+            ),
         }
         if prev:
             for key in OPTIONAL_KEYS:

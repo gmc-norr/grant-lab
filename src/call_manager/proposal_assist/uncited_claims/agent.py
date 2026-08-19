@@ -32,6 +32,7 @@ def build_uncited_claims_adapter(
     requested_by: int | None,
     job_id: uuid.UUID,
     draft_section_count: int,
+    lifecycle_generation: int,
 ) -> ClaudeAgentSDKAdapter:
     def tools_factory(repo_dir: Path, ws_id: uuid.UUID):
         ctx = ToolContext(
@@ -43,6 +44,7 @@ def build_uncited_claims_adapter(
             origin_job_id=job_id,
             created_by=requested_by,
             uncited_draft_section_count=draft_section_count,
+            lifecycle_generation=lifecycle_generation,
         )
         return build_proposal_assist_mcp_server(ctx)
 

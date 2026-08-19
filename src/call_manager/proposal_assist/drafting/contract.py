@@ -194,6 +194,8 @@ class DraftingAgent(Protocol):
         triggering_prompt: str | None,
         created_by: int | None,
         origin_session_id: str | None,
+        lifecycle_generation: int,
+        active_turn_job_id: uuid.UUID,
         allowed_tool_names: set[str] | None = None,
         turn_selection: dict | None = None,
     ) -> None:

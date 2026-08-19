@@ -60,7 +60,8 @@ def _now() -> datetime:
 
 
 async def _run_one_call(
-    *, kind, instruction, run_id, workspace_id, session_factory, settings, adapter_builder
+    *, kind, instruction, run_id, workspace_id, session_factory, settings, adapter_builder,
+    lifecycle_generation
 ) -> None:
     """Run a single sub-call against its (already 'running') item. Records tokens +
     dollars and flips the item to done/failed. Never raises — failure is recorded."""
@@ -110,6 +111,7 @@ async def _run_one_call(
             review_run_id=run_id,
             item_id=item_id,
             kind=kind,
+            lifecycle_generation=lifecycle_generation,
         )
         _entry.bind_adapter(adapter)
         handle = None
@@ -203,6 +205,7 @@ def _markdown_of(session, run_id, kind) -> str | None:
 async def run_review_pass(
     *,
     run_id: uuid.UUID,
+    claimed_generation: int,
     session_factory: sessionmaker,
     settings: Settings,
     adapter_builder=build_review_adapter,
@@ -284,6 +287,7 @@ async def run_review_pass(
                     session_factory=session_factory,
                     settings=settings,
                     adapter_builder=adapter_builder,
+                    lifecycle_generation=claimed_generation,
                 )
 
         wave1 = [_guarded(kind, persona_instruction(kind, ctx)) for kind in WAVE1_KINDS]
@@ -304,6 +308,7 @@ async def run_review_pass(
                 session_factory=session_factory,
                 settings=settings,
                 adapter_builder=adapter_builder,
+                lifecycle_generation=claimed_generation,
             )
         else:
             with session_factory() as s:
@@ -380,10 +385,12 @@ async def drain_review_queue_tick(
         run = claim_next_review_run(s)
         s.commit()
         run_id = run.id if run is not None else None
+        claimed_generation = run.claimed_at_generation if run is not None else None
     if run_id is None:
         return
     await run_review_pass(
         run_id=run_id,
+        claimed_generation=claimed_generation,
         session_factory=session_factory,
         settings=settings,
         adapter_builder=adapter_builder,

@@ -106,6 +106,8 @@ def test_drafting_agent_protocol_methods_exist():
             triggering_prompt,
             created_by,
             origin_session_id,
+            lifecycle_generation,
+            active_turn_job_id,
             allowed_tool_names=None,
             turn_selection=None,
         ) -> None: ...

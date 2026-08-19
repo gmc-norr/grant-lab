@@ -56,23 +56,39 @@ def enqueue_review_run(
 
 def claim_next_review_run(session: Session) -> ReviewRun | None:
     """Claim the oldest queued run whose workspace is LIVE and has no running run.
-    FOR UPDATE SKIP LOCKED. Soft-deleted workspaces excluded."""
+    FOR UPDATE SKIP LOCKED. Soft-deleted workspaces excluded.
+
+    The join captures lifecycle_generation IN THE SAME STATEMENT as the FOR UPDATE
+    lock (Global Constraint 2). A separate SELECT would reopen the delete/restore
+    race the fence exists to close.
+
+    `of=ReviewRun` keeps the lock on the run row only. Without `of=`, PostgreSQL
+    also locks the joined Workspace row, putting this claim in the delete path's way
+    and inverting the lock order the architecture spec fixes in §5.
+
+    Note: ReviewRun has no started_at column (the reaper uses triggered_at; queue
+    latency is bounded by the 20s drain tick)."""
     running_ws = select(ReviewRun.workspace_id).where(ReviewRun.status == "running")
-    live_ws = select(Workspace.id).where(Workspace.soft_deleted_at.is_(None))
-    run = session.scalar(
-        select(ReviewRun)
+    row = session.execute(
+        select(ReviewRun, Workspace.lifecycle_generation)
+        .join(Workspace, Workspace.id == ReviewRun.workspace_id)
         .where(
             ReviewRun.status == "queued",
             ReviewRun.workspace_id.not_in(running_ws),
-            ReviewRun.workspace_id.in_(live_ws),
+            Workspace.soft_deleted_at.is_(None),
         )
         .order_by(ReviewRun.triggered_at)
         .limit(1)
-        .with_for_update(skip_locked=True)
-    )
-    if run is None:
+        # `of=` keeps FOR UPDATE on the RUN only. Without it PostgreSQL would
+        # also lock the Workspace row, putting this claim in the delete path's
+        # way and inverting the lock order the architecture spec fixes in §5.
+        .with_for_update(of=ReviewRun, skip_locked=True)
+    ).first()
+    if row is None:
         return None
+    run, generation = row
     run.status = "running"
+    run.claimed_at_generation = generation
     session.flush()
     return run
 

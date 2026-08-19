@@ -52,7 +52,7 @@ import logging
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import sessionmaker
@@ -123,6 +123,55 @@ def _prepend_summary(
     if isinstance(user_message, list):
         return [{"type": "text", "text": block}, *user_message]
     return f"{block}\n\n---\n\n{user_message}"
+
+
+class ClaimedTurn(NamedTuple):
+    """What the interactive claim returns. `claimed_at_generation` is the
+    actor's BELIEF for the whole turn — captured by the claim statement itself,
+    because a read after it lets a delete/restore land in the gap and the actor
+    would adopt a generation it never claimed at."""
+
+    workspace_id: uuid.UUID
+    user_turn_id: uuid.UUID
+    submitted_by_user_id: int | None
+    claimed_at_generation: int
+
+
+def claim_turn_job(session_factory: sessionmaker, turn_job_id: uuid.UUID) -> ClaimedTurn | None:
+    """Atomically claim a queued turn and capture the workspace generation.
+
+    The generation is a CORRELATED SUBQUERY inside the same UPDATE, so the
+    capture and the claim are one statement and one snapshot. Splitting them
+    reopens the race this exists to close.
+
+    RETURNING also brings back submitted_by_user_id so the outcome events
+    (cloud_turn_completed / cloud_turn_failed) carry actor_id — matches the
+    submit-time cloud_turn_sent event and gives compliance a single-row "who"
+    answer without a turn_jobs join.
+    """
+    current_generation = (
+        select(Workspace.lifecycle_generation)
+        .where(Workspace.id == TurnJob.workspace_id)
+        .scalar_subquery()
+    )
+    with session_factory() as s:
+        row = s.execute(
+            update(TurnJob)
+            .where(TurnJob.id == turn_job_id, TurnJob.status == "queued")
+            .values(
+                status="running",
+                started_at=datetime.now(UTC),
+                claimed_at_generation=current_generation,
+            )
+            .returning(
+                TurnJob.workspace_id,
+                TurnJob.user_turn_id,
+                TurnJob.submitted_by_user_id,
+                TurnJob.claimed_at_generation,
+            )
+        ).first()
+        s.commit()
+    return None if row is None else ClaimedTurn(*row)
 
 
 async def process_turn_once(
@@ -207,27 +256,15 @@ async def process_turn_once(
         )
         return
 
-    # Atomic claim AFTER the sweep has run. RETURNING also brings back
-    # submitted_by_user_id so the outcome events (cloud_turn_completed /
-    # cloud_turn_failed) carry actor_id — matches the submit-time
-    # cloud_turn_sent event and gives compliance a single-row "who"
-    # answer without a turn_jobs join.
-    with session_factory() as s:
-        result = s.execute(
-            update(TurnJob)
-            .where(TurnJob.id == turn_job_id, TurnJob.status == "queued")
-            .values(status="running", started_at=datetime.now(UTC))
-            .returning(
-                TurnJob.workspace_id,
-                TurnJob.user_turn_id,
-                TurnJob.submitted_by_user_id,
-            )
-        ).first()
-        s.commit()
-        if result is None:
-            logger.info("turn_job %s already claimed or completed; skipping", turn_job_id)
-            return
-        workspace_id, user_turn_id, submitted_by_user_id = result
+    # Atomic claim AFTER the sweep has run.
+    claimed = claim_turn_job(session_factory, turn_job_id)
+    if claimed is None:
+        logger.info("turn_job %s already claimed or completed; skipping", turn_job_id)
+        return
+    workspace_id = claimed.workspace_id
+    user_turn_id = claimed.user_turn_id
+    submitted_by_user_id = claimed.submitted_by_user_id
+    claimed_generation = claimed.claimed_at_generation
 
     with session_factory() as s:
         user_turn = s.scalar(select(ChatTurn).where(ChatTurn.id == user_turn_id))
@@ -323,6 +360,8 @@ async def process_turn_once(
             triggering_prompt=_extract_triggering_prompt(raw_turn_content),
             created_by=submitted_by_user_id,
             origin_session_id=ws_session_id,
+            lifecycle_generation=claimed_generation,
+            active_turn_job_id=turn_job_id,
             allowed_tool_names=allowed_tools_for_content(raw_turn_content),
             turn_selection=selection_from_content(raw_turn_content),
         )
