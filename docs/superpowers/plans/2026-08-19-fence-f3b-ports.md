@@ -596,7 +596,7 @@ def test_two_effects_hold_the_lease_concurrently(pg_session_factory):
     fence would be a global per-workspace write lock, not a lease."""
     with pg_session_factory() as s:
         ws = make_workspace(s)
-        s.commit()  # make_workspace does NOT flush — ws.id is None until it does
+        s.commit()  # commit, not flush: the other threads use separate connections
         ws_id = ws.id
 
     first_has_lease = threading.Event()
@@ -624,7 +624,7 @@ def test_the_lease_blocks_an_exclusive_lifecycle_acquisition(pg_session_factory)
     is in flight."""
     with pg_session_factory() as s:
         ws = make_workspace(s)
-        s.commit()  # make_workspace does NOT flush — ws.id is None until it does
+        s.commit()  # commit, not flush: the other threads use separate connections
         ws_id = ws.id
 
     lease_held = threading.Event()
@@ -657,7 +657,7 @@ def test_the_lease_is_released_by_rollback(pg_session_factory):
     provide no exclusion at all."""
     with pg_session_factory() as s:
         ws = make_workspace(s)
-        s.commit()  # make_workspace does NOT flush — ws.id is None until it does
+        s.commit()  # commit, not flush: the other threads use separate connections
         ws_id = ws.id
 
     with pg_session_factory() as s1:
@@ -674,7 +674,7 @@ def test_a_contended_lease_raises_commit_mutex_timeout(pg_session_factory):
     wedged holder pin a worker indefinitely."""
     with pg_session_factory() as s:
         ws = make_workspace(s)
-        s.commit()  # make_workspace does NOT flush — ws.id is None until it does
+        s.commit()  # commit, not flush: the other threads use separate connections
         ws_id = ws.id
 
     holder_ready = threading.Event()
@@ -705,7 +705,7 @@ def test_the_tail_stays_bounded_after_the_lease_is_won(pg_session_factory):
     every lock wait for the rest of the effect's transaction."""
     with pg_session_factory() as s:
         ws = make_workspace(s)
-        s.commit()  # make_workspace does NOT flush — ws.id is None until it does
+        s.commit()  # commit, not flush: the other threads use separate connections
         ws_id = ws.id
 
     with pg_session_factory() as s1:
