@@ -7,7 +7,13 @@ import uuid
 
 import pytest
 
-from call_manager.db.models import EvaluatorJob, ProposedChange, ReviewRunItem, UncitedClaimsJob
+from call_manager.db.models import (
+    ChatTurn,
+    EvaluatorJob,
+    ProposedChange,
+    ReviewRunItem,
+    UncitedClaimsJob,
+)
 from call_manager.proposal_assist.port_impl.effects import SqlEffects
 from call_manager.proposal_assist.ports.effects import (
     EFFECT_MECHANISMS,
@@ -23,6 +29,7 @@ from call_manager.proposal_assist.ports.errors import (
     WorkspaceGenerationStale,
 )
 from call_manager.proposal_assist.ports.stamp import FenceStamp, Provenance
+from tests.proposal_assist.conftest import make_user
 from tests.proposal_assist.f3b_seeds import (
     bump_generation,
     seed_evaluator_job,
@@ -384,7 +391,19 @@ def test_generation_zero_is_fenced_like_any_other(pg_session_factory):
 _PROV = Provenance(
     origin_kind="interactive_turn",
     origin_session_id="sess-9",
-    origin_job_id=None,
+    # A real, fixed UUID rather than None: origin_job_id has NO foreign key
+    # (models.py), so every propose_* test below can carry it through a real
+    # INSERT without seeding anything. This is what makes a
+    # provenance.origin_job_id-vs-stamp.origin_job_id mixup observable — two
+    # None defaults agree regardless of which one a bug reads.
+    origin_job_id=uuid.uuid4(),
+    # triggering_turn_id and created_by ARE foreign keys (chat_turns.id,
+    # users.id — models.py, fk_pc_turn / fk_pc_created_by). Every other test
+    # in this section inserts a real row using this baseline Provenance, so
+    # it has to stay FK-satisfiable, and None is the only value that is
+    # without seeding a row per test. test_propose_artifact_edit_copies_the_
+    # provenance_verbatim below seeds a real ChatTurn and a real User and
+    # builds its own Provenance to exercise both fields non-NULL.
     triggering_turn_id=None,
     triggering_prompt="tighten the aims",
     created_by=None,
@@ -422,21 +441,55 @@ def test_propose_artifact_edit_inserts_a_pending_row(pg_session_factory):
 
 def test_propose_artifact_edit_copies_the_provenance_verbatim(pg_session_factory):
     """These fields are durable attribution. A snapshot taken late — or dropped
-    on the way through the port — misattributes stored data."""
+    on the way through the port — misattributes stored data.
+
+    triggering_turn_id and created_by are foreign keys, so — unlike _PROV's
+    module-level baseline, which stays FK-free to keep every other propose_*
+    test's INSERT valid — this test seeds a real ChatTurn and a real User and
+    builds its own Provenance with all six fields populated.
+
+    The stamp built here also carries its OWN origin_job_id and
+    active_turn_job_id, deliberately different from the provenance's: a stamp
+    is the actor's identity for targeting its own row, the provenance is
+    durable attribution copied into proposed_changes, and confusing the two
+    would misattribute stored data. Two equal (or two None) values would let
+    that mixup pass unnoticed; distinct real values make it observable.
+    """
     with pg_session_factory() as s:
         ws_id = seed_workspace(s, generation=1)
+        turn = ChatTurn(workspace_id=ws_id, role="user", content={"type": "text", "text": "hi"})
+        s.add(turn)
+        s.flush()
+        turn_id = turn.id
+        author_id = make_user(s, email="provenance-author@ki.se").id
+        s.commit()
 
-    pc_id = SqlEffects(pg_session_factory).propose_artifact_edit(
-        _stamp(ws_id, generation=1), _edit()
+    prov = Provenance(
+        origin_kind=_PROV.origin_kind,
+        origin_session_id=_PROV.origin_session_id,
+        origin_job_id=_PROV.origin_job_id,
+        triggering_turn_id=turn_id,
+        triggering_prompt=_PROV.triggering_prompt,
+        created_by=author_id,
     )
+    stamp = FenceStamp(
+        workspace_id=ws_id,
+        generation=1,
+        active_turn_job_id=uuid.uuid4(),
+        origin_job_id=uuid.uuid4(),  # deliberately != prov.origin_job_id
+    )
+
+    pc_id = SqlEffects(pg_session_factory).propose_artifact_edit(stamp, _edit(provenance=prov))
 
     with pg_session_factory() as s:
         pc = s.get(ProposedChange, pc_id)
         assert pc.origin_kind == "interactive_turn"
         assert pc.origin_session_id == "sess-9"
         assert pc.triggering_prompt == "tighten the aims"
-        assert pc.origin_job_id is None
-        assert pc.created_by is None
+        assert pc.origin_job_id == prov.origin_job_id
+        assert pc.origin_job_id != stamp.origin_job_id
+        assert pc.triggering_turn_id == turn_id
+        assert pc.created_by == author_id
 
 
 def test_a_draft_edit_folds_the_selection_into_the_payload(pg_session_factory):
