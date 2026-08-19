@@ -1,26 +1,40 @@
-"""Epoch fencing — the two primitives every belief-carrying actor uses.
+"""Epoch fencing — the three primitives every belief-carrying actor uses.
 
-Spec: docs/superpowers/specs/2026-08-17-lifecycle-fence-design.md (revision 3).
+Spec: docs/superpowers/specs/2026-08-17-lifecycle-fence-design.md (revision 4),
+and docs/superpowers/specs/2026-08-18-fence-session-ownership-design.md (revision
+8) for the mechanism table that says which primitives an effect combines.
 
 THE INVARIANT: a semantic effect produced from a belief formed earlier must
 carry the lifecycle generation of that belief and validate it, durably in
 Postgres, at the moment the effect takes place.
 
-Two primitives, chosen by what the effect touches:
+Three primitives. Which ones an effect uses is decided ONCE per operation and
+never changed mid-flight (2026-08-18 spec 3.5):
 
-  A. `live_at_generation` — a PREDICATE, no lock. For effects that are purely DB
-     rows. Drop it into the WHERE of the statement that performs the effect, so
-     the fence and the write are ONE statement. This is the default: it cannot
-     create a lock-order problem because it takes no lock.
+  A. `live_at_generation` — a PREDICATE, no lock. Goes in the WHERE of the
+     statement that performs the effect, so the fence and the write are ONE
+     statement. NOT SUFFICIENT ALONE: it takes no lock on the workspace row, so
+     under READ COMMITTED it evaluates against the statement's snapshot and a
+     transition committing after that snapshot is invisible to it.
 
-  B. `acquire_commit_mutex_at_generation` — mutex + under-mutex re-read. For
-     effects spanning git, the filesystem, or multiple rows that must move
-     together.
+  C. `acquire_shared_lease` — the workspace's commit-mutex key in SHARED mode.
+     Pairs with A for every DB-only effect, acquired FIRST. Shared locks do not
+     conflict, so effects stay concurrent with each other; a lifecycle
+     transition needs the key exclusively, so it either waits for in-flight
+     effects or wins first and leaves A to fail.
 
-Where a transaction ALREADY holds the workspace row under FOR UPDATE, use
-neither: assert the generation on that already-locked row. Acquiring the mutex
-afterwards inverts the normative M -> J -> W order and opens a real Postgres
-40P01 against the delete path (spec 5).
+  B. `acquire_commit_mutex_at_generation` — the EXCLUSIVE mutex plus an
+     under-mutex re-read. For effects spanning git, the filesystem, or multiple
+     rows that must move together, taken before the first effect of any kind.
+
+NEVER take C and then B for the same workspace. Two operations each holding
+shared and each waiting to upgrade is the one deadlock shape this protocol has.
+
+Where a transaction ALREADY holds the WORKSPACE row under FOR UPDATE, use none
+of them: assert the generation on that already-locked row. Only the workspace row
+qualifies — a job row carries no lifecycle state, so locking one proves nothing.
+Acquiring the mutex afterwards inverts the normative M -> J -> W order and opens
+a real Postgres 40P01 against the delete path (spec 5).
 
 `WorkspaceGenerationStale` is DEFINED in ports/errors.py and re-exported here.
 It moved in F3b: a tool has to be able to CATCH it, and this module imports
@@ -32,19 +46,25 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import exists, select
+from sqlalchemy import exists, select, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from call_manager.db.models import Workspace
 from call_manager.proposal_assist.drafting.locking import (
+    MUTEX_TAIL_LOCK_TIMEOUT_SECONDS,
+    CommitMutexTimeout,
     WorkspaceDeleted,
     acquire_commit_mutex,
+    commit_mutex_key,
+    is_lock_timeout,
 )
 from call_manager.proposal_assist.ports.errors import WorkspaceGenerationStale
 
 __all__ = [
     "WorkspaceGenerationStale",
     "acquire_commit_mutex_at_generation",
+    "acquire_shared_lease",
     "live_at_generation",
 ]
 
@@ -138,3 +158,52 @@ def acquire_commit_mutex_at_generation(
         raise WorkspaceGenerationStale(
             workspace_id, expected=generation, actual=row[1]
         )
+
+
+def acquire_shared_lease(
+    session: Session, workspace_id: uuid.UUID, *, timeout_seconds: int = 10
+) -> None:
+    """Primitive C. Take the workspace's commit-mutex key in SHARED mode for the
+    rest of this transaction, so a lifecycle transition cannot commit underneath
+    the effect that follows.
+
+    Pair it with `live_at_generation` in the WHERE of the effect's single write
+    (spec 3.5, mechanism 1). The predicate alone is NOT enough: it is an exists()
+    subquery taking no lock on the workspace row, so under READ COMMITTED it
+    evaluates against the statement's snapshot and a transition committing after
+    that snapshot is invisible to it. Reproduced on PostgreSQL 16 with an INSERT,
+    which has no target row and therefore no re-check to mask the race.
+
+    The lease is what turns "I checked" into "I waited, then checked": shared
+    locks do not conflict, so effects stay concurrent with each other, while a
+    lifecycle transition needs the key EXCLUSIVELY and therefore either waits for
+    in-flight effects or wins first and leaves the effect's predicate to fail.
+
+    NEVER upgrade: an operation holding this lease must not go on to call
+    acquire_commit_mutex* for the same workspace. Two operations each holding
+    shared and each waiting to upgrade is the one deadlock shape this protocol
+    has. An operation that will touch git or the filesystem takes the EXCLUSIVE
+    mutex first, before its first effect of any kind.
+
+    Transaction scoped: released at COMMIT or ROLLBACK, with no explicit unlock.
+    Requires a non-AUTOCOMMIT session — an AUTOCOMMIT connection would release it
+    immediately and silently provide no exclusion.
+
+    Bounded exactly as acquire_commit_mutex is, and it leaves the same
+    MUTEX_TAIL_LOCK_TIMEOUT_SECONDS cap in force for the rest of the transaction
+    (Slice C3) rather than restoring DEFAULT, which is 0 = disabled.
+    """
+    timeout_ms = int(timeout_seconds) * 1000
+    if timeout_ms <= 0:
+        raise ValueError(f"timeout_seconds must be a positive int, got {timeout_seconds!r}")
+    session.execute(text(f"SET LOCAL lock_timeout = '{timeout_ms}ms'"))
+    try:
+        session.execute(
+            text("SELECT pg_advisory_xact_lock_shared(:k)"),
+            {"k": commit_mutex_key(workspace_id)},
+        )
+    except OperationalError as exc:
+        if is_lock_timeout(exc):
+            raise CommitMutexTimeout(str(workspace_id)) from exc
+        raise
+    session.execute(text(f"SET LOCAL lock_timeout = '{MUTEX_TAIL_LOCK_TIMEOUT_SECONDS * 1000}ms'"))
