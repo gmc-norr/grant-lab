@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import importlib
+import inspect
 import uuid
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select, update
@@ -160,51 +163,105 @@ def test_every_background_claim_captures_the_generation(
         s.commit()
 
 
-def test_a_one_shot_context_carries_the_generation_at_construction(tmp_path, monkeypatch):
+#: Every one-shot builder, and the builder-specific kwargs it needs.
+#:
+#: All four construct a ToolContext inside a `tools_factory` closure, so the only
+#: place `lifecycle_generation` can enter is the builder's own argument — and
+#: ToolContext defaults it to None, which makes a dropped kwarg SILENT.
+#:
+#: Parametrised rather than written once for the evaluator because F3c deleted the
+#: F2 containment machinery, which had been the only mechanical check standing over
+#: the other three (`coherence/agent.py:51`, `review/agent.py:46`,
+#: `uncited_claims/agent.py:47`). This table is that check's replacement.
+_ONE_SHOT_BUILDERS = [
+    pytest.param(
+        "call_manager.proposal_assist.evaluator.agent",
+        "build_evaluator_adapter",
+        lambda: {
+            "requested_by": 1,
+            "job_id": uuid.uuid4(),
+            "draft_section_count": 0,
+            "spec_section_count": 0,
+            "rubric_criteria": [],
+        },
+        id="evaluator",
+    ),
+    pytest.param(
+        "call_manager.proposal_assist.coherence.agent",
+        "build_keeper_adapter",
+        lambda: {"requested_by": 1, "job_id": uuid.uuid4(), "locked": False},
+        id="coherence_keeper",
+    ),
+    pytest.param(
+        "call_manager.proposal_assist.review.agent",
+        "build_review_adapter",
+        lambda: {
+            "review_run_id": uuid.uuid4(),
+            "item_id": uuid.uuid4(),
+            "kind": "persona",
+        },
+        id="review",
+    ),
+    pytest.param(
+        "call_manager.proposal_assist.uncited_claims.agent",
+        "build_uncited_claims_adapter",
+        lambda: {"requested_by": 1, "job_id": uuid.uuid4(), "draft_section_count": 0},
+        id="uncited_claims",
+    ),
+]
+
+
+@pytest.mark.parametrize("module_path, builder_name, extra_kwargs", _ONE_SHOT_BUILDERS)
+def test_a_one_shot_context_carries_the_generation_at_construction(
+    tmp_path, monkeypatch, module_path, builder_name, extra_kwargs
+):
     """One-shot contexts KNOW their generation when they are built, so they must
     carry it then. Only the retained interactive context may omit it, because
     launch precedes the claim."""
-    from call_manager.proposal_assist.evaluator import agent as evaluator_agent
+    mod = importlib.import_module(module_path)
+    builder = getattr(mod, builder_name)
 
     captured: dict = {}
 
-    # tools_factory returns build_proposal_assist_mcp_server(ctx) — an MCP
-    # server config, NOT the ToolContext. Capture the factory's INPUT.
-    import call_manager.proposal_assist.evaluator.agent as agent_mod
-
+    # tools_factory returns build_proposal_assist_mcp_server(ctx) — an MCP server
+    # config, NOT the ToolContext. Capture the factory's INPUT.
     def _capture(ctx):
         captured["ctx"] = ctx
         return object()
 
-    monkeypatch.setattr(agent_mod, "build_proposal_assist_mcp_server", _capture)
+    monkeypatch.setattr(mod, "build_proposal_assist_mcp_server", _capture)
 
     class _FakeSDK:
         def __init__(self, *, tools_factory=None, **kwargs):
             tools_factory(tmp_path, uuid.uuid4())
 
-    evaluator_agent.build_evaluator_adapter(
-        settings=None,
+    # TWO injection points, and both are needed. Three builders call
+    # ClaudeAgentSDKAdapter directly, so patching the module symbol reaches them.
+    # The evaluator takes `_sdk_factory=ClaudeAgentSDKAdapter`, a default bound to
+    # the REAL adapter at import time, which no monkeypatch of the module symbol
+    # can reach — it has to be passed.
+    monkeypatch.setattr(mod, "ClaudeAgentSDKAdapter", _FakeSDK, raising=False)
+    kwargs = dict(extra_kwargs())
+    if "_sdk_factory" in inspect.signature(builder).parameters:
+        kwargs["_sdk_factory"] = _FakeSDK
+
+    builder(
+        settings=SimpleNamespace(proposal_assist_llm_model="m", workspaces_dir=tmp_path),
         session_factory=lambda: None,
         workspace_id=uuid.uuid4(),
-        requested_by=1,
-        job_id=uuid.uuid4(),
-        draft_section_count=0,
-        spec_section_count=0,
-        rubric_criteria=[],
         lifecycle_generation=11,
-        _sdk_factory=_FakeSDK,
+        **kwargs,
     )
     assert captured["ctx"].lifecycle_generation == 11
 
 
-def test_a_one_shot_builder_REQUIRES_the_generation():
+@pytest.mark.parametrize("module_path, builder_name, extra_kwargs", _ONE_SHOT_BUILDERS)
+def test_a_one_shot_builder_REQUIRES_the_generation(module_path, builder_name, extra_kwargs):
     """A default would let a caller silently build a context with no belief,
     which is the failure F3b cannot detect and the fence cannot survive."""
-    import inspect
+    builder = getattr(importlib.import_module(module_path), builder_name)
 
-    from call_manager.proposal_assist.evaluator.agent import build_evaluator_adapter
-
-    param = inspect.signature(build_evaluator_adapter).parameters["lifecycle_generation"]
+    param = inspect.signature(builder).parameters["lifecycle_generation"]
     assert param.default is inspect.Parameter.empty
 
 
