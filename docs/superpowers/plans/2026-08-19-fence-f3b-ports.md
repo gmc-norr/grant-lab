@@ -60,14 +60,25 @@ Every task's requirements implicitly include this section.
 - **GC-8 — Additive only.** No production caller is converted. No site sets
   `pass_invocation=True`. No existing tool module changes behaviour. The branch is
   inert in production.
-- **GC-10 — Mutation testing happens AFTER the task's commit, never before.**
-  `git checkout <path>` on a file the task itself created fails with
-  `pathspec … did not match any file(s) known to git` — the mutation survives,
-  and if the command was piped the non-zero exit is masked. Reverting to the
-  *previous* commit is worse: it silently discards the current task's
-  implementation. So every task commits its green implementation first, then
-  mutates, then restores with `git checkout` and confirms
-  `git status --porcelain` is empty before moving on.
+- **GC-10 — Mutation testing happens AFTER the task's commit, never before, and
+  the restore is verified by a command that FAILS.** `git checkout <path>` on a
+  file the task itself created fails with `pathspec … did not match any file(s)
+  known to git` — the mutation survives, and piped through anything the non-zero
+  exit is masked. Reverting to the *previous* commit is worse: it silently
+  discards the current task's implementation. So every task commits its green
+  implementation first, then mutates, then restores with:
+
+  ```bash
+  git checkout <path>
+  git diff --exit-code HEAD -- <path>
+  ```
+
+  `git diff --exit-code` exits 1 while the mutation survives, so it is the last
+  command in the block and a live failure. Do **not** use `git status
+  --porcelain`: it exits 0 whether the tree is clean or filthy, so it asserts
+  nothing, and this worktree carries an unrelated untracked note that would make
+  "empty" unreachable anyway. Scoping to the mutated path also means an unrelated
+  edit of the user's own cannot fail the check.
 
 - **GC-9 — Test command.** `uv run pytest -n 16 --dist loadfile`. Never `-n auto`
   (resolves to 72 here) and never `--dist loadgroup`. Baseline on master before this
@@ -789,10 +800,35 @@ Add `from sqlalchemy import exists, select, text` and
 
 - [ ] **Step 3b: Correct the module docstring — there are three primitives now**
 
-The header still says "Two primitives" and calls Primitive A "the default", which
-is the claim this task disproves. Replace the block from `Two primitives, chosen
-by what the effect touches:` down to the end of the `40P01 against the delete
-path (spec 5).` paragraph with:
+The **first line of the module** says "the two primitives", the block below it
+says "Two primitives", and it calls Primitive A "the default" — the claim this
+task disproves. Its spec reference is stale too: it cites revision 3 of the
+architecture spec, which is at revision 4.
+
+First replace line 1 and line 3:
+
+```python
+"""Epoch fencing — the two primitives every belief-carrying actor uses.
+
+Spec: docs/superpowers/specs/2026-08-17-lifecycle-fence-design.md (revision 3).
+```
+
+with:
+
+```python
+"""Epoch fencing — the three primitives every belief-carrying actor uses.
+
+Spec: docs/superpowers/specs/2026-08-17-lifecycle-fence-design.md (revision 4),
+and docs/superpowers/specs/2026-08-18-fence-session-ownership-design.md (revision
+8) for the mechanism table that says which primitives an effect combines.
+```
+
+`revision 4` is what that spec's status line says at this point in the branch.
+Task 9 rewrites its §3 and bumps it, and re-pins this reference in the same step —
+so every intermediate commit cites a revision that actually exists.
+
+Then replace the block from `Two primitives, chosen by what the effect touches:`
+down to the end of the `40P01 against the delete path (spec 5).` paragraph with:
 
 ```python
 Three primitives. Which ones an effect uses is decided ONCE per operation and
@@ -1666,7 +1702,7 @@ scorecard lands.
 
 ```bash
 git checkout src/call_manager/proposal_assist/port_impl/effects.py
-git status --porcelain   # MUST be empty — see GC-10
+git diff --exit-code HEAD -- src/call_manager/proposal_assist/port_impl/effects.py
 ```
 
 Mutation 2 — split the predicate out of the write (the shape GC-2 forbids):
@@ -1680,7 +1716,7 @@ pre-check reads the CURRENT generation and refuses nothing.
 
 ```bash
 git checkout src/call_manager/proposal_assist/port_impl/effects.py
-git status --porcelain   # MUST be empty — see GC-10
+git diff --exit-code HEAD -- src/call_manager/proposal_assist/port_impl/effects.py
 ```
 
 ---
@@ -2161,7 +2197,7 @@ Expected: FAIL `test_propose_artifact_edit_refuses_a_stale_generation` and
 
 ```bash
 git checkout src/call_manager/proposal_assist/port_impl/effects.py
-git status --porcelain   # MUST be empty — see GC-10
+git diff --exit-code HEAD -- src/call_manager/proposal_assist/port_impl/effects.py
 ```
 
 ---
@@ -2540,7 +2576,7 @@ behind the transition. This is the assertion that makes Case B a proof of the
 
 ```bash
 git checkout src/call_manager/proposal_assist/port_impl/effects.py
-git status --porcelain   # MUST be empty — see GC-10
+git diff --exit-code HEAD -- src/call_manager/proposal_assist/port_impl/effects.py
 ```
 
 ---
@@ -2830,7 +2866,7 @@ Expected: FAIL — `the stale actor's accounting reached the NEW turn's row`
 
 ```bash
 git checkout src/call_manager/proposal_assist/port_impl/accounting.py
-git status --porcelain   # MUST be empty — see GC-10
+git diff --exit-code HEAD -- src/call_manager/proposal_assist/port_impl/accounting.py
 ```
 
 ---
@@ -3395,7 +3431,7 @@ before continuing, because it is the one that catches transitive leaks.
 
 ```bash
 git checkout src/call_manager/proposal_assist/ports/queries.py
-git status --porcelain   # MUST be empty — see GC-10
+git diff --exit-code HEAD -- src/call_manager/proposal_assist/ports/queries.py
 ```
 
 ---
@@ -3415,7 +3451,7 @@ spec is not enough — the section header, its lead-in and §3.1's own opening l
 each restate the claim, directly above it. Step 1 replaces the whole run.
 
 **Files:**
-- Modify: `docs/superpowers/specs/2026-08-17-lifecycle-fence-design.md` (§3 header through §3.1)
+- Modify: `docs/superpowers/specs/2026-08-17-lifecycle-fence-design.md` (§3 header through §3.1, plus the status line and §12 changelog)
 - Modify: `src/call_manager/proposal_assist/fencing.py` (the two function docstrings)
 - Modify: `tests/fencing/inventory.py` (`SLICE_STATUS`)
 
@@ -3542,6 +3578,57 @@ with:
     workspace. Two operations each holding shared and each waiting to upgrade is
     the one deadlock shape this protocol has.
 ```
+
+- [ ] **Step 3b: Record the spec revision, and re-pin `fencing.py` to it**
+
+Step 1 rewrote a numbered section of the architecture spec, so the spec records it.
+
+**The spec is already inconsistent, and this step fixes that too.** Its status
+line says `revision 4`, but §12's changelog already carries a
+`**Revision 5 (2026-08-18).**` entry — the F2 demotion — which the status line
+never picked up. So this becomes **revision 6**, not 5. Entries in §12 are prose
+(`**Revision N (date).**`), newest first — match that form, do not introduce
+`###` headings.
+
+In `docs/superpowers/specs/2026-08-17-lifecycle-fence-design.md`, replace the
+status paragraph:
+
+```markdown
+**Status:** revision 4, 2026-08-17. Revision 1 was reviewed and found incomplete;
+revision 2 corrected the audit unit and four further defects; revision 3 settles
+the read-revocation contract; revision 4 folds in the F2 research findings: canonical
+form, classified inventory, and ToolContext lifetime split. See §12 for the changelog.
+```
+
+with:
+
+```markdown
+**Status:** revision 6, 2026-08-19. Revision 1 was reviewed and found incomplete;
+revision 2 corrected the audit unit and four further defects; revision 3 settles
+the read-revocation contract; revision 4 folds in the F2 research findings: canonical
+form, classified inventory, and ToolContext lifetime split; revision 5 demoted F2
+from a coverage gate to an inventory; revision 6 corrects §3 — the conditional-write
+predicate is not a fence on its own and pairs with the shared lease (F3b). See §12
+for the changelog.
+```
+
+Add this entry at the **top** of §12, immediately under the `## 12. Changelog`
+heading and above the existing `**Revision 5 (2026-08-18).**` paragraph:
+
+```markdown
+**Revision 6 (2026-08-19).** §3 rewritten: three primitives, not two. Primitive A
+was documented as the default and as adding no lock. It is an `exists()` subquery
+taking no lock on the workspace row, so under READ COMMITTED it evaluates against
+the statement's snapshot — reproduced on PostgreSQL 16 with an `INSERT`, which has
+no target row and therefore no re-check to mask it. DB-only effects now pair it
+with Primitive C, `acquire_shared_lease` (§3.1a), acquired first, and an effect
+never upgrades from the shared lease to the exclusive mutex. This revision also
+brings the status line into line with revision 5, which the changelog recorded and
+the header did not.
+```
+
+Then update `fencing.py`'s spec reference, written in Task 2, from `(revision 4)`
+to `(revision 6)` — it pins the section this task just rewrote.
 
 - [ ] **Step 4: Mark the slice complete**
 
