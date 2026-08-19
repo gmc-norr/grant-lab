@@ -37,8 +37,11 @@ Every task's requirements implicitly include this section.
   `audit.py` reaches `citations._read_proposal_and_ledger` today.
 - **GC-3 — Closing imports alone does not close authority (§4.1).** `ToolContext`
   exposes `repo_dir`, so `(ctx.repo_dir / "proposal.md").write_text(...)` passes every
-  import check. The gate therefore also forbids naming a resource locator:
-  `repo_dir`, `workspaces_dir`, `session_factory`, `settings`.
+  import check. The gate therefore also forbids naming a resource locator —
+  `repo_dir`, `workspaces_dir`, `session_factory`, `settings` — **as an attribute, as
+  a parameter, or as a local binding**. A tool that takes `repo_dir` as an argument
+  holds identical authority while naming no attribute at all, and `registry.py`, the
+  module that would pass it, is permanently skipped by the gate.
 - **GC-4 — This is architectural hygiene for trusted code, not adversarial
   containment (§4.2).** It makes the wrong thing hard to write and easy to spot in
   review, and makes coverage a CI check rather than a memory. It does not claim a
@@ -47,18 +50,24 @@ Every task's requirements implicitly include this section.
 - **GC-5 — Fixtures are PARSED, never imported.** The checker reads source text and
   walks its AST. A fixture that had to be importable would drag its own violations
   into the test process and could not express a forbidden import at all.
-- **GC-6 — An exemption may not be stale.** Every module named in
-  `TOOLS_NOT_YET_CONVERTED` must still fail the gate. A converted module that stays
-  on the list turns the gate green for the wrong reason, so removing the entry is
-  part of converting it.
+- **GC-6 — An exemption may not be stale, and it may not widen.** Every module named
+  in `TOOLS_NOT_YET_CONVERTED` must still fail the gate: a converted module that stays
+  on the list turns the gate green for the wrong reason, so removing the entry is part
+  of converting it. And each entry **pins** the violations that module is allowed to
+  still have — a violation outside the pin is red even though the module is exempt.
+  Without the pin, "still fails the gate" asks only for ONE surviving violation, so
+  all nine exempt modules could reach anything at all and stay green. The pin is a
+  SUBSET check: removing a violation is always free, adding one is a reviewed diff.
 - **GC-7 — Additive and test-only.** No file under `src/` changes behaviour in this
   slice. No caller is converted, no tool is rewritten, no resource locator is actually
   removed from `ToolContext` — F3d/F3e/F3f do that, and the gate is what tells them
   when they are done.
 - **GC-8 — Test command.** `uv run pytest -n 16 --dist loadfile`. Never `-n auto`
   (resolves to 72 here) and never `--dist loadgroup`. Baseline on master before this
-  branch: **3685 passed, 1 skipped**. The `1 skipped` is an `ANTHROPIC_API_KEY`-gated
-  test — read it as the signal, not the total.
+  branch: **3688 passed, 1 skipped** (measured on `7e5a5e2`; the F3b review follow-ups
+  added three tests after this plan was first written, so an older `3685` anywhere is
+  stale). The `1 skipped` is an `ANTHROPIC_API_KEY`-gated test — read it as the
+  signal, not the total.
 - **GC-9 — `ruff check .` is the lint gate. `ruff format` is NOT** — do not run it and
   do not reformat files to satisfy it.
 - **GC-10 — Mutation testing happens AFTER the task's commit, never before, and the
@@ -84,7 +93,10 @@ Both were open in the spec and would have produced materially different work.
 proven only against synthetic fixtures, pointed at `tools/` in a later slice — leaves
 the boundary with no teeth on real code and nothing stopping `tools/` drifting further
 away meanwhile. Armed-with-exemptions gives a real gate from day one and makes each
-later conversion delete a line. It is the same shape as the existing `SLICE_STATUS`.
+later conversion delete a line. Each entry also **pins** the violations that module
+already has, so an exempt module cannot acquire new ones while it waits for its slice
+— the same shape as the existing `NON_SEMANTIC_PINS`, which pin each hole in the F2
+gate to the exact identity a human reviewed.
 
 **`tools/registry.py` and `tools/__init__.py` are permanently exempt, by name, with
 their own narrower rule.** `registry.py` is the composition root: it defines
@@ -93,8 +105,8 @@ necessarily names things a tool may not. `tools/__init__.py` re-exports from it.
 Moving them out of the package was the alternative; it is cleaner but costs an import
 update across eleven modules in a slice that otherwise changes no production
 behaviour. The exemption is not unconditional: both files are still forbidden to
-import `sqlalchemy` or `call_manager.db.models`, checked separately, so the exemption
-cannot become where violations hide.
+import the `call_manager.db` package or `sqlalchemy`, checked separately, so the
+exemption cannot become where violations hide.
 
 ## File Structure
 
@@ -105,7 +117,7 @@ cannot become where violations hide.
 | `tests/fencing/import_gate.py` | The checker. Allowlist, relative-import rule, locator rule, `check_source`. No pytest, no fixtures — pure functions over source text. |
 | `tests/fencing/test_import_gate.py` | The checker's own tests, the fixture-driven negatives, and the armed gate over `tools/`. |
 | `tests/fencing/fixtures/` | Source files the checker PARSES. Never imported. Never collected (no `test_` prefix). |
-| `tests/proposal_assist/dto_contract.py` | `assert_detached(value, path)` — the recursive ORM-instance walker, promoted out of one test file. |
+| `tests/proposal_assist/dto_contract.py` | `assert_detached(value, path)` — the recursive, **fail-closed** ORM-instance walker, promoted out of one test file; it rejects any shape it cannot see inside. |
 | `tests/proposal_assist/test_ports_dto_contract.py` | Every `Queries` method returns a detached DTO, with a completeness check against the Protocol. |
 
 **Modified:**
@@ -152,16 +164,29 @@ task completes it.
 
 - [ ] **Step 1: Confirm what depends on the machinery before deleting it**
 
-Run:
-```bash
-grep -rn "verifiers\|verify(" tests/ src/ --include=*.py
-```
-Expected: matches in exactly three files — `tests/fencing/verifiers.py` itself,
-`tests/fencing/test_verifiers.py`, and one import plus one call inside
-`tests/fencing/test_fence_coverage.py::test_every_fenced_entry_really_fences`.
+The probe must name the MODULE, not the word `verify(`. `signer.verify(...)` and
+`_ph.verify(...)` are the session-cookie and argon2 APIs: an unscoped
+`grep -rn "verifiers\|verify("` matches 20 lines across nine files, six of them
+unrelated (`auth/passwords.py`, `auth/session_cookie.py`, `auth/dependencies.py`,
+`web/api/auth.py`, `collab/ws_auth.py`, `tests/test_auth_session_cookie.py`) — which
+would send you to BLOCKED on a false positive at the plan's very first step.
 
-If anything else references it, STOP and report BLOCKED with what you found — the
-deletion list in this task is then incomplete.
+```bash
+grep -rn "tests\.fencing\.verifiers\|from tests\.fencing import verifiers" tests/ src/ --include=*.py
+```
+Expected: exactly two lines — `tests/fencing/test_verifiers.py:14` and the lazy import
+inside `test_fence_coverage.py::test_every_fenced_entry_really_fences` (around line
+241). Anything else is a real consumer: STOP and report BLOCKED, because the deletion
+list in this task is then incomplete.
+
+```bash
+grep -rln "verify(" tests/fencing --include=*.py
+```
+Expected: exactly four files — `verifiers.py`, `test_verifiers.py`,
+`test_fence_coverage.py` and `inventory.py`. The last two are PROSE, not consumers:
+`inventory.py:28` and `test_fence_coverage.py:57,134` mention `verify()` in comments
+on tests this task keeps. Leave them — they explain why `CATEGORIES_BY_KIND` and
+`NON_SEMANTIC_PINS` exist, which is still true.
 
 - [ ] **Step 2: Delete the two files**
 
@@ -206,7 +231,7 @@ git commit -m "test(fencing): delete the containment machinery the import check 
 - Consumes: nothing.
 - Produces:
   - `PORTS_PREFIX = "call_manager.proposal_assist.ports"`
-  - `LOCATOR_ATTRS: frozenset[str]` — `{"repo_dir", "workspaces_dir", "session_factory", "settings"}` (used in Task 4)
+  - `LOCATOR_NAMES: frozenset[str]` — `{"repo_dir", "workspaces_dir", "session_factory", "settings"}` (used in Task 3)
   - `check_source(source: str, *, path: str) -> list[str]` — returns a violation string per offence, empty when clean.
 
 - [ ] **Step 1: Write the failing test**
@@ -402,7 +427,12 @@ PORTS_PREFIX = "call_manager.proposal_assist.ports"
 #: authority: ToolContext exposes repo_dir, so
 #:     (ctx.repo_dir / "proposal.md").write_text(new_text)
 #: passes every import check. A tool holds names of operations, not paths.
-LOCATOR_ATTRS = frozenset({"repo_dir", "workspaces_dir", "session_factory", "settings"})
+#:
+#: The rule is on the NAME wherever it is written — as an attribute, as a parameter,
+#: or as a local binding. A tool that takes `repo_dir` as an argument and is wired
+#: from registry.py holds exactly the same authority while writing no attribute at
+#: all, and registry.py is permanently skipped by the gate.
+LOCATOR_NAMES = frozenset({"repo_dir", "workspaces_dir", "session_factory", "settings"})
 
 
 def _module_is_allowed(dotted: str) -> bool:
@@ -507,12 +537,13 @@ that are what a clean tool and a dirty one actually look like.
 - Create: `tests/fencing/fixtures/clean_tool.py`
 - Create: `tests/fencing/fixtures/reaches_a_helper.py`
 - Create: `tests/fencing/fixtures/reaches_a_locator.py`
+- Create: `tests/fencing/fixtures/laundered_locator.py`
 
 **Interfaces:**
-- Consumes: `check_source`, `LOCATOR_ATTRS`, `PORTS_PREFIX` (Task 2).
+- Consumes: `check_source`, `LOCATOR_NAMES`, `PORTS_PREFIX` (Task 2).
 - Produces:
   - `check_source(source, *, path)` now also reports locator access.
-  - `check_file(path: pathlib.Path, *, display: str | None = None) -> list[str]`
+  - `check_file(path: pathlib.Path) -> list[str]`
   - `REPO: pathlib.Path` and `FIXTURES: pathlib.Path`
 
 **The fixtures are PARSED, never imported.** They live under `tests/fencing/fixtures/`
@@ -569,6 +600,29 @@ def test_an_unrelated_attribute_is_fine():
     assert _check(src) == []
 
 
+def test_a_locator_arriving_as_a_parameter_is_rejected():
+    """Spec 4.1, the laundering case. Nothing here is an attribute: the composition
+    root passes `ctx.repo_dir` in and the tool never writes `ctx` at all. An
+    attribute-only rule waves this through, and `registry.py` — the module that would
+    do the passing — is permanently skipped, so nothing else would catch it. The
+    parameter and its one use are both reported. `citations.py:135` is this shape in
+    production today."""
+    src = 'def f(repo_dir, text):\n    (repo_dir / "proposal.md").write_text(text)\n'
+    violations = _check(src)
+    assert len(violations) == 2
+    assert all("repo_dir" in v for v in violations)
+
+
+def test_a_locator_bound_to_a_local_name_is_rejected():
+    """A locator pulled out of `**kwargs` never touches an attribute either."""
+    src = (
+        "def f(**kw):\n"
+        '    session_factory = kw["session_factory"]\n'
+        "    return session_factory()\n"
+    )
+    assert len(_check(src)) == 2
+
+
 # ------------------------------------------------------------ reading a file
 
 
@@ -585,6 +639,13 @@ def test_the_helper_reaching_fixture_fails():
 def test_the_locator_reaching_fixture_fails():
     violations = check_file(FIXTURES / "reaches_a_locator.py")
     assert violations, "the locator fixture stopped violating — fix the fixture"
+    assert any("repo_dir" in v for v in violations)
+
+
+def test_the_laundered_locator_fixture_fails():
+    """Clean imports AND no attribute access, and still a repo write."""
+    violations = check_file(FIXTURES / "laundered_locator.py")
+    assert violations, "the parameter fixture stopped violating — fix the fixture"
     assert any("repo_dir" in v for v in violations)
 
 
@@ -620,27 +681,50 @@ FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures"
 Inside `check_source`, in the same `ast.walk` loop, add a branch:
 
 ```python
-        elif isinstance(node, ast.Attribute) and node.attr in LOCATOR_ATTRS:
+        elif isinstance(node, ast.Attribute) and node.attr in LOCATOR_NAMES:
             violations.append(f"{path}:{node.lineno}: names the resource locator {node.attr}")
+        elif isinstance(node, ast.Name) and node.id in LOCATOR_NAMES:
+            violations.append(f"{path}:{node.lineno}: names the resource locator {node.id}")
+        elif isinstance(node, ast.arg) and node.arg in LOCATOR_NAMES:
+            violations.append(f"{path}:{node.lineno}: names the resource locator {node.arg}")
 ```
 
-The rule is on the attribute NAME, not on `ctx` specifically: binding the context to
-another variable first must not launder it. A chained expression such as
-`ctx.settings.workspaces_dir` is two `ast.Attribute` nodes and is reported twice, so
-fixing one hop cannot look like fixing both.
+Three node types, because there are three ways to write the name.
+
+`ast.Attribute` is `ctx.repo_dir`. The rule is on the attribute name, not on `ctx`
+specifically, so binding the context to another variable first must not launder it.
+
+`ast.arg` is `def f(repo_dir)`. A converted tool that takes the locator as a parameter
+and is wired from `registry.py` holds identical authority while writing no attribute
+at all — and `registry.py` is in `GATE_SKIPS`, so an attribute-only rule leaves nobody
+watching. This is not hypothetical: `citations.py:135` is `def _current_head(repo_dir)`
+today, called with `ctx.repo_dir` from the same module. Once the caller moves, the
+attribute disappears and the authority does not.
+
+`ast.Name` is the local binding — `session_factory = kw["session_factory"]` — and every
+use that follows.
+
+Each hop and each occurrence is reported separately: `ctx.settings.workspaces_dir` is
+two `ast.Attribute` nodes, and a parameter plus its one use is two nodes, so fixing one
+cannot look like fixing all.
+
+`ast.keyword` (the `repo_dir=` in `helper(repo_dir=p)`) is deliberately NOT covered:
+the keyword name is chosen by the callee, and the value passed must itself have been
+obtained through an attribute, a parameter or a local binding — all three of which are
+caught — so it would only double-report. `getattr(ctx, "repo_dir")` is likewise
+uncovered; that is adversarial, and GC-4 says plainly this is hygiene, not containment.
 
 Then append:
 
 ```python
-def check_file(path: pathlib.Path, *, display: str | None = None) -> list[str]:
-    """Check one source file. *display* overrides the path shown in violations;
-    it defaults to the repo-relative path so a failure names something a human
-    can open."""
-    shown = display or str(path.resolve().relative_to(REPO))
+def check_file(path: pathlib.Path) -> list[str]:
+    """Check one source file. Violations name the repo-relative path, so a failure
+    names something a human can open."""
+    shown = str(path.resolve().relative_to(REPO))
     return check_source(path.read_text(encoding="utf-8"), path=shown)
 ```
 
-- [ ] **Step 4: Write the three fixtures**
+- [ ] **Step 4: Write the four fixtures**
 
 Create `tests/fencing/fixtures/clean_tool.py`:
 
@@ -710,13 +794,34 @@ def overwrite(ctx, new_text: str) -> None:
     (ctx.repo_dir / "proposal.md").write_text(new_text)
 ```
 
+Create `tests/fencing/fixtures/laundered_locator.py`:
+
+```python
+"""The locator arriving as a PARAMETER, not as an attribute.
+
+Spec 4.1. The imports are clean AND no attribute is named, so an attribute-only
+locator rule reports nothing at all — and this module overwrites the artifact a
+human is editing. The composition root wires it with `ctx.repo_dir`, and
+`registry.py` is permanently skipped by the gate, so there is no second line of
+defence. `citations.py:135` is this shape in production today.
+
+PARSED by the import gate, never imported and never collected.
+"""
+
+from __future__ import annotations
+
+
+def overwrite(repo_dir, new_text: str) -> None:
+    (repo_dir / "proposal.md").write_text(new_text)
+```
+
 - [ ] **Step 5: Run the tests**
 
 Run:
 ```bash
 uv run pytest tests/fencing/test_import_gate.py -q > /tmp/f3c3.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3c3.txt
 ```
-Expected: `PYTEST_EXIT=0`, 27 passed.
+Expected: `PYTEST_EXIT=0`, 30 passed.
 
 Also confirm the fixtures are not collected and do not trip the linter:
 
@@ -733,9 +838,9 @@ git add tests/fencing/import_gate.py tests/fencing/test_import_gate.py tests/fen
 git commit -m "test(fencing): the resource-locator rule and the on-disk fixtures (F3c Task 3)"
 ```
 
-- [ ] **Step 7: Prove the locator rule bites**
+- [ ] **Step 7: Prove BOTH halves of the locator rule bite**
 
-Delete the `ast.Attribute` branch you added in Step 3.
+Mutation 1 — delete the `ast.Attribute` branch you added in Step 3.
 
 Run:
 ```bash
@@ -749,15 +854,36 @@ git checkout tests/fencing/import_gate.py
 git diff --exit-code HEAD -- tests/fencing/import_gate.py
 ```
 
+Mutation 2 — restore that branch and delete the `ast.Name` and `ast.arg` branches
+instead.
+
+Run:
+```bash
+uv run pytest tests/fencing/test_import_gate.py -q > /tmp/f3c3m2.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -30 /tmp/f3c3m2.txt
+```
+Expected: FAIL on `test_a_locator_arriving_as_a_parameter_is_rejected`,
+`test_a_locator_bound_to_a_local_name_is_rejected` and
+`test_the_laundered_locator_fixture_fails` — the module that takes `repo_dir` as an
+argument goes green, which is the hole an attribute-only rule leaves open. Without
+this second mutation the two new branches ship unproven.
+
+```bash
+git checkout tests/fencing/import_gate.py
+git diff --exit-code HEAD -- tests/fencing/import_gate.py
+```
+
 ---
 
 ### Task 4: Arm the gate over `tools/`
 
 Every module in `tools/` violates the rule today and none is converted until F3d, so
-the gate ships **armed with a named exemption per violating module**. Two tests make
-that honest in both directions: a module not on the list must be clean, and a module
-on the list must still be dirty. Converting a module therefore means deleting its
-line, and the gate goes red if you forget.
+the gate ships **armed with a named exemption per violating module, pinned to that
+module's current violations**. Three tests make that honest in three directions: a
+module not on the list must be clean, a module on the list must still be dirty, and a
+module on the list may not acquire a violation its entry does not pin. Converting a
+module therefore means deleting its entry, and the gate goes red if you forget;
+drifting further away means widening a pin in a reviewed diff, and the gate goes red
+if you do it silently.
 
 **The measured starting state** (run against the tree while planning — reproduce it,
 do not trust it):
@@ -769,20 +895,29 @@ do not trust it):
 | `context.py` | 3 | `session_factory` |
 | `history.py` | 2 | `repo_dir` |
 | `proposal.py` | 7 | `repo_dir`, `session_factory` |
-| `references.py` | 10 | `session_factory`, `settings`, `workspaces_dir` |
+| `references.py` | 16 | `session_factory`, `settings`, `workspaces_dir` |
 | `review_submit.py` | 2 | `session_factory` |
 | `scorecard.py` | 3 | `session_factory` |
 | `uncited_claims.py` | 2 | `session_factory` |
+
+The count is **import statements**, not distinct modules — `references.py` imports
+several of the same modules twice from different function bodies, which is why it
+reads 16 here and pins only 10 distinct import strings below. Every other row is the
+same under either reading.
 
 `registry.py` and `__init__.py` are **permanently skipped**: `registry.py` is the
 composition root — it defines `ToolContext`, builds the MCP server, imports every tool
 module to wire it, and is imported by eleven non-tool modules. It necessarily names
 things a tool may not. `__init__.py` re-exports from it. The skip is not
-unconditional: both are still forbidden to import `call_manager.db.models` at all, or
-`sqlalchemy` outside an `if TYPE_CHECKING:` block, so the exemption cannot become
-where violations hide. Verified while planning: `registry.py` imports no `db.models`,
-and its only `sqlalchemy` import is `from sqlalchemy.orm import sessionmaker` under
-`TYPE_CHECKING`, for the `ToolContext.session_factory` annotation.
+unconditional: both are still forbidden to import the `call_manager.db` package at
+all, or `sqlalchemy` outside an `if TYPE_CHECKING:` block, so the exemption cannot
+become where violations hide. The ban is on the PACKAGE, not on `db.models` alone:
+`src/call_manager/db/__init__.py:7` does `from call_manager.db import models`, so
+`import call_manager.db` hands you `db.models.Workspace` without ever spelling the
+models module. Verified while planning: `registry.py` imports nothing from
+`call_manager.db`, and its only `sqlalchemy` import is
+`from sqlalchemy.orm import sessionmaker` under `TYPE_CHECKING`, for the
+`ToolContext.session_factory` annotation.
 
 **Files:**
 - Modify: `tests/fencing/inventory.py`
@@ -792,8 +927,9 @@ and its only `sqlalchemy` import is `from sqlalchemy.orm import sessionmaker` un
 **Interfaces:**
 - Consumes: `check_file`, `REPO`, `check_source` (Tasks 2-3).
 - Produces:
-  - `TOOLS_NOT_YET_CONVERTED: frozenset[str]` and `GATE_SKIPS: frozenset[str]` in `tests/fencing/inventory.py`
-  - `TOOLS_DIR: pathlib.Path` and `tool_modules() -> list[pathlib.Path]` in `import_gate.py`
+  - `TOOLS_NOT_YET_CONVERTED: dict[str, frozenset[str]]` (module key -> the normalized violations it may still have) and `GATE_SKIPS: frozenset[str]` in `tests/fencing/inventory.py`
+  - `TOOLS_DIR: pathlib.Path`, `tool_modules() -> list[pathlib.Path]` and `tool_key(path: pathlib.Path) -> str` in `import_gate.py`
+  - `normalized_violation(violation: str) -> str` in `import_gate.py`
   - `check_composition_root(source: str, *, path: str) -> list[str]` in `import_gate.py`
 
 - [ ] **Step 1: Write the failing tests**
@@ -808,7 +944,8 @@ def test_every_tool_module_is_either_clean_or_exempt():
     """The armed gate. A module not named in TOOLS_NOT_YET_CONVERTED must pass."""
     problems = []
     for path in tool_modules():
-        if path.name in GATE_SKIPS or path.name in TOOLS_NOT_YET_CONVERTED:
+        key = tool_key(path)
+        if key in GATE_SKIPS or key in TOOLS_NOT_YET_CONVERTED:
             continue
         problems.extend(check_file(path))
     assert not problems, (
@@ -836,28 +973,75 @@ def test_no_exemption_is_stale():
     )
 
 
+def test_no_exempt_module_acquires_a_new_violation():
+    """The THIRD direction, and the one that stops `tools/` drifting further away
+    while it waits for its slice. `test_no_exemption_is_stale` asks only that ONE
+    violation survive, so without this an exempt module could import anything at all
+    and stay green — and today every non-skipped module is exempt, so that is the
+    whole package. The pin is normalized: line numbers are dropped, because moving a
+    line is not new authority, and it is a SUBSET check, so removing a violation is
+    always free."""
+    problems = []
+    for name, pinned in sorted(TOOLS_NOT_YET_CONVERTED.items()):
+        for violation in check_file(TOOLS_DIR / name):
+            if normalized_violation(violation) not in pinned:
+                problems.append(violation)
+    assert not problems, (
+        "exempt modules acquired violations their entry does not pin:\n  "
+        + "\n  ".join(problems)
+        + "\n\nConvert the module, or — if this is genuinely unavoidable for now — "
+        "widen its entry in TOOLS_NOT_YET_CONVERTED. Widening is a reviewed diff: do "
+        "not paste whatever this failure printed."
+    )
+
+
 def test_every_exemption_names_a_module_that_exists():
     """A renamed or deleted tool must not leave a permanent free pass behind."""
-    on_disk = {p.name for p in tool_modules()}
-    missing = sorted(TOOLS_NOT_YET_CONVERTED - on_disk)
+    on_disk = {tool_key(p) for p in tool_modules()}
+    missing = sorted(TOOLS_NOT_YET_CONVERTED.keys() - on_disk)
     assert not missing, f"exemptions naming modules that no longer exist: {missing}"
 
 
 def test_the_skips_and_the_exemptions_do_not_overlap():
     """A module is permanently infrastructure or temporarily unconverted, never
     both — otherwise deleting the exemption would silently change nothing."""
-    assert not (GATE_SKIPS & TOOLS_NOT_YET_CONVERTED)
+    assert not (GATE_SKIPS & TOOLS_NOT_YET_CONVERTED.keys())
 
 
 def test_the_composition_root_may_not_reach_the_database():
     """The skip is narrow, not unconditional. registry.py wires every tool, so it
     names modules a tool may not — but it must not do database work itself, and a
     TYPE_CHECKING-only annotation import cannot do anything at runtime."""
+    seen = set()
     problems = []
-    for name in sorted(GATE_SKIPS):
-        path = TOOLS_DIR / name
-        problems.extend(check_composition_root(path.read_text(encoding="utf-8"), path=name))
+    for path in tool_modules():
+        key = tool_key(path)
+        if key not in GATE_SKIPS:
+            continue
+        seen.add(key)
+        problems.extend(check_composition_root(path.read_text(encoding="utf-8"), path=key))
     assert not problems, "\n  ".join(problems)
+    assert seen == set(GATE_SKIPS), (
+        f"GATE_SKIPS names a module that is not in tools/: {sorted(GATE_SKIPS - seen)}"
+    )
+
+
+def test_a_nested_tool_module_cannot_inherit_a_top_level_exemption(tmp_path, monkeypatch):
+    """The identity is the path under `tools/`, not the basename. Otherwise a new
+    `tools/sub/audit.py` rides on `audit.py`'s exemption, and a new
+    `tools/sub/__init__.py` rides on the composition root's PERMANENT skip while the
+    narrower rule — which reads `TOOLS_DIR / key` — never sees it. `citations.py` is
+    37 KB and `references.py` 23 KB, so splitting one into a package during
+    conversion is exactly what F3d will want to do."""
+    import tests.fencing.import_gate as ig
+
+    nested = tmp_path / "sub" / "audit.py"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("from sqlalchemy import select\n", encoding="utf-8")
+    monkeypatch.setattr(ig, "TOOLS_DIR", tmp_path)
+    assert ig.tool_key(nested) == "sub/audit.py"
+    assert ig.tool_key(nested) not in TOOLS_NOT_YET_CONVERTED
+    assert ig.tool_key(nested) not in GATE_SKIPS
 
 
 def test_the_composition_root_rule_rejects_a_runtime_sqlalchemy_import():
@@ -883,6 +1067,64 @@ def test_the_composition_root_rule_rejects_models_even_under_type_checking():
         "    from call_manager.db.models import Workspace\n"
     )
     assert len(check_composition_root(src, path="registry.py")) == 1
+
+
+def test_the_composition_root_rule_sees_models_imported_as_a_submodule():
+    """`from call_manager.db import models` binds the models MODULE, but
+    `node.module` names only the package — the aliases have to be inspected too, or
+    the most natural spelling of the forbidden import is invisible. The codebase
+    itself writes this form, at `src/call_manager/db/__init__.py:7`."""
+    plain = "from call_manager.db import models\n"
+    assert len(check_composition_root(plain, path="registry.py")) == 1
+    aliased = "from call_manager.db import models as m\n"
+    assert len(check_composition_root(aliased, path="registry.py")) == 1
+
+
+def test_the_composition_root_rule_rejects_the_db_package_itself():
+    """The ban is on the PACKAGE. `src/call_manager/db/__init__.py:7` re-exports
+    models as a side effect its own comment explains, so importing the package hands
+    you `db.models.Workspace` without naming the models module at all."""
+    assert len(check_composition_root("from call_manager import db\n", path="registry.py")) == 1
+    assert len(check_composition_root("import call_manager.db\n", path="registry.py")) == 1
+
+
+def test_the_composition_root_rule_rejects_a_counterfeit_type_checking_guard():
+    """A guard only guards when the name resolves to `typing.TYPE_CHECKING`. A module
+    that rebinds the name runs the body at import time — `TYPE_CHECKING = True`
+    followed by `if TYPE_CHECKING: from sqlalchemy.orm import sessionmaker` binds a
+    usable sessionmaker, which is the opposite of what the exemption grants."""
+    rebound = (
+        "TYPE_CHECKING = True\n"
+        "if TYPE_CHECKING:\n"
+        "    from sqlalchemy.orm import sessionmaker\n"
+    )
+    assert len(check_composition_root(rebound, path="registry.py")) == 1
+    borrowed = (
+        "import types\n"
+        "cfg = types.SimpleNamespace(TYPE_CHECKING=True)\n"
+        "if cfg.TYPE_CHECKING:\n"
+        "    import sqlalchemy\n"
+    )
+    assert len(check_composition_root(borrowed, path="registry.py")) == 1
+
+
+def test_the_composition_root_rule_accepts_every_real_spelling_of_the_guard():
+    """The rule must not cost the composition root a legitimate annotation import, in
+    any of the three ways `typing.TYPE_CHECKING` is actually written."""
+    for src in (
+        "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import sqlalchemy\n",
+        "from typing import TYPE_CHECKING as TC\nif TC:\n    import sqlalchemy\n",
+        "import typing\nif typing.TYPE_CHECKING:\n    import sqlalchemy\n",
+    ):
+        assert check_composition_root(src, path="registry.py") == []
+
+
+def test_the_composition_root_rule_rejects_a_relative_import():
+    """`from ...db import models` reaches the db package without ever spelling its
+    dotted name, and source text alone cannot resolve a relative import. Neither
+    skipped file has one today."""
+    src = "from ...db import models\n"
+    assert len(check_composition_root(src, path="registry.py")) == 1
 ```
 
 and extend the imports at the top of the file:
@@ -894,6 +1136,8 @@ from tests.fencing.import_gate import (
     check_composition_root,
     check_file,
     check_source,
+    normalized_violation,
+    tool_key,
     tool_modules,
 )
 from tests.fencing.inventory import GATE_SKIPS, TOOLS_NOT_YET_CONVERTED
@@ -912,21 +1156,104 @@ Expected: collection error — `ImportError: cannot import name 'TOOLS_DIR'`
 In `tests/fencing/inventory.py`, append:
 
 ```python
-#: Tool modules that do not yet satisfy the F3c import boundary. Each is a
-#: MIGRATION DEBT, not a permission: F3d/F3e/F3f delete its line as they convert
-#: it, and `test_no_exemption_is_stale` goes red if a converted module is left
-#: here. Adding an entry is a reviewed diff — the cost falls on staying dirty.
-TOOLS_NOT_YET_CONVERTED: frozenset[str] = frozenset({
-    "audit.py",           # 7 project imports incl. db.models; repo_dir, session_factory
-    "citations.py",       # 17 project imports incl. sqlalchemy + db.models; repo_dir, session_factory
-    "context.py",         # sqlalchemy + db.models; session_factory
-    "history.py",         # sibling tool import; repo_dir (read-only git via subprocess)
-    "proposal.py",        # 7 project imports incl. a lazy one; repo_dir, session_factory
-    "references.py",      # 10 project imports incl. sqlalchemy + db.models; session_factory, settings, workspaces_dir
-    "review_submit.py",   # db.models; session_factory
-    "scorecard.py",       # db.models + evaluator.scoring; session_factory
-    "uncited_claims.py",  # db.models; session_factory
-})
+#: Tool modules that do not yet satisfy the F3c import boundary, each PINNED to
+#: the violations it is allowed to still have. Every entry is MIGRATION DEBT, not
+#: a permission: F3d/F3e/F3f delete it as they convert the module,
+#: `test_no_exemption_is_stale` goes red if a converted module is left here, and
+#: `test_no_exempt_module_acquires_a_new_violation` goes red if a module on this
+#: list reaches something new. Adding an entry and widening one are both reviewed
+#: diffs — the cost falls on staying dirty.
+#:
+#: Violations are NORMALIZED (no path, no line number), so a pin survives an
+#: unrelated edit; and the check is a SUBSET, so a REMOVED violation never fails.
+#: Cleaning up is free, and both the list and each entry can only shrink.
+TOOLS_NOT_YET_CONVERTED: dict[str, frozenset[str]] = {
+    "audit.py": frozenset({
+        "from call_manager.db.models import ...",
+        "from call_manager.proposal_assist.citations.audit import ...",
+        "from call_manager.proposal_assist.citations.bibliography import ...",
+        "from call_manager.proposal_assist.citations.claims import ...",
+        "from call_manager.proposal_assist.citations.markers import ...",
+        "from call_manager.proposal_assist.tools.citations import ...",
+        "from call_manager.proposal_assist.tools.registry import ...",
+        "names the resource locator repo_dir",
+        "names the resource locator session_factory",
+    }),
+    "citations.py": frozenset({
+        "from call_manager.db.models import ...",
+        "from call_manager.proposal_assist.citations import ...",
+        "from call_manager.proposal_assist.citations.audit import ...",
+        "from call_manager.proposal_assist.citations.gitio import ...",
+        "from call_manager.proposal_assist.citations.ledger import ...",
+        "from call_manager.proposal_assist.citations.markers import ...",
+        "from call_manager.proposal_assist.citations.quotes import ...",
+        "from call_manager.proposal_assist.collab import ...",
+        "from call_manager.proposal_assist.collab.state import ...",
+        "from call_manager.proposal_assist.drafting.locking import ...",
+        "from call_manager.proposal_assist.editing.sectionizer import ...",
+        "from call_manager.proposal_assist.proposals.proposing import ...",
+        "from call_manager.proposal_assist.references.csl import ...",
+        "from call_manager.proposal_assist.tools.proposal import ...",
+        "from call_manager.proposal_assist.tools.registry import ...",
+        "from sqlalchemy import ...",
+        "from sqlalchemy.orm import ...",
+        "names the resource locator repo_dir",
+        "names the resource locator session_factory",
+    }),
+    "context.py": frozenset({
+        "from call_manager.db.models import ...",
+        "from call_manager.proposal_assist.tools.registry import ...",
+        "from sqlalchemy import ...",
+        "names the resource locator session_factory",
+    }),
+    "history.py": frozenset({
+        "from call_manager.proposal_assist.tools.proposal import ...",
+        "from call_manager.proposal_assist.tools.registry import ...",
+        "names the resource locator repo_dir",
+    }),
+    "proposal.py": frozenset({
+        "from call_manager.proposal_assist.artifacts import ...",
+        "from call_manager.proposal_assist.citations.gitio import ...",
+        "from call_manager.proposal_assist.collab import ...",
+        "from call_manager.proposal_assist.collab.state import ...",
+        "from call_manager.proposal_assist.editing.sectionizer import ...",
+        "from call_manager.proposal_assist.proposals.proposing import ...",
+        "from call_manager.proposal_assist.tools.registry import ...",
+        "names the resource locator repo_dir",
+        "names the resource locator session_factory",
+    }),
+    "references.py": frozenset({
+        "from call_manager.db.models import ...",
+        "from call_manager.embeddings.client import ...",
+        "from call_manager.proposal_assist.references.dispatcher import ...",
+        "from call_manager.proposal_assist.references.embed import ...",
+        "from call_manager.proposal_assist.references.fetcher import ...",
+        "from call_manager.proposal_assist.references.ingest import ...",
+        "from call_manager.proposal_assist.references.storage import ...",
+        "from call_manager.proposal_assist.tools.registry import ...",
+        "from sqlalchemy import ...",
+        "from starlette.concurrency import ...",
+        "names the resource locator session_factory",
+        "names the resource locator settings",
+        "names the resource locator workspaces_dir",
+    }),
+    "review_submit.py": frozenset({
+        "from call_manager.db.models import ...",
+        "from call_manager.proposal_assist.tools.registry import ...",
+        "names the resource locator session_factory",
+    }),
+    "scorecard.py": frozenset({
+        "from call_manager.db.models import ...",
+        "from call_manager.proposal_assist.evaluator.scoring import ...",
+        "from call_manager.proposal_assist.tools.registry import ...",
+        "names the resource locator session_factory",
+    }),
+    "uncited_claims.py": frozenset({
+        "from call_manager.db.models import ...",
+        "from call_manager.proposal_assist.tools.registry import ...",
+        "names the resource locator session_factory",
+    }),
+}
 
 #: PERMANENTLY outside the gate, by name. `registry.py` is the composition root:
 #: it defines ToolContext, builds the MCP server, imports every tool module to
@@ -934,7 +1261,8 @@ TOOLS_NOT_YET_CONVERTED: frozenset[str] = frozenset({
 #: tool may not. `__init__.py` re-exports from it.
 #:
 #: The skip is narrow, not unconditional — `check_composition_root` still forbids
-#: both from importing db.models at all, or sqlalchemy outside `if TYPE_CHECKING`,
+#: both from importing the `call_manager.db` package at all (importing it hands you
+#: `db.models`, see db/__init__.py:7), or sqlalchemy outside a REAL `if TYPE_CHECKING`,
 #: so this cannot become where violations hide.
 GATE_SKIPS: frozenset[str] = frozenset({"registry.py", "__init__.py"})
 ```
@@ -946,29 +1274,88 @@ In `tests/fencing/import_gate.py`, append:
 ```python
 TOOLS_DIR = REPO / "src" / "call_manager" / "proposal_assist" / "tools"
 
-#: The composition root may name project modules a tool may not, but it must not
-#: do database work. Models are forbidden outright — naming a model is naming a
-#: table. SQLAlchemy is forbidden at RUNTIME only: an import that exists solely
-#: to annotate a field cannot be used to execute anything.
-_MODELS_MODULE = "call_manager.db.models"
+#: The composition root may name project modules a tool may not, but it must not do
+#: database work. The `call_manager.db` PACKAGE is forbidden outright — naming a model
+#: is naming a table, and `db/__init__.py:7` re-exports `models`, so importing the
+#: package alone hands you `db.models.Workspace`. SQLAlchemy is forbidden at RUNTIME
+#: only: an import that exists solely to annotate a field cannot execute anything.
+_DB_PACKAGE = "call_manager.db"
 
 
 def tool_modules() -> list[pathlib.Path]:
-    """Every `.py` file directly inside `tools/`, sorted. No subpackages exist
-    today; if one appears, it is discovered too."""
+    """Every `.py` file under `tools/`, sorted. No subpackage exists today; if one
+    appears it is discovered, and `tool_key` gives it an identity no top-level
+    exemption can match."""
     return sorted(p for p in TOOLS_DIR.rglob("*.py") if "__pycache__" not in p.parts)
 
 
+def tool_key(path: pathlib.Path) -> str:
+    """The identity an exemption or a skip must name: the path RELATIVE TO `tools/`,
+    POSIX-style.
+
+    Never `path.name`. A basename key lets a new `tools/sub/audit.py` inherit
+    top-level `audit.py`'s exemption and a new `tools/sub/__init__.py` inherit the
+    composition root's PERMANENT skip — while `check_composition_root`, which reads
+    `TOOLS_DIR / key`, never sees the nested file at all. Two dirty modules would then
+    sit inside `tools/` with the whole gate green. For a top-level module the key IS
+    the basename, so both lists read exactly as before.
+    """
+    return path.resolve().relative_to(TOOLS_DIR.resolve()).as_posix()
+
+
+def normalized_violation(violation: str) -> str:
+    """`path:lineno: what` -> `what`.
+
+    A pin records WHAT a dirty module still does, not WHERE it does it: moving a line
+    is not new authority, so the pin must survive an unrelated edit. Lives here, next
+    to the code that formats the string it parses.
+    """
+    _prefix, sep, rest = violation.partition(": ")
+    assert sep, f"unparseable violation string: {violation!r}"
+    return rest
+
+
+def _typing_flag_names(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]:
+    """The names in this module that really resolve to `typing.TYPE_CHECKING`.
+
+    Returns (bare names, typing-module aliases): `from typing import TYPE_CHECKING as
+    TC` contributes "TC" to the first, `import typing as t` contributes "t" to the
+    second. A name the module ASSIGNS to anywhere is dropped from both — a module that
+    writes `TYPE_CHECKING = True` runs the guarded body at import time, and a guard
+    that runs is not a guard. Dropping on any assignment, even a local one, is
+    deliberately conservative: it can cost a false failure, never a miss.
+    """
+    flags: set[str] = set()
+    modules: set[str] = set()
+    rebound: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "typing" and not node.level:
+            for alias in node.names:
+                if alias.name == "TYPE_CHECKING":
+                    flags.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "typing":
+                    modules.add(alias.asname or "typing")
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            rebound.add(node.id)
+    return frozenset(flags - rebound), frozenset(modules - rebound)
+
+
 def _type_checking_node_ids(tree: ast.AST) -> set[int]:
-    """ids of every node inside an `if TYPE_CHECKING:` body."""
+    """ids of every node inside an `if TYPE_CHECKING:` body, where TYPE_CHECKING is
+    the real `typing.TYPE_CHECKING` and not a local name that merely spells it."""
+    flags, modules = _typing_flag_names(tree)
     guarded: set[int] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.If):
             continue
         test = node.test
-        named = (
-            (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING")
-            or (isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING")
+        named = (isinstance(test, ast.Name) and test.id in flags) or (
+            isinstance(test, ast.Attribute)
+            and test.attr == "TYPE_CHECKING"
+            and isinstance(test.value, ast.Name)
+            and test.value.id in modules
         )
         if named:
             for child in node.body:
@@ -977,25 +1364,47 @@ def _type_checking_node_ids(tree: ast.AST) -> set[int]:
     return guarded
 
 
+def _imported_names(node: ast.Import | ast.ImportFrom) -> list[str]:
+    """Every dotted module path an import statement can bind.
+
+    `from call_manager.db import models` binds the SUBMODULE `call_manager.db.models`,
+    but `node.module` says only `call_manager.db` — so the aliases have to be joined
+    onto the module, or the most natural spelling of the forbidden import is invisible.
+    """
+    if isinstance(node, ast.Import):
+        return [alias.name for alias in node.names]
+    return [node.module] + [f"{node.module}.{alias.name}" for alias in node.names]
+
+
 def check_composition_root(source: str, *, path: str) -> list[str]:
     """The narrow rule for GATE_SKIPS. Not the tool rule — these files legitimately
-    name every tool module in order to wire them."""
+    name every tool module in order to wire them.
+
+    One violation per import statement: the first hit wins, so a statement reaching the
+    db package is reported once whether it is spelled as the package, as the models
+    module, or as a name inside it.
+    """
     violations: list[str] = []
     tree = ast.parse(source, filename=path)
     guarded = _type_checking_node_ids(tree)
     for node in ast.walk(tree):
-        names: list[str] = []
-        if isinstance(node, ast.Import):
-            names = [a.name for a in node.names]
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            names = [node.module]
-        for name in names:
-            if name == _MODELS_MODULE or name.startswith(_MODELS_MODULE + "."):
-                violations.append(f"{path}:{node.lineno}: imports {name}")
-            elif name.split(".")[0] == "sqlalchemy" and id(node) not in guarded:
-                violations.append(
-                    f"{path}:{node.lineno}: imports {name} outside TYPE_CHECKING"
-                )
+        if not isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        if isinstance(node, ast.ImportFrom) and (node.level or node.module is None):
+            # Source text alone cannot resolve a relative import, and
+            # `from ...db import models` would reach the db package without ever
+            # spelling its dotted name. Neither skipped file has one today.
+            shown = "." * node.level + (node.module or "")
+            violations.append(f"{path}:{node.lineno}: relative import from {shown}")
+            continue
+        names = _imported_names(node)
+        db = [n for n in names if n == _DB_PACKAGE or n.startswith(_DB_PACKAGE + ".")]
+        if db:
+            violations.append(f"{path}:{node.lineno}: imports {db[0]}")
+            continue
+        sqla = [n for n in names if n.split(".")[0] == "sqlalchemy"]
+        if sqla and id(node) not in guarded:
+            violations.append(f"{path}:{node.lineno}: imports {sqla[0]} outside TYPE_CHECKING")
     return violations
 ```
 
@@ -1005,7 +1414,7 @@ Run:
 ```bash
 uv run pytest tests/fencing/test_import_gate.py -q > /tmp/f3c4.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3c4.txt
 ```
-Expected: `PYTEST_EXIT=0`, 35 passed.
+Expected: `PYTEST_EXIT=0`, 45 passed.
 
 If `test_every_tool_module_is_either_clean_or_exempt` fails, the exemption list in
 Step 3 is wrong for this tree — reproduce the measurement rather than adding whatever
@@ -1021,7 +1430,8 @@ git commit -m "test(fencing): arm the import gate over tools/ with shrinking exe
 
 - [ ] **Step 7: Prove both directions of the armed gate**
 
-Mutation 1 — delete `"scorecard.py"` from `TOOLS_NOT_YET_CONVERTED`.
+Mutation 1 — delete the whole `"scorecard.py": frozenset({...}),` entry from
+`TOOLS_NOT_YET_CONVERTED`.
 
 Run:
 ```bash
@@ -1034,7 +1444,7 @@ git checkout tests/fencing/inventory.py
 git diff --exit-code HEAD -- tests/fencing/inventory.py
 ```
 
-Mutation 2 — add `"clean_stub.py"` to `TOOLS_NOT_YET_CONVERTED` and create
+Mutation 2 — add `"clean_stub.py": frozenset(),` to `TOOLS_NOT_YET_CONVERTED` and create
 `src/call_manager/proposal_assist/tools/clean_stub.py` containing only
 `"""Temporary."""` and `import uuid`, then `__all__ = ["uuid"]` so ruff is satisfied.
 
@@ -1054,6 +1464,65 @@ git diff --exit-code HEAD -- tests/fencing/inventory.py
 The last command EXITS NON-ZERO if the stub survived. Do not substitute
 `git status --short` here — it exits 0 whether or not the file is there, which is
 the same trap GC-10 names.
+
+Mutation 3 — the pin. Append `import httpx` to
+`src/call_manager/proposal_assist/tools/history.py`, an exempt module.
+
+Run:
+```bash
+uv run pytest tests/fencing/test_import_gate.py -q -k acquires_a_new > /tmp/f3c4c.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3c4c.txt
+uv run pytest tests/fencing/test_import_gate.py -q -k "either_clean_or_exempt or stale" > /tmp/f3c4d.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -5 /tmp/f3c4d.txt
+```
+Expected: the FIRST run FAILS, naming `tools/history.py:<line>: import httpx` — being
+exempt does not buy new authority. The SECOND run still PASSES on the same dirty tree,
+which is exactly why the third test exists: the honest-in-both-directions pair cannot
+see a dirty module getting dirtier.
+
+```bash
+git checkout src/call_manager/proposal_assist/tools/history.py
+git diff --exit-code HEAD -- src/call_manager/proposal_assist/tools/history.py
+```
+
+Mutation 4 — the nested-module key. Create
+`src/call_manager/proposal_assist/tools/sub/__init__.py` containing `"""Nested."""`
+and `from call_manager.db.models import Workspace`, then `__all__ = ["Workspace"]` so
+ruff is satisfied.
+
+Run:
+```bash
+uv run pytest tests/fencing/test_import_gate.py -q -k "either_clean_or_exempt or nested" > /tmp/f3c4e.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3c4e.txt
+```
+Expected: FAIL naming `tools/sub/__init__.py`. On a basename key this file would be
+PERMANENTLY skipped — `__init__.py` is in `GATE_SKIPS` — and the composition-root rule,
+which reads `TOOLS_DIR / key`, would never read it either, so a module importing
+`db.models` would sit inside `tools/` with both directions of the gate green.
+
+```bash
+rm -rf src/call_manager/proposal_assist/tools/sub
+[ ! -e src/call_manager/proposal_assist/tools/sub ]
+```
+The last command EXITS NON-ZERO if the directory survived.
+
+Mutation 5 — the composition-root rule. In `check_composition_root`, replace
+`names = _imported_names(node)` with the pre-fix behaviour:
+
+```python
+        names = [node.module] if isinstance(node, ast.ImportFrom) else [a.name for a in node.names]
+```
+
+Run:
+```bash
+uv run pytest tests/fencing/test_import_gate.py -q -k composition_root > /tmp/f3c4f.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3c4f.txt
+```
+Expected: FAIL on `test_the_composition_root_rule_sees_models_imported_as_a_submodule`
+and `test_the_composition_root_rule_rejects_the_db_package_itself` — reading only
+`node.module` misses `from call_manager.db import models`, which is the spelling the
+codebase itself uses at `db/__init__.py:7`.
+
+```bash
+git checkout tests/fencing/import_gate.py
+git diff --exit-code HEAD -- tests/fencing/import_gate.py
+```
 
 ---
 
@@ -1098,7 +1567,6 @@ method the Queries Protocol declares.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
 
 import pytest
 
@@ -1150,8 +1618,17 @@ CASES = {
 
 def test_every_query_method_has_a_contract_case():
     """Completeness. A new query port added without a case here would ship with
-    its detachment unproven, and nothing else in the tree would notice."""
-    declared = {n for n in vars(Queries) if not n.startswith("_")}
+    its detachment unproven, and nothing else in the tree would notice.
+
+    `__protocol_attrs__`, not `vars(Queries)`: `vars` is one class `__dict__` and does
+    not walk the MRO, so the day the read surface is split into a base Protocol every
+    inherited method silently stops needing a case — AND any case still covering one
+    is reported as `stale`, actively instructing the author to delete working
+    coverage. `__protocol_attrs__` is typing-internal but stable in 3.12, which this
+    project pins; if it ever disappears the failure is a loud AttributeError, not a
+    silent pass.
+    """
+    declared = set(Queries.__protocol_attrs__)
     assert set(CASES) == declared, (
         f"uncovered: {sorted(declared - set(CASES))}; "
         f"stale: {sorted(set(CASES) - declared)}"
@@ -1197,6 +1674,34 @@ def test_the_walker_terminates_on_a_cycle():
     node["self"] = node
     with pytest.raises(RecursionError):
         assert_detached(node, "node")
+
+
+def test_the_walker_rejects_a_container_it_cannot_see_inside(pg_session_factory):
+    """Fail-closed. An ordinary object is not a dataclass, a dict or a sequence, so a
+    shape-blind walker returns without descending — and an attached Reference one
+    attribute deep sails through, where `object_session(o.ref)` is the Session this
+    contract exists to deny."""
+
+    class Opaque:
+        def __init__(self, ref):
+            self.ref = ref
+
+    with pg_session_factory() as s:
+        ws_id = seed_workspace(s, generation=0)
+        _seed(s, ws_id)
+        attached = s.query(Reference).first()
+        with pytest.raises(AssertionError) as e:
+            assert_detached(Opaque(attached), "opaque")
+    assert "opaque: the walker cannot see inside Opaque" in str(e.value)
+
+
+def test_the_walker_rejects_a_lazy_iterator():
+    """Rejection, not attribute-recursion, is the only sound answer for an iterator:
+    the walker cannot look inside one without consuming the caller's own result. A
+    query port that yields rows is exactly the shape that must not pass quietly."""
+    with pytest.raises(AssertionError) as e:
+        assert_detached((v for v in [1]), "rows")
+    assert "cannot see inside generator" in str(e.value)
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -1207,11 +1712,16 @@ uv run pytest tests/proposal_assist/test_ports_dto_contract.py -q > /tmp/f3c5.tx
 ```
 Expected: collection error — `ModuleNotFoundError: No module named 'tests.proposal_assist.dto_contract'`
 
-- [ ] **Step 3: Promote the walker**
+- [ ] **Step 3: Promote the walker, fail-closed**
 
-Create `tests/proposal_assist/dto_contract.py`, moving the body of
-`_assert_detached` out of `tests/proposal_assist/test_f3b_queries.py` verbatim,
-renamed and with the module docstring below:
+Create `tests/proposal_assist/dto_contract.py` from the body of `_assert_detached` in
+`tests/proposal_assist/test_f3b_queries.py`, renamed, with the module docstring below
+and ONE deliberate change. The F3b walker descends into dataclasses, dicts and
+sequences and then falls off the end of its `if/elif` chain — so every other shape
+PASSES: a plain object, a `__slots__` object, a `SimpleNamespace`, a `deque`, a
+`dict_values` view, a generator. `Opaque(ref=attached)` is one attribute deep and
+sails through, which is the whole leak. The promoted walker terminates only on a
+listed inert scalar and REJECTS anything it cannot see inside:
 
 ```python
 """The DTO contract: a query result carries data, never a live Session.
@@ -1228,8 +1738,34 @@ drift; every future query port goes through the same walker.
 from __future__ import annotations
 
 import dataclasses
+import datetime
+import decimal
+import enum
+import uuid
 
 from sqlalchemy import inspect as sa_inspect
+
+#: Where the walk STOPS. Every entry is a stdlib scalar with no attribute that could
+#: be a Session, so there is nothing inside one to walk. Anything that is neither
+#: listed here nor a supported container is a hard failure — see the `else` at the
+#: bottom of assert_detached. Extending this tuple is a deliberate act; the two
+#: shipped DTOs need only NoneType, bool, int, str and uuid.UUID. The datetime
+#: family, Decimal and Enum are here because the next DTO with a `created_at` will
+#: need them and they are provably inert, not because anything uses them today.
+INERT_SCALARS = (
+    type(None),
+    bool,
+    int,
+    float,
+    str,
+    bytes,
+    uuid.UUID,
+    decimal.Decimal,
+    datetime.date,  # datetime.datetime is a subclass
+    datetime.time,
+    datetime.timedelta,
+    enum.Enum,
+)
 
 
 def assert_detached(value: object, path: str) -> None:
@@ -1240,6 +1776,14 @@ def assert_detached(value: object, path: str) -> None:
     collection of raw ORM instances untouched and a top-level-only check would
     wave it through.
 
+    FAIL-CLOSED. The walk stops on an INERT_SCALARS value and RAISES on anything else
+    it cannot see inside. A shape-blind version returns silently for a plain object, a
+    `__slots__` object, a `SimpleNamespace`, a `deque` or a `dict_values` view, so
+    `Opaque(ref=attached)` passes — and `object_session(o.ref)` is the Session, the
+    leak this contract exists to deny. Rejection rather than attribute-recursion is
+    the sound answer: a lazy iterator cannot be inspected without consuming the
+    caller's own result.
+
     A cycle raises RecursionError rather than hanging. Deliberately not guarded
     with a visited set: a query DTO containing a cycle is itself a defect, and a
     loud stack overflow says so more clearly than a silent skip.
@@ -1247,6 +1791,8 @@ def assert_detached(value: object, path: str) -> None:
     assert sa_inspect(value, raiseerr=False) is None, (
         f"{path}: {type(value).__name__} is an ORM-mapped object"
     )
+    if isinstance(value, INERT_SCALARS):
+        return
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         for field in dataclasses.fields(value):
             assert_detached(getattr(value, field.name), f"{path}.{field.name}")
@@ -1257,7 +1803,16 @@ def assert_detached(value: object, path: str) -> None:
     elif isinstance(value, (list, tuple, set, frozenset)):
         for index, item in enumerate(value):
             assert_detached(item, f"{path}[{index}]")
+    else:
+        raise AssertionError(
+            f"{path}: the walker cannot see inside {type(value).__name__} — a query "
+            f"result must be a frozen dataclass of scalars and plain collections. "
+            f"Extend INERT_SCALARS deliberately if this type is provably inert."
+        )
 ```
+
+The `sa_inspect` assert stays FIRST, so the inert-scalar shortcut can never shadow a
+mapped instance.
 
 - [ ] **Step 4: Point the F3b test at the shared walker**
 
@@ -1274,7 +1829,7 @@ Run:
 ```bash
 uv run pytest tests/proposal_assist/test_ports_dto_contract.py tests/proposal_assist/test_f3b_queries.py -q > /tmp/f3c5.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3c5.txt
 ```
-Expected: `PYTEST_EXIT=0`, 13 passed.
+Expected: `PYTEST_EXIT=0`, 15 passed.
 
 - [ ] **Step 6: Commit**
 
@@ -1315,6 +1870,22 @@ git checkout tests/proposal_assist/test_ports_dto_contract.py
 git diff --exit-code HEAD -- tests/proposal_assist/test_ports_dto_contract.py
 ```
 
+Mutation 3 — in `tests/proposal_assist/dto_contract.py`, delete the final `else:`
+branch of `assert_detached` (the four-line `raise AssertionError`).
+
+Run:
+```bash
+uv run pytest tests/proposal_assist/test_ports_dto_contract.py -q -k rejects > /tmp/f3c5c.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3c5c.txt
+```
+Expected: FAIL, both `..._rejects_...` tests reporting
+`DID NOT RAISE <class 'AssertionError'>` — without the `else`, a wrapper the walker
+does not recognise passes silently, which is the fail-open shape this task closes.
+
+```bash
+git checkout tests/proposal_assist/dto_contract.py
+git diff --exit-code HEAD -- tests/proposal_assist/dto_contract.py
+```
+
 ---
 
 ### Task 6: Record the demotion, and run the suite
@@ -1346,8 +1917,10 @@ saying the demotion is now complete:
 migration checklist and nothing more. The proof is the import boundary
 (`tests/fencing/import_gate.py`): `tools/` may import only the standard library and
 `call_manager.proposal_assist.ports`, and may not name a resource locator. Every tool
-module is exempted by name until its slice converts it, and an exemption that stops
-being true is a red test — so the list can only shrink. What the boundary cannot see,
+module is exempted by name until its slice converts it, with the violations it
+already has pinned to that name: an exemption that stops being true is a red test, and
+so is a dirty module acquiring a violation its pin does not cover — the list can only
+shrink, and so can each entry. What the boundary cannot see,
 the DTO contract test covers: a query port returning an attached ORM instance hands
 back `object_session(instance)` without the tool importing anything.
 ```
@@ -1371,8 +1944,9 @@ Add the matching entry at the **top** of §12, immediately under the
 the F3c import boundary replaces it. The old detector keyed on `.commit()`, which the
 port form removes, so it went blinder as conversion proceeded; an import allowlist
 does the opposite. `tools/` may import only the standard library and the ports, may
-not name a resource locator, and every unconverted module is exempted by name until
-its slice deletes the line.
+not name a resource locator, and every unconverted module is exempted by name —
+pinned to the violations it already has, so it cannot drift further — until its slice
+deletes the entry.
 ```
 
 - [ ] **Step 4: Run the full suite**
@@ -1381,7 +1955,7 @@ Run:
 ```bash
 uv run pytest -n 16 --dist loadfile > /tmp/f3c-full.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -3 /tmp/f3c-full.txt
 ```
-Expected: `PYTEST_EXIT=0`. The total will be the master baseline of **3685** minus the
+Expected: `PYTEST_EXIT=0`. The total will be the master baseline of **3688** minus the
 tests deleted in Task 1, plus the tests added in Tasks 2-5. **Read the `1 skipped` as
 the signal, not the total** — it is an `ANTHROPIC_API_KEY`-gated test, and anything
 else skipped means something got disabled. Report the result line verbatim.
