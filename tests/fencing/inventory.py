@@ -41,7 +41,7 @@ CATEGORIES = frozenset().union(*CATEGORIES_BY_KIND.values())
 #: site cannot take an exemption by declaring one — it takes a diff here, which
 #: is the point.
 NON_SEMANTIC_PINS = {
-    ("tool_commit", "src/call_manager/proposal_assist/tools/citations.py",
+    ("tool_commit", "src/call_manager/proposal_assist/citations/core.py",
      "_write_citekey_cache"): "caller_fenced",
     ("tool_commit", "src/call_manager/proposal_assist/tools/references.py",
      "fetch_reference_impl"): "accounting",
@@ -135,22 +135,16 @@ TOOLS_NOT_YET_CONVERTED: dict[str, frozenset[str]] = {
     }),
     "citations.py": frozenset({
         "from call_manager.db.models import ...",
-        "from call_manager.proposal_assist.citations import ...",
-        "from call_manager.proposal_assist.citations.audit import ...",
-        "from call_manager.proposal_assist.citations.gitio import ...",
+        "from call_manager.proposal_assist.citations.core import ...",
         "from call_manager.proposal_assist.citations.ledger import ...",
         "from call_manager.proposal_assist.citations.markers import ...",
         "from call_manager.proposal_assist.citations.quotes import ...",
         "from call_manager.proposal_assist.collab import ...",
         "from call_manager.proposal_assist.collab.state import ...",
-        "from call_manager.proposal_assist.drafting.locking import ...",
         "from call_manager.proposal_assist.editing.sectionizer import ...",
         "from call_manager.proposal_assist.proposals.proposing import ...",
-        "from call_manager.proposal_assist.references.csl import ...",
         "from call_manager.proposal_assist.tools.proposal import ...",
         "from call_manager.proposal_assist.tools.registry import ...",
-        "from sqlalchemy import ...",
-        "from sqlalchemy.orm import ...",
         "names the resource locator repo_dir",
         "names the resource locator session_factory",
     }),

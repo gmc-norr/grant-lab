@@ -1,0 +1,105 @@
+"""F3d3a — the citation core relocation. A pure move: the objects are the same
+objects, at a new address, with no behaviour changed.
+
+Spec 2026-08-18 revision 8 section 7: "moves the whole session/model-dependent
+citation core out of tools/ into the effects/domain layer and updates every
+non-tool consumer".
+"""
+
+from __future__ import annotations
+
+import inspect
+
+MOVED = [
+    "_validate_stance_confidence",
+    "_read_proposal_and_ledger",
+    "_current_head",
+    "_citation_snapshot",
+    "_find_idempotent_row",
+    "_resolve_free_citekey",
+    "_resolve_citekey_for_ref",
+    "insert_citation_impl",
+    "compute_citation_insert",
+    "_write_citekey_cache",
+    "_insert_citation_locked",
+]
+
+CONSTANTS = [
+    "CITATIONS_FILENAME",
+    "_BUSY_ERROR",
+    "_DELETED_ERROR",
+    "_GIT_COMMIT_FAILED_ERROR",
+    "ALLOWED_STANCES",
+    "ALLOWED_CONFIDENCE",
+]
+
+
+def test_the_whole_closure_lives_in_the_new_module():
+    """The set is the transitive closure of the five symbols the spec names,
+    computed from the AST — not a judgement call. Moving a subset leaves the new
+    module calling a name it cannot see."""
+    from call_manager.proposal_assist.citations import core
+
+    missing = [n for n in MOVED + CONSTANTS if not hasattr(core, n)]
+    assert not missing, f"not moved: {missing}"
+
+
+def test_the_moved_functions_are_defined_there_not_imported_back():
+    """GC-4: no re-export shim. If a moved function's __module__ still points at
+    tools.citations, the move did not happen — an import was added instead, and
+    tools/ keeps the violation the move exists to remove."""
+    from call_manager.proposal_assist.citations import core
+
+    wrong = [
+        n
+        for n in MOVED
+        if getattr(core, n).__module__ != "call_manager.proposal_assist.citations.core"
+    ]
+    assert not wrong, f"still owned by another module: {wrong}"
+
+
+def test_the_tool_module_no_longer_defines_them():
+    """The other half of the same claim, and the one that catches a copy rather
+    than a move. A duplicated function drifts; that is what F3d1's four
+    CITATIONS_FILENAME literals cost."""
+    from call_manager.proposal_assist.tools import citations as tool_mod
+
+    duplicated = [
+        n
+        for n in MOVED
+        if getattr(getattr(tool_mod, n, None), "__module__", None)
+        == "call_manager.proposal_assist.tools.citations"
+    ]
+    assert not duplicated, f"still defined in tools/: {duplicated}"
+
+
+def test_the_signatures_are_unchanged():
+    """GC-1: this is a MOVE. A changed signature is a conversion wearing a move's
+    clothes, and it destroys the one review property this slice has — that the
+    diff can be checked by comparing bytes."""
+    from call_manager.proposal_assist.citations import core
+
+    assert str(inspect.signature(core._write_citekey_cache)) == (
+        "(session: 'Session', ref: 'Reference', citekey: 'str', *, owns_txn: 'bool') -> 'None'"
+    )
+    assert list(inspect.signature(core._resolve_citekey_for_ref).parameters) == [
+        "session",
+        "ledger",
+        "ref",
+        "workspace_id",
+    ]
+    assert list(inspect.signature(core._insert_citation_locked).parameters)[:2] == [
+        "ctx",
+        "session",
+    ]
+
+
+def test_the_relocated_module_may_hold_a_session_and_that_is_the_point():
+    """GC-3. The new module is outside tools/, so the import gate does not apply.
+    Do not try to make it gate-clean: being able to name a Session here is the
+    reason the code moved."""
+    from call_manager.proposal_assist.citations import core
+
+    src = inspect.getsource(core)
+    assert "from sqlalchemy" in src or "import sqlalchemy" in src
+    assert "ToolContext" in src

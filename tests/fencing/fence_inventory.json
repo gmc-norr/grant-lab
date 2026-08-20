@@ -49,7 +49,7 @@
   },
   {
     "kind": "tool_commit",
-    "path": "src/call_manager/proposal_assist/tools/citations.py",
+    "path": "src/call_manager/proposal_assist/citations/core.py",
     "symbol": "_write_citekey_cache",
     "category": "caller_fenced",
     "fenced": false,
