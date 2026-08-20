@@ -100,3 +100,60 @@ def test_an_existing_raise_site_is_still_caught_by_the_ports_class():
         raise Old("busy")
     except New as exc:
         assert str(exc) == "busy"
+
+
+def test_invocation_is_reachable_from_ports():
+    """GC-2, the reason this slice exists. Every exempt tool module pins the
+    tools.registry import, a converted impl needs Invocation in its signature, and
+    `from __future__ import annotations` does not save you — ruff reports F821 for a
+    lazily-annotated name with no import. So the type must live in ports."""
+    from call_manager.proposal_assist.ports.invocation import Invocation
+
+    assert hasattr(Invocation, "stamp")
+
+
+def test_the_snapshot_factory_stays_with_the_context_it_reads():
+    """ports/ is stdlib-only, so nothing in it may name ToolContext. The factory
+    belongs beside its only production caller, _safe_tool."""
+    from call_manager.proposal_assist.ports.invocation import Invocation
+    from call_manager.proposal_assist.tools.registry import snapshot_invocation
+
+    assert not hasattr(Invocation, "snapshot")
+    assert callable(snapshot_invocation)
+
+
+def test_registry_still_exports_invocation_as_the_same_class():
+    """GC-4. Two test files and any future reader import it from registry."""
+    from call_manager.proposal_assist.ports.invocation import Invocation as FromPorts
+    from call_manager.proposal_assist.tools.registry import Invocation as FromRegistry
+
+    assert FromPorts is FromRegistry
+
+
+def test_a_snapshot_still_stamps_and_still_refuses_an_unfenced_actor():
+    """The behaviour F3a and F3b pinned survives the move: generation 0 is REAL, and
+    a missing generation raises rather than defaulting."""
+    import uuid
+
+    import pytest
+
+    from call_manager.proposal_assist.ports.errors import UnfencedInvocation
+    from call_manager.proposal_assist.tools.registry import (
+        ToolContext,
+        snapshot_invocation,
+    )
+
+    ws = uuid.uuid4()
+
+    def _ctx(generation):
+        return ToolContext(
+            workspace_id=ws,
+            repo_dir=None,
+            session_factory=None,
+            settings=None,
+            lifecycle_generation=generation,
+        )
+
+    assert snapshot_invocation(_ctx(0)).stamp().generation == 0
+    with pytest.raises(UnfencedInvocation):
+        snapshot_invocation(_ctx(None)).stamp()
