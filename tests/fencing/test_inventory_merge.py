@@ -111,3 +111,71 @@ def test_regeneration_preserves_every_human_slice_assignment():
     after = {(r["kind"], r["path"], r["symbol"]): r["slice"] for r in merged}
     assert after == before, "regeneration changed a human slice assignment"
     assert len(after) == 20
+
+
+def test_a_rename_can_move_a_row_into_the_relocated_scope():
+    """The mechanism F3d3a's move depends on. Before Task 1, merge() rejected any
+    rename whose target lived outside tools/ — `target not found in the scan` —
+    because find_sites never recorded one. That made RENAMES useless for the only
+    move this slice makes."""
+    from tests.fencing.detectors import KIND_TOOL_COMMIT, Site
+    from tests.fencing.inventory import merge
+
+    old = (
+        "tool_commit",
+        "src/call_manager/proposal_assist/tools/citations.py",
+        "_write_citekey_cache",
+    )
+    new = (
+        "tool_commit",
+        "src/call_manager/proposal_assist/citations/core.py",
+        "_write_citekey_cache",
+    )
+    previous = [
+        {
+            "kind": old[0], "path": old[1], "symbol": old[2],
+            "category": "caller_fenced", "fenced": False, "slice": "F3d3",
+            "fenced_by": "_insert_citation_locked",
+        }
+    ]
+    found = {Site(KIND_TOOL_COMMIT, new[1], new[2])}
+
+    rows = merge(previous, found, {old: new}, set())
+
+    assert len(rows) == 1
+    assert rows[0]["path"] == new[1]
+    # The human-owned fields ride along — that is the point of a rename.
+    assert rows[0]["category"] == "caller_fenced"
+    assert rows[0]["slice"] == "F3d3"
+    assert rows[0]["fenced_by"] == "_insert_citation_locked"
+
+
+def test_a_rename_into_an_undeclared_path_is_still_refused():
+    """The limit. A rename is not a way to park a row anywhere — the target has to
+    be somewhere the scan actually looks, which is tools/ plus the declared
+    relocated set. Otherwise a row could be 'carried' to a path nothing ever
+    re-checks, and the identity would be preserved in name only."""
+    import pytest
+
+    from tests.fencing.inventory import BadRenameMap, merge
+
+    old = (
+        "tool_commit",
+        "src/call_manager/proposal_assist/tools/citations.py",
+        "_write_citekey_cache",
+    )
+    new = (
+        "tool_commit",
+        "src/call_manager/proposal_assist/editing/save.py",
+        "_write_citekey_cache",
+    )
+    previous = [
+        {
+            "kind": old[0], "path": old[1], "symbol": old[2],
+            "category": "caller_fenced", "fenced": False, "slice": "F3d3",
+            "fenced_by": "_insert_citation_locked",
+        }
+    ]
+    # The scan did not find it there, because editing/save.py is not in scope.
+    with pytest.raises(BadRenameMap, match="target not found in the scan"):
+        merge(previous, set(), {old: new}, set())
