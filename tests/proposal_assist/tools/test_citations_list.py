@@ -14,10 +14,10 @@ import pytest
 
 from call_manager.config import Settings
 from call_manager.db.models import Reference, ReferenceChunk
+from call_manager.proposal_assist.citations.core import insert_citation_impl
 from call_manager.proposal_assist.citations.ledger import dump_ledger, empty_ledger
 from call_manager.proposal_assist.tools.citations import (
     CITATIONS_FILENAME,
-    insert_citation_impl,
     list_citations_impl,
 )
 from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME

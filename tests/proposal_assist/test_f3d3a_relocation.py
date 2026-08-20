@@ -103,3 +103,42 @@ def test_the_relocated_module_may_hold_a_session_and_that_is_the_point():
     src = inspect.getsource(core)
     assert "from sqlalchemy" in src or "import sqlalchemy" in src
     assert "ToolContext" in src
+
+
+# Each patched name paired with the function in citations/core.py that actually READS
+# it. Verified against f9014b68 with ast: compute_citation_insert reads
+# _resolve_citekey_for_ref and new_ev_id; _insert_citation_locked reads
+# write_and_commit_files. Pairing all three with one reader is how the first draft of
+# this test got it wrong.
+PATCH_TARGETS = [
+    ("_resolve_citekey_for_ref", "compute_citation_insert"),
+    ("new_ev_id", "compute_citation_insert"),
+    ("write_and_commit_files", "_insert_citation_locked"),
+]
+
+
+def test_the_monkeypatch_targets_are_the_module_that_actually_reads_them():
+    """GC-5, the sharpest hazard in this slice.
+
+    monkeypatch.setattr(mod, "name", ...) rebinds the name AS THAT MODULE SEES IT.
+    Three test modules patch these names on tools.citations at four sites; after the
+    move the readers live in citations.core, so a patch on the old module rebinds a
+    name nothing reads and the test passes vacuously. Two of the four are NEGATIVE
+    tests (a forced citekey collision at test_accepting.py:591, a forced GitCommitError
+    at :655), which is the direction that fails silently.
+
+    Pinning the READER, not just the module, is what makes this a real check: a name
+    that is present in citations.core but read by nobody would satisfy a hasattr test
+    and still leave the patch site dead.
+    """
+    import importlib
+
+    core = importlib.import_module("call_manager.proposal_assist.citations.core")
+
+    for name, reader_name in PATCH_TARGETS:
+        assert hasattr(core, name), f"citations.core has no {name}"
+        reader = getattr(core, reader_name)
+        assert name in reader.__code__.co_names, (
+            f"{name} is not read by {reader_name} — the patch-target list is stale, "
+            "which is exactly the failure this test exists to catch"
+        )

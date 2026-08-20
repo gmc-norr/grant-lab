@@ -123,8 +123,8 @@ def test_compute_citation_insert_is_pure(pg_session_factory, tmp_path, monkeypat
     citekey stable, ref.citekey untouched); to assert new_proposal_text identity,
     monkeypatch new_ev_id to a fixed value first.
     """
-    from call_manager.proposal_assist.tools import citations as citations_mod
-    from call_manager.proposal_assist.tools.citations import compute_citation_insert
+    from call_manager.proposal_assist.citations import core as citations_mod
+    from call_manager.proposal_assist.citations.core import compute_citation_insert
 
     with pg_session_factory() as s:
         ws, repo = _setup(s, tmp_path)
