@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
+from call_manager.proposal_assist.ports import Ports
 from call_manager.proposal_assist.ports.invocation import Invocation as Invocation
 
 if TYPE_CHECKING:
@@ -153,6 +154,13 @@ class ToolContext:
     # turn content contains a selection block.
     allowed_tool_names: set[str] | None = field(default=None)
     turn_selection: dict | None = field(default=None)
+
+    # F3d1: the capability bundle a converted tool holds INSTEAD of a session.
+    # Defaults to None because two constructions deliberately have no session to
+    # build one from — collect_mcp_tool_names below and proposals/accepting.py's
+    # shim, both of which pass session_factory=None. tests/fencing/detectors.py
+    # keys on that literal to classify them inert, so they must stay as they are.
+    ports: Ports | None = field(default=None)
 
 
 def snapshot_invocation(ctx: ToolContext) -> Invocation:

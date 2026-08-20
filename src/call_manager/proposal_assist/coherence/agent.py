@@ -15,6 +15,7 @@ from sqlalchemy.orm import sessionmaker
 
 from call_manager.config import Settings
 from call_manager.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
+from call_manager.proposal_assist.port_impl import build_ports
 from call_manager.proposal_assist.tools.registry import (
     ToolContext,
     build_proposal_assist_mcp_server,
@@ -49,6 +50,7 @@ def build_keeper_adapter(
             origin_job_id=job_id,
             created_by=requested_by,
             lifecycle_generation=lifecycle_generation,
+            ports=build_ports(session_factory),
         )
         return build_proposal_assist_mcp_server(ctx)
 

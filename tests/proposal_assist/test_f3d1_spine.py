@@ -7,6 +7,17 @@ here starts needing a tool module to have changed, the slice has exceeded its sc
 
 from __future__ import annotations
 
+import importlib
+import inspect
+import uuid
+from types import SimpleNamespace
+
+import pytest
+
+from call_manager.proposal_assist.ports.accounting import Accounting
+from call_manager.proposal_assist.ports.effects import Effects
+from call_manager.proposal_assist.ports.queries import Queries
+
 
 def test_the_artifact_filenames_are_reachable_from_ports():
     """A converted tool may import only stdlib and ports, and it still has to name
@@ -157,3 +168,143 @@ def test_a_snapshot_still_stamps_and_still_refuses_an_unfenced_actor():
     assert snapshot_invocation(_ctx(0)).stamp().generation == 0
     with pytest.raises(UnfencedInvocation):
         snapshot_invocation(_ctx(None)).stamp()
+
+
+#: Every factory that builds a tool surface, and the builder-specific kwargs it needs.
+#: All five already hold a session_factory, which is the only thing build_ports wants.
+#: Parametrised for the same reason the F3a construction table is: a per-factory
+#: omission is SILENT, because ToolContext.ports defaults to None.
+_TOOL_SURFACE_FACTORIES = [
+    pytest.param(
+        "call_manager.proposal_assist.evaluator.agent",
+        "build_evaluator_adapter",
+        lambda: {
+            "requested_by": 1,
+            "job_id": uuid.uuid4(),
+            "draft_section_count": 0,
+            "spec_section_count": 0,
+            "rubric_criteria": [],
+        },
+        id="evaluator",
+    ),
+    pytest.param(
+        "call_manager.proposal_assist.coherence.agent",
+        "build_keeper_adapter",
+        lambda: {"requested_by": 1, "job_id": uuid.uuid4(), "locked": False},
+        id="coherence_keeper",
+    ),
+    pytest.param(
+        "call_manager.proposal_assist.review.agent",
+        "build_review_adapter",
+        lambda: {
+            "review_run_id": uuid.uuid4(),
+            "item_id": uuid.uuid4(),
+            "kind": "persona",
+        },
+        id="review",
+    ),
+    pytest.param(
+        "call_manager.proposal_assist.uncited_claims.agent",
+        "build_uncited_claims_adapter",
+        lambda: {"requested_by": 1, "job_id": uuid.uuid4(), "draft_section_count": 0},
+        id="uncited_claims",
+    ),
+]
+
+
+@pytest.mark.parametrize("module_path, builder_name, extra_kwargs", _TOOL_SURFACE_FACTORIES)
+def test_every_one_shot_factory_injects_a_working_ports_bundle(
+    tmp_path, monkeypatch, module_path, builder_name, extra_kwargs
+):
+    """A capability bundle, not module globals: every tool surface is handed one at
+    construction. isinstance against the runtime_checkable Protocols is what proves
+    the object is usable rather than merely present."""
+    mod = importlib.import_module(module_path)
+    builder = getattr(mod, builder_name)
+
+    captured: dict = {}
+
+    def _capture(ctx):
+        captured["ctx"] = ctx
+        return object()
+
+    monkeypatch.setattr(mod, "build_proposal_assist_mcp_server", _capture)
+
+    class _FakeSDK:
+        def __init__(self, *, tools_factory=None, **kwargs):
+            tools_factory(tmp_path, uuid.uuid4())
+
+    monkeypatch.setattr(mod, "ClaudeAgentSDKAdapter", _FakeSDK, raising=False)
+    kwargs = dict(extra_kwargs())
+    if "_sdk_factory" in inspect.signature(builder).parameters:
+        kwargs["_sdk_factory"] = _FakeSDK
+
+    builder(
+        settings=SimpleNamespace(proposal_assist_llm_model="m", workspaces_dir=tmp_path),
+        session_factory=lambda: None,
+        workspace_id=uuid.uuid4(),
+        lifecycle_generation=3,
+        **kwargs,
+    )
+
+    ports = captured["ctx"].ports
+    assert ports is not None, f"{builder_name} built a tool surface with no ports"
+    assert isinstance(ports.queries, Queries)
+    assert isinstance(ports.effects, Effects)
+    assert isinstance(ports.accounting, Accounting)
+
+
+def test_every_tool_surface_construction_injects_ports():
+    """The fifth factory cannot be faked like the four above: drafting/factory.py
+    imports ClaudeAgentSDKAdapter and build_proposal_assist_mcp_server LAZILY, inside
+    _build_adapter, and reaches build_citation_service on the way — so patching its
+    module namespace does not reach them and a stub Settings does not survive the
+    trip. An AST check covers all five uniformly instead.
+
+    The two INERT constructions are excluded by the same literal
+    tests/fencing/detectors.py keys on: session_factory=None. That is not a
+    coincidence to tidy away — it is the one rule both places have to agree on.
+    """
+    import ast
+    import pathlib
+
+    src_root = pathlib.Path(__file__).resolve().parents[2] / "src"
+    missing = []
+    found = 0
+    for path in sorted(src_root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = node.func.id if isinstance(node.func, ast.Name) else None
+            if name != "ToolContext":
+                continue
+            kwargs = {k.arg: k.value for k in node.keywords if k.arg}
+            inert = isinstance(kwargs.get("session_factory"), ast.Constant) and (
+                kwargs["session_factory"].value is None
+            )
+            if inert:
+                continue
+            found += 1
+            if "ports" not in kwargs:
+                missing.append(f"{path.relative_to(src_root)}:{node.lineno}")
+
+    assert found == 5, f"expected 5 live tool-surface constructions, found {found}"
+    assert not missing, (
+        "tool surfaces built without a ports bundle:\n  " + "\n  ".join(missing)
+    )
+
+
+def test_a_context_without_ports_is_still_constructible():
+    """GC-5. collect_mcp_tool_names in tools/registry.py and the shim in
+    proposals/accepting.py build a context with session_factory=None, and
+    tests/fencing/detectors.py keys on exactly that literal to classify them INERT and
+    keep them out of the inventory. They must not gain a ports argument (there is no
+    session_factory there to build a bundle from), so the field has to default.
+    No line numbers here on purpose: Task 3 already moved the registry site."""
+    from call_manager.proposal_assist.tools.registry import ToolContext
+
+    ctx = ToolContext(
+        workspace_id=uuid.uuid4(), repo_dir=None, session_factory=None, settings=None
+    )
+    assert ctx.ports is None
