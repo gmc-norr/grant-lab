@@ -30,6 +30,7 @@ from call_manager.proposal_assist.analysis.queue import (
     enqueue_section_job,
 )
 from call_manager.proposal_assist.citations.collab_cite import insert_annotation_via_kernel
+from call_manager.proposal_assist.citations.core import _citation_snapshot
 from call_manager.proposal_assist.citations.gitio import GitCommitError, current_head
 from call_manager.proposal_assist.collab import state as collab_state
 from call_manager.proposal_assist.collab import store as collab_store
@@ -39,7 +40,6 @@ from call_manager.proposal_assist.editing.save import PROPOSAL_FILENAME
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.proposals.kernel_accept import RoomEvicted
-from call_manager.proposal_assist.tools.citations import _citation_snapshot
 from call_manager.proposal_assist.web._perms import require_member, require_owner
 
 router = APIRouter()

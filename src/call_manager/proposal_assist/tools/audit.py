@@ -37,8 +37,8 @@ from call_manager.proposal_assist.citations.bibliography import (
     build_bibliography,
 )
 from call_manager.proposal_assist.citations.claims import iter_proposal_sentences
+from call_manager.proposal_assist.citations.core import _read_proposal_and_ledger
 from call_manager.proposal_assist.citations.markers import find_markers
-from call_manager.proposal_assist.tools.citations import _read_proposal_and_ledger
 
 if TYPE_CHECKING:
     from call_manager.proposal_assist.tools.registry import ToolContext

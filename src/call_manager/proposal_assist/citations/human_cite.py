@@ -25,6 +25,10 @@ from call_manager.db.models import (
     WorkspaceEvent,
 )
 from call_manager.proposal_assist.citations import claims
+from call_manager.proposal_assist.citations.core import (
+    _citation_snapshot,
+    _resolve_citekey_for_ref,
+)
 from call_manager.proposal_assist.citations.gitio import current_head, write_and_commit_files
 from call_manager.proposal_assist.citations.ledger import (
     append_evidence,
@@ -45,10 +49,6 @@ from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex_l
 from call_manager.proposal_assist.editing.save import CITATIONS_FILENAME, PROPOSAL_FILENAME
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
-from call_manager.proposal_assist.tools.citations import (
-    _citation_snapshot,
-    _resolve_citekey_for_ref,
-)
 
 logger = logging.getLogger(__name__)
 

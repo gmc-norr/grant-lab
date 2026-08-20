@@ -40,6 +40,15 @@ from call_manager.db.models import (
     Workspace,
     WorkspaceEvent,
 )
+
+# Intra-package private imports — house precedent: tools/audit.py imports
+# _read_proposal_and_ledger from tools.citations the same way. These are the
+# canonical agent-insert pieces; reusing them keeps ONE citekey resolution and
+# ONE "Family Year" snapshot for both the agent and the user insert paths.
+from call_manager.proposal_assist.citations.core import (
+    _citation_snapshot,
+    _resolve_citekey_for_ref,
+)
 from call_manager.proposal_assist.citations.gitio import write_and_commit_files
 from call_manager.proposal_assist.citations.ledger import (
     append_evidence,
@@ -68,16 +77,7 @@ from call_manager.proposal_assist.editing.save import (
 )
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
-
-# Intra-package private imports — house precedent: tools/audit.py imports
-# _read_proposal_and_ledger from tools.citations the same way. These are the
-# canonical agent-insert pieces; reusing them keeps ONE citekey resolution and
-# ONE "Family Year" snapshot for both the agent and the user insert paths.
-from call_manager.proposal_assist.tools.citations import (
-    CITATIONS_FILENAME,
-    _citation_snapshot,
-    _resolve_citekey_for_ref,
-)
+from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
