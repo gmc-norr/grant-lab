@@ -109,7 +109,7 @@
     "path": "src/call_manager/proposal_assist/tools/scorecard.py",
     "symbol": "submit_scorecard_impl",
     "category": "semantic",
-    "fenced": false,
+    "fenced": true,
     "slice": "F3d2"
   },
   {

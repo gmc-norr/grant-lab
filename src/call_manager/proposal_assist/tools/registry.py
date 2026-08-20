@@ -872,6 +872,8 @@ def _collect_tools(ctx: ToolContext) -> list:
             ctx,
             submit_scorecard_impl,
             ctx,
+            pass_ports=True,
+            pass_invocation=True,
             criteria=args.get("criteria") or [],
             summary=args.get("summary", ""),
         )

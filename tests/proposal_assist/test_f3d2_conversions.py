@@ -7,7 +7,16 @@ is measuring the compensation, not the fence".
 
 from __future__ import annotations
 
+import uuid
+
+import pytest
+
 from call_manager.proposal_assist.tools.registry import ToolContext, snapshot_invocation
+from tests.proposal_assist.f3b_seeds import (
+    bump_generation,
+    seed_evaluator_job,
+    seed_workspace,
+)
 
 _G = 4  # the generation every actor in this file claims at
 _NEXT = 5  # what a lifecycle transition moves it to
@@ -58,3 +67,118 @@ def test_the_old_scoring_module_re_exports_the_same_function():
     from call_manager.proposal_assist.ports import scoring as new
 
     assert old.compute_overall_band is new.compute_overall_band
+
+
+@pytest.mark.asyncio
+async def test_scorecard_writes_through_the_port(pg_session_factory):
+    """The conversion itself: the tool no longer opens a session, and the row lands."""
+    from call_manager.db.models import EvaluatorJob
+    from call_manager.proposal_assist.port_impl import build_ports
+    from call_manager.proposal_assist.tools.scorecard import submit_scorecard_impl
+
+    with pg_session_factory() as s:
+        ws_id = seed_workspace(s, generation=_G)
+        job_id = seed_evaluator_job(s, ws_id, generation=_G)
+
+    ctx, invocation = _ctx_and_invocation(
+        ws_id, origin_job_id=job_id, eval_rubric_criteria=[{"name": "A"}]
+    )
+    out = await submit_scorecard_impl(
+        ctx,
+        ports=build_ports(pg_session_factory),
+        invocation=invocation,
+        criteria=[_criterion(0)],
+        summary="ok",
+    )
+
+    assert out["stored"] is True
+    with pg_session_factory() as s:
+        assert s.get(EvaluatorJob, job_id).scorecard is not None
+
+
+@pytest.mark.asyncio
+async def test_scorecard_does_not_land_after_the_generation_moves(pg_session_factory):
+    """GC-4 — THE COMPENSATION IS DISABLED. The tool's own guard (job is this
+    workspace's still-running evaluator run) is left SATISFIED: the job stays
+    running and owned. Only the generation moves. If the write still lands, the
+    fence is decorative and this test is the only thing that would have said so."""
+    from call_manager.db.models import EvaluatorJob
+    from call_manager.proposal_assist.port_impl import build_ports
+    from call_manager.proposal_assist.tools.scorecard import submit_scorecard_impl
+
+    with pg_session_factory() as s:
+        ws_id = seed_workspace(s, generation=_G)
+        job_id = seed_evaluator_job(s, ws_id, generation=_G)
+
+    # Stamp taken at _G — the actor's live claim.
+    ctx, invocation = _ctx_and_invocation(
+        ws_id, origin_job_id=job_id, eval_rubric_criteria=[{"name": "A"}]
+    )
+    # The workspace moves on. The job is untouched and still perfectly claimable.
+    with pg_session_factory() as s:
+        bump_generation(s, ws_id, to=_NEXT)
+        s.commit()
+
+    out = await submit_scorecard_impl(
+        ctx,
+        ports=build_ports(pg_session_factory),
+        invocation=invocation,
+        criteria=[_criterion(0)],
+        summary="ok",
+    )
+
+    assert "error" in out
+    with pg_session_factory() as s:
+        assert s.get(EvaluatorJob, job_id).scorecard is None
+
+
+@pytest.mark.asyncio
+async def test_scorecard_refusal_messages_are_unchanged(pg_session_factory):
+    """GC-6. The port reproduces the tool's strings verbatim and in the same order:
+    a stale ctx pointing at a finished run must still get the TARGET message, not
+    'already submitted'."""
+    from call_manager.db.models import EvaluatorJob
+    from call_manager.proposal_assist.port_impl import build_ports
+    from call_manager.proposal_assist.tools.scorecard import submit_scorecard_impl
+
+    with pg_session_factory() as s:
+        ws_id = seed_workspace(s, generation=_G)
+        job_id = seed_evaluator_job(s, ws_id, generation=_G)
+
+    ctx, invocation = _ctx_and_invocation(
+        ws_id, origin_job_id=job_id, eval_rubric_criteria=[{"name": "A"}]
+    )
+    with pg_session_factory() as s:
+        s.get(EvaluatorJob, job_id).status = "completed"
+        s.commit()
+
+    out = await submit_scorecard_impl(
+        ctx,
+        ports=build_ports(pg_session_factory),
+        invocation=invocation,
+        criteria=[_criterion(0)],
+        summary="ok",
+    )
+    assert out["error"] == (
+        "scorecard target is not an active evaluator run for this workspace"
+    )
+
+
+@pytest.mark.asyncio
+async def test_scorecard_validation_still_runs_before_any_port_call():
+    """The validation half is pure and unchanged. A bad payload must be refused
+    without the port being touched at all — a converted tool that reaches for a
+    capability before validating has widened its blast radius. No database here."""
+    from call_manager.proposal_assist.tools.scorecard import submit_scorecard_impl
+
+    ctx, invocation = _ctx_and_invocation(
+        uuid.uuid4(), origin_job_id=uuid.uuid4(), eval_rubric_criteria=[{"name": "A"}]
+    )
+    out = await submit_scorecard_impl(
+        ctx,
+        ports=_ExplodingPorts(),
+        invocation=invocation,
+        criteria=[],  # covers zero of the one required index
+        summary="ok",
+    )
+    assert "must cover criterion indexes" in out["error"]

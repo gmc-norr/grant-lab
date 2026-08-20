@@ -10,9 +10,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from call_manager.db.models import EvaluatorJob
-from call_manager.proposal_assist.evaluator.scoring import compute_overall_band
-from call_manager.proposal_assist.tools.registry import ToolContext
+from call_manager.proposal_assist.ports.effects import SubmitScorecard
+from call_manager.proposal_assist.ports.errors import (
+    BUSY_ERROR_MESSAGE,
+    DELETED_ERROR_MESSAGE,
+    CommitMutexTimeout,
+    EffectRejected,
+    WorkspaceGenerationStale,
+)
+from call_manager.proposal_assist.ports.scoring import compute_overall_band
 
 _BANDS = ("strong", "adequate", "at_risk", "gap")
 
@@ -29,7 +35,7 @@ def _effective_weight(raw: Any) -> tuple[float, float]:
 
 
 async def submit_scorecard_impl(
-    ctx: ToolContext, *, criteria: list[dict[str, Any]], summary: str
+    ctx, *, ports, invocation, criteria: list[dict[str, Any]], summary: str
 ) -> dict[str, Any]:
     # Validate + roll up against the PINNED rubric snapshot (read once at run start) —
     # pure, no DB. The session is opened only for the guarded write below.
@@ -85,16 +91,20 @@ async def submit_scorecard_impl(
     overall = compute_overall_band([(c["band"], c["effective_weight"]) for c in out])
     scorecard = {"criteria": out, "overall_band": overall, "summary": (summary or "").strip()}
 
-    # Guarded write: row-lock the target and require it is THIS workspace's still-running
-    # evaluator job (so a stale/mismatched ctx.origin_job_id, or a job the reaper/cancel
-    # already failed, can never have a scorecard written onto it). Enforce EXACTLY-ONCE:
-    # the tool contract says submit once, so a second call must not overwrite the first.
-    with ctx.session_factory() as session:
-        job = session.get(EvaluatorJob, ctx.origin_job_id, with_for_update=True)
-        if job is None or job.workspace_id != ctx.workspace_id or job.status != "running":
-            return {"error": "scorecard target is not an active evaluator run for this workspace"}
-        if job.scorecard is not None:
-            return {"error": "a scorecard has already been submitted for this run"}
-        job.scorecard = scorecard
-        session.commit()
+    # The guards, the row lock and the exactly-once rule all moved into
+    # port_impl/effects.py::SqlEffects.submit_scorecard, which reproduces them in
+    # the same order and with these same strings. The generation predicate is in
+    # the UPDATE's WHERE clause, so a workspace that moved on lands nothing.
+    try:
+        ports.effects.submit_scorecard(
+            invocation.stamp(), SubmitScorecard(scorecard=scorecard)
+        )
+    except EffectRejected as e:
+        return {"error": str(e)}
+    except WorkspaceGenerationStale:
+        return {"error": DELETED_ERROR_MESSAGE}
+    except CommitMutexTimeout:
+        # Busy, not failed. Without this clause _safe_tool's catch-all turns a
+        # transient lease timeout into "internal error".
+        return {"error": BUSY_ERROR_MESSAGE}
     return {"stored": True, "overall_band": overall}
