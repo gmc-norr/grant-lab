@@ -313,7 +313,7 @@ git diff --exit-code HEAD -- tests/fencing/detectors.py
 
 ### Task 2: `RENAMES` can now carry a row across the boundary
 
-Task 1 widened the scan; this task proves the consequence the move depends on, and pins the limit of it. Without this, Task 6 discovers at regeneration time whether the mechanism works — and `BadRenameMap` aborts the write, leaving a stale JSON that still looks right.
+Task 1 widened the scan; this task proves the consequence the move depends on, and pins the limit of it. Without this, Task 3 discovers at regeneration time whether the mechanism works — and `BadRenameMap` aborts the write, leaving a stale JSON that still looks right.
 
 **Files:**
 - Modify: `tests/fencing/test_inventory_merge.py`
@@ -386,7 +386,7 @@ Run:
 ```bash
 uv run pytest tests/fencing/test_inventory_merge.py -q -k "relocated_scope or undeclared_path" > /tmp/f3d3a-2.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d3a-2.txt
 ```
-Expected: `PYTEST_EXIT=0` — **both PASS immediately**, and that is correct. Task 1 already supplied the mechanism; these two tests exist to PIN it, because Task 6 depends on it and nothing else in the tree states it. Do not invent a failing state to satisfy TDD ritual here — say in your report that they passed on first run and why.
+Expected: `PYTEST_EXIT=0` — **both PASS immediately**, and that is correct. Task 1 already supplied the mechanism; these two tests exist to PIN it, because Task 3 depends on it and nothing else in the tree states it. Do not invent a failing state to satisfy TDD ritual here — say in your report that they passed on first run and why.
 
 - [ ] **Step 3: Commit**
 
@@ -431,7 +431,7 @@ git diff --exit-code HEAD -- tests/fencing/inventory.py
 
 ---
 
-### Task 3: The core moves to `citations/core.py`
+### Task 3: The core moves to `citations/core.py`, and its inventory row moves with it
 
 The relocation itself. Eleven functions and seven module constants, moved VERBATIM.
 
@@ -471,16 +471,24 @@ _write_citekey_cache             745-769
 _insert_citation_locked          772-871
 ```
 
-The seven module constants those functions read: `logger`, `CITATIONS_FILENAME`, `_BUSY_ERROR`, `_DELETED_ERROR`, `_GIT_COMMIT_FAILED_ERROR`, `ALLOWED_STANCES`, `ALLOWED_CONFIDENCE`.
+The six module constants those functions read: `logger`, `CITATIONS_FILENAME`, `_BUSY_ERROR`, `_DELETED_ERROR`, `_GIT_COMMIT_FAILED_ERROR`, `ALLOWED_STANCES`, `ALLOWED_CONFIDENCE` — seven names, but they do not all travel the same way:
+
+- **Five move:** `_BUSY_ERROR`, `_DELETED_ERROR`, `_GIT_COMMIT_FAILED_ERROR`, `ALLOWED_STANCES`, `ALLOWED_CONFIDENCE`.
+- **`logger` is re-declared**, not moved, so messages carry the new module's name.
+- **`CITATIONS_FILENAME` does not move at all.** There is exactly ONE literal, at `tools/citations.py:80`, and both staying tools read it (`:126`, `:329`). Deleting it would strand them; copying it would make a third copy of a string `ports/artifacts.py:35-38` exists to hold. So the literal stays where it is — F3d3b removes it — and `core.py` imports the name from `ports/artifacts.py`, which is where every other consumer outside `tools/` already gets it.
 
 **Files:**
 - Create: `src/call_manager/proposal_assist/citations/core.py`
 - Modify: `src/call_manager/proposal_assist/tools/citations.py`
 - Modify: `tests/proposal_assist/test_f3d3a_relocation.py`
+- Modify: `tests/fencing/regenerate_inventory.py`
+- Modify: `tests/fencing/fence_inventory.json`
+- Modify: `tests/fencing/inventory.py`
 
 **Interfaces:**
-- Consumes: nothing from earlier tasks.
-- Produces, in `call_manager.proposal_assist.citations.core`: the eleven functions above with unchanged names and signatures, plus the seven constants. `insert_citation_impl` and `_insert_citation_locked` keep their `ctx: ToolContext` parameter — GC-3, the new module is outside the gate.
+- Consumes: `RELOCATED_EFFECT_PATHS` (Task 1) and the rename contract (Task 2). This is
+  the single run that uses them.
+- Produces, in `call_manager.proposal_assist.citations.core`: the eleven functions above with unchanged names and signatures, plus the five moved constants, a re-declared `logger`, and `CITATIONS_FILENAME` imported from `ports/artifacts.py`. `insert_citation_impl` and `_insert_citation_locked` keep their `ctx: ToolContext` parameter — GC-3, the new module is outside the gate.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -620,14 +628,17 @@ of the capability holders in F3f.
 """
 ```
 
-Then move the eleven functions and seven constants **verbatim** — same order as in the original file, so the diff is readable. Build the import header from what the moved code actually references; the source block at `tools/citations.py:20-76` is the superset to select from. Do not copy imports the moved code does not use: `ruff` reports `F401` and Step 6 fails.
+Then move the eleven functions and the five moved constants **verbatim** — same order as in the original file, so the diff is readable. Add `logger = logging.getLogger(__name__)` and `from call_manager.proposal_assist.ports.artifacts import CITATIONS_FILENAME`; do NOT copy the `CITATIONS_FILENAME` literal. Build the import header from what the moved code actually references; the source block at `tools/citations.py:20-76` is the superset to select from. Do not copy imports the moved code does not use: `ruff` reports `F401` and Step 6 fails.
 
-`logger` is re-declared, not moved: `logger = logging.getLogger(__name__)` so messages carry the new module's name.
+`logger` is re-declared, not moved, so messages carry the new module's name.
+
+`test_the_whole_closure_lives_in_the_new_module` checks `hasattr(core, "CITATIONS_FILENAME")`, which the `ports/artifacts.py` import satisfies — the constant is expected to be REACHABLE from `core.py`, not defined there.
 
 - [ ] **Step 4: Strip the tool module and import back what remains**
 
-Delete the eleven functions and the six constants (all but `logger`) from
-`src/call_manager/proposal_assist/tools/citations.py`.
+Delete the eleven functions and the five moved constants from
+`src/call_manager/proposal_assist/tools/citations.py`. Leave `logger` and the
+`CITATIONS_FILENAME` literal at `:80` exactly where they are.
 
 The thin tools that remain — `list_citations_impl` and `propose_citation_impl` — still call some of the moved names. Find exactly which:
 
@@ -636,7 +647,7 @@ uv run python -c "
 import ast
 p='src/call_manager/proposal_assist/tools/citations.py'
 tree=ast.parse(open(p).read())
-MOVED={'_validate_stance_confidence','_read_proposal_and_ledger','_current_head','_citation_snapshot','_find_idempotent_row','_resolve_free_citekey','_resolve_citekey_for_ref','insert_citation_impl','compute_citation_insert','_write_citekey_cache','_insert_citation_locked','CITATIONS_FILENAME','_BUSY_ERROR','_DELETED_ERROR','_GIT_COMMIT_FAILED_ERROR','ALLOWED_STANCES','ALLOWED_CONFIDENCE'}
+MOVED={'_validate_stance_confidence','_read_proposal_and_ledger','_current_head','_citation_snapshot','_find_idempotent_row','_resolve_free_citekey','_resolve_citekey_for_ref','insert_citation_impl','compute_citation_insert','_write_citekey_cache','_insert_citation_locked','_BUSY_ERROR','_DELETED_ERROR','_GIT_COMMIT_FAILED_ERROR','ALLOWED_STANCES','ALLOWED_CONFIDENCE'}
 stay=[n for n in tree.body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name not in MOVED]
 need=sorted({c.id for f in stay for c in ast.walk(f) if isinstance(c,ast.Name) and c.id in MOVED})
 print('still needed by the staying tools:', need)
@@ -651,7 +662,12 @@ from call_manager.proposal_assist.citations.core import (
 )
 ```
 
-Do not import anything the command did not print. `CITATIONS_FILENAME` at `tools/citations.py:80` is a separate literal that stays — `ports/artifacts.py:35-38` records why, and removing it is F3d3b's.
+Measured on `f9014b68`, the command prints exactly `['_validate_stance_confidence']`. If it prints anything else, the strip in the previous step did not match this plan's move set — stop and report the difference rather than importing back a longer list.
+
+Do not import anything the command did not print, and in particular do not import
+`CITATIONS_FILENAME`: its literal at `tools/citations.py:80` was never deleted, and an
+import alongside it is `ruff F811`. `ports/artifacts.py:35-38` records why that copy
+survives; removing it is F3d3b's.
 
 - [ ] **Step 5: Verify no cycle and no drift**
 
@@ -676,28 +692,158 @@ print('functions in core.py:', sum(1 for n in a.body if isinstance(n,(ast.Functi
 ```
 Expected: `citations.py` loses roughly 480 lines; `core.py` holds **11** functions.
 
-- [ ] **Step 6: Run the tests**
+The moment the code lands at its new path, the fencing inventory disagrees with the
+tree: `_write_citekey_cache`'s row still names `tools/citations.py`, and the scan (which
+Task 1 widened to `citations/core.py`) now finds it at the new address. Steps 6-10 carry
+the row across in the SAME commit as the code. They are not a separate task: a commit
+that moves the code without the row leaves `tests/fencing` red for a reason nothing in
+that commit fixes, and it strands `RENAMES` — a one-shot mechanism — half-applied for
+anyone who regenerates in between.
+
+- [ ] **Step 6: Fill in the rename**
+
+In `tests/fencing/regenerate_inventory.py`:
+
+```python
+RENAMES: dict[tuple[str, str, str], tuple[str, str, str]] = {
+    (
+        "tool_commit",
+        "src/call_manager/proposal_assist/tools/citations.py",
+        "_write_citekey_cache",
+    ): (
+        "tool_commit",
+        "src/call_manager/proposal_assist/citations/core.py",
+        "_write_citekey_cache",
+    ),
+}
+```
+
+- [ ] **Step 7: Move the `NON_SEMANTIC_PINS` key**
+
+That dict is keyed by `(kind, path, symbol)`, so the relocation invalidates the KEY
+itself, not just the inventory row. In `tests/fencing/inventory.py` change the first
+entry's path from `.../tools/citations.py` to `.../citations/core.py`. Leave both
+`references.py` entries exactly as they are.
+
+`F3D_IDENTITIES` needs NO edit — it is keyed `(slice, kind, symbol)` with no path, so
+`("F3d3", "tool_commit", "_write_citekey_cache")` survives the move untouched. Verify
+that before assuming it; if it turns out to carry a path, stop, because the ratchet is
+then load-bearing on the old address and this step is incomplete.
+
+- [ ] **Step 8: Regenerate**
+
+```bash
+uv run python -m tests.fencing.regenerate_inventory
+git diff tests/fencing/fence_inventory.json
+```
+Expected: **exactly one changed line** — `_write_citekey_cache`'s `path`. Its
+`category` (`caller_fenced`), `fenced` (`false`), `slice` (`F3d3`) and `fenced_by`
+(`_insert_citation_locked`) all ride along, which is what a rename is for. Row count
+stays **20**.
+
+If instead you see `BadRenameMap`, Task 1 did not land or the path string does not
+match byte-for-byte — the JSON is NOT written when merge() raises, so a stale file
+will look fine. Check the exit code, not the file.
+
+- [ ] **Step 9: Clear the rename**
+
+Set `RENAMES` back to `{}`. It is a one-run instruction, and leaving it populated makes
+the next regeneration raise `BadRenameMap` on an identity that no longer exists.
+
+Re-run the regeneration and confirm the JSON does not move:
+```bash
+uv run python -m tests.fencing.regenerate_inventory && git diff --exit-code tests/fencing/fence_inventory.json && echo "STABLE WITH RENAMES EMPTY"
+```
+
+- [ ] **Step 10: Shrink the `citations.py` exemption**
+
+The move takes six `repo_dir` namings and most of the import violations out of
+`tools/`. Get the new set:
+
+```bash
+uv run python -c "
+from tests.fencing.import_gate import check_file, normalized_violation, tool_key, tool_modules
+for p in tool_modules():
+    if tool_key(p) == 'citations.py':
+        vs = check_file(p)
+        print('raw:', len(vs))
+        for v in sorted({normalized_violation(x) for x in vs}): print(repr(v))
+"
+```
+
+Replace `TOOLS_NOT_YET_CONVERTED["citations.py"]` with exactly that set. Record the
+before/after counts in your report — the before is **28 raw / 19 normalized**, and the
+shrink is this slice's measurable deliverable even though the exemption does not
+retire.
+
+Unlike `audit.py`'s re-pin in Task 4, this shrink is not forced by a gate:
+`test_no_exempt_module_acquires_a_new_violation` is a subset check, so removing
+violations is free, and `test_no_exemption_is_stale` only asks that ONE violation
+survive — `citations.py` keeps several `repo_dir` namings in the two staying tools. Do
+it anyway: an oversized pin is authority the module no longer uses.
+
+- [ ] **Step 11: Run the tests**
 
 Run:
 ```bash
 uv run pytest tests/proposal_assist/test_f3d3a_relocation.py -q > /tmp/f3d3a-3.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d3a-3.txt
+uv run pytest tests/fencing -q > /tmp/f3d3a-3f.txt 2>&1; echo "FENCE_EXIT=$?"; tail -20 /tmp/f3d3a-3f.txt
 ```
-Expected: `PYTEST_EXIT=0`, 5 passed.
+Expected: `PYTEST_EXIT=0` with 5 passed, and `FENCE_EXIT=0`.
 
-The wider suite is expected to be RED at this point — Tasks 4 and 5 have not repointed the consumers yet, so imports fail at collection. Do not chase it. Record the count and move on:
+`test_caller_fenced_entries_name_a_resolvable_ancestor` is the one worth watching: it
+parses `REPO / row["path"]` and requires `fenced_by` to resolve **in that file**. Both
+`_write_citekey_cache` and `_insert_citation_locked` moved to `core.py`, so it passes at
+the new path — if it fails, they did not move together.
+
+The fencing suite is AST-only and does not import the modules it reads, so it is
+expected to be green here even though `src/` does not import cleanly yet. If it fails at
+COLLECTION with an ImportError, that assumption is wrong: report it rather than
+repointing a consumer early to get past it.
+
+The wider suite is expected to be RED at this point — Tasks 4 and 5 have not repointed
+the consumers yet, so imports fail at collection. Do not chase it. Record the count and
+move on:
 ```bash
 uv run pytest tests/proposal_assist -q -n 16 --dist loadfile 2>&1 | tail -3
 ```
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 12: Commit**
 
 ```bash
 uv run ruff check . --fix && uv run ruff check .
-git add src/call_manager/proposal_assist/citations/core.py src/call_manager/proposal_assist/tools/citations.py tests/proposal_assist/test_f3d3a_relocation.py
-git commit -m "refactor(citations): the session-dependent core moves out of tools/ (F3d3a Task 3)"
+git add src/call_manager/proposal_assist/citations/core.py src/call_manager/proposal_assist/tools/citations.py tests/proposal_assist/test_f3d3a_relocation.py tests/fencing/regenerate_inventory.py tests/fencing/fence_inventory.json tests/fencing/inventory.py
+git commit -m "refactor(citations): the session-dependent core moves out of tools/, row and all (F3d3a Task 3)"
 ```
 
-Committing a red tree is deliberate here and it is the only task in this plan that does it: the move and the repointing cannot land atomically without one commit holding a 480-line move plus 20 import edits, which is exactly the diff a reviewer cannot check. Say so in your report.
+Committing a tree whose wider suite is red is deliberate here and it is the only task in
+this plan that does it: the move and the repointing cannot land atomically without one
+commit holding a 480-line move plus 20 import edits, which is exactly the diff a
+reviewer cannot check. The FENCING suite, though, is green — that is the line this task
+holds. Say both in your report.
+
+- [ ] **Step 13: Prove the row would have vanished without Task 1**
+
+GC-10 applies: commit Step 12 before mutating, and restore from a copy rather than
+`git checkout` if you have uncommitted work in the file.
+
+In `tests/fencing/detectors.py`, empty `RELOCATED_EFFECT_PATHS`.
+
+Run:
+```bash
+uv run pytest tests/fencing -q > /tmp/f3d3a-3m.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -30 /tmp/f3d3a-3m.txt
+```
+Expected: FAIL on `test_the_inventory_matches_the_tree_exactly` — the JSON lists a
+`citations/core.py` row the scan no longer finds. This is the state the slice would
+have been in without Task 1, and it is the LOUD version; the silent version is the one
+F3d1's ratchet was built for. Note whether
+`test_every_f3d_identity_is_still_in_the_inventory` also fires and say so — it should
+not, because the row is still IN the JSON; only the scan disagrees.
+
+```bash
+git checkout tests/fencing/detectors.py
+git diff --exit-code HEAD -- tests/fencing/detectors.py
+```
 
 ---
 
@@ -737,15 +883,21 @@ The moved names each file uses, verified against the code:
 
 | file | moved names it imports |
 |---|---|
-| `analysis/insert.py` | `_citation_snapshot`, `_resolve_citekey_for_ref`, `CITATIONS_FILENAME` |
+| `analysis/insert.py` | `_citation_snapshot`, `_resolve_citekey_for_ref` |
 | `citations/human_cite.py` | `_citation_snapshot`, `_resolve_citekey_for_ref` |
-| `collab/kernel.py` | `compute_citation_insert`, `_write_citekey_cache`, `CITATIONS_FILENAME` |
-| `proposals/accepting.py` | `_GIT_COMMIT_FAILED_ERROR` |
+| `collab/kernel.py` | `compute_citation_insert`, `_write_citekey_cache` |
+| `proposals/accepting.py` | `_GIT_COMMIT_FAILED_ERROR`, `_insert_citation_locked` |
 | `web/api/annotations.py` | `_citation_snapshot` |
 | `tools/audit.py` | `_read_proposal_and_ledger` |
 
+`analysis/insert.py` and `collab/kernel.py` also import `CITATIONS_FILENAME` from
+`tools.citations`. That name did NOT move (Task 3), so leave it pointing where it is —
+those two files end up with two import statements, and F3d3b collapses them.
+
 Verify each file's actual import line before editing it — the table is what the survey
-found, and a survey is not the file.
+found, and a survey is not the file. Codex caught a missing `_insert_citation_locked` in
+the `accepting.py` row of an earlier draft; assume the same class of omission is still
+possible and read each import block.
 
 - [ ] **Step 3: Re-pin `audit.py`**
 
@@ -829,10 +981,15 @@ nothing. Two of the four are NEGATIVE tests — a forced citekey collision and a
 Append to `tests/proposal_assist/test_f3d3a_relocation.py`:
 
 ```python
+# Each patched name paired with the function in citations/core.py that actually READS
+# it. Verified against f9014b68 with ast: compute_citation_insert reads
+# _resolve_citekey_for_ref and new_ev_id; _insert_citation_locked reads
+# write_and_commit_files. Pairing all three with one reader is how the first draft of
+# this test got it wrong.
 PATCH_TARGETS = [
-    ("_resolve_citekey_for_ref", "call_manager.proposal_assist.citations.core"),
-    ("write_and_commit_files", "call_manager.proposal_assist.citations.core"),
-    ("new_ev_id", "call_manager.proposal_assist.citations.core"),
+    ("_resolve_citekey_for_ref", "compute_citation_insert"),
+    ("new_ev_id", "compute_citation_insert"),
+    ("write_and_commit_files", "_insert_citation_locked"),
 ]
 
 
@@ -841,29 +998,25 @@ def test_the_monkeypatch_targets_are_the_module_that_actually_reads_them():
 
     monkeypatch.setattr(mod, "name", ...) rebinds the name AS THAT MODULE SEES IT.
     Three test modules patch these names on tools.citations at four sites; after the
-    move, _insert_citation_locked reads them out of citations.core's namespace, so a
-    patch on the old module rebinds a name nothing reads and the test passes
-    vacuously. Two of the four are NEGATIVE tests (a forced citekey collision at
-    test_accepting.py:591, a forced GitCommitError at :655), which is the direction
-    that fails silently.
+    move the readers live in citations.core, so a patch on the old module rebinds a
+    name nothing reads and the test passes vacuously. Two of the four are NEGATIVE
+    tests (a forced citekey collision at test_accepting.py:591, a forced GitCommitError
+    at :655), which is the direction that fails silently.
 
-    This test pins the correct target so the next mover has to update it here too.
+    Pinning the READER, not just the module, is what makes this a real check: a name
+    that is present in citations.core but read by nobody would satisfy a hasattr test
+    and still leave the patch site dead.
     """
     import importlib
 
-    for name, expected_module in PATCH_TARGETS:
-        mod = importlib.import_module(expected_module)
-        assert hasattr(mod, name), f"{expected_module} has no {name}"
-
     core = importlib.import_module("call_manager.proposal_assist.citations.core")
-    reader = core._insert_citation_locked
-    referenced = reader.__code__.co_names
-    for name, _ in PATCH_TARGETS:
-        if name == "_resolve_citekey_for_ref":
-            continue  # read by compute_citation_insert, not the locked path
-        assert name in referenced, (
-            f"{name} is not read by _insert_citation_locked — the patch target list "
-            "is stale, which is exactly the failure this test exists to catch"
+
+    for name, reader_name in PATCH_TARGETS:
+        assert hasattr(core, name), f"citations.core has no {name}"
+        reader = getattr(core, reader_name)
+        assert name in reader.__code__.co_names, (
+            f"{name} is not read by {reader_name} — the patch-target list is stale, "
+            "which is exactly the failure this test exists to catch"
         )
 ```
 
@@ -873,11 +1026,12 @@ Run:
 ```bash
 uv run pytest tests/proposal_assist/test_f3d3a_relocation.py -q -k monkeypatch_targets > /tmp/f3d3a-5.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d3a-5.txt
 ```
-Expected: `PYTEST_EXIT=0` — it PASSES once Task 3 landed, because the names moved with
-the functions that read them. It is a ratchet, not a red-to-green step. If it FAILS,
-`write_and_commit_files` or `new_ev_id` did not move into `core.py` with
-`_insert_citation_locked`, and Task 3 is incomplete: go back rather than editing this
-list.
+Expected: `PYTEST_EXIT=0` — it PASSES once Task 3 landed, because each name moved with
+the function that reads it. It is a ratchet, not a red-to-green step. If it FAILS, one
+of `compute_citation_insert` or `_insert_citation_locked` did not move into `core.py`
+with the names it reads, and Task 3 is incomplete: go back rather than editing this
+list. Editing `PATCH_TARGETS` to make this pass is the one repair that defeats the
+test's purpose.
 
 - [ ] **Step 3: Enumerate every test import**
 
@@ -916,7 +1070,7 @@ uv run pytest -n 16 --dist loadfile -q > /tmp/f3d3a-5b.txt 2>&1; echo "PYTEST_EX
 ```
 Expected: `PYTEST_EXIT=0` and **3783 passed, 1 skipped** — the master baseline of 3771
 (`f9014b68`) plus the 12 tests added so far: 4 (Task 1) + 2 (Task 2) + 5 (Task 3) +
-1 (Task 5). Task 7 adds three more, so the FINAL total is 3786 — do not expect it here.
+1 (Task 5). Task 6 adds three more, so the FINAL total is 3786 — do not expect it here.
 Derive it yourself from the tests you actually added and report both your arithmetic and
 the run. If they disagree, work out which term is wrong — do not adjust either to match
 the other, and do not delete a test to reach a number.
@@ -955,135 +1109,7 @@ git diff --exit-code HEAD -- tests/proposal_assist/tools/test_citations_insert.p
 
 ---
 
-### Task 6: The inventory row crosses with the code
-
-One row relocates: `_write_citekey_cache`. Tasks 1 and 2 built and pinned the
-mechanism; this is the single run that uses it.
-
-**Files:**
-- Modify: `tests/fencing/regenerate_inventory.py`
-- Modify: `tests/fencing/fence_inventory.json`
-- Modify: `tests/fencing/inventory.py`
-
-**Interfaces:**
-- Consumes: `RELOCATED_EFFECT_PATHS` (Task 1), the rename contract (Task 2).
-- Produces: nothing new.
-
-- [ ] **Step 1: Fill in the rename**
-
-In `tests/fencing/regenerate_inventory.py`:
-
-```python
-RENAMES: dict[tuple[str, str, str], tuple[str, str, str]] = {
-    (
-        "tool_commit",
-        "src/call_manager/proposal_assist/tools/citations.py",
-        "_write_citekey_cache",
-    ): (
-        "tool_commit",
-        "src/call_manager/proposal_assist/citations/core.py",
-        "_write_citekey_cache",
-    ),
-}
-```
-
-- [ ] **Step 2: Move the `NON_SEMANTIC_PINS` key**
-
-That dict is keyed by `(kind, path, symbol)`, so the relocation invalidates the KEY
-itself, not just the inventory row. In `tests/fencing/inventory.py` change the first
-entry's path from `.../tools/citations.py` to `.../citations/core.py`. Leave both
-`references.py` entries exactly as they are.
-
-- [ ] **Step 3: Regenerate**
-
-```bash
-uv run python -m tests.fencing.regenerate_inventory
-git diff tests/fencing/fence_inventory.json
-```
-Expected: **exactly one changed line** — `_write_citekey_cache`'s `path`. Its
-`category` (`caller_fenced`), `fenced` (`false`), `slice` (`F3d3`) and `fenced_by`
-(`_insert_citation_locked`) all ride along, which is what a rename is for. Row count
-stays **20**.
-
-If instead you see `BadRenameMap`, Task 1 did not land or the path string does not
-match byte-for-byte — the JSON is NOT written when merge() raises, so a stale file
-will look fine. Check the exit code, not the file.
-
-- [ ] **Step 4: Clear the rename**
-
-Set `RENAMES` back to `{}`. It is a one-run instruction, and leaving it populated makes
-the next regeneration raise `BadRenameMap` on an identity that no longer exists.
-
-Re-run the regeneration and confirm the JSON does not move:
-```bash
-uv run python -m tests.fencing.regenerate_inventory && git diff --exit-code tests/fencing/fence_inventory.json && echo "STABLE WITH RENAMES EMPTY"
-```
-
-- [ ] **Step 5: Shrink the `citations.py` exemption**
-
-The move takes six `repo_dir` namings and most of the import violations out of
-`tools/`. Get the new set:
-
-```bash
-uv run python -c "
-from tests.fencing.import_gate import check_file, normalized_violation, tool_key, tool_modules
-for p in tool_modules():
-    if tool_key(p) == 'citations.py':
-        vs = check_file(p)
-        print('raw:', len(vs))
-        for v in sorted({normalized_violation(x) for x in vs}): print(repr(v))
-"
-```
-
-Replace `TOOLS_NOT_YET_CONVERTED["citations.py"]` with exactly that set. Record the
-before/after counts in your report — the before is **28 raw / 19 normalized**, and the
-shrink is this slice's measurable deliverable even though the exemption does not
-retire.
-
-- [ ] **Step 6: Run the tests**
-
-Run:
-```bash
-uv run pytest tests/fencing -q > /tmp/f3d3a-6.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d3a-6.txt
-uv run pytest -n 16 --dist loadfile -q > /tmp/f3d3a-6b.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -3 /tmp/f3d3a-6b.txt
-```
-Expected: `PYTEST_EXIT=0` for both, and the full-suite total unchanged from Task 5.
-`test_caller_fenced_entries_name_a_resolvable_ancestor` is the one worth watching: it
-parses `REPO / row["path"]` and requires `fenced_by` to resolve **in that file**. Both
-`_write_citekey_cache` and `_insert_citation_locked` moved to `core.py`, so it stays
-green at the new path — if it fails, they did not move together.
-
-- [ ] **Step 7: Commit**
-
-```bash
-uv run ruff check .
-git add tests/fencing/regenerate_inventory.py tests/fencing/fence_inventory.json tests/fencing/inventory.py
-git commit -m "test(fencing): the citekey-cache row crosses with its code (F3d3a Task 6)"
-```
-
-- [ ] **Step 8: Prove the row would have vanished without Task 1**
-
-In `tests/fencing/detectors.py`, empty `RELOCATED_EFFECT_PATHS`.
-
-Run:
-```bash
-uv run pytest tests/fencing -q > /tmp/f3d3a-6m.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -30 /tmp/f3d3a-6m.txt
-```
-Expected: FAIL on `test_the_inventory_matches_the_tree_exactly` — the JSON lists a
-`citations/core.py` row the scan no longer finds. This is the state the slice would
-have been in without Task 1, and it is the LOUD version; the silent version is the one
-F3d1's ratchet was built for. Note whether
-`test_every_f3d_identity_is_still_in_the_inventory` also fires and say so — it should
-not, because the row is still IN the JSON; only the scan disagrees.
-
-```bash
-git checkout tests/fencing/detectors.py
-git diff --exit-code HEAD -- tests/fencing/detectors.py
-```
-
----
-
-### Task 7: Confirm the slice moved code and changed nothing
+### Task 6: Confirm the slice moved code and changed nothing
 
 The closing check. This slice's claim is unusually strong — *zero behaviour change* —
 and a claim that strong deserves a command that would catch a violation.
@@ -1153,7 +1179,7 @@ def test_the_moved_code_still_names_repo_dir_and_that_is_expected():
 
 Run:
 ```bash
-uv run pytest tests/proposal_assist/test_f3d3a_relocation.py -q > /tmp/f3d3a-7.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d3a-7.txt
+uv run pytest tests/proposal_assist/test_f3d3a_relocation.py -q > /tmp/f3d3a-6.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d3a-6.txt
 ```
 Expected: `PYTEST_EXIT=0`.
 
@@ -1161,8 +1187,8 @@ Expected: `PYTEST_EXIT=0`.
 
 Run:
 ```bash
-uv run pytest -n 16 --dist loadfile -q > /tmp/f3d3a-7b.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -3 /tmp/f3d3a-7b.txt
-# Expected: 3786 passed, 1 skipped — 3783 from Task 5 plus Task 7's three.
+uv run pytest -n 16 --dist loadfile -q > /tmp/f3d3a-6b.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -3 /tmp/f3d3a-6b.txt
+# Expected: 3786 passed, 1 skipped — 3783 from Task 5 plus this task's three.
 uv run ruff check .
 uv run python -c "
 from tests.fencing.inventory import SLICE_STATUS, TOOLS_NOT_YET_CONVERTED, load_inventory, scan_tree
@@ -1193,7 +1219,7 @@ its count must not have moved at all.
 
 ```bash
 git add tests/proposal_assist/test_f3d3a_relocation.py
-git commit -m "test(fence): F3d3a moved code and converted nothing (F3d3a Task 7)"
+git commit -m "test(fence): F3d3a moved code and converted nothing (F3d3a Task 6)"
 ```
 
 ---
@@ -1227,16 +1253,18 @@ Checked against the spec and the survey that produced this cut:
 |---|---|
 | §7 "moves the whole session/model-dependent citation core out of `tools/`" | 3 |
 | §7 "updates **every non-tool consumer**" | 4, 5 |
-| Survey finding 1 — pins cannot retire (`repo_dir` is F3f's) | 7, and stated in the header |
-| Survey finding 2 — `RENAMES` cannot cross the boundary | 1, 2, 6 |
-| Survey finding 3 — exactly one row relocates | 6 |
+| Survey finding 1 — pins cannot retire (`repo_dir` is F3f's) | 6, and stated in the header |
+| Survey finding 2 — `RENAMES` cannot cross the boundary | 1, 2, 3 |
+| Survey finding 3 — exactly one row relocates | 3 |
 | GC-5 — the four monkeypatch targets | 5 |
-| `NON_SEMANTIC_PINS` is keyed by path | 6 Step 2 |
-| `caller_fenced` ancestor must resolve in the row's file | 6 Step 6 |
+| `NON_SEMANTIC_PINS` is keyed by path | 3 Step 7 |
+| `caller_fenced` ancestor must resolve in the row's file | 3 Step 11 |
 
 Three things a reviewer should push on, named here rather than discovered later:
 
-1. **Task 3 commits a red tree.** It is the only task that does. The alternative is one
+1. **Task 3 commits a tree whose wider suite is red.** It is the only task that does,
+   and its own fencing suite is green — the code and its inventory row cross together,
+   so no gate is left red for a reason that commit does not fix. The alternative is one
    commit holding a 480-line move plus twenty import edits, which no reviewer can check.
    If a reviewer disagrees, the fix is to squash Tasks 3-5 at merge, not to reorder them.
 2. **Task 2's tests pass on first run.** They pin a contract Task 1 already supplied.
@@ -1245,8 +1273,8 @@ Three things a reviewer should push on, named here rather than discovered later:
    is pinned by Task 1's tests instead. Two pins, two different mechanisms, neither
    redundant.
 3. **Two different totals are expected, and both are correct.** Task 5 Step 5 expects
-   **3783** (baseline 3771 + the 12 tests that exist by then); Task 7 Step 3 expects
-   **3786** (+ Task 7's own three). A reviewer seeing two numbers should check the
+   **3783** (baseline 3771 + the 12 tests that exist by then); Task 6 Step 3 expects
+   **3786** (+ Task 6's own three). A reviewer seeing two numbers should check the
    arithmetic, not assume a typo: 4 (Task 1) + 2 (Task 2) + 5 (Task 3) + 1 (Task 5) +
-   3 (Task 7) = 15, and 3771 + 15 = 3786. Both are derived, neither is measured — this
+   3 (Task 6) = 15, and 3771 + 15 = 3786. Both are derived, neither is measured — this
    plan has not been executed, and the totals are the first thing a run should falsify.
