@@ -341,3 +341,47 @@ def test_non_tool_commit_rows_keep_their_stored_flag():
     assert len(f3a) == 9
     assert all(r["fenced"] for r in f3a)
     assert all(r["kind"] in {"claim_fn", "tool_context"} for r in f3a)
+
+
+def test_the_four_converted_modules_are_no_longer_exempt():
+    """The point of the slice, stated as a fact about the exemption list. These
+    four import stdlib and ports only; the gate now enforces them with no pins."""
+    from tests.fencing.inventory import TOOLS_NOT_YET_CONVERTED
+
+    assert set(TOOLS_NOT_YET_CONVERTED) == {
+        "audit.py",       # F3f — capability holders
+        "citations.py",   # F3d3 — the citation core relocation
+        "history.py",     # F3f — the repo_dir locator, and zero inventory rows
+        "proposal.py",    # F3d3
+        "references.py",  # F3e — the ingest half
+    }
+
+
+def test_f3d2_is_complete_and_every_row_it_owns_is_measured_fenced():
+    """`complete` is now a measurable claim. Task 2 made `fenced` a function of the
+    source, so this cannot be satisfied by editing the JSON."""
+    from tests.fencing.inventory import SLICE_STATUS, load_inventory, scan_tree
+
+    assert SLICE_STATUS["F3d2"] == "complete"
+    _sites, fenced_ids = scan_tree()
+    owned = [r for r in load_inventory() if r["slice"] == "F3d2"]
+    assert len(owned) == 5
+    for row in owned:
+        assert row["fenced"] is True, row["symbol"]
+        assert (row["path"], row["symbol"]) in fenced_ids, row["symbol"]
+
+
+def test_the_ingest_row_is_untouched_and_still_f3e():
+    """The boundary this slice must not cross. fetch_reference_impl._do_fetch_and_ingest
+    is a SEPARATE nested identity (references.py:551) holding the ingest commit at
+    :580. F3d2 converts the accounting around it and leaves it alone — which is also
+    why fetch_reference_impl itself CAN go green here."""
+    from tests.fencing.inventory import load_inventory
+
+    row = next(
+        r
+        for r in load_inventory()
+        if r["symbol"] == "fetch_reference_impl._do_fetch_and_ingest"
+    )
+    assert row["slice"] == "F3e"
+    assert row["fenced"] is False
