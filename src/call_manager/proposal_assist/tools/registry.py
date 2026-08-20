@@ -672,6 +672,8 @@ def _collect_tools(ctx: ToolContext) -> list:
             ctx,
             fetch_reference_impl,
             ctx,
+            pass_ports=True,
+            pass_invocation=True,
             input=args["input"],
             kind=args.get("kind", "paper"),
         )

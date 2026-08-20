@@ -18,9 +18,10 @@ from call_manager.db.models import (
     User,
     Workspace,
 )
+from call_manager.proposal_assist.port_impl import build_ports
 from call_manager.proposal_assist.references.embed import FakeEmbedder
 from call_manager.proposal_assist.tools.references import fetch_reference_impl
-from call_manager.proposal_assist.tools.registry import ToolContext
+from call_manager.proposal_assist.tools.registry import ToolContext, snapshot_invocation
 
 # Every test reaches the SSRF resolver through fetch_reference_impl;
 # apply the shared fake_public_dns fixture from tests/proposal_assist/
@@ -51,13 +52,15 @@ def _mock_arxiv_atom(httpx_mock):
     )
 
 
-def _make_ctx(pg_session_factory, tmp_path, workspace_id):
+def _make_ctx(pg_session_factory, tmp_path, workspace_id, *, active_turn_job_id=None):
     settings = Settings.model_construct(workspaces_dir=str(tmp_path))
     return ToolContext(
         workspace_id=workspace_id,
         repo_dir=tmp_path / str(workspace_id) / "repo",
         session_factory=pg_session_factory,
         settings=settings,
+        lifecycle_generation=0,
+        active_turn_job_id=active_turn_job_id,
     )
 
 
@@ -99,8 +102,10 @@ async def test_fetch_reference_no_running_turn_returns_error(pg_session_factory,
         s.commit()
         wsid = ws.id
 
-    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
-    out = await fetch_reference_impl(ctx, input="2401.12345")
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid, active_turn_job_id=uuid.uuid4())
+    ports = build_ports(pg_session_factory)
+    invocation = snapshot_invocation(ctx)
+    out = await fetch_reference_impl(ctx, ports=ports, invocation=invocation, input="2401.12345")
     assert "error" in out
     assert "no running turn" in out["error"].lower() or "cap" in out["error"].lower()
 
@@ -126,8 +131,12 @@ async def test_fetch_reference_increments_fetch_count(pg_session_factory, tmp_pa
     )
 
     wsid, jobid = _seed_running_turn(pg_session_factory)
-    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
-    out = await fetch_reference_impl(ctx, input="2401.12345", embedder=FakeEmbedder())
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid, active_turn_job_id=jobid)
+    ports = build_ports(pg_session_factory)
+    invocation = snapshot_invocation(ctx)
+    out = await fetch_reference_impl(
+        ctx, ports=ports, invocation=invocation, input="2401.12345", embedder=FakeEmbedder()
+    )
     assert "error" not in out, out
     assert "reference_id" in out
 
@@ -157,7 +166,9 @@ async def test_fetch_reference_4th_attempt_returns_cap_error(
     pdf_bytes = buf.getvalue()
 
     wsid, jobid = _seed_running_turn(pg_session_factory)
-    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid, active_turn_job_id=jobid)
+    ports = build_ports(pg_session_factory)
+    invocation = snapshot_invocation(ctx)
     embedder = FakeEmbedder()
 
     for i, ax_id in enumerate(["2401.00001", "2401.00002", "2401.00003"]):
@@ -165,12 +176,16 @@ async def test_fetch_reference_4th_attempt_returns_cap_error(
             url=f"https://arxiv.org/pdf/{ax_id}.pdf",
             content=pdf_bytes,
         )
-        out = await fetch_reference_impl(ctx, input=ax_id, embedder=embedder)
+        out = await fetch_reference_impl(
+            ctx, ports=ports, invocation=invocation, input=ax_id, embedder=embedder
+        )
         assert "error" not in out, (i, out)
 
     # 4th attempt: cap hit BEFORE any HTTP — no mock registered because
     # the atomic UPDATE returns 0 rows and we short-circuit.
-    out = await fetch_reference_impl(ctx, input="2401.00004", embedder=embedder)
+    out = await fetch_reference_impl(
+        ctx, ports=ports, invocation=invocation, input="2401.00004", embedder=embedder
+    )
     assert "error" in out
     assert "cap" in out["error"].lower() or "3" in out["error"]
 
@@ -194,8 +209,12 @@ async def test_fetch_reference_refunds_count_on_fetch_error(
     )
 
     wsid, jobid = _seed_running_turn(pg_session_factory)
-    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
-    out = await fetch_reference_impl(ctx, input="2401.99999", embedder=FakeEmbedder())
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid, active_turn_job_id=jobid)
+    ports = build_ports(pg_session_factory)
+    invocation = snapshot_invocation(ctx)
+    out = await fetch_reference_impl(
+        ctx, ports=ports, invocation=invocation, input="2401.99999", embedder=FakeEmbedder()
+    )
     assert "error" in out
     assert "fetch failed" in out["error"].lower()
     # The reported count reflects the refund.
@@ -224,17 +243,23 @@ async def test_fetch_reference_refund_keeps_other_successful_fetches(
     pdf_bytes = buf.getvalue()
 
     wsid, jobid = _seed_running_turn(pg_session_factory)
-    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid, active_turn_job_id=jobid)
+    ports = build_ports(pg_session_factory)
+    invocation = snapshot_invocation(ctx)
     embedder = FakeEmbedder()
 
     # One good fetch → count goes to 1.
     httpx_mock.add_response(url="https://arxiv.org/pdf/2401.00010.pdf", content=pdf_bytes)
-    out_ok = await fetch_reference_impl(ctx, input="2401.00010", embedder=embedder)
+    out_ok = await fetch_reference_impl(
+        ctx, ports=ports, invocation=invocation, input="2401.00010", embedder=embedder
+    )
     assert "error" not in out_ok, out_ok
 
     # One bad fetch → count goes to 2, then refunded back to 1.
     httpx_mock.add_response(url="https://arxiv.org/pdf/2401.00011.pdf", status_code=503)
-    out_bad = await fetch_reference_impl(ctx, input="2401.00011", embedder=embedder)
+    out_bad = await fetch_reference_impl(
+        ctx, ports=ports, invocation=invocation, input="2401.00011", embedder=embedder
+    )
     assert "error" in out_bad
     assert out_bad["fetch_count"] == 1
 
@@ -249,8 +274,12 @@ async def test_fetch_reference_with_invalid_input_returns_error(pg_session_facto
     a clear error. fetch_count NOT incremented (defensive: bad input
     shouldn't cost the budget)."""
     wsid, jobid = _seed_running_turn(pg_session_factory)
-    ctx = _make_ctx(pg_session_factory, tmp_path, wsid)
-    out = await fetch_reference_impl(ctx, input="just some text")
+    ctx = _make_ctx(pg_session_factory, tmp_path, wsid, active_turn_job_id=jobid)
+    ports = build_ports(pg_session_factory)
+    invocation = snapshot_invocation(ctx)
+    out = await fetch_reference_impl(
+        ctx, ports=ports, invocation=invocation, input="just some text"
+    )
     assert "error" in out
 
     with pg_session_factory() as s:
@@ -293,7 +322,7 @@ async def test_fetch_reference_impl_passes_source_meta_and_citation_service(
         content=pdf_bytes,
     )
 
-    wsid, _jobid = _seed_running_turn(pg_session_factory)
+    wsid, jobid = _seed_running_turn(pg_session_factory)
 
     class _FakeCitationService:
         def complete_json(self, *, workspace_id, op, system, user):
@@ -315,6 +344,8 @@ async def test_fetch_reference_impl_passes_source_meta_and_citation_service(
         session_factory=pg_session_factory,
         settings=settings,
         citation_service=fake_service,
+        lifecycle_generation=0,
+        active_turn_job_id=jobid,
     )
 
     # Monkeypatch ingest_bytes at its canonical import path. fetch_reference_impl
@@ -335,7 +366,11 @@ async def test_fetch_reference_impl_passes_source_meta_and_citation_service(
 
     monkeypatch.setattr(_ingest_mod, "ingest_bytes", _fake_ingest_bytes)
 
-    await fetch_reference_impl(ctx, input="2401.77777", embedder=FakeEmbedder())
+    _ports = build_ports(pg_session_factory)
+    _invocation = snapshot_invocation(ctx)
+    await fetch_reference_impl(
+        ctx, ports=_ports, invocation=_invocation, input="2401.77777", embedder=FakeEmbedder()
+    )
 
     # Key assertions: source_meta and citation_service were forwarded to ingest_bytes.
     assert "source_meta" in captured, "fetch_reference_impl must pass source_meta= to ingest_bytes"

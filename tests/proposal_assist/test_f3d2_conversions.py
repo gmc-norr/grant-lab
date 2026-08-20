@@ -16,6 +16,7 @@ from tests.proposal_assist.f3b_seeds import (
     bump_generation,
     seed_evaluator_job,
     seed_review_item,
+    seed_running_turn,
     seed_uncited_job,
     seed_workspace,
 )
@@ -341,3 +342,78 @@ async def test_uncited_claims_validation_still_runs_before_any_port_call():
         claims=[{"claim_text": "c", "section_index": 5, "reason": "r"}],
     )
     assert "section_index must be an int in [0,1)" in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_the_refund_does_not_touch_a_later_turns_row(pg_session_factory):
+    """GC-5, the interleaving accounting exists for (spec §5): reserve a slot at
+    generation G, delete and restore, start a NEW turn at G+1, and assert the old
+    actor's refund does not touch the new turn's row.
+
+    TWO schema facts shape this and neither is optional. `uq_turn_jobs_running`
+    (models.py:887-891) is a partial unique index on workspace_id WHERE
+    status='running', so the old turn MUST leave 'running' before the new one can
+    exist — the delete/restore is what does that. And refund_fetch_slot requires
+    `TurnJob.status == "running"` (port_impl/accounting.py:38-45), so the dead
+    actor's refund is a no-op on its own row too.
+
+    The claim under test is therefore about the NEW turn: a late refund from an
+    actor the workspace has moved past must not decrement the live turn's count.
+    That is what binding to active_turn_job_id buys, and what the code this
+    replaces (references.py:465-473, matching workspace + status) did NOT.
+    """
+    from call_manager.db.models import TurnJob
+    from call_manager.proposal_assist.port_impl import build_ports
+
+    ports = build_ports(pg_session_factory)
+    with pg_session_factory() as s:
+        ws_id = seed_workspace(s, generation=_G)
+        old_turn = seed_running_turn(s, ws_id)
+
+    assert ports.accounting.reserve_fetch_slot(old_turn) == 1
+
+    with pg_session_factory() as s:  # delete + restore ends the old turn
+        s.get(TurnJob, old_turn).status = "failed"
+        bump_generation(s, ws_id, to=_NEXT)
+        s.commit()
+        new_turn = seed_running_turn(s, ws_id)  # only now is this insertable
+
+    assert ports.accounting.reserve_fetch_slot(new_turn) == 1
+
+    # The old actor, still holding its slot, finally gives it back.
+    ports.accounting.refund_fetch_slot(old_turn)
+
+    with pg_session_factory() as s:
+        # THE CLAIM: the live turn is untouched.
+        assert s.get(TurnJob, new_turn).fetch_count == 1
+        # The dead turn keeps its count: the status guard refuses to refund a turn
+        # that is no longer running, and the row is terminal anyway.
+        assert s.get(TurnJob, old_turn).fetch_count == 1
+
+
+@pytest.mark.asyncio
+async def test_the_reserve_is_bound_to_the_turn_not_the_workspace(pg_session_factory):
+    """The tightening the port makes over the code it replaces. A reserve against a
+    turn id that is not running returns None even though ANOTHER turn in the same
+    workspace is running and under cap."""
+    from call_manager.db.models import TurnJob
+    from call_manager.proposal_assist.port_impl import build_ports
+
+    ports = build_ports(pg_session_factory)
+    with pg_session_factory() as s:
+        ws_id = seed_workspace(s, generation=_G)
+        dead_turn = seed_running_turn(s, ws_id)
+        s.get(TurnJob, dead_turn).status = "completed"
+        s.commit()
+        seed_running_turn(s, ws_id)  # a live turn, under cap
+
+    assert ports.accounting.reserve_fetch_slot(dead_turn) is None
+
+
+async def test_the_cap_constant_is_the_one_the_tool_reports():
+    """The tool tells the agent 'fetch cap reached (3 per turn)'. That 3 was a
+    literal at references.py:469 while the port carried its own constant — two
+    numbers that must agree and nothing making them. No database here."""
+    from call_manager.proposal_assist.ports.accounting import MAX_FETCHES_PER_TURN
+
+    assert MAX_FETCHES_PER_TURN == 3
