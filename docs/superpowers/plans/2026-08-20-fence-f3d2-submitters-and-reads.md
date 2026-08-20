@@ -17,6 +17,33 @@ identity set from encoding slice ownership. Only then do the six conversions lan
 
 **Tech Stack:** Python 3.12, SQLAlchemy 2.x, pytest.
 
+**Revision 1 (2026-08-20).** A Codex review of revision 0 returned eight findings, five of
+them P1. All eight were verified against the code and all eight were real:
+
+- **The re-slicing task was built on a misread and would have broken the gate.** The ingest
+  commit at `references.py:580` sits inside `_do_fetch_and_ingest` (`:551`), which is its
+  OWN inventory row, already F3e. So `fetch_reference_impl` holds only the reserve, and
+  after conversion it measures `fenced: true` — under the `pending` F3e that revision 0
+  moved it to, `test_each_slice_matches_its_declared_status` fails. **Task 3 is deleted**
+  and the remaining tasks renumber.
+- **36 existing direct callers were unaccounted for.** `ports` and `invocation` are
+  required keywords, so every test calling an impl directly raises `TypeError`. Revision 0
+  claimed those tests "must pass untouched". GC-13 and a migration step per task.
+- **The accounting interleaving fixture could not be built.** `uq_turn_jobs_running`
+  (`models.py:887-891`) forbids two running turns per workspace, and `refund_fetch_slot`
+  ignores a non-running turn — so the old row's expected count of 0 was impossible.
+- **The new query method is not covered automatically.** `test_ports_dto_contract.py`
+  requires an explicit `CASES` entry per method; without one Task 8 goes red, and adding
+  one adds a parametrised node.
+- **A user-visible error string was truncated**, dropping the manual-upload guidance.
+  Existing coverage matches a substring, so the regression would have shipped green.
+- Two orphaned function-local imports (`ruff` F401); a detector rule that accepted any
+  `<anything>.effects.X(...)` receiver; and two mutation steps that did not falsify the
+  fence GC-4 requires.
+
+Two lessons, both already on this project's record: **a nested function is a different
+identity**, and **verify a claim about a file against the file**.
+
 **Spec:** `docs/superpowers/specs/2026-08-18-fence-session-ownership-design.md` (revision
 8). §7's F3d paragraph is the charter — "converts … `submit_review_impl`,
 `submit_scorecard_impl` and `submit_uncited_claims_impl` to effect operations, the two
@@ -52,14 +79,19 @@ into a real gate. Scoped to `tool_commit` only: all nine `tool_commit` rows are
 `fenced: false` today, and F3a's nine `claim_fn`/`tool_context` rows (all `fenced: true`)
 are untouched.
 
-**3. `fetch_reference_impl` cannot go green in this slice, and F3d1's identity set makes
-saying so look like tampering.**
-That qualname holds TWO commits: the accounting reserve at `references.py:475`, which this
-slice converts, and the **ingest** commit at `references.py:580`, which is
-`_do_fetch_and_ingest`'s work and belongs to F3e. So the row keeps a raw commit after this
-slice and must not be marked fenced. It belongs to F3e. But `F3D_IDENTITIES` is keyed
-`(slice, kind, symbol)`, so re-slicing a row edits the frozenset — which its own docstring
-says is "not a way to make a test pass". The key has to stop carrying ownership.
+**3. All five F3d2 rows CAN go green, because the ingest commit is a different row.**
+`references.py` holds three `tool_commit` identities, not two: `fetch_reference_impl`
+(the accounting reserve at `:475`), `fetch_reference_impl._refund_fetch_slot` (`:508`),
+and `fetch_reference_impl._do_fetch_and_ingest` (`:580`) — the last nested in its own
+function at `references.py:551` and already assigned to **F3e**. The detector keys on the
+lexical qualname, so converting the reserve leaves `fetch_reference_impl` holding a port
+call and no raw commit of its own. It measures fenced, it stays in F3d2, and F3d2 closes.
+
+Revision 1 corrects this. Revision 0 read `:580` as sitting directly inside
+`fetch_reference_impl`, concluded the row could never go green, and added a whole task to
+move it to F3e and re-key `F3D_IDENTITIES` so that was legal. That task would have
+*created* the failure it claimed to prevent: a row measuring `fenced: true` under a
+`pending` F3e fails `test_each_slice_matches_its_declared_status`. The task is gone.
 
 **What this slice does NOT take.** `history.py` stays pinned. Its only blocker is the
 `repo_dir` locator and it owns zero inventory rows, so converting it would fence nothing
@@ -78,8 +110,8 @@ Every task's requirements implicitly include this section.
   reads. `tools/citations.py`, `tools/proposal.py`, `tools/audit.py` and `tools/history.py`
   are not touched. At the end, `TOOLS_NOT_YET_CONVERTED` has **five** entries:
   `audit.py`, `citations.py`, `history.py`, `proposal.py`, `references.py`.
-- **GC-2 — Detection lands before conversion.** Tasks 1-3 must be complete and committed
-  before Task 5. A conversion merged ahead of them deletes its own inventory row and takes
+- **GC-2 — Detection lands before conversion.** Tasks 1 and 2 must be complete and
+  committed before Task 4. A conversion merged ahead of them deletes its own inventory row and takes
   F3d1's anti-vacuity ratchet red. If you find yourself editing `F3D_IDENTITIES` to make a
   test pass, stop: that is the failure the ratchet exists to catch.
 - **GC-3 — A converted tool may import stdlib and `call_manager.proposal_assist.ports`,
@@ -131,6 +163,29 @@ Every task's requirements implicitly include this section.
   ```
 
   Never `git status --porcelain`: it exits 0 whether the tree is clean or filthy.
+- **GC-13 — Every conversion breaks its existing direct callers, and the task that
+  converts owns them.** `ports` and `invocation` are REQUIRED keyword parameters, so every
+  test that calls an impl directly raises `TypeError` the moment its task lands. There are
+  **36 such call sites** across six files:
+
+  | file | impl |
+  |---|---|
+  | `tests/proposal_assist/evaluator/test_submit_scorecard.py` | `submit_scorecard_impl` |
+  | `tests/proposal_assist/review/test_submit_review.py` | `submit_review_impl` |
+  | `tests/proposal_assist/uncited_claims/test_submit.py` | `submit_uncited_claims_impl` |
+  | `tests/proposal_assist/tools/test_references_fetch_tool.py` | `fetch_reference_impl` |
+  | `tests/proposal_assist/test_references_admission.py` | `fetch_reference_impl` |
+  | `tests/proposal_assist/test_tools_context.py` | `get_call_details_impl`, `get_profile_impl` |
+
+  Each conversion task migrates its own file in the SAME commit. Migrating means passing
+  `ports=build_ports(<the same session_factory the test already has>)` and, where the impl
+  takes one, `invocation=snapshot_invocation(ctx)` — NOT rewriting what the test asserts.
+  An assertion that has to change is a behaviour change and violates GC-6: stop and report
+  it instead. Find every site in a file with:
+
+  ```bash
+  grep -n "_impl(" <file>
+  ```
 - **GC-12 — There is ONE database fixture and a seed module. Use them; do not invent
   fixtures.** `pg_session_factory` (`tests/conftest.py:70`) is the only DB fixture. Every
   row this slice needs is built by `tests/proposal_assist/f3b_seeds.py`, whose complete API
@@ -145,7 +200,7 @@ Every task's requirements implicitly include this section.
   seed_running_turn(session, workspace_id) -> uuid.UUID
   ```
 
-  `seed_workspace` creates a workspace with EMPTY snapshots, which is what Task 9's
+  `seed_workspace` creates a workspace with EMPTY snapshots, which is what Task 8's
   "unlinked" case needs. Read `tests/proposal_assist/test_f3b_lock_cases.py:46-54` for the
   established usage before writing a test. If you need a row shape the module does not
   seed, ADD a helper there rather than a fixture in the test file — that is where the next
@@ -175,16 +230,15 @@ Every task's requirements implicitly include this section.
 | File | Change |
 |---|---|
 | `tests/fencing/detectors.py` | `find_sites` also records a `tool_commit` for a port effect/accounting call; new `find_fenced_tool_commits` reports which qualnames are port-only. |
-| `tests/fencing/inventory.py` | `merge` COMPUTES `fenced` for `tool_commit` rows instead of copying it forward; `F3D_IDENTITIES` re-keys to `(kind, symbol)`; new `F3D_SLICE_OF` map. |
-| `tests/fencing/fence_inventory.json` | `fetch_reference_impl` moves to `F3e`; the four F3d2 rows end `fenced: true`. |
-| `tests/fencing/test_fence_coverage.py` | The two F3d1 tests read the re-keyed identity set and the slice map. |
+| `tests/fencing/inventory.py` | `merge` COMPUTES `fenced` for `tool_commit` rows instead of copying it forward; four exemptions retire; `SLICE_STATUS["F3d2"]` closes. |
+| `tests/fencing/fence_inventory.json` | The five F3d2 rows end `fenced: true`, written by regeneration and never by hand. |
+| `tests/fencing/test_fence_coverage.py` | Gains the measured-fenced gate and the slice-closing assertions. |
 | `src/call_manager/proposal_assist/evaluator/scoring.py` | Re-exports `compute_overall_band` from `ports/scoring.py`. |
 | `src/call_manager/proposal_assist/ports/queries.py` | Gains `WorkspaceSnapshotView` and `get_workspace_snapshot`. |
 | `src/call_manager/proposal_assist/port_impl/queries.py` | Implements `get_workspace_snapshot`. |
 | `proposal_assist/tools/scorecard.py`, `review_submit.py`, `uncited_claims.py`, `context.py` | Converted: no session, no models, no `ToolContext` annotation. |
 | `proposal_assist/tools/references.py` | Its two accounting sites call the port; ingest is untouched (F3e). |
 | `proposal_assist/tools/registry.py` (`_collect_tools`) | Six call sites gain `pass_ports=True` and, where the effect needs a stamp, `pass_invocation=True`. |
-| `docs/superpowers/specs/2026-08-18-fence-session-ownership-design.md` | §7's row assignment records `fetch_reference_impl` as F3e. |
 
 **Deliberately NOT done here** (named so a reviewer does not read them as gaps):
 `tools/history.py` keeps its `repo_dir` pin — zero inventory rows, and `repo_dir` retires
@@ -280,13 +334,29 @@ def test_the_port_method_list_is_derived_from_the_protocols():
     assert "refund_fetch_slot" in PORT_WRITE_METHODS
     # Queries are reads. Fencing reads is explicitly out of scope (spec §8).
     assert "get_reference" not in PORT_WRITE_METHODS
+
+
+def test_a_lookalike_receiver_is_not_a_site():
+    """The chain root must be the INJECTED `ports` name. Matching on
+    `<anything>.effects.submit_review(...)` would let a local helper — or a test
+    double a tool happened to hold — mint an inventory row, and worse, mark a
+    qualname fenced that never touched a real capability."""
+    from tests.fencing.detectors import find_sites
+
+    path = "src/call_manager/proposal_assist/tools/scorecard.py"
+    src = (
+        "async def submit_scorecard_impl(ctx):\n"
+        "    fake = _Local()\n"
+        "    fake.effects.submit_scorecard(stamp, cmd)\n"
+    )
+    assert find_sites(src, path) == set()
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
 
 Run:
 ```bash
-uv run pytest tests/fencing/test_detectors.py -q -k "port_write or accounting_call or outside_tools or derived_from" > /tmp/f3d2-1.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-1.txt
+uv run pytest tests/fencing/test_detectors.py -q -k "port_write or accounting_call or outside_tools or derived_from or lookalike" > /tmp/f3d2-1.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-1.txt
 ```
 Expected: `PYTEST_EXIT=1`, with `ImportError: cannot import name 'PORT_WRITE_METHODS'`
 for the fourth test and assertion failures for the first two.
@@ -310,10 +380,36 @@ PORT_WRITE_METHODS: frozenset[str] = frozenset(Effects.__protocol_attrs__) | fro
     Accounting.__protocol_attrs__
 )
 
-#: The two bundle attributes a write is reached through. `ports.effects.X(...)`
-#: and `ports.accounting.X(...)` — matching on the method name ALONE would record
-#: any local helper that happens to be called `submit_review`.
+#: The two bundle attributes a write is reached through.
 _PORT_BUNDLE_ATTRS = frozenset({"effects", "accounting"})
+
+#: The name the bundle arrives under. _safe_tool passes it as the keyword `ports`
+#: (F3d1), so the canonical converted call is exactly `ports.effects.X(...)` or
+#: `ports.accounting.X(...)`. Matching the METHOD NAME alone would record any local
+#: helper called `submit_review`; matching `<anything>.effects.X` would let a test
+#: double mint a row and mark a qualname fenced that never held a capability.
+_PORT_ROOT = "ports"
+```
+
+Add the shared predicate at module level — Task 2 needs the identical rule, and two
+copies of it would drift:
+
+```python
+def _is_port_write(node: ast.Call) -> bool:
+    """`ports.effects.X(...)` or `ports.accounting.X(...)`, and nothing else.
+
+    All three parts are load-bearing: the method must be a real port write, the
+    bundle attribute must be `effects` or `accounting`, and the ROOT must be the
+    injected `ports` name.
+    """
+    return (
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr in PORT_WRITE_METHODS
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr in _PORT_BUNDLE_ATTRS
+        and isinstance(node.func.value.value, ast.Name)
+        and node.func.value.value.id == _PORT_ROOT
+    )
 ```
 
 Then, inside `visit`, extend the `ast.Call` branch. The existing `.commit()` check stays
@@ -332,13 +428,7 @@ exactly as it is; this is a second condition beside it:
             # F3d2: the converted form. A tool that has been moved onto the ports
             # has no .commit() at all, so without this the row vanishes the moment
             # the site is converted — and merge() rebuilds only from the scan.
-            if (
-                _TOOLS_DIR in norm
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr in PORT_WRITE_METHODS
-                and isinstance(node.func.value, ast.Attribute)
-                and node.func.value.attr in _PORT_BUNDLE_ATTRS
-            ):
+            if _TOOLS_DIR in norm and _is_port_write(node):
                 sites.add(Site(KIND_TOOL_COMMIT, path, qual))
 ```
 
@@ -348,7 +438,7 @@ Run:
 ```bash
 uv run pytest tests/fencing -q > /tmp/f3d2-1.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-1.txt
 ```
-Expected: `PYTEST_EXIT=0`, 88 passed — the 84 that existed plus these four. No existing
+Expected: `PYTEST_EXIT=0`, 89 passed — the 84 that existed plus these five. No existing
 fencing test changes, because no production tool calls a port yet.
 
 - [ ] **Step 5: Commit**
@@ -361,8 +451,8 @@ git commit -m "test(fencing): a port write is a tool_commit site, so conversion 
 
 - [ ] **Step 6: Prove the detector would miss the converted form without this**
 
-In `tests/fencing/detectors.py`, change `node.func.value.attr in _PORT_BUNDLE_ATTRS` to
-`node.func.value.attr in frozenset({"nothing"})`.
+In `tests/fencing/detectors.py`, change `_PORT_BUNDLE_ATTRS` to
+`frozenset({"nothing"})`.
 
 Run:
 ```bash
@@ -435,10 +525,11 @@ Create `tests/fencing/fixtures/half_converted_site.py`:
 ```python
 """NEGATIVE fixture: half-converted, which is not converted.
 
-One qualname holding BOTH a port write and a residual raw commit. This is the real
-shape of fetch_reference_impl after F3d2 — its accounting reserve moves to the port
-while the ingest commit stays until F3e — and a rule that only looked for a port
-call would mark it fenced and let F3d2 declare itself complete over it.
+One qualname holding BOTH a port write and a residual raw commit. No site in the
+tree has this shape after F3d2 — it is the shape a PARTIAL conversion produces, and
+the rule exists so that a partial conversion cannot be reported as a finished one.
+A rule that only looked for the port call would mark such a qualname fenced and let
+its slice declare itself complete over code that still commits directly.
 """
 
 
@@ -470,10 +561,10 @@ def test_a_fully_converted_site_is_measured_as_fenced():
 
 
 def test_a_half_converted_site_is_not_fenced():
-    """Port call AND a residual raw commit. This is fetch_reference_impl's real
-    shape after F3d2 — the accounting reserve converts, the ingest commit stays
-    until F3e — and a rule that only looked for the port call would wave it
-    through."""
+    """Port call AND a residual raw commit — a PARTIAL conversion. Nothing in the
+    tree has this shape after F3d2, which is exactly why it needs a fixture: the
+    rule has to refuse it before a future slice produces one and reports itself
+    complete over code that still commits directly."""
     import pathlib
 
     from tests.fencing.detectors import find_fenced_tool_commits, find_sites
@@ -536,8 +627,8 @@ def find_fenced_tool_commits(source: str, path: str) -> set[tuple[str, str]]:
     port.
 
     Port call AND no raw commit. A qualname holding both is half-converted, and
-    half-converted is not converted: `fetch_reference_impl` keeps its ingest commit
-    (references.py:580) until F3e, and must not count as fenced meanwhile.
+    half-converted is not converted — a slice must not be able to report itself
+    complete over a site that still commits directly.
 
     Returns an empty set for a path outside tools/ — same scoping as find_sites.
     """
@@ -556,11 +647,7 @@ def find_fenced_tool_commits(source: str, path: str) -> set[tuple[str, str]]:
             qual = ".".join(stack) if stack else "<module>"
             if node.func.attr == "commit":
                 raw_commits.add(qual)
-            elif (
-                node.func.attr in PORT_WRITE_METHODS
-                and isinstance(node.func.value, ast.Attribute)
-                and node.func.value.attr in _PORT_BUNDLE_ATTRS
-            ):
+            elif _is_port_write(node):
                 port_calls.add(qual)
         for child in ast.iter_child_nodes(node):
             visit(child, stack)
@@ -635,7 +722,7 @@ Run:
 uv run pytest tests/fencing -q > /tmp/f3d2-2.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-2.txt
 uv run python -m tests.fencing.regenerate_inventory && git diff --exit-code tests/fencing/fence_inventory.json && echo "INVENTORY UNCHANGED"
 ```
-Expected: `PYTEST_EXIT=0`, 92 passed (88 + 4). The regeneration must leave the JSON
+Expected: `PYTEST_EXIT=0`, 93 passed (89 + 4). The regeneration must leave the JSON
 **byte-identical**: every `tool_commit` row is `fenced: false` today and no tool calls a
 port yet, so the measured value equals the stored one. If the file changes, the rule is
 wrong — investigate before continuing.
@@ -671,239 +758,7 @@ git diff --exit-code HEAD -- tests/fencing/fence_inventory.json
 
 ---
 
-### Task 3: The identity set stops encoding the slice, and `fetch_reference_impl` moves to F3e
-
-`F3D_IDENTITIES` is keyed `(slice, kind, symbol)` (F3d1 Task 7). That was a mistake: it
-makes a legitimate re-slicing indistinguishable from tampering, and its own docstring
-forbids editing the set to make a test pass.
-
-This slice needs exactly that re-slicing. `fetch_reference_impl` holds TWO commits — the
-accounting reserve at `references.py:475`, which this slice converts, and the **ingest**
-commit at `references.py:580`, which is `_do_fetch_and_ingest`'s and belongs to F3e. After
-Task 2's rule, that qualname is port-call-AND-raw-commit, so it is not fenced, so F3d2
-cannot be marked complete while it owns the row. The row belongs to F3e, which already
-owns `_do_fetch_and_ingest`.
-
-Split identity from ownership: the frozenset holds `(kind, symbol)` and is still
-append-only in spirit; a separate mapping says who owns each.
-
-**Files:**
-- Modify: `tests/fencing/inventory.py`
-- Modify: `tests/fencing/test_fence_coverage.py`
-- Modify: `tests/fencing/fence_inventory.json`
-- Modify: `docs/superpowers/specs/2026-08-18-fence-session-ownership-design.md:402-404`
-
-**Interfaces:**
-- Consumes: `SLICE_STATUS` (F3d1 Task 6).
-- Produces:
-  - `F3D_IDENTITIES: frozenset[tuple[str, str]]` — `(kind, symbol)`.
-  - `F3D_SLICE_OF: Mapping[tuple[str, str], str]` — identity → owning slice.
-
-- [ ] **Step 1: Write the failing test**
-
-Append to `tests/fencing/test_fence_coverage.py`:
-
-```python
-def test_the_identity_set_does_not_encode_ownership():
-    """F3d1 keyed identities on (slice, kind, symbol), which made re-slicing a row
-    look exactly like deleting one — and the set's own docstring forbids editing it
-    to make a test pass. Identity and ownership are different facts and the code
-    now says so."""
-    from tests.fencing.inventory import F3D_IDENTITIES, F3D_SLICE_OF
-
-    assert all(len(i) == 2 for i in F3D_IDENTITIES)
-    assert set(F3D_SLICE_OF) == F3D_IDENTITIES
-    assert len(F3D_IDENTITIES) == 8
-
-
-def test_fetch_reference_is_f3e_because_its_ingest_commit_is():
-    """It holds TWO writes: the accounting reserve F3d2 converts, and the ingest
-    commit at references.py:580 that belongs to _do_fetch_and_ingest. Task 2's rule
-    makes it port-call-AND-raw-commit, therefore not fenced, therefore F3d2 cannot
-    be complete while it owns the row."""
-    from tests.fencing.inventory import F3D_SLICE_OF, load_inventory
-
-    identity = ("tool_commit", "fetch_reference_impl")
-    assert F3D_SLICE_OF[identity] == "F3e"
-    row = next(
-        r for r in load_inventory() if (r["kind"], r["symbol"]) == identity
-    )
-    assert row["slice"] == "F3e"
-    # Its nested refund is a different identity and stays with F3d2.
-    assert F3D_SLICE_OF[("tool_commit", "fetch_reference_impl._refund_fetch_slot")] == "F3d2"
-```
-
-- [ ] **Step 2: Run the test to verify it fails**
-
-Run:
-```bash
-uv run pytest tests/fencing/test_fence_coverage.py -q -k "does_not_encode or fetch_reference_is_f3e" > /tmp/f3d2-3.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-3.txt
-```
-Expected: `PYTEST_EXIT=1`, `ImportError: cannot import name 'F3D_SLICE_OF'`.
-
-- [ ] **Step 3: Re-key the identities**
-
-In `tests/fencing/inventory.py`, replace the `F3D_IDENTITIES` block with:
-
-```python
-#: The eight identities spec §7's F3d owns, keyed by (kind, symbol) — the IDENTITY,
-#: with ownership held separately below.
-#:
-#: They are written down because the SCAN cannot be trusted to keep them: a
-#: tool_commit is detected only under proposal_assist/tools/ (detectors.py), and
-#: FencedSiteVanished only guards rows that are already fenced. Relocating a site
-#: therefore drops its row in silence, and every remaining consistency test would
-#: keep passing over a smaller and smaller set.
-#:
-#: Deleting an entry here is not a way to make a test pass. The entry leaves when
-#: the identity is genuinely gone from the design — which for F3d means never; each
-#: of these is converted, not abolished. RE-SLICING one is different and legitimate,
-#: which is why the slice is not part of the key: edit F3D_SLICE_OF instead.
-F3D_IDENTITIES: frozenset[tuple[str, str]] = frozenset({
-    ("tool_commit", "submit_review_impl"),
-    ("tool_commit", "submit_scorecard_impl"),
-    ("tool_commit", "submit_uncited_claims_impl"),
-    ("tool_commit", "fetch_reference_impl"),
-    ("tool_commit", "fetch_reference_impl._refund_fetch_slot"),
-    ("tool_commit", "propose_citation_impl"),
-    ("tool_commit", "_propose_artifact_edit_impl"),
-    ("tool_commit", "_write_citekey_cache"),
-})
-
-#: Which sub-slice owns each identity. Separate from the key because ownership is
-#: revisable and identity is not.
-#:
-#: fetch_reference_impl is F3e, not F3d2: that qualname holds the accounting reserve
-#: (references.py:475, which F3d2 converts) AND the ingest commit (references.py:580,
-#: which is _do_fetch_and_ingest's). Under the measured-fenced rule it is
-#: port-call-AND-raw-commit, so it cannot be fenced until F3e finishes the ingest
-#: half. Its nested _refund_fetch_slot is a separate identity and converts fully here.
-F3D_SLICE_OF: Mapping[tuple[str, str], str] = MappingProxyType({
-    ("tool_commit", "submit_review_impl"): "F3d2",
-    ("tool_commit", "submit_scorecard_impl"): "F3d2",
-    ("tool_commit", "submit_uncited_claims_impl"): "F3d2",
-    ("tool_commit", "fetch_reference_impl._refund_fetch_slot"): "F3d2",
-    ("tool_commit", "fetch_reference_impl"): "F3e",
-    ("tool_commit", "propose_citation_impl"): "F3d3",
-    ("tool_commit", "_propose_artifact_edit_impl"): "F3d3",
-    ("tool_commit", "_write_citekey_cache"): "F3d3",
-})
-```
-
-Add `from collections.abc import Mapping` and `from types import MappingProxyType` to the
-file's imports if they are not already there.
-
-- [ ] **Step 4: Repoint F3d1's two tests**
-
-In `tests/fencing/test_fence_coverage.py`, `test_every_f3d_identity_is_still_in_the_inventory`
-compares against `(slice, kind, symbol)` triples. Change its `present` set and its message
-to the two-tuple, and drop the stale advice about flipping `fenced` by hand — Task 2 made
-that impossible:
-
-```python
-def test_every_f3d_identity_is_still_in_the_inventory():
-    """ANTI-VACUITY. The scan records a tool_commit only for code under tools/
-    (detectors.py), and FencedSiteVanished fires only for rows already fenced — so
-    relocating a site deletes its row silently, and a slice can reach `complete`
-    over an empty set.
-
-    If a row here has vanished, the fix is NOT to edit this set. Either the code
-    moved out of tools/ (use RENAMES in regenerate_inventory.py, which carries the
-    row) or the identity was renamed (same answer).
-    """
-    present = {(r["kind"], r["symbol"]) for r in load_inventory()}
-    missing = sorted(F3D_IDENTITIES - present)
-    assert not missing, (
-        "F3d identities that disappeared from the inventory:\n  "
-        + "\n  ".join(f"{k} {sym}" for k, sym in missing)
-        + "\n\nA relocated site is not a converted site. Carry the row with a "
-        "rename mapping; do not delete the identity."
-    )
-```
-
-and `test_a_complete_f3d_slice_has_every_one_of_its_identities_fenced` reads the map:
-
-```python
-def test_a_complete_f3d_slice_has_every_one_of_its_identities_fenced():
-    """`complete` must mean every identity the slice owns is proven, not merely
-    that nothing red is left in the scan.
-
-    Known and accepted: this is not an independent falsifier. Its red set is a
-    subset of the union of test_every_f3d_identity_is_still_in_the_inventory and
-    test_each_slice_matches_its_declared_status. It is kept for the message it
-    produces, which names the identity rather than the row.
-    """
-    by_id = {(r["kind"], r["symbol"]): r for r in load_inventory()}
-    unproven = []
-    for identity in sorted(F3D_IDENTITIES):
-        if SLICE_STATUS.get(F3D_SLICE_OF[identity]) != "complete":
-            continue
-        row = by_id.get(identity)
-        if row is None or not row.get("fenced"):
-            unproven.append(identity)
-    assert not unproven, (
-        "slices marked complete with identities that are not fenced:\n  "
-        + "\n  ".join(f"{k} {sym}" for k, sym in unproven)
-    )
-```
-
-Extend the file's import from `tests.fencing.inventory` with `F3D_SLICE_OF`, placed
-alphabetically beside `F3D_IDENTITIES` — appending it to the end of the list is `I001` and
-Step 6's `ruff check .` fails.
-
-- [ ] **Step 5: Move the row and the spec**
-
-In `tests/fencing/fence_inventory.json`, change the `slice` field of the
-`fetch_reference_impl` row (path `src/call_manager/proposal_assist/tools/references.py`,
-symbol exactly `fetch_reference_impl`) from `"F3d2"` to `"F3e"`. Leave
-`fetch_reference_impl._refund_fetch_slot` on `"F3d2"`. Change nothing else.
-
-In `docs/superpowers/specs/2026-08-18-fence-session-ownership-design.md`, the passage at
-lines 402-404 lists five `tool_commit` rows under F3d2 and one under F3e. Move
-`fetch_reference_impl` from the F3d2 list to the F3e list, and add a clause saying why:
-that qualname holds both the accounting reserve F3d2 converts and the ingest commit F3e
-owns, so it cannot be fenced until F3e lands.
-
-- [ ] **Step 6: Run the tests**
-
-Run:
-```bash
-uv run pytest tests/fencing -q > /tmp/f3d2-3.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-3.txt
-uv run python -m tests.fencing.regenerate_inventory && git diff --exit-code tests/fencing/fence_inventory.json && echo "INVENTORY STABLE"
-```
-Expected: `PYTEST_EXIT=0`, 94 passed (92 + 2). The regeneration must leave the JSON
-byte-identical — `slice` is a human field that `merge` preserves.
-
-- [ ] **Step 7: Commit**
-
-```bash
-uv run ruff check .
-git add tests/fencing/inventory.py tests/fencing/test_fence_coverage.py tests/fencing/fence_inventory.json docs/superpowers/specs/2026-08-18-fence-session-ownership-design.md
-git commit -m "test(fencing): identity and ownership are different facts; fetch_reference_impl is F3e (F3d2 Task 3)"
-```
-
-- [ ] **Step 8: Prove the anti-vacuity ratchet still bites after the re-key**
-
-Delete the `("tool_commit", "submit_review_impl")` entry from `F3D_IDENTITIES` in
-`tests/fencing/inventory.py` and its line from `F3D_SLICE_OF`.
-
-Run:
-```bash
-uv run pytest tests/fencing -q -k "does_not_encode" > /tmp/f3d2-3m.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-3m.txt
-```
-Expected: FAIL on `test_the_identity_set_does_not_encode_ownership` at
-`assert len(F3D_IDENTITIES) == 8`. That count is the ratchet's teeth after the re-key: the
-set is no longer keyed on anything a slice edits, so its SIZE is the thing that must not
-drift, and this is what catches a quiet deletion.
-
-```bash
-git checkout tests/fencing/inventory.py
-git diff --exit-code HEAD -- tests/fencing/inventory.py
-```
-
----
-
-### Task 4: `compute_overall_band` moves into `ports/`
+### Task 3: `compute_overall_band` moves into `ports/`
 
 `scorecard.py` clears three of its four pins by conversion, and stops on the fourth:
 `from call_manager.proposal_assist.evaluator.scoring import compute_overall_band`
@@ -1011,7 +866,7 @@ def test_the_old_scoring_module_re_exports_the_same_function():
 
 Run:
 ```bash
-uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q > /tmp/f3d2-4.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-4.txt
+uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q > /tmp/f3d2-3.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-3.txt
 ```
 Expected: `PYTEST_EXIT=1`,
 `ModuleNotFoundError: No module named 'call_manager.proposal_assist.ports.scoring'`.
@@ -1057,8 +912,8 @@ names it needs move.
 
 Run:
 ```bash
-uv run pytest tests/proposal_assist/test_f3d2_conversions.py tests/proposal_assist/test_f3b_ports_boundary.py -q > /tmp/f3d2-4.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-4.txt
-uv run pytest tests/proposal_assist -q -k "scoring or scorecard or evaluator" > /tmp/f3d2-4b.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -5 /tmp/f3d2-4b.txt
+uv run pytest tests/proposal_assist/test_f3d2_conversions.py tests/proposal_assist/test_f3b_ports_boundary.py -q > /tmp/f3d2-3.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-3.txt
+uv run pytest tests/proposal_assist -q -k "scoring or scorecard or evaluator" > /tmp/f3d2-3b.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -5 /tmp/f3d2-3b.txt
 ```
 Expected: `PYTEST_EXIT=0` for both. The boundary file proves `ports/` is still
 stdlib-only after the move; the second command is every existing caller of the function.
@@ -1068,7 +923,7 @@ stdlib-only after the move; the second command is every existing caller of the f
 ```bash
 uv run ruff check .
 git add src/call_manager/proposal_assist/ports/scoring.py src/call_manager/proposal_assist/evaluator/scoring.py tests/proposal_assist/test_f3d2_conversions.py
-git commit -m "feat(ports): the band rollup a converted scorecard tool still performs (F3d2 Task 4)"
+git commit -m "feat(ports): the band rollup a converted scorecard tool still performs (F3d2 Task 3)"
 ```
 
 - [ ] **Step 7: Prove the re-export is real**
@@ -1084,7 +939,7 @@ def compute_overall_band(items):
 
 Run:
 ```bash
-uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q > /tmp/f3d2-4m.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -30 /tmp/f3d2-4m.txt
+uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q > /tmp/f3d2-3m.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -30 /tmp/f3d2-3m.txt
 ```
 Expected: FAIL on `test_the_old_scoring_module_re_exports_the_same_function` with
 `assert <function compute_overall_band ...> is <function compute_overall_band ...>` — the
@@ -1097,7 +952,7 @@ git diff --exit-code HEAD -- src/call_manager/proposal_assist/evaluator/scoring.
 
 ---
 
-### Task 5: `submit_scorecard_impl` converts
+### Task 4: `submit_scorecard_impl` converts
 
 The first real conversion. `port_impl/effects.py::SqlEffects.submit_scorecard` already
 reproduces this tool's guards in the same order and with the same refusal strings
@@ -1234,14 +1089,14 @@ async def test_scorecard_validation_still_runs_before_any_port_call():
 ```
 
 `_ctx_and_invocation`, `_criterion` and `_ExplodingPorts` are the shared helpers written in
-Task 4 Step 1. `eval_rubric_criteria`, `eval_draft_section_count`, `eval_spec_section_count`
+Task 3 Step 1. `eval_rubric_criteria`, `eval_draft_section_count`, `eval_spec_section_count`
 and `origin_job_id` are ordinary `ToolContext` fields — pass them through `**extra`.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run:
 ```bash
-uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q -k scorecard > /tmp/f3d2-5.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-5.txt
+uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q -k scorecard > /tmp/f3d2-4.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-4.txt
 ```
 Expected: `PYTEST_EXIT=1`, all four failing with
 `TypeError: submit_scorecard_impl() got an unexpected keyword argument 'ports'`. Note the
@@ -1327,17 +1182,35 @@ In `src/call_manager/proposal_assist/tools/registry.py`, find the `_safe_tool` c
 Keep every other argument exactly as it is — read the current call and change only the two
 new keywords. `pass_invocation=True` is required: `invocation.stamp()` is the fence.
 
+- [ ] **Step 4a: Migrate the existing direct callers**
+
+GC-13. `tests/proposal_assist/evaluator/test_submit_scorecard.py` calls
+`submit_scorecard_impl` directly and every call now misses two required keywords. Find them:
+
+```bash
+grep -n "submit_scorecard_impl(" tests/proposal_assist/evaluator/test_submit_scorecard.py
+```
+
+For each, add `ports=build_ports(<the session factory that test already uses>)` and
+`invocation=snapshot_invocation(ctx)`, importing `build_ports` from
+`call_manager.proposal_assist.port_impl` and `snapshot_invocation` from
+`call_manager.proposal_assist.tools.registry`. Change nothing else — in particular, do not
+touch a single assertion.
+
 - [ ] **Step 5: Run the tests**
 
 Run:
 ```bash
-uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q > /tmp/f3d2-5.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-5.txt
-uv run pytest tests/proposal_assist tests/fencing -q -n 16 --dist loadfile > /tmp/f3d2-5b.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -5 /tmp/f3d2-5b.txt
+uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q > /tmp/f3d2-4.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-4.txt
+uv run pytest tests/proposal_assist tests/fencing -q -n 16 --dist loadfile > /tmp/f3d2-4b.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -5 /tmp/f3d2-4b.txt
 ```
-Expected: `PYTEST_EXIT=0` for both. The second command includes every existing
-`submit_scorecard` test — behaviour and strings are preserved (GC-6), so they must pass
-untouched. If one needs editing, stop and report it: that is a behaviour change, not a
-test that needs updating.
+Expected: `PYTEST_EXIT=0` for both — but only AFTER Step 4a. Run it first and expect
+`TypeError: submit_scorecard_impl() missing 2 required keyword-only arguments` from every
+direct caller in `tests/proposal_assist/evaluator/test_submit_scorecard.py`.
+
+The ASSERTIONS in that file must not change: behaviour and strings are preserved (GC-6).
+If one has to change, stop and report it — that is a behaviour change, not a test that
+needs updating.
 
 Then confirm the inventory now MEASURES the conversion:
 
@@ -1353,8 +1226,8 @@ human touching it.
 
 ```bash
 uv run ruff check .
-git add src/call_manager/proposal_assist/tools/scorecard.py src/call_manager/proposal_assist/tools/registry.py tests/proposal_assist/test_f3d2_conversions.py tests/fencing/fence_inventory.json
-git commit -m "feat(tools): submit_scorecard writes through the effects port (F3d2 Task 5)"
+git add src/call_manager/proposal_assist/tools/scorecard.py src/call_manager/proposal_assist/tools/registry.py tests/proposal_assist/test_f3d2_conversions.py tests/proposal_assist/evaluator/test_submit_scorecard.py tests/fencing/fence_inventory.json
+git commit -m "feat(tools): submit_scorecard writes through the effects port (F3d2 Task 4)"
 ```
 
 - [ ] **Step 7: Prove the fence is what stops the write, not the guard**
@@ -1366,7 +1239,7 @@ This is GC-4 stated as a command. In
 
 Run:
 ```bash
-uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q -k scorecard > /tmp/f3d2-5m.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -30 /tmp/f3d2-5m.txt
+uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q -k scorecard > /tmp/f3d2-4m.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -30 /tmp/f3d2-4m.txt
 ```
 Expected: FAIL on `test_scorecard_does_not_land_after_the_generation_moves`, with the
 scorecard column NOT None. The other three scorecard tests must still PASS — they are
@@ -1382,7 +1255,7 @@ git diff --exit-code HEAD -- src/call_manager/proposal_assist/port_impl/effects.
 
 ---
 
-### Task 6: `submit_review_impl` converts
+### Task 5: `submit_review_impl` converts
 
 Same shape as Task 5, one difference worth knowing: the port stores `cmd.markdown`
 VERBATIM. `ports/effects.py:32-36` says so explicitly — the strip-and-reject step is the
@@ -1485,7 +1358,7 @@ tool used to compare against `ctx.origin_job_id`, so pass it as `origin_job_id`.
 
 Run:
 ```bash
-uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q -k review > /tmp/f3d2-6.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-6.txt
+uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q -k review > /tmp/f3d2-5.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-5.txt
 ```
 Expected: `PYTEST_EXIT=1`, three failures with
 `TypeError: submit_review_impl() got an unexpected keyword argument 'ports'`.
@@ -1540,12 +1413,24 @@ to say the tool validates and hands the body to `Effects.submit_review`.
 In `_collect_tools`, add `pass_ports=True` and `pass_invocation=True` to the
 `submit_review` `_safe_tool` call, changing nothing else about it.
 
+- [ ] **Step 4a: Migrate the existing direct callers**
+
+GC-13. `tests/proposal_assist/review/test_submit_review.py` calls `submit_review_impl` directly and every call now misses two required keywords. Find them:
+
+```bash
+grep -n "submit_review_impl(" tests/proposal_assist/review/test_submit_review.py
+```
+
+For each, add `ports=build_ports(<the session factory that test already uses>)` and `invocation=snapshot_invocation(ctx)`.
+Import `build_ports` from `call_manager.proposal_assist.port_impl` and `snapshot_invocation` from `call_manager.proposal_assist.tools.registry`. Change nothing
+else — in particular, do not touch a single assertion.
+
 - [ ] **Step 5: Run the tests**
 
 Run:
 ```bash
-uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q > /tmp/f3d2-6.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-6.txt
-uv run pytest tests/proposal_assist tests/fencing -q -n 16 --dist loadfile > /tmp/f3d2-6b.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -5 /tmp/f3d2-6b.txt
+uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q > /tmp/f3d2-5.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-5.txt
+uv run pytest tests/proposal_assist tests/fencing -q -n 16 --dist loadfile > /tmp/f3d2-5b.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -5 /tmp/f3d2-5b.txt
 uv run python -m tests.fencing.regenerate_inventory && git diff tests/fencing/fence_inventory.json
 ```
 Expected: `PYTEST_EXIT=0` for both, and exactly one changed inventory line —
@@ -1555,11 +1440,33 @@ Expected: `PYTEST_EXIT=0` for both, and exactly one changed inventory line —
 
 ```bash
 uv run ruff check .
-git add src/call_manager/proposal_assist/tools/review_submit.py src/call_manager/proposal_assist/tools/registry.py tests/proposal_assist/test_f3d2_conversions.py tests/fencing/fence_inventory.json
-git commit -m "feat(tools): submit_review writes through the effects port (F3d2 Task 6)"
+git add src/call_manager/proposal_assist/tools/review_submit.py src/call_manager/proposal_assist/tools/registry.py tests/proposal_assist/test_f3d2_conversions.py tests/proposal_assist/review/test_submit_review.py tests/fencing/fence_inventory.json
+git commit -m "feat(tools): submit_review writes through the effects port (F3d2 Task 5)"
 ```
 
-- [ ] **Step 7: Prove the strip did not move to the port**
+- [ ] **Step 7: Prove the fence is what stops the write, not the guard**
+
+GC-4, per-site. In `src/call_manager/proposal_assist/port_impl/effects.py`, delete the
+`live_at_generation(stamp.workspace_id, stamp.generation),` line from `submit_review`'s
+`update(...).where(...)`.
+
+Run:
+```bash
+uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q -k review > /tmp/f3d2-5f.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -30 /tmp/f3d2-5f.txt
+```
+Expected: FAIL on `test_review_does_not_land_after_the_generation_moves`, with
+`raw_response_json` NOT None. The other two review tests must still PASS — they are about
+the conversion and the strip, not the fence.
+
+If the generation test still passes with that line gone, it is measuring the tool's own
+guard and not the fence. Do not proceed: report it.
+
+```bash
+git checkout src/call_manager/proposal_assist/port_impl/effects.py
+git diff --exit-code HEAD -- src/call_manager/proposal_assist/port_impl/effects.py
+```
+
+- [ ] **Step 8: Prove the strip did not move to the port**
 
 In `src/call_manager/proposal_assist/tools/review_submit.py`, change
 `SubmitReview(review_run_item_id=ctx.review_run_item_id, markdown=body)` to pass
@@ -1567,7 +1474,7 @@ In `src/call_manager/proposal_assist/tools/review_submit.py`, change
 
 Run:
 ```bash
-uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q -k review > /tmp/f3d2-6m.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -30 /tmp/f3d2-6m.txt
+uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q -k review > /tmp/f3d2-5m.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -30 /tmp/f3d2-5m.txt
 ```
 Expected: FAIL on `test_review_writes_through_the_port` with
 `assert {'markdown': '  a body  '} == {'markdown': 'a body'}`. This is the defect the port
@@ -1580,7 +1487,7 @@ git diff --exit-code HEAD -- src/call_manager/proposal_assist/tools/review_submi
 
 ---
 
-### Task 7: `submit_uncited_claims_impl` converts
+### Task 6: `submit_uncited_claims_impl` converts
 
 The third submitter. Its validation loop is pure and stays; only the guarded write moves.
 `SubmitUncitedClaims` carries the validated list.
@@ -1682,7 +1589,7 @@ async def test_uncited_claims_validation_still_runs_before_any_port_call():
 
 Run:
 ```bash
-uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q -k uncited > /tmp/f3d2-7.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-7.txt
+uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q -k uncited > /tmp/f3d2-6.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-6.txt
 ```
 Expected: `PYTEST_EXIT=1`, three failures with
 `TypeError: submit_uncited_claims_impl() got an unexpected keyword argument 'ports'`.
@@ -1733,12 +1640,24 @@ Change the signature to
 In `_collect_tools`, add `pass_ports=True` and `pass_invocation=True` to the
 `submit_uncited_claims` `_safe_tool` call.
 
+- [ ] **Step 4a: Migrate the existing direct callers**
+
+GC-13. `tests/proposal_assist/uncited_claims/test_submit.py` calls `submit_uncited_claims_impl` directly and every call now misses two required keywords. Find them:
+
+```bash
+grep -n "submit_uncited_claims_impl(" tests/proposal_assist/uncited_claims/test_submit.py
+```
+
+For each, add `ports=build_ports(<the session factory that test already uses>)` and `invocation=snapshot_invocation(ctx)`.
+Import `build_ports` from `call_manager.proposal_assist.port_impl` and `snapshot_invocation` from `call_manager.proposal_assist.tools.registry`. Change nothing
+else — in particular, do not touch a single assertion.
+
 - [ ] **Step 5: Run the tests**
 
 Run:
 ```bash
-uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q > /tmp/f3d2-7.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-7.txt
-uv run pytest tests/proposal_assist tests/fencing -q -n 16 --dist loadfile > /tmp/f3d2-7b.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -5 /tmp/f3d2-7b.txt
+uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q > /tmp/f3d2-6.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-6.txt
+uv run pytest tests/proposal_assist tests/fencing -q -n 16 --dist loadfile > /tmp/f3d2-6b.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -5 /tmp/f3d2-6b.txt
 uv run python -m tests.fencing.regenerate_inventory && git diff tests/fencing/fence_inventory.json
 ```
 Expected: `PYTEST_EXIT=0` for both, and exactly one changed inventory line —
@@ -1748,18 +1667,39 @@ Expected: `PYTEST_EXIT=0` for both, and exactly one changed inventory line —
 
 ```bash
 uv run ruff check .
-git add src/call_manager/proposal_assist/tools/uncited_claims.py src/call_manager/proposal_assist/tools/registry.py tests/proposal_assist/test_f3d2_conversions.py tests/fencing/fence_inventory.json
-git commit -m "feat(tools): submit_uncited_claims writes through the effects port (F3d2 Task 7)"
+git add src/call_manager/proposal_assist/tools/uncited_claims.py src/call_manager/proposal_assist/tools/registry.py tests/proposal_assist/test_f3d2_conversions.py tests/proposal_assist/uncited_claims/test_submit.py tests/fencing/fence_inventory.json
+git commit -m "feat(tools): submit_uncited_claims writes through the effects port (F3d2 Task 6)"
 ```
 
-- [ ] **Step 7: Prove the exactly-once rule survived the move**
+- [ ] **Step 7: Prove the fence is what stops the write, not the guard**
+
+GC-4, per-site. In `src/call_manager/proposal_assist/port_impl/effects.py`, delete the
+`live_at_generation(stamp.workspace_id, stamp.generation),` line from
+`submit_uncited_claims`'s `update(...).where(...)`.
+
+Run:
+```bash
+uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q -k uncited > /tmp/f3d2-6f.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -30 /tmp/f3d2-6f.txt
+```
+Expected: FAIL on `test_uncited_claims_does_not_land_after_the_generation_moves`, with the
+`claims` column NOT None. The other two uncited tests must still PASS.
+
+If the generation test still passes with that line gone, it is measuring the tool's own
+guard and not the fence. Do not proceed: report it.
+
+```bash
+git checkout src/call_manager/proposal_assist/port_impl/effects.py
+git diff --exit-code HEAD -- src/call_manager/proposal_assist/port_impl/effects.py
+```
+
+- [ ] **Step 8: Prove the exactly-once rule survived the move**
 
 In `src/call_manager/proposal_assist/port_impl/effects.py`, delete the
 `UncitedClaimsJob.claims.is_(None),` predicate from `submit_uncited_claims`'s `update`.
 
 Run:
 ```bash
-uv run pytest tests/proposal_assist -q -k "uncited" > /tmp/f3d2-7m.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -30 /tmp/f3d2-7m.txt
+uv run pytest tests/proposal_assist -q -k "uncited" > /tmp/f3d2-6m.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -30 /tmp/f3d2-6m.txt
 ```
 Expected: FAIL on the existing exactly-once test for this tool (find its name in the run
 output and record it in your report) — a second submission now overwrites the first. If
@@ -1773,7 +1713,7 @@ git diff --exit-code HEAD -- src/call_manager/proposal_assist/port_impl/effects.
 
 ---
 
-### Task 8: The two `references.py` accounting sites convert
+### Task 7: The two `references.py` accounting sites convert
 
 Accounting is DELIBERATELY unfenced (spec §3.3): freeing a slot must happen after the
 workspace has moved on, and fencing it would strand jobs holding their slots. So these take
@@ -1809,10 +1749,17 @@ async def test_the_refund_does_not_touch_a_later_turns_row(pg_session_factory):
     generation G, delete and restore, start a NEW turn at G+1, and assert the old
     actor's refund does not touch the new turn's row.
 
-    This is why the operation is bound to active_turn_job_id and NOT to
-    'whichever turn is running for this workspace' — the code this replaces
-    (references.py:465-473) matches on workspace + status, so a late refund from a
-    dead turn would decrement a live one.
+    TWO schema facts shape this and neither is optional. `uq_turn_jobs_running`
+    (models.py:887-891) is a partial unique index on workspace_id WHERE
+    status='running', so the old turn MUST leave 'running' before the new one can
+    exist — the delete/restore is what does that. And refund_fetch_slot requires
+    `TurnJob.status == "running"` (port_impl/accounting.py:38-45), so the dead
+    actor's refund is a no-op on its own row too.
+
+    The claim under test is therefore about the NEW turn: a late refund from an
+    actor the workspace has moved past must not decrement the live turn's count.
+    That is what binding to active_turn_job_id buys, and what the code this
+    replaces (references.py:465-473, matching workspace + status) did NOT.
     """
     from call_manager.db.models import TurnJob
     from call_manager.proposal_assist.port_impl import build_ports
@@ -1824,10 +1771,11 @@ async def test_the_refund_does_not_touch_a_later_turns_row(pg_session_factory):
 
     assert ports.accounting.reserve_fetch_slot(old_turn) == 1
 
-    with pg_session_factory() as s:  # delete + restore
+    with pg_session_factory() as s:  # delete + restore ends the old turn
+        s.get(TurnJob, old_turn).status = "failed"
         bump_generation(s, ws_id, to=_NEXT)
         s.commit()
-        new_turn = seed_running_turn(s, ws_id)  # a turn at _NEXT
+        new_turn = seed_running_turn(s, ws_id)  # only now is this insertable
 
     assert ports.accounting.reserve_fetch_slot(new_turn) == 1
 
@@ -1835,8 +1783,11 @@ async def test_the_refund_does_not_touch_a_later_turns_row(pg_session_factory):
     ports.accounting.refund_fetch_slot(old_turn)
 
     with pg_session_factory() as s:
-        assert s.get(TurnJob, new_turn).fetch_count == 1  # untouched
-        assert s.get(TurnJob, old_turn).fetch_count == 0  # refunded
+        # THE CLAIM: the live turn is untouched.
+        assert s.get(TurnJob, new_turn).fetch_count == 1
+        # The dead turn keeps its count: the status guard refuses to refund a turn
+        # that is no longer running, and the row is terminal anyway.
+        assert s.get(TurnJob, old_turn).fetch_count == 1
 
 
 async def test_the_reserve_is_bound_to_the_turn_not_the_workspace(pg_session_factory):
@@ -1874,7 +1825,7 @@ and every block above commits explicitly.
 
 Run:
 ```bash
-uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q -k "refund or reserve or cap_constant" > /tmp/f3d2-8.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-8.txt
+uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q -k "refund or reserve or cap_constant" > /tmp/f3d2-7.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-7.txt
 ```
 Expected: `PYTEST_EXIT=0` — **all three PASS immediately**, and that is correct.
 `Accounting` already exists from F3b; these tests prove the PORT's owner-binding, which is
@@ -1898,13 +1849,17 @@ its `s.commit()`, through the `if new_count_row is None:` branch — with:
         return {
             "error": (
                 f"fetch cap reached ({MAX_FETCHES_PER_TURN} per turn) OR no running "
-                "turn for this workspace"
+                "turn for this workspace — please ask the user to upload the "
+                "reference manually via the /references panel."
             )
         }
 ```
 
-Read the current string at `references.py:477-481` and preserve its wording exactly except
-for the number, which becomes the interpolated constant.
+That third line is not optional. The real string (`references.py:477-483`) ends with the
+manual-upload guidance, and the existing coverage asserts on a SUBSTRING — so dropping it
+is a user-visible GC-6 regression that no test would catch. Read the current string and
+preserve its wording exactly except for the number, which becomes the interpolated
+constant.
 
 - [ ] **Step 4: Convert the refund**
 
@@ -1933,6 +1888,20 @@ Add to `references.py`'s imports:
 ```python
 from call_manager.proposal_assist.ports.accounting import MAX_FETCHES_PER_TURN
 ```
+
+and DELETE the two function-local imports the conversion orphans — they sit inside
+`fetch_reference_impl` at `references.py:440` and `:442`:
+
+```python
+    from sqlalchemy import update as _sql_update
+
+    from call_manager.db.models import TurnJob
+```
+
+Both were used ONLY by the reserve (`:465-472`) and the refund (`:500-506`), and both of
+those are now port calls. Leaving them is two `F401`s and `ruff check .` at Step 8 fails.
+Verify with `grep -n "_sql_update\|TurnJob" src/call_manager/proposal_assist/tools/references.py`
+— it must return nothing after the edit.
 
 Change the signature to
 `async def fetch_reference_impl(ctx, *, ports, invocation, ...)` keeping every existing
@@ -1969,26 +1938,46 @@ is unchanged from the current thirteen, say so in your report rather than editin
 silently — it would mean the accounting conversion removed no import, which is worth
 knowing.
 
+- [ ] **Step 6a: Migrate the existing direct callers**
+
+GC-13. TWO files call `fetch_reference_impl` directly:
+`tests/proposal_assist/tools/test_references_fetch_tool.py` and
+`tests/proposal_assist/test_references_admission.py`. Find every site:
+
+```bash
+grep -n "fetch_reference_impl(" tests/proposal_assist/tools/test_references_fetch_tool.py tests/proposal_assist/test_references_admission.py
+```
+
+Add `ports=build_ports(<the session factory that test already uses>)` and
+`invocation=snapshot_invocation(ctx)` to each. The admission file is the one that
+exercises the cap, so its assertions are the real check that the port's turn-bound reserve
+preserves the behaviour the workspace-bound one had — if an assertion there has to change,
+STOP and report it: the tightening changed something user-visible and that is a decision,
+not a test edit.
+
 - [ ] **Step 7: Run the tests**
 
 Run:
 ```bash
-uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q > /tmp/f3d2-8.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-8.txt
-uv run pytest tests/proposal_assist tests/fencing -q -n 16 --dist loadfile > /tmp/f3d2-8b.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -5 /tmp/f3d2-8b.txt
+uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q > /tmp/f3d2-7.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-7.txt
+uv run pytest tests/proposal_assist tests/fencing -q -n 16 --dist loadfile > /tmp/f3d2-7b.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -5 /tmp/f3d2-7b.txt
 uv run python -m tests.fencing.regenerate_inventory && git diff tests/fencing/fence_inventory.json
 ```
-Expected: `PYTEST_EXIT=0` for both. Exactly ONE inventory line changes:
-`fetch_reference_impl._refund_fetch_slot` flips to `"fenced": true`.
-`fetch_reference_impl` itself must stay `"fenced": false` — it still holds the ingest
-commit. If it flipped, Task 2's port-call-AND-no-raw-commit rule is wrong and the F3e
-boundary has been silently crossed: stop and report.
+Expected: `PYTEST_EXIT=0` for both. Exactly TWO inventory lines change:
+`fetch_reference_impl` AND `fetch_reference_impl._refund_fetch_slot` both flip to
+`"fenced": true`.
+
+`fetch_reference_impl` flips because the ingest commit is NOT in that qualname — it is in
+`fetch_reference_impl._do_fetch_and_ingest`, a nested function at `references.py:551` with
+its own inventory row, already assigned to **F3e**. That third row must stay
+`"fenced": false`. If it flipped, the F3e boundary has been crossed: stop and report.
 
 - [ ] **Step 8: Commit**
 
 ```bash
 uv run ruff check .
-git add src/call_manager/proposal_assist/tools/references.py src/call_manager/proposal_assist/tools/registry.py tests/fencing/inventory.py tests/proposal_assist/test_f3d2_conversions.py tests/fencing/fence_inventory.json
-git commit -m "feat(tools): the two references accounting sites are owner-bound port operations (F3d2 Task 8)"
+git add src/call_manager/proposal_assist/tools/references.py src/call_manager/proposal_assist/tools/registry.py tests/fencing/inventory.py tests/proposal_assist/test_f3d2_conversions.py tests/proposal_assist/tools/test_references_fetch_tool.py tests/proposal_assist/test_references_admission.py tests/fencing/fence_inventory.json
+git commit -m "feat(tools): the two references accounting sites are owner-bound port operations (F3d2 Task 7)"
 ```
 
 - [ ] **Step 9: Prove the owner binding is what protects the later turn**
@@ -2000,7 +1989,7 @@ i.e. reproduce the behaviour the tool had BEFORE this task.
 
 Run:
 ```bash
-uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q -k refund > /tmp/f3d2-8m.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -30 /tmp/f3d2-8m.txt
+uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q -k refund > /tmp/f3d2-7m.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -30 /tmp/f3d2-7m.txt
 ```
 Expected: FAIL on `test_the_refund_does_not_touch_a_later_turns_row` with the NEW turn's
 `fetch_count` at 0 instead of 1 — the dead actor's refund decremented a live turn. That is
@@ -2014,7 +2003,7 @@ git diff --exit-code HEAD -- src/call_manager/proposal_assist/port_impl/accounti
 
 ---
 
-### Task 9: `context.py`'s reads become a query port
+### Task 8: `context.py`'s reads become a query port
 
 Spec §7's F3d charter ends with "and every remaining read to a query port returning DTOs".
 `context.py` is that clause: two tools, both reading four snapshot columns off the same
@@ -2132,7 +2121,7 @@ async def test_a_deleted_workspace_reads_as_unlinked_not_an_error(pg_session_fac
 
 Run:
 ```bash
-uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q -k "snapshot_view or missing_workspace or call_details or unlinked" > /tmp/f3d2-9.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-9.txt
+uv run pytest tests/proposal_assist/test_f3d2_conversions.py -q -k "snapshot_view or missing_workspace or call_details or unlinked" > /tmp/f3d2-8.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-8.txt
 ```
 Expected: `PYTEST_EXIT=1`,
 `AttributeError: 'SqlQueries' object has no attribute 'get_workspace_snapshot'`.
@@ -2246,16 +2235,44 @@ async def get_profile_impl(ctx, *, ports) -> dict[str, Any]:
 In `_collect_tools`, add `pass_ports=True` to BOTH the `get_call_details` and
 `get_profile` `_safe_tool` calls. Do NOT add `pass_invocation=True` — these are reads.
 
+- [ ] **Step 6a: Add the DTO contract case, and migrate the existing callers**
+
+`tests/proposal_assist/test_ports_dto_contract.py` keeps a `CASES` dict — one callable per
+`Queries` method — and `test_every_query_method_has_a_contract_case` fails until the new
+method has one. It also drives
+`@pytest.mark.parametrize("name", sorted(CASES))`, so the entry adds one test node. Add:
+
+```python
+    "get_workspace_snapshot": lambda q, ws, ref: q.get_workspace_snapshot(ws),
+}
+```
+
+as the last entry. The dict's own comment is binding: **every case must return a NON-None
+result, or it proves nothing.** The fixture that seeds `ws` must therefore leave a
+workspace that exists — check what the file's fixture already builds before assuming it
+does, and if `get_workspace_snapshot(ws)` would return None there, seed the row the case
+needs rather than weakening the assertion.
+
+Then, GC-13: `tests/proposal_assist/test_tools_context.py` calls both impls directly.
+
+```bash
+grep -n "get_call_details_impl(\|get_profile_impl(" tests/proposal_assist/test_tools_context.py
+```
+
+Add `ports=build_ports(<the session factory that test already uses>)` to each. Neither
+takes `invocation` — reads are not fenced.
+
 - [ ] **Step 7: Run the tests**
 
 Run:
 ```bash
-uv run pytest tests/proposal_assist/test_f3d2_conversions.py tests/proposal_assist/test_f3b_ports_boundary.py tests/proposal_assist/test_ports_dto_contract.py -q > /tmp/f3d2-9.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-9.txt
-uv run pytest tests/proposal_assist tests/fencing -q -n 16 --dist loadfile > /tmp/f3d2-9b.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -5 /tmp/f3d2-9b.txt
+uv run pytest tests/proposal_assist/test_f3d2_conversions.py tests/proposal_assist/test_f3b_ports_boundary.py tests/proposal_assist/test_ports_dto_contract.py -q > /tmp/f3d2-8.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-8.txt
+uv run pytest tests/proposal_assist tests/fencing -q -n 16 --dist loadfile > /tmp/f3d2-8b.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -5 /tmp/f3d2-8b.txt
 ```
-Expected: `PYTEST_EXIT=0` for both. `test_ports_dto_contract.py` (F3c Task 5) walks every
-`Queries` return type for a smuggled ORM instance — the new method is covered by it
-automatically, and it is the reason that test exists.
+Expected: `PYTEST_EXIT=0` for both — but only after Step 6a. `test_ports_dto_contract.py`
+is NOT automatic: `test_every_query_method_has_a_contract_case` (line 61) reads
+`Queries.__protocol_attrs__` and demands an explicit `CASES` entry per method, so a new
+port method makes it RED until one is added.
 
 The inventory does NOT change here: `context.py` has no `tool_commit` row. Confirm it:
 
@@ -2267,8 +2284,8 @@ uv run python -m tests.fencing.regenerate_inventory && git diff --exit-code test
 
 ```bash
 uv run ruff check .
-git add src/call_manager/proposal_assist/ports/queries.py src/call_manager/proposal_assist/port_impl/queries.py src/call_manager/proposal_assist/tools/context.py src/call_manager/proposal_assist/tools/registry.py tests/proposal_assist/test_f3d2_conversions.py
-git commit -m "feat(ports): the workspace snapshot is a query port returning a DTO (F3d2 Task 9)"
+git add src/call_manager/proposal_assist/ports/queries.py src/call_manager/proposal_assist/port_impl/queries.py src/call_manager/proposal_assist/tools/context.py src/call_manager/proposal_assist/tools/registry.py tests/proposal_assist/test_f3d2_conversions.py tests/proposal_assist/test_ports_dto_contract.py tests/proposal_assist/test_tools_context.py
+git commit -m "feat(ports): the workspace snapshot is a query port returning a DTO (F3d2 Task 8)"
 ```
 
 - [ ] **Step 9: Prove the DTO contract catches a leak**
@@ -2279,12 +2296,14 @@ instead of building the view — the exact mistake the DTO rule exists to preven
 
 Run:
 ```bash
-uv run pytest tests/proposal_assist/test_ports_dto_contract.py tests/proposal_assist/test_f3d2_conversions.py -q -k "dto or snapshot_view" > /tmp/f3d2-9m.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -30 /tmp/f3d2-9m.txt
+uv run pytest tests/proposal_assist/test_ports_dto_contract.py tests/proposal_assist/test_f3d2_conversions.py -q -k "dto or snapshot_view" > /tmp/f3d2-8m.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -30 /tmp/f3d2-8m.txt
 ```
-Expected: FAIL. Record WHICH test caught it. If only
-`test_the_snapshot_view_carries_no_session` fires and the F3c DTO contract stays green,
-say so — it means the contract test does not reach a method whose declared return type is
-a union with `None`, which is a real gap in F3c's gate and belongs in the report.
+Expected: FAIL on BOTH
+`test_every_query_result_is_recursively_free_of_orm_instances[get_workspace_snapshot]` and
+`test_the_snapshot_view_carries_no_session`. The first is F3c's walker doing its job
+through the case added in Step 6a; the second is this slice's own check. If only the
+second fires, the `CASES` entry is returning None and is proving nothing — the dict's
+comment warns about exactly that. Fix the case, do not accept the single red.
 
 ```bash
 git checkout src/call_manager/proposal_assist/port_impl/queries.py
@@ -2293,7 +2312,7 @@ git diff --exit-code HEAD -- src/call_manager/proposal_assist/port_impl/queries.
 
 ---
 
-### Task 10: Four exemptions retire and F3d2 closes
+### Task 9: Four exemptions retire and F3d2 closes
 
 The bookkeeping that makes the slice mean something. Four modules now import only stdlib
 and `ports`, so their entries leave `TOOLS_NOT_YET_CONVERTED` and the gate starts enforcing
@@ -2330,29 +2349,38 @@ def test_the_four_converted_modules_are_no_longer_exempt():
 def test_f3d2_is_complete_and_every_row_it_owns_is_measured_fenced():
     """`complete` is now a measurable claim. Task 2 made `fenced` a function of the
     source, so this cannot be satisfied by editing the JSON."""
-    from tests.fencing.inventory import (
-        F3D_SLICE_OF,
-        SLICE_STATUS,
-        load_inventory,
-        scan_tree,
-    )
+    from tests.fencing.inventory import SLICE_STATUS, load_inventory, scan_tree
 
     assert SLICE_STATUS["F3d2"] == "complete"
     _sites, fenced_ids = scan_tree()
-    owned = {i for i, s in F3D_SLICE_OF.items() if s == "F3d2"}
-    assert len(owned) == 4
-    by_id = {(r["kind"], r["symbol"]): r for r in load_inventory()}
-    for identity in sorted(owned):
-        row = by_id[identity]
-        assert row["fenced"] is True, identity
-        assert (row["path"], row["symbol"]) in fenced_ids, identity
+    owned = [r for r in load_inventory() if r["slice"] == "F3d2"]
+    assert len(owned) == 5
+    for row in owned:
+        assert row["fenced"] is True, row["symbol"]
+        assert (row["path"], row["symbol"]) in fenced_ids, row["symbol"]
+
+
+def test_the_ingest_row_is_untouched_and_still_f3e():
+    """The boundary this slice must not cross. fetch_reference_impl._do_fetch_and_ingest
+    is a SEPARATE nested identity (references.py:551) holding the ingest commit at
+    :580. F3d2 converts the accounting around it and leaves it alone — which is also
+    why fetch_reference_impl itself CAN go green here."""
+    from tests.fencing.inventory import load_inventory
+
+    row = next(
+        r
+        for r in load_inventory()
+        if r["symbol"] == "fetch_reference_impl._do_fetch_and_ingest"
+    )
+    assert row["slice"] == "F3e"
+    assert row["fenced"] is False
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
 
 Run:
 ```bash
-uv run pytest tests/fencing/test_fence_coverage.py -q -k "no_longer_exempt or f3d2_is_complete" > /tmp/f3d2-10.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-10.txt
+uv run pytest tests/fencing/test_fence_coverage.py -q -k "no_longer_exempt or f3d2_is_complete or ingest_row_is_untouched" > /tmp/f3d2-9.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-9.txt
 ```
 Expected: `PYTEST_EXIT=1` — nine keys where five are wanted, and
 `SLICE_STATUS["F3d2"] == "pending"`.
@@ -2375,7 +2403,7 @@ In the same file, change the `SLICE_STATUS` line:
 
 Run:
 ```bash
-uv run pytest tests/fencing -q > /tmp/f3d2-10.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-10.txt
+uv run pytest tests/fencing -q > /tmp/f3d2-9.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d2-9.txt
 ```
 Expected: `PYTEST_EXIT=0`. `test_each_slice_matches_its_declared_status` is the one that
 now has teeth: F3d2 is complete, so every row it owns must be `fenced: true`, and Task 2
@@ -2386,7 +2414,7 @@ means that value came from the source.
 ```bash
 uv run ruff check .
 git add tests/fencing/inventory.py tests/fencing/test_fence_coverage.py
-git commit -m "test(fencing): four modules leave the exemption list and F3d2 closes (F3d2 Task 10)"
+git commit -m "test(fencing): four modules leave the exemption list and F3d2 closes (F3d2 Task 9)"
 ```
 
 - [ ] **Step 7: Prove the gate is now armed on a converted module**
@@ -2396,7 +2424,7 @@ In `src/call_manager/proposal_assist/tools/scorecard.py`, add
 
 Run:
 ```bash
-uv run pytest tests/fencing -q -k import_gate > /tmp/f3d2-10m.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -30 /tmp/f3d2-10m.txt
+uv run pytest tests/fencing -q -k import_gate > /tmp/f3d2-9m.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -30 /tmp/f3d2-9m.txt
 ```
 Expected: FAIL, naming `scorecard.py` and `from call_manager.db.models import ...`. Before
 Step 3 that same import was PINNED and the gate said nothing. That difference is what
@@ -2413,10 +2441,15 @@ Run:
 ```bash
 uv run pytest -n 16 --dist loadfile -q > /tmp/f3d2-full.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -5 /tmp/f3d2-full.txt
 ```
-Expected: `PYTEST_EXIT=0` and **3769 passed, 1 skipped**. That total is derived, not
-measured: the master baseline of 3737 (`684d991`) plus 32 new tests — 4 in Task 1, 4 in
-Task 2, 2 in Task 3, 2 in Task 4, 4 in Task 5, 3 in Task 6, 3 in Task 7, 3 in Task 8, 5 in
-Task 9, 2 in Task 10 (4+4+2+2+4+3+3+3+5+2 = 32). **It is the number a dry run must verify.** If your run differs,
+Expected: `PYTEST_EXIT=0` and **3770 passed, 1 skipped**. That total is derived, not
+measured: the master baseline of 3737 (`684d991`) plus 33 new tests —
+5 (Task 1) + 4 (Task 2) + 2 (Task 3) + 4 (Task 4) + 3 (Task 5) + 3 (Task 6) + 3 (Task 7)
++ 6 (Task 8 — five in the slice file plus one parametrisation of
+`test_every_query_result_is_recursively_free_of_orm_instances`, which `CASES` drives)
++ 3 (Task 9) = **33**.
+
+The 36 migrated call sites (GC-13) add NOTHING to the total: those tests already exist and
+are only being handed the new keywords. **3770 is the number a dry run must verify.** If your run differs,
 work out WHICH term is wrong before touching anything — do not adjust the expectation to
 match the run, and do not delete a test to reach it. **Read the `1 skipped` as the signal,
 not the total**: it is the `ANTHROPIC_API_KEY`-gated test.
@@ -2427,7 +2460,7 @@ Run:
 ```bash
 uv run python -c "
 from tests.fencing.inventory import (
-    F3D_SLICE_OF, SLICE_STATUS, TOOLS_NOT_YET_CONVERTED, load_inventory, scan_tree
+    SLICE_STATUS, TOOLS_NOT_YET_CONVERTED, load_inventory, scan_tree
 )
 rows = load_inventory()
 _s, fenced = scan_tree()
@@ -2443,14 +2476,15 @@ Expected exactly:
 ```
 pins: 5 ['audit.py', 'citations.py', 'history.py', 'proposal.py', 'references.py']
 F3d2 status: complete
-fenced tool_commit rows: 4
-measured fenced identities: 4
+fenced tool_commit rows: 5
+measured fenced identities: 5
 F3d3 rows still unfenced: 3
-F3e rows still unfenced: 2
+F3e rows still unfenced: 1
 ```
-`F3e rows still unfenced: 2` is the one worth reading twice — `_do_fetch_and_ingest` plus
-`fetch_reference_impl`, which Task 3 moved there because its ingest commit outlives this
-slice.
+`F3e rows still unfenced: 1` is the one worth reading twice: it is
+`fetch_reference_impl._do_fetch_and_ingest` and nothing else. If it reads 0, this slice
+converted the ingest commit and crossed into F3e. If it reads 2, `fetch_reference_impl`
+did not measure fenced — check Task 7 Step 7 before touching anything else.
 
 ---
 
@@ -2501,11 +2535,11 @@ Three things a reviewer should push on, named here rather than discovered later:
    gives the grep. A missed caller is a `TypeError` at regeneration time, which is loud, but
    a caller that passes an empty `fenced_ids` would silently unfence everything — check for
    that specifically.
-2. **Task 3 edits a frozenset whose docstring forbids editing it.** The justification is
-   that re-keying is not deleting, and the new key is strictly weaker than the old one
-   (identity without ownership). If a reviewer disagrees, the alternative is to leave
-   `fetch_reference_impl` in F3d2 and mark the slice `pending` forever — which makes
-   `SLICE_STATUS` meaningless instead. Task 3 Step 8 pins the set's SIZE as the replacement
-   ratchet.
-3. **The 3769 total is derived, not measured.** F3d1's plan had every count right and its
+2. **`F3D_IDENTITIES` is not touched at all, and that is the point.** Revision 0 planned
+   to re-key it so `fetch_reference_impl` could move to F3e; revision 1 established the
+   move was never needed (the ingest commit is a separate nested identity). If a future
+   slice genuinely does need to re-slice a row, the `(slice, kind, symbol)` key will have
+   to change then — but doing it speculatively here would have shipped a task whose only
+   effect was to break the slice-status gate.
+3. **The 3770 total is derived, not measured.** F3d1's plan had every count right and its
    reasoning wrong; this one has not been executed at all. Dry-run it before executing it.
