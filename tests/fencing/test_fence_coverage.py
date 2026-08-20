@@ -17,6 +17,7 @@ from tests.fencing.inventory import (
     SRC,
     UNCLASSIFIED,
     load_inventory,
+    merge,
     scan_tree,
 )
 
@@ -334,13 +335,38 @@ def test_the_inventory_fenced_flags_match_the_tree():
 
 
 def test_non_tool_commit_rows_keep_their_stored_flag():
-    """Scoping. `is this a port call` is meaningless for a claim function, and
-    F3a's nine fenced rows must not be disturbed by a rule aimed at F3d."""
-    rows = load_inventory()
-    f3a = [r for r in rows if r["slice"] == "F3a"]
+    """Scoping, tested against merge() ITSELF rather than against the file.
+
+    Reading load_inventory() here would prove nothing: it reports what the JSON
+    says, and the JSON says F3a is fenced because a human wrote that. The claim
+    under test is about the CODE — that merge() applies the measured flag only to
+    tool_commit rows — so drive merge() with a fenced_ids set that would flip an
+    F3a row if the kind check were missing.
+    """
+    previous = load_inventory()
+    f3a = [r for r in previous if r["slice"] == "F3a"]
     assert len(f3a) == 9
-    assert all(r["fenced"] for r in f3a)
     assert all(r["kind"] in {"claim_fn", "tool_context"} for r in f3a)
+
+    found, _measured = scan_tree()
+    # Deliberately EMPTY: nothing is measured as port-only. A merge() that ignored
+    # `kind` would therefore unfence every F3a row.
+    merged = merge(previous, found, None, set())
+    by_id = {(r["kind"], r["path"], r["symbol"]): r for r in merged}
+    for row in f3a:
+        assert by_id[(row["kind"], row["path"], row["symbol"])]["fenced"] is True, row
+
+
+def test_a_tool_commit_row_does_not_keep_its_stored_flag():
+    """The other half of the same rule, and the reason the one above is not
+    vacuous: for a tool_commit the stored value is DISCARDED and the measurement
+    wins. Same empty fenced_ids, opposite outcome."""
+    previous = load_inventory()
+    found, _measured = scan_tree()
+    merged = merge(previous, found, None, set())
+    tool_commits = [r for r in merged if r["kind"] == "tool_commit"]
+    assert tool_commits
+    assert not any(r["fenced"] for r in tool_commits)
 
 
 def test_the_four_converted_modules_are_no_longer_exempt():

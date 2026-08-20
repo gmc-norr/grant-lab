@@ -251,8 +251,12 @@ def merge(
     renames: dict[tuple[str, str, str], tuple[str, str, str]] | None,
     fenced_ids: set[tuple[str, str]],
 ) -> list[dict]:
-    """Fold *found* into *previous*, preserving `fenced`, `category` and every
-    declared optional key.
+    """Fold *found* into *previous*, preserving `category` and every declared
+    optional key.
+
+    `fenced` is NOT preserved for a `tool_commit`: since F3d2 it is MEASURED from
+    the source via *fenced_ids*, so a hand-edited flag does not survive a
+    regeneration. Every other kind still carries its stored value forward.
 
     Validates the WHOLE rename map up front, then aborts if any previously-fenced
     identity is still missing.

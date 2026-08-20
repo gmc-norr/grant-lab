@@ -39,6 +39,16 @@ PORT_WRITE_METHODS: frozenset[str] = frozenset(Effects.__protocol_attrs__) | fro
 #: The two bundle attributes a write is reached through.
 _PORT_BUNDLE_ATTRS = frozenset({"effects", "accounting"})
 
+#: What counts as committing WITHOUT a port, for the fenced measurement below.
+#: `.commit()` is the obvious form; `.begin()` is the quiet one — a
+#: `with session_factory.begin():` block commits on exit with no `.commit()` node
+#: anywhere, so a partial conversion written that way would measure FENCED.
+#: Verified: adding "begin" changes nothing today (zero `.begin()` calls under
+#: tools/), and removing it makes a `.begin()`-based half-conversion measure
+#: fenced. Fail-closed on purpose — the slice most exposed is F3e's ingest, and
+#: its plan is not written yet.
+_RAW_COMMIT_ATTRS = frozenset({"commit", "begin"})
+
 #: The name the bundle arrives under. _safe_tool passes it as the keyword `ports`
 #: (F3d1), so the canonical converted call is exactly `ports.effects.X(...)` or
 #: `ports.accounting.X(...)`. Matching the METHOD NAME alone would record any local
@@ -172,7 +182,7 @@ def find_fenced_tool_commits(source: str, path: str) -> set[tuple[str, str]]:
             stack = stack + [node.name]
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
             qual = ".".join(stack) if stack else "<module>"
-            if node.func.attr == "commit":
+            if node.func.attr in _RAW_COMMIT_ATTRS:
                 raw_commits.add(qual)
             elif _is_port_write(node):
                 port_calls.add(qual)
