@@ -141,8 +141,6 @@ def commit_mutex_key(workspace_id: uuid.UUID) -> int:
     return _advisory_lock_key("commit", workspace_id)
 
 
-
-
 # The cap left in force for the REST of a mutex-held transaction, applied by
 # acquire_commit_mutex once it has won the lock. PostgreSQL's own default is 0 =
 # disabled, and this line used to restore exactly that — which is why every lock

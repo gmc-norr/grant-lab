@@ -257,30 +257,6 @@ def load_inventory() -> list[dict]:
     return json.loads(INVENTORY.read_text(encoding="utf-8"))
 
 
-#: The eight identities spec §7's F3d owns, pinned by (slice, kind, symbol).
-#:
-#: They are written down because the SCAN cannot be trusted to keep them: a
-#: tool_commit is only detected while the code sits under proposal_assist/tools/
-#: (detectors.py), and FencedSiteVanished only guards rows that are already
-#: fenced=True (see the merge above). Relocating an unfenced site therefore drops
-#: its row in silence, and every remaining consistency test would keep passing over
-#: a smaller and smaller set.
-#:
-#: Deleting an entry here is not a way to make a test pass. The entry leaves when
-#: the identity is genuinely gone from the design — which for F3d means never; each
-#: of these is converted, not abolished.
-F3D_IDENTITIES: frozenset[tuple[str, str, str]] = frozenset({
-    ("F3d2", "tool_commit", "submit_review_impl"),
-    ("F3d2", "tool_commit", "submit_scorecard_impl"),
-    ("F3d2", "tool_commit", "submit_uncited_claims_impl"),
-    ("F3d2", "tool_commit", "fetch_reference_impl"),
-    ("F3d2", "tool_commit", "fetch_reference_impl._refund_fetch_slot"),
-    ("F3d3", "tool_commit", "propose_citation_impl"),
-    ("F3d3", "tool_commit", "_propose_artifact_edit_impl"),
-    ("F3d3", "tool_commit", "_write_citekey_cache"),
-})
-
-
 def merge(
     previous: list[dict],
     found: set[Site],
@@ -333,3 +309,27 @@ def merge(
                     row[key] = prev[key]
         rows.append(row)
     return rows
+
+
+#: The eight identities spec §7's F3d owns, pinned by (slice, kind, symbol).
+#:
+#: They are written down because the SCAN cannot be trusted to keep them: a
+#: tool_commit is only detected while the code sits under proposal_assist/tools/
+#: (detectors.py), and FencedSiteVanished only guards rows that are already
+#: fenced=True (see the merge above). Relocating an unfenced site therefore drops
+#: its row in silence, and every remaining consistency test would keep passing over
+#: a smaller and smaller set.
+#:
+#: Deleting an entry here is not a way to make a test pass. The entry leaves when
+#: the identity is genuinely gone from the design — which for F3d means never; each
+#: of these is converted, not abolished.
+F3D_IDENTITIES: frozenset[tuple[str, str, str]] = frozenset({
+    ("F3d2", "tool_commit", "submit_review_impl"),
+    ("F3d2", "tool_commit", "submit_scorecard_impl"),
+    ("F3d2", "tool_commit", "submit_uncited_claims_impl"),
+    ("F3d2", "tool_commit", "fetch_reference_impl"),
+    ("F3d2", "tool_commit", "fetch_reference_impl._refund_fetch_slot"),
+    ("F3d3", "tool_commit", "propose_citation_impl"),
+    ("F3d3", "tool_commit", "_propose_artifact_edit_impl"),
+    ("F3d3", "tool_commit", "_write_citekey_cache"),
+})
