@@ -308,3 +308,74 @@ def test_a_context_without_ports_is_still_constructible():
         workspace_id=uuid.uuid4(), repo_dir=None, session_factory=None, settings=None
     )
     assert ctx.ports is None
+
+
+async def test_safe_tool_threads_the_ports_bundle_to_the_impl():
+    """The dispatch half of the spine. F3d2 flips pass_ports per tool as sites are
+    converted; this proves the wire works before anything rides on it."""
+    from call_manager.proposal_assist.port_impl import build_ports
+    from call_manager.proposal_assist.tools.registry import ToolContext, _safe_tool
+
+    seen: dict = {}
+
+    async def _impl(ctx, *, ports=None, invocation=None):
+        seen["ports"] = ports
+        seen["invocation"] = invocation
+        return {"ok": True}
+
+    bundle = build_ports(lambda: None)
+    ctx = ToolContext(
+        workspace_id=uuid.uuid4(),
+        repo_dir=None,
+        session_factory=None,
+        settings=None,
+        lifecycle_generation=2,
+        ports=bundle,
+    )
+
+    await _safe_tool("t", ctx, _impl, ctx, pass_ports=True, pass_invocation=True)
+
+    assert seen["ports"] is bundle
+    assert seen["invocation"].lifecycle_generation == 2
+
+
+async def test_asking_for_ports_a_surface_never_built_fails_loudly():
+    """Not a runtime condition — a tool surface built by a path that never called
+    build_ports. Handing the impl None would surface later as an AttributeError deep
+    inside a tool, attributed to the wrong cause."""
+    from call_manager.proposal_assist.tools.registry import ToolContext, _safe_tool
+
+    async def _impl(ctx, *, ports=None):
+        return {"ok": True}
+
+    ctx = ToolContext(
+        workspace_id=uuid.uuid4(), repo_dir=None, session_factory=None, settings=None
+    )
+
+    with pytest.raises(RuntimeError, match="no ports"):
+        await _safe_tool("t", ctx, _impl, ctx, pass_ports=True)
+
+
+async def test_an_unconverted_tool_is_dispatched_exactly_as_before():
+    """GC-1. Nothing is converted in this slice, so the default path must be
+    untouched: no ports keyword reaches an impl that did not ask for one."""
+    from call_manager.proposal_assist.tools.registry import ToolContext, _safe_tool
+
+    seen: dict = {}
+
+    async def _impl(ctx):
+        seen["called"] = True
+        return {"ok": True}
+
+    ctx = ToolContext(
+        workspace_id=uuid.uuid4(), repo_dir=None, session_factory=None, settings=None
+    )
+
+    result = await _safe_tool("t", ctx, _impl, ctx)
+    assert seen["called"] is True
+    # NOT `"error" not in str(result)`: the success envelope is
+    # {"content": [...], "is_error": False}, so the substring "error" is always
+    # present inside the KEY. That assertion is false by construction, before and
+    # after this task.
+    assert result["is_error"] is False
+    assert "ports" not in seen

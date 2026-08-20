@@ -258,6 +258,7 @@ async def _safe_tool(
     impl: Callable[..., Awaitable[dict[str, Any]]],
     *args: Any,
     pass_invocation: bool = False,
+    pass_ports: bool = False,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Run an *_impl and wrap its result, catching UNEXPECTED exceptions.
@@ -276,12 +277,25 @@ async def _safe_tool(
     and passed to the impl as the keyword argument ``invocation``. No
     production call site sets pass_invocation=True in F3a; F3d flips it
     per tool as effect sites are converted.
+
+    F3d1: pass_ports=True hands the impl the capability bundle as ``ports``. It sits
+    beside the snapshot deliberately — both are the converted-tool calling
+    convention, and a reader looking for "what does a converted tool receive" should
+    find both in one place. No production call site sets it in F3d1; F3d2 flips it
+    per tool as effect sites are converted.
     """
     # Snapshot BEFORE the deny check: a denied call must not leave a
     # half-built identity anywhere (functionally moot in F3a, but the
     # ordering is the contract).
     if pass_invocation:
         kwargs["invocation"] = snapshot_invocation(ctx)
+    if pass_ports:
+        if ctx.ports is None:
+            raise RuntimeError(
+                f"tool {tool_name} asked for ports on a context that has no ports — "
+                "the tool surface was built without build_ports()"
+            )
+        kwargs["ports"] = ctx.ports
     denied = _deny_if_out_of_turn(tool_name, ctx)
     if denied is not None:
         return denied
