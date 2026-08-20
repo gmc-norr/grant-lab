@@ -15,8 +15,12 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
-from call_manager.db.models import Reference, ReferenceChunk
-from call_manager.proposal_assist.ports.queries import ReferenceChunkView, ReferenceView
+from call_manager.db.models import Reference, ReferenceChunk, Workspace
+from call_manager.proposal_assist.ports.queries import (
+    ReferenceChunkView,
+    ReferenceView,
+    WorkspaceSnapshotView,
+)
 
 
 class SqlQueries:
@@ -74,4 +78,25 @@ class SqlQueries:
             chunk_index=row[2],
             section_path=row[3],
             text=row[4],
+        )
+
+    def get_workspace_snapshot(
+        self, workspace_id: uuid.UUID
+    ) -> WorkspaceSnapshotView | None:
+        with self._sessions() as session:
+            row = session.execute(
+                select(
+                    Workspace.call_body_snapshot,
+                    Workspace.rubric_criteria,
+                    Workspace.rubric_funder_notes,
+                    Workspace.profile_desc_snapshot,
+                ).where(Workspace.id == workspace_id)
+            ).first()
+        if row is None:
+            return None
+        return WorkspaceSnapshotView(
+            call_body=row[0],
+            rubric_criteria=list(row[1] or []),
+            rubric_funder_notes=row[2] or "",
+            profile_desc=row[3],
         )

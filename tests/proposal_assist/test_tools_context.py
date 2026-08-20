@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from call_manager.proposal_assist.port_impl import build_ports
 from call_manager.proposal_assist.tools.context import (
     get_call_details_impl,
     get_profile_impl,
@@ -32,7 +33,7 @@ async def test_get_call_details_returns_empty_when_snapshot_empty(
         s.commit()
         wsid = ws.id
     ctx = _build_ctx(pg_session_factory, wsid)
-    result = await get_call_details_impl(ctx)
+    result = await get_call_details_impl(ctx, ports=build_ports(pg_session_factory))
     assert result == {"linked": False}
 
 
@@ -51,7 +52,7 @@ async def test_get_call_details_returns_snapshot_when_populated(
         s.commit()
         wsid = ws.id
     ctx = _build_ctx(pg_session_factory, wsid)
-    result = await get_call_details_impl(ctx)
+    result = await get_call_details_impl(ctx, ports=build_ports(pg_session_factory))
     assert result["linked"] is True
     assert "Full call body" in result["call_body"]
     assert result["rubric_funder_notes"] == "Late submissions rejected."
@@ -68,7 +69,7 @@ async def test_get_profile_returns_empty_when_snapshot_empty(
         s.commit()
         wsid = ws.id
     ctx = _build_ctx(pg_session_factory, wsid)
-    result = await get_profile_impl(ctx)
+    result = await get_profile_impl(ctx, ports=build_ports(pg_session_factory))
     assert result == {"linked": False}
 
 
@@ -83,6 +84,6 @@ async def test_get_profile_returns_snapshot_when_populated(
         s.commit()
         wsid = ws.id
     ctx = _build_ctx(pg_session_factory, wsid)
-    result = await get_profile_impl(ctx)
+    result = await get_profile_impl(ctx, ports=build_ports(pg_session_factory))
     assert result["linked"] is True
     assert "Group X" in result["description"]

@@ -77,7 +77,7 @@
     "path": "src/call_manager/proposal_assist/tools/references.py",
     "symbol": "fetch_reference_impl",
     "category": "accounting",
-    "fenced": false,
+    "fenced": true,
     "slice": "F3d2"
   },
   {
@@ -93,7 +93,7 @@
     "path": "src/call_manager/proposal_assist/tools/references.py",
     "symbol": "fetch_reference_impl._refund_fetch_slot",
     "category": "accounting",
-    "fenced": false,
+    "fenced": true,
     "slice": "F3d2"
   },
   {
@@ -101,7 +101,7 @@
     "path": "src/call_manager/proposal_assist/tools/review_submit.py",
     "symbol": "submit_review_impl",
     "category": "semantic",
-    "fenced": false,
+    "fenced": true,
     "slice": "F3d2"
   },
   {
@@ -109,7 +109,7 @@
     "path": "src/call_manager/proposal_assist/tools/scorecard.py",
     "symbol": "submit_scorecard_impl",
     "category": "semantic",
-    "fenced": false,
+    "fenced": true,
     "slice": "F3d2"
   },
   {
@@ -117,7 +117,7 @@
     "path": "src/call_manager/proposal_assist/tools/uncited_claims.py",
     "symbol": "submit_uncited_claims_impl",
     "category": "semantic",
-    "fenced": false,
+    "fenced": true,
     "slice": "F3d2"
   },
   {

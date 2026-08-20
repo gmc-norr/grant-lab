@@ -17,6 +17,7 @@ from tests.fencing.inventory import (
     SRC,
     UNCLASSIFIED,
     load_inventory,
+    merge,
     scan_tree,
 )
 
@@ -26,7 +27,7 @@ def _as_sites(rows: list[dict]) -> set[Site]:
 
 
 def test_the_inventory_matches_the_tree_exactly():
-    found = scan_tree()
+    found, _fenced_ids = scan_tree()
     recorded = _as_sites(load_inventory())
     unlisted = sorted(found - recorded)
     stale = sorted(recorded - found)
@@ -277,3 +278,136 @@ def test_a_complete_f3d_slice_has_every_one_of_its_identities_fenced():
         "slices marked complete with identities that are not fenced:\n  "
         + "\n  ".join(f"{s} {k} {sym}" for s, k, sym in unproven)
     )
+
+
+def test_a_fully_converted_site_is_measured_as_fenced():
+    """`fenced` stops being a box a human ticks. Before this, merge() copied the
+    stored boolean forward and nothing checked it against the code — a slice could
+    be marked complete with every row hand-flipped and nothing converted."""
+    import pathlib
+
+    from tests.fencing.detectors import find_fenced_tool_commits
+
+    src = (
+        pathlib.Path(__file__).parent / "fixtures" / "converted_site.py"
+    ).read_text(encoding="utf-8")
+    path = "src/call_manager/proposal_assist/tools/scorecard.py"
+    assert find_fenced_tool_commits(src, path) == {(path, "submit_scorecard_impl")}
+
+
+def test_a_half_converted_site_is_not_fenced():
+    """Port call AND a residual raw commit — a PARTIAL conversion. Nothing in the
+    tree has this shape after F3d2, which is exactly why it needs a fixture: the
+    rule has to refuse it before a future slice produces one and reports itself
+    complete over code that still commits directly."""
+    import pathlib
+
+    from tests.fencing.detectors import find_fenced_tool_commits, find_sites
+
+    src = (
+        pathlib.Path(__file__).parent / "fixtures" / "half_converted_site.py"
+    ).read_text(encoding="utf-8")
+    path = "src/call_manager/proposal_assist/tools/references.py"
+    # The row still EXISTS — it is a write site either way.
+    assert any(s.symbol == "fetch_reference_impl" for s in find_sites(src, path))
+    # It is simply not fenced.
+    assert find_fenced_tool_commits(src, path) == set()
+
+
+def test_the_inventory_fenced_flags_match_the_tree():
+    """The gate this task exists to arm. Every tool_commit row's `fenced` value is
+    now recomputed from the source on every regeneration, so a hand-edit does not
+    survive and `complete` cannot be claimed over unconverted code."""
+    from tests.fencing.inventory import load_inventory, scan_tree
+
+    _sites, fenced_ids = scan_tree()
+    problems = [
+        f"{row['path']}::{row['symbol']} says fenced={row['fenced']}"
+        for row in load_inventory()
+        if row["kind"] == "tool_commit"
+        and row["fenced"] is not ((row["path"], row["symbol"]) in fenced_ids)
+    ]
+    assert not problems, (
+        "tool_commit rows whose fenced flag disagrees with the code:\n  "
+        + "\n  ".join(problems)
+        + "\n\nRegenerate the inventory; do not edit the flag by hand."
+    )
+
+
+def test_non_tool_commit_rows_keep_their_stored_flag():
+    """Scoping, tested against merge() ITSELF rather than against the file.
+
+    Reading load_inventory() here would prove nothing: it reports what the JSON
+    says, and the JSON says F3a is fenced because a human wrote that. The claim
+    under test is about the CODE — that merge() applies the measured flag only to
+    tool_commit rows — so drive merge() with a fenced_ids set that would flip an
+    F3a row if the kind check were missing.
+    """
+    previous = load_inventory()
+    f3a = [r for r in previous if r["slice"] == "F3a"]
+    assert len(f3a) == 9
+    assert all(r["kind"] in {"claim_fn", "tool_context"} for r in f3a)
+
+    found, _measured = scan_tree()
+    # Deliberately EMPTY: nothing is measured as port-only. A merge() that ignored
+    # `kind` would therefore unfence every F3a row.
+    merged = merge(previous, found, None, set())
+    by_id = {(r["kind"], r["path"], r["symbol"]): r for r in merged}
+    for row in f3a:
+        assert by_id[(row["kind"], row["path"], row["symbol"])]["fenced"] is True, row
+
+
+def test_a_tool_commit_row_does_not_keep_its_stored_flag():
+    """The other half of the same rule, and the reason the one above is not
+    vacuous: for a tool_commit the stored value is DISCARDED and the measurement
+    wins. Same empty fenced_ids, opposite outcome."""
+    previous = load_inventory()
+    found, _measured = scan_tree()
+    merged = merge(previous, found, None, set())
+    tool_commits = [r for r in merged if r["kind"] == "tool_commit"]
+    assert tool_commits
+    assert not any(r["fenced"] for r in tool_commits)
+
+
+def test_the_four_converted_modules_are_no_longer_exempt():
+    """The point of the slice, stated as a fact about the exemption list. These
+    four import stdlib and ports only; the gate now enforces them with no pins."""
+    from tests.fencing.inventory import TOOLS_NOT_YET_CONVERTED
+
+    assert set(TOOLS_NOT_YET_CONVERTED) == {
+        "audit.py",       # F3f — capability holders
+        "citations.py",   # F3d3 — the citation core relocation
+        "history.py",     # F3f — the repo_dir locator, and zero inventory rows
+        "proposal.py",    # F3d3
+        "references.py",  # F3e — the ingest half
+    }
+
+
+def test_f3d2_is_complete_and_every_row_it_owns_is_measured_fenced():
+    """`complete` is now a measurable claim. Task 2 made `fenced` a function of the
+    source, so this cannot be satisfied by editing the JSON."""
+    from tests.fencing.inventory import SLICE_STATUS, load_inventory, scan_tree
+
+    assert SLICE_STATUS["F3d2"] == "complete"
+    _sites, fenced_ids = scan_tree()
+    owned = [r for r in load_inventory() if r["slice"] == "F3d2"]
+    assert len(owned) == 5
+    for row in owned:
+        assert row["fenced"] is True, row["symbol"]
+        assert (row["path"], row["symbol"]) in fenced_ids, row["symbol"]
+
+
+def test_the_ingest_row_is_untouched_and_still_f3e():
+    """The boundary this slice must not cross. fetch_reference_impl._do_fetch_and_ingest
+    is a SEPARATE nested identity (references.py:551) holding the ingest commit at
+    :580. F3d2 converts the accounting around it and leaves it alone — which is also
+    why fetch_reference_impl itself CAN go green here."""
+    from tests.fencing.inventory import load_inventory
+
+    row = next(
+        r
+        for r in load_inventory()
+        if r["symbol"] == "fetch_reference_impl._do_fetch_and_ingest"
+    )
+    assert row["slice"] == "F3e"
+    assert row["fenced"] is False

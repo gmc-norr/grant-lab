@@ -18,6 +18,9 @@ from __future__ import annotations
 import ast
 from typing import NamedTuple
 
+from call_manager.proposal_assist.ports.accounting import Accounting
+from call_manager.proposal_assist.ports.effects import Effects
+
 KIND_TOOL_COMMIT = "tool_commit"
 KIND_CLAIM_FN = "claim_fn"
 KIND_TOOL_CONTEXT = "tool_context"
@@ -25,6 +28,33 @@ KIND_TOOL_CONTEXT = "tool_context"
 _TOOLS_DIR = "/proposal_assist/tools/"
 _PROPOSAL_ASSIST = "/proposal_assist/"
 _CLAIM_PREFIXES = ("claim_next_", "claim_queued_")
+
+#: Every WRITE a converted tool can perform through the ports, read off the
+#: Protocols so the list cannot drift away from them. Queries are excluded on
+#: purpose: this design does not fence reads (spec §8), and a read is not a site.
+PORT_WRITE_METHODS: frozenset[str] = frozenset(Effects.__protocol_attrs__) | frozenset(
+    Accounting.__protocol_attrs__
+)
+
+#: The two bundle attributes a write is reached through.
+_PORT_BUNDLE_ATTRS = frozenset({"effects", "accounting"})
+
+#: What counts as committing WITHOUT a port, for the fenced measurement below.
+#: `.commit()` is the obvious form; `.begin()` is the quiet one — a
+#: `with session_factory.begin():` block commits on exit with no `.commit()` node
+#: anywhere, so a partial conversion written that way would measure FENCED.
+#: Verified: adding "begin" changes nothing today (zero `.begin()` calls under
+#: tools/), and removing it makes a `.begin()`-based half-conversion measure
+#: fenced. Fail-closed on purpose — the slice most exposed is F3e's ingest, and
+#: its plan is not written yet.
+_RAW_COMMIT_ATTRS = frozenset({"commit", "begin"})
+
+#: The name the bundle arrives under. _safe_tool passes it as the keyword `ports`
+#: (F3d1), so the canonical converted call is exactly `ports.effects.X(...)` or
+#: `ports.accounting.X(...)`. Matching the METHOD NAME alone would record any local
+#: helper called `submit_review`; matching `<anything>.effects.X` would let a test
+#: double mint a row and mark a qualname fenced that never held a capability.
+_PORT_ROOT = "ports"
 
 SCOPED = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
@@ -39,6 +69,23 @@ def call_name(node: ast.Call) -> str | None:
     """The bare callee name of a Call: `f()` -> "f", `a.b.f()` -> "f"."""
     f = node.func
     return f.id if isinstance(f, ast.Name) else getattr(f, "attr", None)
+
+
+def _is_port_write(node: ast.Call) -> bool:
+    """`ports.effects.X(...)` or `ports.accounting.X(...)`, and nothing else.
+
+    All three parts are load-bearing: the method must be a real port write, the
+    bundle attribute must be `effects` or `accounting`, and the ROOT must be the
+    injected `ports` name.
+    """
+    return (
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr in PORT_WRITE_METHODS
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr in _PORT_BUNDLE_ATTRS
+        and isinstance(node.func.value.value, ast.Name)
+        and node.func.value.value.id == _PORT_ROOT
+    )
 
 
 def qualified_defs(tree: ast.AST) -> dict[str, ast.AST]:
@@ -89,6 +136,12 @@ def find_sites(source: str, path: str) -> set[Site]:
             ):
                 sites.add(Site(KIND_TOOL_COMMIT, path, qual))
 
+            # F3d2: the converted form. A tool that has been moved onto the ports
+            # has no .commit() at all, so without this the row vanishes the moment
+            # the site is converted — and merge() rebuilds only from the scan.
+            if _TOOLS_DIR in norm and _is_port_write(node):
+                sites.add(Site(KIND_TOOL_COMMIT, path, qual))
+
             if call_name(node) == "ToolContext":
                 inert = any(
                     kw.arg == "session_factory"
@@ -104,3 +157,37 @@ def find_sites(source: str, path: str) -> set[Site]:
 
     visit(tree, [])
     return sites
+
+
+def find_fenced_tool_commits(source: str, path: str) -> set[tuple[str, str]]:
+    """`(path, symbol)` for every qualname under tools/ that writes ONLY through a
+    port.
+
+    Port call AND no raw commit. A qualname holding both is half-converted, and
+    half-converted is not converted — a slice must not be able to report itself
+    complete over a site that still commits directly.
+
+    Returns an empty set for a path outside tools/ — same scoping as find_sites.
+    """
+    norm = path.replace("\\", "/")
+    if _TOOLS_DIR not in norm:
+        return set()
+
+    tree = ast.parse(source)
+    port_calls: set[str] = set()
+    raw_commits: set[str] = set()
+
+    def visit(node: ast.AST, stack: list[str]) -> None:
+        if isinstance(node, SCOPED):
+            stack = stack + [node.name]
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            qual = ".".join(stack) if stack else "<module>"
+            if node.func.attr in _RAW_COMMIT_ATTRS:
+                raw_commits.add(qual)
+            elif _is_port_write(node):
+                port_calls.add(qual)
+        for child in ast.iter_child_nodes(node):
+            visit(child, stack)
+
+    visit(tree, [])
+    return {(path, q) for q in port_calls - raw_commits}

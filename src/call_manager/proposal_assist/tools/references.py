@@ -16,6 +16,7 @@ from typing import Any
 from sqlalchemy import or_, select
 
 from call_manager.db.models import Reference, ReferenceChunk
+from call_manager.proposal_assist.ports.accounting import MAX_FETCHES_PER_TURN
 from call_manager.proposal_assist.references.embed import Embedder
 from call_manager.proposal_assist.references.storage import ReferenceStorage
 from call_manager.proposal_assist.tools.registry import ToolContext
@@ -418,6 +419,8 @@ async def summarize_data_impl(
 async def fetch_reference_impl(
     ctx: ToolContext,
     *,
+    ports,
+    invocation,
     input: str,  # noqa: A002
     kind: str = "paper",
     embedder: Embedder | None = None,
@@ -437,9 +440,6 @@ async def fetch_reference_impl(
     OllamaEmbedClient + OllamaEmbedderAdapter; tests pass a FakeEmbedder
     to avoid needing a running Ollama.
     """
-    from sqlalchemy import update as _sql_update
-
-    from call_manager.db.models import TurnJob
     from call_manager.proposal_assist.references.dispatcher import (
         detect_source_type,
         dispatch_fetch,
@@ -457,55 +457,28 @@ async def fetch_reference_impl(
     if kind not in ("paper", "prior_proposal", "analysis", "data"):
         return {"error": f"invalid kind: {kind!r}"}
 
-    # Atomic cap-check + increment. Returns the new fetch_count, or
-    # 0 rows if either (a) no running turn exists for this workspace
-    # or (b) fetch_count was already 3.
-    with ctx.session_factory() as s:
-        result = s.execute(
-            _sql_update(TurnJob)
-            .where(
-                TurnJob.workspace_id == ctx.workspace_id,
-                TurnJob.status == "running",
-                TurnJob.fetch_count < 3,
+    new_count = ports.accounting.reserve_fetch_slot(invocation.active_turn_job_id)
+    if new_count is None:
+        # Either no running turn OR cap reached. Same message the tool has always
+        # returned; MAX_FETCHES_PER_TURN replaces the literal 3 that used to sit in
+        # the WHERE clause AND in this string with nothing keeping them equal.
+        return {
+            "error": (
+                f"fetch cap reached ({MAX_FETCHES_PER_TURN} per turn) OR no running "
+                "turn for this workspace — please ask the user to upload the "
+                "reference manually via the /references panel."
             )
-            .values(fetch_count=TurnJob.fetch_count + 1)
-            .returning(TurnJob.fetch_count)
-        )
-        new_count_row = result.first()
-        s.commit()
-        if new_count_row is None:
-            # Either no running turn OR cap reached.
-            return {
-                "error": (
-                    "fetch cap reached (3 per turn) OR no running turn for "
-                    "this workspace — please ask the user to upload the "
-                    "reference manually via the /references panel."
-                )
-            }
-        new_count = new_count_row[0]
+        }
 
     def _refund_fetch_slot() -> None:
-        """Decrement the per-turn fetch_count we just consumed.
+        """Return a slot reserved but never spent on usable content.
 
-        The cap slot is reserved with an atomic increment BEFORE the
-        fetch so concurrent tool calls can't oversubscribe the budget.
-        When the fetch or ingest fails (transient network error, SSRF
-        refusal, parse failure), the slot was never spent on usable
-        content — refund it so a single flaky URL doesn't burn the
-        agent's whole per-turn budget. Scoped to the running turn so a
-        refund can't push another turn's count negative.
+        Bound to the turn that reserved it, never to 'whichever turn is running for
+        this workspace': a late refund from a turn the workspace has already moved
+        past must not decrement a live turn's count. Unfenced ON PURPOSE (spec 3.3)
+        — fencing it would strand jobs holding their slots.
         """
-        with ctx.session_factory() as s2:
-            s2.execute(
-                _sql_update(TurnJob)
-                .where(
-                    TurnJob.workspace_id == ctx.workspace_id,
-                    TurnJob.status == "running",
-                    TurnJob.fetch_count > 0,
-                )
-                .values(fetch_count=TurnJob.fetch_count - 1)
-            )
-            s2.commit()
+        ports.accounting.refund_fetch_slot(invocation.active_turn_job_id)
 
     storage = ReferenceStorage(root=Path(ctx.settings.workspaces_dir))
     if embedder is None:

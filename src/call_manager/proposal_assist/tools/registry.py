@@ -485,7 +485,9 @@ def _collect_tools(ctx: ToolContext) -> list:
         {"type": "object", "properties": {}, "required": []},
     )
     async def get_call_details(args):
-        return await _safe_tool("get_call_details", ctx, get_call_details_impl, ctx)
+        return await _safe_tool(
+            "get_call_details", ctx, get_call_details_impl, ctx, pass_ports=True
+        )
 
     @tool(
         "get_profile",
@@ -495,7 +497,7 @@ def _collect_tools(ctx: ToolContext) -> list:
         {"type": "object", "properties": {}, "required": []},
     )
     async def get_profile(args):
-        return await _safe_tool("get_profile", ctx, get_profile_impl, ctx)
+        return await _safe_tool("get_profile", ctx, get_profile_impl, ctx, pass_ports=True)
 
     from call_manager.proposal_assist.tools.references import (
         fetch_reference_impl,
@@ -672,6 +674,8 @@ def _collect_tools(ctx: ToolContext) -> list:
             ctx,
             fetch_reference_impl,
             ctx,
+            pass_ports=True,
+            pass_invocation=True,
             input=args["input"],
             kind=args.get("kind", "paper"),
         )
@@ -872,6 +876,8 @@ def _collect_tools(ctx: ToolContext) -> list:
             ctx,
             submit_scorecard_impl,
             ctx,
+            pass_ports=True,
+            pass_invocation=True,
             criteria=args.get("criteria") or [],
             summary=args.get("summary", ""),
         )
@@ -891,6 +897,8 @@ def _collect_tools(ctx: ToolContext) -> list:
             ctx,
             submit_review_impl,
             ctx,
+            pass_ports=True,
+            pass_invocation=True,
             markdown=args.get("markdown", ""),
         )
 
@@ -928,6 +936,8 @@ def _collect_tools(ctx: ToolContext) -> list:
             ctx,
             submit_uncited_claims_impl,
             ctx,
+            pass_ports=True,
+            pass_invocation=True,
             claims=args.get("claims") or [],
         )
 

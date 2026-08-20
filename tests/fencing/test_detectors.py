@@ -179,3 +179,77 @@ def test_site_identity_is_three_fields_and_carries_no_line_number():
     assert a == Site(KIND_TOOL_COMMIT, TOOLS, "f")
     assert len(a) == 3
     assert sorted([Site("b", "p", "s"), Site("a", "p", "s")])[0].kind == "a"
+
+
+def test_a_port_write_call_is_a_tool_commit_site():
+    """The whole reason Task 1 exists. The canonical converted form has NO
+    .commit() anywhere, so a detector that only knows about .commit() drops the
+    row the moment the site is converted — and merge() rebuilds rows only from
+    what the scan found."""
+    from tests.fencing.detectors import KIND_TOOL_COMMIT, find_sites
+
+    src = (
+        "async def submit_scorecard_impl(ctx, *, ports, invocation):\n"
+        "    ports.effects.submit_scorecard(invocation.stamp(), cmd)\n"
+    )
+    sites = find_sites(src, "src/call_manager/proposal_assist/tools/scorecard.py")
+    assert (KIND_TOOL_COMMIT, "submit_scorecard_impl") in {
+        (s.kind, s.symbol) for s in sites
+    }
+
+
+def test_an_accounting_call_is_a_tool_commit_site_too():
+    """Accounting operations are unfenced by design (spec 3.3) but they are still
+    writes, and they still own inventory rows."""
+    from tests.fencing.detectors import KIND_TOOL_COMMIT, find_sites
+
+    src = (
+        "async def fetch_reference_impl(ctx, *, ports):\n"
+        "    def _refund_fetch_slot():\n"
+        "        ports.accounting.refund_fetch_slot(job_id)\n"
+    )
+    sites = find_sites(src, "src/call_manager/proposal_assist/tools/references.py")
+    assert (KIND_TOOL_COMMIT, "fetch_reference_impl._refund_fetch_slot") in {
+        (s.kind, s.symbol) for s in sites
+    }
+
+
+def test_a_port_call_outside_tools_is_not_a_site():
+    """Same scoping as .commit(): the inventory is about TOOL code. port_impl and
+    the domain layer call these methods constantly and are not tool sites."""
+    from tests.fencing.detectors import find_sites
+
+    src = "def helper(ports):\n    ports.effects.submit_review(stamp, cmd)\n"
+    assert find_sites(src, "src/call_manager/proposal_assist/proposals/accepting.py") == set()
+
+
+def test_the_port_method_list_is_derived_from_the_protocols():
+    """A hand-written list drifts the first time a port gains a method, and the
+    drift is silent: the new effect simply stops being detected."""
+    from call_manager.proposal_assist.ports.accounting import Accounting
+    from call_manager.proposal_assist.ports.effects import Effects
+    from tests.fencing.detectors import PORT_WRITE_METHODS
+
+    assert frozenset(Effects.__protocol_attrs__) | frozenset(
+        Accounting.__protocol_attrs__
+    ) == PORT_WRITE_METHODS
+    assert "submit_scorecard" in PORT_WRITE_METHODS
+    assert "refund_fetch_slot" in PORT_WRITE_METHODS
+    # Queries are reads. Fencing reads is explicitly out of scope (spec §8).
+    assert "get_reference" not in PORT_WRITE_METHODS
+
+
+def test_a_lookalike_receiver_is_not_a_site():
+    """The chain root must be the INJECTED `ports` name. Matching on
+    `<anything>.effects.submit_review(...)` would let a local helper — or a test
+    double a tool happened to hold — mint an inventory row, and worse, mark a
+    qualname fenced that never touched a real capability."""
+    from tests.fencing.detectors import find_sites
+
+    path = "src/call_manager/proposal_assist/tools/scorecard.py"
+    src = (
+        "async def submit_scorecard_impl(ctx):\n"
+        "    fake = _Local()\n"
+        "    fake.effects.submit_scorecard(stamp, cmd)\n"
+    )
+    assert find_sites(src, path) == set()

@@ -1,6 +1,8 @@
 import pytest
 
+from call_manager.proposal_assist.port_impl import build_ports
 from call_manager.proposal_assist.references.admission import IngestLimiter, OverCapacity
+from call_manager.proposal_assist.tools.registry import snapshot_invocation
 
 
 def test_limiter_admits_up_to_capacity():
@@ -72,9 +74,19 @@ async def test_fetch_reference_returns_busy_when_limiter_exhausted(pg_session_fa
         session_factory=pg_session_factory,
         settings=settings,
         reference_ingest_limiter=lim,
+        lifecycle_generation=0,
+        active_turn_job_id=job_id,
     )
 
-    out = await fetch_reference_impl(ctx, input="2401.12345", embedder=FakeEmbedder())
+    _ports = build_ports(pg_session_factory)
+    _invocation = snapshot_invocation(ctx)
+    out = await fetch_reference_impl(
+        ctx,
+        ports=_ports,
+        invocation=_invocation,
+        input="2401.12345",
+        embedder=FakeEmbedder(),
+    )
 
     # Tool must return a busy error.
     assert "error" in out, out
