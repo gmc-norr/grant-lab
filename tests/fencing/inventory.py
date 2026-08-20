@@ -18,7 +18,7 @@ SRC = REPO / "src" / "call_manager"
 INVENTORY = pathlib.Path(__file__).resolve().parent / "fence_inventory.json"
 
 _SLICE_FOR_KIND = {KIND_CLAIM_FN: "F4"}   # a NEW claim fn still defaults to F4
-_DEFAULT_SLICE = "F3d"                    # was "F3"
+_DEFAULT_SLICE = "F3d2"                   # was "F3d", split in F3d1
 
 #: A site no human has classified yet. The gate REFUSES these, so a regeneration
 #: cannot quietly admit an unreviewed effect site.
@@ -65,7 +65,12 @@ SLICE_STATUS = {
     "F3a": "complete",  # claim identity for every tool-originating actor
     "F3b": "complete",  # the ports — no inventory row of its own; F3d converts callers
     "F3c": "complete",  # the import gate — no inventory row of its own
-    "F3d": "pending",   # convert the tool sites
+    # Spec §7's F3d, cut into three because it is ~26 production files and a
+    # 512-line relocation. SLICE_STATUS has no partial state, so a multi-slice
+    # conversion needs one key per slice or the first flipped row goes red.
+    "F3d1": "pending",  # the spine: ports/, the bundle, the dispatch — converts nothing
+    "F3d2": "pending",  # the submitters and the reads
+    "F3d3": "pending",  # the citation core relocation, and the propose_* sites
     "F3e": "pending",   # the ingest pipeline
     "F3f": "pending",   # capability holders, then the handle
     "F4": "pending",    # background job families
