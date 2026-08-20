@@ -142,3 +142,52 @@ def test_the_monkeypatch_targets_are_the_module_that_actually_reads_them():
             f"{name} is not read by {reader_name} — the patch-target list is stale, "
             "which is exactly the failure this test exists to catch"
         )
+
+
+def test_no_tool_module_gained_a_port_call():
+    """GC-1. This slice converts nothing. If a tool started calling a port, the
+    move turned into a conversion somewhere along the way and the review property
+    this slice was split to preserve is gone."""
+    from tests.fencing.inventory import load_inventory, scan_tree
+
+    _sites, fenced = scan_tree()
+    assert fenced == {
+        ("src/call_manager/proposal_assist/tools/scorecard.py", "submit_scorecard_impl"),
+        ("src/call_manager/proposal_assist/tools/review_submit.py", "submit_review_impl"),
+        (
+            "src/call_manager/proposal_assist/tools/uncited_claims.py",
+            "submit_uncited_claims_impl",
+        ),
+        ("src/call_manager/proposal_assist/tools/references.py", "fetch_reference_impl"),
+        (
+            "src/call_manager/proposal_assist/tools/references.py",
+            "fetch_reference_impl._refund_fetch_slot",
+        ),
+    }, "F3d2's five and no more — F3d3a converts nothing"
+    assert sum(1 for r in load_inventory() if r["slice"] == "F3d3" and r["fenced"]) == 0
+
+
+def test_the_exemption_list_still_has_five_keys():
+    """The honest headline. Both citations.py and proposal.py are blocked on the
+    repo_dir locator, which retires in F3f — so this slice SHRINKS two pin sets and
+    retires neither. Saying otherwise would misreport the fence's progress."""
+    from tests.fencing.inventory import TOOLS_NOT_YET_CONVERTED
+
+    assert set(TOOLS_NOT_YET_CONVERTED) == {
+        "audit.py",
+        "citations.py",
+        "history.py",
+        "proposal.py",
+        "references.py",
+    }
+
+
+def test_the_moved_code_still_names_repo_dir_and_that_is_expected():
+    """Where the remaining work lives. Four of citations.py's nine repo_dir namings
+    left tools/ with this move; the rest sit in list_citations_impl and
+    propose_citation_impl, which stay. F3f owns the locator."""
+    import inspect
+
+    from call_manager.proposal_assist.citations import core
+
+    assert "repo_dir" in inspect.getsource(core)
