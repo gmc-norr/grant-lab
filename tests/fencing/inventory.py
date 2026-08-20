@@ -10,6 +10,7 @@ from tests.fencing.detectors import (
     KIND_TOOL_COMMIT,
     KIND_TOOL_CONTEXT,
     Site,
+    find_fenced_tool_commits,
     find_sites,
 )
 
@@ -244,13 +245,22 @@ class BadRenameMap(RuntimeError):
     believe a rename carried a proof across when it did not."""
 
 
-def scan_tree() -> set[Site]:
+def scan_tree() -> tuple[set[Site], set[tuple[str, str]]]:
+    """The sites, and the identities the code proves are port-only.
+
+    Returns a PAIR since F3d2: `fenced` for a tool_commit is measured, not stored,
+    so every caller that merges needs both halves and cannot forget the second.
+    """
     sites: set[Site] = set()
+    fenced_ids: set[tuple[str, str]] = set()
     for p in sorted(SRC.rglob("*.py")):
         if "__pycache__" in p.parts:
             continue
-        sites |= find_sites(p.read_text(encoding="utf-8"), p.relative_to(REPO).as_posix())
-    return sites
+        rel = p.relative_to(REPO).as_posix()
+        source = p.read_text(encoding="utf-8")
+        sites |= find_sites(source, rel)
+        fenced_ids |= find_fenced_tool_commits(source, rel)
+    return sites, fenced_ids
 
 
 def load_inventory() -> list[dict]:
@@ -261,6 +271,7 @@ def merge(
     previous: list[dict],
     found: set[Site],
     renames: dict[tuple[str, str, str], tuple[str, str, str]] | None,
+    fenced_ids: set[tuple[str, str]],
 ) -> list[dict]:
     """Fold *found* into *previous*, preserving `fenced`, `category` and every
     declared optional key.
@@ -297,7 +308,16 @@ def merge(
             "path": s.path,
             "symbol": s.symbol,
             "category": prev["category"] if prev else UNCLASSIFIED,
-            "fenced": prev["fenced"] if prev else False,
+            # F3d2: for a tool_commit, `fenced` is MEASURED from the source, never
+            # carried forward. It was a human boolean that nothing checked, which
+            # made "slice complete" an assertion rather than a proof. Other kinds
+            # keep the stored flag: `is this a port call` is meaningless for a
+            # claim function.
+            "fenced": (
+                (s.path, s.symbol) in fenced_ids
+                if s.kind == KIND_TOOL_COMMIT
+                else (prev["fenced"] if prev else False)
+            ),
             "slice": (
                 prev["slice"] if prev is not None
                 else _SLICE_FOR_KIND.get(s.kind, _DEFAULT_SLICE)

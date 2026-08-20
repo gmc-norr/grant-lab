@@ -147,3 +147,37 @@ def find_sites(source: str, path: str) -> set[Site]:
 
     visit(tree, [])
     return sites
+
+
+def find_fenced_tool_commits(source: str, path: str) -> set[tuple[str, str]]:
+    """`(path, symbol)` for every qualname under tools/ that writes ONLY through a
+    port.
+
+    Port call AND no raw commit. A qualname holding both is half-converted, and
+    half-converted is not converted — a slice must not be able to report itself
+    complete over a site that still commits directly.
+
+    Returns an empty set for a path outside tools/ — same scoping as find_sites.
+    """
+    norm = path.replace("\\", "/")
+    if _TOOLS_DIR not in norm:
+        return set()
+
+    tree = ast.parse(source)
+    port_calls: set[str] = set()
+    raw_commits: set[str] = set()
+
+    def visit(node: ast.AST, stack: list[str]) -> None:
+        if isinstance(node, SCOPED):
+            stack = stack + [node.name]
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            qual = ".".join(stack) if stack else "<module>"
+            if node.func.attr == "commit":
+                raw_commits.add(qual)
+            elif _is_port_write(node):
+                port_calls.add(qual)
+        for child in ast.iter_child_nodes(node):
+            visit(child, stack)
+
+    visit(tree, [])
+    return {(path, q) for q in port_calls - raw_commits}

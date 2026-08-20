@@ -26,7 +26,7 @@ def _as_sites(rows: list[dict]) -> set[Site]:
 
 
 def test_the_inventory_matches_the_tree_exactly():
-    found = scan_tree()
+    found, _fenced_ids = scan_tree()
     recorded = _as_sites(load_inventory())
     unlisted = sorted(found - recorded)
     stale = sorted(recorded - found)
@@ -277,3 +277,67 @@ def test_a_complete_f3d_slice_has_every_one_of_its_identities_fenced():
         "slices marked complete with identities that are not fenced:\n  "
         + "\n  ".join(f"{s} {k} {sym}" for s, k, sym in unproven)
     )
+
+
+def test_a_fully_converted_site_is_measured_as_fenced():
+    """`fenced` stops being a box a human ticks. Before this, merge() copied the
+    stored boolean forward and nothing checked it against the code — a slice could
+    be marked complete with every row hand-flipped and nothing converted."""
+    import pathlib
+
+    from tests.fencing.detectors import find_fenced_tool_commits
+
+    src = (
+        pathlib.Path(__file__).parent / "fixtures" / "converted_site.py"
+    ).read_text(encoding="utf-8")
+    path = "src/call_manager/proposal_assist/tools/scorecard.py"
+    assert find_fenced_tool_commits(src, path) == {(path, "submit_scorecard_impl")}
+
+
+def test_a_half_converted_site_is_not_fenced():
+    """Port call AND a residual raw commit — a PARTIAL conversion. Nothing in the
+    tree has this shape after F3d2, which is exactly why it needs a fixture: the
+    rule has to refuse it before a future slice produces one and reports itself
+    complete over code that still commits directly."""
+    import pathlib
+
+    from tests.fencing.detectors import find_fenced_tool_commits, find_sites
+
+    src = (
+        pathlib.Path(__file__).parent / "fixtures" / "half_converted_site.py"
+    ).read_text(encoding="utf-8")
+    path = "src/call_manager/proposal_assist/tools/references.py"
+    # The row still EXISTS — it is a write site either way.
+    assert any(s.symbol == "fetch_reference_impl" for s in find_sites(src, path))
+    # It is simply not fenced.
+    assert find_fenced_tool_commits(src, path) == set()
+
+
+def test_the_inventory_fenced_flags_match_the_tree():
+    """The gate this task exists to arm. Every tool_commit row's `fenced` value is
+    now recomputed from the source on every regeneration, so a hand-edit does not
+    survive and `complete` cannot be claimed over unconverted code."""
+    from tests.fencing.inventory import load_inventory, scan_tree
+
+    _sites, fenced_ids = scan_tree()
+    problems = [
+        f"{row['path']}::{row['symbol']} says fenced={row['fenced']}"
+        for row in load_inventory()
+        if row["kind"] == "tool_commit"
+        and row["fenced"] is not ((row["path"], row["symbol"]) in fenced_ids)
+    ]
+    assert not problems, (
+        "tool_commit rows whose fenced flag disagrees with the code:\n  "
+        + "\n  ".join(problems)
+        + "\n\nRegenerate the inventory; do not edit the flag by hand."
+    )
+
+
+def test_non_tool_commit_rows_keep_their_stored_flag():
+    """Scoping. `is this a port call` is meaningless for a claim function, and
+    F3a's nine fenced rows must not be disturbed by a rule aimed at F3d."""
+    rows = load_inventory()
+    f3a = [r for r in rows if r["slice"] == "F3a"]
+    assert len(f3a) == 9
+    assert all(r["fenced"] for r in f3a)
+    assert all(r["kind"] in {"claim_fn", "tool_context"} for r in f3a)

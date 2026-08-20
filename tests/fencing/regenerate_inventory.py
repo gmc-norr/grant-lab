@@ -24,7 +24,8 @@ RENAMES: dict[tuple[str, str, str], tuple[str, str, str]] = {}
 
 def main() -> None:
     previous = load_inventory() if INVENTORY.exists() else []
-    rows = merge(previous, scan_tree(), RENAMES)
+    sites, fenced_ids = scan_tree()
+    rows = merge(previous, sites, RENAMES, fenced_ids)
     INVENTORY.write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
     unclassified = sum(1 for r in rows if r["category"] == "UNCLASSIFIED")
     print(f"wrote {len(rows)} sites to {INVENTORY}")
