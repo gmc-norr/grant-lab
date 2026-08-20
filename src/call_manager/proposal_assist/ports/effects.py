@@ -84,19 +84,13 @@ class Effects(Protocol):
     past the stamp's generation, and EffectRejected for a wrong, finished or
     already-submitted target.
 
-    A THIRD exception escapes and it is NOT in ports/errors.py:
-    `CommitMutexTimeout` (`drafting/locking.py`), raised by the shared lease
-    when an exclusive holder outlasts `acquire_shared_lease`'s 10s cap. It
-    means "busy, retry", not "failed": web routes answer 429 + Retry-After: 2
-    with BUSY_ERROR_MESSAGE, and `tools/citations.py:793` already returns that
-    same string to the agent.
-
-    A converter that catches only the two errors above therefore DOWNGRADES a
-    transient busy into an internal error — `tools/registry.py::_safe_tool`
-    catches every unnamed exception and returns "internal error". F3d owns the
-    decision of how a fenced tool NAMES this one: ports/ is stdlib-only, and
-    BUSY_ERROR_MESSAGE lives beside the class in drafting/locking.py, so both
-    would have to move for a converted tool to import neither.
+    A THIRD exception escapes, and since F3d1 it lives in `ports/errors.py` beside
+    the others: `CommitMutexTimeout`, raised by the shared lease when an exclusive
+    holder outlasts `acquire_shared_lease`'s 10s cap. It means "busy, retry", not
+    "failed" — answer it with BUSY_ERROR_MESSAGE, which is in `ports/errors.py` too.
+    A converted tool that catches only the two errors above DOWNGRADES a transient
+    busy into an internal error, because `tools/registry.py::_safe_tool` catches
+    every unnamed exception and returns "internal error".
     """
 
     def submit_scorecard(self, stamp: FenceStamp, cmd: SubmitScorecard) -> None: ...

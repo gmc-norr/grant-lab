@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 from call_manager.db.models import Reference, ReferenceChunk, WorkspaceEvent
 from call_manager.proposal_assist.analysis.invalidation import on_reference_unavailable
 from call_manager.proposal_assist.citations.ledger import load_ledger
+from call_manager.proposal_assist.ports.artifacts import CITATIONS_FILENAME
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -34,8 +35,6 @@ if TYPE_CHECKING:
     from call_manager.proposal_assist.references.storage import ReferenceStorage
 
 logger = logging.getLogger(__name__)
-
-CITATIONS_FILENAME = "citations.json"
 
 
 def delete_or_tombstone_reference(

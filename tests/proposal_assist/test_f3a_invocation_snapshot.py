@@ -153,12 +153,12 @@ def test_the_snapshot_is_immune_to_a_mutation_of_the_SOURCE_selection():
     This is safe today only because set_turn_provenance REPLACES the dict rather
     than mutating it. An immutability guarantee must not rest on that.
     """
-    from call_manager.proposal_assist.tools.registry import Invocation
+    from call_manager.proposal_assist.tools.registry import snapshot_invocation
 
     ctx = _ctx()
     ctx.turn_selection = {"kind": "turn one", "nested": {"n": 1}}
 
-    inv = Invocation.snapshot(ctx)
+    inv = snapshot_invocation(ctx)
 
     ctx.turn_selection["kind"] = "turn two"
     ctx.turn_selection["nested"]["n"] = 2

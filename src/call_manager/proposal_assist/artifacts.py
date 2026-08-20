@@ -1,34 +1,20 @@
 """Single source of truth for the proposal-assist artifacts and their files.
 
-`proposal.md` (the draft) and `proposal-spec.md` (the spec) live in one git
-repo per workspace. `Artifact`'s string values MUST match the
-`ProposedChange.target_artifact` CHECK ('draft','spec') in db/models.py and the
-files seeded by phases/setup.py. PROPOSAL_FILENAME is re-exported for the
-existing importers in editing/save.py and tools/proposal.py.
+`proposal.md` (the draft) and `proposal-spec.md` (the spec) live in one git repo
+per workspace. The names themselves moved to `ports/artifacts.py` in F3d1, because
+a converted tool may import only stdlib and `ports` and still has to name a file;
+they are re-exported here so every existing importer is unchanged. SPEC_SKELETON
+stays: it is seeded page content, not a name a tool needs.
 """
 
 from __future__ import annotations
 
-from enum import StrEnum
-
-
-class Artifact(StrEnum):
-    DRAFT = "draft"  # values MUST match ProposedChange.target_artifact (db/models.py:958)
-    SPEC = "spec"
-
-
-_FILENAMES: dict[Artifact, str] = {
-    Artifact.DRAFT: "proposal.md",
-    Artifact.SPEC: "proposal-spec.md",
-}
-
-
-def filename_for(artifact: Artifact) -> str:
-    return _FILENAMES[Artifact(artifact)]
-
-
-PROPOSAL_FILENAME = filename_for(Artifact.DRAFT)  # back-compat re-export
-SPEC_FILENAME = filename_for(Artifact.SPEC)
+from call_manager.proposal_assist.ports.artifacts import (
+    PROPOSAL_FILENAME as PROPOSAL_FILENAME,
+)
+from call_manager.proposal_assist.ports.artifacts import SPEC_FILENAME as SPEC_FILENAME
+from call_manager.proposal_assist.ports.artifacts import Artifact as Artifact
+from call_manager.proposal_assist.ports.artifacts import filename_for as filename_for
 
 # The conventional starting Spec (cockpit design §8). A whitespace-only spec is
 # seeded with this by POST /spec (Task 5). Leads with `## Aims`, so split_sections

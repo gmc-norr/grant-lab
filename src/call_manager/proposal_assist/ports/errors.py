@@ -58,3 +58,29 @@ class UnfencedInvocation(RuntimeError):
     def __init__(self, workspace_id: uuid.UUID) -> None:
         super().__init__(f"invocation for workspace {workspace_id} carries no generation")
         self.workspace_id = workspace_id
+
+
+class CommitMutexTimeout(RuntimeError):
+    """The per-workspace commit mutex could not be acquired within the timeout —
+    another writer is wedged or unusually slow.
+
+    Lives here rather than in drafting/locking.py because EVERY `Effects` method can
+    raise it (the shared lease caps its wait at 10s) and a tool must be able to NAME
+    what it catches. `drafting/locking.py` re-exports it, so every pre-F3d1 import
+    site is unchanged.
+
+    It means "busy, retry", not "failed": web routes answer 429 with a
+    `Retry-After: 2` header and BUSY_ERROR_MESSAGE (the collab checkpoint route in
+    proposal_assist/web/collab_checkpoint.py is the lone holdout, still answering
+    503). A converted tool that lets it escape hands the agent "internal error"
+    instead, because tools/registry.py::_safe_tool catches everything it does not
+    name.
+    """
+
+
+#: Served with 429 + Retry-After: 2, and returned verbatim by the tools. Here so the
+#: message the agent sees and the message the browser sees cannot drift apart.
+BUSY_ERROR_MESSAGE = "workspace is busy — try again in a moment"
+
+#: The workspace was deleted while the actor was mid-turn.
+DELETED_ERROR_MESSAGE = "workspace no longer exists"

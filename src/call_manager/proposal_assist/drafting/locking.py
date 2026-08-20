@@ -34,6 +34,15 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from call_manager.db.models import Workspace
+from call_manager.proposal_assist.ports.errors import (
+    BUSY_ERROR_MESSAGE as BUSY_ERROR_MESSAGE,
+)
+from call_manager.proposal_assist.ports.errors import (
+    DELETED_ERROR_MESSAGE as DELETED_ERROR_MESSAGE,
+)
+from call_manager.proposal_assist.ports.errors import (
+    CommitMutexTimeout as CommitMutexTimeout,
+)
 
 
 def _advisory_lock_key(namespace: str, workspace_id: uuid.UUID) -> int:
@@ -132,20 +141,6 @@ def commit_mutex_key(workspace_id: uuid.UUID) -> int:
     return _advisory_lock_key("commit", workspace_id)
 
 
-class CommitMutexTimeout(RuntimeError):
-    """The per-workspace commit mutex could not be acquired within the
-    timeout — another writer is wedged or unusually slow. Web routes map this
-    to 429 'workspace is busy' with a ``Retry-After: 2`` header (the collab
-    checkpoint route in ``proposal_assist/web/collab_checkpoint.py`` is the
-    lone holdout, still answering 503)."""
-
-
-# Shared busy detail string, served with 429 + Retry-After: 2 — imported by the
-# tool modules and web routes so the message the agent sees and the message the
-# browser sees are byte-identical.
-BUSY_ERROR_MESSAGE = "workspace is busy — try again in a moment"
-
-
 # The cap left in force for the REST of a mutex-held transaction, applied by
 # acquire_commit_mutex once it has won the lock. PostgreSQL's own default is 0 =
 # disabled, and this line used to restore exactly that — which is why every lock
@@ -178,11 +173,6 @@ class WorkspaceDeleted(RuntimeError):
     def __init__(self, workspace_id: uuid.UUID) -> None:
         super().__init__(f"workspace {workspace_id} was deleted")
         self.workspace_id = workspace_id
-
-
-# Shared 404 detail string for the deleted-workspace refusal, so the message the
-# agent sees and the message the browser sees stay byte-identical.
-DELETED_ERROR_MESSAGE = "workspace no longer exists"
 
 
 def is_lock_timeout(exc: BaseException) -> bool:

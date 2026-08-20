@@ -30,10 +30,9 @@ from sqlalchemy.orm import sessionmaker
 
 from call_manager.db.models import ArtifactVersion, Reference, WorkspaceEvent
 from call_manager.proposal_assist.citations.ledger import load_ledger
+from call_manager.proposal_assist.ports.artifacts import CITATIONS_FILENAME
 
 logger = logging.getLogger(__name__)
-
-CITATIONS_FILENAME = "citations.json"
 
 
 def reconcile_workspace_git_drift(

@@ -8,6 +8,7 @@ from tests.fencing.detectors import KIND_TOOL_CONTEXT, Site, qualified_defs
 from tests.fencing.inventory import (
     CATEGORIES_BY_KIND,
     F3A_COLUMN_FILES,
+    F3D_IDENTITIES,
     FENCING_IMPORT_FILES,
     NON_SEMANTIC_PINS,
     REPO,
@@ -232,3 +233,47 @@ def test_the_four_tool_originating_claims_are_f3a():
         "claim_queued_jobs": "F4",
         "claim_next_setup_job": "F5",
     }
+
+
+def test_every_f3d_identity_is_still_in_the_inventory():
+    """ANTI-VACUITY. The scan only records a tool_commit while the code is under
+    tools/ (detectors.py:83-90), and FencedSiteVanished only fires for rows already
+    fenced=True — so relocating an UNFENCED site deletes its row silently, and a
+    slice can reach `complete` over an empty set.
+
+    This is the ratchet that makes that impossible. If a row here has vanished, the
+    fix is not to edit this set: flip the row `fenced: true` BEFORE moving its code,
+    which is what makes FencedSiteVanished fire and preserves the row.
+    """
+    present = {(r["slice"], r["kind"], r["symbol"]) for r in load_inventory()}
+    missing = sorted(F3D_IDENTITIES - present)
+    assert not missing, (
+        "F3d identities that disappeared from the inventory:\n  "
+        + "\n  ".join(f"{s} {k} {sym}" for s, k, sym in missing)
+        + "\n\nA relocated site is not a converted site. Flip the row fenced=true "
+        "in the SAME commit that moves the code, or before it."
+    )
+
+
+def test_a_complete_f3d_slice_has_every_one_of_its_identities_fenced():
+    """`complete` must mean every identity the slice owns is proven, not merely that
+    nothing red is left in the scan.
+
+    Known and accepted: this is not an independent falsifier. Its red set is a subset
+    of the union of test_every_f3d_identity_is_still_in_the_inventory (row relocated)
+    and test_each_slice_matches_its_declared_status (row present but unfenced). It is
+    kept for the message it produces, which names the identity rather than the row.
+    """
+    by_id = {(r["slice"], r["kind"], r["symbol"]): r for r in load_inventory()}
+    unproven = []
+    for identity in sorted(F3D_IDENTITIES):
+        slice_name = identity[0]
+        if SLICE_STATUS.get(slice_name) != "complete":
+            continue
+        row = by_id.get(identity)
+        if row is None or not row.get("fenced"):
+            unproven.append(identity)
+    assert not unproven, (
+        "slices marked complete with identities that are not fenced:\n  "
+        + "\n  ".join(f"{s} {k} {sym}" for s, k, sym in unproven)
+    )

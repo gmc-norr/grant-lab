@@ -22,16 +22,15 @@ import asyncio
 import json
 import logging
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
-from call_manager.proposal_assist.ports.errors import UnfencedInvocation
-from call_manager.proposal_assist.ports.stamp import FenceStamp, Provenance
+from call_manager.proposal_assist.ports import Ports
+from call_manager.proposal_assist.ports.invocation import Invocation as Invocation
 
 if TYPE_CHECKING:
     from claude_agent_sdk.types import McpSdkServerConfig
@@ -156,97 +155,34 @@ class ToolContext:
     allowed_tool_names: set[str] | None = field(default=None)
     turn_selection: dict | None = field(default=None)
 
+    # F3d1: the capability bundle a converted tool holds INSTEAD of a session.
+    # Defaults to None because two constructions deliberately have no session to
+    # build one from — collect_mcp_tool_names below and proposals/accepting.py's
+    # shim, both of which pass session_factory=None. tests/fencing/detectors.py
+    # keys on that literal to classify them inert, so they must stay as they are.
+    ports: Ports | None = field(default=None)
 
-@dataclass(frozen=True)
-class Invocation:
-    """One tool call's immutable identity and per-turn provenance.
 
-    Snapshotted at DISPATCH, before any await or thread handoff. It exists
-    because ToolContext is MUTABLE and shared: set_turn_provenance restamps the
-    retained context every turn, so a tool reading these values when its effect
-    happens can read a LATER turn's. A stale generation paired with a newer
-    turn's prompt is worse than either alone.
+def snapshot_invocation(ctx: ToolContext) -> Invocation:
+    """Freeze one tool call's identity, at DISPATCH.
 
-    Every mutable per-turn field an effect consumes belongs here. The provenance
-    fields are copied into durable proposed-change rows by the propose_* tools
-    (tools/proposal.py), so a late read misattributes stored data.
+    Lives here rather than on Invocation because it reads a ToolContext and ports/
+    is stdlib-only. Called before any await or thread handoff: ToolContext is
+    MUTABLE and shared, set_turn_provenance restamps it every turn, so a tool
+    reading these values when its effect happens can read a LATER turn's.
     """
-
-    workspace_id: uuid.UUID
-    lifecycle_generation: int | None
-    active_turn_job_id: uuid.UUID | None
-    origin_kind: str
-    origin_job_id: uuid.UUID | None
-    triggering_turn_id: uuid.UUID | None
-    triggering_prompt: str | None
-    created_by: int | None
-    origin_session_id: str | None
-    #: A READ-ONLY view over a deep copy. `frozen=True` freezes the dataclass's
-    #: own attributes, not the objects they point at — a plain dict here stays
-    #: aliased to ctx.turn_selection, so mutating the source would change this
-    #: "immutable" snapshot. It happens to be safe today only because
-    #: set_turn_provenance REPLACES the dict rather than mutating it, and an
-    #: immutability guarantee must not rest on that.
-    turn_selection: Mapping[str, Any] | None
-
-    @staticmethod
-    def _freeze(value):
-        """Deep read-only view. turn_selection is copied into durable
-        proposed-change provenance (tools/proposal.py), so a late mutation would
-        misattribute stored data."""
-        if isinstance(value, Mapping):
-            return MappingProxyType({k: Invocation._freeze(v) for k, v in value.items()})
-        if isinstance(value, (list, tuple)):
-            return tuple(Invocation._freeze(v) for v in value)
-        return value
-
-    @classmethod
-    def snapshot(cls, ctx: ToolContext) -> Invocation:
-        return cls(
-            workspace_id=ctx.workspace_id,
-            lifecycle_generation=ctx.lifecycle_generation,
-            active_turn_job_id=ctx.active_turn_job_id,
-            origin_kind=ctx.origin_kind,
-            origin_job_id=ctx.origin_job_id,
-            triggering_turn_id=ctx.triggering_turn_id,
-            triggering_prompt=ctx.triggering_prompt,
-            created_by=ctx.created_by,
-            origin_session_id=ctx.origin_session_id,
-            turn_selection=cls._freeze(ctx.turn_selection),
-        )
-
-    def stamp(self) -> FenceStamp:
-        """This invocation's fencing identity.
-
-        Raises UnfencedInvocation rather than defaulting: an actor with no
-        claimed generation has no belief to fence against, and defaulting would
-        submit an effect against a generation nobody claimed. Generation 0 is
-        REAL (Workspace.lifecycle_generation has server_default 0), so this
-        tests for None, never for falsiness.
-        """
-        if self.lifecycle_generation is None:
-            raise UnfencedInvocation(self.workspace_id)
-        return FenceStamp(
-            workspace_id=self.workspace_id,
-            generation=self.lifecycle_generation,
-            active_turn_job_id=self.active_turn_job_id,
-            origin_job_id=self.origin_job_id,
-        )
-
-    def provenance(self) -> Provenance:
-        """The provenance the propose_* effects copy into durable rows.
-
-        origin_job_id is NOT here: it is on the stamp instead (FenceStamp is
-        built from this same Invocation, from the same self.origin_job_id), so
-        there is exactly one value to disagree with itself.
-        """
-        return Provenance(
-            origin_kind=self.origin_kind,
-            origin_session_id=self.origin_session_id,
-            triggering_turn_id=self.triggering_turn_id,
-            triggering_prompt=self.triggering_prompt,
-            created_by=self.created_by,
-        )
+    return Invocation(
+        workspace_id=ctx.workspace_id,
+        lifecycle_generation=ctx.lifecycle_generation,
+        active_turn_job_id=ctx.active_turn_job_id,
+        origin_kind=ctx.origin_kind,
+        origin_job_id=ctx.origin_job_id,
+        triggering_turn_id=ctx.triggering_turn_id,
+        triggering_prompt=ctx.triggering_prompt,
+        created_by=ctx.created_by,
+        origin_session_id=ctx.origin_session_id,
+        turn_selection=Invocation._freeze(ctx.turn_selection),
+    )
 
 
 def _mcp_ok(data: dict[str, Any]) -> dict[str, Any]:
@@ -322,6 +258,7 @@ async def _safe_tool(
     impl: Callable[..., Awaitable[dict[str, Any]]],
     *args: Any,
     pass_invocation: bool = False,
+    pass_ports: bool = False,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Run an *_impl and wrap its result, catching UNEXPECTED exceptions.
@@ -340,12 +277,25 @@ async def _safe_tool(
     and passed to the impl as the keyword argument ``invocation``. No
     production call site sets pass_invocation=True in F3a; F3d flips it
     per tool as effect sites are converted.
+
+    F3d1: pass_ports=True hands the impl the capability bundle as ``ports``. It sits
+    beside the snapshot deliberately — both are the converted-tool calling
+    convention, and a reader looking for "what does a converted tool receive" should
+    find both in one place. No production call site sets it in F3d1; F3d2 flips it
+    per tool as effect sites are converted.
     """
     # Snapshot BEFORE the deny check: a denied call must not leave a
     # half-built identity anywhere (functionally moot in F3a, but the
     # ordering is the contract).
     if pass_invocation:
-        kwargs["invocation"] = Invocation.snapshot(ctx)
+        kwargs["invocation"] = snapshot_invocation(ctx)
+    if pass_ports:
+        if ctx.ports is None:
+            raise RuntimeError(
+                f"tool {tool_name} asked for ports on a context that has no ports — "
+                "the tool surface was built without build_ports()"
+            )
+        kwargs["ports"] = ctx.ports
     denied = _deny_if_out_of_turn(tool_name, ctx)
     if denied is not None:
         return denied

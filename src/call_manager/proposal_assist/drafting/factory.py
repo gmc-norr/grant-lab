@@ -18,6 +18,7 @@ from call_manager.proposal_assist.drafting.controller import (
 from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
 from call_manager.proposal_assist.drafting.registry import SubprocessRegistry
 from call_manager.proposal_assist.lifecycle import LIFECYCLE
+from call_manager.proposal_assist.port_impl import build_ports
 
 
 def build_workspace_controller(
@@ -96,6 +97,7 @@ def _build_adapter(
                 settings=settings,
                 citation_service=_citation_service,
                 reference_ingest_limiter=reference_ingest_limiter,
+                ports=build_ports(session_factory),
             )
             # SP2a-2: retain the ctx so set_turn_provenance can stamp the SAME
             # object the MCP tool closures captured (one ctx per workspace launch).

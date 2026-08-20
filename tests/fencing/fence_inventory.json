@@ -53,7 +53,7 @@
     "symbol": "_write_citekey_cache",
     "category": "caller_fenced",
     "fenced": false,
-    "slice": "F3d",
+    "slice": "F3d3",
     "fenced_by": "_insert_citation_locked"
   },
   {
@@ -62,7 +62,7 @@
     "symbol": "propose_citation_impl",
     "category": "semantic",
     "fenced": false,
-    "slice": "F3d"
+    "slice": "F3d3"
   },
   {
     "kind": "tool_commit",
@@ -70,7 +70,7 @@
     "symbol": "_propose_artifact_edit_impl",
     "category": "semantic",
     "fenced": false,
-    "slice": "F3d"
+    "slice": "F3d3"
   },
   {
     "kind": "tool_commit",
@@ -78,7 +78,7 @@
     "symbol": "fetch_reference_impl",
     "category": "accounting",
     "fenced": false,
-    "slice": "F3d"
+    "slice": "F3d2"
   },
   {
     "kind": "tool_commit",
@@ -94,7 +94,7 @@
     "symbol": "fetch_reference_impl._refund_fetch_slot",
     "category": "accounting",
     "fenced": false,
-    "slice": "F3d"
+    "slice": "F3d2"
   },
   {
     "kind": "tool_commit",
@@ -102,7 +102,7 @@
     "symbol": "submit_review_impl",
     "category": "semantic",
     "fenced": false,
-    "slice": "F3d"
+    "slice": "F3d2"
   },
   {
     "kind": "tool_commit",
@@ -110,7 +110,7 @@
     "symbol": "submit_scorecard_impl",
     "category": "semantic",
     "fenced": false,
-    "slice": "F3d"
+    "slice": "F3d2"
   },
   {
     "kind": "tool_commit",
@@ -118,7 +118,7 @@
     "symbol": "submit_uncited_claims_impl",
     "category": "semantic",
     "fenced": false,
-    "slice": "F3d"
+    "slice": "F3d2"
   },
   {
     "kind": "tool_context",

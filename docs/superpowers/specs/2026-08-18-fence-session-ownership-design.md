@@ -396,11 +396,11 @@ two *unconditional* inertness guards — `test_nothing_imports_the_fencing_primi
 (`:191`). The moment a claim writes `claimed_at_generation`, the second goes red. So
 F3a must, in the same slice:
 
-- split `SLICE_STATUS` into `F3a…F3f` and reassign row ownership as follows —
+- split `SLICE_STATUS` into `F3a…F3f` with `F3d` cut into `F3d1`, `F3d2`, `F3d3`, and reassign row ownership as follows —
   of the **6** `claim_fn` rows: the 4 tool-originating background claims → **F3a**,
   `queue.py::claim_queued_jobs` → **F4**, `setup.py::claim_next_setup_job` → **F5**; 5 × `tool_context` → **F3a**;
-  7 × `tool_commit` (5 semantic + 2 accounting) → **F3d**;
-  `_write_citekey_cache` → **F3d** (moves with its ancestor);
+  5 × `tool_commit` (submitter and read operations) → **F3d2**: `submit_review_impl`, `submit_scorecard_impl`, `submit_uncited_claims_impl`, `fetch_reference_impl`, `fetch_reference_impl._refund_fetch_slot`;
+  3 × `tool_commit` (citation/proposal operations) → **F3d3**: `propose_citation_impl`, `_propose_artifact_edit_impl`, `_write_citekey_cache`;
   `_do_fetch_and_ingest` → **F3e**;
 - replace both inertness guards with **scoped per-sub-slice obligations** — "nothing
   outside F3a's identities writes the column yet" — rather than "nothing does";
