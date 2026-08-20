@@ -18,6 +18,9 @@ from __future__ import annotations
 import ast
 from typing import NamedTuple
 
+from call_manager.proposal_assist.ports.accounting import Accounting
+from call_manager.proposal_assist.ports.effects import Effects
+
 KIND_TOOL_COMMIT = "tool_commit"
 KIND_CLAIM_FN = "claim_fn"
 KIND_TOOL_CONTEXT = "tool_context"
@@ -25,6 +28,23 @@ KIND_TOOL_CONTEXT = "tool_context"
 _TOOLS_DIR = "/proposal_assist/tools/"
 _PROPOSAL_ASSIST = "/proposal_assist/"
 _CLAIM_PREFIXES = ("claim_next_", "claim_queued_")
+
+#: Every WRITE a converted tool can perform through the ports, read off the
+#: Protocols so the list cannot drift away from them. Queries are excluded on
+#: purpose: this design does not fence reads (spec §8), and a read is not a site.
+PORT_WRITE_METHODS: frozenset[str] = frozenset(Effects.__protocol_attrs__) | frozenset(
+    Accounting.__protocol_attrs__
+)
+
+#: The two bundle attributes a write is reached through.
+_PORT_BUNDLE_ATTRS = frozenset({"effects", "accounting"})
+
+#: The name the bundle arrives under. _safe_tool passes it as the keyword `ports`
+#: (F3d1), so the canonical converted call is exactly `ports.effects.X(...)` or
+#: `ports.accounting.X(...)`. Matching the METHOD NAME alone would record any local
+#: helper called `submit_review`; matching `<anything>.effects.X` would let a test
+#: double mint a row and mark a qualname fenced that never held a capability.
+_PORT_ROOT = "ports"
 
 SCOPED = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
@@ -39,6 +59,23 @@ def call_name(node: ast.Call) -> str | None:
     """The bare callee name of a Call: `f()` -> "f", `a.b.f()` -> "f"."""
     f = node.func
     return f.id if isinstance(f, ast.Name) else getattr(f, "attr", None)
+
+
+def _is_port_write(node: ast.Call) -> bool:
+    """`ports.effects.X(...)` or `ports.accounting.X(...)`, and nothing else.
+
+    All three parts are load-bearing: the method must be a real port write, the
+    bundle attribute must be `effects` or `accounting`, and the ROOT must be the
+    injected `ports` name.
+    """
+    return (
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr in PORT_WRITE_METHODS
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr in _PORT_BUNDLE_ATTRS
+        and isinstance(node.func.value.value, ast.Name)
+        and node.func.value.value.id == _PORT_ROOT
+    )
 
 
 def qualified_defs(tree: ast.AST) -> dict[str, ast.AST]:
@@ -87,6 +124,12 @@ def find_sites(source: str, path: str) -> set[Site]:
                 and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "commit"
             ):
+                sites.add(Site(KIND_TOOL_COMMIT, path, qual))
+
+            # F3d2: the converted form. A tool that has been moved onto the ports
+            # has no .commit() at all, so without this the row vanishes the moment
+            # the site is converted — and merge() rebuilds only from the scan.
+            if _TOOLS_DIR in norm and _is_port_write(node):
                 sites.add(Site(KIND_TOOL_COMMIT, path, qual))
 
             if call_name(node) == "ToolContext":
