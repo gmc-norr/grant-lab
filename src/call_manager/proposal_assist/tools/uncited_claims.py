@@ -9,8 +9,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from call_manager.db.models import UncitedClaimsJob
-from call_manager.proposal_assist.tools.registry import ToolContext
+from call_manager.proposal_assist.ports.effects import SubmitUncitedClaims
+from call_manager.proposal_assist.ports.errors import (
+    BUSY_ERROR_MESSAGE,
+    DELETED_ERROR_MESSAGE,
+    CommitMutexTimeout,
+    EffectRejected,
+    WorkspaceGenerationStale,
+)
 
 
 def _is_int(x: Any) -> bool:
@@ -19,7 +25,7 @@ def _is_int(x: Any) -> bool:
 
 
 async def submit_uncited_claims_impl(
-    ctx: ToolContext, *, claims: list[dict[str, Any]]
+    ctx, *, ports, invocation, claims: list[dict[str, Any]]
 ) -> dict[str, Any]:
     n = ctx.uncited_draft_section_count or 0
     out: list[dict[str, Any]] = []
@@ -37,15 +43,16 @@ async def submit_uncited_claims_impl(
             return {"error": "each claim needs a non-empty reason"}
         out.append({"claim_text": text, "section_index": si, "reason": reason})
 
-    # Guarded write: row-lock the target; require it is THIS workspace's still-running job
-    # (rejects a stale ctx or a job the reaper/cancel already failed). Exactly-once: a second
-    # call must not overwrite the first.
-    with ctx.session_factory() as session:
-        job = session.get(UncitedClaimsJob, ctx.origin_job_id, with_for_update=True)
-        if job is None or job.workspace_id != ctx.workspace_id or job.status != "running":
-            return {"error": "target is not an active uncited-claims run for this workspace"}
-        if job.claims is not None:
-            return {"error": "claims have already been submitted for this run"}
-        job.claims = out
-        session.commit()
+    # The row lock, the ownership guard and the exactly-once rule moved into
+    # port_impl/effects.py::SqlEffects.submit_uncited_claims, with the same strings.
+    try:
+        ports.effects.submit_uncited_claims(
+            invocation.stamp(), SubmitUncitedClaims(claims=out)
+        )
+    except EffectRejected as e:
+        return {"error": str(e)}
+    except WorkspaceGenerationStale:
+        return {"error": DELETED_ERROR_MESSAGE}
+    except CommitMutexTimeout:
+        return {"error": BUSY_ERROR_MESSAGE}
     return {"stored": True, "count": len(out)}

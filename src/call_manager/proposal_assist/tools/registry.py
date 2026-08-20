@@ -932,6 +932,8 @@ def _collect_tools(ctx: ToolContext) -> list:
             ctx,
             submit_uncited_claims_impl,
             ctx,
+            pass_ports=True,
+            pass_invocation=True,
             claims=args.get("claims") or [],
         )
 

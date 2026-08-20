@@ -117,7 +117,7 @@
     "path": "src/call_manager/proposal_assist/tools/uncited_claims.py",
     "symbol": "submit_uncited_claims_impl",
     "category": "semantic",
-    "fenced": false,
+    "fenced": true,
     "slice": "F3d2"
   },
   {

@@ -16,6 +16,7 @@ from tests.proposal_assist.f3b_seeds import (
     bump_generation,
     seed_evaluator_job,
     seed_review_item,
+    seed_uncited_job,
     seed_workspace,
 )
 
@@ -258,3 +259,85 @@ async def test_review_does_not_land_after_the_generation_moves(pg_session_factor
     assert "error" in out
     with pg_session_factory() as s:
         assert s.get(ReviewRunItem, item_id).raw_response_json is None
+
+
+@pytest.mark.asyncio
+async def test_uncited_claims_writes_through_the_port(pg_session_factory):
+    from call_manager.db.models import UncitedClaimsJob
+    from call_manager.proposal_assist.port_impl import build_ports
+    from call_manager.proposal_assist.tools.uncited_claims import (
+        submit_uncited_claims_impl,
+    )
+
+    with pg_session_factory() as s:
+        ws_id = seed_workspace(s, generation=_G)
+        job_id = seed_uncited_job(s, ws_id, generation=_G)
+
+    ctx, invocation = _ctx_and_invocation(
+        ws_id, origin_job_id=job_id, uncited_draft_section_count=2
+    )
+    out = await submit_uncited_claims_impl(
+        ctx,
+        ports=build_ports(pg_session_factory),
+        invocation=invocation,
+        claims=[{"claim_text": "c", "section_index": 0, "reason": "r"}],
+    )
+
+    assert out == {"stored": True, "count": 1}
+    with pg_session_factory() as s:
+        assert s.get(UncitedClaimsJob, job_id).claims is not None
+
+
+@pytest.mark.asyncio
+async def test_uncited_claims_does_not_land_after_the_generation_moves(
+    pg_session_factory,
+):
+    """GC-4 — THE COMPENSATION IS DISABLED. The job stays running and owned; only
+    the generation moves."""
+    from call_manager.db.models import UncitedClaimsJob
+    from call_manager.proposal_assist.port_impl import build_ports
+    from call_manager.proposal_assist.tools.uncited_claims import (
+        submit_uncited_claims_impl,
+    )
+
+    with pg_session_factory() as s:
+        ws_id = seed_workspace(s, generation=_G)
+        job_id = seed_uncited_job(s, ws_id, generation=_G)
+
+    ctx, invocation = _ctx_and_invocation(
+        ws_id, origin_job_id=job_id, uncited_draft_section_count=2
+    )
+    with pg_session_factory() as s:
+        bump_generation(s, ws_id, to=_NEXT)
+        s.commit()
+
+    out = await submit_uncited_claims_impl(
+        ctx,
+        ports=build_ports(pg_session_factory),
+        invocation=invocation,
+        claims=[{"claim_text": "c", "section_index": 0, "reason": "r"}],
+    )
+
+    assert "error" in out
+    with pg_session_factory() as s:
+        assert s.get(UncitedClaimsJob, job_id).claims is None
+
+
+@pytest.mark.asyncio
+async def test_uncited_claims_validation_still_runs_before_any_port_call():
+    """The section-index bound comes from ctx.uncited_draft_section_count, which the
+    converted tool still reads. A bad index must be refused without the port."""
+    from call_manager.proposal_assist.tools.uncited_claims import (
+        submit_uncited_claims_impl,
+    )
+
+    ctx, invocation = _ctx_and_invocation(
+        uuid.uuid4(), origin_job_id=uuid.uuid4(), uncited_draft_section_count=1
+    )
+    out = await submit_uncited_claims_impl(
+        ctx,
+        ports=_ExplodingPorts(),
+        invocation=invocation,
+        claims=[{"claim_text": "c", "section_index": 5, "reason": "r"}],
+    )
+    assert "section_index must be an int in [0,1)" in out["error"]
