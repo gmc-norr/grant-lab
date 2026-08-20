@@ -101,7 +101,7 @@
     "path": "src/call_manager/proposal_assist/tools/review_submit.py",
     "symbol": "submit_review_impl",
     "category": "semantic",
-    "fenced": false,
+    "fenced": true,
     "slice": "F3d2"
   },
   {

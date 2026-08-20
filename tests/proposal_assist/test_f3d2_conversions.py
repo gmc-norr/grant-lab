@@ -15,6 +15,7 @@ from call_manager.proposal_assist.tools.registry import ToolContext, snapshot_in
 from tests.proposal_assist.f3b_seeds import (
     bump_generation,
     seed_evaluator_job,
+    seed_review_item,
     seed_workspace,
 )
 
@@ -182,3 +183,78 @@ async def test_scorecard_validation_still_runs_before_any_port_call():
         summary="ok",
     )
     assert "must cover criterion indexes" in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_review_writes_through_the_port(pg_session_factory):
+    from call_manager.db.models import ReviewRunItem
+    from call_manager.proposal_assist.port_impl import build_ports
+    from call_manager.proposal_assist.tools.review_submit import submit_review_impl
+
+    with pg_session_factory() as s:
+        ws_id = seed_workspace(s, generation=_G)
+        run_id, item_id = seed_review_item(s, ws_id, generation=_G)
+
+    ctx, invocation = _ctx_and_invocation(
+        ws_id, origin_job_id=run_id, review_run_item_id=item_id
+    )
+    out = await submit_review_impl(
+        ctx,
+        ports=build_ports(pg_session_factory),
+        invocation=invocation,
+        markdown="  a body  ",
+    )
+
+    assert out["stored"] is True
+    with pg_session_factory() as s:
+        stored = s.get(ReviewRunItem, item_id).raw_response_json
+    # STRIPPED by the tool, not the port: ports/effects.py:32-36 says the port
+    # stores verbatim and the tool owns the strip-and-reject.
+    assert stored == {"markdown": "a body"}
+
+
+@pytest.mark.asyncio
+async def test_review_still_rejects_an_empty_body_without_touching_the_port():
+    """The strip-and-reject step lives in the tool. A conversion that hands an
+    empty string to the port loses it silently — the port stores verbatim."""
+    from call_manager.proposal_assist.tools.review_submit import submit_review_impl
+
+    ctx, invocation = _ctx_and_invocation(
+        uuid.uuid4(), origin_job_id=uuid.uuid4(), review_run_item_id=uuid.uuid4()
+    )
+    out = await submit_review_impl(
+        ctx, ports=_ExplodingPorts(), invocation=invocation, markdown="   "
+    )
+    assert out["error"] == "markdown must be a non-empty string"
+
+
+@pytest.mark.asyncio
+async def test_review_does_not_land_after_the_generation_moves(pg_session_factory):
+    """GC-4 — THE COMPENSATION IS DISABLED. The item stays running and owned by a
+    running run in this workspace, so every guard the tool used to apply is
+    SATISFIED. Only the generation moves."""
+    from call_manager.db.models import ReviewRunItem
+    from call_manager.proposal_assist.port_impl import build_ports
+    from call_manager.proposal_assist.tools.review_submit import submit_review_impl
+
+    with pg_session_factory() as s:
+        ws_id = seed_workspace(s, generation=_G)
+        run_id, item_id = seed_review_item(s, ws_id, generation=_G)
+
+    ctx, invocation = _ctx_and_invocation(
+        ws_id, origin_job_id=run_id, review_run_item_id=item_id
+    )
+    with pg_session_factory() as s:
+        bump_generation(s, ws_id, to=_NEXT)
+        s.commit()
+
+    out = await submit_review_impl(
+        ctx,
+        ports=build_ports(pg_session_factory),
+        invocation=invocation,
+        markdown="a body",
+    )
+
+    assert "error" in out
+    with pg_session_factory() as s:
+        assert s.get(ReviewRunItem, item_id).raw_response_json is None

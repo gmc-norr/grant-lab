@@ -191,11 +191,6 @@ TOOLS_NOT_YET_CONVERTED: dict[str, frozenset[str]] = {
         "names the resource locator settings",
         "names the resource locator workspaces_dir",
     }),
-    "review_submit.py": frozenset({
-        "from call_manager.db.models import ...",
-        "from call_manager.proposal_assist.tools.registry import ...",
-        "names the resource locator session_factory",
-    }),
     "uncited_claims.py": frozenset({
         "from call_manager.db.models import ...",
         "from call_manager.proposal_assist.tools.registry import ...",

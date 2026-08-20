@@ -893,6 +893,8 @@ def _collect_tools(ctx: ToolContext) -> list:
             ctx,
             submit_review_impl,
             ctx,
+            pass_ports=True,
+            pass_invocation=True,
             markdown=args.get("markdown", ""),
         )
 
