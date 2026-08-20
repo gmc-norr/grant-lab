@@ -68,7 +68,7 @@ SLICE_STATUS = {
     # Spec §7's F3d, cut into three because it is ~26 production files and a
     # 512-line relocation. SLICE_STATUS has no partial state, so a multi-slice
     # conversion needs one key per slice or the first flipped row goes red.
-    "F3d1": "pending",  # the spine: ports/, the bundle, the dispatch — converts nothing
+    "F3d1": "complete",  # the spine: ports/, the bundle, the dispatch — no row of its own
     "F3d2": "pending",  # the submitters and the reads
     "F3d3": "pending",  # the citation core relocation, and the propose_* sites
     "F3e": "pending",   # the ingest pipeline
