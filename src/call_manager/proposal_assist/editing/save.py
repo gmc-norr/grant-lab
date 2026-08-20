@@ -35,10 +35,9 @@ from call_manager.proposal_assist.collab.state import raise_if_collab_severed
 from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex_live
 from call_manager.proposal_assist.editing.sectionizer import is_h2_heading_line, split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.ports.artifacts import CITATIONS_FILENAME
 
 logger = logging.getLogger(__name__)
-
-CITATIONS_FILENAME = "citations.json"
 
 # User-facing message for the turn-in-flight 409 (shared with insert.py and
 # sections.py so all three raise the identical string).
