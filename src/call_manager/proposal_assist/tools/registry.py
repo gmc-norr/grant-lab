@@ -485,7 +485,9 @@ def _collect_tools(ctx: ToolContext) -> list:
         {"type": "object", "properties": {}, "required": []},
     )
     async def get_call_details(args):
-        return await _safe_tool("get_call_details", ctx, get_call_details_impl, ctx)
+        return await _safe_tool(
+            "get_call_details", ctx, get_call_details_impl, ctx, pass_ports=True
+        )
 
     @tool(
         "get_profile",
@@ -495,7 +497,7 @@ def _collect_tools(ctx: ToolContext) -> list:
         {"type": "object", "properties": {}, "required": []},
     )
     async def get_profile(args):
-        return await _safe_tool("get_profile", ctx, get_profile_impl, ctx)
+        return await _safe_tool("get_profile", ctx, get_profile_impl, ctx, pass_ports=True)
 
     from call_manager.proposal_assist.tools.references import (
         fetch_reference_impl,

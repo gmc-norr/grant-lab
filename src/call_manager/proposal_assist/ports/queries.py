@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +38,21 @@ class ReferenceChunkView:
     #: `embedding` is deliberately absent — a Vector(1024) the tool has no use for.
 
 
+@dataclass(frozen=True, slots=True)
+class WorkspaceSnapshotView:
+    """The workspace's frozen copies of the linked call and profile.
+
+    Plain values only. Returning the Workspace row itself would hand the tool
+    object_session(row) — the full Session again, which is the authority this whole
+    design removes (§5).
+    """
+
+    call_body: str | None
+    rubric_criteria: list[dict[str, Any]]
+    rubric_funder_notes: str
+    profile_desc: str | None
+
+
 @runtime_checkable
 class Queries(Protocol):
     def get_reference(
@@ -47,3 +62,14 @@ class Queries(Protocol):
     def get_reference_chunk(
         self, workspace_id: uuid.UUID, reference_id: uuid.UUID, chunk_index: int
     ) -> ReferenceChunkView | None: ...
+
+    def get_workspace_snapshot(
+        self, workspace_id: uuid.UUID
+    ) -> WorkspaceSnapshotView | None:
+        """The linked call + profile snapshots, or None when the workspace is gone.
+
+        Reads are NOT fenced (spec §8). A workspace that was deleted mid-turn reads
+        as None, which the tools answer as {"linked": False} — the same shape they
+        have always returned for an empty snapshot.
+        """
+        ...

@@ -417,3 +417,89 @@ async def test_the_cap_constant_is_the_one_the_tool_reports():
     from call_manager.proposal_assist.ports.accounting import MAX_FETCHES_PER_TURN
 
     assert MAX_FETCHES_PER_TURN == 3
+
+
+@pytest.mark.asyncio
+async def test_the_snapshot_view_carries_no_session(pg_session_factory):
+    """§5: never return an attached instance. object_session(instance) hands the
+    caller the full Session back, which is the leak that killed the forwarding
+    proxy. A frozen DTO of plain values cannot do that."""
+    import dataclasses
+
+    from call_manager.proposal_assist.port_impl import build_ports
+
+    with pg_session_factory() as s:
+        ws_id = seed_workspace(s, generation=_G)
+
+    view = build_ports(pg_session_factory).queries.get_workspace_snapshot(ws_id)
+
+    assert dataclasses.is_dataclass(view)
+    for value in dataclasses.asdict(view).values():
+        assert value is None or isinstance(value, str | list | dict)
+
+
+@pytest.mark.asyncio
+async def test_a_missing_workspace_reads_as_none(pg_session_factory):
+    from call_manager.proposal_assist.port_impl import build_ports
+
+    ports = build_ports(pg_session_factory)
+    assert ports.queries.get_workspace_snapshot(uuid.uuid4()) is None
+
+
+@pytest.mark.asyncio
+async def test_call_details_reads_through_the_port(pg_session_factory):
+    from call_manager.db.models import Workspace
+    from call_manager.proposal_assist.port_impl import build_ports
+    from call_manager.proposal_assist.tools.context import get_call_details_impl
+
+    with pg_session_factory() as s:
+        ws_id = seed_workspace(s, generation=_G)
+        ws = s.get(Workspace, ws_id)
+        ws.call_body_snapshot = "the call body"
+        ws.rubric_criteria = [{"name": "A"}]
+        ws.rubric_funder_notes = "notes"
+        s.commit()
+
+    ctx, _inv = _ctx_and_invocation(ws_id)
+    out = await get_call_details_impl(ctx, ports=build_ports(pg_session_factory))
+
+    assert out == {
+        "linked": True,
+        "call_body": "the call body",
+        "rubric_criteria": [{"name": "A"}],
+        "rubric_funder_notes": "notes",
+    }
+
+
+@pytest.mark.asyncio
+async def test_an_unlinked_workspace_still_answers_linked_false(pg_session_factory):
+    """GC-6. The empty-snapshot contract is the shape the agent depends on, and it
+    is answered for BOTH tools by the same absent-or-empty rule. seed_workspace
+    creates exactly this: a workspace with empty snapshots."""
+    from call_manager.proposal_assist.port_impl import build_ports
+    from call_manager.proposal_assist.tools.context import (
+        get_call_details_impl,
+        get_profile_impl,
+    )
+
+    with pg_session_factory() as s:
+        ws_id = seed_workspace(s, generation=_G)
+
+    ports = build_ports(pg_session_factory)
+    ctx, _inv = _ctx_and_invocation(ws_id)
+
+    assert await get_call_details_impl(ctx, ports=ports) == {"linked": False}
+    assert await get_profile_impl(ctx, ports=ports) == {"linked": False}
+
+
+@pytest.mark.asyncio
+async def test_a_deleted_workspace_reads_as_unlinked_not_an_error(pg_session_factory):
+    """Reads are NOT fenced (spec §8), so there is no stamp and no refusal. The
+    None the port returns for a vanished workspace must surface as the SAME shape
+    an empty snapshot produces — not as an exception the agent has to parse."""
+    from call_manager.proposal_assist.port_impl import build_ports
+    from call_manager.proposal_assist.tools.context import get_call_details_impl
+
+    ctx, _inv = _ctx_and_invocation(uuid.uuid4())  # never existed
+    out = await get_call_details_impl(ctx, ports=build_ports(pg_session_factory))
+    assert out == {"linked": False}

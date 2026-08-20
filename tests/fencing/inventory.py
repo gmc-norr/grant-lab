@@ -154,12 +154,6 @@ TOOLS_NOT_YET_CONVERTED: dict[str, frozenset[str]] = {
         "names the resource locator repo_dir",
         "names the resource locator session_factory",
     }),
-    "context.py": frozenset({
-        "from call_manager.db.models import ...",
-        "from call_manager.proposal_assist.tools.registry import ...",
-        "from sqlalchemy import ...",
-        "names the resource locator session_factory",
-    }),
     "history.py": frozenset({
         "from call_manager.proposal_assist.tools.proposal import ...",
         "from call_manager.proposal_assist.tools.registry import ...",

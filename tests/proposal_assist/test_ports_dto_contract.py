@@ -55,6 +55,7 @@ def _seed(session, ws_id) -> uuid.UUID:
 CASES = {
     "get_reference": lambda q, ws, ref: q.get_reference(ws, ref),
     "get_reference_chunk": lambda q, ws, ref: q.get_reference_chunk(ws, ref, 0),
+    "get_workspace_snapshot": lambda q, ws, ref: q.get_workspace_snapshot(ws),
 }
 
 
