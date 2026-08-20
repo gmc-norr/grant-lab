@@ -63,3 +63,40 @@ def test_no_module_redefines_the_citations_filename_except_the_unconverted_tool(
     assert deletion.CITATIONS_FILENAME is CITATIONS_FILENAME
     assert save.CITATIONS_FILENAME is CITATIONS_FILENAME
     assert citations.CITATIONS_FILENAME == CITATIONS_FILENAME
+
+
+def test_the_busy_error_is_reachable_from_ports():
+    """Every Effects method can raise this — the shared lease has a 10s cap. A
+    converted tool that cannot NAME it has to let it reach _safe_tool's catch-all,
+    which turns "busy, retry" into "internal error"."""
+    from call_manager.proposal_assist.ports.errors import (
+        BUSY_ERROR_MESSAGE,
+        CommitMutexTimeout,
+    )
+
+    assert issubclass(CommitMutexTimeout, RuntimeError)
+    assert BUSY_ERROR_MESSAGE == "workspace is busy — try again in a moment"
+
+
+def test_locking_re_exports_the_identical_error_class():
+    """GC-4, and it is load-bearing here: collab/test_collab_retire_mutex.py asserts
+    membership of this class in a set of clean errors. Two classes that merely look
+    alike would pass every equality test in the tree and fail that one."""
+    from call_manager.proposal_assist.drafting import locking
+    from call_manager.proposal_assist.ports import errors
+
+    assert locking.CommitMutexTimeout is errors.CommitMutexTimeout
+    assert locking.BUSY_ERROR_MESSAGE is errors.BUSY_ERROR_MESSAGE
+    assert locking.DELETED_ERROR_MESSAGE is errors.DELETED_ERROR_MESSAGE
+
+
+def test_an_existing_raise_site_is_still_caught_by_the_ports_class():
+    """The relocation must not fork the taxonomy: something raised through the old
+    import path is catchable through the new one."""
+    from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout as Old
+    from call_manager.proposal_assist.ports.errors import CommitMutexTimeout as New
+
+    try:
+        raise Old("busy")
+    except New as exc:
+        assert str(exc) == "busy"
