@@ -9,6 +9,20 @@ sequence — mechanism 2, which section 3.5 and EFFECT_MECHANISMS place in F3e.
 
 from __future__ import annotations
 
+import uuid
+
+import pytest
+
+from call_manager.proposal_assist.ports.errors import (
+    BUSY_ERROR_MESSAGE,
+    DELETED_ERROR_MESSAGE,
+    CommitMutexTimeout,
+    EffectRejected,
+    WorkspaceGenerationStale,
+)
+from call_manager.proposal_assist.tools.proposal import _propose_artifact_edit_impl
+from tests.proposal_assist.test_f3d2_conversions import _G, _ctx_and_invocation
+
 
 def test_the_citekey_row_belongs_to_the_slice_whose_mechanism_it_needs():
     """The reassignment, stated where a reviewer will look for it.
@@ -35,3 +49,96 @@ def test_f3d3_now_owns_exactly_the_two_propose_sites():
         "propose_citation_impl",
         "_propose_artifact_edit_impl",
     }
+
+
+def test_the_artifact_edit_uses_the_invocation_snapshot_not_the_live_context():
+    """ports/invocation.py:44-51 exists for exactly this call site. ToolContext is
+    MUTABLE and shared — set_turn_provenance restamps it every turn — so a tool that
+    reads ctx.turn_selection when its effect happens can copy a LATER turn's selection
+    into a durable proposed-change row.
+
+    The check is on the RECEIVER, not the attribute name. A first draft of this test
+    walked __code__.co_names, which records `turn_selection` for BOTH `ctx.turn_selection`
+    and `invocation.turn_selection` — so it passed against the unconverted source and
+    proved nothing. Verified: the AST form below returns True/False for the two
+    receivers respectively; the co_names form returns True for both.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from call_manager.proposal_assist.tools import proposal as mod
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(mod._propose_artifact_edit_impl)))
+
+    def reads(receiver: str, attr: str) -> bool:
+        return any(
+            isinstance(n, ast.Attribute)
+            and n.attr == attr
+            and isinstance(n.value, ast.Name)
+            and n.value.id == receiver
+            for n in ast.walk(tree)
+        )
+
+    assert reads("invocation", "turn_selection"), (
+        "reads the selection off the live ToolContext instead of the dispatch snapshot — "
+        "a later turn's selection can be copied into a durable proposed-change row"
+    )
+    assert not reads("ctx", "turn_selection")
+    assert reads("ports", "effects") or "propose_artifact_edit" in ast.dump(tree), (
+        "does not call the effect port"
+    )
+    assert not reads("ctx", "session_factory"), "still opens a session to write"
+
+
+class _RaisingEffects:
+    """An Effects whose propose_artifact_edit raises one chosen port error."""
+
+    def __init__(self, exc):
+        self._exc = exc
+
+    def propose_artifact_edit(self, stamp, cmd):
+        raise self._exc
+
+
+class _Ports:
+    def __init__(self, effects):
+        self.effects = effects
+
+
+# Verified against ports/errors.py:27-36 and :63. WorkspaceGenerationStale requires BOTH
+# keyword arguments — `WorkspaceGenerationStale(wid)` raises TypeError at COLLECTION, so
+# a plan that guesses here does not even produce a red test. CommitMutexTimeout is a
+# plain RuntimeError subclass and takes no arguments.
+_WID = uuid.uuid4()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (WorkspaceGenerationStale(_WID, expected=_G, actual=_G + 1), DELETED_ERROR_MESSAGE),
+        (CommitMutexTimeout(), BUSY_ERROR_MESSAGE),
+        (EffectRejected("this workspace is no longer accepting proposed changes"),
+         "this workspace is no longer accepting proposed changes"),
+    ],
+)
+async def test_the_artifact_edit_answers_every_port_error_as_an_error_dict(exc, expected):
+    """The three arms Step 4 added. ports/effects.py's Protocol docstring says a tool
+    catching only the first two DOWNGRADES a transient busy into "internal error",
+    because _safe_tool turns every unnamed exception into that — so CommitMutexTimeout
+    is the arm most worth pinning, and the one no existing test covered.
+    """
+    ctx, invocation = _ctx_and_invocation(uuid.uuid4())
+    out = await _propose_artifact_edit_impl(
+        ctx,
+        ports=_Ports(_RaisingEffects(exc)),
+        invocation=invocation,
+        target_artifact="draft",
+        head="abc",
+        sections={0: "sha"},
+        section_index=0,
+        new_text="x",
+        not_read_err="unread",
+    )
+    assert out == {"error": expected}

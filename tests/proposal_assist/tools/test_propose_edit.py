@@ -12,12 +12,13 @@ from call_manager.config import Settings
 from call_manager.db.models import ProposedChange
 from call_manager.proposal_assist.editing.save import save_section
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.port_impl import build_ports
 from call_manager.proposal_assist.tools.proposal import (
     PROPOSAL_FILENAME,
     propose_edit_impl,
     read_proposal_impl,
 )
-from call_manager.proposal_assist.tools.registry import ToolContext
+from call_manager.proposal_assist.tools.registry import ToolContext, snapshot_invocation
 from tests.proposal_assist.conftest import make_workspace
 
 
@@ -43,6 +44,9 @@ def _build_ctx(pg_session_factory, tmp_path, content):
         repo_dir=repo,
         session_factory=pg_session_factory,
         settings=Settings(),
+        # make_workspace leaves lifecycle_generation at its server_default 0, so the
+        # actor claims that generation and the port's live_at_generation check passes.
+        lifecycle_generation=0,
     )
     return ctx, wsid, repo
 
@@ -76,7 +80,13 @@ async def test_propose_edit_uses_read_time_base_not_live(
 
     # Agent now proposes — must record the READ-TIME base (so accept goes stale),
     # NOT the live (human-edited) base.
-    result = await propose_edit_impl(ctx, section_index=1, new_text="## Methods\nagent-version.\n")
+    result = await propose_edit_impl(
+        ctx,
+        ports=build_ports(pg_session_factory),
+        invocation=snapshot_invocation(ctx),
+        section_index=1,
+        new_text="## Methods\nagent-version.\n",
+    )
     assert "error" not in result, result
     assert result["status"] == "pending"
 
@@ -94,7 +104,13 @@ async def test_propose_edit_rejects_unread_section(pg_session_factory, _settings
     content = "preamble\n\n## Methods\noriginal.\n"
     ctx, wsid, repo = _build_ctx(pg_session_factory, tmp_path, content)
     # No read_proposal call: agent_view_head is None and agent_view_sections {}.
-    result = await propose_edit_impl(ctx, section_index=1, new_text="## Methods\nx.\n")
+    result = await propose_edit_impl(
+        ctx,
+        ports=build_ports(pg_session_factory),
+        invocation=snapshot_invocation(ctx),
+        section_index=1,
+        new_text="## Methods\nx.\n",
+    )
     assert "error" in result
     assert "read_proposal" in result["error"]
 
@@ -106,7 +122,13 @@ async def test_propose_edit_rejects_section_read_but_not_in_view(
     content = "preamble\n\n## Methods\noriginal.\n"
     ctx, wsid, repo = _build_ctx(pg_session_factory, tmp_path, content)
     await read_proposal_impl(ctx)  # populates indices 0 and 1 only
-    result = await propose_edit_impl(ctx, section_index=5, new_text="## Ghost\nx.\n")
+    result = await propose_edit_impl(
+        ctx,
+        ports=build_ports(pg_session_factory),
+        invocation=snapshot_invocation(ctx),
+        section_index=5,
+        new_text="## Ghost\nx.\n",
+    )
     assert "error" in result
     assert "read_proposal" in result["error"]
 
@@ -124,7 +146,15 @@ async def test_propose_edit_records_selection_provenance(
     ctx.turn_selection = {
         "anchor": "the bit", "from_offset": 5, "to_offset": 12, "section_index": 1
     }
-    result = await propose_edit_impl(ctx, section_index=1, new_text="## Methods\nnew body\n")
+    # Snapshot AFTER stamping the selection: the invocation freezes the live ctx, so
+    # the port folds THIS turn's selection into the durable row.
+    result = await propose_edit_impl(
+        ctx,
+        ports=build_ports(pg_session_factory),
+        invocation=snapshot_invocation(ctx),
+        section_index=1,
+        new_text="## Methods\nnew body\n",
+    )
     assert "error" not in result, result
     pc_id = result["proposed_change_id"]
 
@@ -151,7 +181,13 @@ async def test_propose_edit_plain_turn_omits_selection_keys(
     # Explicitly None — plain chat turn with no text selection.
     ctx.turn_selection = None
 
-    result = await propose_edit_impl(ctx, section_index=1, new_text="## Methods\nnew body\n")
+    result = await propose_edit_impl(
+        ctx,
+        ports=build_ports(pg_session_factory),
+        invocation=snapshot_invocation(ctx),
+        section_index=1,
+        new_text="## Methods\nnew body\n",
+    )
     assert "error" not in result, result
 
     with pg_session_factory() as s:

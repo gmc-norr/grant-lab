@@ -41,6 +41,7 @@ def _make_ctx():
     import uuid
     from pathlib import Path
 
+    from call_manager.proposal_assist.port_impl import build_ports
     from call_manager.proposal_assist.tools.registry import ToolContext
 
     return ToolContext(
@@ -48,6 +49,8 @@ def _make_ctx():
         repo_dir=Path("/tmp/x"),
         session_factory=None,  # type: ignore[arg-type]
         settings=None,  # type: ignore[arg-type]
+        lifecycle_generation=0,  # Workspace.lifecycle_generation has server_default 0
+        ports=build_ports(None),  # bundle holds the (None) factory; no DB touched here
     )
 
 
@@ -279,6 +282,7 @@ async def test_propose_edit_closure_returns_pending_envelope(tmp_path):
     import subprocess
     import uuid as _uuid
 
+    from call_manager.proposal_assist.port_impl import build_ports
     from call_manager.proposal_assist.tools.proposal import (
         PROPOSAL_FILENAME,
     )
@@ -296,12 +300,16 @@ async def test_propose_edit_closure_returns_pending_envelope(tmp_path):
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
 
-    # Error path: no read yet -> error envelope, no raise.
+    # Error path: no read yet -> error envelope, no raise. propose_edit is now a
+    # converted (pass_ports) tool, so the closure needs a real bundle and a
+    # generation or _safe_tool raises before the impl runs.
     ctx = ToolContext(
         workspace_id=_uuid.uuid4(),
         repo_dir=repo,
         session_factory=None,  # type: ignore[arg-type]
         settings=None,  # type: ignore[arg-type]
+        lifecycle_generation=0,  # Workspace.lifecycle_generation has server_default 0
+        ports=build_ports(None),  # error path returns before any port call
     )
     tools = _collect_tools(ctx)
     propose = next(t for t in tools if t.name == "propose_edit")

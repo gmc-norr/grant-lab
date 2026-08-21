@@ -5,8 +5,9 @@ import pytest
 
 from call_manager.config import Settings
 from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
+from call_manager.proposal_assist.port_impl import build_ports
 from call_manager.proposal_assist.tools.proposal import propose_edit_impl, read_proposal_impl
-from call_manager.proposal_assist.tools.registry import ToolContext
+from call_manager.proposal_assist.tools.registry import ToolContext, snapshot_invocation
 
 
 def _ctx(repo_dir, session_factory, **overrides):
@@ -15,6 +16,8 @@ def _ctx(repo_dir, session_factory, **overrides):
         repo_dir=repo_dir,
         session_factory=session_factory,
         settings=Settings(),
+        # make_workspace leaves lifecycle_generation at its server_default 0.
+        lifecycle_generation=overrides.pop("lifecycle_generation", 0),
         **overrides,
     )
 
@@ -46,7 +49,13 @@ async def test_propose_defaults_to_interactive(tmp_path, pg_session_factory, _se
     _init_repo(repo)
     ctx = _ctx(repo, pg_session_factory, workspace_id=ws_id)
     await read_proposal_impl(ctx)
-    await propose_edit_impl(ctx, section_index=1, new_text="## Aims\n\nReworded.\n")
+    await propose_edit_impl(
+        ctx,
+        ports=build_ports(pg_session_factory),
+        invocation=snapshot_invocation(ctx),
+        section_index=1,
+        new_text="## Aims\n\nReworded.\n",
+    )
 
     from call_manager.db.models import ProposedChange
 
@@ -75,7 +84,13 @@ async def test_propose_stamps_coherence_provenance(tmp_path, pg_session_factory,
         origin_job_id=job_id,
     )
     await read_proposal_impl(ctx)
-    await propose_edit_impl(ctx, section_index=1, new_text="## Aims\n\nReworded.\n")
+    await propose_edit_impl(
+        ctx,
+        ports=build_ports(pg_session_factory),
+        invocation=snapshot_invocation(ctx),
+        section_index=1,
+        new_text="## Aims\n\nReworded.\n",
+    )
 
     from call_manager.db.models import ProposedChange
 
