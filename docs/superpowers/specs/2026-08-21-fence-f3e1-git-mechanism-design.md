@@ -1,6 +1,6 @@
 # Fence F3e-1 — the mechanism-2 gate for git effects
 
-**Status:** design, **revision 2** (2026-08-21). Successor to F3d3b (`eb7d4a34`).
+**Status:** design, **revision 3** (2026-08-21). Successor to F3d3b (`eb7d4a34`).
 **Governing architecture:** `2026-08-17-lifecycle-fence-design.md` (why a fence exists).
 **Governing mechanism spec:** `2026-08-18-fence-session-ownership-design.md` (how an
 effect is expressed). This document is a **sub-slice design**: it does not supersede
@@ -24,6 +24,22 @@ why (§9).
 >
 > **The slice is split as a result.** Removing the direct-caller scoping removed what
 > was keeping revision 1 small. See §2.
+>
+> **Revision 3 — six further defects, all verified.** Revision 2's `fenced` predicate was
+> **vacuously true for a sink with no mutex at all**: "every acquisition is
+> `_at_generation` and none is `_live`" is satisfied by zero acquisitions, and
+> `bibliography.build_bibliography` and `pass_runner.run_review_pass` take no mutex —
+> both would have measured `fenced: true` while completely unfenced, contradicting
+> `F3e1a`'s own requirement that all nine rows be `false` (§3.7). Revision 2's §7.3 told
+> maintenance callers to "read G under the mutex and pass it", which **Primitive B cannot
+> do** — `generation` is a required keyword argument consumed before the mutex is taken
+> (§7.3). Revision 2's capture table said "owner load" for routes that use
+> `resolve_access`, which would have **revoked collaborator write access** — a
+> permissions regression inside a fencing slice — and filed the actor-driven
+> `save_version` route under maintenance (§7.1, §7.3). Revision 2 named
+> `store.append_update` as the first effect; the shared `Doc` is mutated one line earlier
+> (§4.1). The outcome matrix named one clean-error tuple; there are **three** (§8). And
+> the sink-completeness claim was broader than its guard (§3.2).
 
 ---
 
@@ -129,10 +145,23 @@ GIT_SINKS = {
 }
 ```
 
-A **sink-completeness guard** asserts that no `subprocess` invocation anywhere in `src/`
-passes an argv beginning `git commit` / `commit` outside a declared sink. A third
-mechanism reddens the build rather than silently escaping the gate — which is the
-failure this finding *was*.
+**Two guards, because one claim was broader than its evidence.** Revision 2 promised that
+a third commit mechanism would redden the build, but a `subprocess`-argv guard cannot see
+a GitPython commit, an `os.system`, or a dynamically assembled wrapper. Rather than narrow
+the claim, the guard is widened to make it true — which is cheap here, because the surface
+is genuinely small:
+
+1. **The argv guard.** No `subprocess` invocation in `src/` passes an argv whose first
+   git-subcommand token is `commit`, outside a declared sink.
+2. **The execution-surface allowlist.** `subprocess` is currently the *only* way this
+   repository runs a process — verified: no `os.system`, no `os.popen`, no
+   `asyncio.create_subprocess_*`, and no git library (`GitPython`, `pygit2`, `dulwich`) in
+   `pyproject.toml` or `uv.lock`. The guard asserts that this remains true. Introducing a
+   new execution surface or a git library is then a **reviewed diff** that must extend the
+   argv guard to cover it.
+
+Together these make the claim honest: every way this repository can invoke git is
+enumerated, and adding a new way stops the build.
 
 **Aliases are resolved, not assumed away.** Revision 1's claim that every git-committing
 function is discovered was false for `from … import write_and_commit_files as
@@ -239,8 +268,21 @@ fixed this once for `tool_commit` by turning `fenced` into a measurement.
 **`F3e1a` extends the measurement to `git_commit`, defined as the same predicate the AST
 gate enforces:**
 
-> a `git_commit` site is `fenced` when every mutex acquisition on its path to a sink is
-> `acquire_commit_mutex_at_generation`, and none is `acquire_commit_mutex_live`.
+> a `git_commit` site is `fenced` when **every executable path from it to a sink passes
+> through at least one `acquire_commit_mutex_at_generation` call, positioned before that
+> path's first effect**, and no path contains an `acquire_commit_mutex_live`.
+
+**The "at least one" clause is load-bearing, and revision 2 omitted it.** "Every
+acquisition is `_at_generation` and none is `_live`" is **vacuously true of a path with no
+acquisitions**. Two sinks are exactly that shape today: `citations/bibliography.py`
+contains no mutex call at all, and `review/pass_runner.py` has none either (its only
+`commit mutex` mention is a comment). Under revision 2's predicate both would have
+measured `fenced: true` — reporting two entirely unfenced git effects as fenced, and
+simultaneously reddening `F3e1a`'s requirement that all nine rows land `false`.
+
+A missing fence and a correct fence must not be the same measurement. The corrected
+predicate is **positive**: something must be there, in the right place, and nothing wrong
+may be.
 
 Deriving the gate and the measurement from **one function** is deliberate. F3d3a found a
 hole where discovery and measurement disagreed about what a raw commit *is* — a
@@ -274,9 +316,17 @@ exists because revision 1 wrote that rule and then scoped against it.
 ### 4.1 What counts as an effect
 
 A DB write, a git commit, a filesystem write, **or a room mutation**.
-`store.append_update` writes a `yjs_updates` row and mutates the shared `Doc`; it is an
-effect by any reading. This matters because it is what the kernel does *between* taking
-the mutex and reaching the sink.
+
+**Revision 2 named the wrong one.** It said `store.append_update` mutates the shared
+`Doc`; it does not — `store.append_update` (`collab/store.py:19-42`) only stages a
+`YjsUpdate` row. **The `Doc` is mutated one step earlier**, by
+`apply_pm_section_to_fragment` (`kernel.py:169-172`) and `apply_pm_json_to_fragment`
+(`kernel.py:338-339`). Those calls are the true first effect on the kernel paths, and they
+are what the lexical gate (§5.1) must recognise as the boundary the mutex has to precede.
+
+Getting this wrong is not cosmetic: a gate anchored on `append_update` would accept an
+implementation that mutated the live room before acquiring the mutex, which is precisely
+the divergence §4.2 exists to prevent.
 
 ### 4.2 Enclosing acquisitions — the defect revision 1 shipped
 
@@ -419,19 +469,40 @@ generation and makes the assertion compare a value against itself. A test drivin
 
 ### 7.1 The chain per entry point
 
-| Entry point | Capture point | Parameter path | Enclosing acquisitions receiving the same G |
+**Capture comes from the access check the route ALREADY performs — never from a
+different one.** Revision 2's table said "route's `require_owner`" across the collab
+paths. That is wrong and it is dangerous: the collab cite branch authorizes with
+`resolve_access` (`workspaces.py:1038`), which grants **any member with write access**,
+while only the *flag-off* branch of the same route uses `require_owner` (`:1098`).
+Proposal acceptance authorizes with `require_member`. Implementing revision 2's table
+literally would have revoked valid collaborator access — a permissions regression
+smuggled into a fencing slice. **No authorization call changes in this slice.**
+
+| Entry point | Access check (UNCHANGED) | Capture | Enclosing acquisitions receiving the same G |
 |---|---|---|---|
-| `POST …/cite` (collab) | route's `require_owner` → `Workspace` | route → `direct_cite_via_kernel` → `apply_citation_to_room` → `checkpoint_artifact` | `apply_citation_to_room` |
-| `POST …/proposed-changes/{id}/accept` (collab, prose) | route's owner load | route → `accept_via_kernel` → `kernel_accept_prose` → `checkpoint_artifact` | `kernel_accept_prose` |
-| same (collab, citation) | route's owner load | route → `accept_via_kernel` → `kernel_accept_citation` → `apply_citation_to_room` → `checkpoint_artifact` | `kernel_accept_citation`, `apply_citation_to_room` |
-| `POST …/spec/init` (collab) | route's owner load | route → `init_spec_via_kernel` → `kernel_init_spec` → `checkpoint_artifact` | `kernel_init_spec` |
-| `POST …/annotations/{id}/insert` (collab) | route's owner load | route → `insert_annotation_via_kernel` → `apply_annotation_insert_to_room` → `checkpoint_artifact` | `apply_annotation_insert_to_room` |
-| `POST …/spec/lock` | route's `require_owner` → `ws` | route → `checkpoint_artifact` | `post_lock_spec` itself |
-| `POST …/spec/unlock` | route's `require_owner` → `ws` | route → `checkpoint_artifact` | `post_unlock_spec` itself |
-| `POST …/sections/{i}` (save) | route's owner load → `Workspace` | route → `save_section` | `save_section` itself |
-| `POST …/cite` (flag-off) | route's owner load → `Workspace` | route → `insert_citation_for_user` | `insert_citation_for_user` itself |
-| accept (flag-off, citation) | route's owner load | route → `accepting.py` → `_insert_citation_locked` | `_insert_citation_locked` itself |
-| checkpoint on evict / handover / `save_version` | see §7.3 | — | `checkpoint_artifact` itself |
+| `POST …/cite` (collab) | `resolve_access` → `can_write` | the `Workspace` that check loaded | `apply_citation_to_room` |
+| `POST …/proposed-changes/{id}/accept` (collab, prose) | `require_member` → `Workspace` | that instance | `kernel_accept_prose` |
+| same (collab, citation) | `require_member` → `Workspace` | that instance | `kernel_accept_citation`, `apply_citation_to_room` |
+| `POST …/spec/init` (collab) | as the route stands | the instance that check loaded | `kernel_init_spec` |
+| `POST …/annotations/{id}/insert` (collab) | as the route stands | the instance that check loaded | `apply_annotation_insert_to_room` |
+| `POST …/spec/lock` | `require_owner` → `ws` (`:645`) | `ws` | `post_lock_spec` itself |
+| `POST …/spec/unlock` | `require_owner` → `ws` (`:734`) | `ws` | `post_unlock_spec` itself |
+| `POST …/sections/{i}` (save) | as the route stands → `Workspace` | that instance | `save_section` itself |
+| `POST …/cite` (flag-off) | `require_owner` → `Workspace` (`:1098`) | that instance | `insert_citation_for_user` itself |
+| accept (flag-off, citation) | `require_member` → `Workspace` | that instance | `_insert_citation_locked` itself |
+| `save_version` | `resolve_access` → `can_write` (`collab_checkpoint.py:38`) | the `Workspace` that check loaded | `checkpoint_artifact` itself |
+| evict hook / handover / tail checkpoint | none — no actor | see §7.3 | `checkpoint_artifact` itself |
+
+**`save_version` is an actor-driven writer, not maintenance.** Revision 2 filed it with
+the evict hook and the handover. It is a user pressing "Save a version", authorized by
+`resolve_access`, and it has a genuine capture point like every other route above.
+
+**`resolve_access` returns `tuple[bool, bool]`, not the `Workspace`** — although it loads
+one internally (`ws_auth.py:105`). The plan surfaces that instance rather than issuing a
+second load: `resolve_access` returns the workspace alongside its two booleans, callers
+that ignore it are unaffected, and **the permission logic is not touched**. The point is
+that the captured generation is provably the one belonging to the object the access check
+approved, not a re-read that could differ.
 
 ### 7.2 The plumbing gap this exposes
 
@@ -465,7 +536,26 @@ Three `checkpoint_artifact` callers are not acting on anyone's behalf: the evict
 periodic tail checkpoint (`collab/checkpoint.py:210`). There is no earlier belief to
 preserve — they are reacting to current state.
 
-These read G **under the mutex** and pass it, making the assertion a deliberate no-op, and
+**Revision 2 prescribed something Primitive B cannot do.** It said these callers "read G
+under the mutex and pass it" — but `acquire_commit_mutex_at_generation` takes `generation`
+as a **required keyword argument**, consumed only after it has already acquired the mutex
+(`fencing.py:115-121`). There is no point at which a caller can read G under a mutex it has
+not yet taken. Implementing revision 2 literally would have required inventing an
+"acquire, then report the current generation" primitive, or exempting these three sites
+from the very gate this slice installs.
+
+**The correction is smaller than either, and it is uniform.** All three callers already
+run the *identical* pre-screen immediately before calling `checkpoint_artifact` —
+`ws = s.get(Workspace, workspace_id)` followed by a `soft_deleted_at` check
+(`permissions.py:53-55`, `handover.py:36-38`, `checkpoint.py:205-207`). **That instance is
+the capture point**, exactly as a route's access check is: pass `ws.lifecycle_generation`
+from the object the caller already holds.
+
+A delete/restore committing between that pre-screen and the mutex then produces a
+`WorkspaceGenerationStale` refusal — and for these three callers that is **correct, not a
+regression**: all three already treat `WorkspaceDeleted` as a benign skip (§8), and a
+workspace that moved generation underneath a maintenance pass is a workspace that pass
+should skip and pick up on its next iteration. The refusal is benign by construction, and
 the plan says so at each site rather than leaving a reader to wonder. What they gain is
 the `WorkspaceDeleted` refusal they already have, plus uniformity: the no-`_live` gate
 needs no exemption for them.
@@ -499,13 +589,22 @@ Left unaddressed, a stale generation becomes a **500**, an unnecessary room evic
 an **error-level maintenance log** — and the room paths would evict for a condition that
 is not an error.
 
+**There are THREE clean-error tuples, not one.** Revision 2 named only
+`_CLEAN_ACCEPT_ERRORS`. Direct citation uses `_CLEAN_CITE_ERRORS` and spec-init /
+annotation-insert use `_CLEAN_INIT_SPEC_ERRORS`, both in `collab_cite.py:34-46`.
+`WorkspaceGenerationStale` must enter **all three**, or those paths will evict the room
+before returning their 404 — the eviction happening first is the part a
+response-code-only test would not notice.
+
 **`F3e1b` ships an explicit per-caller matrix**, and no site converts before its row is
 filled in:
 
 | Caller class | Deleted today | Stale must become |
 |---|---|---|
-| Owner write routes (save, cite, accept, spec lock/unlock) | 404 via the global handler | **404**, same body — registered by extending the `main.py:514` handler to both types |
-| Collab kernel ops | `_CLEAN_ACCEPT_ERRORS` (`kernel_accept.py:43`) → clean error, no room eviction | **clean error, no eviction** — added to that list |
+| Write routes (save, cite, accept, spec lock/unlock, `save_version`) | 404 via the global handler | **404**, same body — by extending the `main.py:514` handler to both types |
+| Collab accept | `_CLEAN_ACCEPT_ERRORS` (`kernel_accept.py:43`) → clean error, no eviction | **clean error, no eviction** — added to that tuple |
+| Collab direct cite | `_CLEAN_CITE_ERRORS` (`collab_cite.py:34`) | **clean error, no eviction** — added to that tuple |
+| Collab spec init / annotation insert | `_CLEAN_INIT_SPEC_ERRORS` (`collab_cite.py:44`) | **clean error, no eviction** — added to that tuple |
 | Maintenance (evict, handover, tail checkpoint) | benign skip, no error log | **benign skip** — added to the same `isinstance` tuples |
 | Agent tool paths (`_insert_citation_locked`) | `DELETED_ERROR_MESSAGE` | `DELETED_ERROR_MESSAGE` — a restored workspace is, from the actor's view, gone |
 
@@ -609,10 +708,13 @@ Beyond §5's gates, proofs and mutations:
 
 1. Nine `git_commit` sites discovered, including `_init_repo` via `_run_git`, and each
    allocated to a named slice. Zero converted; every row `fenced: false`.
-2. A `subprocess` git-commit outside the declared sinks fails the sink-completeness
-   guard — demonstrated.
+2. A `subprocess` git-commit outside the declared sinks fails the argv guard, AND a new
+   process-execution surface (`os.system`, a git library import) fails the
+   execution-surface allowlist — both demonstrated.
 3. An aliased sink import is still discovered — demonstrated by fixture.
 4. A hand-edited `fenced: true` does not survive regeneration — demonstrated.
+4b. **A sink with no mutex on its path measures `false`, not `true`** — demonstrated
+   against `build_bibliography`, the site revision 2's predicate would have passed.
 5. A new git-committing function arrives `UNCLASSIFIED` and the gate refuses it —
    demonstrated.
 6. **No production behaviour changes.** Suite green with no site converted.
@@ -625,6 +727,9 @@ Beyond §5's gates, proofs and mutations:
 9. For each entry point in §7.1, a delete+restore between **capture and effect** leaves
    HEAD unchanged, the worktree clean, file contents byte-identical, and **no
    `yjs_updates` row** — with compensation disabled.
-10. Every §8 mapping asserted by a test; no path yields a 500, a spurious eviction, or an
-    error-level maintenance log.
+10. Every §8 mapping asserted by a test, across **all three** clean-error tuples; no path
+    yields a 500, a spurious eviction, or an error-level maintenance log.
+10b. **Authorization is unchanged.** A collaborator with write access can still cite and
+    accept through the collab paths — asserted, because §7.1's earlier draft would have
+    revoked it.
 11. Pins stay at 5, and the slice's own tests say so.
