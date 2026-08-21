@@ -85,9 +85,7 @@ def test_the_artifact_edit_uses_the_invocation_snapshot_not_the_live_context():
         "a later turn's selection can be copied into a durable proposed-change row"
     )
     assert not reads("ctx", "turn_selection")
-    assert reads("ports", "effects") or "propose_artifact_edit" in ast.dump(tree), (
-        "does not call the effect port"
-    )
+    assert reads("ports", "effects"), "does not call the effect port"
     assert not reads("ctx", "session_factory"), "still opens a session to write"
 
 
