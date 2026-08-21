@@ -400,8 +400,21 @@ F3a must, in the same slice:
   of the **6** `claim_fn` rows: the 4 tool-originating background claims → **F3a**,
   `queue.py::claim_queued_jobs` → **F4**, `setup.py::claim_next_setup_job` → **F5**; 5 × `tool_context` → **F3a**;
   5 × `tool_commit` (submitter and read operations) → **F3d2**: `submit_review_impl`, `submit_scorecard_impl`, `submit_uncited_claims_impl`, `fetch_reference_impl`, `fetch_reference_impl._refund_fetch_slot`;
-  3 × `tool_commit` (citation/proposal operations) → **F3d3**: `propose_citation_impl`, `_propose_artifact_edit_impl`, `_write_citekey_cache`;
-  `_do_fetch_and_ingest` → **F3e**;
+  2 × `tool_commit` (the propose operations, DB-only) → **F3d3**: `propose_citation_impl`, `_propose_artifact_edit_impl`;
+  `_do_fetch_and_ingest` and `_write_citekey_cache` → **F3e**;
+
+  **Revised 2026-08-21 (F3d3b).** Revision 8 put `_write_citekey_cache` in F3d3 with the
+  two propose sites. That allocation is wrong, and F3d3b's revision 0 proved it by
+  building against it: the row's only owner-transaction caller is
+  `_insert_citation_locked`, whose session holds the workspace commit mutex EXCLUSIVELY
+  and has not committed when the cache write runs. A mechanism-1 operation reaches it on
+  a SECOND connection and asks for the shared lease on the same key, so it blocks for
+  `lock_timeout` and then raises — reproduced against a real `pgvector:pg16` container,
+  and warned about in `port_impl/effects.py`'s own module docstring. §3.5 already says an
+  effect spanning DB and git needs an operation owning the entire sequence under the
+  mutex, and §5's mechanism table says the exclusive-mutex mechanism arrives in F3e. So
+  the row belongs with the mechanism that can fence it. F3d3 keeps exactly the two rows
+  that share mechanism 1.
 - replace both inertness guards with **scoped per-sub-slice obligations** — "nothing
   outside F3a's identities writes the column yet" — rather than "nothing does";
 - leave `queue.py::claim_queued_jobs` and `setup.py::claim_next_setup_job` in F4/F5.
@@ -474,7 +487,22 @@ injection retire with the move.
 The attached-instance requirement in `compute_citation_insert` is legitimate — it
 just belongs *inside* the relocated core, never across the tool boundary.
 
-### F3e — the ingest pipeline
+### F3e — the ingest pipeline, and the mechanism-2 effects
+
+F3e is where the **exclusive-mutex mechanism** arrives (§5's `EFFECT_MECHANISMS` note),
+so it owns every effect that spans the DB and either git or the filesystem — not only
+ingest. Two rows sit here:
+
+- `fetch_reference_impl._do_fetch_and_ingest` — the ingest pipeline, described below.
+- `_write_citekey_cache` — reassigned from F3d3 on 2026-08-21; see §7's revision note.
+  Its operation is not a cache-write operation. The fenceable unit is the whole
+  accept-time sequence in `_insert_citation_locked`: mutex, then one git commit of
+  `proposal.md` + `citations.json`, then the rows. §3.5 names this function as its
+  example. Its SAVEPOINT callers (`accepting.py`, `collab/kernel.py` ×2) are inside
+  transactions they commit themselves and are fenced by those callers.
+
+Both share the shape F3e must solve: **bytes land before rows**, so a proof that only
+inspects rows passes while a stale generation has already written to disk.
 
 `references/ingest.py` runs four phases in **deliberately** separate transactions:
 phase 1 commits the `Reference` row on the caller's session (`:389`), then text

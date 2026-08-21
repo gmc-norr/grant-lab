@@ -260,7 +260,21 @@ uv run pytest tests/proposal_assist/test_f3d3b_conversion.py -q > /tmp/f3d3b-1.t
 ```
 Expected: both FAIL — the identity is still keyed `F3d3`.
 
-- [ ] **Step 4: Move the identity**
+- [ ] **Step 4: Move the identity, and reconcile the source of truth**
+
+The governing design assigns all three rows to F3d3 (`docs/superpowers/specs/2026-08-18-fence-session-ownership-design.md:403`)
+and describes F3e as "the ingest pipeline" (`:477`). **Both were amended on 2026-08-21**
+in the same commit as this plan's revision 1: §7 now allocates two rows to F3d3 and two to
+F3e with a revision note, and F3e is retitled "the ingest pipeline, and the mechanism-2
+effects". Read that amendment before doing this step — if the spec on disk does NOT say
+that, the reassignment has no source of truth and you must stop rather than proceed on the
+plan's word alone.
+
+Also fix the now-stale commentary above `F3D_IDENTITIES` in `tests/fencing/inventory.py:310`:
+it opens "The eight identities spec §7's F3d owns". After this move F3d owns seven and
+F3e owns one, and the set still holds eight entries — so the sentence is wrong in a way
+that reads as correct. Restate it as "The eight identities spec §7 pins by
+(slice, kind, symbol) — seven F3d's, one F3e's since F3d3b."
 
 In `tests/fencing/inventory.py`, change the `F3D_IDENTITIES` entry:
 
@@ -281,15 +295,43 @@ it rather than ignoring it:
 #: connection blocks for lock_timeout and then raises. Measured, not predicted.
 ```
 
-- [ ] **Step 5: Regenerate and read the diff**
+- [ ] **Step 5: Edit the JSON row's slice BY HAND, then prove regeneration is a no-op**
+
+**Regeneration will not do this for you.** `merge()` deliberately carries the stored slice
+forward — `tests/fencing/inventory.py:297-300`:
+
+```python
+            "slice": (
+                prev["slice"] if prev is not None
+                else _SLICE_FOR_KIND.get(s.kind, _DEFAULT_SLICE)
+            ),
+```
+
+`slice` is a HUMAN-owned field, like `fenced` was before F3d2 measured it. A first draft
+of this task changed only `F3D_IDENTITIES` and expected regeneration to follow; it does
+not, and the row stays `F3d3` while the ratchet says `F3e` — which
+`test_every_f3d_identity_is_still_in_the_inventory` catches as a missing identity, with a
+message that does not explain why.
+
+So edit the row in `tests/fencing/fence_inventory.json` directly: find the object whose
+`symbol` is `_write_citekey_cache` and change `"slice": "F3d3"` to `"slice": "F3e"`.
+Change nothing else on that row.
+
+Then prove regeneration agrees rather than fights:
 
 ```bash
 uv run python -m tests.fencing.regenerate_inventory
-git diff tests/fencing/fence_inventory.json
+git diff --exit-code tests/fencing/fence_inventory.json && echo "REGENERATION IS A NO-OP — the hand edit is what merge() now carries forward"
 ```
-Expected: **exactly one changed line** — the citekey row's `slice`, `F3d3` -> `F3e`. Its
-`fenced` stays `false`, its `path` stays `citations/core.py`, row count stays **20**.
-`RENAMES` must be `{}`; this slice renames nothing.
+Expected: the echo fires. If regeneration reverts your edit, `merge()` does NOT preserve
+the stored slice the way this step claims — stop, because the whole task rests on it.
+
+Then confirm the committed diff is exactly one line:
+```bash
+git diff --stat tests/fencing/fence_inventory.json
+```
+Expected: 1 insertion, 1 deletion. `fenced` stays `false`, `path` stays
+`citations/core.py`, row count stays **20**, `RENAMES` stays `{}`.
 
 - [ ] **Step 6: Run the tests**
 
@@ -499,7 +541,8 @@ that test is that the set is written down.
 uv run pytest -n 16 --dist loadfile -q > /tmp/f3d3b-2b.txt 2>&1; echo "SUITE_EXIT=$?"; tail -5 /tmp/f3d3b-2b.txt
 uv run pytest tests/fencing -q 2>&1 | tail -3
 ```
-Expected: **3791 passed, 1 skipped** (3790 + this task's 1) and `tests/fencing` **RED on
+Expected: **3794 passed, 1 skipped** (3790 + this task's 4: the invocation-snapshot test
+plus the three-arm error-path parametrisation) and `tests/fencing` **RED on
 `test_the_inventory_matches_the_tree_exactly` only** — the JSON now disagrees with a fresh
 scan, and it stays that way until Task 4 regenerates.
 
@@ -508,22 +551,88 @@ which has not been regenerated. If it fails, the JSON was regenerated early — 
 whom. If anything OUTSIDE `tests/fencing` is red, that is collateral this plan did not
 predict: record it under PLAN DEFECTS with the failing test names.
 
-- [ ] **Step 10: Prove the fence is real**
+- [ ] **Step 10: WRITE the error-path tests — they do not exist**
 
-Temporarily change the `WorkspaceGenerationStale` handler to `raise`. Then run the tests
-that actually exercise the deleted-workspace path — find them rather than guessing, since
-revision 0's `-k` selector matched eleven tests and none of them called this impl:
+Measured: `tests/proposal_assist/tools/test_propose_edit.py`,
+`test_propose_spec_edit.py` and `coherence/test_propose_provenance.py` are the only three
+modules that call these wrappers, and **not one of them contains a stale, deleted, or
+timeout case** (`grep -c 'Stale\|MutexTimeout\|DELETED_ERROR\|BUSY_ERROR'` returns 0 for
+all three). So there is nothing for a mutation to turn red. A first draft of this task
+asked for exactly that mutation; it would have "passed" by changing nothing.
+
+The three `except` arms added in Step 4 are new tool-boundary behaviour and need their own
+tests. Follow the house pattern in `tests/proposal_assist/test_f3d2_conversions.py`:
+`_ExplodingPorts` (`:45`), `_ctx_and_invocation(...)`, `build_ports`, and the
+`f3b_seeds.py` builders. Read that file first and mirror it — do not invent fixtures.
+
+Append to `tests/proposal_assist/test_f3d3b_conversion.py`:
+
+```python
+class _RaisingEffects:
+    """An Effects whose propose_artifact_edit raises one chosen port error."""
+
+    def __init__(self, exc):
+        self._exc = exc
+
+    def propose_artifact_edit(self, stamp, cmd):
+        raise self._exc
+
+
+class _Ports:
+    def __init__(self, effects):
+        self.effects = effects
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (WorkspaceGenerationStale(uuid.uuid4()), DELETED_ERROR_MESSAGE),
+        (CommitMutexTimeout(uuid.uuid4()), BUSY_ERROR_MESSAGE),
+        (EffectRejected("this workspace is no longer accepting proposed changes"),
+         "this workspace is no longer accepting proposed changes"),
+    ],
+)
+async def test_the_artifact_edit_answers_every_port_error_as_an_error_dict(exc, expected):
+    """The three arms Step 4 added. ports/effects.py's Protocol docstring says a tool
+    catching only the first two DOWNGRADES a transient busy into "internal error",
+    because _safe_tool turns every unnamed exception into that — so CommitMutexTimeout
+    is the arm most worth pinning, and the one no existing test covered.
+    """
+    ctx, invocation = _ctx_and_invocation(uuid.uuid4())
+    out = await _propose_artifact_edit_impl(
+        ctx,
+        ports=_Ports(_RaisingEffects(exc)),
+        invocation=invocation,
+        target_artifact="draft",
+        head="abc",
+        sections={0: "sha"},
+        section_index=0,
+        new_text="x",
+        not_read_err="unread",
+    )
+    assert out == {"error": expected}
+```
+
+Check `WorkspaceGenerationStale` and `CommitMutexTimeout`'s real constructor signatures in
+`ports/errors.py` before writing this — the arguments above are a guess and the plan says
+so. Import `_ctx_and_invocation` from the F3d2 module or copy it; do not re-derive it.
+
+- [ ] **Step 11: Prove the port is what refuses, not leftover tool logic**
+
+Now that a stale case exists, the mutation has something to bite. Temporarily change the
+`WorkspaceGenerationStale` arm to `raise`.
 
 ```bash
-grep -rln "propose_edit_impl\|propose_spec_edit_impl" tests/ --include=*.py
+uv run pytest tests/proposal_assist/test_f3d3b_conversion.py -q -k "answers_every_port_error" > /tmp/f3d3b-2m.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d3b-2m.txt
 ```
-Run those files. Expected: the deleted-workspace case raises instead of returning an error
-dict. If nothing changes, no test covers the stale path and the fence is unproven — say so
-under PLAN DEFECTS rather than moving on.
+Expected: FAIL on the `WorkspaceGenerationStale` parametrisation only — the other two
+still return their dicts. A mutation that reddens all three means the arms are not
+independent and you have collapsed them.
 
 Restore from a copy (GC-6).
 
-- [ ] **Step 11: Commit**
+- [ ] **Step 12: Commit**
 
 ```bash
 uv run ruff check . --fix && uv run ruff check .
@@ -596,16 +705,50 @@ def test_the_citation_propose_writes_through_the_port_and_reads_through_a_sessio
     assert "propose_citation_insert(\n            session=" not in src
 
 
-def test_the_tombstone_check_survived_the_conversion():
-    """The check most likely to be lost. ReferenceView.is_tombstoned exists so the tool
-    can tell 'no such reference' from 'tombstoned, cannot be cited' — two different
-    messages to the agent. A conversion that reads only `is None` collapses them."""
-    import inspect
+@pytest.mark.asyncio
+async def test_a_tombstoned_reference_is_refused_and_writes_nothing(pg_session_factory):
+    """The check most likely to be lost, tested by BEHAVIOUR.
 
-    from call_manager.proposal_assist.tools import citations as mod
+    ReferenceView.is_tombstoned exists so the tool can tell 'no such reference' from
+    'tombstoned, cannot be cited' — two different messages to the agent. A conversion
+    that reads only `is None` collapses them, and a source grep for the message would be
+    satisfied by the COMMENT explaining it. This project has shipped a
+    comment-satisfiable test twice; do not make it three.
 
-    src = inspect.getsource(mod.propose_citation_impl)
-    assert "reference is tombstoned and cannot be cited" in src
+    Seed a real tombstoned Reference, call the tool, assert the exact string AND that no
+    ProposedChange row landed.
+    """
+    from call_manager.db.models import ProposedChange
+    from call_manager.proposal_assist.port_impl import build_ports
+    from call_manager.proposal_assist.tools.citations import propose_citation_impl
+
+    # _seed_reference already exists at tests/proposal_assist/tools/test_propose_citation.py:51
+    # and is the house way to build a Reference + its chunks. Import it or copy it — do
+    # NOT reach for f3b_seeds.py, which has no Reference builder (verified: its complete
+    # def list is seed_workspace, bump_generation, seed_evaluator_job, seed_uncited_job,
+    # seed_review_item, seed_running_turn).
+    with pg_session_factory() as sess:
+        ws_id = seed_workspace(sess, generation=_G)
+        sess.commit()
+    ref_id = _seed_reference(pg_session_factory, ws_id, chunks=[(0, "s", "quote text")])
+    with pg_session_factory() as sess:
+        sess.get(Reference, ref_id).tombstoned_at = datetime.now(UTC)
+        sess.commit()
+
+    ctx, invocation = _ctx_and_invocation(ws_id)
+    out = await propose_citation_impl(
+        ctx,
+        ports=build_ports(pg_session_factory),
+        invocation=invocation,
+        reference_id=str(ref_id),
+        anchor="anchor",
+        chunk_index=0,
+        evidence_quote="q",
+    )
+    assert out == {"error": "reference is tombstoned and cannot be cited"}
+
+    with pg_session_factory() as sess:
+        assert sess.query(ProposedChange).filter_by(workspace_id=ws_id).count() == 0
 ```
 
 - [ ] **Step 3: Run them to verify they fail**
@@ -686,20 +829,39 @@ Same edit as Task 2 Step 8, one more pair, and the F3d3 fenced count becomes `==
 uv run pytest -n 16 --dist loadfile -q > /tmp/f3d3b-3b.txt 2>&1; echo "SUITE_EXIT=$?"; tail -5 /tmp/f3d3b-3b.txt
 uv run pytest tests/fencing -q 2>&1 | tail -3
 ```
-Expected: **3793 passed, 1 skipped** (3791 + this task's 2), `tests/fencing` still RED on
+Expected: **3799 passed, 1 skipped** (3794 + this task's 5: the port-write test, the
+behavioural tombstone test, and the three-arm error-path parametrisation),
+`tests/fencing` still RED on
 `test_the_inventory_matches_the_tree_exactly` only.
 
-- [ ] **Step 8: Prove the fence, and prove the read still happens**
+- [ ] **Step 8: Write this tool's error-path tests too**
+
+Same gap as Task 2 Step 10, same reason: `test_propose_citation.py` and
+`test_canonical_consumers.py` contain no stale, deleted or timeout case, so there is
+nothing for a mutation to redden. Add the three-arm parametrisation for
+`propose_citation_impl`, mirroring the one Task 2 added — a `_RaisingEffects` whose
+`propose_citation_insert` raises, and the same three expectations
+(`DELETED_ERROR_MESSAGE`, `BUSY_ERROR_MESSAGE`, the `EffectRejected` string passed
+through).
+
+`propose_citation_impl` reaches the port only after its reads succeed, so this test needs
+a seeded workspace, Reference and ReferenceChunk plus a real `ctx.agent_view_*` snapshot.
+Reuse the setup the existing `test_propose_citation.py` happy-path test already builds —
+read it and lift its arrangement rather than writing a new one.
+
+- [ ] **Step 9: Prove the port is what writes, and the tool still validates**
 
 Two mutations, both restored from a copy afterwards (GC-6):
 
-1. `WorkspaceGenerationStale` handler -> `raise`. Run the two test modules from Step 5.
-   Expected: the deleted-workspace case raises.
+1. `WorkspaceGenerationStale` arm -> `raise`. Expected: FAIL on that parametrisation of
+   the Step 8 test ONLY. If all three redden, the arms are not independent.
 2. Make `ports.effects.propose_citation_insert` a no-op returning a fixed UUID. Expected:
-   the tests that assert a row LANDED go red, the tests that assert an early `{"error": ...}`
-   stay green. That separates "the port does the write" from "the tool still validates".
+   the tests that assert a row LANDED go red, the tests that assert an early
+   `{"error": ...}` stay green. That separates "the port does the write" from "the tool
+   still validates" — and it is the check that would catch a conversion which quietly
+   stopped calling the port at all.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
 uv run ruff check . --fix && uv run ruff check .
@@ -785,7 +947,7 @@ uv run pytest -n 16 --dist loadfile -q > /tmp/f3d3b-4b.txt 2>&1; echo "SUITE_EXI
 uv run ruff check .
 ```
 Expected: `FENCE_EXIT=0` — the first green fencing suite since Task 2 — and the full suite
-green at **3795 passed, 1 skipped** (3793 + 2). Derive that yourself from the tests you
+green at **3801 passed, 1 skipped** (3799 + 2). Derive that yourself from the tests you
 actually added and report your arithmetic beside the run. If they disagree, find which
 term is wrong. Do not adjust either to match the other and do not delete a test to reach
 a number.
@@ -864,16 +1026,35 @@ for p in tool_modules():
         print(f'  {tool_key(p)}: {len(check_file(p))} raw')
 "
 ```
-Expected exactly:
+Expected exactly — every line literal, no placeholders:
 ```
 inventory rows: 20
 pins: 5 ['audit.py', 'citations.py', 'history.py', 'proposal.py', 'references.py']
 F3d3: complete | unfenced F3d3 rows: 0
 still pending: ['F3e', 'F4', 'F5']
-F3e rows: ['_do_fetch_and_ingest'-ish, '_write_citekey_cache']
-  citations.py: <below 15> raw
-  proposal.py: <below 14> raw
+F3e rows: ['_write_citekey_cache', 'fetch_reference_impl._do_fetch_and_ingest']
 ```
+(The F3e symbol is the full qualname `fetch_reference_impl._do_fetch_and_ingest` — a
+nested function is a different identity, which is why F3d2's plan had to learn it the hard
+way. `sorted()` puts the underscore first.)
+
+The two raw counts cannot be predicted here — they depend on exactly which imports the
+conversions removed. Print them and RECORD them; do not treat them as an expectation:
+```bash
+uv run python -c "
+from tests.fencing.import_gate import check_file, tool_key, tool_modules
+for p in tool_modules():
+    if tool_key(p) in ('citations.py','proposal.py'):
+        print(f'  {tool_key(p)}: {len(check_file(p))} raw')
+"
+```
+Both must be **strictly below** their before-counts (citations.py 15, proposal.py 14) and
+both must be **non-zero** — a zero would mean an exemption retired, which GC-3 forbids
+this slice from claiming.
+
+The full suite here is the FINAL total: **3803 passed, 1 skipped** (3801 from Task 4 +
+this task's 2). Revision 1 of this plan stopped at Task 4's number and never stated the
+final one, which is how a plan ends up with two totals that disagree.
 
 - [ ] **Step 3: Commit**
 
@@ -896,6 +1077,31 @@ git commit -m "test(fence): F3d3b converted two sites and claimed nothing more (
 | Provenance parity for the hardcoded `origin_kind` | 3 Step 1 |
 | Slice status flips only once the inventory agrees | 4 |
 | Pins shrink, neither retires | 4 Step 3, 5 |
+
+### Revision 2 (2026-08-21) — five more findings, all confirmed against the tree
+
+An independent read of revision 1 found five defects. Each was reproduced before acting.
+
+1. **P1 — the inventory move could not happen.** Revision 1 changed only
+   `F3D_IDENTITIES` and expected regeneration to follow, but `merge()` deliberately
+   carries the stored slice forward (`inventory.py:297-300`). The JSON row is now edited
+   by hand and regeneration is required to be a NO-OP, which proves the mechanism rather
+   than assuming it.
+2. **P1 — two mutation proofs had nothing to bite.** Measured: none of the five test
+   modules that call these four impls contains a stale, deleted or timeout case. The
+   mutations would have "passed" by changing nothing. Tasks 2 and 3 now WRITE the
+   three-arm error-path tests first, and the mutations reden one arm each.
+3. **P2 — the reassignment contradicted the governing design.** §7 assigned all three
+   rows to F3d3 and §7's F3e was "the ingest pipeline". Arguing *from* the spec's
+   mechanism note while contradicting its allocation is not an argument. The design was
+   amended in the same commit as this revision, and Task 1 Step 4 makes the implementer
+   verify the amendment is on disk before proceeding.
+4. **P2 — the tombstone ratchet was comment-satisfiable**, in a plan whose own
+   self-review rejects that class. Now it seeds a tombstoned Reference, calls the tool,
+   and asserts both the exact string and that no row landed.
+5. **P3 — the "Expected exactly" block was not executable** (a placeholder symbol, two
+   `<below N>` counts) and the final total was never stated. Fixed; the chain is now
+   3788 → 3790 → 3794 → 3799 → 3801 → **3803**.
 
 Four things a reviewer should push on:
 
