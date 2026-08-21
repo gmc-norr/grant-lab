@@ -1278,3 +1278,88 @@ Three things a reviewer should push on, named here rather than discovered later:
    arithmetic, not assume a typo: 4 (Task 1) + 2 (Task 2) + 5 (Task 3) + 1 (Task 5) +
    3 (Task 6) = 15, and 3771 + 15 = 3786. Both are derived, neither is measured — this
    plan has not been executed, and the totals are the first thing a run should falsify.
+
+
+---
+
+## What execution actually found (recorded 2026-08-21, after merge e7cd8f2f)
+
+The plan was read three times before it ran — self-review, a 14-agent survey, and an
+adversarial read that found four P1s. Execution then found ten more. The split below is
+the point of keeping this section: it shows which defect classes reading can reach.
+
+### Reading could not have caught these
+
+**PD-3 (MAJOR).** Step 11 claimed "the fencing suite is AST-only and does not import
+the modules it reads", so it expected `tests/fencing` green at Task 3. It is not
+insulated. `tests/conftest.py:135` holds an autouse teardown fixture that lazily imports
+the app for EVERY test in the repo, so once Task 3 broke the app import chain the
+fencing suite came back **103 passed, 103 teardown ERRORS, 0 FAILED**.
+
+The author had checked whether `tests/fencing/*.py` import `call_manager`. They do not.
+The root conftest was never checked. That is the shape of the miss: the right question,
+asked of the wrong scope.
+
+Worse, the plan's guard said "if `tests/fencing` is red at the Task 3 commit, something
+is wrong with the row relocation — stop." The runner read the actual failures, saw zero
+assertion failures, diagnosed teardown-only, and proceeded. **It was right to override
+the guard.** A blindly obedient run would have stalled on a correct implementation.
+Corrected rule: key the guard on FAILED, never on ERROR.
+
+**PD-1.** The plan's verbatim test bodies do not pass `ruff check` — `SIM300` (yoda
+condition), `E501`, and an `F401` for an import the plan's own test never uses. Tasks 1
+and 2 then ran a bare `ruff check` with no `--fix`. A plan that says "copy this
+verbatim" must run `--fix`, or its own text is the first thing that fails.
+
+### Reading could have caught these, and did not
+
+**PD-2.** The plan asserted "both staying tools read `CITATIONS_FILENAME` (`:126`,
+`:329`)". Actually `:126` is read by `_read_proposal_and_ledger` (moved) and `:847` by
+`_insert_citation_locked` (moved, and omitted from the plan entirely). Only `:329` is a
+staying tool. The prescribed ACTION was right and the stated REASON was backwards — the
+move needs the ports import precisely because two moved functions read it.
+
+**PD-7.** The plan named `src/call_manager/proposal_assist/web/api/annotations.py` in
+three places. That path does not exist; the file is `src/call_manager/web/api/
+annotations.py`. Anyone running the plan's literal import check gets a spurious
+`ModuleNotFoundError`.
+
+**PD-4/5/6/8/9/10.** Cosmetic: a predicted `ModuleNotFoundError` that is really an
+`ImportError`; "~480 lines" that is 563; `ports/artifacts.py:35-38` that is `:39`; two
+line-number drifts; and four sites called `monkeypatch.setattr` of which two are
+actually `unittest.mock.patch.object` (same hazard, same fix, imprecise description).
+
+### What the two post-branch reviews found
+
+Both reviews were the same model through different harnesses. Neither found a defect in
+the moved code. Both found defects in this slice's own safety net.
+
+- **The GC-4 re-export guard did not guard.** It tested ownership
+  (`__module__ != tools.citations`) when the hazard is presence: a re-export shim leaves
+  `__module__` pointing at `citations.core`, so the shim passed. Reproduced by injecting
+  it at runtime; both guards stayed green. Now `DELIBERATELY_IMPORTED_BACK`.
+- **Discovery and measurement disagreed about what a raw commit is.** `find_sites`
+  matched a bare `"commit"` while `find_fenced_tool_commits` used `_RAW_COMMIT_ATTRS`,
+  so a `begin`-only effect owned no row at all. Latent today; F3e's ingest is where it
+  becomes live.
+- **A stale INSTRUCTION, not just stale prose.** `test_fence_coverage.py` told a future
+  mover to flip a row `fenced: true` before relocating it. Since F3d2 `fenced` is a
+  measurement, so that is the exact false claim the measurement exists to prevent.
+
+**The harness difference was disposition, not capability.** The reviewer that mutated
+found the hollow guard; the reviewer that read passed it — and it had a shell, having
+already run a 192-test subset. It also declined to re-run the suite because the package
+had reassured it the suite was green. Both causes were the package's fault and are now
+fixed in `scripts/review_package.py`.
+
+**And the fix repeated the bug.** The first drift test written to pin the two detector
+halves together asserted `"_RAW_COMMIT_ATTRS" in inspect.getsource(find_sites)` — and
+stayed GREEN under the narrowing mutation, because the COMMENT beside the code still
+said the words. A test a comment can satisfy is not a test. Only running the mutation
+caught it.
+
+### Totals
+
+Both derived totals were falsified by real runs and matched exactly: **3783/1** after
+Task 5, **3786/1** after Task 6. No number was adjusted and no test deleted. The merged
+total is **3788/1**, the two extra being the detector tests added by the review fixes.
