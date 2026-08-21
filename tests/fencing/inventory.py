@@ -310,11 +310,12 @@ def merge(
 #: The eight identities spec §7's F3d owns, pinned by (slice, kind, symbol).
 #:
 #: They are written down because the SCAN cannot be trusted to keep them: a
-#: tool_commit is only detected while the code sits under proposal_assist/tools/
-#: (detectors.py), and FencedSiteVanished only guards rows that are already
-#: fenced=True (see the merge above). Relocating an unfenced site therefore drops
-#: its row in silence, and every remaining consistency test would keep passing over
-#: a smaller and smaller set.
+#: tool_commit is only detected inside the EFFECT SCOPE — proposal_assist/tools/
+#: plus the declared RELOCATED_EFFECT_PATHS (detectors.py) — and FencedSiteVanished
+#: only guards rows that are already fenced=True (see the merge above). Moving an
+#: unfenced site to a path outside that scope therefore drops its row in silence,
+#: and every remaining consistency test would keep passing over a smaller and
+#: smaller set.
 #:
 #: Deleting an entry here is not a way to make a test pass. The entry leaves when
 #: the identity is genuinely gone from the design — which for F3d means never; each

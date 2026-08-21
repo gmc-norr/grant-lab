@@ -58,19 +58,38 @@ def test_the_moved_functions_are_defined_there_not_imported_back():
     assert not wrong, f"still owned by another module: {wrong}"
 
 
+#: The ONE moved name `tools/citations.py` deliberately imports back, because the two
+#: staying tools call it. Every other moved name must be UNREACHABLE from the tool
+#: module — not merely "not defined there".
+DELIBERATELY_IMPORTED_BACK = frozenset({"_validate_stance_confidence"})
+
+
 def test_the_tool_module_no_longer_defines_them():
-    """The other half of the same claim, and the one that catches a copy rather
-    than a move. A duplicated function drifts; that is what F3d1's four
-    CITATIONS_FILENAME literals cost."""
+    """The other half of the same claim, catching BOTH a copy and a re-export shim.
+
+    The __module__ check above cannot see a shim. Adding
+    `from ...citations.core import insert_citation_impl` to tools/citations.py leaves
+    that function's __module__ pointing at citations.core, so it still looks correctly
+    owned while tools/ goes on handing it out — and the violation the move exists to
+    remove survives. An adversarial review found this hole by injecting the shim at
+    runtime and watching BOTH guards stay green.
+
+    So the rule is presence, not ownership: a moved name must not be reachable from the
+    tool module at all, except the single one the staying tools genuinely call. That
+    also subsumes the copy case a duplicated `def` would create.
+    """
     from call_manager.proposal_assist.tools import citations as tool_mod
 
-    duplicated = [
-        n
-        for n in MOVED
-        if getattr(getattr(tool_mod, n, None), "__module__", None)
-        == "call_manager.proposal_assist.tools.citations"
-    ]
-    assert not duplicated, f"still defined in tools/: {duplicated}"
+    leaked = sorted(
+        n for n in MOVED if hasattr(tool_mod, n) and n not in DELIBERATELY_IMPORTED_BACK
+    )
+    assert not leaked, (
+        f"still reachable from tools/citations.py: {leaked}\n\n"
+        "Either still defined there (a copy, which drifts) or imported back (a shim, "
+        "which keeps tools/ handing out the code this slice moved out). If a staying "
+        "tool genuinely needs one of these, adding it to DELIBERATELY_IMPORTED_BACK is "
+        "a reviewed design change, not a way to make this pass."
+    )
 
 
 def test_the_signatures_are_unchanged():

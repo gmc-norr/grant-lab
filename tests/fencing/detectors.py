@@ -149,10 +149,16 @@ def find_sites(source: str, path: str) -> set[Site]:
 
         elif isinstance(node, ast.Call):
             qual = ".".join(stack) if stack else "<module>"
+            # _RAW_COMMIT_ATTRS, not a bare "commit": `with session.begin():`
+            # commits on exit with no .commit() node anywhere. F3d2 taught
+            # find_fenced_tool_commits that, but left discovery here blind, so a
+            # begin-only effect owned NO inventory row at all — it was never
+            # discovered, so nothing could notice it going missing. Discovery and
+            # measurement must agree on what a raw commit is or the gap is silent.
             if (
                 _in_effect_scope(norm)
                 and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "commit"
+                and node.func.attr in _RAW_COMMIT_ATTRS
             ):
                 sites.add(Site(KIND_TOOL_COMMIT, path, qual))
 
@@ -180,14 +186,17 @@ def find_sites(source: str, path: str) -> set[Site]:
 
 
 def find_fenced_tool_commits(source: str, path: str) -> set[tuple[str, str]]:
-    """`(path, symbol)` for every qualname under tools/ that writes ONLY through a
-    port.
+    """`(path, symbol)` for every qualname IN EFFECT SCOPE that writes ONLY through
+    a port.
 
     Port call AND no raw commit. A qualname holding both is half-converted, and
     half-converted is not converted — a slice must not be able to report itself
     complete over a site that still commits directly.
 
-    Returns an empty set for a path outside tools/ — same scoping as find_sites.
+    Effect scope is `tools/` plus the declared RELOCATED_EFFECT_PATHS (F3d3a), not
+    `tools/` alone. Returns an empty set outside it — same scoping as find_sites,
+    and the two must stay identical: a site discovered but never measured, or
+    measured but never discovered, is a hole nothing reports.
     """
     norm = path.replace("\\", "/")
     if not _in_effect_scope(norm):

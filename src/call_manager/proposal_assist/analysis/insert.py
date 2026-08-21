@@ -42,7 +42,7 @@ from call_manager.db.models import (
 )
 
 # Intra-package private imports — house precedent: tools/audit.py imports
-# _read_proposal_and_ledger from tools.citations the same way. These are the
+# _read_proposal_and_ledger from citations.core the same way. These are the
 # canonical agent-insert pieces; reusing them keeps ONE citekey resolution and
 # ONE "Family Year" snapshot for both the agent and the user insert paths.
 from call_manager.proposal_assist.citations.core import (

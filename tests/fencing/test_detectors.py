@@ -316,3 +316,56 @@ def test_the_fenced_measurement_uses_the_same_scope():
     assert find_fenced_tool_commits(converted, path) == {
         (path, "_write_citekey_cache")
     }
+
+
+def test_a_begin_block_is_discovered_as_a_tool_commit_site():
+    """Discovery and measurement must agree on what a raw commit IS.
+
+    `with session.begin():` commits on exit with no `.commit()` node anywhere. F3d2
+    taught find_fenced_tool_commits that (_RAW_COMMIT_ATTRS) so a half-conversion
+    written that way could not measure FENCED — but left find_sites matching a bare
+    "commit", so a begin-only effect owned no inventory row at all. Nothing could
+    notice it going missing, because nothing ever knew it was there.
+
+    An adversarial review found the gap. There are zero begin-only effects in scope
+    today; F3e's ingest is where one would first appear.
+    """
+    from tests.fencing.detectors import KIND_TOOL_COMMIT, find_sites
+
+    src = "def ingest(session):\n    with session.begin():\n        session.add(1)\n"
+    path = "src/call_manager/proposal_assist/tools/references.py"
+    assert (KIND_TOOL_COMMIT, "ingest") in {
+        (s.kind, s.symbol) for s in find_sites(src, path)
+    }
+
+
+def test_discovery_and_measurement_share_one_definition_of_a_raw_commit():
+    """The pin that keeps the two halves from drifting apart again.
+
+    Behavioural on purpose. The first draft of this test asserted
+    `"_RAW_COMMIT_ATTRS" in inspect.getsource(find_sites)` — and stayed GREEN when the
+    call was narrowed back to a bare "commit", because the surrounding COMMENT still
+    said the words. A test that a comment can satisfy is not a test. So: drive every
+    spelling in the shared set through find_sites and require each to be discovered.
+    """
+    from tests.fencing.detectors import _RAW_COMMIT_ATTRS, KIND_TOOL_COMMIT, find_sites
+
+    path = "src/call_manager/proposal_assist/tools/references.py"
+    bodies = {
+        "commit": "def w(session):\n    session.commit()\n",
+        "begin": "def w(session):\n    with session.begin():\n        session.add(1)\n",
+    }
+    assert set(bodies) == set(_RAW_COMMIT_ATTRS), (
+        "the shared raw-commit set changed — add a body for the new spelling here, "
+        "or discovery will not be exercised over it"
+    )
+    undiscovered = sorted(
+        attr
+        for attr, body in bodies.items()
+        if (KIND_TOOL_COMMIT, "w") not in {(s.kind, s.symbol) for s in find_sites(body, path)}
+    )
+    assert not undiscovered, (
+        f"find_sites does not discover {undiscovered} — discovery and the fenced "
+        "measurement have drifted, and a site visible to one and not the other is a "
+        "hole that reports nothing"
+    )

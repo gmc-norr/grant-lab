@@ -62,6 +62,13 @@ if TYPE_CHECKING:
 
     from call_manager.proposal_assist.tools.registry import ToolContext
 
+# The ONE observable difference in this otherwise byte-identical move: log records
+# from this code now carry the channel `...citations.core` instead of
+# `...tools.citations`. Deliberate — a re-declared logger, not a moved one, so
+# messages name where the code actually lives. Nothing in this repo configures
+# logging per module name (no dictConfig/fileConfig/addFilter keyed on a channel),
+# so nothing observable changes today; an operator grepping logs for the old channel
+# is the only thing that would notice.
 logger = logging.getLogger(__name__)
 
 # Spec 2026-06-10 §1 — every git mutation serializes on the per-workspace
