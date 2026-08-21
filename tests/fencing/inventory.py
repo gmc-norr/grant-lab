@@ -71,7 +71,7 @@ SLICE_STATUS = {
     # conversion needs one key per slice or the first flipped row goes red.
     "F3d1": "complete",  # the spine: ports/, the bundle, the dispatch — no row of its own
     "F3d2": "complete",  # the submitters and the reads
-    "F3d3": "pending",  # the citation core relocation, and the propose_* sites
+    "F3d3": "complete",  # the citation core relocation, and the propose_* sites
     "F3e": "pending",   # the ingest pipeline
     "F3f": "pending",   # capability holders, then the handle
     "F4": "pending",    # background job families
@@ -142,7 +142,6 @@ TOOLS_NOT_YET_CONVERTED: dict[str, frozenset[str]] = {
         "from call_manager.proposal_assist.collab import ...",
         "from call_manager.proposal_assist.collab.state import ...",
         "from call_manager.proposal_assist.editing.sectionizer import ...",
-        "from call_manager.proposal_assist.proposals.proposing import ...",
         "from call_manager.proposal_assist.tools.proposal import ...",
         "from call_manager.proposal_assist.tools.registry import ...",
         "names the resource locator repo_dir",
@@ -159,7 +158,6 @@ TOOLS_NOT_YET_CONVERTED: dict[str, frozenset[str]] = {
         "from call_manager.proposal_assist.collab import ...",
         "from call_manager.proposal_assist.collab.state import ...",
         "from call_manager.proposal_assist.editing.sectionizer import ...",
-        "from call_manager.proposal_assist.proposals.proposing import ...",
         "from call_manager.proposal_assist.tools.registry import ...",
         "names the resource locator repo_dir",
         "names the resource locator session_factory",

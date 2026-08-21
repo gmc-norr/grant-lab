@@ -160,3 +160,22 @@ def test_the_citation_propose_writes_through_the_port_and_reads_through_a_sessio
     assert "ports.effects.propose_citation_insert" in src, "does not call the effect port"
     assert "session.commit()" not in src, "still commits directly"
     assert "propose_citation_insert(\n            session=" not in src
+
+
+def test_both_f3d3_rows_are_fenced_and_the_slice_says_so():
+    from tests.fencing.inventory import SLICE_STATUS, load_inventory
+
+    rows = {r["symbol"]: r for r in load_inventory() if r["slice"] == "F3d3"}
+    assert set(rows) == {"propose_citation_impl", "_propose_artifact_edit_impl"}
+    assert all(r["fenced"] for r in rows.values())
+    assert SLICE_STATUS["F3d3"] == "complete"
+
+
+def test_the_exemption_list_still_has_five_keys():
+    """This slice SHRINKS two pin sets and retires neither: both modules still name
+    repo_dir and session_factory, which are F3f's."""
+    from tests.fencing.inventory import TOOLS_NOT_YET_CONVERTED
+
+    assert set(TOOLS_NOT_YET_CONVERTED) == {
+        "audit.py", "citations.py", "history.py", "proposal.py", "references.py",
+    }

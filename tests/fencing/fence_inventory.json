@@ -61,7 +61,7 @@
     "path": "src/call_manager/proposal_assist/tools/citations.py",
     "symbol": "propose_citation_impl",
     "category": "semantic",
-    "fenced": false,
+    "fenced": true,
     "slice": "F3d3"
   },
   {
@@ -69,7 +69,7 @@
     "path": "src/call_manager/proposal_assist/tools/proposal.py",
     "symbol": "_propose_artifact_edit_impl",
     "category": "semantic",
-    "fenced": false,
+    "fenced": true,
     "slice": "F3d3"
   },
   {
