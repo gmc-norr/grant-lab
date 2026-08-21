@@ -142,3 +142,21 @@ async def test_the_artifact_edit_answers_every_port_error_as_an_error_dict(exc, 
         not_read_err="unread",
     )
     assert out == {"error": expected}
+
+
+def test_the_citation_propose_writes_through_the_port_and_reads_through_a_session():
+    """GC-2 precisely: the WRITE authority goes, the read stays.
+
+    A session used only for reads holds no commit, and `fenced` is measured as
+    "port call AND no raw commit" — so this tool measures fenced while still reading
+    through a session. Its session_factory and repo_dir namings are already pinned
+    import-gate violations that retire in F3f.
+    """
+    import inspect
+
+    from call_manager.proposal_assist.tools import citations as mod
+
+    src = inspect.getsource(mod.propose_citation_impl)
+    assert "ports.effects.propose_citation_insert" in src, "does not call the effect port"
+    assert "session.commit()" not in src, "still commits directly"
+    assert "propose_citation_insert(\n            session=" not in src

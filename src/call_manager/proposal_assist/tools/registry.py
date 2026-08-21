@@ -763,6 +763,8 @@ def _collect_tools(ctx: ToolContext) -> list:
             ctx,
             propose_citation_impl,
             ctx,
+            pass_ports=True,
+            pass_invocation=True,
             reference_id=args["reference_id"],
             anchor=args["anchor"],
             chunk_index=chunk_index,

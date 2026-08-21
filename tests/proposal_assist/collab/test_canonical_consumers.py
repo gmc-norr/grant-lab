@@ -13,10 +13,11 @@ from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm, 
 from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.port_impl import build_ports
 from call_manager.proposal_assist.proposals.staleness import refresh_staleness
 from call_manager.proposal_assist.tools.citations import propose_citation_impl
 from call_manager.proposal_assist.tools.proposal import _read_artifact_impl, read_proposal_impl
-from call_manager.proposal_assist.tools.registry import ToolContext
+from call_manager.proposal_assist.tools.registry import ToolContext, snapshot_invocation
 from tests.proposal_assist.collab.test_collab_kernel_accept import (
     _git_head,
     _init_repo,
@@ -40,10 +41,14 @@ def _ctx(wid, repo_dir, pg_session_factory, _settings_env):
     # _settings_env is received but not used directly — the parameter exists only
     # to force the Settings-env fixture side-effect (e.g. WORKSPACES_DIR env var)
     # before Settings() is instantiated below.
-    return ToolContext(
+    ctx = ToolContext(
         workspace_id=wid, repo_dir=repo_dir,
         session_factory=pg_session_factory, settings=Settings(),
+        ports=build_ports(pg_session_factory),
     )
+    # Invocation.stamp() raises UnfencedInvocation on None; generation 0 is REAL.
+    ctx.lifecycle_generation = 0
+    return ctx
 
 
 @pytest.mark.anyio
@@ -217,6 +222,8 @@ async def test_citation_anchor_probe_reads_log_canonical_collab_on(
     await read_proposal_impl(ctx)
     result = await propose_citation_impl(
         ctx,
+        ports=ctx.ports,
+        invocation=snapshot_invocation(ctx),
         reference_id=str(rid),
         anchor=ANCHOR,
         chunk_index=0,
@@ -253,6 +260,8 @@ async def test_citation_anchor_probe_reads_raw_disk_flag_off(
     await read_proposal_impl(ctx)
     result = await propose_citation_impl(
         ctx,
+        ports=ctx.ports,
+        invocation=snapshot_invocation(ctx),
         reference_id=str(rid),
         anchor=ANCHOR,
         chunk_index=0,

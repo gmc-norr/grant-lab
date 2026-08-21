@@ -4,18 +4,27 @@ No git commit (unlike insert_citation) — propose writes only a DB row."""
 
 import subprocess
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from call_manager.config import Settings
 from call_manager.db.models import ProposedChange, Reference, ReferenceChunk
+from call_manager.proposal_assist.port_impl import build_ports
+from call_manager.proposal_assist.ports.errors import (
+    BUSY_ERROR_MESSAGE,
+    DELETED_ERROR_MESSAGE,
+    CommitMutexTimeout,
+    EffectRejected,
+    WorkspaceGenerationStale,
+)
 from call_manager.proposal_assist.tools.citations import propose_citation_impl
 from call_manager.proposal_assist.tools.proposal import (
     PROPOSAL_FILENAME,
     read_proposal_impl,
 )
-from call_manager.proposal_assist.tools.registry import ToolContext
+from call_manager.proposal_assist.tools.registry import ToolContext, snapshot_invocation
 from tests.proposal_assist.conftest import make_workspace
 
 EMBED_DIM = 1024
@@ -90,7 +99,10 @@ def _build_ctx(pg_session_factory, tmp_path):
         repo_dir=repo,
         session_factory=pg_session_factory,
         settings=Settings(),
+        ports=build_ports(pg_session_factory),
     )
+    # Invocation.stamp() raises UnfencedInvocation on None; generation 0 is REAL.
+    ctx.lifecycle_generation = 0
     return ctx, wsid, repo
 
 
@@ -105,6 +117,8 @@ async def test_propose_citation_writes_row_and_maps_section(
 
     result = await propose_citation_impl(
         ctx,
+        ports=ctx.ports,
+        invocation=snapshot_invocation(ctx),
         reference_id=str(rid),
         anchor=ANCHOR,
         chunk_index=0,
@@ -159,11 +173,15 @@ async def test_propose_citation_keys_section_skipping_marker_spans(
         repo_dir=repo,
         session_factory=pg_session_factory,
         settings=Settings(),
+        ports=build_ports(pg_session_factory),
     )
+    ctx.lifecycle_generation = 0
     await read_proposal_impl(ctx)
 
     result = await propose_citation_impl(
         ctx,
+        ports=ctx.ports,
+        invocation=snapshot_invocation(ctx),
         reference_id=str(rid),
         anchor="smith2021",
         chunk_index=0,
@@ -192,6 +210,8 @@ async def test_propose_citation_bad_quote_rejected_no_commit(
 
     result = await propose_citation_impl(
         ctx,
+        ports=ctx.ports,
+        invocation=snapshot_invocation(ctx),
         reference_id=str(rid),
         anchor=ANCHOR,
         chunk_index=0,
@@ -214,6 +234,8 @@ async def test_propose_citation_bad_anchor_rejected(pg_session_factory, _setting
     await read_proposal_impl(ctx)
     result = await propose_citation_impl(
         ctx,
+        ports=ctx.ports,
+        invocation=snapshot_invocation(ctx),
         reference_id=str(rid),
         anchor="this anchor is nowhere in the proposal",
         chunk_index=0,
@@ -246,6 +268,8 @@ async def test_propose_citation_anchor_absent_from_read_view_rejected(
 
     result = await propose_citation_impl(
         ctx,
+        ports=ctx.ports,
+        invocation=snapshot_invocation(ctx),
         reference_id=str(rid),
         anchor=ANCHOR,  # ANCHOR lives in the live on-disk proposal
         chunk_index=0,
@@ -260,3 +284,116 @@ async def test_propose_citation_anchor_absent_from_read_view_rejected(
     with pg_session_factory() as s:
         rows = s.scalars(select(ProposedChange).where(ProposedChange.workspace_id == wsid)).all()
         assert rows == [], f"expected no rows, got {len(rows)}"
+
+
+class _RaisingEffects:
+    """An Effects whose propose_citation_insert raises one chosen port error."""
+
+    def __init__(self, exc):
+        self._exc = exc
+
+    def propose_citation_insert(self, stamp, cmd):
+        raise self._exc
+
+
+class _Ports:
+    def __init__(self, effects):
+        self.effects = effects
+
+
+# Verified against ports/errors.py:27-36 and :63. WorkspaceGenerationStale requires BOTH
+# keyword arguments — WorkspaceGenerationStale(wid) raises TypeError at COLLECTION, so a
+# plan that guesses here does not even produce a red test. CommitMutexTimeout is a plain
+# RuntimeError subclass and takes no arguments. EffectRejected's reason is the exact
+# string returned to the agent.
+_WID = uuid.uuid4()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (WorkspaceGenerationStale(_WID, expected=0, actual=1), DELETED_ERROR_MESSAGE),
+        (CommitMutexTimeout(), BUSY_ERROR_MESSAGE),
+        (
+            EffectRejected("this workspace is no longer accepting proposed changes"),
+            "this workspace is no longer accepting proposed changes",
+        ),
+    ],
+)
+async def test_propose_citation_answers_every_port_error_as_an_error_dict(
+    pg_session_factory, _settings_env, tmp_path, exc, expected
+):
+    """The three arms Task 3 adds. ports/effects.py's Protocol docstring says a tool
+    catching only the first two DOWNGRADES a transient busy into "internal error",
+    because _safe_tool turns every unnamed exception into that — so CommitMutexTimeout
+    is the arm most worth pinning, and the one no existing test covered.
+
+    propose_citation_impl reaches the port only AFTER its reads succeed, so this needs
+    the real seeded workspace + Reference + chunk + agent_view snapshot — the
+    happy-path arrangement, with the port swapped for one that raises.
+    """
+    ctx, wsid, repo = _build_ctx(pg_session_factory, tmp_path)
+    rid = _seed_reference(pg_session_factory, wsid, chunks=[(0, "Results", CHUNK_TEXT)])
+    await read_proposal_impl(ctx)
+
+    out = await propose_citation_impl(
+        ctx,
+        ports=_Ports(_RaisingEffects(exc)),
+        invocation=snapshot_invocation(ctx),
+        reference_id=str(rid),
+        anchor=ANCHOR,
+        chunk_index=0,
+        evidence_quote="reduces recurrence by 30%",
+        stance="supports",
+    )
+    assert out == {"error": expected}
+
+
+@pytest.mark.asyncio
+async def test_a_tombstoned_reference_is_refused_and_writes_nothing(
+    pg_session_factory, _settings_env, tmp_path
+):
+    """The check most likely to be lost, tested by BEHAVIOUR.
+
+    ReferenceView.is_tombstoned exists so the tool can tell 'no such reference' from
+    'tombstoned, cannot be cited' — two different messages to the agent. A conversion
+    that reads only `is None` collapses them, and a source grep for the message would be
+    satisfied by the COMMENT explaining it. This project has shipped a
+    comment-satisfiable test twice; do not make it three.
+
+    Seed a real tombstoned Reference, call the tool, assert the exact string AND that no
+    ProposedChange row landed.
+    """
+    # The REAL context FIRST — it creates the workspace and returns its id. _build_ctx
+    # gives a real repo, a live session_factory, Settings() and ports; _ctx_and_invocation
+    # is NOT usable here: its ToolContext has repo_dir=None, session_factory=None and no
+    # read snapshot, so the tool answers "call read_proposal first" and never reaches the
+    # tombstone branch.
+    ctx, ws_id, repo = _build_ctx(pg_session_factory, tmp_path)
+
+    # _seed_reference is the house way to build a Reference plus its chunks. f3b_seeds.py
+    # has NO Reference builder.
+    ref_id = _seed_reference(pg_session_factory, ws_id, chunks=[(0, "s", "quote text")])
+    with pg_session_factory() as sess:
+        sess.get(Reference, ref_id).tombstoned_at = datetime.now(UTC)
+        sess.commit()
+
+    await read_proposal_impl(ctx)          # populates ctx.agent_view_* — required
+    # _build_ctx sets lifecycle_generation=0 (Invocation.stamp() raises UnfencedInvocation
+    # on None; generation 0 is REAL, so it tests for None not falsiness).
+    invocation = snapshot_invocation(ctx)
+
+    out = await propose_citation_impl(
+        ctx,
+        ports=build_ports(pg_session_factory),
+        invocation=invocation,
+        reference_id=str(ref_id),
+        anchor="anchor",
+        chunk_index=0,
+        evidence_quote="q",
+    )
+    assert out == {"error": "reference is tombstoned and cannot be cited"}
+
+    with pg_session_factory() as sess:
+        assert sess.query(ProposedChange).filter_by(workspace_id=ws_id).count() == 0
