@@ -1,6 +1,14 @@
 # Fence F3 — Ports, not Handles
 
-**Status:** agreed 2026-08-18 (revision 8). Mechanism spec for sub-slices F3a–F3f.
+**Status:** agreed 2026-08-18 (revision 8); **amended 2026-08-21 (revision 9)** while
+planning F3d3b. Mechanism spec for sub-slices F3a–F3f.
+
+Revision 9 changes two things, both marked inline with a dated note: §7's row
+allocation moves `_write_citekey_cache` from F3d3 to F3e, and §7's F3e section is
+widened from "the ingest pipeline" to "the ingest pipeline, and the mechanism-2
+effects". The reason is measured, not stylistic — see the note at the allocation.
+Revision 8's claim that `caller_fenced` retires with the F3d move is corrected there
+too; F3d3a made the move and it did not.
 
 **Companion:** `2026-08-17-lifecycle-fence-design.md` is the architecture — why a
 fence exists, what the invariant is, and the F1–F9 slice breakdown. This document
@@ -496,7 +504,8 @@ just belongs *inside* the relocated core, never across the tool boundary.
 
 ### F3e — the ingest pipeline, and the mechanism-2 effects
 
-F3e is where the **exclusive-mutex mechanism** arrives (§5's `EFFECT_MECHANISMS` note),
+F3e is where the **exclusive-mutex mechanism** arrives (§3.5's rule, encoded in
+`EFFECT_MECHANISMS`),
 so it owns every effect that spans the DB and either git or the filesystem — not only
 ingest. Two rows sit here:
 

@@ -533,29 +533,64 @@ registry-level test that drives a converted tool through its closure breaks the 
 you wire it — and a grep for the impl's NAME cannot find them, because they go through
 `_collect_tools`.
 
-Measured: `tests/proposal_assist/test_tools_registry.py:40` defines `_make_ctx()` with no
-`ports`, and **8 call sites use it**. Two drive tools this slice converts:
-`test_propose_edit_closure_returns_pending_envelope` (`:275`) and
-`test_propose_citation_closure_returns_error_envelope_for_bad_ref` (`:336`).
-
-Give `_make_ctx()` a ports bundle. Read how the F3d2 conversions did the same thing —
-they hit this exact wall — and follow it:
+Measured: `tests/proposal_assist/test_tools_registry.py:46` defines `_make_ctx()` with no
+`ports`, and it has **7 call sites**. But that file also builds **8 bare `ToolContext(...)`
+inline**, so fixing the helper is not enough — enumerate both:
 
 ```bash
-git log --oneline -S "_make_ctx" -- tests/proposal_assist/test_tools_registry.py | head -3
-git show <the F3d2 commit> -- tests/proposal_assist/test_tools_registry.py | head -40
+grep -n "_make_ctx()" tests/proposal_assist/test_tools_registry.py
+grep -n "ToolContext(" tests/proposal_assist/test_tools_registry.py
 ```
 
-If `_make_ctx()` already carries ports because F3d2 fixed it, say so and skip this step —
-but check, do not assume. The registry tests are the consumer class this plan's revisions
-have missed twice.
+Two tests drive tools this slice converts, and they get their context DIFFERENTLY:
+
+| test | line | context |
+|---|---|---|
+| `test_propose_citation_closure_returns_error_envelope_for_bad_ref` | `:336` | `_make_ctx()` |
+| `test_propose_edit_closure_returns_pending_envelope` | `:275` | its OWN inline `ToolContext(...)` |
+
+A revision of this plan claimed 8 `_make_ctx` call sites and that both tests used it. Both
+were wrong — the first because `grep -c "_make_ctx("` counts the `def` line. **Count call
+sites with `_make_ctx()`, not `_make_ctx(`.**
+
+Fix BOTH contexts. `ToolContext` takes `ports` and `lifecycle_generation`; give each a
+real bundle and a generation:
+
+```python
+    ctx = ToolContext(
+        workspace_id=wsid,
+        repo_dir=repo,
+        session_factory=pg_session_factory,
+        settings=None,          # type: ignore[arg-type]
+        lifecycle_generation=0, # Workspace.lifecycle_generation has server_default 0
+        ports=build_ports(pg_session_factory),
+    )
+```
+
+`lifecycle_generation` is NOT optional decoration: `Invocation.stamp()` raises
+`UnfencedInvocation` when it is `None` (`ports/invocation.py`), and `_safe_tool` builds the
+invocation before calling the tool. A context with ports but no generation fails at the
+port call instead of at the guard, which is a more confusing failure.
+
+There is no earlier commit to copy from — `git log -S "_make_ctx"` on that file shows no
+F3d2 change to this helper. A revision of this plan told the implementer to `git show <the
+F3d2 commit>`, a literal placeholder for a commit that does not exist.
 
 - [ ] **Step 8: Fix the nine existing wrapper tests**
 
 ```bash
 grep -rn "propose_edit_impl\|propose_spec_edit_impl" tests/ --include=*.py
 ```
-Each call site must now supply `ports=` and `invocation=`. **Change how they CALL; do not
+Each call site must now supply `ports=` and `invocation=`.
+
+**Their contexts have no generation.** `tests/proposal_assist/tools/test_propose_edit.py`
+(and the citation one at `:81`) build a `ToolContext` without `lifecycle_generation`, which
+defaults to `None` — and `Invocation.stamp()` raises `UnfencedInvocation` on `None`, at the
+port call rather than at the fixture. So each converted call site needs THREE things, not
+two: the real context, `ports=build_ports(pg_session_factory)`, and an invocation built
+from a context whose `lifecycle_generation` is set (`0` matches
+`Workspace.lifecycle_generation`'s server default). Set it on the context before
+`snapshot_invocation(ctx)`; do not hand-build an `Invocation`. **Change how they CALL; do not
 change what they ASSERT.** If an assertion has to move for a test to pass, that is a
 behaviour change — stop and record it under PLAN DEFECTS.
 
@@ -603,7 +638,6 @@ class _Ports:
         self.effects = effects
 
 
-@pytest.mark.asyncio
 # Verified against ports/errors.py:27-36 and :63. WorkspaceGenerationStale requires BOTH
 # keyword arguments — `WorkspaceGenerationStale(wid)` raises TypeError at COLLECTION, so
 # a plan that guesses here does not even produce a red test. CommitMutexTimeout is a
@@ -611,6 +645,7 @@ class _Ports:
 _WID = uuid.uuid4()
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("exc", "expected"),
     [
@@ -750,14 +785,15 @@ def test_the_citation_propose_writes_through_the_port_and_reads_through_a_sessio
     assert "ports.effects.propose_citation_insert" in src, "does not call the effect port"
     assert "session.commit()" not in src, "still commits directly"
     assert "propose_citation_insert(\n            session=" not in src
-
+```
 
 - [ ] **Step 3: Run them to verify they fail**
 
 ```bash
 uv run pytest tests/proposal_assist/test_f3d3b_conversion.py -q -k "citation_propose or tombstone" > /tmp/f3d3b-3.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d3b-3.txt
 ```
-Expected: FAIL on `does not call the effect port`.
+Expected: FAIL on `does not call the effect port`. Only ONE test is selected here — the
+tombstone test does not exist yet.
 
 The behavioural tombstone test is NOT written here. It calls the tool with `ports=` and
 `invocation=`, which do not exist until Step 4 — writing it now produces a `TypeError`,
@@ -856,8 +892,11 @@ file and reuse its fixtures; do not write a new arrangement.
 
 Write the behavioural tombstone test here too, on that same arrangement:
 
+```python
 @pytest.mark.asyncio
-async def test_a_tombstoned_reference_is_refused_and_writes_nothing(pg_session_factory):
+async def test_a_tombstoned_reference_is_refused_and_writes_nothing(
+    pg_session_factory, tmp_path
+):
     """The check most likely to be lost, tested by BEHAVIOUR.
 
     ReferenceView.is_tombstoned exists so the tool can tell 'no such reference' from
@@ -873,20 +912,28 @@ async def test_a_tombstoned_reference_is_refused_and_writes_nothing(pg_session_f
     from call_manager.proposal_assist.port_impl import build_ports
     from call_manager.proposal_assist.tools.citations import propose_citation_impl
 
-    # _seed_reference already exists at tests/proposal_assist/tools/test_propose_citation.py:51
-    # and is the house way to build a Reference + its chunks. Import it or copy it — do
-    # NOT reach for f3b_seeds.py, which has no Reference builder (verified: its complete
-    # def list is seed_workspace, bump_generation, seed_evaluator_job, seed_uncited_job,
-    # seed_review_item, seed_running_turn).
-    with pg_session_factory() as sess:
-        ws_id = seed_workspace(sess, generation=_G)
-        sess.commit()
+    # The REAL context FIRST — it creates the workspace and returns its id. _build_ctx is
+    # at test_propose_citation.py:81 and gives a real repo, a live session_factory and
+    # Settings(). _ctx_and_invocation is NOT usable here (see the note above): its
+    # ToolContext has repo_dir=None, session_factory=None and no read snapshot, so the
+    # tool answers "call read_proposal first" and never reaches the tombstone branch.
+    ctx, ws_id, repo = _build_ctx(pg_session_factory, tmp_path)
+
+    # _seed_reference (test_propose_citation.py:51) is the house way to build a Reference
+    # plus its chunks. Do NOT reach for f3b_seeds.py — it has no Reference builder
+    # (verified: seed_workspace, bump_generation, seed_evaluator_job, seed_uncited_job,
+    # seed_review_item, seed_running_turn, and nothing else).
     ref_id = _seed_reference(pg_session_factory, ws_id, chunks=[(0, "s", "quote text")])
     with pg_session_factory() as sess:
         sess.get(Reference, ref_id).tombstoned_at = datetime.now(UTC)
         sess.commit()
 
-    ctx, invocation = _ctx_and_invocation(ws_id)
+    await read_proposal_impl(ctx)          # populates ctx.agent_view_* — required
+    # _build_ctx leaves lifecycle_generation unset, and Invocation.stamp() raises
+    # UnfencedInvocation on None (generation 0 is REAL, so it tests for None not falsiness).
+    ctx.lifecycle_generation = 0
+    invocation = snapshot_invocation(ctx)
+
     out = await propose_citation_impl(
         ctx,
         ports=build_ports(pg_session_factory),
@@ -902,8 +949,10 @@ async def test_a_tombstoned_reference_is_refused_and_writes_nothing(pg_session_f
         assert sess.query(ProposedChange).filter_by(workspace_id=ws_id).count() == 0
 ```
 
-Its `_seed_reference` returns the reference id; set `tombstoned_at` in a second session and
-commit before calling the tool.
+`_build_ctx`, `_seed_reference`, `read_proposal_impl`, `snapshot_invocation` and
+`build_ports` all have to be imported into the new test module; `Reference`, `datetime`
+and `UTC` too. Check each import resolves before running — `ruff check` catches the unused
+ones but not the missing ones.
 
 - [ ] **Step 8: Run everything**
 
