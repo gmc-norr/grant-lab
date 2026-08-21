@@ -27,6 +27,7 @@ from call_manager.proposal_assist.citations.audit import (
     validate_citations_deterministic,
 )
 from call_manager.proposal_assist.citations.claims import claim_sentence_around
+from call_manager.proposal_assist.citations.core import insert_citation_impl
 from call_manager.proposal_assist.citations.ledger import (
     append_evidence,
     build_evidence_row,
@@ -34,10 +35,7 @@ from call_manager.proposal_assist.citations.ledger import (
     load_ledger,
 )
 from call_manager.proposal_assist.citations.markers import build_marker, find_markers
-from call_manager.proposal_assist.tools.citations import (
-    CITATIONS_FILENAME,
-    insert_citation_impl,
-)
+from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
 from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 from call_manager.proposal_assist.tools.registry import ToolContext
 from tests.proposal_assist.conftest import make_user, make_workspace

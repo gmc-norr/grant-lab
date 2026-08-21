@@ -237,14 +237,22 @@ def test_the_four_tool_originating_claims_are_f3a():
 
 
 def test_every_f3d_identity_is_still_in_the_inventory():
-    """ANTI-VACUITY. The scan only records a tool_commit while the code is under
-    tools/ (detectors.py:83-90), and FencedSiteVanished only fires for rows already
-    fenced=True — so relocating an UNFENCED site deletes its row silently, and a
-    slice can reach `complete` over an empty set.
+    """ANTI-VACUITY. The scan only records a tool_commit inside the effect scope —
+    tools/ plus the declared RELOCATED_EFFECT_PATHS — and FencedSiteVanished only
+    fires for rows already fenced=True, so moving an UNFENCED site to a path outside
+    that scope deletes its row silently, and a slice can reach `complete` over an
+    empty set.
 
     This is the ratchet that makes that impossible. If a row here has vanished, the
-    fix is not to edit this set: flip the row `fenced: true` BEFORE moving its code,
-    which is what makes FencedSiteVanished fire and preserves the row.
+    fix is not to edit this set. Since F3d3a it is: declare the destination in
+    RELOCATED_EFFECT_PATHS and carry the row across with a one-shot RENAMES entry, in
+    the SAME commit as the code.
+
+    Do NOT flip the row `fenced: true` to make it survive the move. That was the
+    pre-F3d3a workaround and it is now a lie the inventory cannot detect — `fenced`
+    became a MEASUREMENT in F3d2 (port call AND no raw commit), so asserting it by
+    hand over a site that still commits directly is exactly the false claim the
+    measurement exists to prevent.
     """
     present = {(r["slice"], r["kind"], r["symbol"]) for r in load_inventory()}
     missing = sorted(F3D_IDENTITIES - present)

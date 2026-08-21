@@ -30,6 +30,10 @@ from call_manager.proposal_assist.analysis.insert import (
     derive_annotation_cite,
 )
 from call_manager.proposal_assist.artifacts import SPEC_SKELETON
+from call_manager.proposal_assist.citations.core import (
+    _write_citekey_cache,
+    compute_citation_insert,
+)
 from call_manager.proposal_assist.citations.human_cite import (
     CiteInvalid,
     CiteRefNotFound,
@@ -55,11 +59,7 @@ from call_manager.proposal_assist.editing.save import SectionStructureError, Spe
 from call_manager.proposal_assist.editing.sectionizer import is_h2_heading_line, split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.proposals.accepting import _load_scoped
-from call_manager.proposal_assist.tools.citations import (
-    CITATIONS_FILENAME,
-    _write_citekey_cache,
-    compute_citation_insert,
-)
+from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
 
 logger = logging.getLogger(__name__)
 

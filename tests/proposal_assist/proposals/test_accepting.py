@@ -555,7 +555,7 @@ def test_citation_accept_citekey_cache_integrity_error_is_savepointed(pg_session
     #     guaranteeing the flush will hit the partial unique index.
     import unittest.mock
 
-    from call_manager.proposal_assist.tools import citations as citations_mod
+    from call_manager.proposal_assist.citations import core as citations_mod
 
     with pg_session_factory() as s:
         ws, repo = _setup(s, tmp_path)
@@ -622,8 +622,8 @@ def test_citation_accept_git_commit_error_is_retryable_not_stale(pg_session_fact
     # the row "pending" so the caller can retry.
     import unittest.mock
 
+    from call_manager.proposal_assist.citations import core as citations_mod
     from call_manager.proposal_assist.citations.gitio import GitCommitError
-    from call_manager.proposal_assist.tools import citations as citations_mod
 
     with pg_session_factory() as s:
         ws, repo = _setup(s, tmp_path)
@@ -649,7 +649,7 @@ def test_citation_accept_git_commit_error_is_retryable_not_stale(pg_session_fact
         s.commit()
         pc_id = pc.id
 
-        # Patch write_and_commit_files (as imported in citations.py) to raise
+        # Patch write_and_commit_files (as imported in citations.core) to raise
         # GitCommitError — simulates a transient git/FS failure.
         with unittest.mock.patch.object(
             citations_mod, "write_and_commit_files", side_effect=GitCommitError("boom")

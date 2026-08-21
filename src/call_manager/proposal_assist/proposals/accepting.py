@@ -13,6 +13,10 @@ from sqlalchemy.orm import Session
 
 from call_manager.db.models import ProposedChange, User, Workspace
 from call_manager.proposal_assist.artifacts import Artifact
+from call_manager.proposal_assist.citations.core import (
+    _GIT_COMMIT_FAILED_ERROR,
+    _insert_citation_locked,
+)
 from call_manager.proposal_assist.citations.gitio import GitCommitError
 from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE
 from call_manager.proposal_assist.editing.save import (
@@ -20,10 +24,6 @@ from call_manager.proposal_assist.editing.save import (
     save_section,
 )
 from call_manager.proposal_assist.paths import workspace_repo_dir
-from call_manager.proposal_assist.tools.citations import (
-    _GIT_COMMIT_FAILED_ERROR,
-    _insert_citation_locked,
-)
 from call_manager.proposal_assist.tools.registry import ToolContext
 
 

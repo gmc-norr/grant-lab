@@ -16,8 +16,8 @@ import pytest
 from call_manager.config import Settings
 from call_manager.db.models import Reference, ReferenceChunk
 from call_manager.proposal_assist.citations import CitationLLMResult
+from call_manager.proposal_assist.citations.core import insert_citation_impl
 from call_manager.proposal_assist.tools.audit import validate_citations_impl
-from call_manager.proposal_assist.tools.citations import insert_citation_impl
 from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 from call_manager.proposal_assist.tools.registry import ToolContext, _collect_tools
 from tests.proposal_assist.conftest import make_workspace

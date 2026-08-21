@@ -253,3 +253,119 @@ def test_a_lookalike_receiver_is_not_a_site():
         "    fake.effects.submit_scorecard(stamp, cmd)\n"
     )
     assert find_sites(src, path) == set()
+
+
+def test_a_declared_relocated_effect_still_owns_a_site():
+    """The whole reason Task 1 exists. F3d3a moves the citation core out of tools/,
+    and find_sites scoped tool_commit detection to tools/ alone — so the move would
+    delete the row, and RENAMES cannot carry it because merge() validates the target
+    against what the scan found."""
+    import pathlib
+
+    from tests.fencing.detectors import KIND_TOOL_COMMIT, find_sites
+
+    src = (
+        pathlib.Path(__file__).parent / "fixtures" / "relocated_effect.py"
+    ).read_text(encoding="utf-8")
+    path = "src/call_manager/proposal_assist/citations/core.py"
+    assert (KIND_TOOL_COMMIT, "_write_citekey_cache") in {
+        (s.kind, s.symbol) for s in find_sites(src, path)
+    }
+
+
+def test_an_ordinary_domain_commit_is_not_a_site():
+    """The widening is a DECLARED list, not a directory sweep. The domain layer
+    commits constantly; recording all of it would mint dozens of UNCLASSIFIED rows
+    and the gate would stop being read."""
+    import pathlib
+
+    from tests.fencing.detectors import find_sites
+
+    src = (
+        pathlib.Path(__file__).parent / "fixtures" / "unrelated_domain_commit.py"
+    ).read_text(encoding="utf-8")
+    assert find_sites(src, "src/call_manager/proposal_assist/editing/save.py") == set()
+
+
+def test_the_relocated_scope_is_declared_and_currently_holds_the_citation_core():
+    """The set is source, not inference. A path enters it when a slice moves an
+    effect out of tools/, and the slice that moves it is the one that adds it."""
+    from tests.fencing.detectors import RELOCATED_EFFECT_PATHS
+
+    assert frozenset(
+        {"src/call_manager/proposal_assist/citations/core.py"}
+    ) == RELOCATED_EFFECT_PATHS
+
+
+def test_the_fenced_measurement_uses_the_same_scope():
+    """find_sites and find_fenced_tool_commits must agree on what is in scope. If
+    only one widened, a relocated effect would own a row whose fenced flag could
+    never be measured — permanently false, and silently so."""
+    import pathlib
+
+    from tests.fencing.detectors import find_fenced_tool_commits
+
+    src = (
+        pathlib.Path(__file__).parent / "fixtures" / "relocated_effect.py"
+    ).read_text(encoding="utf-8")
+    path = "src/call_manager/proposal_assist/citations/core.py"
+    # It commits directly, so it is NOT fenced — but the function must have looked,
+    # which an out-of-scope path would not have done.
+    assert find_fenced_tool_commits(src, path) == set()
+    converted = src.replace("session.commit()", "ports.effects.submit_review(a, b)")
+    assert find_fenced_tool_commits(converted, path) == {
+        (path, "_write_citekey_cache")
+    }
+
+
+def test_a_begin_block_is_discovered_as_a_tool_commit_site():
+    """Discovery and measurement must agree on what a raw commit IS.
+
+    `with session.begin():` commits on exit with no `.commit()` node anywhere. F3d2
+    taught find_fenced_tool_commits that (_RAW_COMMIT_ATTRS) so a half-conversion
+    written that way could not measure FENCED — but left find_sites matching a bare
+    "commit", so a begin-only effect owned no inventory row at all. Nothing could
+    notice it going missing, because nothing ever knew it was there.
+
+    An adversarial review found the gap. There are zero begin-only effects in scope
+    today; F3e's ingest is where one would first appear.
+    """
+    from tests.fencing.detectors import KIND_TOOL_COMMIT, find_sites
+
+    src = "def ingest(session):\n    with session.begin():\n        session.add(1)\n"
+    path = "src/call_manager/proposal_assist/tools/references.py"
+    assert (KIND_TOOL_COMMIT, "ingest") in {
+        (s.kind, s.symbol) for s in find_sites(src, path)
+    }
+
+
+def test_discovery_and_measurement_share_one_definition_of_a_raw_commit():
+    """The pin that keeps the two halves from drifting apart again.
+
+    Behavioural on purpose. The first draft of this test asserted
+    `"_RAW_COMMIT_ATTRS" in inspect.getsource(find_sites)` — and stayed GREEN when the
+    call was narrowed back to a bare "commit", because the surrounding COMMENT still
+    said the words. A test that a comment can satisfy is not a test. So: drive every
+    spelling in the shared set through find_sites and require each to be discovered.
+    """
+    from tests.fencing.detectors import _RAW_COMMIT_ATTRS, KIND_TOOL_COMMIT, find_sites
+
+    path = "src/call_manager/proposal_assist/tools/references.py"
+    bodies = {
+        "commit": "def w(session):\n    session.commit()\n",
+        "begin": "def w(session):\n    with session.begin():\n        session.add(1)\n",
+    }
+    assert set(bodies) == set(_RAW_COMMIT_ATTRS), (
+        "the shared raw-commit set changed — add a body for the new spelling here, "
+        "or discovery will not be exercised over it"
+    )
+    undiscovered = sorted(
+        attr
+        for attr, body in bodies.items()
+        if (KIND_TOOL_COMMIT, "w") not in {(s.kind, s.symbol) for s in find_sites(body, path)}
+    )
+    assert not undiscovered, (
+        f"find_sites does not discover {undiscovered} — discovery and the fenced "
+        "measurement have drifted, and a site visible to one and not the other is a "
+        "hole that reports nothing"
+    )

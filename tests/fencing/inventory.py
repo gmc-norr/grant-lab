@@ -41,7 +41,7 @@ CATEGORIES = frozenset().union(*CATEGORIES_BY_KIND.values())
 #: site cannot take an exemption by declaring one — it takes a diff here, which
 #: is the point.
 NON_SEMANTIC_PINS = {
-    ("tool_commit", "src/call_manager/proposal_assist/tools/citations.py",
+    ("tool_commit", "src/call_manager/proposal_assist/citations/core.py",
      "_write_citekey_cache"): "caller_fenced",
     ("tool_commit", "src/call_manager/proposal_assist/tools/references.py",
      "fetch_reference_impl"): "accounting",
@@ -127,30 +127,24 @@ TOOLS_NOT_YET_CONVERTED: dict[str, frozenset[str]] = {
         "from call_manager.proposal_assist.citations.audit import ...",
         "from call_manager.proposal_assist.citations.bibliography import ...",
         "from call_manager.proposal_assist.citations.claims import ...",
+        "from call_manager.proposal_assist.citations.core import ...",
         "from call_manager.proposal_assist.citations.markers import ...",
-        "from call_manager.proposal_assist.tools.citations import ...",
         "from call_manager.proposal_assist.tools.registry import ...",
         "names the resource locator repo_dir",
         "names the resource locator session_factory",
     }),
     "citations.py": frozenset({
         "from call_manager.db.models import ...",
-        "from call_manager.proposal_assist.citations import ...",
-        "from call_manager.proposal_assist.citations.audit import ...",
-        "from call_manager.proposal_assist.citations.gitio import ...",
+        "from call_manager.proposal_assist.citations.core import ...",
         "from call_manager.proposal_assist.citations.ledger import ...",
         "from call_manager.proposal_assist.citations.markers import ...",
         "from call_manager.proposal_assist.citations.quotes import ...",
         "from call_manager.proposal_assist.collab import ...",
         "from call_manager.proposal_assist.collab.state import ...",
-        "from call_manager.proposal_assist.drafting.locking import ...",
         "from call_manager.proposal_assist.editing.sectionizer import ...",
         "from call_manager.proposal_assist.proposals.proposing import ...",
-        "from call_manager.proposal_assist.references.csl import ...",
         "from call_manager.proposal_assist.tools.proposal import ...",
         "from call_manager.proposal_assist.tools.registry import ...",
-        "from sqlalchemy import ...",
-        "from sqlalchemy.orm import ...",
         "names the resource locator repo_dir",
         "names the resource locator session_factory",
     }),
@@ -316,11 +310,12 @@ def merge(
 #: The eight identities spec §7's F3d owns, pinned by (slice, kind, symbol).
 #:
 #: They are written down because the SCAN cannot be trusted to keep them: a
-#: tool_commit is only detected while the code sits under proposal_assist/tools/
-#: (detectors.py), and FencedSiteVanished only guards rows that are already
-#: fenced=True (see the merge above). Relocating an unfenced site therefore drops
-#: its row in silence, and every remaining consistency test would keep passing over
-#: a smaller and smaller set.
+#: tool_commit is only detected inside the EFFECT SCOPE — proposal_assist/tools/
+#: plus the declared RELOCATED_EFFECT_PATHS (detectors.py) — and FencedSiteVanished
+#: only guards rows that are already fenced=True (see the merge above). Moving an
+#: unfenced site to a path outside that scope therefore drops its row in silence,
+#: and every remaining consistency test would keep passing over a smaller and
+#: smaller set.
 #:
 #: Deleting an entry here is not a way to make a test pass. The entry leaves when
 #: the identity is genuinely gone from the design — which for F3d means never; each

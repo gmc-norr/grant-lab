@@ -29,6 +29,26 @@ _TOOLS_DIR = "/proposal_assist/tools/"
 _PROPOSAL_ASSIST = "/proposal_assist/"
 _CLAIM_PREFIXES = ("claim_next_", "claim_queued_")
 
+#: Modules OUTSIDE tools/ that hold effects relocated out of it.
+#:
+#: An effect does not stop being a tool effect because its code moved — "the audit
+#: unit is the EFFECT, not the mutex site". Without this, relocating a site deletes
+#: its inventory row (merge() rebuilds only from the scan) and RENAMES cannot carry
+#: it, because merge() validates every rename target against found_ids.
+#:
+#: DECLARED, never inferred. Widening to all of proposal_assist/ would record every
+#: domain-layer commit as an UNCLASSIFIED site and the gate would stop being read.
+#: A path enters this set in the SAME slice that moves an effect into it.
+RELOCATED_EFFECT_PATHS: frozenset[str] = frozenset({
+    "src/call_manager/proposal_assist/citations/core.py",  # F3d3a
+})
+
+
+def _in_effect_scope(norm: str) -> bool:
+    """Is this path one where a tool effect may live? tools/, or a declared
+    relocation target."""
+    return _TOOLS_DIR in norm or norm in RELOCATED_EFFECT_PATHS
+
 #: Every WRITE a converted tool can perform through the ports, read off the
 #: Protocols so the list cannot drift away from them. Queries are excluded on
 #: purpose: this design does not fence reads (spec §8), and a read is not a site.
@@ -129,17 +149,23 @@ def find_sites(source: str, path: str) -> set[Site]:
 
         elif isinstance(node, ast.Call):
             qual = ".".join(stack) if stack else "<module>"
+            # _RAW_COMMIT_ATTRS, not a bare "commit": `with session.begin():`
+            # commits on exit with no .commit() node anywhere. F3d2 taught
+            # find_fenced_tool_commits that, but left discovery here blind, so a
+            # begin-only effect owned NO inventory row at all — it was never
+            # discovered, so nothing could notice it going missing. Discovery and
+            # measurement must agree on what a raw commit is or the gap is silent.
             if (
-                _TOOLS_DIR in norm
+                _in_effect_scope(norm)
                 and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "commit"
+                and node.func.attr in _RAW_COMMIT_ATTRS
             ):
                 sites.add(Site(KIND_TOOL_COMMIT, path, qual))
 
             # F3d2: the converted form. A tool that has been moved onto the ports
             # has no .commit() at all, so without this the row vanishes the moment
             # the site is converted — and merge() rebuilds only from the scan.
-            if _TOOLS_DIR in norm and _is_port_write(node):
+            if _in_effect_scope(norm) and _is_port_write(node):
                 sites.add(Site(KIND_TOOL_COMMIT, path, qual))
 
             if call_name(node) == "ToolContext":
@@ -160,17 +186,20 @@ def find_sites(source: str, path: str) -> set[Site]:
 
 
 def find_fenced_tool_commits(source: str, path: str) -> set[tuple[str, str]]:
-    """`(path, symbol)` for every qualname under tools/ that writes ONLY through a
-    port.
+    """`(path, symbol)` for every qualname IN EFFECT SCOPE that writes ONLY through
+    a port.
 
     Port call AND no raw commit. A qualname holding both is half-converted, and
     half-converted is not converted — a slice must not be able to report itself
     complete over a site that still commits directly.
 
-    Returns an empty set for a path outside tools/ — same scoping as find_sites.
+    Effect scope is `tools/` plus the declared RELOCATED_EFFECT_PATHS (F3d3a), not
+    `tools/` alone. Returns an empty set outside it — same scoping as find_sites,
+    and the two must stay identical: a site discovered but never measured, or
+    measured but never discovered, is a hole nothing reports.
     """
     norm = path.replace("\\", "/")
-    if _TOOLS_DIR not in norm:
+    if not _in_effect_scope(norm):
         return set()
 
     tree = ast.parse(source)
