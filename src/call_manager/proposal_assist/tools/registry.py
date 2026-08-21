@@ -373,6 +373,8 @@ def _collect_tools(ctx: ToolContext) -> list:
             ctx,
             propose_edit_impl,
             ctx,
+            pass_ports=True,
+            pass_invocation=True,
             section_index=section_index,
             new_text=args["new_text"],
         )
@@ -413,6 +415,8 @@ def _collect_tools(ctx: ToolContext) -> list:
             ctx,
             propose_spec_edit_impl,
             ctx,
+            pass_ports=True,
+            pass_invocation=True,
             section_index=section_index,
             new_text=args["new_text"],
         )
@@ -759,6 +763,8 @@ def _collect_tools(ctx: ToolContext) -> list:
             ctx,
             propose_citation_impl,
             ctx,
+            pass_ports=True,
+            pass_invocation=True,
             reference_id=args["reference_id"],
             anchor=args["anchor"],
             chunk_index=chunk_index,

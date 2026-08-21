@@ -23,6 +23,14 @@ from call_manager.proposal_assist.citations.gitio import GitCommitError, current
 from call_manager.proposal_assist.collab import canonical
 from call_manager.proposal_assist.collab.state import is_collab_enabled
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.ports.effects import ProposeArtifactEdit
+from call_manager.proposal_assist.ports.errors import (
+    BUSY_ERROR_MESSAGE,
+    DELETED_ERROR_MESSAGE,
+    CommitMutexTimeout,
+    EffectRejected,
+    WorkspaceGenerationStale,
+)
 from call_manager.proposal_assist.tools.registry import ToolContext
 
 logger = logging.getLogger(__name__)
@@ -132,6 +140,8 @@ async def read_spec_impl(ctx: ToolContext) -> dict[str, Any]:
 async def _propose_artifact_edit_impl(
     ctx: ToolContext,
     *,
+    ports,
+    invocation,
     target_artifact: str,
     head: str | None,
     sections: dict[int, str],
@@ -147,53 +157,47 @@ async def _propose_artifact_edit_impl(
 
     Returns {"proposed_change_id", "status": "pending"} or {"error": ...}.
     """
-    # Lazy import avoids the proposing<->proposal module cycle.
-    from call_manager.proposal_assist.proposals.proposing import propose_prose_edit
-
     if head is None:
         return {"error": not_read_err}
     base_section_sha = sections.get(section_index)
     if base_section_sha is None:
         return {"error": not_read_err}
 
-    with ctx.session_factory() as session:
-        pc = propose_prose_edit(
-            session=session,
-            workspace_id=ctx.workspace_id,
-            section_index=section_index,
-            new_text=new_text,
-            base_commit_sha=head,
-            base_section_sha=base_section_sha,
-            target_artifact=target_artifact,
-            origin_kind=ctx.origin_kind,
-            origin_job_id=ctx.origin_job_id,
-            origin_session_id=ctx.origin_session_id,
-            triggering_turn_id=ctx.triggering_turn_id,
-            triggering_prompt=ctx.triggering_prompt,
-            created_by=ctx.created_by,
+    try:
+        pc_id = ports.effects.propose_artifact_edit(
+            invocation.stamp(),
+            ProposeArtifactEdit(
+                target_artifact=target_artifact,
+                section_index=section_index,
+                new_text=new_text,
+                base_commit_sha=head,
+                base_section_sha=base_section_sha,
+                provenance=invocation.provenance(),
+                selection=invocation.turn_selection,
+            ),
         )
-        if target_artifact == "draft" and ctx.turn_selection:
-            sel = ctx.turn_selection
-            pc.payload = {
-                **pc.payload,
-                "selection_anchor": sel.get("anchor"),
-                "selection_from": sel.get("from_offset"),
-                "selection_to": sel.get("to_offset"),
-            }
-        pc_id = str(pc.id)
-        session.commit()
-    return {"proposed_change_id": pc_id, "status": "pending"}
+    except EffectRejected as e:
+        return {"error": str(e)}
+    except WorkspaceGenerationStale:
+        return {"error": DELETED_ERROR_MESSAGE}
+    except CommitMutexTimeout:
+        return {"error": BUSY_ERROR_MESSAGE}
+    return {"proposed_change_id": str(pc_id), "status": "pending"}
 
 
 async def propose_edit_impl(
     ctx: ToolContext,
     *,
+    ports,
+    invocation,
     section_index: int,
     new_text: str,
 ) -> dict[str, Any]:
     """Propose a pending prose_edit on proposal.md from the agent's draft view."""
     return await _propose_artifact_edit_impl(
         ctx,
+        ports=ports,
+        invocation=invocation,
         target_artifact="draft",
         head=ctx.agent_view_head,
         sections=ctx.agent_view_sections,
@@ -206,12 +210,16 @@ async def propose_edit_impl(
 async def propose_spec_edit_impl(
     ctx: ToolContext,
     *,
+    ports,
+    invocation,
     section_index: int,
     new_text: str,
 ) -> dict[str, Any]:
     """Propose a pending prose_edit on proposal-spec.md from the agent's spec view."""
     return await _propose_artifact_edit_impl(
         ctx,
+        ports=ports,
+        invocation=invocation,
         target_artifact="spec",
         head=ctx.agent_view_spec_head,
         sections=ctx.agent_view_spec_sections,

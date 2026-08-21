@@ -71,7 +71,7 @@ SLICE_STATUS = {
     # conversion needs one key per slice or the first flipped row goes red.
     "F3d1": "complete",  # the spine: ports/, the bundle, the dispatch — no row of its own
     "F3d2": "complete",  # the submitters and the reads
-    "F3d3": "pending",  # the citation core relocation, and the propose_* sites
+    "F3d3": "complete",  # the citation core relocation, and the propose_* sites
     "F3e": "pending",   # the ingest pipeline
     "F3f": "pending",   # capability holders, then the handle
     "F4": "pending",    # background job families
@@ -142,7 +142,6 @@ TOOLS_NOT_YET_CONVERTED: dict[str, frozenset[str]] = {
         "from call_manager.proposal_assist.collab import ...",
         "from call_manager.proposal_assist.collab.state import ...",
         "from call_manager.proposal_assist.editing.sectionizer import ...",
-        "from call_manager.proposal_assist.proposals.proposing import ...",
         "from call_manager.proposal_assist.tools.proposal import ...",
         "from call_manager.proposal_assist.tools.registry import ...",
         "names the resource locator repo_dir",
@@ -159,7 +158,6 @@ TOOLS_NOT_YET_CONVERTED: dict[str, frozenset[str]] = {
         "from call_manager.proposal_assist.collab import ...",
         "from call_manager.proposal_assist.collab.state import ...",
         "from call_manager.proposal_assist.editing.sectionizer import ...",
-        "from call_manager.proposal_assist.proposals.proposing import ...",
         "from call_manager.proposal_assist.tools.registry import ...",
         "names the resource locator repo_dir",
         "names the resource locator session_factory",
@@ -307,7 +305,8 @@ def merge(
     return rows
 
 
-#: The eight identities spec §7's F3d owns, pinned by (slice, kind, symbol).
+#: The eight identities spec §7 pins by (slice, kind, symbol) — seven F3d's, one
+#: F3e's since F3d3b.
 #:
 #: They are written down because the SCAN cannot be trusted to keep them: a
 #: tool_commit is only detected inside the EFFECT SCOPE — proposal_assist/tools/
@@ -320,6 +319,12 @@ def merge(
 #: Deleting an entry here is not a way to make a test pass. The entry leaves when
 #: the identity is genuinely gone from the design — which for F3d means never; each
 #: of these is converted, not abolished.
+#:
+#: `_write_citekey_cache` moved F3d3 -> F3e in F3d3b. Not to make a gate pass: its only
+#: owner-transaction caller holds the commit mutex EXCLUSIVELY, so the operation that
+#: fences it must own the whole git-then-rows sequence under that mutex — mechanism 2,
+#: which ports/effects.py says arrives in F3e. A mechanism-1 operation on a second
+#: connection blocks for lock_timeout and then raises. Measured, not predicted.
 F3D_IDENTITIES: frozenset[tuple[str, str, str]] = frozenset({
     ("F3d2", "tool_commit", "submit_review_impl"),
     ("F3d2", "tool_commit", "submit_scorecard_impl"),
@@ -328,5 +333,5 @@ F3D_IDENTITIES: frozenset[tuple[str, str, str]] = frozenset({
     ("F3d2", "tool_commit", "fetch_reference_impl._refund_fetch_slot"),
     ("F3d3", "tool_commit", "propose_citation_impl"),
     ("F3d3", "tool_commit", "_propose_artifact_edit_impl"),
-    ("F3d3", "tool_commit", "_write_citekey_cache"),
+    ("F3e", "tool_commit", "_write_citekey_cache"),
 })

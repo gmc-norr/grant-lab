@@ -43,7 +43,14 @@ from call_manager.proposal_assist.citations.quotes import (
 from call_manager.proposal_assist.collab import canonical
 from call_manager.proposal_assist.collab.state import is_collab_enabled
 from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.proposals.proposing import propose_citation_insert
+from call_manager.proposal_assist.ports.effects import ProposeCitationInsert
+from call_manager.proposal_assist.ports.errors import (
+    BUSY_ERROR_MESSAGE,
+    DELETED_ERROR_MESSAGE,
+    CommitMutexTimeout,
+    EffectRejected,
+    WorkspaceGenerationStale,
+)
 from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 
 if TYPE_CHECKING:
@@ -129,6 +136,8 @@ async def list_citations_impl(ctx: ToolContext, *, limit: int = 100) -> dict[str
 async def propose_citation_impl(
     ctx: ToolContext,
     *,
+    ports,
+    invocation,
     reference_id: str,
     anchor: str,
     chunk_index: int,
@@ -259,24 +268,31 @@ async def propose_citation_impl(
             # (it never read that far). Treat as unread — mirror prose's contract.
             return {"error": "you haven't read the proposal yet — call read_proposal first"}
 
-        pc = propose_citation_insert(
-            session=session,
-            workspace_id=ctx.workspace_id,
-            section_index=section_index,
-            base_commit_sha=base_commit_sha,
-            base_section_sha=base_section_sha,
-            reference_id=str(ref_uuid),
-            anchor=anchor,
-            chunk_index=chunk_index,
-            evidence_quote=evidence_quote,
-            stance=stance,
-            confidence=confidence,
-            origin_kind="interactive_turn",
-            origin_session_id=ctx.origin_session_id,
-            triggering_turn_id=ctx.triggering_turn_id,
-            triggering_prompt=ctx.triggering_prompt,
-            created_by=ctx.created_by,
+    # The effect runs OUTSIDE the read session's `with` block: the port opens its
+    # OWN session and takes the shared lease, so the read session must be closed
+    # before it runs (the two-connection inversion port_impl/effects.py's module
+    # docstring warns against). reference_id is a uuid.UUID on ProposeCitationInsert,
+    # not a str — pass ref_uuid, not str(ref_uuid).
+    try:
+        pc_id = ports.effects.propose_citation_insert(
+            invocation.stamp(),
+            ProposeCitationInsert(
+                section_index=section_index,
+                base_commit_sha=base_commit_sha,
+                base_section_sha=base_section_sha,
+                reference_id=ref_uuid,
+                anchor=anchor,
+                chunk_index=chunk_index,
+                evidence_quote=evidence_quote,
+                stance=stance,
+                confidence=confidence,
+                provenance=invocation.provenance(),
+            ),
         )
-        pc_id = str(pc.id)
-        session.commit()
-    return {"proposed_change_id": pc_id, "status": "pending"}
+    except EffectRejected as e:
+        return {"error": str(e)}
+    except WorkspaceGenerationStale:
+        return {"error": DELETED_ERROR_MESSAGE}
+    except CommitMutexTimeout:
+        return {"error": BUSY_ERROR_MESSAGE}
+    return {"proposed_change_id": str(pc_id), "status": "pending"}

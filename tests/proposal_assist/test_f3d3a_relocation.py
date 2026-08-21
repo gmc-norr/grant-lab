@@ -164,9 +164,11 @@ def test_the_monkeypatch_targets_are_the_module_that_actually_reads_them():
 
 
 def test_no_tool_module_gained_a_port_call():
-    """GC-1. This slice converts nothing. If a tool started calling a port, the
-    move turned into a conversion somewhere along the way and the review property
-    this slice was split to preserve is gone."""
+    """GC-1. The written-down set of fenced tool-commit identities. F3d3a converted
+    nothing (F3d2's five); F3d3b Task 2 added _propose_artifact_edit_impl and Task 3
+    adds propose_citation_impl — BOTH of F3d3's propose sites now write through
+    ports.effects and no longer commit. The set stays a literal on purpose: a derived
+    set would silently absorb the next conversion instead of forcing this diff."""
     from tests.fencing.inventory import load_inventory, scan_tree
 
     _sites, fenced = scan_tree()
@@ -182,8 +184,34 @@ def test_no_tool_module_gained_a_port_call():
             "src/call_manager/proposal_assist/tools/references.py",
             "fetch_reference_impl._refund_fetch_slot",
         ),
-    }, "F3d2's five and no more — F3d3a converts nothing"
-    assert sum(1 for r in load_inventory() if r["slice"] == "F3d3" and r["fenced"]) == 0
+        (
+            "src/call_manager/proposal_assist/tools/proposal.py",
+            "_propose_artifact_edit_impl",
+        ),
+        (
+            "src/call_manager/proposal_assist/tools/citations.py",
+            "propose_citation_impl",
+        ),
+    }, "F3d2's five plus F3d3b's TWO propose sites (artifact-edit + citation)"
+    # Measured from the LIVE tree, not the stored JSON: this task fences the SECOND
+    # of F3d3's two sites (the citation propose); Task 2 fenced the first. The
+    # inventory JSON is regenerated in Task 4, so load_inventory() still reports both
+    # F3d3 rows fenced=false here — the SCAN is the source of truth for what the code
+    # actually does now.
+    f3d3_sites = {
+        (r["path"], r["symbol"])
+        for r in load_inventory()
+        if r["slice"] == "F3d3"
+    }
+    assert len(f3d3_sites & fenced) == 2
+    assert (
+        "src/call_manager/proposal_assist/tools/proposal.py",
+        "_propose_artifact_edit_impl",
+    ) in fenced
+    assert (
+        "src/call_manager/proposal_assist/tools/citations.py",
+        "propose_citation_impl",
+    ) in fenced
 
 
 def test_the_exemption_list_still_has_five_keys():

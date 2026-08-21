@@ -10,11 +10,12 @@ import pytest
 from call_manager.config import Settings
 from call_manager.db.models import ProposedChange
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.port_impl import build_ports
 from call_manager.proposal_assist.tools.proposal import (
     propose_spec_edit_impl,
     read_spec_impl,
 )
-from call_manager.proposal_assist.tools.registry import ToolContext
+from call_manager.proposal_assist.tools.registry import ToolContext, snapshot_invocation
 from tests.proposal_assist.conftest import make_workspace
 
 
@@ -40,14 +41,24 @@ async def test_read_spec_then_propose_spec_edit(pg_session_factory, _settings_en
         wsid = ws.id
     repo = _spec_repo(tmp_path, wsid, spec)
     ctx = ToolContext(
-        workspace_id=wsid, repo_dir=repo, session_factory=pg_session_factory, settings=Settings()
+        workspace_id=wsid,
+        repo_dir=repo,
+        session_factory=pg_session_factory,
+        settings=Settings(),
+        lifecycle_generation=0,  # make_workspace leaves the server_default 0
     )
     read = await read_spec_impl(ctx)
     assert read["content"] == spec
     assert ctx.agent_view_spec_head is not None
     assert ctx.agent_view_spec_sections[1] == split_sections(spec)[1].sha
 
-    result = await propose_spec_edit_impl(ctx, section_index=1, new_text="## Aims\nagent.\n")
+    result = await propose_spec_edit_impl(
+        ctx,
+        ports=build_ports(pg_session_factory),
+        invocation=snapshot_invocation(ctx),
+        section_index=1,
+        new_text="## Aims\nagent.\n",
+    )
     assert result["status"] == "pending"
     with pg_session_factory() as s:
         pc = s.get(ProposedChange, uuid.UUID(result["proposed_change_id"]))
@@ -64,7 +75,17 @@ async def test_propose_spec_edit_rejects_unread(pg_session_factory, _settings_en
         wsid = ws.id
     repo = _spec_repo(tmp_path, wsid, "preamble\n\n## Aims\norig.\n")
     ctx = ToolContext(
-        workspace_id=wsid, repo_dir=repo, session_factory=pg_session_factory, settings=Settings()
+        workspace_id=wsid,
+        repo_dir=repo,
+        session_factory=pg_session_factory,
+        settings=Settings(),
+        lifecycle_generation=0,  # make_workspace leaves the server_default 0
     )
-    result = await propose_spec_edit_impl(ctx, section_index=1, new_text="## Aims\nx.\n")
+    result = await propose_spec_edit_impl(
+        ctx,
+        ports=build_ports(pg_session_factory),
+        invocation=snapshot_invocation(ctx),
+        section_index=1,
+        new_text="## Aims\nx.\n",
+    )
     assert "error" in result and "read_spec" in result["error"]
