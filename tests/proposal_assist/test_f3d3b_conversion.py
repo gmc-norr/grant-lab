@@ -179,3 +179,30 @@ def test_the_exemption_list_still_has_five_keys():
     assert set(TOOLS_NOT_YET_CONVERTED) == {
         "audit.py", "citations.py", "history.py", "proposal.py", "references.py",
     }
+
+
+def test_the_citekey_cache_is_untouched():
+    """The row moved; the code did not. If a later slice finds this failing, it is
+    converting the accept path — which is F3e's job and needs a mechanism-2 operation."""
+    import inspect
+
+    from call_manager.proposal_assist.citations import core
+
+    src = inspect.getsource(core._write_citekey_cache)
+    assert "session.commit()" in src
+    assert "begin_nested" in src
+    assert "ports" not in inspect.signature(core._write_citekey_cache).parameters
+
+
+def test_no_new_effect_operation_was_added():
+    """EFFECT_MECHANISMS and EFFECT_NAMES are set-equality gates; this slice converts
+    onto operations F3d1 already built and adds none."""
+    from call_manager.proposal_assist.ports.effects import EFFECT_MECHANISMS
+
+    assert set(EFFECT_MECHANISMS) == {
+        "submit_scorecard",
+        "submit_review",
+        "submit_uncited_claims",
+        "propose_artifact_edit",
+        "propose_citation_insert",
+    }
