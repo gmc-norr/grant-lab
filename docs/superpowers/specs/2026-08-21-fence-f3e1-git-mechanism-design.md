@@ -1,6 +1,6 @@
 # Fence F3e-1 — the mechanism-2 gate for git effects
 
-**Status:** design, **revision 4** (2026-08-21). Successor to F3d3b (`eb7d4a34`).
+**Status:** design, **revision 5** (2026-08-21). Successor to F3d3b (`eb7d4a34`).
 **Governing architecture:** `2026-08-17-lifecycle-fence-design.md` (why a fence exists).
 **Governing mechanism spec:** `2026-08-18-fence-session-ownership-design.md` (how an
 effect is expressed). This document is a **sub-slice design**: it does not supersede
@@ -51,6 +51,19 @@ why (§9).
 > name the `Doc` mutation as the first effect while §4.2's table still said
 > `append_update` — and the table is what a plan author builds the gate from (§4.2).
 > Four more were wrong citations or wrong tuples (§7.2, §8, §11).
+>
+> **Revision 5 — structural, and it SHRINKS the design.** Four review rounds kept finding
+> defects in one section, §7, and the reason was structural rather than careless: tools
+> have a carrier for the generation (`Invocation` → `FenceStamp`, minted once at dispatch,
+> frozen), and revisions 1–4 asked **eleven services to reinvent it by hand** with a bare
+> `int`. Every §7 finding was a symptom — an impossible capture step, the wrong
+> authorization function, bespoke maintenance handling, untyped orchestrator parameters.
+> Revision 5 reuses `FenceStamp` for services (verified reusable: its two tool fields are
+> already nullable, no git effect reads them, and `stamp.py` is stdlib-only), adds one
+> service-side constructor beside `Invocation.stamp()`, and replaces the eleven-row
+> capture table with **one rule**. Four previously-found defects become unwritable, and
+> "capture early" stops being prose an implementer must remember and becomes a **static
+> gate**: a generation passed to a mechanism-2 acquisition must come from a stamp.
 
 ---
 
@@ -86,14 +99,22 @@ acquisitions are in scope (§4.2), the conversion reaches eleven functions acros
 orchestrators and their routes. That is too much to land with a brand-new detector in
 one plan.
 
-**`F3e1a` — the detector and the inventory. Converts nothing.**
-Canonical git-sink detection, the sink-completeness guard, the `git_commit` kind, the
-`fenced` **measurement** for that kind, the `UNCLASSIFIED` default, and the AST gate
+**`F3e1a` — the carrier, the detector and the inventory. Converts nothing.**
+The service-side `FenceStamp` constructor (§7.0.2) and the gate that mechanism-2
+generations come from a stamp (§7.0.3); canonical git-sink detection, the
+sink-completeness guard, the `git_commit` kind, the `fenced` **measurement** for that
+kind, the `UNCLASSIFIED` slice default, the `CATEGORIES_BY_KIND` entry, and the AST gate
 armed with all nine sites pinned as unconverted. Every `git_commit` row lands
-`fenced: false`. No production behaviour changes at all.
+`fenced: false`. **No production behaviour changes at all** — the constructor has no
+callers yet, exactly as F3b's ports had none.
+
+Putting the carrier in the spine rather than in the conversion slice is the whole lesson
+of §7.0: F3d1 gave converted tools everything they needed *before* F3d2 converted one, and
+the conversions then landed with their derived test counts hitting exactly. F3e1b should
+inherit a mechanism, not a paragraph.
 
 **`F3e1b` — the conversions.**
-The enclosing-acquisition enumeration, the generation plumbing from route to sink, the
+The enclosing-acquisition enumeration, the stamp threaded from mint site to sink, the
 stale-outcome matrix, and the per-site runtime proofs. Sites leave the pin list as they
 convert.
 
@@ -520,136 +541,188 @@ half done while production's path stayed exposed.
 The flag-off paths still convert. They are reachable (the flag can be off for a workspace
 never touched), and leaving them out would put entries in the pin list with no reason.
 
-## 7. The generation, from capture to sink
+## 7. The carrier, and the generation from capture to sink
 
-Revision 1 stopped at "`checkpoint_artifact` takes G as a parameter — ten call sites."
-That is the last link, not the chain. `acquire_commit_mutex_at_generation` requires the
-caller to know G, and **G must be the value the actor believed when it decided to act**.
-Reading G later — immediately before the mutex, or under it — adopts the *restored*
-generation and makes the assertion compare a value against itself. A test driving
-`checkpoint_artifact` directly cannot catch that, because it supplies G itself.
+### 7.0 Services get a carrier, not eleven sets of instructions
 
-### 7.1 The chain per entry point
+**Revisions 1–4 kept getting this section wrong, and the reason was structural.**
+`acquire_commit_mutex_at_generation` needs G, and G must be the value the actor believed
+when it *decided to act* — not a value read later, which adopts the restored generation
+and makes the assertion compare a value against itself.
 
-**Capture comes from the access check the route ALREADY performs — never from a
-different one.** Revision 2's table said "route's `require_owner`" across the collab
-paths. That is wrong and it is dangerous: the collab cite branch authorizes with
-`resolve_access` (`workspaces.py:1038`), which grants **any member with write access**,
-while only the *flag-off* branch of the same route uses `require_owner` (`:1098`).
-Proposal acceptance authorizes with `require_member`. Implementing revision 2's table
-literally would have revoked valid collaborator access — a permissions regression
-smuggled into a fencing slice. **No authorization call changes in this slice.**
+Tools already have machinery for exactly that. F3a/F3b built `Invocation` → `FenceStamp`
+(`ports/stamp.py`): minted once at dispatch, frozen, carried with the actor. There is
+exactly **one** place in the codebase that can build one — `invocation.py:75`.
 
-| Entry point | Access check (UNCHANGED) | Capture | Enclosing acquisitions receiving the same G |
-|---|---|---|---|
-| `POST …/cite` (collab) | `resolve_access` → `can_write` | the `Workspace` that check loaded | `apply_citation_to_room` |
-| `POST …/proposed-changes/{id}/accept` (collab, prose) | `require_member` → `Workspace` | that instance | `kernel_accept_prose` |
-| same (collab, citation) | `require_member` → `Workspace` | that instance | `kernel_accept_citation`, `apply_citation_to_room` |
-| `POST …/spec/init` (collab) | as the route stands | the instance that check loaded | `kernel_init_spec` |
-| `POST …/annotations/{id}/insert` (collab) | as the route stands | the instance that check loaded | `apply_annotation_insert_to_room` |
-| `POST …/spec/lock` | `require_owner` → `ws` (`:645`) | `ws` | `post_lock_spec` itself |
-| `POST …/spec/unlock` | `require_owner` → `ws` (`:734`) | `ws` | `post_unlock_spec` itself |
-| `POST …/sections/{i}` (save) | as the route stands → `Workspace` | that instance | `save_section` itself |
-| `POST …/cite` (flag-off) | `require_owner` → `Workspace` (`:1098`) | that instance | `insert_citation_for_user` itself |
-| accept (flag-off, citation) | `require_member` → `Workspace` | that instance | `_insert_citation_locked` itself |
-| `save_version` | `resolve_access` → `can_write` (`collab_checkpoint.py:38`) | the `Workspace` that check loaded | `checkpoint_artifact` itself |
-| evict hook / handover / tail checkpoint | none — no actor | see §7.3 | `checkpoint_artifact` itself |
+Revisions 1–4 asked **eleven services** to reinvent it by hand, threading a bare `int`.
+That is where the review findings concentrated, and they were all the same shape:
 
-**`save_version` is an actor-driven writer, not maintenance.** Revision 2 filed it with
-the evict hook and the handover. It is a user pressing "Save a version", authorized by
-`resolve_access`, and it has a genuine capture point like every other route above.
+- a capture step **no API can perform** ("read G under the mutex and pass it");
+- a capture table naming **the wrong authorization function**, which would have revoked
+  collaborator write access;
+- maintenance callers needing a bespoke special case;
+- four orchestrators needing an untyped parameter nothing could check.
 
-**`resolve_access` returns `tuple[bool, bool]`, not the `Workspace`** — although it loads
-one internally (`ws_auth.py:105`). **Revision 3 proposed widening it to a 3-tuple and
-claimed "callers that ignore it are unaffected". That is false in Python.** All six call
-sites destructure exactly two values — `workspaces.py:298`, `:351`, `:1038`,
-`permissions.py:116`, `collab_checkpoint.py:38`, `collab_ws.py:81` — so a third element
-raises `ValueError: too many values to unpack` at **every one**, including two that are
-otherwise nothing to do with this slice.
+Prose describing eleven bespoke capture points is where enumeration errors live. **The
+fix is a carrier, and the carrier already exists.**
 
-**`resolve_access` does not change at all.** The route reads the generation itself, after
-the access check passes and before the mutex:
+### 7.0.1 `FenceStamp` is reused, not re-invented
+
+Verified against the tree, three ways:
+
+- Its two tool-ish fields are **already nullable** — `active_turn_job_id: uuid.UUID | None`
+  and `origin_job_id: uuid.UUID | None` — and `None` is a documented legitimate value:
+  `registry.py` leaves `origin_job_id` `None` for interactive contexts *by design*.
+- **Nothing a mechanism-2 git effect does reads them.** Every `stamp.origin_job_id`
+  consumer in `port_impl/effects.py` is on a `submit_*` (background job row) or `propose_*`
+  (durable attribution) path. A git effect needs `workspace_id` and `generation`, full stop.
+- `ports/stamp.py` is **stdlib-only** (`uuid`, `dataclasses`), so a route, the kernel or a
+  maintenance job can import it with no layering problem.
+
+So `FenceStamp` is not tool-shaped, and F3e-1 does not mint a sibling type.
+
+### 7.0.2 Exactly two ways to build one, and each REFUSES rather than defaults
+
+`F3e1a` adds the second constructor beside `Invocation.stamp()`:
 
 ```python
-is_member, can_write = resolve_access(session, user=user, workspace_id=wid, artifact=a)
-if not can_write:
-    raise HTTPException(403)
-generation = session.get(Workspace, wid).lifecycle_generation   # pre-mutex capture
+def stamp_for_workspace(workspace: Workspace) -> FenceStamp:
+    """The fencing identity of an actor holding a Workspace it just loaded.
+
+    The service-side twin of Invocation.stamp(). The job fields are None because
+    a request or a maintenance pass is not a background job — the same `None`
+    registry.py already writes for interactive contexts.
+    """
+    if workspace.lifecycle_generation is None:
+        raise UnfencedInvocation(workspace.id)
+    return FenceStamp(
+        workspace_id=workspace.id,
+        generation=workspace.lifecycle_generation,
+        active_turn_job_id=None,
+        origin_job_id=None,
+    )
 ```
 
-The correctness requirement is only **"read G in the route, before the mutex"** — which
-this satisfies on its own terms, with no dependency on identity-map behaviour and no
-signature change anywhere. (It happens to cost no extra query, since `resolve_access` has
-already loaded the row into this same session, but that is an optimisation note, not the
-argument.)
+**The refusal is copied deliberately.** `Invocation.stamp()` raises `UnfencedInvocation`
+rather than defaulting, and its docstring gives the reason: *"an actor with no claimed
+generation has no belief to fence against, and defaulting would submit an effect against a
+generation nobody claimed. Generation 0 is REAL … so this tests for None, never for
+falsiness."* Every word of that applies here.
 
-### 7.2 The plumbing gap this exposes
+### 7.0.3 What the carrier buys, stated as the rule it replaces
+
+> **Every mechanism-2 acquisition takes its generation from a `FenceStamp`, and a
+> `FenceStamp` is minted only where an actor already holds the `Workspace` it is acting on.**
+
+One rule replaces revision 4's eleven-row capture table. Four previously-found defects
+become **unwritable**:
+
+| Defect | Why it cannot recur |
+|---|---|
+| "read G under the mutex" | minting happens where the `Workspace` is held, which is before the mutex by construction |
+| wrong authorization function named | the rule names no check — you mint from whatever object the check you *already run* loaded |
+| maintenance callers special-cased | they hold a `Workspace` from their pre-screen, so they follow the same rule |
+| orchestrators take a bare `int` | they take `stamp: FenceStamp`, which is typed, self-documenting and checkable |
+
+**And it converts a prose discipline into a machine-checkable one.** Revisions 1–4 could
+only *say* "capture early". With a carrier, `F3e1a` can add a gate:
+
+> no call to `acquire_commit_mutex_at_generation` may pass a `generation=` argument that is
+> not a `FenceStamp` attribute.
+
+That gate rejects `generation=session.get(Workspace, wid).lifecycle_generation` written
+inline at the mutex — the late-read defect — statically. A rule the tooling enforces is
+worth more than four revisions of prose asking implementers to be careful.
+
+### 7.1 Where each entry point mints its stamp
+
+**No authorization call changes in this slice.** The mint site is "the object the existing
+check loaded", whatever that check is. Recorded so an implementer never has to guess, and
+because revision 2 guessed wrong here and would have revoked collaborator access:
+the collab cite branch authorizes with `resolve_access` (`workspaces.py:1038`, **any member
+with write**), while only the flag-off branch of the same route uses `require_owner`
+(`:1098`); acceptance uses `require_member`.
+
+| Entry point | Existing check (UNCHANGED) | Mints from | Stamp threaded through |
+|---|---|---|---|
+| `POST …/cite` (collab) | `resolve_access` → `can_write` | the `Workspace` it loaded | `direct_cite_via_kernel` → `apply_citation_to_room` → `checkpoint_artifact` |
+| accept (collab, prose) | `require_member` → `Workspace` | that instance | `accept_via_kernel` → `kernel_accept_prose` → `checkpoint_artifact` |
+| accept (collab, citation) | `require_member` → `Workspace` | that instance | `accept_via_kernel` → `kernel_accept_citation` → `apply_citation_to_room` → `checkpoint_artifact` |
+| `POST …/spec/init` (collab) | as the route stands | the instance it loaded | `init_spec_via_kernel` → `kernel_init_spec` → `checkpoint_artifact` |
+| `POST …/annotations/{id}/insert` | as the route stands | the instance it loaded | `insert_annotation_via_kernel` → `apply_annotation_insert_to_room` → `checkpoint_artifact` |
+| `POST …/spec/lock` | `require_owner` → `ws` (`:645`) | `ws` | `post_lock_spec` → `checkpoint_artifact` |
+| `POST …/spec/unlock` | `require_owner` → `ws` (`:734`) | `ws` | `post_unlock_spec` → `checkpoint_artifact` |
+| `POST …/sections/{i}` (save) | as the route stands | the instance it loaded | `save_section` |
+| `POST …/cite` (flag-off) | `require_owner` (`:1098`) | that instance | `insert_citation_for_user` |
+| accept (flag-off, citation) | `require_member` | that instance | `accepting.py` → `_insert_citation_locked` |
+| `save_version` | `resolve_access` → `can_write` (`collab_checkpoint.py:38`) | the `Workspace` it loaded | `checkpoint_artifact` |
+| evict hook / handover / tail checkpoint | none — no actor | the `s.get(Workspace, …)` pre-screen (§7.3) | `checkpoint_artifact` |
+
+**`resolve_access` does not change.** Revision 3 proposed widening it to a 3-tuple and
+claimed callers ignoring the extra value would be unaffected; that is false in Python —
+all six call sites destructure exactly two values (`workspaces.py:298`, `:351`, `:1038`,
+`permissions.py:116`, `collab_checkpoint.py:38`, `collab_ws.py:81`), so a third element
+raises at every one, including two unrelated to this slice. The route reads the workspace
+itself after the check passes and mints from it. That costs no extra query — the row is
+already in this session's identity map — but the argument does not depend on that.
+
+### 7.2 The plumbing this still requires
+
+A carrier removes the *reasoning* from each call site; it does not remove the parameter.
 
 **`direct_cite_via_kernel` (`collab_cite.py:31`), `init_spec_via_kernel`,
 `insert_annotation_via_kernel` and `accept_via_kernel` (`kernel_accept.py:57`) carry only
-`workspace_id: uuid.UUID`.** They open their own sessions through `session_factory`
-inside `_body()`, and the route's authorization `Workspace` — the actual capture point —
-is discarded before they are entered.
+`workspace_id: uuid.UUID`** and open their own sessions inside `_body()`, so the route's
+`Workspace` is discarded before they are entered. Each gains a `stamp: FenceStamp`
+parameter, as does `checkpoint_artifact` and the seven enclosing acquisitions of §4.2.
 
-So the plumbing is not a ten-call-site signature change on one helper. It is a
-`generation: int` parameter added to **four orchestrators** as well, threaded from the
-route's already-loaded `Workspace.lifecycle_generation`. This is the largest mechanical
-piece of `F3e1b` and the plan enumerates it per call site.
+That is still the largest mechanical piece of `F3e1b`, and the plan enumerates it per call
+site. What changed is that a wrong thread is now a **type error or a gate failure** rather
+than a plausible-looking integer.
 
-**Route-driven sites capture from the instance they already hold.** `save_section`,
-`insert_citation_for_user` and the two spec routes take a `Workspace` **instance**, loaded
-for authorization *before* the mutex. That load is the capture point, and the gap between
-it and the mutex is real: the handler authorizes, does request-shaped work, then blocks on
-a mutex another writer may hold for seconds. `G` comes from
-`workspace.lifecycle_generation` on that instance.
+**Nested acquisition threads the same stamp inward.** `kernel_accept_prose` acquires and
+then calls `checkpoint_artifact`, which acquires again — safe today because PostgreSQL
+advisory xact locks are re-entrant within a transaction (`kernel.py:203-206`). The inner
+call receives **the same stamp object**, never a re-mint: re-minting under a held mutex
+would read the same value and so hide a caller that threaded the wrong one. A test asserts
+that an inner acquisition handed a *different* stamp raises rather than proceeding.
 
-This is the mirror image of the Slice C1 defect fixed in `701fbb7`, where `session.get()`
-returned an identity-map instance loaded *before* the mutex and carried the pre-race
-generation. There it was the bug; here the pre-block value is precisely the claim being
-checked. **What must not happen is re-reading G under the mutex.**
+### 7.3 Maintenance callers mint from their pre-screen — the same rule
 
-### 7.3 Maintenance callers have no actor
-
-Three `checkpoint_artifact` callers are not acting on anyone's behalf: the evict hook
+Three `checkpoint_artifact` callers act for no one: the evict hook
 (`collab/permissions.py:58`), the kill-switch handover (`collab/handover.py:40`), and the
-periodic tail checkpoint (`collab/checkpoint.py:210`). There is no earlier belief to
-preserve — they are reacting to current state.
+periodic tail checkpoint (`collab/checkpoint.py:210`).
 
-**Revision 2 prescribed something Primitive B cannot do.** It said these callers "read G
-under the mutex and pass it" — but `acquire_commit_mutex_at_generation` takes `generation`
-as a **required keyword argument**, consumed only after it has already acquired the mutex
-(`fencing.py:115-121`). There is no point at which a caller can read G under a mutex it has
-not yet taken. Implementing revision 2 literally would have required inventing an
-"acquire, then report the current generation" primitive, or exempting these three sites
-from the very gate this slice installs.
-
-**The correction is smaller than either, and it is uniform.** All three callers already
-run the *identical* pre-screen immediately before calling `checkpoint_artifact` —
-`ws = s.get(Workspace, workspace_id)` followed by a `soft_deleted_at` check
+**Revision 2 told them to "read G under the mutex and pass it", which Primitive B cannot
+do** — `generation` is a required keyword argument consumed only after the mutex is
+already held (`fencing.py:115-121`). Under the carrier the question does not arise: all
+three already run the *identical* pre-screen immediately before calling —
+`ws = s.get(Workspace, workspace_id)` then a `soft_deleted_at` check
 (`permissions.py:53-55`, `handover.py:36-38`, `checkpoint.py:205-207`). **That instance is
-the capture point**, exactly as a route's access check is: pass `ws.lifecycle_generation`
-from the object the caller already holds.
+the mint site**, exactly as a route's access check is. No special case, and no exemption
+from the gate.
 
-A delete/restore committing between that pre-screen and the mutex then produces a
-`WorkspaceGenerationStale` refusal — and for these three callers that is **correct, not a
+A delete/restore committing between the pre-screen and the mutex then produces a
+`WorkspaceGenerationStale` refusal, which for these three is **correct rather than a
 regression**: all three already treat `WorkspaceDeleted` as a benign skip (§8), and a
-workspace that moved generation underneath a maintenance pass is a workspace that pass
-should skip and pick up on its next iteration. The refusal is benign by construction, and
-the plan says so at each site rather than leaving a reader to wonder. What they gain is
-the `WorkspaceDeleted` refusal they already have, plus uniformity: the no-`_live` gate
-needs no exemption for them.
+workspace that moved generation under a maintenance pass is one that pass should skip and
+pick up next iteration.
 
 ### 7.4 What the tests must drive
 
 **At the semantic boundary, not the helper.** A test that calls `checkpoint_artifact` with
-a hand-supplied G proves nothing about capture. Each entry point in §7.1 gets a runtime
-race: capture at G (through the real route or orchestrator), commit a delete+restore to
-G+2, then let the operation proceed. It must raise and land nothing — including no
-`yjs_updates` row (§5.2).
+a hand-built stamp proves nothing about minting. Each entry point in §7.1 gets a runtime
+race: mint at G through the real route or orchestrator, commit a delete+restore to G+2,
+then let the operation proceed. It must raise and land nothing — no git commit, a clean
+worktree, byte-identical files, and **no `yjs_updates` row** (§5.2).
 
-The nested case gets its own test: an inner acquisition handed a **different** G than the
-outer asserted must raise rather than proceed, so a future caller that re-reads instead of
-threading is caught.
+Plus two the carrier makes possible:
+
+- **`stamp_for_workspace` refuses a workspace with no generation**, mirroring
+  `Invocation.stamp()`'s `UnfencedInvocation` — asserted, not assumed.
+- **The static gate rejects an inline late read.** A fixture writing
+  `generation=session.get(Workspace, wid).lifecycle_generation` at the mutex must fail
+  §7.0.3's gate. This is the defect four revisions could only warn about in prose.
 
 ## 8. The stale-generation outcome matrix
 
@@ -823,6 +896,13 @@ Beyond §5's gates, proofs and mutations:
    rows; `F3D_IDENTITIES`' `_write_citekey_cache` tuple `"F3e"` → `"F3e2"`; and
    `test_the_ingest_row_is_untouched_and_still_f3e`'s assertion, name and docstring.
 7. **`resolve_access` is unchanged** — its six call sites still destructure two values.
+7b. **`stamp_for_workspace` exists, refuses a workspace with no generation
+   (`UnfencedInvocation`), and has zero production callers** — the carrier ships before the
+   conversions that use it, as F3b's ports did.
+7c. **The stamp-provenance gate is armed**: a fixture passing an inline
+   `session.get(Workspace, wid).lifecycle_generation` to a mechanism-2 acquisition fails
+   it, and fails on that named assertion. This is the late-read defect four revisions could
+   only warn about.
 
 **`F3e1b`:**
 
@@ -832,9 +912,12 @@ Beyond §5's gates, proofs and mutations:
 10. The §5.1 gate's "first effect" boundary is the **`Doc` mutation** (§4.2's table), not
     `append_update`. Demonstrated by a fixture that mutates the room before acquiring and
     is rejected — the case a gate anchored one line late would have accepted.
-11. For each entry point in §7.1, a delete+restore between **capture and effect** leaves
+11. For each entry point in §7.1, a delete+restore between **mint and effect** leaves
     HEAD unchanged, the worktree clean, file contents byte-identical, and **no
-    `yjs_updates` row** — with compensation disabled.
+    `yjs_updates` row** — with compensation disabled. Driven through the real route or
+    orchestrator, never by handing `checkpoint_artifact` a stamp built by the test.
+11b. **Every mechanism-2 acquisition's generation comes from a `FenceStamp`** — no site
+    reads one inline, enforced by §7.0.3's gate rather than by review.
 12. Every §8 mapping asserted by a test, across all three clean-error tuples **and both
     maintenance shapes** (the two `isinstance` tuples and the tail checkpoint's bare
     clause); no path yields a 500, a spurious eviction, or an error-level maintenance log.
