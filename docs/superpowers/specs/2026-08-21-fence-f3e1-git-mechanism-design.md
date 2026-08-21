@@ -1,6 +1,6 @@
 # Fence F3e-1 — the mechanism-2 gate for git effects
 
-**Status:** design, **revision 3** (2026-08-21). Successor to F3d3b (`eb7d4a34`).
+**Status:** design, **revision 4** (2026-08-21). Successor to F3d3b (`eb7d4a34`).
 **Governing architecture:** `2026-08-17-lifecycle-fence-design.md` (why a fence exists).
 **Governing mechanism spec:** `2026-08-18-fence-session-ownership-design.md` (how an
 effect is expressed). This document is a **sub-slice design**: it does not supersede
@@ -40,6 +40,17 @@ why (§9).
 > `store.append_update` as the first effect; the shared `Doc` is mutated one line earlier
 > (§4.1). The outcome matrix named one clean-error tuple; there are **three** (§8). And
 > the sink-completeness claim was broader than its guard (§3.2).
+>
+> **Revision 4 — ten more, from a detached multi-agent review.** No High findings and no
+> architectural ones; the split was confirmed drawn in the right place. But four
+> **unenumerated machinery updates** would each have turned `F3e1a` red on its own "suite
+> green, nothing converted" criterion: a hardcoded `== 20` row count
+> (`test_inventory_merge.py:113`), a `CATEGORIES_BY_KIND` entry the new kind requires
+> plus a legal category per row, an `F3D_IDENTITIES` tuple and a test name/assertion that
+> both hardcode `"F3e"`. Revision 3 also **half-fixed its own bug**: §4.1 was corrected to
+> name the `Doc` mutation as the first effect while §4.2's table still said
+> `append_update` — and the table is what a plan author builds the gate from (§4.2).
+> Four more were wrong citations or wrong tuples (§7.2, §8, §11).
 
 ---
 
@@ -159,6 +170,11 @@ is genuinely small:
    `pyproject.toml` or `uv.lock`. The guard asserts that this remains true. Introducing a
    new execution surface or a git library is then a **reviewed diff** that must extend the
    argv guard to cover it.
+3. **No `shell=True` outside a declared sink.** A list-walking argv guard cannot see
+   `subprocess.run("git commit -m x", shell=True)` — the command is one string with no
+   element to index, so clause 1 is blind to it. No `shell=True` call exists in `src/`
+   today (the only match is a *comment* at `gitio.py:56`), so this closes a hole rather
+   than fixing a miss.
 
 Together these make the claim honest: every way this repository can invoke git is
 enumerated, and adding a new way stops the build.
@@ -226,10 +242,26 @@ Keys use no hyphen — `F3d1`, `F3d2`, `F3d3` — so the new keys are **`F3e1a`*
 The two rows currently allocated to `F3e` — `_write_citekey_cache` and
 `fetch_reference_impl._do_fetch_and_ingest` — **both belong to `F3e2`**. `merge()`
 preserves `prev["slice"]` (`inventory.py:295-298`) because `slice` is a **human-owned**
-field, so regeneration will not move them: the reassignment is a hand-edit of
+field, so regeneration will not move them: the reassignment starts as a hand-edit of
 `fence_inventory.json`, proven by regenerating into a temporary copy and comparing it to
 the committed file. **Not by `git diff --exit-code`** — on a file the task deliberately
 edited, that can never pass. F3d3b shipped that mistake and had it caught twice.
+
+**But it is NOT a single-file edit, and revision 3 said it was.** Three Python assertions
+hardcode the strings this slice changes, and each reddens `F3e1a` on its own "suite green,
+nothing converted" criterion. All four edits land in the **same commit**:
+
+| File | What | Change |
+|---|---|---|
+| `tests/fencing/fence_inventory.json` | the two rows' `slice` | `"F3e"` → `"F3e2"` |
+| `tests/fencing/inventory.py:336` | `F3D_IDENTITIES` holds `("F3e", "tool_commit", "_write_citekey_cache")`; `test_every_f3d_identity_is_still_in_the_inventory` compares it against the live rows | the tuple's slice → `"F3e2"` |
+| `tests/fencing/test_fence_coverage.py:408-421` | `test_the_ingest_row_is_untouched_and_still_f3e` asserts `row["slice"] == "F3e"` | assertion, **name** and docstring → `F3e2` |
+| `tests/fencing/test_inventory_merge.py:113` | `assert len(after) == 20`, driven over the real tree | → `29` (the nine new `git_commit` rows) |
+
+**`F3D_IDENTITIES` is edited here, and that does not contradict §10.** Its comment forbids
+*deleting* an entry to make a test pass. This **modifies** an entry's slice to follow a
+reallocation a human made — the identity is intact, and the row it names still exists. A
+reader who takes §10 to mean the constant is untouchable will leave `F3e1a` red.
 
 Shape after each sub-slice:
 
@@ -290,7 +322,31 @@ hole where discovery and measurement disagreed about what a raw commit *is* — 
 Two predicates that must agree will eventually not; one predicate cannot disagree with
 itself.
 
-**Two consequences the plan must carry:**
+**The new kind also needs a `category`, and revision 3 never mentioned it.** The row shape
+is `{kind, path, symbol, category, fenced, slice}` and two gates police that field:
+
+- `CATEGORIES_BY_KIND` (`inventory.py:31-35`) has entries for `tool_commit`,
+  `tool_context` and `claim_fn` only. `test_each_category_is_legal_for_its_kind` does
+  `allowed = CATEGORIES_BY_KIND.get(row["kind"])` then asserts `allowed is not None`.
+  Nine `git_commit` rows with no entry **fail** it.
+- `test_no_entry_is_unclassified` forbids `category == UNCLASSIFIED` on any row — while
+  `merge()` (`inventory.py:284`) assigns exactly that to a row with no `prev`. So the nine
+  rows cannot be left to default.
+
+`F3e1a` therefore defines **`CATEGORIES_BY_KIND[KIND_GIT_COMMIT] = frozenset({"semantic",
+UNCLASSIFIED})`** and gives all nine rows the explicit category **`semantic`**.
+
+That choice is a design decision, not plumbing: `semantic` only, with **no analogue of
+`caller_fenced`**. A `tool_commit` may claim `caller_fenced` because a caller's transaction
+can fence it; a git effect cannot be fenced by someone else's transaction — the mutex is
+taken by the function itself or the effect is unfenced. Leaving the exemption out means a
+`git_commit` row has no way to declare itself somebody else's problem.
+
+**Note the two `UNCLASSIFIED` uses are different fields and must not be conflated.**
+`_SLICE_FOR_KIND` maps the new kind's **slice** to `UNCLASSIFIED` so an undeclared site
+stops the build; the **category** must never be `UNCLASSIFIED`.
+
+**Three further consequences the plan must carry:**
 
 1. **`test_non_tool_commit_rows_keep_their_stored_flag` changes.** It asserts the old
    scoping and will be wrong once `git_commit` is measured. It is **narrowed** to the
@@ -337,13 +393,19 @@ themselves, at an outer boundary, and mutate before the inner call:
 
 | Enclosing function | Outer mutex | First effect | Sink reached at | Slice |
 |---|---|---|---|---|
-| `kernel.apply_citation_to_room` | `kernel.py:136` | `append_update` `:172` | `checkpoint_artifact` `:174` | `F3e1b` |
-| `kernel.kernel_accept_prose` | `kernel.py:208` | `append_update` `:290` | `checkpoint_artifact` `:294` | `F3e1b` |
-| `kernel.kernel_init_spec` | `kernel.py:325` | `append_update` `:339` | `checkpoint_artifact` `:343` | `F3e1b` |
+| `kernel.apply_citation_to_room` | `kernel.py:136` | `apply_pm_section_to_fragment` `:169` | `checkpoint_artifact` `:174` | `F3e1b` |
+| `kernel.kernel_accept_prose` | `kernel.py:208` | `apply_pm_section_to_fragment` `:274` | `checkpoint_artifact` `:294` | `F3e1b` |
+| `kernel.kernel_init_spec` | `kernel.py:325` | `apply_pm_json_to_fragment` `:338` | `checkpoint_artifact` `:343` | `F3e1b` |
 | `kernel.kernel_accept_citation` | `kernel.py:369` | (delegates) | via `apply_citation_to_room` | `F3e1b` |
-| `kernel.apply_annotation_insert_to_room` | `kernel.py:443` | `append_update` `:520` | `checkpoint_artifact` `:524` | `F3e1b` |
+| `kernel.apply_annotation_insert_to_room` | `kernel.py:443` | `apply_pm_section_to_fragment` `:517` | `checkpoint_artifact` `:524` | `F3e1b` |
 | `workspaces.post_lock_spec` | `:651` | spec-lock write | `checkpoint_artifact` `:665` | `F3e1b` |
 | `workspaces.post_unlock_spec` | `:739` | spec-unlock write | `checkpoint_artifact` `:746` | `F3e1b` |
+
+**The "First effect" column names the `Doc` mutation, not `store.append_update`** — see
+§4.1. Revision 3 corrected §4.1's prose and left this table pointing at `append_update`,
+which is the column a plan author builds the §5.1 gate boundary from. Anchoring the gate
+one line late would accept an implementation that mutated the live room before taking the
+mutex: the exact hollow gate §4.1 warns about, in the table §4.1 is warning about.
 
 **Left unconverted, each of these passes `_live` at G after a delete-then-restore, writes
 a `yjs_updates` row and mutates the live room, and only discovers staleness at the inner
@@ -498,11 +560,28 @@ the evict hook and the handover. It is a user pressing "Save a version", authori
 `resolve_access`, and it has a genuine capture point like every other route above.
 
 **`resolve_access` returns `tuple[bool, bool]`, not the `Workspace`** — although it loads
-one internally (`ws_auth.py:105`). The plan surfaces that instance rather than issuing a
-second load: `resolve_access` returns the workspace alongside its two booleans, callers
-that ignore it are unaffected, and **the permission logic is not touched**. The point is
-that the captured generation is provably the one belonging to the object the access check
-approved, not a re-read that could differ.
+one internally (`ws_auth.py:105`). **Revision 3 proposed widening it to a 3-tuple and
+claimed "callers that ignore it are unaffected". That is false in Python.** All six call
+sites destructure exactly two values — `workspaces.py:298`, `:351`, `:1038`,
+`permissions.py:116`, `collab_checkpoint.py:38`, `collab_ws.py:81` — so a third element
+raises `ValueError: too many values to unpack` at **every one**, including two that are
+otherwise nothing to do with this slice.
+
+**`resolve_access` does not change at all.** The route reads the generation itself, after
+the access check passes and before the mutex:
+
+```python
+is_member, can_write = resolve_access(session, user=user, workspace_id=wid, artifact=a)
+if not can_write:
+    raise HTTPException(403)
+generation = session.get(Workspace, wid).lifecycle_generation   # pre-mutex capture
+```
+
+The correctness requirement is only **"read G in the route, before the mutex"** — which
+this satisfies on its own terms, with no dependency on identity-map behaviour and no
+signature change anywhere. (It happens to cost no extra query, since `resolve_access` has
+already loaded the row into this same session, but that is an optimisation note, not the
+argument.)
 
 ### 7.2 The plumbing gap this exposes
 
@@ -578,8 +657,12 @@ Revision 1 asserted that `WorkspaceGenerationStale` "maps to each caller's exist
 deleted-workspace outcome". **It maps to nothing today.** Verified:
 
 - `WorkspaceGenerationStale` is defined in `ports/errors.py:13` as a bare `RuntimeError`.
-- `WorkspaceDeleted` is defined in `drafting/locking.py:163`, also a bare `RuntimeError`.
-  `main.py:541` records explicitly that **neither is a subclass of the other**.
+- `WorkspaceDeleted` is defined in `drafting/locking.py:163`, also a bare `RuntimeError`,
+  and nothing relates the two types. (Revision 3 cited `main.py:541` for this; that comment
+  is about **`WorkspaceRetired`** not subclassing `WorkspaceDeleted`. The *pattern* it
+  records is the relevant precedent — a sibling bare `RuntimeError` needs its own
+  registration because "Starlette cannot reach the handler above" — but it is precedent,
+  not a statement about `WorkspaceGenerationStale`.)
 - The global handler at `main.py:514` registers `WorkspaceDeleted` only.
 - Maintenance paths classify only deletion as benign: `handover.py:82` and
   `permissions.py:79` catch `WorkspaceDeleted` in their skip clauses, and
@@ -589,12 +672,22 @@ Left unaddressed, a stale generation becomes a **500**, an unnecessary room evic
 an **error-level maintenance log** — and the room paths would evict for a condition that
 is not an error.
 
-**There are THREE clean-error tuples, not one.** Revision 2 named only
-`_CLEAN_ACCEPT_ERRORS`. Direct citation uses `_CLEAN_CITE_ERRORS` and spec-init /
-annotation-insert use `_CLEAN_INIT_SPEC_ERRORS`, both in `collab_cite.py:34-46`.
-`WorkspaceGenerationStale` must enter **all three**, or those paths will evict the room
-before returning their 404 — the eviction happening first is the part a
+**There are THREE clean-error tuples, not one** — revision 2 named only
+`_CLEAN_ACCEPT_ERRORS`. `WorkspaceGenerationStale` must enter all three, or those paths
+evict the room before returning their 404, and the eviction happening first is the part a
 response-code-only test would not notice.
+
+**Revision 3 then mis-assigned one of them.** It paired annotation-insert with
+`_CLEAN_INIT_SPEC_ERRORS`; `insert_annotation_via_kernel` actually catches
+`(*_CLEAN_CITE_ERRORS, InsertConflict)` at `collab_cite.py:199`. Only spec-init reads
+`_CLEAN_INIT_SPEC_ERRORS`. Coverage happens to survive because the direct-cite row already
+adds stale to `_CLEAN_CITE_ERRORS` — but **a test asserting annotation-insert maps via the
+init-spec tuple would be asserting something false**, and a reader trusting the old row
+could drop the `_CLEAN_CITE_ERRORS` edit and leave annotation-insert evicting the room.
+
+**And the maintenance row was not executable as written.** "Added to the same `isinstance`
+tuples" holds for the evict hook and the handover, but the tail checkpoint uses a bare
+`except WorkspaceDeleted:` clause — there is no tuple there to extend.
 
 **`F3e1b` ships an explicit per-caller matrix**, and no site converts before its row is
 filled in:
@@ -604,8 +697,10 @@ filled in:
 | Write routes (save, cite, accept, spec lock/unlock, `save_version`) | 404 via the global handler | **404**, same body — by extending the `main.py:514` handler to both types |
 | Collab accept | `_CLEAN_ACCEPT_ERRORS` (`kernel_accept.py:43`) → clean error, no eviction | **clean error, no eviction** — added to that tuple |
 | Collab direct cite | `_CLEAN_CITE_ERRORS` (`collab_cite.py:34`) | **clean error, no eviction** — added to that tuple |
-| Collab spec init / annotation insert | `_CLEAN_INIT_SPEC_ERRORS` (`collab_cite.py:44`) | **clean error, no eviction** — added to that tuple |
-| Maintenance (evict, handover, tail checkpoint) | benign skip, no error log | **benign skip** — added to the same `isinstance` tuples |
+| Collab spec init | `_CLEAN_INIT_SPEC_ERRORS` (`collab_cite.py:44`, caught at `:142`) | **clean error, no eviction** — added to that tuple |
+| Collab annotation insert | `_CLEAN_CITE_ERRORS` — caught at `collab_cite.py:199` as `(*_CLEAN_CITE_ERRORS, InsertConflict)`, **not** the init-spec tuple | covered by the direct-cite row's edit; asserted separately |
+| Maintenance — evict hook, handover | `isinstance(exc, (…, WorkspaceDeleted))` (`permissions.py:79`, `handover.py:82`) | **benign skip** — extend those tuples |
+| Maintenance — tail checkpoint | a **bare** `except WorkspaceDeleted:` (`checkpoint.py:219`), no tuple to extend | **benign skip** — widen the clause to `except (WorkspaceDeleted, WorkspaceGenerationStale):` |
 | Agent tool paths (`_insert_citation_locked`) | `DELETED_ERROR_MESSAGE` | `DELETED_ERROR_MESSAGE` — a restored workspace is, from the actor's view, gone |
 
 The last row is a judgement worth stating plainly: the agent is told "deleted" for a
@@ -682,8 +777,12 @@ problem. **`F3e2` owns it.**
   commits). It belongs with the job families.
 - **`F5`** — `phases/setup.py:Phase0Worker._init_repo`, discovered in `F3e1a` and
   converted with Phase 0.
-- **`F3f`** — the pins. Nothing in F3e-1 retires one: all five exempt modules still name
-  `repo_dir`.
+- **`F3f`** — the pins. Nothing in F3e-1 retires one, and revision 3's reason was wrong.
+  **Four** of the five exempt modules name `repo_dir` — `audit.py`, `citations.py`,
+  `history.py`, `proposal.py`. **`references.py` does not**; it is held by
+  `session_factory`. Both locators retire only with the capability holders, so the pin
+  count is unchanged either way — but "all five name `repo_dir`" was a measured fact
+  asserted from memory, and it was false.
 - **Deferred, no owner yet:** whether accepting a `ProposedChange` created at G should be
   refused after a delete/restore to G+2. `ProposedChange` carries no generation column
   (the five job tables carry `claimed_at_generation`; it does not), and adding one here
@@ -717,19 +816,29 @@ Beyond §5's gates, proofs and mutations:
    against `build_bibliography`, the site revision 2's predicate would have passed.
 5. A new git-committing function arrives `UNCLASSIFIED` and the gate refuses it —
    demonstrated.
-6. **No production behaviour changes.** Suite green with no site converted.
+6. **No production behaviour changes.** Suite green with no site converted — which
+   requires the four machinery updates §3.6 and §3.7 enumerate, each of which reddens the
+   suite on its own: `test_inventory_merge.py:113`'s `== 20` → `29`;
+   `CATEGORIES_BY_KIND[KIND_GIT_COMMIT]` plus an explicit `semantic` category on all nine
+   rows; `F3D_IDENTITIES`' `_write_citekey_cache` tuple `"F3e"` → `"F3e2"`; and
+   `test_the_ingest_row_is_untouched_and_still_f3e`'s assertion, name and docstring.
+7. **`resolve_access` is unchanged** — its six call sites still destructure two values.
 
 **`F3e1b`:**
 
-7. `acquire_commit_mutex_at_generation` has production callers for the first time.
-8. All seven enclosing acquisitions (§4.2) converted, and reverting any one fails the
+8. `acquire_commit_mutex_at_generation` has production callers for the first time.
+9. All seven enclosing acquisitions (§4.2) converted, and reverting any one fails the
    no-`_live`-reaches-a-sink gate on its named assertion — demonstrated.
-9. For each entry point in §7.1, a delete+restore between **capture and effect** leaves
-   HEAD unchanged, the worktree clean, file contents byte-identical, and **no
-   `yjs_updates` row** — with compensation disabled.
-10. Every §8 mapping asserted by a test, across **all three** clean-error tuples; no path
-    yields a 500, a spurious eviction, or an error-level maintenance log.
-10b. **Authorization is unchanged.** A collaborator with write access can still cite and
-    accept through the collab paths — asserted, because §7.1's earlier draft would have
-    revoked it.
-11. Pins stay at 5, and the slice's own tests say so.
+10. The §5.1 gate's "first effect" boundary is the **`Doc` mutation** (§4.2's table), not
+    `append_update`. Demonstrated by a fixture that mutates the room before acquiring and
+    is rejected — the case a gate anchored one line late would have accepted.
+11. For each entry point in §7.1, a delete+restore between **capture and effect** leaves
+    HEAD unchanged, the worktree clean, file contents byte-identical, and **no
+    `yjs_updates` row** — with compensation disabled.
+12. Every §8 mapping asserted by a test, across all three clean-error tuples **and both
+    maintenance shapes** (the two `isinstance` tuples and the tail checkpoint's bare
+    clause); no path yields a 500, a spurious eviction, or an error-level maintenance log.
+13. **Authorization is unchanged.** A collaborator with write access can still cite and
+    accept through the collab paths — asserted, because an earlier draft of §7.1 would
+    have revoked it.
+14. Pins stay at 5, and the slice's own tests say so.
