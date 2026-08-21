@@ -216,11 +216,11 @@ Create `tests/proposal_assist/test_f3d3b_conversion.py`:
 ```python
 """F3d3b — the two propose sites go onto the effect port, and F3d3 closes.
 
-Spec 2026-08-18 section 7 assigns three rows to F3d3. Two of them are DB-only writes
-(mechanism 1) and convert here. The third, _write_citekey_cache, is reached only from
-inside a transaction already holding the workspace commit mutex EXCLUSIVELY, so it needs
-an operation owning the whole git-then-rows sequence — mechanism 2, which
-ports/effects.py:118-119 says arrives in F3e. Its row moves there.
+Spec 2026-08-18 section 7 (as amended 2026-08-21) assigns TWO rows to F3d3, both DB-only
+writes on mechanism 1. It previously assigned three; _write_citekey_cache moved to F3e
+because it is reached only from inside a transaction already holding the workspace commit
+mutex EXCLUSIVELY, so the operation that fences it must own the whole git-then-rows
+sequence — mechanism 2, which section 3.5 and EFFECT_MECHANISMS place in F3e.
 """
 
 from __future__ import annotations
@@ -319,14 +319,25 @@ Change nothing else on that row.
 
 Then prove regeneration agrees rather than fights:
 
-```bash
-uv run python -m tests.fencing.regenerate_inventory
-git diff --exit-code tests/fencing/fence_inventory.json && echo "REGENERATION IS A NO-OP — the hand edit is what merge() now carries forward"
-```
-Expected: the echo fires. If regeneration reverts your edit, `merge()` does NOT preserve
-the stored slice the way this step claims — stop, because the whole task rests on it.
+**Not `git diff --exit-code`.** The edit is deliberate and uncommitted, so a diff against
+HEAD returns 1 no matter what regeneration does, and the `&&` success branch can never
+run. A first draft of this step did exactly that, and so did revision 0's Task 1 — the
+same mistake twice, which is why it is spelled out here. Compare the file against ITSELF,
+before and after:
 
-Then confirm the committed diff is exactly one line:
+```bash
+cp tests/fencing/fence_inventory.json /tmp/f3d3b-inv-before.json
+uv run python -m tests.fencing.regenerate_inventory
+diff -q /tmp/f3d3b-inv-before.json tests/fencing/fence_inventory.json \
+  && echo "REGENERATION IS A NO-OP — merge() carries the hand-edited slice forward" \
+  || echo "REGENERATION CHANGED THE FILE — see the diff below"
+diff /tmp/f3d3b-inv-before.json tests/fencing/fence_inventory.json
+```
+Expected: the NO-OP echo, and the second `diff` printing nothing. If regeneration reverts
+your edit, `merge()` does NOT preserve the stored slice the way this step claims — stop,
+because the whole task rests on it.
+
+Then confirm the change against HEAD is exactly one line:
 ```bash
 git diff --stat tests/fencing/fence_inventory.json
 ```
@@ -514,7 +525,32 @@ grep -n -B3 -A8 "submit_review_impl" src/call_manager/proposal_assist/tools/regi
 
 Do not invent a new wiring shape.
 
-- [ ] **Step 7: Fix the nine existing wrapper tests**
+- [ ] **Step 7: Fix `_make_ctx()` — the registry closure tests are consumers too**
+
+`_safe_tool` raises `RuntimeError` when `pass_ports=True` and `ctx.ports is None`
+(`registry.py:292-297`), BEFORE the impl is called and OUTSIDE its try/except. So every
+registry-level test that drives a converted tool through its closure breaks the moment
+you wire it — and a grep for the impl's NAME cannot find them, because they go through
+`_collect_tools`.
+
+Measured: `tests/proposal_assist/test_tools_registry.py:40` defines `_make_ctx()` with no
+`ports`, and **8 call sites use it**. Two drive tools this slice converts:
+`test_propose_edit_closure_returns_pending_envelope` (`:275`) and
+`test_propose_citation_closure_returns_error_envelope_for_bad_ref` (`:336`).
+
+Give `_make_ctx()` a ports bundle. Read how the F3d2 conversions did the same thing —
+they hit this exact wall — and follow it:
+
+```bash
+git log --oneline -S "_make_ctx" -- tests/proposal_assist/test_tools_registry.py | head -3
+git show <the F3d2 commit> -- tests/proposal_assist/test_tools_registry.py | head -40
+```
+
+If `_make_ctx()` already carries ports because F3d2 fixed it, say so and skip this step —
+but check, do not assume. The registry tests are the consumer class this plan's revisions
+have missed twice.
+
+- [ ] **Step 8: Fix the nine existing wrapper tests**
 
 ```bash
 grep -rn "propose_edit_impl\|propose_spec_edit_impl" tests/ --include=*.py
@@ -523,7 +559,7 @@ Each call site must now supply `ports=` and `invocation=`. **Change how they CAL
 change what they ASSERT.** If an assertion has to move for a test to pass, that is a
 behaviour change — stop and record it under PLAN DEFECTS.
 
-- [ ] **Step 8: Restate F3d3a's fenced-set literal**
+- [ ] **Step 9: Restate F3d3a's fenced-set literal**
 
 `tests/proposal_assist/test_f3d3a_relocation.py:170-186`
 (`test_no_tool_module_gained_a_port_call`) asserts the fenced set equals exactly F3d2's
@@ -534,22 +570,6 @@ Add the new pair to the literal set and change the F3d3 count assertion to `== 1
 the docstring: its claim was "F3d2's five and no more — F3d3a converts nothing", which was
 true of F3d3a and is not true here. Do NOT weaken it into something derived — the point of
 that test is that the set is written down.
-
-- [ ] **Step 9: Run everything**
-
-```bash
-uv run pytest -n 16 --dist loadfile -q > /tmp/f3d3b-2b.txt 2>&1; echo "SUITE_EXIT=$?"; tail -5 /tmp/f3d3b-2b.txt
-uv run pytest tests/fencing -q 2>&1 | tail -3
-```
-Expected: **3794 passed, 1 skipped** (3790 + this task's 4: the invocation-snapshot test
-plus the three-arm error-path parametrisation) and `tests/fencing` **RED on
-`test_the_inventory_matches_the_tree_exactly` only** — the JSON now disagrees with a fresh
-scan, and it stays that way until Task 4 regenerates.
-
-`test_each_slice_matches_its_declared_status` should still PASS: it reads the stored JSON,
-which has not been regenerated. If it fails, the JSON was regenerated early — find out by
-whom. If anything OUTSIDE `tests/fencing` is red, that is collateral this plan did not
-predict: record it under PLAN DEFECTS with the failing test names.
 
 - [ ] **Step 10: WRITE the error-path tests — they do not exist**
 
@@ -584,11 +604,18 @@ class _Ports:
 
 
 @pytest.mark.asyncio
+# Verified against ports/errors.py:27-36 and :63. WorkspaceGenerationStale requires BOTH
+# keyword arguments — `WorkspaceGenerationStale(wid)` raises TypeError at COLLECTION, so
+# a plan that guesses here does not even produce a red test. CommitMutexTimeout is a
+# plain RuntimeError subclass and takes no arguments.
+_WID = uuid.uuid4()
+
+
 @pytest.mark.parametrize(
     ("exc", "expected"),
     [
-        (WorkspaceGenerationStale(uuid.uuid4()), DELETED_ERROR_MESSAGE),
-        (CommitMutexTimeout(uuid.uuid4()), BUSY_ERROR_MESSAGE),
+        (WorkspaceGenerationStale(_WID, expected=_G, actual=_G + 1), DELETED_ERROR_MESSAGE),
+        (CommitMutexTimeout(), BUSY_ERROR_MESSAGE),
         (EffectRejected("this workspace is no longer accepting proposed changes"),
          "this workspace is no longer accepting proposed changes"),
     ],
@@ -614,11 +641,29 @@ async def test_the_artifact_edit_answers_every_port_error_as_an_error_dict(exc, 
     assert out == {"error": expected}
 ```
 
-Check `WorkspaceGenerationStale` and `CommitMutexTimeout`'s real constructor signatures in
-`ports/errors.py` before writing this — the arguments above are a guess and the plan says
-so. Import `_ctx_and_invocation` from the F3d2 module or copy it; do not re-derive it.
+`_ctx_and_invocation` and `_G` come from `tests/proposal_assist/test_f3d2_conversions.py`
+(`:19`, `:28`) — import them or copy them; do not re-derive. That helper builds a
+`ToolContext` with `repo_dir=None` and `session_factory=None`, which is FINE here because
+`_propose_artifact_edit_impl` touches neither: it validates `head`/`sections` and calls
+the port. It is NOT fine for `propose_citation_impl` — see Task 3 Step 7.
 
-- [ ] **Step 11: Prove the port is what refuses, not leftover tool logic**
+- [ ] **Step 11: Run everything**
+
+```bash
+uv run pytest -n 16 --dist loadfile -q > /tmp/f3d3b-2b.txt 2>&1; echo "SUITE_EXIT=$?"; tail -5 /tmp/f3d3b-2b.txt
+uv run pytest tests/fencing -q 2>&1 | tail -3
+```
+Expected: **3794 passed, 1 skipped** (3790 + this task's 4: the invocation-snapshot test
+plus the three-arm error-path parametrisation) and `tests/fencing` **RED on
+`test_the_inventory_matches_the_tree_exactly` only** — the JSON now disagrees with a fresh
+scan, and it stays that way until Task 4 regenerates.
+
+`test_each_slice_matches_its_declared_status` should still PASS: it reads the stored JSON,
+which has not been regenerated. If it fails, the JSON was regenerated early — find out by
+whom. If anything OUTSIDE `tests/fencing` is red, that is collateral this plan did not
+predict: record it under PLAN DEFECTS with the failing test names.
+
+- [ ] **Step 12: Prove the port is what refuses, not leftover tool logic**
 
 Now that a stale case exists, the mutation has something to bite. Temporarily change the
 `WorkspaceGenerationStale` arm to `raise`.
@@ -630,9 +675,11 @@ Expected: FAIL on the `WorkspaceGenerationStale` parametrisation only — the ot
 still return their dicts. A mutation that reddens all three means the arms are not
 independent and you have collapsed them.
 
-Restore from a copy (GC-6).
+Restore from a copy (GC-6), then **re-run the full suite and confirm it is green at the
+Step 11 total before committing.** A mutation left half-restored is the most common way a
+task commits a broken tree while its own report says green.
 
-- [ ] **Step 12: Commit**
+- [ ] **Step 13: Commit**
 
 ```bash
 uv run ruff check . --fix && uv run ruff check .
@@ -705,59 +752,17 @@ def test_the_citation_propose_writes_through_the_port_and_reads_through_a_sessio
     assert "propose_citation_insert(\n            session=" not in src
 
 
-@pytest.mark.asyncio
-async def test_a_tombstoned_reference_is_refused_and_writes_nothing(pg_session_factory):
-    """The check most likely to be lost, tested by BEHAVIOUR.
-
-    ReferenceView.is_tombstoned exists so the tool can tell 'no such reference' from
-    'tombstoned, cannot be cited' — two different messages to the agent. A conversion
-    that reads only `is None` collapses them, and a source grep for the message would be
-    satisfied by the COMMENT explaining it. This project has shipped a
-    comment-satisfiable test twice; do not make it three.
-
-    Seed a real tombstoned Reference, call the tool, assert the exact string AND that no
-    ProposedChange row landed.
-    """
-    from call_manager.db.models import ProposedChange
-    from call_manager.proposal_assist.port_impl import build_ports
-    from call_manager.proposal_assist.tools.citations import propose_citation_impl
-
-    # _seed_reference already exists at tests/proposal_assist/tools/test_propose_citation.py:51
-    # and is the house way to build a Reference + its chunks. Import it or copy it — do
-    # NOT reach for f3b_seeds.py, which has no Reference builder (verified: its complete
-    # def list is seed_workspace, bump_generation, seed_evaluator_job, seed_uncited_job,
-    # seed_review_item, seed_running_turn).
-    with pg_session_factory() as sess:
-        ws_id = seed_workspace(sess, generation=_G)
-        sess.commit()
-    ref_id = _seed_reference(pg_session_factory, ws_id, chunks=[(0, "s", "quote text")])
-    with pg_session_factory() as sess:
-        sess.get(Reference, ref_id).tombstoned_at = datetime.now(UTC)
-        sess.commit()
-
-    ctx, invocation = _ctx_and_invocation(ws_id)
-    out = await propose_citation_impl(
-        ctx,
-        ports=build_ports(pg_session_factory),
-        invocation=invocation,
-        reference_id=str(ref_id),
-        anchor="anchor",
-        chunk_index=0,
-        evidence_quote="q",
-    )
-    assert out == {"error": "reference is tombstoned and cannot be cited"}
-
-    with pg_session_factory() as sess:
-        assert sess.query(ProposedChange).filter_by(workspace_id=ws_id).count() == 0
-```
-
 - [ ] **Step 3: Run them to verify they fail**
 
 ```bash
 uv run pytest tests/proposal_assist/test_f3d3b_conversion.py -q -k "citation_propose or tombstone" > /tmp/f3d3b-3.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -20 /tmp/f3d3b-3.txt
 ```
-Expected: FAIL on `does not call the effect port`. The tombstone test passes already — it
-is a ratchet against the conversion, not a red-to-green step. Say so in your report.
+Expected: FAIL on `does not call the effect port`.
+
+The behavioural tombstone test is NOT written here. It calls the tool with `ports=` and
+`invocation=`, which do not exist until Step 4 — writing it now produces a `TypeError`,
+which is a red test that proves nothing about tombstones. It lands in Step 7 with the
+other tests that need the converted signature.
 
 - [ ] **Step 4: Convert the write only**
 
@@ -823,18 +828,7 @@ than passing vacuously.
 
 Same edit as Task 2 Step 8, one more pair, and the F3d3 fenced count becomes `== 2`.
 
-- [ ] **Step 7: Run everything**
-
-```bash
-uv run pytest -n 16 --dist loadfile -q > /tmp/f3d3b-3b.txt 2>&1; echo "SUITE_EXIT=$?"; tail -5 /tmp/f3d3b-3b.txt
-uv run pytest tests/fencing -q 2>&1 | tail -3
-```
-Expected: **3799 passed, 1 skipped** (3794 + this task's 5: the port-write test, the
-behavioural tombstone test, and the three-arm error-path parametrisation),
-`tests/fencing` still RED on
-`test_the_inventory_matches_the_tree_exactly` only.
-
-- [ ] **Step 8: Write this tool's error-path tests too**
+- [ ] **Step 7: Write this tool's error-path tests too**
 
 Same gap as Task 2 Step 10, same reason: `test_propose_citation.py` and
 `test_canonical_consumers.py` contain no stale, deleted or timeout case, so there is
@@ -846,8 +840,81 @@ through).
 
 `propose_citation_impl` reaches the port only after its reads succeed, so this test needs
 a seeded workspace, Reference and ReferenceChunk plus a real `ctx.agent_view_*` snapshot.
-Reuse the setup the existing `test_propose_citation.py` happy-path test already builds —
-read it and lift its arrangement rather than writing a new one.
+
+**Do NOT use `_ctx_and_invocation` from the F3d2 module here.** It builds a `ToolContext`
+with `repo_dir=None`, `session_factory=None` and no read snapshot
+(`test_f3d2_conversions.py:28-40`), so `propose_citation_impl` returns
+`"you haven't read the proposal yet — call read_proposal first"` and never reaches the
+reference lookup, the tombstone branch, or the port. Confirmed by running it. It is fine
+for `_propose_artifact_edit_impl`, which touches neither field.
+
+Lift the arrangement from `tests/proposal_assist/tools/test_propose_citation.py`'s
+happy-path test instead: it already builds a real repo, a `ToolContext` with a live
+`session_factory` and `repo_dir`, `_seed_reference(...)` (`:51`), and the
+`ctx.agent_view_head` / `agent_view_proposal` / `agent_view_sections` snapshot. Read that
+file and reuse its fixtures; do not write a new arrangement.
+
+Write the behavioural tombstone test here too, on that same arrangement:
+
+@pytest.mark.asyncio
+async def test_a_tombstoned_reference_is_refused_and_writes_nothing(pg_session_factory):
+    """The check most likely to be lost, tested by BEHAVIOUR.
+
+    ReferenceView.is_tombstoned exists so the tool can tell 'no such reference' from
+    'tombstoned, cannot be cited' — two different messages to the agent. A conversion
+    that reads only `is None` collapses them, and a source grep for the message would be
+    satisfied by the COMMENT explaining it. This project has shipped a
+    comment-satisfiable test twice; do not make it three.
+
+    Seed a real tombstoned Reference, call the tool, assert the exact string AND that no
+    ProposedChange row landed.
+    """
+    from call_manager.db.models import ProposedChange
+    from call_manager.proposal_assist.port_impl import build_ports
+    from call_manager.proposal_assist.tools.citations import propose_citation_impl
+
+    # _seed_reference already exists at tests/proposal_assist/tools/test_propose_citation.py:51
+    # and is the house way to build a Reference + its chunks. Import it or copy it — do
+    # NOT reach for f3b_seeds.py, which has no Reference builder (verified: its complete
+    # def list is seed_workspace, bump_generation, seed_evaluator_job, seed_uncited_job,
+    # seed_review_item, seed_running_turn).
+    with pg_session_factory() as sess:
+        ws_id = seed_workspace(sess, generation=_G)
+        sess.commit()
+    ref_id = _seed_reference(pg_session_factory, ws_id, chunks=[(0, "s", "quote text")])
+    with pg_session_factory() as sess:
+        sess.get(Reference, ref_id).tombstoned_at = datetime.now(UTC)
+        sess.commit()
+
+    ctx, invocation = _ctx_and_invocation(ws_id)
+    out = await propose_citation_impl(
+        ctx,
+        ports=build_ports(pg_session_factory),
+        invocation=invocation,
+        reference_id=str(ref_id),
+        anchor="anchor",
+        chunk_index=0,
+        evidence_quote="q",
+    )
+    assert out == {"error": "reference is tombstoned and cannot be cited"}
+
+    with pg_session_factory() as sess:
+        assert sess.query(ProposedChange).filter_by(workspace_id=ws_id).count() == 0
+```
+
+Its `_seed_reference` returns the reference id; set `tombstoned_at` in a second session and
+commit before calling the tool.
+
+- [ ] **Step 8: Run everything**
+
+```bash
+uv run pytest -n 16 --dist loadfile -q > /tmp/f3d3b-3b.txt 2>&1; echo "SUITE_EXIT=$?"; tail -5 /tmp/f3d3b-3b.txt
+uv run pytest tests/fencing -q 2>&1 | tail -3
+```
+Expected: **3799 passed, 1 skipped** (3794 + this task's 5: the port-write test, the
+behavioural tombstone test, and the three-arm error-path parametrisation),
+`tests/fencing` still RED on
+`test_the_inventory_matches_the_tree_exactly` only.
 
 - [ ] **Step 9: Prove the port is what writes, and the tool still validates**
 
@@ -860,6 +927,9 @@ Two mutations, both restored from a copy afterwards (GC-6):
    `{"error": ...}` stay green. That separates "the port does the write" from "the tool
    still validates" — and it is the check that would catch a conversion which quietly
    stopped calling the port at all.
+
+Restore both from a copy (GC-6), then **re-run the full suite and confirm it is green at
+the Step 8 total before committing.**
 
 - [ ] **Step 10: Commit**
 

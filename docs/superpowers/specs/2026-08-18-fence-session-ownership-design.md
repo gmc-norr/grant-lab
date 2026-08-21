@@ -412,7 +412,7 @@ F3a must, in the same slice:
   `lock_timeout` and then raises — reproduced against a real `pgvector:pg16` container,
   and warned about in `port_impl/effects.py`'s own module docstring. §3.5 already says an
   effect spanning DB and git needs an operation owning the entire sequence under the
-  mutex, and §5's mechanism table says the exclusive-mutex mechanism arrives in F3e. So
+  mutex, and §3.5's mechanism rule — and `EFFECT_MECHANISMS`, which encodes it — says the exclusive-mutex mechanism arrives in F3e. So
   the row belongs with the mechanism that can fence it. F3d3 keeps exactly the two rows
   that share mechanism 1.
 - replace both inertness guards with **scoped per-sub-slice obligations** — "nothing
@@ -481,8 +481,15 @@ the effects/domain layer and updates **every non-tool consumer** — then conver
 `propose_citation_impl`, `_propose_artifact_edit_impl`, `submit_review_impl`,
 `submit_scorecard_impl` and `submit_uncited_claims_impl` to effect operations, the
 two `references.py` accounting sites to owner-bound operations, and every remaining
-read to a query port returning DTOs. `caller_fenced` and the `accepting.py`
-injection retire with the move.
+read to a query port returning DTOs.
+
+**Revised 2026-08-21 (F3d3b).** Revision 8 said "`caller_fenced` and the `accepting.py`
+injection retire with the move". The move happened in F3d3a and they did not. The one
+`caller_fenced` row, `_write_citekey_cache`, is fenced by `_insert_citation_locked`, which
+holds the commit mutex EXCLUSIVELY — so the category cannot retire until an operation owns
+that whole sequence, which is F3e's (see §7's allocation note). What the move DID retire is
+the reason the category was unavoidable: the code is now outside `tools/`, so its fencing
+is an ordinary mechanism question rather than a tool-boundary exemption.
 
 The attached-instance requirement in `compute_citation_insert` is legitimate — it
 just belongs *inside* the relocated core, never across the tool boundary.
