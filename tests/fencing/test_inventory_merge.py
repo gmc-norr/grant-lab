@@ -112,7 +112,7 @@ def test_regeneration_preserves_every_human_slice_assignment():
     merged = merge(load_inventory(), sites, renames={}, fenced_ids=fenced_ids)
     after = {(r["kind"], r["path"], r["symbol"]): r["slice"] for r in merged}
     assert after == before, "regeneration changed a human slice assignment"
-    assert len(after) == 20
+    assert len(after) == 29
 
 
 def test_a_rename_can_move_a_row_into_the_relocated_scope():

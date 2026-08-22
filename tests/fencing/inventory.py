@@ -11,6 +11,7 @@ from tests.fencing.detectors import (
     KIND_TOOL_COMMIT,
     KIND_TOOL_CONTEXT,
     Site,
+    find_fenced_git_commits,
     find_fenced_tool_commits,
     find_sites,
 )
@@ -46,7 +47,7 @@ CATEGORIES_BY_KIND = {
 #: Kinds whose `fenced` is RECOMPUTED from source on every regeneration rather than
 #: carried forward. A kind outside this set keeps its stored flag — `is this a port
 #: call` is meaningless for a claim function.
-MEASURED_KINDS = frozenset({KIND_TOOL_COMMIT})
+MEASURED_KINDS = frozenset({KIND_TOOL_COMMIT, KIND_GIT_COMMIT})
 CATEGORIES = frozenset().union(*CATEGORIES_BY_KIND.values())
 
 #: EXEMPTION PINS. `accounting` and `caller_fenced` short-circuit the semantic
@@ -237,7 +238,7 @@ class BadRenameMap(RuntimeError):
 def scan_tree() -> tuple[set[Site], set[tuple[str, str, str]]]:
     """The sites, and the identities the code proves are port-only.
 
-    Returns a PAIR since F3d2: `fenced` for a tool_commit is measured, not stored,
+    Returns a PAIR since F3d2: `fenced` for MEASURED_KINDS is measured, not stored,
     so every caller that merges needs both halves and cannot forget the second.
     """
     sites: set[Site] = set()
@@ -249,6 +250,7 @@ def scan_tree() -> tuple[set[Site], set[tuple[str, str, str]]]:
         source = p.read_text(encoding="utf-8")
         sites |= find_sites(source, rel)
         fenced_ids |= find_fenced_tool_commits(source, rel)
+        fenced_ids |= find_fenced_git_commits(source, rel)
     return sites, fenced_ids
 
 
@@ -265,9 +267,9 @@ def merge(
     """Fold *found* into *previous*, preserving `category` and every declared
     optional key.
 
-    `fenced` is NOT preserved for a `tool_commit`: since F3d2 it is MEASURED from
-    the source via *fenced_ids*, so a hand-edited flag does not survive a
-    regeneration. Every other kind still carries its stored value forward.
+    `fenced` is NOT preserved for any kind in MEASURED_KINDS: since F3d2 it is
+    MEASURED from the source via *fenced_ids*, so a hand-edited flag does not
+    survive a regeneration. Every other kind still carries its stored value forward.
 
     Validates the WHOLE rename map up front, then aborts if any previously-fenced
     identity is still missing.
@@ -301,11 +303,11 @@ def merge(
             "path": s.path,
             "symbol": s.symbol,
             "category": prev["category"] if prev else UNCLASSIFIED,
-            # F3d2: for a tool_commit, `fenced` is MEASURED from the source, never
-            # carried forward. It was a human boolean that nothing checked, which
-            # made "slice complete" an assertion rather than a proof. Other kinds
-            # keep the stored flag: `is this a port call` is meaningless for a
-            # claim function.
+            # F3d2+F3e1a: for any kind in MEASURED_KINDS (tool_commit, git_commit),
+            # `fenced` is MEASURED from the source, never carried forward. It was a
+            # human boolean that nothing checked, which made "slice complete" an
+            # assertion rather than a proof. Other kinds keep the stored flag: `is
+            # this a port call` is meaningless for a claim function.
             "fenced": (
                 (s.kind, s.path, s.symbol) in fenced_ids
                 if s.kind in MEASURED_KINDS

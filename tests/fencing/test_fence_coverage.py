@@ -428,6 +428,89 @@ def test_the_ingest_row_is_untouched_and_still_f3e2():
     assert row["fenced"] is False
 
 
+def test_the_inventory_git_flags_match_the_tree():
+    """The git half of the measurement. A hand-edited `fenced: true` on a git row
+    does not survive a regeneration, so `complete` cannot be claimed over an
+    unconverted git site."""
+    from tests.fencing.inventory import load_inventory, scan_tree
+
+    _sites, fenced_ids = scan_tree()
+    problems = [
+        f"{row['path']}::{row['symbol']} says fenced={row['fenced']}"
+        for row in load_inventory()
+        if row["kind"] == "git_commit"
+        and row["fenced"] is not ((row["kind"], row["path"], row["symbol"]) in fenced_ids)
+    ]
+    assert not problems, (
+        "git_commit rows whose fenced flag disagrees with the code:\n  "
+        + "\n  ".join(problems)
+        + "\n\nRegenerate the inventory; do not edit the flag by hand."
+    )
+
+
+def test_the_measurement_is_the_shared_predicate_and_nothing_more():
+    """Task 5 owns the rule and its ten shape tests. What this asserts is that the
+    measurement ADDS no rule of its own — the two cannot disagree if one delegates.
+    Spec §3.7."""
+    from tests.fencing.detectors import find_fenced_git_commits
+    from tests.fencing.git_fence import fenced_qualnames
+
+    src = (
+        "def f(session, wid, stamp, repo):\n"
+        "    acquire_commit_mutex_at_generation(session, wid, generation=stamp.generation)\n"
+        "    return write_and_commit_files(repo, {}, 'm')\n"
+    )
+    assert find_fenced_git_commits(src, "x/f.py") == {
+        ("git_commit", "x/f.py", q) for q in fenced_qualnames(src, "x/f.py")
+    }
+    # And the ordering rule reaches the measurement, not just the checker:
+    after = (
+        "def f(session, wid, stamp, repo):\n"
+        "    write_and_commit_files(repo, {}, 'm')\n"
+        "    acquire_commit_mutex_at_generation(session, wid, generation=stamp.generation)\n"
+    )
+    assert find_fenced_git_commits(after, "x/f.py") == set()
+
+
+def test_an_aliased_sink_import_is_still_discovered():
+    """Revision 1 claimed every git-committing function is discovered; that was
+    false for an aliased import. No alias exists in the tree — this keeps it that
+    way honestly rather than by luck."""
+    from tests.fencing.detectors import find_sites
+
+    src = (
+        "from call_manager.proposal_assist.citations.gitio import "
+        "write_and_commit_files as commit_files\n"
+        "def f(repo):\n"
+        "    return commit_files(repo, {}, 'm')\n"
+    )
+    assert any(s.kind == "git_commit" and s.symbol == "f" for s in find_sites(src, "x/f.py"))
+
+
+def test_run_git_is_a_site_only_when_its_argv_commits():
+    """_run_git also runs init/add/rev-list. Only a commit argv makes its caller a
+    git-commit site, or phase 0 would own three spurious rows."""
+    from tests.fencing.detectors import find_sites
+
+    commits = "def f(d):\n    _run_git(['commit', '-q', '-m', 'x'], cwd=d)\n"
+    inits = "def g(d):\n    _run_git(['init', '-q'], cwd=d)\n"
+    assert any(s.kind == "git_commit" for s in find_sites(commits, "x/s.py"))
+    assert not any(s.kind == "git_commit" for s in find_sites(inits, "x/s.py"))
+
+
+def test_an_aliased_run_git_keeps_its_argv_rule():
+    """An alias must keep its CANONICAL identity, not just a local spelling. An
+    earlier draft resolved aliases to local names and then tested the local name
+    against "_run_git" — so aliased `run_git(['init'])` was wrongly a commit."""
+    from tests.fencing.detectors import find_sites
+
+    head = "from call_manager.proposal_assist.phases.setup import _run_git as run_git\n"
+    commits = head + "def f(d):\n    run_git(['commit', '-q', '-m', 'x'], cwd=d)\n"
+    inits = head + "def g(d):\n    run_git(['init', '-q'], cwd=d)\n"
+    assert any(s.kind == "git_commit" for s in find_sites(commits, "x/s.py"))
+    assert not any(s.kind == "git_commit" for s in find_sites(inits, "x/s.py"))
+
+
 def test_slice_status_has_no_f3e_key_and_has_all_three_f3e1a_keys():
     """F3e1a Task 4 splits the single F3e key into F3e1a / F3e1b / F3e2.
 

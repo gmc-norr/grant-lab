@@ -107,13 +107,20 @@ def _is_commit_call(canonical: str, node: ast.Call) -> bool:
 def _sink_bindings(tree: ast.AST) -> dict[str, str]:
     """Return a map of local-name → canonical-sink-name for any alias assignments.
 
-    Handles patterns like ``wac = write_and_commit_files`` so that a later call
-    to ``wac(...)`` still matches the canonical sink identity and the argv rule
-    applies correctly.
+    Handles two aliasing patterns so that a call to the local alias still matches
+    the canonical sink identity and the argv rule applies correctly:
+
+    1. ``from some.module import write_and_commit_files as wac`` — ImportFrom with
+       an asname for a canonical sink name.
+    2. ``wac = write_and_commit_files`` — assignment-based alias.
     """
     bindings: dict[str, str] = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and (
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name in _SINK_NAMES and alias.asname:
+                    bindings[alias.asname] = alias.name
+        elif isinstance(node, ast.Assign) and (
             isinstance(node.value, ast.Name) and node.value.id in _SINK_NAMES
         ):
             # simple_value = canonical_sink

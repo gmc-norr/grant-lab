@@ -20,6 +20,7 @@ from typing import NamedTuple
 
 from call_manager.proposal_assist.ports.accounting import Accounting
 from call_manager.proposal_assist.ports.effects import Effects
+from tests.fencing.git_fence import fenced_qualnames, sink_calls
 
 KIND_TOOL_COMMIT = "tool_commit"
 KIND_CLAIM_FN = "claim_fn"
@@ -183,6 +184,13 @@ def find_sites(source: str, path: str) -> set[Site]:
             visit(child, stack)
 
     visit(tree, [])
+
+    # Git-commit sites: repo-wide, not scoped to _in_effect_scope. Git effects
+    # live in services, exactly as KIND_CLAIM_FN is discovered repo-wide.
+    # sink_calls takes SOURCE TEXT, not a tree — it calls ast.parse internally.
+    for qual, _node, _stmt_index in sink_calls(source, path):
+        sites.add(Site(KIND_GIT_COMMIT, path, qual))
+
     return sites
 
 
@@ -221,3 +229,15 @@ def find_fenced_tool_commits(source: str, path: str) -> set[tuple[str, str, str]
 
     visit(tree, [])
     return {(KIND_TOOL_COMMIT, path, q) for q in port_calls - raw_commits}
+
+
+def find_fenced_git_commits(source: str, path: str) -> set[tuple[str, str, str]]:
+    """`(kind, path, symbol)` for every git-committing qualname that is FENCED.
+
+    Derived from `git_fence.fenced_qualnames`, which is the SAME predicate the gate
+    in test_live_mutex_gate.py uses. This function must contain no rule of its own:
+    spec §3.7 requires one predicate, because two that must agree eventually will
+    not — and in an earlier draft of this plan they disagreed immediately, the
+    measurement accepting a sink that ran BEFORE its acquisition.
+    """
+    return {(KIND_GIT_COMMIT, path, q) for q in fenced_qualnames(source, path)}
