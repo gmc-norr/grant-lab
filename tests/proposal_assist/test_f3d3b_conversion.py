@@ -34,11 +34,11 @@ def test_the_citekey_row_belongs_to_the_slice_whose_mechanism_it_needs():
     """
     from tests.fencing.inventory import F3D_IDENTITIES, load_inventory
 
-    assert ("F3e", "tool_commit", "_write_citekey_cache") in F3D_IDENTITIES
+    assert ("F3e2", "tool_commit", "_write_citekey_cache") in F3D_IDENTITIES   # was "F3e"
     assert ("F3d3", "tool_commit", "_write_citekey_cache") not in F3D_IDENTITIES
 
     row = next(r for r in load_inventory() if r["symbol"] == "_write_citekey_cache")
-    assert row["slice"] == "F3e"
+    assert row["slice"] == "F3e2"                                              # was "F3e"
     assert row["fenced"] is False
 
 

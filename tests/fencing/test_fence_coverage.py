@@ -412,11 +412,11 @@ def test_f3d2_is_complete_and_every_row_it_owns_is_measured_fenced():
         assert (row["kind"], row["path"], row["symbol"]) in fenced_ids, row["symbol"]
 
 
-def test_the_ingest_row_is_untouched_and_still_f3e():
+def test_the_ingest_row_is_untouched_and_still_f3e2():
     """The boundary this slice must not cross. fetch_reference_impl._do_fetch_and_ingest
-    is a SEPARATE nested identity (references.py:551) holding the ingest commit at
-    :580. F3d2 converts the accounting around it and leaves it alone — which is also
-    why fetch_reference_impl itself CAN go green here."""
+    is a SEPARATE nested identity holding the ingest commit. F3d2 converted the
+    accounting around it and left it alone; F3e1a discovers git sites but converts
+    nothing, so it is still unfenced and now sits in F3e2."""
     from tests.fencing.inventory import load_inventory
 
     row = next(
@@ -424,5 +424,18 @@ def test_the_ingest_row_is_untouched_and_still_f3e():
         for r in load_inventory()
         if r["symbol"] == "fetch_reference_impl._do_fetch_and_ingest"
     )
-    assert row["slice"] == "F3e"
+    assert row["slice"] == "F3e2"
     assert row["fenced"] is False
+
+
+def test_slice_status_has_no_f3e_key_and_has_all_three_f3e1a_keys():
+    """F3e1a Task 4 splits the single F3e key into F3e1a / F3e1b / F3e2.
+
+    This asserts the split is complete: the old key is gone (so no inventory row
+    can land in an unknown slice via the old string) and all three new keys exist
+    with the correct statuses.
+    """
+    assert "F3e" not in SLICE_STATUS, "stale F3e key still present in SLICE_STATUS"
+    assert SLICE_STATUS.get("F3e1a") == "complete"
+    assert SLICE_STATUS.get("F3e1b") == "pending"
+    assert SLICE_STATUS.get("F3e2") == "pending"

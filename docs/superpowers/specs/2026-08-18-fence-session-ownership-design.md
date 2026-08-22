@@ -504,6 +504,15 @@ just belongs *inside* the relocated core, never across the tool boundary.
 
 ### F3e — the ingest pipeline, and the mechanism-2 effects
 
+**Revised 2026-08-22 (F3e1a Task 4).** F3e is split into three sub-slices for the same
+reason F3d was: SLICE_STATUS has no partial state, so a multi-slice conversion needs one
+key per slice or the first flipped row goes red. The three keys are `F3e1a` (complete —
+the carrier, the git detector, the gates; no inventory row of its own), `F3e1b` (pending
+— the git-effect conversions), and `F3e2` (pending — the ingest pipeline and the
+filesystem effects). The mechanism-2 effects (including `_write_citekey_cache`) are fenced
+by **converting the mutex acquisition**, not by a port operation; the argument is in
+`2026-08-21-fence-f3e1-git-mechanism-design.md` §9.
+
 F3e is where the **exclusive-mutex mechanism** arrives (§3.5's rule, encoded in
 `EFFECT_MECHANISMS`),
 so it owns every effect that spans the DB and either git or the filesystem — not only
