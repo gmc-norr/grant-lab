@@ -11,6 +11,8 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
+from call_manager.proposal_assist.ports.errors import UnfencedInvocation
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class FenceStamp:
@@ -50,3 +52,36 @@ class Provenance:
     triggering_turn_id: uuid.UUID | None
     triggering_prompt: str | None
     created_by: int | None
+
+
+def stamp_for_workspace(workspace) -> FenceStamp:
+    """The fencing identity of an actor holding a Workspace it just loaded.
+
+    The service-side twin of `Invocation.stamp()`. Tools get their stamp from
+    dispatch; a route, the collab kernel and a maintenance pass get it here, from
+    the object whose access check or liveness pre-screen they have already run.
+    Spec 2026-08-21 §7.0.2.
+
+    *workspace* is duck-typed on purpose — it needs `.id` and
+    `.lifecycle_generation` and nothing else. Annotating it `Workspace` would put
+    `db.models` in this module's import graph, and the whole point of the ports
+    package is that it names nothing from the app (it is stdlib-only, so a route,
+    the kernel and a background job can all import it).
+
+    The job fields are None because a request is not a background job — the same
+    None `registry.py` already writes for interactive contexts, by design.
+
+    Raises UnfencedInvocation rather than defaulting, for the reason
+    Invocation.stamp() gives: an actor with no claimed generation has no belief to
+    fence against, and defaulting would submit an effect against a generation
+    nobody claimed. Generation 0 is REAL (Workspace.lifecycle_generation has
+    server_default 0), so this tests for None, never for falsiness.
+    """
+    if workspace.lifecycle_generation is None:
+        raise UnfencedInvocation(workspace.id)
+    return FenceStamp(
+        workspace_id=workspace.id,
+        generation=workspace.lifecycle_generation,
+        active_turn_job_id=None,
+        origin_job_id=None,
+    )
