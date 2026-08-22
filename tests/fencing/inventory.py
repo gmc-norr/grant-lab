@@ -7,6 +7,7 @@ import pathlib
 
 from tests.fencing.detectors import (
     KIND_CLAIM_FN,
+    KIND_GIT_COMMIT,
     KIND_TOOL_COMMIT,
     KIND_TOOL_CONTEXT,
     Site,
@@ -18,12 +19,15 @@ REPO = pathlib.Path(__file__).resolve().parents[2]
 SRC = REPO / "src" / "call_manager"
 INVENTORY = pathlib.Path(__file__).resolve().parent / "fence_inventory.json"
 
-_SLICE_FOR_KIND = {KIND_CLAIM_FN: "F4"}   # a NEW claim fn still defaults to F4
-_DEFAULT_SLICE = "F3d2"                   # was "F3d", split in F3d1
-
 #: A site no human has classified yet. The gate REFUSES these, so a regeneration
 #: cannot quietly admit an unreviewed effect site.
 UNCLASSIFIED = "UNCLASSIFIED"
+
+_SLICE_FOR_KIND = {
+    KIND_CLAIM_FN: "F4",          # a NEW claim fn still defaults to F4
+    KIND_GIT_COMMIT: UNCLASSIFIED,  # a NEW git site stops the build until allocated
+}
+_DEFAULT_SLICE = "F3d2"                   # was "F3d", split in F3d1
 
 #: Which categories each kind may declare. Without this, a future tool_context
 #: could be classified `accounting` and verify() would return success before its
@@ -32,7 +36,17 @@ CATEGORIES_BY_KIND = {
     KIND_TOOL_COMMIT: frozenset({"semantic", "accounting", "caller_fenced", UNCLASSIFIED}),
     KIND_TOOL_CONTEXT: frozenset({"semantic", UNCLASSIFIED}),
     KIND_CLAIM_FN: frozenset({"semantic", UNCLASSIFIED}),
+    # `semantic` only, and deliberately NO caller_fenced analogue: a caller's
+    # transaction can fence a DB write, but nothing anyone else's transaction does
+    # can fence a git commit. Either the function takes the mutex at a generation
+    # itself or the effect is unfenced — there is no third party to defer to.
+    KIND_GIT_COMMIT: frozenset({"semantic", UNCLASSIFIED}),
 }
+
+#: Kinds whose `fenced` is RECOMPUTED from source on every regeneration rather than
+#: carried forward. A kind outside this set keeps its stored flag — `is this a port
+#: call` is meaningless for a claim function.
+MEASURED_KINDS = frozenset({KIND_TOOL_COMMIT})
 CATEGORIES = frozenset().union(*CATEGORIES_BY_KIND.values())
 
 #: EXEMPTION PINS. `accounting` and `caller_fenced` short-circuit the semantic
@@ -215,14 +229,14 @@ class BadRenameMap(RuntimeError):
     believe a rename carried a proof across when it did not."""
 
 
-def scan_tree() -> tuple[set[Site], set[tuple[str, str]]]:
+def scan_tree() -> tuple[set[Site], set[tuple[str, str, str]]]:
     """The sites, and the identities the code proves are port-only.
 
     Returns a PAIR since F3d2: `fenced` for a tool_commit is measured, not stored,
     so every caller that merges needs both halves and cannot forget the second.
     """
     sites: set[Site] = set()
-    fenced_ids: set[tuple[str, str]] = set()
+    fenced_ids: set[tuple[str, str, str]] = set()
     for p in sorted(SRC.rglob("*.py")):
         if "__pycache__" in p.parts:
             continue
@@ -241,7 +255,7 @@ def merge(
     previous: list[dict],
     found: set[Site],
     renames: dict[tuple[str, str, str], tuple[str, str, str]] | None,
-    fenced_ids: set[tuple[str, str]],
+    fenced_ids: set[tuple[str, str, str]],
 ) -> list[dict]:
     """Fold *found* into *previous*, preserving `category` and every declared
     optional key.
@@ -288,8 +302,8 @@ def merge(
             # keep the stored flag: `is this a port call` is meaningless for a
             # claim function.
             "fenced": (
-                (s.path, s.symbol) in fenced_ids
-                if s.kind == KIND_TOOL_COMMIT
+                (s.kind, s.path, s.symbol) in fenced_ids
+                if s.kind in MEASURED_KINDS
                 else (prev["fenced"] if prev else False)
             ),
             "slice": (

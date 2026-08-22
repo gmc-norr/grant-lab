@@ -24,6 +24,7 @@ from call_manager.proposal_assist.ports.effects import Effects
 KIND_TOOL_COMMIT = "tool_commit"
 KIND_CLAIM_FN = "claim_fn"
 KIND_TOOL_CONTEXT = "tool_context"
+KIND_GIT_COMMIT = "git_commit"
 
 _TOOLS_DIR = "/proposal_assist/tools/"
 _PROPOSAL_ASSIST = "/proposal_assist/"
@@ -185,8 +186,8 @@ def find_sites(source: str, path: str) -> set[Site]:
     return sites
 
 
-def find_fenced_tool_commits(source: str, path: str) -> set[tuple[str, str]]:
-    """`(path, symbol)` for every qualname IN EFFECT SCOPE that writes ONLY through
+def find_fenced_tool_commits(source: str, path: str) -> set[tuple[str, str, str]]:
+    """`(kind, path, symbol)` for every qualname IN EFFECT SCOPE that writes ONLY through
     a port.
 
     Port call AND no raw commit. A qualname holding both is half-converted, and
@@ -219,4 +220,4 @@ def find_fenced_tool_commits(source: str, path: str) -> set[tuple[str, str]]:
             visit(child, stack)
 
     visit(tree, [])
-    return {(path, q) for q in port_calls - raw_commits}
+    return {(KIND_TOOL_COMMIT, path, q) for q in port_calls - raw_commits}

@@ -10,6 +10,7 @@ from tests.fencing.inventory import (
     F3A_COLUMN_FILES,
     F3D_IDENTITIES,
     FENCING_IMPORT_FILES,
+    MEASURED_KINDS,
     NON_SEMANTIC_PINS,
     REPO,
     RETAINED_PINS,
@@ -300,7 +301,9 @@ def test_a_fully_converted_site_is_measured_as_fenced():
         pathlib.Path(__file__).parent / "fixtures" / "converted_site.py"
     ).read_text(encoding="utf-8")
     path = "src/call_manager/proposal_assist/tools/scorecard.py"
-    assert find_fenced_tool_commits(src, path) == {(path, "submit_scorecard_impl")}
+    assert find_fenced_tool_commits(src, path) == {
+        ("tool_commit", path, "submit_scorecard_impl")
+    }
 
 
 def test_a_half_converted_site_is_not_fenced():
@@ -333,7 +336,7 @@ def test_the_inventory_fenced_flags_match_the_tree():
         f"{row['path']}::{row['symbol']} says fenced={row['fenced']}"
         for row in load_inventory()
         if row["kind"] == "tool_commit"
-        and row["fenced"] is not ((row["path"], row["symbol"]) in fenced_ids)
+        and row["fenced"] is not ((row["kind"], row["path"], row["symbol"]) in fenced_ids)
     ]
     assert not problems, (
         "tool_commit rows whose fenced flag disagrees with the code:\n  "
@@ -342,23 +345,27 @@ def test_the_inventory_fenced_flags_match_the_tree():
     )
 
 
-def test_non_tool_commit_rows_keep_their_stored_flag():
+def test_unmeasured_kinds_keep_their_stored_flag():
     """Scoping, tested against merge() ITSELF rather than against the file.
 
     Reading load_inventory() here would prove nothing: it reports what the JSON
     says, and the JSON says F3a is fenced because a human wrote that. The claim
     under test is about the CODE — that merge() applies the measured flag only to
-    tool_commit rows — so drive merge() with a fenced_ids set that would flip an
-    F3a row if the kind check were missing.
+    kinds in MEASURED_KINDS — so drive merge() with an EMPTY fenced_ids set that
+    would flip an F3a row if the kind check were missing.
+
+    F3e1a widened this from "only tool_commit" to MEASURED_KINDS, which now also
+    holds git_commit. claim_fn and tool_context stay stored-flag kinds.
     """
     previous = load_inventory()
     f3a = [r for r in previous if r["slice"] == "F3a"]
     assert len(f3a) == 9
     assert all(r["kind"] in {"claim_fn", "tool_context"} for r in f3a)
+    assert not ({"claim_fn", "tool_context"} & MEASURED_KINDS), (
+        "this test's premise is that these kinds are NOT measured"
+    )
 
     found, _measured = scan_tree()
-    # Deliberately EMPTY: nothing is measured as port-only. A merge() that ignored
-    # `kind` would therefore unfence every F3a row.
     merged = merge(previous, found, None, set())
     by_id = {(r["kind"], r["path"], r["symbol"]): r for r in merged}
     for row in f3a:
@@ -402,7 +409,7 @@ def test_f3d2_is_complete_and_every_row_it_owns_is_measured_fenced():
     assert len(owned) == 5
     for row in owned:
         assert row["fenced"] is True, row["symbol"]
-        assert (row["path"], row["symbol"]) in fenced_ids, row["symbol"]
+        assert (row["kind"], row["path"], row["symbol"]) in fenced_ids, row["symbol"]
 
 
 def test_the_ingest_row_is_untouched_and_still_f3e():

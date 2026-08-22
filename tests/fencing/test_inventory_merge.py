@@ -45,7 +45,9 @@ def test_a_new_site_arrives_unclassified_and_unfenced():
 def test_an_unchanged_site_keeps_flag_and_category():
     # F3d2: tool_commit fenced flag is measured, not stored. Pass it in fenced_ids
     # to get fenced=True in output.
-    out = merge([_row("alpha", fenced=True)], {_site("alpha")}, None, {(P, "alpha")})
+    out = merge(
+        [_row("alpha", fenced=True)], {_site("alpha")}, None, {(KIND_TOOL_COMMIT, P, "alpha")}
+    )
     assert out[0]["fenced"] is True
     assert out[0]["category"] == "semantic"
 
@@ -76,7 +78,7 @@ def test_a_rename_carries_the_flag_and_the_extra_fields_across():
     renames = {(KIND_TOOL_COMMIT, P, "alpha"): (KIND_TOOL_COMMIT, P, "beta")}
     # F3d2: tool_commit fenced flag is measured from fenced_ids. Pass the renamed
     # identity to preserve its fenced status.
-    out = merge(prev, {_site("beta")}, renames, {(P, "beta")})
+    out = merge(prev, {_site("beta")}, renames, {(KIND_TOOL_COMMIT, P, "beta")})
     assert len(out) == 1
     assert out[0]["symbol"] == "beta"
     assert out[0]["fenced"] is True

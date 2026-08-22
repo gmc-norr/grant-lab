@@ -314,7 +314,7 @@ def test_the_fenced_measurement_uses_the_same_scope():
     assert find_fenced_tool_commits(src, path) == set()
     converted = src.replace("session.commit()", "ports.effects.submit_review(a, b)")
     assert find_fenced_tool_commits(converted, path) == {
-        (path, "_write_citekey_cache")
+        ("tool_commit", path, "_write_citekey_cache")
     }
 
 

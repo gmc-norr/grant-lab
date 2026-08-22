@@ -173,22 +173,38 @@ def test_no_tool_module_gained_a_port_call():
 
     _sites, fenced = scan_tree()
     assert fenced == {
-        ("src/call_manager/proposal_assist/tools/scorecard.py", "submit_scorecard_impl"),
-        ("src/call_manager/proposal_assist/tools/review_submit.py", "submit_review_impl"),
         (
+            "tool_commit",
+            "src/call_manager/proposal_assist/tools/scorecard.py",
+            "submit_scorecard_impl",
+        ),
+        (
+            "tool_commit",
+            "src/call_manager/proposal_assist/tools/review_submit.py",
+            "submit_review_impl",
+        ),
+        (
+            "tool_commit",
             "src/call_manager/proposal_assist/tools/uncited_claims.py",
             "submit_uncited_claims_impl",
         ),
-        ("src/call_manager/proposal_assist/tools/references.py", "fetch_reference_impl"),
         (
+            "tool_commit",
+            "src/call_manager/proposal_assist/tools/references.py",
+            "fetch_reference_impl",
+        ),
+        (
+            "tool_commit",
             "src/call_manager/proposal_assist/tools/references.py",
             "fetch_reference_impl._refund_fetch_slot",
         ),
         (
+            "tool_commit",
             "src/call_manager/proposal_assist/tools/proposal.py",
             "_propose_artifact_edit_impl",
         ),
         (
+            "tool_commit",
             "src/call_manager/proposal_assist/tools/citations.py",
             "propose_citation_impl",
         ),
@@ -199,16 +215,18 @@ def test_no_tool_module_gained_a_port_call():
     # F3d3 rows fenced=false here — the SCAN is the source of truth for what the code
     # actually does now.
     f3d3_sites = {
-        (r["path"], r["symbol"])
+        (r["kind"], r["path"], r["symbol"])
         for r in load_inventory()
         if r["slice"] == "F3d3"
     }
     assert len(f3d3_sites & fenced) == 2
     assert (
+        "tool_commit",
         "src/call_manager/proposal_assist/tools/proposal.py",
         "_propose_artifact_edit_impl",
     ) in fenced
     assert (
+        "tool_commit",
         "src/call_manager/proposal_assist/tools/citations.py",
         "propose_citation_impl",
     ) in fenced
