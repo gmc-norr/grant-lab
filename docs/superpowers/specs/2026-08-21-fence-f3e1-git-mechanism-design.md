@@ -297,6 +297,23 @@ Shape after each sub-slice:
 Totals: **20 rows → 29** at the end of `F3e1a` (nine new `git_commit` rows), unchanged in
 count by `F3e1b`. Kinds: `tool_commit` 9, `claim_fn` 6, `tool_context` 5, `git_commit` 9.
 
+> **Revised 2026-08-22 (F3e1a dry run) — the `F3e1b` "4 rows, all `true`" column is NOT
+> reachable through the `fenced` measurement as F3e1a builds the checker.** Executing the
+> F3e1a plan end-to-end showed that every one of the nine real git sinks CAPTURES its return
+> value (`sha = write_and_commit_files(...)`) or is nested inside an `if`/`try`. The
+> conservative Task-5 checker credits a sink as `fenced` only when it is a **bare top-level
+> expression statement** (`sink_calls` marks any captured or nested sink `stmt_index=None`),
+> so no real git row can ever measure `fenced: true` under it — converting the mutex
+> acquisition is necessary but not sufficient. **This does not affect `F3e1a`** (all nine take
+> `acquire_commit_mutex_live` today and measure `false` regardless; "nine false" holds). It is
+> an OPEN design decision for `F3e1b`, escalated to the human: either **(a)** extend the
+> checker to also credit an `ast.Assign` whose value is the sink (still requiring a top-level
+> `_at_generation` before it and no `_live`, and re-validating that it still never
+> over-reports), or **(b)** complete `F3e1b` via the §5.2 runtime proofs + pins WITHOUT a
+> `fenced`-flip, in which case §3.6's bidirectional "`complete` ⇒ every row `true`" rule needs
+> a documented `git_commit`-row exception. Do not treat the "all `true`" column as settled
+> when planning `F3e1b`.
+
 ### 3.7 Discovery is not enough — `fenced` must be MEASURED for the new kind
 
 `merge()` recomputes `fenced` **only for `KIND_TOOL_COMMIT`**:

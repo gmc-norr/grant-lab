@@ -4,6 +4,34 @@
 > (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps
 > use checkbox (`- [ ]`) syntax for tracking.
 
+> **Revision 4 (2026-08-22)** — folds **17 defects** found by executing this plan
+> end-to-end in a throwaway worktree (Phase 1 of the F3e1a build). Rejects 1 (D18) and
+> escalates 1 F3e1b design question. The five High defects, one line each:
+> - **D2** — Task 2's checker accepted a positional `stamp.generation`, so its own
+>   `test_a_positional_generation_is_rejected` failed against the checker the plan ships.
+>   Step 3 now flags any positional generation unconditionally.
+> - **D7** — `tests/proposal_assist/test_f3d3b_conversion.py` hardcodes the citekey row's
+>   slice as `"F3e"` and reddens the FULL suite on the F3e→F3e2 move — a fifth unenumerated
+>   consumer, invisible to Task 4's `tests/fencing`-only check. Added to Task 4's edit set;
+>   Step 7 now runs the full suite.
+> - **D9** — Task 5's Mutation 1 was hollow: relaxing the acquisition-position clause left
+>   all 12 tests green (the two named tests do not flip — their sinks are independently
+>   nested). A 13th pinning fixture is added and the mutation is re-pointed to it.
+> - **D11** — `sink_calls` double-attributed a nested `def`'s sink to the outer function,
+>   yielding TEN git sites and breaking Task 6's "exactly nine". The interface now pins
+>   innermost-only attribution, with a 14th test and a mutation.
+> - **D17** — every real git sink CAPTURES its return value (`sha = write_and_commit_files(...)`)
+>   or is nested, so the conservative checker gives it `stmt_index=None` and can never
+>   credit it `fenced: true`. F3e1a is unaffected (all nine measure `false` regardless), but
+>   the Task 5 "What this costs" note's "three try-wrapped sites stay pinned" is wrong (it is
+>   all nine), and Task 8 Step 4's real-conversion mutation is unexecutable (now a synthetic
+>   module). How an F3e1b git row ever flips to `fenced: true` is an **escalated design
+>   question** — flagged in spec §3.6 (SPEC CHANGED) and in the dry-run defect log.
+>
+> The test-count chain moves from **3803 → 3850** to **3803 → 3852** (Task 5 gains 2 tests:
+> D9's 13th and D11's 14th). Baseline unchanged: the dry run measured exactly
+> `3803 passed, 1 skipped`.
+
 **Goal:** Give services a carrier for the generation, discover every git-committing site
 in the repository, and arm the gates — **converting nothing**.
 
@@ -58,11 +86,11 @@ failing on the same section, and this plan exists in the shape it does because o
   | 2 stamp gate | 7 | 3816 |
   | 3 machinery | **0** (renames and edits existing tests) | 3816 |
   | 4 slice split | 1 | 3817 |
-  | 5 shared checker | 12 | 3829 |
-  | 6 detection | 5 | 3834 |
-  | 7 sink guards | 7 (+1 stale-pin) | 3841 |
-  | 8 gate over the tree | 4 | 3845 |
-  | 9 confirm | 5 | **3850** |
+  | 5 shared checker | 14 (12 shapes + D9's acquisition-position fixture + D11's nested-def fixture) | 3831 |
+  | 6 detection | 5 | 3836 |
+  | 7 sink guards | 7 (+1 stale-pin) | 3843 |
+  | 8 gate over the tree | 4 | 3847 |
+  | 9 confirm | 5 | **3852** |
 
   If your run disagrees,
   do **not** adjust a number and do **not** delete a test to reach one. Work out which term
@@ -82,7 +110,7 @@ failing on the same section, and this plan exists in the shape it does because o
 | `tests/proposal_assist/ports/test_stamp_for_workspace.py` | **create** — the carrier's tests | 1 |
 | `tests/fencing/stamp_gate.py` | **create** — AST: a mechanism-2 generation comes from a stamp | 2 |
 | `tests/fencing/git_fence.py` | **create** — THE shared conservative predicate + `GIT_SINKS` | 5 |
-| `tests/fencing/test_git_fence.py` | **create** — its twelve shapes and five mutations | 5 |
+| `tests/fencing/test_git_fence.py` | **create** — its fourteen shapes and six mutations | 5 |
 | **`tests/fencing/test_detectors.py`** | **modify** — whole-set equality on `find_fenced_tool_commits` (line 316) | 3 |
 | `tests/fencing/test_stamp_gate.py` | **create** — its fixtures and mutations | 2 |
 | `tests/fencing/detectors.py` | **modify** — `KIND_GIT_COMMIT`; discovery and measurement both DELEGATE to `git_fence` | 3, 6 |
@@ -122,7 +150,14 @@ ports package, and the point of the ports package is that it names nothing from 
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `tests/proposal_assist/ports/test_stamp_for_workspace.py`:
+First create the directory `tests/proposal_assist/ports/` and an **empty**
+`tests/proposal_assist/ports/__init__.py`. This repo uses a package-style test layout —
+every one of the test subdirs (`collab`, `citations`, `tools`, `review`, …) has an
+`__init__.py`, and without one the package chain `tests.proposal_assist.ports` is broken,
+so Step 2's expected `ImportError` can surface as a package-collection error instead
+(`find tests -name __init__.py | wc -l` → 17 on master).
+
+Then create `tests/proposal_assist/ports/test_stamp_for_workspace.py`:
 
 ```python
 """Fence F3e1a — the service-side twin of Invocation.stamp().
@@ -301,9 +336,8 @@ prints anything, something converted a caller — that is `F3e1b`.
 ```bash
 uv run pytest -n 16 --dist loadfile -q && uv run ruff check .
 ```
-Expected: **3809 passed, 1 skipped** (3803 + 6). An `__init__.py` is not a test and does
-not change the count; only add one if this repo's test tree uses them — check a sibling
-directory first.
+Expected: **3809 passed, 1 skipped** (3803 + 6). The `tests/proposal_assist/ports/__init__.py`
+created in Step 1 is not a test and does not change the count.
 
 - [ ] **Step 7: Commit**
 
@@ -485,11 +519,19 @@ def check_source(source: str, path: str) -> list[str]:
             if name == MECHANISM_2_ACQUIRE:
                 qual = ".".join(stack) if stack else "<module>"
                 supplied = [kw.value for kw in node.keywords if kw.arg == STAMP_FIELD]
-                # A positional third argument is the generation too. Checking only
-                # keywords would pass a future positional form silently.
-                if len(node.args) > 2:
-                    supplied.append(node.args[2])
-                if not supplied:
+                # A positional third argument IS the generation, and it is ALWAYS
+                # wrong: the primitive is keyword-only, so a positional generation is
+                # a violation regardless of the value's shape. Flag it directly —
+                # do NOT route it through _is_stamp_attribute, or a positional
+                # `stamp.generation` (a valid stamp attribute) would be accepted and
+                # test_a_positional_generation_is_rejected could never pass.
+                positional_generation = len(node.args) > 2
+                if positional_generation:
+                    problems.append(
+                        f"{path}::{qual} passes generation positionally to "
+                        f"{MECHANISM_2_ACQUIRE} — must use generation= keyword"
+                    )
+                if not supplied and not positional_generation:
                     problems.append(
                         f"{path}::{qual} calls {MECHANISM_2_ACQUIRE} with no generation"
                     )
@@ -534,8 +576,14 @@ uv run pytest tests/fencing/test_stamp_gate.py -q
 ```
 Expected: **4 FAILED** — `test_an_inline_late_read_is_rejected`,
 `test_a_bare_local_read_is_rejected`, `test_a_literal_is_rejected`,
-`test_a_positional_generation_is_rejected`. **FAILED, not ERROR.** If they ERROR, the
+`test_the_checker_reports_the_qualified_symbol`. **FAILED, not ERROR.** If they ERROR, the
 mutation broke an import and proves nothing — fix the mutation, do not accept the result.
+
+**Not** `test_a_positional_generation_is_rejected`: after the Step-3 fix, positional
+detection no longer routes through `_is_stamp_attribute`, so the `return True` mutation
+leaves that test green. It reddens `test_the_checker_reports_the_qualified_symbol` instead
+(its `generation=1` keyword literal is no longer flagged, so `_check(src)[0]` raises
+`IndexError`). Net is still exactly four genuine FAILED.
 
 Restore and re-verify green:
 
@@ -671,8 +719,13 @@ Known sites — read each before editing, and do not assume this list is complet
 | `tests/fencing/test_inventory_merge.py` | 109 | pass-through; no edit |
 | **`tests/fencing/test_detectors.py`** | **316** | **whole-set equality on `find_fenced_tool_commits`** |
 | `tests/fencing/test_fence_coverage.py` | 303 | whole-set equality |
-| `tests/fencing/test_fence_coverage.py` | 331, 400 | membership |
-| `tests/proposal_assist/test_f3d3a_relocation.py` | 175 | whole-set equality against a literal set of pairs |
+| `tests/fencing/test_fence_coverage.py` | 336, 405 | membership — the `(…) in fenced_ids` expressions. **NOT 331/400**: those are the `_sites, fenced_ids = scan_tree()` unpack, which needs no edit |
+| `tests/proposal_assist/test_f3d3a_relocation.py` | ~175 | whole-set equality against a literal set of pairs |
+| `tests/proposal_assist/test_f3d3a_relocation.py` | ~201 | a SECOND consumer: `f3d3_sites = {(r["path"], r["symbol"]) …}` set comprehension → triples |
+| `tests/proposal_assist/test_f3d3a_relocation.py` | ~206, ~210, ~214 | `len(f3d3_sites & fenced) == 2` intersection + two `(…) in fenced` membership asserts — all pair-shaped, permanently False once `fenced` holds triples unless widened |
+
+Line numbers are BASE-relative (master `af7b1909`) and drift as you edit; describe by
+construct and let the grep + suite confirm.
 
 **`test_detectors.py` is a whole file this plan's earlier draft never mentioned.** Derive
 the real list rather than trusting the table:
@@ -683,6 +736,12 @@ grep -rnE "fenced_ids|find_fenced_tool_commits|_measured|_fenced" \
 ```
 
 Then run the fencing suite and let it name anything the grep missed.
+
+**Widening pushes several of these past ruff's 100-char limit — wrap them.** Adding the
+kind element grows each tuple, and at least the `test_fence_coverage.py:303` whole-set
+equality (`== {(KIND_TOOL_COMMIT, path, "submit_scorecard_impl")}`, 101 chars) and the
+`test_inventory_merge.py` hand-built inputs cross 100. `ruff check .` (E501) is THE gate,
+so line-wrap every widened tuple that exceeds it; the dry run wrapped five lines.
 
 - [ ] **Step 4: Narrow the scoping test**
 
@@ -751,13 +810,17 @@ git commit -m "test(fence): inventory machinery for a second measured kind (F3e1
 ## Task 4: The slice split, and the spec amendment
 
 Splits `F3e` into `F3e1a` / `F3e1b` / `F3e2` and moves the two existing rows. **Still no
-new sites** — this is four coordinated edits that must land in ONE commit, because each
-alone reddens a gate.
+new sites** — this is **five** coordinated edits that must land in ONE commit, because each
+alone reddens a gate. Four are in `tests/fencing`; the fifth,
+`tests/proposal_assist/test_f3d3b_conversion.py`, lives outside it and is invisible to a
+`tests/fencing`-only run — the dry run reddened the FULL suite on it (the fifth unenumerated
+`"F3e"` consumer this spec has now found, after four review rounds named four).
 
 **Files:**
 - Modify: `tests/fencing/inventory.py` (`SLICE_STATUS`, `F3D_IDENTITIES`)
 - Modify: `tests/fencing/fence_inventory.json` (two `slice` strings)
 - Modify: `tests/fencing/test_fence_coverage.py` (the ingest-row test)
+- Modify: `tests/proposal_assist/test_f3d3b_conversion.py` (two hardcoded `"F3e"` assertions)
 - Modify: `docs/superpowers/specs/2026-08-18-fence-session-ownership-design.md`
 
 - [ ] **Step 1: Split `SLICE_STATUS`**
@@ -804,9 +867,12 @@ above the set to say so, so the next reader does not hesitate:
 #: forbids: the identity is intact and the row still exists.
 ```
 
-- [ ] **Step 4: Update the ingest-row test**
+- [ ] **Step 4: Update the two hardcoded-slice tests**
 
-`test_fence_coverage.py:408` — its **name, docstring and assertion** all say `F3e`:
+**(a) The ingest-row test in `test_fence_coverage.py`** — find it by content
+(`def test_the_ingest_row_is_untouched_and_still_f3e`); its cited line drifts because
+Task 3 already edited this file (master 408 → ~415 after Task 3). Its **name, docstring and
+assertion** all say `F3e`:
 
 ```python
 def test_the_ingest_row_is_untouched_and_still_f3e2():
@@ -824,6 +890,22 @@ def test_the_ingest_row_is_untouched_and_still_f3e2():
     assert row["slice"] == "F3e2"
     assert row["fenced"] is False
 ```
+
+**(b) The citekey-row test in `tests/proposal_assist/test_f3d3b_conversion.py`** — this is
+the fifth unenumerated consumer (outside `tests/fencing`). Its
+`test_the_citekey_row_belongs_to_the_slice_whose_mechanism_it_needs` hardcodes the old
+slice in two places (master lines 37 and 41 — describe by content):
+
+```python
+    assert ("F3e2", "tool_commit", "_write_citekey_cache") in F3D_IDENTITIES   # was "F3e"
+    ...
+    assert row["slice"] == "F3e2"                                              # was "F3e"
+```
+
+Both flip to `F3e2` in lock-step with `F3D_IDENTITIES` (Step 3) and the JSON row (Step 2).
+The module docstring's prose "moved to F3e" may be updated for clarity but is not
+load-bearing. **This file is under `tests/proposal_assist/`, so `pytest tests/fencing`
+never runs it** — only the full-suite command in Step 7 catches a miss here.
 
 - [ ] **Step 5: Amend the governing spec**
 
@@ -863,9 +945,12 @@ uv run pytest -n 16 --dist loadfile -q && uv run ruff check .
 ```
 Expected: fencing **green**; full suite **3817 passed, 1 skipped** (3816 + 1). The +1 is a
 test asserting `SLICE_STATUS` has no `"F3e"` key and does have all three new ones — write
-it, in `test_fence_coverage.py`, beside the other `SLICE_STATUS` tests.
+it, in `test_fence_coverage.py`, beside the other `SLICE_STATUS` tests. **The
+`test_f3d3b_conversion.py` edit (Step 4b) adds no test — it keeps an existing one green —
+so the count is unchanged by it.** Run BOTH commands: the `tests/fencing` run cannot see
+the citekey-row consumer, and only the full-suite run proves nothing else hardcodes `"F3e"`.
 
-- [ ] **Step 8: Commit — all four edits together**
+- [ ] **Step 8: Commit — all five edits together**
 
 ```bash
 git add tests/fencing/ docs/superpowers/specs/2026-08-18-fence-session-ownership-design.md
@@ -920,13 +1005,36 @@ Why each clause dissolves a defect rather than patching it:
 
 ### What this costs, stated loudly
 
-Three real sites acquire inside a `try:` — `_insert_citation_locked`,
-`insert_citation_for_user`, and `post_lock_spec`. They will measure **unfenced even after
-F3e1b converts them correctly**, and each needs a pin carrying a human sentence plus its
-§5.2 runtime proof. **`fenced: false` on a git row does not mean "broken"** — it means
-"not provable by the cheap check". Put that sentence in the module docstring, in the
-inventory's own comment, and in the pin list's comment, because a future reader who
-believes `false` means broken will "fix" working code.
+**Every one of the nine real sites will measure `fenced: false` even after F3e1b converts
+its acquisition correctly** — not just the three that acquire inside a `try:`. Two
+independent reasons, and each alone is enough:
+
+- **The sink captures its return value, or is nested.** All nine real sinks are
+  `commit_sha = write_and_commit_files(...)` / `sha = write_and_commit_files(...)`
+  assignments (checkpoint, core, human_cite, save, insert, bibliography, workspaces), or a
+  `write_and_commit_files(...)` / `_run_git(["commit", …])` call nested inside an `if`/`try`
+  (`pass_runner`, `setup._init_repo`). The conservative checker credits a sink only when it
+  is a **bare top-level expression statement** — `sink_calls` marks any captured or nested
+  sink `stmt_index=None` ("position unknown to the cheap check") — so no real sink is
+  orderable and no real site can measure `fenced: true` through this checker, whatever its
+  acquisition looks like.
+- **Three acquire inside a `try:`** — `_insert_citation_locked`, `insert_citation_for_user`,
+  and `post_lock_spec` — which the checker also refuses.
+
+Each of the nine therefore needs a pin carrying a human sentence plus its §5.2 runtime
+proof. **`fenced: false` on a git row does not mean "broken"** — it means "not provable by
+the cheap check". Put that sentence in the module docstring, in the inventory's own comment,
+and in the pin list's comment, because a future reader who believes `false` means broken
+will "fix" working code.
+
+**F3e1a is unaffected either way** — all nine take `acquire_commit_mutex_live` today, so they
+measure `false` no matter the sink shape, and "nine false" is exactly this slice's goal. But
+it means **F3e1b cannot flip a git row to `fenced: true` through this checker** (spec §3.6's
+"4 rows all `true`, complete" is unreachable as the checker stands). How an F3e1b row ever
+becomes fenced — extend the checker to credit an `ast.Assign` whose value is the sink, or
+complete via pins + §5.2 runtime proofs without a `fenced`-flip — is an OPEN design decision,
+flagged in spec §3.6 and escalated to the human. It is out of F3e1a's scope and changes
+nothing here.
 
 **Files:**
 - Create: `tests/fencing/git_fence.py`
@@ -1048,6 +1156,32 @@ def test_the_two_halves_PARTITION_every_sink_qualname():
         unprot = set(unprotected_sinks(src, "x/f.py"))
         assert fenced | unprot == holders, (body, holders, fenced, unprot)
         assert not (fenced & unprot)
+
+
+def test_an_acquisition_in_an_if_with_a_toplevel_sink_after_is_not_fenced():
+    """Pins the acquisition-POSITION clause independently of the sink-position clause
+    (DEFECT D9). Acquire nested in an `if`, sink a top-level statement AFTER it: the
+    faithful checker says unfenced (the acquisition is not a top-level statement), but a
+    checker relaxed to 'accept an acquisition anywhere in the function' would over-report
+    {'f'}. This is the ONLY test that flips under Step-5 Mutation 1 — the two branch /
+    argument tests keep their set() verdict from the sink side alone, so without this
+    fixture that mutation is undetected."""
+    src = _HEAD + "    if cond:\n    " + _ACQ + _SINK
+    assert fenced_qualnames(src, "x/f.py") == set()
+
+
+def test_a_nested_defs_sink_does_not_make_the_outer_a_holder():
+    """A sink inside a nested `def` belongs to that inner qualname ALONE (DEFECT D11).
+    If `sink_calls` also credited the OUTER function as a holder (with stmt_index None),
+    discovery would find a TENTH git site over the tree and Task 6's 'exactly nine' would
+    break. The outer holds no sink of its own here, so it must appear in none of the three
+    maps. The existing nested-def test checks only that the INNER def is not fenced, so it
+    does not catch this leak."""
+    src = _HEAD + "    def inner():\n    " + _SINK + "    return inner\n"
+    holders = {q for q, _n, _i in sink_calls(src, "x/f.py")}
+    assert "f" not in holders
+    assert "f" not in unprotected_sinks(src, "x/f.py")
+    assert "f" not in fenced_qualnames(src, "x/f.py")
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -1074,15 +1208,46 @@ GIT_SINKS = (
 )
 ```
 
+**Callee-name matching (DEFECT D10).** Both acquisitions and sinks are matched by their
+**final callee name**, attribute form reduced to `.attr` (`a.b.f()` → `f`), so a
+module-qualified or aliased `mod.write_and_commit_files(...)` still matches its canonical
+identity. This is a deliberate robustness choice for aliases, accepted because every
+acquisition and sink symbol is module-level in this repo (no unrelated object exposes a
+same-named method); it mirrors `stamp_gate.py`, which also keys on `.attr`. State it in the
+interface so it is a choice, not an accident.
+
 **`_sink_bindings(tree) -> dict[str, str]`** — local name → **canonical** sink name.
 Returning only local spellings loses which sink it is, and the argv rule is per-sink, so an
 aliased `_run_git(["init"])` would otherwise count as a commit.
 
 **`_is_commit_call(canonical, node)`** keyed on the canonical name.
 
-**`sink_calls(source, path)`** → `[(qualname, node, stmt_index)]`, where `stmt_index` is the
-index of the **function-body top-level statement** containing the call, or `None` if the
-call is not under one (nested in a branch, a nested `def`, or an argument position).
+**`sink_calls(source, path)`** → `[(qualname, node, stmt_index)]`, where `stmt_index` is
+the index of the **function-body top-level statement** containing the call. It is set ONLY
+when the sink is a **bare top-level expression statement** (`ast.Expr` whose value IS the
+sink call); it is `None` for a **captured sink** (`sha = write_and_commit_files(...)`), a
+sink nested in a branch / `with` / argument, or a sink inside a nested `def`. `None` means
+"position unknown to the cheap check", which the fence treats as unprovable. Every one of
+the nine real sites captures or nests its sink, so every one gets `None` and measures
+unfenced (see "What this costs"; DEFECT D17 relies on this being stated, not assumed).
+
+**A sink is attributed to its INNERMOST enclosing function ONLY (DEFECT D11).** A nested
+`def`'s sink does NOT make the outer function a holder. In `sink_calls`, skip any body
+statement that is itself a nested scope before walking it (illustrative fragment):
+
+```python
+for stmt_index, stmt in enumerate(body):
+    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        continue  # a nested def/class is a SEPARATE qualname, analysed on its own pass
+    for node in _iter_own_nodes(stmt):
+        ...
+```
+
+Without this skip, `_iter_own_nodes` descends into a nested `def` when that def IS the body
+statement being walked, so the outer inherits the inner's sink (with `stmt_index None`) and
+becomes a spurious holder. Over the real tree that turns nine sites into ten (an extra bare
+`post_init_spec` beside `post_init_spec._git`), which Task 6's "exactly nine" refuses.
+`test_a_nested_defs_sink_does_not_make_the_outer_a_holder` (Step 1) pins this.
 
 **`fenced_qualnames` / `unprotected_sinks`** implementing the rule above.
 `fenced_qualnames` must be defined as `holders - set(unprotected_sinks(...))` so the two
@@ -1093,7 +1258,7 @@ cannot drift; do not compute it with a second walk.
 ```bash
 uv run pytest tests/fencing/test_git_fence.py -q
 ```
-Expected: **12 passed**.
+Expected: **14 passed**.
 
 - [ ] **Step 5: Mutations — each clause must be provably load-bearing**
 
@@ -1101,13 +1266,20 @@ Expected: **12 passed**.
 
 | Mutation | Must FAIL |
 |---|---|
-| accept an acquisition anywhere in the function, not only a top-level `ast.Expr` | `test_an_acquisition_nested_as_a_call_argument_is_not_fenced`, `test_an_acquisition_in_an_if_branch_is_not_fenced` |
+| accept an acquisition anywhere in the function, not only a top-level `ast.Expr` | `test_an_acquisition_in_an_if_with_a_toplevel_sink_after_is_not_fenced` |
 | drop the statement-index comparison | `test_sink_before_acquisition_is_not_fenced`, `test_a_second_unprotected_sink_disqualifies_the_function` |
 | require only ONE protected sink rather than all | `test_a_second_unprotected_sink_disqualifies_the_function` |
 | drop the `_live` check | `test_a_live_acquisition_disqualifies_even_with_a_correct_one` |
 | let `fenced_qualnames` compute its own walk instead of subtracting | `test_the_two_halves_PARTITION_every_sink_qualname` |
+| attribute a nested `def`'s sink to the outer function (drop the nested-scope skip in `sink_calls`) | `test_a_nested_defs_sink_does_not_make_the_outer_a_holder` |
 
-**FAILED, not ERROR** each time. Restore, confirm 12 passed.
+**Mutation 1 names only the DEFECT-D9 fixture — not the two branch/argument tests.** Those
+two keep their `set()` verdict from the sink side alone (their sinks are independently
+nested, `stmt_index None`), so relaxing the acquisition-position clause does NOT flip them;
+the D9 fixture is the only test that detects the mutation. An earlier revision named the two
+wrong tests here, and the mutation would have passed while claiming the clause was pinned.
+
+**FAILED, not ERROR** each time. Restore, confirm 14 passed.
 
 - [ ] **Step 6: Full suite + lint, then commit**
 
@@ -1116,7 +1288,7 @@ uv run pytest -n 16 --dist loadfile -q && uv run ruff check .
 git add tests/fencing/git_fence.py tests/fencing/test_git_fence.py
 git commit -m "test(fence): one conservative predicate for a fenced git sink (F3e1a Task 5)"
 ```
-Expected: **3829 passed, 1 skipped** (3817 + 12).
+Expected: **3831 passed, 1 skipped** (3817 + 14).
 
 ---
 ## Task 6: Git-sink detection, and the nine rows
@@ -1155,11 +1327,13 @@ Inside `find_sites`, add a branch. It is **not** guarded by `_in_effect_scope` �
 is tool-centric and git effects live in services, exactly as `KIND_CLAIM_FN` is already
 discovered repo-wide.
 
-Rather than re-walking, reuse Task 5's `sink_calls(tree)` and emit one `Site` per qualname
-it reports:
+Rather than re-walking, reuse Task 5's `sink_calls(source, path)` and emit one `Site` per
+qualname it reports. **`sink_calls` takes SOURCE TEXT, not a tree** — it calls `ast.parse`
+internally — so pass `source`, not the local `tree` that `find_sites` already built, or it
+raises (DEFECT D12). The third tuple element is `stmt_index`, not ancestors:
 
 ```python
-    for qual, _node, _ancestors in sink_calls(tree, path):
+    for qual, _node, _stmt_index in sink_calls(source, path):
         sites.add(Site(KIND_GIT_COMMIT, path, qual))
 ```
 
@@ -1256,7 +1430,8 @@ All nine keep `"fenced": false` — nothing is converted in this slice.
 
 - [ ] **Step 6: Fix the hardcoded count**
 
-`tests/fencing/test_inventory_merge.py:113`:
+In `tests/fencing/test_inventory_merge.py`, find `assert len(after) == 20` by content — its
+cited line drifts (master 113 → ~116 after Task 3 edited the same file) — and change it:
 
 ```python
     assert len(after) == 29
@@ -1357,7 +1532,7 @@ uv run pytest tests/fencing -q
 uv run pytest -n 16 --dist loadfile -q && uv run ruff check .
 ```
 Expected: fencing **green** (all 29 rows classified, all nine git rows `fenced: false` in
-`pending` slices — consistent with the bidirectional slice gate); full suite **3834 passed, 1 skipped** (3829 + 5).
+`pending` slices — consistent with the bidirectional slice gate); full suite **3836 passed, 1 skipped** (3831 + 5).
 
 - [ ] **Step 9: Commit — detection and rows together**
 
@@ -1433,6 +1608,19 @@ def test_shell_true_is_caught():
 
     src = "import subprocess\ndef f():\n    subprocess.run('git commit -m x', shell=True)\n"
     assert _shell_true_in(src, "x/r.py")
+
+
+def test_no_pin_is_stale():
+    """Every entry in PROVEN_NON_COMMIT must still correspond to a call the guard would
+    report if the allowlist were empty. A pin whose function moved, or whose call was
+    removed, is stale — it silently exempts nothing and must LEAVE the list. This is the
+    direction that makes the allowlist shrink (mirrors the import gate's
+    no-stale-exemption test). Step 3 mandates it; it is the SEVENTH test, not the sixth."""
+    from tests.fencing.sink_guard import PROVEN_NON_COMMIT, pristine_stray_git_report
+
+    reported = pristine_stray_git_report()  # every fail-closed hit, allowlist ignored
+    stale = [pin for pin in PROVEN_NON_COMMIT if pin not in reported]
+    assert not stale, f"pins the guard no longer reports (remove them): {stale}"
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -1465,8 +1653,15 @@ Create `tests/fencing/sink_guard.py` with:
   **Pin the CALL, not the function.** A `(path, qualname)` entry waives every subprocess
   call in that function, so adding a second `base + ["commit"]` call inside an
   already-pinned read helper would be silently exempt. Key each entry on a call-level
-  fingerprint — `(path, qualname, lineno_offset_within_function, argv_repr)` — and add a
-  stale-pin test asserting every entry still corresponds to a call the guard reports.
+  fingerprint — `(path, qualname, lineno_offset_within_function, argv_repr)` — held in
+  `PROVEN_NON_COMMIT` as a tuple of these fingerprints, and add a stale-pin test asserting
+  every entry still corresponds to a call the guard reports.
+
+  **Expose `pristine_stray_git_report()`** — the set of fail-closed fingerprints the guard
+  would report with the allowlist **ignored** (the same fingerprint type `PROVEN_NON_COMMIT`
+  holds). `check_no_stray_git_commit()` is then `pristine_stray_git_report()` minus the
+  allowlist, and `test_no_pin_is_stale` (Step 1, the seventh test) asserts every pin is
+  still in the pristine report. Step 4's probe prints this same pristine report.
 
   **Resolve aliases for EVERY execution surface, not just `subprocess`**:
   `import subprocess as sp`, `from subprocess import run`, `from os import system`,
@@ -1505,17 +1700,27 @@ for p in sorted(check_no_stray_git_commit()):
 PY
 ```
 
-Read each hit and confirm from the source that it does not commit — `reconcile.py`,
-`tools/history.py` and `citations/core.py` all run git for reads. Paste the confirmed ones
-into `PROVEN_NON_COMMIT` with a one-line reason each. **If you cannot tell what a call
-runs, leave it in the report rather than allowlisting it** and record it under PLAN DEFECTS.
+Read each hit and confirm from the source that it does not commit. The pristine fail-closed
+set is exactly six calls, in two files — the dry run measured them, so use them as the check
+on your own probe, not as a substitute for it:
+
+- `tools/history.py` — `get_artifact_history_impl`, `read_artifact_at_impl`,
+  `diff_artifact_impl` (git `log`/`show`/`diff` with f-string / dynamic argv);
+- `citations/gitio.py` — `blob_sha`, `read_blob`, `list_commits` (`rev-parse`/`cat-file`/
+  Popen-`log` with dynamic argv), the read helpers OUTSIDE the `write_and_commit_files` sink.
+
+**`reconcile.py` and `citations/core.py` are NOT reported** — their subprocess argv is all
+literal-non-commit, so `_first_arg_is_definitely_not_commit` proves them safe and they need
+NO pin. Paste the confirmed six into `PROVEN_NON_COMMIT` with a one-line reason each.
+**If you cannot tell what a call runs, leave it in the report rather than allowlisting it**
+and record it under PLAN DEFECTS.
 
 - [ ] **Step 5: Run the tests**
 
 ```bash
 uv run pytest tests/fencing/test_sink_guard.py -q
 ```
-Expected: **6 passed**.
+Expected: **7 passed** (the six clause tests plus `test_no_pin_is_stale`).
 
 - [ ] **Step 6: Mutation — plant a real violation**
 
@@ -1536,7 +1741,7 @@ Expected: **`test_the_real_tree_has_no_stray_git_commit` FAILED**, naming
 
 ```bash
 cp /tmp/reconcile.bak src/call_manager/proposal_assist/reconcile.py
-uv run pytest tests/fencing/test_sink_guard.py -q   # 6 passed
+uv run pytest tests/fencing/test_sink_guard.py -q   # 7 passed
 ```
 
 - [ ] **Step 7: Full suite + lint, then commit**
@@ -1546,7 +1751,7 @@ uv run pytest -n 16 --dist loadfile -q && uv run ruff check .
 git add tests/fencing/sink_guard.py tests/fencing/test_sink_guard.py
 git commit -m "test(fence): a third way to run git stops the build (F3e1a Task 7)"
 ```
-Expected: **3841 passed, 1 skipped** (3834 + 7).
+Expected: **3843 passed, 1 skipped** (3836 + 7).
 
 ---
 
@@ -1602,16 +1807,23 @@ UNCONVERTED_LIVE_CALLERS: frozenset[tuple[str, str]] = frozenset({
 })
 ```
 
-and `check_tree() -> list[str]`, which:
+and three functions, all built on `git_fence.unprotected_sinks` — **no separate call graph**
+(the intro says why the earlier call-graph draft was abandoned). Use ONE pin-list name,
+`UNCONVERTED_LIVE_CALLERS`, throughout:
 
-1. builds a module-level static call graph over `src/` (qualname → callee bare names);
-2. marks every function reaching a `GIT_SINKS` name transitively;
-3. reports any marked function containing an `acquire_commit_mutex_live` call, unless its
-   `(path, qualname)` is pinned.
+- `all_unprotected() -> set[tuple[str, str]]` — every `(path, qualname)` that
+  `unprotected_sinks` reports across `src/call_manager/`. This is the direct sink-holder
+  set; `sink_calls` already resolves aliases, so nothing is hidden.
+- `check_tree() -> list[str]` — one problem string for every `(path, qualname)` in
+  `all_unprotected()` whose pair is NOT in `UNCONVERTED_LIVE_CALLERS`. Empty list = green.
+- `check_sources(mapping: Mapping[str, str]) -> list[str]` — the same gate over a synthetic
+  `{path: source_text}` map, so the transitive/synthetic test (Step 3) can drive it without
+  touching `src/`. A gate whose central claim is only tested against the real tree cannot be
+  tested at all once the tree is converted.
 
-A bare-name call graph over-approximates (two same-named helpers in different modules
-merge). **That is the safe direction** — it can only over-report, and an over-report is a
-pin entry a human reads. Say so in the module docstring.
+`unprotected_sinks` under-reports by design, so the gate over-approximates the sink-holder
+set in the SAFE direction — an extra holder is a pin entry a human reads, never a hidden
+escape. Say so in the module docstring.
 
 - [ ] **Step 2: Derive the pin list from the tree, do not guess**
 
@@ -1678,27 +1890,71 @@ def test_no_pin_is_stale():
     import tests.fencing.live_mutex_gate as g
 
     reported = g.all_unprotected()          # {(path, qualname)} over src/
-    stale = sorted(p for p in g.UNPROVEN_SINKS if p not in reported)
+    stale = sorted(p for p in g.UNCONVERTED_LIVE_CALLERS if p not in reported)
     assert not stale, f"pins for sites the checker no longer reports: {stale}"
 
 
-def test_a_transitive_reacher_is_caught_not_just_a_direct_caller():
-    """The defect this gate exists for: an OUTER function takes _live and mutates,
-    then calls a helper that reaches the sink. A direct-caller-only rule misses it."""
-    # drive check_source-style helpers over a synthetic two-function module
+def test_the_direct_gate_catches_the_sink_holder_not_the_enclosing_caller():
+    """The contrast a naive `_live`-only rule gets wrong, driven through `check_sources`
+    so it needs no `src/` edit. A synthetic two-function module: `inner()` directly holds
+    the sink; `outer()` takes `_live` at the boundary, mutates, then delegates to `inner()`.
+    The DIRECT gate reports `inner` (the sink holder) and NOT `outer` (an enclosing-
+    acquisition site whose proof is a §5.2 runtime race, not this gate). A rule that only
+    inspected `_live` on the function under test would be satisfied by `outer` and miss
+    `inner` entirely."""
+    from tests.fencing.live_mutex_gate import check_sources
+
+    source = (
+        "from call_manager.proposal_assist.citations.gitio import write_and_commit_files\n"
+        "def inner(repo, files, msg):\n"
+        "    return write_and_commit_files(repo, files, msg)\n"
+        "def outer(session, wid, repo):\n"
+        "    acquire_commit_mutex_live(session, wid)\n"
+        "    return inner(repo, {}, 'm')\n"
+    )
+    problems = check_sources({"call_manager/_synthetic/two_function.py": source})
+    reported = {p.split("::")[1].split(" ")[0] for p in problems}
+    assert "inner" in reported, problems
+    assert "outer" not in reported, problems
 ```
 
-Write the third test against whatever synthetic entry point `live_mutex_gate.py` exposes —
-if it only offers `check_tree()`, add a `check_sources(mapping)` taking `{path: source}` so
-the transitive case is testable without touching `src/`. **A gate whose central claim is
-only tested against the real tree cannot be tested at all once the tree is converted.**
+`check_sources` is defined in Step 1, so all four tests are concrete. The fourth drives the
+synthetic case without touching `src/` — **a gate whose central claim is only tested against
+the real tree cannot be tested at all once the tree is converted.**
 
-- [ ] **Step 4: Mutation**
+- [ ] **Step 4: Prove the gate keys on the fence, not on a name — WITHOUT converting `src/`**
 
-Copy, then change `checkpoint_artifact`'s `acquire_commit_mutex_live` to
-`acquire_commit_mutex_at_generation(session, workspace_id, generation=0)` and remove its
-pin. `check_tree()` must stop reporting it — proving the gate keys on the call, not on the
-name being in a list. Restore from the copy.
+**Do NOT convert the real `checkpoint_artifact` for this (DEFECT D17).** Its sink is a
+CAPTURED assignment (`commit_sha = write_and_commit_files(...)`), so the conservative checker
+gives it `stmt_index=None` and reports it as unprotected REGARDLESS of the mutex — changing
+`_live` to `_at_generation` there would NOT make `check_tree()` stop reporting it, so the
+mutation proves nothing. It would also edit `src/`, which this slice forbids.
+
+Prove keys-on-the-fence with an in-process `check_sources` probe over two synthetic modules
+instead — a correctly FENCED shape (top-level acquire before a BARE-EXPR sink, no `_live`)
+is not reported; drop the acquisition and it is:
+
+```bash
+uv run python - <<'PY'
+from tests.fencing.live_mutex_gate import check_sources
+fenced = (
+    "def f(session, wid, stamp, repo):\n"
+    "    acquire_commit_mutex_at_generation(session, wid, generation=stamp.generation)\n"
+    "    write_and_commit_files(repo, {}, 'm')\n"
+)
+unfenced = (
+    "def f(session, wid, stamp, repo):\n"
+    "    write_and_commit_files(repo, {}, 'm')\n"
+)
+print("fenced   ->", check_sources({"call_manager/_synthetic/a.py": fenced}))
+print("unfenced ->", check_sources({"call_manager/_synthetic/b.py": unfenced}))
+PY
+```
+Expected: `fenced   -> []` (the gate credits the fence and does not report it) and
+`unfenced -> [...]` naming `f`. Together with `test_removing_a_pin_reddens_the_gate` (pins
+are load-bearing) and `test_no_pin_is_stale` (a site that becomes fenced drops out of
+`all_unprotected` and its pin goes stale), this proves the gate keys on the fence, not on the
+name being in a list — with no `src/` edit and no unexecutable conversion.
 
 - [ ] **Step 5: Full suite + lint, then commit**
 
@@ -1707,8 +1963,9 @@ uv run pytest -n 16 --dist loadfile -q && uv run ruff check .
 git add tests/fencing/live_mutex_gate.py tests/fencing/test_live_mutex_gate.py
 git commit -m "test(fence): no _live may reach a git sink (F3e1a Task 8)"
 ```
-Expected: **3845 passed, 1 skipped** (3841 + 4). If the transitive fixture needed a
-fifth test, say so and carry it forward.
+Expected: **3847 passed, 1 skipped** (3843 + 4). The four tests are the two gate directions
+(`no unpinned live caller`, `removing a pin reddens`), the stale-pin test, and the
+sink-holder-vs-enclosing-caller contrast.
 
 ---
 
@@ -1798,7 +2055,7 @@ uv run pytest -n 16 --dist loadfile -q
 uv run ruff check .
 uv run pytest tests/fencing -q
 ```
-Expected: **3850 passed, 1 skipped** if every derived step matched; otherwise report your
+Expected: **3852 passed, 1 skipped** if every derived step matched; otherwise report your
 arithmetic against the run. `0 skipped` means a live API call ran.
 
 Then confirm each spec §13 `F3e1a` criterion with the command that proves it, and write the
