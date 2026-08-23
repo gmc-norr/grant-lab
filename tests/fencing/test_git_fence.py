@@ -337,3 +337,67 @@ def test_an_unlisted_FIELD_of_a_listed_node_is_not_credited():
     allowlisted by node type alone would pass that one and fail here.
     """
     _uncredited_but_held(_ACQ + "    if cond:\n        pass\n    else:\n    " + _SINK)
+
+
+# ------------------------------------------------- F3e1a2 §4.3 — generators
+# A generator's body does not begin until the caller calls next(), so even the
+# ACQUISITION is deferred; and every yield hands control to a caller who may COMMIT
+# or ROLLBACK, releasing the transaction-scoped mutex before the sink resumes.
+
+def test_a_yield_between_acquisition_and_sink_is_not_fenced():
+    _disqualified_but_held(_ACQ + "    yield 1\n    sha = write_and_commit_files(repo, {}, 'm')\n")
+
+
+def test_a_yield_AFTER_the_sink_still_disqualifies():
+    """§4.3 is a DISQUALIFIER, not a position rule. Deliberately over-broad: a
+    correct generator costs a pin, and deciding which yields precede which sinks is
+    the branch reasoning this design refuses to do."""
+    _disqualified_but_held(_ACQ + "    sha = write_and_commit_files(repo, {}, 'm')\n    yield 1\n")
+
+
+def test_yield_from_also_disqualifies():
+    _disqualified_but_held(
+        _ACQ + "    yield from [1]\n    sha = write_and_commit_files(repo, {}, 'm')\n"
+    )
+
+
+def test_an_async_generator_is_not_fenced():
+    _disqualified_but_held(
+        _ACQ + "    yield 1\n    sha = write_and_commit_files(repo, {}, 'm')\n",
+        head="async def f(s, w, stamp, repo, cond):\n",
+    )
+
+
+def test_a_yield_in_a_nested_defs_DEFAULT_disqualifies_the_ENCLOSING_function():
+    """Verified with inspect.isgeneratorfunction: the yield belongs to f, not inner."""
+    _disqualified_but_held(
+        _ACQ
+        + "    sha = write_and_commit_files(repo, {}, 'm')\n"
+        + "    def inner(x=(yield 1)):\n        return x\n"
+    )
+
+
+def test_a_yield_in_a_LAMBDA_BODY_does_not_disqualify_the_outer():
+    """A yield in a lambda body makes the LAMBDA a generator, not this function —
+    verified: inspect.isgeneratorfunction(outer) is False. The yield scan must not
+    reuse the sink walk, which deliberately descends into Lambda.body."""
+    src = (
+        _HEAD
+        + _ACQ
+        + "    cb = lambda: (yield 1)\n"
+        + "    sha = write_and_commit_files(repo, {}, 'm')\n"
+    )
+    assert fenced_qualnames(src, "x/f.py") == {"f"}
+
+
+def test_an_unrelated_nested_generator_does_not_disqualify_the_outer():
+    """§5.3's scope-boundary positive. A naive yield scan fails this: _iter_own_nodes
+    guards its CHILDREN but descends into a FunctionDef handed to it directly, so a
+    scan written the obvious way marks a correctly fenced function unfenced."""
+    src = (
+        _HEAD
+        + _ACQ
+        + "    sha = write_and_commit_files(repo, {}, 'm')\n"
+        + "    def inner():\n        yield 1\n    return inner\n"
+    )
+    assert fenced_qualnames(src, "x/f.py") == {"f"}

@@ -177,6 +177,44 @@ def _walk_fields(node: ast.AST, skip: tuple[str, ...] = ()):
                 yield child
 
 
+def _iter_yield_scope(node: ast.AST):
+    """Yield every node whose ``yield`` would belong to the ENCLOSING function.
+
+    Deliberately NOT ``_iter_credited``. That walk descends into ``Lambda.body``,
+    which is right for sink DISCOVERY (a lambda is anonymous, so nothing else would
+    find a sink in it) and wrong here: a ``yield`` in a lambda body makes the LAMBDA a
+    generator, not its enclosing function. Verified —
+    ``inspect.isgeneratorfunction(outer)`` is **False** for::
+
+        def outer():
+            cb = lambda: (yield 1)
+            return cb
+
+    Lambda DEFAULTS still count: they evaluate in the enclosing scope. So this walk
+    treats a ``lambda`` exactly like a nested ``def`` — everything but the body.
+    """
+    yield node
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        for child in _walk_fields(node, skip=("body",)):
+            yield from _iter_yield_scope(child)
+        return
+    for child in _walk_fields(node):
+        yield from _iter_yield_scope(child)
+
+
+def _is_generator(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """True if *func* has an own-scope ``yield`` — its whole body is deferred.
+
+    F3e1a2 §4.3. A ``yield`` in a nested def's or lambda's DEFAULT is seen (it belongs
+    to this function); one in either BODY is not.
+    """
+    return any(
+        isinstance(node, (ast.Yield, ast.YieldFrom))
+        for stmt in func.body
+        for node in _iter_yield_scope(stmt)
+    )
+
+
 def _iter_credited(node: ast.AST, credited: bool):
     """Yield ``(node, credited)`` for everything reachable in the ENCLOSING scope.
 
@@ -393,6 +431,13 @@ def unprotected_sinks(source: str, path: str) -> dict[str, list[str]]:
             ):
                 has_live = True
                 break
+
+        if _is_generator(func):
+            reasons.append(
+                f"{qualname} is a generator — its body does not run until the caller "
+                f"iterates, and a yield returns control to a caller that may COMMIT "
+                f"or ROLLBACK, releasing the transaction-scoped mutex"
+            )
 
         if has_live:
             reasons.append(
