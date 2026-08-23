@@ -415,3 +415,21 @@ def test_a_visible_transaction_ending_disqualifies(ending):
     _disqualified_but_held(
         _ACQ + f"    s.{ending}()\n    sha = write_and_commit_files(repo, {{}}, 'm')\n"
     )
+
+
+@pytest.mark.parametrize("ending", ["commit", "rollback"])
+def test_a_transaction_ending_AFTER_the_sink_also_disqualifies(ending):
+    """§4.4 says "in the function's own scope" — ANYWHERE, not "before the sink".
+
+    The sibling test above only ever places the ending BETWEEN acquisition and
+    sink, so an implementation that stopped scanning at the sink would pass it and
+    still violate §4.4. `_ends_transaction` iterates the whole body precisely so
+    position does not matter; this test is what makes that load-bearing.
+
+    Conservative on purpose: an ending after the sink means the mutex probably WAS
+    held for the write. §4.4 still fails closed, because deciding otherwise needs
+    ordering reasoning this intraprocedural checker does not have.
+    """
+    _disqualified_but_held(
+        _ACQ + f"    sha = write_and_commit_files(repo, {{}}, 'm')\n    s.{ending}()\n"
+    )
