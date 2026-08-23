@@ -1000,7 +1000,7 @@ over stale), `WorkspaceGenerationStale`, and mutating nothing in every failure c
 |---|---|
 | `workspaces.py:665` (`post_lock_spec`) | `stamp = stamp_for_workspace(ws)` as a LOCAL, then `stamp=stamp` — `ws` from `require_owner` at `:645` |
 | `workspaces.py:746` (`post_unlock_spec`) | `stamp = stamp_for_workspace(ws)` as a LOCAL, then `stamp=stamp` — `ws` from `require_owner` at `:734` |
-| `collab_checkpoint.py:52` (`save_version`) | `stamp=stamp_for_workspace(<the Workspace resolve_access loaded at :38>)` |
+| `collab_checkpoint.py:52` (`save_version`) | **`resolve_access` at `:38` returns `tuple[bool, bool]` — there is NO Workspace here.** Inside `_do()`'s session, after the `is_member` check, add `ws = s.get(Workspace, workspace_id)`; that load is the mint site, per §7.3's rule. Then `stamp = stamp_for_workspace(ws)`. |
 | `handover.py:40` | `stamp=stamp_for_workspace(ws)` — pre-screen at `:36-38` |
 | `permissions.py:58` | `stamp=stamp_for_workspace(ws)` — pre-screen at `:53-55` |
 | `checkpoint.py:210` | `stamp=stamp_for_workspace(ws)` — pre-screen at `:205-207` |
@@ -1027,8 +1027,27 @@ each gain `stamp: FenceStamp` and pass it to their kernel function. Each kernel 
 
 **`kernel_accept_citation` passes its stamp to `apply_citation_to_room`.**
 
-**Pass the same object inward; never re-mint.** The four routes mint per §7.1's table.
-**No authorization call changes** (Constraint 10).
+**Pass the same object inward; never re-mint.** **No authorization call changes**
+(Constraint 10) — every row below binds a value an existing call already returns, or adds
+a plain `s.get`, and changes no check.
+
+Earlier revisions said only "the four routes mint per §7.1's table" and named no site. The
+four routes are these, and three of them have no `ws` in scope today:
+
+| Route (mints) | Calls | Access check | What to add |
+|---|---|---|---|
+| `web/api/workspaces.py` `post_citation` | `direct_cite_via_kernel` (`:1052`) | `resolve_access` at `:1039` in `_gate()` | **No Workspace** — booleans only. After the `is_member` check add `ws = s.get(Workspace, workspace_id)`; mint from it. |
+| `web/api/workspaces.py` (spec init) | `init_spec_via_kernel` (`:494`) | `require_owner` at `:486` in `_gate()`, **return discarded** | Bind it: `ws = require_owner(...)`. |
+| `web/api/annotations.py` | `insert_annotation_via_kernel` (`:261`) | `ws = require_owner(...)` at `:257` in `_gate()` | **Already bound.** Mint from `ws`. |
+| `proposal_assist/web/proposals.py` `accept` | `accept_via_kernel` (`:177`) | `require_member` at `:164` in `_route()`, **return discarded** | Bind it: `ws = require_member(...)`. |
+
+**All four mint INSIDE a `run_in_threadpool` closure whose session then closes**, and the
+orchestrator is called after it. That is safe and it is the only correct place: a
+`FenceStamp` is a frozen carrier of plain values (`workspace_id`, `generation`, two
+optional ids), not an ORM object, so it survives its session. But each closure must now
+**return the stamp** — `_gate()` currently returns `None` and `_route()` returns
+`(enabled, artifact)`. Widen the return; do not re-open a session outside the gate to
+mint, which would read a generation no access check covered and defeat the carrier.
 
 - [ ] **Step 6: Run the new tests, then the full suite**
 
@@ -1454,19 +1473,29 @@ def test_the_inner_acquisition_receives_the_SAME_stamp_object(
     pg_session_factory, tmp_path, monkeypatch
 ):
     """§7.2, on the `kernel_accept_citation` -> `apply_citation_to_room` edge (§4.2's
-    seventh acquisition). Assert `received is minted`, not `==`: a re-mint under the held
-    mutex reads the same generation, so equality passes and the mis-threading is invisible.
+    seventh acquisition). Assert `received is supplied`, not `==`: a re-mint under the
+    held mutex reads the same generation, so equality passes and the mis-threading is
+    invisible.
 
-    Do NOT patch `stamp_for_workspace` to return a fixed object and then assert identity
-    against it — that makes the assertion true by construction whether or not the stamp is
-    threaded. Spy the MINT and the RECEIPT separately, and pin that the path mints exactly
-    once. Revisions 1-2 shipped this as a docstring with no body; revision 3 shipped
+    `kernel_accept_citation` RECEIVES its stamp (Step 5) and never mints one, so this
+    test pre-mints, passes it in, and proves that same object reached the inner call.
+
+    Revision 11 had this BACKWARDS: it called the kernel with no `stamp` at all and spied
+    `kernel.stamp_for_workspace`, asserting exactly one mint. Against a compliant
+    implementation that is a TypeError for a missing required argument, and the only way
+    to make it green is to mint inside the kernel — which Step 5 forbids in those words
+    ("pass the same object inward; never re-mint"). A test that fails against the correct
+    implementation and passes against the forbidden one is worse than no test.
+    Revisions 1-2 shipped this as a docstring with no body; revision 3 shipped
     `supplied = <mint the stamp...>`, an angle-bracket placeholder that does not parse.
 
-    Assumes Task 2 imported `stamp_for_workspace` into `kernel.py` as a module global.
+    No separate "zero re-mints" assertion is needed: a re-mint is only observable if the
+    new object is what gets passed on, and identity already catches that. A re-mint whose
+    result is discarded changes no behaviour.
     """
     import call_manager.proposal_assist.collab.kernel as kernel
-    from call_manager.db.models import User
+    from call_manager.db.models import User, Workspace
+    from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
 
     wid, oid, repo, room_doc, base_sha = _kernel_setup(
         pg_session_factory, tmp_path, ref_citekey="smith2021"
@@ -1479,24 +1508,17 @@ def test_the_inner_acquisition_receives_the_SAME_stamp_object(
             base_section_sha=base_sha, reference_id=ref.id,
         )
 
-    minted: list = []
     received: list = []
-    real_mint = kernel.stamp_for_workspace
     real_inner = kernel.apply_citation_to_room
-
-    def _mint_spy(*a, **kw):
-        out = real_mint(*a, **kw)
-        minted.append(out)
-        return out
 
     def _inner_spy(*a, **kw):
         received.append(kw.get("stamp"))
         return real_inner(*a, **kw)
 
-    monkeypatch.setattr(kernel, "stamp_for_workspace", _mint_spy)
     monkeypatch.setattr(kernel, "apply_citation_to_room", _inner_spy)
 
     with pg_session_factory() as s:
+        supplied = stamp_for_workspace(s.get(Workspace, wid))
         kernel_accept_citation(
             s,
             room_doc=room_doc,
@@ -1504,13 +1526,12 @@ def test_the_inner_acquisition_receives_the_SAME_stamp_object(
             workspace_id=wid,
             approver=s.get(User, oid),
             workspaces_dir=str(tmp_path),
+            stamp=supplied,
         )
         s.commit()
 
-    # Three assertions, none of which the others imply.
-    assert len(minted) == 1, f"the path minted {len(minted)} stamps; a re-mint IS the defect"
     assert received, "apply_citation_to_room never ran — the spy proved nothing"
-    assert all(got is minted[0] for got in received), [id(x) for x in received]
+    assert all(got is supplied for got in received), [id(x) for x in received]
 ```
 
 - [ ] **Step 6: Collaborator authorization parity (spec crit-13)**
@@ -1784,3 +1805,16 @@ Kept so a future reader does not reintroduce any of it. Items 1–3 were Critica
     `<...>` placeholders survived nine review rounds while the scan reported clean. A
     gate that skips what it cannot handle reports the absence of evidence as evidence of
     absence.
+19. **The same-stamp test was inverted.** Revision 11 called `kernel_accept_citation`
+    with no `stamp` and spied `kernel.stamp_for_workspace`, asserting one mint — but
+    Step 5 makes the kernel RECEIVE its stamp and forbids re-minting in those words.
+    The test would have raised TypeError against a compliant build and gone green only
+    against the forbidden one. It now pre-mints and asserts identity inward.
+20. **Three of the four Step 5 mint sites had no `ws` in scope, and none was named.**
+    Step 5 said only "the four routes mint per §7.1's table". MEASURED: `resolve_access`
+    returns `tuple[bool, bool]`, not a Workspace, and `require_owner`/`require_member`
+    return one that two routes discard. The same false belief had already produced a
+    wrong Step 4 row for `save_version`. All four routes are now named with file, line,
+    access check and the exact binding to add — plus the threadpool-closure return the
+    stamp has to travel out through. The other five Step 4 rows were verified one by one
+    against the tree and are correct.
