@@ -406,6 +406,39 @@ def test_a_nested_def_is_judged_separately_from_its_parent():
     assert "never calls acquire_commit_mutex_at_generation" in by_qual["outer.inner"]
 
 
+def test_neither_mutex_primitive_is_ever_ALIASED():
+    """Every scanner in this slice compares callee NAMES to the two literal strings —
+    the reach gate, the converted gate, the positive-Primitive-B test and the
+    live-acquirer partition all do. So one import line defeats all four at once:
+
+        from ...fencing import acquire_commit_mutex_live as old_live
+        old_live(session, workspace_id)      # invisible to every gate
+
+    and the site keeps calling `_live` while also calling Primitive B, so it reads as
+    converted everywhere. Resolving aliases in four scanners would be four places to get
+    it wrong; forbidding the alias is one rule with no blind spot. Nothing in the tree
+    needs it — MEASURED at `8f7b1ef7`: zero aliases of either primitive.
+    """
+    import ast
+    import pathlib
+
+    from tests.fencing.converted_gate import _AT_GENERATION, _LIVE, _callee_name
+
+    root = pathlib.Path(__file__).resolve().parents[2]
+    primitives = {_LIVE, _AT_GENERATION}
+    aliased = []
+    for path in (root / "src").rglob("*.py"):
+        rel = str(path.relative_to(root))
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.ImportFrom):
+                for a in node.names:
+                    if a.name in primitives and a.asname:
+                        aliased.append(f"{rel}:{node.lineno} ({a.name} as {a.asname})")
+            elif isinstance(node, ast.Assign) and _callee_name(node.value) in primitives:
+                aliased.append(f"{rel}:{node.lineno} (rebound)")
+    assert aliased == [], f"a mutex primitive was aliased, defeating every gate: {aliased}"
+
+
 def test_a_comment_naming_the_primitive_does_not_satisfy_the_gate():
     """Constraint 4. The gate keys on parsed Call nodes; a comment is not a call."""
     from tests.fencing.converted_gate import check_source
@@ -529,36 +562,66 @@ NOT_YET_CONVERTED: frozenset[tuple[str, str]] = frozenset(
 )
 
 
-def _own_calls(func: ast.AST) -> list[tuple[int, int, str]]:
-    """`(lineno, col_offset, callee-name)` for calls in THIS function's OWN scope.
+def _header_calls(node: ast.AST) -> list[tuple[int, int, str]]:
+    """Calls in a definition's HEADER — decorators, argument defaults, class bases and
+    metaclass keywords. A header is evaluated where the `def`/`class` STATEMENT sits,
+    not when the thing is invoked, so it belongs to the ENCLOSING scope.
+    """
+    out: list[tuple[int, int, str]] = []
+    roots: list[ast.AST] = list(getattr(node, "decorator_list", []))
+    roots += list(getattr(node, "bases", []))
+    roots += [k.value for k in getattr(node, "keywords", [])]
+    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+        a = node.args
+        roots += list(a.defaults)
+        roots += [d for d in a.kw_defaults if d is not None]
+    for r in roots:
+        out.extend(_own_calls(r, _as_expression=True))
+    return out
 
-    A nested `def`/`lambda`/`class` body belongs to the nested scope. `ast.walk`
-    descends into them, so judging `outer` on `inner`'s effects is exactly F3e1a2's
-    `_iter_own_nodes` trap — MEASURED: a fixture where `outer` takes `_live` and a
-    nested `inner` holds the sink makes `ast.walk(outer)` report the sink, and the
-    gate then blames the wrong function.
 
-    **BODY ONLY.** `ast.iter_child_nodes(func)` also yields `decorator_list` and the
-    default expressions in `args` — which run at DEFINITION time, in the ENCLOSING
-    scope, not on invocation. MEASURED: with them included,
-    `def f(s, w, stamp, _x=acquire_commit_mutex_at_generation(...)): write_and_commit_files(s)`
-    sorts the mutex above the sink and PASSES the gate unfenced.
+def _own_calls(scope: ast.AST, _as_expression: bool = False) -> list[tuple[int, int, str]]:
+    """`(lineno, col_offset, callee-name)` for calls that execute WHEN THIS SCOPE RUNS.
 
-    **`col_offset`, not `lineno` alone.** Two calls on one line compared equal, so
-    MEASURED: `write_and_commit_files(s); acquire_commit_mutex_at_generation(...)` —
-    effect first, on one line — PASSED. A position is (line, column).
+    For a `Module` that means import time. For a function or lambda it means one
+    invocation. The algorithm is identical for both — only the POLICY differs, and
+    `check_source` applies it: at import time any effect is a defect outright, inside a
+    function the effect must be preceded by the acquisition.
+
+    Three rules, each of which was a defect before it was one:
+
+    1. **Nested function and lambda BODIES belong to the nested scope.** `ast.walk`
+       descends into them, so judging `outer` on `inner`'s effects is F3e1a2's
+       `_iter_own_nodes` trap. The guard is at the TOP of `walk`, not on its children:
+       guarding only children lets a ROOT that is itself a nested `def` through, and an
+       earlier revision walked each body statement and so reported `inner`'s sink as
+       `outer`'s.
+
+    2. **A nested definition's HEADER belongs HERE**, because that is where it is
+       evaluated. Two revisions got the two halves of this wrong in opposite directions:
+       one counted headers as part of the function's invocation (so a Primitive B call in
+       a default argument sorted above a body sink and PASSED), the other stopped
+       counting them at all and added no other judge (so a module-level sink, a class-body
+       sink and `def f(s, x=write_and_commit_files(s))` were judged by NOBODY).
+
+    3. **A nested class BODY executes here too** — `class C: x = sink()` inside a
+       function runs on every call. Only a class at import scope is import-time, and that
+       case falls out of rule 3 applied at the module: `_own_calls(module)` already
+       descends through module-level class bodies.
+
+    Positions carry `col_offset`. Comparing bare line numbers made two calls on ONE line
+    equal, so an effect-first same-line site PASSED — MEASURED.
     """
     out: list[tuple[int, int, str]] = []
 
-    # The scope guard is at the TOP of `walk`, not on its children. Guarding only
-    # children lets a ROOT that is itself a nested `def` through: MEASURED, an earlier
-    # revision walked each body statement and so reported a nested `inner`'s sink as
-    # `outer`'s — reintroducing the very `_iter_own_nodes` trap this docstring warns
-    # about, in the commit that rewrote it.
     def walk(node: ast.AST) -> None:
-        if isinstance(
-            node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef
-        ):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+            out.extend(_header_calls(node))       # header here, body to its own scope
+            return
+        if isinstance(node, ast.ClassDef):
+            out.extend(_header_calls(node))
+            for stmt in node.body:                # a class body runs in THIS scope
+                walk(stmt)
             return
         if isinstance(node, ast.Call):
             name = _callee_name(node.func)
@@ -567,64 +630,12 @@ def _own_calls(func: ast.AST) -> list[tuple[int, int, str]]:
         for child in ast.iter_child_nodes(node):
             walk(child)
 
-    body = func.body if hasattr(func, "body") else []
+    if _as_expression:                            # a header expression, already unwrapped
+        walk(scope)
+        return sorted(out)
+    body = scope.body if hasattr(scope, "body") else []
     for stmt in body if isinstance(body, list) else [body]:
         walk(stmt)
-    return sorted(out)
-
-
-def _own_calls_definition_time(node: ast.AST) -> list[tuple[int, int, str]]:
-    """The EXACT COMPLEMENT of `_own_calls`: calls in this scope that run when the
-    scope is DEFINED rather than when it is invoked.
-
-    For a module or class body that is every statement except nested `def`/`class`
-    bodies. For a `def` it is the decorators and the argument defaults. Between the
-    two functions every call in the tree is judged by exactly one of them; that is
-    the property to preserve when editing either.
-    """
-    out: list[tuple[int, int, str]] = []
-
-    # Same top-of-walk guard as `_own_calls`, for the same reason: a root that is
-    # itself a `def`/`lambda`/`class` belongs to that scope, not this one. Without it,
-    # a Module's roots include every `def` in the file and this function reported the
-    # whole tree at `<module>` — MEASURED as false positives on a correct fixture.
-    def walk(n: ast.AST) -> None:
-        if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef):
-            return
-        if isinstance(n, ast.Call):
-            name = _callee_name(n.func)
-            if name:
-                out.append((n.lineno, n.col_offset, name))
-        for child in ast.iter_child_nodes(n):
-            walk(child)
-
-    roots: list[ast.AST] = []
-    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
-        # A lambda has defaults but no decorators; `getattr` covers both shapes.
-        roots += list(getattr(node, "decorator_list", []))
-        a = node.args
-        roots += list(a.defaults)
-        roots += [d for d in a.kw_defaults if d is not None]
-    elif isinstance(node, ast.Module | ast.ClassDef):
-        # The body runs at definition time — and for a class, so does its HEADER.
-        # Decorators, bases and metaclass keywords are evaluated when the `class`
-        # statement executes. The module-level walk cannot reach them (it stops at
-        # the ClassDef node), so if this branch omitted them nothing would judge
-        # them at all, and the "exact complement" claim above would be false.
-        roots += list(getattr(node, "decorator_list", []))
-        roots += list(getattr(node, "bases", []))
-        roots += [k.value for k in getattr(node, "keywords", [])]
-        roots += list(node.body)
-    else:
-        # SCOPE NODES ONLY. `Try`, `If`, `For`, `While` and `With` all have a `.body`,
-        # and an earlier revision's `else: roots += node.body` accepted every one of
-        # them — so ordinary runtime control flow was reported as running at definition
-        # time. MEASURED: a correct `post_lock_spec` with its acquisition and checkpoint
-        # inside `try:` FAILED the gate, which would have made Task 4's tree gate
-        # impossible to turn green. Refuse rather than guess.
-        raise TypeError(f"definition-time scope expected, got {type(node).__name__}")
-    for r in roots:
-        walk(r)
     return sorted(out)
 
 
@@ -660,88 +671,127 @@ def _judge(qual: str, path: str, ordered: list[tuple[int, int, str]]) -> list[st
     return []
 
 
-def check_source(source: str, path: str) -> list[str]:
-    """§5.1's scope, verbatim: "every `git_commit` site AND every enclosing acquisition".
+def _rename_map(tree: ast.AST) -> dict[str, str]:
+    """local-name -> canonical name, for every name this gate keys on.
 
+    The gate compares CALLEE NAMES to literal strings, so ONE import line defeats it:
+    `from ...fencing import acquire_commit_mutex_live as old_live`, then `old_live(s, w)`
+    is a `_live` call that `_LIVE in names` never sees. MEASURED: a declared site calling
+    Primitive B AND the aliased `_live` passed the converted gate, the reach gate, the
+    positive-B test and the live-acquirer partition — all four, because all four compare
+    the same literal. `git_fence._sink_bindings` already does this for sink names; the
+    mutex primitives had no equivalent.
+
+    Monotone and self-terminating: names are only ever added, and they are drawn from the
+    file's own identifiers, so the loop converges rather than stopping at a fixed count.
+    """
+    out = {n: n for n in _MUTEX_PRIMITIVES | _EFFECTS | _DELEGATED_EFFECTS}
+    while True:
+        before = len(out)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                for a in node.names:
+                    if a.name in out:
+                        out[a.asname or a.name] = out[a.name]
+            elif isinstance(node, ast.Assign):
+                origin = _callee_name(node.value)
+                if origin in out:
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            out[target.id] = out[origin]
+        if len(out) == before:
+            return out
+
+
+def check_source_records(source: str, path: str) -> list[tuple[str, str, str]]:
+    """`(kind, qualname, message)` for one file. `kind` is "import-time" or "order".
+
+    §5.1's scope, verbatim: "every `git_commit` site AND every enclosing acquisition".
     Both halves are required. MEASURED: effect-holders alone cover only 5 of F3e1b-1's
     8 sites — `kernel_accept_citation`, `post_lock_spec` and `post_unlock_spec`
     DELEGATE rather than hold an effect, so a direct-effect rule cannot see them.
 
-    **Lambdas are judged too.** `_own_calls` correctly refuses to attribute a lambda's
-    calls to its enclosing function — but for four revisions nothing then judged the
-    lambda itself, so its calls were attributed to NOBODY. MEASURED:
-    `go = lambda: write_and_commit_files(s)` with no mutex anywhere PASSED. Skipping a
-    scope when ATTRIBUTING is right; skipping it when JUDGING is a hole.
+    The KIND is not decoration. `check_tree` suppresses pinned sites, and pins are about
+    a function whose conversion another slice owns — they must never suppress an
+    import-time effect, which no slice could make correct. An earlier revision returned
+    bare strings and recovered the qualname by splitting the message on "::" and then on
+    a space, which both silently swallowed import-time problems for pinned functions and
+    made the message format load-bearing.
     """
-    problems: list[str] = []
+    records: list[tuple[str, str, str]] = []
+    tree = ast.parse(source)
+    renames = _rename_map(tree)
 
-    def _consider(node: ast.AST, sub: str) -> None:
-        ordered = _own_calls(node)
+    def _calls(scope: ast.AST) -> list[tuple[int, int, str]]:
+        """`_own_calls`, with every alias mapped back to the canonical name."""
+        return [(ln, col, renames.get(n, n)) for ln, col, n in _own_calls(scope)]
+
+    def _import_time(scope: ast.AST, qual: str) -> None:
+        """At import time there is no request, no session and no mutex to precede
+        anything, so ANY effect here is a defect outright — there is no ordering
+        question to ask. Only the MODULE scope is import time; a nested definition's
+        header runs when its enclosing function runs and is ordered like any other call.
+        """
+        for ln, col, name in _calls(scope):
+            if name in _EFFECTS | _DELEGATED_EFFECTS:
+                records.append((
+                    "import-time",
+                    qual or "<module>",
+                    f"{path}::{qual or '<module>'} — {name} runs at import time "
+                    f"(line {ln}, col {col}); nothing can fence it",
+                ))
+
+    def _consider(scope: ast.AST, qual: str) -> None:
+        ordered = _calls(scope)
         names = {n for *_pos, n in ordered}
         if names & _EFFECTS or names & _MUTEX_PRIMITIVES:
-            problems.extend(_judge(sub, path, ordered))
-
-    def _definition_time(node: ast.AST, qual: str) -> None:
-        """Effects that run at DEFINITION time, where no mutex can be held.
-
-        `_own_calls` walks a function's BODY only — correct, because decorators and
-        default expressions execute in the enclosing scope, not on invocation. But
-        for four revisions nothing then judged that enclosing scope, so those calls
-        were attributed to NOBODY. MEASURED as PASSING: a module-level
-        `write_and_commit_files(session)`, the same inside a class body, and
-        `def f(s, x=write_and_commit_files(s))`. Fixing the mis-attribution without
-        adding this had moved the defect rather than removed it.
-
-        There is no ordering question here. An import-time effect cannot be fenced:
-        there is no request, no session in flight and no mutex to precede it. Any
-        effect in this scope is a problem outright.
-        """
-        for ln, col, name in _own_calls_definition_time(node):
-            if name in _EFFECTS | _DELEGATED_EFFECTS:
-                problems.append(
-                    f"{path}::{qual or '<module>'} — {name} runs at definition time "
-                    f"(line {ln}, col {col}); nothing can fence it"
-                )
+            for msg in _judge(qual, path, ordered):
+                records.append(("order", qual, msg))
 
     def visit(node: ast.AST, qual: str) -> None:
-        # `_definition_time` is called ONLY when a scope is ENTERED — never on every
-        # node walked. An earlier revision called it at the top of `visit`, which
-        # recurses through `Try`/`If`/`For` nodes, so every statement nested in ordinary
-        # control flow was judged as definition-time. That is the Critical above.
         for child in ast.iter_child_nodes(node):
-            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
                 sub = f"{qual}.{child.name}" if qual else child.name
-                _definition_time(child, sub)   # decorators + defaults, or a class header
-                if not isinstance(child, ast.ClassDef):
-                    _consider(child, sub)
+                _consider(child, sub)
                 visit(child, sub)
             elif isinstance(child, ast.Lambda):
-                # Line-qualified: a function may hold several, and "<lambda>" alone
-                # would collapse them into one indistinguishable name in the report.
+                # Line-qualified: a scope may hold several, and "<lambda>" alone would
+                # collapse them into one indistinguishable name in the report.
                 sub = f"{qual}.<lambda:{child.lineno}>" if qual else f"<lambda:{child.lineno}>"
-                _definition_time(child, sub)   # its defaults
                 _consider(child, sub)
+                visit(child, sub)
+            elif isinstance(child, ast.ClassDef):
+                # A class is NOT its own execution scope here: its body runs in whatever
+                # scope contains it, and `_own_calls` already folded it in there. Only
+                # recurse, to reach the methods.
+                sub = f"{qual}.{child.name}" if qual else child.name
                 visit(child, sub)
             else:
                 visit(child, qual)
 
-    tree = ast.parse(source)
-    _definition_time(tree, "")                 # the module body, once
+    _import_time(tree, "")     # the module scope, and only the module scope
     visit(tree, "")
-    return problems
+    return records
+
+
+def check_source(source: str, path: str) -> list[str]:
+    """The messages alone — what the unit fixtures assert on."""
+    return [msg for _kind, _qual, msg in check_source_records(source, path)]
 
 
 def check_tree() -> list[str]:
-    """`check_source` over `src/`, minus the sinks other slices own."""
+    """`check_source` over `src/`, minus the sinks other slices own.
+
+    Pins suppress ONLY "order" verdicts. See `check_source_records`.
+    """
     root = pathlib.Path(__file__).resolve().parents[2]
     problems: list[str] = []
     for path in (root / "src").rglob("*.py"):
         rel = str(path.relative_to(root))
-        problems.extend(
-            p
-            for p in check_source(path.read_text(), rel)
-            if (rel, p.split("::", 1)[1].split(" ", 1)[0]) not in NOT_YET_CONVERTED
-        )
+        for kind, qual, msg in check_source_records(path.read_text(), rel):
+            if kind == "order" and (rel, qual) in NOT_YET_CONVERTED:
+                continue
+            problems.append(msg)
     return problems
 ```
 
@@ -904,7 +954,9 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
         "src/call_manager/proposal_assist/ports/invocation.py",
         "src/call_manager/proposal_assist/ports/stamp.py",
     }
-    def _stamp_aliases(source: str, seed: frozenset[str] = frozenset()) -> set[str]:
+    def _stamp_aliases(
+        source: str, seed: frozenset[str] = frozenset(), path_hint: str = "<source>"
+    ) -> set[str]:
         """`from ...stamp import FenceStamp as FS` then `FS(...)` builds one too. A check
         keyed on the literal name "FenceStamp" is bypassed by one import line.
 
@@ -925,7 +977,11 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
         # real tree: planting `FS = stamp.FenceStamp` + `FS(...)` in a new `ports/` file
         # fails this test with "FenceStamp built outside its two constructors:
         # ['...:7']"; with the bare-Name check it passed. Six alias shapes exercised.
-        for _ in range(3):  # transitive: FS = stamp.FenceStamp; G = FS
+        # UNTIL STABLE. An earlier revision looped a fixed 3 (and the tree-wide pass
+        # a fixed 4) and exited without checking convergence, so a chain one hop longer
+        # than the cap resolved to nothing and said nothing. A bound that can be reached
+        # by real input is not a safety bound; this one asserts it never is.
+        for _ in range(50):
             before = len(names)
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom):
@@ -968,6 +1024,8 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
                             names.add(param.arg)
             if len(names) == before:
                 break
+        else:
+            raise AssertionError(f"alias set never converged in {path_hint}: {sorted(names)}")
         return names
 
     # Alias resolution is TREE-WIDE, not file-local. One module can re-export the class
@@ -980,13 +1038,15 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
     # never a silent escape. The same trade the default-argument rule above makes.
     sources = {p: p.read_text() for p in (root / "src").rglob("*.py")}
     aliases: set[str] = {"FenceStamp"}
-    for _ in range(4):
+    for _ in range(50):
         grown = set(aliases)
-        for text in sources.values():
-            grown |= _stamp_aliases(text, seed=frozenset(aliases))
+        for src_path, text in sources.items():
+            grown |= _stamp_aliases(text, seed=frozenset(aliases), path_hint=str(src_path))
         if grown == aliases:
             break
         aliases = grown
+    else:
+        raise AssertionError(f"tree-wide alias set never converged: {sorted(aliases)}")
 
     built = []
     for path, source_text in sources.items():
@@ -997,6 +1057,37 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
             if isinstance(node, ast.Call) and _callee_name(node.func) in aliases:
                 built.append(f"{rel}:{node.lineno}")
     assert built == [], f"FenceStamp built outside its two constructors: {built}"
+
+    # And the class may not ESCAPE as a value. Alias tracking follows imports,
+    # assignments and default arguments — but `build(FenceStamp)` hands the class to a
+    # parameter this file never names, and `factory(...)` inside `build` is then a
+    # callee no lexical rule can connect back. MEASURED: that pair passed every count
+    # above. Rather than chase each way a callable can travel, forbid the travelling:
+    # outside the two constructors the name may appear ONLY as the callee of a call, in
+    # an import, or in a type annotation. Anything else — an argument, a dict value, a
+    # return — is a constructor leaving the allowlist.
+    escaped = []
+    for path, source_text in sources.items():
+        rel = str(path.relative_to(root))
+        if rel in allowed:
+            continue
+        tree = ast.parse(source_text)
+        exempt: set[int] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                exempt.add(id(node.func))          # the callee position itself
+            for field in ("annotation", "returns"):
+                ann = getattr(node, field, None)
+                if ann is not None:
+                    exempt.update(id(x) for x in ast.walk(ann))
+            if isinstance(node, ast.AnnAssign) and node.annotation is not None:
+                exempt.update(id(x) for x in ast.walk(node.annotation))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name | ast.Attribute) and id(node) not in exempt:
+                nm = node.id if isinstance(node, ast.Name) else node.attr
+                if nm in aliases:
+                    escaped.append(f"{rel}:{node.lineno}")
+    assert escaped == [], f"FenceStamp used as a VALUE, not called: {escaped}"
 
     # Two-sided. `built == []` is also satisfied if BOTH constructors were deleted, or
     # if a third were added inside an allowlisted file. Assert the population, not just
@@ -2094,3 +2185,33 @@ Kept so a future reader does not reintroduce any of it. Items 1–3 were Critica
     was already a known alias — a fixpoint over a rule that refuses to propagate is just
     a slow version of the same rule. Now `a.name in names`. PROVEN by mutation across
     two new modules with a two-hop rename.
+38. **Nested definitions were called unfenceable when they are not.** A `def` or `class`
+    written after an acquisition inside a route runs during that invocation — its
+    decorators and defaults CAN be fenced — but revision 16 declared every
+    definition-time call unconditionally invalid. This codebase writes `_gate()`,
+    `_do()`, `_route()` and `_body()` closures inside routes constantly, so the rule was
+    aimed straight at its own idiom. Only the MODULE scope is import time now. The
+    complement harness could not have caught this: it proves every call is judged ONCE,
+    not that it is judged by the RIGHT scope.
+39. **The scope model collapsed into one function.** `_own_calls(scope)` answers "what
+    runs when this scope runs" for a module and a function alike; only the POLICY
+    differs — unconditional at import time, ordered inside a function. Three revisions
+    of two functions drifting apart produced a Critical and two HIGHs between them.
+40. **Pins suppressed import-time effects.** `check_tree` filtered every problem whose
+    `(path, qualname)` was pinned, so a sink in a pinned function's decorator was
+    silently accepted. Pins mean "another slice owns this conversion"; no slice can make
+    an import-time effect correct. Verdicts are now typed records and pins apply only to
+    "order". This also removed the pin lookup's string surgery on the message text.
+41. **Both alias fixpoints were capped, not converged.** `range(3)` and `range(4)`, each
+    exiting silently if still growing. They now iterate until stable and raise if they
+    do not. A bound reachable by real input is not a safety bound.
+42. **The constructor could escape as a VALUE.** `build(FenceStamp)` then `factory(...)`
+    inside `build`: neither callee is an alias, and every count stayed at one. Chasing
+    each way a callable can travel is unwinnable — outside the two constructors the name
+    may now appear ONLY as a call's callee, in an import, or in an annotation.
+43. **Nothing forbade aliasing the mutex primitives.** Every scanner here compares callee
+    names to two literal strings, so `from ...fencing import acquire_commit_mutex_live as
+    old_live` defeats the reach gate, the converted gate, the positive-Primitive-B test
+    and the live-acquirer partition at once — while the site still reads as converted.
+    Resolving aliases in four scanners is four places to get it wrong; one rule forbids
+    the alias instead. MEASURED: zero aliases exist today.
