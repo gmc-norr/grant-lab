@@ -186,10 +186,14 @@ Spec §4.2. This is the gate that would have caught revision 1's defect —
 it alone leaves seven outer acquisitions mutating before the inner call. §5.3 says it
 is therefore NOT optional.
 
-The call graph is name-based: two functions sharing a name are ONE node, and an alias
-bound to an `ast.Attribute` is not followed. It OVER-approximates, which is the safe
-direction — an extra edge is an extra pin a human reads, never a hidden escape. It is
-NOT a precise call graph and must not be described as one.
+The call graph is name-based. It over-approximates on SHARED NAMES (two functions with
+one name are one node — extra edges, extra pins, safe) but **UNDER-approximates on
+aliases**: `f = mod.checkpoint_artifact; f(...)` creates an edge this graph does not
+follow, and an under-reported edge is a MISSED pin, not an extra one. Do not describe
+this gate as purely conservative. It is a ratchet over the shapes production actually
+uses; the proof is §5.2's runtime races. If a future slice introduces an aliased sink
+call, this gate goes quiet — `test_every_declared_site_positively_takes_primitive_b`
+is the two-sided check that does not.
 """
 
 from __future__ import annotations
@@ -367,6 +371,9 @@ def test_a_nested_def_is_judged_separately_from_its_parent():
         "    return inner\n"
     )
     problems = check_source(nested, "x/f.py")
+    # `assert all(...)` ALONE IS VACUOUS — it is True for an empty list, so a gate that
+    # reported nothing would pass. Assert non-emptiness first.
+    assert problems, "the gate reported nothing at all"
     assert all("::outer.inner" in p for p in problems), problems
 
 
@@ -410,8 +417,18 @@ from __future__ import annotations
 import ast
 import pathlib
 
+from tests.fencing.f3e1b1_sites import DECLARED_SITES
 from tests.fencing.git_fence import _SINK_KIND, _callee_name
 from tests.fencing.live_mutex_gate import ENCLOSING_ACQUISITIONS
+
+#: Scope is the UNION of the immutable catalog and the live record. The catalog half
+#: is what makes it safe: Task 4 REMOVES the seven from ENCLOSING_ACQUISITIONS, and a
+#: gate keyed on that record alone would silently stop checking the very functions the
+#: conversion just touched — while its own test stayed green. Revision 1 shipped that
+#: defect; revision 2 fixed it in one place and left it here.
+_ENCLOSING_QUALNAMES: frozenset[str] = frozenset(q for _p, q in DECLARED_SITES) | frozenset(
+    ENCLOSING_ACQUISITIONS
+)
 
 _LIVE = "acquire_commit_mutex_live"
 _AT_GENERATION = "acquire_commit_mutex_at_generation"
@@ -447,17 +464,20 @@ _DELEGATED_EFFECTS: frozenset[str] = frozenset(
 
 #: Sinks other slices own. `check_source` is scope-free so it can be unit-tested on
 #: fixtures; `check_tree` is the tree gate and needs this. This list only SHRINKS.
-NOT_YET_CONVERTED: frozenset[str] = frozenset(
+#: PATH-QUALIFIED. A bare-name exemption is inherited by any same-named function
+#: anywhere in the tree — a new `save_section` in an unrelated module would be exempt
+#: without anyone deciding that. Same defect a bare-name holder set has.
+NOT_YET_CONVERTED: frozenset[tuple[str, str]] = frozenset(
     {
-        "save_section",  # F3e1b-2
-        "insert_citation_for_user",  # F3e1b-2
-        "_insert_citation_locked",  # F3e1b-2
-        "insert_from_annotation",  # F3e2
-        "build_bibliography",  # F3e2
-        "post_init_spec._git",  # F3e2
-        "run_review_pass",  # F4
-        "Phase0Worker._init_repo",  # F5
-        "Phase0Worker._m1",  # F5
+        ("src/call_manager/proposal_assist/editing/save.py", "save_section"),  # F3e1b-2
+        ("src/call_manager/proposal_assist/citations/human_cite.py", "insert_citation_for_user"),
+        ("src/call_manager/proposal_assist/citations/core.py", "_insert_citation_locked"),
+        ("src/call_manager/proposal_assist/analysis/insert.py", "insert_from_annotation"),  # F3e2
+        ("src/call_manager/proposal_assist/citations/bibliography.py", "build_bibliography"),
+        ("src/call_manager/web/api/workspaces.py", "post_init_spec._git"),  # F3e2
+        ("src/call_manager/proposal_assist/review/pass_runner.py", "run_review_pass"),  # F4
+        ("src/call_manager/proposal_assist/phases/setup.py", "Phase0Worker._init_repo"),  # F5
+        ("src/call_manager/proposal_assist/phases/setup.py", "Phase0Worker._m1"),  # F5
     }
 )
 
@@ -523,7 +543,7 @@ def check_source(source: str, path: str) -> list[str]:
                 sub = f"{qual}.{child.name}" if qual else child.name
                 if not isinstance(child, ast.ClassDef):
                     ordered = _own_calls(child)
-                    enclosing = sub in ENCLOSING_ACQUISITIONS
+                    enclosing = sub in _ENCLOSING_QUALNAMES
                     if enclosing or ({n for _l, n in ordered} & _EFFECTS):
                         problems.extend(_judge(sub, path, ordered, enclosing))
                 visit(child, sub)
@@ -543,7 +563,7 @@ def check_tree() -> list[str]:
         problems.extend(
             p
             for p in check_source(path.read_text(), rel)
-            if p.split("::", 1)[1].split(" ", 1)[0] not in NOT_YET_CONVERTED
+            if (rel, p.split("::", 1)[1].split(" ", 1)[0]) not in NOT_YET_CONVERTED
         )
     return problems
 ```
@@ -683,6 +703,68 @@ def test_a_generation_disagreeing_with_its_stamp_raises(db_session, seeded_works
         acquire_commit_mutex_at_generation(db_session, wid, generation=1, stamp=stamp)
 
 
+def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
+    """#7. §7.0.2 says there are "exactly two ways to build one, and each REFUSES rather
+    than defaults" — but that was CONVENTION, enforced by nothing. A direct
+    `FenceStamp(...)` anywhere in `src/` bypasses both refusals, and the whole carrier
+    argument rests on a stamp never existing without a claimed generation.
+
+    MEASURED at `8f7b1ef7`: the only construction in `src/` is `Invocation.stamp()` at
+    `ports/invocation.py:75`. This pins that, so the second constructor
+    (`stamp_for_workspace`) and any third are a reviewed diff.
+    """
+    import ast
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[2]
+    allowed = {
+        "src/call_manager/proposal_assist/ports/invocation.py",
+        "src/call_manager/proposal_assist/ports/stamp.py",
+    }
+    built = []
+    for path in (root / "src").rglob("*.py"):
+        rel = str(path.relative_to(root))
+        if rel in allowed:
+            continue
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+                if name == "FenceStamp":
+                    built.append(f"{rel}:{node.lineno}")
+    assert built == [], f"FenceStamp built outside its two constructors: {built}"
+
+
+def test_a_stamp_for_a_DIFFERENT_workspace_raises(db_session, seeded_workspace):
+    """#10. The workspace-id half of the mismatch check, which was specified and never
+    asserted. A stamp minted for workspace A must not fence an effect on workspace B."""
+    from call_manager.proposal_assist.fencing import acquire_commit_mutex_at_generation
+    from call_manager.proposal_assist.ports.errors import FenceStampMismatch
+    from call_manager.proposal_assist.ports.stamp import FenceStamp
+
+    other = FenceStamp(
+        workspace_id=uuid.uuid4(), generation=0, active_turn_job_id=None, origin_job_id=None
+    )
+    with pytest.raises(FenceStampMismatch):
+        acquire_commit_mutex_at_generation(db_session, seeded_workspace, generation=0, stamp=other)
+
+
+def test_a_new_transaction_may_bind_a_FRESH_stamp(db_session, seeded_workspace):
+    """#8. Step 3's cleanup clause, asserted rather than assumed. Without it the binding
+    outlives its transaction and the SECOND request on a pooled Session raises
+    FenceStampMismatch against a stamp from the first — a self-inflicted outage that no
+    other test in this plan would catch."""
+    from call_manager.proposal_assist.fencing import acquire_commit_mutex_at_generation
+    from call_manager.proposal_assist.ports.stamp import FenceStamp
+
+    wid = seeded_workspace
+    fields = dict(workspace_id=wid, generation=0, active_turn_job_id=None, origin_job_id=None)
+    acquire_commit_mutex_at_generation(db_session, wid, generation=0, stamp=FenceStamp(**fields))
+    db_session.rollback()
+    # A DISTINCT object, after the transaction ended: must be accepted, not rejected.
+    acquire_commit_mutex_at_generation(db_session, wid, generation=0, stamp=FenceStamp(**fields))
+
+
 def test_stamp_for_workspace_refuses_a_workspace_with_no_generation():
     """Mirrors `Invocation.stamp()`'s `UnfencedInvocation` — asserted, not assumed."""
     from call_manager.proposal_assist.ports.errors import UnfencedInvocation
@@ -744,12 +826,18 @@ over stale), `WorkspaceGenerationStale`, and mutating nothing in every failure c
 
 | Call site | Add |
 |---|---|
-| `workspaces.py:665` (`post_lock_spec`) | `stamp=stamp_for_workspace(ws)` — `ws` from `require_owner` at `:645` |
-| `workspaces.py:746` (`post_unlock_spec`) | `stamp=stamp_for_workspace(ws)` — `ws` from `require_owner` at `:734` |
+| `workspaces.py:665` (`post_lock_spec`) | `stamp = stamp_for_workspace(ws)` as a LOCAL, then `stamp=stamp` — `ws` from `require_owner` at `:645` |
+| `workspaces.py:746` (`post_unlock_spec`) | `stamp = stamp_for_workspace(ws)` as a LOCAL, then `stamp=stamp` — `ws` from `require_owner` at `:734` |
 | `collab_checkpoint.py:52` (`save_version`) | `stamp=stamp_for_workspace(<the Workspace resolve_access loaded at :38>)` |
 | `handover.py:40` | `stamp=stamp_for_workspace(ws)` — pre-screen at `:36-38` |
 | `permissions.py:58` | `stamp=stamp_for_workspace(ws)` — pre-screen at `:53-55` |
 | `checkpoint.py:210` | `stamp=stamp_for_workspace(ws)` — pre-screen at `:205-207` |
+
+**Bind `stamp` as a NAMED LOCAL in every one of these functions**, then pass
+`stamp=stamp`. Passing `stamp=stamp_for_workspace(ws)` inline binds no name, and
+Task 4 then writes `generation=stamp.generation, stamp=stamp` inside the same
+function — a `NameError`. The local is also what makes the same-object rule
+checkable: one mint per function, reused, never re-called.
 
 §7.3: the three maintenance callers act for no one, and all three already run the
 identical `ws = s.get(Workspace, workspace_id)` + `soft_deleted_at` pre-screen
@@ -939,6 +1027,14 @@ acquisition goes above `apply_pm_section_to_fragment` (`:169`, `:274`, `:517`) a
 call.** Anchoring it one line late accepts an implementation that mutates the live room
 before taking the mutex: the exact defect §4.2 describes.
 
+**For `post_lock_spec` / `post_unlock_spec`, `checkpoint_artifact` is NOT the first
+effect.** §4.2's table names the **spec-lock write** / **spec-unlock write**.
+MEASURED at `8f7b1ef7`: the mutex at `:651` already precedes both, so this is a
+ratchet against future movement rather than a current failure — but the gate as
+written would ACCEPT a mutex moved to just above `checkpoint_artifact` at `:665`
+and below the lock write. Identify the lock/unlock write's callee and add it to
+`_EFFECTS`, then re-run `check_tree()` and record the count.
+
 Rewrite `checkpoint.py`'s `_live:` comment block at `:87-90` — it explains a refusal on
 deletion only, and the refusal is now also on generation.
 
@@ -1016,8 +1112,11 @@ def test_a_collaborator_with_write_access_can_still_cite_and_accept():
 
 - [ ] **Step 7: Prove the gates bite — §5.3's mutations**
 
-Commit the work first, then mutate, then restore **from a copy**. `git checkout <path>`
-destroys uncommitted work in the same file.
+**Do NOT commit before mutating** — Constraint 2 says this task is one commit, and an
+earlier revision instructed a commit here and another at Step 8, contradicting it.
+Copy every file you are about to mutate (`cp <f> /tmp/<f>.bak`), mutate, record the
+failure, restore from the copy. **Never `git checkout <path>`** — the work is
+uncommitted at this point and that destroys it.
 
 | Mutation | Must fail |
 |---|---|
@@ -1152,9 +1251,14 @@ State this in the final review rather than discovering it later.
 - **The reach gate over-approximates.** Its call graph is name-based — two same-named
   functions are one node, and an alias bound to an `ast.Attribute` is not followed. Safe
   direction, but not a precise call graph.
-- **Six sinks remain unconverted**: `save_section`, `insert_citation_for_user`,
-  `_insert_citation_locked` (F3e1b-2), `insert_from_annotation` and `post_init_spec._git`
-  (F3e2), `Phase0Worker._m1` (F5). Their rows stay `pending` and their pins stay listed.
+- **Five git SINKS remain unconverted** — `save_section`, `insert_citation_for_user`,
+  `_insert_citation_locked` (F3e1b-2), `insert_from_annotation` and
+  `post_init_spec._git` (F3e2) — plus `build_bibliography` (F3e2), `run_review_pass`
+  (F4) and `Phase0Worker._init_repo` (F5), which hold sinks but take no `_live` and so
+  appear in the converted gate's list, not the reach gate's.
+- **Six reach-gate PINS remain**, which is a different set: the five above plus
+  `Phase0Worker._m1`, which takes `_live` and holds no sink. Sinks and pins are not
+  the same population and an earlier revision conflated them.
 - **Task 4 is one commit**, so `git bisect` cannot separate the eight flips from each
   other. That is the deliberate cost of Constraint 2.
 
