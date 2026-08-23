@@ -8,15 +8,16 @@
 
 **Tech Stack:** Python 3.12 stdlib `ast` only. `pytest`. No `src/` change, no new dependency.
 
-**Spec:** `docs/superpowers/specs/2026-08-23-fence-f3e1a2-containing-statement-order-design.md` (revision 6, commit `7841e64f`). Section numbers below refer to it.
+**Spec:** `docs/superpowers/specs/2026-08-23-fence-f3e1a2-containing-statement-order-design.md` (revision 7, commit `ea481e2c`). Section numbers below refer to it.
 
 ## Global Constraints
 
-- **Baseline is `3857 passed, 1 skipped`** on master at `7841e64f`. The `1 skipped` is the `ANTHROPIC_API_KEY`-gated real-SDK test. **`0 skipped` means a live billed API call ran** — do not export that key.
+- **Baseline is `3857 passed, 1 skipped`** on master at `ea481e2c`. The `1 skipped` is the `ANTHROPIC_API_KEY`-gated real-SDK test. **`0 skipped` means a live billed API call ran** — do not export that key.
 - **Fast suite:** `uv run pytest -n 16 --dist loadfile -q`. Never `-n auto` (resolves to 72 here). Never `--dist loadgroup`.
 - **`ruff check .` is THE lint gate.** `ruff format` is not. Line limit 100. Rules: `E,F,I,B,UP,SIM`.
 - **`tests/fencing` is NOT insulated from the app import chain.** The root `tests/conftest.py` autouse teardown imports the app for every test in the repo, so a broken import shows as mass teardown **ERRORS with zero FAILED**. **Judge every mutation on FAILED, never on ERROR.**
-- **NO `src/` change in this slice.** `git diff master..HEAD --stat -- src/` must be empty at every commit. This is a slice-identity line: if a task seems to need one, STOP and escalate.
+- **NO `src/` change in this slice.** Check it against the **fixed base `ea481e2c`**, not `master`: this work may happen directly on `master`, where `master..HEAD` is empty and the check is vacuous. `git diff --stat ea481e2c..HEAD -- src/` must be empty at every commit. Slice-identity line — if a task seems to need a `src/` change, STOP and escalate.
+- **The base commit is `ea481e2c`** (spec revision 7). Every identity check in this plan uses it literally. Do not substitute `master`, `HEAD~n`, or a merge-base.
 - **The inventory must not move.** `fence_inventory.json` byte-identical, all nine `git_commit` rows still `fenced: false`, exemption pins still 5.
 - **Never widen §4.1's allowlist.** Six entries, exactly what the nine production paths need. Eagerness is NOT a reason to add one (§4.1). If a task seems to need a seventh, STOP and escalate.
 - **Every uncredited and disqualified test case asserts the qualname is STILL a sink holder.** An invisible sink is worse than an unfenced one (§3).
@@ -107,15 +108,23 @@ def _disqualified_but_held(body: str, head: str = _HEAD) -> None:
     """The sink's position is FINE — the FUNCTION is disqualified.
 
     Distinct from _uncredited_but_held ON PURPOSE. These cases put the sink on a
-    CREDITED path (`sha = sink(...)` is `Assign.value`), so its index is an INT.
-    Asserting None here fails for the wrong reason — verified: the real index is 2.
-    Only the verdict differs, so only the verdict is asserted.
+    CREDITED path (`sha = sink(...)` is `Assign.value`), so its index is an INT, not
+    None — asserting None fails for the wrong reason.
+
+    It asserts `isinstance(i, int)` rather than a literal. An earlier draft hardcoded
+    `[2]` and was wrong for half these cases: measured, `yield` before the sink gives
+    2, `yield` after gives 1, and a `yield` in a nested default gives 1. The exact
+    index is an artefact of how many statements the fixture happens to have; what
+    matters is that the position was credited and the verdict is still unfenced.
     """
     src = head + body
     calls = sink_calls(src, "x/f.py")
     assert fenced_qualnames(src, "x/f.py") == set(), "must be disqualified"
     assert {q for q, _n, _i in calls} == {"f"}, "sink must remain discoverable"
-    assert [i for _q, _n, i in calls] == [2], "the POSITION is fine; the function is not"
+    indices = [i for _q, _n, i in calls]
+    assert all(isinstance(i, int) for i in indices), (
+        f"the POSITION should be credited here; the FUNCTION is what fails. got {indices}"
+    )
 
 
 def test_lambda_body_is_not_credited():
@@ -230,9 +239,10 @@ def test_an_unlisted_FIELD_of_a_listed_node_is_not_credited():
 
 Run: `uv run pytest tests/fencing/test_git_fence.py -q -p no:randomly`
 
-Expected: **7 failed, 28 passed.** The failures are the five credited-container
-positives (`Assign`, `If`, `Try`, `With`, `AsyncWith`) and the two class/annotation
-discovery cases, which today are not found at all. `test_expr_value_is_credited`
+Expected: **10 failed, 25 passed.** The failures are the five credited-container
+positives (`Assign`, `If`, `Try`, `With`, `AsyncWith`) and the five discovery cases
+that today are not found at all — nested-`def` default, nested-`def` decorator,
+nested-`async def` default, annotation, and class. `test_expr_value_is_credited`
 already passes — it is F3e1a's shape. **Most negatives already pass**, because today
 *everything* nested returns `None`: they cannot tell a correct implementation from a
 blanket `None`, which is exactly what Step 5's mutations are for. Re-derive this split
@@ -359,7 +369,7 @@ Note the top-level statement itself is yielded with `credited=True`, so a bare
 `is_bare_top_level` branch is now redundant and must be **deleted**.
 
 > **Prototyped before this plan was committed.** The code above was run against
-> `git_fence.py` at `7841e64f` and reverted. All 6 positives and all 11 uncredited /
+> `git_fence.py` at `ea481e2c` and reverted. All 6 positives and all 11 uncredited /
 > discovery cases behave as specified, `153 passed`, real tree still nine holders and
 > an empty fenced set. **The first version of this code lost lambda-body sinks
 > entirely** — caught by running it, not by reading it, which is why the asymmetry
@@ -374,16 +384,21 @@ Expected: **35 passed** (15 existing + 20 new).
 Then run the full fencing package: `uv run pytest tests/fencing/ -q -p no:randomly`
 Expected: **173 passed** (153 + 20).
 
-> ### Restoring a mutation: NEVER `git checkout --`
+> ### Restoring a mutation: NEVER `git checkout --`, and NEVER a stale checkpoint
 >
-> The implementation is **not committed yet** here. `git checkout --
+> The implementation is **not committed yet** at mutation time. `git checkout --
 > tests/fencing/git_fence.py` restores **pre-task HEAD** and silently deletes
-> everything you just wrote. Checkpoint first, restore from the copy:
+> everything you just wrote.
+>
+> **Take a FRESH checkpoint at the start of every task's mutation step**, named for
+> that task. Task 1's checkpoint predates `_is_generator` and `_ends_transaction`;
+> restoring Task 2 or Task 3 from it deletes the function that task just added, and
+> the tests go green again for the wrong reason:
 >
 > ```bash
-> cp tests/fencing/git_fence.py /tmp/git_fence.checkpoint.py   # BEFORE any mutation
+> cp tests/fencing/git_fence.py /tmp/git_fence.taskN.py   # N = THIS task
 > # ...apply mutation, run, observe FAILED-not-ERROR...
-> cp /tmp/git_fence.checkpoint.py tests/fencing/git_fence.py   # restore
+> cp /tmp/git_fence.taskN.py tests/fencing/git_fence.py   # restore
 > ```
 >
 > Re-run and confirm green after every restore, before the next mutation.
@@ -397,8 +412,8 @@ named tests, restore from the checkpoint, re-confirm green.
 | 3 | `CREDITED_FIELDS.get(type(node), frozenset())` → a sentinel meaning "all fields" | the uncredited negatives whose path runs through a NON-definition node: lambda-body, lambda-in-container, genexp, genexp-as-arg, type-alias, unlisted-NODE (`For`). **NOT `If.orelse`** — `ast.If` is a listed node, so this mutation still consults its field set and `orelse` stays out. Mutation 4 is what covers that. **NOT** the definition/discovery cases either — those return early, before `CREDITED_FIELDS` is read. |
 | 4 | `child_credited = credited and type(node) in CREDITED_FIELDS` (ignore the field) | `test_an_unlisted_FIELD_of_a_listed_node_is_not_credited` |
 | 6 | walk `Lambda.body` with `credited=True` instead of `False` | the two lambda-body negatives falsely fence |
-| 6b | **skip `Lambda.body` entirely** (drop the `isinstance(node, ast.Lambda)` branch) | the two lambda-body negatives fail on the **holder** assertion — the sink vanishes. Discovery coverage, not safety: it under-reports. Found by prototyping this exact code; the plan shipped it broken. |
-| 9 | `child_credited = field in allowed` (drop `credited and` — non-monotonic) | `test_lambda_nested_in_a_returned_container_is_not_credited` |
+| 6b | **skip a `Lambda`'s body via an EXPLICIT early return**: `if isinstance(node, ast.Lambda): yield node, credited; return`, placed before the `(Lambda, ClassDef)` branch | the two lambda-body negatives fail on the **holder** assertion — the sink vanishes. Discovery coverage, not safety. <br>**Merely removing `ast.Lambda` from the `(Lambda, ClassDef)` tuple does NOT work**: the node falls through to the generic traversal, which still descends into `body`, so the sink stays discoverable and the mutation flips **nothing**. Measured. |
+| 9 | **make `credited` non-monotonic**: `child_credited = field in allowed` (drop the `credited and`) | **Measured**: `For`, `If.orelse`, **and `class body`** — any sink reached by a listed field sitting under an unlisted one, or under a definition branch that had already forced `False`. NOT the lambda cases, which an earlier draft named: the `Lambda` branch forces `False` **and returns**, so monotonicity never arises there, while `ClassDef` forces `False` and keeps walking — which is exactly why `class body` flips and the lambda ones do not. |
 | 12 | remove ONE entry from the table, six times | The paths **compose**, so the flip sets differ per entry and must each be recorded: removing `ast.Expr` flips the `Expr`, `If`, `Try`, `With` and `AsyncWith` positives (all five reach their call through a statement node); removing `ast.Assign` flips only `test_assign_value_is_credited`; removing `ast.If`, `ast.Try`, `ast.With` or `ast.AsyncWith` flips only that entry's own positive. Run all six — the point is that every entry is load-bearing, and "one test per entry" was false. |
 
 Record each mutation's actual output in the task report. A mutation that reddens nothing is a finding, not a pass.
@@ -623,7 +638,7 @@ nobody has tried to break is a comment.
 - [ ] **Step 1: Checkpoint**
 
 ```bash
-cp tests/fencing/git_fence.py /tmp/git_fence.checkpoint.py
+cp tests/fencing/git_fence.py /tmp/git_fence.task4.py
 ```
 
 - [ ] **Step 2: Mutation 10 — restore the pre-skip**
@@ -644,7 +659,7 @@ async default, annotation and class cases. The lambda cases are unaffected — a
 Discovery coverage, not safety: it does **not** falsely fence anything. That is why it
 sits here rather than among Task 1's safety mutations. Record the exact failing set.
 
-Restore: `cp /tmp/git_fence.checkpoint.py tests/fencing/git_fence.py`; re-run, green.
+Restore: `cp /tmp/git_fence.task4.py tests/fencing/git_fence.py`; re-run, green.
 
 - [ ] **Step 3: Mutation 11 — stop walking a definition's non-body fields**
 
@@ -746,12 +761,17 @@ In `tests/fencing/inventory.py`'s `SLICE_STATUS`, after the `"F3e1a"` line:
 - [ ] **Step 4: Verify no "provably" survives, then run**
 
 ```bash
-grep -rn "provably" tests/fencing/ || echo "clean"
+grep -rn "provably" tests/fencing/git_fence.py tests/fencing/live_mutex_gate.py || echo "clean"
 uv run pytest tests/fencing/ -q -p no:randomly
 uv run ruff check .
 ```
 
-Expected: `clean`, then **181 passed**. No new tests — this task changes prose and one dict key.
+Expected: `clean`, then **181 passed**.
+
+Scope the grep to the two files this task edits. A repo-wide
+`grep -rn "provably" tests/fencing/` can **never** print `clean`: `sink_guard.py`
+carries an unrelated and correct use of the word, so a whole-directory grep would make
+this step permanently unpassable. No new tests — this task changes prose and one dict key.
 
 - [ ] **Step 5: Commit**
 
@@ -797,12 +817,24 @@ def test_primitive_b_still_has_zero_production_callers():
     hits = []
     for path in (_ROOT / "src").rglob("*.py"):
         tree = ast.parse(path.read_text())
+        # Resolve aliases FIRST. `from ... import acquire_commit_mutex_at_generation
+        # as acquire` then `acquire(...)` is a caller, and a bare-name check misses it
+        # — the same alias handling F3e1a's own identity test already does.
+        names = {_PRIMITIVE_B}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                for a in node.names:
+                    if a.name == _PRIMITIVE_B and a.asname:
+                        names.add(a.asname)
+            elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Name):
+                if node.value.id in names:
+                    names.update(t.id for t in node.targets if isinstance(t, ast.Name))
         for node in ast.walk(tree):
             # Its own `def` is not a caller. Excluding the whole of fencing.py would
             # hide a real caller added inside it, so exclude the DEFINITION, by AST.
             if isinstance(node, ast.FunctionDef) and node.name == _PRIMITIVE_B:
                 continue
-            if isinstance(node, ast.Call) and _callee_name(node.func) == _PRIMITIVE_B:
+            if isinstance(node, ast.Call) and _callee_name(node.func) in names:
                 hits.append(f"{path.relative_to(_ROOT)}:{node.lineno}")
     assert hits == [], f"Primitive B gained a caller: {hits}"
 
@@ -854,7 +886,7 @@ def test_the_allowlist_is_still_six_entries():
 # `git show` against `merge-base master HEAD`. Both are wrong as permanent tests:
 # once this merges, base == HEAD and they assert nothing; and CI's shallow
 # checkout may have no local `master` ref at all, so they ERROR rather than fail.
-# Those two checks are one-time PLAN commands against the fixed base 7841e64f —
+# Those two checks are one-time PLAN commands against the fixed base `ea481e2c` —
 # see Step 4 — not pytest tests.
 ```
 
@@ -866,9 +898,34 @@ Expected: **5 passed.**
 - [ ] **Step 3: Prove the identity gates bite**
 
 - Add `ast.For: frozenset({"body"})` to `CREDITED_FIELDS` → `test_the_allowlist_is_still_six_entries` FAILS, and `test_an_unlisted_NODE_type_is_not_credited` FAILS. Restore from the checkpoint.
-- Hand-edit one git row's `fenced` to `true` in `fence_inventory.json` → `test_every_git_row_is_still_unfenced_and_classified` and `test_the_inventory_file_is_byte_identical_to_master` FAIL. Restore from the checkpoint.
+- Hand-edit one git row's `fenced` to `true` in `fence_inventory.json` → `test_every_git_row_is_still_unfenced_and_classified` FAILS, and identity check 2 in Step 4 prints `FAIL`. Restore with `git checkout -- tests/fencing/fence_inventory.json` (safe here: that file is unmodified by this slice, so there is nothing of yours to lose).
 
-- [ ] **Step 4: Full suite, lint, commit**
+- [ ] **Step 4: Run the fixed-base identity checks**
+
+These are commands, not pytest tests — a test asserting `merge-base master HEAD` is
+vacuous once this merges and ERRORs under CI's shallow checkout. Run them here, and
+paste the real output into the task report:
+
+```bash
+BASE=ea481e2c
+
+# 1. The slice converts nothing.
+git diff --stat "$BASE"..HEAD -- src/ | tee /dev/stderr | grep -q . \
+  && echo "FAIL: src/ was touched" || echo "OK: src/ untouched"
+
+# 2. The inventory did not move — byte-identical, not merely equivalent.
+git show "$BASE":tests/fencing/fence_inventory.json > /tmp/inv.base.json
+diff -q /tmp/inv.base.json tests/fencing/fence_inventory.json \
+  && echo "OK: inventory byte-identical" || echo "FAIL: the inventory moved"
+
+# 3. Exemption pins are still 5.
+git diff "$BASE"..HEAD -- tests/fencing/inventory.py | grep -E '^[+-].*"[a-z_]+\.py":' \
+  && echo "FAIL: the pin list changed" || echo "OK: pins untouched"
+```
+
+All three must print `OK`.
+
+- [ ] **Step 5: Full suite, lint, commit**
 
 ```bash
 uv run pytest -n 16 --dist loadfile -q
