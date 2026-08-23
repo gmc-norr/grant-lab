@@ -139,28 +139,31 @@ UNCONVERTED_LIVE_CALLERS: frozenset[tuple[str, str]] = frozenset(
 #: seven are F3e1b's (§4.2's table), and ``Phase0Worker._m1`` is NOT: it reaches
 #: ``_init_repo``, whose row is **F5** (spec §7 line 233 and §12), so it converts with F5.
 #: Treating it as an F3e1b deliverable would make F3e1b's completion check unsatisfiable.
-ENCLOSING_ACQUISITIONS: Mapping[str, str] = {
-    "apply_citation_to_room": "F3e1b",
-    "kernel_accept_prose": "F3e1b",
-    "kernel_init_spec": "F3e1b",
-    "kernel_accept_citation": "F3e1b",
-    "apply_annotation_insert_to_room": "F3e1b",
-    "post_lock_spec": "F3e1b",
-    "post_unlock_spec": "F3e1b",
-    "Phase0Worker._m1": "F5",
+ENCLOSING_ACQUISITIONS: Mapping[tuple[str, str], str] = {
+    ("src/call_manager/proposal_assist/collab/kernel.py", "apply_citation_to_room"): "F3e1b",
+    ("src/call_manager/proposal_assist/collab/kernel.py", "kernel_accept_prose"): "F3e1b",
+    ("src/call_manager/proposal_assist/collab/kernel.py", "kernel_init_spec"): "F3e1b",
+    ("src/call_manager/proposal_assist/collab/kernel.py", "kernel_accept_citation"): "F3e1b",
+    (
+        "src/call_manager/proposal_assist/collab/kernel.py",
+        "apply_annotation_insert_to_room",
+    ): "F3e1b",
+    ("src/call_manager/web/api/workspaces.py", "post_lock_spec"): "F3e1b",
+    ("src/call_manager/web/api/workspaces.py", "post_unlock_spec"): "F3e1b",
+    ("src/call_manager/proposal_assist/phases/setup.py", "Phase0Worker._m1"): "F5",
 }
 
 #: Take ``acquire_commit_mutex_live`` AND hold a git sink in the same function. Not
 #: enclosing acquisitions — the static gate CAN see these, and each already owns an
 #: inventory row.  Recorded only so the partition below is total.
-LIVE_ACQUIRING_SINK_HOLDERS: frozenset[str] = frozenset(
+LIVE_ACQUIRING_SINK_HOLDERS: frozenset[tuple[str, str]] = frozenset(
     {
-        "checkpoint_artifact",
-        "_insert_citation_locked",
-        "insert_citation_for_user",
-        "save_section",
-        "insert_from_annotation",
-        "post_init_spec._git",
+        ("src/call_manager/proposal_assist/collab/checkpoint.py", "checkpoint_artifact"),
+        ("src/call_manager/proposal_assist/citations/core.py", "_insert_citation_locked"),
+        ("src/call_manager/proposal_assist/citations/human_cite.py", "insert_citation_for_user"),
+        ("src/call_manager/proposal_assist/editing/save.py", "save_section"),
+        ("src/call_manager/proposal_assist/analysis/insert.py", "insert_from_annotation"),
+        ("src/call_manager/web/api/workspaces.py", "post_init_spec._git"),
     }
 )
 
@@ -168,42 +171,43 @@ LIVE_ACQUIRING_SINK_HOLDERS: frozenset[str] = frozenset(
 #: pinned by name so the partition is total: a NEW ``_live`` caller lands in none of the
 #: three sets and fails the partition test, instead of being silently absent from a
 #: record nobody reads.
-LIVE_ACQUIRERS_WITHOUT_A_SINK: frozenset[str] = frozenset(
+LIVE_ACQUIRERS_WITHOUT_A_SINK: frozenset[tuple[str, str]] = frozenset(
     {
-        "load_or_hydrate",
-        "maybe_auto_enable",
-        "soft_delete_workspace_db",
-        "workspace_write",
+        ("src/call_manager/proposal_assist/collab/hydrate.py", "load_or_hydrate"),
+        ("src/call_manager/proposal_assist/collab/flip.py", "maybe_auto_enable"),
+        ("src/call_manager/workspaces.py", "soft_delete_workspace_db"),
+        ("src/call_manager/proposal_assist/web/_writes.py", "workspace_write"),
     }
 )
 
 
-def live_acquirer_qualnames() -> set[str]:
-    """Every function in ``src/`` that calls ``acquire_commit_mutex_live``, by qualname.
+def live_acquirer_qualnames() -> set[tuple[str, str]]:
+    """Every ``acquire_commit_mutex_live`` caller in ``src/``, as ``(path, qualname)``.
 
-    Qualnames are DOTTED and consistent (``Phase0Worker._m1``, ``post_init_spec._git``).
-    The old record mixed bare and dotted forms, and a set of bare names cannot tell two
-    same-named functions in different files apart — the same way a holder count cannot
-    tell "site removed + site added" from "nothing changed".
+    PATH-QUALIFIED. Qualnames alone are dotted and consistent (``Phase0Worker._m1``,
+    ``post_init_spec._git``), but a set of them still cannot tell two same-named
+    functions in different files apart — so a site added in one file and removed in
+    another leaves the partition green. That is the same weakness a holder COUNT has,
+    and it survived here for one revision after being fixed in both gates.
     """
     import ast
 
-    found: set[str] = set()
+    found: set[tuple[str, str]] = set()
 
-    def walk(node: ast.AST, qual: str) -> None:
+    def walk(node: ast.AST, qual: str, rel: str) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-                walk(child, f"{qual}.{child.name}" if qual else child.name)
+                walk(child, f"{qual}.{child.name}" if qual else child.name, rel)
                 continue
             if isinstance(child, ast.Call):
                 func = child.func
                 name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
                 if name == "acquire_commit_mutex_live":
-                    found.add(qual)
-            walk(child, qual)
+                    found.add((rel, qual))
+            walk(child, qual, rel)
 
     for path in _SRC.rglob("*.py"):
-        walk(ast.parse(path.read_text()), "")
+        walk(ast.parse(path.read_text()), "", str(path.relative_to(_REPO)))
     return found
 
 

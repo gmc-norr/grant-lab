@@ -810,6 +810,7 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
     from tests.fencing.converted_gate import _own_calls
 
     inside = set()
+    built_counts: dict[tuple[str, str], int] = {}
     for rel in sorted(allowed):
         tree = ast.parse((root / rel).read_text())
         aliases = _stamp_aliases((root / rel).read_text())
@@ -819,8 +820,10 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
                 if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
                     sub = f"{prefix}.{child.name}" if prefix else child.name
                     if not isinstance(child, ast.ClassDef):
-                        if aliases & {n for _l, n in _own_calls(child)}:
+                        hits = [n for _l, n in _own_calls(child) if n in aliases]
+                        if hits:
                             inside.add((rel, sub))
+                            built_counts[(rel, sub)] = len(hits)
                     visit(child, sub)
                 else:
                     visit(child, prefix)
@@ -834,6 +837,9 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
         ("src/call_manager/proposal_assist/ports/invocation.py", "Invocation.stamp"),
         ("src/call_manager/proposal_assist/ports/stamp.py", "stamp_for_workspace"),
     }, f"the two sanctioned constructors are not the two that build one: {sorted(inside)}"
+    # And EXACTLY ONE construction each. `inside` is a set, so a function building two
+    # collapses to one entry and the identity check above cannot see it.
+    assert built_counts == {k: 1 for k in inside}, f"extra constructions: {built_counts}"
 
 
 def test_a_stamp_for_a_DIFFERENT_workspace_raises(db_session, seeded_workspace):
@@ -1269,8 +1275,9 @@ def test_a_mutex_after_the_lock_write_is_rejected():
 
 - [ ] **Step 4: Update the records and pins in the same working tree**
 
-- `live_mutex_gate.ENCLOSING_ACQUISITIONS` — remove the seven; it becomes
-  `{"Phase0Worker._m1": "F5"}`.
+- `live_mutex_gate.ENCLOSING_ACQUISITIONS` — remove the seven. All three records are
+  keyed on **`(path, qualname)`**, so it becomes
+  `{("src/call_manager/proposal_assist/phases/setup.py", "Phase0Worker._m1"): "F5"}`.
 - `live_mutex_gate.LIVE_ACQUIRING_SINK_HOLDERS` — remove `checkpoint_artifact` **only**.
   MEASURED: it is the sole in-scope member; the other five are F3e1b-2's and F3e2's.
 - `live_mutex_gate.LIVE_ACQUIRERS_WITHOUT_A_SINK` — **unchanged**. MEASURED: none of the
@@ -1316,7 +1323,9 @@ def test_only_F5s_enclosing_acquisition_remains_unconverted():
     """The other half: after this slice, the live record holds exactly `_m1`."""
     from tests.fencing.live_mutex_gate import ENCLOSING_ACQUISITIONS
 
-    assert dict(ENCLOSING_ACQUISITIONS) == {"Phase0Worker._m1": "F5"}
+    assert dict(ENCLOSING_ACQUISITIONS) == {
+        ("src/call_manager/proposal_assist/phases/setup.py", "Phase0Worker._m1"): "F5"
+    }
 ```
 
 `test_the_live_acquirers_partition_exactly` also reads those records, and Step 4 keeps it
@@ -1466,12 +1475,15 @@ git commit -m "feat(fence): the choke point and seven enclosing acquisitions tak
 ```python
 # tests/fencing/test_f3e1b1_slice.py
 def test_this_slice_is_recorded_complete():
+    # KEY IS `F3e1b1`, NOT `F3e1b-1`. MEASURED: every existing key is unhyphenated —
+    # F3a, F3d1, F3d2, F3e1a, F3e1a2 — and a sub-slice appends a character rather than
+    # a separator. `F3e1b-1` would be the first hyphenated key in the collection.
     """F3e1b-1 owns no NEW inventory row, so a row-iterating test never reads its
     status. F3e1a2 shipped exactly this hole: deleting its status key left the whole
     fencing suite green."""
     from tests.fencing.inventory import SLICE_STATUS
 
-    assert SLICE_STATUS["F3e1b-1"] == "complete"
+    assert SLICE_STATUS["F3e1b1"] == "complete"
 
 
 def test_f3e1b_still_owns_exactly_four_pending_git_rows():
@@ -1553,7 +1565,7 @@ Expected: FAIL — `KeyError: 'F3e1b-1'`.
 
 - [ ] **Step 3: Add the status and regenerate the inventory**
 
-Add `"F3e1b-1": "complete",` to `SLICE_STATUS`. **Do not hand-edit
+Add `"F3e1b1": "complete",` to `SLICE_STATUS`. **Do not hand-edit
 `fence_inventory.json`** — regenerate it via `tests/fencing/regenerate_inventory.py`.
 §5.3: hand-editing a row's `fenced` to `true` must not survive regeneration.
 

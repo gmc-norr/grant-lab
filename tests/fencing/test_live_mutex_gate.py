@@ -121,13 +121,20 @@ def test_f3e1b_owns_exactly_the_seven_enclosing_acquisitions_of_spec_4_2():
     """
     from tests.fencing.live_mutex_gate import ENCLOSING_ACQUISITIONS
 
-    assert {q for q, s in ENCLOSING_ACQUISITIONS.items() if s == "F3e1b"} == {
-        "apply_citation_to_room",
-        "kernel_accept_prose",
-        "kernel_init_spec",
-        "kernel_accept_citation",
-        "apply_annotation_insert_to_room",
-        "post_lock_spec",
-        "post_unlock_spec",
+    _KERNEL = "src/call_manager/proposal_assist/collab/kernel.py"
+    _ROUTES = "src/call_manager/web/api/workspaces.py"
+    assert {k for k, sl in ENCLOSING_ACQUISITIONS.items() if sl == "F3e1b"} == {
+        (_KERNEL, "apply_citation_to_room"),
+        (_KERNEL, "kernel_accept_prose"),
+        (_KERNEL, "kernel_init_spec"),
+        (_KERNEL, "kernel_accept_citation"),
+        (_KERNEL, "apply_annotation_insert_to_room"),
+        (_ROUTES, "post_lock_spec"),
+        (_ROUTES, "post_unlock_spec"),
     }
-    assert ENCLOSING_ACQUISITIONS["Phase0Worker._m1"] == "F5"
+    assert (
+        ENCLOSING_ACQUISITIONS[
+            ("src/call_manager/proposal_assist/phases/setup.py", "Phase0Worker._m1")
+        ]
+        == "F5"
+    )
