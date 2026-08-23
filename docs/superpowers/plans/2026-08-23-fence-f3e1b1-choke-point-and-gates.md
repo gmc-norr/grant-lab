@@ -550,16 +550,21 @@ def _own_calls(func: ast.AST) -> list[tuple[int, int, str]]:
     """
     out: list[tuple[int, int, str]] = []
 
+    # The scope guard is at the TOP of `walk`, not on its children. Guarding only
+    # children lets a ROOT that is itself a nested `def` through: MEASURED, an earlier
+    # revision walked each body statement and so reported a nested `inner`'s sink as
+    # `outer`'s — reintroducing the very `_iter_own_nodes` trap this docstring warns
+    # about, in the commit that rewrote it.
     def walk(node: ast.AST) -> None:
+        if isinstance(
+            node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef
+        ):
+            return
         if isinstance(node, ast.Call):
             name = _callee_name(node.func)
             if name:
                 out.append((node.lineno, node.col_offset, name))
         for child in ast.iter_child_nodes(node):
-            if isinstance(
-                child, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef
-            ):
-                continue
             walk(child)
 
     body = func.body if hasattr(func, "body") else []
@@ -568,9 +573,46 @@ def _own_calls(func: ast.AST) -> list[tuple[int, int, str]]:
     return sorted(out)
 
 
-def _judge(
-    qual: str, path: str, ordered: list[tuple[int, int, str]], enclosing: bool
-) -> list[str]:
+def _own_calls_definition_time(node: ast.AST) -> list[tuple[int, int, str]]:
+    """The EXACT COMPLEMENT of `_own_calls`: calls in this scope that run when the
+    scope is DEFINED rather than when it is invoked.
+
+    For a module or class body that is every statement except nested `def`/`class`
+    bodies. For a `def` it is the decorators and the argument defaults. Between the
+    two functions every call in the tree is judged by exactly one of them; that is
+    the property to preserve when editing either.
+    """
+    out: list[tuple[int, int, str]] = []
+
+    # Same top-of-walk guard as `_own_calls`, for the same reason: a root that is
+    # itself a `def`/`lambda`/`class` belongs to that scope, not this one. Without it,
+    # a Module's roots include every `def` in the file and this function reported the
+    # whole tree at `<module>` — MEASURED as false positives on a correct fixture.
+    def walk(n: ast.AST) -> None:
+        if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef):
+            return
+        if isinstance(n, ast.Call):
+            name = _callee_name(n.func)
+            if name:
+                out.append((n.lineno, n.col_offset, name))
+        for child in ast.iter_child_nodes(n):
+            walk(child)
+
+    roots: list[ast.AST] = []
+    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+        # A lambda has defaults but no decorators; `getattr` covers both shapes.
+        roots += list(getattr(node, "decorator_list", []))
+        a = node.args
+        roots += list(a.defaults)
+        roots += [d for d in a.kw_defaults if d is not None]
+    else:  # Module, ClassDef — the body itself runs at definition time
+        roots += list(getattr(node, "body", []))
+    for r in roots:
+        walk(r)
+    return sorted(out)
+
+
+def _judge(qual: str, path: str, ordered: list[tuple[int, int, str]]) -> list[str]:
     """One function's verdict. Returns a list so callers can `extend`, never `+=`
     inside a closure — that rebinds the name and raises UnboundLocalError.
 
@@ -584,8 +626,16 @@ def _judge(
     acquisitions = [(ln, col) for ln, col, n in ordered if n == _AT_GENERATION]
     if not acquisitions:
         return [f"{path}::{qual} is in scope but never calls {_AT_GENERATION}"]
-    effects_here = _EFFECTS | (_DELEGATED_EFFECTS if enclosing else frozenset())
-    effects = [(ln, col) for ln, col, n in ordered if n in effects_here]
+    # DELEGATED effects count for EVERY in-scope function, not only for the ones that
+    # hold no direct effect of their own. An earlier revision passed
+    # `enclosing=takes_mutex and not holds_effect`, so a function holding BOTH ignored
+    # its delegated call entirely and was judged against the later direct effect.
+    # MEASURED: `checkpoint_artifact(...); acquire_...(); write_and_commit_files(...)`
+    # PASSED, with the mutex sitting after the delegated effect it was supposed to fence.
+    # This does not drag in ordinary callers (`save_version._do`, `checkpoint_active_tails`,
+    # `direct_cite_via_kernel._body`): they take no mutex and hold no direct effect, so
+    # `check_source` never puts them in scope in the first place.
+    effects = [(ln, col) for ln, col, n in ordered if n in _EFFECTS | _DELEGATED_EFFECTS]
     if effects and min(acquisitions) > min(effects):
         return [
             f"{path}::{qual} — {_AT_GENERATION} must precede the first effect "
@@ -612,16 +662,33 @@ def check_source(source: str, path: str) -> list[str]:
     def _consider(node: ast.AST, sub: str) -> None:
         ordered = _own_calls(node)
         names = {n for *_pos, n in ordered}
-        holds_effect = bool(names & _EFFECTS)
-        takes_mutex = bool(names & _MUTEX_PRIMITIVES)
-        # "Enclosing" is DERIVED too: takes a mutex, holds no effect of its own,
-        # therefore its delegated call is its first effect.
-        if holds_effect or takes_mutex:
-            problems.extend(
-                _judge(sub, path, ordered, enclosing=takes_mutex and not holds_effect)
-            )
+        if names & _EFFECTS or names & _MUTEX_PRIMITIVES:
+            problems.extend(_judge(sub, path, ordered))
+
+    def _definition_time(node: ast.AST, qual: str) -> None:
+        """Effects that run at DEFINITION time, where no mutex can be held.
+
+        `_own_calls` walks a function's BODY only — correct, because decorators and
+        default expressions execute in the enclosing scope, not on invocation. But
+        for four revisions nothing then judged that enclosing scope, so those calls
+        were attributed to NOBODY. MEASURED as PASSING: a module-level
+        `write_and_commit_files(session)`, the same inside a class body, and
+        `def f(s, x=write_and_commit_files(s))`. Fixing the mis-attribution without
+        adding this had moved the defect rather than removed it.
+
+        There is no ordering question here. An import-time effect cannot be fenced:
+        there is no request, no session in flight and no mutex to precede it. Any
+        effect in this scope is a problem outright.
+        """
+        for ln, col, name in _own_calls_definition_time(node):
+            if name in _EFFECTS | _DELEGATED_EFFECTS:
+                problems.append(
+                    f"{path}::{qual or '<module>'} — {name} runs at definition time "
+                    f"(line {ln}, col {col}); nothing can fence it"
+                )
 
     def visit(node: ast.AST, qual: str) -> None:
+        _definition_time(node, qual)
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
                 sub = f"{qual}.{child.name}" if qual else child.name
@@ -814,10 +881,14 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
         "src/call_manager/proposal_assist/ports/invocation.py",
         "src/call_manager/proposal_assist/ports/stamp.py",
     }
-    def _stamp_aliases(source: str) -> set[str]:
+    def _stamp_aliases(source: str, seed: frozenset[str] = frozenset()) -> set[str]:
         """`from ...stamp import FenceStamp as FS` then `FS(...)` builds one too. A check
-        keyed on the literal name "FenceStamp" is bypassed by one import line."""
-        names = {"FenceStamp"}
+        keyed on the literal name "FenceStamp" is bypassed by one import line.
+
+        `seed` carries names already known to be aliases ANYWHERE in the tree, so a
+        cross-module re-export resolves — see the fixpoint loop below.
+        """
+        names = {"FenceStamp"} | set(seed)
         tree = ast.parse(source)
         # THREE rebinding forms, not two. `from ... import FenceStamp as FS`; the plain
         # `FS = FenceStamp`; and the QUALIFIED `FS = stamp.FenceStamp`, which binds the
@@ -869,17 +940,32 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
                 break
         return names
 
+    # Alias resolution is TREE-WIDE, not file-local. One module can re-export the class
+    # under another name — `from ...ports.stamp import FenceStamp as FS` — and a second
+    # module then does `from that_module import FS` and calls `FS(...)`. In the second
+    # module the imported name is "FS", not "FenceStamp", so a file-local scan never
+    # learns it is a constructor. MEASURED as passing before this. Union the per-file
+    # alias sets to a fixpoint. This over-approximates — an unrelated `FS` in some other
+    # module becomes suspect too — which for a gate is a spurious failure a human reads,
+    # never a silent escape. The same trade the default-argument rule above makes.
+    sources = {p: p.read_text() for p in (root / "src").rglob("*.py")}
+    aliases: set[str] = {"FenceStamp"}
+    for _ in range(4):
+        grown = set(aliases)
+        for text in sources.values():
+            grown |= _stamp_aliases(text, seed=frozenset(aliases))
+        if grown == aliases:
+            break
+        aliases = grown
+
     built = []
-    for path in (root / "src").rglob("*.py"):
+    for path, source_text in sources.items():
         rel = str(path.relative_to(root))
         if rel in allowed:
             continue
-        for node in ast.walk(ast.parse(path.read_text())):
-            if isinstance(node, ast.Call):
-                func = node.func
-                name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
-                if name in _stamp_aliases(path.read_text()):
-                    built.append(f"{rel}:{node.lineno}")
+        for node in ast.walk(ast.parse(source_text)):
+            if isinstance(node, ast.Call) and _callee_name(node.func) in aliases:
+                built.append(f"{rel}:{node.lineno}")
     assert built == [], f"FenceStamp built outside its two constructors: {built}"
 
     # Two-sided. `built == []` is also satisfied if BOTH constructors were deleted, or
@@ -899,9 +985,7 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
     inside = set()
     per_file_total: dict[str, int] = {}
     for rel in sorted(allowed):
-        source = (root / rel).read_text()
-        tree = ast.parse(source)
-        aliases = _stamp_aliases(source)
+        tree = ast.parse((root / rel).read_text())
 
         per_file_total[rel] = sum(
             1
@@ -1520,8 +1604,10 @@ def test_the_inner_acquisition_receives_the_SAME_stamp_object(
     to make it green is to mint inside the kernel — which Step 5 forbids in those words
     ("pass the same object inward; never re-mint"). A test that fails against the correct
     implementation and passes against the forbidden one is worse than no test.
-    Revisions 1-2 shipped this as a docstring with no body; revision 3 shipped
-    `supplied = <mint the stamp...>`, an angle-bracket placeholder that does not parse.
+    Revisions 1-2 shipped this as a docstring with no body; revision 3 shipped an
+    angle-bracket placeholder in place of the mint, which does not parse. (Written out
+    rather than quoted: the block scan rejects that shape wherever it appears, and it is
+    right not to make an exception for prose that only means to describe it.)
 
     No separate "zero re-mints" assertion is needed: a re-mint is only observable if the
     new object is what gets passed on, and identity already catches that. A re-mint whose
@@ -1788,6 +1874,18 @@ State this in the final review rather than discovering it later.
   over-approximation in one place while the gate's own docstring said the opposite.
   The compensating check is
   `test_every_declared_site_positively_takes_primitive_b`, which is two-sided.
+- **A re-mint BEFORE the first acquisition is undetectable.** Primitive B enforces
+  identity by binding the stamp to the session on its FIRST acquisition and refusing a
+  different object thereafter — so it accepts whatever stamp it is handed first. A route
+  that minted, passed the stamp down, and then had an intermediate hop call
+  `stamp_for_workspace` again before ANY acquisition would be fenced against a generation
+  no access check covered, and nothing here would see it. `stamp_for_workspace` returns a
+  fresh object every call, so identity cannot distinguish the two after the fact.
+  `test_the_inner_acquisition_receives_the_SAME_stamp_object` covers exactly ONE edge —
+  `kernel_accept_citation` -> `apply_citation_to_room` — chosen because it is the only
+  one whose setup already exists in the suite. The route -> orchestrator -> kernel hops
+  that Task 5 threads are NOT spied. The compensating control is Step 5's written rule
+  and the fact that every mint site is enumerated in a reviewed table, not a test.
 - **The spec-lock write is invisible to the converted gate, and no name can fix that.**
   MEASURED in `post_lock_spec` / `post_unlock_spec`: the lock write is
   `ws.spec_locked_at = …` (an ORM attribute assignment, which has no callee) plus a
@@ -1847,7 +1945,8 @@ Kept so a future reader does not reintroduce any of it. Items 1–3 were Critica
 13. **Primitive B was to take an OPTIONAL `stamp`** for compatibility with callers that
     do not exist — MEASURED: zero production callers, so the parameter is required.
 14. **The same-stamp-threading invariant was mandated and never tested.** Now enforced in
-    the primitive and spied per edge.
+    the primitive and spied on ONE edge — see the residual below, which revision 15
+    corrected from the "per edge" this line used to claim.
 15. **Gate code was 101 characters wide** and would have failed `ruff check` (limit 100).
 16. **The constructor gate regressed a fix the tree had already made.** `_stamp_aliases`
     used `isinstance(node.value, ast.Name)`, so `FS = stamp.FenceStamp; FS(...)` built a
@@ -1921,3 +2020,28 @@ Kept so a future reader does not reintroduce any of it. Items 1–3 were Critica
 29. **A default argument bound the constructor.** `def rogue(ws, factory=FenceStamp)`
     built a third `FenceStamp` in an allowlisted file and the gate PASSED. Default-arg
     bindings are now tracked as aliases.
+30. **Delegated effects were ignored whenever the function also held a direct one.**
+    `enclosing=takes_mutex and not holds_effect` meant a function holding BOTH was judged
+    only against the direct effect. MEASURED:
+    `checkpoint_artifact(); acquire_...(); write_and_commit_files()` PASSED, with the
+    mutex sitting after the delegated effect it existed to fence. Delegated effects now
+    count for every in-scope function; the `enclosing` parameter is gone.
+31. **Nothing judged definition-time scopes.** Revision 14 fixed `_own_calls` to walk the
+    body only — correct — but added no judge for the decorators, defaults, module bodies
+    and class bodies it had stopped walking, so those calls were attributed to NOBODY.
+    MEASURED as PASSING: a module-level sink, a class-body sink, and
+    `def f(s, x=write_and_commit_files(s))`. The fix had MOVED the defect, not removed
+    it. `_own_calls_definition_time` is now its exact complement — between them every
+    call in the tree is judged by exactly one, and that is the property to preserve.
+32. **Revision 14 reintroduced the `_iter_own_nodes` trap it warns about.** Its rewrite
+    guarded nested scopes on a walk's CHILDREN but called that walk on each body
+    statement — so a root that was itself a nested `def` was descended into, and
+    `_own_calls(outer)` reported `inner`'s sink. Found by testing the fix, not by any
+    reviewer. The guard is now at the top of the walk in both functions.
+33. **Alias resolution was file-local.** A module can re-export the class under another
+    name and a second module import THAT name, which is never spelled "FenceStamp"
+    anywhere in the second file. PROVEN by mutation across two new files. Resolution is
+    now a tree-wide fixpoint.
+34. **"Spied per edge" was a two-edge overstatement of a one-edge test.** Recorded as a
+    residual instead, together with the deeper limit: Primitive B binds on FIRST
+    acquisition, so a re-mint before any acquisition is undetectable by construction.
