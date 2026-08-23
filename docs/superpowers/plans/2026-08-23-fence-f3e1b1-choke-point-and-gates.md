@@ -443,8 +443,12 @@ def test_neither_mutex_primitive_is_ever_ALIASED():
                 for a in node.names:
                     if a.name in primitives and a.asname:
                         aliased.append(f"{rel}:{node.lineno} ({a.name} as {a.asname})")
-            elif isinstance(node, ast.Assign) and _callee_name(node.value) in primitives:
-                aliased.append(f"{rel}:{node.lineno} (rebound)")
+            elif isinstance(node, ast.Assign | ast.AnnAssign):
+                # AnnAssign as well as Assign. `old_live: Callable = acquire_...live` is
+                # a rebinding that an Assign-only rule cannot see, and the annotation
+                # makes it read as deliberate design rather than an evasion.
+                if node.value is not None and _callee_name(node.value) in primitives:
+                    aliased.append(f"{rel}:{node.lineno} (rebound)")
     assert aliased == [], f"a mutex primitive was aliased, defeating every gate: {aliased}"
 
 
@@ -571,10 +575,33 @@ NOT_YET_CONVERTED: frozenset[tuple[str, str]] = frozenset(
 )
 
 
-def _header_calls(node: ast.AST) -> list[tuple[int, int, str]]:
-    """Calls in a definition's HEADER — decorators, argument defaults, class bases and
-    metaclass keywords. A header is evaluated where the `def`/`class` STATEMENT sits,
-    not when the thing is invoked, so it belongs to the ENCLOSING scope.
+def _eager_annotations(tree: ast.Module) -> bool:
+    """True when this module's annotations are EVALUATED at definition time.
+
+    `from __future__ import annotations` (PEP 563) makes every annotation a string that
+    is never evaluated. Without it they are ordinary expressions that run when the `def`
+    executes — so `def f(s, x: write_and_commit_files(s) = None)` is a real import-time
+    sink. MEASURED at `8f7b1ef7`: 234 of 276 files in `src/` carry the future import and
+    **42 do not**, so this is not a theoretical shape. Deciding per file is what keeps
+    the 234 free of false positives while the 42 are actually checked.
+    """
+    return not any(
+        isinstance(n, ast.ImportFrom)
+        and n.module == "__future__"
+        and any(a.name == "annotations" for a in n.names)
+        for n in tree.body
+    )
+
+
+def _header_calls(node: ast.AST, eager_annotations: bool = False) -> list[tuple[int, int, str]]:
+    """Calls in a definition's HEADER — decorators, argument defaults, class bases,
+    metaclass keywords, and (only where they are evaluated) annotations. A header is
+    evaluated where the `def`/`class` STATEMENT sits, not when the thing is invoked, so
+    it belongs to the ENCLOSING scope.
+
+    `eager_annotations` defaults to FALSE, the conservative reading for a caller that
+    has not decided: it omits annotations rather than inventing effects in the 234 files
+    where they never run. `check_source_records` computes the real value per file.
     """
     out: list[tuple[int, int, str]] = []
     roots: list[ast.AST] = list(getattr(node, "decorator_list", []))
@@ -584,12 +611,22 @@ def _header_calls(node: ast.AST) -> list[tuple[int, int, str]]:
         a = node.args
         roots += list(a.defaults)
         roots += [d for d in a.kw_defaults if d is not None]
+        if eager_annotations:
+            roots += [
+                arg.annotation
+                for arg in (*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg)
+                if arg is not None and arg.annotation is not None
+            ]
+            if getattr(node, "returns", None) is not None:
+                roots.append(node.returns)
     for r in roots:
-        out.extend(_own_calls(r, _as_expression=True))
+        out.extend(_own_calls(r, _as_expression=True, eager_annotations=eager_annotations))
     return out
 
 
-def _own_calls(scope: ast.AST, _as_expression: bool = False) -> list[tuple[int, int, str]]:
+def _own_calls(
+    scope: ast.AST, _as_expression: bool = False, eager_annotations: bool = False
+) -> list[tuple[int, int, str]]:
     """`(lineno, col_offset, callee-name)` for calls that execute WHEN THIS SCOPE RUNS.
 
     For a `Module` that means import time. For a function or lambda it means one
@@ -625,10 +662,10 @@ def _own_calls(scope: ast.AST, _as_expression: bool = False) -> list[tuple[int, 
 
     def walk(node: ast.AST) -> None:
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
-            out.extend(_header_calls(node))       # header here, body to its own scope
+            out.extend(_header_calls(node, eager_annotations))   # header here, body to its scope
             return
         if isinstance(node, ast.ClassDef):
-            out.extend(_header_calls(node))
+            out.extend(_header_calls(node, eager_annotations))
             for stmt in node.body:                # a class body runs in THIS scope
                 walk(stmt)
             return
@@ -702,10 +739,16 @@ def _rename_map(tree: ast.AST) -> dict[str, str]:
                 for a in node.names:
                     if a.name in out:
                         out[a.asname or a.name] = out[a.name]
-            elif isinstance(node, ast.Assign):
+            elif isinstance(node, ast.Assign | ast.AnnAssign):
+                # AnnAssign too. `old_live: Callable = acquire_commit_mutex_live` is an
+                # alias, and a rule that reads only `Assign` never sees it — MEASURED, it
+                # defeated every named scanner while the type hint made it look deliberate.
+                if node.value is None:
+                    continue
                 origin = _callee_name(node.value)
                 if origin in out:
-                    for target in node.targets:
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    for target in targets:
                         if isinstance(target, ast.Name):
                             out[target.id] = out[origin]
         if len(out) == before:
@@ -730,10 +773,14 @@ def check_source_records(source: str, path: str) -> list[tuple[str, str, str]]:
     records: list[tuple[str, str, str]] = []
     tree = ast.parse(source)
     renames = _rename_map(tree)
+    eager = _eager_annotations(tree)
 
     def _calls(scope: ast.AST) -> list[tuple[int, int, str]]:
         """`_own_calls`, with every alias mapped back to the canonical name."""
-        return [(ln, col, renames.get(n, n)) for ln, col, n in _own_calls(scope)]
+        return [
+            (ln, col, renames.get(n, n))
+            for ln, col, n in _own_calls(scope, eager_annotations=eager)
+        ]
 
     def _import_time(scope: ast.AST, qual: str) -> None:
         """At import time there is no request, no session and no mutex to precede
@@ -1075,11 +1122,14 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
     # outside the two constructors the name may appear ONLY as the callee of a call, in
     # an import, or in a type annotation. Anything else — an argument, a dict value, a
     # return — is a constructor leaving the allowlist.
+    # EVERY file, the two allowlisted ones INCLUDED. Skipping them was the hole: a
+    # forwarding helper written INSIDE `stamp.py` — `_forward(FenceStamp, **kw)` — built
+    # an extra instance while every direct-call count and constructor identity stayed
+    # exactly right. MEASURED as passing. The allowlist says which functions may CALL the
+    # constructor; it was never a licence to hand it out as a value.
     escaped = []
     for path, source_text in sources.items():
         rel = str(path.relative_to(root))
-        if rel in allowed:
-            continue
         tree = ast.parse(source_text)
         exempt: set[int] = set()
         for node in ast.walk(tree):
@@ -2238,3 +2288,22 @@ Kept so a future reader does not reintroduce any of it. Items 1–3 were Critica
     reads as coverage that is not there. A guard now checks every `test_*` the plan
     mentions in prose against the tests defined in the plan and in `tests/` — 9 mentioned,
     all resolve — and it is proven by mutation.
+40. **"One rule with no blind spot" had one.** Both alias checks read `ast.Assign` and
+    not `ast.AnnAssign`, so `old_live: Callable = acquire_commit_mutex_live` was invisible
+    to every named scanner — and the type hint makes it read as deliberate design rather
+    than an evasion. MEASURED. Fixed in the ban test and in `_rename_map`, with a control
+    proving an annotated alias of the CORRECT primitive still passes. The claim in the
+    docstring was written one revision before the counter-example existed; a "no blind
+    spot" sentence should be a test, not a sentence.
+41. **The value-escape scan skipped the two files it trusts most.** A forwarding helper
+    written INSIDE `stamp.py` — `_forward(FenceStamp, **kw)` — built an extra instance
+    while every direct-call count and constructor identity stayed exactly right. MEASURED
+    as passing. The allowlist says which functions may CALL the constructor; it was never
+    a licence to hand it out as a value. The scan now covers every file.
+42. **Annotations execute, in 42 files.** `_header_calls` collected decorators, defaults,
+    bases and keywords but not parameter or return annotations — which, absent
+    `from __future__ import annotations`, are ordinary expressions evaluated when the
+    `def` runs. MEASURED at `8f7b1ef7`: 234 of 276 files in `src/` carry the future
+    import and 42 do NOT, so `def f(s, x: write_and_commit_files(s) = None)` is a real
+    import-time sink, not a puzzle. The flag is computed per file, so the 234 stay free
+    of false positives while the 42 are actually checked — proven both ways.
