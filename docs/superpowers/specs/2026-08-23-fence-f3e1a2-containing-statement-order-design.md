@@ -1,6 +1,6 @@
 # Fence F3e1a2 — a narrow allowlist for a position, not a proof of a lock
 
-**Status:** design, revision 7
+**Status:** design, revision 8
 **Slice:** `F3e1a2` — between `F3e1a` (merged, `2086ac19`) and `F3e1b` (pending)
 **Amends:** `2026-08-21-fence-f3e1-git-mechanism-design.md` §5.1
 **Touches:** `tests/fencing/git_fence.py` and its tests. No `src/` change. No row moves.
@@ -363,44 +363,60 @@ the reason: an invisible sink is worse than an unfenced one.
 F3e1a's six stay and must still bite. Each below names **the tests that redden** —
 several flip a group by design, and that does not make them weaker.
 
-**Safety — each moves the checker toward OVER-reporting**, this change's risk:
+**Safety — each moves the checker toward OVER-reporting**, this change's risk. **Every
+expectation below was MEASURED against a prototype, not predicted.** Four earlier
+revisions predicted flip sets and were wrong five times, twice in opposite directions
+on the same mutation, so a mutation whose expected set is merely argued does not count.
 
-1. `stmt_index <= first_acq` → `<` — the same-statement argument case falsely fences
-2. attribute a nested sink to **`len(body)`** instead of its container — the
-   sink-before-acquisition and straddling cases falsely fence. (Revision 1 specified
-   mutating to `0`. **Inert**: a sink nested before the acquisition already has index 0.)
-3. **invert the allowlist default** — credit unless explicitly denied. Every uncredited
-   case in §5.4 falsely fences. This is what proves §3.1's inversion is real and not
-   prose describing a denylist.
-4. **credit by node type, ignoring the field** — the `If.orelse` case falsely fences,
-   proving the table's second column is load-bearing.
-5. **credit `FunctionDef.body`** — the nested-`def`-body case falsely fences, collapsing
-   §4.2's field distinction.
-6. **credit `Lambda.body`** — the lambda-body negatives falsely fence.
-7. drop the §4.3 generator disqualifier — all generator cases falsely fence
-8. drop the §4.4 transaction disqualifier — the `s.commit()` case falsely fences
-9. **make `credited` non-monotonic** — let a listed field beneath an unlisted one
-   restore credit; a sink at `Lambda.body` → `Assign.value` falsely fences
+1. `stmt_index <= first_acq` → `<` — **measured: flips NOTHING. This mutation is inert
+   under the allowlist**, and the reason is worth keeping: the same-statement-argument
+   case it used to catch now sits at `Expr.value` → `Call.args`, and `ast.Call` has no
+   entry in §4.1, so it is already unfenced by *position unknown* before the comparison
+   runs. No credited sink can share the acquisition's statement index. The `<=` stays as
+   cheap defence; the plan must record the empty result rather than assert a flip.
+2. attribute a nested sink to **`len(body)`** instead of its container index — measured:
+   flips the same-statement-argument case, the lambda-body case and the `For` case, i.e.
+   every case whose true index is `None`. (Revision 1 specified mutating to `0`, which is
+   **inert**: a sink nested before the acquisition already has index 0.)
+3. **credit every field of every node** — `allowed = None` plus
+   `credited and (allowed is None or field in allowed)`. Measured: flips `genexp`,
+   `genexp`-as-argument, `type X = sink()`, `For`, **and `If.orelse`**. NOT the lambda or
+   discovery cases: the `Lambda`/`ClassDef` branch forces `False` and returns before
+   §4.1 is consulted. This is what proves §3.1's inversion is real rather than prose
+   describing a denylist.
+4. **credit by node type, ignoring the field** — flips `If.orelse`, proving §4.1's second
+   column is load-bearing. The unknown-*node* case does not prove this.
+5. **credit `FunctionDef.body`** — flips the nested-`def`-body case, collapsing §4.2's
+   field distinction.
+6. **credit `Lambda.body`** — flips the lambda-body negatives.
+7. drop §4.3's generator disqualifier — flips every generator case.
+8. drop §4.4's transaction disqualifier — flips the `commit` and `rollback` cases.
+9. **make `credited` non-monotonic** (`child_credited = field in allowed`) — measured:
+   flips `For`, `If.orelse` **and `class body`**. NOT the lambda cases: `Lambda` forces
+   `False` **and returns**, while `ClassDef` forces `False` and keeps walking — which is
+   exactly why `class body` flips and the lambda ones do not.
 
 **Discovery and completeness — these move toward UNDER-reporting or affect only
 visibility.** They prove a case is pinned, not that the checker is safe:
 
-10. **restore `sink_calls`'s pre-skip** (`git_fence.py:233-235`) — the four §5.4
-    discovery cases lose their holder entirely, reproducing the pre-existing defect.
-    It does **not** falsely fence, which is why this sits here and not above; mutation 5
-    is the safety mutation for that boundary. (Revisions 3–5 wrote this as "drop the
-    nested-scope skip", which assumed the pre-skip survived. §4.2 removes it, so the
-    mutation is its restoration.)
-11. stop walking a nested definition's `decorator_list` / `args.defaults` /
-    `args.kw_defaults` inside the walk — the same four §5.4 discovery cases lose their
-    holder, by a different route than mutation 10
-12. remove one entry from §4.1's allowlist table — **name the expected test set per
-    entry rather than claiming one test each.** The table's paths *compose*: a sink in
-    an `if` is reached by `If.body` → `Expr.value`, so removing `Expr.value` flips the
-    bare-expression positive **and** the `If.body`, `Try.body`, `With.body` and
-    `AsyncWith.body` positives, since all four reach their call through a statement
-    node. Removing `Assign.value` flips only the assignment positive. The plan states
-    the expected flip set for each of the six.
+10. **restore `sink_calls`'s pre-skip** — the nested-`def` default, decorator, async
+    default, annotation and class cases lose their holder entirely, reproducing the
+    pre-existing defect. It does **not** falsely fence; that is why it is here. The
+    lambda cases are unaffected — a `lambda` is not a statement.
+11. **walk no field of a definition** — every discovery case loses its holder, the
+    lambda ones included: a different route to the same defect than 10, losing fields
+    rather than statements.
+12. remove one entry from §4.1's table, **six times, recording each flip set**. The paths
+    compose, so "one test per entry" is false: removing `ast.Expr` flips five positives
+    (every container reaches its call through a statement node), removing `ast.Assign`
+    flips one.
+
+**The yield scan needs its own probe.** Reusing the sink walk for §4.3 is a defect, not
+a shortcut: that walk descends into `Lambda.body` — correct for discovery, wrong here,
+because a `yield` in a lambda body makes the **lambda** a generator, not its enclosing
+function (verified: `inspect.isgeneratorfunction(outer)` is `False`). The yield scan
+treats a `lambda` like a nested `def` — everything but the body — and §5.3 carries a
+positive for it.
 
 ### 5.6 Real-tree probe
 
@@ -495,6 +511,26 @@ And per §2 and §7, each converted site carries its runtime two-ordered-lock pr
 measurement is the ratchet; the runtime case is the proof.
 
 ## 10. Changelog
+
+**Revision 8** — the mutation contract was stale and partly false, and one mutation
+turned out to be inert.
+
+- §5.5 is rewritten with **measured** expectations throughout. Four earlier revisions
+  predicted flip sets and were wrong five times — twice in **opposite directions on the
+  same mutation** — so an expectation that is merely argued no longer counts.
+- **Mutation 1 is now inert**, and the reason is a genuine consequence of the allowlist:
+  the same-statement-argument case it used to catch sits at `Expr.value` → `Call.args`,
+  and `ast.Call` has no §4.1 entry, so it is already unfenced by *position unknown*
+  before the comparison runs. No credited sink can share the acquisition's index. The
+  `<=` stays as cheap defence; the empty result gets recorded rather than asserted away.
+- Mutations 3 and 9 flip **more** than revision 7 claimed (`If.orelse` in both cases,
+  plus `class body` for 9) and **less** in the lambda cases, because the `Lambda` branch
+  forces `False` and *returns* while `ClassDef` forces `False` and *keeps walking*.
+- **§4.3's yield scan must not reuse the sink walk.** That walk descends into
+  `Lambda.body` — correct for discovery, wrong here: a `yield` in a lambda body makes
+  the **lambda** a generator, not its enclosing function (verified). §5.3 gains a
+  positive for it.
+
 
 **Revision 7** — the walk contract's field enumeration was incomplete, in exactly the
 open-set way §3.1 warns about. Found while reviewing the implementation plan, whose

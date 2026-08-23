@@ -29,7 +29,7 @@
 | File | Change |
 |---|---|
 | `tests/fencing/git_fence.py` | Modify. New allowlist table, new field-aware walk, `sink_calls` rewritten, two disqualifiers, docstring corrections. |
-| `tests/fencing/test_git_fence.py` | Modify. 15 existing tests keep their verdict; 7 positives + 24 negatives added. |
+| `tests/fencing/test_git_fence.py` | Modify. 15 existing tests keep their verdict; spec §5.3's 7 positives and §5.4's 30 negatives added, as 26 new test functions (some cover several cases). |
 | `tests/fencing/live_mutex_gate.py` | Modify. Module docstring only — drop "provably". |
 | `tests/fencing/inventory.py` | Modify. One `SLICE_STATUS` key. |
 | `tests/fencing/test_f3e1a2_slice.py` | Create. Slice-identity confirmation. |
@@ -368,9 +368,22 @@ Note the top-level statement itself is yielded with `credited=True`, so a bare
 `ast.Expr` sink is credited by `Expr.value` like any other path — F3e1a's special
 `is_bare_top_level` branch is now redundant and must be **deleted**.
 
+**Two docstrings in this file now describe the old rule and must be corrected in the
+same commit**, or the module documents a checker it no longer contains:
+
+- **`sink_calls`** (`git_fence.py:200-218`) says `stmt_index` is set only for a *bare
+  top-level expression statement*. Replace with: set to the containing top-level
+  statement's index when every step of the descent was allowlisted (`CREDITED_FIELDS`),
+  and `None` otherwise — including deferred contexts and anything unrecognised.
+- **`unprotected_sinks`** (`git_fence.py:272-282`) lists the original three clauses.
+  It now has five: add the own-scope `yield` disqualifier (§4.3, Task 2) and the
+  visible transaction ending (§4.4, Task 3). Write all five now and implement the last
+  two in their tasks — a docstring that lags its code by two tasks is how the module
+  docstring got to "provably fenced" in the first place.
+
 > **Prototyped before this plan was committed.** The code above was run against
-> `git_fence.py` at `ea481e2c` and reverted. All 6 positives and all 11 uncredited /
-> discovery cases behave as specified, `153 passed`, real tree still nine holders and
+> `git_fence.py` at `ea481e2c` and reverted. All 6 positives and all 17 uncredited and
+> discovery shapes behave as specified, `153 passed`, real tree still nine holders and
 > an empty fenced set. **The first version of this code lost lambda-body sinks
 > entirely** — caught by running it, not by reading it, which is why the asymmetry
 > above carries a comment rather than a shrug. Treat this as evidence the code works,
@@ -409,7 +422,10 @@ named tests, restore from the checkpoint, re-confirm green.
 
 | # | Mutation | Must redden |
 |---|---|---|
-| 3 | `CREDITED_FIELDS.get(type(node), frozenset())` → a sentinel meaning "all fields" | the uncredited negatives whose path runs through a NON-definition node: lambda-body, lambda-in-container, genexp, genexp-as-arg, type-alias, unlisted-NODE (`For`). **NOT `If.orelse`** — `ast.If` is a listed node, so this mutation still consults its field set and `orelse` stays out. Mutation 4 is what covers that. **NOT** the definition/discovery cases either — those return early, before `CREDITED_FIELDS` is read. |
+| 1 | `stmt_index <= first_acq` → `<` | **Measured: NOTHING — this mutation is INERT, and the reason is a real consequence of the allowlist.** Spec §5.5 expects it to flip the same-statement-argument case. Under F3e1a it did. It cannot now: that sink sits at `Expr.value` → `Call.args`, and `ast.Call` has no entry in `CREDITED_FIELDS`, so the case is already caught by *position unknown* before the comparison runs. No credited sink can share the acquisition's statement index at all. **Run it anyway and record the empty result** — do not delete the `<=`, which stays as cheap defence, and do not pretend the mutation bites. Spec revision 8 should record this. |
+| 2 | attribute a nested sink to `len(func.body)` instead of its container index | **Measured**: the same-statement-argument case, `lambda body`, and `For` — every case whose real index is `None` becomes a large int that sorts after the acquisition. |
+| 5 | credit `FunctionDef.body`: `_walk_fields(node)` with no `skip`, passing `credited` through | **Measured**: the nested-`def`-body case falsely fences, collapsing §4.2's field distinction. |
+| 3 | **Exactly this mutant**: `allowed = None` in place of the `CREDITED_FIELDS.get(...)` lookup, plus `child_credited = credited and (allowed is None or field in allowed)` — i.e. credit every field of every node. | **Measured**: `genexp`, `genexp-as-arg`, `type-alias`, `For`, **and `If.orelse`**. NOT the two lambda cases and NOT the discovery cases — the `Lambda`/`ClassDef` branch forces `False` and returns *before* `CREDITED_FIELDS` is read. <br>Two earlier drafts of this row were wrong in **opposite** directions (one said it flips the lambda cases, one said it spares `If.orelse`), and a review that flagged it also omitted `If.orelse`. The flip set depends on the mutant's exact form, which is why the form is spelled out above rather than described. |
 | 4 | `child_credited = credited and type(node) in CREDITED_FIELDS` (ignore the field) | `test_an_unlisted_FIELD_of_a_listed_node_is_not_credited` |
 | 6 | walk `Lambda.body` with `credited=True` instead of `False` | the two lambda-body negatives falsely fence |
 | 6b | **skip a `Lambda`'s body via an EXPLICIT early return**: `if isinstance(node, ast.Lambda): yield node, credited; return`, placed before the `(Lambda, ClassDef)` branch | the two lambda-body negatives fail on the **holder** assertion — the sink vanishes. Discovery coverage, not safety. <br>**Merely removing `ast.Lambda` from the `(Lambda, ClassDef)` tuple does NOT work**: the node falls through to the generic traversal, which still descends into `body`, so the sink stays discoverable and the mutation flips **nothing**. Measured. |
@@ -477,6 +493,19 @@ def test_a_yield_in_a_nested_defs_DEFAULT_disqualifies_the_ENCLOSING_function():
     )
 
 
+def test_a_yield_in_a_LAMBDA_BODY_does_not_disqualify_the_outer():
+    """A yield in a lambda body makes the LAMBDA a generator, not this function —
+    verified: inspect.isgeneratorfunction(outer) is False. The yield scan must not
+    reuse the sink walk, which deliberately descends into Lambda.body."""
+    src = (
+        _HEAD
+        + _ACQ
+        + "    cb = lambda: (yield 1)\n"
+        + "    sha = write_and_commit_files(repo, {}, 'm')\n"
+    )
+    assert fenced_qualnames(src, "x/f.py") == {"f"}
+
+
 def test_an_unrelated_nested_generator_does_not_disqualify_the_outer():
     """§5.3's scope-boundary positive. A naive yield scan fails this: _iter_own_nodes
     guards its CHILDREN but descends into a FunctionDef handed to it directly, so a
@@ -493,27 +522,51 @@ def test_an_unrelated_nested_generator_does_not_disqualify_the_outer():
 - [ ] **Step 2: Run to verify they fail**
 
 Run: `uv run pytest tests/fencing/test_git_fence.py -q -p no:randomly -k "yield or generator"`
-Expected: **5 failed, 1 passed.** The five generator cases fail (currently credited); `test_an_unrelated_nested_generator_does_not_disqualify_the_outer` passes already and is a regression pin.
+Expected: **5 failed, 4 passed.** The `-k` filter also selects Task 1's two
+generator-EXPRESSION tests and the new lambda-body-yield positive, which all pass
+already — a reminder that `-k` matches substrings, not concepts. The five generator cases fail (currently credited); `test_an_unrelated_nested_generator_does_not_disqualify_the_outer` passes already and is a regression pin.
 
 - [ ] **Step 3: Implement**
 
 Add to `git_fence.py`:
 
 ```python
+def _iter_yield_scope(node: ast.AST):
+    """Yield every node whose ``yield`` would belong to the ENCLOSING function.
+
+    Deliberately NOT ``_iter_credited``. That walk descends into ``Lambda.body``,
+    which is right for sink DISCOVERY (a lambda is anonymous, so nothing else would
+    find a sink in it) and wrong here: a ``yield`` in a lambda body makes the LAMBDA a
+    generator, not its enclosing function. Verified —
+    ``inspect.isgeneratorfunction(outer)`` is **False** for::
+
+        def outer():
+            cb = lambda: (yield 1)
+            return cb
+
+    Lambda DEFAULTS still count: they evaluate in the enclosing scope. So this walk
+    treats a ``lambda`` exactly like a nested ``def`` — everything but the body.
+    """
+    yield node
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        for child in _walk_fields(node, skip=("body",)):
+            yield from _iter_yield_scope(child)
+        return
+    for child in _walk_fields(node):
+        yield from _iter_yield_scope(child)
+
+
 def _is_generator(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     """True if *func* has an own-scope ``yield`` — its whole body is deferred.
 
-    F3e1a2 §4.3. Uses ``_iter_credited`` for the scope boundary, so a ``yield`` in a
-    nested def's DEFAULT is seen (it belongs to this function — verified with
-    ``inspect.isgeneratorfunction``) while a ``yield`` in that def's BODY is not.
-    The ``credited`` flag is irrelevant here and discarded: deferred execution is not
-    an excuse for a disqualifier.
+    F3e1a2 §4.3. A ``yield`` in a nested def's or lambda's DEFAULT is seen (it belongs
+    to this function); one in either BODY is not.
     """
-    for stmt in func.body:
-        for node, _credited in _iter_credited(stmt, True):
-            if isinstance(node, (ast.Yield, ast.YieldFrom)):
-                return True
-    return False
+    return any(
+        isinstance(node, (ast.Yield, ast.YieldFrom))
+        for stmt in func.body
+        for node in _iter_yield_scope(stmt)
+    )
 ```
 
 In `unprotected_sinks`, immediately before the existing `if has_live:` block:
@@ -529,11 +582,11 @@ In `unprotected_sinks`, immediately before the existing `if has_live:` block:
 
 - [ ] **Step 4: Run and mutate**
 
-Run: `uv run pytest tests/fencing/ -q -p no:randomly` → **179 passed**.
+Run: `uv run pytest tests/fencing/ -q -p no:randomly` → **180 passed**.
 
 Mutation 7 (safety): make `_is_generator` `return False`. Expect **5 FAILED** — the five generator cases, FAILED not ERROR. Restore from the checkpoint, re-confirm green.
 
-Mutation 9 (discovery): in `_is_generator`, iterate `ast.walk(stmt)` instead of `_iter_credited`. Expect **1 FAILED** — `test_an_unrelated_nested_generator_does_not_disqualify_the_outer`. This is the trap §4.2 names. Restore from the checkpoint.
+Mutation 7b (discovery): in `_is_generator`, iterate `ast.walk(stmt)` instead of the scope-aware walk. Expect **1 FAILED** — `test_an_unrelated_nested_generator_does_not_disqualify_the_outer`. This is the trap §4.2 names. Restore from the checkpoint.
 
 - [ ] **Step 5: Lint and commit**
 
@@ -591,7 +644,7 @@ def _ends_transaction(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
 
     F3e1a2 §4.4, and READ §2 BEFORE CHANGING THIS. It is a ratchet over the cases
     that happen to be visible, NOT a guarantee: a helper that commits is invisible
-    from here, and no static checker can ever catch that. It does not license
+    from here, and THIS INTRAPROCEDURAL checker cannot catch that. It does not license
     dropping the parent spec's §5.2 runtime two-ordered-lock proof.
     """
     for stmt in func.body:
@@ -613,7 +666,7 @@ Add the reason in `unprotected_sinks` beside the generator check:
 
 - [ ] **Step 4: Run and mutate**
 
-Run: `uv run pytest tests/fencing/ -q -p no:randomly` → **181 passed**.
+Run: `uv run pytest tests/fencing/ -q -p no:randomly` → **182 passed**.
 
 Mutation 8: make `_ends_transaction` `return False`. Expect **2 FAILED** (both parameters). Restore from the checkpoint.
 
@@ -703,7 +756,7 @@ call precedes the sink call in execution order, along a path made only of
 constructs vetted to run with their statement. It does NOT prove the mutex is
 held when the sink runs. The commit mutex is transaction-scoped, so a commit
 between the two releases it, and a commit inside a called helper is invisible
-here — no static checker can catch that. See the 2026-08-23 F3e1a2 spec §2.
+here — this intraprocedural checker cannot catch that. See the 2026-08-23 F3e1a2 spec §2.
 
 So BOTH readings are weaker than they look, and both matter:
 
@@ -766,7 +819,7 @@ uv run pytest tests/fencing/ -q -p no:randomly
 uv run ruff check .
 ```
 
-Expected: `clean`, then **181 passed**.
+Expected: `clean`, then **182 passed**.
 
 Scope the grep to the two files this task edits. A repo-wide
 `grep -rn "provably" tests/fencing/` can **never** print `clean`: `sink_guard.py`
@@ -932,7 +985,7 @@ uv run pytest -n 16 --dist loadfile -q
 uv run ruff check .
 ```
 
-Expected: **`3890 passed, 1 skipped`** (3857 + 20 + 6 + 2 + 0 + 0 + 5 — **re-derive this from the actual per-task counts rather than trusting this arithmetic**; the plan's number is a prediction and every previous fence plan's prediction moved during the build. Record the real total and the term that changed).
+Expected: **`3891 passed, 1 skipped`** (3857 + 20 + 7 + 2 + 0 + 0 + 5 — **re-derive this from the actual per-task counts rather than trusting this arithmetic**; the plan's number is a prediction and every previous fence plan's prediction moved during the build. Record the real total and the term that changed).
 
 **`1 skipped` is the signal.** `0 skipped` means a live billed Anthropic API call ran.
 
@@ -949,15 +1002,15 @@ git commit -m "test(fence): F3e1a2 widened the checker and moved no measurement 
 |---|---|---|
 | baseline | — | 3857 |
 | 1 — allowlist, walk, and every §5.3/§5.4 case | 20 | 3877 |
-| 2 — generator disqualifier | 6 | 3883 |
-| 3 — transaction disqualifier | 2 (one case, two params) | 3885 |
-| 4 — discovery mutations | 0 (verification only) | 3885 |
-| 5 — docstrings + slice key | 0 | 3885 |
-| 6 — slice confirmation | 5 | 3890 |
+| 2 — generator disqualifier | 7 | 3884 |
+| 3 — transaction disqualifier | 2 (one case, two params) | 3886 |
+| 4 — discovery mutations | 0 (verification only) | 3886 |
+| 5 — docstrings + slice key | 0 | 3886 |
+| 6 — slice confirmation | 5 | 3891 |
 
-**33 new collected tests**, counted from this plan's own code blocks rather than
-predicted. The relationship to the spec's "7 positives + 24 negatives = 31 cases" is
-not one-to-one, and the differences are all deliberate:
+**34 new collected tests**, counted from this plan's own code blocks rather than
+predicted. The relationship to spec revision 7's "7 positives + 30 negatives = 37
+cases" is not one-to-one, and the differences are all deliberate:
 
 - **6 of §5.4's 7 order/acquisition negatives already exist** among F3e1a's 15 —
   `test_sink_before_acquisition_is_not_fenced`,
@@ -969,8 +1022,9 @@ not one-to-one, and the differences are all deliberate:
   against the new walk, not rewritten. The seventh — `_live` inside a lambda — is new
   and lives in Task 1.
 - **Two tests carry several cases each.** `test_a_sink_in_an_ANNOTATION_…` covers the
-  argument and return annotation; `test_a_sink_in_a_nested_CLASS_…` loops over four
-  class shapes. Six §5.4 cases, two collected tests.
+  argument and return annotation; `test_a_sink_in_a_nested_CLASS_…` loops over the four
+  class shapes (body, base, keyword, decorator). **Six §5.4 cases, two collected
+  tests** — this is where most of the 37-vs-34 gap lives.
 - **The `commit`/`rollback` case is one entry but two collected tests.**
 - `test_expr_value_is_credited` restates `test_acquisition_then_sink_is_fenced`
   deliberately: mutation 12 needs a positive that names the `Expr.value` entry.
