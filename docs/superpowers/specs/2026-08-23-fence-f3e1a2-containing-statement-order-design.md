@@ -1,6 +1,6 @@
 # Fence F3e1a2 — a narrow allowlist for a position, not a proof of a lock
 
-**Status:** design, revision 6
+**Status:** design, revision 7
 **Slice:** `F3e1a2` — between `F3e1a` (merged, `2086ac19`) and `F3e1b` (pending)
 **Amends:** `2026-08-21-fence-f3e1-git-mechanism-design.md` §5.1
 **Touches:** `tests/fencing/git_fence.py` and its tests. No `src/` change. No row moves.
@@ -56,7 +56,9 @@ write_and_commit_files(repo, {}, "m")       # runs with no mutex at all
 ```
 
 Verified: `{'f'}`. Same for `s.rollback()`. And worse, this is equally false-fenced and
-**no static checker can ever catch it**, because the commit is behind a call:
+**this intraprocedural checker cannot catch it**, because the commit is behind a call.
+An interprocedural analysis over known helpers could; this one deliberately looks at a
+single function and nothing else:
 
 ```python
 acquire_commit_mutex_at_generation(s, w, generation=stamp.generation)
@@ -196,12 +198,30 @@ The new walk yields `(node, credited)` and obeys:
 - **Discovery does not stop at `False`.** The walk keeps descending so sinks are still
   found; only their position is lost. It descends into `Lambda`, `GeneratorExp`,
   `TypeAlias`, comprehensions and every unlisted field, all with `credited=False`.
-- **Nested scopes are field-aware.** For a nested `ast.FunctionDef` / `AsyncFunctionDef`
-  / `Lambda`, `decorator_list`, `args.defaults` and `args.kw_defaults` are **walked**
-  (they execute in the enclosing scope — verified) while `body` is **not walked at all**
-  (a separate qualname, analysed on its own pass). This closes a pre-existing discovery
-  gap: today `sink_calls` skips a `FunctionDef` statement whole, so a sink in a nested
-  `def`'s default or decorator yields **zero holders** — invisible, not merely unfenced.
+- **A definition's ONLY unwalked field is a FUNCTION's body.** Revision 6 enumerated
+  `decorator_list`, `args.defaults` and `args.kw_defaults`; that enumeration was
+  incomplete, in the same open-set way §3.1 describes. Everything else a `def` or
+  `class` statement carries executes in the enclosing scope when that statement runs,
+  and **all of it must be walked** (uncredited). Verified invisible under revision 6's
+  enumeration — zero holders for every one:
+
+  | Shape | Runs when |
+  |---|---|
+  | nested `def` / `lambda` argument defaults | the `def`/`lambda` statement runs |
+  | nested `def` argument and **return annotations** | same, unless the scanned file has `from __future__ import annotations` — which the checker cannot rely on |
+  | `class` **body** statements | the `class` statement runs |
+  | `class` **bases** and **keywords** (e.g. `metaclass=`) | same |
+  | `def` / `class` **decorators** | same |
+
+  Three definition kinds, three different rules, and the asymmetry is deliberate:
+  a nested `def`'s **body** is skipped (own qualname, separate pass); a `lambda`'s body
+  is **walked** (anonymous — nothing else would ever visit it, so skipping loses the
+  sink); a `class`'s body is **walked** (it runs at definition time; methods inside are
+  `FunctionDef`s and stop at their own body by the first rule).
+
+  This closes a pre-existing discovery gap: today `sink_calls` skips a `FunctionDef`
+  statement whole, so a sink in any of the above yields **zero holders** — invisible,
+  not merely unfenced.
 - **A `FunctionDef` handed to a walk directly is a trap.** `_iter_own_nodes` guards
   only its *children*, so passing it a `def` descends into the body. `sink_calls`
   avoided this with the pre-skip that is now being removed, so the new walk must handle
@@ -274,7 +294,7 @@ One per allowlist entry, plus the scope-boundary case. There is deliberately **n
 positive for `For`, `While`, `Return`, comprehensions or defaults: §4.1 does not credit
 them, and a positive test for one would be a request to widen the list.
 
-### 5.4 Negative cases — **24**, each must NOT be fenced
+### 5.4 Negative cases — **30**, each must NOT be fenced
 
 *Order and acquisition position (F3e1a's rules, re-verified against the new walk):*
 
@@ -310,6 +330,12 @@ and revision 5's mutation 11 had nothing to redden.
 - **sink in a nested `def`'s decorator** — `@register(sink())`
 - **sink in a `lambda`'s default** — `lambda x=sink(): x`
 - **sink in a nested `async def`'s default**
+- **sink in a nested `def`'s argument annotation** — `def inner(x: sink()): ...`
+- **sink in a nested `def`'s return annotation** — `def inner() -> sink(): ...`
+- **sink in a `class` body** — `class C: x = sink()`
+- **sink in a `class` base** — `class C(sink()): ...`
+- **sink in a `class` keyword** — `class C(metaclass=sink()): ...`
+- **sink in a `class` decorator** — `@register(sink())` on a `class`
 
 (All four are eager in the enclosing scope — verified — yet none is credited, because
 defaults and decorators are not on §4.1's six-entry list. Eager is not a reason to
@@ -470,6 +496,23 @@ measurement is the ratchet; the runtime case is the proof.
 
 ## 10. Changelog
 
+**Revision 7** — the walk contract's field enumeration was incomplete, in exactly the
+open-set way §3.1 warns about. Found while reviewing the implementation plan, whose
+prototype measured **zero holders** for six shapes revision 6's contract could not
+reach: `class` bodies, bases, keywords and decorators, and function argument and return
+annotations. All execute in the enclosing scope when their statement runs, and a class
+base can carry an own-scope `yield`.
+
+§4.2 no longer enumerates `decorator_list` / `defaults` / `kw_defaults`. It states the
+rule that closes the set: **a definition's only unwalked field is a FUNCTION's body**,
+with `lambda` and `class` bodies walked for the reasons given there. §5.4's discovery
+group grows from 4 cases to 10, and the negatives from 24 to 30.
+
+Also: §2's "no static checker can ever catch it" was too absolute — an interprocedural
+analysis over known helpers could. It now says **this intraprocedural checker cannot**,
+which is the true and still-sufficient claim.
+
+
 **Revision 6** — five findings, all verified against the code before folding, none
 rejected. Two were High, and both were internal contradictions in revision 5 rather than
 new facts about Python.
@@ -528,7 +571,7 @@ rejected. Two were High.
   of being filled: `DictComp`, keyword-only defaults and nested-`def` decorators are not
   on the six-entry allowlist at all, so they need negatives, not positives.
 - Case counts shrank with the allowlist: **7 positives** (one per entry, plus the scope
-  case), **24 negatives**, **12 mutations** (9 safety, 3 discovery/completeness).
+  case), **30 negatives**, **12 mutations** (9 safety, 3 discovery/completeness).
 
 **Revision 4** — `ast.TypeAlias` (PEP 695) is a deferred context; a nested `def`'s
 defaults and decorators execute in the enclosing scope, which both hid a `yield` from the
