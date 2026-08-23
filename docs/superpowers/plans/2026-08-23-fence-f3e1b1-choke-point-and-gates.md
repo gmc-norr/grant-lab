@@ -26,7 +26,8 @@ Every task's requirements implicitly include this section.
 9. **`resolve_access` does not change.** All six call sites destructure exactly two values; a third element raises at every one. Routes read the workspace themselves after the check passes and mint from it.
 10. **No authorization call changes in this slice.** The mint site is "the object the existing check already loaded", whatever that check is.
 11. **Every code block here — implementation AND test — must be executed before it is written down, and RE-executed after any edit to what it depends on.** Revision 3 changed a gate's data shape from `str` to `(path, str)`, verified the gate, and left revision 2's tests of that gate untouched: the pin-mutation test then removed a bare string from a set of tuples, deleted nothing, and could never redden. MEASURED. Running the implementation is not enough — run the assertions that ride on it.
-12. **Code in this plan was executed before it was written down.** Where a block says MEASURED, it was run against the tree at `8f7b1ef7` and passed `ruff check`. Revision 1 shipped a gate whose `problems += …` inside a closure raised `UnboundLocalError` on every call — it had been prototyped with `.append()` and re-typed differently into the plan. Copy these blocks verbatim; do not "tidy" them.
+12. **Before this plan is handed to anyone, every ```python block is extracted, parsed, and scanned for unbound names.** Rounds 1 and 9 each shipped a block that could not run — one an `UnboundLocalError` from `+=` in a closure, one a `NameError` from using `_callee_name` without importing it. Reviewers found both, which is a waste of a review round: a parse-and-resolve pass is seconds and finds this class mechanically. MEASURED: that scan found two further defects no reviewer had reported — a fixture parameter used but never bound, and three baseline constants referenced but never defined.
+13. **Code in this plan was executed before it was written down.** Where a block says MEASURED, it was run against the tree at `8f7b1ef7` and passed `ruff check`. Revision 1 shipped a gate whose `problems += …` inside a closure raised `UnboundLocalError` on every call — it had been prototyped with `.append()` and re-typed differently into the plan. Copy these blocks verbatim; do not "tidy" them.
 
 ---
 
@@ -465,8 +466,10 @@ _AT_GENERATION = "acquire_commit_mutex_at_generation"
 #: rather than listed. MEASURED at `8f7b1ef7`: 21 functions, covering all 8 of
 #: F3e1b-1's sites. `Phase0Worker._m1` stays in `check_source`'s SCOPE no matter what
 #: F5 edits — but it is pinned in `NOT_YET_CONVERTED`, so `check_tree` still filters
-#: it. F5 must REMOVE that pin as it converts, and the pin's own load-bearing test is
-#: what forces that. Scope surviving is necessary, not sufficient.
+#: it. The same is true of `Phase0Worker._init_repo`, which holds F5's sink. F5 must
+#: REMOVE both pins as it converts, and `test_every_converted_gate_pin_is_load_bearing`
+#: is what forces that: a pin whose removal changes nothing fails. Scope surviving is
+#: necessary, not sufficient — the load-bearing test is the sufficient half.
 _MUTEX_PRIMITIVES: frozenset[str] = frozenset({_LIVE, _AT_GENERATION})
 
 #: Callee names that count as "the first effect". §4.1: the effect is the `Doc`
@@ -830,18 +833,34 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
                     visit(child, prefix)
 
         visit(tree)
-        # Module and class scope too. `_own_calls` only ever sees a FUNCTION's body, so
-        # a construction at import time — `_BLANK = FenceStamp(...)` beside the two
-        # constructors — was invisible to the walk above, in the file the allowlist
-        # trusts most.
-        module_level = [
-            n.lineno
-            for n in ast.iter_child_nodes(tree)
-            if isinstance(n, ast.Expr | ast.Assign | ast.AnnAssign)
-            for c in ast.walk(n)
+        # Module AND class scope. `_own_calls` only ever sees a FUNCTION's body, so a
+        # construction at import time — `_BLANK = FenceStamp(...)` beside the two
+        # constructors, or inside a class body — was invisible to the walk above, in the
+        # file the allowlist trusts most.
+        #
+        # `_callee_name` must be IMPORTED here. An earlier revision used it in this block
+        # without importing it: a NameError at collection time, in a plan whose
+        # Constraint 12 exists because of exactly that mistake.
+        from tests.fencing.git_fence import _callee_name
+
+        def _outside_functions(node):
+            """Statements that execute at definition time: module body and class bodies,
+            skipping anything inside a function."""
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                    continue
+                if isinstance(child, ast.ClassDef):
+                    yield from _outside_functions(child)
+                    continue
+                yield child
+
+        eager = [
+            c.lineno
+            for stmt in _outside_functions(tree)
+            for c in ast.walk(stmt)
             if isinstance(c, ast.Call) and _callee_name(c.func) in aliases
         ]
-        assert module_level == [], f"{rel}: FenceStamp built at module scope, lines {module_level}"
+        assert eager == [], f"{rel}: FenceStamp built outside a function, lines {eager}"
     # By CONSTRUCTOR IDENTITY, not by file. `sorted(inside) == sorted(allowed)` is
     # satisfied by two constructions in the right FILES but the wrong FUNCTIONS — a
     # module-level `FenceStamp(...)` in stamp.py would pass while `stamp_for_workspace`
@@ -1435,7 +1454,7 @@ def test_the_inner_acquisition_receives_the_SAME_stamp_object(monkeypatch):
 - [ ] **Step 6: Collaborator authorization parity (spec crit-13)**
 
 ```python
-def test_a_collaborator_with_write_access_can_still_cite_and_accept(client, collaborator):
+def test_a_collaborator_with_write_access_can_still_cite_and_accept(client, collaborator, ws_id):
     """Constraint 10 says no authorization call changes. The collab cite branch
     authorizes with `resolve_access` (ANY member with write); only the flag-off branch
     uses `require_owner`. Revision 2 of the spec guessed wrong here and would have
@@ -1445,6 +1464,8 @@ def test_a_collaborator_with_write_access_can_still_cite_and_accept(client, coll
     docstring said "this ASSERTS it rather than trusting it" while asserting nothing.
     Write the body: a NON-OWNER member with write access, through the real routes.
     """
+    # `ws_id` is a fixture parameter, not a free name — an earlier revision used it
+    # without binding it anywhere.
     cite = client.post(f"/api/workspaces/{ws_id}/cite", json=<...>, headers=collaborator)
     assert cite.status_code == 200, cite.text
     accept = client.post(f"/api/workspaces/{ws_id}/accept", json=<...>, headers=collaborator)
@@ -1559,6 +1580,14 @@ def test_the_exemption_pins_are_unchanged_by_this_slice():
         RETAINED_PINS,
         TOOLS_NOT_YET_CONVERTED,
     )
+
+    # The baselines, MEASURED at slice start. An earlier revision referenced these three
+    # names without defining them anywhere — the test could not run. Read them off the
+    # tree in Task 5 Step 1 and paste the literal values here; do NOT derive them from
+    # the module under test, which would make every assertion below a tautology.
+    _BASELINE_TOOLS = {...}          # 5 entries at 8f7b1ef7
+    _BASELINE_NON_SEMANTIC = {...}   # 3 entries
+    _BASELINE_RETAINED = {...}       # 1 entry
 
     # SUBSET, not equality. Pins only shrink, and this plan says so — but an earlier
     # revision then asserted set EQUALITY, which forbids the shrink it just permitted.
