@@ -529,48 +529,67 @@ NOT_YET_CONVERTED: frozenset[tuple[str, str]] = frozenset(
 )
 
 
-def _own_calls(func: ast.AST) -> list[tuple[int, str]]:
-    """`(lineno, callee-name)` for calls in THIS function's OWN scope.
+def _own_calls(func: ast.AST) -> list[tuple[int, int, str]]:
+    """`(lineno, col_offset, callee-name)` for calls in THIS function's OWN scope.
 
     A nested `def`/`lambda`/`class` body belongs to the nested scope. `ast.walk`
     descends into them, so judging `outer` on `inner`'s effects is exactly F3e1a2's
     `_iter_own_nodes` trap — MEASURED: a fixture where `outer` takes `_live` and a
     nested `inner` holds the sink makes `ast.walk(outer)` report the sink, and the
     gate then blames the wrong function.
+
+    **BODY ONLY.** `ast.iter_child_nodes(func)` also yields `decorator_list` and the
+    default expressions in `args` — which run at DEFINITION time, in the ENCLOSING
+    scope, not on invocation. MEASURED: with them included,
+    `def f(s, w, stamp, _x=acquire_commit_mutex_at_generation(...)): write_and_commit_files(s)`
+    sorts the mutex above the sink and PASSES the gate unfenced.
+
+    **`col_offset`, not `lineno` alone.** Two calls on one line compared equal, so
+    MEASURED: `write_and_commit_files(s); acquire_commit_mutex_at_generation(...)` —
+    effect first, on one line — PASSED. A position is (line, column).
     """
-    out: list[tuple[int, str]] = []
+    out: list[tuple[int, int, str]] = []
 
     def walk(node: ast.AST) -> None:
+        if isinstance(node, ast.Call):
+            name = _callee_name(node.func)
+            if name:
+                out.append((node.lineno, node.col_offset, name))
         for child in ast.iter_child_nodes(node):
             if isinstance(
                 child, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef
             ):
                 continue
-            if isinstance(child, ast.Call):
-                name = _callee_name(child.func)
-                if name:
-                    out.append((child.lineno, name))
             walk(child)
 
-    walk(func)
+    body = func.body if hasattr(func, "body") else []
+    for stmt in body if isinstance(body, list) else [body]:
+        walk(stmt)
     return sorted(out)
 
 
-def _judge(qual: str, path: str, ordered: list[tuple[int, str]], enclosing: bool) -> list[str]:
+def _judge(
+    qual: str, path: str, ordered: list[tuple[int, int, str]], enclosing: bool
+) -> list[str]:
     """One function's verdict. Returns a list so callers can `extend`, never `+=`
-    inside a closure — that rebinds the name and raises UnboundLocalError."""
-    names = {n for _l, n in ordered}
+    inside a closure — that rebinds the name and raises UnboundLocalError.
+
+    Positions are `(lineno, col_offset)` pairs, compared as tuples. Comparing bare
+    line numbers made two calls on ONE line equal, so an effect-first same-line
+    site passed — MEASURED.
+    """
+    names = {n for *_pos, n in ordered}
     if _LIVE in names:
         return [f"{path}::{qual} still calls {_LIVE}"]
-    acquisitions = [ln for ln, n in ordered if n == _AT_GENERATION]
+    acquisitions = [(ln, col) for ln, col, n in ordered if n == _AT_GENERATION]
     if not acquisitions:
         return [f"{path}::{qual} is in scope but never calls {_AT_GENERATION}"]
     effects_here = _EFFECTS | (_DELEGATED_EFFECTS if enclosing else frozenset())
-    effects = [ln for ln, n in ordered if n in effects_here]
+    effects = [(ln, col) for ln, col, n in ordered if n in effects_here]
     if effects and min(acquisitions) > min(effects):
         return [
             f"{path}::{qual} — {_AT_GENERATION} must precede the first effect "
-            f"(mutex at line {min(acquisitions)}, effect at line {min(effects)})"
+            f"(mutex at line {min(acquisitions)[0]}, effect at line {min(effects)[0]})"
         ]
     return []
 
@@ -581,24 +600,39 @@ def check_source(source: str, path: str) -> list[str]:
     Both halves are required. MEASURED: effect-holders alone cover only 5 of F3e1b-1's
     8 sites — `kernel_accept_citation`, `post_lock_spec` and `post_unlock_spec`
     DELEGATE rather than hold an effect, so a direct-effect rule cannot see them.
+
+    **Lambdas are judged too.** `_own_calls` correctly refuses to attribute a lambda's
+    calls to its enclosing function — but for four revisions nothing then judged the
+    lambda itself, so its calls were attributed to NOBODY. MEASURED:
+    `go = lambda: write_and_commit_files(s)` with no mutex anywhere PASSED. Skipping a
+    scope when ATTRIBUTING is right; skipping it when JUDGING is a hole.
     """
     problems: list[str] = []
+
+    def _consider(node: ast.AST, sub: str) -> None:
+        ordered = _own_calls(node)
+        names = {n for *_pos, n in ordered}
+        holds_effect = bool(names & _EFFECTS)
+        takes_mutex = bool(names & _MUTEX_PRIMITIVES)
+        # "Enclosing" is DERIVED too: takes a mutex, holds no effect of its own,
+        # therefore its delegated call is its first effect.
+        if holds_effect or takes_mutex:
+            problems.extend(
+                _judge(sub, path, ordered, enclosing=takes_mutex and not holds_effect)
+            )
 
     def visit(node: ast.AST, qual: str) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
                 sub = f"{qual}.{child.name}" if qual else child.name
                 if not isinstance(child, ast.ClassDef):
-                    ordered = _own_calls(child)
-                    names = {n for _l, n in ordered}
-                    holds_effect = bool(names & _EFFECTS)
-                    takes_mutex = bool(names & _MUTEX_PRIMITIVES)
-                    # "Enclosing" is DERIVED too: takes a mutex, holds no effect of its
-                    # own, therefore its delegated call is its first effect.
-                    if holds_effect or takes_mutex:
-                        problems.extend(
-                            _judge(sub, path, ordered, enclosing=takes_mutex and not holds_effect)
-                        )
+                    _consider(child, sub)
+                visit(child, sub)
+            elif isinstance(child, ast.Lambda):
+                # Line-qualified: a function may hold several, and "<lambda>" alone
+                # would collapse them into one indistinguishable name in the report.
+                sub = f"{qual}.<lambda:{child.lineno}>" if qual else f"<lambda:{child.lineno}>"
+                _consider(child, sub)
                 visit(child, sub)
             else:
                 visit(child, qual)
@@ -811,6 +845,26 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
                         node.targets if isinstance(node, ast.Assign) else [node.target]
                     )
                     names.update(t.id for t in targets if isinstance(t, ast.Name))
+                elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+                    # A DEFAULT ARGUMENT binds the class to a parameter name:
+                    # `def rogue(ws, factory=FenceStamp): return factory(...)`.
+                    # MEASURED: without this the rogue built a third FenceStamp in an
+                    # allowlisted file and the gate PASSED. The binding is per-function
+                    # but this alias set is per-file, so an unrelated `factory` parameter
+                    # elsewhere in the file also becomes suspect — an over-approximation,
+                    # which for a gate means a spurious failure a human reads, never a
+                    # silent escape.
+                    a = node.args
+                    for param, default in zip(
+                        (a.posonlyargs + a.args)[-len(a.defaults) :] if a.defaults else [],
+                        a.defaults,
+                        strict=True,
+                    ):
+                        if _callee_name(default) in names:
+                            names.add(param.arg)
+                    for param, default in zip(a.kwonlyargs, a.kw_defaults, strict=True):
+                        if default is not None and _callee_name(default) in names:
+                            names.add(param.arg)
             if len(names) == before:
                 break
         return names
@@ -860,7 +914,7 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
                 if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
                     sub = f"{prefix}.{child.name}" if prefix else child.name
                     if not isinstance(child, ast.ClassDef):
-                        if any(n in aliases for _l, n in _own_calls(child)):
+                        if any(n in aliases for *_pos, n in _own_calls(child)):
                             inside.add((rel, sub))
                     visit(child, sub)
                 else:
@@ -1211,7 +1265,7 @@ def test_every_declared_site_positively_takes_primitive_b():
                 if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
                     sub = f"{prefix}.{child.name}" if prefix else child.name
                     if sub == qual and not isinstance(child, ast.ClassDef):
-                        names = {n for _l, n in _own_calls(child)}
+                        names = {n for *_pos, n in _own_calls(child)}
                         if "acquire_commit_mutex_at_generation" in names:
                             found = True
                     visit(child, sub)
@@ -1403,6 +1457,29 @@ Then assert the landing, every time:
 an unchanged HEAD is not enough, because a stale implementation can dirty the working
 tree without committing; and cleanliness alone passes an implementation that wrote and
 then reverted.
+
+**For `post_lock_spec` and `post_unlock_spec`, add two more lines.** Those five assertions
+cover git, Yjs and the room — and the effect §4.2 names for these two routes is none of
+those. It is the DB lock write, which every assertion above ignores, so a stale
+generation could set `spec_locked_at` and persist a `SpecLockEvent` while Case B reported
+clean. This is the same blind spot as the static gate's (see "What this slice does NOT
+prove"): having recorded that `_EFFECTS` cannot see an ORM attribute write, the runtime
+race is the ONLY place left that can, and it was not looking either.
+
+```python
+    # SCAN: fragment
+    session.refresh(ws, ["spec_locked_at", "spec_locked_by"])
+    assert (ws.spec_locked_at, ws.spec_locked_by) == lock_state_before
+    assert session.scalar(
+        select(func.count()).select_from(SpecLockEvent).where(
+            SpecLockEvent.workspace_id == wid)
+    ) == lock_events_before
+```
+
+Capture `lock_state_before` and `lock_events_before` alongside `head_before`. **Case A
+must assert the mirror image** — that the pair CHANGED and exactly one new
+`SpecLockEvent` row exists. An unchanged-only assertion is satisfied by a route that
+never writes at all, which is the failure mode Case A exists to exclude.
 
 **The first three apply everywhere. The last two — no `yjs_updates` row, unmutated
 room `Doc` — apply to the paths that touch a room**: the five kernel entry points and
@@ -1819,3 +1896,28 @@ Kept so a future reader does not reintroduce any of it. Items 1–3 were Critica
     revisions. It now rejects both shapes, each proven by mutation. The lesson repeats
     itself: a check that only sees the failures it was built for reports the rest as
     absent.
+25. **`_own_calls` walked decorators and default arguments.** `ast.iter_child_nodes(func)`
+    yields `decorator_list` and `args.defaults` — expressions that run at DEFINITION
+    time, in the enclosing scope. PROVEN by mutation: a Primitive B call in a default
+    argument sorted above a body sink and the site PASSED unfenced. It now walks the
+    body only.
+26. **Two calls on one line compared equal.** `_judge` compared bare line numbers, so
+    `write_and_commit_files(s); acquire_commit_mutex_at_generation(...)` — effect first —
+    PASSED. Positions are now `(lineno, col_offset)`.
+27. **Nothing judged a lambda.** `_own_calls` correctly refused to attribute a lambda's
+    calls to its enclosing function, but `check_source` never visited the lambda itself,
+    so those calls were attributed to NOBODY: `go = lambda: write_and_commit_files(s)`
+    with no mutex PASSED. Skipping a scope when ATTRIBUTING is right; skipping it when
+    JUDGING is a hole. Both gates had this same bug independently — the constructor gate
+    (item 22) and the converted gate — and it was fixed in the first without anyone
+    checking the second.
+28. **The lock/unlock Case B race never inspected the effect it fences.** Its five
+    assertions cover git, Yjs and the room; §4.2's effect for these two routes is the DB
+    lock write, which none of them touches. Having just recorded that the STATIC gate
+    cannot see an ORM attribute write (item 21), the runtime race was the only remaining
+    check — and it was not looking either. That is the twin pattern this loop keeps
+    finding: document a limitation in one place, leave its only compensating control
+    blind in another.
+29. **A default argument bound the constructor.** `def rogue(ws, factory=FenceStamp)`
+    built a third `FenceStamp` in an allowlisted file and the gate PASSED. Default-arg
+    bindings are now tracked as aliases.
