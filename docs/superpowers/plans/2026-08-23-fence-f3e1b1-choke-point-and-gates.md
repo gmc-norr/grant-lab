@@ -605,8 +605,24 @@ def _own_calls_definition_time(node: ast.AST) -> list[tuple[int, int, str]]:
         a = node.args
         roots += list(a.defaults)
         roots += [d for d in a.kw_defaults if d is not None]
-    else:  # Module, ClassDef — the body itself runs at definition time
-        roots += list(getattr(node, "body", []))
+    elif isinstance(node, ast.Module | ast.ClassDef):
+        # The body runs at definition time — and for a class, so does its HEADER.
+        # Decorators, bases and metaclass keywords are evaluated when the `class`
+        # statement executes. The module-level walk cannot reach them (it stops at
+        # the ClassDef node), so if this branch omitted them nothing would judge
+        # them at all, and the "exact complement" claim above would be false.
+        roots += list(getattr(node, "decorator_list", []))
+        roots += list(getattr(node, "bases", []))
+        roots += [k.value for k in getattr(node, "keywords", [])]
+        roots += list(node.body)
+    else:
+        # SCOPE NODES ONLY. `Try`, `If`, `For`, `While` and `With` all have a `.body`,
+        # and an earlier revision's `else: roots += node.body` accepted every one of
+        # them — so ordinary runtime control flow was reported as running at definition
+        # time. MEASURED: a correct `post_lock_spec` with its acquisition and checkpoint
+        # inside `try:` FAILED the gate, which would have made Task 4's tree gate
+        # impossible to turn green. Refuse rather than guess.
+        raise TypeError(f"definition-time scope expected, got {type(node).__name__}")
     for r in roots:
         walk(r)
     return sorted(out)
@@ -688,10 +704,14 @@ def check_source(source: str, path: str) -> list[str]:
                 )
 
     def visit(node: ast.AST, qual: str) -> None:
-        _definition_time(node, qual)
+        # `_definition_time` is called ONLY when a scope is ENTERED — never on every
+        # node walked. An earlier revision called it at the top of `visit`, which
+        # recurses through `Try`/`If`/`For` nodes, so every statement nested in ordinary
+        # control flow was judged as definition-time. That is the Critical above.
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
                 sub = f"{qual}.{child.name}" if qual else child.name
+                _definition_time(child, sub)   # decorators + defaults, or a class header
                 if not isinstance(child, ast.ClassDef):
                     _consider(child, sub)
                 visit(child, sub)
@@ -699,12 +719,15 @@ def check_source(source: str, path: str) -> list[str]:
                 # Line-qualified: a function may hold several, and "<lambda>" alone
                 # would collapse them into one indistinguishable name in the report.
                 sub = f"{qual}.<lambda:{child.lineno}>" if qual else f"<lambda:{child.lineno}>"
+                _definition_time(child, sub)   # its defaults
                 _consider(child, sub)
                 visit(child, sub)
             else:
                 visit(child, qual)
 
-    visit(ast.parse(source), "")
+    tree = ast.parse(source)
+    _definition_time(tree, "")                 # the module body, once
+    visit(tree, "")
     return problems
 
 
@@ -907,8 +930,15 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom):
                     for a in node.names:
-                        if a.name == "FenceStamp" and a.asname:
-                            names.add(a.asname)
+                        # `a.name in names`, NOT `a.name == "FenceStamp"`. Keying on the
+                        # literal name meant a rename-on-re-export was never learned:
+                        # module A does `import FenceStamp as FS`, module B does
+                        # `from A import FS as G`, and B's `a.name` is "FS" — already a
+                        # known alias, but the literal check rejected it, so `G(...)`
+                        # built a stamp unseen. The tree-wide fixpoint below cannot help
+                        # a rule that refuses to propagate.
+                        if a.name in names:
+                            names.add(a.asname or a.name)
                 elif isinstance(node, ast.Assign | ast.AnnAssign):
                     if node.value is None or _callee_name(node.value) not in names:
                         continue
@@ -2045,3 +2075,22 @@ Kept so a future reader does not reintroduce any of it. Items 1–3 were Critica
 34. **"Spied per edge" was a two-edge overstatement of a one-edge test.** Recorded as a
     residual instead, together with the deeper limit: Primitive B binds on FIRST
     acquisition, so a re-mint before any acquisition is undetectable by construction.
+35. **CRITICAL — revision 15's definition-time walker flagged ordinary control flow.**
+    `visit` called `_definition_time` on EVERY node it walked, and the walker's `else`
+    branch took `.body` from anything that had one — `Try`, `If`, `For`, `While`, `With`.
+    MEASURED: a CORRECT `post_lock_spec`, with its acquisition and checkpoint inside
+    `try:` — the real source's exact shape — FAILED the gate. Task 4's tree gate could
+    never have gone green. `_definition_time` is now called only when a SCOPE is
+    entered, and the walker raises `TypeError` on a non-scope node rather than guessing.
+36. **The "exact complement" claim was false for class headers.** A module walk stops at
+    each `ClassDef`, and the class branch scanned only `.body`, so decorators, bases and
+    metaclass keywords were judged by nobody. Now included — and the claim is no longer
+    taken on trust: a harness compares every `ast.Call` in a file against the union of
+    the two functions across every scope. VERIFIED over 5 shape fixtures and all 276
+    files in `src/`: nothing judged twice, nothing judged by nobody. Re-run it after any
+    edit to either function; that is what makes the claim a fact rather than a comment.
+37. **The tree-wide alias fixpoint could not propagate a rename.** It kept
+    `a.name == "FenceStamp"`, so `from A import FS as G` was rejected even though `FS`
+    was already a known alias — a fixpoint over a rule that refuses to propagate is just
+    a slow version of the same rule. Now `a.name in names`. PROVEN by mutation across
+    two new modules with a two-hop rename.
