@@ -774,11 +774,21 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
         """`from ...stamp import FenceStamp as FS` then `FS(...)` builds one too. A check
         keyed on the literal name "FenceStamp" is bypassed by one import line."""
         names = {"FenceStamp"}
-        for node in ast.walk(ast.parse(source)):
-            if isinstance(node, ast.ImportFrom):
-                for a in node.names:
-                    if a.name == "FenceStamp" and a.asname:
-                        names.add(a.asname)
+        tree = ast.parse(source)
+        # Two alias forms, not one. `from ... import FenceStamp as FS` AND the plain
+        # rebinding `FS = FenceStamp`, which an import-only check misses entirely.
+        for _ in range(3):  # transitive: FS = FenceStamp; G = FS
+            before = len(names)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    for a in node.names:
+                        if a.name == "FenceStamp" and a.asname:
+                            names.add(a.asname)
+                elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Name):
+                    if node.value.id in names:
+                        names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+            if len(names) == before:
+                break
         return names
 
     built = []
@@ -1061,6 +1071,44 @@ def test_the_converted_gate_is_green_over_the_tree():
     assert check_tree() == []
 
 
+def test_every_converted_gate_pin_is_load_bearing():
+    """#3's real fix. `Phase0Worker._m1` is in scope but PINNED, so `check_tree` filters
+    it and the gate enforces nothing on it today — "scope survives F5's edits" is
+    necessary, not sufficient.
+
+    What makes F5 actually remove the pin is this: a pin whose removal changes nothing
+    is DEAD, and this test fails on it. The moment F5 converts `_m1`, its pin stops being
+    load-bearing and F5 must delete it or go red. Same mechanism `live_reach_gate` uses.
+    """
+    import tests.fencing.converted_gate as gate
+
+    original = gate.NOT_YET_CONVERTED
+    dead = []
+    try:
+        for pin in sorted(original):
+            gate.NOT_YET_CONVERTED = frozenset(original - {pin})
+            _path, qual = pin
+            if not any(qual in p for p in gate.check_tree()):
+                dead.append(pin)
+    finally:
+        gate.NOT_YET_CONVERTED = original
+    assert dead == [], f"pins that protect nothing: {dead}"
+
+
+def test_no_declared_site_is_pinned():
+    """The escape hatch that would make every other gate here optional.
+
+    `check_tree` filters `NOT_YET_CONVERTED`, so adding one of this slice's own eight
+    sites to that list silences the precedence gate for it — and every remaining
+    assertion would stay green. The two lists must be disjoint, permanently.
+    """
+    from tests.fencing.converted_gate import NOT_YET_CONVERTED
+    from tests.fencing.f3e1b1_sites import DECLARED_SITES
+
+    overlap = DECLARED_SITES & NOT_YET_CONVERTED
+    assert overlap == frozenset(), f"a site this slice owns was pinned instead of fixed: {overlap}"
+
+
 def test_every_declared_site_positively_takes_primitive_b():
     """Two-sided. A green `check_tree()` also passes if a declared site VANISHED — the
     gate reports nothing about a function that is not there. This asserts presence."""
@@ -1149,14 +1197,36 @@ def test_the_spec_lock_write_is_a_declared_effect():
     import ast
     import pathlib
 
+    from tests.fencing.converted_gate import _own_calls
+
     root = pathlib.Path(__file__).resolve().parents[2]
-    src = (root / "src/call_manager/web/api/workspaces.py").read_text()
-    # Two-sided: the names must be in `_EFFECTS` AND must actually be called by the
-    # routes. Asserting membership alone passes for any string the implementer invents.
-    for route, callee in (("post_lock_spec", "<lock-write callee>"),
-                          ("post_unlock_spec", "<unlock-write callee>")):
+    tree = ast.parse((root / "src/call_manager/web/api/workspaces.py").read_text())
+
+    # PARSED, not grepped. `assert callee in source_text` is satisfied by a COMMENT
+    # naming the callee — Constraint 4 forbids exactly that, and an earlier revision of
+    # this very test did it. Resolve the route's own calls from the AST instead.
+    def _calls_of(qual: str) -> set[str]:
+        found: set[str] = set()
+
+        def visit(node, prefix=""):
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                    sub = f"{prefix}.{child.name}" if prefix else child.name
+                    if sub == qual and not isinstance(child, ast.ClassDef):
+                        found.update(n for _l, n in _own_calls(child))
+                    visit(child, sub)
+                else:
+                    visit(child, prefix)
+
+        visit(tree)
+        return found
+
+    for route, callee in (
+        ("post_lock_spec", "<lock-write callee>"),
+        ("post_unlock_spec", "<unlock-write callee>"),
+    ):
         assert callee in _EFFECTS, f"{callee} missing from _EFFECTS"
-        assert callee in src, f"{callee} is not called anywhere in workspaces.py"
+        assert callee in _calls_of(route), f"{route} does not call {callee}"
 ```
 
 Then re-run `check_tree()` and **record the count before and after adding them.** If it
@@ -1390,9 +1460,13 @@ def test_the_exemption_pins_are_unchanged_by_this_slice():
     assert set(TOOLS_NOT_YET_CONVERTED) <= _BASELINE_TOOLS
     assert set(NON_SEMANTIC_PINS) <= _BASELINE_NON_SEMANTIC
     assert set(RETAINED_PINS) <= _BASELINE_RETAINED
-    # And this slice specifically must not shrink them either — it touches no tool
-    # module. Equality HERE is correct because the claim is "unchanged by this slice".
+    # And this slice must not shrink them either — it touches no tool module and no
+    # exemption. Equality is correct here because the claim is "unchanged BY THIS SLICE",
+    # and it must cover ALL THREE: an earlier revision asserted equality for one and left
+    # the other two free to shrink while the docstring claimed all three were unchanged.
     assert set(TOOLS_NOT_YET_CONVERTED) == _BASELINE_TOOLS
+    assert set(NON_SEMANTIC_PINS) == _BASELINE_NON_SEMANTIC
+    assert set(RETAINED_PINS) == _BASELINE_RETAINED
 ```
 
 - [ ] **Step 2: Run to verify they fail**
