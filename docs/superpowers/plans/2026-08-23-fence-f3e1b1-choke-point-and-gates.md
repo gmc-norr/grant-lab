@@ -833,61 +833,54 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
     # its complement.
     from tests.fencing.converted_gate import _own_calls
 
+    # COUNT with a whole-tree walk, ATTRIBUTE with a scoped one. Do not merge these.
+    #
+    # Every scoped walk has a blind spot, because scoping is what it is FOR. `_own_calls`
+    # answers "what does THIS function call" and so skips nested defs, lambdas and class
+    # bodies; an earlier `_outside_functions` covered module and class scope but skipped
+    # every FunctionDef. A `(lambda: FenceStamp(...))()` inside a function fell between
+    # the two and MEASURED as PASSING — a third constructor in the file the allowlist
+    # trusts most. `ast.walk` has no scope and therefore no blind spot, so it does the
+    # counting; the scoped walk only says which function owns the one it finds.
     inside = set()
-    built_counts: dict[tuple[str, str], int] = {}
+    per_file_total: dict[str, int] = {}
     for rel in sorted(allowed):
-        tree = ast.parse((root / rel).read_text())
-        aliases = _stamp_aliases((root / rel).read_text())
+        source = (root / rel).read_text()
+        tree = ast.parse(source)
+        aliases = _stamp_aliases(source)
+
+        per_file_total[rel] = sum(
+            1
+            for c in ast.walk(tree)
+            if isinstance(c, ast.Call) and _callee_name(c.func) in aliases
+        )
 
         def visit(node, prefix=""):
             for child in ast.iter_child_nodes(node):
                 if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
                     sub = f"{prefix}.{child.name}" if prefix else child.name
                     if not isinstance(child, ast.ClassDef):
-                        hits = [n for _l, n in _own_calls(child) if n in aliases]
-                        if hits:
+                        if any(n in aliases for _l, n in _own_calls(child)):
                             inside.add((rel, sub))
-                            built_counts[(rel, sub)] = len(hits)
                     visit(child, sub)
                 else:
                     visit(child, prefix)
 
         visit(tree)
-        # Module AND class scope. `_own_calls` only ever sees a FUNCTION's body, so a
-        # construction at import time — `_BLANK = FenceStamp(...)` beside the two
-        # constructors, or inside a class body — was invisible to the walk above, in the
-        # file the allowlist trusts most. (`_callee_name` is imported at the top of this
-        # test, not here.)
 
-        def _outside_functions(node):
-            """Statements that execute at definition time: module body and class bodies,
-            skipping anything inside a function."""
-            for child in ast.iter_child_nodes(node):
-                if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
-                    continue
-                if isinstance(child, ast.ClassDef):
-                    yield from _outside_functions(child)
-                    continue
-                yield child
+    # EXACTLY ONE construction per allowlisted file, counted where nothing can hide.
+    # This subsumes the old module-scope and per-function-count checks: a second build
+    # anywhere — module body, class body, lambda, nested def — moves this number.
+    assert per_file_total == {rel: 1 for rel in allowed}, f"extra builds: {per_file_total}"
 
-        eager = [
-            c.lineno
-            for stmt in _outside_functions(tree)
-            for c in ast.walk(stmt)
-            if isinstance(c, ast.Call) and _callee_name(c.func) in aliases
-        ]
-        assert eager == [], f"{rel}: FenceStamp built outside a function, lines {eager}"
-    # By CONSTRUCTOR IDENTITY, not by file. `sorted(inside) == sorted(allowed)` is
-    # satisfied by two constructions in the right FILES but the wrong FUNCTIONS — a
-    # module-level `FenceStamp(...)` in stamp.py would pass while `stamp_for_workspace`
-    # had been gutted.
+    # And by CONSTRUCTOR IDENTITY, not by file. The count above is satisfied by one
+    # construction in the right FILE but the wrong FUNCTION — a module-level
+    # `FenceStamp(...)` in stamp.py would pass it while `stamp_for_workspace` was gutted.
+    # A build that lives ONLY in a lambda attributes to no owner and fails here.
     assert inside == {
         ("src/call_manager/proposal_assist/ports/invocation.py", "Invocation.stamp"),
         ("src/call_manager/proposal_assist/ports/stamp.py", "stamp_for_workspace"),
     }, f"the two sanctioned constructors are not the two that build one: {sorted(inside)}"
-    # And EXACTLY ONE construction each. `inside` is a set, so a function building two
-    # collapses to one entry and the identity check above cannot see it.
-    assert built_counts == {k: 1 for k in inside}, f"extra constructions: {built_counts}"
 
 
 def test_a_stamp_for_a_DIFFERENT_workspace_raises(db_session, seeded_workspace):
@@ -1262,84 +1255,48 @@ effect.** §4.2's table names the **spec-lock write** / **spec-unlock write**.
 MEASURED at `8f7b1ef7`: the mutex at `:651` already precedes both, so this is a
 ratchet against future movement rather than a current failure — but the gate as
 written would ACCEPT a mutex moved to just above `checkpoint_artifact` at `:665`
-and below the lock write. Identify the lock/unlock write's callee and add it to
-`_EFFECTS`, then re-run `check_tree()` and record the count.
+and below the lock write.
+
+**MEASURED: there is no lock-write callee, so nothing goes into `_EFFECTS`.** Two
+revisions instructed "identify the lock/unlock write's callee and add it to `_EFFECTS`"
+and left `<lock-write callee>` as a placeholder in both the fixture and its oracle — so
+whatever an implementer picked would satisfy both sides, and a no-op name placed after
+the real write would have certified itself. Read the routes: in `post_lock_spec`
+(`web/api/workspaces.py`) the spec-lock write is
+
+```python
+# SCAN: fragment
+ws.spec_locked_at = datetime.now(UTC)     # ORM attribute assignment - NOT a call
+ws.spec_locked_by = user.id
+session.add(
+    SpecLockEvent(
+        workspace_id=ws.id,
+        action="lock",
+        actor_id=user.id,
+        artifact_commit_sha=sha,
+    )
+)
+```
+
+and `post_unlock_spec` is the same shape with `None`. `_EFFECTS` is keyed on CALLEE
+NAMES. An attribute assignment has no callee, and `session.add` is a generic ORM call
+that appears all over the tree — adding it would flag hundreds of unrelated functions.
+**So this gate structurally cannot see the spec-lock write, and no name makes it able
+to.** Do not invent one.
+
+What the gate DOES cover for these two routes is `checkpoint_artifact`, via
+`_DELEGATED_EFFECTS` — already present, already checked for precedence. And the real
+ordering is not at risk: MEASURED in both routes, `acquire_commit_mutex_live` is the
+FIRST statement in the `try:`, the checkpoint follows it, and the ORM write follows
+that. There is no gap for a mutex to move into.
+
+Record the residual in "What this slice does NOT prove" rather than faking a gate for
+it, and delete Step 3b — its test asserted a placeholder against itself.
 
 Rewrite `checkpoint.py`'s `_live:` comment block at `:87-90` — it explains a refusal on
 deletion only, and the refusal is now also on generation.
 
 **Do not re-mint inside any of these.** They receive their stamp from Task 2.
-
-- [ ] **Step 3b: Pin the lock/unlock first-effect boundary with a test**
-
-Step 3 tells you to add the lock/unlock write's callee to `_EFFECTS`. Nothing so far
-proves you did — the static gate and every runtime race stay green either way, because
-the mutex already precedes both today. Add:
-
-```python
-def test_the_spec_lock_write_is_a_declared_effect():
-    """§4.2's table names the spec-lock write as `post_lock_spec`'s FIRST effect, not
-    `checkpoint_artifact`. Without the write in `_EFFECTS`, a mutex moved to just above
-    `checkpoint_artifact` and below the write passes the gate — anchoring one line late,
-    the exact defect §4.1 warns about."""
-    from tests.fencing.converted_gate import _EFFECTS
-
-    import ast
-    import pathlib
-
-    from tests.fencing.converted_gate import _own_calls
-
-    root = pathlib.Path(__file__).resolve().parents[2]
-    tree = ast.parse((root / "src/call_manager/web/api/workspaces.py").read_text())
-
-    # PARSED, not grepped. `assert callee in source_text` is satisfied by a COMMENT
-    # naming the callee — Constraint 4 forbids exactly that, and an earlier revision of
-    # this very test did it. Resolve the route's own calls from the AST instead.
-    def _calls_of(qual: str) -> set[str]:
-        found: set[str] = set()
-
-        def visit(node, prefix=""):
-            for child in ast.iter_child_nodes(node):
-                if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-                    sub = f"{prefix}.{child.name}" if prefix else child.name
-                    if sub == qual and not isinstance(child, ast.ClassDef):
-                        found.update(n for _l, n in _own_calls(child))
-                    visit(child, sub)
-                else:
-                    visit(child, prefix)
-
-        visit(tree)
-        return found
-
-    for route, callee in (
-        ("post_lock_spec", "<lock-write callee>"),
-        ("post_unlock_spec", "<unlock-write callee>"),
-    ):
-        assert callee in _EFFECTS, f"{callee} missing from _EFFECTS"
-        assert callee in _calls_of(route), f"{route} does not call {callee}"
-```
-
-Then re-run `check_tree()` and **record the count before and after adding them.** If it
-does not move, say so — that is the measurement, not a disappointment.
-
-**And prove the boundary bites**, or the two names are decoration:
-
-```python
-def test_a_mutex_after_the_lock_write_is_rejected():
-    """Membership in `_EFFECTS` proves nothing on its own — the mutex already precedes
-    both calls today, so adding the names moves no count and no existing test. Drive a
-    fixture that puts the mutex BETWEEN the lock write and `checkpoint_artifact`: without
-    the lock write in `_EFFECTS` this passes, which is the defect."""
-    from tests.fencing.converted_gate import check_source
-
-    late = (
-        "def post_lock_spec(s, wid, stamp, ws):\n"
-        "    <lock-write callee>(s, ws)\n"
-        "    acquire_commit_mutex_at_generation(s, wid, generation=stamp.generation)\n"
-        "    return checkpoint_artifact(s, workspace_id=wid, stamp=stamp)\n"
-    )
-    assert any("precede" in p for p in check_source(late, "x/f.py"))
-```
 
 - [ ] **Step 4: Update the records and pins in the same working tree**
 
@@ -1677,19 +1634,34 @@ def test_the_exemption_pins_are_unchanged_by_this_slice():
         TOOLS_NOT_YET_CONVERTED,
     )
 
-    # The baselines, MEASURED at slice start. An earlier revision referenced these three
-    # names without defining them anywhere — the test could not run. Read them off the
-    # tree in Task 5 Step 1 and paste the literal values here; do NOT derive them from
-    # the module under test, which would make every assertion below a tautology.
-    _BASELINE_TOOLS = {...}          # 5 entries at 8f7b1ef7
-    _BASELINE_NON_SEMANTIC = {...}   # 3 entries
-    _BASELINE_RETAINED = {...}       # 1 entry
+    # The baselines, READ OFF `8f7b1ef7` AND WRITTEN DOWN HERE — not read at Task 5 time.
+    #
+    # Two earlier revisions got this wrong in two different ways. The first referenced
+    # these names without defining them anywhere, so the test could not run. The second
+    # "fixed" that with `{...}` placeholders and an instruction to fill them from the tree
+    # in Task 5 Step 1 — but Task 5 runs AFTER Tasks 1-4, so any exemption those tasks
+    # changed would already be present and would be pasted in AS the baseline. Both the
+    # subset and the equality assertion below would then pass against a moved target.
+    # `{...}` is also a legal set-of-Ellipsis, so it PARSED and the block scan called it
+    # clean. A baseline that is captured after the change it is meant to detect is not a
+    # baseline. These are the literal values; `git diff 8f7b1ef7 HEAD --
+    # tests/fencing/inventory.py` is empty, so they are also HEAD's.
+    _BASELINE_TOOLS = {"audit.py", "citations.py", "history.py", "proposal.py", "references.py"}
+    _CORE = "src/call_manager/proposal_assist/citations/core.py"
+    _REFS = "src/call_manager/proposal_assist/tools/references.py"
+    _BASELINE_NON_SEMANTIC = {
+        ("tool_commit", _CORE, "_write_citekey_cache"),
+        ("tool_commit", _REFS, "fetch_reference_impl"),
+        ("tool_commit", _REFS, "fetch_reference_impl._refund_fetch_slot"),
+    }
+    _BASELINE_RETAINED = {
+        ("src/call_manager/proposal_assist/drafting/factory.py", "_build_adapter.tools_factory"),
+    }
 
     # SUBSET, not equality. Pins only shrink, and this plan says so — but an earlier
     # revision then asserted set EQUALITY, which forbids the shrink it just permitted.
     # `<=` blocks an ADDITION (what this slice must not do) while allowing a later
-    # slice's legitimate cleanup. Fill the baselines from the tree at slice start;
-    # MEASURED at 8f7b1ef7: 5, 3 and 1 entries respectively.
+    # slice's legitimate cleanup. MEASURED at 8f7b1ef7: 5, 3 and 1 entries.
     assert set(TOOLS_NOT_YET_CONVERTED) <= _BASELINE_TOOLS
     assert set(NON_SEMANTIC_PINS) <= _BASELINE_NON_SEMANTIC
     assert set(RETAINED_PINS) <= _BASELINE_RETAINED
@@ -1739,6 +1711,15 @@ State this in the final review rather than discovering it later.
   over-approximation in one place while the gate's own docstring said the opposite.
   The compensating check is
   `test_every_declared_site_positively_takes_primitive_b`, which is two-sided.
+- **The spec-lock write is invisible to the converted gate, and no name can fix that.**
+  MEASURED in `post_lock_spec` / `post_unlock_spec`: the lock write is
+  `ws.spec_locked_at = …` (an ORM attribute assignment, which has no callee) plus a
+  generic `session.add(...)`. `_EFFECTS` is keyed on callee names, so it cannot see
+  either. The gate covers these two routes only through `checkpoint_artifact` in
+  `_DELEGATED_EFFECTS`. The ordering is nonetheless correct today —
+  `acquire_commit_mutex_live` is the first statement in each route's `try:`, the
+  checkpoint follows, the ORM write follows that — but that is a fact about the current
+  source, not something this slice's gate would keep true.
 - **`_sink_bindings` misses the qualified alias.** MEASURED against the shipped
   `tests/fencing/git_fence.py`: it resolves `from m import _run_git as wac` and
   `wac = _run_git`, but not `wac = m._run_git`. Every gate reading `sink_calls`
@@ -1818,3 +1799,23 @@ Kept so a future reader does not reintroduce any of it. Items 1–3 were Critica
     access check and the exact binding to add — plus the threadpool-closure return the
     stamp has to travel out through. The other five Step 4 rows were verified one by one
     against the tree and are correct.
+21. **Step 3b was built on a callee that does not exist.** It told the implementer to add
+    "the lock/unlock write's callee" to `_EFFECTS` and left `<lock-write callee>` as a
+    placeholder in BOTH the fixture and the oracle that checked it, so any name would
+    have certified itself. MEASURED: the spec-lock write is `ws.spec_locked_at = …`, an
+    ORM attribute assignment with no callee at all. Step 3b is deleted and the residual
+    recorded.
+22. **The constructor gate missed a build inside a lambda.** `_own_calls` skips nested
+    scopes and `_outside_functions` skipped every function, so `(lambda: FenceStamp(…))()`
+    inside a function in an allowlisted file fell between them — PROVEN by mutation: the
+    gate PASSED. Counting is now a whole-tree `ast.walk` (no scope, no blind spot) and
+    the scoped walk only attributes ownership.
+23. **The exemption baseline was captured after the changes it was meant to detect.**
+    Task 5 Step 1 said to read the three pin sets off the tree — but Task 5 runs after
+    Tasks 1-4, so any exemption they moved would have been pasted in as the baseline and
+    both assertions would pass. The literal values from `8f7b1ef7` are now written down.
+24. **Three placeholders survived because they PARSE.** Two `<…>` inside string literals
+    and one `{...}` set-of-Ellipsis. The block scan called them clean for four
+    revisions. It now rejects both shapes, each proven by mutation. The lesson repeats
+    itself: a check that only sees the failures it was built for reports the rest as
+    absent.
