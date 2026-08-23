@@ -1,21 +1,30 @@
-"""Fence F3e1a — conservative git-commit-fence predicate.
+"""Fence F3e1a2 — the git-commit-fence predicate.
 
-CONSERVATIVE BY DESIGN: it under-reports. A shape it cannot prove fenced measures
-unfenced, including shapes that are perfectly correct. That direction is the safe
-one — a false ``fenced: true`` lets a slice claim a conversion it did not make, while
-a false ``false`` costs a pin and a sentence.
+WHAT THIS PROVES, AND WHAT IT DOES NOT. It proves LEXICAL ORDER: the acquisition
+call precedes the sink call in execution order, along a path made only of
+constructs vetted to run with their statement. It does NOT prove the mutex is
+held when the sink runs. The commit mutex is transaction-scoped, so a commit
+between the two releases it, and a commit inside a called helper is invisible
+here — this intraprocedural checker cannot catch that. See the 2026-08-23 F3e1a2 spec §2.
 
-**The rule** (all three clauses are required):
+So BOTH readings are weaker than they look, and both matter:
 
-1. ``acquire_commit_mutex_at_generation`` appears as a *standalone expression statement
-   directly in that function's body* — an ``ast.Expr`` whose value is the call, and
-   whose parent statement list is the function body itself (NOT inside ``if``, ``try``,
-   ``for``, ``while``, or ``with``).
-2. It appears *before every statement containing a sink call* — compared by statement
-   index in the same top-level block, not by AST preorder.
-3. NO ``acquire_commit_mutex_live`` appears anywhere in the function.
+* ``fenced: false`` does NOT mean broken. The checker under-reports by design;
+  correct sites stay pinned.
+* ``fenced: true`` does NOT mean safe. It means the cheap check found nothing
+  wrong along a vetted path. A slice claims ``complete`` on this measurement
+  PLUS the parent spec's §5.2 runtime two-ordered-lock proof — never on the
+  measurement alone.
 
-Everything else is **unfenced**.
+**The rule** (all clauses required):
+
+1. ``acquire_commit_mutex_at_generation`` appears as a standalone expression
+   statement directly in the function body (NOT inside ``if``/``try``/``with``).
+2. Every sink has a credited position AFTER it, by statement index. A position is
+   credited only along ``CREDITED_FIELDS`` — see that table's comment.
+3. No ``acquire_commit_mutex_live`` anywhere (F3e1a).
+4. No own-scope ``yield`` — the body is deferred (§4.3).
+5. No visible ``commit``/``rollback`` — it drops the mutex (§4.4).
 
 **Callee-name matching**: both acquisitions and sinks are matched by their *final
 callee name* — the ``.attr`` of an ``ast.Attribute``, or the ``id`` of an ``ast.Name``.
@@ -39,7 +48,7 @@ otherwise — including deferred contexts and anything unrecognised.
 
 All nine real sites capture or nest their sink, so all nine measure ``fenced: false``
 through this checker regardless of acquisition shape. ``fenced: false`` does NOT mean
-broken — it means not provable by the cheap check. See Task-5 brief §"What this costs".
+broken — it means the lexical check found nothing wrong. See the 2026-08-23 F3e1a2 spec §2.
 """
 
 from __future__ import annotations
@@ -495,10 +504,11 @@ def unprotected_sinks(source: str, path: str) -> dict[str, list[str]]:
 
 
 def fenced_qualnames(source: str, path: str) -> set[str]:
-    """Return the set of qualnames whose git-sink calls are provably fenced.
+    """Return the set of qualnames whose git-sink calls PASS THE LEXICAL CHECK.
 
-    Defined as ``holders - set(unprotected_sinks(...))``, so the two halves
-    partition every sink-holding qualname with no overlap and no gap.
+    Not "provably fenced" — see this module's docstring. Passing means the cheap
+    static check found nothing wrong; it is necessary for a slice to claim
+    `complete`, and it is not sufficient.
     """
     calls = sink_calls(source, path)
     holders = {q for q, _n, _i in calls}
