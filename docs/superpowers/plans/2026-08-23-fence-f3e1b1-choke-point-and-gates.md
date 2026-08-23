@@ -210,52 +210,64 @@ _SRC = _REPO / "src" / "call_manager"
 #: This list only SHRINKS: Task 4 removes the eight F3e1b-1 entries; F3e1b-2 removes
 #: `save_section`, `insert_citation_for_user` and `_insert_citation_locked`; F3e2 and
 #: F5 remove the rest. MEASURED at `8f7b1ef7`: all fourteen are load-bearing.
-UNCONVERTED: frozenset[str] = frozenset(
+#: PATH-QUALIFIED, for the same reason `converted_gate.NOT_YET_CONVERTED` is. An
+#: earlier revision path-qualified that one and left this one bare — a new function
+#: named `save_section` anywhere in the tree would silently inherit the exemption.
+UNCONVERTED: frozenset[tuple[str, str]] = frozenset(
     {
         # --- F3e1b-1: the seven §4.2 enclosing acquisitions, removed in Task 4 ---
-        "apply_citation_to_room",
-        "kernel_accept_prose",
-        "kernel_init_spec",
-        "kernel_accept_citation",
-        "apply_annotation_insert_to_room",
-        "post_lock_spec",
-        "post_unlock_spec",
+        ("src/call_manager/proposal_assist/collab/kernel.py", "apply_citation_to_room"),
+        ("src/call_manager/proposal_assist/collab/kernel.py", "kernel_accept_prose"),
+        ("src/call_manager/proposal_assist/collab/kernel.py", "kernel_init_spec"),
+        ("src/call_manager/proposal_assist/collab/kernel.py", "kernel_accept_citation"),
+        ("src/call_manager/proposal_assist/collab/kernel.py", "apply_annotation_insert_to_room"),
+        ("src/call_manager/web/api/workspaces.py", "post_lock_spec"),
+        ("src/call_manager/web/api/workspaces.py", "post_unlock_spec"),
         # --- F3e1b-1: the choke point, removed in Task 4 ---
-        "checkpoint_artifact",
+        ("src/call_manager/proposal_assist/collab/checkpoint.py", "checkpoint_artifact"),
         # --- F3e1b-2 ---
-        "save_section",
-        "insert_citation_for_user",
-        "_insert_citation_locked",
+        ("src/call_manager/proposal_assist/editing/save.py", "save_section"),
+        ("src/call_manager/proposal_assist/citations/human_cite.py", "insert_citation_for_user"),
+        ("src/call_manager/proposal_assist/citations/core.py", "_insert_citation_locked"),
         # --- F3e2 / F5 ---
-        "insert_from_annotation",
-        "post_init_spec._git",
-        "Phase0Worker._m1",
+        ("src/call_manager/proposal_assist/analysis/insert.py", "insert_from_annotation"),
+        ("src/call_manager/web/api/workspaces.py", "post_init_spec._git"),
+        ("src/call_manager/proposal_assist/phases/setup.py", "Phase0Worker._m1"),
     }
 )
 
 
-def _graph() -> tuple[dict[str, set[str]], dict[str, set[str]]]:
-    """`calls[qualname] -> callee final-names`, and `defines[name] -> qualnames`."""
+def _graph() -> tuple[dict[str, set[str]], dict[str, set[str]], dict[str, str]]:
+    """`calls[qualname] -> callee names`, `defines[name] -> qualnames`, and
+    `defined_in[qualname] -> repo-relative path`.
+
+    The third map exists so the pin list can be PATH-QUALIFIED. Without it a new
+    function named `save_section` in an unrelated module inherits an exemption nobody
+    granted it.
+    """
     calls: dict[str, set[str]] = {}
     defines: dict[str, set[str]] = {}
+    defined_in: dict[str, str] = {}
 
-    def walk(node: ast.AST, qual: str) -> None:
+    def walk(node: ast.AST, qual: str, rel: str) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
                 sub = f"{qual}.{child.name}" if qual else child.name
                 if not isinstance(child, ast.ClassDef):
                     defines.setdefault(child.name, set()).add(sub)
-                walk(child, sub)
+                    defined_in.setdefault(sub, rel)
+                walk(child, sub, rel)
                 continue
             if isinstance(child, ast.Call):
                 name = _callee_name(child.func)
                 if name:
                     calls.setdefault(qual, set()).add(name)
-            walk(child, qual)
+            walk(child, qual, rel)
 
     for path in _SRC.rglob("*.py"):
-        walk(ast.parse(path.read_text()), "")
-    return calls, defines
+        rel = str(path.relative_to(_REPO))
+        walk(ast.parse(path.read_text()), "", rel)
+    return calls, defines, defined_in
 
 
 def _reaches_sink(qual: str, calls, defines, seen: set[str] | None = None) -> bool:
@@ -275,15 +287,18 @@ def _reaches_sink(qual: str, calls, defines, seen: set[str] | None = None) -> bo
 
 def check_tree() -> list[str]:
     """Every unpinned `_live` caller that reaches a sink."""
-    calls, defines = _graph()
+    calls, defines, defined_in = _graph()
     problems: list[str] = []
     for qual, callees in sorted(calls.items()):
         if "acquire_commit_mutex_live" not in callees:
             continue
-        if qual in UNCONVERTED:
+        if (defined_in.get(qual, ""), qual) in UNCONVERTED:
             continue
         if _reaches_sink(qual, calls, defines):
-            problems.append(f"{qual} :: calls acquire_commit_mutex_live and reaches a git sink")
+            problems.append(
+                f"{defined_in.get(qual, '?')}::{qual} :: calls acquire_commit_mutex_live "
+                f"and reaches a git sink"
+            )
     return problems
 ```
 
@@ -417,21 +432,24 @@ from __future__ import annotations
 import ast
 import pathlib
 
-from tests.fencing.f3e1b1_sites import DECLARED_SITES
 from tests.fencing.git_fence import _SINK_KIND, _callee_name
-from tests.fencing.live_mutex_gate import ENCLOSING_ACQUISITIONS
-
-#: Scope is the UNION of the immutable catalog and the live record. The catalog half
-#: is what makes it safe: Task 4 REMOVES the seven from ENCLOSING_ACQUISITIONS, and a
-#: gate keyed on that record alone would silently stop checking the very functions the
-#: conversion just touched — while its own test stayed green. Revision 1 shipped that
-#: defect; revision 2 fixed it in one place and left it here.
-_ENCLOSING_QUALNAMES: frozenset[str] = frozenset(q for _p, q in DECLARED_SITES) | frozenset(
-    ENCLOSING_ACQUISITIONS
-)
 
 _LIVE = "acquire_commit_mutex_live"
 _AT_GENERATION = "acquire_commit_mutex_at_generation"
+
+#: Scope derives from the AST ALONE — no list any slice edits.
+#:
+#: Two earlier revisions keyed scope on a record (`ENCLOSING_ACQUISITIONS`, then a
+#: union including it). Both could be SILENTLY NARROWED by the very conversion they
+#: were meant to check: Task 4 empties that record, and MEASURED, the
+#: delegating-precedence check then returned nothing while its own test still
+#: passed. F5 would do the same to `Phase0Worker._m1`.
+#:
+#: A function is in scope if it holds an effect OR takes either mutex primitive.
+#: That is §5.1's "every git_commit site AND every enclosing acquisition", derived
+#: rather than listed. MEASURED at `8f7b1ef7`: 21 functions, covering all 8 of
+#: F3e1b-1's sites, and `Phase0Worker._m1` stays in scope no matter what F5 edits.
+_MUTEX_PRIMITIVES: frozenset[str] = frozenset({_LIVE, _AT_GENERATION})
 
 #: Callee names that count as "the first effect". §4.1: the effect is the `Doc`
 #: mutation, NOT `store.append_update`.
@@ -478,6 +496,14 @@ NOT_YET_CONVERTED: frozenset[tuple[str, str]] = frozenset(
         ("src/call_manager/proposal_assist/review/pass_runner.py", "run_review_pass"),  # F4
         ("src/call_manager/proposal_assist/phases/setup.py", "Phase0Worker._init_repo"),  # F5
         ("src/call_manager/proposal_assist/phases/setup.py", "Phase0Worker._m1"),  # F5
+        # --- take `_live` but reach NO sink, so they are outside §5.1 by definition.
+        # They are pinned only because the scope rule above is deliberately MECHANICAL:
+        # deriving scope from the AST is what stops a slice narrowing it, and the price
+        # is four pins a human reads once. Cheaper than a gate that can go quiet.
+        ("src/call_manager/proposal_assist/collab/flip.py", "maybe_auto_enable"),
+        ("src/call_manager/proposal_assist/collab/hydrate.py", "load_or_hydrate"),
+        ("src/call_manager/proposal_assist/web/_writes.py", "workspace_write"),
+        ("src/call_manager/workspaces.py", "soft_delete_workspace_db"),
     }
 )
 
@@ -543,9 +569,15 @@ def check_source(source: str, path: str) -> list[str]:
                 sub = f"{qual}.{child.name}" if qual else child.name
                 if not isinstance(child, ast.ClassDef):
                     ordered = _own_calls(child)
-                    enclosing = sub in _ENCLOSING_QUALNAMES
-                    if enclosing or ({n for _l, n in ordered} & _EFFECTS):
-                        problems.extend(_judge(sub, path, ordered, enclosing))
+                    names = {n for _l, n in ordered}
+                    holds_effect = bool(names & _EFFECTS)
+                    takes_mutex = bool(names & _MUTEX_PRIMITIVES)
+                    # "Enclosing" is DERIVED too: takes a mutex, holds no effect of its
+                    # own, therefore its delegated call is its first effect.
+                    if holds_effect or takes_mutex:
+                        problems.extend(
+                            _judge(sub, path, ordered, enclosing=takes_mutex and not holds_effect)
+                        )
                 visit(child, sub)
             else:
                 visit(child, qual)
@@ -734,6 +766,21 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
                     built.append(f"{rel}:{node.lineno}")
     assert built == [], f"FenceStamp built outside its two constructors: {built}"
 
+    # Two-sided. `built == []` is also satisfied if BOTH constructors were deleted, or
+    # if a third were added inside an allowlisted file. Assert the population, not just
+    # its complement.
+    inside = []
+    for rel in sorted(allowed):
+        for node in ast.walk(ast.parse((root / rel).read_text())):
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+                if name == "FenceStamp":
+                    inside.append(rel)
+    assert sorted(inside) == sorted(allowed), (
+        f"expected exactly one construction in each of the two constructors, got {inside}"
+    )
+
 
 def test_a_stamp_for_a_DIFFERENT_workspace_raises(db_session, seeded_workspace):
     """#10. The workspace-id half of the mismatch check, which was specified and never
@@ -762,6 +809,23 @@ def test_a_new_transaction_may_bind_a_FRESH_stamp(db_session, seeded_workspace):
     acquire_commit_mutex_at_generation(db_session, wid, generation=0, stamp=FenceStamp(**fields))
     db_session.rollback()
     # A DISTINCT object, after the transaction ended: must be accepted, not rejected.
+    acquire_commit_mutex_at_generation(db_session, wid, generation=0, stamp=FenceStamp(**fields))
+
+
+@pytest.mark.parametrize("end", ["commit", "rollback"])
+def test_the_stamp_binding_clears_on_EITHER_transaction_ending(db_session, seeded_workspace, end):
+    """Both endings, not just rollback. An implementation hooked only to rollback leaves
+    the binding alive after a COMMIT — and the request path commits. The second request
+    on a pooled Session would then raise FenceStampMismatch against the first request's
+    stamp. That is the shape that takes a service down, and testing only rollback misses
+    it entirely."""
+    from call_manager.proposal_assist.fencing import acquire_commit_mutex_at_generation
+    from call_manager.proposal_assist.ports.stamp import FenceStamp
+
+    wid = seeded_workspace
+    fields = dict(workspace_id=wid, generation=0, active_turn_job_id=None, origin_job_id=None)
+    acquire_commit_mutex_at_generation(db_session, wid, generation=0, stamp=FenceStamp(**fields))
+    getattr(db_session, end)()
     acquire_commit_mutex_at_generation(db_session, wid, generation=0, stamp=FenceStamp(**fields))
 
 
@@ -1040,6 +1104,27 @@ deletion only, and the refusal is now also on generation.
 
 **Do not re-mint inside any of these.** They receive their stamp from Task 2.
 
+- [ ] **Step 3b: Pin the lock/unlock first-effect boundary with a test**
+
+Step 3 tells you to add the lock/unlock write's callee to `_EFFECTS`. Nothing so far
+proves you did — the static gate and every runtime race stay green either way, because
+the mutex already precedes both today. Add:
+
+```python
+def test_the_spec_lock_write_is_a_declared_effect():
+    """§4.2's table names the spec-lock write as `post_lock_spec`'s FIRST effect, not
+    `checkpoint_artifact`. Without the write in `_EFFECTS`, a mutex moved to just above
+    `checkpoint_artifact` and below the write passes the gate — anchoring one line late,
+    the exact defect §4.1 warns about."""
+    from tests.fencing.converted_gate import _EFFECTS
+
+    assert "<the lock-write callee>" in _EFFECTS
+    assert "<the unlock-write callee>" in _EFFECTS
+```
+
+Then re-run `check_tree()` and **record the count before and after adding them.** If it
+does not move, say so — that is the measurement, not a disappointment.
+
 - [ ] **Step 4: Update the records and pins in the same working tree**
 
 - `live_mutex_gate.ENCLOSING_ACQUISITIONS` — remove the seven; it becomes
@@ -1097,17 +1182,43 @@ technique that exposed Slice C1's decorative tests. Follow the precedent in
 def test_the_inner_acquisition_receives_the_SAME_stamp_object(monkeypatch):
     """§7.2. Spy every outer→inner edge and assert `received is supplied`, not `==`.
     A re-mint under the held mutex reads the same generation, so equality passes and the
-    mis-threading is invisible."""
+    mis-threading is invisible.
+
+    An earlier revision shipped this as a DOCSTRING WITH NO BODY, which passes
+    unconditionally. Write the body.
+    """
+    import call_manager.proposal_assist.collab.checkpoint as cp_mod
+
+    seen = []
+    real = cp_mod.checkpoint_artifact
+    monkeypatch.setattr(
+        cp_mod,
+        "checkpoint_artifact",
+        lambda *a, **kw: (seen.append(kw.get("stamp")), real(*a, **kw))[1],
+    )
+    supplied = <mint the stamp at the entry point under test>
+    <drive the real entry point with `supplied`>
+    assert seen, "the inner call never happened — the spy proved nothing"
+    assert all(got is supplied for got in seen), [id(x) for x in seen]
 ```
 
 - [ ] **Step 6: Collaborator authorization parity (spec crit-13)**
 
 ```python
-def test_a_collaborator_with_write_access_can_still_cite_and_accept():
-    """Constraint 10 says no authorization call changes. This ASSERTS it rather than
-    trusting it. The collab cite branch authorizes with `resolve_access` (ANY member
-    with write); only the flag-off branch uses `require_owner`. Revision 2 of the spec
-    guessed wrong here and would have revoked collaborator access."""
+def test_a_collaborator_with_write_access_can_still_cite_and_accept(client, collaborator):
+    """Constraint 10 says no authorization call changes. The collab cite branch
+    authorizes with `resolve_access` (ANY member with write); only the flag-off branch
+    uses `require_owner`. Revision 2 of the spec guessed wrong here and would have
+    revoked collaborator access.
+
+    An earlier revision shipped this as a DOCSTRING WITH NO BODY — a test whose
+    docstring said "this ASSERTS it rather than trusting it" while asserting nothing.
+    Write the body: a NON-OWNER member with write access, through the real routes.
+    """
+    cite = client.post(f"/api/workspaces/{ws_id}/cite", json=<...>, headers=collaborator)
+    assert cite.status_code == 200, cite.text
+    accept = client.post(f"/api/workspaces/{ws_id}/accept", json=<...>, headers=collaborator)
+    assert accept.status_code == 200, accept.text
 ```
 
 - [ ] **Step 7: Prove the gates bite — §5.3's mutations**
@@ -1169,11 +1280,13 @@ def test_f3e1b_still_owns_exactly_four_pending_git_rows():
 
     rows = [r for r in load_inventory() if r["kind"] == "git_commit"]
     assert len(rows) == 9
-    assert {r["symbol"] for r in rows if r["slice"] == "F3e1b"} == {
-        "_insert_citation_locked",
-        "insert_citation_for_user",
-        "checkpoint_artifact",
-        "save_section",
+    # (path, symbol), not bare symbol — two modules can define the same name, and a
+    # bare-symbol set cannot tell a MOVED row from an unchanged one.
+    assert {(r["path"], r["symbol"]) for r in rows if r["slice"] == "F3e1b"} == {
+        ("src/call_manager/proposal_assist/citations/core.py", "_insert_citation_locked"),
+        ("src/call_manager/proposal_assist/citations/human_cite.py", "insert_citation_for_user"),
+        ("src/call_manager/proposal_assist/collab/checkpoint.py", "checkpoint_artifact"),
+        ("src/call_manager/proposal_assist/editing/save.py", "save_section"),
     }
     assert SLICE_STATUS["F3e1b"] == "pending"
     assert all(r["fenced"] is False for r in rows)
@@ -1211,11 +1324,17 @@ def test_the_exemption_pins_are_unchanged_by_this_slice():
         TOOLS_NOT_YET_CONVERTED,
     )
 
-    # Fill these from the tree at slice start; MEASURED at 8f7b1ef7:
-    # TOOLS_NOT_YET_CONVERTED has 5 entries, NON_SEMANTIC_PINS 3, RETAINED_PINS 1.
-    assert set(TOOLS_NOT_YET_CONVERTED) == {...}
-    assert set(NON_SEMANTIC_PINS) == {...}
-    assert set(RETAINED_PINS) == {...}
+    # SUBSET, not equality. Pins only shrink, and this plan says so — but an earlier
+    # revision then asserted set EQUALITY, which forbids the shrink it just permitted.
+    # `<=` blocks an ADDITION (what this slice must not do) while allowing a later
+    # slice's legitimate cleanup. Fill the baselines from the tree at slice start;
+    # MEASURED at 8f7b1ef7: 5, 3 and 1 entries respectively.
+    assert set(TOOLS_NOT_YET_CONVERTED) <= _BASELINE_TOOLS
+    assert set(NON_SEMANTIC_PINS) <= _BASELINE_NON_SEMANTIC
+    assert set(RETAINED_PINS) <= _BASELINE_RETAINED
+    # And this slice specifically must not shrink them either — it touches no tool
+    # module. Equality HERE is correct because the claim is "unchanged by this slice".
+    assert set(TOOLS_NOT_YET_CONVERTED) == _BASELINE_TOOLS
 ```
 
 - [ ] **Step 2: Run to verify they fail**
