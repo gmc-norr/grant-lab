@@ -293,7 +293,16 @@ def _reaches_sink(node: tuple[str, str], calls, defines, seen: set | None = None
 
 
 def check_tree() -> list[str]:
-    """Every unpinned `_live` caller that reaches a sink."""
+    """Every unpinned `_live` caller that reaches a sink.
+
+    The name match below is LITERAL, and that is only safe because
+    `test_neither_mutex_primitive_is_ever_ALIASED` forbids an alias existing anywhere in
+    `src/`. Four gates share this assumption — this one, the converted gate, the
+    positive-Primitive-B test and the live-acquirer partition — so that test is not a
+    nicety: delete it and one import line turns all four green on a violating site. The
+    converted gate additionally resolves aliases itself (`_rename_map`), belt and braces;
+    this gate does not, and depends on the ban.
+    """
     calls, defines = _graph()
     problems: list[str] = []
     for node, callees in sorted(calls.items()):
@@ -2215,3 +2224,17 @@ Kept so a future reader does not reintroduce any of it. Items 1–3 were Critica
     and the live-acquirer partition at once — while the site still reads as converted.
     Resolving aliases in four scanners is four places to get it wrong; one rule forbids
     the alias instead. MEASURED: zero aliases exist today.
+38. **One import line hid a `_live` call from every gate.** All four scanners compared
+    callee names to the two literal strings, so
+    `from ...fencing import acquire_commit_mutex_live as old_live` then `old_live(s, w)`
+    was invisible. MEASURED: a site calling Primitive B AND the aliased `_live` passed
+    the converted gate, the reach gate, the positive-B test and the live-acquirer
+    partition. Two controls now: `test_neither_mutex_primitive_is_ever_ALIASED` bans the
+    alias tree-wide, and the converted gate resolves aliases itself via `_rename_map`.
+    The reach gate still matches literally and now SAYS it depends on the ban — a gate
+    that rests on another gate should name it.
+39. **A referenced test name was never checked to exist.** Naming that ban from the reach
+    gate, I cited it with the wrong case. Same defect class as an invented helper: it
+    reads as coverage that is not there. A guard now checks every `test_*` the plan
+    mentions in prose against the tests defined in the plan and in `tests/` — 9 mentioned,
+    all resolve — and it is proven by mutation.
