@@ -69,3 +69,65 @@ def test_the_direct_gate_catches_the_sink_holder_not_the_enclosing_caller():
     reported = {p.split("::")[1].split(" ")[0] for p in problems}
     assert "inner" in reported, problems
     assert "outer" not in reported, problems
+
+
+def test_the_live_acquirers_partition_exactly():
+    """Every `acquire_commit_mutex_live` caller in `src/` is in exactly one record.
+
+    The three records replace one frozenset that held two categories under a name
+    claiming one — which is how a reader concluded spec §4.2's "seven" was wrong. It is
+    not: §4.2 is scoped to F3e1b, whose seven enclosing sites all reach
+    `checkpoint_artifact`. The old record additionally held six direct sink holders and
+    one F5 site, so it summed to fourteen against a different denominator.
+
+    A TOTAL partition is what makes these records honest. The old one had zero readers,
+    so nothing noticed that its own comment said "thirteen" while it held fourteen. Under
+    this test a NEW `_live` caller belongs to no record and fails here by name, and a
+    deleted one fails as a stale entry.
+    """
+    from tests.fencing.live_mutex_gate import (
+        ENCLOSING_ACQUISITIONS,
+        LIVE_ACQUIRERS_WITHOUT_A_SINK,
+        LIVE_ACQUIRING_SINK_HOLDERS,
+        live_acquirer_qualnames,
+    )
+
+    recorded = (
+        set(ENCLOSING_ACQUISITIONS) | LIVE_ACQUIRING_SINK_HOLDERS | LIVE_ACQUIRERS_WITHOUT_A_SINK
+    )
+    actual = live_acquirer_qualnames()
+
+    assert actual - recorded == set(), f"unrecorded `_live` caller(s): {sorted(actual - recorded)}"
+    assert recorded - actual == set(), f"stale record entr(ies): {sorted(recorded - actual)}"
+
+    # Disjoint, not merely covering: an entry in two records would let a category error
+    # hide, which is the exact defect this replaces.
+    pairs = [
+        (set(ENCLOSING_ACQUISITIONS), LIVE_ACQUIRING_SINK_HOLDERS),
+        (set(ENCLOSING_ACQUISITIONS), LIVE_ACQUIRERS_WITHOUT_A_SINK),
+        (LIVE_ACQUIRING_SINK_HOLDERS, LIVE_ACQUIRERS_WITHOUT_A_SINK),
+    ]
+    for left, right in pairs:
+        assert left & right == set(), f"a qualname is in two records: {sorted(left & right)}"
+
+
+def test_f3e1b_owns_exactly_the_seven_enclosing_acquisitions_of_spec_4_2():
+    """Spec §4.2's table, as a gate. Its seven rows all reach `checkpoint_artifact`.
+
+    `Phase0Worker._m1` is the eighth enclosing acquisition in the tree and is NOT one of
+    them: it reaches `_init_repo`, whose inventory row is F5. Scheduling it into F3e1b
+    would make F3e1b's completion criterion (spec §13 crit-9) unsatisfiable, because F5's
+    sink is not F3e1b's to convert.
+    """
+    from tests.fencing.live_mutex_gate import ENCLOSING_ACQUISITIONS
+
+    assert {q for q, s in ENCLOSING_ACQUISITIONS.items() if s == "F3e1b"} == {
+        "apply_citation_to_room",
+        "kernel_accept_prose",
+        "kernel_init_spec",
+        "kernel_accept_citation",
+        "apply_annotation_insert_to_room",
+        "post_lock_spec",
+        "post_unlock_spec",
+    }
+    assert ENCLOSING_ACQUISITIONS["Phase0Worker._m1"] == "F5"

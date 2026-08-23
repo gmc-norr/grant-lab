@@ -455,6 +455,15 @@ The existing re-entrancy comment at `kernel.py:203-206` is what makes this safe 
 acquisition is a no-op). Re-entrancy is exactly why the outer acquisition is the one that
 decides, and therefore the one that must carry G.
 
+**Seven, not eight — the table is scoped to F3e1b.** The tree holds an eighth enclosing
+acquisition, `Phase0Worker._m1` (`setup.py:350`, mutex at `:363`, delegating to
+`_init_repo` at `:375`). It is absent here because `_init_repo`'s row is **`F5`** (§3.4's
+allocation table, and §11), so it converts with F5. Scheduling it into F3e1b would make crit-9 unsatisfiable —
+F5's sink is not F3e1b's to convert. A reader who counts `acquire_commit_mutex_live`
+callers instead will find fourteen that reach a sink at all: these seven, `_m1`, and six
+that hold their sink directly. All three groups, and the four `_live` callers that reach
+no sink, are partitioned and gate-checked in `tests/fencing/live_mutex_gate.py`.
+
 **`F3e1b` converts all seven enclosing acquisitions**, not only the four row-owning
 sinks. They do not each get an inventory row — the row stays anchored to the sink caller
 — but they are covered by a dedicated gate:

@@ -29,8 +29,15 @@ escape.
 **Transitive callers are NOT covered.**  ``apply_citation_to_room`` mutates the
 room and then calls ``checkpoint_artifact``, which holds the sink; a per-function
 checker cannot see across that boundary.  Those enclosing-acquisition sites are
-recorded in ``ENCLOSING_ACQUISITIONS`` and convert in F3e1b with §5.2 runtime
-proofs — not this gate.
+recorded in ``ENCLOSING_ACQUISITIONS`` and convert with §5.2 runtime proofs — not
+this gate.  Seven of the eight are F3e1b's (spec §4.2); ``Phase0Worker._m1``
+reaches an F5 sink and converts with F5.
+
+Every ``acquire_commit_mutex_live`` caller in ``src/`` belongs to exactly one of
+three records — ``ENCLOSING_ACQUISITIONS``, ``LIVE_ACQUIRING_SINK_HOLDERS``, or
+``LIVE_ACQUIRERS_WITHOUT_A_SINK`` — and ``test_the_live_acquirers_partition_exactly``
+holds that partition against the tree.  Before that test the records were one
+frozenset with **zero readers**, and its own comment miscounted it.
 """
 
 from __future__ import annotations
@@ -110,39 +117,94 @@ UNCONVERTED_LIVE_CALLERS: frozenset[tuple[str, str]] = frozenset(
 # Enclosing-acquisition record (NOT gate-proven — written down for F3e1b)
 # ---------------------------------------------------------------------------
 
-#: Spec §4.2's enclosing-acquisition sites: functions that take
-#: ``acquire_commit_mutex_live`` at a top-level boundary and then delegate to a
-#: direct sink holder.  This static gate cannot see across that delegation boundary;
-#: their proof is the §5.2 runtime race per entry point, which lands in F3e1b.
+#: **Spec §4.2's "seven" is CORRECT — do not "fix" it.** An earlier version of this
+#: comment claimed the spec's prose was wrong because it says seven while this record
+#: held fourteen names.  They count different things, and the record was the confused one:
 #:
-#: NOTE: the brief's prose says "seven" enclosing acquisitions but then enumerates
-#: thirteen names below.  The count in the prose is wrong; all enumerated names are
-#: recorded faithfully here.
+#:   * §4.2's table is scoped to **F3e1b**. All seven of its rows reach
+#:     ``checkpoint_artifact``, which is F3e1b's own inventory row.
+#:   * This record held every ``acquire_commit_mutex_live`` caller that reaches a sink
+#:     AT ALL — across every slice, and including six that hold the sink themselves and
+#:     are therefore not "enclosing" anything.
 #:
-#: ``_init_repo`` is NOT here — it holds the sink directly and belongs in
-#: ``UNCONVERTED_LIVE_CALLERS``.  ``_m1`` IS here (setup.py:363 takes _live and
-#: calls self._init_repo at :375 — the enclosing-acquisition shape).
-#: ``post_init_spec._git`` appears in BOTH lists: it is a direct sink holder (pin
-#: list) AND it also acquires _live directly before its sink (workspaces.py:540),
-#: placing it in the enclosing-acquisition record too.
-ENCLOSING_ACQUISITIONS: frozenset[str] = frozenset(
+#: Two categories under a name claiming one is how a reader concludes the spec is wrong.
+#: They are split below, and ``test_the_live_acquirers_partition_exactly`` pins the split
+#: against the tree.  Nothing read this record before that test existed — a written-down
+#: count with zero consumers drifts silently, which is precisely what happened here
+#: (the comment said "thirteen", the set held fourteen, and neither was checked).
+
+#: Take ``acquire_commit_mutex_live`` at a boundary, then DELEGATE to a direct sink
+#: holder.  This static gate cannot see across that delegation boundary; the proof is
+#: the §5.2 runtime race per entry point.  Mapped to the slice that converts each one —
+#: seven are F3e1b's (§4.2's table), and ``Phase0Worker._m1`` is NOT: it reaches
+#: ``_init_repo``, whose row is **F5** (spec §7 line 233 and §12), so it converts with F5.
+#: Treating it as an F3e1b deliverable would make F3e1b's completion check unsatisfiable.
+ENCLOSING_ACQUISITIONS: Mapping[str, str] = {
+    "apply_citation_to_room": "F3e1b",
+    "kernel_accept_prose": "F3e1b",
+    "kernel_init_spec": "F3e1b",
+    "kernel_accept_citation": "F3e1b",
+    "apply_annotation_insert_to_room": "F3e1b",
+    "post_lock_spec": "F3e1b",
+    "post_unlock_spec": "F3e1b",
+    "Phase0Worker._m1": "F5",
+}
+
+#: Take ``acquire_commit_mutex_live`` AND hold a git sink in the same function. Not
+#: enclosing acquisitions — the static gate CAN see these, and each already owns an
+#: inventory row.  Recorded only so the partition below is total.
+LIVE_ACQUIRING_SINK_HOLDERS: frozenset[str] = frozenset(
     {
-        "apply_citation_to_room",
-        "kernel_accept_prose",
-        "kernel_init_spec",
-        "kernel_accept_citation",
-        "apply_annotation_insert_to_room",
-        "post_lock_spec",
-        "post_unlock_spec",
         "checkpoint_artifact",
         "_insert_citation_locked",
         "insert_citation_for_user",
         "save_section",
         "insert_from_annotation",
         "post_init_spec._git",
-        "_m1",
     }
 )
+
+#: Take ``acquire_commit_mutex_live`` and reach NO git sink. Nothing to convert, but
+#: pinned by name so the partition is total: a NEW ``_live`` caller lands in none of the
+#: three sets and fails the partition test, instead of being silently absent from a
+#: record nobody reads.
+LIVE_ACQUIRERS_WITHOUT_A_SINK: frozenset[str] = frozenset(
+    {
+        "load_or_hydrate",
+        "maybe_auto_enable",
+        "soft_delete_workspace_db",
+        "workspace_write",
+    }
+)
+
+
+def live_acquirer_qualnames() -> set[str]:
+    """Every function in ``src/`` that calls ``acquire_commit_mutex_live``, by qualname.
+
+    Qualnames are DOTTED and consistent (``Phase0Worker._m1``, ``post_init_spec._git``).
+    The old record mixed bare and dotted forms, and a set of bare names cannot tell two
+    same-named functions in different files apart — the same way a holder count cannot
+    tell "site removed + site added" from "nothing changed".
+    """
+    import ast
+
+    found: set[str] = set()
+
+    def walk(node: ast.AST, qual: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                walk(child, f"{qual}.{child.name}" if qual else child.name)
+                continue
+            if isinstance(child, ast.Call):
+                func = child.func
+                name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+                if name == "acquire_commit_mutex_live":
+                    found.add(qual)
+            walk(child, qual)
+
+    for path in _SRC.rglob("*.py"):
+        walk(ast.parse(path.read_text()), "")
+    return found
 
 
 # ---------------------------------------------------------------------------
