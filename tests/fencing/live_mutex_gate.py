@@ -1,4 +1,8 @@
-"""Gate: every function holding a git sink must be pinned or provably fenced.
+"""Gate: every function holding a git sink must be pinned or pass the lexical check.
+
+"Passes the lexical check" is deliberately weaker than "provably fenced", which is
+what this docstring used to say. See git_fence.py's module docstring: the check
+proves the acquisition precedes the sink, not that the mutex is still held.
 
 **The rule** (built directly on ``git_fence.unprotected_sinks``):
 

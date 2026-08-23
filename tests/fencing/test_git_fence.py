@@ -8,6 +8,8 @@ false `fenced: true` lets a slice claim a conversion it did not make, while a fa
 
 from __future__ import annotations
 
+import pytest
+
 from tests.fencing.git_fence import fenced_qualnames, sink_calls, unprotected_sinks
 
 _ACQ = "    acquire_commit_mutex_at_generation(s, w, generation=stamp.generation)\n"
@@ -158,3 +160,276 @@ def test_branch_nested_def_attributed_to_inner_not_outer():
     assert "outer" not in fenced_qualnames(src, "x/f.py")
     assert "outer.inner" in holders
     assert "outer.inner" in unprotected_sinks(src, "x/f.py")
+
+
+# ---------------------------------------------------------------- F3e1a2 §5.3
+# One positive per §4.1 allowlist entry. There is deliberately NO positive for
+# `for`, `while`, `return`, comprehensions or defaults: §4.1 does not credit them,
+# and adding one would be a request to widen the list.
+
+_ASYNC_HEAD = "async def f(s, w, stamp, repo, cond):\n"
+
+
+def test_assign_value_is_credited():
+    assert _fenced(_ACQ + "    sha = write_and_commit_files(repo, {}, 'm')\n") == {"f"}
+
+
+def test_expr_value_is_credited():
+    assert _fenced(_ACQ + _SINK) == {"f"}
+
+
+def test_if_body_is_credited():
+    assert _fenced(_ACQ + "    if cond:\n    " + _SINK) == {"f"}
+
+
+def test_try_body_is_credited():
+    src = _ACQ + "    try:\n    " + _SINK + "    except Exception:\n        pass\n"
+    assert _fenced(src) == {"f"}
+
+
+def test_with_body_is_credited():
+    assert _fenced(_ACQ + "    with open('x') as fh:\n    " + _SINK) == {"f"}
+
+
+def test_async_with_body_is_credited():
+    src = _ASYNC_HEAD + _ACQ + "    async with lock:\n    " + _SINK
+    assert fenced_qualnames(src, "x/f.py") == {"f"}
+
+
+# ---------------------------------------------------------------- F3e1a2 §5.4
+# Uncredited paths. Each asserts BOTH verdicts: unfenced AND still a holder.
+# The holder assertion is the point — an invisible sink is worse than an unfenced
+# one (spec §3), and a future "fix" that loses the site must go red here.
+
+def _uncredited_but_held(body: str, head: str = _HEAD) -> None:
+    """The sink's POSITION is unprovable: unfenced, still found, index None."""
+    src = head + body
+    calls = sink_calls(src, "x/f.py")
+    assert fenced_qualnames(src, "x/f.py") == set(), "must not be credited"
+    assert {q for q, _n, _i in calls} == {"f"}, "sink must remain discoverable"
+    assert [i for _q, _n, i in calls] == [None], "position must be unprovable"
+
+
+def _disqualified_but_held(body: str, head: str = _HEAD) -> None:
+    """The sink's position is FINE — the FUNCTION is disqualified.
+
+    Distinct from _uncredited_but_held ON PURPOSE. These cases put the sink on a
+    CREDITED path (`sha = sink(...)` is `Assign.value`), so its index is an INT, not
+    None — asserting None fails for the wrong reason.
+
+    It asserts `isinstance(i, int)` rather than a literal. An earlier draft hardcoded
+    `[2]` and was wrong for half these cases: measured, `yield` before the sink gives
+    2, `yield` after gives 1, and a `yield` in a nested default gives 1. The exact
+    index is an artefact of how many statements the fixture happens to have; what
+    matters is that the position was credited and the verdict is still unfenced.
+    """
+    src = head + body
+    calls = sink_calls(src, "x/f.py")
+    assert fenced_qualnames(src, "x/f.py") == set(), "must be disqualified"
+    assert {q for q, _n, _i in calls} == {"f"}, "sink must remain discoverable"
+    indices = [i for _q, _n, i in calls]
+    assert all(isinstance(i, int) for i in indices), (
+        f"the POSITION should be credited here; the FUNCTION is what fails. got {indices}"
+    )
+
+
+def test_lambda_body_is_not_credited():
+    _uncredited_but_held(_ACQ + "    return lambda: write_and_commit_files(repo, {}, 'm')\n")
+
+
+def test_generator_expression_is_not_credited():
+    _uncredited_but_held(
+        _ACQ + "    return (write_and_commit_files(repo, {}, 'm') for i in [1])\n"
+    )
+
+
+def test_lambda_nested_in_a_returned_container_is_not_credited():
+    _uncredited_but_held(
+        _ACQ + "    return {'go': lambda: write_and_commit_files(repo, {}, 'm')}\n"
+    )
+
+
+def test_generator_expression_as_a_call_argument_is_not_credited():
+    _uncredited_but_held(
+        _ACQ + "    register((write_and_commit_files(repo, {}, 'm') for i in [1]))\n"
+    )
+
+
+def test_a_pep695_type_alias_is_not_credited():
+    """PEP 695: the RHS is lazy until `__value__` is read, and the alias can escape."""
+    _uncredited_but_held(_ACQ + "    type Deferred = write_and_commit_files(repo, {}, 'm')\n")
+
+
+def test_an_unlisted_NODE_type_is_not_credited():
+    """ast.For is not in CREDITED_FIELDS at all. The default must be no-credit."""
+    _uncredited_but_held(_ACQ + "    for i in [1]:\n    " + _SINK)
+
+
+def test_a_live_acquisition_inside_a_LAMBDA_still_disqualifies():
+    """Verified to disqualify today via `has_live`, which uses ast.walk and so
+    descends into lambdas. The new walk must not accidentally excuse it: for a
+    DISQUALIFIER, deferred execution is not a defence."""
+    src = (
+        _HEAD
+        + _ACQ
+        + "    cb = lambda: acquire_commit_mutex_live(s, w)\n"
+        + "    sha = write_and_commit_files(repo, {}, 'm')\n"
+    )
+    assert fenced_qualnames(src, "x/f.py") == set()
+
+
+# --- DISCOVERY. These live in Task 1, not later, because spec §5.7 requires every
+# --- case locked BEFORE the implementation that satisfies it. All execute in the
+# --- ENCLOSING scope when their statement runs; NONE is credited, because eager is
+# --- not a reason to credit (§4.1). Each must still be FOUND — that is the point.
+
+def test_a_sink_in_a_nested_defs_DEFAULT_is_found_but_not_credited():
+    _uncredited_but_held(
+        _ACQ + "    def inner(x=write_and_commit_files(repo, {}, 'm')):\n        return x\n"
+    )
+
+
+def test_a_sink_in_a_nested_defs_DECORATOR_is_found_but_not_credited():
+    _uncredited_but_held(
+        _ACQ
+        + "    @register(write_and_commit_files(repo, {}, 'm'))\n"
+        + "    def inner():\n        pass\n"
+    )
+
+
+def test_a_sink_in_a_LAMBDAS_default_is_found_but_not_credited():
+    _uncredited_but_held(_ACQ + "    cb = lambda x=write_and_commit_files(repo, {}, 'm'): x\n")
+
+
+def test_a_sink_in_a_nested_ASYNC_defs_default_is_found_but_not_credited():
+    _uncredited_but_held(
+        _ACQ
+        + "    async def inner(x=write_and_commit_files(repo, {}, 'm')):\n        return x\n"
+    )
+
+
+def test_a_sink_in_an_ANNOTATION_is_found_but_not_credited():
+    """Argument and return annotations evaluate at `def` time, in THIS scope, unless
+    the scanned file carries `from __future__ import annotations` — which the checker
+    cannot rely on. Fail closed: found, never credited."""
+    _uncredited_but_held(
+        _ACQ + "    def inner(x: write_and_commit_files(repo, {}, 'm')):\n        pass\n"
+    )
+    _uncredited_but_held(
+        _ACQ + "    def inner() -> write_and_commit_files(repo, {}, 'm'):\n        pass\n"
+    )
+
+
+def test_a_sink_in_a_nested_CLASS_is_found_but_not_credited():
+    """A `class` statement runs its decorators, bases, keywords and body immediately,
+    in this function. All four shapes were invisible before this slice."""
+    for body in (
+        "    class C:\n        x = write_and_commit_files(repo, {}, 'm')\n",
+        "    class C(write_and_commit_files(repo, {}, 'm')):\n        pass\n",
+        "    class C(metaclass=write_and_commit_files(repo, {}, 'm')):\n        pass\n",
+        "    @register(write_and_commit_files(repo, {}, 'm'))\n    class C:\n        pass\n",
+    ):
+        _uncredited_but_held(_ACQ + body)
+
+
+def test_an_unlisted_FIELD_of_a_listed_node_is_not_credited():
+    """`ast.If` IS listed, but only its `body`. `orelse` is not.
+
+    The unknown-NODE test above does not prove this: an implementation that
+    allowlisted by node type alone would pass that one and fail here.
+    """
+    _uncredited_but_held(_ACQ + "    if cond:\n        pass\n    else:\n    " + _SINK)
+
+
+# ------------------------------------------------- F3e1a2 §4.3 — generators
+# A generator's body does not begin until the caller calls next(), so even the
+# ACQUISITION is deferred; and every yield hands control to a caller who may COMMIT
+# or ROLLBACK, releasing the transaction-scoped mutex before the sink resumes.
+
+def test_a_yield_between_acquisition_and_sink_is_not_fenced():
+    _disqualified_but_held(_ACQ + "    yield 1\n    sha = write_and_commit_files(repo, {}, 'm')\n")
+
+
+def test_a_yield_AFTER_the_sink_still_disqualifies():
+    """§4.3 is a DISQUALIFIER, not a position rule. Deliberately over-broad: a
+    correct generator costs a pin, and deciding which yields precede which sinks is
+    the branch reasoning this design refuses to do."""
+    _disqualified_but_held(_ACQ + "    sha = write_and_commit_files(repo, {}, 'm')\n    yield 1\n")
+
+
+def test_yield_from_also_disqualifies():
+    _disqualified_but_held(
+        _ACQ + "    yield from [1]\n    sha = write_and_commit_files(repo, {}, 'm')\n"
+    )
+
+
+def test_an_async_generator_is_not_fenced():
+    _disqualified_but_held(
+        _ACQ + "    yield 1\n    sha = write_and_commit_files(repo, {}, 'm')\n",
+        head="async def f(s, w, stamp, repo, cond):\n",
+    )
+
+
+def test_a_yield_in_a_nested_defs_DEFAULT_disqualifies_the_ENCLOSING_function():
+    """Verified with inspect.isgeneratorfunction: the yield belongs to f, not inner."""
+    _disqualified_but_held(
+        _ACQ
+        + "    sha = write_and_commit_files(repo, {}, 'm')\n"
+        + "    def inner(x=(yield 1)):\n        return x\n"
+    )
+
+
+def test_a_yield_in_a_LAMBDA_BODY_does_not_disqualify_the_outer():
+    """A yield in a lambda body makes the LAMBDA a generator, not this function —
+    verified: inspect.isgeneratorfunction(outer) is False. The yield scan must not
+    reuse the sink walk, which deliberately descends into Lambda.body."""
+    src = (
+        _HEAD
+        + _ACQ
+        + "    cb = lambda: (yield 1)\n"
+        + "    sha = write_and_commit_files(repo, {}, 'm')\n"
+    )
+    assert fenced_qualnames(src, "x/f.py") == {"f"}
+
+
+def test_an_unrelated_nested_generator_does_not_disqualify_the_outer():
+    """§5.3's scope-boundary positive. A naive yield scan fails this: _iter_own_nodes
+    guards its CHILDREN but descends into a FunctionDef handed to it directly, so a
+    scan written the obvious way marks a correctly fenced function unfenced."""
+    src = (
+        _HEAD
+        + _ACQ
+        + "    sha = write_and_commit_files(repo, {}, 'm')\n"
+        + "    def inner():\n        yield 1\n    return inner\n"
+    )
+    assert fenced_qualnames(src, "x/f.py") == {"f"}
+
+
+# ------------------------------------- F3e1a2 §4.4 — visible transaction endings
+# The commit mutex is TRANSACTION-SCOPED: acquire_commit_mutex says "Released
+# automatically at COMMIT or ROLLBACK; there is no explicit release"
+# (drafting/locking.py:195-203). So a commit between the two drops it.
+
+@pytest.mark.parametrize("ending", ["commit", "rollback"])
+def test_a_visible_transaction_ending_disqualifies(ending):
+    _disqualified_but_held(
+        _ACQ + f"    s.{ending}()\n    sha = write_and_commit_files(repo, {{}}, 'm')\n"
+    )
+
+
+@pytest.mark.parametrize("ending", ["commit", "rollback"])
+def test_a_transaction_ending_AFTER_the_sink_also_disqualifies(ending):
+    """§4.4 says "in the function's own scope" — ANYWHERE, not "before the sink".
+
+    The sibling test above only ever places the ending BETWEEN acquisition and
+    sink, so an implementation that stopped scanning at the sink would pass it and
+    still violate §4.4. `_ends_transaction` iterates the whole body precisely so
+    position does not matter; this test is what makes that load-bearing.
+
+    Conservative on purpose: an ending after the sink means the mutex probably WAS
+    held for the write. §4.4 still fails closed, because deciding otherwise needs
+    ordering reasoning this intraprocedural checker does not have.
+    """
+    _disqualified_but_held(
+        _ACQ + f"    sha = write_and_commit_files(repo, {{}}, 'm')\n    s.{ending}()\n"
+    )

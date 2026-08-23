@@ -91,6 +91,7 @@ SLICE_STATUS = {
     # SLICE_STATUS has no partial state, so a multi-slice conversion needs one key
     # per slice or the first flipped row goes red.
     "F3e1a": "complete",  # the carrier, the git detector, the gates — no row of its own
+    "F3e1a2": "complete",  # the allowlist walk — no row of its own
     "F3e1b": "pending",   # the git-effect conversions
     "F3e2": "pending",    # the ingest pipeline and the filesystem effects
     "F3f": "pending",    # capability holders, then the handle
