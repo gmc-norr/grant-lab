@@ -24,7 +24,8 @@ Every task's requirements implicitly include this section.
 8. **Test commands:** `uv run --python 3.12 pytest -n 16 --dist loadfile` for the suite; never `-n auto` (resolves to 72) and never `--dist loadgroup`. The lint gate is `ruff check`, not `ruff format`. **Line limit is 100** — revision 1's gate code was 101 and would have failed the gate.
 9. **`resolve_access` does not change.** All six call sites destructure exactly two values; a third element raises at every one. Routes read the workspace themselves after the check passes and mint from it.
 10. **No authorization call changes in this slice.** The mint site is "the object the existing check already loaded", whatever that check is.
-11. **Code in this plan was executed before it was written down.** Where a block says MEASURED, it was run against the tree at `8f7b1ef7` and passed `ruff check`. Revision 1 shipped a gate whose `problems += …` inside a closure raised `UnboundLocalError` on every call — it had been prototyped with `.append()` and re-typed differently into the plan. Copy these blocks verbatim; do not "tidy" them.
+11. **Every code block here — implementation AND test — must be executed before it is written down, and RE-executed after any edit to what it depends on.** Revision 3 changed a gate's data shape from `str` to `(path, str)`, verified the gate, and left revision 2's tests of that gate untouched: the pin-mutation test then removed a bare string from a set of tuples, deleted nothing, and could never redden. MEASURED. Running the implementation is not enough — run the assertions that ride on it.
+12. **Code in this plan was executed before it was written down.** Where a block says MEASURED, it was run against the tree at `8f7b1ef7` and passed `ruff check`. Revision 1 shipped a gate whose `problems += …` inside a closure raised `UnboundLocalError` on every call — it had been prototyped with `.append()` and re-typed differently into the plan. Copy these blocks verbatim; do not "tidy" them.
 
 ---
 
@@ -144,7 +145,11 @@ def test_removing_a_pin_reddens_the_gate():
 
     original = gate.UNCONVERTED
     try:
-        gate.UNCONVERTED = frozenset(original - {"save_section"})
+        # A TUPLE. `original - {"save_section"}` removes nothing from a set of tuples,
+        # so the mutation is inert and the test fails for an unrelated reason.
+        target = ("src/call_manager/proposal_assist/editing/save.py", "save_section")
+        assert target in original, "the pin moved; update this target"
+        gate.UNCONVERTED = frozenset(original - {target})
         problems = gate.check_tree()
     finally:
         gate.UNCONVERTED = original
@@ -161,7 +166,8 @@ def test_every_pin_is_load_bearing():
     try:
         for pin in sorted(original):
             gate.UNCONVERTED = frozenset(original - {pin})
-            if not any(pin in p for p in gate.check_tree()):
+            _path, qual = pin
+            if not any(qual in p for p in gate.check_tree()):
                 dead.append(pin)
     finally:
         gate.UNCONVERTED = original
@@ -237,46 +243,45 @@ UNCONVERTED: frozenset[tuple[str, str]] = frozenset(
 )
 
 
-def _graph() -> tuple[dict[str, set[str]], dict[str, set[str]], dict[str, str]]:
-    """`calls[qualname] -> callee names`, `defines[name] -> qualnames`, and
-    `defined_in[qualname] -> repo-relative path`.
+def _graph() -> tuple[dict[tuple[str, str], set[str]], dict[str, set[tuple[str, str]]]]:
+    """`calls[(path, qualname)] -> callee names` and `defines[name] -> {(path, qualname)}`.
 
-    The third map exists so the pin list can be PATH-QUALIFIED. Without it a new
-    function named `save_section` in an unrelated module inherits an exemption nobody
-    granted it.
+    Keyed on (path, qualname) THROUGHOUT. An earlier revision keyed `calls` on the bare
+    qualname and looked the path up afterwards — which collapses two same-named functions
+    in different files into one node, so whichever was parsed first decided the path, and
+    a path-qualified pin could be applied to the wrong one. Path-qualifying the pin list
+    while the graph behind it is not qualified buys nothing.
     """
-    calls: dict[str, set[str]] = {}
-    defines: dict[str, set[str]] = {}
-    defined_in: dict[str, str] = {}
+    calls: dict[tuple[str, str], set[str]] = {}
+    defines: dict[str, set[tuple[str, str]]] = {}
 
     def walk(node: ast.AST, qual: str, rel: str) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
                 sub = f"{qual}.{child.name}" if qual else child.name
                 if not isinstance(child, ast.ClassDef):
-                    defines.setdefault(child.name, set()).add(sub)
-                    defined_in.setdefault(sub, rel)
+                    defines.setdefault(child.name, set()).add((rel, sub))
                 walk(child, sub, rel)
                 continue
             if isinstance(child, ast.Call):
                 name = _callee_name(child.func)
                 if name:
-                    calls.setdefault(qual, set()).add(name)
+                    calls.setdefault((rel, qual), set()).add(name)
             walk(child, qual, rel)
 
     for path in _SRC.rglob("*.py"):
         rel = str(path.relative_to(_REPO))
         walk(ast.parse(path.read_text()), "", rel)
-    return calls, defines, defined_in
+    return calls, defines
 
 
-def _reaches_sink(qual: str, calls, defines, seen: set[str] | None = None) -> bool:
+def _reaches_sink(node: tuple[str, str], calls, defines, seen: set | None = None) -> bool:
     if seen is None:
         seen = set()
-    if qual in seen:
+    if node in seen:
         return False
-    seen.add(qual)
-    for name in calls.get(qual, ()):
+    seen.add(node)
+    for name in calls.get(node, ()):
         if name in _SINK_KIND:
             return True
         for target in defines.get(name, ()):
@@ -287,17 +292,17 @@ def _reaches_sink(qual: str, calls, defines, seen: set[str] | None = None) -> bo
 
 def check_tree() -> list[str]:
     """Every unpinned `_live` caller that reaches a sink."""
-    calls, defines, defined_in = _graph()
+    calls, defines = _graph()
     problems: list[str] = []
-    for qual, callees in sorted(calls.items()):
+    for node, callees in sorted(calls.items()):
         if "acquire_commit_mutex_live" not in callees:
             continue
-        if (defined_in.get(qual, ""), qual) in UNCONVERTED:
+        if node in UNCONVERTED:
             continue
-        if _reaches_sink(qual, calls, defines):
+        if _reaches_sink(node, calls, defines):
+            rel, qual = node
             problems.append(
-                f"{defined_in.get(qual, '?')}::{qual} :: calls acquire_commit_mutex_live "
-                f"and reaches a git sink"
+                f"{rel}::{qual} :: calls acquire_commit_mutex_live and reaches a git sink"
             )
     return problems
 ```
@@ -386,10 +391,17 @@ def test_a_nested_def_is_judged_separately_from_its_parent():
         "    return inner\n"
     )
     problems = check_source(nested, "x/f.py")
-    # `assert all(...)` ALONE IS VACUOUS — it is True for an empty list, so a gate that
-    # reported nothing would pass. Assert non-emptiness first.
+    # `assert all(...)` ALONE IS VACUOUS — True for an empty list. Assert the exact set.
+    #
+    # BOTH are reported, for DIFFERENT reasons, and that is the point: `outer` takes
+    # `_live` (so it is in scope and wrong), while `inner` holds the sink (so it is in
+    # scope and unfenced). An earlier revision asserted every problem named
+    # `outer.inner`, which the derived-scope rule makes false — MEASURED.
     assert problems, "the gate reported nothing at all"
-    assert all("::outer.inner" in p for p in problems), problems
+    by_qual = {p.split("::", 1)[1].split(" ", 1)[0]: p for p in problems}
+    assert set(by_qual) == {"outer", "outer.inner"}, problems
+    assert "still calls acquire_commit_mutex_live" in by_qual["outer"]
+    assert "never calls acquire_commit_mutex_at_generation" in by_qual["outer.inner"]
 
 
 def test_a_comment_naming_the_primitive_does_not_satisfy_the_gate():
@@ -413,7 +425,9 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'tests.fencing.converte
 
 **Copy this verbatim.** It was written to a file, executed against the tree, and passed
 `ruff check` before being pasted here (Constraint 11). MEASURED: `check_tree()` returns
-**8** at `8f7b1ef7` — exactly F3e1b-1's eight, the other nine filtered.
+**8** at `8f7b1ef7` — exactly F3e1b-1's eight. Scope is 21 functions and
+`NOT_YET_CONVERTED` holds 13, so 21 − 13 = 8. An earlier revision said "the other
+nine", which was the pin count before the four no-sink `_live` callers entered scope.
 
 ```python
 # tests/fencing/converted_gate.py
@@ -448,7 +462,10 @@ _AT_GENERATION = "acquire_commit_mutex_at_generation"
 #: A function is in scope if it holds an effect OR takes either mutex primitive.
 #: That is §5.1's "every git_commit site AND every enclosing acquisition", derived
 #: rather than listed. MEASURED at `8f7b1ef7`: 21 functions, covering all 8 of
-#: F3e1b-1's sites, and `Phase0Worker._m1` stays in scope no matter what F5 edits.
+#: F3e1b-1's sites. `Phase0Worker._m1` stays in `check_source`'s SCOPE no matter what
+#: F5 edits — but it is pinned in `NOT_YET_CONVERTED`, so `check_tree` still filters
+#: it. F5 must REMOVE that pin as it converts, and the pin's own load-bearing test is
+#: what forces that. Scope surviving is necessary, not sufficient.
 _MUTEX_PRIMITIVES: frozenset[str] = frozenset({_LIVE, _AT_GENERATION})
 
 #: Callee names that count as "the first effect". §4.1: the effect is the `Doc`
@@ -753,6 +770,17 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
         "src/call_manager/proposal_assist/ports/invocation.py",
         "src/call_manager/proposal_assist/ports/stamp.py",
     }
+    def _stamp_aliases(source: str) -> set[str]:
+        """`from ...stamp import FenceStamp as FS` then `FS(...)` builds one too. A check
+        keyed on the literal name "FenceStamp" is bypassed by one import line."""
+        names = {"FenceStamp"}
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.ImportFrom):
+                for a in node.names:
+                    if a.name == "FenceStamp" and a.asname:
+                        names.add(a.asname)
+        return names
+
     built = []
     for path in (root / "src").rglob("*.py"):
         rel = str(path.relative_to(root))
@@ -762,7 +790,7 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
             if isinstance(node, ast.Call):
                 func = node.func
                 name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
-                if name == "FenceStamp":
+                if name in _stamp_aliases(path.read_text()):
                     built.append(f"{rel}:{node.lineno}")
     assert built == [], f"FenceStamp built outside its two constructors: {built}"
 
@@ -1027,7 +1055,7 @@ and the §5.2 runtime races. There is no intermediate green state, so do not cre
 # tests/fencing/test_converted_gate.py  (append)
 def test_the_converted_gate_is_green_over_the_tree():
     """§5.1 over the real tree. MEASURED before conversion: `check_tree()` returns 8 —
-    exactly F3e1b-1's eight, the other nine filtered by `NOT_YET_CONVERTED`."""
+    exactly F3e1b-1's eight: scope is 21 and `NOT_YET_CONVERTED` holds 13."""
     from tests.fencing.converted_gate import check_tree
 
     assert check_tree() == []
@@ -1118,8 +1146,17 @@ def test_the_spec_lock_write_is_a_declared_effect():
     the exact defect §4.1 warns about."""
     from tests.fencing.converted_gate import _EFFECTS
 
-    assert "<the lock-write callee>" in _EFFECTS
-    assert "<the unlock-write callee>" in _EFFECTS
+    import ast
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[2]
+    src = (root / "src/call_manager/web/api/workspaces.py").read_text()
+    # Two-sided: the names must be in `_EFFECTS` AND must actually be called by the
+    # routes. Asserting membership alone passes for any string the implementer invents.
+    for route, callee in (("post_lock_spec", "<lock-write callee>"),
+                          ("post_unlock_spec", "<unlock-write callee>")):
+        assert callee in _EFFECTS, f"{callee} missing from _EFFECTS"
+        assert callee in src, f"{callee} is not called anywhere in workspaces.py"
 ```
 
 Then re-run `check_tree()` and **record the count before and after adding them.** If it
@@ -1154,7 +1191,17 @@ the delete/restore blocks and proceeds after. The write **lands**, and that is c
 implementation that refuses unconditionally passes every Case B.
 
 **Case B — lifecycle first, effect second.** Delete+restore commits to G+2, then the
-operation proceeds. It must raise and land **nothing**. Assert all five, every time:
+operation proceeds and lands **nothing**.
+
+**What the caller SEES depends on the caller, and Task 3 decided it** — do not assert
+`pytest.raises` at a route. Task 3 maps `WorkspaceGenerationStale` to a
+non-disclosing **404** at the HTTP boundary and to a **benign skip** in the three
+maintenance callers. So: assert 404 for the seven route entry points, assert a clean
+skip with no error-level log for the maintenance ones, and reserve `pytest.raises`
+for direct helper-level calls. An earlier revision said "it must raise" for all of
+them, contradicting the task that had just made it not raise.
+
+Then assert the landing, every time:
 
 ```python
     assert head_before == _git(repo, "rev-parse", "HEAD")          # HEAD unchanged
@@ -1167,8 +1214,16 @@ operation proceeds. It must raise and land **nothing**. Assert all five, every t
 §5.2 is explicit: a proof that inspects only rows passes while bytes are already on disk;
 an unchanged HEAD is not enough, because a stale implementation can dirty the working
 tree without committing; and cleanliness alone passes an implementation that wrote and
-then reverted. **For the kernel paths the last two are not optional** — a test that
-checked only git would pass the exact defect §4.2 describes.
+then reverted.
+
+**The first three apply everywhere. The last two — no `yjs_updates` row, unmutated
+room `Doc` — apply to the paths that touch a room**: the five kernel entry points and
+the three maintenance callers, which checkpoint a live room. `post_lock_spec`,
+`post_unlock_spec` and `save_version` reach the room through `checkpoint_artifact`
+too, so assert all five there as well. An earlier revision said "all five, every
+time" one sentence before restricting two of them to kernel paths; if a path
+provably cannot touch a room, say which and why in the test, rather than dropping
+the assertion silently.
 
 **Disable the compensation in every one of these tests.** Cancel-on-delete is still in
 the tree and masks staleness for statements touching the same row; a conversion test that
@@ -1298,12 +1353,15 @@ def test_the_reach_gate_pin_list_is_exactly_the_six_that_remain():
 
     assert UNCONVERTED == frozenset(
         {
-            "save_section",
-            "insert_citation_for_user",
-            "_insert_citation_locked",
-            "insert_from_annotation",
-            "post_init_spec._git",
-            "Phase0Worker._m1",
+            ("src/call_manager/proposal_assist/editing/save.py", "save_section"),
+            (
+                "src/call_manager/proposal_assist/citations/human_cite.py",
+                "insert_citation_for_user",
+            ),
+            ("src/call_manager/proposal_assist/citations/core.py", "_insert_citation_locked"),
+            ("src/call_manager/proposal_assist/analysis/insert.py", "insert_from_annotation"),
+            ("src/call_manager/web/api/workspaces.py", "post_init_spec._git"),
+            ("src/call_manager/proposal_assist/phases/setup.py", "Phase0Worker._m1"),
         }
     )
 
