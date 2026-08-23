@@ -14,6 +14,7 @@
 
 Every task's requirements implicitly include this section.
 
+0. **The slice is called `F3e1b-1` in prose; its `SLICE_STATUS` key is `"F3e1b1"`, unhyphenated.** MEASURED: every existing key is unhyphenated (`F3a`, `F3d1`, `F3d2`, `F3e1a`, `F3e1a2`) — a sub-slice appends a character, never a separator. Typing the prose name as the key would make it the first hyphenated entry in the collection.
 1. **Spec §4.2's "seven" is CORRECT — do not "fix" it.** The table is scoped to F3e1b. The tree's eighth enclosing acquisition, `Phase0Worker._m1`, reaches `_init_repo`, whose row is **F5**. Converting it here is OUT OF SCOPE and makes crit-9 unsatisfiable. `test_f3e1b_owns_exactly_the_seven_enclosing_acquisitions_of_spec_4_2` already pins this.
 2. **Task 4 is ONE commit. Do not split it.** Flipping `checkpoint_artifact` before its callers leaves outer functions mutating under `_live` while the inner call refuses on generation — a live half-conversion. Flipping the callers first publishes a mixed primitive graph. Either split also breaks `test_the_live_acquirers_partition_exactly` at the boundary, because a converted site leaves the AST-discovered `_live` set while the literal record still names it. The cost of atomicity is exactly one bisect boundary; take it.
 3. **F3e1b-1 does NOT convert `save_section`, `insert_citation_for_user`, or `_insert_citation_locked`.** Those are F3e1b-2. They stay pinned throughout.
@@ -829,6 +830,18 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
                     visit(child, prefix)
 
         visit(tree)
+        # Module and class scope too. `_own_calls` only ever sees a FUNCTION's body, so
+        # a construction at import time — `_BLANK = FenceStamp(...)` beside the two
+        # constructors — was invisible to the walk above, in the file the allowlist
+        # trusts most.
+        module_level = [
+            n.lineno
+            for n in ast.iter_child_nodes(tree)
+            if isinstance(n, ast.Expr | ast.Assign | ast.AnnAssign)
+            for c in ast.walk(n)
+            if isinstance(c, ast.Call) and _callee_name(c.func) in aliases
+        ]
+        assert module_level == [], f"{rel}: FenceStamp built at module scope, lines {module_level}"
     # By CONSTRUCTOR IDENTITY, not by file. `sorted(inside) == sorted(allowed)` is
     # satisfied by two constructions in the right FILES but the wrong FUNCTIONS — a
     # module-level `FenceStamp(...)` in stamp.py would pass while `stamp_for_workspace`
@@ -1353,9 +1366,14 @@ operation proceeds and lands **nothing**.
 **What the caller SEES depends on the caller, and Task 3 decided it** — do not assert
 `pytest.raises` at a route. Task 3 maps `WorkspaceGenerationStale` to a
 non-disclosing **404** at the HTTP boundary and to a **benign skip** in the three
-maintenance callers. So: assert 404 for the seven route entry points, assert a clean
-skip with no error-level log for the maintenance ones, and reserve `pytest.raises`
-for direct helper-level calls. An earlier revision said "it must raise" for all of
+maintenance callers.
+
+**EIGHT HTTP entry points, not seven.** `save_version` (`collab_checkpoint.py:52`)
+is a route — the user-triggered "Save a version" — and an earlier revision counted
+it among the four "non-enclosing paths" without giving it an outward assertion at
+all. It gets a 404 like the other seven. That leaves **three** maintenance callers
+asserting a clean skip: the evict hook, the kill-switch handover, and the periodic
+tail checkpoint. Reserve `pytest.raises` for direct helper-level calls. An earlier revision said "it must raise" for all of
 them, contradicting the task that had just made it not raise.
 
 Then assert the landing, every time:
@@ -1561,7 +1579,7 @@ def test_the_exemption_pins_are_unchanged_by_this_slice():
 
 - [ ] **Step 2: Run to verify they fail**
 
-Expected: FAIL — `KeyError: 'F3e1b-1'`.
+Expected: FAIL — `KeyError: 'F3e1b1'`. (Not `'F3e1b-1'` — the key was renamed in revision 8 to match every other unhyphenated key.)
 
 - [ ] **Step 3: Add the status and regenerate the inventory**
 
