@@ -8,6 +8,8 @@ false `fenced: true` lets a slice claim a conversion it did not make, while a fa
 
 from __future__ import annotations
 
+import pytest
+
 from tests.fencing.git_fence import fenced_qualnames, sink_calls, unprotected_sinks
 
 _ACQ = "    acquire_commit_mutex_at_generation(s, w, generation=stamp.generation)\n"
@@ -401,3 +403,15 @@ def test_an_unrelated_nested_generator_does_not_disqualify_the_outer():
         + "    def inner():\n        yield 1\n    return inner\n"
     )
     assert fenced_qualnames(src, "x/f.py") == {"f"}
+
+
+# ------------------------------------- F3e1a2 §4.4 — visible transaction endings
+# The commit mutex is TRANSACTION-SCOPED: acquire_commit_mutex says "Released
+# automatically at COMMIT or ROLLBACK; there is no explicit release"
+# (drafting/locking.py:195-203). So a commit between the two drops it.
+
+@pytest.mark.parametrize("ending", ["commit", "rollback"])
+def test_a_visible_transaction_ending_disqualifies(ending):
+    _disqualified_but_held(
+        _ACQ + f"    s.{ending}()\n    sha = write_and_commit_files(repo, {{}}, 'm')\n"
+    )

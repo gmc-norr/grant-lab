@@ -215,6 +215,27 @@ def _is_generator(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     )
 
 
+#: F3e1a2 §4.4. Method names that end the transaction and therefore release the
+#: commit mutex. Matched by attribute name only, so an unrelated `.commit()` also
+#: disqualifies — an UNDER-report, the safe direction, and not worth special-casing.
+_TXN_ENDINGS = frozenset({"commit", "rollback"})
+
+
+def _ends_transaction(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """True if the function visibly ends its transaction.
+
+    F3e1a2 §4.4, and READ §2 BEFORE CHANGING THIS. It is a ratchet over the cases
+    that happen to be visible, NOT a guarantee: a helper that commits is invisible
+    from here, and THIS INTRAPROCEDURAL checker cannot catch that. It does not license
+    dropping the parent spec's §5.2 runtime two-ordered-lock proof.
+    """
+    for stmt in func.body:
+        for node, _credited in _iter_credited(stmt, True):
+            if isinstance(node, ast.Call) and _callee_name(node.func) in _TXN_ENDINGS:
+                return True
+    return False
+
+
 def _iter_credited(node: ast.AST, credited: bool):
     """Yield ``(node, credited)`` for everything reachable in the ENCLOSING scope.
 
@@ -437,6 +458,12 @@ def unprotected_sinks(source: str, path: str) -> dict[str, list[str]]:
                 f"{qualname} is a generator — its body does not run until the caller "
                 f"iterates, and a yield returns control to a caller that may COMMIT "
                 f"or ROLLBACK, releasing the transaction-scoped mutex"
+            )
+
+        if _ends_transaction(func):
+            reasons.append(
+                f"{qualname} visibly ends its transaction (commit/rollback), which "
+                f"releases the transaction-scoped commit mutex before the sink runs"
             )
 
         if has_live:
