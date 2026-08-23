@@ -94,45 +94,60 @@ def test_async_with_body_is_credited():
 # The holder assertion is the point — an invisible sink is worse than an unfenced
 # one (spec §3), and a future "fix" that loses the site must go red here.
 
-def _unfenced_but_held(body: str, head: str = _HEAD) -> None:
+def _uncredited_but_held(body: str, head: str = _HEAD) -> None:
+    """The sink's POSITION is unprovable: unfenced, still found, index None."""
     src = head + body
+    calls = sink_calls(src, "x/f.py")
     assert fenced_qualnames(src, "x/f.py") == set(), "must not be credited"
-    holders = {q for q, _n, _i in sink_calls(src, "x/f.py")}
-    assert holders == {"f"}, f"sink must remain discoverable, got {holders}"
-    indices = [i for _q, _n, i in sink_calls(src, "x/f.py")]
-    assert indices == [None], f"position must be unprovable, got {indices}"
+    assert {q for q, _n, _i in calls} == {"f"}, "sink must remain discoverable"
+    assert [i for _q, _n, i in calls] == [None], "position must be unprovable"
+
+
+def _disqualified_but_held(body: str, head: str = _HEAD) -> None:
+    """The sink's position is FINE — the FUNCTION is disqualified.
+
+    Distinct from _uncredited_but_held ON PURPOSE. These cases put the sink on a
+    CREDITED path (`sha = sink(...)` is `Assign.value`), so its index is an INT.
+    Asserting None here fails for the wrong reason — verified: the real index is 2.
+    Only the verdict differs, so only the verdict is asserted.
+    """
+    src = head + body
+    calls = sink_calls(src, "x/f.py")
+    assert fenced_qualnames(src, "x/f.py") == set(), "must be disqualified"
+    assert {q for q, _n, _i in calls} == {"f"}, "sink must remain discoverable"
+    assert [i for _q, _n, i in calls] == [2], "the POSITION is fine; the function is not"
 
 
 def test_lambda_body_is_not_credited():
-    _unfenced_but_held(_ACQ + "    return lambda: write_and_commit_files(repo, {}, 'm')\n")
+    _uncredited_but_held(_ACQ + "    return lambda: write_and_commit_files(repo, {}, 'm')\n")
 
 
 def test_generator_expression_is_not_credited():
-    _unfenced_but_held(
+    _uncredited_but_held(
         _ACQ + "    return (write_and_commit_files(repo, {}, 'm') for i in [1])\n"
     )
 
 
 def test_lambda_nested_in_a_returned_container_is_not_credited():
-    _unfenced_but_held(
+    _uncredited_but_held(
         _ACQ + "    return {'go': lambda: write_and_commit_files(repo, {}, 'm')}\n"
     )
 
 
 def test_generator_expression_as_a_call_argument_is_not_credited():
-    _unfenced_but_held(
+    _uncredited_but_held(
         _ACQ + "    register((write_and_commit_files(repo, {}, 'm') for i in [1]))\n"
     )
 
 
 def test_a_pep695_type_alias_is_not_credited():
     """PEP 695: the RHS is lazy until `__value__` is read, and the alias can escape."""
-    _unfenced_but_held(_ACQ + "    type Deferred = write_and_commit_files(repo, {}, 'm')\n")
+    _uncredited_but_held(_ACQ + "    type Deferred = write_and_commit_files(repo, {}, 'm')\n")
 
 
 def test_an_unlisted_NODE_type_is_not_credited():
     """ast.For is not in CREDITED_FIELDS at all. The default must be no-credit."""
-    _unfenced_but_held(_ACQ + "    for i in [1]:\n    " + _SINK)
+    _uncredited_but_held(_ACQ + "    for i in [1]:\n    " + _SINK)
 
 
 def test_a_live_acquisition_inside_a_LAMBDA_still_disqualifies():
@@ -148,20 +163,80 @@ def test_a_live_acquisition_inside_a_LAMBDA_still_disqualifies():
     assert fenced_qualnames(src, "x/f.py") == set()
 
 
+# --- DISCOVERY. These live in Task 1, not later, because spec §5.7 requires every
+# --- case locked BEFORE the implementation that satisfies it. All execute in the
+# --- ENCLOSING scope when their statement runs; NONE is credited, because eager is
+# --- not a reason to credit (§4.1). Each must still be FOUND — that is the point.
+
+def test_a_sink_in_a_nested_defs_DEFAULT_is_found_but_not_credited():
+    _uncredited_but_held(
+        _ACQ + "    def inner(x=write_and_commit_files(repo, {}, 'm')):\n        return x\n"
+    )
+
+
+def test_a_sink_in_a_nested_defs_DECORATOR_is_found_but_not_credited():
+    _uncredited_but_held(
+        _ACQ
+        + "    @register(write_and_commit_files(repo, {}, 'm'))\n"
+        + "    def inner():\n        pass\n"
+    )
+
+
+def test_a_sink_in_a_LAMBDAS_default_is_found_but_not_credited():
+    _uncredited_but_held(_ACQ + "    cb = lambda x=write_and_commit_files(repo, {}, 'm'): x\n")
+
+
+def test_a_sink_in_a_nested_ASYNC_defs_default_is_found_but_not_credited():
+    _uncredited_but_held(
+        _ACQ
+        + "    async def inner(x=write_and_commit_files(repo, {}, 'm')):\n        return x\n"
+    )
+
+
+def test_a_sink_in_an_ANNOTATION_is_found_but_not_credited():
+    """Argument and return annotations evaluate at `def` time, in THIS scope, unless
+    the scanned file carries `from __future__ import annotations` — which the checker
+    cannot rely on. Fail closed: found, never credited."""
+    _uncredited_but_held(
+        _ACQ + "    def inner(x: write_and_commit_files(repo, {}, 'm')):\n        pass\n"
+    )
+    _uncredited_but_held(
+        _ACQ + "    def inner() -> write_and_commit_files(repo, {}, 'm'):\n        pass\n"
+    )
+
+
+def test_a_sink_in_a_nested_CLASS_is_found_but_not_credited():
+    """A `class` statement runs its decorators, bases, keywords and body immediately,
+    in this function. All four shapes were invisible before this slice."""
+    for body in (
+        "    class C:\n        x = write_and_commit_files(repo, {}, 'm')\n",
+        "    class C(write_and_commit_files(repo, {}, 'm')):\n        pass\n",
+        "    class C(metaclass=write_and_commit_files(repo, {}, 'm')):\n        pass\n",
+        "    @register(write_and_commit_files(repo, {}, 'm'))\n    class C:\n        pass\n",
+    ):
+        _uncredited_but_held(_ACQ + body)
+
+
 def test_an_unlisted_FIELD_of_a_listed_node_is_not_credited():
     """`ast.If` IS listed, but only its `body`. `orelse` is not.
 
     The unknown-NODE test above does not prove this: an implementation that
     allowlisted by node type alone would pass that one and fail here.
     """
-    _unfenced_but_held(_ACQ + "    if cond:\n        pass\n    else:\n    " + _SINK)
+    _uncredited_but_held(_ACQ + "    if cond:\n        pass\n    else:\n    " + _SINK)
 ```
 
 - [ ] **Step 2: Run them to see which fail and why**
 
 Run: `uv run pytest tests/fencing/test_git_fence.py -q -p no:randomly`
 
-Expected: **9 failed, 22 passed.** The failures are the four credited-container positives (`if`/`try`/`with`/`async with`), the `Assign` positive, and the four holder-index assertions that currently return `None` for the right reason but the wrong one. `test_expr_value_is_credited` passes already (F3e1a's shape). The `for`, `orelse`, lambda, genexp and type-alias negatives pass already — today *everything* nested is `None`.
+Expected: **7 failed, 28 passed.** The failures are the five credited-container
+positives (`Assign`, `If`, `Try`, `With`, `AsyncWith`) and the two class/annotation
+discovery cases, which today are not found at all. `test_expr_value_is_credited`
+already passes — it is F3e1a's shape. **Most negatives already pass**, because today
+*everything* nested returns `None`: they cannot tell a correct implementation from a
+blanket `None`, which is exactly what Step 5's mutations are for. Re-derive this split
+by running it; do not trust this paragraph over the terminal.
 
 **This is expected and it is the point:** the negatives cannot distinguish a correct implementation from today's blanket `None`. Task 1's mutations (Step 5) are what pin them.
 
@@ -190,9 +265,6 @@ CREDITED_FIELDS: dict[type[ast.AST], frozenset[str]] = {
     ast.AsyncWith: frozenset({"body"}),
 }
 
-#: Scopes whose BODY belongs to a different qualname and is never walked from here,
-#: but whose decorators and defaults execute in the ENCLOSING scope and are.
-_NESTED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
 ```
 
 - [ ] **Step 4: Add the walk and rewrite `sink_calls`'s descent**
@@ -200,49 +272,56 @@ _NESTED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
 Add after `_iter_own_nodes` (leave that function and `_collect_functions` untouched — §4.2):
 
 ```python
+def _walk_fields(node: ast.AST, skip: tuple[str, ...] = ()):
+    """Yield every direct AST child of *node*, skipping the named fields."""
+    for field, value in ast.iter_fields(node):
+        if field in skip:
+            continue
+        for child in value if isinstance(value, list) else [value]:
+            if isinstance(child, ast.AST):
+                yield child
+
+
 def _iter_credited(node: ast.AST, credited: bool):
     """Yield ``(node, credited)`` for everything reachable in the ENCLOSING scope.
 
-    F3e1a2 §4.2. Three properties, each load-bearing:
+    F3e1a2 §4.2.
 
     * **Monotonic.** ``credited`` starts True at a top-level statement and can only
-      go False. A listed field beneath an unlisted one stays uncredited — otherwise
-      a sink at ``Lambda.body -> Assign.value`` would be credited.
+      go False — a listed field beneath an unlisted one stays uncredited, or a sink
+      at ``Lambda.body -> Assign.value`` would be credited.
     * **Discovery does not stop at False.** The walk keeps descending, so a sink in a
-      lambda, a generator expression or a type alias is still FOUND; only its
-      position is lost. A site missing from the inventory is worse than one measuring
-      ``false``.
-    * **Nested scopes are field-aware, and def/lambda differ.** Decorators and
-      defaults run in the enclosing scope and are walked (uncredited). A nested
-      ``def``'s body is NOT walked — it has its own qualname. A ``lambda``'s body IS
-      walked, uncredited — a lambda is anonymous, so nothing else would ever find a
-      sink in it.
+      lambda, generator expression, type alias, class base or annotation is still
+      FOUND; only its position is lost. A site missing from the inventory is worse
+      than one measuring ``false``.
+    * **A definition's ONLY unwalked field is a FUNCTION's body.** Everything else a
+      ``def``/``class`` carries — decorators, bases, keywords, argument defaults,
+      argument and return ANNOTATIONS, the class body — executes in the enclosing
+      scope when that statement runs, so all of it is walked, uncredited.
 
-    Unlike ``_iter_own_nodes`` this handles a nested scope as its ENTRY node, not
-    only as a child — ``sink_calls`` no longer pre-skips them.
+    The def/lambda/class asymmetry is deliberate. Read this before "simplifying" it:
+
+    * a nested ``def``'s **body** is skipped — it has its own qualname and
+      ``_collect_functions`` analyses it on a separate pass, so nothing is lost;
+    * a ``lambda``'s body is **walked** — a lambda is ANONYMOUS, gets no qualname,
+      and nothing else ever visits it, so skipping it makes a sink inside VANISH;
+    * a ``class``'s body is **walked** — its statements run at class-definition time,
+      in this function. Methods inside are ``FunctionDef``s and stop at their own
+      body by the first rule.
+
+    Unlike ``_iter_own_nodes`` this handles a definition as its ENTRY node, not only
+    as a child — ``sink_calls`` no longer pre-skips them.
     """
     yield node, credited
 
-    if isinstance(node, _NESTED_SCOPES):
-        enclosing: list[ast.AST] = list(getattr(node, "decorator_list", []))
-        args = getattr(node, "args", None)
-        if args is not None:
-            enclosing.extend(d for d in args.defaults if d is not None)
-            enclosing.extend(d for d in args.kw_defaults if d is not None)
-        if isinstance(node, ast.Lambda):
-            # A LAMBDA'S BODY IS WALKED; A DEF'S IS NOT. This asymmetry is not an
-            # oversight — read before "simplifying" it. A nested `def` has its own
-            # qualname, so `_collect_functions` analyses its body on a separate pass
-            # and skipping it here loses nothing. A lambda is ANONYMOUS: it gets no
-            # qualname, nothing else ever visits it, and skipping its body makes a
-            # sink inside it VANISH from the inventory entirely. That is the
-            # invisible-sink defect this slice exists to close.
-            enclosing.append(node.body)
-        for child in enclosing:
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        for child in _walk_fields(node, skip=("body",)):
             yield from _iter_credited(child, False)
         return
 
-    if isinstance(node, ast.ClassDef):
+    if isinstance(node, (ast.Lambda, ast.ClassDef)):
+        for child in _walk_fields(node):
+            yield from _iter_credited(child, False)
         return
 
     allowed = CREDITED_FIELDS.get(type(node), frozenset())
@@ -290,22 +369,37 @@ Note the top-level statement itself is yielded with `credited=True`, so a bare
 - [ ] **Step 5: Run the tests, then prove the new logic by breaking it**
 
 Run: `uv run pytest tests/fencing/test_git_fence.py -q -p no:randomly`
-Expected: **29 passed** (15 existing + 6 positives + 8 negatives).
+Expected: **35 passed** (15 existing + 20 new).
 
 Then run the full fencing package: `uv run pytest tests/fencing/ -q -p no:randomly`
-Expected: **167 passed** (153 + 14).
+Expected: **173 passed** (153 + 20).
 
-Now the safety mutations. For each: apply, run, confirm **FAILED** (not ERROR) for the named tests, restore with `git checkout -- tests/fencing/git_fence.py`, re-confirm green.
+> ### Restoring a mutation: NEVER `git checkout --`
+>
+> The implementation is **not committed yet** here. `git checkout --
+> tests/fencing/git_fence.py` restores **pre-task HEAD** and silently deletes
+> everything you just wrote. Checkpoint first, restore from the copy:
+>
+> ```bash
+> cp tests/fencing/git_fence.py /tmp/git_fence.checkpoint.py   # BEFORE any mutation
+> # ...apply mutation, run, observe FAILED-not-ERROR...
+> cp /tmp/git_fence.checkpoint.py tests/fencing/git_fence.py   # restore
+> ```
+>
+> Re-run and confirm green after every restore, before the next mutation.
+> **This applies to every mutation step in every task of this plan.**
+
+Now the safety mutations. For each: apply, run, confirm **FAILED** (not ERROR) for the
+named tests, restore from the checkpoint, re-confirm green.
 
 | # | Mutation | Must redden |
 |---|---|---|
-| 3 | `CREDITED_FIELDS.get(type(node), frozenset())` → a sentinel meaning "all fields" | all 7 uncredited negatives (not the `_live`-in-lambda one — that is a disqualifier, unaffected by crediting) |
+| 3 | `CREDITED_FIELDS.get(type(node), frozenset())` → a sentinel meaning "all fields" | the uncredited negatives whose path runs through a NON-definition node: lambda-body, lambda-in-container, genexp, genexp-as-arg, type-alias, unlisted-NODE (`For`). **NOT `If.orelse`** — `ast.If` is a listed node, so this mutation still consults its field set and `orelse` stays out. Mutation 4 is what covers that. **NOT** the definition/discovery cases either — those return early, before `CREDITED_FIELDS` is read. |
 | 4 | `child_credited = credited and type(node) in CREDITED_FIELDS` (ignore the field) | `test_an_unlisted_FIELD_of_a_listed_node_is_not_credited` |
 | 6 | walk `Lambda.body` with `credited=True` instead of `False` | the two lambda-body negatives falsely fence |
 | 6b | **skip `Lambda.body` entirely** (drop the `isinstance(node, ast.Lambda)` branch) | the two lambda-body negatives fail on the **holder** assertion — the sink vanishes. Discovery coverage, not safety: it under-reports. Found by prototyping this exact code; the plan shipped it broken. |
 | 9 | `child_credited = field in allowed` (drop `credited and` — non-monotonic) | `test_lambda_nested_in_a_returned_container_is_not_credited` |
-| 12a | remove `ast.Expr` from the table | all 5 container positives — `Expr`, `If`, `Try`, `With`, `AsyncWith`, because each reaches its call through a statement node. NOT the `Assign` positive. |
-| 12b | remove `ast.Assign` from the table | only `test_assign_value_is_credited` |
+| 12 | remove ONE entry from the table, six times | The paths **compose**, so the flip sets differ per entry and must each be recorded: removing `ast.Expr` flips the `Expr`, `If`, `Try`, `With` and `AsyncWith` positives (all five reach their call through a statement node); removing `ast.Assign` flips only `test_assign_value_is_credited`; removing `ast.If`, `ast.Try`, `ast.With` or `ast.AsyncWith` flips only that entry's own positive. Run all six — the point is that every entry is load-bearing, and "one test per entry" was false. |
 
 Record each mutation's actual output in the task report. A mutation that reddens nothing is a finding, not a pass.
 
@@ -338,22 +432,22 @@ git commit -m "test(fence): a six-entry allowlist decides a sink's position (F3e
 # or ROLLBACK, releasing the transaction-scoped mutex before the sink resumes.
 
 def test_a_yield_between_acquisition_and_sink_is_not_fenced():
-    _unfenced_but_held(_ACQ + "    yield 1\n    sha = write_and_commit_files(repo, {}, 'm')\n")
+    _disqualified_but_held(_ACQ + "    yield 1\n    sha = write_and_commit_files(repo, {}, 'm')\n")
 
 
 def test_a_yield_AFTER_the_sink_still_disqualifies():
     """§4.3 is a DISQUALIFIER, not a position rule. Deliberately over-broad: a
     correct generator costs a pin, and deciding which yields precede which sinks is
     the branch reasoning this design refuses to do."""
-    _unfenced_but_held(_ACQ + "    sha = write_and_commit_files(repo, {}, 'm')\n    yield 1\n")
+    _disqualified_but_held(_ACQ + "    sha = write_and_commit_files(repo, {}, 'm')\n    yield 1\n")
 
 
 def test_yield_from_also_disqualifies():
-    _unfenced_but_held(_ACQ + "    yield from [1]\n    sha = write_and_commit_files(repo, {}, 'm')\n")
+    _disqualified_but_held(_ACQ + "    yield from [1]\n    sha = write_and_commit_files(repo, {}, 'm')\n")
 
 
 def test_an_async_generator_is_not_fenced():
-    _unfenced_but_held(
+    _disqualified_but_held(
         _ACQ + "    yield 1\n    sha = write_and_commit_files(repo, {}, 'm')\n",
         head="async def f(s, w, stamp, repo, cond):\n",
     )
@@ -361,7 +455,7 @@ def test_an_async_generator_is_not_fenced():
 
 def test_a_yield_in_a_nested_defs_DEFAULT_disqualifies_the_ENCLOSING_function():
     """Verified with inspect.isgeneratorfunction: the yield belongs to f, not inner."""
-    _unfenced_but_held(
+    _disqualified_but_held(
         _ACQ
         + "    sha = write_and_commit_files(repo, {}, 'm')\n"
         + "    def inner(x=(yield 1)):\n        return x\n"
@@ -420,11 +514,11 @@ In `unprotected_sinks`, immediately before the existing `if has_live:` block:
 
 - [ ] **Step 4: Run and mutate**
 
-Run: `uv run pytest tests/fencing/ -q -p no:randomly` → **173 passed**.
+Run: `uv run pytest tests/fencing/ -q -p no:randomly` → **179 passed**.
 
-Mutation 7 (safety): make `_is_generator` `return False`. Expect **5 FAILED** — the five generator cases, FAILED not ERROR. Restore, re-confirm green.
+Mutation 7 (safety): make `_is_generator` `return False`. Expect **5 FAILED** — the five generator cases, FAILED not ERROR. Restore from the checkpoint, re-confirm green.
 
-Mutation 9 (discovery): in `_is_generator`, iterate `ast.walk(stmt)` instead of `_iter_credited`. Expect **1 FAILED** — `test_an_unrelated_nested_generator_does_not_disqualify_the_outer`. This is the trap §4.2 names. Restore.
+Mutation 9 (discovery): in `_is_generator`, iterate `ast.walk(stmt)` instead of `_iter_credited`. Expect **1 FAILED** — `test_an_unrelated_nested_generator_does_not_disqualify_the_outer`. This is the trap §4.2 names. Restore from the checkpoint.
 
 - [ ] **Step 5: Lint and commit**
 
@@ -455,7 +549,7 @@ git commit -m "test(fence): a yield can drop the mutex before the sink runs (F3e
 
 @pytest.mark.parametrize("ending", ["commit", "rollback"])
 def test_a_visible_transaction_ending_disqualifies(ending):
-    _unfenced_but_held(
+    _disqualified_but_held(
         _ACQ + f"    s.{ending}()\n    sha = write_and_commit_files(repo, {{}}, 'm')\n"
     )
 ```
@@ -504,9 +598,9 @@ Add the reason in `unprotected_sinks` beside the generator check:
 
 - [ ] **Step 4: Run and mutate**
 
-Run: `uv run pytest tests/fencing/ -q -p no:randomly` → **175 passed**.
+Run: `uv run pytest tests/fencing/ -q -p no:randomly` → **181 passed**.
 
-Mutation 8: make `_ends_transaction` `return False`. Expect **2 FAILED** (both parameters). Restore.
+Mutation 8: make `_ends_transaction` `return False`. Expect **2 FAILED** (both parameters). Restore from the checkpoint.
 
 - [ ] **Step 5: Lint and commit**
 
@@ -518,79 +612,60 @@ git commit -m "test(fence): a visible commit releases the mutex before the sink 
 
 ---
 
-### Task 4: The discovery cases
+### Task 4: Prove the discovery cases are load-bearing
 
-**Files:**
-- Test: `tests/fencing/test_git_fence.py`
+**Files:** none changed. Verification only — no new tests, no production edit.
 
-**Interfaces:** consumes Task 1's walk. **No production change is expected** — Task 1 already removed the pre-skip. This task proves it, and exists separately because revision 5 shipped a mutation with nothing to redden.
+Task 1 wrote these tests and its walk satisfies them. This task is separate because
+revision 5 of the spec shipped a mutation with nothing to redden, and a discovery test
+nobody has tried to break is a comment.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Checkpoint**
 
-```python
-# ----------------------------------------------- F3e1a2 §5.4 — DISCOVERY group
-# These four are the cases that drive the pre-existing invisible-sink defect. All
-# four are EAGER in the enclosing scope (verified) and NONE is credited, because
-# defaults and decorators are not on §4.1's table — eager is not a reason to credit.
-# Each asserts the sink is still FOUND. Without this group the defect survives every
-# other test in this file.
-
-def test_a_sink_in_a_nested_defs_DEFAULT_is_found_but_not_credited():
-    _unfenced_but_held(
-        _ACQ + "    def inner(x=write_and_commit_files(repo, {}, 'm')):\n        return x\n"
-    )
-
-
-def test_a_sink_in_a_nested_defs_DECORATOR_is_found_but_not_credited():
-    _unfenced_but_held(
-        _ACQ
-        + "    @register(write_and_commit_files(repo, {}, 'm'))\n"
-        + "    def inner():\n        pass\n"
-    )
-
-
-def test_a_sink_in_a_LAMBDAS_default_is_found_but_not_credited():
-    _unfenced_but_held(
-        _ACQ + "    cb = lambda x=write_and_commit_files(repo, {}, 'm'): x\n"
-    )
-
-
-def test_a_sink_in_a_nested_ASYNC_defs_default_is_found_but_not_credited():
-    _unfenced_but_held(
-        _ACQ
-        + "    async def inner(x=write_and_commit_files(repo, {}, 'm')):\n        return x\n"
-    )
+```bash
+cp tests/fencing/git_fence.py /tmp/git_fence.checkpoint.py
 ```
 
-- [ ] **Step 2: Run**
+- [ ] **Step 2: Mutation 10 — restore the pre-skip**
 
-Run: `uv run pytest tests/fencing/test_git_fence.py -q -p no:randomly -k "DEFAULT or DECORATOR or LAMBDAS or ASYNC_defs"`
-Expected: **4 passed.** If any fails on the *holder* assertion, Task 1's walk did not remove the pre-skip correctly — fix Task 1, do not weaken the assertion.
-
-- [ ] **Step 3: Prove they are load-bearing**
-
-Mutation 10 — **restore** the pre-skip at the top of `sink_calls`'s statement loop:
+Put back, at the top of `sink_calls`'s statement loop:
 
 ```python
             if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 continue
 ```
 
-Expect **3 FAILED** on the *holder* assertion (`sink must remain discoverable`) — the two nested-`def` cases and the async one. The lambda-default case is unaffected, since a `lambda` is not a statement. This is discovery coverage, not a safety mutation: it does **not** falsely fence anything. Restore.
+Run: `uv run pytest tests/fencing/test_git_fence.py -q -p no:randomly`
 
-Mutation 11 — in `_iter_credited`, drop `decorator_list` / defaults from the nested-scope branch (`enclosing = []`). Expect **4 FAILED** on the holder assertion. Restore.
+Expected: FAILED on the **holder** assertion for the nested-`def` default, decorator,
+async default, annotation and class cases. The lambda cases are unaffected — a
+`lambda` is not a statement, so the pre-skip never sees one.
 
-- [ ] **Step 4: Run the whole package, lint, commit**
+Discovery coverage, not safety: it does **not** falsely fence anything. That is why it
+sits here rather than among Task 1's safety mutations. Record the exact failing set.
 
-Run: `uv run pytest tests/fencing/ -q -p no:randomly` → **179 passed**.
+Restore: `cp /tmp/git_fence.checkpoint.py tests/fencing/git_fence.py`; re-run, green.
+
+- [ ] **Step 3: Mutation 11 — stop walking a definition's non-body fields**
+
+In `_iter_credited`, make both definition branches `return` immediately after
+`yield node, credited` — walking the node but none of its fields.
+
+Expected: FAILED on the holder assertion for **every** discovery case, the lambda ones
+included. A different route to the same defect than mutation 10: that one loses whole
+statements, this one loses fields within them.
+
+Restore from the checkpoint; re-run, green.
+
+- [ ] **Step 4: Record and commit**
+
+No file changes. Record both mutations' real output in the task report. **If either
+reddens nothing, that is a finding** — the discovery fix is not doing what Task 1
+claims, and Task 1 needs revisiting before this plan continues.
 
 ```bash
-uv run ruff check .
-git add tests/fencing/test_git_fence.py
-git commit -m "test(fence): a sink in a nested default must still be visible (F3e1a2 Task 4)"
+git commit --allow-empty -m "test(fence): discovery mutations recorded, no code change (F3e1a2 Task 4)"
 ```
-
----
 
 ### Task 5: Say what the checker actually proves
 
@@ -676,7 +751,7 @@ uv run pytest tests/fencing/ -q -p no:randomly
 uv run ruff check .
 ```
 
-Expected: `clean`, then **179 passed**. No new tests — this task changes prose and one dict key.
+Expected: `clean`, then **181 passed**. No new tests — this task changes prose and one dict key.
 
 - [ ] **Step 5: Commit**
 
@@ -706,12 +781,12 @@ changed a measurement it promised not to touch.
 from __future__ import annotations
 
 import ast
-import json
 import pathlib
-import subprocess
 
-from tests.fencing.git_fence import fenced_qualnames, sink_calls
+from tests.fencing.git_fence import _callee_name, fenced_qualnames, sink_calls
 from tests.fencing.inventory import SLICE_STATUS, load_inventory
+
+_PRIMITIVE_B = "acquire_commit_mutex_at_generation"
 
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -721,19 +796,26 @@ def test_primitive_b_still_has_zero_production_callers():
     is no longer inert and every other assertion here means something different."""
     hits = []
     for path in (_ROOT / "src").rglob("*.py"):
-        if path.name == "fencing.py" and path.parent.name == "proposal_assist":
-            continue
-        if "acquire_commit_mutex_at_generation" in path.read_text():
-            hits.append(str(path.relative_to(_ROOT)))
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            # Its own `def` is not a caller. Excluding the whole of fencing.py would
+            # hide a real caller added inside it, so exclude the DEFINITION, by AST.
+            if isinstance(node, ast.FunctionDef) and node.name == _PRIMITIVE_B:
+                continue
+            if isinstance(node, ast.Call) and _callee_name(node.func) == _PRIMITIVE_B:
+                hits.append(f"{path.relative_to(_ROOT)}:{node.lineno}")
     assert hits == [], f"Primitive B gained a caller: {hits}"
 
 
 def test_the_real_tree_still_has_exactly_nine_sink_holders():
     """Two-sided: §4.2 WIDENS discovery, so this must not grow either."""
+    # Identity is (path, qualname), NOT qualname alone: two files can both define
+    # `_git` or `checkpoint_artifact`, and counting bare qualnames would collapse
+    # them — hiding an ADDED site behind an existing name.
     holders = set()
     for path in (_ROOT / "src").rglob("*.py"):
         rel = str(path.relative_to(_ROOT))
-        holders |= {q for q, _n, _i in sink_calls(path.read_text(), rel)}
+        holders |= {(rel, q) for q, _n, _i in sink_calls(path.read_text(), rel)}
     assert len(holders) == 9, sorted(holders)
 
 
@@ -752,18 +834,6 @@ def test_every_git_row_is_still_unfenced_and_classified():
     assert all(SLICE_STATUS[r["slice"]] == "pending" for r in rows)
 
 
-def test_the_slice_touched_no_production_code():
-    base = subprocess.run(
-        ["git", "merge-base", "master", "HEAD"],
-        cwd=_ROOT, capture_output=True, text=True, check=True,
-    ).stdout.strip()
-    changed = subprocess.run(
-        ["git", "diff", "--name-only", f"{base}..HEAD", "--", "src/"],
-        cwd=_ROOT, capture_output=True, text=True, check=True,
-    ).stdout.strip()
-    assert changed == "", f"F3e1a2 converts nothing but touched: {changed}"
-
-
 def test_the_allowlist_is_still_six_entries():
     """§4.1: the smallness IS the safety property. Growing this table needs a spec
     amendment and a real site that requires the entry — not a passing thought that a
@@ -780,28 +850,23 @@ def test_the_allowlist_is_still_six_entries():
     }
 
 
-def test_the_inventory_file_is_byte_identical_to_master():
-    base = subprocess.run(
-        ["git", "merge-base", "master", "HEAD"],
-        cwd=_ROOT, capture_output=True, text=True, check=True,
-    ).stdout.strip()
-    before = subprocess.run(
-        ["git", "show", f"{base}:tests/fencing/fence_inventory.json"],
-        cwd=_ROOT, capture_output=True, text=True, check=True,
-    ).stdout
-    now = (_ROOT / "tests/fencing/fence_inventory.json").read_text()
-    assert json.loads(before) == json.loads(now), "the inventory moved"
+# NO GIT-DEPENDENT TESTS HERE. Two earlier drafts asserted `git diff` and
+# `git show` against `merge-base master HEAD`. Both are wrong as permanent tests:
+# once this merges, base == HEAD and they assert nothing; and CI's shallow
+# checkout may have no local `master` ref at all, so they ERROR rather than fail.
+# Those two checks are one-time PLAN commands against the fixed base 7841e64f —
+# see Step 4 — not pytest tests.
 ```
 
 - [ ] **Step 2: Run**
 
 Run: `uv run pytest tests/fencing/test_f3e1a2_slice.py -q -p no:randomly`
-Expected: **7 passed.**
+Expected: **5 passed.**
 
 - [ ] **Step 3: Prove the identity gates bite**
 
-- Add `ast.For: frozenset({"body"})` to `CREDITED_FIELDS` → `test_the_allowlist_is_still_six_entries` FAILS, and `test_an_unlisted_NODE_type_is_not_credited` FAILS. Restore.
-- Hand-edit one git row's `fenced` to `true` in `fence_inventory.json` → `test_every_git_row_is_still_unfenced_and_classified` and `test_the_inventory_file_is_byte_identical_to_master` FAIL. Restore with `git checkout --`.
+- Add `ast.For: frozenset({"body"})` to `CREDITED_FIELDS` → `test_the_allowlist_is_still_six_entries` FAILS, and `test_an_unlisted_NODE_type_is_not_credited` FAILS. Restore from the checkpoint.
+- Hand-edit one git row's `fenced` to `true` in `fence_inventory.json` → `test_every_git_row_is_still_unfenced_and_classified` and `test_the_inventory_file_is_byte_identical_to_master` FAIL. Restore from the checkpoint.
 
 - [ ] **Step 4: Full suite, lint, commit**
 
@@ -810,7 +875,7 @@ uv run pytest -n 16 --dist loadfile -q
 uv run ruff check .
 ```
 
-Expected: **`3890 passed, 1 skipped`** (3857 + 14 + 6 + 2 + 4 + 0 + 7 — **re-derive this from the actual per-task counts rather than trusting this arithmetic**; the plan's number is a prediction and every previous fence plan's prediction moved during the build. Record the real total and the term that changed).
+Expected: **`3890 passed, 1 skipped`** (3857 + 20 + 6 + 2 + 0 + 0 + 5 — **re-derive this from the actual per-task counts rather than trusting this arithmetic**; the plan's number is a prediction and every previous fence plan's prediction moved during the build. Record the real total and the term that changed).
 
 **`1 skipped` is the signal.** `0 skipped` means a live billed Anthropic API call ran.
 
@@ -823,23 +888,39 @@ git commit -m "test(fence): F3e1a2 widened the checker and moved no measurement 
 
 ## Task-count reconciliation
 
-| Task | New tests | Running total |
+| Task | New collected tests | Running total |
 |---|---|---|
 | baseline | — | 3857 |
-| 1 — allowlist + walk | 14 | 3871 |
-| 2 — generator disqualifier | 6 | 3877 |
-| 3 — transaction disqualifier | 2 | 3879 |
-| 4 — discovery cases | 4 | 3883 |
-| 5 — docstrings + slice key | 0 | 3883 |
-| 6 — slice confirmation | 7 | 3890 |
+| 1 — allowlist, walk, and every §5.3/§5.4 case | 20 | 3877 |
+| 2 — generator disqualifier | 6 | 3883 |
+| 3 — transaction disqualifier | 2 (one case, two params) | 3885 |
+| 4 — discovery mutations | 0 (verification only) | 3885 |
+| 5 — docstrings + slice key | 0 | 3885 |
+| 6 — slice confirmation | 5 | 3890 |
 
-Spec §5.3 promises 7 positives and §5.4 promises 24 negatives = **31 cases**, but only **26 new test functions** appear in Tasks 1–4. The gap is deliberate and must be checked, not assumed:
+**33 new collected tests**, counted from this plan's own code blocks rather than
+predicted. The relationship to the spec's "7 positives + 24 negatives = 31 cases" is
+not one-to-one, and the differences are all deliberate:
 
-- **6 of §5.4's 7 order/acquisition negatives already exist** among F3e1a's 15 — `test_sink_before_acquisition_is_not_fenced`, `test_a_second_unprotected_sink_disqualifies_the_function`, `test_an_acquisition_nested_as_a_call_argument_is_not_fenced`, `test_an_acquisition_in_an_if_with_a_toplevel_sink_after_is_not_fenced`, `test_a_live_acquisition_disqualifies_even_with_a_correct_one`, `test_a_nested_def_does_not_inherit_its_parent_acquisition`. They are re-verified against the new walk, not rewritten. The seventh, `_live` inside a lambda, is new and is in Task 1.
-- The `commit`/`rollback` case is one §5.4 entry but two collected tests.
-- `test_expr_value_is_credited` restates `test_acquisition_then_sink_is_fenced` on purpose: mutation 12a needs a positive that names the `Expr.value` entry explicitly.
+- **6 of §5.4's 7 order/acquisition negatives already exist** among F3e1a's 15 —
+  `test_sink_before_acquisition_is_not_fenced`,
+  `test_a_second_unprotected_sink_disqualifies_the_function`,
+  `test_an_acquisition_nested_as_a_call_argument_is_not_fenced`,
+  `test_an_acquisition_in_an_if_with_a_toplevel_sink_after_is_not_fenced`,
+  `test_a_live_acquisition_disqualifies_even_with_a_correct_one`,
+  `test_a_nested_def_does_not_inherit_its_parent_acquisition`. They are re-verified
+  against the new walk, not rewritten. The seventh — `_live` inside a lambda — is new
+  and lives in Task 1.
+- **Two tests carry several cases each.** `test_a_sink_in_an_ANNOTATION_…` covers the
+  argument and return annotation; `test_a_sink_in_a_nested_CLASS_…` loops over four
+  class shapes. Six §5.4 cases, two collected tests.
+- **The `commit`/`rollback` case is one entry but two collected tests.**
+- `test_expr_value_is_credited` restates `test_acquisition_then_sink_is_fenced`
+  deliberately: mutation 12 needs a positive that names the `Expr.value` entry.
 
-26 + 6 existing + 1 double-counted parameterisation reconciles to the 31. **If your total differs, find the term that changed and write it down — do not adjust a number to make the chain close.** That rule caught two real defects in F3e1a's build.
+**If your total differs, find the term that changed and write it down — never adjust a
+number to make the chain close.** That rule caught two real defects in F3e1a's build,
+and every count in an earlier draft of THIS plan was wrong at least once.
 
 ## What to do when the plan is wrong
 
