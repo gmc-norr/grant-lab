@@ -48,12 +48,84 @@
     "slice": "F3a"
   },
   {
+    "kind": "git_commit",
+    "path": "src/call_manager/proposal_assist/analysis/insert.py",
+    "symbol": "insert_from_annotation",
+    "category": "semantic",
+    "fenced": false,
+    "slice": "F3e2"
+  },
+  {
+    "kind": "git_commit",
+    "path": "src/call_manager/proposal_assist/citations/bibliography.py",
+    "symbol": "build_bibliography",
+    "category": "semantic",
+    "fenced": false,
+    "slice": "F3e2"
+  },
+  {
+    "kind": "git_commit",
+    "path": "src/call_manager/proposal_assist/citations/core.py",
+    "symbol": "_insert_citation_locked",
+    "category": "semantic",
+    "fenced": false,
+    "slice": "F3e1b"
+  },
+  {
+    "kind": "git_commit",
+    "path": "src/call_manager/proposal_assist/citations/human_cite.py",
+    "symbol": "insert_citation_for_user",
+    "category": "semantic",
+    "fenced": false,
+    "slice": "F3e1b"
+  },
+  {
+    "kind": "git_commit",
+    "path": "src/call_manager/proposal_assist/collab/checkpoint.py",
+    "symbol": "checkpoint_artifact",
+    "category": "semantic",
+    "fenced": false,
+    "slice": "F3e1b"
+  },
+  {
+    "kind": "git_commit",
+    "path": "src/call_manager/proposal_assist/editing/save.py",
+    "symbol": "save_section",
+    "category": "semantic",
+    "fenced": false,
+    "slice": "F3e1b"
+  },
+  {
+    "kind": "git_commit",
+    "path": "src/call_manager/proposal_assist/phases/setup.py",
+    "symbol": "Phase0Worker._init_repo",
+    "category": "semantic",
+    "fenced": false,
+    "slice": "F5"
+  },
+  {
+    "kind": "git_commit",
+    "path": "src/call_manager/proposal_assist/review/pass_runner.py",
+    "symbol": "run_review_pass",
+    "category": "semantic",
+    "fenced": false,
+    "slice": "F4"
+  },
+  {
+    "kind": "git_commit",
+    "path": "src/call_manager/web/api/workspaces.py",
+    "symbol": "post_init_spec._git",
+    "category": "semantic",
+    "fenced": false,
+    "slice": "F3e2"
+  },
+  {
     "kind": "tool_commit",
     "path": "src/call_manager/proposal_assist/citations/core.py",
     "symbol": "_write_citekey_cache",
     "category": "caller_fenced",
     "fenced": false,
-    "slice": "F3e",
+    "slice": "F3e2",
     "fenced_by": "_insert_citation_locked"
   },
   {
@@ -86,7 +158,7 @@
     "symbol": "fetch_reference_impl._do_fetch_and_ingest",
     "category": "semantic",
     "fenced": false,
-    "slice": "F3e"
+    "slice": "F3e2"
   },
   {
     "kind": "tool_commit",

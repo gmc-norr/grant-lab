@@ -7,9 +7,11 @@ import pathlib
 
 from tests.fencing.detectors import (
     KIND_CLAIM_FN,
+    KIND_GIT_COMMIT,
     KIND_TOOL_COMMIT,
     KIND_TOOL_CONTEXT,
     Site,
+    find_fenced_git_commits,
     find_fenced_tool_commits,
     find_sites,
 )
@@ -18,12 +20,15 @@ REPO = pathlib.Path(__file__).resolve().parents[2]
 SRC = REPO / "src" / "call_manager"
 INVENTORY = pathlib.Path(__file__).resolve().parent / "fence_inventory.json"
 
-_SLICE_FOR_KIND = {KIND_CLAIM_FN: "F4"}   # a NEW claim fn still defaults to F4
-_DEFAULT_SLICE = "F3d2"                   # was "F3d", split in F3d1
-
 #: A site no human has classified yet. The gate REFUSES these, so a regeneration
 #: cannot quietly admit an unreviewed effect site.
 UNCLASSIFIED = "UNCLASSIFIED"
+
+_SLICE_FOR_KIND = {
+    KIND_CLAIM_FN: "F4",          # a NEW claim fn still defaults to F4
+    KIND_GIT_COMMIT: UNCLASSIFIED,  # a NEW git site stops the build until allocated
+}
+_DEFAULT_SLICE = "F3d2"                   # was "F3d", split in F3d1
 
 #: Which categories each kind may declare. Without this, a future tool_context
 #: could be classified `accounting` and verify() would return success before its
@@ -32,7 +37,17 @@ CATEGORIES_BY_KIND = {
     KIND_TOOL_COMMIT: frozenset({"semantic", "accounting", "caller_fenced", UNCLASSIFIED}),
     KIND_TOOL_CONTEXT: frozenset({"semantic", UNCLASSIFIED}),
     KIND_CLAIM_FN: frozenset({"semantic", UNCLASSIFIED}),
+    # `semantic` only, and deliberately NO caller_fenced analogue: a caller's
+    # transaction can fence a DB write, but nothing anyone else's transaction does
+    # can fence a git commit. Either the function takes the mutex at a generation
+    # itself or the effect is unfenced — there is no third party to defer to.
+    KIND_GIT_COMMIT: frozenset({"semantic", UNCLASSIFIED}),
 }
+
+#: Kinds whose `fenced` is RECOMPUTED from source on every regeneration rather than
+#: carried forward. A kind outside this set keeps its stored flag — `is this a port
+#: call` is meaningless for a claim function.
+MEASURED_KINDS = frozenset({KIND_TOOL_COMMIT, KIND_GIT_COMMIT})
 CATEGORIES = frozenset().union(*CATEGORIES_BY_KIND.values())
 
 #: EXEMPTION PINS. `accounting` and `caller_fenced` short-circuit the semantic
@@ -72,8 +87,13 @@ SLICE_STATUS = {
     "F3d1": "complete",  # the spine: ports/, the bundle, the dispatch — no row of its own
     "F3d2": "complete",  # the submitters and the reads
     "F3d3": "complete",  # the citation core relocation, and the propose_* sites
-    "F3e": "pending",   # the ingest pipeline
-    "F3f": "pending",   # capability holders, then the handle
+    # Spec §7's F3e, cut into three for the same reason F3d was cut into three:
+    # SLICE_STATUS has no partial state, so a multi-slice conversion needs one key
+    # per slice or the first flipped row goes red.
+    "F3e1a": "complete",  # the carrier, the git detector, the gates — no row of its own
+    "F3e1b": "pending",   # the git-effect conversions
+    "F3e2": "pending",    # the ingest pipeline and the filesystem effects
+    "F3f": "pending",    # capability holders, then the handle
     "F4": "pending",    # background job families
     "F5": "pending",    # setup (Phase 0)
 }
@@ -215,14 +235,14 @@ class BadRenameMap(RuntimeError):
     believe a rename carried a proof across when it did not."""
 
 
-def scan_tree() -> tuple[set[Site], set[tuple[str, str]]]:
+def scan_tree() -> tuple[set[Site], set[tuple[str, str, str]]]:
     """The sites, and the identities the code proves are port-only.
 
-    Returns a PAIR since F3d2: `fenced` for a tool_commit is measured, not stored,
+    Returns a PAIR since F3d2: `fenced` for MEASURED_KINDS is measured, not stored,
     so every caller that merges needs both halves and cannot forget the second.
     """
     sites: set[Site] = set()
-    fenced_ids: set[tuple[str, str]] = set()
+    fenced_ids: set[tuple[str, str, str]] = set()
     for p in sorted(SRC.rglob("*.py")):
         if "__pycache__" in p.parts:
             continue
@@ -230,6 +250,7 @@ def scan_tree() -> tuple[set[Site], set[tuple[str, str]]]:
         source = p.read_text(encoding="utf-8")
         sites |= find_sites(source, rel)
         fenced_ids |= find_fenced_tool_commits(source, rel)
+        fenced_ids |= find_fenced_git_commits(source, rel)
     return sites, fenced_ids
 
 
@@ -241,14 +262,14 @@ def merge(
     previous: list[dict],
     found: set[Site],
     renames: dict[tuple[str, str, str], tuple[str, str, str]] | None,
-    fenced_ids: set[tuple[str, str]],
+    fenced_ids: set[tuple[str, str, str]],
 ) -> list[dict]:
     """Fold *found* into *previous*, preserving `category` and every declared
     optional key.
 
-    `fenced` is NOT preserved for a `tool_commit`: since F3d2 it is MEASURED from
-    the source via *fenced_ids*, so a hand-edited flag does not survive a
-    regeneration. Every other kind still carries its stored value forward.
+    `fenced` is NOT preserved for any kind in MEASURED_KINDS: since F3d2 it is
+    MEASURED from the source via *fenced_ids*, so a hand-edited flag does not
+    survive a regeneration. Every other kind still carries its stored value forward.
 
     Validates the WHOLE rename map up front, then aborts if any previously-fenced
     identity is still missing.
@@ -282,14 +303,14 @@ def merge(
             "path": s.path,
             "symbol": s.symbol,
             "category": prev["category"] if prev else UNCLASSIFIED,
-            # F3d2: for a tool_commit, `fenced` is MEASURED from the source, never
-            # carried forward. It was a human boolean that nothing checked, which
-            # made "slice complete" an assertion rather than a proof. Other kinds
-            # keep the stored flag: `is this a port call` is meaningless for a
-            # claim function.
+            # F3d2+F3e1a: for any kind in MEASURED_KINDS (tool_commit, git_commit),
+            # `fenced` is MEASURED from the source, never carried forward. It was a
+            # human boolean that nothing checked, which made "slice complete" an
+            # assertion rather than a proof. Other kinds keep the stored flag: `is
+            # this a port call` is meaningless for a claim function.
             "fenced": (
-                (s.path, s.symbol) in fenced_ids
-                if s.kind == KIND_TOOL_COMMIT
+                (s.kind, s.path, s.symbol) in fenced_ids
+                if s.kind in MEASURED_KINDS
                 else (prev["fenced"] if prev else False)
             ),
             "slice": (
@@ -306,7 +327,7 @@ def merge(
 
 
 #: The eight identities spec §7 pins by (slice, kind, symbol) — seven F3d's, one
-#: F3e's since F3d3b.
+#: F3e2's since F3d3b (moved to F3e1a Task 4).
 #:
 #: They are written down because the SCAN cannot be trusted to keep them: a
 #: tool_commit is only detected inside the EFFECT SCOPE — proposal_assist/tools/
@@ -320,11 +341,9 @@ def merge(
 #: the identity is genuinely gone from the design — which for F3d means never; each
 #: of these is converted, not abolished.
 #:
-#: `_write_citekey_cache` moved F3d3 -> F3e in F3d3b. Not to make a gate pass: its only
-#: owner-transaction caller holds the commit mutex EXCLUSIVELY, so the operation that
-#: fences it must own the whole git-then-rows sequence under that mutex — mechanism 2,
-#: which ports/effects.py says arrives in F3e. A mechanism-1 operation on a second
-#: connection blocks for lock_timeout and then raises. Measured, not predicted.
+#: `_write_citekey_cache` moved F3d3 -> F3e (F3d3b) -> F3e2 (F3e1a). Modifying a
+#: slice string to follow a human reallocation is NOT the deletion this comment
+#: forbids: the identity is intact and the row still exists.
 F3D_IDENTITIES: frozenset[tuple[str, str, str]] = frozenset({
     ("F3d2", "tool_commit", "submit_review_impl"),
     ("F3d2", "tool_commit", "submit_scorecard_impl"),
@@ -333,5 +352,5 @@ F3D_IDENTITIES: frozenset[tuple[str, str, str]] = frozenset({
     ("F3d2", "tool_commit", "fetch_reference_impl._refund_fetch_slot"),
     ("F3d3", "tool_commit", "propose_citation_impl"),
     ("F3d3", "tool_commit", "_propose_artifact_edit_impl"),
-    ("F3e", "tool_commit", "_write_citekey_cache"),
+    ("F3e2", "tool_commit", "_write_citekey_cache"),
 })
