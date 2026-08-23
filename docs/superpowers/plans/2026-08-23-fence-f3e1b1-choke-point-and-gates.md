@@ -26,7 +26,7 @@ Every task's requirements implicitly include this section.
 9. **`resolve_access` does not change.** All six call sites destructure exactly two values; a third element raises at every one. Routes read the workspace themselves after the check passes and mint from it.
 10. **No authorization call changes in this slice.** The mint site is "the object the existing check already loaded", whatever that check is.
 11. **Every code block here — implementation AND test — must be executed before it is written down, and RE-executed after any edit to what it depends on.** Revision 3 changed a gate's data shape from `str` to `(path, str)`, verified the gate, and left revision 2's tests of that gate untouched: the pin-mutation test then removed a bare string from a set of tuples, deleted nothing, and could never redden. MEASURED. Running the implementation is not enough — run the assertions that ride on it.
-12. **Before this plan is handed to anyone, every ```python block is extracted, parsed, and scanned for unbound names.** Rounds 1 and 9 each shipped a block that could not run — one an `UnboundLocalError` from `+=` in a closure, one a `NameError` from using `_callee_name` without importing it. Reviewers found both, which is a waste of a review round: a parse-and-resolve pass is seconds and finds this class mechanically. MEASURED: that scan found two further defects no reviewer had reported — a fixture parameter used but never bound, and three baseline constants referenced but never defined.
+12. **Before this plan is handed to anyone, every ```python block is dedented, parsed, and name-resolved.** A block that does not parse is ALWAYS a failure — that rule is what catches `<angle-bracket placeholders>`. A block that is not a whole unit declares `# SCAN: fragment` (parse only); a block appended to an existing test file declares `# SCAN: names-from <path>`, and the scan then resolves its free names against that file and **fails if a named helper does not exist there**. Rounds 1 and 9 each shipped a block that could not run — an `UnboundLocalError` from `+=` in a closure, and a `NameError` from using `_callee_name` unimported. Reviewers found both, which wastes a review round on something a seconds-long pass finds mechanically. MEASURED across revisions: the scan found a fixture parameter never bound; three baseline constants never defined; and — once it was made to fail on unparseable blocks instead of skipping them — two `<...>` placeholders that had survived NINE review rounds, one of them in a test built entirely from invented fixtures, routes, and helpers. The skip was the bug. Both rules are proven by mutation: reintroducing a placeholder gives `BLOCK 13: DOES NOT PARSE`, and inventing a helper gives `BLOCK 13: UNBOUND ['_totally_invented_helper'] (not in …)`.
 13. **Code in this plan was executed before it was written down.** Where a block says MEASURED, it was run against the tree at `8f7b1ef7` and passed `ruff check`. Revision 1 shipped a gate whose `problems += …` inside a closure raised `UnboundLocalError` on every call — it had been prototyped with `.append()` and re-typed differently into the plan. Copy these blocks verbatim; do not "tidy" them.
 
 ---
@@ -769,6 +769,12 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
     import ast
     import pathlib
 
+    # `_callee_name` is imported HERE, at the top, and used in both blocks below. An
+    # earlier revision used it in the second block without importing it at all: a
+    # NameError at collection time, in a plan whose Constraint 12 exists because of
+    # exactly that mistake.
+    from tests.fencing.git_fence import _callee_name
+
     root = pathlib.Path(__file__).resolve().parents[2]
     allowed = {
         "src/call_manager/proposal_assist/ports/invocation.py",
@@ -779,18 +785,32 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
         keyed on the literal name "FenceStamp" is bypassed by one import line."""
         names = {"FenceStamp"}
         tree = ast.parse(source)
-        # Two alias forms, not one. `from ... import FenceStamp as FS` AND the plain
-        # rebinding `FS = FenceStamp`, which an import-only check misses entirely.
-        for _ in range(3):  # transitive: FS = FenceStamp; G = FS
+        # THREE rebinding forms, not two. `from ... import FenceStamp as FS`; the plain
+        # `FS = FenceStamp`; and the QUALIFIED `FS = stamp.FenceStamp`, which binds the
+        # class without ever writing a bare name. `_callee_name` — NOT
+        # `isinstance(node.value, ast.Name)` — is what resolves the third: it returns the
+        # final name of an Attribute too. `test_f3e1a2_slice.py:41` already made exactly
+        # this correction for Primitive B, with a comment saying so; an earlier revision
+        # of THIS gate regressed to the bare-Name check that file had already retired.
+        # MEASURED: bare-Name misses `FS = stamp.FenceStamp; FS(...)` and
+        # `import x.stamp as m; FS = m.FenceStamp; FS(...)`. PROVEN BY MUTATION on the
+        # real tree: planting `FS = stamp.FenceStamp` + `FS(...)` in a new `ports/` file
+        # fails this test with "FenceStamp built outside its two constructors:
+        # ['...:7']"; with the bare-Name check it passed. Six alias shapes exercised.
+        for _ in range(3):  # transitive: FS = stamp.FenceStamp; G = FS
             before = len(names)
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom):
                     for a in node.names:
                         if a.name == "FenceStamp" and a.asname:
                             names.add(a.asname)
-                elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Name):
-                    if node.value.id in names:
-                        names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+                elif isinstance(node, ast.Assign | ast.AnnAssign):
+                    if node.value is None or _callee_name(node.value) not in names:
+                        continue
+                    targets = (
+                        node.targets if isinstance(node, ast.Assign) else [node.target]
+                    )
+                    names.update(t.id for t in targets if isinstance(t, ast.Name))
             if len(names) == before:
                 break
         return names
@@ -836,12 +856,8 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
         # Module AND class scope. `_own_calls` only ever sees a FUNCTION's body, so a
         # construction at import time — `_BLANK = FenceStamp(...)` beside the two
         # constructors, or inside a class body — was invisible to the walk above, in the
-        # file the allowlist trusts most.
-        #
-        # `_callee_name` must be IMPORTED here. An earlier revision used it in this block
-        # without importing it: a NameError at collection time, in a plan whose
-        # Constraint 12 exists because of exactly that mistake.
-        from tests.fencing.git_fence import _callee_name
+        # file the allowlist trusts most. (`_callee_name` is imported at the top of this
+        # test, not here.)
 
         def _outside_functions(node):
             """Statements that execute at definition time: module body and class bodies,
@@ -1207,6 +1223,7 @@ declared sites.
 Replace `acquire_commit_mutex_live(session, workspace_id)` with
 
 ```python
+    # SCAN: fragment
     acquire_commit_mutex_at_generation(
         session, workspace_id, generation=stamp.generation, stamp=stamp
     )
@@ -1398,6 +1415,7 @@ them, contradicting the task that had just made it not raise.
 Then assert the landing, every time:
 
 ```python
+    # SCAN: fragment
     assert head_before == _git(repo, "rev-parse", "HEAD")          # HEAD unchanged
     assert _git(repo, "status", "--porcelain") == ""               # worktree clean
     assert path.read_bytes() == before_bytes                       # byte-identical
@@ -1427,50 +1445,107 @@ technique that exposed Slice C1's decorative tests. Follow the precedent in
 
 **Also prove the threading, per edge:**
 
+Add to `tests/proposal_assist/collab/test_collab_kernel_citation.py`, which already has
+the setup helpers this needs (`_kernel_setup`, `_git_head`, `_get_ref`, `_mk_citation_pc`).
+
 ```python
-def test_the_inner_acquisition_receives_the_SAME_stamp_object(monkeypatch):
-    """§7.2. Spy every outer→inner edge and assert `received is supplied`, not `==`.
-    A re-mint under the held mutex reads the same generation, so equality passes and the
-    mis-threading is invisible.
+# SCAN: names-from tests/proposal_assist/collab/test_collab_kernel_citation.py
+def test_the_inner_acquisition_receives_the_SAME_stamp_object(
+    pg_session_factory, tmp_path, monkeypatch
+):
+    """§7.2, on the `kernel_accept_citation` -> `apply_citation_to_room` edge (§4.2's
+    seventh acquisition). Assert `received is minted`, not `==`: a re-mint under the held
+    mutex reads the same generation, so equality passes and the mis-threading is invisible.
 
-    An earlier revision shipped this as a DOCSTRING WITH NO BODY, which passes
-    unconditionally. Write the body.
+    Do NOT patch `stamp_for_workspace` to return a fixed object and then assert identity
+    against it — that makes the assertion true by construction whether or not the stamp is
+    threaded. Spy the MINT and the RECEIPT separately, and pin that the path mints exactly
+    once. Revisions 1-2 shipped this as a docstring with no body; revision 3 shipped
+    `supplied = <mint the stamp...>`, an angle-bracket placeholder that does not parse.
+
+    Assumes Task 2 imported `stamp_for_workspace` into `kernel.py` as a module global.
     """
-    import call_manager.proposal_assist.collab.checkpoint as cp_mod
+    import call_manager.proposal_assist.collab.kernel as kernel
+    from call_manager.db.models import User
 
-    seen = []
-    real = cp_mod.checkpoint_artifact
-    monkeypatch.setattr(
-        cp_mod,
-        "checkpoint_artifact",
-        lambda *a, **kw: (seen.append(kw.get("stamp")), real(*a, **kw))[1],
+    wid, oid, repo, room_doc, base_sha = _kernel_setup(
+        pg_session_factory, tmp_path, ref_citekey="smith2021"
     )
-    supplied = <mint the stamp at the entry point under test>
-    <drive the real entry point with `supplied`>
-    assert seen, "the inner call never happened — the spy proved nothing"
-    assert all(got is supplied for got in seen), [id(x) for x in seen]
+    head_before = _git_head(repo)
+    with pg_session_factory() as s:
+        ref = _get_ref(s, wid)
+        pc_id = _mk_citation_pc(
+            s, wid, section_index=1, base_commit_sha=head_before,
+            base_section_sha=base_sha, reference_id=ref.id,
+        )
+
+    minted: list = []
+    received: list = []
+    real_mint = kernel.stamp_for_workspace
+    real_inner = kernel.apply_citation_to_room
+
+    def _mint_spy(*a, **kw):
+        out = real_mint(*a, **kw)
+        minted.append(out)
+        return out
+
+    def _inner_spy(*a, **kw):
+        received.append(kw.get("stamp"))
+        return real_inner(*a, **kw)
+
+    monkeypatch.setattr(kernel, "stamp_for_workspace", _mint_spy)
+    monkeypatch.setattr(kernel, "apply_citation_to_room", _inner_spy)
+
+    with pg_session_factory() as s:
+        kernel_accept_citation(
+            s,
+            room_doc=room_doc,
+            proposed_change_id=pc_id,
+            workspace_id=wid,
+            approver=s.get(User, oid),
+            workspaces_dir=str(tmp_path),
+        )
+        s.commit()
+
+    # Three assertions, none of which the others imply.
+    assert len(minted) == 1, f"the path minted {len(minted)} stamps; a re-mint IS the defect"
+    assert received, "apply_citation_to_room never ran — the spy proved nothing"
+    assert all(got is minted[0] for got in received), [id(x) for x in received]
 ```
 
 - [ ] **Step 6: Collaborator authorization parity (spec crit-13)**
 
-```python
-def test_a_collaborator_with_write_access_can_still_cite_and_accept(client, collaborator, ws_id):
-    """Constraint 10 says no authorization call changes. The collab cite branch
-    authorizes with `resolve_access` (ANY member with write); only the flag-off branch
-    uses `require_owner`. Revision 2 of the spec guessed wrong here and would have
-    revoked collaborator access.
+**Write NO new test here.** Constraint 10 says no authorization call changes, and that
+requirement is *already* pinned by five tests that exist and pass today. Run them after
+Task 4's conversion and require green:
 
-    An earlier revision shipped this as a DOCSTRING WITH NO BODY — a test whose
-    docstring said "this ASSERTS it rather than trusting it" while asserting nothing.
-    Write the body: a NON-OWNER member with write access, through the real routes.
-    """
-    # `ws_id` is a fixture parameter, not a free name — an earlier revision used it
-    # without binding it anywhere.
-    cite = client.post(f"/api/workspaces/{ws_id}/cite", json=<...>, headers=collaborator)
-    assert cite.status_code == 200, cite.text
-    accept = client.post(f"/api/workspaces/{ws_id}/accept", json=<...>, headers=collaborator)
-    assert accept.status_code == 200, accept.text
+```bash
+uv run --python 3.12 pytest -q \
+  "tests/test_api_workspaces.py::test_post_citation_collab_any_writer_allowed" \
+  "tests/test_api_workspaces.py::test_post_citation_flag_off_still_owner_only" \
+  "tests/test_api_workspaces.py::test_post_citation_member_is_403" \
+  "tests/proposal_assist/test_web_proposed_changes.py::test_accept_endpoint_allows_viewer" \
+  "tests/proposal_assist/test_web_proposed_changes.py::test_accept_endpoint_rejects_non_member"
 ```
+
+MEASURED at rev 11: `5 passed in 5.98s`. What they pin, in order — a NON-OWNER member
+citing with collab ON succeeds (`resolve_access`, any writer); the same member with
+collab OFF is 403 (`require_owner`, unchanged git path); a member is 403; a viewer may
+accept; a non-member may not. Together that is crit-13, both sides, on the real routes.
+
+**Why this step used to be worse than nothing.** Revisions 1–2 shipped it as a docstring
+with no body. Revision 3 gave it a body — invented from memory, and wrong in every
+particular: fixtures (`client`, `collaborator`, `ws_id`) that do not exist; routes
+`/api/workspaces/{ws_id}/cite` and `/api/workspaces/{ws_id}/accept` that do not exist
+(the real ones are `POST /api/workspaces/{workspace_id}/citations` with an
+`AddCitationIn` body, and `POST /api/workspaces/{workspace_id}/proposed-changes/{pc_id}/accept`
+with **no body at all**); `headers=collaborator` where the file's own idiom is
+`_client(app, user_id)`; and no `_enable_collab(...)` call, without which the
+already-passing `test_post_citation_member_is_403` proves the OPPOSITE — collab is a DB
+row (`enabled_at is not None`), not an env flag. An implementer would have got a 404,
+"fixed" it toward the member-403 test, and concluded collaborators cannot cite — which is
+exactly the wrong conclusion spec revision 2 reached and this step exists to prevent.
+Grep for the coverage before writing the test.
 
 - [ ] **Step 7: Prove the gates bite — §5.3's mutations**
 
@@ -1643,6 +1718,15 @@ State this in the final review rather than discovering it later.
   over-approximation in one place while the gate's own docstring said the opposite.
   The compensating check is
   `test_every_declared_site_positively_takes_primitive_b`, which is two-sided.
+- **`_sink_bindings` misses the qualified alias.** MEASURED against the shipped
+  `tests/fencing/git_fence.py`: it resolves `from m import _run_git as wac` and
+  `wac = _run_git`, but not `wac = m._run_git`. Every gate reading `sink_calls`
+  inherits that blind spot, and `live_mutex_gate.py` claimed the direct approach
+  "hides nothing" on the strength of it — corrected in this slice's commit to
+  "hides strictly less". Fixing `_sink_bindings` itself is NOT in this slice: it
+  would newly resolve names across the whole tree and must land with its own suite
+  run. The constructor gate's `_stamp_aliases` does not share the gap; it uses
+  `_callee_name`.
 - **Five git SINKS remain unconverted** — `save_section`, `insert_citation_for_user`,
   `_insert_citation_locked` (F3e1b-2), `insert_from_annotation` and
   `post_init_spec._git` (F3e2) — plus `build_bibliography` (F3e2), `run_review_pass`
@@ -1686,3 +1770,17 @@ Kept so a future reader does not reintroduce any of it. Items 1–3 were Critica
 14. **The same-stamp-threading invariant was mandated and never tested.** Now enforced in
     the primitive and spied per edge.
 15. **Gate code was 101 characters wide** and would have failed `ruff check` (limit 100).
+16. **The constructor gate regressed a fix the tree had already made.** `_stamp_aliases`
+    used `isinstance(node.value, ast.Name)`, so `FS = stamp.FenceStamp; FS(...)` built a
+    third `FenceStamp` past it. `tests/fencing/test_f3e1a2_slice.py:41` had made exactly
+    this correction for Primitive B, with a comment saying a bare-Name check "saw only
+    the second form". Now uses `_callee_name`; MEASURED against six alias shapes.
+17. **Step 6 was invented from memory instead of grepped.** It posted to
+    `/api/workspaces/{ws_id}/cite` and `/accept` — neither exists — with fabricated
+    fixtures and `json=<...>` placeholders, to prove something
+    `test_post_citation_collab_any_writer_allowed` ALREADY proves and passes. It now runs
+    the five existing tests by name. Grep for the coverage before writing the test.
+18. **Constraint 12's scan silently skipped blocks that would not parse**, so the two
+    `<...>` placeholders survived nine review rounds while the scan reported clean. A
+    gate that skips what it cannot handle reports the absence of evidence as evidence of
+    absence.

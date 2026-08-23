@@ -17,8 +17,12 @@ at an outer boundary and mutated before reaching it.
 rejected only functions still taking ``_live``.  Two holes: deleting an outer
 ``_live`` WITHOUT adding ``_at_generation`` passed once its pin was removed, and
 a bare-name call graph does not "only over-report" — an alias or a rebound helper
-HIDES an edge, so it can under-report too.  ``sink_calls`` already resolves
-aliases via ``_sink_bindings``, so the direct approach hides nothing.
+HIDES an edge, so it can under-report too.  ``sink_calls`` resolves aliases via
+``_sink_bindings``, so the direct approach hides strictly less — not nothing.
+MEASURED: ``_sink_bindings`` resolves ``from m import _run_git as wac`` and
+``wac = _run_git``, but NOT the qualified ``wac = m._run_git``, which binds the
+sink without ever writing a bare name.  A call graph would compound that miss
+across every edge; the direct approach pays it once, at the call site.
 
 **Safe direction.**  ``unprotected_sinks`` under-reports by design (Task 5 brief,
 §"What this costs"): a correct ``try:``-acquire gives its sink a ``stmt_index``
