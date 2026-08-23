@@ -1,6 +1,6 @@
 # Fence F3e1a2 — a narrow allowlist for a position, not a proof of a lock
 
-**Status:** design, revision 5
+**Status:** design, revision 6
 **Slice:** `F3e1a2` — between `F3e1a` (merged, `2086ac19`) and `F3e1b` (pending)
 **Amends:** `2026-08-21-fence-f3e1-git-mechanism-design.md` §5.1
 **Touches:** `tests/fencing/git_fence.py` and its tests. No `src/` change. No row moves.
@@ -168,8 +168,27 @@ completeness" undoes this revision.
 
 ### 4.2 The walk contract
 
-Replacing `_iter_own_nodes` (`git_fence.py:136`), which descends into everything except
-nested `def`/`class`. The new walk yields `(node, credited)` and obeys:
+**Added alongside `_iter_own_nodes` (`git_fence.py:136`), not replacing it.**
+`_iter_own_nodes` has a second consumer, `_collect_functions` (`git_fence.py:176`),
+which iterates it as **plain AST nodes** (`for child in …`, `child is stmt`,
+`isinstance(child, …)`). Changing it to yield tuples breaks that caller silently — it
+would compare a tuple against `stmt` and `isinstance`-test a tuple, both simply False,
+so qualname discovery would go quietly empty rather than error. `_iter_own_nodes` and
+`_collect_functions` are therefore **left untouched**, and the new walk is a separate
+function used by `sink_calls` and the §4.3 yield scan.
+
+The two walks must agree on one thing — the nested-scope boundary — and the nine-holder
+real-tree probe (§5.6) plus the existing nested-`def` tests are what pin that agreement.
+
+**`sink_calls`'s pre-skip is REMOVED.** Today `sink_calls` skips a `FunctionDef` /
+`AsyncFunctionDef` / `ClassDef` body statement before it walks
+(`git_fence.py:233-235`), which is exactly why a sink in a nested `def`'s default or
+decorator is invisible. That `continue` goes; the boundary moves *inside* the new
+walk, which walks a nested definition's `decorator_list` and defaults while never
+entering its `body`. Revision 5's mutation 10 assumed the pre-skip survived — it does
+not, and §5.5 is corrected.
+
+The new walk yields `(node, credited)` and obeys:
 
 - **Monotonic.** `credited` starts `True` at the top-level statement and can only go
   `False`. It never returns to `True` deeper in the tree — a credited field beneath an
@@ -183,10 +202,11 @@ nested `def`/`class`. The new walk yields `(node, credited)` and obeys:
   (a separate qualname, analysed on its own pass). This closes a pre-existing discovery
   gap: today `sink_calls` skips a `FunctionDef` statement whole, so a sink in a nested
   `def`'s default or decorator yields **zero holders** — invisible, not merely unfenced.
-- **A `FunctionDef` handed to the walk directly is a trap.** `_iter_own_nodes` guards
-  only its *children*, so passing it a `def` descends into the body. `sink_calls` avoids
-  this by skipping nested scopes first (`git_fence.py:234`); a new caller will not. A
-  prototype of §4.3 hit exactly this and marked a correctly fenced function unfenced.
+- **A `FunctionDef` handed to a walk directly is a trap.** `_iter_own_nodes` guards
+  only its *children*, so passing it a `def` descends into the body. `sink_calls`
+  avoided this with the pre-skip that is now being removed, so the new walk must handle
+  a `def` **as its entry node**, not only as a child. A prototype of §4.3 hit exactly
+  this and marked a correctly fenced function unfenced.
 
 ### 4.3 The generator disqualifier
 
@@ -254,7 +274,7 @@ One per allowlist entry, plus the scope-boundary case. There is deliberately **n
 positive for `For`, `While`, `Return`, comprehensions or defaults: §4.1 does not credit
 them, and a positive test for one would be a request to widen the list.
 
-### 5.4 Negative cases — **20**, each must NOT be fenced
+### 5.4 Negative cases — **24**, each must NOT be fenced
 
 *Order and acquisition position (F3e1a's rules, re-verified against the new walk):*
 
@@ -279,6 +299,22 @@ them, and a positive test for one would be a request to widen the list.
   The unknown-*node* test does not prove field granularity; without this one, an
   implementation could allowlist by node type alone and pass everything else.
 
+*Discovery — uncredited but MUST still be found (§4.2's fix):*
+
+These are the cases that drive the pre-existing invisible-sink defect. Each asserts
+**both** that the outer function is unfenced **and** that it is still a holder with
+`stmt_index is None`. Without them the defect survives every other test on this list,
+and revision 5's mutation 11 had nothing to redden.
+
+- **sink in a nested `def`'s default** — `def inner(x=sink()): ...`
+- **sink in a nested `def`'s decorator** — `@register(sink())`
+- **sink in a `lambda`'s default** — `lambda x=sink(): x`
+- **sink in a nested `async def`'s default**
+
+(All four are eager in the enclosing scope — verified — yet none is credited, because
+defaults and decorators are not on §4.1's six-entry list. Eager is not a reason to
+credit; §4.1.)
+
 *Disqualifiers:*
 
 - generator: `yield` between acquisition and sink
@@ -287,8 +323,10 @@ them, and a positive test for one would be a request to widen the list.
 - `async def` with an own-scope `yield`
 - a `yield` in a nested `def`'s **default** — belongs to the enclosing function
   (verified with `inspect.isgeneratorfunction`)
-- `s.commit()` between the acquisition and the sink (§4.4) — verified falsely fenced
-  under revisions 1–4
+- a transaction ending between the acquisition and the sink (§4.4), **parameterised over
+  both `s.commit()` and `s.rollback()`** — both verified falsely fenced under revisions
+  1–4, and §4.4 disqualifies both, so testing only `commit` would leave `rollback`
+  unpinned
 
 Every uncredited and disqualified case must ALSO assert the qualname is **still a sink
 holder**, so a future change that fixes a verdict by losing the site is caught. §3 is
@@ -321,14 +359,22 @@ several flip a group by design, and that does not make them weaker.
 **Discovery and completeness — these move toward UNDER-reporting or affect only
 visibility.** They prove a case is pinned, not that the checker is safe:
 
-10. drop the nested-scope skip in `sink_calls` — the outer function gains a holder with
-    `stmt_index=None`. It does **not** falsely fence, which is why this is here and not
-    above; mutation 5 is the safety mutation for that boundary. (Revisions 3–4 filed
-    this as a safety mutation. Wrong.)
-11. stop walking `FunctionDef.decorator_list` / `args.defaults` — the §4.2 discovery
-    fix regresses and a nested-default sink vanishes from the holders entirely
-12. remove an entry from the allowlist table — its §5.3 positive flips to unfenced,
-    one test per entry, pinning that all six are load-bearing
+10. **restore `sink_calls`'s pre-skip** (`git_fence.py:233-235`) — the four §5.4
+    discovery cases lose their holder entirely, reproducing the pre-existing defect.
+    It does **not** falsely fence, which is why this sits here and not above; mutation 5
+    is the safety mutation for that boundary. (Revisions 3–5 wrote this as "drop the
+    nested-scope skip", which assumed the pre-skip survived. §4.2 removes it, so the
+    mutation is its restoration.)
+11. stop walking a nested definition's `decorator_list` / `args.defaults` /
+    `args.kw_defaults` inside the walk — the same four §5.4 discovery cases lose their
+    holder, by a different route than mutation 10
+12. remove one entry from §4.1's allowlist table — **name the expected test set per
+    entry rather than claiming one test each.** The table's paths *compose*: a sink in
+    an `if` is reached by `If.body` → `Expr.value`, so removing `Expr.value` flips the
+    bare-expression positive **and** the `If.body`, `Try.body`, `With.body` and
+    `AsyncWith.body` positives, since all four reach their call through a statement
+    node. Removing `Assign.value` flips only the assignment positive. The plan states
+    the expected flip set for each of the six.
 
 ### 5.6 Real-tree probe
 
@@ -389,7 +435,19 @@ that ends inside a called helper is invisible to it (§2). A slice claims `compl
 the measurement **plus** the parent spec's §5.2 runtime two-ordered-lock proof — never on
 the measurement alone.
 
-Both sentences belong in `git_fence.py`'s module docstring, next to each other.
+Both sentences belong in `git_fence.py`'s module docstring, next to each other — **and
+the word "provably" has to go from the places that already claim more than the checker
+delivers.** Two exist today and both are read by someone deciding whether a site is
+safe:
+
+- `git_fence.py:366` — `fenced_qualnames`: *"Return the set of qualnames whose git-sink
+  calls are **provably** fenced."*
+- `live_mutex_gate.py:1` — the gate's module docstring: *"every function holding a git
+  sink must be pinned or **provably** fenced."*
+
+Both become "passes the lexical check" or equivalent. Leaving them is not a wording
+nit: `live_mutex_gate.py` is the gate a future slice reads to decide it is done, and
+§2 is the reason it must not say "provably".
 
 ## 8. Slice status
 
@@ -411,6 +469,37 @@ And per §2 and §7, each converted site carries its runtime two-ordered-lock pr
 measurement is the ratchet; the runtime case is the proof.
 
 ## 10. Changelog
+
+**Revision 6** — five findings, all verified against the code before folding, none
+rejected. Two were High, and both were internal contradictions in revision 5 rather than
+new facts about Python.
+
+- **High — the walk contract contradicted its own mutation, twice.** §4.2 required the
+  new walk to reach a nested definition's decorators and defaults, but `sink_calls`
+  `continue`s past those statements *before* walking (`git_fence.py:233-235`), so it
+  never would; and mutation 10 assumed that pre-skip survived. §4.2 now states the
+  pre-skip is **removed** and the boundary moves inside the walk, and mutation 10 is
+  its **restoration**. Separately: `_iter_own_nodes` has a second consumer,
+  `_collect_functions` (`git_fence.py:176`), which iterates it as plain nodes — yielding
+  tuples would make `child is stmt` and `isinstance(child, …)` silently False and empty
+  qualname discovery **without an error**. So the new walk is **added alongside**;
+  `_iter_own_nodes` and `_collect_functions` are untouched.
+- **High — nothing tested the discovery fix.** Mutation 11 expected a nested-default
+  sink to vanish, but no §5.4 case put a sink in a nested default or decorator; the
+  yield-default case has its sink elsewhere, so holder visibility never moved. §5.4
+  gains a **Discovery** group of four cases — nested-`def` default, nested-`def`
+  decorator, `lambda` default, nested-`async def` default — each asserting the function
+  is unfenced **and still a holder with `stmt_index is None`**. Without them the
+  pre-existing invisible-sink defect survived every listed test.
+- **Medium — the docstring update was incomplete.** §7 mandated only the module
+  docstring while `fenced_qualnames` (`git_fence.py:366`) and `live_mutex_gate.py:1`
+  both still say "**provably** fenced". Both are now named. The gate's docstring matters
+  most: it is what a later slice reads to decide it is done.
+- **Low — `rollback` was unpinned.** §4.4 disqualifies `.commit()` and `.rollback()`;
+  §5.4 and mutation 8 exercised only `commit`. The case is now parameterised over both.
+- **Low — mutation 12's "one test per entry" is impossible.** The table's paths compose:
+  a sink in an `if` is reached by `If.body` → `Expr.value`, so removing `Expr.value`
+  flips five positives, not one. The plan now names the expected flip set per entry.
 
 **Revision 5** — four findings, all verified as counterexamples before folding, none
 rejected. Two were High.
@@ -439,7 +528,7 @@ rejected. Two were High.
   of being filled: `DictComp`, keyword-only defaults and nested-`def` decorators are not
   on the six-entry allowlist at all, so they need negatives, not positives.
 - Case counts shrank with the allowlist: **7 positives** (one per entry, plus the scope
-  case), **20 negatives**, **12 mutations** (9 safety, 3 discovery/completeness).
+  case), **24 negatives**, **12 mutations** (9 safety, 3 discovery/completeness).
 
 **Revision 4** — `ast.TypeAlias` (PEP 695) is a deferred context; a nested `def`'s
 defaults and decorators execute in the enclosing scope, which both hid a `yield` from the
