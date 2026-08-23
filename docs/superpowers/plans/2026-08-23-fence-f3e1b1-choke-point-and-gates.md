@@ -807,17 +807,33 @@ def test_only_the_two_sanctioned_constructors_build_a_FenceStamp():
     # Two-sided. `built == []` is also satisfied if BOTH constructors were deleted, or
     # if a third were added inside an allowlisted file. Assert the population, not just
     # its complement.
-    inside = []
+    from tests.fencing.converted_gate import _own_calls
+
+    inside = set()
     for rel in sorted(allowed):
-        for node in ast.walk(ast.parse((root / rel).read_text())):
-            if isinstance(node, ast.Call):
-                func = node.func
-                name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
-                if name == "FenceStamp":
-                    inside.append(rel)
-    assert sorted(inside) == sorted(allowed), (
-        f"expected exactly one construction in each of the two constructors, got {inside}"
-    )
+        tree = ast.parse((root / rel).read_text())
+        aliases = _stamp_aliases((root / rel).read_text())
+
+        def visit(node, prefix=""):
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                    sub = f"{prefix}.{child.name}" if prefix else child.name
+                    if not isinstance(child, ast.ClassDef):
+                        if aliases & {n for _l, n in _own_calls(child)}:
+                            inside.add((rel, sub))
+                    visit(child, sub)
+                else:
+                    visit(child, prefix)
+
+        visit(tree)
+    # By CONSTRUCTOR IDENTITY, not by file. `sorted(inside) == sorted(allowed)` is
+    # satisfied by two constructions in the right FILES but the wrong FUNCTIONS — a
+    # module-level `FenceStamp(...)` in stamp.py would pass while `stamp_for_workspace`
+    # had been gutted.
+    assert inside == {
+        ("src/call_manager/proposal_assist/ports/invocation.py", "Invocation.stamp"),
+        ("src/call_manager/proposal_assist/ports/stamp.py", "stamp_for_workspace"),
+    }, f"the two sanctioned constructors are not the two that build one: {sorted(inside)}"
 
 
 def test_a_stamp_for_a_DIFFERENT_workspace_raises(db_session, seeded_workspace):
@@ -1232,6 +1248,25 @@ def test_the_spec_lock_write_is_a_declared_effect():
 Then re-run `check_tree()` and **record the count before and after adding them.** If it
 does not move, say so — that is the measurement, not a disappointment.
 
+**And prove the boundary bites**, or the two names are decoration:
+
+```python
+def test_a_mutex_after_the_lock_write_is_rejected():
+    """Membership in `_EFFECTS` proves nothing on its own — the mutex already precedes
+    both calls today, so adding the names moves no count and no existing test. Drive a
+    fixture that puts the mutex BETWEEN the lock write and `checkpoint_artifact`: without
+    the lock write in `_EFFECTS` this passes, which is the defect."""
+    from tests.fencing.converted_gate import check_source
+
+    late = (
+        "def post_lock_spec(s, wid, stamp, ws):\n"
+        "    <lock-write callee>(s, ws)\n"
+        "    acquire_commit_mutex_at_generation(s, wid, generation=stamp.generation)\n"
+        "    return checkpoint_artifact(s, workspace_id=wid, stamp=stamp)\n"
+    )
+    assert any("precede" in p for p in check_source(late, "x/f.py"))
+```
+
 - [ ] **Step 4: Update the records and pins in the same working tree**
 
 - `live_mutex_gate.ENCLOSING_ACQUISITIONS` — remove the seven; it becomes
@@ -1245,6 +1280,49 @@ does not move, say so — that is the measurement, not a disappointment.
 
 `test_the_live_acquirers_partition_exactly` must stay green throughout: the eight leave
 the AST-discovered `_live` set and the literal records in the same commit.
+
+- [ ] **Step 4b: Migrate the two existing tests this task's record edits break**
+
+`tests/fencing/test_live_mutex_gate.py` already asserts things about
+`ENCLOSING_ACQUISITIONS`, and Step 4 empties its F3e1b entries. MEASURED: the F3e1b
+count goes 7 → 0, so `test_f3e1b_owns_exactly_the_seven_enclosing_acquisitions_of_spec_4_2`
+fails. Migrate it **in this commit** — Constraint 2 forbids leaving it red.
+
+Re-point it at the immutable catalog, which is what it was always trying to pin:
+
+```python
+def test_f3e1b_owns_exactly_the_seven_enclosing_acquisitions_of_spec_4_2():
+    """Spec §4.2's table, pinned to a record no conversion edits.
+
+    It previously read the seven out of `ENCLOSING_ACQUISITIONS`, which F3e1b-1 empties —
+    so the conversion broke the test that guarded it. `DECLARED_SITES` is fixed, so this
+    keeps asserting §4.2 after the sites convert.
+    """
+    from tests.fencing.f3e1b1_sites import DECLARED_SITES
+
+    assert {q for _p, q in DECLARED_SITES} == {
+        "checkpoint_artifact",  # the choke point, not a §4.2 row
+        "apply_citation_to_room",
+        "kernel_accept_prose",
+        "kernel_init_spec",
+        "kernel_accept_citation",
+        "apply_annotation_insert_to_room",
+        "post_lock_spec",
+        "post_unlock_spec",
+    }
+
+
+def test_only_F5s_enclosing_acquisition_remains_unconverted():
+    """The other half: after this slice, the live record holds exactly `_m1`."""
+    from tests.fencing.live_mutex_gate import ENCLOSING_ACQUISITIONS
+
+    assert dict(ENCLOSING_ACQUISITIONS) == {"Phase0Worker._m1": "F5"}
+```
+
+`test_the_live_acquirers_partition_exactly` also reads those records, and Step 4 keeps it
+green by editing the records in the same commit as the calls. **Run
+`tests/fencing/test_live_mutex_gate.py` before moving on** — those two tests are the ones
+this task's record edits reach.
 
 - [ ] **Step 5: Write the §5.2 races — both cases, every entry point**
 
@@ -1499,9 +1577,13 @@ State this in the final review rather than discovering it later.
   the commit mutex is transaction-scoped, so `acquire(); s.commit(); sink()` passes and
   is not fenced. A helper that commits is invisible to it entirely. The proof is Task 4's
   runtime races.
-- **The reach gate over-approximates.** Its call graph is name-based — two same-named
-  functions are one node, and an alias bound to an `ast.Attribute` is not followed. Safe
-  direction, but not a precise call graph.
+- **The reach gate is NOT purely conservative.** Its call graph over-approximates on
+  shared names (extra edges, extra pins — safe) but **UNDER-reports aliases**:
+  `f = mod.checkpoint_artifact; f(...)` is an edge it does not follow, and a missed
+  edge is a MISSED PIN, not an extra one. An earlier revision described this as safe
+  over-approximation in one place while the gate's own docstring said the opposite.
+  The compensating check is
+  `test_every_declared_site_positively_takes_primitive_b`, which is two-sided.
 - **Five git SINKS remain unconverted** — `save_section`, `insert_citation_for_user`,
   `_insert_citation_locked` (F3e1b-2), `insert_from_annotation` and
   `post_init_spec._git` (F3e2) — plus `build_bibliography` (F3e2), `run_review_pass`
