@@ -1,6 +1,6 @@
 # Fence F3e1a2 — the containing statement is the order
 
-**Status:** design, revision 3
+**Status:** design, revision 4
 **Slice:** `F3e1a2` — between `F3e1a` (merged, `2086ac19`) and `F3e1b` (pending)
 **Amends:** `2026-08-21-fence-f3e1-git-mechanism-design.md` §5.1
 **Touches:** `tests/fencing/git_fence.py` and its tests. No `src/` change. No row moves.
@@ -48,7 +48,10 @@ Replace the sink-position question. Today the checker asks:
 Ask instead:
 
 > Is the **acquisition** a standalone top-level statement at index *j*, and is every
-> sink that **runs with** its containing top-level statement at index *i* > *j*?
+> sink reached from a top-level statement at index *i* > *j* **through an explicitly
+> allowlisted path**?
+
+The allowlist is the whole design, and §2.1 explains why it had to become one.
 
 Nothing else changes:
 
@@ -58,7 +61,7 @@ Nothing else changes:
 - nested `def`s are still separate qualnames, analysed on their own pass;
 - the comparison is still `stmt_index <= first_acq → unfenced`, unchanged.
 
-### 2.1 Why it is sound, and the exception that makes "runs with" load-bearing
+### 2.1 Why it is sound, and why the exceptions had to become an allowlist
 
 A function body's statements execute in order. To reach any code inside statement
 *i*, control passed through statement *j* < *i*. Python has no goto and no way to
@@ -76,23 +79,36 @@ statement *i* runs, which is after *j* completes.
 assembly or an LLM call."* So any construct that hands control back to a caller
 between the acquisition and the sink can lose the mutex before the sink runs.
 
-Three constructs do that:
+### The count of such constructs is an OPEN SET, and that is the real finding
 
-1. **`lambda` bodies** — run on call, and the lambda can escape the function.
-2. **generator-expression bodies** — run on consumption, and the genexp can escape.
-3. **generator functions** — a body containing an own-scope `yield` or `yield from`.
+Three review rounds each found a new one, and every one was an over-report:
 
-The third is the worst of the three and revision 2 got it wrong in the safe-looking
-direction. A generator function's body **does not begin executing until the caller
-calls `next()`** — verified: creating the generator runs none of it. So the
-*acquisition itself* is deferred, and every `yield` thereafter returns control to a
-caller that may `COMMIT` or `ROLLBACK` and drop the mutex before the sink resumes.
-Revision 2 listed a generator with a `yield` between acquisition and sink as a
-**positive**. It is a negative.
+| Round | Construct | Why it defers |
+|---|---|---|
+| 1 | `lambda` body | runs on call; the lambda can escape |
+| 1 | generator-expression body | runs on consumption; the genexp can escape |
+| 2 | generator function (own-scope `yield`) | body does not start until `next()`; every `yield` hands the transaction back |
+| 3 | **`type X = sink()`** (PEP 695) | RHS is lazy — verified: it runs only on `__value__` access |
 
-Revision 1 claimed all nesting runs with its statement. That was **false**, and false
-in the dangerous direction. Measured on a prototype of revision 1's rule, all of these
-measured `fenced: true`:
+Revisions 1, 2 and 3 each responded by adding the newly-found construct to a
+**denylist**: credit everything, except these. That is the same shape as the effect
+enumeration that got F2 demoted from a gate, and it fails the same way. Python 3.12
+added `ast.TypeAlias`; a later version will add something else; and a denylist's
+default for anything unheard-of is **credit it** — the unsafe direction.
+
+**So revision 4 inverts the polarity.** The descent from a top-level statement to a
+sink is credited only along an **allowlist** of node types and fields that have been
+deliberately vetted as running with their statement. Anything else — an unrecognised
+node, a field nobody considered, a construct a future Python adds — yields
+`stmt_index = None` and fails closed.
+
+This closes the set. The question stops being *"did we remember to exclude X?"*, whose
+wrong answer over-reports, and becomes *"did we deliberately include X?"*, whose wrong
+answer under-reports and costs a pin. That is the same trade the whole checker is built
+on, applied one level up.
+
+Measured on a prototype of the earlier rules, every one of these measured
+`fenced: true`:
 
 ```python
 deferred = lambda: write_and_commit_files(repo, {}, "m")   # escapes, runs later
@@ -100,25 +116,29 @@ gen = (write_and_commit_files(repo, {}, "m") for item in items)
 return {"go": lambda: write_and_commit_files(repo, {}, "m")}
 register((write_and_commit_files(repo, {}, "m") for i in items))
 yield 1; sha = write_and_commit_files(repo, {}, "m")       # mutex may be gone
+type Deferred = write_and_commit_files(repo, {}, "m")      # lazy until __value__
 ```
 
-Each is an **over-report** — the direction that lets a slice claim a conversion it did
-not make. So: a sink inside an `ast.Lambda` or `ast.GeneratorExp` has **no provable
-position** (`stmt_index` is `None`, and the existing fail-closed branch reports it
-unfenced — §4.1), and a function with an own-scope `yield` is **disqualified outright**,
-like `acquire_commit_mutex_live` (§4.2).
+Generator functions remain a **disqualifier** rather than a position rule (§4.2),
+because a `yield` compromises the whole body, not one position in it.
 
-**The genexp boundary is an intentional under-report, not an exact one.** Python
-evaluates a generator expression's *outermost iterable* immediately — verified:
-`(elem(x) for x in outer())` calls `outer()` at creation and `elem` only on
-consumption. A sink in that one position is therefore eager and could safely be
-credited. Treating the whole `GeneratorExp` as deferred marks it unfenced instead.
-That is a deliberate simplification in the safe direction, consistent with the rest of
-this checker: the shape does not occur in the tree, and distinguishing it would add
-branch reasoning this design refuses to do.
+### Eager constructs that the allowlist must deliberately include
 
-**List, set and dict comprehensions are eager** in Python 3 — they have their own
-scope but run at their statement — so they are credited, and that is correct.
+Under an allowlist the burden flips: these run with their statement, so they are
+credited **on purpose**, and each is a case in §5.3.
+
+- **List, set and dict comprehensions** — own scope, but eager.
+- **A `lambda`'s DEFAULTS** — verified eager: `lambda x=sink(): x` calls `sink()` when
+  the lambda is created. Only the lambda's *body* defers. Revision 3 deferred the whole
+  `ast.Lambda`, which is safe but imprecise; the allowlist must distinguish the fields.
+- **A nested `def`'s defaults and decorators** — verified eager, and they execute in the
+  **enclosing** scope, not the nested one. §4.3 covers the two consequences.
+
+**The genexp boundary is an intentional under-report.** Python evaluates a generator
+expression's *outermost iterable* immediately — verified: `(elem(x) for x in outer())`
+calls `outer()` at creation. A sink in that one position is eager and could safely be
+credited. The allowlist does not include it: the shape does not occur in the tree, and
+distinguishing it would add reasoning this design refuses to do.
 
 **One failure mode is avoided here by construction.** Plan revision 2 compared *AST
 preorder* to execution order and was wrong: preorder visits an outer call before its
@@ -156,17 +176,28 @@ and a gate that says *you moved nothing*.
 
 ## 4. What changes in the code
 
-Two places in `tests/fencing/git_fence.py`, both small.
+All in `tests/fencing/git_fence.py`. Revisions 1–3 called this "two lines" and then
+"two places"; after §2.1's inversion it is honestly four, and the plan should be
+scoped for that.
 
 **`sink_calls`.** Today a sink that is not a bare top-level expression gets
 `stmt_index = None` ("position unknown"), and `unprotected_sinks` reports it as
 order-unprovable. After this slice it gets **the index of the top-level body statement
-that contains it** — unless it is deferred, which is the second place.
+that contains it** — but only when every step of the descent was allowlisted.
 
-**The walk.** `_iter_own_nodes` (`git_fence.py:136`) currently yields nodes only. It
-must also report whether the node lies inside an `ast.Lambda` or `ast.GeneratorExp`,
-the flag being set on crossing either boundary and inherited by everything beneath.
-Whether that is a new helper or an added parameter is the implementer's call.
+**The allowlist walk** (§2.1). `_iter_own_nodes` (`git_fence.py:136`) descends into
+everything except nested `def`/`class`. It is replaced by a descent that carries a
+`credited` flag, cleared the moment it steps through a node or field not on the
+allowlist. The allowlist names node types **and the fields within them** — §4.3 needs
+`FunctionDef.decorator_list` credited while `FunctionDef.body` is not, so a node-type
+allowlist alone cannot express it.
+
+A sink reached with `credited` still set records its containing statement index;
+otherwise it records `None` and fails closed. Deferred constructs (`Lambda.body`,
+`GeneratorExp`, `TypeAlias.value`) are simply absent from the allowlist rather than
+enumerated as exclusions — that is the point of the inversion.
+
+**The generator disqualifier** (§4.2) and **the field-aware scope boundary** (§4.3).
 
 **It has a second caller, and that one must not change.** `_collect_functions`
 (`git_fence.py:176`) uses the same walk to find nested `def`/`class` boundaries inside
@@ -197,14 +228,50 @@ really does acquire, sink, then yield measures unfenced and costs a pin. Reasoni
 about which yields precede which sinks is exactly the branch analysis this design
 refuses to do.
 
-**Own-scope means the existing walk, and there is a trap in it.** `_iter_own_nodes`
+**Own-scope means the allowlist walk of §4, not a nested-scope skip.** `_iter_own_nodes`
 guards only its *children*: handed an `ast.FunctionDef` directly it yields the node
 **and descends into its body**. `sink_calls` avoids this by skipping nested scopes
 before it calls the walk (`git_fence.py:234`), and `_collect_functions` never reaches
 the walk with a `def`. A yield scan written without that skip attributes a nested
 generator's `yield` to its enclosing function — confirmed on a prototype, where a
 correctly-fenced outer function measured unfenced because an unrelated nested `def`
-contained a `yield`. The plan must pin this with a test, not a comment.
+contained a `yield`.
+
+But a *plain* nested-scope skip is wrong too, in the other direction — see §4.3.
+
+### 4.3 The nested-scope boundary is field-aware, and today it is not
+
+A nested `def` is not wholly a separate scope. Its **defaults and decorators are
+evaluated in the enclosing function**, when the `def` statement runs. Verified both
+ways:
+
+```python
+def f():
+    def inner(x=sink()):    # sink() runs when f() runs, in f's scope
+        return x
+def f():
+    def inner(x=(yield 1)): # this yield makes F a generator
+        return x
+```
+
+`inspect.isgeneratorfunction(f)` is `True` for the second. Two consequences, one of
+them a defect in the code as merged:
+
+**4.3.1 — Discovery gap (pre-existing, `git_fence.py:233-234`).** `sink_calls` skips a
+   `FunctionDef` body statement entirely, so a sink in a nested `def`'s default or
+   decorator is **not found at all** — confirmed: both shapes yield zero holders today.
+   That is worse than unfenced; the site would simply be absent from the inventory. No
+   real site currently takes that shape (8 `write_and_commit_files` call sites plus 1
+   `_run_git` commit equal the 9 inventory rows exactly), so fixing it is inert — but
+   the hole should not be left open next to the one this slice closes.
+**4.3.2 — Yield gap.** A `yield` in a nested `def`'s default belongs to the enclosing
+   function and makes it a generator. A scan that skips the whole `FunctionDef` never
+   sees it, and §4.2's disqualifier misses — an over-report.
+
+Both are fixed by the same thing: the walk crosses a nested `def`/`lambda` boundary
+**field-aware**. `decorator_list`, `args.defaults` and `args.kw_defaults` belong to the
+enclosing scope and are traversed; `body` does not and is not. For a `lambda`,
+`args.defaults` / `args.kw_defaults` are traversed and `body` is not.
 
 Docstrings stating the old rule must be corrected in the same commit —
 `git_fence.py` module docstring, the `stmt_index` semantics note, `sink_calls`, and
@@ -260,7 +327,7 @@ do not:
 Because no existing test flips, **no existing test pins the widened behaviour.** The
 new tests below are the only thing that does.
 
-### 5.3 New positive cases — **13**, each must be fenced
+### 5.3 New positive cases — **15**, each must be fenced
 
 Acquisition as a standalone top-level statement at index 0, sink inside the top-level
 statement at index 1: `ast.Assign`; `ast.Try` body; `ast.Try` `finally`; `ast.If` body;
@@ -268,11 +335,15 @@ statement at index 1: `ast.Assign`; `ast.Try` body; `ast.Try` `finally`; `ast.If
 `async def`; and — pinning the eager/deferred boundary from the eager side — an
 `ast.ListComp` and an `ast.SetComp`.
 
-Plus one that pins §4.2's scope trap from the fenced side: **a correctly fenced
-function containing an unrelated nested `def` that is itself a generator.** The outer
-function must stay fenced. This is the case a naive yield scan fails.
+Plus three that pin the scope boundaries from the fenced side:
 
-### 5.4 New negative cases — **15**, each must NOT be fenced
+- **a correctly fenced function containing an unrelated nested `def` that is itself a
+  generator** — the outer stays fenced (the case a naive yield scan fails, §4.2);
+- **a sink in a nested `def`'s default**, at a statement after the acquisition — eager
+  in the enclosing scope, so fenced, and it must be **discovered at all** (§4.3.1);
+- **a sink in a `lambda`'s default** — eager, so fenced, unlike the same lambda's body.
+
+### 5.4 New negative cases — **18**, each must NOT be fenced
 
 - sink inside a top-level statement at index *i* < *j*
 - two sinks straddling the acquisition — one nested before it, one nested after
@@ -294,6 +365,15 @@ function must stay fenced. This is the case a naive yield scan fails.
   that §4.2 is a disqualifier and not a position rule
 - **`yield from` rather than `yield`**
 - **an `async def` with an own-scope `yield`** (an async generator)
+- **a `yield` in a nested `def`'s default** — it belongs to the enclosing function and
+  makes it a generator (§4.3.2); verified with `inspect.isgeneratorfunction`
+- **`type X = sink()`** — PEP 695, RHS lazy until `__value__`; verified to measure
+  falsely fenced under revision 3's rule
+- **a sink reached through a node type absent from the allowlist** — driven with a
+  construct the allowlist does not name, asserting the default is `None` and not
+  credit. This is the test that pins the *inversion itself*: without it, a future
+  allowlist rewrite could flip the default back to credit-by-default and nothing would
+  go red.
 
 Each deferred and generator case must ALSO assert that the qualname is **still a sink
 holder** — `sink_calls` returns it — so a future change that fixes the fencing verdict
@@ -318,24 +398,41 @@ change's risk:
    (Revision 1 specified mutating to index `0`. That mutation is **inert**: a sink
    nested before the acquisition already has index 0, so nothing changes and no test
    flips. It also mutated toward under-reporting, the harmless direction.)
-3. never set the `deferred` flag — all four §5.4 deferred cases flip to falsely fenced
-4. drop the §4.2 generator disqualifier — all four §5.4 generator cases flip to falsely
+3. **invert the allowlist default** — credit any descent not explicitly denied. Every
+   §5.4 deferred case, the type-alias case, and the unknown-node case flip to falsely
+   fenced. This is the mutation that proves §2.1's inversion is real and not just
+   prose describing a denylist.
+4. drop the §4.2 generator disqualifier — all §5.4 generator cases flip to falsely
    fenced
 5. drop the nested-scope skip in `sink_calls` — the nested-`def` case flips (F3e1a's
    mutation 6, re-verified against the new code)
+6. **credit `FunctionDef.body` as well as its decorators and defaults** — the §4.3
+   field distinction collapses, and the nested-`def`-body cases flip to falsely fenced
+7. **credit `Lambda.body` as well as `Lambda` defaults** — the lambda-body negatives
+   flip to falsely fenced while the lambda-default positive is unaffected, pinning
+   that the two fields are genuinely treated differently
 
 **Completeness coverage — these move toward UNDER-reporting**, so they prove a case is
 pinned rather than that the checker is safe. Kept, and labelled as what they are:
 
-6. set the `deferred` flag on `ast.ListComp`/`ast.SetComp` as well — the two eager
-   positives in §5.3 flip to unfenced, pinning the boundary from the eager side
-7. drop §4.2's nested-scope skip in the yield scan — the §5.3 unrelated-nested-generator
+8. remove `ast.ListComp`/`ast.SetComp` from the allowlist — the two eager positives in
+   §5.3 flip to unfenced, pinning the boundary from the eager side
+9. drop §4.2's nested-scope skip in the yield scan — the §5.3 unrelated-nested-generator
    positive flips to unfenced, pinning the trap named in §4.2
+10. remove `FunctionDef.decorator_list` / `args.defaults` from the allowlist — the
+    §5.3 nested-`def`-default positive flips to unfenced (and, before §4.3.1's fix,
+    would vanish as a holder entirely)
 
 ### 5.6 Real-tree probe
 
 `sink_calls` over `src/` still returns exactly nine holders, and
 `fenced_qualnames` over `src/` still returns the empty set.
+
+§4.3.1 widens discovery, so the nine-count is now a **two-sided** check: it must not
+grow (no new site appears) and it must not shrink. It is inert today because the raw
+call sites already account for exactly nine — 8 `write_and_commit_files` call sites
+plus 1 `_run_git` commit — so nothing is currently hiding in a default or a decorator.
+The plan must re-derive that arithmetic rather than assume it.
 
 ### 5.7 What the prototypes showed, and why they are exploratory only
 
@@ -395,6 +492,30 @@ wrong anyway. Prototype 2 repeated the lesson one revision later.
   criterion 9 says seven. It is inert today and stays F3e1b's problem.
 
 ## 6.1 Changelog
+
+**Revision 4** — two review findings, both verified as counterexamples before folding,
+neither rejected. Both were over-reports, which makes it **five over-reports found
+across four rounds**, and that trend is what revision 4 actually responds to.
+
+- **High.** `type X = sink()` (PEP 695, `ast.TypeAlias`) is a fourth deferred context —
+  verified lazy until `__value__`, and verified to measure **falsely fenced** under
+  revision 3's rule.
+- **High.** A nested `def`'s defaults and decorators execute in the **enclosing** scope.
+  Two consequences, both verified: a `yield` there makes the *enclosing* function a
+  generator, which revision 3's nested-scope skip never sees (over-report); and
+  `sink_calls` **loses a sink there entirely** today — zero holders, not an unfenced
+  one — which is a pre-existing discovery gap at `git_fence.py:233-234`. Also verified:
+  a `lambda`'s defaults are eager while its body is not, so the two need different
+  treatment.
+- **The structural change.** Revisions 1–3 each answered a finding by adding one entry
+  to a **denylist**, whose default for anything unheard-of is *credit it* — the unsafe
+  direction, and an open set, which is what got F2 demoted from a gate. §2.1 now
+  **inverts the polarity**: descent is credited only along an explicit allowlist of node
+  types **and fields**, and anything unrecognised fails closed. §5.4 gains a test for an
+  unallowlisted node, and safety mutation 3 flips the default back to prove the
+  inversion is real.
+- §4 is honest that this is no longer a two-line change, and §5.6's nine-count becomes
+  a two-sided check because §4.3.1 widens discovery.
 
 **Revision 3** — three review findings, all verified against the code before folding,
 none rejected.
