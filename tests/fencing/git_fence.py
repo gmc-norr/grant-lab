@@ -28,15 +28,14 @@ that inner qualname ALONE, no matter how deeply or indirectly it is nested.
 ``_collect_functions`` recurses into defs at any depth (including defs nested inside
 ``if``/``try``/``with``/``for`` blocks), building the qualname from the enclosing
 function/class names only (control-flow blocks are NOT scope boundaries).
-``sink_calls`` uses ``_iter_own_nodes`` for each body statement, which descends into
-control-flow children but stops at nested ``def``/``class`` boundaries — so a sink
-inside a branch-nested ``def`` is NOT inherited by the outer function.
+``sink_calls`` uses ``_iter_credited`` for each body statement, which walks into
+deferred contexts (lambda bodies, generator expressions, class bodies, definition
+decorators/defaults/annotations) but stops at nested ``def`` bodies — so a sink inside
+a branch-nested ``def`` body is NOT inherited by the outer function.
 
-**``stmt_index`` semantics**: set only when the sink is a *bare top-level expression
-statement* (``ast.Expr`` whose value IS the sink call directly in the function body).
-It is ``None`` for a captured sink (``sha = write_and_commit_files(...)``), a sink
-nested in a branch / ``with`` / argument, or a sink inside a nested def. ``None``
-means "position unknown to the cheap check" → unprovable → unfenced.
+**``stmt_index`` semantics**: set to the containing top-level statement's index when
+every step of the descent was allowlisted (``CREDITED_FIELDS``), and ``None``
+otherwise — including deferred contexts and anything unrecognised.
 
 All nine real sites capture or nest their sink, so all nine measure ``fenced: false``
 through this checker regardless of acquisition shape. ``fenced: false`` does NOT mean
@@ -61,6 +60,26 @@ GIT_SINKS: tuple[tuple[str, str, str], ...] = (
 
 _ACQ_AT_GEN = "acquire_commit_mutex_at_generation"
 _ACQ_LIVE = "acquire_commit_mutex_live"
+
+#: F3e1a2 §4.1. The ONLY (node type, field) steps along which a sink's position is
+#: credited. Everything absent from this table — an unlisted node, an unlisted field
+#: of a listed node, or anything a future Python adds — yields stmt_index=None and
+#: fails closed.
+#:
+#: Six entries, and they are exactly what the nine production sink paths need,
+#: derived from the tree rather than chosen. DO NOT ADD AN ENTRY BECAUSE A CONSTRUCT
+#: IS EAGER. `For.body`, `Return.value`, `If.orelse`, `Try.finalbody` and every
+#: comprehension are all eager and all deliberately absent: each is an under-report
+#: costing a pin, and the smallness of this table IS the safety property. Add an
+#: entry only when a real site needs it, as a reviewed diff with its own test.
+CREDITED_FIELDS: dict[type[ast.AST], frozenset[str]] = {
+    ast.Assign: frozenset({"value"}),
+    ast.Expr: frozenset({"value"}),
+    ast.If: frozenset({"body"}),
+    ast.Try: frozenset({"body"}),
+    ast.With: frozenset({"body"}),
+    ast.AsyncWith: frozenset({"body"}),
+}
 
 # Names of all sink functions (canonical, final name component).
 _SINK_NAMES: frozenset[str] = frozenset(name for _, name, _ in GIT_SINKS)
@@ -148,6 +167,66 @@ def _iter_own_nodes(stmt: ast.stmt):
             yield from _iter_own_nodes(child)
 
 
+def _walk_fields(node: ast.AST, skip: tuple[str, ...] = ()):
+    """Yield every direct AST child of *node*, skipping the named fields."""
+    for field, value in ast.iter_fields(node):
+        if field in skip:
+            continue
+        for child in value if isinstance(value, list) else [value]:
+            if isinstance(child, ast.AST):
+                yield child
+
+
+def _iter_credited(node: ast.AST, credited: bool):
+    """Yield ``(node, credited)`` for everything reachable in the ENCLOSING scope.
+
+    F3e1a2 §4.2.
+
+    * **Monotonic.** ``credited`` starts True at a top-level statement and can only
+      go False — a listed field beneath an unlisted one stays uncredited, or a sink
+      at ``Lambda.body -> Assign.value`` would be credited.
+    * **Discovery does not stop at False.** The walk keeps descending, so a sink in a
+      lambda, generator expression, type alias, class base or annotation is still
+      FOUND; only its position is lost. A site missing from the inventory is worse
+      than one measuring ``false``.
+    * **A definition's ONLY unwalked field is a FUNCTION's body.** Everything else a
+      ``def``/``class`` carries — decorators, bases, keywords, argument defaults,
+      argument and return ANNOTATIONS, the class body — executes in the enclosing
+      scope when that statement runs, so all of it is walked, uncredited.
+
+    The def/lambda/class asymmetry is deliberate. Read this before "simplifying" it:
+
+    * a nested ``def``'s **body** is skipped — it has its own qualname and
+      ``_collect_functions`` analyses it on a separate pass, so nothing is lost;
+    * a ``lambda``'s body is **walked** — a lambda is ANONYMOUS, gets no qualname,
+      and nothing else ever visits it, so skipping it makes a sink inside VANISH;
+    * a ``class``'s body is **walked** — its statements run at class-definition time,
+      in this function. Methods inside are ``FunctionDef``s and stop at their own
+      body by the first rule.
+
+    Unlike ``_iter_own_nodes`` this handles a definition as its ENTRY node, not only
+    as a child — ``sink_calls`` no longer pre-skips them.
+    """
+    yield node, credited
+
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        for child in _walk_fields(node, skip=("body",)):
+            yield from _iter_credited(child, False)
+        return
+
+    if isinstance(node, (ast.Lambda, ast.ClassDef)):
+        for child in _walk_fields(node):
+            yield from _iter_credited(child, False)
+        return
+
+    allowed = CREDITED_FIELDS.get(type(node), frozenset())
+    for field, value in ast.iter_fields(node):
+        child_credited = credited and field in allowed
+        for child in value if isinstance(value, list) else [value]:
+            if isinstance(child, ast.AST):
+                yield from _iter_credited(child, child_credited)
+
+
 def _collect_functions(
     tree: ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
     prefix: str,
@@ -201,11 +280,9 @@ def sink_calls(source: str, path: str) -> list[tuple[str, ast.Call, int | None]]
     """Return ``[(qualname, call_node, stmt_index)]`` for every git-sink call.
 
     ``stmt_index`` is the index of the function-body top-level statement that
-    contains the call.  It is set ONLY when the sink is a **bare top-level
-    expression statement** (``ast.Expr`` whose value IS the sink call) — i.e.
-    the sink is directly in the function body as a standalone call, not captured,
-    not nested in a branch / ``with`` / argument, and not inside a nested def.
-    ``None`` means position unknown → unprovable → unfenced.
+    contains the call.  It is set to the containing top-level statement's index when
+    every step of the descent was allowlisted (``CREDITED_FIELDS``), and ``None``
+    otherwise — including deferred contexts and anything unrecognised.
 
     *path* is used to filter which GIT_SINKS apply (matched by suffix).  When no
     suffix matches, all sink names are eligible (conservative: may over-count but
@@ -230,41 +307,20 @@ def sink_calls(source: str, path: str) -> list[tuple[str, ast.Call, int | None]]
     for qualname, func in _collect_functions(tree, ""):
         body = func.body
         for stmt_idx, stmt in enumerate(body):
-            # Skip nested scopes — they are separate qualnames, analysed on their own pass.
-            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                continue
-
-            # Check if this statement IS a bare top-level sink expression.
-            is_bare_top_level = (
-                isinstance(stmt, ast.Expr)
-                and isinstance(stmt.value, ast.Call)
-                and (callee := _callee_name(stmt.value.func)) is not None
-                and bindings.get(callee) in relevant
-                and _is_commit_call(bindings[callee], stmt.value)
-            )
-
-            if is_bare_top_level:
-                results.append((qualname, stmt.value, stmt_idx))
-            else:
-                # Walk the statement WITHOUT crossing into nested function/class scopes
-                # — use _iter_own_nodes so a sink inside a branch-nested def is NOT
-                # attributed to the outer function (it will be attributed on that inner
-                # def's own pass through _collect_functions).
-                for node in _iter_own_nodes(stmt):
-                    if node is stmt:
-                        continue
-                    if not isinstance(node, ast.Call):
-                        continue
-                    callee = _callee_name(node.func)
-                    if callee is None:
-                        continue
-                    canonical = bindings.get(callee)
-                    if canonical not in relevant:
-                        continue
-                    if not _is_commit_call(canonical, node):
-                        continue
-                    # This sink is nested — stmt_index is None (position unknown).
-                    results.append((qualname, node, None))
+            # NO pre-skip: a nested def's decorators and defaults run HERE, in this
+            # function's scope, and a sink in one must still be discovered (§4.2).
+            for node, credited in _iter_credited(stmt, True):
+                if not isinstance(node, ast.Call):
+                    continue
+                callee = _callee_name(node.func)
+                if callee is None:
+                    continue
+                canonical = bindings.get(callee)
+                if canonical not in relevant:
+                    continue
+                if not _is_commit_call(canonical, node):
+                    continue
+                results.append((qualname, node, stmt_idx if credited else None))
 
     return results
 
@@ -277,7 +333,11 @@ def unprotected_sinks(source: str, path: str) -> dict[str, list[str]]:
     - ``acquire_commit_mutex_at_generation`` appears as a standalone ``ast.Expr``
       directly in the function body (not inside if/try/for/while/with), AND
     - it appears before every statement containing a sink call (by stmt_index), AND
-    - no ``acquire_commit_mutex_live`` appears anywhere in the function.
+    - no ``acquire_commit_mutex_live`` appears anywhere in the function, AND
+    - no ``yield`` or ``yield from`` appears in the function's own scope (§4.3,
+      Task 2 — implemented in Task 2), AND
+    - no visible transaction ending appears between the acquisition and the sink
+      (§4.4, Task 3 — implemented in Task 3).
 
     Everything else is unfenced, including correct shapes this checker cannot prove.
     """

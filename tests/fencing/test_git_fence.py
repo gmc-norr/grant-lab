@@ -158,3 +158,182 @@ def test_branch_nested_def_attributed_to_inner_not_outer():
     assert "outer" not in fenced_qualnames(src, "x/f.py")
     assert "outer.inner" in holders
     assert "outer.inner" in unprotected_sinks(src, "x/f.py")
+
+
+# ---------------------------------------------------------------- F3e1a2 §5.3
+# One positive per §4.1 allowlist entry. There is deliberately NO positive for
+# `for`, `while`, `return`, comprehensions or defaults: §4.1 does not credit them,
+# and adding one would be a request to widen the list.
+
+_ASYNC_HEAD = "async def f(s, w, stamp, repo, cond):\n"
+
+
+def test_assign_value_is_credited():
+    assert _fenced(_ACQ + "    sha = write_and_commit_files(repo, {}, 'm')\n") == {"f"}
+
+
+def test_expr_value_is_credited():
+    assert _fenced(_ACQ + _SINK) == {"f"}
+
+
+def test_if_body_is_credited():
+    assert _fenced(_ACQ + "    if cond:\n    " + _SINK) == {"f"}
+
+
+def test_try_body_is_credited():
+    src = _ACQ + "    try:\n    " + _SINK + "    except Exception:\n        pass\n"
+    assert _fenced(src) == {"f"}
+
+
+def test_with_body_is_credited():
+    assert _fenced(_ACQ + "    with open('x') as fh:\n    " + _SINK) == {"f"}
+
+
+def test_async_with_body_is_credited():
+    src = _ASYNC_HEAD + _ACQ + "    async with lock:\n    " + _SINK
+    assert fenced_qualnames(src, "x/f.py") == {"f"}
+
+
+# ---------------------------------------------------------------- F3e1a2 §5.4
+# Uncredited paths. Each asserts BOTH verdicts: unfenced AND still a holder.
+# The holder assertion is the point — an invisible sink is worse than an unfenced
+# one (spec §3), and a future "fix" that loses the site must go red here.
+
+def _uncredited_but_held(body: str, head: str = _HEAD) -> None:
+    """The sink's POSITION is unprovable: unfenced, still found, index None."""
+    src = head + body
+    calls = sink_calls(src, "x/f.py")
+    assert fenced_qualnames(src, "x/f.py") == set(), "must not be credited"
+    assert {q for q, _n, _i in calls} == {"f"}, "sink must remain discoverable"
+    assert [i for _q, _n, i in calls] == [None], "position must be unprovable"
+
+
+def _disqualified_but_held(body: str, head: str = _HEAD) -> None:
+    """The sink's position is FINE — the FUNCTION is disqualified.
+
+    Distinct from _uncredited_but_held ON PURPOSE. These cases put the sink on a
+    CREDITED path (`sha = sink(...)` is `Assign.value`), so its index is an INT, not
+    None — asserting None fails for the wrong reason.
+
+    It asserts `isinstance(i, int)` rather than a literal. An earlier draft hardcoded
+    `[2]` and was wrong for half these cases: measured, `yield` before the sink gives
+    2, `yield` after gives 1, and a `yield` in a nested default gives 1. The exact
+    index is an artefact of how many statements the fixture happens to have; what
+    matters is that the position was credited and the verdict is still unfenced.
+    """
+    src = head + body
+    calls = sink_calls(src, "x/f.py")
+    assert fenced_qualnames(src, "x/f.py") == set(), "must be disqualified"
+    assert {q for q, _n, _i in calls} == {"f"}, "sink must remain discoverable"
+    indices = [i for _q, _n, i in calls]
+    assert all(isinstance(i, int) for i in indices), (
+        f"the POSITION should be credited here; the FUNCTION is what fails. got {indices}"
+    )
+
+
+def test_lambda_body_is_not_credited():
+    _uncredited_but_held(_ACQ + "    return lambda: write_and_commit_files(repo, {}, 'm')\n")
+
+
+def test_generator_expression_is_not_credited():
+    _uncredited_but_held(
+        _ACQ + "    return (write_and_commit_files(repo, {}, 'm') for i in [1])\n"
+    )
+
+
+def test_lambda_nested_in_a_returned_container_is_not_credited():
+    _uncredited_but_held(
+        _ACQ + "    return {'go': lambda: write_and_commit_files(repo, {}, 'm')}\n"
+    )
+
+
+def test_generator_expression_as_a_call_argument_is_not_credited():
+    _uncredited_but_held(
+        _ACQ + "    register((write_and_commit_files(repo, {}, 'm') for i in [1]))\n"
+    )
+
+
+def test_a_pep695_type_alias_is_not_credited():
+    """PEP 695: the RHS is lazy until `__value__` is read, and the alias can escape."""
+    _uncredited_but_held(_ACQ + "    type Deferred = write_and_commit_files(repo, {}, 'm')\n")
+
+
+def test_an_unlisted_NODE_type_is_not_credited():
+    """ast.For is not in CREDITED_FIELDS at all. The default must be no-credit."""
+    _uncredited_but_held(_ACQ + "    for i in [1]:\n    " + _SINK)
+
+
+def test_a_live_acquisition_inside_a_LAMBDA_still_disqualifies():
+    """Verified to disqualify today via `has_live`, which uses ast.walk and so
+    descends into lambdas. The new walk must not accidentally excuse it: for a
+    DISQUALIFIER, deferred execution is not a defence."""
+    src = (
+        _HEAD
+        + _ACQ
+        + "    cb = lambda: acquire_commit_mutex_live(s, w)\n"
+        + "    sha = write_and_commit_files(repo, {}, 'm')\n"
+    )
+    assert fenced_qualnames(src, "x/f.py") == set()
+
+
+# --- DISCOVERY. These live in Task 1, not later, because spec §5.7 requires every
+# --- case locked BEFORE the implementation that satisfies it. All execute in the
+# --- ENCLOSING scope when their statement runs; NONE is credited, because eager is
+# --- not a reason to credit (§4.1). Each must still be FOUND — that is the point.
+
+def test_a_sink_in_a_nested_defs_DEFAULT_is_found_but_not_credited():
+    _uncredited_but_held(
+        _ACQ + "    def inner(x=write_and_commit_files(repo, {}, 'm')):\n        return x\n"
+    )
+
+
+def test_a_sink_in_a_nested_defs_DECORATOR_is_found_but_not_credited():
+    _uncredited_but_held(
+        _ACQ
+        + "    @register(write_and_commit_files(repo, {}, 'm'))\n"
+        + "    def inner():\n        pass\n"
+    )
+
+
+def test_a_sink_in_a_LAMBDAS_default_is_found_but_not_credited():
+    _uncredited_but_held(_ACQ + "    cb = lambda x=write_and_commit_files(repo, {}, 'm'): x\n")
+
+
+def test_a_sink_in_a_nested_ASYNC_defs_default_is_found_but_not_credited():
+    _uncredited_but_held(
+        _ACQ
+        + "    async def inner(x=write_and_commit_files(repo, {}, 'm')):\n        return x\n"
+    )
+
+
+def test_a_sink_in_an_ANNOTATION_is_found_but_not_credited():
+    """Argument and return annotations evaluate at `def` time, in THIS scope, unless
+    the scanned file carries `from __future__ import annotations` — which the checker
+    cannot rely on. Fail closed: found, never credited."""
+    _uncredited_but_held(
+        _ACQ + "    def inner(x: write_and_commit_files(repo, {}, 'm')):\n        pass\n"
+    )
+    _uncredited_but_held(
+        _ACQ + "    def inner() -> write_and_commit_files(repo, {}, 'm'):\n        pass\n"
+    )
+
+
+def test_a_sink_in_a_nested_CLASS_is_found_but_not_credited():
+    """A `class` statement runs its decorators, bases, keywords and body immediately,
+    in this function. All four shapes were invisible before this slice."""
+    for body in (
+        "    class C:\n        x = write_and_commit_files(repo, {}, 'm')\n",
+        "    class C(write_and_commit_files(repo, {}, 'm')):\n        pass\n",
+        "    class C(metaclass=write_and_commit_files(repo, {}, 'm')):\n        pass\n",
+        "    @register(write_and_commit_files(repo, {}, 'm'))\n    class C:\n        pass\n",
+    ):
+        _uncredited_but_held(_ACQ + body)
+
+
+def test_an_unlisted_FIELD_of_a_listed_node_is_not_credited():
+    """`ast.If` IS listed, but only its `body`. `orelse` is not.
+
+    The unknown-NODE test above does not prove this: an implementation that
+    allowlisted by node type alone would pass that one and fail here.
+    """
+    _uncredited_but_held(_ACQ + "    if cond:\n        pass\n    else:\n    " + _SINK)
