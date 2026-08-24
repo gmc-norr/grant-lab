@@ -102,6 +102,11 @@ UNCONVERTED_LIVE_CALLERS: frozenset[tuple[str, str]] = frozenset(
             "src/call_manager/proposal_assist/review/pass_runner.py",
             "run_review_pass",
         ),
+        # post_init_spec._git: converted to Primitive B in endgame Task 4.
+        # The acquisition is inside a try: block, so the static checker cannot prove
+        # order (stmt_index=None for the sink) and still reports it as unprotected.
+        # The §5.2 runtime proof is that require_owner stamps the generation before the
+        # mutex, and write_and_commit_files is only reached under that mutex.
         (
             "src/call_manager/web/api/workspaces.py",
             "post_init_spec._git",
@@ -145,8 +150,7 @@ ENCLOSING_ACQUISITIONS: Mapping[tuple[str, str], str] = {
         "src/call_manager/proposal_assist/collab/kernel.py",
         "apply_annotation_insert_to_room",
     ): "F3e1b",
-    ("src/call_manager/web/api/workspaces.py", "post_lock_spec"): "F3e1b",
-    ("src/call_manager/web/api/workspaces.py", "post_unlock_spec"): "F3e1b",
+    # post_lock_spec and post_unlock_spec converted to Primitive B in endgame Task 4
     ("src/call_manager/proposal_assist/phases/setup.py", "Phase0Worker._m1"): "F5",
 }
 
@@ -158,7 +162,7 @@ LIVE_ACQUIRING_SINK_HOLDERS: frozenset[tuple[str, str]] = frozenset(
         ("src/call_manager/proposal_assist/collab/checkpoint.py", "checkpoint_artifact"),
         ("src/call_manager/proposal_assist/citations/core.py", "_insert_citation_locked"),
         ("src/call_manager/proposal_assist/editing/save.py", "save_section"),
-        ("src/call_manager/web/api/workspaces.py", "post_init_spec._git"),
+        # post_init_spec._git converted to Primitive B in endgame Task 4
     }
 )
 

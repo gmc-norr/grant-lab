@@ -339,12 +339,12 @@ def test_collab_unlock_no_committable_head_is_404(
 
 
 def _install_flip_on_acquire(monkeypatch, pg_session_factory, ws_id):
-    """Monkeypatch workspaces.acquire_commit_mutex to enable spec collab (on a
-    separate committed session) as a side effect before acquiring — simulating a
+    """Monkeypatch workspaces.acquire_commit_mutex_at_generation to enable spec collab
+    (on a separate committed session) as a side effect before acquiring — simulating a
     first-touch flip that committed just before we got the mutex."""
     import call_manager.web.api.workspaces as workspaces_mod
 
-    real_acquire = workspaces_mod.acquire_commit_mutex_live
+    real_acquire = workspaces_mod.acquire_commit_mutex_at_generation
 
     def _flip_then_acquire(session, wsid, **kw):
         with pg_session_factory() as s2:
@@ -352,7 +352,7 @@ def _install_flip_on_acquire(monkeypatch, pg_session_factory, ws_id):
             s2.commit()
         return real_acquire(session, wsid, **kw)
 
-    monkeypatch.setattr(workspaces_mod, "acquire_commit_mutex_live", _flip_then_acquire)
+    monkeypatch.setattr(workspaces_mod, "acquire_commit_mutex_at_generation", _flip_then_acquire)
 
 
 def test_lock_reads_flag_under_mutex_after_concurrent_flip(

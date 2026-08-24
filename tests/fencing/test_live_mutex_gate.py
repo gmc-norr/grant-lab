@@ -111,10 +111,12 @@ def test_the_live_acquirers_partition_exactly():
         assert left & right == set(), f"a qualname is in two records: {sorted(left & right)}"
 
 
-def test_f3e1b_owns_exactly_the_seven_enclosing_acquisitions_of_spec_4_2():
-    """Spec §4.2's table, as a gate. Its seven rows all reach `checkpoint_artifact`.
+def test_f3e1b_owns_exactly_the_five_enclosing_acquisitions_remaining_after_endgame_task4():
+    """Spec §4.2's table originally had seven rows; two route sites were converted by
+    endgame Task 4 (post_lock_spec, post_unlock_spec) and are no longer enclosing
+    acquisitions. The five remaining all reach `checkpoint_artifact`.
 
-    `Phase0Worker._m1` is the eighth enclosing acquisition in the tree and is NOT one of
+    `Phase0Worker._m1` is the sixth enclosing acquisition in the tree and is NOT one of
     them: it reaches `_init_repo`, whose inventory row is F5. Scheduling it into F3e1b
     would make F3e1b's completion criterion (spec §13 crit-9) unsatisfiable, because F5's
     sink is not F3e1b's to convert.
@@ -122,15 +124,12 @@ def test_f3e1b_owns_exactly_the_seven_enclosing_acquisitions_of_spec_4_2():
     from tests.fencing.live_mutex_gate import ENCLOSING_ACQUISITIONS
 
     _KERNEL = "src/call_manager/proposal_assist/collab/kernel.py"
-    _ROUTES = "src/call_manager/web/api/workspaces.py"
     assert {k for k, sl in ENCLOSING_ACQUISITIONS.items() if sl == "F3e1b"} == {
         (_KERNEL, "apply_citation_to_room"),
         (_KERNEL, "kernel_accept_prose"),
         (_KERNEL, "kernel_init_spec"),
         (_KERNEL, "kernel_accept_citation"),
         (_KERNEL, "apply_annotation_insert_to_room"),
-        (_ROUTES, "post_lock_spec"),
-        (_ROUTES, "post_unlock_spec"),
     }
     assert (
         ENCLOSING_ACQUISITIONS[

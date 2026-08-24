@@ -59,7 +59,6 @@ from call_manager.proposal_assist.collab.ws_auth import resolve_access
 from call_manager.proposal_assist.drafting.locking import (
     BUSY_ERROR_MESSAGE,
     CommitMutexTimeout,
-    acquire_commit_mutex_live,
 )
 from call_manager.proposal_assist.editing.save import (
     CITATIONS_FILENAME,
@@ -71,7 +70,9 @@ from call_manager.proposal_assist.editing.save import (
     save_section,
 )
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.fencing import acquire_commit_mutex_at_generation
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
 from call_manager.proposal_assist.proposals.kernel_accept import RoomEvicted
 from call_manager.proposal_assist.references.storage import ReferenceStorage
 from call_manager.proposal_assist.retirement import signal_workspace_retirement
@@ -527,6 +528,7 @@ async def post_init_spec(
     def _git() -> SpecOut:
         with sf() as session:
             ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+            stamp = stamp_for_workspace(ws)  # minted at the access check (endgame Task 4)
             repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
             spec = repo_dir / SPEC_FILENAME
             if not spec.exists():
@@ -537,7 +539,9 @@ async def post_init_spec(
                 # retiring rather than maintained. Slice C3 bounds its tail anyway — the 2s cap now
                 # left in force by acquire_commit_mutex applies at every site, including this one,
                 # with nothing needed here.
-                acquire_commit_mutex_live(session, ws.id)
+                acquire_commit_mutex_at_generation(
+                    session, stamp.workspace_id, generation=stamp.generation
+                )
                 # Severance recheck UNDER the mutex (3b-5d.D4 Item 2b): the _route()
                 # fork read the flag as False, but enable-on-touch may have flipped
                 # spec collab on while we blocked on the mutex. Abort writing NOTHING
@@ -643,12 +647,15 @@ def post_lock_spec(
     sf = request.app.state.session_factory
     with sf() as session:
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        stamp = stamp_for_workspace(ws)  # minted at the access check (endgame Task 4)
         repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
         spec_path = repo_dir / SPEC_FILENAME
         if not spec_path.exists():
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
         try:
-            acquire_commit_mutex_live(session, ws.id)
+            acquire_commit_mutex_at_generation(
+                session, stamp.workspace_id, generation=stamp.generation
+            )
             # Fresh flag read UNDER the mutex (Codex): a pre-mutex read can go
             # stale while we block — enable-on-touch commits the enable while
             # HOLDING this mutex, so an under-mutex read is authoritative. If it
@@ -732,11 +739,14 @@ def post_unlock_spec(
     sf = request.app.state.session_factory
     with sf() as session:
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        stamp = stamp_for_workspace(ws)  # minted at the access check (endgame Task 4)
         repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
         if not (repo_dir / SPEC_FILENAME).exists():
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
         try:
-            acquire_commit_mutex_live(session, ws.id)
+            acquire_commit_mutex_at_generation(
+                session, stamp.workspace_id, generation=stamp.generation
+            )
             # Fresh flag read UNDER the mutex (Codex) — see post_lock_spec for the
             # soundness argument; unlock shares the moved-read shape exactly.
             is_collab = collab_state.is_collab_enabled(
