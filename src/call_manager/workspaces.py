@@ -29,8 +29,8 @@ from call_manager.db.models import TurnJob, Workspace, WorkspaceEvent, Workspace
 from call_manager.proposal_assist.attachments.storage import AttachmentStorage
 from call_manager.proposal_assist.coherence.jobs import cancel_coherence_jobs_for_workspace
 from call_manager.proposal_assist.drafting.locking import (
+    WorkspaceDeleted,
     acquire_commit_mutex,
-    acquire_commit_mutex_live,
 )
 from call_manager.proposal_assist.evaluator.jobs import cancel_evaluator_jobs_for_workspace
 from call_manager.proposal_assist.references.storage import ReferenceStorage
@@ -160,17 +160,27 @@ def soft_delete_workspace_db(
         # than silently skipping the soft_deleted_at stamp while cancelling jobs.
         raise ValueError(f"workspace not found: {workspace_id}")
     # Take the per-workspace commit mutex for this whole transaction, BEFORE any
-    # mutation. Mutex-participating writers call acquire_commit_mutex_live, which
-    # re-reads soft_deleted_at once it wins this lock — so holding it here is what
-    # turns their check into a real linearization point rather than a hope.
+    # mutation. Mutex-participating writers re-read soft_deleted_at once they win
+    # this lock — so holding it here is what turns their check into a real
+    # linearization point rather than a hope.
     #
-    # _live, not the plain acquire: `ws` above was loaded BEFORE we could block on
-    # the mutex, so a concurrent deletion that committed while we waited would be
-    # invisible to it and we would re-stamp soft_deleted_at off a stale instance
-    # and report a second success. The fresh under-mutex read raises
-    # WorkspaceDeleted instead — which is exactly the route's documented
-    # re-delete 404.
-    acquire_commit_mutex_live(session, workspace_id, timeout_seconds=timeout_seconds)
+    # This path BUMPS the generation, so it takes the RAW acquire_commit_mutex,
+    # NOT the generation-fenced Primitive B (acquire_commit_mutex_at_generation):
+    # fencing a transition against the generation it is about to change is
+    # incoherent.
+    acquire_commit_mutex(session, workspace_id, timeout_seconds=timeout_seconds)
+    # The under-mutex liveness re-read, inlined. `ws` above was loaded BEFORE we
+    # could block on the mutex, so a concurrent deletion that committed while we
+    # waited would be invisible to it and we would re-stamp soft_deleted_at off a
+    # stale instance and report a second success. A FRESH scalar SELECT (never
+    # session.get, which can return the pre-block identity-map instance) raises
+    # WorkspaceDeleted instead — exactly the route's documented re-delete 404, and
+    # the same guard the deleted acquire_commit_mutex_live used to perform.
+    live = session.execute(
+        select(Workspace.soft_deleted_at).where(Workspace.id == workspace_id)
+    ).first()
+    if live is None or live[0] is not None:
+        raise WorkspaceDeleted(workspace_id)
     ws.soft_deleted_at = datetime.now(UTC)
     # Fail any active (queued|running) background pass so it can't claim and burn
     # cloud tokens after the workspace is gone (each claim_next also excludes
@@ -239,10 +249,10 @@ def restore_workspace_db(
     """Clear soft_deleted_at, allocate the lifecycle generation, repair the setup
     job and write the audit event — all in ONE transaction, then COMMIT.
 
-    Takes the plain commit mutex for the whole transaction, NEVER
-    acquire_commit_mutex_live: the _live variant re-reads liveness and raises
-    WorkspaceDeleted, which would refuse every workspace this function exists to
-    serve. Restore is the one path that makes the mutex load-bearing rather than
+    Takes the plain commit mutex for the whole transaction, and does NOT perform
+    the under-mutex liveness re-read that mutation writers do (a re-read would
+    raise WorkspaceDeleted and refuse every workspace this function exists to
+    serve). Restore is the one path that makes the mutex load-bearing rather than
     defensive — it FLIPS the liveness flag every other writer re-reads under that
     same mutex, which is what makes the flip a linearization point.
 

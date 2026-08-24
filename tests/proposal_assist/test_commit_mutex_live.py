@@ -1,6 +1,8 @@
-"""acquire_commit_mutex_live: the live-workspace guard on the commit mutex.
+"""acquire_commit_mutex_at_generation: the live-and-at-generation guard on the
+commit mutex (formerly acquire_commit_mutex_live, deleted in the fence endgame —
+the liveness half survives on Primitive B, which adds the generation check).
 
-The point of the helper is the FRESH read. session.get() can return the
+The point of the guard is the FRESH read. session.get() can return the
 identity-map instance loaded before we blocked on the mutex — which is exactly
 the instance a writer holds while a deletion commits underneath it.
 """
@@ -16,8 +18,8 @@ from call_manager.proposal_assist.drafting.locking import (
     CommitMutexTimeout,
     WorkspaceDeleted,
     acquire_commit_mutex,
-    acquire_commit_mutex_live,
 )
+from call_manager.proposal_assist.fencing import acquire_commit_mutex_at_generation
 from tests.proposal_assist.conftest import make_workspace
 
 
@@ -25,10 +27,10 @@ def test_live_workspace_acquires_normally(pg_session_factory):
     with pg_session_factory() as s:
         ws = make_workspace(s)
         s.commit()
-        ws_id = ws.id
+        ws_id, gen = ws.id, ws.lifecycle_generation
 
     with pg_session_factory() as s:
-        acquire_commit_mutex_live(s, ws_id)  # must not raise
+        acquire_commit_mutex_at_generation(s, ws_id, generation=gen)  # must not raise
         s.rollback()
 
 
@@ -36,22 +38,25 @@ def test_deleted_workspace_raises_before_any_mutation(pg_session_factory):
     with pg_session_factory() as s:
         ws = make_workspace(s)
         s.commit()
-        ws_id = ws.id
+        ws_id, gen = ws.id, ws.lifecycle_generation
     with pg_session_factory() as s:
         s.get(Workspace, ws_id).soft_deleted_at = datetime.now(UTC)
         s.commit()
 
     with pg_session_factory() as s:
+        # Deleted takes precedence over stale: WorkspaceDeleted even at the
+        # pre-delete generation, before any mutation.
         with pytest.raises(WorkspaceDeleted) as e:
-            acquire_commit_mutex_live(s, ws_id)
+            acquire_commit_mutex_at_generation(s, ws_id, generation=gen)
         assert e.value.workspace_id == ws_id
         s.rollback()
 
 
 def test_missing_workspace_raises(pg_session_factory):
     with pg_session_factory() as s:
+        # A missing row is treated as deleted regardless of the asserted generation.
         with pytest.raises(WorkspaceDeleted):
-            acquire_commit_mutex_live(s, _uuid.uuid4())
+            acquire_commit_mutex_at_generation(s, _uuid.uuid4(), generation=0)
         s.rollback()
 
 
@@ -67,13 +72,14 @@ def test_reads_fresh_state_not_the_identity_map(pg_session_factory):
     with pg_session_factory() as writer:
         stale = writer.get(Workspace, ws_id)  # warms the identity map
         assert stale.soft_deleted_at is None
+        gen = stale.lifecycle_generation  # the belief the writer formed while live
 
         with pg_session_factory() as deleter:  # committed by ANOTHER session
             deleter.get(Workspace, ws_id).soft_deleted_at = datetime.now(UTC)
             deleter.commit()
 
         with pytest.raises(WorkspaceDeleted):
-            acquire_commit_mutex_live(writer, ws_id)
+            acquire_commit_mutex_at_generation(writer, ws_id, generation=gen)
         writer.rollback()
 
 
@@ -86,7 +92,7 @@ def test_writer_blocked_on_the_mutex_sees_a_deletion_that_commits_meanwhile(
     with pg_session_factory() as s:
         ws = make_workspace(s)
         s.commit()
-        ws_id = ws.id
+        ws_id, gen = ws.id, ws.lifecycle_generation
 
     holder_has_mutex = threading.Event()
     writer_is_blocking = threading.Event()
@@ -105,7 +111,7 @@ def test_writer_blocked_on_the_mutex_sees_a_deletion_that_commits_meanwhile(
         with pg_session_factory() as s:
             writer_is_blocking.set()
             try:
-                acquire_commit_mutex_live(s, ws_id)
+                acquire_commit_mutex_at_generation(s, ws_id, generation=gen)
                 result["outcome"] = "acquired"
             except WorkspaceDeleted:
                 result["outcome"] = "refused"

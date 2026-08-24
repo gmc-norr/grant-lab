@@ -178,12 +178,18 @@ LIVE_ACQUIRING_SINK_HOLDERS: frozenset[tuple[str, str]] = frozenset(
 #: record nobody reads.
 LIVE_ACQUIRERS_WITHOUT_A_SINK: frozenset[tuple[str, str]] = frozenset(
     {
-        ("src/call_manager/workspaces.py", "soft_delete_workspace_db"),
+        # soft_delete_workspace_db (Group X, the delete path) moved to the RAW
+        # acquire_commit_mutex in endgame Task 6b — it BUMPS the generation, so
+        # fencing it against the generation it is about to change is incoherent, and
+        # it keeps the under-mutex liveness re-read inline. It no longer calls _live,
+        # so it leaves this record. acquire_commit_mutex_live itself was DELETED in
+        # the same commit; the interpreter (a NameError) is the gate now.
         # load_or_hydrate and maybe_auto_enable converted to Primitive B in endgame
         # Task 5 — each takes acquire_commit_mutex_at_generation at a threaded stamp
         # and no longer calls _live, so both leave this record.
         # workspace_write converted to Primitive B (acquire_commit_mutex_at_generation)
         # in the 2026-08-24 endgame Task 3 — no longer calls _live.
+        # This record is now empty: no _live caller without a git sink remains.
     }
 )
 

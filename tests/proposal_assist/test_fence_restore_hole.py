@@ -34,7 +34,6 @@ import pytest
 from sqlalchemy import select
 
 from call_manager.db.models import Workspace
-from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex_live
 from call_manager.proposal_assist.fencing import (
     WorkspaceGenerationStale,
     acquire_commit_mutex_at_generation,
@@ -63,23 +62,14 @@ def _seed_workspace(pg_session_factory) -> tuple[uuid.UUID, int]:
         return ws.id, owner.id
 
 
-def test_live_primitive_admits_the_stale_writer_after_restore(pg_session_factory):
-    """Case A: the hole, demonstrated. This is why the slice exists."""
-    ws_id, admin_id = _seed_workspace(pg_session_factory)
-    with pg_session_factory() as s:
-        admitted_at = _generation(s, ws_id)
+def test_the_trusting_primitive_no_longer_exists():
+    """The hole is closed by absence, not a rule someone must remember.
+    TARGET drafting.locking, where the function was defined — an absence check against
+    `fencing` passes on an unmodified tree (fencing never defined it), a hollow gate."""
+    from call_manager.proposal_assist.drafting import locking
 
-    with pg_session_factory() as s:
-        soft_delete_workspace_db(s, workspace_id=ws_id)
-    with pg_session_factory() as s:
-        restore_workspace_db(s, workspace_id=ws_id, admin_id=admin_id)
-
-    with pg_session_factory() as s:
-        assert _generation(s, ws_id) != admitted_at, (
-            "delete+restore must move the generation, or this test proves nothing"
-        )
-        # The stale actor wakes up. The trusting primitive lets it write.
-        acquire_commit_mutex_live(s, ws_id)  # does NOT raise — that is the hole
+    assert not hasattr(locking, "acquire_commit_mutex_live")
+    assert hasattr(locking, "acquire_commit_mutex")  # the raw mutex stays; delete path uses it
 
 
 def test_generation_primitive_refuses_the_stale_writer_after_restore(pg_session_factory):

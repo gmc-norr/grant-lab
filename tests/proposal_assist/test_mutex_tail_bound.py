@@ -22,8 +22,8 @@ from call_manager.proposal_assist.drafting.locking import (
     BUSY_ERROR_MESSAGE,
     CommitMutexTimeout,
     acquire_commit_mutex,
-    acquire_commit_mutex_live,
 )
+from call_manager.proposal_assist.fencing import acquire_commit_mutex_at_generation
 from tests.proposal_assist.conftest import make_workspace, stamp_for
 
 
@@ -152,12 +152,12 @@ def test_the_tail_after_the_mutex_is_bounded(pg_session_factory, current_user):
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
         s.commit()
-        ws_id = ws.id
+        ws_id, gen = ws.id, ws.lifecycle_generation
 
     release, t = _hold_workspace_row(pg_session_factory, ws_id)
     try:
         with pg_session_factory() as s:
-            acquire_commit_mutex_live(s, ws_id)
+            acquire_commit_mutex_at_generation(s, ws_id, generation=gen)
             with pytest.raises(OperationalError) as exc:
                 s.get(Workspace, ws_id, with_for_update=True)
             sqlstate = getattr(exc.value.orig, "sqlstate", None)
@@ -181,13 +181,14 @@ def test_a_nested_acquire_does_not_wipe_the_bound(pg_session_factory, current_us
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
         s.commit()
-        ws_id = ws.id
+        ws_id, gen = ws.id, ws.lifecycle_generation
 
     release, t = _hold_workspace_row(pg_session_factory, ws_id)
     try:
         with pg_session_factory() as s:
-            acquire_commit_mutex_live(s, ws_id)
-            acquire_commit_mutex_live(s, ws_id)  # re-entrant, as checkpoint does
+            acquire_commit_mutex_at_generation(s, ws_id, generation=gen)
+            # re-entrant, as checkpoint_artifact does (it re-takes Primitive B mid-tail)
+            acquire_commit_mutex_at_generation(s, ws_id, generation=gen)
             with pytest.raises(OperationalError) as exc:
                 s.get(Workspace, ws_id, with_for_update=True)
             assert getattr(exc.value.orig, "sqlstate", None) == "55P03"

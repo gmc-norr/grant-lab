@@ -29,11 +29,10 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from sqlalchemy import select, text
+from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
-from call_manager.db.models import Workspace
 from call_manager.proposal_assist.ports.errors import (
     BUSY_ERROR_MESSAGE as BUSY_ERROR_MESSAGE,
 )
@@ -163,7 +162,8 @@ MUTEX_TAIL_LOCK_TIMEOUT_SECONDS = 2
 class WorkspaceDeleted(RuntimeError):
     """The workspace was soft-deleted, observed UNDER the commit mutex.
 
-    Raised by :func:`acquire_commit_mutex_live` before the caller mutates
+    Raised by :func:`~call_manager.proposal_assist.fencing.acquire_commit_mutex_at_generation`
+    (and the delete path's inlined under-mutex re-read) before the caller mutates
     anything, so the caller's transaction can be rolled back having written no
     git commit and no DB row. HTTP surfaces map this to 404 (the workspace is
     already 404 to every reader); agent tools return an error; background and
@@ -252,31 +252,3 @@ def acquire_commit_mutex(
     # bounded_lock_waits call already passes 2 — and strictly better than the
     # old behaviour, which widened all the way to DEFAULT (disabled).
     session.execute(text(f"SET LOCAL lock_timeout = '{MUTEX_TAIL_LOCK_TIMEOUT_SECONDS * 1000}ms'"))
-
-
-def acquire_commit_mutex_live(
-    session: Session, workspace_id: uuid.UUID, *, timeout_seconds: int = 10
-) -> None:
-    """Acquire the commit mutex, then refuse a workspace that is already deleted.
-
-    The linearization point for mutex-participating writers: soft_delete takes
-    this SAME mutex before it mutates anything, so a writer that was blocked on
-    the mutex while a deletion committed observes the deletion the instant it
-    wins the lock — and raises BEFORE performing any git or DB mutation.
-
-    The re-read MUST be fresh. ``session.get(Workspace, id)`` can return the
-    identity-map instance the caller loaded before blocking on the mutex, which
-    is precisely the stale state this guard exists to defeat; a scalar SELECT of
-    the column always round-trips. A missing row is treated as deleted (a missing
-    workspace is never writable).
-
-    Raises :class:`CommitMutexTimeout` exactly as :func:`acquire_commit_mutex`
-    does, or :class:`WorkspaceDeleted`. Mutates nothing in either case; the
-    caller rolls back.
-    """
-    acquire_commit_mutex(session, workspace_id, timeout_seconds=timeout_seconds)
-    row = session.execute(
-        select(Workspace.soft_deleted_at).where(Workspace.id == workspace_id)
-    ).first()
-    if row is None or row[0] is not None:
-        raise WorkspaceDeleted(workspace_id)
