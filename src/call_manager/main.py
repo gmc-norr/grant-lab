@@ -37,6 +37,7 @@ from call_manager.proposal_assist.drafting.locking import (
     WorkspaceDeleted,
     is_lock_timeout,
 )
+from call_manager.proposal_assist.ports.errors import WorkspaceGenerationStale
 from call_manager.proposal_assist.references.admission import IngestLimiter
 from call_manager.proposal_assist.web import collab_checkpoint, collab_ws
 from call_manager.proposal_assist.web.activity import (
@@ -541,6 +542,40 @@ def create_app() -> FastAPI:
         # subclass of WorkspaceDeleted (both are bare RuntimeErrors), so Starlette
         # cannot reach the handler above — this registration is required, not
         # redundant.
+        if api_request(request):
+            return api_error(404, "workspace_deleted", DELETED_ERROR_MESSAGE)
+        return JSONResponse(status_code=404, content={"detail": DELETED_ERROR_MESSAGE})
+
+    @app.exception_handler(WorkspaceGenerationStale)
+    async def _workspace_generation_stale(request: Request, exc: WorkspaceGenerationStale):
+        # The same fact again, observed by the epoch fence: a writer that won the
+        # commit mutex carrying a generation the workspace has since moved past.
+        # The only way a LIVE workspace changes generation is a lifecycle
+        # transition (delete, and then restore) — so the workspace this client
+        # addressed is gone, and the row now under that id belongs to a later
+        # epoch. `acquire_commit_mutex_at_generation` raises this BEFORE any
+        # effect (fencing.py), so nothing was mutated.
+        #
+        # 404 + "workspace_deleted" + DELETED_ERROR_MESSAGE, reused rather than
+        # minted, for the same reason the WorkspaceRetired handler above reuses
+        # them: this is one event to a client, and the collab-ON fork of the very
+        # routes Primitive B now fences ALREADY answers exactly this body for it
+        # (via WorkspaceRetired). Minting a distinct code here would make the
+        # response depend on a feature flag.
+        #
+        # Registered explicitly because WorkspaceGenerationStale is a bare
+        # RuntimeError, sibling to WorkspaceDeleted rather than a subclass, so
+        # Starlette's MRO walk cannot reach the handler above; without this it
+        # falls to the catch-all Exception handler and the epoch race — the exact
+        # event the fence exists to catch — surfaces as a sanitized 500.
+        # ports/errors.py states this exception "never reaches a user as a 5xx";
+        # this registration is what makes that true.
+        #
+        # UnfencedInvocation (ports/errors.py) sits in the same position and is
+        # deliberately NOT handled here: it means the actor carried no generation
+        # at all, which on a live row (lifecycle_generation is NOT NULL with
+        # server_default 0) is an internal inconsistency, not a lifecycle event a
+        # client caused. A 500 is the correct answer to it.
         if api_request(request):
             return api_error(404, "workspace_deleted", DELETED_ERROR_MESSAGE)
         return JSONResponse(status_code=404, content={"detail": DELETED_ERROR_MESSAGE})
