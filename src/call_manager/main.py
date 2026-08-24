@@ -570,9 +570,9 @@ def create_app() -> FastAPI:
         #     (fencing.py:166-167) -> 404 via the handler above. Collab-ON:
         #     RoomManager.operate's is_retired guards raise WorkspaceRetired
         #     (collab/room.py:548, 563, 577) -> 404, and the collab checkpoint's
-        #     acquire_commit_mutex_live re-reads soft_deleted_at underneath that
-        #     (drafting/locking.py:278-282). Parity holds here, and reusing this
-        #     body is what keeps it holding.
+        #     acquire_commit_mutex_at_generation re-reads soft_deleted_at (and
+        #     compares the generation) underneath that (fencing.py). Parity holds
+        #     here, and reusing this body is what keeps it holding.
         #
         #   * Delete-and-RESTORE race — the only race that can reach THIS handler,
         #     because a still-deleted row is caught by WorkspaceDeleted first.
