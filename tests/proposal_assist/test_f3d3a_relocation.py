@@ -164,11 +164,20 @@ def test_the_monkeypatch_targets_are_the_module_that_actually_reads_them():
 
 
 def test_no_tool_module_gained_a_port_call():
-    """GC-1. The written-down set of fenced tool-commit identities. F3d3a converted
-    nothing (F3d2's five); F3d3b Task 2 added _propose_artifact_edit_impl and Task 3
-    adds propose_citation_impl — BOTH of F3d3's propose sites now write through
-    ports.effects and no longer commit. The set stays a literal on purpose: a derived
-    set would silently absorb the next conversion instead of forcing this diff."""
+    """GC-1. The written-down set of EVERY fenced identity — not only the tool-commit
+    ones the function name suggests. F3d3a converted nothing (F3d2's five); F3d3b
+    Task 2 added _propose_artifact_edit_impl and Task 3 adds propose_citation_impl —
+    BOTH of F3d3's propose sites now write through ports.effects and no longer commit.
+
+    The 2026-08-24 endgame slice then added the first two `git_commit` rows, which is
+    why the literal is no longer homogeneous in `kind`. Scoping the comparison to
+    `kind == "tool_commit"` was considered and REJECTED: that is precisely the derived
+    set this docstring warns about, and it would make every later git_commit
+    conversion invisible here.
+
+    The set stays a literal on purpose: a derived set would silently absorb the next
+    conversion instead of forcing this diff. Each endgame task that converts a site is
+    expected to edit this literal — that cost IS the feature."""
     from tests.fencing.inventory import load_inventory, scan_tree
 
     _sites, fenced = scan_tree()
@@ -208,7 +217,21 @@ def test_no_tool_module_gained_a_port_call():
             "src/call_manager/proposal_assist/tools/citations.py",
             "propose_citation_impl",
         ),
-    }, "F3d2's five plus F3d3b's TWO propose sites (artifact-edit + citation)"
+        # --- 2026-08-24 endgame, Task 2: the first two git_commit conversions ---
+        (
+            "git_commit",
+            "src/call_manager/proposal_assist/analysis/insert.py",
+            "insert_from_annotation",
+        ),
+        (
+            "git_commit",
+            "src/call_manager/proposal_assist/citations/human_cite.py",
+            "insert_citation_for_user",
+        ),
+    }, (
+        "F3d2's five, plus F3d3b's TWO propose sites (artifact-edit + citation), "
+        "plus the endgame slice's git_commit conversions"
+    )
     # Measured from the LIVE tree, not the stored JSON: this task fences the SECOND
     # of F3d3's two sites (the citation propose); Task 2 fenced the first. The
     # inventory JSON is regenerated in Task 4, so load_inventory() still reports both
