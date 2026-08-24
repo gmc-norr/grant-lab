@@ -171,7 +171,8 @@ LIVE_ACQUIRERS_WITHOUT_A_SINK: frozenset[tuple[str, str]] = frozenset(
         ("src/call_manager/proposal_assist/collab/hydrate.py", "load_or_hydrate"),
         ("src/call_manager/proposal_assist/collab/flip.py", "maybe_auto_enable"),
         ("src/call_manager/workspaces.py", "soft_delete_workspace_db"),
-        ("src/call_manager/proposal_assist/web/_writes.py", "workspace_write"),
+        # workspace_write converted to Primitive B (acquire_commit_mutex_at_generation)
+        # in the 2026-08-24 endgame Task 3 — no longer calls _live.
     }
 )
 

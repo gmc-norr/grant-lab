@@ -139,6 +139,8 @@ FENCING_IMPORT_FILES: frozenset[str] = frozenset({
     # Endgame Group A (2026-08-24 Task 2)
     "proposal_assist/analysis/insert.py",
     "proposal_assist/citations/human_cite.py",
+    # Endgame Group B (2026-08-24 Task 3) — workspace_write choke point
+    "proposal_assist/web/_writes.py",
 })
 
 #: Extra declared keys, preserved verbatim across regeneration — they are what

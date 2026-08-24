@@ -17,6 +17,7 @@ from sqlalchemy import select
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import User, WorkspaceEvent, WorkspaceSetupJob
 from call_manager.proposal_assist.collab.permissions import signal_from_request
+from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
 from call_manager.proposal_assist.row_locks import (
     SETUP_JOB_LOCK_TIMEOUT_SECONDS,
     WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS,
@@ -161,6 +162,8 @@ def update_rubric(
         # Authorization decides first. It stays BEFORE the mutex because it takes
         # no lock: a malformed body must not queue behind the commit mutex.
         criteria = _validate_criteria(body.criteria)
+        # Stamp minted at the access check (require_owner), before the mutex.
+        stamp = stamp_for_workspace(ws)
         # Slice C2 lock-order rule: the write scope opens immediately after
         # require_owner and its lock-free validation, before any other lock.
         # WorkspaceDeleted -> main.py -> 404. workspace_write bounds every lock
@@ -174,7 +177,7 @@ def update_rubric(
         # this route never touches a WorkspaceSetupJob row.
         with workspace_write(
             session,
-            ws.id,
+            stamp=stamp,
             timeout_seconds=WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS,
             what="rubric-update",
         ):
@@ -237,6 +240,8 @@ def retry_setup(
     row could not be taken in time."""
     with request.app.state.session_factory() as session:
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        # Stamp minted at the access check (require_owner), before the mutex.
+        stamp = stamp_for_workspace(ws)
         # Slice C2 lock-order rule: the write scope opens immediately after
         # require_owner and BEFORE the setup-job row lock below. Order matters
         # here for a concrete reason: a route that took the job row first would
@@ -259,7 +264,7 @@ def retry_setup(
         # early exit writes.
         with workspace_write(
             session,
-            ws.id,
+            stamp=stamp,
             timeout_seconds=SETUP_JOB_LOCK_TIMEOUT_SECONDS,
             what="setup-retry",
         ):
@@ -299,6 +304,8 @@ def activate(
         # non-owner with a malformed rubric gets 403, not a 400 confirming the
         # body shape. Before the mutex, because it takes no lock.
         criteria = _validate_criteria(body.criteria)
+        # Stamp minted at the access check (require_owner), before the mutex.
+        stamp = stamp_for_workspace(ws)
         # Slice C2 lock-order rule: the write scope opens immediately after
         # require_owner and BEFORE the setup-job row lock below. Taking the job
         # row first would hold it across the whole mutex wait, and the delete's
@@ -314,7 +321,7 @@ def activate(
         # really can block after the job lock.
         with workspace_write(
             session,
-            ws.id,
+            stamp=stamp,
             timeout_seconds=SETUP_JOB_LOCK_TIMEOUT_SECONDS,
             what="activate",
         ):

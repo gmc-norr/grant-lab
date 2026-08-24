@@ -24,6 +24,7 @@ from call_manager.proposal_assist.drafting.locking import (
     WorkspaceDeleted,
     acquire_commit_mutex,
 )
+from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
 from call_manager.proposal_assist.web._writes import workspace_write
 from tests.proposal_assist.conftest import make_workspace
 
@@ -72,14 +73,16 @@ def _short_mutex_wait(monkeypatch, seconds: int = 1) -> None:
     """Shorten the manager's mutex wait from the production 10s.
 
     Patches the module global `workspace_write` looks up at call time. This only
-    works because the manager calls `acquire_commit_mutex_live(session, ws_id)`
+    works because the manager calls `acquire_commit_mutex_at_generation(session, ...)`
     with NO timeout_seconds keyword — a call-time keyword would override this
     partial's and silently restore the 10s default (spec §3).
     """
     monkeypatch.setattr(
         writes_module,
-        "acquire_commit_mutex_live",
-        functools.partial(writes_module.acquire_commit_mutex_live, timeout_seconds=seconds),
+        "acquire_commit_mutex_at_generation",
+        functools.partial(
+            writes_module.acquire_commit_mutex_at_generation, timeout_seconds=seconds
+        ),
     )
 
 
@@ -88,10 +91,11 @@ def test_a_clean_exit_commits(pg_session_factory, current_user):
         ws = make_workspace(s, owner=current_user)
         s.commit()
         ws_id = ws.id
+        stamp = stamp_for_workspace(ws)
 
     with pg_session_factory() as s:
         ws = s.get(Workspace, ws_id)
-        with workspace_write(s, ws_id, timeout_seconds=2, what="test"):
+        with workspace_write(s, stamp=stamp, timeout_seconds=2, what="test"):
             ws.title = "written under the manager"
 
     with pg_session_factory() as s:
@@ -109,13 +113,14 @@ def test_a_wedged_mutex_raises_the_contracted_429(pg_session_factory, current_us
         ws = make_workspace(s, owner=current_user)
         s.commit()
         ws_id = ws.id
+        stamp = stamp_for_workspace(ws)
 
     _short_mutex_wait(monkeypatch)
     release, t = _hold_mutex(pg_session_factory, ws_id)
     try:
         with pg_session_factory() as s:
             with pytest.raises(HTTPException) as exc:  # noqa: SIM117
-                with workspace_write(s, ws_id, timeout_seconds=2, what="test"):
+                with workspace_write(s, stamp=stamp, timeout_seconds=2, what="test"):
                     pytest.fail("the body must not run when the mutex is wedged")
             _assert_busy(exc.value)
             assert not s.in_transaction(), (
@@ -138,13 +143,14 @@ def test_a_held_row_raises_the_contracted_429(pg_session_factory, current_user):
         ws = make_workspace(s, owner=current_user)
         s.commit()
         ws_id = ws.id
+        stamp = stamp_for_workspace(ws)
 
     release, t = _hold_workspace_row(pg_session_factory, ws_id)
     try:
         with pg_session_factory() as s:
             ws = s.get(Workspace, ws_id)
             with pytest.raises(HTTPException) as exc:  # noqa: SIM117
-                with workspace_write(s, ws_id, timeout_seconds=1, what="test"):
+                with workspace_write(s, stamp=stamp, timeout_seconds=1, what="test"):
                     # Blocks on the holder; the bound fires after 1s.
                     s.refresh(ws, with_for_update=True)
             _assert_busy(exc.value)
@@ -166,10 +172,11 @@ def test_a_body_HTTPException_propagates_unchanged_and_commits_nothing(
         ws = make_workspace(s, owner=current_user)
         s.commit()
         ws_id = ws.id
+        stamp = stamp_for_workspace(ws)
 
     with pg_session_factory() as s:
         with pytest.raises(HTTPException) as exc:  # noqa: SIM117
-            with workspace_write(s, ws_id, timeout_seconds=2, what="test"):
+            with workspace_write(s, stamp=stamp, timeout_seconds=2, what="test"):
                 s.add(
                     WorkspaceEvent(
                         workspace_id=ws_id,
@@ -199,11 +206,13 @@ def test_a_deleted_workspace_raises_WorkspaceDeleted_not_a_429(pg_session_factor
         ws = make_workspace(s, owner=current_user)
         ws.soft_deleted_at = datetime.now(UTC)
         s.commit()
-        ws_id = ws.id
+        # Stamp minted from ws whose generation is 0; the workspace is deleted,
+        # so acquire_commit_mutex_at_generation will raise WorkspaceDeleted.
+        stamp = stamp_for_workspace(ws)
 
     with pg_session_factory() as s:
         with pytest.raises(WorkspaceDeleted):  # noqa: SIM117
-            with workspace_write(s, ws_id, timeout_seconds=2, what="test"):
+            with workspace_write(s, stamp=stamp, timeout_seconds=2, what="test"):
                 pytest.fail("the body must not run for a deleted workspace")
         assert not s.in_transaction(), (
             "workspace_write left the transaction open after WorkspaceDeleted"
@@ -225,10 +234,11 @@ def test_a_body_exception_propagates_and_rolls_back_for_a_REUSED_session(
         ws = make_workspace(s, owner=current_user)
         s.commit()
         ws_id = ws.id
+        stamp = stamp_for_workspace(ws)
 
     with pg_session_factory() as s:
         with pytest.raises(RuntimeError, match="deliberate"):  # noqa: SIM117
-            with workspace_write(s, ws_id, timeout_seconds=2, what="test"):
+            with workspace_write(s, stamp=stamp, timeout_seconds=2, what="test"):
                 s.add(
                     WorkspaceEvent(
                         workspace_id=ws_id,
@@ -264,13 +274,14 @@ def test_a_timeout_leaves_the_session_usable_rather_than_aborted(
         ws = make_workspace(s, owner=current_user)
         s.commit()
         ws_id = ws.id
+        stamp = stamp_for_workspace(ws)
 
     _short_mutex_wait(monkeypatch)
     release, t = _hold_mutex(pg_session_factory, ws_id)
     try:
         with pg_session_factory() as s:
             with pytest.raises(HTTPException):  # noqa: SIM117
-                with workspace_write(s, ws_id, timeout_seconds=2, what="test"):
+                with workspace_write(s, stamp=stamp, timeout_seconds=2, what="test"):
                     pytest.fail("unreachable")
             # Must not raise "current transaction is aborted".
             assert s.get(Workspace, ws_id) is not None

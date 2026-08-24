@@ -21,6 +21,7 @@ from call_manager.proposal_assist.citations.bibliography import (
     CITATION_STYLES as _CITATION_STYLES,
 )
 from call_manager.proposal_assist.collab.permissions import signal_from_request
+from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
 from call_manager.proposal_assist.row_locks import WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS
 from call_manager.proposal_assist.web._perms import require_owner
 from call_manager.proposal_assist.web._writes import workspace_write
@@ -90,18 +91,20 @@ def update_settings(
         if not title or len(title) > _MAX_WORKSPACE_TITLE_LEN:
             raise HTTPException(status_code=400, detail="invalid title")
         deadline = _parse_deadline_form(body.deadline)  # HTTPException(400) on malformed
+        # Stamp minted at the access check (require_owner), before the mutex.
+        stamp = stamp_for_workspace(ws)
         # Slice C2 lock-order rule: the write scope opens immediately after
         # require_owner and its lock-free validation, and before any other lock.
-        # workspace_write takes the live commit mutex, bounds every lock wait in
-        # the rest of the transaction, and commits INSIDE that bound —
-        # soft_delete_workspace_db holds the same mutex for its whole
+        # workspace_write takes the commit mutex at the stamp's generation, bounds
+        # every lock wait in the rest of the transaction, and commits INSIDE that
+        # bound — soft_delete_workspace_db holds the same mutex for its whole
         # transaction, so a deletion committing while we blocked is observed the
         # instant we win it and WorkspaceDeleted propagates to main.py's 404
         # handler with nothing mutated. Both timeout types become the contracted
         # 429 + Retry-After: 2.
         with workspace_write(
             session,
-            ws.id,
+            stamp=stamp,
             timeout_seconds=WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS,
             what="settings-update",
         ):
@@ -130,6 +133,8 @@ def add_member(
 ) -> MemberOut:
     with request.app.state.session_factory() as session:
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        # Stamp minted at the access check (require_owner), before the mutex.
+        stamp = stamp_for_workspace(ws)
         # Slice C2 lock-order rule: the write scope opens immediately after
         # require_owner, before any other lock. WorkspaceDeleted -> main.py -> 404.
         # The bound reaches COMMIT because the WorkspaceEvent insert takes
@@ -141,7 +146,7 @@ def add_member(
         # nothing; test_add_member_no_op_paths_add_no_rows holds that.
         with workspace_write(
             session,
-            ws.id,
+            stamp=stamp,
             timeout_seconds=WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS,
             what="add-member",
         ):
@@ -192,13 +197,15 @@ def remove_member(
 ) -> Response:
     with request.app.state.session_factory() as session:
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        # Stamp minted at the access check (require_owner), before the mutex.
+        stamp = stamp_for_workspace(ws)
         # Slice C2 lock-order rule: the write scope opens immediately after
         # require_owner, before any other lock. WorkspaceDeleted -> main.py -> 404.
         # The bound reaches COMMIT because both the DELETE and the WorkspaceEvent
         # insert flush there — see update_settings' note.
         with workspace_write(
             session,
-            ws.id,
+            stamp=stamp,
             timeout_seconds=WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS,
             what="remove-member",
         ):
