@@ -32,10 +32,11 @@ from call_manager.proposal_assist.citations.gitio import current_head, write_and
 from call_manager.proposal_assist.citations.ledger import empty_ledger, load_ledger
 from call_manager.proposal_assist.citations.markers import find_bare_markers
 from call_manager.proposal_assist.collab.state import raise_if_collab_severed
-from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex_live
 from call_manager.proposal_assist.editing.sectionizer import is_h2_heading_line, split_sections
+from call_manager.proposal_assist.fencing import acquire_commit_mutex_at_generation
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.ports.artifacts import CITATIONS_FILENAME
+from call_manager.proposal_assist.ports.stamp import FenceStamp
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +146,7 @@ def save_section(
     *,
     session: Session,
     workspace: Workspace,
+    stamp: FenceStamp,
     user_id: int,
     section_index: int,
     new_text: str,
@@ -162,9 +164,15 @@ def save_section(
     spec is citation-free), so a spec save always returns ``issues == []`` and
     ``job_enqueued is False``.
 
+    ``stamp`` carries the workspace generation the caller observed at its access
+    check; the mutex is taken AT that generation, so a delete or lifecycle
+    transition that committed after the check aborts this save before any effect
+    (WorkspaceDeleted / WorkspaceGenerationStale, pre-commit).
+
     Caller owns the transaction: rows are added but NOT committed here, and
     the commit mutex is released by the caller's COMMIT/ROLLBACK. Raises
-    CommitMutexTimeout, StaleSectionError, SectionStructureError
+    CommitMutexTimeout, WorkspaceDeleted, WorkspaceGenerationStale (all three
+    pre-commit — no git side-effect), StaleSectionError, SectionStructureError
     (pre-commit — no git side-effect), IndexError (section_index out of
     range), GitCommitError, SpecLockedError (pre-commit — the spec
     artifact is locked).
@@ -175,12 +183,15 @@ def save_section(
     inside a section is allowed — save_section splits the result and enqueues
     the first resulting chunk; the reconcile tick covers any remainder.
     """
-    # 1. Serialize against every other git mutation of this workspace.
+    # 1. Serialize against every other git mutation of this workspace, and fence
+    # against the generation the CALLER snapshotted at its access check — never a
+    # generation re-read here at the write (endgame Task 6). Deleted/stale both abort
+    # before any git or DB mutation.
     # Flag-off-only path: with collab enabled the step-1b severance recheck below raises
     # CollabSeveranceConflict, which the route maps to 409, so this path is retiring rather than
     # maintained. Slice C3 bounds its tail anyway — the 2s cap now left in force by
     # acquire_commit_mutex applies at every site, including this one, with nothing needed here.
-    acquire_commit_mutex_live(session, workspace.id)
+    acquire_commit_mutex_at_generation(session, stamp.workspace_id, generation=stamp.generation)
 
     artifact = Artifact(artifact)  # normalize a stringly-typed caller
 

@@ -4,6 +4,7 @@ from pathlib import Path
 from call_manager.db.models import TurnJob
 from call_manager.proposal_assist.editing.save import save_section
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
 from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 from tests.proposal_assist.conftest import make_workspace
 
@@ -37,6 +38,7 @@ def test_save_section_succeeds_while_turn_in_flight(pg_session_factory, tmp_path
         result = save_section(
             session=s,
             workspace=ws,
+            stamp=stamp_for_workspace(ws),
             user_id=ws.owner_id,
             section_index=1,
             new_text="## Methods\nrewritten.\n",

@@ -26,12 +26,25 @@ from call_manager.proposal_assist.drafting.locking import (
     acquire_workspace_lock,
     release_workspace_lock,
 )
+from call_manager.proposal_assist.ports.stamp import FenceStamp
 from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
 from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 from call_manager.proposal_assist.tools.registry import ToolContext
 from tests.proposal_assist.conftest import make_workspace
 
 EMBED_DIM = 1024
+
+
+def _stamp(ctx: ToolContext) -> FenceStamp:
+    """The fencing identity insert_citation_impl now requires. These test
+    workspaces are all at lifecycle_generation 0, so the stamp the caller would
+    thread carries generation 0."""
+    return FenceStamp(
+        workspace_id=ctx.workspace_id,
+        generation=0,
+        active_turn_job_id=None,
+        origin_job_id=None,
+    )
 
 
 def _init_repo(repo_dir: Path, initial_content: str) -> None:
@@ -167,6 +180,7 @@ async def test_happy_path_inserts_marker_and_ledger_row(
 
     result = await insert_citation_impl(
         ctx,
+        stamp=_stamp(ctx),
         reference_id=str(rid),
         anchor=ANCHOR,
         chunk_index=0,
@@ -249,6 +263,7 @@ async def test_tombstoned_reference_rejected_no_commit(pg_session_factory, _sett
 
     result = await insert_citation_impl(
         ctx,
+        stamp=_stamp(ctx),
         reference_id=str(rid),
         anchor=ANCHOR,
         chunk_index=0,
@@ -268,6 +283,7 @@ async def test_anchor_not_found_no_commit(pg_session_factory, _settings_env, tmp
     before = _head(ctx.repo_dir)
     result = await insert_citation_impl(
         ctx,
+        stamp=_stamp(ctx),
         reference_id=str(rid),
         anchor="this anchor does not exist",
         chunk_index=0,
@@ -287,6 +303,7 @@ async def test_anchor_ambiguous_no_commit(pg_session_factory, _settings_env, tmp
     before = _head(ctx.repo_dir)
     result = await insert_citation_impl(
         ctx,
+        stamp=_stamp(ctx),
         reference_id=str(rid),
         anchor=dup,
         chunk_index=0,
@@ -304,6 +321,7 @@ async def test_quote_not_found_no_commit(pg_session_factory, _settings_env, tmp_
     before = _head(ctx.repo_dir)
     result = await insert_citation_impl(
         ctx,
+        stamp=_stamp(ctx),
         reference_id=str(rid),
         anchor=ANCHOR,
         chunk_index=0,
@@ -322,6 +340,7 @@ async def test_quote_ambiguous_no_commit(pg_session_factory, _settings_env, tmp_
     before = _head(ctx.repo_dir)
     result = await insert_citation_impl(
         ctx,
+        stamp=_stamp(ctx),
         reference_id=str(rid),
         anchor=ANCHOR,
         chunk_index=0,
@@ -350,6 +369,7 @@ async def test_reference_in_another_workspace_not_found(
     before = _head(ctx.repo_dir)
     result = await insert_citation_impl(
         ctx,
+        stamp=_stamp(ctx),
         reference_id=str(rid),
         anchor=ANCHOR,
         chunk_index=0,
@@ -367,6 +387,7 @@ async def test_chunk_index_missing_no_commit(pg_session_factory, _settings_env, 
     before = _head(ctx.repo_dir)
     result = await insert_citation_impl(
         ctx,
+        stamp=_stamp(ctx),
         reference_id=str(rid),
         anchor=ANCHOR,
         chunk_index=99,
@@ -383,6 +404,7 @@ async def test_bad_uuid_returns_error(pg_session_factory, _settings_env, tmp_pat
     before = _head(ctx.repo_dir)
     result = await insert_citation_impl(
         ctx,
+        stamp=_stamp(ctx),
         reference_id="not-a-uuid",
         anchor=ANCHOR,
         chunk_index=0,
@@ -436,6 +458,7 @@ async def test_db_cache_update_failure_still_succeeds(
 
     result = await insert_citation_impl(
         ctx,
+        stamp=_stamp(ctx),
         reference_id=str(rid),
         anchor=ANCHOR,
         chunk_index=0,
@@ -509,6 +532,7 @@ async def test_insert_succeeds_while_workspace_advisory_lock_held(
 
         result = await insert_citation_impl(
             ctx,
+            stamp=_stamp(ctx),
             reference_id=str(rid),
             anchor=ANCHOR,
             chunk_index=0,
@@ -564,6 +588,7 @@ async def test_concurrent_inserts_serialize_no_corruption(
     r1, r2 = await asyncio.gather(
         insert_citation_impl(
             ctx,
+            stamp=_stamp(ctx),
             reference_id=str(rid),
             anchor=ANCHOR,
             chunk_index=0,
@@ -571,6 +596,7 @@ async def test_concurrent_inserts_serialize_no_corruption(
         ),
         insert_citation_impl(
             ctx,
+            stamp=_stamp(ctx),
             reference_id=str(rid),
             anchor=anchor2,
             chunk_index=0,
@@ -615,6 +641,7 @@ async def test_insert_with_fallback_citekey_when_csl_thin(
 
     result = await insert_citation_impl(
         ctx,
+        stamp=_stamp(ctx),
         reference_id=str(rid),
         anchor=ANCHOR,
         chunk_index=0,
@@ -656,6 +683,7 @@ async def test_citekey_reuse_when_already_set(pg_session_factory, _settings_env,
 
     r1 = await insert_citation_impl(
         ctx,
+        stamp=_stamp(ctx),
         reference_id=str(rid),
         anchor=ANCHOR,
         chunk_index=0,
@@ -665,6 +693,7 @@ async def test_citekey_reuse_when_already_set(pg_session_factory, _settings_env,
 
     r2 = await insert_citation_impl(
         ctx,
+        stamp=_stamp(ctx),
         reference_id=str(rid),
         anchor=anchor2,
         chunk_index=0,
@@ -694,6 +723,7 @@ async def test_idempotency_same_args_no_duplicate(pg_session_factory, _settings_
     )
     r1 = await insert_citation_impl(
         ctx,
+        stamp=_stamp(ctx),
         reference_id=str(rid),
         anchor=ANCHOR,
         chunk_index=0,
@@ -704,6 +734,7 @@ async def test_idempotency_same_args_no_duplicate(pg_session_factory, _settings_
 
     r2 = await insert_citation_impl(
         ctx,
+        stamp=_stamp(ctx),
         reference_id=str(rid),
         anchor=ANCHOR,
         chunk_index=0,
@@ -736,6 +767,7 @@ async def test_whitespace_tolerant_quote_stores_raw_offsets(
     )
     result = await insert_citation_impl(
         ctx,
+        stamp=_stamp(ctx),
         reference_id=str(rid),
         anchor=ANCHOR,
         chunk_index=0,
@@ -791,6 +823,7 @@ async def test_insert_self_heals_on_ledger_citekey_collision(
 
     result = await insert_citation_impl(
         ctx,
+        stamp=_stamp(ctx),
         reference_id=str(rid2),
         anchor=anchor2,
         chunk_index=0,
@@ -813,6 +846,7 @@ async def test_unknown_stance_rejected(pg_session_factory, _settings_env, tmp_pa
     before = _head(ctx.repo_dir)
     result = await insert_citation_impl(
         ctx,
+        stamp=_stamp(ctx),
         reference_id=str(rid),
         anchor=ANCHOR,
         chunk_index=0,

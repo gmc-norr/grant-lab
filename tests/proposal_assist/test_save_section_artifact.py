@@ -6,6 +6,7 @@ from call_manager.proposal_assist.artifacts import Artifact
 from call_manager.proposal_assist.citations.gitio import _git_env
 from call_manager.proposal_assist.editing.save import save_section
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
 from tests.proposal_assist.conftest import make_workspace
 
 SPEC_DOC = "## Aims\nbe great.\n\n## Approach\ndo science.\n"
@@ -41,6 +42,7 @@ def test_spec_save_commits_spec_file_and_skips_tier1_tier2(pg_session_factory, t
         result = save_section(
             session=s,
             workspace=ws,
+            stamp=stamp_for_workspace(ws),
             user_id=ws.owner_id,
             section_index=1,
             new_text="## Aims\nbe truly great.\n",
@@ -81,6 +83,7 @@ def test_spec_save_still_enforces_structure_guard(pg_session_factory, tmp_path):
             save_section(
                 session=s,
                 workspace=ws,
+                stamp=stamp_for_workspace(ws),
                 user_id=ws.owner_id,
                 section_index=1,
                 new_text="be great.\n",  # dropped the "## Aims" heading
@@ -118,6 +121,7 @@ def test_raw_draft_string_still_runs_draft_pipeline(pg_session_factory, tmp_path
         result = save_section(
             session=s,
             workspace=ws,
+            stamp=stamp_for_workspace(ws),
             user_id=ws.owner_id,
             section_index=1,
             new_text="## Methods\nSee [@ghost] again.\n",
@@ -149,6 +153,7 @@ def test_spec_save_survives_cross_artifact_head_move(pg_session_factory, tmp_pat
         result = save_section(
             session=s,
             workspace=ws,
+            stamp=stamp_for_workspace(ws),
             user_id=ws.owner_id,
             section_index=1,
             new_text="## Aims\nrevised under a moved HEAD.\n",
@@ -175,6 +180,7 @@ def test_spec_save_stale_section_raises(pg_session_factory, tmp_path):
         save_section(
             session=s,
             workspace=ws,
+            stamp=stamp_for_workspace(ws),
             user_id=ws.owner_id,
             section_index=1,
             new_text="## Aims\nfirst change.\n",
@@ -190,6 +196,7 @@ def test_spec_save_stale_section_raises(pg_session_factory, tmp_path):
             save_section(
                 session=s,
                 workspace=ws,
+                stamp=stamp_for_workspace(ws),
                 user_id=ws.owner_id,
                 section_index=1,
                 new_text="## Aims\nconflicting change.\n",

@@ -105,6 +105,13 @@ SLICE_STATUS = {
     # exactly as Task 2 re-pointed its two rows off their original slices. The
     # kernel/hydrate/flip conversions hold no direct sink, so they add no row.
     "F3e-endgame-D": "complete",
+    # Task 6a: Group E (_insert_citation_locked) + save_section (Group D orphan) +
+    # Group F (_m1). Only ONE row becomes provably fenced — save_section, whose
+    # top-level acquire statically pairs with its write_and_commit_files sink; it is
+    # re-pointed here from F3e1b and marked complete. _insert_citation_locked acquires
+    # inside a try: block (unprovable), so its F3e1b row stays pending; _m1 reaches
+    # _init_repo, whose git_commit row is F5's to convert, so that row stays pending too.
+    "F3e-endgame-E-F": "complete",
     "F3e1b": "pending",   # the git-effect conversions
     "F3e2": "pending",    # the ingest pipeline and the filesystem effects
     "F3f": "pending",    # capability holders, then the handle
@@ -126,6 +133,9 @@ F3A_COLUMN_FILES = frozenset({
     "proposal_assist/review/pass_runner.py",
     "proposal_assist/uncited_claims/jobs.py",
     "proposal_assist/uncited_claims/pass_runner.py",
+    # Endgame Group F (2026-08-24 Task 6) — claim_next_setup_job now stamps
+    # claimed_at_generation in its locking statement and run_one threads it into _m1.
+    "proposal_assist/phases/setup.py",
     "db/models.py",
 })
 
@@ -161,6 +171,13 @@ FENCING_IMPORT_FILES: frozenset[str] = frozenset({
     "proposal_assist/citations/collab_cite.py",
     "proposal_assist/proposals/kernel_accept.py",
     "proposal_assist/web/collab_ws.py",
+    # Endgame Group E + save_section + Group F (2026-08-24 Task 6) — the last
+    # convertible live callers. save_section takes the mutex at its threaded stamp's
+    # generation; _insert_citation_locked (in citations/core.py) does the same inside a
+    # try: block; _m1 (in phases/setup.py) takes it at the generation the claim stamped.
+    "proposal_assist/editing/save.py",
+    "proposal_assist/citations/core.py",
+    "proposal_assist/phases/setup.py",
 })
 
 #: Extra declared keys, preserved verbatim across regeneration — they are what

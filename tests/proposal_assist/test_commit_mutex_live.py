@@ -133,6 +133,7 @@ def test_save_section_refuses_a_deleted_workspace(pg_session_factory, tmp_path):
     import subprocess
 
     from call_manager.proposal_assist.editing.save import PROPOSAL_FILENAME, save_section
+    from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
 
     md0 = "## Background\noriginal.\n"
     with pg_session_factory() as s:
@@ -161,6 +162,7 @@ def test_save_section_refuses_a_deleted_workspace(pg_session_factory, tmp_path):
             save_section(
                 session=s,
                 workspace=ws,
+                stamp=stamp_for_workspace(ws),
                 user_id=ws.owner_id,
                 section_index=1,
                 new_text="## Background\nedited.\n",

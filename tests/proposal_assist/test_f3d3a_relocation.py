@@ -239,6 +239,17 @@ def test_no_tool_module_gained_a_port_call():
             "src/call_manager/proposal_assist/collab/checkpoint.py",
             "checkpoint_artifact",
         ),
+        # --- 2026-08-24 endgame, Task 6: save_section (Group D orphan) ---
+        # save_section takes acquire_commit_mutex_at_generation as a top-level
+        # statement that statically pairs with its own write_and_commit_files sink,
+        # so the scanner measures it fenced=true. Its sibling conversion this task,
+        # _insert_citation_locked (Group E), acquires inside a try: block, so the
+        # scanner cannot prove order (stmt_index=None) and adds NO git_commit row.
+        (
+            "git_commit",
+            "src/call_manager/proposal_assist/editing/save.py",
+            "save_section",
+        ),
     }, (
         "F3d2's five, plus F3d3b's TWO propose sites (artifact-edit + citation), "
         "plus the endgame slice's git_commit conversions"

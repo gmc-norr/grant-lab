@@ -174,9 +174,9 @@ def test_waiting_for_rubric_review_does_not_re_run_extraction_after_restore(
     called = {"m1": False}
     real_m1 = worker._m1
 
-    def _spy_m1(job_id_, workspace_id_):
+    def _spy_m1(job_id_, workspace_id_, claimed_generation_):
         called["m1"] = True
-        return real_m1(job_id_, workspace_id_)
+        return real_m1(job_id_, workspace_id_, claimed_generation_)
 
     monkeypatch.setattr(worker, "_m1", _spy_m1)
 

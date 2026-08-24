@@ -16,9 +16,22 @@ from call_manager.config import Settings
 from call_manager.db.models import Workspace
 from call_manager.proposal_assist.citations.core import insert_citation_impl
 from call_manager.proposal_assist.drafting.locking import DELETED_ERROR_MESSAGE
+from call_manager.proposal_assist.ports.stamp import FenceStamp
 from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 from call_manager.proposal_assist.tools.registry import ToolContext
 from tests.proposal_assist.conftest import make_workspace
+
+
+def _stamp(ctx: ToolContext) -> FenceStamp:
+    """The fencing identity insert_citation_impl now requires. These test
+    workspaces are all at lifecycle_generation 0, so the stamp the caller would
+    thread carries generation 0."""
+    return FenceStamp(
+        workspace_id=ctx.workspace_id,
+        generation=0,
+        active_turn_job_id=None,
+        origin_job_id=None,
+    )
 
 PROPOSAL = "# Proposal\n\nWe argue that something is true in our population.\n"
 
@@ -66,6 +79,7 @@ async def test_insert_citation_refuses(deleted_ctx):
     head = _head(repo_dir)
     result = await insert_citation_impl(
         ctx,
+        stamp=_stamp(ctx),
         anchor="something is true",
         reference_id=str(uuid.uuid4()),
         chunk_index=0,

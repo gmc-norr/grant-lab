@@ -388,6 +388,7 @@ def post_save_spec_section(
         # non-owner must not be able to distinguish "no proposal-spec.md yet" (404)
         # from "owner only" (403) for any workspace UUID they can name.
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        stamp = stamp_for_workspace(ws)  # minted at the access check (endgame Task 6)
         repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
         if not (repo_dir / SPEC_FILENAME).exists():
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
@@ -409,6 +410,7 @@ def post_save_spec_section(
             result = save_section(
                 session=session,
                 workspace=ws,
+                stamp=stamp,
                 user_id=user.id,
                 section_index=index,
                 new_text=body.content,
@@ -945,6 +947,7 @@ def post_save_section(
         # yet" (404) from "owner only" (403) and leak the draft-lifecycle state of
         # any workspace UUID they can name — so require_owner runs first.
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        stamp = stamp_for_workspace(ws)  # minted at the access check (endgame Task 6)
         # Mirror the HTMX route's pre-read 404 (sections.py:73-89, used at
         # sections.py:240): before touching save_section, reject a workspace that
         # has no proposal.md yet OR no git HEAD yet with the SAME user-facing 404 as
@@ -973,6 +976,7 @@ def post_save_section(
             result = save_section(
                 session=session,
                 workspace=ws,
+                stamp=stamp,
                 user_id=user.id,
                 section_index=index,
                 new_text=body.content,

@@ -24,6 +24,7 @@ from call_manager.proposal_assist.editing.save import (
     save_section,
 )
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.ports.stamp import FenceStamp
 from call_manager.proposal_assist.tools.registry import ToolContext
 
 
@@ -70,6 +71,7 @@ def accept_proposed_change(
     workspace_id: uuid.UUID,
     approver: User,
     workspaces_dir: Path | str,
+    stamp: FenceStamp,
 ) -> ProposedChange:
     pc = _load_scoped(session, proposed_change_id, workspace_id)
     if pc.status != "pending":
@@ -88,6 +90,7 @@ def accept_proposed_change(
             result = save_section(
                 session=session,
                 workspace=ws,
+                stamp=stamp,
                 user_id=approver.id,
                 section_index=pc.section_index,
                 new_text=pc.payload["new_text"],
@@ -120,6 +123,7 @@ def accept_proposed_change(
             result = save_section(
                 session=session,
                 workspace=ws,
+                stamp=stamp,
                 user_id=approver.id,
                 section_index=pc.section_index,
                 new_text=pc.payload["new_text"],
@@ -152,6 +156,7 @@ def accept_proposed_change(
             pc=pc,
             approver=approver,
             workspaces_dir=workspaces_dir,
+            stamp=stamp,
         )
 
     raise NotImplementedError(f"accept of kind {pc.kind!r} is not supported")
@@ -174,6 +179,7 @@ def _accept_citation_insert(
     pc: ProposedChange,
     approver: User,
     workspaces_dir: Path | str,
+    stamp: FenceStamp,
 ) -> ProposedChange:
     """Replay the citation insert as the named approver, under the commit mutex.
 
@@ -207,6 +213,7 @@ def _accept_citation_insert(
     result = _insert_citation_locked(
         ctx,
         session,
+        stamp=stamp,
         ref_uuid=uuid.UUID(str(payload["reference_id"])),
         anchor=payload["anchor"],
         chunk_index=payload["chunk_index"],

@@ -39,6 +39,7 @@ from call_manager.proposal_assist.drafting.locking import (
     acquire_commit_mutex,
 )
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
 from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 
@@ -125,6 +126,7 @@ def test_blocked_save_section_refuses_and_leaves_git_untouched(pg_session_factor
                 save_section(
                     session=s,
                     workspace=wsr,
+                    stamp=stamp_for_workspace(wsr),
                     user_id=wsr.owner_id,
                     section_index=1,
                     new_text="## Background\nedited by a blocked writer.\n",

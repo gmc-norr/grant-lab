@@ -4,6 +4,7 @@ from pathlib import Path
 from call_manager.db.models import ProposedChange
 from call_manager.proposal_assist.editing.save import save_section
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
 from call_manager.proposal_assist.proposals.proposing import capture_base, propose_prose_edit
 from call_manager.proposal_assist.proposals.staleness import refresh_staleness
 from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
@@ -59,6 +60,7 @@ def test_refresh_marks_moved_section_stale_only(pg_session_factory, tmp_path):
         save_section(
             session=s,
             workspace=ws,
+            stamp=stamp_for_workspace(ws),
             user_id=ws.owner_id,
             section_index=1,
             new_text="## Methods\nmoved.\n",

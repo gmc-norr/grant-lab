@@ -176,7 +176,7 @@ def test_m2_holds_the_workspace_row_before_it_blocks_on_the_call_row(
 
     job_id, ws_id = _queued_job(pg_session_factory, current_user)
     w = _worker(pg_session_factory, tmp_path, phase0_client)
-    pinned = w._m1(job_id, ws_id)                 # BEFORE the Session.get patch
+    pinned = w._m1(job_id, ws_id, claimed_generation=0)  # BEFORE the Session.get patch
     with pg_session_factory() as s:
         call_id = s.get(Workspace, ws_id).call_id
 
@@ -251,7 +251,7 @@ def test_m3_holds_the_job_row_before_it_blocks_on_the_workspace_row(
 
     job_id, ws_id = _queued_job(pg_session_factory, current_user)
     w = _worker(pg_session_factory, tmp_path, phase0_client)
-    pinned = w._m1(job_id, ws_id)                 # BEFORE the Session.get patch
+    pinned = w._m1(job_id, ws_id, claimed_generation=0)  # BEFORE the Session.get patch
     w._m2(job_id, ws_id, pinned)
 
     job_row_locked = threading.Event()
@@ -321,7 +321,9 @@ def test_m1_creates_the_repo_and_pins_the_call_hash(
         s.commit()
         job_id, ws_id = job.id, ws.id
 
-    pinned = _worker(pg_session_factory, tmp_path, phase0_client)._m1(job_id, ws_id)
+    pinned = _worker(pg_session_factory, tmp_path, phase0_client)._m1(
+        job_id, ws_id, claimed_generation=0
+    )
 
     assert isinstance(pinned, str) and pinned
     assert (tmp_path / str(ws_id) / "repo" / ".git").is_dir()
@@ -345,7 +347,9 @@ def test_m1_refuses_a_deleted_workspace_and_creates_nothing(
         job_id, ws_id = job.id, ws.id
 
     with pytest.raises(WorkspaceDeleted):
-        _worker(pg_session_factory, tmp_path, phase0_client)._m1(job_id, ws_id)
+        _worker(pg_session_factory, tmp_path, phase0_client)._m1(
+            job_id, ws_id, claimed_generation=0
+        )
 
     assert not (tmp_path / str(ws_id)).exists()
 
@@ -379,7 +383,7 @@ def test_a_wedged_m1_makes_delete_time_out_at_the_mutex_not_the_row(
     monkeypatch.setattr(Path, "mkdir", _blocking_mkdir)
 
     worker = _worker(pg_session_factory, tmp_path, phase0_client)
-    t = threading.Thread(target=lambda: worker._m1(job_id, ws_id))
+    t = threading.Thread(target=lambda: worker._m1(job_id, ws_id, claimed_generation=0))
     t.start()
     try:
         assert inside.wait(timeout=10)
@@ -423,7 +427,7 @@ def test_m1_acquires_the_mutex_before_the_workspace_row_lock(
         ).one()
 
     order: list[str] = []
-    real_acquire = setup_mod.acquire_commit_mutex_live
+    real_acquire = setup_mod.acquire_commit_mutex_at_generation
     real_get = Session.get
 
     def _tracking_acquire(session, workspace_id, *a, **kw):
@@ -436,14 +440,14 @@ def test_m1_acquires_the_mutex_before_the_workspace_row_lock(
         return real_get(self, entity, ident, **kw)
 
     # Patch the name as USED inside setup.py, not where it's defined — `from
-    # ... import acquire_commit_mutex_live` binds the name into setup_mod's
-    # namespace at import time, so patching locking.acquire_commit_mutex_live
+    # ... import acquire_commit_mutex_at_generation` binds the name into setup_mod's
+    # namespace at import time, so patching fencing.acquire_commit_mutex_at_generation
     # would not intercept _m1's call at all.
-    monkeypatch.setattr(setup_mod, "acquire_commit_mutex_live", _tracking_acquire)
+    monkeypatch.setattr(setup_mod, "acquire_commit_mutex_at_generation", _tracking_acquire)
     monkeypatch.setattr(Session, "get", _tracking_get)
 
     worker = _worker(pg_session_factory, tmp_path, phase0_client)
-    worker._m1(job_id, ws_id)
+    worker._m1(job_id, ws_id, claimed_generation=0)
 
     assert order == ["mutex", "row"]
 
@@ -453,7 +457,7 @@ def test_m2_snapshots_sections_onto_the_workspace(
 ):
     job_id, ws_id = _queued_job(pg_session_factory, current_user)
     w = _worker(pg_session_factory, tmp_path, phase0_client)
-    pinned = w._m1(job_id, ws_id)
+    pinned = w._m1(job_id, ws_id, claimed_generation=0)
     w._m2(job_id, ws_id, pinned)
 
     with pg_session_factory() as s:
@@ -474,7 +478,7 @@ def test_m2_raises_when_the_call_changed_under_it(
     pinned to the under-lock re-read at setup.py, not the pre-lock read)."""
     job_id, ws_id = _queued_job(pg_session_factory, current_user)
     w = _worker(pg_session_factory, tmp_path, phase0_client)
-    pinned = w._m1(job_id, ws_id)
+    pinned = w._m1(job_id, ws_id, claimed_generation=0)
 
     real_compute = setup_mod.compute_section_extracts
 
@@ -516,7 +520,7 @@ def test_m2_does_not_start_a_cloud_call_for_a_deleted_workspace(
     client = _CountingClient()
     job_id, ws_id = _queued_job(pg_session_factory, current_user)
     w = _worker(pg_session_factory, tmp_path, client)
-    pinned = w._m1(job_id, ws_id)
+    pinned = w._m1(job_id, ws_id, claimed_generation=0)
 
     with pg_session_factory() as s:
         s.get(Workspace, ws_id).soft_deleted_at = datetime.now(UTC)
@@ -548,7 +552,7 @@ def test_m2_discards_a_payload_another_worker_made_redundant(
     and the under-lock re-check this test is actually about gets exercised."""
     job_id, ws_id = _queued_job(pg_session_factory, current_user)
     w = _worker(pg_session_factory, tmp_path, phase0_client)
-    pinned = w._m1(job_id, ws_id)
+    pinned = w._m1(job_id, ws_id, claimed_generation=0)
 
     real_compute = setup_mod.compute_section_extracts
 
@@ -745,7 +749,7 @@ def test_m2_times_out_on_a_held_cache_row_rather_than_pinning_the_workspace(
         job_id, ws_id, call_id = job.id, ws.id, call.id
 
     w = _worker(pg_session_factory, tmp_path, phase0_client)
-    pinned = w._m1(job_id, ws_id)
+    pinned = w._m1(job_id, ws_id, claimed_generation=0)
 
     holding = threading.Event()
     release = threading.Event()
@@ -784,7 +788,7 @@ def test_m3_writes_rubric_event_and_status_atomically(
 ):
     job_id, ws_id = _queued_job(pg_session_factory, current_user)
     w = _worker(pg_session_factory, tmp_path, phase0_client)
-    pinned = w._m1(job_id, ws_id)
+    pinned = w._m1(job_id, ws_id, claimed_generation=0)
     w._m2(job_id, ws_id, pinned)
     w._m3(job_id, ws_id, pinned)
 
@@ -813,7 +817,7 @@ def test_a_cancel_beats_m3_and_is_not_overwritten(
     test_a_cancel_during_the_compute_window_beats_m3_under_lock below."""
     job_id, ws_id = _queued_job(pg_session_factory, current_user)
     w = _worker(pg_session_factory, tmp_path, phase0_client)
-    pinned = w._m1(job_id, ws_id)
+    pinned = w._m1(job_id, ws_id, claimed_generation=0)
     w._m2(job_id, ws_id, pinned)
 
     with pg_session_factory() as s:
@@ -841,7 +845,7 @@ def test_m3_raises_when_the_call_changed_under_it(
 ):
     job_id, ws_id = _queued_job(pg_session_factory, current_user)
     w = _worker(pg_session_factory, tmp_path, phase0_client)
-    pinned = w._m1(job_id, ws_id)
+    pinned = w._m1(job_id, ws_id, claimed_generation=0)
     w._m2(job_id, ws_id, pinned)
 
     with pg_session_factory() as s:
@@ -871,7 +875,7 @@ def test_a_cancel_during_the_compute_window_beats_m3_under_lock(
     mirroring test_m2_raises_when_the_call_changed_under_it's pattern."""
     job_id, ws_id = _queued_job(pg_session_factory, current_user)
     w = _worker(pg_session_factory, tmp_path, phase0_client)
-    pinned = w._m1(job_id, ws_id)
+    pinned = w._m1(job_id, ws_id, claimed_generation=0)
     w._m2(job_id, ws_id, pinned)
 
     real_compute = setup_mod.compute_rubric
@@ -916,7 +920,7 @@ def test_m3_raises_when_the_call_changes_during_the_compute_window(
     which only an under-lock re-read can catch."""
     job_id, ws_id = _queued_job(pg_session_factory, current_user)
     w = _worker(pg_session_factory, tmp_path, phase0_client)
-    pinned = w._m1(job_id, ws_id)
+    pinned = w._m1(job_id, ws_id, claimed_generation=0)
     w._m2(job_id, ws_id, pinned)
 
     real_compute = setup_mod.compute_rubric
@@ -999,7 +1003,7 @@ def test_m3_times_out_on_a_held_rubric_row_rather_than_pinning_the_workspace(
         job_id, ws_id, call_id = job.id, ws.id, call.id
 
     w = _worker(pg_session_factory, tmp_path, phase0_client)
-    pinned = w._m1(job_id, ws_id)
+    pinned = w._m1(job_id, ws_id, claimed_generation=0)
 
     holding = threading.Event()
     release = threading.Event()
@@ -1131,7 +1135,7 @@ def test_delete_route_returns_promptly_while_phase0_runs_its_extractors(
         job_id, ws_id = job.id, ws.id
 
     w = _worker(pg_session_factory, tmp_path, _SlowClient())
-    pinned = w._m1(job_id, ws_id)
+    pinned = w._m1(job_id, ws_id, claimed_generation=0)
 
     outcome: list[BaseException | None] = []
 
@@ -1176,10 +1180,10 @@ def test_recovery_after_a_crash_between_m1_and_m2(
     job_id, ws_id = _queued_job(pg_session_factory, current_user)
     w = _worker(pg_session_factory, tmp_path, phase0_client)
 
-    pinned_first = w._m1(job_id, ws_id)
+    pinned_first = w._m1(job_id, ws_id, claimed_generation=0)
     head_before = _run_git_head(tmp_path / str(ws_id) / "repo")
 
-    pinned_again = w._m1(job_id, ws_id)          # the re-run
+    pinned_again = w._m1(job_id, ws_id, claimed_generation=0)          # the re-run
     assert pinned_again == pinned_first
     assert _run_git_head(tmp_path / str(ws_id) / "repo") == head_before
 
@@ -1207,7 +1211,7 @@ def test_recovery_after_a_crash_between_m2_and_m3_makes_no_second_llm_call(
     client = _CountingClient()
     job_id, ws_id = _queued_job(pg_session_factory, current_user)
     w = _worker(pg_session_factory, tmp_path, client)
-    pinned = w._m1(job_id, ws_id)
+    pinned = w._m1(job_id, ws_id, claimed_generation=0)
     w._m2(job_id, ws_id, pinned)
     after_m2 = calls["n"]
     assert after_m2 > 0

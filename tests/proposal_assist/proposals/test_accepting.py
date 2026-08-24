@@ -8,6 +8,7 @@ from call_manager.proposal_assist.citations.ledger import load_ledger
 from call_manager.proposal_assist.citations.markers import find_markers
 from call_manager.proposal_assist.editing.save import save_section
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
 from call_manager.proposal_assist.proposals.accepting import (
     ProposedChangeNotFound,
     ProposedChangeNotPending,
@@ -93,6 +94,7 @@ def test_accept_prose_applies_and_records_approver(pg_session_factory, tmp_path)
             session=s,
             proposed_change_id=pc.id,
             workspace_id=ws.id,
+            stamp=stamp_for_workspace(ws),
             approver=approver,
             workspaces_dir=str(tmp_path),
         )
@@ -127,6 +129,7 @@ def test_accept_non_pending_is_rejected(pg_session_factory, tmp_path):
                 session=s,
                 proposed_change_id=pc.id,
                 workspace_id=ws.id,
+                stamp=stamp_for_workspace(ws),
                 approver=approver,
                 workspaces_dir=str(tmp_path),
             )
@@ -146,6 +149,7 @@ def test_accept_does_not_clobber_human_edit_race(pg_session_factory, tmp_path):
         save_section(
             session=s,
             workspace=ws,
+            stamp=stamp_for_workspace(ws),
             user_id=ws.owner_id,
             section_index=1,
             new_text="## Methods\nhuman-edited.\n",
@@ -171,6 +175,7 @@ def test_accept_does_not_clobber_human_edit_race(pg_session_factory, tmp_path):
             session=s,
             proposed_change_id=pc.id,
             workspace_id=ws.id,
+            stamp=stamp_for_workspace(ws),
             approver=approver,
             workspaces_dir=str(tmp_path),
         )
@@ -211,6 +216,7 @@ def test_accept_rejects_mismatched_workspace(pg_session_factory, tmp_path):
                 session=s,
                 proposed_change_id=pc.id,
                 workspace_id=other.id,
+                stamp=stamp_for_workspace(other),
                 approver=approver,
                 workspaces_dir=str(tmp_path),
             )
@@ -242,6 +248,7 @@ def test_accept_noop_proposal_is_accepted_at_current_head(pg_session_factory, tm
             session=s,
             proposed_change_id=pc.id,
             workspace_id=ws.id,
+            stamp=stamp_for_workspace(ws),
             approver=approver,
             workspaces_dir=str(tmp_path),
         )
@@ -284,6 +291,7 @@ def test_accept_rejects_non_prose_spec_kind(pg_session_factory, tmp_path):
                 session=s,
                 proposed_change_id=pc.id,
                 workspace_id=ws.id,
+                stamp=stamp_for_workspace(ws),
                 approver=approver,
                 workspaces_dir=str(tmp_path),
             )
@@ -320,6 +328,7 @@ def test_accept_citation_inserts_marker_and_ledger_row(pg_session_factory, tmp_p
             session=s,
             proposed_change_id=pc.id,
             workspace_id=ws.id,
+            stamp=stamp_for_workspace(ws),
             approver=approver,
             workspaces_dir=str(tmp_path),
         )
@@ -369,6 +378,7 @@ def test_accept_citation_verify_fail_goes_stale(pg_session_factory, tmp_path):
             session=s,
             proposed_change_id=pc.id,
             workspace_id=ws.id,
+            stamp=stamp_for_workspace(ws),
             approver=approver,
             workspaces_dir=str(tmp_path),
         )
@@ -433,6 +443,7 @@ def test_accept_citation_atomic_when_citekey_cache_branch_runs(pg_session_factor
                 session=s,
                 proposed_change_id=pc.id,
                 workspace_id=ws.id,
+                stamp=stamp_for_workspace(ws),
                 approver=approver,
                 workspaces_dir=str(tmp_path),
             )
@@ -596,6 +607,7 @@ def test_citation_accept_citekey_cache_integrity_error_is_savepointed(pg_session
                 session=s,
                 proposed_change_id=pc.id,
                 workspace_id=ws.id,
+                stamp=stamp_for_workspace(ws),
                 approver=approver,
                 workspaces_dir=str(tmp_path),
             )
@@ -659,6 +671,7 @@ def test_citation_accept_git_commit_error_is_retryable_not_stale(pg_session_fact
                     session=s,
                     proposed_change_id=pc_id,
                     workspace_id=ws.id,
+                    stamp=stamp_for_workspace(ws),
                     approver=approver,
                     workspaces_dir=str(tmp_path),
                 )
@@ -709,6 +722,7 @@ def test_accept_spec_prose_commits_to_spec(pg_session_factory, tmp_path):
             session=s,
             proposed_change_id=pc.id,
             workspace_id=ws.id,
+            stamp=stamp_for_workspace(ws),
             approver=owner,
             workspaces_dir=str(tmp_path),
         )
@@ -747,6 +761,7 @@ def test_accept_spec_prose_blocked_when_locked(pg_session_factory, tmp_path):
                 session=s,
                 proposed_change_id=pc.id,
                 workspace_id=ws.id,
+                stamp=stamp_for_workspace(ws),
                 approver=owner,
                 workspaces_dir=str(tmp_path),
             )

@@ -92,8 +92,8 @@
     "path": "src/call_manager/proposal_assist/editing/save.py",
     "symbol": "save_section",
     "category": "semantic",
-    "fenced": false,
-    "slice": "F3e1b"
+    "fenced": true,
+    "slice": "F3e-endgame-E-F"
   },
   {
     "kind": "git_commit",

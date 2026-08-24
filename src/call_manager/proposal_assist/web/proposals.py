@@ -94,7 +94,8 @@ def list_proposed_changes(
 def _accept_git_first(session_factory, workspace_id, pc_id, user, workspaces_dir) -> dict:
     """The pre-collab git-first accept path, verbatim — no behavior change."""
     with session_factory() as session:
-        require_member(workspace_id=workspace_id, user=user, session=session)
+        ws = require_member(workspace_id=workspace_id, user=user, session=session)
+        stamp = stamp_for_workspace(ws)  # minted at the access check (endgame Task 6)
         try:
             pc = accept_proposed_change(
                 session=session,
@@ -102,6 +103,7 @@ def _accept_git_first(session_factory, workspace_id, pc_id, user, workspaces_dir
                 workspace_id=workspace_id,
                 approver=user,
                 workspaces_dir=workspaces_dir,
+                stamp=stamp,
             )
         except collab_state.CollabSeveranceConflict as exc:
             # enable-on-touch flipped the artifact to collab AFTER _route() read

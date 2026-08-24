@@ -82,6 +82,11 @@ UNCONVERTED_LIVE_CALLERS: frozenset[tuple[str, str]] = frozenset(
             "src/call_manager/proposal_assist/citations/bibliography.py",
             "build_bibliography",
         ),
+        # _insert_citation_locked: converted to Primitive B in endgame Task 6, but its
+        # acquisition sits inside a try: block (it maps CommitMutexTimeout / deleted /
+        # stale to error dicts), so the static checker gives the sink stmt_index=None
+        # and cannot prove order — it stays pinned with a §5.2 runtime proof, exactly
+        # the shape this list exists for. It no longer calls acquire_commit_mutex_live.
         (
             "src/call_manager/proposal_assist/citations/core.py",
             "_insert_citation_locked",
@@ -90,10 +95,10 @@ UNCONVERTED_LIVE_CALLERS: frozenset[tuple[str, str]] = frozenset(
         # acquisition is now a top-level acquire_commit_mutex_at_generation that
         # statically pairs with its own write_and_commit_files sink, so the checker
         # proves it fenced and it leaves this pin list.
-        (
-            "src/call_manager/proposal_assist/editing/save.py",
-            "save_section",
-        ),
+        # save_section: converted to Primitive B in endgame Task 6. Its acquisition is
+        # a top-level acquire_commit_mutex_at_generation that statically pairs with its
+        # own write_and_commit_files sink, so the checker proves it fenced and it leaves
+        # this pin list (it gained a git_commit inventory row instead).
         (
             "src/call_manager/proposal_assist/phases/setup.py",
             "Phase0Worker._init_repo",
@@ -148,9 +153,11 @@ ENCLOSING_ACQUISITIONS: Mapping[tuple[str, str], str] = {
     # Task 5 — each now takes acquire_commit_mutex_at_generation at a threaded stamp
     # and no longer calls acquire_commit_mutex_live, so none is an enclosing _live
     # acquisition any more. post_lock_spec and post_unlock_spec left in Task 4.
-    # Only Phase0Worker._m1 (F5) remains: it reaches _init_repo, whose sink row is
-    # F5's, so it converts with F5 rather than here.
-    ("src/call_manager/proposal_assist/phases/setup.py", "Phase0Worker._m1"): "F5",
+    # Phase0Worker._m1 converted in endgame Task 6: it now takes
+    # acquire_commit_mutex_at_generation at the generation the claim stamped on its
+    # job row (threaded through run_one), so it no longer calls acquire_commit_mutex_live
+    # and is no longer an enclosing _live acquisition. This record is now empty — every
+    # enclosing _live acquisition in the tree has been converted.
 }
 
 #: Take ``acquire_commit_mutex_live`` AND hold a git sink in the same function. Not
@@ -158,11 +165,10 @@ ENCLOSING_ACQUISITIONS: Mapping[tuple[str, str], str] = {
 #: inventory row.  Recorded only so the partition below is total.
 LIVE_ACQUIRING_SINK_HOLDERS: frozenset[tuple[str, str]] = frozenset(
     {
-        ("src/call_manager/proposal_assist/citations/core.py", "_insert_citation_locked"),
-        ("src/call_manager/proposal_assist/editing/save.py", "save_section"),
-        # checkpoint_artifact converted to Primitive B in endgame Task 5 — no longer
-        # calls acquire_commit_mutex_live, so it leaves this record.
-        # post_init_spec._git converted to Primitive B in endgame Task 4
+        # _insert_citation_locked and save_section converted to Primitive B in endgame
+        # Task 6 — neither calls acquire_commit_mutex_live any more, so both leave this
+        # record. checkpoint_artifact converted in Task 5; post_init_spec._git in Task 4.
+        # This record is now empty: no function both takes _live and holds a git sink.
     }
 )
 

@@ -33,6 +33,7 @@ from call_manager.proposal_assist.collab.yjs_bridge import (
     ydoc_to_pm_json,
 )
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
 from call_manager.proposal_assist.proposals.accepting import (
     accept_proposed_change,
 )
@@ -263,6 +264,7 @@ def test_git_first_citation_accept_commits_both_files(pg_session_factory, tmp_pa
             workspace_id=ws.id,
             approver=approver,
             workspaces_dir=str(tmp_path),
+            stamp=stamp_for_workspace(ws),
         )
         s.flush()
 

@@ -35,10 +35,23 @@ from call_manager.proposal_assist.citations.ledger import (
     load_ledger,
 )
 from call_manager.proposal_assist.citations.markers import build_marker, find_markers
+from call_manager.proposal_assist.ports.stamp import FenceStamp
 from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
 from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 from call_manager.proposal_assist.tools.registry import ToolContext
 from tests.proposal_assist.conftest import make_user, make_workspace
+
+
+def _stamp(ctx: ToolContext) -> FenceStamp:
+    """The fencing identity insert_citation_impl now requires. These test
+    workspaces are all at lifecycle_generation 0, so the stamp the caller would
+    thread carries generation 0."""
+    return FenceStamp(
+        workspace_id=ctx.workspace_id,
+        generation=0,
+        active_turn_job_id=None,
+        origin_job_id=None,
+    )
 
 EMBED_DIM = 1024
 
@@ -185,6 +198,7 @@ async def test_clean_citation_no_errors(pg_session_factory, _settings_env, tmp_p
     )
     result = await insert_citation_impl(
         ctx,
+        stamp=_stamp(ctx),
         reference_id=str(rid),
         anchor=ANCHOR,
         chunk_index=0,
@@ -236,6 +250,7 @@ async def test_empty_claim_insert_has_no_spurious_drift(
     )
     result = await insert_citation_impl(
         ctx,
+        stamp=_stamp(ctx),
         reference_id=str(rid),
         anchor=anchor,
         chunk_index=0,

@@ -121,22 +121,17 @@ def test_f3e1b_enclosing_acquisitions_are_all_converted_after_endgame_task5():
     acquire_commit_mutex_live, so NONE remains an enclosing `_live` acquisition —
     F3e1b's enclosing set is now empty.
 
-    `Phase0Worker._m1` is the only enclosing acquisition left in the tree and is NOT
-    F3e1b's: it reaches `_init_repo`, whose inventory row is F5. Scheduling it into
-    F3e1b would make F3e1b's completion criterion (spec §13 crit-9) unsatisfiable,
-    because F5's sink is not F3e1b's to convert.
+    `Phase0Worker._m1` was the one enclosing acquisition NOT in §4.2's table — it
+    reaches `_init_repo`, an F5 sink — and endgame Task 6 converted it too: it now takes
+    acquire_commit_mutex_at_generation at the generation the claim stamped on its job
+    row (threaded through run_one) and no longer calls acquire_commit_mutex_live. So the
+    ENCLOSING_ACQUISITIONS record is now empty: every enclosing `_live` acquisition in
+    the tree has been converted.
     """
     from tests.fencing.live_mutex_gate import ENCLOSING_ACQUISITIONS
 
     # No F3e1b enclosing acquisition survives Task 5.
     assert {k for k, sl in ENCLOSING_ACQUISITIONS.items() if sl == "F3e1b"} == set()
-    # The single remaining enclosing acquisition is Phase0Worker._m1, and it is F5's.
-    assert set(ENCLOSING_ACQUISITIONS) == {
-        ("src/call_manager/proposal_assist/phases/setup.py", "Phase0Worker._m1")
-    }
-    assert (
-        ENCLOSING_ACQUISITIONS[
-            ("src/call_manager/proposal_assist/phases/setup.py", "Phase0Worker._m1")
-        ]
-        == "F5"
-    )
+    # Phase0Worker._m1 (the last, F5, enclosing acquisition) converted in Task 6 — the
+    # record is now empty.
+    assert dict(ENCLOSING_ACQUISITIONS) == {}
