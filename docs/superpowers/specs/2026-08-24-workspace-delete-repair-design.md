@@ -174,9 +174,10 @@ lines can go. The interpreter becomes the gate.
 > **UPDATE (2026-08-24): the fence WAS completed, and this ending was taken.** Every
 > convertible caller was moved to `acquire_commit_mutex_at_generation`, the delete path
 > (`soft_delete_workspace_db`) moved to the raw `acquire_commit_mutex` with its liveness
-> re-read inlined, and `acquire_commit_mutex_live` was **deleted** — `grep` for it in
-> `src/` now returns nothing and `hasattr(locking, "acquire_commit_mutex_live")` is
-> `False`. **But the "all 4,993 lines can go" prediction did NOT hold:** measurement
+> re-read inlined, and `acquire_commit_mutex_live` was **deleted** — grepping `src/` for a
+> call or definition (`acquire_commit_mutex_live(`) now returns nothing (only a few
+> historical comments still name it), and `hasattr(locking, "acquire_commit_mutex_live")`
+> is `False`. **But the "all 4,993 lines can go" prediction did NOT hold:** measurement
 > during the endgame (see the plan's PLAN-DEFECTS) found the `tests/fencing/` gates
 > police the durable fence *architecture* (stamp shape, ports purity, sink enumeration,
 > sink ordering, inventory coverage), not the two-primitive migration. Only
