@@ -9,9 +9,27 @@ on `main.py`'s catch-all `Exception` handler as a sanitized 500.
 Two things make that wrong rather than merely untidy:
 
 * `ports/errors.py` says of this exception "It never reaches a user as a 5xx".
-* It broke flag parity. With collab ON these same two routes go through
-  `RoomManager.operate`, whose `WorkspaceRetired` already answers 404 for the
-  identical user-visible event, so the status code depended on a feature flag.
+* A client cannot act on it. "The workspace you addressed is gone" is a 404 fact,
+  and the same routes already answer 404 for it whenever the row is still deleted
+  — flag-off from Primitive B's own `WorkspaceDeleted` (`fencing.py:166-167`),
+  collab-ON from `RoomManager.operate`'s `WorkspaceRetired` (`collab/room.py:548,
+  563, 577`). A 500 for the one variant where the row came BACK would be a
+  different answer to the same question.
+
+An earlier draft of this docstring said collab-ON "already answers exactly this
+body" for the event this handler sees. It does not, and the distinction is worth
+keeping straight because the last test in this file exercises exactly the case
+where it fails:
+
+* **Plain delete race** — parity holds, per the two paths named above.
+* **Delete-and-RESTORE race** — the only race that can reach this handler (a
+  still-deleted row is caught by `WorkspaceDeleted` first), and here flag-off is
+  STRICTER than collab-ON. Restore clears the retired flag
+  (`lifecycle.py:157`, `retired=False`) and leaves `soft_deleted_at` NULL, so
+  `is_retired()` is False, the under-mutex liveness re-read passes, and collab-ON
+  proceeds into the new epoch. Only the generation carried on the caller's stamp
+  catches it. The 404 here is right on its own merits, not because it matches a
+  collab-ON answer that does not exist.
 
 One handler covers all 18 endgame sites, so this file is the place the mapping is
 pinned as the remaining 16 convert.
@@ -66,9 +84,12 @@ def test_a_raising_api_route_returns_the_same_404_body_as_workspace_deleted(_app
     deleted = client.get("/api/_test/deleted")
 
     assert stale.status_code == 404                      # NOT 500
-    # Byte-identical to WorkspaceDeleted and to the collab-ON fork's
-    # WorkspaceRetired: to a client these are one event, and a response that
-    # differed would make the answer depend on the collab flag.
+    # Byte-identical to WorkspaceDeleted, and to the WorkspaceRetired the
+    # collab-ON fork raises on a PLAIN delete race: to a client these are one
+    # event, and a response that differed would make the answer to "your
+    # workspace is gone" depend on the collab flag. (On the delete+restore race
+    # collab-ON raises nothing at all — see the module docstring; that gap is the
+    # fence's remaining work, not a reason to answer this one differently.)
     assert stale.json() == deleted.json()
     assert stale.json()["error"]["code"] == "workspace_deleted"
     assert DELETED_ERROR_MESSAGE in stale.text

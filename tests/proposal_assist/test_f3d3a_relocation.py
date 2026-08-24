@@ -232,11 +232,19 @@ def test_no_tool_module_gained_a_port_call():
         "F3d2's five, plus F3d3b's TWO propose sites (artifact-edit + citation), "
         "plus the endgame slice's git_commit conversions"
     )
-    # Measured from the LIVE tree, not the stored JSON: this task fences the SECOND
-    # of F3d3's two sites (the citation propose); Task 2 fenced the first. The
-    # inventory JSON is regenerated in Task 4, so load_inventory() still reports both
-    # F3d3 rows fenced=false here — the SCAN is the source of truth for what the code
-    # actually does now.
+    # The inventory is consulted only for WHICH rows belong to F3d3; whether they are
+    # fenced is read from `fenced`, MEASURED off the live tree above.
+    #
+    # That ordering has outlived the reason it was introduced. When F3d3b's Task 3
+    # wrote this line, the stored JSON still carried both F3d3 rows as fenced=false
+    # (F3d3b's own Task 2 had converted the artifact-edit propose site, Task 3 the
+    # citation one, and neither had regenerated the file yet), so the scan was
+    # CORRECTING the JSON. F3d3b's Task 4 then regenerated it — f38e5feb, "F3d3
+    # closes" — and both rows have read fenced=true ever since, so the two now agree.
+    # Note the Task numbers above are F3d3b's; the 2026-08-24 endgame numbers its own
+    # tasks from 1 again, and ITS Task 2 (5f66eada) touched only the two git_commit
+    # rows, not these. Keeping the intersection against the measured set means this
+    # assertion still tests the code rather than the file if they ever drift apart.
     f3d3_sites = {
         (r["kind"], r["path"], r["symbol"])
         for r in load_inventory()

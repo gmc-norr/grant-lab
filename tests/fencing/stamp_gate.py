@@ -1,8 +1,21 @@
-"""Fence F3e1a — a mechanism-2 generation must come from a FenceStamp.
+"""Fence F3e1a — a mechanism-2 generation must come from a FenceStamp minted early.
 
 Spec 2026-08-21 §7.0.3. Revisions 1-4 of that spec could only SAY "capture the
 generation early"; four review rounds found defects in the prose that said it. This
 turns the rule into something the build checks.
+
+TWO rules, because either alone is satisfiable by an unfenced site:
+
+* the mutex's `generation=` must be `<name>.generation`, and
+* `stamp_for_workspace(...)` must be handed a bare name.
+
+The second exists because the first is a rule about SHAPE and says nothing about
+where the name came from. Measured on this tree with only the first rule in force:
+replacing a converted site's
+`stamp = stamp_for_workspace(workspace)` with
+`stamp = stamp_for_workspace(session.get(Workspace, workspace.id))` left the mutex
+line letter-perfect and the whole fencing suite green, while fencing nothing at all —
+the belief was minted from a read taken at the write.
 
 Reads source as TEXT and matches parsed AST call nodes. It never inspects source
 text for a substring, because a comment beside the code would satisfy that — a
@@ -19,6 +32,18 @@ MECHANISM_2_ACQUIRE = "acquire_commit_mutex_at_generation"
 #: The attribute a stamp exposes. `stamp.generation` is the only accepted shape.
 STAMP_FIELD = "generation"
 
+#: The service-side stamp mint (`ports/stamp.py`, spec §7.0.2). Constraining only
+#: the mutex's `generation=` shape is not enough: `stamp_for_workspace(...)` accepts
+#: ANY object with `.lifecycle_generation`, so a late read laundered through it —
+#: `generation=stamp_for_workspace(session.get(Workspace, wid)).generation` — wears
+#: a perfect `<name>.generation` at the mutex and still fences nothing. The mint must
+#: therefore be handed the object an access check ALREADY loaded, which at the syntax
+#: level means a bare name.
+STAMP_MINT = "stamp_for_workspace"
+
+#: The mint's only parameter, for the `stamp_for_workspace(workspace=ws)` spelling.
+STAMP_MINT_PARAM = "workspace"
+
 SCOPED = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
 
@@ -34,6 +59,21 @@ def _is_stamp_attribute(node: ast.AST) -> bool:
         and node.attr == STAMP_FIELD
         and isinstance(node.value, ast.Name)
     )
+
+
+def _minted_from(node: ast.Call) -> ast.AST | None:
+    """The expression a `stamp_for_workspace(...)` call mints from, or None.
+
+    None means "no workspace argument at all" — a TypeError at runtime, but at
+    scan time it is simply an unprovable origin, and this gate treats an origin
+    it cannot see as a violation rather than waving it through.
+    """
+    if node.args:
+        return node.args[0]
+    for kw in node.keywords:
+        if kw.arg == STAMP_MINT_PARAM:
+            return kw.value
+    return None
 
 
 def check_source(source: str, path: str) -> list[str]:
@@ -73,6 +113,23 @@ def check_source(source: str, path: str) -> list[str]:
                             f"<stamp>.{STAMP_FIELD} — the actor's belief must come "
                             f"from a FenceStamp, never a read at the mutex"
                         )
+            elif name == STAMP_MINT:
+                qual = ".".join(stack) if stack else "<module>"
+                source_expr = _minted_from(node)
+                # A bare Name is a workspace object bound EARLIER — by an access
+                # check, a liveness pre-screen, a parameter. Anything else is an
+                # expression evaluated right here, and a `session.get`/`select`
+                # hiding inside it re-reads the generation at the write. Both
+                # production mints pass a bare name today; a conversion that
+                # cannot is a Group D conversion (thread a stamp parameter in),
+                # not a case for relaxing this.
+                if not isinstance(source_expr, ast.Name):
+                    problems.append(
+                        f"{path}::{qual} mints a stamp from an expression rather "
+                        f"than a bound name — {STAMP_MINT}() must be handed the "
+                        f"workspace the caller's access check already loaded, or "
+                        f"the stamp is itself a read at the mutex"
+                    )
         for child in ast.iter_child_nodes(node):
             visit(child, stack)
 

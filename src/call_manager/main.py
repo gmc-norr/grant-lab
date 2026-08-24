@@ -558,10 +558,38 @@ def create_app() -> FastAPI:
         #
         # 404 + "workspace_deleted" + DELETED_ERROR_MESSAGE, reused rather than
         # minted, for the same reason the WorkspaceRetired handler above reuses
-        # them: this is one event to a client, and the collab-ON fork of the very
-        # routes Primitive B now fences ALREADY answers exactly this body for it
-        # (via WorkspaceRetired). Minting a distinct code here would make the
-        # response depend on a feature flag.
+        # them: to a client this is the same event — the workspace you addressed
+        # is gone — and it should not be told two different things about it.
+        #
+        # What the collab-ON fork of these routes does, measured rather than
+        # assumed (this comment previously claimed blanket parity, which is false
+        # for the second case):
+        #
+        #   * Plain delete race — soft-deleted mid-request and still deleted.
+        #     Flag-off: Primitive B's own re-read raises WorkspaceDeleted
+        #     (fencing.py:166-167) -> 404 via the handler above. Collab-ON:
+        #     RoomManager.operate's is_retired guards raise WorkspaceRetired
+        #     (collab/room.py:548, 563, 577) -> 404, and the collab checkpoint's
+        #     acquire_commit_mutex_live re-reads soft_deleted_at underneath that
+        #     (drafting/locking.py:278-282). Parity holds here, and reusing this
+        #     body is what keeps it holding.
+        #
+        #   * Delete-and-RESTORE race — the only race that can reach THIS handler,
+        #     because a still-deleted row is caught by WorkspaceDeleted first.
+        #     Parity does NOT hold here, and claiming it did was this comment's
+        #     earlier error: flag-off is now STRICTER than collab-ON. A restore
+        #     clears the retired flag (lifecycle.py:157 applies retired=False), so
+        #     is_retired() is False again and collab-ON proceeds into the new
+        #     epoch; soft_deleted_at is back to NULL, so the durable backstop waves
+        #     it through too. Only the generation on the caller's stamp catches it,
+        #     and only on the converted (flag-off) path — which is the fence doing
+        #     its job, not a regression.
+        #
+        # So this 404 is not chosen to MATCH collab-ON on the case that reaches it;
+        # it is chosen because the client-visible fact is identical to the plain
+        # delete it already knows, and because minting a second code would make the
+        # answer to "your workspace is gone" depend on a feature flag. Closing the
+        # collab-ON gap is the epoch fence's own remaining work, not this handler's.
         #
         # Registered explicitly because WorkspaceGenerationStale is a bare
         # RuntimeError, sibling to WorkspaceDeleted rather than a subclass, so
