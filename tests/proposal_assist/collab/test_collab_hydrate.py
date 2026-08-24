@@ -12,7 +12,7 @@ from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
 from call_manager.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from tests.proposal_assist.collab.test_collab_recovery import _canonical
-from tests.proposal_assist.conftest import make_user, make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 
 def _init_repo(repo: Path, content: str) -> None:
@@ -37,7 +37,8 @@ def test_hydrates_from_git_when_store_empty_and_enabled(pg_session_factory, tmp_
         s.commit()
     with pg_session_factory() as s:
         updates = load_or_hydrate(
-            s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
+            s, stamp=stamp_for(s, wid), workspace_id=wid, artifact="draft",
+            workspaces_dir=str(tmp_path),
         )
         s.commit()
         assert len(updates) == 1  # a single seed update
@@ -58,7 +59,10 @@ def test_no_hydrate_when_flag_off(pg_session_factory, tmp_path):
     _init_repo(Path(tmp_path) / str(wid) / "repo", "## X\nbody\n")
     with pg_session_factory() as s:
         assert (
-            load_or_hydrate(s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path))
+            load_or_hydrate(
+                s, stamp=stamp_for(s, wid), workspace_id=wid, artifact="draft",
+                workspaces_dir=str(tmp_path),
+            )
             == []
         )
         assert store.load_updates(s, workspace_id=wid, artifact="draft") == []  # nothing persisted
@@ -78,7 +82,8 @@ def test_hydrates_empty_paragraph_when_head_is_blank(pg_session_factory, tmp_pat
         s.commit()
     with pg_session_factory() as s:
         updates = load_or_hydrate(
-            s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
+            s, stamp=stamp_for(s, wid), workspace_id=wid, artifact="draft",
+            workspaces_dir=str(tmp_path),
         )
         s.commit()
         assert len(updates) == 1  # seeded, did not crash
@@ -105,7 +110,10 @@ def test_no_hydrate_when_enabled_but_artifact_file_missing(pg_session_factory, t
         s.commit()
     with pg_session_factory() as s:
         assert (
-            load_or_hydrate(s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path))
+            load_or_hydrate(
+                s, stamp=stamp_for(s, wid), workspace_id=wid, artifact="draft",
+                workspaces_dir=str(tmp_path),
+            )
             == []
         )
         assert store.load_updates(s, workspace_id=wid, artifact="draft") == []
@@ -132,6 +140,7 @@ def test_existing_updates_are_replayed_not_rehydrated(pg_session_factory, tmp_pa
         s.commit()
     with pg_session_factory() as s:
         updates = load_or_hydrate(
-            s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
+            s, stamp=stamp_for(s, wid), workspace_id=wid, artifact="draft",
+            workspaces_dir=str(tmp_path),
         )
         assert updates == cap  # replayed the store, did NOT re-hydrate from git

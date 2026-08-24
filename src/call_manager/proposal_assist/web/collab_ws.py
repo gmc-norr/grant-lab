@@ -16,6 +16,7 @@ from sqlalchemy.exc import OperationalError
 from starlette.concurrency import run_in_threadpool
 from starlette.websockets import WebSocketDisconnect
 
+from call_manager.db.models import Workspace
 from call_manager.proposal_assist.collab import state as collab_state
 from call_manager.proposal_assist.collab import store
 from call_manager.proposal_assist.collab.hydrate import load_or_hydrate
@@ -36,6 +37,8 @@ from call_manager.proposal_assist.drafting.locking import (
     WorkspaceDeleted,
     is_lock_timeout,
 )
+from call_manager.proposal_assist.fencing import WorkspaceGenerationStale
+from call_manager.proposal_assist.ports.stamp import FenceStamp, stamp_for_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +79,7 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
     # 2. Authorize membership + resolve write permission (once, at connect).
     session_factory = websocket.app.state.session_factory
 
-    def _access():
+    def _access() -> tuple[bool, bool, bool, FenceStamp | None]:
         with session_factory() as s:
             is_member, can_write = resolve_access(
                 s, user=user, workspace_id=workspace_id, artifact=artifact
@@ -84,10 +87,21 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
             enabled = collab_state.is_collab_enabled(
                 s, workspace_id=workspace_id, artifact=artifact
             )
-            return is_member, can_write, enabled
+            # Mint the fence stamp HERE, at connect, from a bare-name workspace load
+            # in the SAME transaction as resolve_access above. A long-lived socket
+            # authorizes once at generation G and can still be sending edits after a
+            # delete — so the hydrate write (load_or_hydrate) must re-validate THIS
+            # captured generation under the mutex, in its own later session, never a
+            # generation re-read at that write (endgame Task 5, framework §2b). Only
+            # threaded to the hydrate path; the per-message _persist path takes no
+            # commit mutex and is not a Group-D site. None when the workspace is gone
+            # (is_member is already False on that path, so it is never used).
+            ws = s.get(Workspace, workspace_id)
+            stamp = stamp_for_workspace(ws) if ws is not None else None
+            return is_member, can_write, enabled, stamp
 
-    is_member, can_write, collab_enabled = await run_in_threadpool(_access)
-    if not is_member:
+    is_member, can_write, collab_enabled, stamp = await run_in_threadpool(_access)
+    if not is_member or stamp is None:
         await websocket.close(code=_WS_POLICY_VIOLATION)
         return
     if not collab_enabled:
@@ -104,7 +118,8 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
         def _read():
             with session_factory() as s:
                 updates = load_or_hydrate(
-                    s, workspace_id=workspace_id, artifact=artifact, workspaces_dir=workspaces_dir
+                    s, stamp=stamp, workspace_id=workspace_id, artifact=artifact,
+                    workspaces_dir=workspaces_dir,
                 )
                 s.commit()  # persist the seed if hydration happened
                 return updates
@@ -127,12 +142,14 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
     state = ClientState(user_id=user.id, can_write=can_write)
     try:
         room = await MANAGER.acquire(key, load=_load, client=websocket, state=state)
-    except (WorkspaceRetired, WorkspaceDeleted):
+    except (WorkspaceRetired, WorkspaceDeleted, WorkspaceGenerationStale):
         # The workspace was retired (soft-deleted) between the membership check and
         # room acquisition — or during cold-start hydration, where load_or_hydrate's
-        # live-mutex guard raises WorkspaceDeleted. accept() already happened, so a
-        # raise would surface as 1011/1006; close with 1008 (policy) and return
-        # WITHOUT entering the try below (no client registered, nothing to release).
+        # commit-mutex-at-generation guard raises WorkspaceDeleted (still deleted) or
+        # WorkspaceGenerationStale (deleted-and-restored past the connect stamp).
+        # accept() already happened, so a raise would surface as 1011/1006; close
+        # with 1008 (policy) and return WITHOUT entering the try below (no client
+        # registered, nothing to release).
         with contextlib.suppress(Exception):
             await websocket.close(code=_WS_POLICY_VIOLATION)
         return

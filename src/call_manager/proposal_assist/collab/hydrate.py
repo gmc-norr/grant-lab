@@ -14,8 +14,9 @@ from call_manager.proposal_assist.collab.canonical import (  # shared, single so
     read_head_markdown,
 )
 from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
-from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex_live
+from call_manager.proposal_assist.fencing import acquire_commit_mutex_at_generation
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.ports.stamp import FenceStamp
 
 # The hydration seed runs once per room, ever, so a modest bound is safe: on
 # contention the caller's operation fails with the house busy semantics and the
@@ -24,7 +25,7 @@ _HYDRATE_MUTEX_TIMEOUT_SECONDS = 5
 
 
 def load_or_hydrate(
-    session, *, workspace_id: uuid.UUID, artifact: str, workspaces_dir
+    session, *, stamp: FenceStamp, workspace_id: uuid.UUID, artifact: str, workspaces_dir
 ) -> list[bytes]:
     updates = store.load_updates(session, workspace_id=workspace_id, artifact=artifact)
     if updates:
@@ -37,26 +38,32 @@ def load_or_hydrate(
         # room empty (Slice-1 behavior) rather than persisting a synthetic seed.
         return []
     seed = pm_json_to_ydoc(markdown_to_pm_or_empty(md)).get_update()
-    # B-retire: the seed is a DB write on a cold path, so take the SAME lock the
-    # delete transaction takes (B4) before committing it. This is race-free, not
-    # merely narrowing: acquire_commit_mutex_live re-reads soft_deleted_at under
-    # the mutex, and deletion holds that mutex across its own commit. Cost is one
-    # mutex acquisition on the FIRST open of a room ever (afterwards load_updates
-    # returns rows and we never reach here) — the same shape maybe_auto_enable
-    # already pays on the artifact read path.
+    # B-retire + endgame Task 5 (Primitive B): the seed is a DB write on a cold
+    # path, so take the SAME lock the delete transaction takes (B4) before committing
+    # it, now AT the caller's stamped generation. This is race-free, not merely
+    # narrowing: acquire_commit_mutex_at_generation re-reads soft_deleted_at AND the
+    # lifecycle_generation under the mutex, and deletion holds that mutex across its
+    # own commit. The generation is threaded from the caller's access check (a route
+    # membership check, or the WS connect authorization) — never re-read here at the
+    # write. Cost is one mutex acquisition on the FIRST open of a room ever
+    # (afterwards load_updates returns rows and we never reach here) — the same shape
+    # maybe_auto_enable already pays on the artifact read path.
     #
-    # Do NOT catch WorkspaceDeleted / CommitMutexTimeout here. Returning [] would
-    # be indistinguishable from "this artifact has no content yet" (the branch
-    # above), and accept_via_kernel would then build an EMPTY room and apply a
-    # section write to it. Both exceptions are already house contracts: on the HTTP
-    # paths WorkspaceDeleted is a 404 (app-level handler) and CommitMutexTimeout the
-    # standard busy -> 429. On the WEBSOCKET path those handlers still RUN (Starlette
-    # dispatches them in the websocket scope too), but all they can emit on an
-    # already-accepted socket is a denial response the client cannot see or act on —
-    # so collab_ws maps BOTH to a close frame instead; see its except around
-    # MANAGER.acquire.
-    acquire_commit_mutex_live(
-        session, workspace_id, timeout_seconds=_HYDRATE_MUTEX_TIMEOUT_SECONDS
+    # Do NOT catch WorkspaceDeleted / WorkspaceGenerationStale / CommitMutexTimeout
+    # here. Returning [] would be indistinguishable from "this artifact has no
+    # content yet" (the branch above), and accept_via_kernel would then build an
+    # EMPTY room and apply a section write to it. All three are already house
+    # contracts: on the HTTP paths WorkspaceDeleted and WorkspaceGenerationStale are
+    # a 404 (app-level handlers) and CommitMutexTimeout the standard busy -> 429. On
+    # the WEBSOCKET path those handlers still RUN (Starlette dispatches them in the
+    # websocket scope too), but all they can emit on an already-accepted socket is a
+    # denial response the client cannot see or act on — so collab_ws maps them to a
+    # close frame instead; see its except around MANAGER.acquire.
+    acquire_commit_mutex_at_generation(
+        session,
+        stamp.workspace_id,
+        generation=stamp.generation,
+        timeout_seconds=_HYDRATE_MUTEX_TIMEOUT_SECONDS,
     )
     store.append_update(
         session, workspace_id=workspace_id, artifact=artifact, actor_id=None, update=seed

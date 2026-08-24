@@ -111,25 +111,28 @@ def test_the_live_acquirers_partition_exactly():
         assert left & right == set(), f"a qualname is in two records: {sorted(left & right)}"
 
 
-def test_f3e1b_owns_exactly_the_five_enclosing_acquisitions_remaining_after_endgame_task4():
+def test_f3e1b_enclosing_acquisitions_are_all_converted_after_endgame_task5():
     """Spec §4.2's table originally had seven rows; two route sites were converted by
-    endgame Task 4 (post_lock_spec, post_unlock_spec) and are no longer enclosing
-    acquisitions. The five remaining all reach `checkpoint_artifact`.
+    endgame Task 4 (post_lock_spec, post_unlock_spec), and endgame Task 5 converted the
+    remaining FIVE kernel enclosing acquisitions (apply_citation_to_room,
+    kernel_accept_prose, kernel_init_spec, kernel_accept_citation,
+    apply_annotation_insert_to_room) to Primitive B. Each now takes
+    acquire_commit_mutex_at_generation at a threaded stamp and no longer calls
+    acquire_commit_mutex_live, so NONE remains an enclosing `_live` acquisition —
+    F3e1b's enclosing set is now empty.
 
-    `Phase0Worker._m1` is the sixth enclosing acquisition in the tree and is NOT one of
-    them: it reaches `_init_repo`, whose inventory row is F5. Scheduling it into F3e1b
-    would make F3e1b's completion criterion (spec §13 crit-9) unsatisfiable, because F5's
-    sink is not F3e1b's to convert.
+    `Phase0Worker._m1` is the only enclosing acquisition left in the tree and is NOT
+    F3e1b's: it reaches `_init_repo`, whose inventory row is F5. Scheduling it into
+    F3e1b would make F3e1b's completion criterion (spec §13 crit-9) unsatisfiable,
+    because F5's sink is not F3e1b's to convert.
     """
     from tests.fencing.live_mutex_gate import ENCLOSING_ACQUISITIONS
 
-    _KERNEL = "src/call_manager/proposal_assist/collab/kernel.py"
-    assert {k for k, sl in ENCLOSING_ACQUISITIONS.items() if sl == "F3e1b"} == {
-        (_KERNEL, "apply_citation_to_room"),
-        (_KERNEL, "kernel_accept_prose"),
-        (_KERNEL, "kernel_init_spec"),
-        (_KERNEL, "kernel_accept_citation"),
-        (_KERNEL, "apply_annotation_insert_to_room"),
+    # No F3e1b enclosing acquisition survives Task 5.
+    assert {k for k, sl in ENCLOSING_ACQUISITIONS.items() if sl == "F3e1b"} == set()
+    # The single remaining enclosing acquisition is Phase0Worker._m1, and it is F5's.
+    assert set(ENCLOSING_ACQUISITIONS) == {
+        ("src/call_manager/proposal_assist/phases/setup.py", "Phase0Worker._m1")
     }
     assert (
         ENCLOSING_ACQUISITIONS[

@@ -228,6 +228,17 @@ def test_no_tool_module_gained_a_port_call():
             "src/call_manager/proposal_assist/citations/human_cite.py",
             "insert_citation_for_user",
         ),
+        # --- 2026-08-24 endgame, Task 5: the collab cluster (Group D) ---
+        # checkpoint_artifact is the ONLY Group-D function that holds a git sink
+        # (write_and_commit_files) directly in its body, and its converted
+        # acquisition pairs statically with that sink, so the scanner measures it
+        # fenced=true. The five kernel functions + hydrate + flip + handover
+        # delegate to it and hold no sink themselves, so they add no git_commit row.
+        (
+            "git_commit",
+            "src/call_manager/proposal_assist/collab/checkpoint.py",
+            "checkpoint_artifact",
+        ),
     }, (
         "F3d2's five, plus F3d3b's TWO propose sites (artifact-edit + citation), "
         "plus the endgame slice's git_commit conversions"

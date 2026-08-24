@@ -8,12 +8,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 
 from call_manager.auth.dependencies import get_current_user
-from call_manager.db.models import User
+from call_manager.db.models import User, Workspace
 from call_manager.proposal_assist.citations.gitio import GitCommitError
 from call_manager.proposal_assist.collab import state as collab_state
 from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
 from call_manager.proposal_assist.collab.ws_auth import resolve_access
 from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, CommitMutexTimeout
+from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
 
 router = APIRouter()
 _VALID = {"draft", "spec"}
@@ -44,13 +45,22 @@ async def save_version(
                 raise HTTPException(status_code=409, detail="collab not enabled for this artifact")
             if not can_write:
                 raise HTTPException(status_code=403, detail="read-only")
+            # Mint the fence stamp from a bare-name workspace load taken in the SAME
+            # transaction as resolve_access above (the route's access check). The
+            # generation is captured here and re-validated under the mutex inside
+            # checkpoint_artifact — never re-read at the write (endgame Task 5).
+            ws = s.get(Workspace, workspace_id)
+            if ws is None or ws.soft_deleted_at is not None:
+                raise HTTPException(status_code=404, detail="workspace not found")
+            stamp = stamp_for_workspace(ws)
             # checkpoint_artifact rebuilds the doc from the durable log itself
             # (Slice 1 persists every update, so the log == the live room),
             # holds the commit mutex, and no-ops when nothing new needs saving —
             # so this works whether or not a room is currently open.
             try:
                 res = checkpoint_artifact(
-                    s, workspace_id=workspace_id, artifact=artifact, workspaces_dir=workspaces_dir
+                    s, stamp=stamp, workspace_id=workspace_id, artifact=artifact,
+                    workspaces_dir=workspaces_dir,
                 )
                 s.commit()
             except CommitMutexTimeout as exc:

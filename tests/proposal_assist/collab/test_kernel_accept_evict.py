@@ -12,7 +12,7 @@ from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.proposals.kernel_accept import accept_via_kernel
 from tests.proposal_assist.collab.test_collab_kernel_accept import _git_head, _init_repo, _mk_pc
 from tests.proposal_assist.collab.test_collab_room import FakeClient
-from tests.proposal_assist.conftest import make_user, make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 
 @pytest.fixture
@@ -37,7 +37,10 @@ def _seed_repo(pg_session_factory, tmp_path, email):
 async def _acquire_client(pg_session_factory, tmp_path, wid, oid):
     async def _load():
         with pg_session_factory() as s:
-            u = load_or_hydrate(s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path))
+            u = load_or_hydrate(
+                s, stamp=stamp_for(s, wid), workspace_id=wid, artifact="draft",
+                workspaces_dir=str(tmp_path),
+            )
             s.commit()
             return u
     client = FakeClient()
@@ -59,10 +62,11 @@ async def test_pre_mutation_failure_does_not_evict(pg_session_factory, tmp_path)
                            base_commit_sha=_git_head(repo), base_section_sha="deadbeef")
         with pg_session_factory() as s:
             approver = s.get(User, oid)
+            stamp = stamp_for(s, wid)  # the accept route's belief, formed while live
         with pytest.raises(IndexError):
             await accept_via_kernel(
                 session_factory=pg_session_factory, workspaces_dir=str(tmp_path),
-                workspace_id=wid, pc_id=pc_id, approver=approver, artifact="draft",
+                stamp=stamp, workspace_id=wid, pc_id=pc_id, approver=approver, artifact="draft",
             )
         assert MANAGER.get(key) is not None          # NOT evicted (pre-mutation)
         assert client in MANAGER.get(key).clients      # client kept
@@ -88,6 +92,7 @@ async def test_post_mutation_failure_evicts(pg_session_factory, tmp_path, monkey
                        base_commit_sha=_git_head(repo), base_section_sha=base_sha)
     with pg_session_factory() as s:
         approver = s.get(User, oid)
+        stamp = stamp_for(s, wid)  # the accept route's belief, formed while live
 
     def _boom(*_a, **_k):
         raise RuntimeError("checkpoint failed")
@@ -95,6 +100,7 @@ async def test_post_mutation_failure_evicts(pg_session_factory, tmp_path, monkey
     monkeypatch.setattr(kmod, "checkpoint_artifact", _boom)
     with pytest.raises(RuntimeError):
         await accept_via_kernel(session_factory=pg_session_factory, workspaces_dir=str(tmp_path),
-                                workspace_id=wid, pc_id=pc_id, approver=approver, artifact="draft")
+                                stamp=stamp, workspace_id=wid, pc_id=pc_id, approver=approver,
+                                artifact="draft")
     assert MANAGER.get(key) is None       # evicted (post-mutation recovery)
     assert client.closed == 1011           # evict force-closed the socket

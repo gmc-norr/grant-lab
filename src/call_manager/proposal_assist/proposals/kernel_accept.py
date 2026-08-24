@@ -18,6 +18,8 @@ from call_manager.proposal_assist.collab.kernel import (
 from call_manager.proposal_assist.collab.room import MANAGER
 from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout, WorkspaceDeleted
 from call_manager.proposal_assist.editing.save import SectionStructureError, SpecLockedError
+from call_manager.proposal_assist.fencing import WorkspaceGenerationStale
+from call_manager.proposal_assist.ports.stamp import FenceStamp
 from call_manager.proposal_assist.proposals.accepting import (
     ProposedChangeNotFound,
     ProposedChangeNotPending,
@@ -48,14 +50,19 @@ _CLEAN_ACCEPT_ERRORS = (
     ProposedChangeNotPending,
     CommitMutexTimeout,
     WorkspaceDeleted,
+    # Primitive B (endgame Task 5) raises this from the kernel's
+    # acquire_commit_mutex_at_generation BEFORE any fragment mutation — the same
+    # pre-mutation, non-evicting shape as WorkspaceDeleted. The app-wide handler
+    # maps it to 404.
+    WorkspaceGenerationStale,
     IndexError,
     RoomEvicted,
 )
 
 
 async def accept_via_kernel(
-    *, session_factory, workspaces_dir, workspace_id: uuid.UUID, pc_id: uuid.UUID,
-    approver: User, artifact: str,
+    *, session_factory, workspaces_dir, stamp: FenceStamp, workspace_id: uuid.UUID,
+    pc_id: uuid.UUID, approver: User, artifact: str,
 ) -> ProposedChange:
     key = (workspace_id, artifact)
 
@@ -63,7 +70,8 @@ async def accept_via_kernel(
         def _read():
             with session_factory() as s:
                 updates = load_or_hydrate(
-                    s, workspace_id=workspace_id, artifact=artifact, workspaces_dir=workspaces_dir
+                    s, stamp=stamp, workspace_id=workspace_id, artifact=artifact,
+                    workspaces_dir=workspaces_dir,
                 )
                 s.commit()
                 return updates
@@ -78,12 +86,12 @@ async def accept_via_kernel(
                         kind = pc0.kind if pc0 is not None else None
                         if kind == "citation_insert":
                             res = kernel_accept_citation(
-                                s, room_doc=room.doc, proposed_change_id=pc_id,
+                                s, stamp=stamp, room_doc=room.doc, proposed_change_id=pc_id,
                                 workspace_id=workspace_id, approver=approver,
                                 workspaces_dir=workspaces_dir)
                         elif kind == "prose_edit":
                             res = kernel_accept_prose(
-                                s, room_doc=room.doc, proposed_change_id=pc_id,
+                                s, stamp=stamp, room_doc=room.doc, proposed_change_id=pc_id,
                                 workspace_id=workspace_id, approver=approver,
                                 workspaces_dir=workspaces_dir)
                         else:

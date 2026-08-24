@@ -72,7 +72,7 @@ from call_manager.proposal_assist.editing.save import (
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.fencing import acquire_commit_mutex_at_generation
 from call_manager.proposal_assist.paths import workspace_repo_dir
-from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
+from call_manager.proposal_assist.ports.stamp import FenceStamp, stamp_for_workspace
 from call_manager.proposal_assist.proposals.kernel_accept import RoomEvicted
 from call_manager.proposal_assist.references.storage import ReferenceStorage
 from call_manager.proposal_assist.retirement import signal_workspace_retirement
@@ -270,6 +270,7 @@ def get_draft(
     sf = request.app.state.session_factory
     with sf() as session:
         ws = require_member(workspace_id=workspace_id, user=user, session=session)
+        stamp = stamp_for_workspace(ws)  # minted at the access check (endgame Task 5)
         can_edit = ws.owner_id == user.id
         repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
         proposal = repo_dir / PROPOSAL_FILENAME
@@ -285,6 +286,7 @@ def get_draft(
         # already reports collab_enabled=true.
         collab_enabled = maybe_auto_enable(
             session,
+            stamp=stamp,
             workspace_id=workspace_id,
             artifact="draft",
         )
@@ -320,6 +322,7 @@ def get_spec(
     sf = request.app.state.session_factory
     with sf() as session:
         ws = require_member(workspace_id=workspace_id, user=user, session=session)
+        stamp = stamp_for_workspace(ws)  # minted at the access check (endgame Task 5)
         is_owner = ws.owner_id == user.id
         locked = ws.spec_locked_at is not None
         can_edit = is_owner and not locked
@@ -334,6 +337,7 @@ def get_spec(
         raw_disk = spec.read_text()
         collab_enabled = maybe_auto_enable(
             session,
+            stamp=stamp,
             workspace_id=workspace_id,
             artifact="spec",
         )
@@ -483,18 +487,23 @@ async def post_init_spec(
     enabled = await run_in_threadpool(_route)
 
     if enabled:
-        def _gate() -> None:
+        def _gate() -> FenceStamp:
             with sf() as session:
-                require_owner(workspace_id=workspace_id, user=user, session=session)
+                ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+                # Mint the fence stamp at the owner access check (endgame Task 5):
+                # kernel_init_spec re-validates THIS generation under the commit
+                # mutex, in a separate session, never a read at the write.
+                stamp = stamp_for_workspace(ws)
             if not (
                 workspace_repo_dir(settings.workspaces_dir, workspace_id) / SPEC_FILENAME
             ).exists():
                 raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
-        await run_in_threadpool(_gate)
+            return stamp
+        stamp = await run_in_threadpool(_gate)
         try:
             head, md = await init_spec_via_kernel(
                 session_factory=sf, workspaces_dir=settings.workspaces_dir,
-                workspace_id=workspace_id, actor_id=user.id,
+                stamp=stamp, workspace_id=workspace_id, actor_id=user.id,
             )
         except SpecLockedError as e:
             raise HTTPException(
@@ -671,6 +680,7 @@ def post_lock_spec(
             if is_collab:
                 cp = checkpoint_artifact(
                     session,
+                    stamp=stamp,
                     workspace_id=ws.id,
                     artifact="spec",
                     workspaces_dir=settings.workspaces_dir,
@@ -755,6 +765,7 @@ def post_unlock_spec(
             if is_collab:
                 cp = checkpoint_artifact(
                     session,
+                    stamp=stamp,
                     workspace_id=ws.id,
                     artifact="spec",
                     workspaces_dir=settings.workspaces_dir,
@@ -1043,7 +1054,7 @@ async def post_citation(
     enabled = await run_in_threadpool(_route)
 
     if enabled:
-        def _gate() -> None:
+        def _gate() -> FenceStamp:
             with sf() as session:
                 is_member, can_write = resolve_access(
                     session, user=user, workspace_id=workspace_id, artifact="draft")
@@ -1051,17 +1062,27 @@ async def post_citation(
                     raise HTTPException(status_code=404, detail="workspace not found")
                 if not can_write:
                     raise HTTPException(status_code=403, detail="not permitted to write this draft")
+                # Mint the fence stamp from a bare-name load in the SAME transaction
+                # as resolve_access above (this route's access check). apply_citation_
+                # to_room re-validates THIS generation under the commit mutex, in a
+                # separate session, never a read at the write (endgame Task 5).
+                ws = session.get(Workspace, workspace_id)
+                if ws is None or ws.soft_deleted_at is not None:
+                    raise HTTPException(status_code=404, detail="workspace not found")
+                stamp = stamp_for_workspace(ws)
             if not (repo_dir / PROPOSAL_FILENAME).exists():
                 raise HTTPException(status_code=404, detail="no proposal.md yet")
             try:
                 current_head(repo_dir)
             except GitCommitError as e:
                 raise HTTPException(status_code=404, detail="no proposal.md yet") from e
-        await run_in_threadpool(_gate)
+            return stamp
+        stamp = await run_in_threadpool(_gate)
         try:
             out = await direct_cite_via_kernel(
                 session_factory=sf,
                 workspaces_dir=settings.workspaces_dir,
+                stamp=stamp,
                 workspace_id=workspace_id,
                 actor_id=user.id,
                 section_index=body.section_index,

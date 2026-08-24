@@ -15,12 +15,13 @@ from call_manager.proposal_assist.editing.sectionizer import split_sections
 
 # Reuse the citation-kernel harness helpers.
 from tests.proposal_assist.collab.test_collab_kernel_citation import _init_repo, _seed_reference
-from tests.proposal_assist.conftest import make_user, make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 
 def _live_room(session, wid, workspaces_dir):
     updates = load_or_hydrate(
-        session, workspace_id=wid, artifact="draft", workspaces_dir=workspaces_dir
+        session, stamp=stamp_for(session, wid), workspace_id=wid, artifact="draft",
+        workspaces_dir=workspaces_dir
     )
     session.commit()
     return build_doc(updates)
@@ -45,7 +46,7 @@ def test_apply_citation_to_room_inserts_marker_and_cocommits_ledger(pg_session_f
     base_sha = split_sections(pm_to_markdown(ydoc_to_pm_json(room_doc)))[1].sha
     with pg_session_factory() as s:
         res = apply_citation_to_room(
-            s, room_doc=room_doc, workspace_id=wid, section_index=1,
+            s, stamp=stamp_for(s, wid), room_doc=room_doc, workspace_id=wid, section_index=1,
             base_section_sha=base_sha, anchor="The claim here.", reference_id=rid,
             chunk_index=0, evidence_quote="azure", quote_start=0, quote_end=5,
             actor_id=oid, workspaces_dir=str(tmp_path), require_anchor_in_section=True)
@@ -75,7 +76,7 @@ def test_apply_citation_stale_section_sha_raises(pg_session_factory, tmp_path):
         room_doc = _live_room(s, wid, str(tmp_path))
     with pg_session_factory() as s, pytest.raises(CiteStale):
         apply_citation_to_room(
-            s, room_doc=room_doc, workspace_id=wid, section_index=1,
+            s, stamp=stamp_for(s, wid), room_doc=room_doc, workspace_id=wid, section_index=1,
             base_section_sha="deadbeef" * 8, anchor="The claim here.", reference_id=rid,
             chunk_index=0, evidence_quote="azure", quote_start=0, quote_end=5,
             actor_id=oid, workspaces_dir=str(tmp_path), require_anchor_in_section=True)
@@ -100,7 +101,7 @@ def test_apply_citation_anchor_absent_from_section_raises(pg_session_factory, tm
     base_sha = split_sections(pm_to_markdown(ydoc_to_pm_json(room_doc)))[1].sha
     with pg_session_factory() as s, pytest.raises(CiteStale):   # anchor not in section 1
         apply_citation_to_room(
-            s, room_doc=room_doc, workspace_id=wid, section_index=1,
+            s, stamp=stamp_for(s, wid), room_doc=room_doc, workspace_id=wid, section_index=1,
             base_section_sha=base_sha, anchor="NOT PRESENT ANYWHERE", reference_id=rid,
             chunk_index=0, evidence_quote="azure", quote_start=0, quote_end=5,
             actor_id=oid, workspaces_dir=str(tmp_path), require_anchor_in_section=True)
@@ -130,7 +131,7 @@ def test_apply_citation_anchor_unique_in_other_section_rejected(pg_session_facto
     # "UNIQUE PHRASE" is in section 2, not section 1
     with pg_session_factory() as s, pytest.raises(CiteStale):
         apply_citation_to_room(
-                s, room_doc=room_doc, workspace_id=wid, section_index=1,
+                s, stamp=stamp_for(s, wid), room_doc=room_doc, workspace_id=wid, section_index=1,
                 base_section_sha=sec1_sha, anchor="UNIQUE PHRASE", reference_id=rid,
                 chunk_index=0, evidence_quote="azure", quote_start=0, quote_end=5,
                 actor_id=oid, workspaces_dir=str(tmp_path), require_anchor_in_section=True)

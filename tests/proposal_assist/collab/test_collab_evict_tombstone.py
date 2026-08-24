@@ -78,7 +78,7 @@ async def test_kernel_accept_aborts_on_tombstoned_room(pg_session_factory, tmp_p
         _init_repo,
         _mk_pc,
     )
-    from tests.proposal_assist.conftest import make_user, make_workspace
+    from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
     with pg_session_factory() as s:
         o = make_user(s, email="k-tombstone@ki.se")
@@ -95,7 +95,8 @@ async def test_kernel_accept_aborts_on_tombstoned_room(pg_session_factory, tmp_p
     async def _load():
         with pg_session_factory() as s:
             u = load_or_hydrate(
-                s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
+                s, stamp=stamp_for(s, wid), workspace_id=wid, artifact="draft",
+                workspaces_dir=str(tmp_path)
             )
             s.commit()
             return u
@@ -113,11 +114,12 @@ async def test_kernel_accept_aborts_on_tombstoned_room(pg_session_factory, tmp_p
     room.evicted = True   # tombstone the live room (still registered → operate reuses it)
     with pg_session_factory() as s:
         approver = s.get(User, oid)
+        stamp = stamp_for(s, wid)  # the accept route's belief, formed while live
     try:
         with pytest.raises(RoomEvicted):
             await accept_via_kernel(
                 session_factory=pg_session_factory, workspaces_dir=str(tmp_path),
-                workspace_id=wid, pc_id=pc_id, approver=approver, artifact="draft",
+                stamp=stamp, workspace_id=wid, pc_id=pc_id, approver=approver, artifact="draft",
             )
         with pg_session_factory() as s:
             assert s.get(ProposedChange, pc_id).status == "pending"   # not committed

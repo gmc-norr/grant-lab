@@ -15,7 +15,7 @@ from call_manager.proposal_assist.collab.checkpoint import (
 from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
 from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
 from call_manager.proposal_assist.editing.sectionizer import split_sections
-from tests.proposal_assist.conftest import make_user, make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 
 def _init_repo(repo: Path, content: str) -> None:
@@ -62,7 +62,11 @@ def test_checkpoint_commits_serialized_doc_with_provenance(pg_session_factory, t
 
     with pg_session_factory() as s:
         res = checkpoint_artifact(
-            s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            artifact="draft",
+            workspaces_dir=str(tmp_path),
         )
         s.commit()
     assert res.committed is True
@@ -107,11 +111,21 @@ def test_second_checkpoint_with_no_new_updates_is_noop(pg_session_factory, tmp_p
         s.commit()
     _seed_room_with_edit(pg_session_factory, wid, oid, "## X\n\nedited.\n")
     with pg_session_factory() as s:
-        checkpoint_artifact(s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path))
+        checkpoint_artifact(
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            artifact="draft",
+            workspaces_dir=str(tmp_path),
+        )
         s.commit()
     with pg_session_factory() as s:
         res2 = checkpoint_artifact(
-            s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            artifact="draft",
+            workspaces_dir=str(tmp_path),
         )
         s.commit()
     assert res2.committed is False  # watermark already at max update id -> no-op
@@ -145,7 +159,11 @@ def test_seed_only_open_close_does_not_checkpoint(pg_session_factory, tmp_path):
 
     with pg_session_factory() as s:
         res = checkpoint_artifact(
-            s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            artifact="draft",
+            workspaces_dir=str(tmp_path),
         )
         s.commit()
     assert res.committed is False
@@ -178,7 +196,11 @@ def test_checkpoint_repo_missing_is_clean_noop(pg_session_factory, tmp_path):
     _seed_room_with_edit(pg_session_factory, wid, oid, "## X\n\nedited.\n")
     with pg_session_factory() as s:
         res = checkpoint_artifact(
-            s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            artifact="draft",
+            workspaces_dir=str(tmp_path),
         )
         s.commit()
     assert res.committed is False
@@ -227,7 +249,8 @@ def test_checkpoint_record_version_false_is_quiet_and_compacts(pg_session_factor
 
     with pg_session_factory() as s:
         res = checkpoint_artifact(
-            s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path),
+            s, stamp=stamp_for(s, wid), workspace_id=wid, artifact="draft",
+            workspaces_dir=str(tmp_path),
             record_version=False,
         )
         s.commit()
@@ -270,6 +293,7 @@ def test_checkpoint_co_commits_extra_files(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
         res = checkpoint_artifact(
             s,
+            stamp=stamp_for(s, wid),
             workspace_id=wid,
             artifact="draft",
             workspaces_dir=str(tmp_path),

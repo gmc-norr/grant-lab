@@ -25,6 +25,8 @@ from call_manager.proposal_assist.drafting.locking import (
     WorkspaceDeleted,
     is_lock_timeout,
 )
+from call_manager.proposal_assist.fencing import WorkspaceGenerationStale
+from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -54,9 +56,16 @@ def make_checkpoint_on_evict(session_factory, workspaces_dir, workspace_id, arti
                 ws = s.get(Workspace, workspace_id)
                 if ws is None or ws.soft_deleted_at is not None:
                     return
+                # Mint the fence stamp from the liveness pre-screen above (this
+                # teardown pass's access check): checkpoint_artifact re-validates it
+                # under the mutex, so a workspace deleted or bumped between here and
+                # the mutex raises WorkspaceDeleted / WorkspaceGenerationStale, both
+                # benign below (endgame Task 5).
+                stamp = stamp_for_workspace(ws)
                 try:
                     checkpoint_artifact(
                         s,
+                        stamp=stamp,
                         workspace_id=workspace_id,
                         artifact=artifact,
                         workspaces_dir=workspaces_dir,
@@ -76,7 +85,13 @@ def make_checkpoint_on_evict(session_factory, workspaces_dir, workspace_id, arti
                     # entirely instead of falling through to `except Exception`,
                     # which would change what a REAL database failure does here.
                     benign = isinstance(
-                        exc, (GitCommitError, CommitMutexTimeout, WorkspaceDeleted)
+                        exc,
+                        (
+                            GitCommitError,
+                            CommitMutexTimeout,
+                            WorkspaceDeleted,
+                            WorkspaceGenerationStale,
+                        ),
                     ) or is_lock_timeout(exc)
                     if benign:
                         logger.warning(

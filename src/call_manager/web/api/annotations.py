@@ -39,6 +39,7 @@ from call_manager.proposal_assist.drafting.locking import BUSY_ERROR_MESSAGE, Co
 from call_manager.proposal_assist.editing.save import PROPOSAL_FILENAME
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.ports.stamp import FenceStamp, stamp_for_workspace
 from call_manager.proposal_assist.proposals.kernel_accept import RoomEvicted
 from call_manager.proposal_assist.web._perms import require_member, require_owner
 
@@ -252,15 +253,20 @@ async def insert_annotation(
     enabled = await run_in_threadpool(_route)
 
     if enabled:
-        def _gate() -> None:
+        def _gate() -> FenceStamp:
             with sf() as session:
                 ws = require_owner(workspace_id=workspace_id, user=user, session=session)
                 _annotation_or_404(session, ws, annotation_id)
-        await run_in_threadpool(_gate)
+                # Mint the fence stamp at the owner access check (endgame Task 5):
+                # apply_annotation_insert_to_room re-validates THIS generation under
+                # the commit mutex, in a separate session, never a read at the write.
+                return stamp_for_workspace(ws)
+        stamp = await run_in_threadpool(_gate)
         try:
             out = await insert_annotation_via_kernel(
                 session_factory=sf,
                 workspaces_dir=settings.workspaces_dir,
+                stamp=stamp,
                 workspace_id=workspace_id,
                 actor_id=user.id,
                 annotation_id=annotation_id,

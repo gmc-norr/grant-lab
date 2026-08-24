@@ -86,10 +86,10 @@ UNCONVERTED_LIVE_CALLERS: frozenset[tuple[str, str]] = frozenset(
             "src/call_manager/proposal_assist/citations/core.py",
             "_insert_citation_locked",
         ),
-        (
-            "src/call_manager/proposal_assist/collab/checkpoint.py",
-            "checkpoint_artifact",
-        ),
+        # checkpoint_artifact: converted to Primitive B in endgame Task 5. Its
+        # acquisition is now a top-level acquire_commit_mutex_at_generation that
+        # statically pairs with its own write_and_commit_files sink, so the checker
+        # proves it fenced and it leaves this pin list.
         (
             "src/call_manager/proposal_assist/editing/save.py",
             "save_section",
@@ -142,15 +142,14 @@ UNCONVERTED_LIVE_CALLERS: frozenset[tuple[str, str]] = frozenset(
 #: ``_init_repo``, whose row is **F5** (spec §7 line 233 and §12), so it converts with F5.
 #: Treating it as an F3e1b deliverable would make F3e1b's completion check unsatisfiable.
 ENCLOSING_ACQUISITIONS: Mapping[tuple[str, str], str] = {
-    ("src/call_manager/proposal_assist/collab/kernel.py", "apply_citation_to_room"): "F3e1b",
-    ("src/call_manager/proposal_assist/collab/kernel.py", "kernel_accept_prose"): "F3e1b",
-    ("src/call_manager/proposal_assist/collab/kernel.py", "kernel_init_spec"): "F3e1b",
-    ("src/call_manager/proposal_assist/collab/kernel.py", "kernel_accept_citation"): "F3e1b",
-    (
-        "src/call_manager/proposal_assist/collab/kernel.py",
-        "apply_annotation_insert_to_room",
-    ): "F3e1b",
-    # post_lock_spec and post_unlock_spec converted to Primitive B in endgame Task 4
+    # The five kernel enclosing acquisitions (apply_citation_to_room,
+    # kernel_accept_prose, kernel_init_spec, kernel_accept_citation,
+    # apply_annotation_insert_to_room) were converted to Primitive B in endgame
+    # Task 5 — each now takes acquire_commit_mutex_at_generation at a threaded stamp
+    # and no longer calls acquire_commit_mutex_live, so none is an enclosing _live
+    # acquisition any more. post_lock_spec and post_unlock_spec left in Task 4.
+    # Only Phase0Worker._m1 (F5) remains: it reaches _init_repo, whose sink row is
+    # F5's, so it converts with F5 rather than here.
     ("src/call_manager/proposal_assist/phases/setup.py", "Phase0Worker._m1"): "F5",
 }
 
@@ -159,9 +158,10 @@ ENCLOSING_ACQUISITIONS: Mapping[tuple[str, str], str] = {
 #: inventory row.  Recorded only so the partition below is total.
 LIVE_ACQUIRING_SINK_HOLDERS: frozenset[tuple[str, str]] = frozenset(
     {
-        ("src/call_manager/proposal_assist/collab/checkpoint.py", "checkpoint_artifact"),
         ("src/call_manager/proposal_assist/citations/core.py", "_insert_citation_locked"),
         ("src/call_manager/proposal_assist/editing/save.py", "save_section"),
+        # checkpoint_artifact converted to Primitive B in endgame Task 5 — no longer
+        # calls acquire_commit_mutex_live, so it leaves this record.
         # post_init_spec._git converted to Primitive B in endgame Task 4
     }
 )
@@ -172,9 +172,10 @@ LIVE_ACQUIRING_SINK_HOLDERS: frozenset[tuple[str, str]] = frozenset(
 #: record nobody reads.
 LIVE_ACQUIRERS_WITHOUT_A_SINK: frozenset[tuple[str, str]] = frozenset(
     {
-        ("src/call_manager/proposal_assist/collab/hydrate.py", "load_or_hydrate"),
-        ("src/call_manager/proposal_assist/collab/flip.py", "maybe_auto_enable"),
         ("src/call_manager/workspaces.py", "soft_delete_workspace_db"),
+        # load_or_hydrate and maybe_auto_enable converted to Primitive B in endgame
+        # Task 5 — each takes acquire_commit_mutex_at_generation at a threaded stamp
+        # and no longer calls _live, so both leave this record.
         # workspace_write converted to Primitive B (acquire_commit_mutex_at_generation)
         # in the 2026-08-24 endgame Task 3 — no longer calls _live.
     }

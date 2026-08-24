@@ -28,7 +28,7 @@ from call_manager.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
 from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout, WorkspaceDeleted
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.lifecycle import LIFECYCLE
-from tests.proposal_assist.conftest import make_user, make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 
 def _init_repo(repo: Path, content: str) -> None:
@@ -49,7 +49,9 @@ def _git_head(repo: Path) -> str:
 
 def _setup(pg_session_factory, tmp_path, email):
     """ws + git repo + enabled collab + a hydrated room doc. Returns the pieces
-    every test below needs."""
+    every test below needs, including a fence `stamp` minted while the workspace is
+    still LIVE — exactly a real caller's belief, formed at its access check before
+    any delete race (endgame Task 5)."""
     md0 = "## Background\noriginal.\n"
     with pg_session_factory() as s:
         owner = make_user(s, email=email)
@@ -62,14 +64,15 @@ def _setup(pg_session_factory, tmp_path, email):
         state.enable_collab(s, workspace_id=wid, artifact="draft")
         s.commit()
     with pg_session_factory() as s:
+        stamp = stamp_for(s, wid)  # minted while live
         updates = load_or_hydrate(
-            s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
+            s, stamp=stamp, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
         )
         s.commit()
         room_doc = build_doc(updates)
     live_md = pm_to_markdown(ydoc_to_pm_json(room_doc))
     base_sha = split_sections(live_md)[1].sha
-    return wid, oid, repo, room_doc, base_sha
+    return wid, oid, repo, room_doc, base_sha, stamp
 
 
 def _mk_pc(session, wid, *, base_section_sha, base_commit_sha, kind, payload):
@@ -114,7 +117,7 @@ async def test_accept_via_kernel_lets_workspace_retired_reach_the_route(
     from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
     from call_manager.proposal_assist.proposals.kernel_accept import accept_via_kernel
 
-    wid, oid, repo, _room_doc, base_sha = _setup(
+    wid, oid, repo, _room_doc, base_sha, stamp = _setup(
         pg_session_factory, tmp_path, "kernel-retired@ki.se"
     )
     head = _git_head(repo)
@@ -135,6 +138,7 @@ async def test_accept_via_kernel_lets_workspace_retired_reach_the_route(
             await accept_via_kernel(
                 session_factory=pg_session_factory,
                 workspaces_dir=str(tmp_path),
+                stamp=stamp,
                 workspace_id=wid,
                 pc_id=pc_id,
                 approver=approver,
@@ -152,7 +156,9 @@ async def test_accept_via_kernel_lets_workspace_retired_reach_the_route(
 
 
 def test_kernel_accept_prose_refuses_a_deleted_workspace(pg_session_factory, tmp_path):
-    wid, oid, repo, room_doc, base_sha = _setup(pg_session_factory, tmp_path, "kp-live@ki.se")
+    wid, oid, repo, room_doc, base_sha, stamp = _setup(
+        pg_session_factory, tmp_path, "kp-live@ki.se"
+    )
     head = _git_head(repo)
     with pg_session_factory() as s:
         pc_id = _mk_pc(
@@ -165,7 +171,7 @@ def test_kernel_accept_prose_refuses_a_deleted_workspace(pg_session_factory, tmp
         approver = s.get(User, oid)
         with pytest.raises(WorkspaceDeleted):
             kernel_accept_prose(
-                s, room_doc=room_doc, proposed_change_id=pc_id, workspace_id=wid,
+                s, stamp=stamp, room_doc=room_doc, proposed_change_id=pc_id, workspace_id=wid,
                 approver=approver, workspaces_dir=str(tmp_path),
             )
         s.rollback()
@@ -181,7 +187,9 @@ def test_STALE_prose_proposal_on_a_deleted_workspace_is_not_resolved(
     """REGRESSION. kernel.py's staleness branch flushes status="stale" ABOVE the
     original acquire, and accept_via_kernel commits. With the acquire merely
     swapped in place, a deleted workspace still gets a durable row mutation."""
-    wid, oid, repo, room_doc, _base_sha = _setup(pg_session_factory, tmp_path, "kp-stale@ki.se")
+    wid, oid, repo, room_doc, _base_sha, stamp = _setup(
+        pg_session_factory, tmp_path, "kp-stale@ki.se"
+    )
     head = _git_head(repo)
     with pg_session_factory() as s:
         pc_id = _mk_pc(
@@ -195,7 +203,7 @@ def test_STALE_prose_proposal_on_a_deleted_workspace_is_not_resolved(
     with pg_session_factory() as s:
         with pytest.raises(WorkspaceDeleted):
             kernel_accept_prose(
-                s, room_doc=room_doc, proposed_change_id=pc_id, workspace_id=wid,
+                s, stamp=stamp, room_doc=room_doc, proposed_change_id=pc_id, workspace_id=wid,
                 approver=s.get(User, oid), workspaces_dir=str(tmp_path),
             )
         s.rollback()
@@ -218,7 +226,9 @@ def test_STALE_citation_proposal_on_a_deleted_workspace_is_not_resolved(
     """REGRESSION, second path. _stale() fires when apply_citation_to_room raises
     CiteStale — and that raise is at kernel.py:127, ABOVE that function's own
     acquire. Guarding only the inner acquire leaves this unguarded."""
-    wid, oid, repo, room_doc, _base_sha = _setup(pg_session_factory, tmp_path, "kc-stale@ki.se")
+    wid, oid, repo, room_doc, _base_sha, stamp = _setup(
+        pg_session_factory, tmp_path, "kc-stale@ki.se"
+    )
     head = _git_head(repo)
     with pg_session_factory() as s:
         pc_id = _mk_pc(
@@ -238,7 +248,7 @@ def test_STALE_citation_proposal_on_a_deleted_workspace_is_not_resolved(
     with pg_session_factory() as s:
         with pytest.raises(WorkspaceDeleted):
             kernel_accept_citation(
-                s, room_doc=room_doc, proposed_change_id=pc_id, workspace_id=wid,
+                s, stamp=stamp, room_doc=room_doc, proposed_change_id=pc_id, workspace_id=wid,
                 approver=s.get(User, oid), workspaces_dir=str(tmp_path),
             )
         s.rollback()
@@ -255,12 +265,12 @@ def test_STALE_citation_proposal_on_a_deleted_workspace_is_not_resolved(
 
 
 def test_kernel_init_spec_refuses_a_deleted_workspace(pg_session_factory, tmp_path):
-    wid, oid, _repo, room_doc, _sha = _setup(pg_session_factory, tmp_path, "ki-spec@ki.se")
+    wid, oid, _repo, room_doc, _sha, stamp = _setup(pg_session_factory, tmp_path, "ki-spec@ki.se")
     _delete(pg_session_factory, wid)
     with pg_session_factory() as s:
         with pytest.raises(WorkspaceDeleted):
             kernel_init_spec(
-                s, room_doc=room_doc, workspace_id=wid, workspaces_dir=str(tmp_path),
+                s, stamp=stamp, room_doc=room_doc, workspace_id=wid, workspaces_dir=str(tmp_path),
                 actor_id=oid,
             )
         s.rollback()
@@ -297,13 +307,13 @@ def test_checkpoint_artifact_refuses_a_deleted_workspace(pg_session_factory, tmp
     """Checkpointing writes git + DB rows — exactly what deletion must stop."""
     from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
 
-    wid, _oid, _repo, _room_doc, _sha = _setup(pg_session_factory, tmp_path, "cp-del@ki.se")
+    wid, _oid, _repo, _room_doc, _sha, stamp = _setup(pg_session_factory, tmp_path, "cp-del@ki.se")
     _delete(pg_session_factory, wid)
 
     with pg_session_factory() as s:
         with pytest.raises(WorkspaceDeleted):
             checkpoint_artifact(
-                s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
+                s, stamp=stamp, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
             )
         s.rollback()
 
@@ -316,7 +326,7 @@ def test_checkpoint_active_tails_skips_a_deleted_workspace_without_failing(
     quiet skip rather than an error."""
     from call_manager.proposal_assist.collab.checkpoint import checkpoint_active_tails
 
-    wid, _oid, repo, _room_doc, _sha = _setup(pg_session_factory, tmp_path, "cp-tail@ki.se")
+    wid, _oid, repo, _room_doc, _sha, _stamp = _setup(pg_session_factory, tmp_path, "cp-tail@ki.se")
     head = _git_head(repo)
     _delete(pg_session_factory, wid)
 
@@ -340,12 +350,17 @@ def test_enable_on_touch_refuses_a_deleted_workspace(pg_session_factory, tmp_pat
         wid = ws.id
     repo = Path(tmp_path) / str(wid) / "repo"
     _init_repo(repo, md0)
+    # Mint the stamp while the workspace is still live (a real read route's belief),
+    # THEN delete — the under-mutex generation guard is what refuses the flip.
+    with pg_session_factory() as s:
+        stamp = stamp_for(s, wid)
     _delete(pg_session_factory, wid)
 
     with pg_session_factory() as s:
         assert (
             maybe_auto_enable(
                 s,
+                stamp=stamp,
                 workspace_id=wid,
                 artifact="draft",  # a live workspace here WOULD be enabled
             )
@@ -372,7 +387,9 @@ def test_checkpoint_active_tails_skips_an_under_mutex_refusal_QUIETLY(
 
     from call_manager.proposal_assist.collab import checkpoint as checkpoint_mod
 
-    wid, _oid, repo, _room_doc, _sha = _setup(pg_session_factory, tmp_path, "cp-straddle@ki.se")
+    wid, _oid, repo, _room_doc, _sha, _stamp = _setup(
+        pg_session_factory, tmp_path, "cp-straddle@ki.se"
+    )
     head = _git_head(repo)
 
     def _boom(*a, **k):
@@ -413,12 +430,16 @@ def test_hydration_refuses_to_seed_a_deleted_workspace(pg_session_factory, tmp_p
         wid = ws.id
     repo = Path(tmp_path) / str(wid) / "repo"
     _init_repo(repo, md0)
+    # Mint the stamp while live (the connect-time belief), THEN delete before the
+    # first hydration — the under-mutex generation guard is what raises.
+    with pg_session_factory() as s:
+        stamp = stamp_for(s, wid)
     _delete(pg_session_factory, wid)          # soft-delete BEFORE first hydration
 
     with pg_session_factory() as s:
         with pytest.raises(WorkspaceDeleted):
             load_or_hydrate(
-                s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
+                s, stamp=stamp, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
             )
         s.rollback()
 

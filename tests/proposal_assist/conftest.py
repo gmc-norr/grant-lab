@@ -255,6 +255,24 @@ def make_workspace(
     return ws
 
 
+def stamp_for(session, workspace_id):
+    """The fence stamp a Group-D call site expects, minted the way production does.
+
+    Endgame Task 5: the collab kernel + checkpoint + hydrate + flip functions take a
+    `stamp: FenceStamp` threaded from their caller's ACCESS CHECK. A unit test that
+    calls one of them directly stands in for that caller, so it mints the stamp the
+    same way a route does — load the workspace, then `stamp_for_workspace`. Minting
+    from the CURRENT row is exactly a live caller's stamp; a test that wants to prove
+    the fence rejects a moved-on generation captures the stamp BEFORE bumping the
+    generation (see the retire/straddle tests), which this helper supports by being
+    called at the moment the caller's belief was formed.
+    """
+    from call_manager.db.models import Workspace
+    from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
+
+    return stamp_for_workspace(session.get(Workspace, workspace_id))
+
+
 def make_chat_turn(
     session,
     workspace,

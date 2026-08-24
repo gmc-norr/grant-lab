@@ -20,9 +20,13 @@ from call_manager.proposal_assist.collab import state
 from call_manager.proposal_assist.drafting.locking import (
     CommitMutexTimeout,
     WorkspaceDeleted,
-    acquire_commit_mutex_live,
     is_lock_timeout,
 )
+from call_manager.proposal_assist.fencing import (
+    WorkspaceGenerationStale,
+    acquire_commit_mutex_at_generation,
+)
+from call_manager.proposal_assist.ports.stamp import FenceStamp
 
 logger = logging.getLogger(__name__)
 
@@ -36,14 +40,16 @@ _FLIP_MUTEX_TIMEOUT_SECONDS = 5
 def maybe_auto_enable(
     session: Session,
     *,
+    stamp: FenceStamp,
     workspace_id: uuid.UUID,
     artifact: str,
 ) -> bool:
     """Sticky lazy flip. Returns the artifact's EFFECTIVE enabled state.
 
     Enables iff: kill-switch off AND not already enabled AND the workspace is
-    not soft-deleted (B-mutex: the live-mutex helper refuses a retired
-    workspace under the lock). The enable is committed while HOLDING the
+    not soft-deleted and still at the caller's stamped generation (Primitive B:
+    acquire_commit_mutex_at_generation refuses a retired or moved-on workspace
+    under the lock). The enable is committed while HOLDING the
     workspace commit mutex — the linearization anchor the D4 severance-recheck
     family (writers' under-mutex re-reads) depends on; a route blocked on the
     mutex re-checks the flag after us and sees the enable. If the mutex can't
@@ -58,15 +64,21 @@ def maybe_auto_enable(
     if state.is_collab_enabled(session, workspace_id=workspace_id, artifact=artifact):
         return True
     try:
-        acquire_commit_mutex_live(
-            session, workspace_id, timeout_seconds=_FLIP_MUTEX_TIMEOUT_SECONDS
+        acquire_commit_mutex_at_generation(
+            session,
+            stamp.workspace_id,
+            generation=stamp.generation,
+            timeout_seconds=_FLIP_MUTEX_TIMEOUT_SECONDS,
         )
     except CommitMutexTimeout:
         session.rollback()
         return False
-    except WorkspaceDeleted:
-        # Never enable collab on a deleted workspace — enable_collab writes a
-        # CollabArtifactState row and COMMITS. Stay legacy; there is no next read.
+    except (WorkspaceDeleted, WorkspaceGenerationStale):
+        # Never enable collab on a deleted (or deleted-and-restored-past-our-
+        # generation) workspace — enable_collab writes a CollabArtifactState row and
+        # COMMITS. Stay legacy; there is no next read for this stale caller. The
+        # generation is threaded from the read route's access check, not re-read
+        # here.
         session.rollback()
         return False
     state.enable_collab(session, workspace_id=workspace_id, artifact=artifact)

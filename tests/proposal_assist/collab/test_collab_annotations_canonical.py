@@ -10,7 +10,7 @@ from call_manager.proposal_assist.collab.hydrate import load_or_hydrate
 from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
 from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
 from call_manager.proposal_assist.editing.sectionizer import split_sections
-from tests.proposal_assist.conftest import make_workspace
+from tests.proposal_assist.conftest import make_workspace, stamp_for
 from tests.test_analysis_pipeline import _init_repo
 
 DOC = "# T\nintro\n## Body\nA plain claim.\n"
@@ -83,7 +83,8 @@ def test_untouched_room_reads_disk_and_keeps_preflip_findings(
     # draft does today via load_or_hydrate).
     with pg_session_factory() as s:
         updates = load_or_hydrate(
-            s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
+            s, stamp=stamp_for(s, wid), workspace_id=wid, artifact="draft",
+            workspaces_dir=str(tmp_path)
         )
         s.commit()
         assert len(updates) == 1  # confirms this is the seed-only, untouched case

@@ -100,6 +100,11 @@ SLICE_STATUS = {
     # task lands, and the rows it converted are re-pointed to it. The keys below
     # keep exactly the rows their slice has NOT yet converted.
     "F3e-endgame-A": "complete",  # Task 2: the two workspace-object sites
+    # Task 5: the collab cluster (Group D). Its ONE git_commit row —
+    # checkpoint_artifact — is re-pointed here from F3e1b and marked complete,
+    # exactly as Task 2 re-pointed its two rows off their original slices. The
+    # kernel/hydrate/flip conversions hold no direct sink, so they add no row.
+    "F3e-endgame-D": "complete",
     "F3e1b": "pending",   # the git-effect conversions
     "F3e2": "pending",    # the ingest pipeline and the filesystem effects
     "F3f": "pending",    # capability holders, then the handle
@@ -143,6 +148,19 @@ FENCING_IMPORT_FILES: frozenset[str] = frozenset({
     "proposal_assist/web/_writes.py",
     # Endgame Group C (2026-08-24 Task 4) — the three workspaces.py route sites
     "web/api/workspaces.py",
+    # Endgame Group D (2026-08-24 Task 5) — the collab cluster. checkpoint/hydrate/
+    # flip/kernel take the mutex at a generation directly; handover/permissions/
+    # collab_cite/kernel_accept/collab_ws thread the stamp and catch
+    # WorkspaceGenerationStale (re-exported from fencing).
+    "proposal_assist/collab/checkpoint.py",
+    "proposal_assist/collab/hydrate.py",
+    "proposal_assist/collab/flip.py",
+    "proposal_assist/collab/kernel.py",
+    "proposal_assist/collab/handover.py",
+    "proposal_assist/collab/permissions.py",
+    "proposal_assist/citations/collab_cite.py",
+    "proposal_assist/proposals/kernel_accept.py",
+    "proposal_assist/web/collab_ws.py",
 })
 
 #: Extra declared keys, preserved verbatim across regeneration — they are what

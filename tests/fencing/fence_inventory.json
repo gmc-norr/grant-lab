@@ -84,8 +84,8 @@
     "path": "src/call_manager/proposal_assist/collab/checkpoint.py",
     "symbol": "checkpoint_artifact",
     "category": "semantic",
-    "fenced": false,
-    "slice": "F3e1b"
+    "fenced": true,
+    "slice": "F3e-endgame-D"
   },
   {
     "kind": "git_commit",

@@ -7,7 +7,7 @@ from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
 from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
 from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc, ydoc_to_pm_json
 from tests.proposal_assist.collab.test_collab_checkpoint import _init_repo
-from tests.proposal_assist.conftest import make_user, make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 
 def _append(pg_session_factory, wid, md, actor_id=None):
@@ -115,7 +115,13 @@ def test_checkpoint_compacts_log_to_single_row(pg_session_factory, tmp_path):
             build_doc(store.load_updates(s, workspace_id=wid, artifact="draft"))
         )
     with pg_session_factory() as s:
-        checkpoint_artifact(s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path))
+        checkpoint_artifact(
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            artifact="draft",
+            workspaces_dir=str(tmp_path),
+        )
         s.commit()
     with pg_session_factory() as s:
         rows = store.load_rows(s, workspace_id=wid, artifact="draft")
@@ -133,7 +139,13 @@ def test_checkpoint_single_row_no_compaction_noop(pg_session_factory, tmp_path):
     _enable(pg_session_factory, wid)
     _append(pg_session_factory, wid, "## A\n\none edit.\n", actor_id=1)
     with pg_session_factory() as s:
-        checkpoint_artifact(s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path))
+        checkpoint_artifact(
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            artifact="draft",
+            workspaces_dir=str(tmp_path),
+        )
         s.commit()
     with pg_session_factory() as s:
         rows = store.load_rows(s, workspace_id=wid, artifact="draft")
@@ -170,7 +182,13 @@ def test_checkpoint_compaction_preserves_last_author(pg_session_factory, tmp_pat
     # authored tail
     _append(pg_session_factory, wid, "## A\n\nauthored edit.\n", actor_id=1)
     with pg_session_factory() as s:
-        checkpoint_artifact(s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path))
+        checkpoint_artifact(
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            artifact="draft",
+            workspaces_dir=str(tmp_path),
+        )
         s.commit()
     with pg_session_factory() as s:
         rows = store.load_rows(s, workspace_id=wid, artifact="draft")

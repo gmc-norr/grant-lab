@@ -19,7 +19,7 @@ from call_manager.proposal_assist.collab.checkpoint import (
 from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
 from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
 from call_manager.proposal_assist.editing.sectionizer import split_sections
-from tests.proposal_assist.conftest import make_user, make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 
 def _init_repo(repo: Path, content: str) -> None:
@@ -86,7 +86,11 @@ def test_draft_checkpoint_enqueues_coverage_for_new_sections(pg_session_factory,
 
     with pg_session_factory() as s:
         res = checkpoint_artifact(
-            s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            artifact="draft",
+            workspaces_dir=str(tmp_path),
         )
         s.commit()
     assert res.committed is True
@@ -109,7 +113,11 @@ def test_spec_checkpoint_enqueues_nothing(pg_session_factory, tmp_path):
     )
     with pg_session_factory() as s:
         res = checkpoint_artifact(
-            s, workspace_id=wid, artifact="spec", workspaces_dir=str(tmp_path)
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            artifact="spec",
+            workspaces_dir=str(tmp_path),
         )
         s.commit()
     assert res.committed is True  # a REAL spec commit — the guard is the artifact, not vacuity
@@ -124,7 +132,11 @@ def test_seed_only_checkpoint_enqueues_nothing(pg_session_factory, tmp_path):
     _seed_room_edit(pg_session_factory, wid, None, "## Background\n\noriginal.\n")
     with pg_session_factory() as s:
         res = checkpoint_artifact(
-            s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            artifact="draft",
+            workspaces_dir=str(tmp_path),
         )
         s.commit()
     assert res.committed is False
@@ -141,7 +153,13 @@ def test_unchanged_content_checkpoint_enqueues_nothing(pg_session_factory, tmp_p
     wid, oid = _setup_ws(pg_session_factory, tmp_path, email="d3-nochange@ki.se")
     doc = _seed_room_edit(pg_session_factory, wid, oid, "## Background\n\nedited once.\n")
     with pg_session_factory() as s:
-        checkpoint_artifact(s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path))
+        checkpoint_artifact(
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            artifact="draft",
+            workspaces_dir=str(tmp_path),
+        )
         s.commit()
     with pg_session_factory() as s:
         assert len(_jobs(s, wid)) > 0  # checkpoint 1 enqueued
@@ -158,7 +176,11 @@ def test_unchanged_content_checkpoint_enqueues_nothing(pg_session_factory, tmp_p
         s.commit()
     with pg_session_factory() as s:
         res2 = checkpoint_artifact(
-            s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            artifact="draft",
+            workspaces_dir=str(tmp_path),
         )
         s.commit()
     assert res2.committed is False  # changed=False: real attempt, empty git diff
@@ -168,7 +190,11 @@ def test_unchanged_content_checkpoint_enqueues_nothing(pg_session_factory, tmp_p
     # And the max_id<=watermark early-return (no new rows at all): still nothing.
     with pg_session_factory() as s:
         res3 = checkpoint_artifact(
-            s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            artifact="draft",
+            workspaces_dir=str(tmp_path),
         )
         s.commit()
     assert res3.committed is False
@@ -187,6 +213,7 @@ def test_scan_path_checkpoint_enqueues_coverage(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
         res = checkpoint_artifact(
             s,
+            stamp=stamp_for(s, wid),
             workspace_id=wid,
             artifact="draft",
             workspaces_dir=str(tmp_path),

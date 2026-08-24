@@ -54,10 +54,11 @@ from call_manager.proposal_assist.collab.yjs_bridge import (
     apply_pm_section_to_fragment,
     ydoc_to_pm_json,
 )
-from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex_live
 from call_manager.proposal_assist.editing.save import SectionStructureError, SpecLockedError
 from call_manager.proposal_assist.editing.sectionizer import is_h2_heading_line, split_sections
+from call_manager.proposal_assist.fencing import acquire_commit_mutex_at_generation
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.ports.stamp import FenceStamp
 from call_manager.proposal_assist.proposals.accepting import _load_scoped
 from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
 
@@ -98,6 +99,7 @@ def _live_sections(room_doc: Doc):
 def apply_citation_to_room(
     session,
     *,
+    stamp: FenceStamp,
     room_doc,
     workspace_id,
     section_index,
@@ -133,7 +135,9 @@ def apply_citation_to_room(
         # empty-check (`== 0` would compare a list to an int and never fire).
         raise CiteStale("this section changed — reopen and re-cite")
 
-    acquire_commit_mutex_live(session, workspace_id)
+    acquire_commit_mutex_at_generation(
+        session, stamp.workspace_id, generation=stamp.generation
+    )
     repo = workspace_repo_dir(workspaces_dir, workspace_id)
     _cpath = repo / CITATIONS_FILENAME
     try:
@@ -172,7 +176,8 @@ def apply_citation_to_room(
     store.append_update(session, workspace_id=workspace_id, artifact="draft",
                         actor_id=actor_id, update=update, commit=False)
     cp = checkpoint_artifact(
-        session, workspace_id=workspace_id, artifact="draft", workspaces_dir=workspaces_dir,
+        session, stamp=stamp, workspace_id=workspace_id, artifact="draft",
+        workspaces_dir=workspaces_dir,
         extra_files={CITATIONS_FILENAME: dump_ledger(result["new_ledger"])})
     _write_citekey_cache(session, result["ref"], result["citekey"], owns_txn=False)
     return CitationApplyResult(
@@ -183,6 +188,7 @@ def apply_citation_to_room(
 def kernel_accept_prose(
     session: Session,
     *,
+    stamp: FenceStamp,
     room_doc: Doc,
     proposed_change_id: uuid.UUID,
     workspace_id: uuid.UUID,
@@ -193,7 +199,8 @@ def kernel_accept_prose(
     #   (1) the staleness branch below resolves the ProposedChange to "stale" and
     #       flushes, and accept_via_kernel COMMITS — so a workspace deleted
     #       mid-turn would get a durable row mutation if we only guarded the later
-    #       write path. _live raises WorkspaceDeleted before any of it.
+    #       write path. Primitive B raises WorkspaceDeleted / WorkspaceGenerationStale
+    #       (at the caller's stamped generation) before any of it.
     #   (2) it pins ONE lock order everywhere: advisory mutex -> ProposedChange row
     #       lock (_load_scoped takes FOR UPDATE), never the reverse.
     #   (3) it still precedes the spec_locked_at read below, which is what the
@@ -203,9 +210,13 @@ def kernel_accept_prose(
     # checkpoint_artifact re-acquires the same xact lock later — Postgres advisory
     # xact locks are re-entrant within a transaction, so that is an instant no-op
     # (no deadlock, no second timeout) with one redundant fresh liveness read.
-    # Raised BEFORE any mutation, so it needs no room eviction (both
-    # CommitMutexTimeout and WorkspaceDeleted are in _CLEAN_ACCEPT_ERRORS).
-    acquire_commit_mutex_live(session, workspace_id)
+    # Raised BEFORE any mutation, so it needs no room eviction (CommitMutexTimeout,
+    # WorkspaceDeleted and WorkspaceGenerationStale are all in _CLEAN_ACCEPT_ERRORS).
+    # The generation comes from the accept route's access check (the threaded stamp),
+    # not a read taken here at the write.
+    acquire_commit_mutex_at_generation(
+        session, stamp.workspace_id, generation=stamp.generation
+    )
 
     pc = _load_scoped(session, proposed_change_id, workspace_id)  # FOR UPDATE
     if pc.status != "pending":
@@ -292,7 +303,8 @@ def kernel_accept_prose(
         actor_id=approver.id, update=update, commit=False,
     )
     result = checkpoint_artifact(
-        session, workspace_id=workspace_id, artifact=artifact, workspaces_dir=workspaces_dir
+        session, stamp=stamp, workspace_id=workspace_id, artifact=artifact,
+        workspaces_dir=workspaces_dir,
     )
     pc.status = "accepted"
     pc.resolved_by = approver.id
@@ -305,6 +317,7 @@ def kernel_accept_prose(
 def kernel_init_spec(
     session: Session,
     *,
+    stamp: FenceStamp,
     room_doc: Doc,
     workspace_id: uuid.UUID,
     workspaces_dir,
@@ -322,7 +335,9 @@ def kernel_init_spec(
     spec", WorkspaceEvent kind="collab_checkpoint") rather than the git path's
     "user spec init" / kind="user_edit" rows — do NOT duplicate provenance rows.
     """
-    acquire_commit_mutex_live(session, workspace_id)
+    acquire_commit_mutex_at_generation(
+        session, stamp.workspace_id, generation=stamp.generation
+    )
     ws = session.get(Workspace, workspace_id)
     session.refresh(ws, ["spec_locked_at"])
     if ws.spec_locked_at is not None:
@@ -341,7 +356,8 @@ def kernel_init_spec(
         actor_id=actor_id, update=update, commit=False,
     )
     cp = checkpoint_artifact(
-        session, workspace_id=workspace_id, artifact="spec", workspaces_dir=workspaces_dir,
+        session, stamp=stamp, workspace_id=workspace_id, artifact="spec",
+        workspaces_dir=workspaces_dir,
     )
     return cp.commit_sha, serialize_doc_to_markdown(room_doc), update
 
@@ -349,6 +365,7 @@ def kernel_init_spec(
 def kernel_accept_citation(
     session: Session,
     *,
+    stamp: FenceStamp,
     room_doc: Doc,
     proposed_change_id: uuid.UUID,
     workspace_id: uuid.UUID,
@@ -365,8 +382,13 @@ def kernel_accept_citation(
     # ProposedChange, and it fires on CiteStale/CiteInvalid/CiteRefNotFound —
     # which apply_citation_to_room raises ABOVE its own acquire. Guarding only
     # that inner acquire would leave this path writing to a deleted workspace.
-    # Also pins the lock order: advisory mutex -> ProposedChange row lock.
-    acquire_commit_mutex_live(session, workspace_id)
+    # Also pins the lock order: advisory mutex -> ProposedChange row lock. The
+    # generation comes from the accept route's access check (the threaded stamp);
+    # the inner apply_citation_to_room re-acquires with the SAME stamp, a re-entrant
+    # no-op on the mutex.
+    acquire_commit_mutex_at_generation(
+        session, stamp.workspace_id, generation=stamp.generation
+    )
 
     pc = _load_scoped(session, proposed_change_id, workspace_id)  # FOR UPDATE
     if pc.status != "pending":
@@ -384,7 +406,7 @@ def kernel_accept_citation(
     p = pc.payload
     try:
         res = apply_citation_to_room(
-            session, room_doc=room_doc, workspace_id=workspace_id,
+            session, stamp=stamp, room_doc=room_doc, workspace_id=workspace_id,
             section_index=pc.section_index, base_section_sha=pc.base_section_sha,
             anchor=p["anchor"], reference_id=p["reference_id"], chunk_index=p["chunk_index"],
             evidence_quote=p["evidence_quote"], quote_start=None, quote_end=None,
@@ -411,6 +433,7 @@ def kernel_accept_citation(
 def apply_annotation_insert_to_room(
     session: Session,
     *,
+    stamp: FenceStamp,
     room_doc: Doc,
     workspace_id: uuid.UUID,
     workspaces_dir,
@@ -440,7 +463,9 @@ def apply_annotation_insert_to_room(
     if ann is None or ann.workspace_id != workspace_id:
         raise InsertConflict("annotation is no longer actionable")
 
-    acquire_commit_mutex_live(session, workspace_id)
+    acquire_commit_mutex_at_generation(
+        session, stamp.workspace_id, generation=stamp.generation
+    )
 
     # Parity with insert.py step 1: re-read status inside the mutex. A
     # concurrent insert that committed while we were blocked would have
@@ -522,7 +547,8 @@ def apply_annotation_insert_to_room(
         actor_id=actor_id, update=update, commit=False,
     )
     cp = checkpoint_artifact(
-        session, workspace_id=workspace_id, artifact="draft", workspaces_dir=workspaces_dir,
+        session, stamp=stamp, workspace_id=workspace_id, artifact="draft",
+        workspaces_dir=workspaces_dir,
         extra_files={CITATIONS_FILENAME: dump_ledger(outcome.new_ledger)},
         # Suppress the checkpoint's own collab_checkpoint WorkspaceEvent (final-
         # review Minor 5): this op emits its OWN user_citation_insert event just
