@@ -131,7 +131,23 @@ These take `workspace_id`, not a workspace. Each needs a `stamp: FenceStamp` par
 
 `ctx` is a `ToolContext`. `ports/stamp.py` states explicitly: **never read the stamp from the retained ToolContext at the moment of the effect** — `set_turn_provenance` restamps that context every turn, so a late read reads a *newer* generation and the stale actor's write is fenced against the wrong generation. The stamp must come from `Invocation.stamp()` at dispatch.
 
-**Totals: 1 excluded + 3 + 1 + 3 + 8 + 1 = 17 to convert.**
+### Group F — background job with **no generation source yet** (1)
+
+| Site | Function |
+|---|---|
+| `proposal_assist/phases/setup.py:363` | `_m1(self, job_id, workspace_id)` — setup Milestone 1 |
+
+**This is the one site that needs work before it can be converted.** `_m1` is a background job, so its generation must come from the job's claim, not from a request. Five claim sites already stamp `claimed_at_generation` (measured):
+
+- `review/jobs.py:91`, `coherence/jobs.py:98`, `evaluator/jobs.py:89`, `uncited_claims/jobs.py:91`, `turns/processor.py:164`
+
+`claim_next_setup_job` is **not** among them — it stamps nothing, which is why the earlier fence programme deferred this site. Task 6 adds the stamp before converting.
+
+Two properties of `_m1` to preserve, both documented in its own docstring:
+- It takes the mutex **before** the workspace row lock (M → W). That order is what bounds a concurrent DELETE. Do not reorder.
+- `acquire_commit_mutex_live` supplies M1's liveness check, raising `WorkspaceDeleted` before anything is created on disk. Primitive B raises the same exception for the same condition, so this is preserved — confirm it rather than assuming.
+
+**Totals: 1 excluded + 3 + 1 + 3 + 8 + 1 + 1 = 18. Sixteen convert directly; `_m1` needs its claim stamped first; `soft_delete_workspace_db` is excluded.**
 
 ---
 
@@ -522,12 +538,13 @@ git commit -m "refactor(fence): convert the collab cluster to Primitive B"
 
 ---
 
-## Task 6: Convert Group E, fix the delete path, delete the trusting primitive
+## Task 6: Convert Groups E and F, fix the delete path, delete the trusting primitive
 
 The moment the slice is for.
 
 **Files:**
 - Modify: `src/call_manager/proposal_assist/citations/core.py:556`
+- Modify: `src/call_manager/proposal_assist/phases/setup.py` — `claim_next_setup_job` and `_m1:363`
 - Modify: `src/call_manager/workspaces.py:173`
 - Modify: `src/call_manager/proposal_assist/drafting/locking.py` — delete `acquire_commit_mutex_live` (**defined here, not in `fencing.py`**)
 
@@ -538,6 +555,40 @@ Run: `cat src/call_manager/proposal_assist/ports/invocation.py`
 The stamp must come from `Invocation.stamp()` at dispatch — **not** from the retained `ToolContext`. `ports/stamp.py` documents why: `set_turn_provenance` restamps that context every turn, so a late read reads a newer generation and the stale actor's write is fenced against the wrong generation.
 
 Thread the stamp from the tool dispatch boundary down to `_insert_citation_locked`.
+
+- [ ] **Step 1b: Stamp the generation at the setup-job claim (Group F prerequisite)**
+
+Read one of the five claim sites that already do this, and copy its shape:
+
+Run: `sed -n '80,100p' src/call_manager/proposal_assist/evaluator/jobs.py`
+
+Then apply the same treatment to `claim_next_setup_job` in `phases/setup.py`. F3a's rule is that the generation is stamped **in the locking statement itself**, not read separately afterwards — a separate read can observe a generation that moved between the claim and the read. Follow the existing pattern exactly.
+
+- [ ] **Step 1c: Convert `_m1`**
+
+```python
+# Before:
+acquire_commit_mutex_live(s, workspace_id)
+ws = s.get(Workspace, workspace_id, with_for_update=True)
+
+# After — the generation comes from the CLAIM, not from a fresh read:
+acquire_commit_mutex_at_generation(s, workspace_id, generation=claimed_generation)
+ws = s.get(Workspace, workspace_id, with_for_update=True)
+```
+
+`claimed_generation` must be threaded from the claim in `run()` (`setup.py:334` calls `self._m1(job_id, workspace_id)`) — read it off the claimed job there and pass it in. Do **not** re-read the workspace's generation inside `_m1`; that is the late read this whole slice exists to eliminate.
+
+Keep the mutex **before** the `with_for_update` row lock. Reordering breaks the M → W lock order and opens a 40P01 against the delete path.
+
+- [ ] **Step 1d: Confirm the liveness behaviour survives**
+
+`_m1`'s docstring says `acquire_commit_mutex_live` raises `WorkspaceDeleted` for an already-deleted workspace before anything is created on disk. Primitive B raises the same exception for the same condition (`fencing.py`: deleted takes precedence over stale). Find the test that covers this:
+
+```bash
+grep -rn "WorkspaceDeleted" tests/proposal_assist/ --include=*.py | grep -i "setup\|m1" | head
+```
+
+Run it. If no test covers it, say so in the report — do not assume the behaviour is preserved because the docstring says it should be.
 
 - [ ] **Step 2: Move the delete path to the raw mutex**
 
