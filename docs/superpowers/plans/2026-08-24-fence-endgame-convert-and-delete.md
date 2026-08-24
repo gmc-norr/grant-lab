@@ -11,9 +11,12 @@
 ## Global Constraints
 
 - Test command: `uv run --python 3.12 pytest -n 16 --dist loadfile`. Never `-n auto` (resolves to 72 workers here) and never `--dist loadgroup`.
-- Baseline before this slice: **`3361 passed, 1 skipped`** (2026-08-16). The `1 skipped` is the signal, not the total — it is the real-SDK test gated on `ANTHROPIC_API_KEY`. `0 skipped` means a live API call ran.
+- Baseline before this slice: **`3897 passed, 1 skipped`** in ~76s — MEASURED at branch base `947ff546` on 2026-08-24, not copied from CLAUDE.md (whose `3361` is from 2026-08-16 and is stale by 536 tests). The `1 skipped` is the signal, not the total — it is the real-SDK test gated on `ANTHROPIC_API_KEY`. `0 skipped` means a live API call ran.
 - `ruff check` is the lint gate (not `ruff format`). Line limit 100.
-- `pytest` exit code 4 means usage error, not test failure. Read the code, not just the tail.
+- `pytest` exit code 4 means usage error, not test failure ("no tests ran" reads as success to a naive check). Read the code, not just the tail.
+- **Never pipe pytest through `tail`/`head`** — the exit code becomes the pager's. Use:
+  `uv run --python 3.12 pytest <args> > /tmp/out.txt 2>&1; echo "PYTEST_EXIT=$?"; tail -40 /tmp/out.txt`
+- **Mutation-test restore procedure.** Several tasks require temporarily breaking code to prove a test catches it. Commit the green implementation **first**, then mutate, then restore with `git checkout <path>` and verify with `git diff --exit-code HEAD -- <path>`. **Never verify a restore with `git status --porcelain`** — it exits 0 whether or not the file is clean. A mutation left in the tree is the worst outcome this plan can produce.
 - Lock order is **M → J → W** (mutex, then setup job, then workspace row). `acquire_commit_mutex_at_generation` acquires M. Calling it after a J or W row lock inverts the order against the delete path and opens a real Postgres 40P01.
 - Where a caller **already holds** the workspace row `FOR UPDATE`, do not call the mutex at all — assert the generation on the already-locked row.
 - Never call `acquire_commit_mutex_at_generation` while already holding the shared lease for the same workspace. That is the one deadlock shape this protocol has.
@@ -184,7 +187,9 @@ The load-bearing claim of this plan. Written first, as a failing test, before an
 - Consumes: `acquire_commit_mutex_at_generation`, `WorkspaceGenerationStale` from `call_manager.proposal_assist.fencing`; `soft_delete_workspace_db`, `restore_workspace_db` from `call_manager.workspaces`
 - Produces: nothing later tasks import. This is a pinned regression test.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the characterization test**
+
+**This step is deliberately NOT red-green TDD.** Both cases are expected to pass on the *unmodified* tree, and that is the point: this task characterizes existing behaviour so the rest of the plan has a fixed reference. Case A passes because the hole is real today. Case B passes because Primitive B already works correctly — it simply has no callers. If you find yourself trying to make either case fail first, stop and re-read this paragraph.
 
 Two cases. Case A proves today's primitive lets the stale write through. Case B proves Primitive B stops it. Case A is what makes this test honest — without it, Case B could pass for the wrong reason.
 
