@@ -1,45 +1,29 @@
-"""Fence F3e1a — what this slice did, and what it deliberately did not."""
+"""Fence F3e1a — what this slice did, and what it deliberately did not.
+
+The two assertions that F3e1a converted NOTHING (`the carrier has no production
+callers`, `no git site is fenced yet`) were retired by the 2026-08-24 endgame,
+which converts those sites. See `test_the_nine_git_rows_are_all_still_there`.
+"""
 
 from __future__ import annotations
 
 
-def test_the_carrier_has_no_production_callers():
-    """F3e1a ships the carrier; F3e1b uses it. A caller here means a conversion
-    leaked into the spine slice.
+def test_the_nine_git_rows_are_all_still_there():
+    """What survives of `test_no_git_site_is_fenced_yet`.
 
-    AST, not a regex: `def stamp_for_workspace(` matches a name regex, so a
-    text scan would report the DEFINITION as its own caller and could never pass.
-    Alias-resolving too, since `import ... as` would evade a bare name match.
+    Its `not any(fenced)` clause and `test_the_carrier_has_no_production_callers`
+    were both assertions that the tree was UNCONVERTED — true at F3e1a, and
+    deliberately ended by the 2026-08-24 endgame, which converts these very sites.
+    They are retired rather than weakened: the property they protected (no site is
+    marked fenced before it is converted) is now held, per row and against the
+    source, by `test_the_inventory_git_flags_match_the_tree` plus
+    `test_each_slice_matches_its_declared_status`. The row COUNT is not covered by
+    either, so it stays here.
     """
-    import ast
-    import pathlib
-
-    src = pathlib.Path(__file__).resolve().parents[2] / "src"
-    hits = []
-    for f in src.rglob("*.py"):
-        if "__pycache__" in f.parts:
-            continue
-        tree = ast.parse(f.read_text(encoding="utf-8"))
-        names = {"stamp_for_workspace"}
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
-                names |= {a.asname for a in node.names
-                          if a.name == "stamp_for_workspace" and a.asname}
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                fn = node.func
-                called = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", None)
-                if called in names:
-                    hits.append(f.relative_to(src).as_posix())
-    assert hits == [], f"F3e1a converts nothing, but these call the carrier: {hits}"
-
-
-def test_no_git_site_is_fenced_yet():
     from tests.fencing.inventory import load_inventory
 
     git = [r for r in load_inventory() if r["kind"] == "git_commit"]
     assert len(git) == 9
-    assert not any(r["fenced"] for r in git)
 
 
 def test_every_git_row_is_classified_and_allocated():

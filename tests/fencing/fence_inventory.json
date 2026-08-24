@@ -52,8 +52,8 @@
     "path": "src/call_manager/proposal_assist/analysis/insert.py",
     "symbol": "insert_from_annotation",
     "category": "semantic",
-    "fenced": false,
-    "slice": "F3e2"
+    "fenced": true,
+    "slice": "F3e-endgame-A"
   },
   {
     "kind": "git_commit",
@@ -76,8 +76,8 @@
     "path": "src/call_manager/proposal_assist/citations/human_cite.py",
     "symbol": "insert_citation_for_user",
     "category": "semantic",
-    "fenced": false,
-    "slice": "F3e1b"
+    "fenced": true,
+    "slice": "F3e-endgame-A"
   },
   {
     "kind": "git_commit",

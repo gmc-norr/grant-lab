@@ -69,14 +69,15 @@ from call_manager.proposal_assist.citations.quotes import (
     normalize_for_quote_match,
 )
 from call_manager.proposal_assist.collab.state import raise_if_collab_severed
-from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex_live
 from call_manager.proposal_assist.editing.save import (
     PROPOSAL_FILENAME,
     TURN_IN_FLIGHT_MESSAGE,
     _turn_in_flight,
 )
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.fencing import acquire_commit_mutex_at_generation
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
 from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
 
 if TYPE_CHECKING:
@@ -352,7 +353,8 @@ def insert_from_annotation(
     # CollabSeveranceConflict, which the route maps to 409, so this path is retiring rather than
     # maintained. Slice C3 bounds its tail anyway — the 2s cap now left in force by
     # acquire_commit_mutex applies at every site, including this one, with nothing needed here.
-    acquire_commit_mutex_live(session, workspace.id)
+    stamp = stamp_for_workspace(workspace)
+    acquire_commit_mutex_at_generation(session, stamp.workspace_id, generation=stamp.generation)
 
     # 1b. Severance recheck UNDER the mutex (3b-5d.D4 Item 2b): enable-on-touch may
     # have flipped draft collab on while we blocked on the mutex, after the route's

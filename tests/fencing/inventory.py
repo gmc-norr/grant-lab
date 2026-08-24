@@ -92,6 +92,14 @@ SLICE_STATUS = {
     # per slice or the first flipped row goes red.
     "F3e1a": "complete",  # the carrier, the git detector, the gates — no row of its own
     "F3e1a2": "complete",  # the allowlist walk — no row of its own
+    # The 2026-08-24 endgame converts all 18 remaining sites across six tasks,
+    # cutting ACROSS the F3e1b/F3e2/F4/F5 keys below. SLICE_STATUS has no partial
+    # state, so — following the remedy this file already documents for F3d and F3e
+    # ("a multi-slice conversion needs one key per slice or the first flipped row
+    # goes red") — each endgame task gets its own key, marked `complete` when that
+    # task lands, and the rows it converted are re-pointed to it. The keys below
+    # keep exactly the rows their slice has NOT yet converted.
+    "F3e-endgame-A": "complete",  # Task 2: the two workspace-object sites
     "F3e1b": "pending",   # the git-effect conversions
     "F3e2": "pending",    # the ingest pipeline and the filesystem effects
     "F3f": "pending",    # capability holders, then the handle
@@ -122,8 +130,15 @@ F3A_COLUMN_FILES = frozenset({
 #: whole point of the ports is that no tool, route or pass runner writes one.
 #: Sharing one list with the column check would both permit premature fencing
 #: imports across all of F3a's files and block the ports, which live in neither.
+#: The 2026-08-24 endgame widens this set as it converts: Primitive B lives in
+#: `fencing.py` (the trusting primitive it replaces lived in `drafting/locking.py`),
+#: so every converted git-write site necessarily imports `fencing` directly. Each
+#: task's entries are a reviewed diff, exactly as the F3b entry above was.
 FENCING_IMPORT_FILES: frozenset[str] = frozenset({
     "proposal_assist/port_impl/effects.py",
+    # Endgame Group A (2026-08-24 Task 2)
+    "proposal_assist/analysis/insert.py",
+    "proposal_assist/citations/human_cite.py",
 })
 
 #: Extra declared keys, preserved verbatim across regeneration — they are what

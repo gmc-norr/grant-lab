@@ -46,9 +46,13 @@ a branch-nested ``def`` body is NOT inherited by the outer function.
 every step of the descent was allowlisted (``CREDITED_FIELDS``), and ``None``
 otherwise — including deferred contexts and anything unrecognised.
 
-All nine real sites capture or nest their sink, so all nine measure ``fenced: false``
-through this checker regardless of acquisition shape. ``fenced: false`` does NOT mean
-broken — it means the lexical check found nothing wrong. See the 2026-08-23 F3e1a2 spec §2.
+All nine real sites capture or nest their sink. That was written when it meant all nine
+measured ``fenced: false`` regardless of acquisition shape — true only because F3e1a
+credited a bare top-level ``ast.Expr`` and nothing else. F3e1a2's six-entry
+``CREDITED_FIELDS`` table credits a captured sink, so a converted site now measures
+``fenced: true`` and the sentence's conclusion no longer follows from its premise.
+Both readings above still stand: ``fenced: false`` does NOT mean broken, and
+``fenced: true`` does NOT mean safe. See the 2026-08-23 F3e1a2 spec §2.
 """
 
 from __future__ import annotations

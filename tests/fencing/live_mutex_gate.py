@@ -70,17 +70,14 @@ _SRC = _REPO / "src" / "call_manager"
 #: exactly that shape and will still be pinned after F3e1b converts them correctly,
 #: carrying a human sentence and a §5.2 runtime proof instead.
 #:
-#: This list SHRINKS; an addition is a reviewed diff, not a formality. Entries leave
-#: across THREE slices, not one: the citation/checkpoint/save sites in F3e1b, the
-#: annotation and bibliography sites in F3e2, and phase 0's in F5. A comment claiming
-#: they all leave in F3e1b would make a reader treat a still-pinned F5 site as a bug.
+#: This list SHRINKS; an addition is a reviewed diff, not a formality. Entries do NOT
+#: all leave in one slice — a comment claiming they did would make a reader treat a
+#: still-pinned site as a bug. The 2026-08-24 endgame is now removing them task by
+#: task: Group A (`insert_from_annotation`, `insert_citation_for_user`) left in its
+#: Task 2, and the remaining seven leave across its Tasks 3-6.
 UNCONVERTED_LIVE_CALLERS: frozenset[tuple[str, str]] = frozenset(
     {
         # (repo-relative path, qualname) — derived from Step 2 probe output, not guessed
-        (
-            "src/call_manager/proposal_assist/analysis/insert.py",
-            "insert_from_annotation",
-        ),
         (
             "src/call_manager/proposal_assist/citations/bibliography.py",
             "build_bibliography",
@@ -88,10 +85,6 @@ UNCONVERTED_LIVE_CALLERS: frozenset[tuple[str, str]] = frozenset(
         (
             "src/call_manager/proposal_assist/citations/core.py",
             "_insert_citation_locked",
-        ),
-        (
-            "src/call_manager/proposal_assist/citations/human_cite.py",
-            "insert_citation_for_user",
         ),
         (
             "src/call_manager/proposal_assist/collab/checkpoint.py",
@@ -164,9 +157,7 @@ LIVE_ACQUIRING_SINK_HOLDERS: frozenset[tuple[str, str]] = frozenset(
     {
         ("src/call_manager/proposal_assist/collab/checkpoint.py", "checkpoint_artifact"),
         ("src/call_manager/proposal_assist/citations/core.py", "_insert_citation_locked"),
-        ("src/call_manager/proposal_assist/citations/human_cite.py", "insert_citation_for_user"),
         ("src/call_manager/proposal_assist/editing/save.py", "save_section"),
-        ("src/call_manager/proposal_assist/analysis/insert.py", "insert_from_annotation"),
         ("src/call_manager/web/api/workspaces.py", "post_init_spec._git"),
     }
 )
