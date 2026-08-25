@@ -24,12 +24,13 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import insert, literal, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
-from call_manager.db.models import ArtifactVersion, Reference, WorkspaceEvent
+from call_manager.db.models import ArtifactVersion, Reference, Workspace, WorkspaceEvent
 from call_manager.proposal_assist.citations.ledger import load_ledger
+from call_manager.proposal_assist.fencing import acquire_shared_lease, live_at_generation
 from call_manager.proposal_assist.ports.artifacts import CITATIONS_FILENAME
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,19 @@ def reconcile_workspace_git_drift(
         git_commits.append((sha, int(ts_str), message))
 
     with session_factory() as s:
+        # Primitive C FIRST. Shared locks do not conflict with each other, so
+        # concurrent reconciles stay concurrent, but a delete or restore needs
+        # this key EXCLUSIVELY — so it either waits behind us or wins first and
+        # leaves the predicate below to refuse.
+        acquire_shared_lease(s, workspace_id)
+        # Read the generation UNDER the lease: the belief this effect carries is
+        # the git log read a few lines above, not an HTTP authorization
+        # boundary, so this is the right place to form it.
+        generation = s.scalar(
+            select(Workspace.lifecycle_generation).where(Workspace.id == workspace_id)
+        )
+        if generation is None:
+            return 0  # workspace row is gone entirely (hard delete)
         existing_shas = set(
             s.scalars(
                 select(ArtifactVersion.commit_sha).where(
@@ -86,18 +100,59 @@ def reconcile_workspace_git_drift(
         for sha, ts, message in git_commits:
             if sha in existing_shas:
                 continue
-            s.add(
-                ArtifactVersion(
-                    workspace_id=workspace_id,
-                    commit_sha=sha,
-                    triggering_turn_id=None,
-                    created_by="reconciled",
-                    message=message,
-                    created_at=datetime.fromtimestamp(ts, tz=UTC),
+            # INSERT ... SELECT ... WHERE, never INSERT ... VALUES after a check.
+            # An INSERT has no target row, so there is no READ COMMITTED re-check
+            # to mask a missing fence; check-then-insert is the exact race
+            # reproduced on PostgreSQL 16 (see port_impl/effects.py:258-268).
+            #
+            # THE LOAD-BEARING TERMS ARE THE LEASE ABOVE AND THE LIVENESS CLAUSE
+            # HERE — NOT the generation. Under the lease the generation cannot
+            # move, so the equality term can never fail; it is kept for
+            # uniformity with every other mechanism-1 site. If you are tempted
+            # to simplify this, drop the generation term, NEVER the liveness
+            # term and NEVER the lease.
+            landed = s.execute(
+                insert(ArtifactVersion)
+                .from_select(
+                    [
+                        "id",
+                        "workspace_id",
+                        "commit_sha",
+                        "triggering_turn_id",
+                        "created_by",
+                        "message",
+                        "created_at",
+                    ],
+                    select(
+                        literal(uuid.uuid4()),
+                        literal(workspace_id),
+                        literal(sha),
+                        literal(None),
+                        literal("reconciled"),
+                        literal(message),
+                        literal(datetime.fromtimestamp(ts, tz=UTC)),
+                    ).where(live_at_generation(workspace_id, generation)),
                 )
-            )
+                .returning(ArtifactVersion.id)
+            ).first()
+            if landed is None:
+                # Under the lease the generation cannot move, so if ANY insert is
+                # refused the first one was — nothing has landed yet. Roll back
+                # anyway rather than committing a partial batch, and leave every
+                # orphan for a later run.
+                logger.info(
+                    "reconcile_workspace_git_drift: refused for %s — workspace "
+                    "not live at generation %s; orphan commits left for a later run",
+                    workspace_id,
+                    generation,
+                )
+                s.rollback()
+                return 0
             backfilled += 1
         if backfilled > 0:
+            # Safe as a plain add: same transaction, still holding the lease, and
+            # the predicate above already passed — so the workspace is provably
+            # live at `generation` right now.
             s.add(
                 WorkspaceEvent(
                     workspace_id=workspace_id,
