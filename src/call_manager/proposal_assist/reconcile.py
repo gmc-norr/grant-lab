@@ -24,7 +24,8 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import insert, literal, select, update
+from sqlalchemy import literal, select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
@@ -133,9 +134,19 @@ def reconcile_workspace_git_drift(
                         literal(datetime.fromtimestamp(ts, tz=UTC)),
                     ).where(live_at_generation(workspace_id, generation)),
                 )
+                .on_conflict_do_nothing(index_elements=["workspace_id", "commit_sha"])
                 .returning(ArtifactVersion.id)
             ).first()
             if landed is None:
+                already = s.scalar(
+                    select(ArtifactVersion.id).where(
+                        ArtifactVersion.workspace_id == workspace_id,
+                        ArtifactVersion.commit_sha == sha,
+                    )
+                )
+                if already is not None:
+                    # A concurrent reconcile inserted it. Not a fence refusal.
+                    continue
                 # Under the lease the generation cannot move, so if ANY insert is
                 # refused the first one was — nothing has landed yet. Roll back
                 # anyway rather than committing a partial batch, and leave every

@@ -1142,6 +1142,12 @@ class ArtifactVersion(Base):
             "workspace_id",
             text("created_at DESC"),
         ),
+        Index(
+            "uq_artifact_versions_ws_sha",
+            "workspace_id",
+            "commit_sha",
+            unique=True,
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 
 from call_manager.db.models import ArtifactVersion, WorkspaceEvent
 from call_manager.proposal_assist.drafting.locking import commit_mutex_key
@@ -330,3 +331,25 @@ def test_reconcile_git_drift_still_backfills_a_live_workspace(pg_session_factory
             )
         )
         assert got == set(shas)
+
+
+def test_artifact_versions_rejects_a_duplicate_sha_for_one_workspace(pg_session_factory):
+    """The DB, not a caller's read-then-insert, must prevent a duplicate version
+    row appearing in the user's history."""
+    with pg_session_factory() as s:
+        ws = make_workspace(s)
+        wsid = ws.id
+        s.commit()
+    with pg_session_factory() as s:
+        s.add(ArtifactVersion(
+            workspace_id=wsid, commit_sha="deadbeef", triggering_turn_id=None,
+            created_by="agent", message="first",
+        ))
+        s.commit()
+    with pg_session_factory() as s:
+        s.add(ArtifactVersion(
+            workspace_id=wsid, commit_sha="deadbeef", triggering_turn_id=None,
+            created_by="reconciled", message="duplicate",
+        ))
+        with pytest.raises(IntegrityError):
+            s.commit()
