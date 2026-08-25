@@ -27,6 +27,7 @@ from call_manager.proposal_assist.editing.save import (
 )
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 DOC = "# T\nintro\n## Background\nold body [@x9]\n## Aims\naims\n"
@@ -66,6 +67,7 @@ def test_happy_path_save(pg_session_factory, tmp_path):
         res = save_section(
             session=s,
             workspace=ws,
+            stamp=stamp_for_workspace(ws),
             user_id=user.id,
             section_index=1,
             new_text="## Background\nnew body\n",
@@ -117,6 +119,7 @@ def test_turn_in_flight_no_longer_blocks_save(pg_session_factory, tmp_path):
         result = save_section(
             session=s,
             workspace=ws,
+            stamp=stamp_for_workspace(ws),
             user_id=user.id,
             section_index=1,
             new_text="## Background\nx\n",
@@ -144,6 +147,7 @@ def test_stale_section_rejected_but_unrelated_head_move_allowed(pg_session_facto
         res = save_section(
             session=s,
             workspace=ws,
+            stamp=stamp_for_workspace(ws),
             user_id=user.id,
             section_index=1,
             new_text="## Background\nnew body\n",
@@ -160,6 +164,7 @@ def test_stale_section_rejected_but_unrelated_head_move_allowed(pg_session_facto
             save_section(
                 session=s,
                 workspace=ws,
+                stamp=stamp_for_workspace(ws),
                 user_id=user.id,
                 section_index=2,
                 new_text="## Aims\nuser aims\n",
@@ -178,6 +183,7 @@ def test_tier1_flags_bare_marker_and_missing_newline_glue(pg_session_factory, tm
         res = save_section(
             session=s,
             workspace=ws,
+            stamp=stamp_for_workspace(ws),
             user_id=user.id,
             section_index=1,
             new_text="## Background\nclaim [@hand2024]",  # no trailing newline
@@ -205,6 +211,7 @@ def test_no_change_save_short_circuits(pg_session_factory, tmp_path):
         res = save_section(
             session=s,
             workspace=ws,
+            stamp=stamp_for_workspace(ws),
             user_id=user.id,
             section_index=1,
             new_text=live.text,
@@ -236,6 +243,7 @@ def test_heading_deletion_rejected_middle_section(pg_session_factory, tmp_path):
             save_section(
                 session=s,
                 workspace=ws,
+                stamp=stamp_for_workspace(ws),
                 user_id=user.id,
                 section_index=1,
                 new_text="no heading anymore\n",
@@ -258,6 +266,7 @@ def test_preamble_gaining_heading_rejected(pg_session_factory, tmp_path):
             save_section(
                 session=s,
                 workspace=ws,
+                stamp=stamp_for_workspace(ws),
                 user_id=user.id,
                 section_index=0,
                 new_text="## Sneaky\nx\n",
@@ -274,6 +283,7 @@ def test_heading_rename_allowed(pg_session_factory, tmp_path):
         result = save_section(
             session=s,
             workspace=ws,
+            stamp=stamp_for_workspace(ws),
             user_id=user.id,
             section_index=1,
             new_text="## Background & Significance\nbody\n",
@@ -293,6 +303,7 @@ def test_extra_heading_split_allowed(pg_session_factory, tmp_path):
         result = save_section(
             session=s,
             workspace=ws,
+            stamp=stamp_for_workspace(ws),
             user_id=user.id,
             section_index=1,
             new_text="## Background\nb1\n## New Sub\nb2\n",
@@ -328,6 +339,7 @@ def test_save_section_blocks_locked_spec(pg_session_factory, tmp_path):
             save_section(
                 session=s,
                 workspace=ws,
+                stamp=stamp_for_workspace(ws),
                 user_id=owner.id,
                 section_index=1,
                 new_text="## Aims\nedited.\n",
@@ -349,6 +361,7 @@ def test_save_section_allows_draft_while_spec_locked(pg_session_factory, tmp_pat
         draft = save_section(
             session=s,
             workspace=ws,
+            stamp=stamp_for_workspace(ws),
             user_id=owner.id,
             section_index=1,
             new_text="## Methods\nm2.\n",

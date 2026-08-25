@@ -51,9 +51,13 @@ from call_manager.proposal_assist.drafting.locking import (
     DELETED_ERROR_MESSAGE,
     CommitMutexTimeout,
     WorkspaceDeleted,
-    acquire_commit_mutex_live,
+)
+from call_manager.proposal_assist.fencing import (
+    WorkspaceGenerationStale,
+    acquire_commit_mutex_at_generation,
 )
 from call_manager.proposal_assist.ports.artifacts import CITATIONS_FILENAME
+from call_manager.proposal_assist.ports.stamp import FenceStamp
 from call_manager.proposal_assist.references.csl import generate_citekey
 from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 
@@ -286,6 +290,7 @@ def _resolve_citekey_for_ref(
 async def insert_citation_impl(
     ctx: ToolContext,
     *,
+    stamp: FenceStamp,
     reference_id: str,
     anchor: str,
     chunk_index: int,
@@ -299,6 +304,14 @@ async def insert_citation_impl(
     {"ev_id", "citekey", "commit_sha"} on success (plus "idempotent": True when
     a duplicate insert was a no-op), or {"error": "..."} on any expected
     failure (leaving NO commit and a clean working tree).
+
+    ``stamp`` carries the workspace generation the caller claimed; it fences the
+    write against a lifecycle transition that committed after the claim. This is a
+    DORMANT path — it is NOT in the MCP tool registry (the propose-only world
+    exposes ``propose_citation``), so no live agent dispatch reaches it. The stamp
+    is threaded from the caller rather than read off ``ctx`` because a late ctx read
+    would observe a newer turn's generation (set_turn_provenance restamps the
+    retained ToolContext every turn).
     """
     err = _validate_stance_confidence(stance, confidence)
     if err is not None:
@@ -319,6 +332,7 @@ async def insert_citation_impl(
             return _insert_citation_locked(
                 ctx,
                 session,
+                stamp=stamp,
                 ref_uuid=ref_uuid,
                 anchor=anchor,
                 chunk_index=chunk_index,
@@ -537,6 +551,7 @@ def _insert_citation_locked(
     ctx: ToolContext,
     session: Session,
     *,
+    stamp: FenceStamp,
     ref_uuid: uuid.UUID,
     anchor: str,
     chunk_index: int,
@@ -546,19 +561,27 @@ def _insert_citation_locked(
     owns_txn: bool = True,
 ) -> dict[str, Any]:
     # 0. Serialize against every other git mutation of this workspace (spec
-    # 2026-06-10 §1). Transaction-scoped: released by this session's
+    # 2026-06-10 §1) AND fence against the generation the CALLER snapshotted at its
+    # access check (endgame Task 6). The generation comes from the threaded `stamp`,
+    # NEVER re-read off `ctx`: set_turn_provenance restamps the retained ToolContext
+    # every turn, so a late ctx read would fence against a NEWER generation and let a
+    # stale actor's write through. Transaction-scoped: released by this session's
     # COMMIT/ROLLBACK. Acquired before reading proposal.md for the mutation.
     try:
         # Flag-off-only path: with collab enabled the step-0b severance recheck below RAISES
         # CollabSeveranceConflict (-> 409), so this path is retiring rather than maintained. Slice
         # C3 bounds its tail anyway — the 2s cap now left in force by acquire_commit_mutex applies
         # at every site, including this one, with nothing needed here.
-        acquire_commit_mutex_live(session, ctx.workspace_id)
+        acquire_commit_mutex_at_generation(
+            session, stamp.workspace_id, generation=stamp.generation
+        )
     except CommitMutexTimeout:
         return {"error": _BUSY_ERROR}
-    except WorkspaceDeleted:
-        # Deleted while the agent was mid-turn. Nothing was mutated; tell the
-        # agent plainly rather than crashing the tool.
+    except (WorkspaceDeleted, WorkspaceGenerationStale):
+        # Deleted (or moved past the caller's generation) while the agent was
+        # mid-turn. Nothing was mutated; tell the agent plainly rather than
+        # crashing the tool. Deleted takes precedence over stale in Primitive B, and
+        # both mean the same thing to this effect: the workspace has moved on, abort.
         session.rollback()
         return {"error": _DELETED_ERROR}
 

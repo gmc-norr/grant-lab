@@ -61,8 +61,12 @@ def test_phase0_worker_runs_milestones_in_order_on_success(
         )
         calls: list[tuple] = []
 
-        def fake_m1(self, job_id, workspace_id):
-            calls.append(("m1",))
+        def fake_m1(self, job_id, workspace_id, claimed_generation):
+            # run_one threads the generation the claim stamped on the job row into
+            # _m1. A fresh make_workspace() is at lifecycle_generation 0, so the
+            # claim stamped 0 and it must arrive here — a None would mean the claim
+            # did not stamp it (the whole point of Group F's claim change).
+            calls.append(("m1", claimed_generation))
             return "pinned"
 
         monkeypatch.setattr(Phase0Worker, "_m1", fake_m1)
@@ -82,7 +86,7 @@ def test_phase0_worker_runs_milestones_in_order_on_success(
 
         processed = worker.run_one()
         assert processed is True
-        assert calls == [("m1",), ("m2", "pinned"), ("m3", "pinned")]
+        assert calls == [("m1", 0), ("m2", "pinned"), ("m3", "pinned")]
 
         s.expire_all()
         job = s.scalar(select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws_id))
@@ -116,7 +120,7 @@ def test_phase0_worker_increments_attempts_and_marks_failed_after_5(
             workspaces_dir=str(tmp_path / "repos"),
         )
 
-        def boom(self, job_id, workspace_id):
+        def boom(self, job_id, workspace_id, claimed_generation):
             raise RuntimeError("transient")
 
         monkeypatch.setattr(Phase0Worker, "_m1", boom)
@@ -154,7 +158,7 @@ def test_phase0_worker_requeues_on_transient_failure_below_attempt_cap(
             workspaces_dir=str(tmp_path / "repos"),
         )
 
-        def boom(self, job_id, workspace_id):
+        def boom(self, job_id, workspace_id, claimed_generation):
             raise RuntimeError("transient")
 
         monkeypatch.setattr(Phase0Worker, "_m1", boom)
@@ -186,7 +190,7 @@ def test_phase0_steps_1_3_init_repo_and_snapshot(pg_session_factory, tmp_path):
         rubric_extractor_version="rubric-v1",
         workspaces_dir=str(tmp_path / "repos"),
     )
-    worker._m1(job_id, ws_id)
+    worker._m1(job_id, ws_id, claimed_generation=0)
 
     # repo exists with three empty artifact files
     repo_dir = tmp_path / "repos" / str(ws_id) / "repo"
@@ -449,7 +453,7 @@ def test_phase0_steps_1_3_recovers_from_aborted_git_init(
         rubric_extractor_version="rubric-v1",
         workspaces_dir=str(tmp_path / "repos"),
     )
-    worker._m1(job_id, ws_id)
+    worker._m1(job_id, ws_id, claimed_generation=0)
 
     # Recovery: artifact files + initial commit now exist.
     for fname in ("proposal-spec.md", "proposal-plan.md", "proposal.md"):

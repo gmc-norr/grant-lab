@@ -14,7 +14,7 @@ from tests.proposal_assist.collab.test_collab_kernel_accept import (
     _live_room,
     _mk_pc,
 )
-from tests.proposal_assist.conftest import make_user, make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 _DOC = "Preamble.\n\n## A\n\nBody a.\n\n## B\n\nBody b.\n"
 _NO_PREAMBLE = "## A\n\nBody a.\n\n## B\n\nBody b.\n"
@@ -70,8 +70,9 @@ def test_accept_preserves_concurrent_edit_in_other_section(pg_session_factory, t
                        base_commit_sha=_git_head(repo), base_section_sha=base_sha)
     with pg_session_factory() as s:
         approver = s.get(User, oid)
-        kernel_accept_prose(s, room_doc=room_doc, proposed_change_id=pc_id,
-                            workspace_id=wid, approver=approver, workspaces_dir=str(tmp_path))
+        kernel_accept_prose(s, stamp=stamp_for(s, wid), room_doc=room_doc,
+                            proposed_change_id=pc_id, workspace_id=wid,
+                            approver=approver, workspaces_dir=str(tmp_path))
         s.commit()
     room_doc.apply_update(fork_update)   # concurrent client update merges post-accept
     out = pm_to_markdown(ydoc_to_pm_json(room_doc))
@@ -90,8 +91,9 @@ def test_clear_preamble_via_empty_new_text_does_not_crash(pg_session_factory, tm
                        base_commit_sha=_git_head(repo), base_section_sha=base_sha)
     with pg_session_factory() as s:
         approver = s.get(User, oid)
-        res = kernel_accept_prose(s, room_doc=room_doc, proposed_change_id=pc_id,
-                                  workspace_id=wid, approver=approver, workspaces_dir=str(tmp_path))
+        res = kernel_accept_prose(s, stamp=stamp_for(s, wid), room_doc=room_doc,
+                                  proposed_change_id=pc_id, workspace_id=wid,
+                                  approver=approver, workspaces_dir=str(tmp_path))
         s.commit()
         assert res.pc.status == "accepted"
     assert "Preamble." not in pm_to_markdown(ydoc_to_pm_json(room_doc))
@@ -107,8 +109,9 @@ def test_normal_single_section_accept_unchanged(pg_session_factory, tmp_path):
                        base_commit_sha=_git_head(repo), base_section_sha=base_sha)
     with pg_session_factory() as s:
         approver = s.get(User, oid)
-        kernel_accept_prose(s, room_doc=room_doc, proposed_change_id=pc_id,
-                            workspace_id=wid, approver=approver, workspaces_dir=str(tmp_path))
+        kernel_accept_prose(s, stamp=stamp_for(s, wid), room_doc=room_doc,
+                            proposed_change_id=pc_id, workspace_id=wid,
+                            approver=approver, workspaces_dir=str(tmp_path))
         s.commit()
     secs = split_sections(pm_to_markdown(ydoc_to_pm_json(room_doc)))
     assert "Plain edit." in secs[1].text and "Body b." in secs[2].text
@@ -127,8 +130,9 @@ def test_blank_clear_of_already_empty_preamble_is_noop_accept(pg_session_factory
                        base_commit_sha=_git_head(repo), base_section_sha=base_sha)
     with pg_session_factory() as s:
         approver = s.get(User, oid)
-        res = kernel_accept_prose(s, room_doc=room_doc, proposed_change_id=pc_id,
-                                  workspace_id=wid, approver=approver, workspaces_dir=str(tmp_path))
+        res = kernel_accept_prose(s, stamp=stamp_for(s, wid), room_doc=room_doc,
+                                  proposed_change_id=pc_id, workspace_id=wid,
+                                  approver=approver, workspaces_dir=str(tmp_path))
         s.commit()
         assert res.pc.status == "accepted"
         assert res.update is None and res.committed is False
@@ -151,8 +155,9 @@ def test_section_write_beside_a_table_preserves_it(pg_session_factory, tmp_path)
                        base_commit_sha=_git_head(repo), base_section_sha=base_sha)
     with pg_session_factory() as s:
         approver = s.get(User, oid)
-        kernel_accept_prose(s, room_doc=room_doc, proposed_change_id=pc_id,
-                            workspace_id=wid, approver=approver, workspaces_dir=str(tmp_path))
+        kernel_accept_prose(s, stamp=stamp_for(s, wid), room_doc=room_doc,
+                            proposed_change_id=pc_id, workspace_id=wid,
+                            approver=approver, workspaces_dir=str(tmp_path))
         s.commit()
     out = pm_to_markdown(ydoc_to_pm_json(room_doc))
     assert "| Item | Cost |" in out            # table untouched
@@ -175,8 +180,9 @@ def test_section_write_INTO_a_table_section_roundtrips(pg_session_factory, tmp_p
                        base_commit_sha=_git_head(repo), base_section_sha=base_sha)
     with pg_session_factory() as s:
         approver = s.get(User, oid)
-        kernel_accept_prose(s, room_doc=room_doc, proposed_change_id=pc_id,
-                            workspace_id=wid, approver=approver, workspaces_dir=str(tmp_path))
+        kernel_accept_prose(s, stamp=stamp_for(s, wid), room_doc=room_doc,
+                            proposed_change_id=pc_id, workspace_id=wid,
+                            approver=approver, workspaces_dir=str(tmp_path))
         s.commit()
     out = pm_to_markdown(ydoc_to_pm_json(room_doc))
     assert "| Staff | 120 |" in out       # edit landed, bordered form

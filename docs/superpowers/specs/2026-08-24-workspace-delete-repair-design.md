@@ -1,8 +1,25 @@
 # Workspace delete: quarantine and repair — Design
 
-**Status:** proposed, 2026-08-24. Supersedes the *approach* of the epoch-fence
-programme for the workspace-delete lifecycle. Does not propose reverting anything
-already merged.
+> **SUPERSEDED (2026-08-24) by the fence endgame.** This spec's headline claim —
+> that quarantine-and-repair can *replace* the epoch-fence for the workspace-delete
+> lifecycle — was **disproved** by the delete-restore-resume hole an outside review
+> found the same day: an actor admitted at generation **G** can resume *after* a delete
+> **and** a restore have both committed, by which point `soft_deleted_at` is `NULL`
+> again, so a liveness-only check waves the stale write through. Closing that hole
+> requires a generation comparison **at the write**, which quarantine (a rename at
+> delete) cannot provide. The fence endgame did exactly that: it converted every
+> commit-mutex caller to `acquire_commit_mutex_at_generation` (equality on
+> `lifecycle_generation`) and **deleted** the trusting `acquire_commit_mutex_live`, so
+> the interpreter now enforces the rule. See
+> `docs/superpowers/plans/2026-08-24-fence-endgame-convert-and-delete.md`.
+>
+> **Quarantine remains valid as defense-in-depth** (a cheap, independent rename at
+> delete), and the restore/inspection lifecycle in §§1–4 stands. Only the "replaces the
+> fence" framing is retracted.
+
+**Status:** SUPERSEDED (see banner), 2026-08-24. Originally proposed to supersede the
+*approach* of the epoch-fence programme for the workspace-delete lifecycle; that framing
+is retracted. Does not propose reverting anything already merged.
 
 ## 1. The lifecycle we are protecting
 
@@ -154,12 +171,44 @@ If the fence is ever completed, the correct ending is to **delete
 `acquire_commit_mutex_live`**, at which point calling it is a `NameError` and all 4,993
 lines can go. The interpreter becomes the gate.
 
+> **UPDATE (2026-08-24): the fence WAS completed, and this ending was taken.** Every
+> convertible caller was moved to `acquire_commit_mutex_at_generation`, the delete path
+> (`soft_delete_workspace_db`) moved to the raw `acquire_commit_mutex` with its liveness
+> re-read inlined, and `acquire_commit_mutex_live` was **deleted** — grepping `src/` for a
+> call or definition (`acquire_commit_mutex_live(`) now returns nothing (only a few
+> historical comments still name it), and `hasattr(locking, "acquire_commit_mutex_live")`
+> is `False`. **But the "all 4,993 lines can go" prediction did NOT hold:** measurement
+> during the endgame (see the plan's PLAN-DEFECTS) found the `tests/fencing/` gates
+> police the durable fence *architecture* (stamp shape, ports purity, sink enumeration,
+> sink ordering, inventory coverage), not the two-primitive migration. Only
+> `live_mutex_gate.py`'s `_live`-caller partition machinery became vacuous, and it is
+> entangled with the sole tree-level sink-ordering gate (`check_tree`), so it was kept.
+> The scaffolding did not vanish because it was never only migration scaffolding.
+
 ## 6. Also missing from the user's model
 
 Not part of this design, but discovered while checking it: **admin hard-delete is not
 built.** `scrub_workspace_bytes` exists, is tested, and has zero production callers — and
 it removes attachments and references but **not the repo**. Completing the safety feature
 needs a purge that also removes `repo/` and any `repo.frozen-*`.
+
+### The two real gaps the fence endgame did NOT close (recorded 2026-08-24)
+
+The endgame closed the delete-restore-resume correctness hole. It did **not** close, and
+was never scoped to close, these two — both real, neither a delete/restore correctness
+problem:
+
+1. **Admin hard-delete does not exist.** As above: `scrub_workspace_bytes` has zero
+   production callers and does not remove the repo. There is no way for a system admin
+   to *really* delete a workspace's bytes — the "only the admin can really delete it"
+   half of the user's model (§1) is unbuilt.
+2. **Reference ingestion runs on an unkillable thread, and the web tier cannot scale.**
+   Reference ingestion executes on a plain Python worker thread that cannot be killed
+   mid-flight (unlike the LLM subprocess, which is reapable). Separately, APScheduler
+   runs **in-process** under a hard single-instance constraint (the scheduler must not
+   run on more than one process), which blocks scaling the web tier horizontally. Moving
+   background work out of the web process (crash isolation, real cancellation) is the
+   proper fix — see §7 open question 3 — and is independent of the fence.
 
 ## 7. Open questions
 

@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from call_manager.proposal_assist.collab import flip, state
 from call_manager.proposal_assist.collab.flip import maybe_auto_enable
 from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
-from tests.proposal_assist.conftest import make_user, make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 
 @pytest.fixture(autouse=True)
@@ -26,12 +26,12 @@ def test_enables_once_sticky_and_commits(pg_session_factory):
         wid = _ws(s, "flip1@ki.se").id
         s.commit()
     with pg_session_factory() as s:
-        result = maybe_auto_enable(s, workspace_id=wid, artifact="draft")
+        result = maybe_auto_enable(s, stamp=stamp_for(s, wid), workspace_id=wid, artifact="draft")
         assert result is True
     with pg_session_factory() as s:  # committed by the hook — visible to a NEW session
         assert state.is_collab_enabled(s, workspace_id=wid, artifact="draft") is True
         # sticky repeat: no error, still True
-        result = maybe_auto_enable(s, workspace_id=wid, artifact="draft")
+        result = maybe_auto_enable(s, stamp=stamp_for(s, wid), workspace_id=wid, artifact="draft")
         assert result is True
 
 
@@ -40,7 +40,7 @@ def test_kill_switch_suppresses(pg_session_factory):
     with pg_session_factory() as s:
         wid = _ws(s, "flip3@ki.se").id
         s.commit()
-        result = maybe_auto_enable(s, workspace_id=wid, artifact="draft")
+        result = maybe_auto_enable(s, stamp=stamp_for(s, wid), workspace_id=wid, artifact="draft")
         assert result is False
     state.set_kill_switch(False)
     with pg_session_factory() as s:  # nothing was persisted while suppressed
@@ -52,7 +52,10 @@ def test_per_artifact_independence(pg_session_factory):
         wid = _ws(s, "flip4@ki.se").id
         s.commit()
     with pg_session_factory() as s:
-        assert maybe_auto_enable(s, workspace_id=wid, artifact="spec") is True
+        assert (
+            maybe_auto_enable(s, stamp=stamp_for(s, wid), workspace_id=wid, artifact="spec")
+            is True
+        )
         assert state.is_collab_enabled(s, workspace_id=wid, artifact="draft") is False
 
 
@@ -73,7 +76,7 @@ def test_concurrent_first_read_race_reports_enabled(pg_session_factory, monkeypa
             real_commit()
 
         monkeypatch.setattr(s, "commit", _racy_commit)
-        result = maybe_auto_enable(s, workspace_id=wid, artifact="draft")
+        result = maybe_auto_enable(s, stamp=stamp_for(s, wid), workspace_id=wid, artifact="draft")
         assert result is True
 
 
@@ -89,7 +92,9 @@ def test_mutex_held_by_writer_defers_flip(pg_session_factory, monkeypatch):
     try:
         acquire_commit_mutex(holder, wid)  # held until holder commits/rolls back
         with pg_session_factory() as s:
-            result = maybe_auto_enable(s, workspace_id=wid, artifact="draft")
+            result = maybe_auto_enable(
+                s, stamp=stamp_for(s, wid), workspace_id=wid, artifact="draft"
+            )
             assert result is False
             # session still usable after the aborted-mutex rollback
             assert state.is_collab_enabled(s, workspace_id=wid, artifact="draft") is False
@@ -107,5 +112,8 @@ def test_table_doc_enables_now(pg_session_factory):
         wid = _ws(s, "flip7@ki.se").id
         s.commit()
     with pg_session_factory() as s:
-        assert maybe_auto_enable(s, workspace_id=wid, artifact="draft") is True
+        assert (
+            maybe_auto_enable(s, stamp=stamp_for(s, wid), workspace_id=wid, artifact="draft")
+            is True
+        )
         assert state.is_collab_enabled(s, workspace_id=wid, artifact="draft") is True

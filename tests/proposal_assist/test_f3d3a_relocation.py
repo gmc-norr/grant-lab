@@ -164,11 +164,20 @@ def test_the_monkeypatch_targets_are_the_module_that_actually_reads_them():
 
 
 def test_no_tool_module_gained_a_port_call():
-    """GC-1. The written-down set of fenced tool-commit identities. F3d3a converted
-    nothing (F3d2's five); F3d3b Task 2 added _propose_artifact_edit_impl and Task 3
-    adds propose_citation_impl — BOTH of F3d3's propose sites now write through
-    ports.effects and no longer commit. The set stays a literal on purpose: a derived
-    set would silently absorb the next conversion instead of forcing this diff."""
+    """GC-1. The written-down set of EVERY fenced identity — not only the tool-commit
+    ones the function name suggests. F3d3a converted nothing (F3d2's five); F3d3b
+    Task 2 added _propose_artifact_edit_impl and Task 3 adds propose_citation_impl —
+    BOTH of F3d3's propose sites now write through ports.effects and no longer commit.
+
+    The 2026-08-24 endgame slice then added the first two `git_commit` rows, which is
+    why the literal is no longer homogeneous in `kind`. Scoping the comparison to
+    `kind == "tool_commit"` was considered and REJECTED: that is precisely the derived
+    set this docstring warns about, and it would make every later git_commit
+    conversion invisible here.
+
+    The set stays a literal on purpose: a derived set would silently absorb the next
+    conversion instead of forcing this diff. Each endgame task that converts a site is
+    expected to edit this literal — that cost IS the feature."""
     from tests.fencing.inventory import load_inventory, scan_tree
 
     _sites, fenced = scan_tree()
@@ -208,12 +217,56 @@ def test_no_tool_module_gained_a_port_call():
             "src/call_manager/proposal_assist/tools/citations.py",
             "propose_citation_impl",
         ),
-    }, "F3d2's five plus F3d3b's TWO propose sites (artifact-edit + citation)"
-    # Measured from the LIVE tree, not the stored JSON: this task fences the SECOND
-    # of F3d3's two sites (the citation propose); Task 2 fenced the first. The
-    # inventory JSON is regenerated in Task 4, so load_inventory() still reports both
-    # F3d3 rows fenced=false here — the SCAN is the source of truth for what the code
-    # actually does now.
+        # --- 2026-08-24 endgame, Task 2: the first two git_commit conversions ---
+        (
+            "git_commit",
+            "src/call_manager/proposal_assist/analysis/insert.py",
+            "insert_from_annotation",
+        ),
+        (
+            "git_commit",
+            "src/call_manager/proposal_assist/citations/human_cite.py",
+            "insert_citation_for_user",
+        ),
+        # --- 2026-08-24 endgame, Task 5: the collab cluster (Group D) ---
+        # checkpoint_artifact is the ONLY Group-D function that holds a git sink
+        # (write_and_commit_files) directly in its body, and its converted
+        # acquisition pairs statically with that sink, so the scanner measures it
+        # fenced=true. The five kernel functions + hydrate + flip + handover
+        # delegate to it and hold no sink themselves, so they add no git_commit row.
+        (
+            "git_commit",
+            "src/call_manager/proposal_assist/collab/checkpoint.py",
+            "checkpoint_artifact",
+        ),
+        # --- 2026-08-24 endgame, Task 6: save_section (Group D orphan) ---
+        # save_section takes acquire_commit_mutex_at_generation as a top-level
+        # statement that statically pairs with its own write_and_commit_files sink,
+        # so the scanner measures it fenced=true. Its sibling conversion this task,
+        # _insert_citation_locked (Group E), acquires inside a try: block, so the
+        # scanner cannot prove order (stmt_index=None) and adds NO git_commit row.
+        (
+            "git_commit",
+            "src/call_manager/proposal_assist/editing/save.py",
+            "save_section",
+        ),
+    }, (
+        "F3d2's five, plus F3d3b's TWO propose sites (artifact-edit + citation), "
+        "plus the endgame slice's git_commit conversions"
+    )
+    # The inventory is consulted only for WHICH rows belong to F3d3; whether they are
+    # fenced is read from `fenced`, MEASURED off the live tree above.
+    #
+    # That ordering has outlived the reason it was introduced. When F3d3b's Task 3
+    # wrote this line, the stored JSON still carried both F3d3 rows as fenced=false
+    # (F3d3b's own Task 2 had converted the artifact-edit propose site, Task 3 the
+    # citation one, and neither had regenerated the file yet), so the scan was
+    # CORRECTING the JSON. F3d3b's Task 4 then regenerated it — f38e5feb, "F3d3
+    # closes" — and both rows have read fenced=true ever since, so the two now agree.
+    # Note the Task numbers above are F3d3b's; the 2026-08-24 endgame numbers its own
+    # tasks from 1 again, and ITS Task 2 (5f66eada) touched only the two git_commit
+    # rows, not these. Keeping the intersection against the measured set means this
+    # assertion still tests the code rather than the file if they ever drift apart.
     f3d3_sites = {
         (r["kind"], r["path"], r["symbol"])
         for r in load_inventory()

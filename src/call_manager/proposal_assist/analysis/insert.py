@@ -69,14 +69,15 @@ from call_manager.proposal_assist.citations.quotes import (
     normalize_for_quote_match,
 )
 from call_manager.proposal_assist.collab.state import raise_if_collab_severed
-from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex_live
 from call_manager.proposal_assist.editing.save import (
     PROPOSAL_FILENAME,
     TURN_IN_FLIGHT_MESSAGE,
     _turn_in_flight,
 )
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.fencing import acquire_commit_mutex_at_generation
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
 from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
 
 if TYPE_CHECKING:
@@ -342,17 +343,26 @@ def insert_from_annotation(
     Returns ``{"ev_id", "citekey", "commit_sha"}`` on success, or
     ``{"idempotent": True}`` when THIS annotation was already inserted.
     Raises :class:`InsertConflict` for every expected user-facing failure,
-    ``CommitMutexTimeout`` (web maps to 429), ``WorkspaceDeleted`` (404, via the
-    app-level handler) and ``GitCommitError`` (500).
+    ``CommitMutexTimeout`` (web maps to 429), ``GitCommitError`` (500), and —
+    both via app-level handlers in ``main.py``, both as 404 — ``WorkspaceDeleted``
+    and ``WorkspaceGenerationStale``. The latter is Primitive B's addition: the
+    workspace is live, but at a LATER epoch than the caller's stamp, i.e. it was
+    deleted and restored while this request was in flight.
     """
     # 1. Serialize against every other git mutation of this workspace, and refuse
-    # outright if it was deleted while we blocked. Both propagate — the web layer
-    # maps them to 429 and 404 respectively.
+    # outright if it was deleted — or restored into a new epoch — while we
+    # blocked. `stamp_for_workspace` mints the belief from the object
+    # `require_owner` loaded at the ACCESS CHECK, before the mutex could block;
+    # re-reading the generation here would compare the post-race value against
+    # itself and fence nothing. All three propagate — the web layer maps
+    # CommitMutexTimeout to 429, and main.py maps WorkspaceDeleted and
+    # WorkspaceGenerationStale to the same 404.
     # Flag-off-only path: with collab enabled the step-1b severance recheck below raises
     # CollabSeveranceConflict, which the route maps to 409, so this path is retiring rather than
     # maintained. Slice C3 bounds its tail anyway — the 2s cap now left in force by
     # acquire_commit_mutex applies at every site, including this one, with nothing needed here.
-    acquire_commit_mutex_live(session, workspace.id)
+    stamp = stamp_for_workspace(workspace)
+    acquire_commit_mutex_at_generation(session, stamp.workspace_id, generation=stamp.generation)
 
     # 1b. Severance recheck UNDER the mutex (3b-5d.D4 Item 2b): enable-on-touch may
     # have flipped draft collab on while we blocked on the mutex, after the route's

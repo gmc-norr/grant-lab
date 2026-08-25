@@ -14,7 +14,7 @@ from call_manager.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
 from call_manager.proposal_assist.editing.save import CITATIONS_FILENAME, PROPOSAL_FILENAME
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from tests.proposal_assist.collab.test_collab_kernel_citation import _init_repo, _seed_reference
-from tests.proposal_assist.conftest import make_user, make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 
 @pytest.fixture
@@ -24,7 +24,8 @@ def anyio_backend():
 
 def _base_sha(session, wid, workspaces_dir, section_index=1):
     updates = load_or_hydrate(
-        session, workspace_id=wid, artifact="draft", workspaces_dir=workspaces_dir
+        session, stamp=stamp_for(session, wid), workspace_id=wid, artifact="draft",
+        workspaces_dir=workspaces_dir
     )
     session.commit()
     room_doc = build_doc(updates)
@@ -48,11 +49,12 @@ async def test_direct_cite_applies_and_returns(pg_session_factory, tmp_path):
         s.commit()
     with pg_session_factory() as s:
         bsha = _base_sha(s, wid, str(tmp_path))
+        stamp = stamp_for(s, wid)
     out = await direct_cite_via_kernel(
-        session_factory=pg_session_factory, workspaces_dir=str(tmp_path), workspace_id=wid,
-        actor_id=oid, section_index=1, base_section_sha=bsha, anchor="The claim here.",
-        reference_id=rid, chunk_index=0, evidence_quote="azure", quote_start=0, quote_end=5,
-        stance="supports")
+        session_factory=pg_session_factory, workspaces_dir=str(tmp_path), stamp=stamp,
+        workspace_id=wid, actor_id=oid, section_index=1, base_section_sha=bsha,
+        anchor="The claim here.", reference_id=rid, chunk_index=0, evidence_quote="azure",
+        quote_start=0, quote_end=5, stance="supports")
     assert set(out) == {"ev_id", "citekey", "commit_sha"}
     disk = (repo / PROPOSAL_FILENAME).read_text()
     assert f"[@{out['citekey']}]<!-- ev:{out['ev_id']} -->" in disk
@@ -81,6 +83,7 @@ async def test_direct_cite_anchor_gone_is_clean_stale_no_evict(
         s.commit()
     with pg_session_factory() as s:
         bsha = _base_sha(s, wid, str(tmp_path))
+        stamp = stamp_for(s, wid)
     evict_calls: list = []
     _orig_evict = MANAGER.evict
     async def _spy_evict(key):
@@ -89,8 +92,8 @@ async def test_direct_cite_anchor_gone_is_clean_stale_no_evict(
     monkeypatch.setattr(MANAGER, "evict", _spy_evict)
     with pytest.raises(CiteStale):
         await direct_cite_via_kernel(
-            session_factory=pg_session_factory, workspaces_dir=str(tmp_path), workspace_id=wid,
-            actor_id=oid, section_index=1, base_section_sha=bsha,
+            session_factory=pg_session_factory, workspaces_dir=str(tmp_path), stamp=stamp,
+            workspace_id=wid, actor_id=oid, section_index=1, base_section_sha=bsha,
             anchor="NOT PRESENT IN THIS SECTION", reference_id=rid, chunk_index=0,
             evidence_quote="azure", quote_start=0, quote_end=5, stance="supports")
     assert evict_calls == []  # clean error → evict must NOT have been called
@@ -114,6 +117,7 @@ async def test_direct_cite_post_mutation_failure_evicts(pg_session_factory, tmp_
         s.commit()
     with pg_session_factory() as s:
         bsha = _base_sha(s, wid, str(tmp_path))
+        stamp = stamp_for(s, wid)
     # Fail AFTER the fragment mutation (during checkpoint) → room.doc ahead of log → evict.
     import call_manager.proposal_assist.collab.kernel as kmod
     def _boom(*a, **k): raise RuntimeError("disk full")
@@ -126,10 +130,10 @@ async def test_direct_cite_post_mutation_failure_evicts(pg_session_factory, tmp_
     monkeypatch.setattr(MANAGER, "evict", _spy_evict)
     with pytest.raises(RuntimeError):
         await direct_cite_via_kernel(
-            session_factory=pg_session_factory, workspaces_dir=str(tmp_path), workspace_id=wid,
-            actor_id=oid, section_index=1, base_section_sha=bsha, anchor="The claim here.",
-            reference_id=rid, chunk_index=0, evidence_quote="azure", quote_start=0, quote_end=5,
-            stance="supports")
+            session_factory=pg_session_factory, workspaces_dir=str(tmp_path), stamp=stamp,
+            workspace_id=wid, actor_id=oid, section_index=1, base_section_sha=bsha,
+            anchor="The claim here.", reference_id=rid, chunk_index=0, evidence_quote="azure",
+            quote_start=0, quote_end=5, stance="supports")
     assert (wid, "draft") in evict_calls  # post-mutation error → evict must have been called
     assert len(evict_calls) == 1
     assert MANAGER.get((wid, "draft")) is None  # evicted (poison recovery)
@@ -160,6 +164,7 @@ async def test_direct_cite_section_structure_error_does_not_evict(
         s.commit()
     with pg_session_factory() as s:
         bsha = _base_sha(s, wid, str(tmp_path))
+        stamp = stamp_for(s, wid)
 
     def _raise_struct(*a, **k):
         raise SectionStructureError("section-map divergence")
@@ -175,10 +180,10 @@ async def test_direct_cite_section_structure_error_does_not_evict(
     monkeypatch.setattr(MANAGER, "evict", _spy_evict)
     with pytest.raises(SectionStructureError):
         await direct_cite_via_kernel(
-            session_factory=pg_session_factory, workspaces_dir=str(tmp_path), workspace_id=wid,
-            actor_id=oid, section_index=1, base_section_sha=bsha, anchor="The claim here.",
-            reference_id=rid, chunk_index=0, evidence_quote="azure", quote_start=0, quote_end=5,
-            stance="supports")
+            session_factory=pg_session_factory, workspaces_dir=str(tmp_path), stamp=stamp,
+            workspace_id=wid, actor_id=oid, section_index=1, base_section_sha=bsha,
+            anchor="The claim here.", reference_id=rid, chunk_index=0, evidence_quote="azure",
+            quote_start=0, quote_end=5, stance="supports")
     assert evict_calls == []  # pre-mutation clean error → no evict
 
 
@@ -200,9 +205,12 @@ async def test_direct_cite_stale_sha_allowed_when_anchor_present(pg_session_fact
         s.commit()
         rid = _seed_reference(s, wid, chunk_text="azure sky").id
         s.commit()
+    with pg_session_factory() as _s:
+        stamp = stamp_for(_s, wid)
     out = await direct_cite_via_kernel(
-        session_factory=pg_session_factory, workspaces_dir=str(tmp_path), workspace_id=wid,
-        actor_id=oid, section_index=1, base_section_sha="dead" * 16,  # STALE — now ignored
+        session_factory=pg_session_factory, workspaces_dir=str(tmp_path), stamp=stamp,
+        workspace_id=wid, actor_id=oid, section_index=1,
+        base_section_sha="dead" * 16,  # STALE — now ignored
         anchor="The claim here.", reference_id=rid, chunk_index=0,
         evidence_quote="azure", quote_start=0, quote_end=5, stance="supports")
     assert set(out) == {"ev_id", "citekey", "commit_sha"}

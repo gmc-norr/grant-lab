@@ -92,6 +92,26 @@ SLICE_STATUS = {
     # per slice or the first flipped row goes red.
     "F3e1a": "complete",  # the carrier, the git detector, the gates — no row of its own
     "F3e1a2": "complete",  # the allowlist walk — no row of its own
+    # The 2026-08-24 endgame converts all 18 remaining sites across six tasks,
+    # cutting ACROSS the F3e1b/F3e2/F4/F5 keys below. SLICE_STATUS has no partial
+    # state, so — following the remedy this file already documents for F3d and F3e
+    # ("a multi-slice conversion needs one key per slice or the first flipped row
+    # goes red") — each endgame task gets its own key, marked `complete` when that
+    # task lands, and the rows it converted are re-pointed to it. The keys below
+    # keep exactly the rows their slice has NOT yet converted.
+    "F3e-endgame-A": "complete",  # Task 2: the two workspace-object sites
+    # Task 5: the collab cluster (Group D). Its ONE git_commit row —
+    # checkpoint_artifact — is re-pointed here from F3e1b and marked complete,
+    # exactly as Task 2 re-pointed its two rows off their original slices. The
+    # kernel/hydrate/flip conversions hold no direct sink, so they add no row.
+    "F3e-endgame-D": "complete",
+    # Task 6a: Group E (_insert_citation_locked) + save_section (Group D orphan) +
+    # Group F (_m1). Only ONE row becomes provably fenced — save_section, whose
+    # top-level acquire statically pairs with its write_and_commit_files sink; it is
+    # re-pointed here from F3e1b and marked complete. _insert_citation_locked acquires
+    # inside a try: block (unprovable), so its F3e1b row stays pending; _m1 reaches
+    # _init_repo, whose git_commit row is F5's to convert, so that row stays pending too.
+    "F3e-endgame-E-F": "complete",
     "F3e1b": "pending",   # the git-effect conversions
     "F3e2": "pending",    # the ingest pipeline and the filesystem effects
     "F3f": "pending",    # capability holders, then the handle
@@ -113,6 +133,9 @@ F3A_COLUMN_FILES = frozenset({
     "proposal_assist/review/pass_runner.py",
     "proposal_assist/uncited_claims/jobs.py",
     "proposal_assist/uncited_claims/pass_runner.py",
+    # Endgame Group F (2026-08-24 Task 6) — claim_next_setup_job now stamps
+    # claimed_at_generation in its locking statement and run_one threads it into _m1.
+    "proposal_assist/phases/setup.py",
     "db/models.py",
 })
 
@@ -122,8 +145,39 @@ F3A_COLUMN_FILES = frozenset({
 #: whole point of the ports is that no tool, route or pass runner writes one.
 #: Sharing one list with the column check would both permit premature fencing
 #: imports across all of F3a's files and block the ports, which live in neither.
+#: The 2026-08-24 endgame widens this set as it converts: Primitive B lives in
+#: `fencing.py` (the trusting primitive it replaces lived in `drafting/locking.py`),
+#: so every converted git-write site necessarily imports `fencing` directly. Each
+#: task's entries are a reviewed diff, exactly as the F3b entry above was.
 FENCING_IMPORT_FILES: frozenset[str] = frozenset({
     "proposal_assist/port_impl/effects.py",
+    # Endgame Group A (2026-08-24 Task 2)
+    "proposal_assist/analysis/insert.py",
+    "proposal_assist/citations/human_cite.py",
+    # Endgame Group B (2026-08-24 Task 3) — workspace_write choke point
+    "proposal_assist/web/_writes.py",
+    # Endgame Group C (2026-08-24 Task 4) — the three workspaces.py route sites
+    "web/api/workspaces.py",
+    # Endgame Group D (2026-08-24 Task 5) — the collab cluster. checkpoint/hydrate/
+    # flip/kernel take the mutex at a generation directly; handover/permissions/
+    # collab_cite/kernel_accept/collab_ws thread the stamp and catch
+    # WorkspaceGenerationStale (re-exported from fencing).
+    "proposal_assist/collab/checkpoint.py",
+    "proposal_assist/collab/hydrate.py",
+    "proposal_assist/collab/flip.py",
+    "proposal_assist/collab/kernel.py",
+    "proposal_assist/collab/handover.py",
+    "proposal_assist/collab/permissions.py",
+    "proposal_assist/citations/collab_cite.py",
+    "proposal_assist/proposals/kernel_accept.py",
+    "proposal_assist/web/collab_ws.py",
+    # Endgame Group E + save_section + Group F (2026-08-24 Task 6) — the last
+    # convertible live callers. save_section takes the mutex at its threaded stamp's
+    # generation; _insert_citation_locked (in citations/core.py) does the same inside a
+    # try: block; _m1 (in phases/setup.py) takes it at the generation the claim stamped.
+    "proposal_assist/editing/save.py",
+    "proposal_assist/citations/core.py",
+    "proposal_assist/phases/setup.py",
 })
 
 #: Extra declared keys, preserved verbatim across regeneration — they are what

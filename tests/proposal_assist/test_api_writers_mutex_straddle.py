@@ -154,19 +154,18 @@ def patch_route_mutex_timeout(monkeypatch, module, seconds: int = 1) -> None:
     route's error mapping, not the production timeout value, and the 10s default
     would stall the suite.
 
-    Patches BOTH the route module and `_writes`, tolerating the name's absence on
-    either, because the routes migrate one commit at a time: before a route moves
-    it calls `acquire_commit_mutex_live` itself; afterwards `workspace_write`
-    does. `module` is retained so each caller still names the module under test.
+    After Task 3's conversion all six routes go through `workspace_write`, which
+    calls `acquire_commit_mutex_at_generation`. We patch that name on `_writes`
+    (where `workspace_write` looks it up), leaving `module` as the caller-visible
+    label that ties each test to the module under test.
     """
-    for target in (module, writes_module):
-        current = getattr(target, "acquire_commit_mutex_live", None)
-        if current is not None:
-            monkeypatch.setattr(
-                target,
-                "acquire_commit_mutex_live",
-                functools.partial(current, timeout_seconds=seconds),
-            )
+    current = getattr(writes_module, "acquire_commit_mutex_at_generation", None)
+    if current is not None:
+        monkeypatch.setattr(
+            writes_module,
+            "acquire_commit_mutex_at_generation",
+            functools.partial(current, timeout_seconds=seconds),
+        )
 
 
 def straddle_delete(pg_session_factory, ws_id, send):

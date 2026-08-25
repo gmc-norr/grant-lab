@@ -22,6 +22,8 @@ from call_manager.proposal_assist.drafting.locking import (
     WorkspaceDeleted,
     is_lock_timeout,
 )
+from call_manager.proposal_assist.fencing import WorkspaceGenerationStale
+from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +38,15 @@ def run_kill_switch_handover(session_factory, *, workspaces_dir) -> int:
             ws = s.get(Workspace, workspace_id)
             if ws is None or ws.soft_deleted_at is not None:
                 continue
+            # Mint the fence stamp from the liveness pre-screen above (this pass's
+            # access check): checkpoint_artifact re-validates it under the mutex, so
+            # a workspace deleted or bumped between here and the mutex raises
+            # WorkspaceDeleted / WorkspaceGenerationStale, both benign below.
+            stamp = stamp_for_workspace(ws)
             try:
                 res = checkpoint_artifact(
                     s,
+                    stamp=stamp,
                     workspace_id=workspace_id,
                     artifact=artifact,
                     workspaces_dir=workspaces_dir,
@@ -60,7 +68,8 @@ def run_kill_switch_handover(session_factory, *, workspaces_dir) -> int:
                 # where it used to hang — the same benign "someone else is
                 # writing; the log survives untruncated and the next scan tick
                 # retries" outcome as a mutex ACQUISITION timeout, or as a
-                # workspace deleted between the pre-screen above and the mutex.
+                # workspace deleted (or deleted-and-restored past the stamped
+                # generation) between the pre-screen above and the mutex.
                 # None of those is a fault, so none earns an ERROR + traceback
                 # on a path the scheduler re-runs while the switch stays engaged
                 # — or, with COLLAB_CHECKPOINT_SCAN_SECONDS=0, on the one-shot
@@ -79,7 +88,7 @@ def run_kill_switch_handover(session_factory, *, workspaces_dir) -> int:
                 # commit that fails is a real fault — as is the repo-less
                 # RuntimeError raised above.
                 benign = isinstance(
-                    exc, (CommitMutexTimeout, WorkspaceDeleted)
+                    exc, (CommitMutexTimeout, WorkspaceDeleted, WorkspaceGenerationStale)
                 ) or is_lock_timeout(exc)
                 if benign:
                     logger.warning(

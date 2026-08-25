@@ -6,6 +6,7 @@ from call_manager.db.models import Reference, ReferenceChunk, WorkspaceViewer
 from call_manager.proposal_assist.citations.ledger import load_ledger
 from call_manager.proposal_assist.citations.markers import find_markers
 from call_manager.proposal_assist.editing.save import save_section
+from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
 from call_manager.proposal_assist.proposals.proposing import (
     capture_base,
     propose_citation_insert,
@@ -321,6 +322,7 @@ def _seed_pending_then_move_section(s, ws, current_user, tmp_path):
     save_section(
         session=s,
         workspace=ws,
+        stamp=stamp_for_workspace(ws),
         user_id=current_user.id,
         section_index=1,
         new_text="## Methods\nhuman.\n",

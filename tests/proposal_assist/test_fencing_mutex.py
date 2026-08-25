@@ -177,10 +177,12 @@ def test_a_deleted_workspace_observed_only_under_the_mutex_still_raises(
 
     The competing session takes the mutex, symmetrically with the bump test
     above, because that is what a real deletion does —
-    `soft_delete_workspace_db` holds `acquire_commit_mutex_live` across the
-    whole transaction, and that is what makes the flip a linearization point
-    rather than a hope. A plain UPDATE here would still exercise fresh-read
-    ordering but not the serialization, and those are different properties.
+    `soft_delete_workspace_db` holds the commit mutex across the whole
+    transaction (the raw `acquire_commit_mutex` plus an inlined under-mutex
+    liveness re-read, since it bumps the generation and cannot be fenced against
+    it), and that is what makes the flip a linearization point rather than a
+    hope. A plain UPDATE here would still exercise fresh-read ordering but not
+    the serialization, and those are different properties.
 
     Taking the mutex here does NOT deadlock, and any comment claiming otherwise
     is wrong: the seam fires BEFORE the caller's own `pg_advisory_xact_lock`, so

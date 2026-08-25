@@ -25,10 +25,14 @@ from call_manager.proposal_assist.collab.markdown_bridge import pm_to_markdown
 from call_manager.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
 from call_manager.proposal_assist.drafting.locking import (
     WorkspaceDeleted,
-    acquire_commit_mutex_live,
     is_lock_timeout,
 )
+from call_manager.proposal_assist.fencing import (
+    WorkspaceGenerationStale,
+    acquire_commit_mutex_at_generation,
+)
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.ports.stamp import FenceStamp, stamp_for_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +63,7 @@ def _head_or_empty(repo) -> str:
 def checkpoint_artifact(
     session: Session,
     *,
+    stamp: FenceStamp,
     workspace_id: uuid.UUID,
     artifact: str,
     workspaces_dir,
@@ -84,11 +89,16 @@ def checkpoint_artifact(
     # and our write — we could then rewrite git HEAD backwards and regress the
     # watermark. Released at the caller's COMMIT/ROLLBACK; we never commit here.
     #
-    # _live: refuse outright if the workspace was deleted while we blocked. A
-    # checkpoint writes git + DB rows, which is precisely the mutation deletion
-    # must stop. Teardown/background callers skip on WorkspaceDeleted; the
-    # user-triggered "Save a version" route lets it reach the 404 handler.
-    acquire_commit_mutex_live(session, workspace_id)
+    # Primitive B (endgame Task 5): refuse outright if the workspace was deleted OR
+    # has moved past the caller's stamped generation while we blocked. A checkpoint
+    # writes git + DB rows, which is precisely the mutation deletion must stop. The
+    # generation is threaded from the caller's access check (the stamp), never
+    # re-read here at the write. Teardown/background callers skip on
+    # WorkspaceDeleted/WorkspaceGenerationStale; the user-triggered "Save a version"
+    # route lets both reach the 404 handler.
+    acquire_commit_mutex_at_generation(
+        session, stamp.workspace_id, generation=stamp.generation
+    )
 
     # ONE atomic snapshot of the log: doc, max_id, and authors all derive from
     # these rows (fixes the load-doc-then-read-max TOCTOU).
@@ -206,9 +216,15 @@ def checkpoint_active_tails(session_factory, *, workspaces_dir, min_tail: int) -
             ws = s.get(Workspace, workspace_id)
             if ws is None or ws.soft_deleted_at is not None:
                 continue
+            # Mint the fence stamp from the liveness re-screen above (the access
+            # check for this background pass): checkpoint_artifact re-validates it
+            # under the mutex, so a workspace deleted or bumped between here and the
+            # mutex is caught as WorkspaceDeleted/WorkspaceGenerationStale below.
+            stamp = stamp_for_workspace(ws)
             try:
                 checkpoint_artifact(
                     s,
+                    stamp=stamp,
                     workspace_id=workspace_id,
                     artifact=artifact,
                     workspaces_dir=workspaces_dir,
@@ -216,9 +232,11 @@ def checkpoint_active_tails(session_factory, *, workspaces_dir, min_tail: int) -
                 )
                 s.commit()
                 done += 1
-            except WorkspaceDeleted:
-                # Deleted between the liveness screen above and the mutex. Expected,
-                # not a failure: there is nothing to checkpoint and nothing to retry.
+            except (WorkspaceDeleted, WorkspaceGenerationStale):
+                # Deleted — or deleted-and-restored into a new generation — between
+                # the liveness screen above and the mutex. Expected, not a failure:
+                # the tail we scanned belongs to a workspace/epoch that is gone, so
+                # there is nothing to checkpoint and nothing to retry.
                 s.rollback()
                 continue
             except Exception as exc:  # noqa: BLE001 — best-effort; isolate per artifact

@@ -37,6 +37,7 @@ from call_manager.proposal_assist.drafting.locking import (
     WorkspaceDeleted,
     is_lock_timeout,
 )
+from call_manager.proposal_assist.ports.errors import WorkspaceGenerationStale
 from call_manager.proposal_assist.references.admission import IngestLimiter
 from call_manager.proposal_assist.web import collab_checkpoint, collab_ws
 from call_manager.proposal_assist.web.activity import (
@@ -541,6 +542,68 @@ def create_app() -> FastAPI:
         # subclass of WorkspaceDeleted (both are bare RuntimeErrors), so Starlette
         # cannot reach the handler above — this registration is required, not
         # redundant.
+        if api_request(request):
+            return api_error(404, "workspace_deleted", DELETED_ERROR_MESSAGE)
+        return JSONResponse(status_code=404, content={"detail": DELETED_ERROR_MESSAGE})
+
+    @app.exception_handler(WorkspaceGenerationStale)
+    async def _workspace_generation_stale(request: Request, exc: WorkspaceGenerationStale):
+        # The same fact again, observed by the epoch fence: a writer that won the
+        # commit mutex carrying a generation the workspace has since moved past.
+        # The only way a LIVE workspace changes generation is a lifecycle
+        # transition (delete, and then restore) — so the workspace this client
+        # addressed is gone, and the row now under that id belongs to a later
+        # epoch. `acquire_commit_mutex_at_generation` raises this BEFORE any
+        # effect (fencing.py), so nothing was mutated.
+        #
+        # 404 + "workspace_deleted" + DELETED_ERROR_MESSAGE, reused rather than
+        # minted, for the same reason the WorkspaceRetired handler above reuses
+        # them: to a client this is the same event — the workspace you addressed
+        # is gone — and it should not be told two different things about it.
+        #
+        # What the collab-ON fork of these routes does, measured rather than
+        # assumed (this comment previously claimed blanket parity, which is false
+        # for the second case):
+        #
+        #   * Plain delete race — soft-deleted mid-request and still deleted.
+        #     Flag-off: Primitive B's own re-read raises WorkspaceDeleted
+        #     (fencing.py:166-167) -> 404 via the handler above. Collab-ON:
+        #     RoomManager.operate's is_retired guards raise WorkspaceRetired
+        #     (collab/room.py:548, 563, 577) -> 404, and the collab checkpoint's
+        #     acquire_commit_mutex_at_generation re-reads soft_deleted_at (and
+        #     compares the generation) underneath that (fencing.py). Parity holds
+        #     here, and reusing this body is what keeps it holding.
+        #
+        #   * Delete-and-RESTORE race — the only race that can reach THIS handler,
+        #     because a still-deleted row is caught by WorkspaceDeleted first.
+        #     Parity does NOT hold here, and claiming it did was this comment's
+        #     earlier error: flag-off is now STRICTER than collab-ON. A restore
+        #     clears the retired flag (lifecycle.py:157 applies retired=False), so
+        #     is_retired() is False again and collab-ON proceeds into the new
+        #     epoch; soft_deleted_at is back to NULL, so the durable backstop waves
+        #     it through too. Only the generation on the caller's stamp catches it,
+        #     and only on the converted (flag-off) path — which is the fence doing
+        #     its job, not a regression.
+        #
+        # So this 404 is not chosen to MATCH collab-ON on the case that reaches it;
+        # it is chosen because the client-visible fact is identical to the plain
+        # delete it already knows, and because minting a second code would make the
+        # answer to "your workspace is gone" depend on a feature flag. Closing the
+        # collab-ON gap is the epoch fence's own remaining work, not this handler's.
+        #
+        # Registered explicitly because WorkspaceGenerationStale is a bare
+        # RuntimeError, sibling to WorkspaceDeleted rather than a subclass, so
+        # Starlette's MRO walk cannot reach the handler above; without this it
+        # falls to the catch-all Exception handler and the epoch race — the exact
+        # event the fence exists to catch — surfaces as a sanitized 500.
+        # ports/errors.py states this exception "never reaches a user as a 5xx";
+        # this registration is what makes that true.
+        #
+        # UnfencedInvocation (ports/errors.py) sits in the same position and is
+        # deliberately NOT handled here: it means the actor carried no generation
+        # at all, which on a live row (lifecycle_generation is NOT NULL with
+        # server_default 0) is an internal inconsistency, not a lifecycle event a
+        # client caused. A 500 is the correct answer to it.
         if api_request(request):
             return api_error(404, "workspace_deleted", DELETED_ERROR_MESSAGE)
         return JSONResponse(status_code=404, content={"detail": DELETED_ERROR_MESSAGE})

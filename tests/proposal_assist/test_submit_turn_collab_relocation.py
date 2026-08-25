@@ -20,6 +20,7 @@ from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
 from call_manager.proposal_assist.collab.yjs_bridge import apply_pm_section_to_fragment
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from tests.proposal_assist.conftest import stamp_for
 from tests.test_api_workspaces import _app, _client, _seed
 
 # git: preamble (0) + Aims (1) WITHOUT "diagnostic". The live room adds it.
@@ -43,7 +44,8 @@ def test_collab_modify_relocates_against_live_room(
     with pg_session_factory() as s:
         state.enable_collab(s, workspace_id=ws_id, artifact="draft")
         updates = load_or_hydrate(
-            s, workspace_id=ws_id, artifact="draft", workspaces_dir=str(tmp_path)
+            s, stamp=stamp_for(s, ws_id), workspace_id=ws_id, artifact="draft",
+            workspaces_dir=str(tmp_path)
         )
         room_doc = build_doc(updates)
         blocks = markdown_to_pm(_LIVE_AIMS).get("content") or []

@@ -45,10 +45,11 @@ from call_manager.proposal_assist.citations.markers import (
 )
 from call_manager.proposal_assist.citations.quotes import normalize_for_quote_match
 from call_manager.proposal_assist.collab.state import raise_if_collab_severed
-from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex_live
 from call_manager.proposal_assist.editing.save import CITATIONS_FILENAME, PROPOSAL_FILENAME
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.fencing import acquire_commit_mutex_at_generation
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -91,19 +92,29 @@ def insert_citation_for_user(
     """Insert a human-selected citation. Returns {ev_id, citekey, commit_sha}.
 
     Raises CiteStale / CiteInvalid / CiteRefNotFound (mapped by the endpoint to
-    409 / 422 / 404), CommitMutexTimeout (429) and GitCommitError (500). The
-    caller owns the transaction (this adds provenance rows but does not commit)."""
+    409 / 422 / 404), CommitMutexTimeout (429) and GitCommitError (500). Two more
+    escape the endpoint's except chain entirely and are answered 404 by app-level
+    handlers in main.py: WorkspaceDeleted, and — Primitive B's addition —
+    WorkspaceGenerationStale, meaning the workspace is live but at a LATER epoch
+    than the caller's stamp (deleted and restored while this request was in
+    flight). The caller owns the transaction (this adds provenance rows but does
+    not commit)."""
     if stance not in _ALLOWED_STANCES:
         raise CiteInvalid(f"invalid stance {stance!r}")
     if not anchor:
         raise CiteInvalid("select a claim span to cite")
 
-    # 1. Serialize against every other git mutation of this workspace.
+    # 1. Serialize against every other git mutation of this workspace, and refuse
+    # outright if it was deleted — or restored into a new epoch — while we blocked.
+    # `stamp_for_workspace` mints the belief from the object `require_owner` loaded at
+    # the ACCESS CHECK, before the mutex could block; re-reading the generation here
+    # would compare the post-race value against itself and fence nothing.
     # Flag-off-only path: with collab enabled the step-1b severance recheck below raises
     # CollabSeveranceConflict, which the route maps to 409, so this path is retiring rather than
     # maintained. Slice C3 bounds its tail anyway — the 2s cap now left in force by
     # acquire_commit_mutex applies at every site, including this one, with nothing needed here.
-    acquire_commit_mutex_live(session, workspace.id)
+    stamp = stamp_for_workspace(workspace)
+    acquire_commit_mutex_at_generation(session, stamp.workspace_id, generation=stamp.generation)
 
     # 1b. Severance recheck UNDER the mutex (3b-5d.D4 Item 2b follow-up): the
     # route's _route() fork read the flag as False, but enable-on-touch may have

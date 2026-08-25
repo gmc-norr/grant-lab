@@ -59,7 +59,6 @@ from call_manager.proposal_assist.collab.ws_auth import resolve_access
 from call_manager.proposal_assist.drafting.locking import (
     BUSY_ERROR_MESSAGE,
     CommitMutexTimeout,
-    acquire_commit_mutex_live,
 )
 from call_manager.proposal_assist.editing.save import (
     CITATIONS_FILENAME,
@@ -71,7 +70,9 @@ from call_manager.proposal_assist.editing.save import (
     save_section,
 )
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.fencing import acquire_commit_mutex_at_generation
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.ports.stamp import FenceStamp, stamp_for_workspace
 from call_manager.proposal_assist.proposals.kernel_accept import RoomEvicted
 from call_manager.proposal_assist.references.storage import ReferenceStorage
 from call_manager.proposal_assist.retirement import signal_workspace_retirement
@@ -269,6 +270,7 @@ def get_draft(
     sf = request.app.state.session_factory
     with sf() as session:
         ws = require_member(workspace_id=workspace_id, user=user, session=session)
+        stamp = stamp_for_workspace(ws)  # minted at the access check (endgame Task 5)
         can_edit = ws.owner_id == user.id
         repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
         proposal = repo_dir / PROPOSAL_FILENAME
@@ -284,6 +286,7 @@ def get_draft(
         # already reports collab_enabled=true.
         collab_enabled = maybe_auto_enable(
             session,
+            stamp=stamp,
             workspace_id=workspace_id,
             artifact="draft",
         )
@@ -319,6 +322,7 @@ def get_spec(
     sf = request.app.state.session_factory
     with sf() as session:
         ws = require_member(workspace_id=workspace_id, user=user, session=session)
+        stamp = stamp_for_workspace(ws)  # minted at the access check (endgame Task 5)
         is_owner = ws.owner_id == user.id
         locked = ws.spec_locked_at is not None
         can_edit = is_owner and not locked
@@ -333,6 +337,7 @@ def get_spec(
         raw_disk = spec.read_text()
         collab_enabled = maybe_auto_enable(
             session,
+            stamp=stamp,
             workspace_id=workspace_id,
             artifact="spec",
         )
@@ -383,6 +388,7 @@ def post_save_spec_section(
         # non-owner must not be able to distinguish "no proposal-spec.md yet" (404)
         # from "owner only" (403) for any workspace UUID they can name.
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        stamp = stamp_for_workspace(ws)  # minted at the access check (endgame Task 6)
         repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
         if not (repo_dir / SPEC_FILENAME).exists():
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
@@ -404,6 +410,7 @@ def post_save_spec_section(
             result = save_section(
                 session=session,
                 workspace=ws,
+                stamp=stamp,
                 user_id=user.id,
                 section_index=index,
                 new_text=body.content,
@@ -482,18 +489,23 @@ async def post_init_spec(
     enabled = await run_in_threadpool(_route)
 
     if enabled:
-        def _gate() -> None:
+        def _gate() -> FenceStamp:
             with sf() as session:
-                require_owner(workspace_id=workspace_id, user=user, session=session)
+                ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+                # Mint the fence stamp at the owner access check (endgame Task 5):
+                # kernel_init_spec re-validates THIS generation under the commit
+                # mutex, in a separate session, never a read at the write.
+                stamp = stamp_for_workspace(ws)
             if not (
                 workspace_repo_dir(settings.workspaces_dir, workspace_id) / SPEC_FILENAME
             ).exists():
                 raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
-        await run_in_threadpool(_gate)
+            return stamp
+        stamp = await run_in_threadpool(_gate)
         try:
             head, md = await init_spec_via_kernel(
                 session_factory=sf, workspaces_dir=settings.workspaces_dir,
-                workspace_id=workspace_id, actor_id=user.id,
+                stamp=stamp, workspace_id=workspace_id, actor_id=user.id,
             )
         except SpecLockedError as e:
             raise HTTPException(
@@ -527,6 +539,7 @@ async def post_init_spec(
     def _git() -> SpecOut:
         with sf() as session:
             ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+            stamp = stamp_for_workspace(ws)  # minted at the access check (endgame Task 4)
             repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
             spec = repo_dir / SPEC_FILENAME
             if not spec.exists():
@@ -537,7 +550,9 @@ async def post_init_spec(
                 # retiring rather than maintained. Slice C3 bounds its tail anyway — the 2s cap now
                 # left in force by acquire_commit_mutex applies at every site, including this one,
                 # with nothing needed here.
-                acquire_commit_mutex_live(session, ws.id)
+                acquire_commit_mutex_at_generation(
+                    session, stamp.workspace_id, generation=stamp.generation
+                )
                 # Severance recheck UNDER the mutex (3b-5d.D4 Item 2b): the _route()
                 # fork read the flag as False, but enable-on-touch may have flipped
                 # spec collab on while we blocked on the mutex. Abort writing NOTHING
@@ -643,12 +658,15 @@ def post_lock_spec(
     sf = request.app.state.session_factory
     with sf() as session:
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        stamp = stamp_for_workspace(ws)  # minted at the access check (endgame Task 4)
         repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
         spec_path = repo_dir / SPEC_FILENAME
         if not spec_path.exists():
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
         try:
-            acquire_commit_mutex_live(session, ws.id)
+            acquire_commit_mutex_at_generation(
+                session, stamp.workspace_id, generation=stamp.generation
+            )
             # Fresh flag read UNDER the mutex (Codex): a pre-mutex read can go
             # stale while we block — enable-on-touch commits the enable while
             # HOLDING this mutex, so an under-mutex read is authoritative. If it
@@ -664,6 +682,7 @@ def post_lock_spec(
             if is_collab:
                 cp = checkpoint_artifact(
                     session,
+                    stamp=stamp,
                     workspace_id=ws.id,
                     artifact="spec",
                     workspaces_dir=settings.workspaces_dir,
@@ -732,11 +751,14 @@ def post_unlock_spec(
     sf = request.app.state.session_factory
     with sf() as session:
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        stamp = stamp_for_workspace(ws)  # minted at the access check (endgame Task 4)
         repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
         if not (repo_dir / SPEC_FILENAME).exists():
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
         try:
-            acquire_commit_mutex_live(session, ws.id)
+            acquire_commit_mutex_at_generation(
+                session, stamp.workspace_id, generation=stamp.generation
+            )
             # Fresh flag read UNDER the mutex (Codex) — see post_lock_spec for the
             # soundness argument; unlock shares the moved-read shape exactly.
             is_collab = collab_state.is_collab_enabled(
@@ -745,6 +767,7 @@ def post_unlock_spec(
             if is_collab:
                 cp = checkpoint_artifact(
                     session,
+                    stamp=stamp,
                     workspace_id=ws.id,
                     artifact="spec",
                     workspaces_dir=settings.workspaces_dir,
@@ -924,6 +947,7 @@ def post_save_section(
         # yet" (404) from "owner only" (403) and leak the draft-lifecycle state of
         # any workspace UUID they can name — so require_owner runs first.
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
+        stamp = stamp_for_workspace(ws)  # minted at the access check (endgame Task 6)
         # Mirror the HTMX route's pre-read 404 (sections.py:73-89, used at
         # sections.py:240): before touching save_section, reject a workspace that
         # has no proposal.md yet OR no git HEAD yet with the SAME user-facing 404 as
@@ -952,6 +976,7 @@ def post_save_section(
             result = save_section(
                 session=session,
                 workspace=ws,
+                stamp=stamp,
                 user_id=user.id,
                 section_index=index,
                 new_text=body.content,
@@ -1033,7 +1058,7 @@ async def post_citation(
     enabled = await run_in_threadpool(_route)
 
     if enabled:
-        def _gate() -> None:
+        def _gate() -> FenceStamp:
             with sf() as session:
                 is_member, can_write = resolve_access(
                     session, user=user, workspace_id=workspace_id, artifact="draft")
@@ -1041,17 +1066,27 @@ async def post_citation(
                     raise HTTPException(status_code=404, detail="workspace not found")
                 if not can_write:
                     raise HTTPException(status_code=403, detail="not permitted to write this draft")
+                # Mint the fence stamp from a bare-name load in the SAME transaction
+                # as resolve_access above (this route's access check). apply_citation_
+                # to_room re-validates THIS generation under the commit mutex, in a
+                # separate session, never a read at the write (endgame Task 5).
+                ws = session.get(Workspace, workspace_id)
+                if ws is None or ws.soft_deleted_at is not None:
+                    raise HTTPException(status_code=404, detail="workspace not found")
+                stamp = stamp_for_workspace(ws)
             if not (repo_dir / PROPOSAL_FILENAME).exists():
                 raise HTTPException(status_code=404, detail="no proposal.md yet")
             try:
                 current_head(repo_dir)
             except GitCommitError as e:
                 raise HTTPException(status_code=404, detail="no proposal.md yet") from e
-        await run_in_threadpool(_gate)
+            return stamp
+        stamp = await run_in_threadpool(_gate)
         try:
             out = await direct_cite_via_kernel(
                 session_factory=sf,
                 workspaces_dir=settings.workspaces_dir,
+                stamp=stamp,
                 workspace_id=workspace_id,
                 actor_id=user.id,
                 section_index=body.section_index,

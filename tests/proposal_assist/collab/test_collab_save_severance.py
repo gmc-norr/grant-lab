@@ -232,6 +232,7 @@ def test_citation_accept_replay_severed_when_flag_flips_after_guard(
     ProposedChange row stays PENDING — retryable via the kernel accept after the
     client reloads, never burned to 'stale'."""
     from call_manager.proposal_assist.editing.sectionizer import split_sections
+    from call_manager.proposal_assist.ports.stamp import FenceStamp
     from call_manager.proposal_assist.proposals.accepting import accept_proposed_change
     from call_manager.proposal_assist.proposals.proposing import propose_citation_insert
 
@@ -257,6 +258,12 @@ def test_citation_accept_replay_severed_when_flag_flips_after_guard(
     with pg_session_factory() as s:
         approver = make_user(s, email="sever-approver@ki.se")
         s.flush()
+        # The workspace is live at generation 0; the stamp the route would thread
+        # from require_member. The severance recheck runs UNDER the mutex, so the
+        # stamp must let acquire_commit_mutex_at_generation succeed first.
+        stamp = FenceStamp(
+            workspace_id=wid, generation=0, active_turn_job_id=None, origin_job_id=None
+        )
         with pytest.raises(CollabSeveranceConflict):
             accept_proposed_change(
                 session=s,
@@ -264,6 +271,7 @@ def test_citation_accept_replay_severed_when_flag_flips_after_guard(
                 workspace_id=wid,
                 approver=approver,
                 workspaces_dir=str(tmp_path),
+                stamp=stamp,
             )
         s.rollback()
     assert current_head(repo) == head_before  # git untouched

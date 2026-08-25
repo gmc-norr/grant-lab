@@ -16,6 +16,7 @@ from call_manager.config import Settings
 from call_manager.db.models import Reference, ReferenceChunk
 from call_manager.proposal_assist.citations.core import insert_citation_impl
 from call_manager.proposal_assist.citations.ledger import dump_ledger, empty_ledger
+from call_manager.proposal_assist.ports.stamp import FenceStamp
 from call_manager.proposal_assist.tools.citations import (
     CITATIONS_FILENAME,
     list_citations_impl,
@@ -23,6 +24,18 @@ from call_manager.proposal_assist.tools.citations import (
 from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 from call_manager.proposal_assist.tools.registry import ToolContext
 from tests.proposal_assist.conftest import make_workspace
+
+
+def _stamp(ctx: ToolContext) -> FenceStamp:
+    """The fencing identity insert_citation_impl now requires. These test
+    workspaces are all at lifecycle_generation 0, so the stamp the caller would
+    thread carries generation 0."""
+    return FenceStamp(
+        workspace_id=ctx.workspace_id,
+        generation=0,
+        active_turn_job_id=None,
+        origin_job_id=None,
+    )
 
 EMBED_DIM = 1024
 
@@ -117,6 +130,7 @@ async def test_lists_inserted_citations(pg_session_factory, _settings_env, tmp_p
 
     r1 = await insert_citation_impl(
         ctx,
+        stamp=_stamp(ctx),
         reference_id=str(rid),
         anchor=ANCHOR_A,
         chunk_index=0,
@@ -127,6 +141,7 @@ async def test_lists_inserted_citations(pg_session_factory, _settings_env, tmp_p
     assert "error" not in r1, r1
     r2 = await insert_citation_impl(
         ctx,
+        stamp=_stamp(ctx),
         reference_id=str(rid),
         anchor=ANCHOR_B,
         chunk_index=0,

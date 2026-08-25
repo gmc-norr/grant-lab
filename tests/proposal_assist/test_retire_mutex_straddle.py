@@ -39,7 +39,8 @@ from call_manager.proposal_assist.drafting.locking import (
     acquire_commit_mutex,
 )
 from call_manager.proposal_assist.editing.sectionizer import split_sections
-from tests.proposal_assist.conftest import make_user, make_workspace
+from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 
 def _advisory_waiters(session_factory) -> int:
@@ -125,6 +126,7 @@ def test_blocked_save_section_refuses_and_leaves_git_untouched(pg_session_factor
                 save_section(
                     session=s,
                     workspace=wsr,
+                    stamp=stamp_for_workspace(wsr),
                     user_id=wsr.owner_id,
                     section_index=1,
                     new_text="## Background\nedited by a blocked writer.\n",
@@ -162,8 +164,9 @@ def test_blocked_kernel_accept_refuses_and_leaves_the_proposal_pending(
         state.enable_collab(s, workspace_id=ws_id, artifact="draft")
         s.commit()
     with pg_session_factory() as s:
+        stamp = stamp_for(s, ws_id)  # the writer's belief, formed while live
         updates = load_or_hydrate(
-            s, workspace_id=ws_id, artifact="draft", workspaces_dir=str(tmp_path)
+            s, stamp=stamp, workspace_id=ws_id, artifact="draft", workspaces_dir=str(tmp_path)
         )
         s.commit()
         room_doc = build_doc(updates)
@@ -195,6 +198,7 @@ def test_blocked_kernel_accept_refuses_and_leaves_the_proposal_pending(
             try:
                 kernel_accept_prose(
                     s,
+                    stamp=stamp,
                     room_doc=room_doc,
                     proposed_change_id=pc_id,
                     workspace_id=ws_id,
@@ -233,11 +237,14 @@ def test_blocked_enable_on_touch_returns_false_and_writes_no_state_row(
         ws_id = ws.id
     repo = Path(tmp_path) / str(ws_id) / "repo"
     _init_repo(repo, md0)
+    with pg_session_factory() as s:
+        stamp = stamp_for(s, ws_id)  # the read route's belief, formed while live
 
     def _writer(out):
         with pg_session_factory() as s:
             out["r"] = maybe_auto_enable(
                 s,
+                stamp=stamp,
                 workspace_id=ws_id,
                 artifact="draft",
             )

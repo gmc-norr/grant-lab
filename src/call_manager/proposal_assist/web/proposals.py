@@ -19,6 +19,7 @@ from call_manager.proposal_assist.drafting.locking import (
     CommitMutexTimeout,
 )
 from call_manager.proposal_assist.editing.save import SectionStructureError, SpecLockedError
+from call_manager.proposal_assist.ports.stamp import FenceStamp, stamp_for_workspace
 from call_manager.proposal_assist.proposals.accepting import (
     CitationAcceptBusy,
     ProposedChangeNotFound,
@@ -93,7 +94,8 @@ def list_proposed_changes(
 def _accept_git_first(session_factory, workspace_id, pc_id, user, workspaces_dir) -> dict:
     """The pre-collab git-first accept path, verbatim — no behavior change."""
     with session_factory() as session:
-        require_member(workspace_id=workspace_id, user=user, session=session)
+        ws = require_member(workspace_id=workspace_id, user=user, session=session)
+        stamp = stamp_for_workspace(ws)  # minted at the access check (endgame Task 6)
         try:
             pc = accept_proposed_change(
                 session=session,
@@ -101,6 +103,7 @@ def _accept_git_first(session_factory, workspace_id, pc_id, user, workspaces_dir
                 workspace_id=workspace_id,
                 approver=user,
                 workspaces_dir=workspaces_dir,
+                stamp=stamp,
             )
         except collab_state.CollabSeveranceConflict as exc:
             # enable-on-touch flipped the artifact to collab AFTER _route() read
@@ -159,24 +162,29 @@ async def accept(
     session_factory = request.app.state.session_factory
     workspaces_dir = request.app.state.settings.workspaces_dir
 
-    def _route() -> tuple[bool, str]:
+    def _route() -> tuple[bool, str, FenceStamp]:
         with session_factory() as s:
-            require_member(workspace_id=workspace_id, user=user, session=s)
+            ws = require_member(workspace_id=workspace_id, user=user, session=s)
+            # Mint the fence stamp at the access check (endgame Task 5): the kernel
+            # accept path re-validates THIS generation under the commit mutex, in a
+            # separate session, never a read at the write.
+            stamp = stamp_for_workspace(ws)
             pc = s.get(ProposedChange, pc_id)
             if pc is None or pc.workspace_id != workspace_id:
                 raise HTTPException(status_code=404, detail="proposed change not found")
             enabled = collab_state.is_collab_enabled(
                 s, workspace_id=workspace_id, artifact=pc.target_artifact
             )
-            return enabled, pc.target_artifact
+            return enabled, pc.target_artifact, stamp
 
-    enabled, artifact = await run_in_threadpool(_route)
+    enabled, artifact, stamp = await run_in_threadpool(_route)
 
     if enabled:
         try:
             pc = await accept_via_kernel(
                 session_factory=session_factory, workspaces_dir=workspaces_dir,
-                workspace_id=workspace_id, pc_id=pc_id, approver=user, artifact=artifact,
+                stamp=stamp, workspace_id=workspace_id, pc_id=pc_id, approver=user,
+                artifact=artifact,
             )
         except ProposedChangeNotFound as exc:
             raise HTTPException(status_code=404, detail="proposed change not found") from exc

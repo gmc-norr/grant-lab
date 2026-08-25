@@ -22,9 +22,9 @@ from call_manager.proposal_assist.drafting.locking import (
     BUSY_ERROR_MESSAGE,
     CommitMutexTimeout,
     acquire_commit_mutex,
-    acquire_commit_mutex_live,
 )
-from tests.proposal_assist.conftest import make_workspace
+from call_manager.proposal_assist.fencing import acquire_commit_mutex_at_generation
+from tests.proposal_assist.conftest import make_workspace, stamp_for
 
 
 class _Orig(Exception):
@@ -152,12 +152,12 @@ def test_the_tail_after_the_mutex_is_bounded(pg_session_factory, current_user):
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
         s.commit()
-        ws_id = ws.id
+        ws_id, gen = ws.id, ws.lifecycle_generation
 
     release, t = _hold_workspace_row(pg_session_factory, ws_id)
     try:
         with pg_session_factory() as s:
-            acquire_commit_mutex_live(s, ws_id)
+            acquire_commit_mutex_at_generation(s, ws_id, generation=gen)
             with pytest.raises(OperationalError) as exc:
                 s.get(Workspace, ws_id, with_for_update=True)
             sqlstate = getattr(exc.value.orig, "sqlstate", None)
@@ -181,13 +181,14 @@ def test_a_nested_acquire_does_not_wipe_the_bound(pg_session_factory, current_us
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
         s.commit()
-        ws_id = ws.id
+        ws_id, gen = ws.id, ws.lifecycle_generation
 
     release, t = _hold_workspace_row(pg_session_factory, ws_id)
     try:
         with pg_session_factory() as s:
-            acquire_commit_mutex_live(s, ws_id)
-            acquire_commit_mutex_live(s, ws_id)  # re-entrant, as checkpoint does
+            acquire_commit_mutex_at_generation(s, ws_id, generation=gen)
+            # re-entrant, as checkpoint_artifact does (it re-takes Primitive B mid-tail)
+            acquire_commit_mutex_at_generation(s, ws_id, generation=gen)
             with pytest.raises(OperationalError) as exc:
                 s.get(Workspace, ws_id, with_for_update=True)
             assert getattr(exc.value.orig, "sqlstate", None) == "55P03"
@@ -424,11 +425,16 @@ def test_hydration_really_can_raise_a_lock_timeout_after_the_mutex(
     with pg_session_factory() as s:
         collab_state.enable_collab(s, workspace_id=ws_id, artifact="draft")
         s.commit()
+    with pg_session_factory() as s:
+        stamp = stamp_for(s, ws_id)  # the connect-time belief, formed while live
 
     release, t = _hold_workspace_row(pg_session_factory, ws_id)
     try:
         with pg_session_factory() as s, pytest.raises(OperationalError) as exc:
-            load_or_hydrate(s, workspace_id=ws_id, artifact="draft", workspaces_dir=str(tmp_path))
+            load_or_hydrate(
+                s, stamp=stamp, workspace_id=ws_id, artifact="draft",
+                workspaces_dir=str(tmp_path),
+            )
     finally:
         release.set()
         t.join(timeout=30)
@@ -453,11 +459,15 @@ def test_a_bounded_flip_commit_defers_instead_of_erroring_the_read(
         ws = make_workspace(s, owner=current_user, current_phase="active")
         s.commit()
         ws_id = ws.id
+    with pg_session_factory() as s:
+        stamp = stamp_for(s, ws_id)  # the read route's belief, formed while live
 
     release, t = _hold_workspace_row(pg_session_factory, ws_id)
     try:
         with pg_session_factory() as s:
-            assert maybe_auto_enable(s, workspace_id=ws_id, artifact="draft") is False
+            assert maybe_auto_enable(
+                s, stamp=stamp, workspace_id=ws_id, artifact="draft"
+            ) is False
     finally:
         release.set()
         t.join(timeout=30)
@@ -499,9 +509,10 @@ def test_the_collab_checkpoint_route_still_answers_503_not_the_new_429(
     The route screens `is_collab_enabled` BEFORE it reaches the mutex and returns
     409 if the artifact is off (collab_checkpoint.py:43), so collab must be enabled
     or the test never exercises anything. And the route does NOT import
-    acquire_commit_mutex_live — it reaches the mutex through checkpoint_artifact —
-    so the patch target is the `collab.checkpoint` module, with raising=True so a
-    future rename fails loudly instead of installing a dead attribute.
+    acquire_commit_mutex_at_generation — it reaches the mutex through
+    checkpoint_artifact (endgame Task 5: Primitive B) — so the patch target is the
+    `collab.checkpoint` module, with raising=True so a future rename fails loudly
+    instead of installing a dead attribute.
     """
     import call_manager.proposal_assist.collab.checkpoint as checkpoint_mod
     from call_manager.proposal_assist.collab import state as collab_state
@@ -515,7 +526,9 @@ def test_the_collab_checkpoint_route_still_answers_503_not_the_new_429(
     # Shorten the acquisition wait from the production 10s. Pass NO call-time
     # keyword at the call site — a call-time keyword overrides a partial's, which is
     # how the consolidation slice's equivalent patch was silently defeated.
-    shortened = functools.partial(checkpoint_mod.acquire_commit_mutex_live, timeout_seconds=1)
+    shortened = functools.partial(
+        checkpoint_mod.acquire_commit_mutex_at_generation, timeout_seconds=1
+    )
     # Also record what the acquisition raised. See the pin below the status
     # assertion for why the wire body cannot answer that question.
     raised: list[BaseException] = []
@@ -529,7 +542,7 @@ def test_the_collab_checkpoint_route_still_answers_503_not_the_new_429(
 
     monkeypatch.setattr(
         checkpoint_mod,
-        "acquire_commit_mutex_live",
+        "acquire_commit_mutex_at_generation",
         _recording_acquire,
         raising=True,
     )

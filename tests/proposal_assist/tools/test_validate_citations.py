@@ -17,12 +17,25 @@ from call_manager.config import Settings
 from call_manager.db.models import Reference, ReferenceChunk
 from call_manager.proposal_assist.citations import CitationLLMResult
 from call_manager.proposal_assist.citations.core import insert_citation_impl
+from call_manager.proposal_assist.ports.stamp import FenceStamp
 from call_manager.proposal_assist.tools.audit import validate_citations_impl
 from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 from call_manager.proposal_assist.tools.registry import ToolContext, _collect_tools
 from tests.proposal_assist.conftest import make_workspace
 
 EMBED_DIM = 1024
+
+
+def _stamp(ctx: ToolContext) -> FenceStamp:
+    """The fencing identity insert_citation_impl now requires. These test
+    workspaces are all at lifecycle_generation 0, so the stamp the caller would
+    thread carries generation 0."""
+    return FenceStamp(
+        workspace_id=ctx.workspace_id,
+        generation=0,
+        active_turn_job_id=None,
+        origin_job_id=None,
+    )
 
 
 def _init_repo(repo_dir: Path, initial_content: str) -> None:
@@ -125,6 +138,7 @@ PROPOSAL = f"# Proposal\n\nWe argue that {ANCHOR} in our population.\n"
 async def _insert_one(ctx, rid):
     res = await insert_citation_impl(
         ctx,
+        stamp=_stamp(ctx),
         reference_id=str(rid),
         anchor=ANCHOR,
         chunk_index=0,

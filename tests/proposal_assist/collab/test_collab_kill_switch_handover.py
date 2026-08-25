@@ -14,7 +14,7 @@ from call_manager.proposal_assist.collab.checkpoint import serialize_doc_to_mark
 from call_manager.proposal_assist.collab.hydrate import load_or_hydrate
 from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
 from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
-from tests.proposal_assist.conftest import make_user, make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 
 def _init_repo(repo: Path, content: str) -> None:
@@ -114,7 +114,13 @@ def test_fully_checkpointed_log_is_still_truncated(pg_session_factory, tmp_path)
     wid, oid, repo = _setup(pg_session_factory, tmp_path, "ho2@ki.se")
     _seed_room_edit(pg_session_factory, wid, oid, "## Background\n\ncheckpointed edit.\n")
     with pg_session_factory() as s:
-        checkpoint_artifact(s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path))
+        checkpoint_artifact(
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            artifact="draft",
+            workspaces_dir=str(tmp_path),
+        )
         s.commit()
     with pg_session_factory() as s:
         assert _log_len(s, wid) >= 1  # log present, tail == 0
@@ -126,7 +132,13 @@ def test_fully_checkpointed_log_is_still_truncated(pg_session_factory, tmp_path)
     # exit direction: kill-window git edit, then a fresh room open hydrates from CURRENT HEAD
     write_and_commit_files(repo, {PROPOSAL_FILENAME: "## Background\nkill-window truth.\n"}, "cm6")
     with pg_session_factory() as s:
-        load_or_hydrate(s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path))
+        load_or_hydrate(
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            artifact="draft",
+            workspaces_dir=str(tmp_path),
+        )
         s.commit()
         rows = store.load_rows(s, workspace_id=wid, artifact="draft")
     assert len(rows) == 1  # fresh hydration seed

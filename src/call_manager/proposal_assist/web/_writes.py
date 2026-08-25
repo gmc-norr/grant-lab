@@ -26,7 +26,6 @@ WHAT IT DOES NOT DO, deliberately:
 
 from __future__ import annotations
 
-import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -36,8 +35,9 @@ from sqlalchemy.orm import Session
 from call_manager.proposal_assist.drafting.locking import (
     BUSY_ERROR_MESSAGE,
     CommitMutexTimeout,
-    acquire_commit_mutex_live,
 )
+from call_manager.proposal_assist.fencing import acquire_commit_mutex_at_generation
+from call_manager.proposal_assist.ports.stamp import FenceStamp
 from call_manager.proposal_assist.row_locks import RowLockTimeout, bounded_lock_waits
 
 
@@ -52,19 +52,19 @@ def _busy() -> HTTPException:
 @contextmanager
 def workspace_write(
     session: Session,
-    workspace_id: uuid.UUID,
     *,
+    stamp: FenceStamp,
     timeout_seconds: float,
     what: str,
 ) -> Iterator[None]:
     """Run the body as a mutex-held, fully bounded workspace write.
 
-    Takes the live commit mutex, opens `bounded_lock_waits` for the rest of the
-    transaction, yields, and COMMITS INSIDE THE BOUND. Both timeout types become
-    `429 + Retry-After: 2`. `WorkspaceDeleted` propagates untouched (main.py
-    answers 404 — the documented straddle contract), as does an `HTTPException`
-    raised by the body, which is what preserves `retry_setup`'s 404/409 and
-    `activate`'s 409.
+    Takes the commit mutex at the stamp's generation, opens `bounded_lock_waits`
+    for the rest of the transaction, yields, and COMMITS INSIDE THE BOUND. Both
+    timeout types become `429 + Retry-After: 2`. `WorkspaceDeleted` propagates
+    untouched (main.py answers 404 — the documented straddle contract), as does
+    an `HTTPException` raised by the body, which is what preserves
+    `retry_setup`'s 404/409 and `activate`'s 409.
 
     Rolls back on EVERY exceptional exit. That is not redundant with the
     caller's `with session_factory()`: without it, a caller that catches the
@@ -74,18 +74,20 @@ def workspace_write(
     the bound deliberately leaves in force, which is correct — that setting is
     scoped to the transaction being ended.
 
-    DO NOT pass `timeout_seconds` to `acquire_commit_mutex_live` below, not even
-    from a parameter defaulting to 10. Both the straddle harness and this
-    manager's own tests shorten the mutex wait by replacing the module global
-    with `functools.partial(..., timeout_seconds=1)`, and a call-time keyword
-    OVERRIDES a partial's keyword — so passing it explicitly silently restores
-    the production 10s and makes every wedged-mutex test wait ten seconds
-    instead of one. Spec §3 states this as a requirement.
+    DO NOT pass `timeout_seconds` to `acquire_commit_mutex_at_generation` below,
+    not even from a parameter defaulting to 10. Both the straddle harness and
+    this manager's own tests shorten the mutex wait by replacing the module
+    global with `functools.partial(..., timeout_seconds=1)`, and a call-time
+    keyword OVERRIDES a partial's keyword — so passing it explicitly silently
+    restores the production 10s and makes every wedged-mutex test wait ten
+    seconds instead of one. Spec §3 states this as a requirement.
     """
     committed = False
     try:
         try:
-            acquire_commit_mutex_live(session, workspace_id)
+            acquire_commit_mutex_at_generation(
+                session, stamp.workspace_id, generation=stamp.generation
+            )
         except CommitMutexTimeout as e:
             raise _busy() from e
         with bounded_lock_waits(

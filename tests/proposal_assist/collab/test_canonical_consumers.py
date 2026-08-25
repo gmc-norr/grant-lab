@@ -24,7 +24,7 @@ from tests.proposal_assist.collab.test_collab_kernel_accept import (
     _live_room,
     _mk_pc,
 )
-from tests.proposal_assist.conftest import make_user, make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 from tests.proposal_assist.tools.test_propose_citation import (
     ANCHOR,
     CHUNK_TEXT,
@@ -125,9 +125,9 @@ async def test_read_then_accept_end_to_end_not_false_stale(
         pc_id = _mk_pc(s, wid, section_index=1, new_text="## A\n\nAccepted body.\n",
                        base_commit_sha=_git_head(repo), base_section_sha=base_sha)
     with pg_session_factory() as s:
-        res = kernel_accept_prose(s, room_doc=room_doc, proposed_change_id=pc_id,
-                                  workspace_id=wid, approver=s.get(User, oid),
-                                  workspaces_dir=str(tmp_path))
+        res = kernel_accept_prose(s, stamp=stamp_for(s, wid), room_doc=room_doc,
+                                  proposed_change_id=pc_id, workspace_id=wid,
+                                  approver=s.get(User, oid), workspaces_dir=str(tmp_path))
         s.commit()
         assert res.pc.status == "accepted"        # NOT "stale"
 

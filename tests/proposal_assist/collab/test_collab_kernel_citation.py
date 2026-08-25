@@ -33,6 +33,7 @@ from call_manager.proposal_assist.collab.yjs_bridge import (
     ydoc_to_pm_json,
 )
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
 from call_manager.proposal_assist.proposals.accepting import (
     accept_proposed_change,
 )
@@ -41,7 +42,7 @@ from call_manager.proposal_assist.proposals.proposing import (
     propose_citation_insert,
 )
 from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
-from tests.proposal_assist.conftest import make_user, make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 EMBED_DIM = 1024
 CHUNK_TEXT = "Adjuvant therapy reduces recurrence by 30% in the treated cohort."
@@ -263,6 +264,7 @@ def test_git_first_citation_accept_commits_both_files(pg_session_factory, tmp_pa
             workspace_id=ws.id,
             approver=approver,
             workspaces_dir=str(tmp_path),
+            stamp=stamp_for_workspace(ws),
         )
         s.flush()
 
@@ -295,7 +297,8 @@ KERNEL_MD0 = "preamble\n\n## Methods\nSee original.\n"
 def _live_room(session, wid, workspaces_dir):
     """Hydrate + return the collab room doc (seeded from HEAD, persisted as update #1)."""
     updates = load_or_hydrate(
-        session, workspace_id=wid, artifact="draft", workspaces_dir=workspaces_dir
+        session, stamp=stamp_for(session, wid), workspace_id=wid, artifact="draft",
+        workspaces_dir=workspaces_dir,
     )
     session.commit()
     return build_doc(updates)
@@ -417,6 +420,7 @@ def test_kernel_accept_citation_applies_marker_and_cocommits_ledger(pg_session_f
         approver = s.get(User, oid)
         res = kernel_accept_citation(
             s,
+            stamp=stamp_for(s, wid),
             room_doc=room_doc,
             proposed_change_id=pc_id,
             workspace_id=wid,
@@ -491,7 +495,7 @@ def test_kernel_accept_citation_stale_against_live_room(pg_session_factory, tmp_
         from call_manager.db.models import User
         approver = s.get(User, oid)
         res = kernel_accept_citation(
-            s, room_doc=room_doc, proposed_change_id=pc_id,
+            s, stamp=stamp_for(s, wid), room_doc=room_doc, proposed_change_id=pc_id,
             workspace_id=wid, approver=approver, workspaces_dir=str(tmp_path),
         )
         s.commit()
@@ -521,7 +525,7 @@ def test_kernel_accept_citation_verify_fail_is_stale(pg_session_factory, tmp_pat
         from call_manager.db.models import User
         approver = s.get(User, oid)
         res = kernel_accept_citation(
-            s, room_doc=room_doc, proposed_change_id=pc_id,
+            s, stamp=stamp_for(s, wid), room_doc=room_doc, proposed_change_id=pc_id,
             workspace_id=wid, approver=approver, workspaces_dir=str(tmp_path),
         )
         s.commit()
@@ -569,7 +573,7 @@ def test_kernel_accept_citation_anchor_moved_is_stale(pg_session_factory, tmp_pa
         from call_manager.db.models import User
         approver = s.get(User, oid)
         res = kernel_accept_citation(
-            s, room_doc=room_doc, proposed_change_id=pc_id,
+            s, stamp=stamp_for(s, wid), room_doc=room_doc, proposed_change_id=pc_id,
             workspace_id=wid, approver=approver, workspaces_dir=str(tmp_path),
         )
         s.commit()
@@ -599,7 +603,7 @@ def test_kernel_accept_citation_idempotent_no_new_version(pg_session_factory, tm
     with pg_session_factory() as s:
         approver = s.get(User, oid)
         res1 = kernel_accept_citation(
-            s, room_doc=room_doc, proposed_change_id=pc1,
+            s, stamp=stamp_for(s, wid), room_doc=room_doc, proposed_change_id=pc1,
             workspace_id=wid, approver=approver, workspaces_dir=str(tmp_path),
         )
         s.commit()
@@ -620,7 +624,7 @@ def test_kernel_accept_citation_idempotent_no_new_version(pg_session_factory, tm
     with pg_session_factory() as s:
         approver = s.get(User, oid)
         res2 = kernel_accept_citation(
-            s, room_doc=room_doc, proposed_change_id=pc2,
+            s, stamp=stamp_for(s, wid), room_doc=room_doc, proposed_change_id=pc2,
             workspace_id=wid, approver=approver, workspaces_dir=str(tmp_path),
         )
         s.commit()
@@ -665,7 +669,7 @@ def test_kernel_accept_citation_corrupt_ledger_is_stale(pg_session_factory, tmp_
         from call_manager.db.models import User
         approver = s.get(User, oid)
         res = kernel_accept_citation(
-            s, room_doc=room_doc, proposed_change_id=pc_id,
+            s, stamp=stamp_for(s, wid), room_doc=room_doc, proposed_change_id=pc_id,
             workspace_id=wid, approver=approver, workspaces_dir=str(tmp_path),
         )
         s.commit()
@@ -699,7 +703,7 @@ def test_kernel_accept_citation_caches_citekey_in_one_transaction(pg_session_fac
     with pg_session_factory() as s:
         approver = s.get(User, oid)
         res = kernel_accept_citation(
-            s, room_doc=room_doc, proposed_change_id=pc_id,
+            s, stamp=stamp_for(s, wid), room_doc=room_doc, proposed_change_id=pc_id,
             workspace_id=wid, approver=approver, workspaces_dir=str(tmp_path),
         )
         # BEFORE the caller commits, a SEPARATE session must NOT see the accepted

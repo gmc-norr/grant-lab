@@ -47,7 +47,6 @@ from call_manager.db.models import (
 )
 from call_manager.proposal_assist.drafting.locking import (
     WorkspaceDeleted,
-    acquire_commit_mutex_live,
 )
 from call_manager.proposal_assist.extractors.refresh import (
     compute_rubric,
@@ -58,7 +57,10 @@ from call_manager.proposal_assist.extractors.refresh import (
     section_extracts_are_fresh,
 )
 from call_manager.proposal_assist.extractors.sections import SECTION_NAMES
+from call_manager.proposal_assist.fencing import acquire_commit_mutex_at_generation
 from call_manager.proposal_assist.hashing import source_text_hash
+from call_manager.proposal_assist.ports.errors import UnfencedInvocation
+from call_manager.proposal_assist.ports.stamp import FenceStamp
 from call_manager.proposal_assist.row_locks import RowLockTimeout, bounded_lock_waits
 
 logger = logging.getLogger(__name__)
@@ -78,8 +80,8 @@ class CallSourceChanged(RuntimeError):
 class WorkspaceGoneDuringSetup(RuntimeError):
     """The workspace was soft-deleted, or the job was cancelled, between
     milestones. Phase0Worker._fail routes this — and WorkspaceDeleted raised
-    by acquire_commit_mutex_live in _m1 — straight to a terminal 'cancelled'
-    status rather than a requeue; see _fail's docstring."""
+    by acquire_commit_mutex_at_generation in _m1 — straight to a terminal
+    'cancelled' status rather than a requeue; see _fail's docstring."""
 
 
 class SetupRowLockTimeout(RowLockTimeout):
@@ -278,28 +280,37 @@ class _AnthropicClientLike(Protocol):
 
 def claim_next_setup_job(*, session: Session) -> WorkspaceSetupJob | None:
     """Claim the oldest queued job under SELECT FOR UPDATE SKIP LOCKED.
-    Sets status='running' and started_at. Caller commits.
+    Sets status='running', started_at, and claimed_at_generation. Caller commits.
 
     Jobs for soft-deleted workspaces are excluded in SQL, mirroring the four
     analysis-pass claim queries. This is the durable half of retirement: it
     survives a restart, needs no in-process tombstone, and holds even when the
-    "jobs" hook could not reach the row."""
-    live_ws = select(Workspace.id).where(Workspace.soft_deleted_at.is_(None))
-    stmt = (
-        select(WorkspaceSetupJob)
+    "jobs" hook could not reach the row.
+
+    The join captures ``lifecycle_generation`` IN THE SAME STATEMENT as the FOR
+    UPDATE lock (F3a rule / Global Constraint 2), copying the shape of
+    ``claim_next_evaluator_job``. A separate SELECT would reopen the
+    delete/restore race the fence exists to close. ``of=WorkspaceSetupJob`` keeps
+    the lock on the JOB row only — without it PostgreSQL would also lock the
+    joined Workspace row, inverting the M -> J -> W lock order against the delete
+    path."""
+    row = session.execute(
+        select(WorkspaceSetupJob, Workspace.lifecycle_generation)
+        .join(Workspace, Workspace.id == WorkspaceSetupJob.workspace_id)
         .where(
             WorkspaceSetupJob.status == "queued",
-            WorkspaceSetupJob.workspace_id.in_(live_ws),
+            Workspace.soft_deleted_at.is_(None),
         )
         .order_by(WorkspaceSetupJob.queued_at)  # FIFO
         .limit(1)
         .with_for_update(skip_locked=True, of=WorkspaceSetupJob)
-    )
-    job = session.scalar(stmt)
-    if job is None:
+    ).first()
+    if row is None:
         return None
+    job, generation = row
     job.status = "running"
     job.started_at = datetime.now(UTC)
+    job.claimed_at_generation = generation
     return job
 
 
@@ -328,10 +339,13 @@ class Phase0Worker:
                 return False
             job_id = job.id
             workspace_id = job.workspace_id
+            # Read the generation the claim stamped, in the SAME session that holds
+            # it, and thread it into _m1 — never re-read it at the write (F3a rule).
+            claimed_generation = job.claimed_at_generation
             s.commit()
 
         try:
-            pinned = self._m1(job_id, workspace_id)
+            pinned = self._m1(job_id, workspace_id, claimed_generation)
             self._m2(job_id, workspace_id, pinned)
             self._m3(job_id, workspace_id, pinned)
         except Exception as exc:  # noqa: BLE001 — every outcome is recorded on the row
@@ -347,7 +361,9 @@ class Phase0Worker:
     def _workspace_repo_dir(self, workspace_id) -> Path:
         return Path(self.workspaces_dir) / str(workspace_id) / "repo"
 
-    def _m1(self, job_id: uuid.UUID, workspace_id: uuid.UUID) -> str:
+    def _m1(
+        self, job_id: uuid.UUID, workspace_id: uuid.UUID, claimed_generation: int | None
+    ) -> str:
         """Milestone 1: filesystem init + call/profile snapshots. Returns the
         pinned Call source hash for the rest of the run.
 
@@ -355,12 +371,32 @@ class Phase0Worker:
         bounds a concurrent DELETE: soft_delete_workspace_db takes the same mutex
         first, so a delete blocked behind a wedged M1 raises CommitMutexTimeout
         (the route's 429) instead of waiting on a row lock that has no timeout.
-        acquire_commit_mutex_live also supplies M1's liveness check — it raises
-        WorkspaceDeleted for an already-deleted workspace, before anything is
-        created on disk.
+
+        ``claimed_generation`` is the ``lifecycle_generation`` the claim stamped on
+        the job row (F3a), threaded down from ``run_one`` — never re-read here. It is
+        carried into a FenceStamp, the background-job twin of ``Invocation.stamp()``:
+        the actor's belief is the generation it claimed, and the mutex is taken at
+        ``stamp.generation``. A None claimed_generation is a legacy row claimed before
+        the fence existed and has no belief to fence against, so it raises
+        UnfencedInvocation rather than defaulting (generation 0 is REAL).
+
+        acquire_commit_mutex_at_generation supplies M1's liveness check: it raises
+        WorkspaceDeleted for an already-deleted workspace (deleted takes precedence
+        over stale), or WorkspaceGenerationStale if the workspace moved past the
+        claimed generation — before anything is created on disk.
         """
+        if claimed_generation is None:
+            raise UnfencedInvocation(workspace_id)
+        stamp = FenceStamp(
+            workspace_id=workspace_id,
+            generation=claimed_generation,
+            active_turn_job_id=None,
+            origin_job_id=job_id,
+        )
         with self.session_factory() as s:
-            acquire_commit_mutex_live(s, workspace_id)
+            acquire_commit_mutex_at_generation(
+                s, stamp.workspace_id, generation=stamp.generation
+            )
             ws = s.get(Workspace, workspace_id, with_for_update=True)
             if ws is None:
                 raise RuntimeError(f"workspace {workspace_id} vanished")
@@ -631,7 +667,7 @@ class Phase0Worker:
             job.last_error = f"{type(exc).__name__}: {exc}"
 
             # WorkspaceDeleted is _m1's own signal (raised by
-            # acquire_commit_mutex_live before anything is mutated);
+            # acquire_commit_mutex_at_generation before anything is mutated);
             # WorkspaceGoneDuringSetup is _m2/_m3's. Both mean the same thing
             # here — route terminal, not just the locally-defined exception.
             if gone or deleted is not None:

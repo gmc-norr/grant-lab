@@ -47,7 +47,7 @@ from call_manager.proposal_assist.proposals.proposing import (
     propose_citation_insert,
 )
 from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
-from tests.proposal_assist.conftest import make_user, make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -87,7 +87,8 @@ def _live_sections_from_md(pg_session_factory, wid, workspaces_dir):
     """
     with pg_session_factory() as s:
         updates = load_or_hydrate(
-            s, workspace_id=wid, artifact="draft", workspaces_dir=workspaces_dir
+            s, stamp=stamp_for(s, wid), workspace_id=wid, artifact="draft",
+            workspaces_dir=workspaces_dir,
         )
         s.commit()
     doc = Doc()
@@ -362,7 +363,8 @@ def test_stale_vs_live(_app, pg_session_factory, tmp_path):
     # Hydrate the room, get base sha (pre-edit)
     with pg_session_factory() as s:
         updates = load_or_hydrate(
-            s, workspace_id=wid, artifact="draft", workspaces_dir=str(tmp_path)
+            s, stamp=stamp_for(s, wid), workspace_id=wid, artifact="draft",
+            workspaces_dir=str(tmp_path),
         )
         s.commit()
     doc = Doc()
@@ -737,7 +739,11 @@ def test_kernel_commit_mutex_timeout_maps_to_429(_app, pg_session_factory, tmp_p
     def _boom(*a, **k):
         raise CommitMutexTimeout("busy")
 
-    monkeypatch.setattr(kernel_mod, "acquire_commit_mutex_live", _boom)
+    # endgame Task 5: kernel_accept_prose now takes the mutex via Primitive B
+    # (acquire_commit_mutex_at_generation), threaded from the accept route's stamp.
+    # Patch that name in kernel_mod — a CommitMutexTimeout from it is still a
+    # pre-mutation _CLEAN_ACCEPT_ERROR and must map to 429.
+    monkeypatch.setattr(kernel_mod, "acquire_commit_mutex_at_generation", _boom)
 
     client = TestClient(_app)
     client.__enter__()

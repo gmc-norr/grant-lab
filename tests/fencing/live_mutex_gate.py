@@ -70,37 +70,35 @@ _SRC = _REPO / "src" / "call_manager"
 #: exactly that shape and will still be pinned after F3e1b converts them correctly,
 #: carrying a human sentence and a §5.2 runtime proof instead.
 #:
-#: This list SHRINKS; an addition is a reviewed diff, not a formality. Entries leave
-#: across THREE slices, not one: the citation/checkpoint/save sites in F3e1b, the
-#: annotation and bibliography sites in F3e2, and phase 0's in F5. A comment claiming
-#: they all leave in F3e1b would make a reader treat a still-pinned F5 site as a bug.
+#: This list SHRINKS; an addition is a reviewed diff, not a formality. Entries do NOT
+#: all leave in one slice — a comment claiming they did would make a reader treat a
+#: still-pinned site as a bug. The 2026-08-24 endgame is now removing them task by
+#: task: Group A (`insert_from_annotation`, `insert_citation_for_user`) left in its
+#: Task 2, and the remaining seven leave across its Tasks 3-6.
 UNCONVERTED_LIVE_CALLERS: frozenset[tuple[str, str]] = frozenset(
     {
         # (repo-relative path, qualname) — derived from Step 2 probe output, not guessed
         (
-            "src/call_manager/proposal_assist/analysis/insert.py",
-            "insert_from_annotation",
-        ),
-        (
             "src/call_manager/proposal_assist/citations/bibliography.py",
             "build_bibliography",
         ),
+        # _insert_citation_locked: converted to Primitive B in endgame Task 6, but its
+        # acquisition sits inside a try: block (it maps CommitMutexTimeout / deleted /
+        # stale to error dicts), so the static checker gives the sink stmt_index=None
+        # and cannot prove order — it stays pinned with a §5.2 runtime proof, exactly
+        # the shape this list exists for. It no longer calls acquire_commit_mutex_live.
         (
             "src/call_manager/proposal_assist/citations/core.py",
             "_insert_citation_locked",
         ),
-        (
-            "src/call_manager/proposal_assist/citations/human_cite.py",
-            "insert_citation_for_user",
-        ),
-        (
-            "src/call_manager/proposal_assist/collab/checkpoint.py",
-            "checkpoint_artifact",
-        ),
-        (
-            "src/call_manager/proposal_assist/editing/save.py",
-            "save_section",
-        ),
+        # checkpoint_artifact: converted to Primitive B in endgame Task 5. Its
+        # acquisition is now a top-level acquire_commit_mutex_at_generation that
+        # statically pairs with its own write_and_commit_files sink, so the checker
+        # proves it fenced and it leaves this pin list.
+        # save_section: converted to Primitive B in endgame Task 6. Its acquisition is
+        # a top-level acquire_commit_mutex_at_generation that statically pairs with its
+        # own write_and_commit_files sink, so the checker proves it fenced and it leaves
+        # this pin list (it gained a git_commit inventory row instead).
         (
             "src/call_manager/proposal_assist/phases/setup.py",
             "Phase0Worker._init_repo",
@@ -109,6 +107,11 @@ UNCONVERTED_LIVE_CALLERS: frozenset[tuple[str, str]] = frozenset(
             "src/call_manager/proposal_assist/review/pass_runner.py",
             "run_review_pass",
         ),
+        # post_init_spec._git: converted to Primitive B in endgame Task 4.
+        # The acquisition is inside a try: block, so the static checker cannot prove
+        # order (stmt_index=None for the sink) and still reports it as unprotected.
+        # The §5.2 runtime proof is that require_owner stamps the generation before the
+        # mutex, and write_and_commit_files is only reached under that mutex.
         (
             "src/call_manager/web/api/workspaces.py",
             "post_init_spec._git",
@@ -144,17 +147,17 @@ UNCONVERTED_LIVE_CALLERS: frozenset[tuple[str, str]] = frozenset(
 #: ``_init_repo``, whose row is **F5** (spec §7 line 233 and §12), so it converts with F5.
 #: Treating it as an F3e1b deliverable would make F3e1b's completion check unsatisfiable.
 ENCLOSING_ACQUISITIONS: Mapping[tuple[str, str], str] = {
-    ("src/call_manager/proposal_assist/collab/kernel.py", "apply_citation_to_room"): "F3e1b",
-    ("src/call_manager/proposal_assist/collab/kernel.py", "kernel_accept_prose"): "F3e1b",
-    ("src/call_manager/proposal_assist/collab/kernel.py", "kernel_init_spec"): "F3e1b",
-    ("src/call_manager/proposal_assist/collab/kernel.py", "kernel_accept_citation"): "F3e1b",
-    (
-        "src/call_manager/proposal_assist/collab/kernel.py",
-        "apply_annotation_insert_to_room",
-    ): "F3e1b",
-    ("src/call_manager/web/api/workspaces.py", "post_lock_spec"): "F3e1b",
-    ("src/call_manager/web/api/workspaces.py", "post_unlock_spec"): "F3e1b",
-    ("src/call_manager/proposal_assist/phases/setup.py", "Phase0Worker._m1"): "F5",
+    # The five kernel enclosing acquisitions (apply_citation_to_room,
+    # kernel_accept_prose, kernel_init_spec, kernel_accept_citation,
+    # apply_annotation_insert_to_room) were converted to Primitive B in endgame
+    # Task 5 — each now takes acquire_commit_mutex_at_generation at a threaded stamp
+    # and no longer calls acquire_commit_mutex_live, so none is an enclosing _live
+    # acquisition any more. post_lock_spec and post_unlock_spec left in Task 4.
+    # Phase0Worker._m1 converted in endgame Task 6: it now takes
+    # acquire_commit_mutex_at_generation at the generation the claim stamped on its
+    # job row (threaded through run_one), so it no longer calls acquire_commit_mutex_live
+    # and is no longer an enclosing _live acquisition. This record is now empty — every
+    # enclosing _live acquisition in the tree has been converted.
 }
 
 #: Take ``acquire_commit_mutex_live`` AND hold a git sink in the same function. Not
@@ -162,12 +165,10 @@ ENCLOSING_ACQUISITIONS: Mapping[tuple[str, str], str] = {
 #: inventory row.  Recorded only so the partition below is total.
 LIVE_ACQUIRING_SINK_HOLDERS: frozenset[tuple[str, str]] = frozenset(
     {
-        ("src/call_manager/proposal_assist/collab/checkpoint.py", "checkpoint_artifact"),
-        ("src/call_manager/proposal_assist/citations/core.py", "_insert_citation_locked"),
-        ("src/call_manager/proposal_assist/citations/human_cite.py", "insert_citation_for_user"),
-        ("src/call_manager/proposal_assist/editing/save.py", "save_section"),
-        ("src/call_manager/proposal_assist/analysis/insert.py", "insert_from_annotation"),
-        ("src/call_manager/web/api/workspaces.py", "post_init_spec._git"),
+        # _insert_citation_locked and save_section converted to Primitive B in endgame
+        # Task 6 — neither calls acquire_commit_mutex_live any more, so both leave this
+        # record. checkpoint_artifact converted in Task 5; post_init_spec._git in Task 4.
+        # This record is now empty: no function both takes _live and holds a git sink.
     }
 )
 
@@ -177,10 +178,18 @@ LIVE_ACQUIRING_SINK_HOLDERS: frozenset[tuple[str, str]] = frozenset(
 #: record nobody reads.
 LIVE_ACQUIRERS_WITHOUT_A_SINK: frozenset[tuple[str, str]] = frozenset(
     {
-        ("src/call_manager/proposal_assist/collab/hydrate.py", "load_or_hydrate"),
-        ("src/call_manager/proposal_assist/collab/flip.py", "maybe_auto_enable"),
-        ("src/call_manager/workspaces.py", "soft_delete_workspace_db"),
-        ("src/call_manager/proposal_assist/web/_writes.py", "workspace_write"),
+        # soft_delete_workspace_db (Group X, the delete path) moved to the RAW
+        # acquire_commit_mutex in endgame Task 6b — it BUMPS the generation, so
+        # fencing it against the generation it is about to change is incoherent, and
+        # it keeps the under-mutex liveness re-read inline. It no longer calls _live,
+        # so it leaves this record. acquire_commit_mutex_live itself was DELETED in
+        # the same commit; the interpreter (a NameError) is the gate now.
+        # load_or_hydrate and maybe_auto_enable converted to Primitive B in endgame
+        # Task 5 — each takes acquire_commit_mutex_at_generation at a threaded stamp
+        # and no longer calls _live, so both leave this record.
+        # workspace_write converted to Primitive B (acquire_commit_mutex_at_generation)
+        # in the 2026-08-24 endgame Task 3 — no longer calls _live.
+        # This record is now empty: no _live caller without a git sink remains.
     }
 )
 

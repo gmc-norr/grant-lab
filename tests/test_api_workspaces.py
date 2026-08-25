@@ -33,6 +33,7 @@ from call_manager.proposal_assist.citations.gitio import _git_env
 from call_manager.proposal_assist.citations.ledger import dump_ledger, empty_ledger
 from call_manager.proposal_assist.editing.save import CITATIONS_FILENAME, PROPOSAL_FILENAME
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from tests.proposal_assist.conftest import stamp_for
 from tests.test_editing_save import _init_repo
 
 
@@ -311,7 +312,8 @@ def test_draft_collab_returns_room_canonical_sections(
     # Hydrate then apply a LIVE, uncheckpointed edit to the room (git stays "original.").
     with pg_session_factory() as s:
         updates = load_or_hydrate(
-            s, workspace_id=ws_id, artifact="draft", workspaces_dir=str(tmp_path)
+            s, stamp=stamp_for(s, ws_id), workspace_id=ws_id, artifact="draft",
+            workspaces_dir=str(tmp_path)
         )
         s.commit()
         room = build_doc(updates)

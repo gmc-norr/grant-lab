@@ -25,6 +25,8 @@ from call_manager.proposal_assist.collab.kernel import (
 from call_manager.proposal_assist.collab.room import MANAGER
 from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout, WorkspaceDeleted
 from call_manager.proposal_assist.editing.save import SectionStructureError, SpecLockedError
+from call_manager.proposal_assist.fencing import WorkspaceGenerationStale
+from call_manager.proposal_assist.ports.stamp import FenceStamp
 from call_manager.proposal_assist.proposals.kernel_accept import RoomEvicted
 
 # Pre-mutation validation errors — re-raised WITHOUT evicting the room (it is
@@ -33,6 +35,10 @@ from call_manager.proposal_assist.proposals.kernel_accept import RoomEvicted
 # BEFORE the fragment mutation, so it must not needlessly evict a clean room.
 _CLEAN_CITE_ERRORS = (
     CiteStale, CiteInvalid, CiteRefNotFound, CommitMutexTimeout, WorkspaceDeleted,
+    # Primitive B (endgame Task 5): raised from the kernel's
+    # acquire_commit_mutex_at_generation BEFORE any room mutation — same pre-mutation,
+    # non-evicting shape as WorkspaceDeleted; the app-wide handler maps it to 404.
+    WorkspaceGenerationStale,
     IndexError, RoomEvicted, SectionStructureError,
 )
 
@@ -42,12 +48,14 @@ _CLEAN_CITE_ERRORS = (
 # that a genuine post-mutation failure had left dirty. Named (not inlined at the
 # except) so the "raised before any room mutation" invariant is assertable.
 _CLEAN_INIT_SPEC_ERRORS = (
-    SpecLockedError, CommitMutexTimeout, WorkspaceDeleted, RoomEvicted,
+    SpecLockedError, CommitMutexTimeout, WorkspaceDeleted, WorkspaceGenerationStale,
+    RoomEvicted,
 )
 
 
 async def direct_cite_via_kernel(
-    *, session_factory, workspaces_dir, workspace_id: uuid.UUID, actor_id: int,
+    *, session_factory, workspaces_dir, stamp: FenceStamp, workspace_id: uuid.UUID,
+    actor_id: int,
     section_index, base_section_sha, anchor, reference_id, chunk_index,
     evidence_quote, quote_start, quote_end, stance="supports",
 ) -> dict:
@@ -61,8 +69,8 @@ async def direct_cite_via_kernel(
     async def _load() -> list[bytes]:
         def _read():
             with session_factory() as s:
-                updates = load_or_hydrate(s, workspace_id=workspace_id, artifact="draft",
-                                          workspaces_dir=workspaces_dir)
+                updates = load_or_hydrate(s, stamp=stamp, workspace_id=workspace_id,
+                                          artifact="draft", workspaces_dir=workspaces_dir)
                 s.commit()
                 return updates
         return await run_in_threadpool(_read)
@@ -73,7 +81,7 @@ async def direct_cite_via_kernel(
                 def _body() -> tuple[bytes | None, dict]:
                     with session_factory() as s:
                         res = apply_citation_to_room(
-                            s, room_doc=room.doc, workspace_id=workspace_id,
+                            s, stamp=stamp, room_doc=room.doc, workspace_id=workspace_id,
                             section_index=section_index, base_section_sha=base_section_sha,
                             anchor=anchor, reference_id=reference_id, chunk_index=chunk_index,
                             evidence_quote=evidence_quote, quote_start=quote_start,
@@ -97,7 +105,8 @@ async def direct_cite_via_kernel(
 
 
 async def init_spec_via_kernel(
-    *, session_factory, workspaces_dir, workspace_id: uuid.UUID, actor_id: int
+    *, session_factory, workspaces_dir, stamp: FenceStamp, workspace_id: uuid.UUID,
+    actor_id: int,
 ) -> tuple[str, str]:
     """'Start spec from skeleton' against the live spec room. Same
     operate/lock/threadpool/broadcast-outside-lock/evict contract as
@@ -115,7 +124,7 @@ async def init_spec_via_kernel(
         def _read():
             with session_factory() as s:
                 updates = load_or_hydrate(
-                    s, workspace_id=workspace_id, artifact="spec",
+                    s, stamp=stamp, workspace_id=workspace_id, artifact="spec",
                     workspaces_dir=workspaces_dir,
                 )
                 s.commit()
@@ -128,7 +137,7 @@ async def init_spec_via_kernel(
                 def _body() -> tuple[bytes | None, str, str]:
                     with session_factory() as s:
                         head, md, update = kernel_init_spec(
-                            s, room_doc=room.doc, workspace_id=workspace_id,
+                            s, stamp=stamp, room_doc=room.doc, workspace_id=workspace_id,
                             workspaces_dir=workspaces_dir, actor_id=actor_id,
                         )
                         if room.evicted:
@@ -147,8 +156,8 @@ async def init_spec_via_kernel(
 
 
 async def insert_annotation_via_kernel(
-    *, session_factory, workspaces_dir, workspace_id: uuid.UUID, actor_id: int,
-    annotation_id: int,
+    *, session_factory, workspaces_dir, stamp: FenceStamp, workspace_id: uuid.UUID,
+    actor_id: int, annotation_id: int,
 ) -> dict:
     """Claims-tab annotation insert against the live draft room. Same
     operate/lock/threadpool/broadcast-outside-lock/evict contract as
@@ -166,8 +175,8 @@ async def insert_annotation_via_kernel(
     async def _load() -> list[bytes]:
         def _read():
             with session_factory() as s:
-                updates = load_or_hydrate(s, workspace_id=workspace_id, artifact="draft",
-                                          workspaces_dir=workspaces_dir)
+                updates = load_or_hydrate(s, stamp=stamp, workspace_id=workspace_id,
+                                          artifact="draft", workspaces_dir=workspaces_dir)
                 s.commit()
                 return updates
         return await run_in_threadpool(_read)
@@ -178,7 +187,7 @@ async def insert_annotation_via_kernel(
                 def _body() -> tuple[bytes | None, dict]:
                     with session_factory() as s:
                         res = apply_annotation_insert_to_room(
-                            s, room_doc=room.doc, workspace_id=workspace_id,
+                            s, stamp=stamp, room_doc=room.doc, workspace_id=workspace_id,
                             workspaces_dir=workspaces_dir, annotation_id=annotation_id,
                             actor_id=actor_id,
                         )

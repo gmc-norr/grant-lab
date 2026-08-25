@@ -31,7 +31,7 @@ from call_manager.proposal_assist.editing.save import SpecLockedError
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.proposals.accepting import ProposedChangeNotFound
 from call_manager.proposal_assist.proposals.kernel_accept import _CLEAN_ACCEPT_ERRORS
-from tests.proposal_assist.conftest import make_user, make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 
 def _init_repo(repo: Path, content: str) -> None:
@@ -47,7 +47,8 @@ def _init_repo(repo: Path, content: str) -> None:
 def _live_room(session, wid, workspaces_dir):
     """Hydrate + return the collab room doc (seeded from HEAD, persisted as update #1)."""
     updates = load_or_hydrate(
-        session, workspace_id=wid, artifact="draft", workspaces_dir=workspaces_dir
+        session, stamp=stamp_for(session, wid), workspace_id=wid, artifact="draft",
+        workspaces_dir=workspaces_dir,
     )
     session.commit()
     return build_doc(updates)
@@ -121,6 +122,7 @@ def test_kernel_accept_applies_edit_and_checkpoints(pg_session_factory, tmp_path
         approver = s.get(type(o), oid)
         res = kernel_accept_prose(
             s,
+            stamp=stamp_for(s, wid),
             room_doc=room_doc,
             proposed_change_id=pc_id,
             workspace_id=wid,
@@ -198,6 +200,7 @@ def test_kernel_accept_detects_staleness_against_LIVE_room_not_git(pg_session_fa
         approver = s.get(type(o), oid)
         res = kernel_accept_prose(
             s,
+            stamp=stamp_for(s, wid),
             room_doc=room_doc,
             proposed_change_id=pc_id,
             workspace_id=wid,
@@ -243,6 +246,7 @@ def test_kernel_accept_noop_proposal_accepts_without_new_commit(pg_session_facto
         approver = s.get(type(o), oid)
         res = kernel_accept_prose(
             s,
+            stamp=stamp_for(s, wid),
             room_doc=room_doc,
             proposed_change_id=pc_id,
             workspace_id=wid,
@@ -292,6 +296,7 @@ def test_kernel_accept_raises_proposed_change_not_found_for_missing_pc(
         try:
             kernel_accept_prose(
                 s,
+                stamp=stamp_for(s, wid),
                 room_doc=room_doc,
                 proposed_change_id=nonexistent_pc_id,
                 workspace_id=wid,
@@ -342,7 +347,7 @@ def test_kernel_rejects_accept_into_locked_spec(pg_session_factory, tmp_path):
         approver = s.get(User, oid)
         with pytest.raises(SpecLockedError):
             kernel_accept_prose(
-                s, room_doc=room_doc, proposed_change_id=pc_id,
+                s, stamp=stamp_for(s, wid), room_doc=room_doc, proposed_change_id=pc_id,
                 workspace_id=wid, approver=approver, workspaces_dir=str(tmp_path),
             )
     # The rejected proposal was NOT resolved (still pending — the guard raised).
@@ -367,7 +372,8 @@ def test_kernel_accepts_unlocked_spec_and_checkpoints(pg_session_factory, tmp_pa
         s.commit()
     with pg_session_factory() as s:
         updates = load_or_hydrate(
-            s, workspace_id=wid, artifact="spec", workspaces_dir=str(tmp_path)
+            s, stamp=stamp_for(s, wid), workspace_id=wid, artifact="spec",
+            workspaces_dir=str(tmp_path),
         )
         s.commit()
         room_doc = build_doc(updates)
@@ -380,7 +386,7 @@ def test_kernel_accepts_unlocked_spec_and_checkpoints(pg_session_factory, tmp_pa
     with pg_session_factory() as s:
         approver = s.get(User, oid)
         res = kernel_accept_prose(
-            s, room_doc=room_doc, proposed_change_id=pc_id,
+            s, stamp=stamp_for(s, wid), room_doc=room_doc, proposed_change_id=pc_id,
             workspace_id=wid, approver=approver, workspaces_dir=str(tmp_path),
         )
         s.commit()

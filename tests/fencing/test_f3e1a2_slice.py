@@ -1,53 +1,28 @@
 """F3e1a2 confirmation: the checker got smarter and the measurement did not move.
 
-The slice's central claim is INERTNESS. `acquire_commit_mutex_at_generation` has zero
-production callers, so every git row fails the positive rule before position is ever
-consulted — whatever the allowlist does. If any assertion here fails, the slice
-changed a measurement it promised not to touch.
+F3e1a2's central claim was INERTNESS — `acquire_commit_mutex_at_generation` had zero
+production callers, so every git row failed the positive rule before position was ever
+consulted. **That premise is over.** The 2026-08-24 endgame converts those callers, so
+the three assertions that restated it — Primitive B has no callers, no real site
+measures fenced, every git row is unfenced — are RETIRED here rather than weakened.
+Deleting them loses nothing: each was a statement about the tree's conversion state,
+and that state is now measured per row by `test_the_inventory_git_flags_match_the_tree`
+and `test_each_slice_matches_its_declared_status` in test_fence_coverage.py.
+
+What remains is what F3e1a2 actually built and what still has to hold while the tree
+converts: the nine sink holders are still nine and still those nine, every one of them
+still gets a credited position, the allowlist is still six entries, and the slice's own
+status is still recorded.
 """
 
 from __future__ import annotations
 
-import ast
 import pathlib
 
-from tests.fencing.git_fence import _callee_name, fenced_qualnames, sink_calls
+from tests.fencing.git_fence import sink_calls
 from tests.fencing.inventory import SLICE_STATUS, load_inventory
 
-_PRIMITIVE_B = "acquire_commit_mutex_at_generation"
-
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
-
-
-def test_primitive_b_still_has_zero_production_callers():
-    """The premise of the whole inertness argument. If this ever goes red, the slice
-    is no longer inert and every other assertion here means something different."""
-    hits = []
-    for path in (_ROOT / "src").rglob("*.py"):
-        tree = ast.parse(path.read_text())
-        # Resolve aliases FIRST. `from ... import acquire_commit_mutex_at_generation
-        # as acquire` then `acquire(...)` is a caller, and a bare-name check misses it
-        # — the same alias handling F3e1a's own identity test already does.
-        names = {_PRIMITIVE_B}
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
-                for a in node.names:
-                    if a.name == _PRIMITIVE_B and a.asname:
-                        names.add(a.asname)
-            # `_callee_name`, not `isinstance(..., ast.Name)`: it resolves the final
-            # name of an Attribute too, so `alias = mod.acquire_commit_mutex_at_...`
-            # binds an alias just as `alias = acquire_commit_mutex_at_...` does. A
-            # bare-Name check saw only the second form.
-            elif isinstance(node, ast.Assign) and _callee_name(node.value) in names:
-                names.update(t.id for t in node.targets if isinstance(t, ast.Name))
-        for node in ast.walk(tree):
-            # Its own `def` is not a caller. Excluding the whole of fencing.py would
-            # hide a real caller added inside it, so exclude the DEFINITION, by AST.
-            if isinstance(node, ast.FunctionDef) and node.name == _PRIMITIVE_B:
-                continue
-            if isinstance(node, ast.Call) and _callee_name(node.func) in names:
-                hits.append(f"{path.relative_to(_ROOT)}:{node.lineno}")
-    assert hits == [], f"Primitive B gained a caller: {hits}"
 
 
 #: The nine production sink holders, by (path, qualname). Fixed, not derived: a
@@ -95,27 +70,30 @@ def test_every_real_sink_gets_a_credited_position():
     a git row could ever reach `complete`. The six-entry allowlist (§4.1) was
     derived from exactly these nine paths.
 
-    Without this test the allowlist could go back to crediting nothing and every
-    other assertion in this file would still pass, because they all key off
-    Primitive B having zero callers. `None` here is the old bug returning.
+    Without this test the allowlist could go back to crediting nothing and nothing
+    else in this file would notice — none of the remaining assertions reads a
+    position. `None` here is the old bug returning, and since the endgame started
+    converting these sites it would also silently un-fence every converted row.
     """
     uncredited = [(rel, q) for rel, q, i in _real_sink_calls() if i is None]
     assert uncredited == [], f"the allowlist stopped crediting real sinks: {uncredited}"
 
 
-def test_no_real_site_measures_fenced():
-    fenced = set()
-    for path in (_ROOT / "src").rglob("*.py"):
-        rel = str(path.relative_to(_ROOT))
-        fenced |= fenced_qualnames(path.read_text(), rel)
-    assert fenced == set(), f"a site measured fenced with zero Primitive B callers: {fenced}"
+def test_every_git_row_is_still_counted_and_allocated():
+    """Was `test_every_git_row_is_still_unfenced_and_classified`.
 
-
-def test_every_git_row_is_still_unfenced_and_classified():
+    Its `fenced is False` and `slice is pending` clauses asserted that the tree was
+    UNCONVERTED — F3e1a2's inertness premise, deliberately ended by the 2026-08-24
+    endgame. What is left is the part that is not about inertness: the nine rows
+    still exist and every one names a slice the bookkeeping knows. The retired
+    clauses' real obligation — a row's `fenced` must match the source, and a
+    `pending` slice must have no fenced row — is enforced per row by
+    `test_the_inventory_git_flags_match_the_tree` and
+    `test_each_slice_matches_its_declared_status`.
+    """
     rows = [r for r in load_inventory() if r["kind"] == "git_commit"]
     assert len(rows) == 9
-    assert all(r["fenced"] is False for r in rows)
-    assert all(SLICE_STATUS[r["slice"]] == "pending" for r in rows)
+    assert all(SLICE_STATUS[r["slice"]] in {"pending", "complete"} for r in rows)
 
 
 def test_this_slice_is_recorded_complete():

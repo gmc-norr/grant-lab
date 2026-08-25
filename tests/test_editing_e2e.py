@@ -23,6 +23,7 @@ from call_manager.proposal_assist.citations.gitio import current_head
 from call_manager.proposal_assist.citations.ledger import load_ledger
 from call_manager.proposal_assist.editing.save import save_section
 from call_manager.proposal_assist.editing.sectionizer import split_sections
+from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
 from tests.test_analysis_pipeline import (
     FakeCitationService,
     _drain,
@@ -51,6 +52,7 @@ def _save(session, ws, user_id, repo, tmp_path, *, section_index, new_text):
     return save_section(
         session=session,
         workspace=ws,
+        stamp=stamp_for_workspace(ws),
         user_id=user_id,
         section_index=section_index,
         new_text=new_text,
