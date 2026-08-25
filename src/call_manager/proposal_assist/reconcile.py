@@ -24,7 +24,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import insert, literal, select
+from sqlalchemy import insert, literal, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
@@ -231,6 +231,13 @@ def reconcile_workspace_citekeys(
 
     repaired = 0
     with session_factory() as s:
+        # Primitive C first — see reconcile_workspace_git_drift for the reasoning.
+        acquire_shared_lease(s, workspace_id)
+        generation = s.scalar(
+            select(Workspace.lifecycle_generation).where(Workspace.id == workspace_id)
+        )
+        if generation is None:
+            return 0
         for ref_id_str, ledger_citekey in desired.items():
             try:
                 ref_uuid = uuid.UUID(str(ref_id_str))
@@ -262,14 +269,34 @@ def reconcile_workspace_citekeys(
                 )
                 continue
             try:
-                # Flush per-row inside a savepoint so a surprise IntegrityError
-                # (e.g. a concurrent write racing the check above) rolls back
-                # only this one change, not the whole batch. The savepoint's
-                # context manager auto-rolls-back to the savepoint on raise, so
-                # earlier repairs in the batch survive.
+                # The fence and the write are ONE statement. THE LOAD-BEARING TERMS
+                # ARE THE LEASE AND THE LIVENESS CLAUSE — see the note in
+                # reconcile_workspace_git_drift.
+                #
+                # The savepoint stays. Its documented reason still holds: a
+                # concurrent write racing the holder check above can still raise
+                # IntegrityError, and only this one row should roll back. The
+                # rowcount == 0 branch below is the NEW fence path and is a
+                # different case from that IntegrityError.
                 with s.begin_nested():
-                    ref.citekey = ledger_citekey
-                    s.flush()
+                    result = s.execute(
+                        update(Reference)
+                        .where(
+                            Reference.id == ref_uuid,
+                            Reference.workspace_id == workspace_id,
+                            live_at_generation(workspace_id, generation),
+                        )
+                        .values(citekey=ledger_citekey)
+                    )
+                if result.rowcount == 0:
+                    logger.info(
+                        "reconcile_workspace_citekeys: refused for %s — workspace "
+                        "not live at generation %s; leaving citekey cache as-is",
+                        workspace_id,
+                        generation,
+                    )
+                    s.rollback()
+                    return 0
                 repaired += 1
             except IntegrityError:
                 logger.warning(
