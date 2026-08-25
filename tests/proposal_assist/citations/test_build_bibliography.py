@@ -776,3 +776,42 @@ def test_compose_bare_marker_in_prose_still_blocks(pg_session_factory, tmp_path)
     reasons = {b["reason"] for b in exc.value.blocked}
     assert "unresolved_marker" in reasons
     assert any(b["citekey"] == "orphan" for b in exc.value.blocked)
+
+
+def test_build_bibliography_does_not_commit_unless_asked(pg_session_factory, tmp_path):
+    """The git write is unfenced, so it must never be the default.
+
+    bibliography.py calls write_and_commit_files with no mutex and no
+    generation. Both current production callers pass commit=False; the default
+    must match, so a future caller who forgets the keyword does not get an
+    unfenced git write.
+    """
+    wsid = _make_workspace(pg_session_factory)
+    rid_a = _seed_reference(pg_session_factory, wsid, citekey="smith2021", csl_json=SMITH_CSL)
+    rid_b = _seed_reference(pg_session_factory, wsid, citekey="jones2019", csl_json=JONES_CSL)
+    proposal = _proposal(
+        build_marker("smith2021", "ev-aaaaaaaaaaaa"),
+        build_marker("jones2019", "ev-bbbbbbbbbbbb"),
+    )
+    repo_dir = tmp_path / "repo"
+    _init_repo(repo_dir, proposal)
+    head_before = _head(repo_dir)
+
+    with pg_session_factory() as session:
+        result = build_bibliography(
+            proposal_text=proposal,
+            ledger=_ledger(
+                [
+                    _ledger_row(citekey="smith2021", reference_id=rid_a, ev_id="ev-aaaaaaaaaaaa"),
+                    _ledger_row(citekey="jones2019", reference_id=rid_b, ev_id="ev-bbbbbbbbbbbb"),
+                ]
+            ),
+            session=session,
+            workspace_id=wsid,
+            style="vancouver",
+            repo_dir=repo_dir,
+            # commit deliberately omitted — must not produce a git write by default
+        )
+
+    assert result["commit_sha"] is None
+    assert _head(repo_dir) == head_before
