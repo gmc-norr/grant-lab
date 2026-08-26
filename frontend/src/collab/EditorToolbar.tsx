@@ -174,7 +174,13 @@ export function EditorToolbar(props: EditorToolbarProps) {
       >
         —
       </Button>
-      <Popover opened={linkOpen} onChange={setLinkOpen} position="bottom" withArrow withinPortal={false} keepMounted>
+      <Popover
+        opened={linkOpen}
+        onChange={setLinkOpen}
+        position="bottom"
+        withArrow
+        withinPortal={false}
+      >
         <Popover.Target>
           <Button
             size="compact-xs"

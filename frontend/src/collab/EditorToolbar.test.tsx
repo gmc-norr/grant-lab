@@ -1,6 +1,7 @@
 import { Editor } from "@tiptap/core";
 import { MantineProvider } from "@mantine/core";
 import { fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import type { ReactNode } from "react";
 
@@ -193,50 +194,55 @@ describe("EditorToolbar — permissions and slots", () => {
 });
 
 describe("EditorToolbar — link", () => {
-  it("applies an https href to the selection", () => {
+  it("applies an https href to the selection", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
     const e = mk();
     mount(e);
-    fireEvent.click(screen.getByTestId("tb-link"));
-    fireEvent.change(screen.getByTestId("tb-link-input"), {
+    await user.click(screen.getByTestId("tb-link"));
+    fireEvent.change(await screen.findByTestId("tb-link-input"), {
       target: { value: "https://vinnova.se" },
     });
-    fireEvent.click(screen.getByTestId("tb-link-apply"));
+    await user.click(screen.getByTestId("tb-link-apply"));
     expect(e.getHTML()).toContain('<a href="https://vinnova.se">word</a>');
   });
 
-  it("accepts mailto:", () => {
+  it("accepts mailto:", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
     const e = mk();
     mount(e);
-    fireEvent.click(screen.getByTestId("tb-link"));
-    fireEvent.change(screen.getByTestId("tb-link-input"), {
+    await user.click(screen.getByTestId("tb-link"));
+    fireEvent.change(await screen.findByTestId("tb-link-input"), {
       target: { value: "mailto:a@b.se" },
     });
-    fireEvent.click(screen.getByTestId("tb-link-apply"));
+    await user.click(screen.getByTestId("tb-link-apply"));
     expect(e.getHTML()).toContain('href="mailto:a@b.se"');
   });
 
-  it("REFUSES a javascript: href and sets no mark", () => {
+  it("REFUSES a javascript: href and sets no mark", async () => {
     // This one is load-bearing: the href is written verbatim into markdown and
     // persisted in git, so a javascript: URL would round-trip into the
     // rendered document.
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
     const e = mk();
     mount(e);
-    fireEvent.click(screen.getByTestId("tb-link"));
-    fireEvent.change(screen.getByTestId("tb-link-input"), {
+    await user.click(screen.getByTestId("tb-link"));
+    fireEvent.change(await screen.findByTestId("tb-link-input"), {
       target: { value: "javascript:alert(1)" },
     });
-    fireEvent.click(screen.getByTestId("tb-link-apply"));
+    await user.click(screen.getByTestId("tb-link-apply"));
     expect(e.getHTML()).not.toContain("javascript:");
     expect(e.getHTML()).not.toContain("<a ");
     expect(screen.getByTestId("tb-link-error")).toBeInTheDocument();
   });
 
-  it("removes an existing link", () => {
+  it("removes an existing link", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
     const e = mk('<p><a href="https://x.se">word</a></p>');
     e.commands.setTextSelection({ from: 1, to: 5 });
     mount(e);
-    fireEvent.click(screen.getByTestId("tb-link"));
-    fireEvent.click(screen.getByTestId("tb-link-remove"));
+    await user.click(screen.getByTestId("tb-link"));
+    await screen.findByTestId("tb-link-input");
+    await user.click(screen.getByTestId("tb-link-remove"));
     expect(e.getHTML()).toContain("<p>word</p>");
     expect(e.getHTML()).not.toContain("<a ");
   });
