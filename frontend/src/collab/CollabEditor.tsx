@@ -1,4 +1,3 @@
-import { Group } from "@mantine/core";
 import Collaboration from "@tiptap/extension-collaboration";
 import { CollaborationCaret } from "@tiptap/extension-collaboration-caret";
 import { EditorContent, useEditor } from "@tiptap/react";
@@ -10,6 +9,7 @@ import { collabEditorExtensions } from "./CitationNode";
 import { colorForUserId, displayName } from "./collabColor";
 import type { CollabProvider, ProviderStatus } from "./collabProvider";
 import styles from "./CollabEditor.module.css";
+import { EditorToolbar } from "./EditorToolbar";
 import { SaveVersionButton } from "./SaveVersionButton";
 import { InsertTableButton, TableMenu } from "./TableControls";
 import { TiptapSelectionToolbar } from "./TiptapSelectionToolbar";
@@ -19,6 +19,8 @@ type CollabEditorProps = {
   workspaceId: string;
   artifact: "draft" | "spec";
   canWrite: boolean;
+  /** Panel-level actions rendered at the END of the toolbar. */
+  actions?: React.ReactNode;
   /** Optional props for the draft selection toolbar (draft-only) */
   head?: string;
   sections?: { sha: string; text: string }[];
@@ -82,16 +84,23 @@ function CollabEditorInner(
 
   return (
     <div data-collab-status={props.status} className={styles.editor}>
-      <Group gap="xs">
-        <SaveVersionButton
-          id={props.workspaceId}
-          artifact={props.artifact}
-          provider={props.provider}
-          canWrite={props.canWrite}
-          status={props.status}
-        />
-        <InsertTableButton editor={editor} canWrite={props.canWrite} />
-      </Group>
+      <EditorToolbar
+        editor={editor}
+        canWrite={props.canWrite}
+        actions={props.actions}
+        builtins={
+          <>
+            <SaveVersionButton
+              id={props.workspaceId}
+              artifact={props.artifact}
+              provider={props.provider}
+              canWrite={props.canWrite}
+              status={props.status}
+            />
+            <InsertTableButton editor={editor} canWrite={props.canWrite} />
+          </>
+        }
+      />
       <TableMenu editor={editor} canWrite={props.canWrite} />
       <EditorContent editor={editor} data-testid="collab-editor" />
       {props.artifact === "draft" && props.sections != null && props.head != null && editor && (
