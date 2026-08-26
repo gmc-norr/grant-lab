@@ -52,6 +52,11 @@ function currentBlock(editor: Editor): string {
 export function EditorToolbar(props: EditorToolbarProps) {
   const { editor, canWrite } = props;
   useEditorTick(editor);
+
+  const [linkOpen, setLinkOpen] = useState(false);
+  const [linkHref, setLinkHref] = useState("");
+  const [linkError, setLinkError] = useState(false);
+
   if (!editor) return null;
 
   // Gate EVERY option on can(). This is not politeness: measured, inside a list
@@ -75,9 +80,6 @@ export function EditorToolbar(props: EditorToolbarProps) {
     editor.chain().focus().setNode("heading", { level }).run();
   };
 
-  const [linkOpen, setLinkOpen] = useState(false);
-  const [linkHref, setLinkHref] = useState("");
-  const [linkError, setLinkError] = useState(false);
   const selectionEmpty = editor.state.selection.empty;
 
   const applyLink = () => {
