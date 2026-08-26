@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import threading
 import time
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from sqlalchemy import select
@@ -15,6 +17,9 @@ from sqlalchemy.exc import OperationalError
 from call_manager.config import Settings
 from call_manager.db.models import CoherenceJob, Workspace
 from call_manager.proposal_assist.coherence.pass_runner import run_coherence_pass
+from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.review.pass_runner import run_review_pass
+from call_manager.workspaces import soft_delete_workspace_db
 from tests.proposal_assist.conftest import make_workspace
 
 
@@ -747,3 +752,151 @@ def test_a_prefix_holds_the_workspace_row_then_releases_it(
     # it does after the prefix is not this test's business — the swallowed
     # exception above keeps a post-prefix error from masquerading as a lock defect.
     assert not _row_is_locked(), f"the {kind} prefix never released the workspace row"
+
+
+def _head(repo_dir: Path) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _init_workspace_repo(repo_dir: Path) -> str:
+    """A real git repo with one committed proposal.md, so the review prefix's
+    assemble_review_context gets a draft_sha and the finalize's
+    write_and_commit_files has a base to commit onto. Mirrors
+    _init_repo_with_n_commits in test_reconcile.py."""
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "config", "user.email", "agent@test"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "config", "user.name", "Test Agent"], cwd=repo_dir, check=True)
+    (repo_dir / "proposal.md").write_text("# Draft\n\nseed proposal body\n")
+    subprocess.run(["git", "add", "proposal.md"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "seed proposal"], cwd=repo_dir, check=True)
+    return _head(repo_dir)
+
+
+def _completing_then_parking_adapter_builder(gate: threading.Event, entered: threading.Event):
+    """An adapter that COMPLETES every Wave-1 call (fit_check + the four personas)
+    with real markdown, then PARKS on consolidation.
+
+    The vanilla _pausing_adapter_builder is hollow for this test: it persists no
+    markdown, so `files` in the finalize is always empty and the git write is never
+    reached — the finalize guard could be deleted and nothing would move. Here the
+    Wave-1 markdown is committed to raw_response_json (so _run_one_call marks each
+    item 'done' and _markdown_of returns non-empty), which makes the finalize
+    genuinely try to write fit-check.md. Consolidation parks so the test can delete
+    the workspace in the window between the persisted Wave-1 markdown and the
+    finalize — the exact window the delete/finalize coupling is supposed to cover.
+    """
+
+    def _build(**kwargs):
+        session_factory = kwargs["session_factory"]
+        item_id = kwargs["item_id"]
+        kind = kwargs["kind"]
+
+        class _Stub:
+            async def launch(self, context):
+                handle = type("H", (), {})()
+                handle.state = {"launch_id": uuid.uuid4()}
+                handle.workspace_id = kwargs.get("workspace_id")
+                return handle
+
+            async def send_turn(self, handle, instruction):
+                if kind == "consolidation":
+                    # The window: Wave-1 markdown is already persisted; the finalize
+                    # has not run. Hold here until the test releases the gate.
+                    entered.set()
+                    await asyncio.get_running_loop().run_in_executor(None, gate.wait, 30)
+                    return
+                    yield  # pragma: no cover
+                # Persist markdown so this Wave-1 item finalizes 'done' — the deciding
+                # condition in _run_one_call is item.raw_response_json.get("markdown").
+                from call_manager.db.models import ReviewRunItem
+
+                with session_factory() as s:
+                    item = s.get(ReviewRunItem, item_id)
+                    item.raw_response_json = {"markdown": f"# {kind} review\n"}
+                    s.commit()
+                return
+                yield  # pragma: no cover
+
+            async def terminate(self, handle) -> None:
+                return None
+
+            def unconfirmed_launch_ids(self):
+                return []
+
+            async def retire_unconfirmed(self) -> int:
+                return 0
+
+        return _Stub()
+
+    return _build
+
+
+def test_no_git_commit_lands_for_a_workspace_deleted_mid_review_pass(
+    pg_session_factory, current_user, tmp_path, _settings_env
+):
+    """The git-level consequence of the delete/finalize coupling.
+
+    Nothing else asserts this. The mechanism is covered by the run-row tests in
+    this file, but a refactor of either soft_delete_workspace_db's cancel or
+    pass_runner's still-running guard could reopen a post-delete git write
+    without any of them failing.
+
+    The delete must land BETWEEN the prefix and the finalize. Deleting first
+    makes the prefix return at pass_runner.py:242-243, which passes whether or
+    not the finalize guard exists — a hollow gate. And the pass must reach a real
+    git-write attempt: every Wave-1 call completes with markdown so the finalize's
+    `files` is non-empty; only then does deleting mid-pass (which cancels the run)
+    versus the finalize's still-running guard actually decide whether HEAD moves.
+    """
+    from call_manager.db.models import ReviewRun
+
+    run_id, ws_id = _seed_review(pg_session_factory, current_user)
+    repo_dir = workspace_repo_dir(Settings().workspaces_dir, ws_id)
+    head_before = _init_workspace_repo(repo_dir)
+    assert _head(repo_dir) == head_before
+
+    gate = threading.Event()
+    entered = threading.Event()
+    done = threading.Event()
+
+    def _pass():
+        try:
+            asyncio.run(
+                run_review_pass(
+                    run_id=run_id,
+                    claimed_generation=0,
+                    session_factory=pg_session_factory,
+                    settings=Settings(),
+                    adapter_builder=_completing_then_parking_adapter_builder(gate, entered),
+                )
+            )
+        finally:
+            done.set()
+
+    t = threading.Thread(target=_pass)
+    t.start()
+    try:
+        assert entered.wait(timeout=30), "the pass never reached consolidation"
+        # Wave-1 markdown is persisted; the prefix has committed; finalization has
+        # not run. Delete FOR REAL — through the service, so the run-cancel in the
+        # delete transaction is part of what is under test. soft_delete_workspace_db
+        # commits itself; there is no actor_id parameter.
+        with pg_session_factory() as s:
+            soft_delete_workspace_db(s, workspace_id=ws_id)
+    finally:
+        gate.set()
+        assert done.wait(timeout=60), "the pass never finished"
+        t.join(timeout=5)
+
+    assert _head(repo_dir) == head_before, (
+        "a review pass committed to the repo of a workspace deleted mid-pass"
+    )
+    with pg_session_factory() as s:
+        assert s.get(ReviewRun, run_id).status == "cancelled"

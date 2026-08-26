@@ -8,10 +8,16 @@ must respect the partial unique index on (workspace_id, citekey).
 """
 
 import json
+import threading
+import time
 import uuid
+from datetime import UTC, datetime
 
-from call_manager.db.models import Reference
+from sqlalchemy import text
+
+from call_manager.db.models import Reference, Workspace
 from call_manager.proposal_assist.citations.ledger import dump_ledger, empty_ledger
+from call_manager.proposal_assist.drafting.locking import commit_mutex_key
 from call_manager.proposal_assist.reconcile import (
     CITATIONS_FILENAME,
     reconcile_workspace_citekeys,
@@ -183,3 +189,89 @@ def test_rows_without_reference_id_or_citekey_ignored(pg_session_factory, tmp_pa
     assert n == 1
     with pg_session_factory() as s:
         assert s.get(Reference, rid).citekey == "smith2021"
+
+
+def test_reconcile_citekeys_repairs_nothing_on_a_soft_deleted_workspace(
+    pg_session_factory, tmp_path
+):
+    """references.citekey is user-visible. A dead workspace must not be mutated."""
+    wsid = _make_ws(pg_session_factory)
+    ref_id = _seed_ref(pg_session_factory, wsid, citekey=None)
+    repo_dir = tmp_path / "repo"
+    _write_ledger(
+        repo_dir, [_row(ev_id="ev-aaaaaa", citekey="smith2021", reference_id=str(ref_id))]
+    )
+
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, wsid)
+        ws.soft_deleted_at = datetime.now(UTC)
+        s.commit()
+
+    repaired = reconcile_workspace_citekeys(pg_session_factory, wsid, repo_dir)
+
+    assert repaired == 0
+    with pg_session_factory() as s:
+        assert s.get(Reference, ref_id).citekey is None, (
+            "a dead workspace's user-visible column was mutated"
+        )
+
+
+def test_reconcile_citekeys_waits_for_the_commit_mutex_key(pg_session_factory, tmp_path):
+    """The lease gate. Structure and reasoning are identical to
+    test_reconcile_git_drift_waits_for_the_commit_mutex_key in
+    tests/proposal_assist/test_reconcile.py — read that test's docstring; the
+    observation must be made WHILE the holder is in force.
+    """
+    wsid = _make_ws(pg_session_factory)
+    ref_id = _seed_ref(pg_session_factory, wsid, citekey=None)
+    repo_dir = tmp_path / "repo"
+    _write_ledger(
+        repo_dir, [_row(ev_id="ev-aaaaaa", citekey="smith2021", reference_id=str(ref_id))]
+    )
+
+    done = threading.Event()
+
+    def _reconcile():
+        try:
+            reconcile_workspace_citekeys(pg_session_factory, wsid, repo_dir)
+        finally:
+            done.set()
+
+    holder = pg_session_factory()
+    observed: list[str | None] = []
+    t = threading.Thread(target=_reconcile)
+    try:
+        holder.execute(
+            text("SELECT pg_advisory_xact_lock(:k)"), {"k": commit_mutex_key(wsid)}
+        )
+        t.start()
+        time.sleep(1.5)
+        with pg_session_factory() as probe:
+            observed.append(probe.get(Reference, ref_id).citekey)
+    finally:
+        holder.rollback()
+        holder.close()
+        assert done.wait(timeout=30), "reconcile never finished"
+        t.join(timeout=5)
+
+    assert observed == [None], (
+        f"while the commit-mutex key was held exclusively the citekey was already "
+        f"{observed!r} — reconcile did not take the shared lease"
+    )
+    with pg_session_factory() as s:
+        assert s.get(Reference, ref_id).citekey == "smith2021"
+
+
+def test_reconcile_citekeys_still_repairs_a_live_workspace(pg_session_factory, tmp_path):
+    """Regression guard: the fence must not break the case reconcile exists for."""
+    wsid = _make_ws(pg_session_factory)
+    ref_id = _seed_ref(pg_session_factory, wsid, citekey=None)
+    repo_dir = tmp_path / "repo"
+    _write_ledger(
+        repo_dir, [_row(ev_id="ev-aaaaaa", citekey="smith2021", reference_id=str(ref_id))]
+    )
+
+    repaired = reconcile_workspace_citekeys(pg_session_factory, wsid, repo_dir)
+    assert repaired == 1
+    with pg_session_factory() as s:
+        assert s.get(Reference, ref_id).citekey == "smith2021"

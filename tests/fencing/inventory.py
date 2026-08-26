@@ -178,6 +178,10 @@ FENCING_IMPORT_FILES: frozenset[str] = frozenset({
     "proposal_assist/editing/save.py",
     "proposal_assist/citations/core.py",
     "proposal_assist/phases/setup.py",
+    # Reconcile fence (2026-08-25 Task 1) — git-drift backfill fenced with Primitive C
+    # (shared lease) + Primitive A (live_at_generation) so it cannot write into a
+    # soft-deleted workspace.
+    "proposal_assist/reconcile.py",
 })
 
 #: Extra declared keys, preserved verbatim across regeneration — they are what

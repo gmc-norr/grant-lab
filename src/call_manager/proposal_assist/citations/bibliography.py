@@ -578,7 +578,7 @@ def build_bibliography(
     workspace_id,
     style: str,
     repo_dir,
-    commit: bool = True,
+    commit: bool = False,
 ) -> dict:
     """Render the cited references into a formatted bibliography (fail-closed).
 
@@ -590,11 +590,13 @@ def build_bibliography(
     canonical column is still NULL. Only marker-present citekeys are rendered.
 
     ``commit`` optionally writes the result to ``bibliography.md`` (a separate git
-    artifact, NEVER merged into proposal.md). NOTE: no production caller currently
-    passes ``commit=True`` — the bibliography is a DERIVED artifact, so the MCP
-    tool and the composed-export route both render with ``commit=False`` and
-    consume the returned text (a persisted snapshot would only drift). The write
-    path is retained + unit-tested for optional reuse.
+    artifact, NEVER merged into proposal.md). ``commit`` defaults to False because
+    the write path calls ``write_and_commit_files`` with NO commit mutex and NO
+    lifecycle generation — it is an unfenced git write, and this default does not
+    change that, only who opts into it. The only current production callers pass
+    ``commit=False`` explicitly (export.py, tools/audit.py); the default matches
+    them so that omitting the keyword cannot produce an unfenced commit. Any future
+    caller that genuinely needs to persist must fence this function first.
 
     Returns ``{"bibliography_md", "citekey_count", "commit_sha"}`` — ``commit_sha``
     is the new commit's SHA when ``commit`` is True, else None. (The MCP tool
