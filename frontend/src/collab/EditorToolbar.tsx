@@ -2,7 +2,8 @@
 // @tiptap/core command against the hand-rolled schema's snake_case names —
 // StarterKit's toggleBulletList/toggleBlockquote/toggleHeading DO NOT EXIST
 // here. See docs/superpowers/specs/2026-08-26-editor-toolbar-design.md.
-import { Button, Divider, Group, NativeSelect } from "@mantine/core";
+import { Button, Divider, Group, NativeSelect, Popover, Text, TextInput } from "@mantine/core";
+import { useState } from "react";
 import type { Editor } from "@tiptap/core";
 import type { ReactNode } from "react";
 
@@ -33,6 +34,13 @@ const MARKS: { name: string; label: string; title: string }[] = [
   { name: "strikethrough", label: "S", title: "Strikethrough (Ctrl+Shift+S)" },
   { name: "code", label: "</>", title: "Inline code" },
 ];
+
+/** Only these schemes may be written into the document.
+ *
+ * The href goes verbatim into markdown that is committed to git and rendered
+ * later, so a `javascript:` URL would survive the round trip. Allowlist, never
+ * blocklist. */
+const SAFE_SCHEME = /^(https?:\/\/|mailto:)/i;
 
 function currentBlock(editor: Editor): string {
   for (const level of [1, 2, 3, 4, 5, 6]) {
@@ -65,6 +73,30 @@ export function EditorToolbar(props: EditorToolbarProps) {
     }
     const level = Number(value.slice(1));
     editor.chain().focus().setNode("heading", { level }).run();
+  };
+
+  const [linkOpen, setLinkOpen] = useState(false);
+  const [linkHref, setLinkHref] = useState("");
+  const [linkError, setLinkError] = useState(false);
+  const selectionEmpty = editor.state.selection.empty;
+
+  const applyLink = () => {
+    const href = linkHref.trim();
+    if (!SAFE_SCHEME.test(href)) {
+      setLinkError(true);
+      return;
+    }
+    setLinkError(false);
+    editor.chain().focus().setMark("link", { href }).run();
+    setLinkOpen(false);
+    setLinkHref("");
+  };
+
+  const removeLink = () => {
+    editor.chain().focus().unsetMark("link").run();
+    setLinkOpen(false);
+    setLinkHref("");
+    setLinkError(false);
   };
 
   return (
@@ -140,6 +172,49 @@ export function EditorToolbar(props: EditorToolbarProps) {
       >
         —
       </Button>
+      <Popover opened={linkOpen} onChange={setLinkOpen} position="bottom" withArrow withinPortal={false} keepMounted>
+        <Popover.Target>
+          <Button
+            size="compact-xs"
+            variant={editor.isActive("link") ? "filled" : "default"}
+            data-testid="tb-link"
+            aria-label="Link"
+            title="Link"
+            disabled={!canWrite || selectionEmpty}
+            onClick={() => setLinkOpen((o) => !o)}
+          >
+            🔗
+          </Button>
+        </Popover.Target>
+        <Popover.Dropdown>
+          <Group gap="xs" align="flex-end">
+            <TextInput
+              size="xs"
+              label="URL"
+              placeholder="https://…"
+              data-testid="tb-link-input"
+              value={linkHref}
+              onChange={(e) => setLinkHref(e.currentTarget.value)}
+            />
+            <Button size="compact-xs" data-testid="tb-link-apply" onClick={applyLink}>
+              Apply
+            </Button>
+            <Button
+              size="compact-xs"
+              variant="default"
+              data-testid="tb-link-remove"
+              onClick={removeLink}
+            >
+              Remove
+            </Button>
+          </Group>
+          {linkError && (
+            <Text size="xs" c="red" mt="xs" data-testid="tb-link-error">
+              Only http://, https:// and mailto: links are allowed.
+            </Text>
+          )}
+        </Popover.Dropdown>
+      </Popover>
       {props.builtins}
       {props.actions}
     </Group>

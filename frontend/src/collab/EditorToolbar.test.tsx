@@ -191,3 +191,66 @@ describe("EditorToolbar — permissions and slots", () => {
     expect(container).toBeEmptyDOMElement();
   });
 });
+
+describe("EditorToolbar — link", () => {
+  it("applies an https href to the selection", () => {
+    const e = mk();
+    mount(e);
+    fireEvent.click(screen.getByTestId("tb-link"));
+    fireEvent.change(screen.getByTestId("tb-link-input"), {
+      target: { value: "https://vinnova.se" },
+    });
+    fireEvent.click(screen.getByTestId("tb-link-apply"));
+    expect(e.getHTML()).toContain('<a href="https://vinnova.se">word</a>');
+  });
+
+  it("accepts mailto:", () => {
+    const e = mk();
+    mount(e);
+    fireEvent.click(screen.getByTestId("tb-link"));
+    fireEvent.change(screen.getByTestId("tb-link-input"), {
+      target: { value: "mailto:a@b.se" },
+    });
+    fireEvent.click(screen.getByTestId("tb-link-apply"));
+    expect(e.getHTML()).toContain('href="mailto:a@b.se"');
+  });
+
+  it("REFUSES a javascript: href and sets no mark", () => {
+    // This one is load-bearing: the href is written verbatim into markdown and
+    // persisted in git, so a javascript: URL would round-trip into the
+    // rendered document.
+    const e = mk();
+    mount(e);
+    fireEvent.click(screen.getByTestId("tb-link"));
+    fireEvent.change(screen.getByTestId("tb-link-input"), {
+      target: { value: "javascript:alert(1)" },
+    });
+    fireEvent.click(screen.getByTestId("tb-link-apply"));
+    expect(e.getHTML()).not.toContain("javascript:");
+    expect(e.getHTML()).not.toContain("<a ");
+    expect(screen.getByTestId("tb-link-error")).toBeInTheDocument();
+  });
+
+  it("removes an existing link", () => {
+    const e = mk('<p><a href="https://x.se">word</a></p>');
+    e.commands.setTextSelection({ from: 1, to: 5 });
+    mount(e);
+    fireEvent.click(screen.getByTestId("tb-link"));
+    fireEvent.click(screen.getByTestId("tb-link-remove"));
+    expect(e.getHTML()).toContain("<p>word</p>");
+    expect(e.getHTML()).not.toContain("<a ");
+  });
+
+  it("is disabled with an empty selection (a link mark needs a range)", () => {
+    const e = new Editor({ extensions: collabExtensions, content: "<p>word</p>" });
+    e.commands.setTextSelection({ from: 3, to: 3 });
+    mount(e);
+    expect(screen.getByTestId("tb-link")).toBeDisabled();
+  });
+
+  it("is disabled when canWrite is false", () => {
+    const e = mk();
+    mount(e, false);
+    expect(screen.getByTestId("tb-link")).toBeDisabled();
+  });
+});
