@@ -58,6 +58,27 @@ export function SpecPanel({ id }: { id: string }) {
     );
   }
   const lockedOn = locked_at ? new Date(locked_at).toLocaleDateString() : "";
+  const coherenceActions = (
+    <>
+      <Button
+        size="xs"
+        disabled={checking || startCoherence.isPending}
+        onClick={() => startCoherence.mutate()}
+      >
+        {checking ? "Checking coherence…" : "Check coherence"}
+      </Button>
+      {runStatus === "completed" && coherence.data && (
+        <Text role="status" size="sm" c="dimmed">
+          Last check: {coherence.data.n_proposals} proposal(s)
+        </Text>
+      )}
+      {runStatus === "failed" && (
+        <Text role="status" size="sm" c="red">
+          {coherence.data?.error ?? "Coherence check failed."}
+        </Text>
+      )}
+    </>
+  );
   return (
     <Stack gap="sm">
       {locked && (
@@ -79,47 +100,32 @@ export function SpecPanel({ id }: { id: string }) {
           )}
         </Group>
       )}
-      <Group gap="sm" align="center">
-        <Button
-          size="xs"
-          disabled={checking || startCoherence.isPending}
-          onClick={() => startCoherence.mutate()}
-        >
-          {checking ? "Checking coherence…" : "Check coherence"}
-        </Button>
-        {runStatus === "completed" && coherence.data && (
-          <Text role="status" size="sm" c="dimmed">
-            Last check: {coherence.data.n_proposals} proposal(s)
-          </Text>
-        )}
-        {runStatus === "failed" && (
-          <Text role="status" size="sm" c="red">
-            {coherence.data?.error ?? "Coherence check failed."}
-          </Text>
-        )}
-      </Group>
       {spec.data.collab_enabled ? (
         <CollabEditor
           key={`collab-spec:${id}`}
           workspaceId={id}
           artifact="spec"
           canWrite={spec.data.can_write}
+          actions={coherenceActions}
         />
       ) : (
-        <ArtifactSectionEditor
-          // Remount on workspace change so index-keyed buffers / peek / selection never
-          // leak across workspaces (a param nav keeps Cockpit + this editor mounted).
-          key={`spec:${id}`}
-          workspaceId={id}
-          queryKey={["spec", id]}
-          head={head}
-          canEdit={can_edit}
-          sections={sections}
-          save={save}
-          refetch={spec.refetch}
-          citations={false}
-          fullViewLabel="Full spec"
-        />
+        <>
+          <Group gap="sm" align="center">{coherenceActions}</Group>
+          <ArtifactSectionEditor
+            // Remount on workspace change so index-keyed buffers / peek / selection never
+            // leak across workspaces (a param nav keeps Cockpit + this editor mounted).
+            key={`spec:${id}`}
+            workspaceId={id}
+            queryKey={["spec", id]}
+            head={head}
+            canEdit={can_edit}
+            sections={sections}
+            save={save}
+            refetch={spec.refetch}
+            citations={false}
+            fullViewLabel="Full spec"
+          />
+        </>
       )}
     </Stack>
   );
