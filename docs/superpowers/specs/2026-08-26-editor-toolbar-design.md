@@ -124,8 +124,32 @@ type CollabEditorProps = {
 ```
 
 `DraftPanel` passes its `Export ▾` menu as `actions`; `SpecPanel` passes its
-`Check coherence` button. Neither panel keeps a separate row. The editor stays
-ignorant of what those actions do.
+`Check coherence` button. The editor stays ignorant of what those actions do.
+
+**Each panel must keep its own row for the two states where the slot cannot
+render** (Sol review finding 1, confirmed):
+
+1. **The legacy fallback.** Both panels render their action row *outside* the
+   `collab_enabled ? <CollabEditor/> : <ArtifactSectionEditor/>` branch, so it
+   serves the legacy editor too. Passing it only as `actions` would silently
+   remove Export whenever collab is off.
+2. **While connecting.** `CollabEditor` returns a bare `Connecting…` div until
+   `doc`, `provider` and `me.user` all resolve (`CollabEditor.tsx:41-47`) — it
+   never reaches `CollabEditorInner`, so the slot is not rendered at all.
+   Export would blink out of existence on every mount.
+
+The panel therefore builds the action node **once** and renders it in one of two
+places: inside `actions` when collab is enabled *and* connected, in its own
+`<Group>` otherwise. Same node, two positions.
+
+**Also move the status messages, not just the buttons** (finding 6, confirmed):
+the current rows also render `exportMsg` (`DraftPanel.tsx:59-63`) and the
+completed/failed coherence text (`SpecPanel.tsx:90-99`). These travel with their
+button — they are that action's feedback and are useless anywhere else.
+
+The prop is named `actions`. A reviewer suggested `toolbarActions`; `actions` is
+kept because the prop already sits on a component whose only bar is the toolbar,
+and the doc comment states where it renders.
 
 ### Layout
 
@@ -147,6 +171,11 @@ re-render on selection and document change: reuse the existing
 `useEditorTick(editor)` hook that `TableControls.tsx` already uses for exactly
 this. Do not add a new subscription mechanism.
 
+**It is currently private** — `TableControls.tsx:11` declares
+`function useEditorTick` with no `export` (finding 7). Extract it to
+`frontend/src/collab/useEditorTick.ts` and have both components import it,
+rather than duplicating the hook or exporting it from a component module.
+
 ### The block-type dropdown
 
 A Mantine `Select` with seven entries (not `Menu`: `Select` shows the current
@@ -158,8 +187,29 @@ heading calls `setNode("paragraph")`, which converts the block back — this is
 the only way to un-heading a line, since there is no markdown "unheading" you
 can type.
 
-When the cursor is in a block that is neither (a code block, a table cell), the
-dropdown shows no selection and applying a value still works via `setNode`.
+**Every option must be gated on `editor.can().setNode(...)`, and this is not
+defensive politeness — it prevents data loss.** Measured by executing
+`setNode("heading", { level: 2 })` in each context:
+
+| Context | `can()` | `commands.setNode()` | Result |
+|---|---|---|---|
+| paragraph | true | true | `<h2 level="2">plain</h2>` |
+| inside a blockquote | true | true | `<blockquote><h2 …>quoted</h2></blockquote>` |
+| table cell | false | **false** | unchanged — a safe no-op |
+| **list item** | **false** | **true** | **`<h2 level="2">item</h2>` — the `<ul><li>` wrapper is GONE** |
+
+`table_cell` and `table_header` declare `content: "paragraph"` and `list_item`
+declares `content: "paragraph block*"` (`schema.ts:93`, `:116-122`), so a
+heading is invalid in both. But the two behave differently and only one is
+safe: in a table cell the command refuses, while **in a list item the command
+returns `true` and lifts the content out of the list**, destroying the list
+structure without any error.
+
+So the command does not protect the document. The dropdown must disable a
+heading option when `editor.can().setNode("heading", { level })` is false, and
+disable `Body text` when `editor.can().setNode("paragraph")` is false. A test
+must cover the list-item case specifically — it is the one that silently eats
+structure.
 
 ### Link
 
@@ -197,12 +247,28 @@ Mechanism: on selection change, compute the rectangle from
 anchor `<div>` at it, and render the existing toolbar content inside a Mantine
 `Popover` attached to that anchor.
 
-The existing hide conditions are unchanged and stay correct:
+**One `coordsAtPos` sample is not enough** (finding 5). Those coordinates are
+viewport-relative and go stale whenever the content moves without the selection
+changing — scrolling the editor's container, resizing the cockpit's resizable
+pane, or a reflow that changes line wrapping. Slice 2 must recompute on the
+editor's `transaction` event **and** on `scroll` of the nearest scrollable
+ancestor **and** on a `ResizeObserver` over the editor element, tearing all
+three down on unmount. Its tests must cover a scroll and a pane resize, not just
+a selection change.
 
-- empty selection → no claim → nothing shown;
-- selection inside a heading → `deriveClaimAnchor` skips headings, so no anchor;
-- non-unique anchor text within the section → `anchorable` false, so `Ask` and
-  `Edit` are disabled (the popup still appears, with `Cite` available).
+The existing behaviour is unchanged by this slice. **Revision 2 corrects two
+descriptions that were wrong** (Sol review findings 2 and 4, both confirmed
+against the code):
+
+| Selection | What actually happens |
+|---|---|
+| empty | `deriveClaimAnchor` returns `null` → nothing rendered (`selectionAnchor.ts:26`) |
+| inside a heading | a claim **IS** returned, with `headingOnly: true` (`selectionAnchor.ts:32-38`). The popup **appears**; `Ask` is enabled if anchorable, `Edit` is disabled because `writeReady = settled && anchorable && !claim.headingOnly` |
+| anchor text not unique in the section | `anchorable` false → `askReady` false **and** `writeReady` false. `Ask`, `Edit` **and `Cite`** are all disabled — `Cite` is `disabled={!writeReady}` at `TiptapSelectionToolbar.tsx:169` |
+
+The earlier draft claimed headings produce no anchor, and that `Cite` stayed
+available on a non-unique anchor. Both were false. Slice 2 changes placement
+only, so these are the behaviours its tests must assert.
 
 ## Testing
 

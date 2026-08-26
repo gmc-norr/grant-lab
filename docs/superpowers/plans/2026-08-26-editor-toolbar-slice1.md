@@ -34,6 +34,12 @@ Vitest 2.0.5, pnpm.
   check before each commit: `pnpm exec tsc --noEmit` and `pnpm vitest run`.
 - **`cd frontend` does not persist between tool calls.** Use absolute paths or
   re-`cd` in every command.
+- **The block-type dropdown MUST gate every option on `editor.can().setNode(...)`.**
+  This prevents data loss, not just an invalid state. Measured by execution:
+  inside a **list item**, `can()` returns `false` but `commands.setNode("heading",…)`
+  returns **`true` and lifts the text out of the list**, destroying the `<ul><li>`
+  wrapper with no error. Inside a table cell the command correctly refuses. The
+  command does not protect the document; the gate does.
 - Do not weaken, delete, or skip any existing test.
 
 ## The command table — measured, not assumed
@@ -264,6 +270,56 @@ describe("EditorToolbar — block type dropdown", () => {
   });
 });
 
+describe("EditorToolbar — block type is gated on can()", () => {
+  it("DESTROYS NOTHING in a list item: the heading options are disabled", () => {
+    // Measured: inside a list item, editor.can().setNode("heading") is false but
+    // commands.setNode("heading") returns TRUE and lifts the text out of the
+    // list, silently destroying the <ul><li> wrapper. The gate is the only
+    // thing standing between the user and that data loss.
+    const e = new Editor({ extensions: collabExtensions, content: "<ul><li><p>item</p></li></ul>" });
+    e.commands.setTextSelection(4);
+    mount(e);
+    const select = screen.getByTestId("tb-blocktype") as HTMLSelectElement;
+    const h2 = Array.from(select.options).find((o) => o.value === "h2")!;
+    expect(h2.disabled).toBe(true);
+    // And if it were somehow chosen, the list must survive.
+    fireEvent.change(select, { target: { value: "h2" } });
+    expect(e.getHTML()).toContain("<ul>");
+    expect(e.getHTML()).toContain("<li>");
+  });
+
+  it("disables heading options inside a table cell", () => {
+    const e = new Editor({
+      extensions: collabExtensions,
+      content: "<table><tr><td><p>cell</p></td></tr></table>",
+    });
+    e.commands.setTextSelection(4);
+    mount(e);
+    const select = screen.getByTestId("tb-blocktype") as HTMLSelectElement;
+    expect(Array.from(select.options).find((o) => o.value === "h2")!.disabled).toBe(true);
+  });
+
+  it("leaves heading options ENABLED in an ordinary paragraph", () => {
+    // Guard against 'fix' by disabling everything everywhere.
+    const e = mk();
+    mount(e);
+    const select = screen.getByTestId("tb-blocktype") as HTMLSelectElement;
+    expect(Array.from(select.options).find((o) => o.value === "h2")!.disabled).toBe(false);
+  });
+
+  it("leaves heading options ENABLED inside a blockquote", () => {
+    // Measured: a heading IS valid inside a blockquote; can() returns true.
+    const e = new Editor({
+      extensions: collabExtensions,
+      content: "<blockquote><p>quoted</p></blockquote>",
+    });
+    e.commands.setTextSelection(3);
+    mount(e);
+    const select = screen.getByTestId("tb-blocktype") as HTMLSelectElement;
+    expect(Array.from(select.options).find((o) => o.value === "h2")!.disabled).toBe(false);
+  });
+});
+
 describe("EditorToolbar — permissions and slots", () => {
   it("every control is disabled when canWrite is false", () => {
     const e = mk();
@@ -355,7 +411,19 @@ export function EditorToolbar(props: EditorToolbarProps) {
   useEditorTick(editor);
   if (!editor) return null;
 
+  // Gate EVERY option on can(). This is not politeness: measured, inside a list
+  // item can() is false but commands.setNode("heading") returns TRUE and lifts
+  // the text out of the list, destroying the <ul><li>. The command will not
+  // protect the document — only this check does.
+  const canSet = (value: string) =>
+    value === "p"
+      ? editor.can().setNode("paragraph")
+      : editor.can().setNode("heading", { level: Number(value.slice(1)) });
+
+  const options = BLOCK_OPTIONS.map((o) => ({ ...o, disabled: !canSet(o.value) }));
+
   const setBlock = (value: string) => {
+    if (!canSet(value)) return; // belt and braces: the option is already disabled
     if (value === "p") {
       editor.chain().focus().setNode("paragraph").run();
       return;
@@ -372,7 +440,7 @@ export function EditorToolbar(props: EditorToolbarProps) {
         aria-label="Block type"
         disabled={!canWrite}
         value={currentBlock(editor)}
-        data={BLOCK_OPTIONS}
+        data={options}
         onChange={(e) => setBlock(e.currentTarget.value)}
       />
       <Divider orientation="vertical" />
@@ -542,8 +610,22 @@ Restore:
 git checkout -- frontend/src/collab/EditorToolbar.tsx
 ```
 
-This is the mutation that matters: it is the exact mistake a developer familiar
-with Tiptap would make, and it must not be able to pass.
+This is the mutation that matters most: it is the exact mistake a developer
+familiar with Tiptap would make, and it must not be able to pass.
+
+**Second mutation — remove the `can()` gate.** Change
+`const options = BLOCK_OPTIONS.map((o) => ({ ...o, disabled: !canSet(o.value) }));`
+to `const options = BLOCK_OPTIONS;` and delete the `if (!canSet(value)) return;`
+line from `setBlock`.
+
+Run the same command. Expected: **`DESTROYS NOTHING in a list item`** reports
+FAILED, and the failure shows the `<ul><li>` gone from the HTML. That is the
+data-loss path, reproduced.
+
+Restore:
+```bash
+git checkout -- frontend/src/collab/EditorToolbar.tsx
+```
 
 ---
 
@@ -788,15 +870,32 @@ git checkout -- frontend/src/collab/EditorToolbar.tsx
 - Consumes: `CollabEditor`'s `actions?: React.ReactNode` prop, added in Task 1.
 - Produces: nothing.
 
-**THE TRAP IN THIS TASK — read before editing.** In both panels the action row
-sits **outside** the `collab_enabled ? <CollabEditor/> : <ArtifactSectionEditor/>`
-branch, so it currently serves *both* editors. Moving it into `actions` without
-care **silently removes Export from the legacy fallback** — a real regression
-that no existing test covers, because the fallback path is only taken when
-collab is off.
+**TWO TRAPS IN THIS TASK — read before editing.**
 
-The fix: extract the row into a local variable and render it in **one of two
-places** depending on the branch. Same node, two positions.
+**Trap 1 — the legacy fallback.** In both panels the action row sits **outside**
+the `collab_enabled ? <CollabEditor/> : <ArtifactSectionEditor/>` branch, so it
+currently serves *both* editors. Moving it into `actions` without care
+**silently removes Export from the legacy fallback** — a real regression that no
+existing test covers, because that path is only taken when collab is off.
+
+**Trap 2 — the connecting state.** `CollabEditor` returns a bare `Connecting…`
+div until `doc`, `provider` and `me.user` all resolve
+(`CollabEditor.tsx:41-47`). It never reaches `CollabEditorInner`, so **the
+`actions` slot is not rendered at all while connecting** — Export would blink
+out of existence on every mount. The panel cannot see that state directly, so it
+must not depend on it: `actions` is a bonus placement, never the only one.
+
+The fix for both: extract the row into a local variable and render it in **one
+of two places** — inside `actions` when collab is enabled, and in its own
+`<Group>` otherwise. Same node, two positions. The connecting flash is accepted
+as a brief duplicate-free gap only if the panel's own row covers it; if you
+cannot arrange that, keep the panel row **always** and treat `actions` as
+additive. State which you chose in the task report.
+
+**Also move the status text, not just the buttons.** The current rows render
+`exportMsg` (`DraftPanel.tsx:59-63`) and the completed/failed coherence text
+(`SpecPanel.tsx:90-99`). These are that action's feedback and must travel with
+their button, or the user gets a button whose result appears nowhere.
 
 - [ ] **Step 1: Write the failing test**
 
