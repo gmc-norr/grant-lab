@@ -7,6 +7,7 @@ import { useState } from "react";
 import type { Editor } from "@tiptap/core";
 import type { ReactNode } from "react";
 
+import styles from "./EditorToolbar.module.css";
 import { useEditorTick } from "./useEditorTick";
 
 export type EditorToolbarProps = {
@@ -102,7 +103,7 @@ export function EditorToolbar(props: EditorToolbarProps) {
   };
 
   return (
-    <Group gap="xs" wrap="wrap" role="toolbar" aria-label="Formatting">
+    <Group gap="xs" wrap="wrap" role="toolbar" aria-label="Formatting" className={styles.toolbar}>
       <NativeSelect
         size="xs"
         data-testid="tb-blocktype"
