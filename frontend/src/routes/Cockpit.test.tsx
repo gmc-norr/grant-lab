@@ -225,6 +225,24 @@ it("renders the Outline from sections", async () => {
   expect(screen.getByRole("button", { name: /preamble/i })).toBeInTheDocument();
 });
 
+it("puts the artifact inside a scroll container, not directly in the Panel", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(draftPayload(true) as never);
+  renderCockpit();
+  await screen.findByRole("button", { name: /Methods/ });
+  // react-resizable-panels writes `overflow: hidden` as an INLINE style on the
+  // Panel element, which beats any class rule — so the artifact cannot live
+  // directly in the Panel and still scroll. It must sit inside .editorScroll,
+  // a plain child the library does not style. Measured on the Panel element:
+  //   flex-basis: 0px; flex-grow: 1; flex-shrink: 1; overflow: hidden
+  const panel = document.querySelector("[data-panel]") as HTMLElement;
+  expect(panel.style.overflow).toBe("hidden"); // pins WHY the wrapper exists
+  const scroll = screen.getByTestId("editor-scroll");
+  expect(panel.contains(scroll)).toBe(true);
+  // and the artifact really is inside it, not a sibling above it
+  const editor = document.querySelector(".cm-content") as HTMLElement;
+  expect(scroll.contains(editor)).toBe(true);
+});
+
 it("separates the editor and the bottom panel with a vertical resize handle", async () => {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue(draftPayload(true) as never);
   renderCockpit();

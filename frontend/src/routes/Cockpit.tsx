@@ -84,10 +84,12 @@ export function Cockpit() {
             <Tabs.Tab value="review">Panel review</Tabs.Tab>
           </Tabs.List>
         </Tabs>
-        {tab === "draft" && <DraftPanel id={id} openPeek={openPeek} />}
-        {tab === "spec" && <SpecPanel id={id} />}
-        {tab === "scorecard" && <ScorecardPanel id={id} onNavigate={onNavigate} />}
-        {tab === "review" && <ReviewPanel id={id} />}
+        <div className={styles.editorScroll} data-testid="editor-scroll">
+          {tab === "draft" && <DraftPanel id={id} openPeek={openPeek} />}
+          {tab === "spec" && <SpecPanel id={id} />}
+          {tab === "scorecard" && <ScorecardPanel id={id} onNavigate={onNavigate} />}
+          {tab === "review" && <ReviewPanel id={id} />}
+        </div>
       </Panel>
       <PanelResizeHandle className={styles.vHandle} aria-label="Resize panel" />
       <Panel
