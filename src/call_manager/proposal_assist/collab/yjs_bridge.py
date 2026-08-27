@@ -343,11 +343,41 @@ def apply_pm_section_to_fragment(
             )
         start = starts[section_index]
         end = starts[section_index + 1] if section_index + 1 < len(starts) else len(blocks_json)
+        # NEVER call children.insert(0, …) on a non-empty fragment. In pycrdt
+        # 0.14.0 that APPENDS instead of prepending whenever the existing
+        # children arrived via apply_update from a doc with a LOWER client id —
+        # which is a coin flip on a live room, since client ids are random.
+        # Measured in raw pycrdt (no app code): index 0 is the only affected
+        # index; 1 .. len(children) are correct in both directions.
+        #
+        #   seed_cid=1 replay_cid=2  insert(0) -> ['a','b','c','NEW']   WRONG
+        #   seed_cid=2 replay_cid=1  insert(0) -> ['NEW','a','b','c']   right
+        #
+        # It scrambled ~48% of section replacements whose range starts at block
+        # 0 — every section-1 edit of a document that opens with "## " — and the
+        # checkpoint then committed the scrambled document to git.
+        #
+        # So insert the replacement AFTER the old range and delete the old range
+        # afterwards: `end` is >= 1 whenever the range is non-empty, and the old
+        # blocks are still at [start, end) while we insert, so the delete indices
+        # are unchanged. Untouched sections keep their Yjs identity either way.
+        if blocks and start == 0 and end == 0 and len(fragment.children) > 0:
+            # A pure front-insert of CONTENT into a non-empty fragment is the one
+            # shape this cannot express without insert(0): it must place blocks
+            # before every existing child. `blocks` being empty is not that — it
+            # is a no-op clear of an already-empty preamble, which must stay a
+            # no-op returning b"" (kernel_accept_prose relies on it, see
+            # test_blank_clear_of_already_empty_preamble_is_noop_accept).
+            # Fail loudly rather than silently scramble the document.
+            raise SectionMapDivergenceError(
+                "cannot insert at the front of a non-empty document: "
+                "pycrdt 0.14.0 cannot prepend to a replayed fragment"
+            )
         with doc.transaction():
-            for i in range(end - 1, start - 1, -1):   # delete range back-to-front
+            for offset, block in enumerate(blocks):   # insert AFTER the old range
+                _insert_node(fragment, end + offset, block)
+            for i in range(end - 1, start - 1, -1):   # then delete it, back-to-front
                 del fragment.children[i]
-            for offset, block in enumerate(blocks):    # insert new blocks at `start`
-                _insert_node(fragment, start + offset, block)
     finally:
         doc.unobserve(sub)
     return captured[-1] if captured else b""
