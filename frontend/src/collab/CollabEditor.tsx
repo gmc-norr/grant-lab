@@ -15,6 +15,7 @@ import { SaveVersionButton } from "./SaveVersionButton";
 import { InsertTableButton, TableMenu } from "./TableControls";
 import { TiptapSelectionToolbar } from "./TiptapSelectionToolbar";
 import { useCollabDoc } from "./useCollabDoc";
+import { useSectionJump } from "./useSectionJump";
 
 type CollabEditorProps = {
   workspaceId: string;
@@ -89,6 +90,10 @@ function CollabEditorInner(
     },
     [props.doc], // editor keyed ONLY on the doc — NOT rebuilt on identity change
   );
+
+  // Scroll to whichever section the sidebar Outline asks for. Lives here, next
+  // to the editor that owns the document — the sidebar cannot reach into it.
+  useSectionJump(editor);
 
   // Keep identity fresh if the user renames themselves mid-session (a cheap no-op
   // otherwise). The mount gate — not this effect — is now the primary mechanism.
