@@ -1,3 +1,4 @@
+import pycrdt
 import pytest
 
 from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
@@ -202,3 +203,69 @@ def test_fence_flip_divergence_raises():
     # If the divergence DOES appear in a future build, the guard must fire.
     with pytest.raises(SectionMapDivergenceError):
         apply_pm_section_to_fragment(doc, section_index=1, blocks=_blocks_of("## B\n\nX.\n"))
+
+
+# ---------------------------------------------------------------------------
+# Regression: the REPLAYED-room shape.
+#
+# Every test above builds the doc directly with pm_json_to_ydoc, so the
+# fragment's children were created by the same Doc that then edits them. A
+# production room is never that: hydrate.py seeds a doc, and the room replays
+# that update into a DIFFERENT Doc with its own client id.
+#
+# In pycrdt 0.14.0, children.insert(0, x) APPENDS instead of prepending on such
+# a replayed fragment whenever the seed's client id is LOWER than the room's.
+# Client ids are random, so this scrambled ~48% of real section-1 edits on a
+# document opening with "## " — and the checkpoint committed the result to git.
+# A fresh-doc test cannot fail on it; only a replayed one can.
+# ---------------------------------------------------------------------------
+
+_HEADING_FIRST = "## Aims\n\nOriginal aims.\n\n## Approach\n\nOriginal approach.\n"
+
+
+def _replayed_room(markdown: str, *, seed_client_id: int, room_client_id: int):
+    """Mirror hydrate.py + canonical.build_doc: seed one Doc, replay into another.
+
+    The client ids are pinned so the ordering that triggers the pycrdt bug is
+    exercised on purpose rather than half the time.
+    """
+    seed = pm_json_to_ydoc(markdown_to_pm(markdown), client_id=seed_client_id)
+    room = pycrdt.Doc(client_id=room_client_id)
+    room.apply_update(seed.get_update())
+    return room
+
+
+@pytest.mark.parametrize("seed_cid,room_cid", [(1, 2), (2, 1), (7, 7)])
+def test_replace_first_section_of_a_replayed_room_keeps_order(seed_cid, room_cid):
+    # seed_cid < room_cid is the ordering that used to append instead of
+    # prepend; the other two are included so a fix that only works one way
+    # cannot pass.
+    room = _replayed_room(_HEADING_FIRST, seed_client_id=seed_cid, room_client_id=room_cid)
+    apply_pm_section_to_fragment(
+        room, section_index=1, blocks=_blocks_of("## Aims\n\nEDITED aims.\n")
+    )
+    out = pm_to_markdown(ydoc_to_pm_json(room))
+    assert out == "## Aims\n\nEDITED aims.\n\n## Approach\n\nOriginal approach.\n", out
+    secs = split_sections(out)
+    assert [s.heading for s in secs] == ["", "Aims", "Approach"]
+
+
+def test_replayed_room_preamble_edit_keeps_order():
+    # start=0 but end>0 (the document HAS a preamble), so the replacement is
+    # inserted after the old range and the guard does not apply.
+    room = _replayed_room(_DOC, seed_client_id=1, room_client_id=9)
+    apply_pm_section_to_fragment(room, section_index=0, blocks=_blocks_of("New preamble.\n"))
+    secs = split_sections(pm_to_markdown(ydoc_to_pm_json(room)))
+    assert "New preamble." in secs[0].text
+    assert [s.heading for s in secs] == ["", "A", "B"]
+
+
+def test_front_insert_into_empty_preamble_raises_rather_than_scrambling():
+    # start==0 AND end==0: a pure prepend, which pycrdt cannot do reliably on a
+    # replayed fragment. The kernel never asks for this (it writes the section
+    # containing the edited text, and an empty preamble contains none), but the
+    # old code answered it correctly only ~48% of the time and silently
+    # scrambled the document otherwise. Failing loudly is the contract.
+    room = _replayed_room(_HEADING_FIRST, seed_client_id=1, room_client_id=2)
+    with pytest.raises(SectionMapDivergenceError, match="front of a non-empty document"):
+        apply_pm_section_to_fragment(room, section_index=0, blocks=_blocks_of("Sneaky.\n"))
