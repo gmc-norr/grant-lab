@@ -5,19 +5,8 @@
 // Tiptap v3 menus require.
 import { Button, Group, Paper } from "@mantine/core";
 import type { Editor } from "@tiptap/core";
-import { useEffect, useReducer } from "react";
 
-/** Re-render on every editor transaction so isActive()/can() stay fresh. */
-function useEditorTick(editor: Editor | null) {
-  const [, bump] = useReducer((n: number) => n + 1, 0);
-  useEffect(() => {
-    if (!editor) return;
-    editor.on("transaction", bump);
-    return () => {
-      editor.off("transaction", bump);
-    };
-  }, [editor]);
-}
+import { useEditorTick } from "./useEditorTick";
 
 /** True when the selection head sits in the FIRST row of its table. */
 function inHeaderRow(editor: Editor): boolean {

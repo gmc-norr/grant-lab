@@ -40,28 +40,30 @@ export function DraftPanel({ id, openPeek }: { id: string; openPeek?: { ev: stri
     );
   }
   const { head, can_edit, sections } = draft.data;
+  const exportActions = (
+    <>
+      <Menu position="bottom-start">
+        <Menu.Target>
+          <Button variant="default" size="xs">
+            Export ▾
+          </Button>
+        </Menu.Target>
+        <Menu.Dropdown>
+          <Menu.Item onClick={() => void onExport("raw")}>Markdown</Menu.Item>
+          <Menu.Item onClick={() => void onExport("composed")}>
+            Markdown + citations & bibliography
+          </Menu.Item>
+        </Menu.Dropdown>
+      </Menu>
+      {exportMsg && (
+        <Text role="status" size="sm" c="dimmed">
+          {exportMsg}
+        </Text>
+      )}
+    </>
+  );
   return (
     <Stack gap="sm">
-      <Group gap="sm">
-        <Menu position="bottom-start">
-          <Menu.Target>
-            <Button variant="default" size="xs">
-              Export ▾
-            </Button>
-          </Menu.Target>
-          <Menu.Dropdown>
-            <Menu.Item onClick={() => void onExport("raw")}>Markdown</Menu.Item>
-            <Menu.Item onClick={() => void onExport("composed")}>
-              Markdown + citations & bibliography
-            </Menu.Item>
-          </Menu.Dropdown>
-        </Menu>
-        {exportMsg && (
-          <Text role="status" size="sm" c="dimmed">
-            {exportMsg}
-          </Text>
-        )}
-      </Group>
       {draft.data.collab_enabled ? (
         <CollabEditor
           key={`collab-draft:${id}`}
@@ -71,20 +73,24 @@ export function DraftPanel({ id, openPeek }: { id: string; openPeek?: { ev: stri
           head={head}
           sections={sections}
           canEdit={can_edit}
+          actions={exportActions}
         />
       ) : (
-        <ArtifactSectionEditor
-          key={`draft:${id}`}
-          workspaceId={id}
-          queryKey={["draft", id]}
-          head={head}
-          canEdit={can_edit}
-          sections={sections}
-          save={save}
-          refetch={draft.refetch}
-          citations
-          openPeek={openPeek}
-        />
+        <>
+          <Group gap="sm">{exportActions}</Group>
+          <ArtifactSectionEditor
+            key={`draft:${id}`}
+            workspaceId={id}
+            queryKey={["draft", id]}
+            head={head}
+            canEdit={can_edit}
+            sections={sections}
+            save={save}
+            refetch={draft.refetch}
+            citations
+            openPeek={openPeek}
+          />
+        </>
       )}
     </Stack>
   );

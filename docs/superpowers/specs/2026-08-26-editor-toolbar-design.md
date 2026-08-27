@@ -134,13 +134,27 @@ render** (Sol review finding 1, confirmed):
    serves the legacy editor too. Passing it only as `actions` would silently
    remove Export whenever collab is off.
 2. **While connecting.** `CollabEditor` returns a bare `Connecting…` div until
-   `doc`, `provider` and `me.user` all resolve (`CollabEditor.tsx:41-47`) — it
+   `doc`, `provider` and `me.user` all resolve (`CollabEditor.tsx:44`) — it
    never reaches `CollabEditorInner`, so the slot is not rendered at all.
    Export would blink out of existence on every mount.
 
-The panel therefore builds the action node **once** and renders it in one of two
-places: inside `actions` when collab is enabled *and* connected, in its own
-`<Group>` otherwise. Same node, two positions.
+The panel builds the action node **once** and renders it in one of two places:
+inside `actions` when `collab_enabled`, in its own `<Group>` otherwise. Same
+node, two positions.
+
+That covers case 1 but not case 2 — **the panel cannot see the connecting
+state**, so it cannot decide against it. Case 2 is therefore fixed where the
+state actually lives: `CollabEditor`'s early-return branch renders
+`{props.actions}` beside the `Connecting…` text. The action then appears in
+exactly one place in both states, with no duplicate once the editor mounts.
+
+This was built the other way first — `actions` as the only placement, no slot in
+the connecting branch — and Export did vanish on every mount. Three reviews
+passed it, because `DraftPanel.test.tsx` mocks `CollabEditor` as
+`(p) => <div>{p.actions}</div>`: **a mock with no connecting state cannot fail a
+connecting test.** The regression guard is therefore
+`CollabEditor.connecting.test.tsx`, which mocks `useCollabDoc`/`useSession` and
+drives the real component through both reasons for the branch.
 
 **Also move the status messages, not just the buttons** (finding 6, confirmed):
 the current rows also render `exportMsg` (`DraftPanel.tsx:59-63`) and the
