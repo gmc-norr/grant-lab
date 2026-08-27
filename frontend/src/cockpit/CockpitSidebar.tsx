@@ -14,6 +14,7 @@ import { useCockpitNav } from "./cockpitNav";
 import styles from "./CockpitSidebar.module.css";
 import { useEditorDirty } from "./editorStore";
 import { RubricEditor } from "./RubricEditor";
+import { requestSectionJump } from "./sectionJump";
 import { SidebarGroup } from "./SidebarGroup";
 
 // The cockpit's left sidebar (the route's handle.Sidebar). Reads the SAME queries +
@@ -78,7 +79,14 @@ export function CockpitSidebar() {
                 type="button"
                 className={styles.row}
                 aria-current={sec === s.index}
-                onClick={() => navigate({ top_tab: artifact, section_index: s.index })}
+                onClick={() => {
+                  // The URL keeps the active-section STATE (the legacy editor
+                  // reads it, and it drives aria-current); the jump is the
+                  // EVENT, so re-clicking the section you are already on still
+                  // scrolls you back to it. See cockpit/sectionJump.ts.
+                  navigate({ top_tab: artifact, section_index: s.index });
+                  requestSectionJump(s.index);
+                }}
               >
                 <span className={styles.rowLabel}>{s.heading || "preamble"}</span>
                 {dirty.includes(s.index) && (
