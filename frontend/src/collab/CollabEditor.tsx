@@ -1,3 +1,4 @@
+import { Group, Text } from "@mantine/core";
 import Collaboration from "@tiptap/extension-collaboration";
 import { CollaborationCaret } from "@tiptap/extension-collaboration-caret";
 import { EditorContent, useEditor } from "@tiptap/react";
@@ -41,9 +42,22 @@ export function CollabEditor(props: CollabEditorProps) {
   // editable surface waits for identity — normally instant (me is app-shell cached),
   // and the cockpit's auth gate guarantees me resolves for anyone who reaches it.
   if (!doc || !provider || !me?.user) {
+    // The `actions` slot must survive this branch. Both panels pass their
+    // panel-level button (Export on draft, Check coherence on spec) ONLY as
+    // `actions` once collab is on, and neither can see this state — so dropping
+    // the slot here blinks the button out of existence on every mount. Keeping
+    // it renders the action in exactly one place in both states, with no
+    // duplicate once the editor mounts.
+    // Spec: docs/superpowers/specs/2026-08-26-editor-toolbar-design.md (§ "Each
+    // panel must keep its own row…", Sol review finding 1).
     return (
       <div data-collab-status={status} data-testid="collab-connecting">
-        Connecting…
+        <Group gap="sm">
+          <Text size="sm" c="dimmed">
+            Connecting…
+          </Text>
+          {props.actions}
+        </Group>
       </div>
     );
   }
