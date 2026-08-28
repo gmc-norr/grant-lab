@@ -378,10 +378,14 @@ PROVEN_NON_COMMIT: tuple[Fingerprint, ...] = (
         8,
         "List(elts=[Constant(value='git'), Constant(value='cat-file'), Constant(value='-p'), Name(id='sha', ctx=Load())], ctx=Load())",  # noqa: E501
     ),
-    (  # list_commits: Popen(argv) where argv = ["git", "log", ...] — reads history, no write
+    (  # list_commits: Popen(argv) where argv = ["git", "log", ..., "--", pathspec]
+        # — reads history, no write. The optional pathspec is appended after a
+        # literal `--`, so a filename can never be parsed as an option. Offset
+        # moved 29 -> 42 when that pathspec block and its docstring paragraph
+        # went in above the Popen; the call itself is unchanged.
         "call_manager/proposal_assist/citations/gitio.py",
         "list_commits",
-        29,
+        42,
         "Name(id='argv', ctx=Load())",
     ),
 )
