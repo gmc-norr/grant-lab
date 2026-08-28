@@ -24,7 +24,9 @@ pane, exactly as opening a file in VS Code puts it in the editor.
 - **Frontend only.** `git diff --stat <base>..HEAD -- src/` must be empty at every commit.
   Do not run `uv sync`; do not touch the Python environment.
 - **Gates**, from `frontend/`: `pnpm exec tsc --noEmit`, `pnpm vitest run`, `pnpm build`.
-  Baseline at plan time: **`Test Files 116 passed (116)`**, **`Tests 748 passed (748)`**.
+  Baseline at plan time: **`Test Files 116 passed (116)`**, **`Tests 748 passed (748)`** —
+  MEASURED on 2026-08-28 at `79369d5c` by running `cd frontend && pnpm vitest run`, not
+  carried over from an earlier plan. Re-run it before Task 1 and stop if it differs.
 - **vitest's false-pass signature:** `include` is `src/**/*.{test,spec}.{ts,tsx}`. A test
   file outside `src/`, or misnamed, is **silently not collected** — exit 0, all green, zero
   coverage. Judge every run on the printed `Test Files N passed (N)` and
@@ -336,10 +338,10 @@ In `frontend/src/shell/ActivityBar.test.tsx`:
 | --- | --- | --- |
 | 35 | `on the editor route the Current-workspace chip is active, Workspaces is not` | **Rewrite** — see below. |
 | 41 | `hides the current-workspace item outside a cockpit` | **Delete.** The new `shows no workspace band when no workspace is open` covers the same route with the replacement assertion. |
-| 48 | `shows the current-workspace item inside a cockpit and deactivates Calls` | **Rewrite** — see below. |
+| 49 | `shows the current-workspace item inside a cockpit and deactivates Calls` | **Rewrite** — see below. |
 | 65 | `hides the current-workspace item on the cockpit list route` | **Delete.** The new band test uses `/cockpit` and asserts the band is absent. |
 | 70 | `hides the current-workspace item on the create route` | **Rewrite** — keep the `/cockpit/new` route, assert no band. |
-| 108 | `active nav item toggles the sidebar instead of navigating (preserves query state)` | **Rewrite** — click the active workspace icon. |
+| 105 | `active nav item toggles the sidebar instead of navigating (preserves query state)` | **Rewrite** — click the active workspace icon. |
 
 Replace those four with:
 
@@ -363,8 +365,13 @@ it("inside a cockpit the band is present and Calls is not active", () => {
 });
 
 it("shows no workspace band on the create route", () => {
+  // All five and the divider, for the same reason as the /cockpit twin below:
+  // asserting one label passes on an implementation that renders the other four.
   renderWithProviders(<ActivityBar />, { route: "/cockpit/new" });
-  expect(screen.queryByRole("link", { name: "Versions" })).toBeNull();
+  for (const label of ["Outline", "Versions", "References", "Criteria", "Members"]) {
+    expect(screen.queryByRole("link", { name: label })).toBeNull();
+  }
+  expect(screen.queryByTestId("activity-divider")).toBeNull();
 });
 
 it("clicking the ACTIVE workspace icon toggles the pane and keeps the query", () => {
@@ -692,6 +699,11 @@ it("renders ONLY the view the URL asks for", async () => {
   // assertion the accordion cannot satisfy.
   expect(screen.queryByRole("list", { name: "Outline" })).toBeNull();
   expect(screen.queryByRole("button", { name: /Methods/ })).toBeNull();
+  // References is named EXPLICITLY because Step 10 mutates ReferencesPane to
+  // unconditional and expects THIS test to go red. Without this line that
+  // mutation is caught only by `heads EVERY pane` — a different test than the
+  // one the mutation step names.
+  expect(screen.queryByRole("list", { name: "References" })).toBeNull();
 });
 
 it("heads EVERY pane with its own name, and shows no other", async () => {
@@ -728,9 +740,21 @@ it("has no collapsible group chrome left", async () => {
 - [ ] **Step 2b: Run and watch them fail**
 
 Run: `cd frontend && pnpm vitest run src/cockpit/CockpitSidebar.test.tsx`
-Expected: `renders ONLY the view the URL asks for` fails because the Outline list is present
-alongside; `heads EVERY pane` fails on `expected length 5 to be 1` (all five group headers
-render); `has no collapsible group chrome left` fails on a non-zero length.
+Expected — and the first two do NOT fail where you would guess. **There is no
+`role="heading"` anywhere in the sidebar today**: `SidebarGroup` renders its title as
+`<span className={styles.groupTitle}>` inside the header `<button>` (`SidebarGroup.tsx:41`),
+and no pane renders a `Title` or `<h*>`. So:
+
+- `renders ONLY the view the URL asks for` rejects on its FIRST line —
+  `findByRole("heading", { name: /members/i })` → *"Unable to find an accessible element
+  with the role heading"*. It never reaches the Outline assertion.
+- `heads EVERY pane` rejects the same way on `findAllByRole("heading")`. **Not**
+  `expected length 5 to be 1` — that would require headings to exist.
+- `has no collapsible group chrome left` fails on a non-zero length, five
+  `[aria-expanded]` header buttons.
+
+All three are genuine reds. If any of them fails with a *different* message than the one
+above, stop: the code is not in the state this task assumes.
 
 - [ ] **Step 3: Create `frontend/src/cockpit/panes/PaneHeader.tsx`**
 
@@ -845,7 +869,7 @@ and the closing `</SidebarGroup>` with `</>`. Import `PaneHeader` from `./panes/
 
 - [ ] **Step 7: Fix `VersionGraph.test.tsx`'s helper**
 
-Its `wrap()` clicks the group header to expand it (`VersionGraph.test.tsx:32-46`). There is
+Its `wrap()` clicks the group header to expand it (`VersionGraph.test.tsx:32-50`). There is
 no header button any more. Delete these two lines from `wrap()`:
 
 ```tsx
@@ -1249,12 +1273,17 @@ describe("selectAndOpen after the rename", () => {
 Append to `frontend/src/routes/Cockpit.test.tsx`:
 
 ```tsx
-it("the tab strip no longer offers History", () => {
+it("the tab strip offers EXACTLY Draft, Spec, Scorecard, Panel review", () => {
+  // Asserting only that History is gone would pass on an implementation that
+  // renamed it to a visible "Diff" tab — the one thing the spec forbids, since
+  // the comparison is reached from the Versions pane, not from the tab strip.
   renderCockpit("/cockpit/ws-1?tab=draft");
-  expect(screen.queryByRole("tab", { name: "History" })).toBeNull();
-  for (const name of ["Draft", "Spec", "Scorecard", "Panel review"]) {
-    expect(screen.getByRole("tab", { name })).toBeInTheDocument();
-  }
+  expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual([
+    "Draft",
+    "Spec",
+    "Scorecard",
+    "Panel review",
+  ]);
 });
 
 it("?tab=diff renders the comparison even though no tab offers it", () => {
@@ -1275,7 +1304,9 @@ the route.
 - [ ] **Step 9: Run and watch them fail**
 
 Run: `cd frontend && pnpm vitest run src/cockpit/historyNav.test.tsx src/routes/Cockpit.test.tsx`
-Expected: `tab` is `history` not `diff`; the History tab is still present.
+Expected: the `historyNav` tests fail because `tab` is `history` not `diff`; the tab-strip
+test fails on a `toEqual` mismatch listing five tabs with `History` last; the two
+`?tab=diff` / legacy tests fail because `Cockpit` renders nothing for an unknown tab.
 
 - [ ] **Step 10: Update `frontend/src/routes/Cockpit.tsx`**
 
