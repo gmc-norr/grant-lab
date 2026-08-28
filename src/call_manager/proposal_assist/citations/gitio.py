@@ -459,7 +459,9 @@ def _read_capped_fields(stream, *, max_fields: int, repo_dir: Path) -> list[byte
     return fields
 
 
-def list_commits(repo_dir: Path, *, limit: int) -> tuple[list[CommitInfo], bool]:
+def list_commits(
+    repo_dir: Path, *, limit: int, pathspec: str | None = None
+) -> tuple[list[CommitInfo], bool]:
     """Return (commits newest-first, truncated).
 
     Bounded at the source twice over: asks git for `limit + 1` and reports
@@ -471,6 +473,12 @@ def list_commits(repo_dir: Path, *, limit: int) -> tuple[list[CommitInfo], bool]
 
     Individual subjects are truncated to `_MAX_SUBJECT_CHARS` with a visible
     marker.
+
+    `pathspec` scopes the history to commits touching that path. It is passed
+    after a literal `--` so a filename can never be read as an option, and it is
+    applied INSIDE `git log` — scoping the returned list instead would let
+    unrelated commits consume `--max-count` and hide older matching commits.
+    Omitted, the history is unscoped, exactly as before.
 
     Raises GitCommitError if the repository is missing, is not a repository, or
     has no commits (an unborn HEAD).
@@ -485,6 +493,11 @@ def list_commits(repo_dir: Path, *, limit: int) -> tuple[list[CommitInfo], bool]
         "-z",
         "--format=%H%x00%aI%x00%s",
     ]
+    if pathspec is not None:
+        # After `--`, so a filename can never be parsed as an option. git also
+        # enables history simplification here, which is what makes the count
+        # honest: `--max-count` now counts MATCHING commits.
+        argv += ["--", pathspec]
     # Three fields per record, and git emits a trailing NUL after the last one.
     max_fields = 3 * (limit + 1)
     try:

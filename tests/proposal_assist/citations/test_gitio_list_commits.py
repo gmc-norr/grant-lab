@@ -328,3 +328,69 @@ def test_the_reader_refuses_a_pathological_stream_rather_than_reading_forever():
 
     with pytest.raises(GitCommitError, match="exceeded"):
         _read_capped_fields(stream, max_fields=3, repo_dir=Path("/nonexistent"))
+
+
+def _repo_two_files(tmp_path: Path) -> Path:
+    """A repo whose NEWEST commits touch only proposal-spec.md.
+
+    This shape is the whole point: with the pathspec applied AFTER git has
+    already capped at --max-count, a small limit returns only spec commits and
+    the draft's history vanishes. A fixture whose commits all touch both files
+    cannot fail on that bug.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "."], cwd=repo, check=True)
+
+    def commit(name: str, body: str, msg: str) -> None:
+        (repo / name).write_text(body, encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", msg],
+            cwd=repo,
+            check=True,
+        )
+
+    commit("proposal.md", "# draft 0\n", "draft 0")
+    commit("proposal.md", "# draft 1\n", "draft 1")
+    for i in range(5):
+        commit("proposal-spec.md", f"# spec {i}\n", f"spec {i}")
+    return repo
+
+
+def test_pathspec_scopes_to_one_file(tmp_path):
+    repo = _repo_two_files(tmp_path)
+    commits, truncated = list_commits(repo, limit=10, pathspec="proposal.md")
+    assert [c.subject for c in commits] == ["draft 1", "draft 0"]
+    assert truncated is False
+
+
+def test_pathspec_is_applied_before_the_limit(tmp_path):
+    """THE gate. The 5 newest commits touch only the spec. With a limit of 3 and
+    the scope applied inside git log, the draft's two commits still come back.
+    Filtering list_commits' RESULT instead would return an empty list."""
+    repo = _repo_two_files(tmp_path)
+    commits, truncated = list_commits(repo, limit=3, pathspec="proposal.md")
+    assert [c.subject for c in commits] == ["draft 1", "draft 0"]
+    assert truncated is False
+
+
+def test_pathspec_matching_nothing_is_empty_not_an_error(tmp_path):
+    repo = _repo_two_files(tmp_path)
+    commits, truncated = list_commits(repo, limit=10, pathspec="does-not-exist.md")
+    assert commits == []
+    assert truncated is False
+
+
+def test_omitting_pathspec_keeps_the_old_unscoped_behaviour(tmp_path):
+    repo = _repo_two_files(tmp_path)
+    commits, _ = list_commits(repo, limit=10)
+    assert len(commits) == 7
+
+
+def test_pathspec_still_reports_truncation(tmp_path):
+    repo = _repo_two_files(tmp_path)
+    commits, truncated = list_commits(repo, limit=1, pathspec="proposal-spec.md")
+    assert [c.subject for c in commits] == ["spec 4"]
+    assert truncated is True
