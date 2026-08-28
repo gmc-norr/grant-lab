@@ -30,10 +30,15 @@ function renderIPR(rows: unknown[], over: Record<string, unknown> = {}) {
   );
 }
 
-it("renders the diff for a pending proposal in this section", async () => {
+it("renders the diff for a pending proposal in this section, with word-level spans", async () => {
+  // currentText "old body" vs proposed "new body": "old"/"new" differ, " body" is
+  // shared, so DiffView wraps only the changed word in a span (not the whole
+  // line) — the text is split across elements, not one "new body" text node.
   renderIPR([ROW]);
   expect(await screen.findByText(/suggested edit/i)).toBeInTheDocument();
-  expect(screen.getByText(/new body/)).toBeInTheDocument();
+  const addSpan = screen.getByText("new");
+  expect(addSpan).toHaveAttribute("data-span", "add");
+  expect(addSpan.closest("[data-diff]")).toHaveAttribute("data-diff", "add");
 });
 
 it("renders nothing when no pending proposal targets this section", async () => {

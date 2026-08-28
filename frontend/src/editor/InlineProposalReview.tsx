@@ -9,8 +9,8 @@ import {
   useProposedChanges,
   useRejectProposal,
 } from "../api/proposals";
-import { lineDiff } from "../cockpit/diff";
-import styles from "../cockpit/CockpitPanels.module.css";
+import { DiffView } from "../cockpit/DiffView";
+import { lineDiff, refineRuns } from "../cockpit/diff";
 
 export type InlineProposalReviewProps = {
   workspaceId: string;
@@ -36,16 +36,6 @@ export function InlineProposalReview({
 
   const pc = pending;
 
-  // Content-aware keys: diff rows are stateless and recomputed each render, so
-  // an array index would be a foot-gun if the diff ever reorders. Key on the
-  // row's tag+text, disambiguating repeated lines by occurrence count.
-  const seen: Record<string, number> = {};
-  const rows = lineDiff(currentText, pc.new_text ?? "").map((r) => {
-    const base = `${r.tag}:${r.text}`;
-    const n = (seen[base] = (seen[base] ?? 0) + 1);
-    return { ...r, key: `${base}#${n}` };
-  });
-
   async function onAccept() {
     setNotice(null);
     try {
@@ -70,13 +60,7 @@ export function InlineProposalReview({
       <Stack gap="xs">
         <Text size="xs" c="dimmed">Suggested edit from the assistant</Text>
         {notice && <Text role="status" size="sm" c="dimmed">{notice}</Text>}
-        <pre className={styles.proposalDiff}>
-          {rows.map((r) => (
-            <div key={r.key} data-diff={r.tag}>
-              {(r.tag === "add" ? "+ " : r.tag === "del" ? "- " : "  ") + r.text}
-            </div>
-          ))}
-        </pre>
+        <DiffView rows={refineRuns(lineDiff(currentText, pc.new_text ?? ""))} />
         {canEdit && (
           <Group gap="sm">
             <Button size="xs" disabled={accept.isPending} onClick={onAccept}>Accept</Button>
