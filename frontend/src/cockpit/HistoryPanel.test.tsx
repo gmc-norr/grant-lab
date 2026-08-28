@@ -134,21 +134,29 @@ describe("HistoryPanel", () => {
     expect(spy).toHaveBeenCalledWith("ws1", "draft", null);
   });
 
-  it("asks for the selected sha when exactly one row is selected", () => {
+  it("asks for the selected sha, and leaves the second slot idle", () => {
     mockList({ versions: [ROW("aaaaaaa", "one")] });
     const spy = mockVersion("# an old draft\n");
     wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa");
     expect(spy).toHaveBeenCalledWith("ws1", "draft", "aaaaaaa");
+    // The second slot stays null so its query stays disabled — one selection
+    // must cost one request, not two.
+    expect(spy).toHaveBeenCalledWith("ws1", "draft", null);
   });
 
-  it("stops asking for a single version once TWO rows are selected", () => {
-    // The `nav.b == null ? nav.a : null` arm. Replace that ternary with a bare
-    // `nav.a` and every other test here still passes — this one does not.
+  it("asks for BOTH versions once two rows are selected", () => {
+    // This assertion is the INVERSE of the one it replaces. While the panel had
+    // a single `useVersion` call and comparing did not exist, "stop asking for a
+    // single version once two are selected" was the correct gate. Comparing
+    // fetches both sides, so the gate moves rather than disappears: both shas
+    // must be requested and neither slot may be left idle. Dropping one of the
+    // two calls, or leaving the second one `null`, reddens this.
     mockList({ versions: [ROW("bbbbbbb", "newer"), ROW("aaaaaaa", "older")] });
     const spy = mockVersion(null);
     wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
-    expect(spy).toHaveBeenCalledWith("ws1", "draft", null);
-    expect(spy).not.toHaveBeenCalledWith("ws1", "draft", "aaaaaaa");
+    expect(spy).toHaveBeenCalledWith("ws1", "draft", "aaaaaaa");
+    expect(spy).toHaveBeenCalledWith("ws1", "draft", "bbbbbbb");
+    expect(spy).not.toHaveBeenCalledWith("ws1", "draft", null);
   });
 
   it("says so when the version list itself fails to load", () => {
@@ -180,5 +188,81 @@ describe("HistoryPanel", () => {
         "true",
       ),
     );
+  });
+});
+
+describe("HistoryPanel comparison", () => {
+  beforeEach(() => {
+    // Block body, not a concise arrow: `restoreAllMocks()` returns VitestUtils,
+    // and `pnpm exec tsc --noEmit` rejects returning it from a void callback.
+    vi.restoreAllMocks();
+  });
+
+  /** Two versions: the OLDER one is second in the list (newest-first). */
+  function mockPair(olderMd: string, newerMd: string) {
+    mockList({
+      versions: [ROW("bbbbbbb", "newer"), ROW("aaaaaaa", "older")],
+    });
+    vi.spyOn(versionsMod, "useVersion").mockImplementation(
+      ((_id: string, _artifact: string, sha: string | null) => ({
+        data:
+          sha === "aaaaaaa"
+            ? { commit_sha: "aaaaaaa", artifact: "draft", markdown: olderMd }
+            : sha === "bbbbbbb"
+              ? { commit_sha: "bbbbbbb", artifact: "draft", markdown: newerMd }
+              : null,
+        isLoading: false,
+        isError: false,
+      })) as never,
+    );
+  }
+
+  it("diffs older against newer, refined to word level", () => {
+    mockPair("We recruit 40 patients.\n", "We recruit 120 patients.\n");
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
+    expect(
+      Array.from(document.querySelectorAll('[data-diff="del"] span[data-span="del"]')).map(
+        (s) => s.textContent,
+      ),
+    ).toEqual(["40"]);
+    expect(
+      Array.from(document.querySelectorAll('[data-diff="add"] span[data-span="add"]')).map(
+        (s) => s.textContent,
+      ),
+    ).toEqual(["120"]);
+  });
+
+  it("selection ORDER does not change the view — direction is a contract", () => {
+    // THE gate. lineDiff assigns `del` to its FIRST argument, so the panel must
+    // sort by the list's own order (newest-first) and always pass older, newer.
+    mockPair("We recruit 40 patients.\n", "We recruit 120 patients.\n");
+    const forward = wrap(
+      <HistoryPanel id="ws1" />,
+      "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb",
+    );
+    const forwardHtml = document.querySelector("[data-testid='version-diff']")?.innerHTML;
+    forward.unmount();
+
+    mockPair("We recruit 40 patients.\n", "We recruit 120 patients.\n");
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=bbbbbbb&b=aaaaaaa");
+    const reverseHtml = document.querySelector("[data-testid='version-diff']")?.innerHTML;
+
+    expect(reverseHtml).toBe(forwardHtml);
+  });
+
+  it("falls back with a reason above the 2,000-line ceiling", () => {
+    const huge = Array(2001).fill("x").join("\n");
+    mockPair(huge, huge + "\ny");
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
+    expect(screen.getByText(/too large to compare/i)).toBeInTheDocument();
+    expect(document.querySelector("[data-testid='version-diff']")).toBeNull();
+  });
+
+  it("exactly 2,000 lines still diffs — the boundary is inclusive", () => {
+    const atLimit = Array(2000).fill("x").join("\n");
+    mockPair(atLimit, atLimit.replace("x", "y"));
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
+    expect(screen.queryByText(/too large to compare/i)).toBeNull();
+    expect(document.querySelector("[data-testid='version-diff']")).not.toBeNull();
   });
 });

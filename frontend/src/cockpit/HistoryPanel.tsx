@@ -3,6 +3,8 @@ import { Badge, Group, SegmentedControl, Stack, Text, Title } from "@mantine/cor
 import type { Artifact } from "../api/proposals";
 import { useVersion, useVersions } from "../api/versions";
 import styles from "./CockpitPanels.module.css";
+import { DiffView } from "./DiffView";
+import { lineDiff, refineRuns, tooLargeToDiff } from "./diff";
 import { useHistoryNav } from "./historyNav";
 
 function VersionRowButton({
@@ -62,9 +64,22 @@ function VersionRowButton({
 export function HistoryPanel({ id }: { id: string }) {
   const nav = useHistoryNav();
   const list = useVersions(id, nav.artifact);
-  const one = useVersion(id, nav.artifact, nav.b == null ? nav.a : null);
-
   const data = list.data;
+
+  // Direction is part of the contract, not an accident of selection order.
+  // lineDiff assigns `del` to its FIRST argument, so compare must always pass
+  // older, newer. The list is newest-first, so the LATER index is the older
+  // version. Selecting the two rows in the opposite order must produce an
+  // identical view — that is a test, not a convention.
+  const order = data?.versions.map((v) => v.commit_sha) ?? [];
+  const both = nav.a != null && nav.b != null;
+  const [olderSha, newerSha] =
+    both && order.indexOf(nav.a as string) < order.indexOf(nav.b as string)
+      ? [nav.b, nav.a]
+      : [nav.a, nav.b];
+
+  const older = useVersion(id, nav.artifact, both ? olderSha : nav.a);
+  const newer = useVersion(id, nav.artifact, both ? newerSha : null);
 
   return (
     <Stack gap="sm" p="sm">
@@ -141,14 +156,38 @@ export function HistoryPanel({ id }: { id: string }) {
       {/* One selected: read it. An old version must never look editable, so it
           renders as text the way ReviewPanel renders a review file — not the
           Tiptap editor. */}
-      {one.data && (
-        <pre className={styles.reviewDoc}>{one.data.markdown}</pre>
-      )}
-      {nav.b == null && nav.a != null && one.isError && (
+      {!both && older.data && <pre className={styles.reviewDoc}>{older.data.markdown}</pre>}
+      {!both && nav.a != null && older.isError && (
         <Text size="sm" c="dimmed">
           That version could not be read.
         </Text>
       )}
+
+      {both && (older.isLoading || newer.isLoading) && (
+        <Text size="sm" c="dimmed">
+          Loading both versions…
+        </Text>
+      )}
+      {both && (older.isError || newer.isError) && (
+        <Text size="sm" c="dimmed">
+          One of those versions could not be read.
+        </Text>
+      )}
+      {both &&
+        older.data &&
+        newer.data &&
+        (tooLargeToDiff(older.data.markdown, newer.data.markdown) ? (
+          <Stack gap="xs">
+            <Text size="sm" c="dimmed">
+              These versions are too large to compare (over 2,000 lines). Open each one on its own
+              instead.
+            </Text>
+          </Stack>
+        ) : (
+          <div data-testid="version-diff">
+            <DiffView rows={refineRuns(lineDiff(older.data.markdown, newer.data.markdown))} />
+          </div>
+        ))}
     </Stack>
   );
 }
