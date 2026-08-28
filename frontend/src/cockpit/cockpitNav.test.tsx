@@ -135,3 +135,57 @@ it("navigate() does NOT ask when the editor is clean", () => {
   expect(confirmSpy).not.toHaveBeenCalled();
   expect(sp.get("tab")).toBe("scorecard");
 });
+
+import { VIEWS, viewFromParams, viewHref } from "./cockpitNav";
+
+const sp = (q: string) => new URLSearchParams(q);
+
+it("parses every valid view", () => {
+  for (const v of VIEWS) expect(viewFromParams(sp(`view=${v}`))).toBe(v);
+  expect(VIEWS).toEqual(["outline", "versions", "references", "criteria", "members"]);
+});
+
+it("normalises an unrecognised view instead of erroring", () => {
+  // Matches tabFromParams and artifactParam: a URL is user input, and a typo
+  // shows the default rather than an error.
+  expect(viewFromParams(sp("view=banana"))).toBe("outline");
+  expect(viewFromParams(sp(""))).toBe("outline");
+});
+
+it("defaults to versions when the middle is showing the comparison", () => {
+  // Otherwise a bare ?tab=history renders "pick two versions from the Versions
+  // list in the side pane" beside the OUTLINE — the defect this design removes,
+  // rebuilt by a default. Slice 2 adds "diff" to the same set.
+  expect(viewFromParams(sp("tab=history"))).toBe("versions");
+  expect(viewFromParams(sp("tab=draft"))).toBe("outline");
+});
+
+it("an explicit view always wins over the comparison default", () => {
+  expect(viewFromParams(sp("tab=history&view=criteria"))).toBe("criteria");
+});
+
+it("viewHref changes ONLY view and keeps every other parameter", () => {
+  // Seeded with every parameter the merge protects. Seeding with two of them
+  // passes on an implementation that preserves those two and drops the rest,
+  // and asserting only that view=versions is present passes on a plain
+  // <Link to="?view=versions">, which REPLACES the search string.
+  const start = sp(
+    "tab=scorecard&sec=3&artifact=spec&a=aaaaaaa&b=bbbbbbb&layout=unified&view=outline",
+  );
+  const href = viewHref(start, "versions", "/cockpit/ws-1");
+  expect(href.pathname).toBe("/cockpit/ws-1");
+  const out = sp(href.search);
+  expect(out.get("view")).toBe("versions");
+  expect(out.get("tab")).toBe("scorecard");
+  expect(out.get("sec")).toBe("3");
+  expect(out.get("artifact")).toBe("spec");
+  expect(out.get("a")).toBe("aaaaaaa");
+  expect(out.get("b")).toBe("bbbbbbb");
+  expect(out.get("layout")).toBe("unified");
+});
+
+it("viewHref does not mutate the params it was given", () => {
+  const start = sp("tab=draft&view=outline");
+  viewHref(start, "members", "/cockpit/ws-1");
+  expect(start.get("view")).toBe("outline");
+});

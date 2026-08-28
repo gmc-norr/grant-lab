@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import type { NavTarget, TopTab } from "./nav";
+import type { NavTarget, TopTab, View } from "./nav";
 import { confirmDiscardIfDirty } from "./editorStore";
 
 export const TOP_TABS: TopTab[] = ["draft", "spec", "scorecard", "review", "history"];
@@ -10,6 +10,41 @@ export const TOP_TABS: TopTab[] = ["draft", "spec", "scorecard", "review", "hist
 export function tabFromParams(sp: URLSearchParams): TopTab {
   const t = sp.get("tab");
   return (TOP_TABS as string[]).includes(t ?? "") ? (t as TopTab) : "draft";
+}
+
+export const VIEWS: View[] = ["outline", "versions", "references", "criteria", "members"];
+
+/** The `?tab` values whose middle IS the comparison. `?view` defaults to
+ *  `versions` for these, so the comparison's own empty state points at a pane
+ *  that is actually showing. Written as a set because Slice 2 renames the
+ *  destination and the rule must not move with it. */
+const COMPARISON_TABS: string[] = ["history"];
+
+/** `?view` parsed to a valid View.
+ *
+ *  Anything unrecognised normalises to the default rather than erroring,
+ *  matching tabFromParams and artifactParam: a URL is user input. An explicit
+ *  view always wins over the comparison default. */
+export function viewFromParams(sp: URLSearchParams): View {
+  const v = sp.get("view");
+  if (v != null && (VIEWS as string[]).includes(v)) return v as View;
+  return COMPARISON_TABS.includes(sp.get("tab") ?? "") ? "versions" : "outline";
+}
+
+/** A rail destination that changes the pane and NOTHING else.
+ *
+ *  A query-only `<Link to="?view=versions">` resolves to a search string that
+ *  REPLACES the current one, silently dropping ?tab, ?sec, ?artifact, ?a, ?b
+ *  and ?layout — clicking a rail icon would discard the comparison the user was
+ *  looking at. Copies first, so the caller's params are not mutated. */
+export function viewHref(
+  sp: URLSearchParams,
+  view: View,
+  pathname: string,
+): { pathname: string; search: string } {
+  const next = new URLSearchParams(sp);
+  next.set("view", view);
+  return { pathname, search: next.toString() };
 }
 
 /** `?sec` parsed to a non-negative int, defaulting to 0. */
@@ -21,8 +56,10 @@ export function secFromParams(sp: URLSearchParams): number {
 export type CockpitNav = {
   tab: TopTab;
   sec: number;
+  view: View;
   setTab: (t: TopTab) => void;
   setSec: (i: number, opts?: { replace?: boolean }) => void;
+  setView: (v: View) => void;
   navigate: (target: NavTarget) => void;
 };
 
@@ -37,6 +74,7 @@ export function useCockpitNav(): CockpitNav {
   const [sp, setSp] = useSearchParams();
   const tab = tabFromParams(sp);
   const sec = secFromParams(sp);
+  const view = viewFromParams(sp);
 
   const setTab = useCallback(
     (t: TopTab) =>
@@ -58,6 +96,18 @@ export function useCockpitNav(): CockpitNav {
         },
         { replace: opts?.replace ?? false },
       ),
+    [setSp],
+  );
+
+  // No dirty-editor guard: changing the PANE unmounts no editor. Only writers
+  // of ?tab carry that obligation.
+  const setView = useCallback(
+    (v: View) =>
+      setSp((prev) => {
+        const next = new URLSearchParams(prev);
+        next.set("view", v);
+        return next;
+      }),
     [setSp],
   );
 
@@ -88,7 +138,7 @@ export function useCockpitNav(): CockpitNav {
     [tab, setSp],
   );
 
-  return { tab, sec, setTab, setSec, navigate };
+  return { tab, sec, view, setTab, setSec, setView, navigate };
 }
 
 // static /cockpit/* subpaths that are NOT workspace ids
