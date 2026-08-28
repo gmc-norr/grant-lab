@@ -1,9 +1,9 @@
 # Workspace rail — information architecture
 
 **Date:** 2026-08-28
-**Status:** design, revision 2 — outside review round 1, 5/5 findings confirmed. Not
-implemented. Round 1 also found a **live data-loss bug** in shipped code, fixed separately
-in `cc50e0e7` (see §7.3).
+**Status:** design, revision 3 — outside review rounds 1 and 2, 9/9 findings confirmed.
+Not implemented. The two rounds also found **two live data-loss bugs** in shipped code,
+fixed separately in `cc50e0e7` and `1f3fd60a` (see §7.3).
 **Supersedes nothing.** Follows `2026-08-28-version-graph-side-pane-design.md`, which moved
 the version list into the side pane and exposed the problem this spec fixes.
 
@@ -191,13 +191,21 @@ The URL stays the single channel across the AppShell boundary, as it already is
 | --- | --- | --- | --- |
 | `?view` | rail icon / pane content | `outline` `versions` `references` `criteria` `members` | `outline` |
 | `?tab` | middle content | `draft` `spec` `scorecard` `review` `diff` | `draft` |
-| `?sec` | active section | non-negative int | `0` |
+| `?sec` | active section | safe non-negative int | `0` |
 | `?artifact` | which artifact's history | `draft` `spec` | `draft` |
 | `?a` `?b` | the two versions | sha `[0-9a-f]{7,64}`, lowercased | unset |
 | `?layout` | diff rendering | `split` `unified` | `split` |
 
 `?view` parses exactly like `?tab` does today: anything unrecognised normalises to the
 default rather than erroring, matching `tabFromParams` and `artifactParam`.
+
+**`?sec` needs a bound it does not have.** `secFromParams` accepts any `/^\d+$/` and
+applies `Number` (`cockpitNav.ts:15-17`), so a long digit string yields a value that is not
+an integer at all — measured: `sec=` twenty-five nines returns `1e+25`, and
+`Number.isSafeInteger` is false. It is then compared against real section indices and
+written back to the URL. Add `Number.isSafeInteger` to the predicate, falling back to `0`
+like every other invalid value. Small, unrelated to the rail, and in scope only because
+this spec pins the contract of the table above.
 
 ### 7.0 The rail must MERGE the query, never replace it
 
@@ -235,10 +243,31 @@ times** and moved the URL to `tab=history`. Fixed in `cc50e0e7` by moving the gu
 `selectAndOpen` itself, so it covers every caller rather than every call site someone
 remembers, and conditional on the destination actually changing.
 
-**That guard must survive this design.** When `selectAndOpen` starts writing `tab=diff`,
-its condition changes with it, and the four tests in `historyNav.test.tsx`
-("selectAndOpen guards unsaved edits") must still pass. Any future writer of `?tab` carries
-the same obligation.
+Round 2 then found that the spec's own words — "any future writer of `?tab` carries the
+same obligation" — were pointing at an **existing** writer that did not. `cockpitNav
+.navigate` writes `tab` with no guard, and every Criteria row reaches it
+(`CockpitSidebar.tsx:127`). Measured the same way: dirty editor, `window.confirm` called
+**zero** times, URL moved to `tab=scorecard`. Pre-existing, unrelated to the version-graph
+work, fixed in `1f3fd60a`.
+
+**There are three writers of `?tab`, and now three guards:** `Cockpit.onTab`,
+`historyNav.selectAndOpen`, `cockpitNav.navigate`. Nothing structural stops a fourth from
+being written unguarded — that is how both of these happened. This design does not
+consolidate them, and says so rather than implying the problem is solved.
+
+**The guards must survive this design, and one of them changes shape.**
+
+`selectAndOpen`'s guard asks "am I already on the comparison?" by comparing the **raw**
+`sp.get("tab")` (`historyNav.ts:148`). Renaming the destination to `diff` while §7.2
+aliases `history` → `diff` breaks that comparison: a user arriving on a legacy
+`?tab=history` link is on the comparison, but the raw string says `history`, so the guard
+would prompt when nothing is being discarded. **The guard must compare the parsed
+effective destination, not the raw parameter** — that is, both `history` and `diff` count
+as already open.
+
+Required tests: the four existing `selectAndOpen guards unsaved edits` tests pass against
+`tab=diff`, **plus** one starting from a legacy `?tab=history` URL that asserts no prompt.
+The four `navigate()` guard tests in `cockpitNav.test.tsx` also stay green.
 
 ### 7.1 One write, not two
 
@@ -253,10 +282,20 @@ discards the first. This was measured, and is pinned by a test in `historyNav.te
 
 ### 7.2 Old links
 
-`?tab=history` maps to `?tab=diff&view=versions` when parsed, so existing bookmarks and
-any link already shared keep working. This is a parse-time alias, not a redirect: the URL
-the user arrived on is not rewritten, consistent with the decision recorded in
-`HistoryPanel.tsx` not to rewrite a URL the user was given.
+`?tab=history` parses as `diff`, so existing bookmarks and any link already shared keep
+working. This is a parse-time alias, not a redirect: the URL the user arrived on is not
+rewritten, consistent with the decision recorded in `HistoryPanel.tsx` not to rewrite a
+URL the user was given.
+
+**Precedence, because the two rules can collide.** The alias supplies `view=versions`
+**only when `view` is absent**. An explicit `view` always wins. Without this, a legacy
+`?tab=history` URL plus a rail click — which merges, producing
+`?tab=history&view=criteria` (§7.0) — would have the alias force the pane back to Versions
+and the click would do nothing.
+
+So `?tab=history&view=criteria` shows the **Criteria** pane with the comparison in the
+middle. That is a coherent state and the same one `?tab=diff&view=criteria` produces; the
+alias only ever fills a gap.
 
 ## 8. What does not change
 
@@ -317,10 +356,16 @@ tab strip (`Cockpit.tsx:86`); add `diff`; point `selectAndOpen` at it; add the
   exists to forbid.
 - **Deselect does not open** — clicking the only selected version leaves `?tab` untouched
   and clears the sha. Assert `tab`, not just the absence of the sha.
-- **The dirty guard survives** — the four `selectAndOpen guards unsaved edits` tests pass
-  against `tab=diff`: asks when the destination changes with a dirty editor, does nothing
-  when refused, proceeds when accepted, and stays silent when the comparison is already
-  open.
+- **The dirty guards survive** — the four `selectAndOpen guards unsaved edits` tests pass
+  against `tab=diff`, and the four `navigate()` guard tests stay green. One test added:
+  from a legacy `?tab=history` URL with a dirty editor, picking a version prompts **not at
+  all**, because the comparison is already open (§7.3). Without it, the raw-string
+  comparison would prompt and no existing test would notice.
+- **Alias precedence** — `?tab=history&view=criteria` shows the Criteria pane, not
+  Versions. A test that only checks `?tab=history` alone passes whichever way precedence
+  falls.
+- **`?sec` is bounded** — a twenty-five-digit `sec` parses to `0`, not `1e+25`. Assert the
+  parsed value, not merely that the app did not crash.
 - **Criteria is untouched** — this slice must not make the Criteria rows look more
   specific than they are (§3.1). No new test; a reviewer check.
 - **The alias** — `?tab=history` resolves to the diff with the versions pane.
@@ -328,7 +373,7 @@ tab strip (`Cockpit.tsx:86`); add `diff`; point `selectAndOpen` at it; add the
   (`ActivityBar.tsx:76`), and the active item keeps `aria-current="page"`.
 
 Frontend gates unchanged: `pnpm exec tsc --noEmit`, `pnpm vitest run`, `pnpm build`, from
-`frontend/`. Baseline at the time of writing: **116 files / 744 tests** (740 plus the four added by `cc50e0e7`).
+`frontend/`. Baseline at the time of writing: **116 files / 748 tests** (740, plus four from `cc50e0e7` and four from `1f3fd60a`).
 
 ## 12. Files
 
@@ -336,7 +381,9 @@ Frontend gates unchanged: `pnpm exec tsc --noEmit`, `pnpm vitest run`, `pnpm bui
 - `frontend/src/shell/nav-items.ts` — split into app, workspace and bottom groups
 - `frontend/src/shell/ActivityBar.tsx` — two bands, divider, drop the dynamic item
 - `frontend/src/shell/ActivityBar.module.css` — the divider
-- `frontend/src/cockpit/cockpitNav.ts` — `?view`; `TOP_TABS` gains `diff`, loses `history`
+- `frontend/src/cockpit/cockpitNav.ts` — `?view`; `TOP_TABS` gains `diff`, loses `history`;
+  the `history`→`diff` parse alias with its precedence rule (§7.2); `Number.isSafeInteger`
+  on `?sec`; keeps `navigate`'s dirty-editor guard
 - `frontend/src/cockpit/nav.ts` — `TopTab` union
 - `frontend/src/cockpit/CockpitSidebar.tsx` — render one view
 - `frontend/src/cockpit/VersionGraph.tsx` — drop `openWhen` and its own `SidebarGroup`;
