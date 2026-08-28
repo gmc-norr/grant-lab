@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 
 import type { Artifact } from "../api/proposals";
 import { confirmDiscardIfDirty } from "./editorStore";
+import { tabFromParams } from "./cockpitNav";
 
 /** Mirrors ports/shas.py's SHA_RE. A sha arriving from the URL is user input:
  *  the backend rejects a bad one with 422, but there is no reason to spend the
@@ -131,35 +132,34 @@ export function useHistoryNav(): HistoryNav {
 
   const selectAndOpen = useCallback(
     (sha: string) => {
-      // Opening the comparison changes the middle destination, which unmounts
-      // the artifact editor and discards its unsaved per-section buffers. That
-      // is not a router navigation, so the router blocker cannot see it —
-      // Cockpit.onTab confirms for the tab strip, and this is the SECOND way to
-      // change that destination. It was silent, and a click in the side pane
-      // threw the buffers away without asking.
+      const next = nextSelection({ a: shaParam(sp, "a"), b: shaParam(sp, "b") }, sha);
+      const opens = next.a != null || next.b != null;
+      // Computed BEFORE the guard: a click that empties the selection changes no
+      // destination, so there is nothing to discard and prompting would be a
+      // prompt for nothing.
       //
-      // Only when the destination actually changes: picking a second version
-      // while the comparison is already open discards nothing, and nagging
-      // there would train the user to dismiss the prompt that matters.
+      // `tabFromParams`, not the raw string: a legacy ?tab=history IS the
+      // comparison, and comparing raw would prompt on every legacy link.
       //
-      // Read from the render closure, not `prev`: window.confirm must never run
-      // inside a setSearchParams updater, which is expected to be pure and runs
-      // twice under StrictMode.
-      if (sp.get("tab") !== "history" && !confirmDiscardIfDirty()) return;
+      // The guard runs OUTSIDE setSp — window.confirm must never run inside an
+      // updater, which is expected to be pure and runs twice under StrictMode.
+      const alreadyThere = tabFromParams(sp) === "diff";
+      if (opens && !alreadyThere && !confirmDiscardIfDirty()) return;
       setSp((prev) => {
         const out = new URLSearchParams(prev);
         // Read from `prev`, not the render closure: this is the one write that
-        // carries both changes, so it must see the params it is about to replace.
-        const next = nextSelection(
+        // carries both changes, so it must see the params it is about to
+        // replace. See the PINNED two-writer test.
+        const fresh = nextSelection(
           { a: shaParam(prev, "a"), b: shaParam(prev, "b") },
           sha,
         );
         for (const key of ["a", "b"] as const) {
-          const v = next[key];
+          const v = fresh[key];
           if (v == null) out.delete(key);
           else out.set(key, v);
         }
-        out.set("tab", "history");
+        if (fresh.a != null || fresh.b != null) out.set("tab", "diff");
         return out;
       });
     },

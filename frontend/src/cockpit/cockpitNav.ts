@@ -4,21 +4,36 @@ import { useSearchParams } from "react-router-dom";
 import type { NavTarget, TopTab, View } from "./nav";
 import { confirmDiscardIfDirty } from "./editorStore";
 
-export const TOP_TABS: TopTab[] = ["draft", "spec", "scorecard", "review", "history"];
+export const TOP_TABS: TopTab[] = ["draft", "spec", "scorecard", "review", "diff"];
 
-/** `?tab` parsed to a valid TopTab, defaulting to "draft". */
+/** The comparison destination, by every name it has had. `history` is the name
+ *  it shipped under; links already exist. */
+const COMPARISON_TABS: string[] = ["diff", "history"];
+
+/** `?tab` parsed to a valid TopTab, defaulting to "draft".
+ *
+ *  `history` parses to `diff` — a parse-time ALIAS, not a redirect. The URL the
+ *  user arrived on is not rewritten: doing so costs them the back button and
+ *  hides which link was broken. */
 export function tabFromParams(sp: URLSearchParams): TopTab {
   const t = sp.get("tab");
+  if (t === "history") return "diff";
   return (TOP_TABS as string[]).includes(t ?? "") ? (t as TopTab) : "draft";
 }
 
-export const VIEWS: View[] = ["outline", "versions", "references", "criteria", "members"];
+/** `?sec` parsed to a safe non-negative int, defaulting to 0.
+ *
+ *  Number.isSafeInteger, not just /^\d+$/: a long digit string parsed to a
+ *  float — measured, twenty-five nines gave 1e+25 — which was then compared
+ *  against real section indices and written back to the URL. */
+export function secFromParams(sp: URLSearchParams): number {
+  const s = sp.get("sec");
+  if (s == null || !/^\d+$/.test(s)) return 0;
+  const n = Number(s);
+  return Number.isSafeInteger(n) ? n : 0;
+}
 
-/** The `?tab` values whose middle IS the comparison. `?view` defaults to
- *  `versions` for these, so the comparison's own empty state points at a pane
- *  that is actually showing. Written as a set because Slice 2 renames the
- *  destination and the rule must not move with it. */
-const COMPARISON_TABS: string[] = ["history"];
+export const VIEWS: View[] = ["outline", "versions", "references", "criteria", "members"];
 
 /** `?view` parsed to a valid View.
  *
@@ -45,12 +60,6 @@ export function viewHref(
   const next = new URLSearchParams(sp);
   next.set("view", view);
   return { pathname, search: next.toString() };
-}
-
-/** `?sec` parsed to a non-negative int, defaulting to 0. */
-export function secFromParams(sp: URLSearchParams): number {
-  const s = sp.get("sec");
-  return s != null && /^\d+$/.test(s) ? Number(s) : 0;
 }
 
 export type CockpitNav = {

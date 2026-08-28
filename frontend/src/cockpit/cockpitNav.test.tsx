@@ -136,7 +136,7 @@ it("navigate() does NOT ask when the editor is clean", () => {
   expect(sp.get("tab")).toBe("scorecard");
 });
 
-import { VIEWS, viewFromParams, viewHref } from "./cockpitNav";
+import { TOP_TABS, tabFromParams, secFromParams, VIEWS, viewFromParams, viewHref } from "./cockpitNav";
 
 const sp = (q: string) => new URLSearchParams(q);
 
@@ -188,4 +188,34 @@ it("viewHref does not mutate the params it was given", () => {
   const start = sp("tab=draft&view=outline");
   viewHref(start, "members", "/cockpit/ws-1");
   expect(start.get("view")).toBe("outline");
+});
+
+it("parses the comparison as diff, and TOP_TABS no longer offers history", () => {
+  expect(tabFromParams(sp("tab=diff"))).toBe("diff");
+  expect(TOP_TABS).toEqual(["draft", "spec", "scorecard", "review", "diff"]);
+});
+
+it("a legacy ?tab=history link still opens the comparison", () => {
+  // Parse-time alias, not a redirect: the URL the user arrived on is not
+  // rewritten, so the back button and the broken link both survive.
+  expect(tabFromParams(sp("tab=history"))).toBe("diff");
+});
+
+it("the alias supplies the pane only when ?view is absent", () => {
+  expect(viewFromParams(sp("tab=history"))).toBe("versions");
+  expect(viewFromParams(sp("tab=diff"))).toBe("versions");
+  // An explicit view WINS. Otherwise a rail click from a legacy URL — which
+  // merges to ?tab=history&view=criteria — would silently do nothing.
+  expect(viewFromParams(sp("tab=history&view=criteria"))).toBe("criteria");
+  expect(viewFromParams(sp("tab=diff&view=criteria"))).toBe("criteria");
+});
+
+it("?sec rejects a value that is not a safe integer", () => {
+  // The predicate was /^\d+$/ + Number, so twenty-five nines returned 1e+25 —
+  // measured — which was then compared against real section indices and
+  // written back to the URL.
+  expect(secFromParams(sp("sec=3"))).toBe(3);
+  expect(secFromParams(sp(`sec=${"9".repeat(25)}`))).toBe(0);
+  expect(secFromParams(sp("sec=-1"))).toBe(0);
+  expect(secFromParams(sp("sec=x"))).toBe(0);
 });

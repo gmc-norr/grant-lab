@@ -67,7 +67,7 @@ describe("VersionGraph", () => {
     expect(dots).toEqual(["agent", "none"]);
   });
 
-  it("clicking a dot writes BOTH the selection and tab=history to the URL", async () => {
+  it("clicking a dot writes BOTH the selection and tab=diff to the URL", async () => {
     // The whole point of selectAndOpen. Asserting the URL, not the calls:
     // two separate calls both happen while the feature is broken (spec 6.1).
     const user = userEvent.setup();
@@ -76,7 +76,7 @@ describe("VersionGraph", () => {
     await user.click(screen.getByRole("button", { name: /aaaaaaa/ }));
     const url = screen.getByTestId("url").textContent ?? "";
     expect(url).toContain("a=aaaaaaa");
-    expect(url).toContain("tab=history");
+    expect(url).toContain("tab=diff");
   });
 
   it("marks a selected version with aria-pressed", () => {
