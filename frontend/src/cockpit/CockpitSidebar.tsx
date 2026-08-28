@@ -8,7 +8,8 @@ import { useDraft, useSpec } from "../api/editor";
 import { useScorecard } from "../api/evaluator";
 import { type RubricCriterion, useRubric, useUpdateRubric } from "../api/rubric";
 import { useAddMember, useRemoveMember } from "../api/settings";
-import { useCockpitMeta, useMembers, useVersions } from "../api/workspace";
+import { useCockpitMeta, useMembers } from "../api/workspace";
+import { VersionGraph } from "./VersionGraph";
 import { BandBadge } from "./BandBadge";
 import { useCockpitNav } from "./cockpitNav";
 import styles from "./CockpitSidebar.module.css";
@@ -41,8 +42,6 @@ export function CockpitSidebar() {
   const scorecard = useScorecard(id);
   const criteria = scorecard.data?.scorecard?.criteria ?? [];
 
-  const versions = useVersions(id);
-  const versionRows = Array.isArray(versions.data) ? versions.data : [];
   const members = useMembers(id);
   const meta = useCockpitMeta(id);
   // Owners get the named list; non-owner members 403 on /members and fall back to the
@@ -135,17 +134,7 @@ export function CockpitSidebar() {
         </ul>
       </SidebarGroup>
 
-      <SidebarGroup title="Versions" count={versionRows.length || undefined} defaultOpen={false}>
-        {versionRows.length === 0 && <p className={styles.note}>No versions yet.</p>}
-        <ul className={styles.outline} aria-label="Versions">
-          {versionRows.map((v) => (
-            <li key={v.commit_sha} className={styles.metaRow}>
-              <span className={styles.rowLabel}>{v.message}</span>
-              <span className={styles.metaSub}>{v.created_by}</span>
-            </li>
-          ))}
-        </ul>
-      </SidebarGroup>
+      <VersionGraph id={id} />
 
       <SidebarGroup title="Members" count={memberCount} defaultOpen={false}>
         {memberRows ? (

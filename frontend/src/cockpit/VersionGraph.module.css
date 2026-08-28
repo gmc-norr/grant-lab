@@ -1,0 +1,91 @@
+/* The lane: a dot per version, joined by a vertical line. One lane — measured
+   across all 14 workspace repos, every one has a single branch and zero merge
+   commits, so the graph is a straight line today (spec section 10). */
+.row {
+  position: relative;
+}
+.button {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  padding: 0.2rem 0.5rem 0.2rem 0.5rem;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  color: var(--app-text);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.button:hover {
+  background: var(--app-hover, rgba(255, 255, 255, 0.06));
+}
+.button[aria-pressed="true"] {
+  background: var(--app-sidebar);
+  outline: 1px solid var(--app-accent);
+  outline-offset: -1px;
+}
+
+/* Fixed-width lane so every dot lines up regardless of sha or subject length. */
+.lane {
+  position: relative;
+  flex: 0 0 12px;
+  align-self: stretch;
+  min-height: 1.4em;
+}
+/* The connector. Drawn on the lane rather than between rows so the last row
+   simply has no line below it — no special case, no :last-child rule. */
+.lane::before {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 0;
+  bottom: -0.4rem;
+  width: 2px;
+  background: var(--app-border);
+}
+.row:last-child .lane::before {
+  bottom: 50%;
+}
+.dot {
+  position: absolute;
+  left: 1px;
+  top: calc(50% - 5px);
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--app-muted);
+  border: 2px solid var(--app-editor);
+  box-sizing: border-box;
+}
+.dot[data-role="agent"] { background: #4c8dff; }
+.dot[data-role="user"] { background: #3fb950; }
+.dot[data-role="reconciled"] { background: #d29922; }
+.dot[data-role="none"] { background: var(--app-muted); }
+
+.sha {
+  flex: 0 0 auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  color: var(--app-muted);
+}
+/* 276px is the pane's default width; the subject is what gives way. `min-width:
+   0` is load-bearing — without it a flex item refuses to shrink below its
+   content and the row overflows the pane instead of ellipsising. */
+.subject {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.note {
+  color: var(--app-muted);
+  padding: 0.25rem 0.5rem;
+  font-size: 0.85rem;
+}
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}

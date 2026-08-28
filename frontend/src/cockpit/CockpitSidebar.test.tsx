@@ -164,8 +164,24 @@ it("clicking a criterion navigates to the Scorecard tab", async () => {
 
 it("owner sees the named Members list and the Versions commits", async () => {
   vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
-    if (path.endsWith("/versions"))
-      return Promise.resolve({ data: [{ commit_sha: "a".repeat(40), message: "user spec init", created_by: "user", created_at: "2026-06-24T00:00:00Z" }], error: undefined });
+    if (path.includes("/history"))
+      return Promise.resolve({
+        data: {
+          versions: [
+            {
+              commit_sha: "a".repeat(40),
+              committed_at: "2026-06-24T00:00:00Z",
+              subject: "user spec init",
+              created_by: "user",
+              triggering_turn_id: null,
+              turn_prompt: null,
+            },
+          ],
+          truncated: false,
+          history_available: true,
+        },
+        error: undefined,
+      });
     if (path.endsWith("/members"))
       return Promise.resolve({ data: [{ email: "owner@ki.se", role: "owner" }, { email: "m@ki.se", role: "member" }], error: undefined });
     if (path.endsWith("/cockpit-meta"))
@@ -187,7 +203,11 @@ it("a non-owner member sees the member count only (no emails)", async () => {
       return Promise.resolve({ data: undefined, error: { error: { code: "forbidden", message: "owner only" } } });
     if (path.endsWith("/cockpit-meta"))
       return Promise.resolve({ data: { workspace_title: "W", workspace_deadline: null, current_phase: "active", role: "member", spec_locked: false, member_count: 3 }, error: undefined });
-    if (path.endsWith("/versions")) return Promise.resolve({ data: [], error: undefined });
+    if (path.includes("/history"))
+      return Promise.resolve({
+        data: { versions: [], truncated: false, history_available: true },
+        error: undefined,
+      });
     if (path.endsWith("/references")) return Promise.resolve({ data: [], error: undefined });
     if (path.endsWith("/scorecard")) return Promise.resolve({ data: null, error: undefined });
     return Promise.resolve(draft as never);
@@ -213,7 +233,11 @@ it("owner can remove a viewer (confirm-gated) from the Members group", async () 
         data: { workspace_title: "W", workspace_deadline: null, current_phase: "active", role: "owner", spec_locked: false, member_count: 2 },
         error: undefined,
       });
-    if (path.endsWith("/versions")) return Promise.resolve({ data: [], error: undefined });
+    if (path.includes("/history"))
+      return Promise.resolve({
+        data: { versions: [], truncated: false, history_available: true },
+        error: undefined,
+      });
     if (path.endsWith("/references")) return Promise.resolve({ data: [], error: undefined });
     if (path.endsWith("/scorecard")) return Promise.resolve({ data: null, error: undefined });
     return Promise.resolve(draft as never);
@@ -234,7 +258,11 @@ it("owner can open Edit rubric and save (active phase)", async () => {
       return Promise.resolve({ data: { workspace_title: "W", workspace_deadline: null, current_phase: "active", role: "owner", spec_locked: false, member_count: 1 }, error: undefined });
     if (path.endsWith("/members"))
       return Promise.resolve({ data: [{ user_id: 1, email: "owner@ki.se", role: "owner" }], error: undefined });
-    if (path.endsWith("/versions")) return Promise.resolve({ data: [], error: undefined });
+    if (path.includes("/history"))
+      return Promise.resolve({
+        data: { versions: [], truncated: false, history_available: true },
+        error: undefined,
+      });
     if (path.endsWith("/references")) return Promise.resolve({ data: [], error: undefined });
     if (path.endsWith("/scorecard")) return Promise.resolve({ data: null, error: undefined });
     return Promise.resolve(draft as never);
@@ -244,4 +272,42 @@ it("owner can open Edit rubric and save (active phase)", async () => {
   fireEvent.click(await screen.findByRole("button", { name: /edit rubric/i }));
   fireEvent.click(await screen.findByRole("button", { name: /save/i }));
   expect(rb.update).toHaveBeenCalled();
+});
+
+it("renders the version GRAPH, not the old plain list", async () => {
+  // Must assert something only the graph produces. "No versions yet." is NOT
+  // that: the old sidebar renders those exact words too (CockpitSidebar.tsx:139),
+  // so an empty-list assertion passes either way and proves nothing.
+  vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
+    if (path.includes("/history"))
+      return Promise.resolve({
+        data: {
+          versions: [
+            {
+              commit_sha: "abcdef1234567890abcdef1234567890abcdef12",
+              committed_at: "2026-06-24T00:00:00Z",
+              subject: "user spec init",
+              created_by: "agent",
+              triggering_turn_id: null,
+              turn_prompt: null,
+            },
+          ],
+          truncated: false,
+          history_available: true,
+        },
+        error: undefined,
+      });
+    if (path.endsWith("/members")) return Promise.resolve({ data: [], error: undefined });
+    if (path.endsWith("/cockpit-meta"))
+      return Promise.resolve({ data: { workspace_title: "W", workspace_deadline: null, current_phase: "active", role: "owner", spec_locked: false, member_count: 1 }, error: undefined });
+    if (path.endsWith("/references")) return Promise.resolve({ data: [], error: undefined });
+    if (path.endsWith("/scorecard")) return Promise.resolve({ data: null, error: undefined });
+    return Promise.resolve(draft as never);
+  }) as never);
+  renderSidebar();
+  fireEvent.click(await screen.findByRole("button", { name: /versions/i }));
+  // Graph-only output: the 7-char sha and a role dot. The old list rendered
+  // neither — it showed the full message and the role as plain text.
+  expect(await screen.findByText("abcdef1")).toBeInTheDocument();
+  expect(document.querySelector('[data-role="agent"]')).not.toBeNull();
 });

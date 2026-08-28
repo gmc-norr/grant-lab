@@ -1,4 +1,5 @@
-import { Badge, Group, SegmentedControl, Stack, Text, Title } from "@mantine/core";
+import { Button, Group, SegmentedControl, Stack, Text, Title } from "@mantine/core";
+import { useId } from "react";
 
 import type { Artifact } from "../api/proposals";
 import { useVersion, useVersions } from "../api/versions";
@@ -7,63 +8,6 @@ import { DiffView } from "./DiffView";
 import { lineDiff, pairRows, refineRuns, tooLargeToDiff } from "./diff";
 import { SideBySideDiffView } from "./SideBySideDiffView";
 import { type DiffLayout, useHistoryNav } from "./historyNav";
-
-function VersionRowButton({
-  subject,
-  committedAt,
-  createdBy,
-  turnPrompt,
-  selected,
-  onClick,
-}: {
-  subject: string;
-  committedAt: string;
-  createdBy: string | null;
-  turnPrompt: string | null;
-  selected: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      aria-pressed={selected}
-      onClick={onClick}
-      style={{
-        display: "block",
-        width: "100%",
-        textAlign: "left",
-        background: selected ? "var(--app-sidebar)" : "transparent",
-        border: "1px solid var(--app-border)",
-        borderRadius: 6,
-        padding: "0.4rem 0.6rem",
-        cursor: "pointer",
-        color: "inherit",
-      }}
-    >
-      <Group gap="xs" wrap="nowrap">
-        <Badge size="sm" variant="light">
-          {createdBy ?? "not recorded"}
-        </Badge>
-        {/* gitio caps a subject at 500 chars, and it carries a user-controlled
-            section heading (editing/save.py:275). Unclamped, a long heading
-            wraps the row and pushes the timestamp out of view. */}
-        <Text size="sm" style={{ flex: 1 }} lineClamp={2}>
-          {subject}
-        </Text>
-        <Text size="xs" c="dimmed">
-          {new Date(committedAt).toLocaleString()}
-        </Text>
-      </Group>
-      {/* The "why" half of goal 1. Rendered only when a turn caused this
-          version; absence is ordinary, so there is no placeholder. */}
-      {turnPrompt && (
-        <Text size="xs" c="dimmed" mt={2}>
-          because you asked: {turnPrompt}
-        </Text>
-      )}
-    </button>
-  );
-}
 
 export function HistoryPanel({ id }: { id: string }) {
   const nav = useHistoryNav();
@@ -76,7 +20,12 @@ export function HistoryPanel({ id }: { id: string }) {
   // version. Selecting the two rows in the opposite order must produce an
   // identical view — that is a test, not a convention.
   const order = data?.versions.map((v) => v.commit_sha) ?? [];
-  const both = nav.a != null && nav.b != null;
+  // `nav.a !== nav.b`: the same sha in both slots is not a comparison. It cannot
+  // arise from clicking — nextSelection deselects a row that is already
+  // selected — so it comes from a hand-edited or truncated link, and diffing a
+  // document against itself renders an empty diff that explains nothing. Treated
+  // as the single selection it really is.
+  const both = nav.a != null && nav.b != null && nav.a !== nav.b;
   const ia = order.indexOf(nav.a as string);
   const ib = order.indexOf(nav.b as string);
   // BOTH shas must be FOUND in the list before direction is knowable. Before the
@@ -92,6 +41,44 @@ export function HistoryPanel({ id }: { id: string }) {
   // state — the row highlights and nothing renders.
   const older = useVersion(id, nav.artifact, both ? olderSha : (nav.a ?? nav.b));
   const newer = useVersion(id, nav.artifact, both ? newerSha : null);
+
+  // One place decides whether comparing is even possible. Three messages used to
+  // say "pick two from the side pane" unconditionally; against a one-version
+  // history all three are unfollowable, because the pane holds one row. `both`
+  // comes from the URL, not from clicking, so a shared or stale link reaches the
+  // recovery messages in a workspace that never had two versions.
+  //
+  // Zero and one need DIFFERENT words, not one "cannot compare" message: an
+  // empty workspace told "only one version" contradicts the "No versions yet"
+  // line rendered directly above it.
+  const shown = data?.versions.length ?? 0;
+  const canCompare = shown > 1;
+  const pickAdvice = canCompare
+    ? "Pick two from the Versions list in the side pane."
+    : shown === 1
+      ? "This workspace has only one version, so there is nothing to compare it with."
+      : "This workspace has no versions to compare.";
+
+  // The lone selection, and whether it is a sha this artifact's history actually
+  // contains. A stale `?a=` is NOT "the only version this workspace has" — the
+  // workspace's one version is a different sha, and saying otherwise names the
+  // wrong thing.
+  const single = both ? null : (nav.a ?? nav.b);
+  // Membership is UNKNOWABLE until the list lands. `order` is [] while it is in
+  // flight and when the request failed, which made `singleInList` false for a
+  // perfectly valid sha — so a read that failed first was reported as a stale
+  // link, printed beside "Loading versions…". Same class of race as `ordered`.
+  // `history_available` too: a 200 saying git was unreadable carries
+  // `versions: []`, and treating that as authoritative made the panel claim a
+  // selection was absent and the workspace empty — neither of which is known.
+  const listReady = !list.isError && data != null && data.history_available;
+  const singleInList = single != null && order.includes(single);
+  const singleAbsent = listReady && single != null && !singleInList;
+
+  // useId, not a literal: two HistoryPanels on one page would otherwise share an
+  // id and aria-labelledby would resolve to the first one for both.
+  const olderPaneId = useId();
+  const newerPaneId = useId();
 
   // The header timestamps come from the LIST row, not the version payload:
   // VersionContent is {commit_sha, artifact, markdown} and carries no
@@ -109,6 +96,7 @@ export function HistoryPanel({ id }: { id: string }) {
         <Title order={3}>Version history</Title>
         <SegmentedControl
           size="xs"
+          aria-label="Which artifact"
           value={nav.artifact}
           onChange={(v) => nav.setArtifact(v as Artifact)}
           data={[
@@ -148,32 +136,22 @@ export function HistoryPanel({ id }: { id: string }) {
         </Text>
       )}
 
-      {data && data.versions.length > 0 && (
-        <Stack gap="xs">
-          {data.versions.map((v) => (
-            <VersionRowButton
-              key={v.commit_sha}
-              subject={v.subject}
-              committedAt={v.committed_at}
-              createdBy={v.created_by}
-              turnPrompt={v.turn_prompt}
-              selected={v.commit_sha === nav.a || v.commit_sha === nav.b}
-              onClick={() => nav.toggle(v.commit_sha)}
-            />
-          ))}
-          {data.truncated && (
-            <Text size="xs" c="dimmed">
-              {/* No number: it would duplicate the backend's HISTORY_LIMIT
-                  across the wire and silently lie if that constant moved. */}
-              Older versions exist than are shown here.
-            </Text>
-          )}
-        </Stack>
-      )}
+      {/* NEITHER selected — not "fewer than two". One selected renders as a
+          read-only document below, and that behaviour is kept.
 
-      {data && data.versions.length === 1 && (
-        <Text size="xs" c="dimmed">
-          Comparing needs two versions.
+          Split on the list length: "pick two" is unfollowable against a
+          one-version history, because the side pane has exactly one row to
+          click. Both branches point at the same place; only the instruction
+          differs. */}
+      {nav.a == null && nav.b == null && shown === 1 && (
+        <Text size="sm" c="dimmed">
+          Only one version so far. Select it in the Versions list in the side pane to read it —
+          comparing needs a second one.
+        </Text>
+      )}
+      {nav.a == null && nav.b == null && canCompare && (
+        <Text size="sm" c="dimmed">
+          Pick two versions from the Versions list in the side pane to compare them.
         </Text>
       )}
 
@@ -181,24 +159,67 @@ export function HistoryPanel({ id }: { id: string }) {
           renders as text the way ReviewPanel renders a review file — not the
           Tiptap editor. */}
       {!both && older.data && <pre className={styles.reviewDoc}>{older.data.markdown}</pre>}
+      {/* The LIST has landed and the payload has not. Without this the panel is
+          a header over blank space, which reads as "nothing here" rather than
+          "wait" — the list's own loading message is already gone by now. */}
+      {!both && single != null && older.isLoading && (
+        <Text size="sm" c="dimmed">
+          Loading that version…
+        </Text>
+      )}
       {/* Gated on the same expression the FETCH uses. Gating on `nav.a` alone
           left a hand-trimmed `?b=` whose read failed rendering nothing. */}
-      {!both && (nav.a ?? nav.b) != null && older.isError && (
-        <Text size="sm" c="dimmed">
-          That version could not be read. Pick one from the list above.
-        </Text>
+      {!both && single != null && older.isError && singleAbsent && (
+        <Stack gap="xs" align="flex-start">
+          <Text size="sm" c="dimmed">
+            That version is not in the Versions list — the link may be stale, or point at the
+            other artifact.
+          </Text>
+          <ClearComparison onClear={nav.clearSelection} pair={both} />
+        </Stack>
+      )}
+      {/* No "pick one from the list": that instruction does not do what it says.
+          From {a: unreadable, b: null} the next click yields
+          {a: unreadable, b: clicked} — a comparison CONTAINING the unreadable
+          version, not the version the user clicked. Clearing first is the only
+          route to reading another one, so the control is the advice. */}
+      {!both && single != null && older.isError && !singleAbsent && (
+        <Stack gap="xs" align="flex-start">
+          <Text size="sm" c="dimmed">That version could not be read.</Text>
+          <ClearComparison onClear={nav.clearSelection} pair={both} />
+        </Stack>
       )}
 
       {/* The selection is deliberately NOT cleared from the URL here: rewriting
           the address the user arrived on costs them the back button and hides
-          which link was broken. The list below stays usable, which is what §6.4
+          which link was broken. The side pane's list stays usable, which is what §6.4
           is actually protecting. */}
-      {both && (older.isError || newer.isError) && (
-        <Text size="sm" c="dimmed">
-          One of those versions could not be read. Pick two from the list above.
-        </Text>
+      {/* Gated on `ordered`, so this and the not-in-list branch below partition
+          the `both` failure space instead of overlapping. Ungated, a stale sha
+          whose read ALSO failed rendered both messages and two Clear buttons.
+          Reached with two DISTINCT listed shas — `both` requires them to differ
+          — one of which cannot be read. */}
+      {both && ordered && (older.isError || newer.isError) && (
+        <Stack gap="xs" align="flex-start">
+          {/* No "pick two" here. Both shas are in the list and one of them
+              cannot be read, so with exactly two versions no readable pair
+              exists and the instruction cannot be followed however many times
+              it is tried. The control is the action. */}
+          <Text size="sm" c="dimmed">
+            One of those versions could not be read.
+          </Text>
+          <ClearComparison onClear={nav.clearSelection} pair={both} />
+        </Stack>
       )}
-      {both && !ordered && !list.isError && list.isLoading && (
+      {/* Two separate waits, and both must say so: the LIST may still be in
+          flight (direction is not yet knowable), or the list is in hand and the
+          two payloads are not. The second left the panel blank. */}
+      {((both && !ordered && !list.isError && list.isLoading) ||
+        (both &&
+          ordered &&
+          !older.isError &&
+          !newer.isError &&
+          (older.isLoading || newer.isLoading))) && (
         <Text size="sm" c="dimmed">
           Loading both versions…
         </Text>
@@ -206,10 +227,13 @@ export function HistoryPanel({ id }: { id: string }) {
       {/* The list is loaded and one of the two selections is not in it — an
           abbreviated sha, a sha from the other artifact, a stale link. Direction
           is unknowable, so say so rather than waiting on it forever. */}
-      {both && !ordered && !list.isError && !list.isLoading && (
-        <Text size="sm" c="dimmed">
-          One of the selected versions is not in this list. Pick two from above.
-        </Text>
+      {both && !ordered && listReady && !list.isLoading && (
+        <Stack gap="xs" align="flex-start">
+          <Text size="sm" c="dimmed">
+            One of the selected versions is not in the Versions list. {pickAdvice}
+          </Text>
+          {!canCompare && <ClearComparison onClear={nav.clearSelection} pair={both} />}
+        </Stack>
       )}
       {both &&
         ordered &&
@@ -224,14 +248,43 @@ export function HistoryPanel({ id }: { id: string }) {
             {/* Both payloads are already in hand. A note on its own is a dead
                 end — the user is told the comparison failed and given nothing
                 to read. Older on the left, newer on the right, same order the
-                diff would have used. */}
+                diff would have used — and SAID, not just commented: two bare
+                <pre> blocks carry no order, least of all to a screen reader
+                that lands on the pane rather than on the text above it.
+
+                minWidth: 0 on each column — a flex item's minimum is its
+                content's max-content width, so a long unbroken token would push
+                the pane wider than its share instead of scrolling inside it. */}
             <Group align="flex-start" gap="sm" grow wrap="nowrap">
-              <pre className={styles.reviewDoc} data-testid="version-side">
-                {older.data.markdown}
-              </pre>
-              <pre className={styles.reviewDoc} data-testid="version-side">
-                {newer.data.markdown}
-              </pre>
+              <Stack gap={4} style={{ minWidth: 0 }}>
+                <Text size="xs" c="dimmed" id={olderPaneId} data-testid="version-side-header-older">
+                  older · {labelFor(olderSha)}
+                </Text>
+                {/* role="region": a bare <pre> has no role that accepts a
+                    name, so aria-labelledby on it resolves to nothing. With the
+                    role the heading becomes the pane's accessible name. */}
+                <pre
+                  className={styles.reviewDoc}
+                  data-testid="version-side"
+                  role="region"
+                  aria-labelledby={olderPaneId}
+                >
+                  {older.data.markdown}
+                </pre>
+              </Stack>
+              <Stack gap={4} style={{ minWidth: 0 }}>
+                <Text size="xs" c="dimmed" id={newerPaneId} data-testid="version-side-header-newer">
+                  newer · {labelFor(newerSha)}
+                </Text>
+                <pre
+                  className={styles.reviewDoc}
+                  data-testid="version-side"
+                  role="region"
+                  aria-labelledby={newerPaneId}
+                >
+                  {newer.data.markdown}
+                </pre>
+              </Stack>
             </Group>
           </Stack>
         ) : (
@@ -262,5 +315,29 @@ export function HistoryPanel({ id }: { id: string }) {
           </Stack>
         ))}
     </Stack>
+  );
+}
+
+/** The way out of a selection the user cannot fix by clicking.
+ *
+ *  Clicking the side pane cannot escape a stale pair — nextSelection either
+ *  deselects the row (leaving the stale sha) or slides it back into the pair, a
+ *  two-click cycle with no exit, pinned in historyNav.test.tsx.
+ *
+ *  Offered on three states: a stale single selection that is not in the list; an
+ *  ordered pair where a read failed (with two versions there is no readable pair
+ *  left); and a not-in-list pair in a history too short to compare. Not offered
+ *  where picking again genuinely works.
+ *
+ *  The URL is still not rewritten on the user's behalf: they arrived on this
+ *  link, and silently changing the address costs them the back button and hides
+ *  which link was broken. This makes the correction theirs to make. */
+function ClearComparison({ onClear, pair }: { onClear: () => void; pair: boolean }) {
+  return (
+    <Button size="xs" variant="default" onClick={onClear}>
+      {/* `!pair` means there is no comparison — naming one in the visible label
+          and the accessible name describes state that does not exist. */}
+      {pair ? "Clear the comparison" : "Clear selection"}
+    </Button>
   );
 }
