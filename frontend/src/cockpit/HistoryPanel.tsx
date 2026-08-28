@@ -4,8 +4,9 @@ import type { Artifact } from "../api/proposals";
 import { useVersion, useVersions } from "../api/versions";
 import styles from "./CockpitPanels.module.css";
 import { DiffView } from "./DiffView";
-import { lineDiff, refineRuns, tooLargeToDiff } from "./diff";
-import { useHistoryNav } from "./historyNav";
+import { lineDiff, pairRows, refineRuns, tooLargeToDiff } from "./diff";
+import { SideBySideDiffView } from "./SideBySideDiffView";
+import { type DiffLayout, useHistoryNav } from "./historyNav";
 
 function VersionRowButton({
   subject,
@@ -91,6 +92,16 @@ export function HistoryPanel({ id }: { id: string }) {
   // state — the row highlights and nothing renders.
   const older = useVersion(id, nav.artifact, both ? olderSha : (nav.a ?? nav.b));
   const newer = useVersion(id, nav.artifact, both ? newerSha : null);
+
+  // The header timestamps come from the LIST row, not the version payload:
+  // VersionContent is {commit_sha, artifact, markdown} and carries no
+  // committed_at by design. Degrades to the short sha alone when the row is
+  // absent — a state the panel already names elsewhere.
+  const labelFor = (sha: string | null) => {
+    const short = (sha ?? "").slice(0, 7);
+    const row = data?.versions.find((v) => v.commit_sha === sha);
+    return row ? `${short} · ${new Date(row.committed_at).toLocaleString()}` : short;
+  };
 
   return (
     <Stack gap="sm" p="sm">
@@ -207,8 +218,8 @@ export function HistoryPanel({ id }: { id: string }) {
         (tooLargeToDiff(older.data.markdown, newer.data.markdown) ? (
           <Stack gap="xs">
             <Text size="sm" c="dimmed">
-              These versions are too large to compare (over 2,000 lines), so they are shown side by
-              side instead.
+              These versions are too large to compare (over 2,000 lines), so the full text of each
+              is shown without highlighting.
             </Text>
             {/* Both payloads are already in hand. A note on its own is a dead
                 end — the user is told the comparison failed and given nothing
@@ -224,9 +235,31 @@ export function HistoryPanel({ id }: { id: string }) {
             </Group>
           </Stack>
         ) : (
-          <div data-testid="version-diff">
-            <DiffView rows={refineRuns(lineDiff(older.data.markdown, newer.data.markdown))} />
-          </div>
+          <Stack gap="xs">
+            <Group justify="flex-end">
+              <SegmentedControl
+                size="xs"
+                aria-label="Compare layout"
+                value={nav.layout}
+                onChange={(v) => nav.setLayout(v as DiffLayout)}
+                data={[
+                  { label: "Side-by-side", value: "split" },
+                  { label: "Unified", value: "unified" },
+                ]}
+              />
+            </Group>
+            {nav.layout === "unified" ? (
+              <div data-testid="version-diff">
+                <DiffView rows={refineRuns(lineDiff(older.data.markdown, newer.data.markdown))} />
+              </div>
+            ) : (
+              <SideBySideDiffView
+                pairs={pairRows(refineRuns(lineDiff(older.data.markdown, newer.data.markdown)))}
+                olderLabel={labelFor(olderSha)}
+                newerLabel={labelFor(newerSha)}
+              />
+            )}
+          </Stack>
         ))}
     </Stack>
   );

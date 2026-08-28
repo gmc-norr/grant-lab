@@ -25,6 +25,15 @@ function artifactParam(sp: URLSearchParams): Artifact {
   return v === "spec" ? "spec" : "draft";
 }
 
+export type DiffLayout = "split" | "unified";
+
+/** Anything unrecognised normalises to `split`, matching artifactParam's
+ *  posture: a URL is user input, and a typo should show the default view
+ *  rather than an error. */
+function layoutParam(sp: URLSearchParams): DiffLayout {
+  return sp.get("layout") === "unified" ? "unified" : "split";
+}
+
 export type HistoryNav = {
   artifact: Artifact;
   /** The OLDER selection slot. */
@@ -33,6 +42,10 @@ export type HistoryNav = {
   b: string | null;
   setArtifact: (x: Artifact) => void;
   toggle: (sha: string) => void;
+  /** How the comparison renders. Not cleared by artifact or selection changes —
+   *  it is a display preference, not part of what is selected. */
+  layout: DiffLayout;
+  setLayout: (x: DiffLayout) => void;
 };
 
 /** The History tab's URL state: `?tab=history&artifact=…&a=…&b=…`.
@@ -46,12 +59,14 @@ export function useHistoryNav(): HistoryNav {
   const artifact = artifactParam(sp);
   const a = shaParam(sp, "a");
   const b = shaParam(sp, "b");
+  const layout = layoutParam(sp);
 
   const write = useCallback(
-    (next: { artifact?: Artifact; a?: string | null; b?: string | null }) =>
+    (next: { artifact?: Artifact; a?: string | null; b?: string | null; layout?: DiffLayout }) =>
       setSp((prev) => {
         const out = new URLSearchParams(prev);
         if (next.artifact !== undefined) out.set("artifact", next.artifact);
+        if (next.layout !== undefined) out.set("layout", next.layout);
         for (const key of ["a", "b"] as const) {
           if (next[key] === undefined) continue;
           const v = next[key];
@@ -83,5 +98,7 @@ export function useHistoryNav(): HistoryNav {
     [a, b, write],
   );
 
-  return { artifact, a, b, setArtifact, toggle };
+  const setLayout = useCallback((x: DiffLayout) => write({ layout: x }), [write]);
+
+  return { artifact, a, b, layout, setArtifact, toggle, setLayout };
 }

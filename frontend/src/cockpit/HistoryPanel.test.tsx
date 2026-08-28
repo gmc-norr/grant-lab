@@ -240,12 +240,16 @@ describe("HistoryPanel comparison", () => {
       <HistoryPanel id="ws1" />,
       "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb",
     );
-    const forwardHtml = document.querySelector("[data-testid='version-diff']")?.innerHTML;
+    // Asserting presence BEFORE reading innerHTML: a missing element yields
+    // undefined on both sides and the comparison passes while proving nothing.
+    const forwardEl = screen.getByTestId("side-by-side-diff");
+    const forwardHtml = forwardEl.innerHTML;
+    expect(forwardHtml).toContain("120");
     forward.unmount();
 
     mockPair("We recruit 40 patients.\n", "We recruit 120 patients.\n");
     wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=bbbbbbb&b=aaaaaaa");
-    const reverseHtml = document.querySelector("[data-testid='version-diff']")?.innerHTML;
+    const reverseHtml = screen.getByTestId("side-by-side-diff").innerHTML;
 
     expect(reverseHtml).toBe(forwardHtml);
   });
@@ -271,7 +275,11 @@ describe("HistoryPanel comparison", () => {
       })) as never,
     );
     wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=bbbbbbb&b=aaaaaaa");
+    // BOTH renderers, not just the unified one. `version-diff` identifies only
+    // the unified view, and split is now the default — so checking it alone
+    // would let a wrongly-ordered side-by-side diff render here and still pass.
     expect(document.querySelector("[data-testid='version-diff']")).toBeNull();
+    expect(screen.queryByTestId("side-by-side-diff")).toBeNull();
   });
 
   it("says a selected version is not in this list instead of loading forever", () => {
@@ -323,6 +331,64 @@ describe("HistoryPanel comparison", () => {
     mockPair(atLimit, atLimit.replace("x", "y"));
     wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
     expect(screen.queryByText(/too large to compare/i)).toBeNull();
+    expect(screen.getByTestId("side-by-side-diff")).toBeInTheDocument();
+  });
+
+  it("renders the side-by-side view by default when two versions are selected", () => {
+    mockPair("We recruit 40 patients.\n", "We recruit 120 patients.\n");
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
+    expect(screen.getByTestId("side-by-side-diff")).toBeInTheDocument();
+    expect(document.querySelector("[data-testid='version-diff']")).toBeNull();
+  });
+
+  it("renders the unified view when the URL asks for it", () => {
+    mockPair("We recruit 40 patients.\n", "We recruit 120 patients.\n");
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb&layout=unified");
     expect(document.querySelector("[data-testid='version-diff']")).not.toBeNull();
+    expect(screen.queryByTestId("side-by-side-diff")).toBeNull();
+  });
+
+  it("offers no layout control until two versions are selected", () => {
+    mockPair("We recruit 40 patients.\n", "We recruit 120 patients.\n");
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa");
+    expect(screen.queryByRole("radio", { name: "Unified" })).toBeNull();
+  });
+
+  it("switches to unified when the control is used", async () => {
+    const user = userEvent.setup();
+    mockPair("We recruit 40 patients.\n", "We recruit 120 patients.\n");
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
+    await user.click(screen.getByRole("radio", { name: "Unified" }));
+    await waitFor(() =>
+      expect(document.querySelector("[data-testid='version-diff']")).not.toBeNull(),
+    );
+  });
+
+  it("labels the left column older and the right column newer", () => {
+    mockPair("We recruit 40 patients.\n", "We recruit 120 patients.\n");
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
+    // mockPair lists bbbbbbb first (newest-first), so aaaaaaa is the older one.
+    expect(screen.getByTestId("side-header-older").textContent).toContain("aaaaaaa");
+    expect(screen.getByTestId("side-header-newer").textContent).toContain("bbbbbbb");
+  });
+
+  it("offers no layout control for a comparison too large to diff", () => {
+    const huge = Array(2001).fill("x").join("\n");
+    mockPair(huge + "\nOLDMARKER", huge + "\nNEWMARKER");
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
+    expect(screen.getByText(/too large to compare/i)).toBeInTheDocument();
+    // There is no diff to lay out, so a layout choice would be a dead control.
+    expect(screen.queryByRole("radio", { name: "Unified" })).toBeNull();
+  });
+
+  it("does not describe the too-large fallback as if it were the feature", () => {
+    const huge = Array(2001).fill("x").join("\n");
+    mockPair(huge + "\nOLDMARKER", huge + "\nNEWMARKER");
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
+    const note = screen.getByText(/too large to compare/i);
+    // The normal view IS side by side now, so the old copy described the
+    // fallback as if it were the feature.
+    expect(note.textContent).toContain("the full text of each is shown without highlighting");
+    expect(note.textContent).not.toContain("shown side by side instead");
   });
 });
