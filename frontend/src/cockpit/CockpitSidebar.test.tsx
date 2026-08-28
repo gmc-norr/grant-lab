@@ -126,7 +126,7 @@ it("a caret-only store update does NOT re-render a dirty subscriber (Defect 4)",
   expect(screen.getByTestId("dirty").textContent).toBe("1");
 });
 
-it("renders References and Criteria groups with a band pill", async () => {
+it("renders the References pane with a citation", async () => {
   vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
     if (path.endsWith("/references"))
       return Promise.resolve({ data: [{ id: "r1", citekey: "smith2021", title: "Smith 2021", kind: "paper", text_status: "done" }], error: undefined });
@@ -137,11 +137,22 @@ it("renders References and Criteria groups with a band pill", async () => {
       });
     return Promise.resolve(draft as never); // /draft + /spec
   }) as never);
-  renderSidebar();
-  // Open the (default-collapsed) groups.
-  fireEvent.click(await screen.findByRole("button", { name: /references/i }));
+  renderSidebar("/cockpit/ws-1?view=references");
   expect(await screen.findByText("Smith 2021")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: /criteria/i }));
+});
+
+it("renders the Criteria pane with a band pill", async () => {
+  vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
+    if (path.endsWith("/references"))
+      return Promise.resolve({ data: [{ id: "r1", citekey: "smith2021", title: "Smith 2021", kind: "paper", text_status: "done" }], error: undefined });
+    if (path.endsWith("/scorecard"))
+      return Promise.resolve({
+        data: { scorecard: { criteria: [{ index: 0, name: "Impact", band: "gap", note: "", deep_link: null, weight: 1, effective_weight: 1 }], overall_band: "gap", summary: "" }, evaluated_draft_sha: null, evaluated_spec_sha: null, completed_at: null, stale: false, stale_reasons: [] },
+        error: undefined,
+      });
+    return Promise.resolve(draft as never); // /draft + /spec
+  }) as never);
+  renderSidebar("/cockpit/ws-1?view=criteria");
   expect(await screen.findByText("Impact")).toBeInTheDocument();
   expect(screen.getByText("Gap")).toBeInTheDocument();
 });
@@ -156,13 +167,12 @@ it("clicking a criterion navigates to the Scorecard tab", async () => {
       });
     return Promise.resolve(draft as never);
   }) as never);
-  renderSidebar();
-  fireEvent.click(await screen.findByRole("button", { name: /criteria/i }));
+  renderSidebar("/cockpit/ws-1?view=criteria");
   fireEvent.click(await screen.findByRole("button", { name: /Impact/ }));
   expect(screen.getByTestId("search").textContent).toContain("tab=scorecard");
 });
 
-it("owner sees the named Members list and the Versions commits", async () => {
+it("owner sees the Versions commits", async () => {
   vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
     if (path.includes("/history"))
       return Promise.resolve({
@@ -190,10 +200,30 @@ it("owner sees the named Members list and the Versions commits", async () => {
     if (path.endsWith("/scorecard")) return Promise.resolve({ data: null, error: undefined });
     return Promise.resolve(draft as never);
   }) as never);
-  renderSidebar();
-  fireEvent.click(await screen.findByRole("button", { name: /versions/i }));
+  renderSidebar("/cockpit/ws-1?view=versions");
   expect(await screen.findByText("user spec init")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: /members/i }));
+});
+
+it("owner sees the named Members list", async () => {
+  vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
+    if (path.includes("/history"))
+      return Promise.resolve({
+        data: {
+          versions: [],
+          truncated: false,
+          history_available: true,
+        },
+        error: undefined,
+      });
+    if (path.endsWith("/members"))
+      return Promise.resolve({ data: [{ email: "owner@ki.se", role: "owner" }, { email: "m@ki.se", role: "member" }], error: undefined });
+    if (path.endsWith("/cockpit-meta"))
+      return Promise.resolve({ data: { workspace_title: "W", workspace_deadline: null, current_phase: "active", role: "owner", spec_locked: false, member_count: 2 }, error: undefined });
+    if (path.endsWith("/references")) return Promise.resolve({ data: [], error: undefined });
+    if (path.endsWith("/scorecard")) return Promise.resolve({ data: null, error: undefined });
+    return Promise.resolve(draft as never);
+  }) as never);
+  renderSidebar("/cockpit/ws-1?view=members");
   expect(await screen.findByText("owner@ki.se")).toBeInTheDocument();
 });
 
@@ -212,8 +242,7 @@ it("a non-owner member sees the member count only (no emails)", async () => {
     if (path.endsWith("/scorecard")) return Promise.resolve({ data: null, error: undefined });
     return Promise.resolve(draft as never);
   }) as never);
-  renderSidebar();
-  fireEvent.click(await screen.findByRole("button", { name: /members/i }));
+  renderSidebar("/cockpit/ws-1?view=members");
   expect(await screen.findByText(/3 members/)).toBeInTheDocument();
   expect(screen.queryByText("owner@ki.se")).toBeNull();
 });
@@ -243,9 +272,7 @@ it("owner can remove a viewer (confirm-gated) from the Members group", async () 
     return Promise.resolve(draft as never);
   }) as never);
   vi.spyOn(window, "confirm").mockReturnValue(true);
-  renderSidebar();
-  // The Members group is defaultOpen={false} — open it before the rows render:
-  fireEvent.click(await screen.findByRole("button", { name: /members/i }));
+  renderSidebar("/cockpit/ws-1?view=members");
   fireEvent.click(await screen.findByRole("button", { name: /remove viewer@ki\.se/i }));
   expect(m.removeMutate).toHaveBeenCalledWith(2);
   // owner row has NO remove control:
@@ -267,8 +294,7 @@ it("owner can open Edit rubric and save (active phase)", async () => {
     if (path.endsWith("/scorecard")) return Promise.resolve({ data: null, error: undefined });
     return Promise.resolve(draft as never);
   }) as never);
-  renderSidebar();
-  fireEvent.click(await screen.findByRole("button", { name: /criteria/i })); // open the group
+  renderSidebar("/cockpit/ws-1?view=criteria");
   fireEvent.click(await screen.findByRole("button", { name: /edit rubric/i }));
   fireEvent.click(await screen.findByRole("button", { name: /save/i }));
   expect(rb.update).toHaveBeenCalled();
@@ -304,78 +330,60 @@ it("renders the version GRAPH, not the old plain list", async () => {
     if (path.endsWith("/scorecard")) return Promise.resolve({ data: null, error: undefined });
     return Promise.resolve(draft as never);
   }) as never);
-  renderSidebar();
-  fireEvent.click(await screen.findByRole("button", { name: /versions/i }));
+  renderSidebar("/cockpit/ws-1?view=versions");
   // Graph-only output: the 7-char sha and a role dot. The old list rendered
   // neither — it showed the full message and the role as plain text.
   expect(await screen.findByText("abcdef1")).toBeInTheDocument();
   expect(document.querySelector('[data-role="agent"]')).not.toBeNull();
 });
 
-it("opens the Versions group on the History tab, without a click", async () => {
-  // The History tab's own message says "Pick two versions from the Versions
-  // list in the side pane". That list is the FOURTH group and collapsed by
-  // default, so following the instruction meant scrolling to a folded header
-  // the message never mentions. The tab that depends on the list opens it.
-  vi.spyOn(clientMod.api, "GET").mockImplementation((async (p: string) => {
-    if (String(p).includes("/history"))
-      return {
-        data: {
-          versions: [
-            {
-              commit_sha: "b".repeat(40),
-              committed_at: "2026-08-28T10:00:00+00:00",
-              subject: "a version subject",
-              created_by: "user",
-              triggering_turn_id: null,
-              turn_prompt: null,
-            },
-          ],
-          truncated: false,
-          history_available: true,
-        },
-      };
-    return draft;
-  }) as never);
-  renderSidebar("/cockpit/ws-1?tab=history");
-  // The ROWS, not the header: the header is present either way, so asserting it
-  // would pass on the collapsed group this test exists to rule out.
-  expect(await screen.findByRole("list", { name: "Versions" })).toBeInTheDocument();
-  expect(screen.getByText(/a version subject/)).toBeInTheDocument();
-});
-
-it("leaves the Versions group folded on the Draft tab", async () => {
+it("renders ONLY the view the URL asks for", async () => {
+  // Asserting the OTHERS are absent on ?view=outline would prove nothing:
+  // SidebarGroup mounts children only when open (SidebarGroup.tsx:44) and
+  // References, Criteria, Members and Versions are all defaultOpen={false}, so
+  // those lists are already absent under the accordion. The gate has to name a
+  // NON-default view and assert the default one is gone.
   vi.spyOn(clientMod.api, "GET").mockResolvedValue(draft as never);
-  renderSidebar("/cockpit/ws-1?tab=draft");
-  await screen.findByRole("button", { name: /Methods/ });
-  expect(screen.queryByRole("list", { name: "Versions" })).toBeNull();
+  renderSidebar("/cockpit/ws-1?view=members");
+  expect(await screen.findByRole("heading", { name: /members/i })).toBeInTheDocument();
+  // Outline is the group the accordion leaves OPEN, so its absence is the
+  // assertion the accordion cannot satisfy.
+  expect(screen.queryByRole("list", { name: "Outline" })).toBeNull();
+  expect(screen.queryByRole("button", { name: /Methods/ })).toBeNull();
+  // References is named EXPLICITLY because Step 10 mutates ReferencesPane to
+  // unconditional and expects THIS test to go red. Without this line that
+  // mutation is caught only by `heads EVERY pane` — a different test than the
+  // one the mutation step names.
+  expect(screen.queryByRole("list", { name: "References" })).toBeNull();
 });
 
-it("a group opened by the tab can still be folded by hand", async () => {
-  vi.spyOn(clientMod.api, "GET").mockImplementation((async (p: string) => {
-    if (String(p).includes("/history"))
-      return {
-        data: {
-          versions: [
-            {
-              commit_sha: "b".repeat(40),
-              committed_at: "2026-08-28T10:00:00+00:00",
-              subject: "a version subject",
-              created_by: "user",
-              triggering_turn_id: null,
-              turn_prompt: null,
-            },
-          ],
-          truncated: false,
-          history_available: true,
-        },
-      };
-    return draft;
-  }) as never);
-  renderSidebar("/cockpit/ws-1?tab=history");
-  await screen.findByRole("list", { name: "Versions" });
-  fireEvent.click(screen.getByRole("button", { name: /versions/i }));
-  // Must STAY folded: an effect that re-opens on every render would make the
-  // header un-collapsible, which is worse than the bug it fixes.
-  expect(screen.queryByRole("list", { name: "Versions" })).toBeNull();
+it("heads EVERY pane with its own name, and shows no other", async () => {
+  // Parameterised: checking one pane's heading lets a missing or wrong heading
+  // on the other four pass.
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(draft as never);
+  const pairs = [
+    ["outline", /outline/i],
+    ["versions", /versions/i],
+    ["references", /references/i],
+    ["criteria", /criteria/i],
+    ["members", /members/i],
+  ] as const;
+  for (const [view, title] of pairs) {
+    const { unmount } = renderSidebar(`/cockpit/ws-1?view=${view}`);
+    const headings = await screen.findAllByRole("heading");
+    expect(headings).toHaveLength(1);
+    expect(headings[0].textContent ?? "").toMatch(title);
+    unmount();
+  }
 });
+
+it("has no collapsible group chrome left", async () => {
+  // SidebarGroup rendered a header BUTTON with aria-expanded. One view at a
+  // time needs no toggle, and leaving one invites the folded-below-the-fold
+  // problem back.
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(draft as never);
+  const { container } = renderSidebar("/cockpit/ws-1?view=outline");
+  await screen.findByRole("button", { name: /Methods/ });
+  expect(container.querySelectorAll("[aria-expanded]")).toHaveLength(0);
+});
+

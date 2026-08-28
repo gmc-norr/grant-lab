@@ -1,5 +1,5 @@
 import { MantineProvider } from "@mantine/core";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, useSearchParams } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
@@ -38,16 +38,6 @@ function wrap(initial = "/cockpit/ws1?tab=draft") {
       </MemoryRouter>
     </MantineProvider>,
   );
-  // SidebarGroup with defaultOpen={false} mounts children only when open, so
-  // these tests must expand it to query rows and notes. CONDITIONAL, because on
-  // ?tab=history the group now opens itself and an unconditional click would
-  // FOLD it — which is exactly how this helper broke when that landed.
-  //
-  // A conditional click could mask the group failing to open on its own, so
-  // that behaviour is gated where it belongs, in CockpitSidebar.test.tsx
-  // ("opens the Versions group on the History tab, without a click").
-  const header = screen.getByRole("button", { name: /versions/i });
-  if (header.getAttribute("aria-expanded") !== "true") fireEvent.click(header);
   return result;
 }
 
