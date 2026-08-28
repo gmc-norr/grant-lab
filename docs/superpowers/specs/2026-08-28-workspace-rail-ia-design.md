@@ -1,7 +1,8 @@
 # Workspace rail — information architecture
 
 **Date:** 2026-08-28
-**Status:** design, revision 3 — outside review rounds 1 and 2, 9/9 findings confirmed.
+**Status:** design, revision 4 — outside review rounds 1-3, 13/13 findings confirmed (one
+with a correction).
 Not implemented. The two rounds also found **two live data-loss bugs** in shipped code,
 fixed separately in `cc50e0e7` and `1f3fd60a` (see §7.3).
 **Supersedes nothing.** Follows `2026-08-28-version-graph-side-pane-design.md`, which moved
@@ -167,6 +168,21 @@ without adding a permanent tab.
 Selecting **one** version opens it read-only in the middle; selecting **two** opens the
 diff. Both behaviours exist today in `HistoryPanel` and are preserved.
 
+### 6.0 The Draft/Spec switch moves to the pane
+
+`?artifact` decides **whose history the Versions pane lists**. Its control today is a
+`SegmentedControl` in `HistoryPanel`'s header (`HistoryPanel.tsx:97-106`) — that is, in the
+**middle**. After this design the middle is the comparison and the pane is the list, so the
+switch would sit on the thing it does not govern: a user looking at the Versions pane and
+wanting Spec history would have to go to the middle to change what the pane shows.
+
+The switch moves into the **Versions pane header**, beside the title, keeping its
+`aria-label="Which artifact"` and its two options. `HistoryPanel` loses it; nothing else
+about `HistoryPanel` changes, and it continues to read `nav.artifact`.
+
+Changing the artifact still clears both shas (`historyNav.setArtifact`, unchanged): a sha
+from the draft's history is not a version of the spec.
+
 ### 6.1 Deselecting must not open anything
 
 Clicking an already-selected version **deselects** it (`historyNav.ts:51-52`), and
@@ -178,9 +194,25 @@ destination the user did not ask for.
 non-empty**. A click that empties it leaves `?tab` alone, and the user stays where they
 were.
 
+**Order matters, and it is a requirement, not an implementation detail.** The resulting
+selection must be computed **before** the dirty-editor guard runs (§7.3). Guarding first
+prompts "discard your unsaved edits?" and then discovers that no destination change was
+going to happen — a prompt for nothing, which is how users learn to dismiss prompts
+without reading them. The test in §11 asserts no prompt on a deselection from a dirty
+editor on another tab.
+
 `?tab=diff` with nothing selected remains reachable by hand-editing the URL. It renders
-`HistoryPanel`'s existing empty state, which is correct and — unlike before this design —
-actually followable: the Versions pane it refers to is the pane the user is looking at.
+`HistoryPanel`'s existing empty state, which points at the Versions pane.
+
+**That pointer is only true if the pane is showing.** `?view` defaults to `outline`, so a
+bare `?tab=diff` would render "pick a version in the Versions pane" beside the **Outline**
+— the exact defect this whole design exists to remove, reintroduced by a default. An
+earlier revision claimed the pane "is the pane the user is looking at"; it is not.
+
+**`?view` defaults to `versions` when it is absent and the effective tab is `diff`**,
+`outline` otherwise. This is the same gap-filling rule as the legacy alias (§7.2) and
+obeys the same precedence: an explicit `view` always wins, so `?tab=diff&view=criteria`
+shows Criteria.
 
 ## 7. URL state
 
@@ -350,12 +382,20 @@ tab strip (`Cockpit.tsx:86`); add `diff`; point `selectAndOpen` at it; add the
 - **One URL write** — clicking a version in the pane yields a URL carrying `a` **and**
   `tab=diff`. Assert the resulting URL, not that two functions were called: the latter
   passes while the feature is broken. The existing pinned two-writer test stays.
-- **The rail merges** — with `?tab=scorecard&sec=3` in the URL, clicking a workspace-band
-  item yields a URL that still carries **both**, with only `view` changed. A test that
-  only asserts `view=versions` is present passes on the replacing `<Link>` this rule
-  exists to forbid.
-- **Deselect does not open** — clicking the only selected version leaves `?tab` untouched
-  and clears the sha. Assert `tab`, not just the absence of the sha.
+- **The rail merges** — seed the URL with **every** parameter the merge must preserve:
+  `?tab=scorecard&sec=3&artifact=spec&a=<sha>&b=<sha>&layout=unified`. Click a
+  workspace-band item and assert all six are unchanged and only `view` differs. Seeding
+  with `tab` and `sec` alone is a hollow gate: an implementation that keeps those two and
+  drops `artifact`, `a`, `b` and `layout` passes it. Asserting merely that `view=versions`
+  is present is weaker still — that passes on the replacing `<Link>` this rule forbids.
+- **The `diff` default** — a bare `?tab=diff` shows the **Versions** pane; an explicit
+  `?tab=diff&view=criteria` shows Criteria.
+- **The artifact switch** — it renders in the Versions pane and no longer in
+  `HistoryPanel`; changing it clears both shas.
+- **Deselect does not open, and does not prompt** — clicking the only selected version
+  leaves `?tab` untouched and clears the sha, with a **dirty editor on another tab** and
+  **no `window.confirm` call**. Assert `tab` and the confirm count, not just the absence of
+  the sha.
 - **The dirty guards survive** — the four `selectAndOpen guards unsaved edits` tests pass
   against `tab=diff`, and the four `navigate()` guard tests stay green. One test added:
   from a legacy `?tab=history` URL with a dirty editor, picking a version prompts **not at
@@ -392,6 +432,9 @@ Frontend gates unchanged: `pnpm exec tsc --noEmit`, `pnpm vitest run`, `pnpm bui
   dirty-editor guard (§7.3), and only sets the destination when the selection is non-empty
   (§6.1)
 - `frontend/src/routes/Cockpit.tsx` — tab strip and the `diff` destination
+- `frontend/src/cockpit/HistoryPanel.tsx` — loses the Draft/Spec `SegmentedControl` to the
+  Versions pane (§6.0), and nothing else. It renders the comparison; where it is reached
+  from is not its concern
 
 **Delete**
 - `frontend/src/cockpit/SidebarGroup.tsx` — no consumers once the accordion is gone. It has
@@ -399,8 +442,6 @@ Frontend gates unchanged: `pnpm exec tsc --noEmit`, `pnpm vitest run`, `pnpm bui
   `VersionGraph.test.tsx`, and those assertions go with the accordion.
 
 **Unchanged**
-- `frontend/src/cockpit/HistoryPanel.tsx` — it renders the comparison; where it is reached
-  from is not its concern
 - `frontend/src/cockpit/diff.ts`, `DiffView.tsx`, `SideBySideDiffView.tsx`
 - `frontend/src/routes/CallsFilters.tsx`, `WorkspacesFilters.tsx`
 - All backend code. This spec touches `frontend/` only.
