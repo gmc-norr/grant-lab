@@ -124,12 +124,27 @@ export function withinWordCap(before: string, after: string): boolean {
   return tokens(before).length * tokens(after).length <= MAX_WORD_MATRIX;
 }
 
-export function refineRuns(rows: DiffRow[]): DiffRow[] {
-  const out: DiffRow[] = [];
+type Block =
+  | { kind: "single"; row: DiffRow }
+  | { kind: "change"; dels: DiffRow[]; adds: DiffRow[] };
+
+/** Group a flat diff into single rows and change-blocks. This is the walk
+ *  refineRuns has always performed, lifted out so pairRows uses the SAME one.
+ *
+ *  A `del` row OPENS a change-block: the contiguous run of `del` rows, then the
+ *  contiguous run of `add` rows immediately following it. Any other row is a
+ *  `single`.
+ *
+ *  Two consequences that are easy to get wrong: `dels` is NEVER empty in a
+ *  change-block, because only a `del` opens one. A run of `add` rows with no
+ *  `del` before it is NOT a change-block — each such row arrives as its own
+ *  `single`. */
+function blocks(rows: DiffRow[]): Block[] {
+  const out: Block[] = [];
   let i = 0;
   while (i < rows.length) {
     if (rows[i].tag !== "del") {
-      out.push(rows[i]);
+      out.push({ kind: "single", row: rows[i] });
       i++;
       continue;
     }
@@ -137,8 +152,19 @@ export function refineRuns(rows: DiffRow[]): DiffRow[] {
     while (i < rows.length && rows[i].tag === "del") i++;
     const addStart = i;
     while (i < rows.length && rows[i].tag === "add") i++;
-    const dels = rows.slice(delStart, addStart);
-    const adds = rows.slice(addStart, i);
+    out.push({ kind: "change", dels: rows.slice(delStart, addStart), adds: rows.slice(addStart, i) });
+  }
+  return out;
+}
+
+export function refineRuns(rows: DiffRow[]): DiffRow[] {
+  const out: DiffRow[] = [];
+  for (const b of blocks(rows)) {
+    if (b.kind === "single") {
+      out.push(b.row);
+      continue;
+    }
+    const { dels, adds } = b;
     const paired = Math.min(dels.length, adds.length);
     // One wordDiff per pair, not two: it used to be computed twice, once for
     // `.del` and once for `.add`, doubling the cost of the matrix capped below.
