@@ -61,6 +61,28 @@ def test_list_is_newest_first_and_scoped_to_the_artifact(
     assert [v["subject"] for v in r2.json()["versions"]] == ["spec 0"]
 
 
+def test_readable_history_with_no_matching_commits_is_NOT_unavailable(
+    client_authed_owner, _app, current_user, pg_session_factory, tmp_path
+):
+    """The other side of `history_available`, and the one an "empty means broken"
+    regression would silently eat.
+
+    A repo with real commits, none of which touched the requested artifact, is a
+    perfectly readable history that happens to be empty for this tab. It must
+    answer `history_available: true` with no versions — distinct from the unborn
+    HEAD below, which is `false`. Every other success-path test here has at least
+    one matching commit, so none of them can fail on
+    `if not versions: history_available = False`.
+    """
+    ws_id = _make_ws(_app, current_user, pg_session_factory, tmp_path)
+    repo = tmp_path / ws_id / "repo"
+    _commit(repo, "proposal-spec.md", "# spec only\n", "spec only")
+
+    r = client_authed_owner.get(f"/api/workspaces/{ws_id}/history?artifact=draft")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"versions": [], "truncated": False, "history_available": True}
+
+
 def test_unborn_head_is_a_state_not_a_500(
     client_authed_owner, _app, current_user, pg_session_factory, tmp_path
 ):
