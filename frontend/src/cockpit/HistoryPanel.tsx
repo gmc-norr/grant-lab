@@ -19,7 +19,12 @@ export function HistoryPanel({ id }: { id: string }) {
   // version. Selecting the two rows in the opposite order must produce an
   // identical view — that is a test, not a convention.
   const order = data?.versions.map((v) => v.commit_sha) ?? [];
-  const both = nav.a != null && nav.b != null;
+  // `nav.a !== nav.b`: the same sha in both slots is not a comparison. It cannot
+  // arise from clicking — nextSelection deselects a row that is already
+  // selected — so it comes from a hand-edited or truncated link, and diffing a
+  // document against itself renders an empty diff that explains nothing. Treated
+  // as the single selection it really is.
+  const both = nav.a != null && nav.b != null && nav.a !== nav.b;
   const ia = order.indexOf(nav.a as string);
   const ib = order.indexOf(nav.b as string);
   // BOTH shas must be FOUND in the list before direction is knowable. Before the
@@ -168,10 +173,14 @@ export function HistoryPanel({ id }: { id: string }) {
           Reachable with one version via `?a=X&b=X`, where both indices resolve. */}
       {both && ordered && (older.isError || newer.isError) && (
         <Stack gap="xs" align="flex-start">
+          {/* No "pick two" here. Both shas are in the list and one of them
+              cannot be read, so with exactly two versions no readable pair
+              exists and the instruction cannot be followed however many times
+              it is tried. The control is the action. */}
           <Text size="sm" c="dimmed">
-            One of those versions could not be read. {pickAdvice}
+            One of those versions could not be read.
           </Text>
-          {!canCompare && <ClearComparison onClear={nav.clearSelection} />}
+          <ClearComparison onClear={nav.clearSelection} />
         </Stack>
       )}
       {both && !ordered && !list.isError && list.isLoading && (

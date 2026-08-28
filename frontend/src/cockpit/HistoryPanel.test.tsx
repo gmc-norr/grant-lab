@@ -222,10 +222,39 @@ describe("HistoryPanel", () => {
       isLoading: false,
       isError: true,
     } as never);
-    // Both slots hold the SAME listed sha: `ordered` is true, so this is the
-    // failed-read branch and only that branch. A stale second sha would instead
-    // be the not-in-list state, which is the next test.
     wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=aaaaaaa");
+    // The same sha in both slots is not a comparison. It reads as a single
+    // selection, so this is the single-read failure, and it names the version
+    // correctly rather than claiming two.
+    expect(screen.getByText(/could not be read/i)).toBeInTheDocument();
+    expect(screen.getByText(/only version this workspace has/i)).toBeInTheDocument();
+    expect(screen.queryByText(/pick two/i)).toBeNull();
+  });
+
+  it("the same sha in both slots reads one version, it does not diff it against itself", () => {
+    // nextSelection can never produce a === b (clicking a selected row
+    // deselects it), so this arrives only by hand-edited or truncated URL.
+    // Diffing a document against itself renders an empty diff and tells the
+    // user nothing.
+    mockList({ versions: [ROW("bbbbbbb", "two"), ROW("aaaaaaa", "one")] });
+    mockVersion("# just this one\n");
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=aaaaaaa");
+    expect(screen.getByText(/# just this one/)).toBeInTheDocument();
+    expect(screen.queryByTestId("version-diff")).toBeNull();
+    expect(screen.queryByLabelText(/compare layout/i)).toBeNull();
+  });
+
+  it("a failed read in a two-version history offers the exit, not more picking", () => {
+    // With exactly two versions and one unreadable there is no readable pair,
+    // so "pick two from the list" cannot be followed however many times it is
+    // tried. The control is the action.
+    mockList({ versions: [ROW("bbbbbbb", "two"), ROW("aaaaaaa", "one")] });
+    vi.spyOn(versionsMod, "useVersion").mockReturnValue({
+      data: null,
+      isLoading: false,
+      isError: true,
+    } as never);
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
     expect(screen.getByText(/could not be read/i)).toBeInTheDocument();
     expect(screen.queryByText(/pick two/i)).toBeNull();
     expect(screen.getAllByRole("button", { name: /clear the comparison/i })).toHaveLength(1);
@@ -292,7 +321,9 @@ describe("HistoryPanel", () => {
       isLoading: false,
       isError: true,
     } as never);
-    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
+    // A stale THIRD sha, so this is the not-in-list branch: with two real
+    // versions "pick two" is followable there, and no exit control is needed.
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=ccccccc&b=bbbbbbb");
     expect(screen.getByText(/pick two/i)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /clear the comparison/i })).toBeNull();
   });
