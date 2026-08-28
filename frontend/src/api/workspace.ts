@@ -17,20 +17,6 @@ export function useCockpitMeta(id: string) {
   });
 }
 
-/** GET /api/workspaces/{id}/versions — recent commits for the Versions group. */
-export function useVersions(id: string) {
-  return useQuery({
-    queryKey: ["versions", id],
-    enabled: !!id,
-    queryFn: async () =>
-      unwrap(
-        await api.GET("/api/workspaces/{workspace_id}/versions", {
-          params: { path: { workspace_id: id } },
-        }),
-      ),
-  });
-}
-
 /** GET /api/workspaces/{id}/members — OWNER-GATED. A non-owner member gets a 403,
  *  which is expected (they fall back to the member_count) — so do NOT retry it. */
 export function useMembers(id: string) {
