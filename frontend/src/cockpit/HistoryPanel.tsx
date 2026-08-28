@@ -113,7 +113,7 @@ export function HistoryPanel({ id }: { id: string }) {
 
       {/* The selection is deliberately NOT cleared from the URL here: rewriting
           the address the user arrived on costs them the back button and hides
-          which link was broken. The list below stays usable, which is what §6.4
+          which link was broken. The side pane's list stays usable, which is what §6.4
           is actually protecting. */}
       {both && (older.isError || newer.isError) && (
         <Text size="sm" c="dimmed">

@@ -1,5 +1,5 @@
 import { MantineProvider } from "@mantine/core";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, useSearchParams } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
@@ -157,5 +157,15 @@ describe("VersionGraph", () => {
     await user.hover(screen.getByRole("button", { name: /aaaaaaa/ }));
     await screen.findByTestId("version-card-aaaaaaa");
     expect(screen.queryByText(/because you asked/i)).toBeNull();
+  });
+
+  it("opens the card on keyboard focus, not only on hover — spec 5.1", async () => {
+    mockList({
+      versions: [{ ...ROW("aaaaaaa", "agent draft edit", "agent"), turn_prompt: "Tighten the aims section" }],
+    });
+    wrap();
+    act(() => screen.getByRole("button", { name: /aaaaaaa/ }).focus());
+    const card = await screen.findByTestId("version-card-aaaaaaa");
+    expect(card.textContent).toContain("because you asked: Tighten the aims section");
   });
 });

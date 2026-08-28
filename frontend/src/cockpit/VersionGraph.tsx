@@ -1,9 +1,109 @@
-import { HoverCard, Text } from "@mantine/core";
+import { Popover, Text } from "@mantine/core";
+import { useEffect, useRef, useState } from "react";
 
-import { useVersions } from "../api/versions";
+import { useVersions, type VersionRow } from "../api/versions";
 import { useHistoryNav } from "./historyNav";
 import { SidebarGroup } from "./SidebarGroup";
 import styles from "./VersionGraph.module.css";
+
+/** One version row with a controlled Popover that opens on hover (250ms) or keyboard focus.
+ *
+ *  Each row needs its own `opened` state and delay timer, which is why the row
+ *  is extracted into its own component rather than inlined into the `.map`. */
+function VersionGraphRow({ v, selected, onSelect }: { v: VersionRow; selected: boolean; onSelect: () => void }) {
+  const [opened, setOpened] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Clear any pending open timer on unmount to avoid a state update on an
+  // unmounted component.
+  useEffect(() => {
+    return () => {
+      if (timerRef.current != null) {
+        clearTimeout(timerRef.current);
+      }
+    };
+  }, []);
+
+  const sha7 = v.commit_sha.slice(0, 7);
+
+  function handleMouseEnter() {
+    timerRef.current = setTimeout(() => {
+      setOpened(true);
+    }, 250);
+  }
+
+  function handleMouseLeave() {
+    if (timerRef.current != null) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    setOpened(false);
+  }
+
+  function handleFocus() {
+    if (timerRef.current != null) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    setOpened(true);
+  }
+
+  function handleBlur() {
+    setOpened(false);
+  }
+
+  return (
+    <li className={styles.row}>
+      <Popover
+        position="right-start"
+        withinPortal
+        shadow="md"
+        width={340}
+        opened={opened}
+      >
+        <Popover.Target>
+          <button
+            type="button"
+            className={styles.button}
+            aria-pressed={selected}
+            onClick={onSelect}
+            onMouseEnter={handleMouseEnter}
+            onMouseLeave={handleMouseLeave}
+            onFocus={handleFocus}
+            onBlur={handleBlur}
+          >
+            <span className={styles.lane} aria-hidden="true">
+              <span className={styles.dot} data-role={v.created_by ?? "none"} />
+            </span>
+            <span className={styles.sha}>{sha7}</span>
+            <span className={styles.subject}>{v.subject}</span>
+          </button>
+        </Popover.Target>
+        {/* What will not fit at 276px lives here. `right-start` puts it
+            beside the pane; Mantine's floating middleware flips it when
+            there is no room to the right (a widened pane, a narrow
+            window), so no manual positioning is needed. */}
+        <Popover.Dropdown data-testid={`version-card-${sha7}`}>
+          <Text size="sm" fw={600}>
+            {v.subject}
+          </Text>
+          <Text size="xs" c="dimmed" mt={2}>
+            {v.created_by ?? "not recorded"} · {sha7} ·{" "}
+            {new Date(v.committed_at).toLocaleString()}
+          </Text>
+          {/* The "why". Null for every reconciled row and every commit
+              with no DB row, so absence is ordinary — render nothing,
+              not a placeholder. */}
+          {v.turn_prompt && (
+            <Text size="xs" mt={6}>
+              because you asked: {v.turn_prompt}
+            </Text>
+          )}
+        </Popover.Dropdown>
+      </Popover>
+    </li>
+  );
+}
 
 /** The cockpit side pane's Versions group, drawn as a commit graph.
  *
@@ -38,51 +138,12 @@ export function VersionGraph({ id }: { id: string }) {
           {rows.map((v) => {
             const selected = v.commit_sha === nav.a || v.commit_sha === nav.b;
             return (
-              <li key={v.commit_sha} className={styles.row}>
-                <HoverCard
-                  position="right-start"
-                  withinPortal
-                  openDelay={250}
-                  shadow="md"
-                  width={340}
-                >
-                  <HoverCard.Target>
-                    <button
-                      type="button"
-                      className={styles.button}
-                      aria-pressed={selected}
-                      onClick={() => nav.selectAndOpen(v.commit_sha)}
-                    >
-                      <span className={styles.lane} aria-hidden="true">
-                        <span className={styles.dot} data-role={v.created_by ?? "none"} />
-                      </span>
-                      <span className={styles.sha}>{v.commit_sha.slice(0, 7)}</span>
-                      <span className={styles.subject}>{v.subject}</span>
-                    </button>
-                  </HoverCard.Target>
-                  {/* What will not fit at 276px lives here. `right-start` puts it
-                      beside the pane; Mantine's floating middleware flips it when
-                      there is no room to the right (a widened pane, a narrow
-                      window), so no manual positioning is needed. */}
-                  <HoverCard.Dropdown data-testid={`version-card-${v.commit_sha.slice(0, 7)}`}>
-                    <Text size="sm" fw={600}>
-                      {v.subject}
-                    </Text>
-                    <Text size="xs" c="dimmed" mt={2}>
-                      {v.created_by ?? "not recorded"} · {v.commit_sha.slice(0, 7)} ·{" "}
-                      {new Date(v.committed_at).toLocaleString()}
-                    </Text>
-                    {/* The "why". Null for every reconciled row and every commit
-                        with no DB row, so absence is ordinary — render nothing,
-                        not a placeholder. */}
-                    {v.turn_prompt && (
-                      <Text size="xs" mt={6}>
-                        because you asked: {v.turn_prompt}
-                      </Text>
-                    )}
-                  </HoverCard.Dropdown>
-                </HoverCard>
-              </li>
+              <VersionGraphRow
+                key={v.commit_sha}
+                v={v}
+                selected={selected}
+                onSelect={() => nav.selectAndOpen(v.commit_sha)}
+              />
             );
           })}
         </ul>
