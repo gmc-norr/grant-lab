@@ -321,15 +321,17 @@ export interface paths {
          *        the full `acquire_commit_mutex` default of `timeout_seconds=10`
          *        (drafting/locking.py:206) just to answer a 404.
          *     2. Post-lock, with a fresh scalar SELECT (never the identity-mapped row
-         *        from step 1 — same pattern as `acquire_commit_mutex_live`,
-         *        drafting/locking.py:288-292): the workspace can be restored in the
+         *        from step 1 — the same fresh-under-mutex re-read `soft_delete_workspace_db`
+         *        now inlines in workspaces.py, factored out of the deleted
+         *        `acquire_commit_mutex_live`): the workspace can be restored in the
          *        window between step 1 and winning the mutex, and the git read below
          *        must never proceed against a workspace that is live again.
          *
          *     Holds the per-workspace commit mutex for the git read. That is the plain
-         *     `acquire_commit_mutex`, NOT `acquire_commit_mutex_live` — the live variant
-         *     re-reads liveness and raises WorkspaceDeleted, which would refuse every
-         *     workspace this endpoint exists to serve.
+         *     `acquire_commit_mutex` — deliberately not a liveness-raising variant. (The
+         *     old `acquire_commit_mutex_live`, deleted in the 2026-08-24 fence endgame,
+         *     re-read liveness and raised WorkspaceDeleted on a soft-deleted row, which
+         *     would have refused every workspace this endpoint exists to serve.)
          *
          *     Refuses with 403 when RETENTION_INSPECTION_ENABLED is false (the default).
          *
@@ -1152,6 +1154,40 @@ export interface paths {
         post?: never;
         /** Api Delete File */
         delete: operations["api_delete_file_api_workspaces__workspace_id__files__attachment_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspaces/{workspace_id}/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Versions */
+        get: operations["list_versions_api_workspaces__workspace_id__history_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspaces/{workspace_id}/history/{commit_sha}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Version */
+        get: operations["read_version_api_workspaces__workspace_id__history__commit_sha__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -3722,6 +3758,15 @@ export interface components {
             /** Error Type */
             type: string;
         };
+        /** VersionListOut */
+        VersionListOut: {
+            /** History Available */
+            history_available: boolean;
+            /** Truncated */
+            truncated: boolean;
+            /** Versions */
+            versions: components["schemas"]["VersionRow"][];
+        };
         /** VersionOut */
         VersionOut: {
             /** Commit Sha */
@@ -3735,6 +3780,30 @@ export interface components {
             created_by: string;
             /** Message */
             message: string;
+        };
+        /** VersionReadOut */
+        VersionReadOut: {
+            /** Artifact */
+            artifact: string;
+            /** Commit Sha */
+            commit_sha: string;
+            /** Markdown */
+            markdown: string;
+        };
+        /** VersionRow */
+        VersionRow: {
+            /** Commit Sha */
+            commit_sha: string;
+            /** Committed At */
+            committed_at: string;
+            /** Created By */
+            created_by?: string | null;
+            /** Subject */
+            subject: string;
+            /** Triggering Turn Id */
+            triggering_turn_id?: string | null;
+            /** Turn Prompt */
+            turn_prompt?: string | null;
         };
         /** WaiverIn */
         WaiverIn: {
@@ -10635,6 +10704,73 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    list_versions_api_workspaces__workspace_id__history_get: {
+        parameters: {
+            query?: {
+                artifact?: "draft" | "spec";
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VersionListOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_version_api_workspaces__workspace_id__history__commit_sha__get: {
+        parameters: {
+            query?: {
+                artifact?: "draft" | "spec";
+            };
+            header?: never;
+            path: {
+                workspace_id: string;
+                commit_sha: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VersionReadOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
