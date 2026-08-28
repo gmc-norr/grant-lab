@@ -1,4 +1,4 @@
-import { Group, SegmentedControl, Stack, Text, Title } from "@mantine/core";
+import { Button, Group, SegmentedControl, Stack, Text, Title } from "@mantine/core";
 
 import type { Artifact } from "../api/proposals";
 import { useVersion, useVersions } from "../api/versions";
@@ -41,11 +41,17 @@ export function HistoryPanel({ id }: { id: string }) {
   // history all three are unfollowable, because the pane holds one row. `both`
   // comes from the URL, not from clicking, so a shared or stale link reaches the
   // recovery messages in a workspace that never had two versions.
+  //
+  // Zero and one need DIFFERENT words, not one "cannot compare" message: an
+  // empty workspace told "only one version" contradicts the "No versions yet"
+  // line rendered directly above it.
   const shown = data?.versions.length ?? 0;
   const canCompare = shown > 1;
   const pickAdvice = canCompare
     ? "Pick two from the Versions list in the side pane."
-    : "This workspace has only one version — select it in the side pane to read it.";
+    : shown === 1
+      ? "This workspace has only one version, so there is nothing to compare it with."
+      : "This workspace has no versions to compare.";
 
   // The header timestamps come from the LIST row, not the version payload:
   // VersionContent is {commit_sha, artifact, markdown} and carries no
@@ -129,7 +135,10 @@ export function HistoryPanel({ id }: { id: string }) {
           left a hand-trimmed `?b=` whose read failed rendering nothing. */}
       {!both && (nav.a ?? nav.b) != null && older.isError && (
         <Text size="sm" c="dimmed">
-          That version could not be read. Pick one from the Versions list in the side pane.
+          That version could not be read.{" "}
+          {shown > 1
+            ? "Pick one from the Versions list in the side pane."
+            : "It is the only version this workspace has."}
         </Text>
       )}
 
@@ -138,9 +147,12 @@ export function HistoryPanel({ id }: { id: string }) {
           which link was broken. The side pane's list stays usable, which is what §6.4
           is actually protecting. */}
       {both && (older.isError || newer.isError) && (
-        <Text size="sm" c="dimmed">
-          One of those versions could not be read. {pickAdvice}
-        </Text>
+        <Stack gap="xs" align="flex-start">
+          <Text size="sm" c="dimmed">
+            One of those versions could not be read. {pickAdvice}
+          </Text>
+          {!canCompare && <ClearComparison onClear={nav.clearSelection} />}
+        </Stack>
       )}
       {both && !ordered && !list.isError && list.isLoading && (
         <Text size="sm" c="dimmed">
@@ -151,9 +163,12 @@ export function HistoryPanel({ id }: { id: string }) {
           abbreviated sha, a sha from the other artifact, a stale link. Direction
           is unknowable, so say so rather than waiting on it forever. */}
       {both && !ordered && !list.isError && !list.isLoading && (
-        <Text size="sm" c="dimmed">
-          One of the selected versions is not in the Versions list. {pickAdvice}
-        </Text>
+        <Stack gap="xs" align="flex-start">
+          <Text size="sm" c="dimmed">
+            One of the selected versions is not in the Versions list. {pickAdvice}
+          </Text>
+          {!canCompare && <ClearComparison onClear={nav.clearSelection} />}
+        </Stack>
       )}
       {both &&
         ordered &&
@@ -206,5 +221,24 @@ export function HistoryPanel({ id }: { id: string }) {
           </Stack>
         ))}
     </Stack>
+  );
+}
+
+/** The way out of a stale two-sha URL.
+ *
+ *  Clicking the side pane cannot escape one — nextSelection either deselects the
+ *  row (leaving the stale sha) or slides it back into the pair, a two-click
+ *  cycle with no exit, pinned in historyNav.test.tsx. Offered only when the
+ *  history is too short to compare, which is the case where no amount of
+ *  clicking produces a valid pair.
+ *
+ *  The URL is still not rewritten on the user's behalf: they arrived on this
+ *  link, and silently changing the address costs them the back button and hides
+ *  which link was broken. This makes the correction theirs to make. */
+function ClearComparison({ onClear }: { onClear: () => void }) {
+  return (
+    <Button size="xs" variant="default" onClick={onClear}>
+      Clear the comparison
+    </Button>
   );
 }

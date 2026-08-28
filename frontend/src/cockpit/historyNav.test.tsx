@@ -4,7 +4,7 @@ import { MemoryRouter, useSearchParams } from "react-router-dom";
 import { describe, expect, it } from "vitest";
 
 import { useCockpitNav } from "./cockpitNav";
-import { useHistoryNav } from "./historyNav";
+import { nextSelection, useHistoryNav } from "./historyNav";
 
 function wrapperFor(initial: string) {
   return ({ children }: { children: ReactNode }) =>
@@ -231,5 +231,64 @@ describe("one URL write, not two — spec section 6.1", () => {
     const url = urlAfterClick("two-writers");
     expect(url).toContain("tab=history");
     expect(url).not.toContain("a=abc1234");
+  });
+});
+
+describe("nextSelection — the stale-pair trap", () => {
+  it("cannot reach a single valid selection by clicking the only row", () => {
+    // A one-version workspace reached by a stale link: `a` is a sha that is not
+    // in the list, `b` is the only real row. Clicking that row deselects it and
+    // LEAVES the stale sha; clicking again slides it back into the pair. The
+    // state cycles with period two and never reaches "one valid sha". This is
+    // why HistoryPanel offers an explicit way out instead of telling the user
+    // to click the pane.
+    const stale = "abc1234";
+    const real = "aaaaaaa";
+    let cur: { a: string | null; b: string | null } = { a: stale, b: real };
+    const seen: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      cur = nextSelection(cur, real);
+      seen.push(`${cur.a ?? "-"}/${cur.b ?? "-"}`);
+    }
+    expect(seen).toEqual([
+      `${stale}/-`,
+      `${stale}/${real}`,
+      `${stale}/-`,
+      `${stale}/${real}`,
+    ]);
+    expect(seen.every((x) => x.includes(stale))).toBe(true);
+  });
+});
+
+describe("clearSelection", () => {
+  function ClearProbe() {
+    const hist = useHistoryNav();
+    const [sp] = useSearchParams();
+    return (
+      <>
+        <button onClick={() => hist.clearSelection()}>clear</button>
+        <output data-testid="url">{sp.toString()}</output>
+      </>
+    );
+  }
+
+  it("removes BOTH shas and keeps everything else in the URL", () => {
+    render(
+      <MemoryRouter
+        initialEntries={["/cockpit/ws1?tab=history&artifact=spec&layout=unified&a=abc1234&b=aaaaaaa"]}
+      >
+        <ClearProbe />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText("clear"));
+    // Parsed, not substring-matched: "tab=history" contains the literal "b=",
+    // so `not.toContain("b=")` fails on a URL that is in fact correct.
+    const url = new URLSearchParams(screen.getByTestId("url").textContent ?? "");
+    expect(url.get("a")).toBeNull();
+    expect(url.get("b")).toBeNull();
+    // The exit must not cost the user their tab, artifact or layout.
+    expect(url.get("tab")).toBe("history");
+    expect(url.get("artifact")).toBe("spec");
+    expect(url.get("layout")).toBe("unified");
   });
 });

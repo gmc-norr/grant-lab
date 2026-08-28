@@ -69,6 +69,13 @@ export type HistoryNav = {
    *  discards the first. Measured — see the PINNED test in historyNav.test.tsx
    *  and spec section 6.1. */
   selectAndOpen: (sha: string) => void;
+  /** Drop both shas, keeping tab, artifact and layout.
+   *
+   *  The panel's own exit from a stale two-sha URL. Clicking the side pane
+   *  cannot escape one: nextSelection either deselects the row (leaving the
+   *  stale sha) or slides it back into the pair, a two-click cycle with no
+   *  exit — pinned in historyNav.test.tsx. */
+  clearSelection: () => void;
   /** How the comparison renders. Not cleared by artifact or selection changes —
    *  it is a display preference, not part of what is selected. */
   layout: DiffLayout;
@@ -140,5 +147,17 @@ export function useHistoryNav(): HistoryNav {
 
   const setLayout = useCallback((x: DiffLayout) => write({ layout: x }), [write]);
 
-  return { artifact, a, b, layout, setArtifact, toggle, setLayout, selectAndOpen };
+  const clearSelection = useCallback(() => write({ a: null, b: null }), [write]);
+
+  return {
+    artifact,
+    a,
+    b,
+    layout,
+    setArtifact,
+    toggle,
+    setLayout,
+    selectAndOpen,
+    clearSelection,
+  };
 }

@@ -4,7 +4,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { readFileSync } from "node:fs";
 import type { ReactNode } from "react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useSearchParams } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as versionsMod from "../api/versions";
@@ -55,6 +55,25 @@ function mockVersion(markdown: string | null) {
       isLoading: false,
       isError: false,
     })) as never,
+  );
+}
+
+function UrlProbe() {
+  const [sp] = useSearchParams();
+  return <output data-testid="url">{sp.toString()}</output>;
+}
+
+function wrapWithUrl(ui: ReactNode, initial: string) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <MemoryRouter initialEntries={[initial]}>
+        <QueryClientProvider client={qc}>
+          {ui}
+          <UrlProbe />
+        </QueryClientProvider>
+      </MemoryRouter>
+    </MantineProvider>,
   );
 }
 
@@ -190,6 +209,10 @@ describe("HistoryPanel", () => {
     wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=abc1234&b=aaaaaaa");
     expect(screen.getByText(/not in the Versions list/i)).toBeInTheDocument();
     expect(screen.queryByText(/pick two/i)).toBeNull();
+    // Absence alone would pass if `pickAdvice` were simply deleted. The
+    // replacement must actually say why, and offer the exit.
+    expect(screen.getByText(/only one version/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /clear the comparison/i })).toBeInTheDocument();
   });
 
   it("does not say 'pick two' when a one-version workspace fails to read both", () => {
@@ -202,6 +225,7 @@ describe("HistoryPanel", () => {
     wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
     expect(screen.getByText(/could not be read/i)).toBeInTheDocument();
     expect(screen.queryByText(/pick two/i)).toBeNull();
+    expect(screen.getAllByRole("button", { name: /clear the comparison/i }).length).toBeGreaterThan(0);
   });
 
   it("still says 'pick two' in those same states when two versions DO exist", () => {
@@ -211,6 +235,56 @@ describe("HistoryPanel", () => {
     mockVersion(null);
     wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=abc1234&b=aaaaaaa");
     expect(screen.getByText(/pick two/i)).toBeInTheDocument();
+  });
+
+
+  it("does not claim 'only one version' when the workspace has none", () => {
+    // `canCompare` is false for BOTH zero and one. A shared link into an empty
+    // workspace would otherwise render "No versions yet" and "only one
+    // version" side by side, contradicting each other.
+    mockList({ versions: [] });
+    mockVersion(null);
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=abc1234&b=aaaaaaa");
+    expect(screen.queryByText(/only one version/i)).toBeNull();
+  });
+
+  it("still says 'pick two' when a TWO-version history fails to read one", () => {
+    // The converse the round-1 tests missed: the failed-read branch, not just
+    // the stale-link branch.
+    mockList({ versions: [ROW("bbbbbbb", "two"), ROW("aaaaaaa", "one")] });
+    vi.spyOn(versionsMod, "useVersion").mockReturnValue({
+      data: null,
+      isLoading: false,
+      isError: true,
+    } as never);
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
+    expect(screen.getByText(/pick two/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /clear the comparison/i })).toBeNull();
+  });
+
+  it("the single-read failure does not tell a one-version workspace to pick another", () => {
+    mockList({ versions: [ROW("aaaaaaa", "one")] });
+    vi.spyOn(versionsMod, "useVersion").mockReturnValue({
+      data: null,
+      isLoading: false,
+      isError: true,
+    } as never);
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa");
+    expect(screen.getByText(/could not be read/i)).toBeInTheDocument();
+    expect(screen.queryByText(/pick one from the Versions list/i)).toBeNull();
+  });
+
+  it("clearing the comparison empties BOTH shas from the URL", async () => {
+    // The exit must actually work. Clicking the side pane cannot escape a stale
+    // pair (pinned in historyNav.test.tsx), so this control is the only way out.
+    mockList({ versions: [ROW("aaaaaaa", "one")] });
+    mockVersion(null);
+    wrapWithUrl(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=abc1234&b=aaaaaaa");
+    await userEvent.click(screen.getByRole("button", { name: /clear the comparison/i }));
+    const url = new URLSearchParams(screen.getByTestId("url").textContent ?? "");
+    expect(url.get("a")).toBeNull();
+    expect(url.get("b")).toBeNull();
+    expect(url.get("tab")).toBe("history");
   });
 
   it("no message in this panel still says 'above' — scanned from source, not from one render", () => {
@@ -429,7 +503,12 @@ describe("HistoryPanel comparison", () => {
   });
 
   it("points a failed single read at the side pane, not at a list above", () => {
-    mockList({ versions: [ROW("bbbbbbb", "newer")] });
+    // TWO versions, not one: this test's subject is WHERE the message points,
+    // and pointing at the side pane is only correct when there is another row
+    // to pick. The one-version wording has its own test above ("does not tell a
+    // one-version workspace to pick another"). The "not above" half of this
+    // assertion is now also enforced across the whole file by the source scan.
+    mockList({ versions: [ROW("bbbbbbb", "newer"), ROW("aaaaaaa", "older")] });
     vi.spyOn(versionsMod, "useVersion").mockReturnValue({
       data: null,
       isLoading: false,
