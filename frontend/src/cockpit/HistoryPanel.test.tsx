@@ -353,6 +353,34 @@ describe("HistoryPanel", () => {
     expect(url.get("tab")).toBe("history");
   });
 
+  it("says a single version is loading instead of rendering nothing", () => {
+    // Between the list landing and the payload arriving, this branch had no
+    // message at all: the panel showed a header and blank space, which reads as
+    // "there is nothing here" rather than "wait".
+    mockList({ versions: [ROW("aaaaaaa", "one")] });
+    vi.spyOn(versionsMod, "useVersion").mockReturnValue({
+      data: null,
+      isLoading: true,
+      isError: false,
+    } as never);
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa");
+    expect(screen.getByText(/loading that version/i)).toBeInTheDocument();
+  });
+
+  it("says a comparison is loading once the list has already landed", () => {
+    // The existing "Loading both versions…" is gated on the LIST loading. Once
+    // the list is in hand and the two payloads are still in flight, nothing
+    // rendered.
+    mockList({ versions: [ROW("bbbbbbb", "two"), ROW("aaaaaaa", "one")] });
+    vi.spyOn(versionsMod, "useVersion").mockReturnValue({
+      data: null,
+      isLoading: true,
+      isError: false,
+    } as never);
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
+    expect(screen.getByText(/loading both versions/i)).toBeInTheDocument();
+  });
+
   it("no message in this panel still says 'above' — scanned from source, not from one render", () => {
     // Rendering one state and asserting the absence of a phrase only ever
     // checks the branches that state happens to reach. This reads the
@@ -485,6 +513,31 @@ describe("HistoryPanel comparison", () => {
     expect(panes).toHaveLength(2);
     expect(panes[0].textContent).toContain("OLDMARKER");
     expect(panes[1].textContent).toContain("NEWMARKER");
+  });
+
+  it("says which too-large pane is older and which is newer", () => {
+    // Two bare <pre> blocks in a row carry no order. "Older on the left" lived
+    // only in a source comment: sighted users had to infer it, and assistive
+    // technology had nothing at all. The diff view labels its columns; this
+    // fallback must too, or the note is the only thing the user can act on.
+    const huge = Array(2001).fill("x").join("\n");
+    mockPair(huge + "\nOLDMARKER", huge + "\nNEWMARKER");
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
+
+    const older = screen.getByTestId("version-side-header-older");
+    const newer = screen.getByTestId("version-side-header-newer");
+    expect(older.textContent).toMatch(/older/i);
+    expect(older.textContent).toContain("aaaaaaa");
+    expect(newer.textContent).toMatch(/newer/i);
+    expect(newer.textContent).toContain("bbbbbbb");
+
+    // The heading must be MACHINE-linked to its pane, not merely nearby: a
+    // screen reader lands on the <pre>, not on the text above it.
+    const panes = document.querySelectorAll("[data-testid='version-side']");
+    expect(panes[0].getAttribute("aria-labelledby")).toBe(older.id);
+    expect(panes[1].getAttribute("aria-labelledby")).toBe(newer.id);
+    expect(older.id).not.toBe("");
+    expect(older.id).not.toBe(newer.id);
   });
 
   it("reports a failed read when only ?b= is set", () => {

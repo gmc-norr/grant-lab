@@ -1,4 +1,5 @@
 import { Button, Group, SegmentedControl, Stack, Text, Title } from "@mantine/core";
+import { useId } from "react";
 
 import type { Artifact } from "../api/proposals";
 import { useVersion, useVersions } from "../api/versions";
@@ -64,6 +65,11 @@ export function HistoryPanel({ id }: { id: string }) {
   // wrong thing.
   const single = both ? null : (nav.a ?? nav.b);
   const singleInList = single != null && order.includes(single);
+
+  // useId, not a literal: two HistoryPanels on one page would otherwise share an
+  // id and aria-labelledby would resolve to the first one for both.
+  const olderPaneId = useId();
+  const newerPaneId = useId();
 
   // The header timestamps come from the LIST row, not the version payload:
   // VersionContent is {commit_sha, artifact, markdown} and carries no
@@ -143,6 +149,14 @@ export function HistoryPanel({ id }: { id: string }) {
           renders as text the way ReviewPanel renders a review file — not the
           Tiptap editor. */}
       {!both && older.data && <pre className={styles.reviewDoc}>{older.data.markdown}</pre>}
+      {/* The LIST has landed and the payload has not. Without this the panel is
+          a header over blank space, which reads as "nothing here" rather than
+          "wait" — the list's own loading message is already gone by now. */}
+      {!both && single != null && older.isLoading && (
+        <Text size="sm" c="dimmed">
+          Loading that version…
+        </Text>
+      )}
       {/* Gated on the same expression the FETCH uses. Gating on `nav.a` alone
           left a hand-trimmed `?b=` whose read failed rendering nothing. */}
       {!both && single != null && older.isError && !singleInList && (
@@ -183,7 +197,11 @@ export function HistoryPanel({ id }: { id: string }) {
           <ClearComparison onClear={nav.clearSelection} />
         </Stack>
       )}
-      {both && !ordered && !list.isError && list.isLoading && (
+      {/* Two separate waits, and both must say so: the LIST may still be in
+          flight (direction is not yet knowable), or the list is in hand and the
+          two payloads are not. The second left the panel blank. */}
+      {((both && !ordered && !list.isError && list.isLoading) ||
+        (both && ordered && (older.isLoading || newer.isLoading))) && (
         <Text size="sm" c="dimmed">
           Loading both versions…
         </Text>
@@ -212,14 +230,38 @@ export function HistoryPanel({ id }: { id: string }) {
             {/* Both payloads are already in hand. A note on its own is a dead
                 end — the user is told the comparison failed and given nothing
                 to read. Older on the left, newer on the right, same order the
-                diff would have used. */}
+                diff would have used — and SAID, not just commented: two bare
+                <pre> blocks carry no order, least of all to a screen reader
+                that lands on the pane rather than on the text above it.
+
+                minWidth: 0 on each column — a flex item's minimum is its
+                content's max-content width, so a long unbroken token would push
+                the pane wider than its share instead of scrolling inside it. */}
             <Group align="flex-start" gap="sm" grow wrap="nowrap">
-              <pre className={styles.reviewDoc} data-testid="version-side">
-                {older.data.markdown}
-              </pre>
-              <pre className={styles.reviewDoc} data-testid="version-side">
-                {newer.data.markdown}
-              </pre>
+              <Stack gap={4} style={{ minWidth: 0 }}>
+                <Text size="xs" c="dimmed" id={olderPaneId} data-testid="version-side-header-older">
+                  older · {labelFor(olderSha)}
+                </Text>
+                <pre
+                  className={styles.reviewDoc}
+                  data-testid="version-side"
+                  aria-labelledby={olderPaneId}
+                >
+                  {older.data.markdown}
+                </pre>
+              </Stack>
+              <Stack gap={4} style={{ minWidth: 0 }}>
+                <Text size="xs" c="dimmed" id={newerPaneId} data-testid="version-side-header-newer">
+                  newer · {labelFor(newerSha)}
+                </Text>
+                <pre
+                  className={styles.reviewDoc}
+                  data-testid="version-side"
+                  aria-labelledby={newerPaneId}
+                >
+                  {newer.data.markdown}
+                </pre>
+              </Stack>
             </Group>
           </Stack>
         ) : (
