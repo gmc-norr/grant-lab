@@ -19,6 +19,7 @@
 - `pnpm add` is refused by a 7-day `minimumReleaseAge` cooldown. **This plan adds no dependency.** If you believe you need one, stop and escalate.
 - `DiffView.tsx`, `ProposalReview.tsx`, and `InlineProposalReview.tsx` are **not modified by any task**. Their tests must pass unmodified.
 - The 16 existing cases in `diff.test.ts` (4) and `diff.refine.test.ts` (12) must pass **unmodified**. Editing one to accommodate a change is a failed task, not a fix.
+- **One exception, and only one:** `HistoryPanel.test.tsx` has exactly **two** tests that must be edited, both listed with their replacement code in Task 5 Step 1b. They depend on `[data-testid='version-diff']`, and making `split` the default legitimately changes what renders. One of them fails loudly; the other goes **silently vacuous**, which is why it is called out rather than left to be discovered. Editing any test beyond those two is a failed task.
 - Colour values are exact, from spec §5.2: del row `rgba(248, 81, 73, 0.15)`, add row `rgba(46, 160, 67, 0.15)`, del span `rgba(248, 81, 73, 0.4)` plus strikethrough, add span `rgba(46, 160, 67, 0.4)`.
 - URL parameter is exactly `layout`, values exactly `split` and `unified`. Default and fallback for any unrecognised value is `split`.
 - **Playwright's package link is broken in this repo.** `frontend/node_modules/playwright` is a dangling symlink; `require.resolve('playwright')` fails. Import from `frontend/node_modules/.pnpm/playwright@1.60.0/node_modules/playwright/index.mjs` instead. Only Task 6 needs this.
@@ -90,6 +91,9 @@ function refineRunsBefore(rows: DiffRow[]): DiffRow[] {
     const dels = rows.slice(delStart, addStart);
     const adds = rows.slice(addStart, i);
     const paired = Math.min(dels.length, adds.length);
+    // One wordDiff per pair, not two: it used to be computed twice, once for
+    // `.del` and once for `.add`, doubling the cost of the matrix capped below.
+    // A pair over the cap yields `null` and stays two whole-line rows.
     const refined = dels
       .slice(0, paired)
       .map((d, k) => (withinWordCap(d.text, adds[k].text) ? wordDiff(d.text, adds[k].text) : null));
@@ -441,9 +445,17 @@ Expected: **11 tests passed** (2 from Task 1 + 7 rule tests + 2 invariant tests)
 
 - [ ] **Step 5: Prove the invariant test can fail**
 
-Temporarily change `for (let k = paired; k < dels.length; k++) out.push({ left: dels[k], right: null });` to `... out.push({ left: dels[k], right: dels[k] });` and re-run.
+Temporarily **delete** the leftover-adds line entirely:
 
-Expected: the "accounts for every row exactly once" test **FAILS**. Revert and confirm green.
+```ts
+    for (let k = paired; k < adds.length; k++) out.push({ left: null, right: adds[k] });
+```
+
+Re-run. Expected: the **"accounts for every row exactly once"** test FAILS — those add rows are now placed nowhere, so `placed` is shorter than `refined`.
+
+Do **not** use the mutation `{ left: dels[k], right: dels[k] }` for this step. It looks like it should break the accounting, and it does not: the test deduplicates when `p.right === p.left` (correct, because a `same` row genuinely is one object on both sides), so the duplicated deletion is counted once and the length still matches. It fails a *different* test — the "right side empty for a deletion with no partner" rule test. A mutation step is only meaningful when it fails the test you name.
+
+Revert and confirm green.
 
 - [ ] **Step 6: Typecheck and commit**
 
@@ -502,8 +514,26 @@ function renderCompare(a: string, b: string) {
 describe("SideBySideDiffView", () => {
   it("names which side is which", () => {
     renderCompare("alpha", "alpha");
-    expect(screen.getByText(/abc1234/)).toBeInTheDocument();
-    expect(screen.getByText(/def5678/)).toBeInTheDocument();
+    expect(screen.getByTestId("side-header-older").textContent).toBe("older · abc1234 · older");
+    expect(screen.getByTestId("side-header-newer").textContent).toBe("newer · def5678 · newer");
+  });
+
+  it("marks both cells of a pair with the same pair index, fillers included", () => {
+    // Position in two filtered lists is NOT a reliable way to match a pair's
+    // halves — after the first insertion the indices diverge. The browser gate
+    // in Task 6 relies on this attribute, so it is pinned here.
+    const { container } = renderCompare("alpha\ndelta", "alpha\nbravo\ndelta");
+    const indices = [...container.querySelectorAll("[data-pair]")].map((n) =>
+      (n as HTMLElement).dataset.pair,
+    );
+    // Every index appears exactly twice: one left cell and one right cell.
+    const counts = new Map<string, number>();
+    for (const i of indices) counts.set(i!, (counts.get(i!) ?? 0) + 1);
+    expect([...counts.values()].every((c) => c === 2)).toBe(true);
+    for (const [i] of counts) {
+      expect(container.querySelector(`[data-pair="${i}"][data-side="left"]`)).not.toBeNull();
+      expect(container.querySelector(`[data-pair="${i}"][data-side="right"]`)).not.toBeNull();
+    }
   });
 
   it("puts old text in the left column and new text in the right", () => {
@@ -631,13 +661,33 @@ import { Fragment } from "react";
 import type { DiffPair, DiffRow } from "./diff";
 import styles from "./SideBySideDiffView.module.css";
 
-function Cell({ row, side }: { row: DiffRow | null; side: "left" | "right" }) {
+function Cell({
+  row,
+  side,
+  pair,
+}: {
+  row: DiffRow | null;
+  side: "left" | "right";
+  /** The pair's index. Both cells of a pair carry the same value, fillers
+   *  included, so a layout check can compare the two halves of a REAL pair.
+   *  Matching cells by position in two filtered lists silently misaligns after
+   *  the first insertion or deletion. */
+  pair: number;
+}) {
   // No counterpart on this side. The cell still occupies the grid row — that
   // blank space is what keeps the following rows in step, and it carries no
   // add/del tint because nothing happened HERE; the change is opposite.
-  if (!row) return <div className={styles.filler} data-side={side} data-filler="" />;
+  if (!row) {
+    return <div className={styles.filler} data-side={side} data-pair={pair} data-filler="" />;
+  }
   return (
-    <div className={styles.cell} data-side={side} data-cell="" data-diff={row.tag}>
+    <div
+      className={styles.cell}
+      data-side={side}
+      data-pair={pair}
+      data-cell=""
+      data-diff={row.tag}
+    >
       {row.spans
         ? row.spans.map((s, k) => (
             <span key={`${s.tag}:${k}`} data-span={s.tag}>
@@ -665,19 +715,19 @@ export function SideBySideDiffView({
   return (
     <div className={styles.scroll} data-testid="side-by-side-diff">
       <div className={styles.grid}>
-        <div className={styles.header} data-side="left">
+        <div className={styles.header} data-side="left" data-testid="side-header-older">
           older · {olderLabel}
         </div>
-        <div className={styles.header} data-side="right">
+        <div className={styles.header} data-side="right" data-testid="side-header-newer">
           newer · {newerLabel}
         </div>
-        {pairs.map((p) => {
-          const base = `${p.left?.tag ?? "-"}:${p.left?.text ?? ""} ${p.right?.tag ?? "-"}:${p.right?.text ?? ""}`;
+        {pairs.map((p, i) => {
+          const base = `${p.left?.tag ?? "-"}:${p.left?.text ?? ""}|${p.right?.tag ?? "-"}:${p.right?.text ?? ""}`;
           const n = (seen[base] = (seen[base] ?? 0) + 1);
           return (
             <Fragment key={`${base}#${n}`}>
-              <Cell row={p.left} side="left" />
-              <Cell row={p.right} side="right" />
+              <Cell row={p.left} side="left" pair={i} />
+              <Cell row={p.right} side="right" pair={i} />
             </Fragment>
           );
         })}
@@ -691,7 +741,7 @@ export function SideBySideDiffView({
 
 Run: `cd frontend && pnpm vitest run src/cockpit/SideBySideDiffView.test.tsx`
 
-Expected: **6 tests passed**.
+Expected: **7 tests passed**.
 
 - [ ] **Step 6: Typecheck, build, commit**
 
@@ -724,40 +774,57 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 Append to `frontend/src/cockpit/historyNav.test.ts`, inside the existing top-level `describe` (match the file's existing render/harness helper — read the file first and reuse it rather than introducing a second one):
 
+The file already provides `wrapperFor(initial)` and imports `renderHook` and `act`
+from `@testing-library/react`. Use them — add no second harness.
+
 ```ts
 it("defaults the layout to split when the parameter is absent", () => {
-  const nav = renderNav("?tab=history");
-  expect(nav().layout).toBe("split");
+  const { result } = renderHook(() => useHistoryNav(), {
+    wrapper: wrapperFor("/cockpit/ws1?tab=history"),
+  });
+  expect(result.current.layout).toBe("split");
 });
 
 it("reads layout=unified from the URL", () => {
-  const nav = renderNav("?tab=history&layout=unified");
-  expect(nav().layout).toBe("unified");
+  const { result } = renderHook(() => useHistoryNav(), {
+    wrapper: wrapperFor("/cockpit/ws1?tab=history&layout=unified"),
+  });
+  expect(result.current.layout).toBe("unified");
 });
 
 it("normalises an unrecognised layout to split rather than rejecting it", () => {
-  const nav = renderNav("?tab=history&layout=sideways");
-  expect(nav().layout).toBe("split");
+  const { result } = renderHook(() => useHistoryNav(), {
+    wrapper: wrapperFor("/cockpit/ws1?tab=history&layout=sideways"),
+  });
+  expect(result.current.layout).toBe("split");
 });
 
-it("writes the layout to the URL", async () => {
-  const nav = renderNav("?tab=history");
-  await act(async () => nav().setLayout("unified"));
-  expect(nav().layout).toBe("unified");
+it("writes the layout to the URL", () => {
+  const { result } = renderHook(() => useHistoryNav(), {
+    wrapper: wrapperFor("/cockpit/ws1?tab=history"),
+  });
+  act(() => result.current.setLayout("unified"));
+  expect(result.current.layout).toBe("unified");
 });
 
-it("keeps the layout when the artifact changes", async () => {
+it("keeps the layout when the artifact changes", () => {
   // The layout is how the user reads, not a property of what is selected.
   // Clearing it here would silently undo their choice mid-session.
-  const nav = renderNav("?tab=history&layout=unified");
-  await act(async () => nav().setArtifact("spec"));
-  expect(nav().layout).toBe("unified");
+  const { result } = renderHook(() => useHistoryNav(), {
+    wrapper: wrapperFor("/cockpit/ws1?tab=history&layout=unified"),
+  });
+  act(() => result.current.setArtifact("spec"));
+  expect(result.current.artifact).toBe("spec");
+  expect(result.current.layout).toBe("unified");
 });
 
-it("keeps the layout when the selection changes", async () => {
-  const nav = renderNav("?tab=history&layout=unified");
-  await act(async () => nav().toggle("abc1234"));
-  expect(nav().layout).toBe("unified");
+it("keeps the layout when the selection changes", () => {
+  const { result } = renderHook(() => useHistoryNav(), {
+    wrapper: wrapperFor("/cockpit/ws1?tab=history&layout=unified"),
+  });
+  act(() => result.current.toggle("abc1234"));
+  expect(result.current.a).toBe("abc1234");
+  expect(result.current.layout).toBe("unified");
 });
 ```
 
@@ -868,55 +935,113 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 Append to `frontend/src/cockpit/HistoryPanel.test.tsx`, reusing the file's existing render harness and mock helpers (read the file first — it already mocks `useVersions`/`useVersion`; do not introduce a second mocking style):
 
+The file already provides `wrap(ui, initial)`, `ROW(...)`, `mockList(...)`, `mockVersion(...)`, and — inside the `describe` — `mockPair(olderMd, newerMd)`, which seeds the list as `[ROW("bbbbbbb", "newer"), ROW("aaaaaaa", "older")]` and serves markdown per sha. Use those; add no new harness. `aaaaaaa` is the **older** version, `bbbbbbb` the **newer**.
+
 ```tsx
-it("renders the side-by-side view by default when two versions are selected", async () => {
-  renderPanelWithTwoSelected();
-  expect(await screen.findByTestId("side-by-side-diff")).toBeInTheDocument();
+it("renders the side-by-side view by default when two versions are selected", () => {
+  mockPair("We recruit 40 patients.\n", "We recruit 120 patients.\n");
+  wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
+  expect(screen.getByTestId("side-by-side-diff")).toBeInTheDocument();
+  expect(document.querySelector("[data-testid='version-diff']")).toBeNull();
 });
 
-it("renders the unified view when the URL asks for it", async () => {
-  renderPanelWithTwoSelected({ search: "&layout=unified" });
-  expect(await screen.findByTestId("version-diff")).toBeInTheDocument();
-  expect(screen.queryByTestId("side-by-side-diff")).not.toBeInTheDocument();
+it("renders the unified view when the URL asks for it", () => {
+  mockPair("We recruit 40 patients.\n", "We recruit 120 patients.\n");
+  wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb&layout=unified");
+  expect(document.querySelector("[data-testid='version-diff']")).not.toBeNull();
+  expect(screen.queryByTestId("side-by-side-diff")).toBeNull();
 });
 
 it("offers no layout control until two versions are selected", () => {
-  renderPanelWithOneSelected();
-  expect(screen.queryByLabelText("Compare layout")).not.toBeInTheDocument();
+  mockPair("We recruit 40 patients.\n", "We recruit 120 patients.\n");
+  wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa");
+  expect(screen.queryByRole("radio", { name: "Unified" })).toBeNull();
 });
 
 it("switches to unified when the control is used", async () => {
   const user = userEvent.setup();
-  renderPanelWithTwoSelected();
+  mockPair("We recruit 40 patients.\n", "We recruit 120 patients.\n");
+  wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
   await user.click(screen.getByRole("radio", { name: "Unified" }));
-  expect(await screen.findByTestId("version-diff")).toBeInTheDocument();
+  await waitFor(() =>
+    expect(document.querySelector("[data-testid='version-diff']")).not.toBeNull(),
+  );
 });
 
-it("labels each column with its short sha", async () => {
-  renderPanelWithTwoSelected();
-  await screen.findByTestId("side-by-side-diff");
-  // Older on the left, newer on the right — the list is newest-first, so the
-  // LATER list entry is the older version.
-  expect(screen.getByText(/older · 0000002/)).toBeInTheDocument();
-  expect(screen.getByText(/newer · 0000001/)).toBeInTheDocument();
+it("labels the left column older and the right column newer", () => {
+  mockPair("We recruit 40 patients.\n", "We recruit 120 patients.\n");
+  wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
+  // mockPair lists bbbbbbb first (newest-first), so aaaaaaa is the older one.
+  expect(screen.getByTestId("side-header-older").textContent).toContain("aaaaaaa");
+  expect(screen.getByTestId("side-header-newer").textContent).toContain("bbbbbbb");
 });
 
-it("does not offer a layout control for a comparison too large to diff", async () => {
-  renderPanelWithTwoSelected({ olderMarkdown: "x\n".repeat(2001), newerMarkdown: "y\n".repeat(2001) });
-  expect(await screen.findByText(/too large to compare/)).toBeInTheDocument();
-  expect(screen.queryByLabelText("Compare layout")).not.toBeInTheDocument();
+it("offers no layout control for a comparison too large to diff", () => {
+  const huge = Array(2001).fill("x").join("\n");
+  mockPair(huge + "\nOLDMARKER", huge + "\nNEWMARKER");
+  wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
+  expect(screen.getByText(/too large to compare/i)).toBeInTheDocument();
+  // There is no diff to lay out, so a layout choice would be a dead control.
+  expect(screen.queryByRole("radio", { name: "Unified" })).toBeNull();
 });
 
-it("does not describe the too-large fallback as if it were the feature", async () => {
-  renderPanelWithTwoSelected({ olderMarkdown: "x\n".repeat(2001), newerMarkdown: "y\n".repeat(2001) });
-  const note = await screen.findByText(/too large to compare/);
-  // The normal view IS side by side now, so the old copy read as a feature.
+it("does not describe the too-large fallback as if it were the feature", () => {
+  const huge = Array(2001).fill("x").join("\n");
+  mockPair(huge + "\nOLDMARKER", huge + "\nNEWMARKER");
+  wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
+  const note = screen.getByText(/too large to compare/i);
+  // The normal view IS side by side now, so the old copy described the
+  // fallback as if it were the feature.
   expect(note.textContent).toContain("the full text of each is shown without highlighting");
   expect(note.textContent).not.toContain("shown side by side instead");
 });
 ```
 
-If the existing test file has no `renderPanelWithTwoSelected` / `renderPanelWithOneSelected` helper, add them there, built from the mocking the file already does. Do not duplicate the mock setup inline in each test.
+- [ ] **Step 1b: Repair the two existing tests this change would break or hollow out**
+
+Making `split` the default changes what `[data-testid='version-diff']` means, and **two existing tests in this file depend on it**. Both must be edited — this is the one file whose tests this plan legitimately changes.
+
+**(a) `HistoryPanel.test.tsx:321-326`, "exactly 2,000 lines still diffs — the boundary is inclusive".** It asserts `version-diff` is **not** null. Under the split default that element does not exist, so this test **fails loudly**. Point it at the new default renderer:
+
+```tsx
+  it("exactly 2,000 lines still diffs — the boundary is inclusive", () => {
+    const atLimit = Array(2000).fill("x").join("\n");
+    mockPair(atLimit, atLimit.replace("x", "y"));
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
+    expect(screen.queryByText(/too large to compare/i)).toBeNull();
+    expect(screen.getByTestId("side-by-side-diff")).toBeInTheDocument();
+  });
+```
+
+**(b) `HistoryPanel.test.tsx:235-250`, "selection ORDER does not change the view — direction is a contract".** This one is worse, because it does **not** fail — it goes silently vacuous. It reads `document.querySelector("[data-testid='version-diff']")?.innerHTML` twice; under the split default both are `undefined`, and `expect(undefined).toBe(undefined)` passes. The single most important test in the feature would stop testing anything while staying green.
+
+Retarget it at the default view **and** assert the element exists, so it can never go vacuous this way again:
+
+```tsx
+  it("selection ORDER does not change the view — direction is a contract", () => {
+    // THE gate. lineDiff assigns `del` to its FIRST argument, so the panel must
+    // sort by the list's own order (newest-first) and always pass older, newer.
+    mockPair("We recruit 40 patients.\n", "We recruit 120 patients.\n");
+    const forward = wrap(
+      <HistoryPanel id="ws1" />,
+      "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb",
+    );
+    // Asserting presence BEFORE reading innerHTML: a missing element yields
+    // undefined on both sides and the comparison passes while proving nothing.
+    const forwardEl = screen.getByTestId("side-by-side-diff");
+    const forwardHtml = forwardEl.innerHTML;
+    expect(forwardHtml).toContain("120");
+    forward.unmount();
+
+    mockPair("We recruit 40 patients.\n", "We recruit 120 patients.\n");
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=bbbbbbb&b=aaaaaaa");
+    const reverseHtml = screen.getByTestId("side-by-side-diff").innerHTML;
+
+    expect(reverseHtml).toBe(forwardHtml);
+  });
+```
+
+Leave the other three `version-diff` references alone. Lines 274 and 299 both assert it is **null**, which stays true. Line 274's test (nothing renders before the list resolves) keeps its meaning; add nothing to it.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -1014,7 +1139,7 @@ import { type DiffLayout, useHistoryNav } from "./historyNav";
 
 Run: `cd frontend && pnpm vitest run src/cockpit/HistoryPanel.test.tsx`
 
-Expected: all existing cases plus **7 new**, all passing.
+Expected: all existing cases plus **7 new**, all passing — including the two from Step 1b, which are edited rather than added and so do not raise the count.
 
 - [ ] **Step 5: Run the whole frontend gate**
 
@@ -1022,7 +1147,7 @@ Expected: all existing cases plus **7 new**, all passing.
 cd frontend && pnpm exec tsc --noEmit && pnpm vitest run && pnpm build
 ```
 
-Expected: tsc clean; **115 test files** (the measured baseline of 113, plus `diff.pair.test.ts` and `SideBySideDiffView.test.tsx`, with none lost) and **688 tests** — the measured baseline of 658 plus 30 new: 2 in Task 1, 9 in Task 2, 6 in Task 3, 6 in Task 4, 7 in Task 5.
+Expected: tsc clean; **115 test files** (the measured baseline of 113, plus `diff.pair.test.ts` and `SideBySideDiffView.test.tsx`, with none lost) and **689 tests** — the measured baseline of 658 plus 31 new: 2 in Task 1, 9 in Task 2, 7 in Task 3, 6 in Task 4, 7 in Task 5. Task 5 Step 1b edits two existing tests in place, so they do not add to the count.
 
 Report the exact printed numbers. A file count that did not reach 115 means a new test file was **not collected** and its tests never ran — vitest reports that as success, so the count is the only signal. A test count below 688 means cases are missing even though nothing is red.
 
@@ -1125,36 +1250,60 @@ await p.waitForSelector('[data-testid="side-by-side-diff"]', { timeout: 20000 })
 
 const r = await p.evaluate(() => {
   const box = document.querySelector('[data-testid="side-by-side-diff"]');
-  const lefts = [...box.querySelectorAll('[data-side="left"][data-cell]')];
-  const rights = [...box.querySelectorAll('[data-side="right"][data-cell]')];
-  const header = box.querySelector('[data-side="left"]');
-  const L = lefts[0].getBoundingClientRect();
-  const R = rights[0].getBoundingClientRect();
+  const header = document.querySelector('[data-testid="side-header-older"]');
+  const boxRect = () => box.getBoundingClientRect();
+
+  // Pair indices, in document order. Matching cells by position in two FILTERED
+  // lists silently misaligns after the first insertion or deletion — the left
+  // list is short by one and every later index compares different pairs. Both
+  // halves of a pair carry the same data-pair, fillers included.
+  const ids = [...new Set([...box.querySelectorAll('[data-pair]')].map((n) => n.dataset.pair))];
+  const halves = (id) => [
+    box.querySelector(`[data-pair="${id}"][data-side="left"]`),
+    box.querySelector(`[data-pair="${id}"][data-side="right"]`),
+  ];
 
   // 1. adjacent, not stacked
+  const [l0, r0] = halves(ids[0]);
+  const L = l0.getBoundingClientRect();
+  const R = r0.getBoundingClientRect();
   const adjacent = L.right <= R.left + 1 && Math.abs(L.top - R.top) < 1;
 
-  // 2. a matching pair shares a vertical offset
-  const sameRow = lefts.slice(0, 10).every((l, i) =>
-    !rights[i] || Math.abs(l.getBoundingClientRect().top - rights[i].getBoundingClientRect().top) < 1);
+  // 2. a REAL pair's two cells share a vertical offset. Both halves must exist:
+  //    a missing one is a failure, not a pass.
+  const sameRow = ids.slice(0, 20).every((id) => {
+    const [a, b] = halves(id);
+    if (!a || !b) return false;
+    return Math.abs(a.getBoundingClientRect().top - b.getBoundingClientRect().top) < 1;
+  });
 
   // 3. the header genuinely sticks. A container that does not overflow never
   //    moves, so a plain non-sticky header would pass a naive check.
   const overflows = box.scrollHeight > box.clientHeight;
   const headerBefore = header.getBoundingClientRect().top;
-  const probe = lefts[1] ?? lefts[0];
-  const probeTopBefore = probe.getBoundingClientRect().top;
-  box.scrollTop = Math.max(header.getBoundingClientRect().height * 3, 200);
+
+  // The probe must START inside the scroller's viewport and END outside it.
+  // "its top moved" is not enough: a container that scrolled by two pixels
+  // also moves it, and proves nothing about the header holding position.
+  const probe = [...box.querySelectorAll('[data-side="left"][data-cell]')].find((n) => {
+    const t = n.getBoundingClientRect();
+    return t.top >= boxRect().top && t.bottom <= boxRect().bottom;
+  });
+  const probeInsideBefore = !!probe;
+  box.scrollTop = box.scrollHeight - box.clientHeight; // all the way down
+  const pr = probe ? probe.getBoundingClientRect() : null;
+  const probeOutsideAfter = !!pr && (pr.bottom <= boxRect().top || pr.top >= boxRect().bottom);
   const headerAfter = header.getBoundingClientRect().top;
-  const probeTopAfter = probe.getBoundingClientRect().top;
 
   return {
     adjacent, sameRow, overflows,
+    pairs: ids.length,
     scrollTop: box.scrollTop,
-    scrolledForReal: box.scrollTop > 0 && Math.abs(probeTopBefore - probeTopAfter) > 1,
+    probeInsideBefore, probeOutsideAfter,
+    scrolledForReal: box.scrollTop > 0 && probeInsideBefore && probeOutsideAfter,
     headerBefore: Math.round(headerBefore), headerAfter: Math.round(headerAfter),
     headerStuck: Math.abs(headerBefore - headerAfter) < 1,
-    cells: lefts.length, viewportH: window.innerHeight,
+    viewportH: window.innerHeight,
   };
 });
 console.log(JSON.stringify(r, null, 1));
@@ -1168,7 +1317,7 @@ await p.screenshot({ path: '/tmp/gate-unified.png' });
 await b.close();
 ```
 
-`scrolledForReal` deliberately checks two things: that `scrollTop` moved **and** that a content row actually shifted. Without the second half, a container that refused to scroll for some unrelated reason would still report a stable header offset and pass.
+`scrolledForReal` requires three things together: `scrollTop` moved, a probe row **started inside** the scroller's visible area, and that same row **ended outside** it. Only the pair of visibility checks proves the content really travelled — "its top changed by a pixel" is satisfied by a container that barely moved, and a stable header offset then proves nothing.
 
 - [ ] **Step 4: Run the gate and read every field**
 
@@ -1181,7 +1330,10 @@ Required, all of them:
 | `adjacent` | `true` | columns are horizontally side by side, not stacked |
 | `sameRow` | `true` | a pair's two cells share a vertical offset |
 | `overflows` | `true` | **fail the gate if false** — the sticky check is vacuous without it |
-| `scrolledForReal` | `true` | the container actually moved |
+| `probeInsideBefore` | `true` | a content row started within the visible area |
+| `probeOutsideAfter` | `true` | that same row left the visible area — the content really travelled |
+| `scrolledForReal` | `true` | all three of the above together |
+| `pairs` | > 20 | enough rows that `sameRow` samples real variety |
 | `headerStuck` | `true` | the header held its viewport offset while content moved |
 | `toggle -> unified: OK` | printed | the control switches the rendered view |
 
@@ -1222,4 +1374,6 @@ No commit — this task produces no tracked files. Report in the task report: th
 
 **Type consistency:** `DiffPair` (Task 2) → consumed by name in Tasks 3 and 5. `DiffLayout` (Task 4) → consumed in Task 5. `SideBySideDiffView`'s props (`pairs`, `olderLabel`, `newerLabel`) match Task 5's call site exactly. `blocks()` stays module-internal and is referenced only inside `diff.ts` (Tasks 1 and 2).
 
-**Known gap, deliberate:** Task 5's tests assume `HistoryPanel.test.tsx` already has a reusable render harness. The implementer must read that file first and reuse its existing mocking rather than adding a second style; the step says so.
+**Round 1 outside review (Sol, 2026-08-28): 8 findings, all 8 confirmed against the real files and fixed here.** The two that mattered most were about tests that would stop testing: `HistoryPanel.test.tsx:321-326` would have failed outright, and `:235-250` — the direction contract, the single most important test in the feature — would have gone **silently green while asserting `undefined === undefined`**. Both now have replacement code in Task 5 Step 1b. Also fixed: the appended tests in Tasks 4 and 5 called helpers (`renderNav`, `renderPanelWithTwoSelected`) that do not exist and now use the file's real harness; Task 2's mutation step named a test the mutation does not break; the browser gate matched cells by position in two filtered lists that misalign after any insertion, and proved "scrolled" only by a one-pixel shift; and `refineRunsBefore` was described as verbatim while omitting a three-line comment.
+
+**One defect found without the reviewer:** the plan file contained a literal NUL byte, from a unicode-escape separator in the Task 3 component that was written as a real null rather than as text. `file(1)` reported the plan as binary data and `grep` silently matched nothing in it. The separator is now `|`.
