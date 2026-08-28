@@ -1,7 +1,7 @@
 # Workspace rail — information architecture
 
 **Date:** 2026-08-28
-**Status:** design, revision 4 — outside review rounds 1-3, 13/13 findings confirmed (one
+**Status:** design, revision 5 — outside review rounds 1-4, 16/16 findings confirmed (one
 with a correction).
 Not implemented. The two rounds also found **two live data-loss bugs** in shipped code,
 fixed separately in `cc50e0e7` and `1f3fd60a` (see §7.3).
@@ -209,10 +209,14 @@ bare `?tab=diff` would render "pick a version in the Versions pane" beside the *
 — the exact defect this whole design exists to remove, reintroduced by a default. An
 earlier revision claimed the pane "is the pane the user is looking at"; it is not.
 
-**`?view` defaults to `versions` when it is absent and the effective tab is `diff`**,
-`outline` otherwise. This is the same gap-filling rule as the legacy alias (§7.2) and
-obeys the same precedence: an explicit `view` always wins, so `?tab=diff&view=criteria`
-shows Criteria.
+**`?view` defaults to `versions` when it is absent and the effective tab is the
+comparison**, `outline` otherwise. "The comparison" is deliberately not spelled `diff`
+here: Slice 1 ships before the rename, and a rule naming only `diff` would leave
+`?tab=history` on the Outline with this same message beside it (§10). The set is exactly
+the one §7.2's alias defines — `{history}` in Slice 1, `{diff, history}` after.
+
+Same gap-filling shape as the alias, same precedence: an explicit `view` always wins, so
+`?tab=diff&view=criteria` shows Criteria.
 
 ## 7. URL state
 
@@ -221,7 +225,7 @@ The URL stays the single channel across the AppShell boundary, as it already is
 
 | Param | Picks | Values | Default |
 | --- | --- | --- | --- |
-| `?view` | rail icon / pane content | `outline` `versions` `references` `criteria` `members` | `outline` |
+| `?view` | rail icon / pane content | `outline` `versions` `references` `criteria` `members` | `versions` when the effective tab is the comparison; `outline` otherwise (§6.1) |
 | `?tab` | middle content | `draft` `spec` `scorecard` `review` `diff` | `draft` |
 | `?sec` | active section | safe non-negative int | `0` |
 | `?artifact` | which artifact's history | `draft` `spec` | `draft` |
@@ -365,6 +369,18 @@ only when a workspace is open; make `CockpitSidebar` render one view; delete the
 "Current workspace" item and the now-unused `SidebarGroup`. After this slice Versions is one
 click away and nothing is hidden in an accordion. `?tab=history` still works.
 
+**The `?view` default must cover `history` in this slice, not just `diff`.** `diff` does not
+exist until Slice 2, so a rule written only for `diff` leaves `?tab=history` defaulting to
+`outline` — and `HistoryPanel` still says "pick two versions from the Versions list in the
+side pane" while the **Outline** is showing. That is the original complaint, rebuilt at the
+slice boundary and living in the app until Slice 2 lands.
+
+So the rule is written once, over the **comparison destination**, whatever it is currently
+called: `?view` defaults to `versions` when `?view` is absent and the effective tab is the
+comparison. In Slice 1 that set is `{history}`; in Slice 2 it becomes `{diff, history}` via
+the alias. Nothing about the rule changes between slices — only the set it consults, which
+is the same set §7.2's alias already defines.
+
 **Slice 2 — History tab becomes an opened diff.**
 Remove `history` from `TOP_TABS` and `TopTab` (`cockpitNav.ts:6`, `nav.ts:1`) and from the
 tab strip (`Cockpit.tsx:86`); add `diff`; point `selectAndOpen` at it; add the
@@ -375,7 +391,9 @@ tab strip (`Cockpit.tsx:86`); add `diff`; point `selectAndOpen` at it; add the
 - **`?view` parsing** — each valid value, plus an unrecognised one normalising to
   `outline`, in the style of the existing `tabFromParams` tests.
 - **The rail** — the workspace band is absent with no workspace open and present with one;
-  each icon marks itself active for its own `?view`; the divider separates the two bands.
+  the divider separates the two bands; and for **every** `?view`, **exactly one** workspace
+  icon carries `aria-current="page"` and it is the matching one. Asserting only that the
+  expected icon is active passes on an implementation that lights all five.
 - **The pane** — exactly one view renders at a time. Asserting the chosen view is present
   is not enough: assert the others are **absent**, or the test passes on the accordion this
   slice removes.
@@ -388,8 +406,9 @@ tab strip (`Cockpit.tsx:86`); add `diff`; point `selectAndOpen` at it; add the
   with `tab` and `sec` alone is a hollow gate: an implementation that keeps those two and
   drops `artifact`, `a`, `b` and `layout` passes it. Asserting merely that `view=versions`
   is present is weaker still — that passes on the replacing `<Link>` this rule forbids.
-- **The `diff` default** — a bare `?tab=diff` shows the **Versions** pane; an explicit
-  `?tab=diff&view=criteria` shows Criteria.
+- **The comparison default** — a bare `?tab=diff` shows the **Versions** pane, and so does
+  a bare `?tab=history`, in Slice 1 as well as after. An explicit `?tab=diff&view=criteria`
+  shows Criteria.
 - **The artifact switch** — it renders in the Versions pane and no longer in
   `HistoryPanel`; changing it clears both shas.
 - **Deselect does not open, and does not prompt** — clicking the only selected version
