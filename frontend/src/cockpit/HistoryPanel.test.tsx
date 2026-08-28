@@ -149,6 +149,26 @@ describe("HistoryPanel", () => {
     expect(screen.getByText(/side pane/i)).toBeInTheDocument();
   });
 
+  it("never asks for two versions when the workspace has only one", () => {
+    // "Pick two" is impossible advice against a one-version history: the side
+    // pane has exactly one row to click. Asserting the absence of "two" is the
+    // point — a message that merely mentions the side pane would pass a
+    // getByText(/side pane/) check while still being unfollowable.
+    mockList({ versions: [ROW("aaaaaaa", "one")] });
+    mockVersion(null);
+    wrap(<HistoryPanel id="ws1" />);
+    expect(screen.getByText(/only one version/i)).toBeInTheDocument();
+    expect(screen.queryByText(/pick two/i)).toBeNull();
+  });
+
+  it("still asks for two once a second version exists", () => {
+    mockList({ versions: [ROW("aaaaaaa", "one"), ROW("bbbbbbb", "two")] });
+    mockVersion(null);
+    wrap(<HistoryPanel id="ws1" />);
+    expect(screen.getByText(/pick two/i)).toBeInTheDocument();
+    expect(screen.queryByText(/only one version/i)).toBeNull();
+  });
+
   it("still reads ONE selected version — the empty state is not 'fewer than two'", () => {
     // A single selection renders a read-only document today and must keep doing
     // so. Gating the empty state on "fewer than two" would replace working

@@ -92,8 +92,19 @@ export function HistoryPanel({ id }: { id: string }) {
       )}
 
       {/* NEITHER selected — not "fewer than two". One selected renders as a
-          read-only document below, and that behaviour is kept. */}
-      {nav.a == null && nav.b == null && data && data.versions.length > 0 && (
+          read-only document below, and that behaviour is kept.
+
+          Split on the list length: "pick two" is unfollowable against a
+          one-version history, because the side pane has exactly one row to
+          click. Both branches point at the same place; only the instruction
+          differs. */}
+      {nav.a == null && nav.b == null && data && data.versions.length === 1 && (
+        <Text size="sm" c="dimmed">
+          Only one version so far. Select it in the Versions list in the side pane to read it —
+          comparing needs a second one.
+        </Text>
+      )}
+      {nav.a == null && nav.b == null && data && data.versions.length > 1 && (
         <Text size="sm" c="dimmed">
           Pick two versions from the Versions list in the side pane to compare them.
         </Text>
