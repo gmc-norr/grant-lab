@@ -222,10 +222,45 @@ describe("HistoryPanel", () => {
       isLoading: false,
       isError: true,
     } as never);
-    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
+    // Both slots hold the SAME listed sha: `ordered` is true, so this is the
+    // failed-read branch and only that branch. A stale second sha would instead
+    // be the not-in-list state, which is the next test.
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=aaaaaaa");
     expect(screen.getByText(/could not be read/i)).toBeInTheDocument();
     expect(screen.queryByText(/pick two/i)).toBeNull();
-    expect(screen.getAllByRole("button", { name: /clear the comparison/i }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("button", { name: /clear the comparison/i })).toHaveLength(1);
+  });
+
+  it("shows ONE recovery message, not two, when a stale sha is also unreadable", () => {
+    // The failed-read and not-in-list branches were independent: a stale sha
+    // whose read also failed rendered BOTH, with two Clear buttons. Direction is
+    // unknowable here, so the not-in-list message is the only true one.
+    mockList({ versions: [ROW("aaaaaaa", "one")] });
+    vi.spyOn(versionsMod, "useVersion").mockReturnValue({
+      data: null,
+      isLoading: false,
+      isError: true,
+    } as never);
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
+    expect(screen.getByText(/not in the Versions list/i)).toBeInTheDocument();
+    expect(screen.queryByText(/could not be read/i)).toBeNull();
+    expect(screen.getAllByRole("button", { name: /clear the comparison/i })).toHaveLength(1);
+  });
+
+  it("does not call a stale single selection the workspace's only version", () => {
+    // `?a=` carries a sha that is not in this list at all. Saying "it is the
+    // only version this workspace has" names the wrong thing entirely — the
+    // workspace's one version is a DIFFERENT sha.
+    mockList({ versions: [ROW("aaaaaaa", "one")] });
+    vi.spyOn(versionsMod, "useVersion").mockReturnValue({
+      data: null,
+      isLoading: false,
+      isError: true,
+    } as never);
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=abc1234");
+    expect(screen.queryByText(/only version this workspace has/i)).toBeNull();
+    expect(screen.getByText(/not in the Versions list/i)).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /clear the comparison/i })).toHaveLength(1);
   });
 
   it("still says 'pick two' in those same states when two versions DO exist", () => {

@@ -53,6 +53,13 @@ export function HistoryPanel({ id }: { id: string }) {
       ? "This workspace has only one version, so there is nothing to compare it with."
       : "This workspace has no versions to compare.";
 
+  // The lone selection, and whether it is a sha this artifact's history actually
+  // contains. A stale `?a=` is NOT "the only version this workspace has" — the
+  // workspace's one version is a different sha, and saying otherwise names the
+  // wrong thing.
+  const single = both ? null : (nav.a ?? nav.b);
+  const singleInList = single != null && order.includes(single);
+
   // The header timestamps come from the LIST row, not the version payload:
   // VersionContent is {commit_sha, artifact, markdown} and carries no
   // committed_at by design. Degrades to the short sha alone when the row is
@@ -133,7 +140,16 @@ export function HistoryPanel({ id }: { id: string }) {
       {!both && older.data && <pre className={styles.reviewDoc}>{older.data.markdown}</pre>}
       {/* Gated on the same expression the FETCH uses. Gating on `nav.a` alone
           left a hand-trimmed `?b=` whose read failed rendering nothing. */}
-      {!both && (nav.a ?? nav.b) != null && older.isError && (
+      {!both && single != null && older.isError && !singleInList && (
+        <Stack gap="xs" align="flex-start">
+          <Text size="sm" c="dimmed">
+            That version is not in the Versions list — the link may be stale, or point at the
+            other artifact.
+          </Text>
+          <ClearComparison onClear={nav.clearSelection} />
+        </Stack>
+      )}
+      {!both && single != null && older.isError && singleInList && (
         <Text size="sm" c="dimmed">
           That version could not be read.{" "}
           {shown > 1
@@ -146,7 +162,11 @@ export function HistoryPanel({ id }: { id: string }) {
           the address the user arrived on costs them the back button and hides
           which link was broken. The side pane's list stays usable, which is what §6.4
           is actually protecting. */}
-      {both && (older.isError || newer.isError) && (
+      {/* Gated on `ordered`, so this and the not-in-list branch below partition
+          the `both` failure space instead of overlapping. Ungated, a stale sha
+          whose read ALSO failed rendered both messages and two Clear buttons.
+          Reachable with one version via `?a=X&b=X`, where both indices resolve. */}
+      {both && ordered && (older.isError || newer.isError) && (
         <Stack gap="xs" align="flex-start">
           <Text size="sm" c="dimmed">
             One of those versions could not be read. {pickAdvice}
