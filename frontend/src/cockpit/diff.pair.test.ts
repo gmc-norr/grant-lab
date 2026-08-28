@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { type DiffRow, lineDiff, refineRuns, withinWordCap, wordDiff } from "./diff";
+import { type DiffRow, lineDiff, pairRows, refineRuns, withinWordCap, wordDiff } from "./diff";
 
 /** The refineRuns implementation as it stood BEFORE the blocks() extraction,
  *  copied verbatim from diff.ts at commit f3cb082c. It exists only to prove the
@@ -93,5 +93,103 @@ describe("the blocks() extraction is inert", () => {
       }
     }
     expect([...seen].sort()).toEqual(["delete", "insert", "replace", "same"]);
+  });
+});
+
+describe("pairRows", () => {
+  it("puts an unchanged line on both sides", () => {
+    const pairs = pairRows([{ tag: "same", text: "alpha" }]);
+    expect(pairs).toEqual([
+      { left: { tag: "same", text: "alpha" }, right: { tag: "same", text: "alpha" } },
+    ]);
+  });
+
+  it("puts a rewritten line's old text left and new text right, on one pair", () => {
+    const pairs = pairRows(refineRuns(lineDiff("recruit 40 patients", "recruit 120 patients")));
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0].left?.text).toBe("recruit 40 patients");
+    expect(pairs[0].right?.text).toBe("recruit 120 patients");
+  });
+
+  it("carries the word spans through untouched", () => {
+    const pairs = pairRows(refineRuns(lineDiff("recruit 40 patients", "recruit 120 patients")));
+    expect(pairs[0].left?.spans?.filter((s) => s.tag === "del").map((s) => s.text)).toEqual(["40"]);
+    expect(pairs[0].right?.spans?.filter((s) => s.tag === "add").map((s) => s.text)).toEqual(["120"]);
+  });
+
+  it("leaves the right side empty for a deletion with no partner", () => {
+    // Three deletions, one addition: dels[0] pairs; dels[1] and dels[2] do not.
+    const pairs = pairRows([
+      { tag: "del", text: "one" },
+      { tag: "del", text: "two" },
+      { tag: "del", text: "three" },
+      { tag: "add", text: "ONE" },
+    ]);
+    expect(pairs).toEqual([
+      { left: { tag: "del", text: "one" }, right: { tag: "add", text: "ONE" } },
+      { left: { tag: "del", text: "two" }, right: null },
+      { left: { tag: "del", text: "three" }, right: null },
+    ]);
+  });
+
+  it("leaves the left side empty for an addition with no partner", () => {
+    const pairs = pairRows([
+      { tag: "del", text: "one" },
+      { tag: "add", text: "ONE" },
+      { tag: "add", text: "TWO" },
+    ]);
+    expect(pairs).toEqual([
+      { left: { tag: "del", text: "one" }, right: { tag: "add", text: "ONE" } },
+      { left: null, right: { tag: "add", text: "TWO" } },
+    ]);
+  });
+
+  it("treats a pure insertion as right-side-only, not as a rewrite", () => {
+    // No `del` precedes these adds, so they are singles, not a change-block.
+    const pairs = pairRows(refineRuns(lineDiff("alpha\ndelta", "alpha\nbravo\ncharlie\ndelta")));
+    expect(pairs.map((p) => [p.left?.text ?? null, p.right?.text ?? null])).toEqual([
+      ["alpha", "alpha"],
+      [null, "bravo"],
+      [null, "charlie"],
+      ["delta", "delta"],
+    ]);
+  });
+
+  it("returns nothing for an empty diff", () => {
+    expect(pairRows([])).toEqual([]);
+  });
+});
+
+describe("the pairing invariant from spec section 4.1", () => {
+  it("never word-highlights a row it did not place opposite a partner", () => {
+    const rand = mulberry32(19700101);
+    for (let n = 0; n < 300; n++) {
+      const refined = refineRuns(lineDiff(randomDoc(rand), randomDoc(rand)));
+      const pairs = pairRows(refined);
+      for (const row of refined) {
+        if (!row.spans) continue;
+        // Identity, not equality: pairRows passes the same objects through.
+        const pair = pairs.find((p) => p.left === row || p.right === row);
+        expect(pair, `a spanned row was not in any pair: ${JSON.stringify(row)}`).toBeDefined();
+        expect(pair!.left).not.toBeNull();
+        expect(pair!.right).not.toBeNull();
+      }
+    }
+  });
+
+  it("accounts for every row exactly once", () => {
+    const rand = mulberry32(19700102);
+    for (let n = 0; n < 100; n++) {
+      const refined = refineRuns(lineDiff(randomDoc(rand), randomDoc(rand)));
+      const pairs = pairRows(refined);
+      const placed: DiffRow[] = [];
+      for (const p of pairs) {
+        if (p.left) placed.push(p.left);
+        // A `same` row is the SAME object on both sides — count it once.
+        if (p.right && p.right !== p.left) placed.push(p.right);
+      }
+      expect(placed).toHaveLength(refined.length);
+      for (const row of refined) expect(placed).toContain(row);
+    }
   });
 });

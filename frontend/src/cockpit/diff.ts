@@ -184,6 +184,43 @@ export function refineRuns(rows: DiffRow[]): DiffRow[] {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Side-by-side pairing.
+//
+// Takes the OUTPUT of refineRuns, so `spans` are already present and pass
+// through untouched. Uses the same blocks() walk, so a pair placed opposite
+// here is exactly a pair refineRuns considered for word refinement.
+//
+// The converse does NOT hold and must not be assumed: withinWordCap can skip
+// refinement for an over-cap pair, which is still placed opposite and simply
+// renders whole-line. Spec section 4.1.
+// ---------------------------------------------------------------------------
+
+export type DiffPair = { left: DiffRow | null; right: DiffRow | null };
+
+export function pairRows(rows: DiffRow[]): DiffPair[] {
+  const out: DiffPair[] = [];
+  for (const b of blocks(rows)) {
+    if (b.kind === "single") {
+      const row = b.row;
+      // A `del` cannot reach here — it always opens a change-block — but
+      // handling it keeps the function total rather than relying on that.
+      if (row.tag === "add") out.push({ left: null, right: row });
+      else if (row.tag === "del") out.push({ left: row, right: null });
+      else out.push({ left: row, right: row });
+      continue;
+    }
+    const { dels, adds } = b;
+    const paired = Math.min(dels.length, adds.length);
+    for (let k = 0; k < paired; k++) out.push({ left: dels[k], right: adds[k] });
+    // Leftover dels before leftover adds, matching the order refineRuns pushes
+    // them in, so both layouts tell the edit in the same sequence.
+    for (let k = paired; k < dels.length; k++) out.push({ left: dels[k], right: null });
+    for (let k = paired; k < adds.length; k++) out.push({ left: null, right: adds[k] });
+  }
+  return out;
+}
+
 /** lineDiff allocates a full (n+1)x(m+1) number matrix, quadratic in the line
  *  counts. Two 2,000-line documents is a 4M-entry matrix — the largest this
  *  approach should attempt. Today's largest document is 37 lines, so this is
