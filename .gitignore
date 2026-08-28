@@ -50,3 +50,6 @@ frontend/.playwright/
 
 # collab e2e runner transient log
 .e2e-vite.log
+
+# local uvicorn log from the run skill (transient, like .e2e-vite.log above)
+app.log
