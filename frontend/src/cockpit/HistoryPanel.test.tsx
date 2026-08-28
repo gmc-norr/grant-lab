@@ -79,45 +79,6 @@ describe("HistoryPanel", () => {
     expect(screen.queryByText(/No versions yet/i)).not.toBeInTheDocument();
   });
 
-  it("says so when the list is truncated", () => {
-    mockList({ versions: [ROW("aaaaaaa", "one")], truncated: true });
-    mockVersion(null);
-    wrap(<HistoryPanel id="ws1" />);
-    expect(screen.getByText(/Older versions exist/i)).toBeInTheDocument();
-  });
-
-  it("renders a row's role badge and its subject verbatim", () => {
-    mockList({ versions: [ROW("aaaaaaa", "user draft edit: Aims (user:7)")] });
-    mockVersion(null);
-    wrap(<HistoryPanel id="ws1" />);
-    expect(screen.getByText("user draft edit: Aims (user:7)")).toBeInTheDocument();
-    expect(screen.getByText("user")).toBeInTheDocument();
-  });
-
-  it("shows WHY a version exists when a prompt caused it", () => {
-    mockList({
-      versions: [ROW("aaaaaaa", "agent draft edit", "agent", "Tighten the aims section")],
-    });
-    mockVersion(null);
-    wrap(<HistoryPanel id="ws1" />);
-    expect(screen.getByText(/because you asked: Tighten the aims section/i)).toBeInTheDocument();
-  });
-
-  it("shows no reason line at all when there is no prompt", () => {
-    mockList({ versions: [ROW("aaaaaaa", "collab checkpoint: draft", null)] });
-    mockVersion(null);
-    wrap(<HistoryPanel id="ws1" />);
-    expect(screen.queryByText(/because you asked/i)).not.toBeInTheDocument();
-  });
-
-  it("renders a row with no provenance as ordinary, not as an error", () => {
-    mockList({ versions: [ROW("aaaaaaa", "collab checkpoint: draft", null)] });
-    mockVersion(null);
-    wrap(<HistoryPanel id="ws1" />);
-    expect(screen.getByText("not recorded")).toBeInTheDocument();
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-  });
-
   it("opens a version read-only when one row is selected", async () => {
     mockList({ versions: [ROW("aaaaaaa", "one"), ROW("bbbbbbb", "two")] });
     mockVersion("# an old draft\n");
@@ -173,22 +134,6 @@ describe("HistoryPanel", () => {
     expect(screen.getByText(/Could not load version history/i)).toBeInTheDocument();
   });
 
-  it("selecting a row puts its sha in the URL", async () => {
-    // MemoryRouter keeps its history in memory and never touches
-    // window.location, so the URL itself isn't observable here; the round-trip
-    // through ?a= is covered directly by historyNav.test.ts. What this test can
-    // observe is the row reacting to its own selection.
-    mockList({ versions: [ROW("aaaaaaa", "one")] });
-    mockVersion(null);
-    wrap(<HistoryPanel id="ws1" />);
-    await userEvent.click(screen.getByRole("button", { name: /one/ }));
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: /one/ })).toHaveAttribute(
-        "aria-pressed",
-        "true",
-      ),
-    );
-  });
 });
 
 describe("HistoryPanel comparison", () => {
@@ -291,7 +236,7 @@ describe("HistoryPanel comparison", () => {
     mockList({ versions: [ROW("bbbbbbb", "newer"), ROW("aaaaaaa", "older")] });
     mockVersion(null);
     wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=abc1234&b=bbbbbbb");
-    expect(screen.getByText(/not in this list/i)).toBeInTheDocument();
+    expect(screen.getByText(/not in the Versions list/i)).toBeInTheDocument();
     expect(screen.queryByText(/Loading both versions/i)).not.toBeInTheDocument();
   });
 
@@ -390,5 +335,61 @@ describe("HistoryPanel comparison", () => {
     // fallback as if it were the feature.
     expect(note.textContent).toContain("the full text of each is shown without highlighting");
     expect(note.textContent).not.toContain("shown side by side instead");
+  });
+
+  it("no longer renders version rows — the side pane owns them now", () => {
+    mockList({ versions: [ROW("aaaaaaa", "one"), ROW("bbbbbbb", "two")] });
+    mockVersion(null);
+    wrap(<HistoryPanel id="ws1" />);
+    expect(screen.queryByRole("button", { name: /one/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /two/ })).toBeNull();
+  });
+
+  it("tells you where to pick versions when NEITHER is selected", () => {
+    mockList({ versions: [ROW("aaaaaaa", "one"), ROW("bbbbbbb", "two")] });
+    mockVersion(null);
+    wrap(<HistoryPanel id="ws1" />);
+    expect(screen.getByText(/side pane/i)).toBeInTheDocument();
+  });
+
+  it("still reads ONE selected version — the empty state is not 'fewer than two'", () => {
+    // A single selection renders a read-only document today and must keep doing
+    // so. Gating the empty state on "fewer than two" would replace working
+    // behaviour with a placeholder.
+    mockList({ versions: [ROW("aaaaaaa", "one"), ROW("bbbbbbb", "two")] });
+    mockVersion("# an old draft\n");
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa");
+    expect(screen.getByText(/# an old draft/)).toBeInTheDocument();
+    expect(screen.queryByText(/side pane/i)).toBeNull();
+  });
+
+  it("points a failed single read at the side pane, not at a list above", () => {
+    mockList({ versions: [ROW("bbbbbbb", "newer")] });
+    vi.spyOn(versionsMod, "useVersion").mockReturnValue({
+      data: null,
+      isLoading: false,
+      isError: true,
+    } as never);
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&b=bbbbbbb");
+    const msg = screen.getByText(/could not be read/i);
+    expect(msg.textContent).toMatch(/side pane/i);
+    expect(msg.textContent).not.toMatch(/above/i);
+  });
+
+  it("points the not-in-this-list message at the side pane", () => {
+    mockList({ versions: [ROW("bbbbbbb", "newer"), ROW("aaaaaaa", "older")] });
+    mockVersion(null);
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=abc1234&b=bbbbbbb");
+    const msg = screen.getByText(/not in the Versions list/i);
+    expect(msg.textContent).not.toMatch(/above/i);
+  });
+
+  it("no message in this panel still says 'above'", () => {
+    // A blanket guard: three messages were reworded, and the next one added must
+    // not reintroduce the phrase.
+    mockList({ versions: [ROW("aaaaaaa", "one")] });
+    mockVersion(null);
+    const { container } = wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=abc1234&b=aaaaaaa");
+    expect(container.textContent ?? "").not.toMatch(/from the list above|from above/i);
   });
 });

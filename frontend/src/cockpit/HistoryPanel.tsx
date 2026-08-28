@@ -1,4 +1,4 @@
-import { Badge, Group, SegmentedControl, Stack, Text, Title } from "@mantine/core";
+import { Group, SegmentedControl, Stack, Text, Title } from "@mantine/core";
 
 import type { Artifact } from "../api/proposals";
 import { useVersion, useVersions } from "../api/versions";
@@ -7,63 +7,6 @@ import { DiffView } from "./DiffView";
 import { lineDiff, pairRows, refineRuns, tooLargeToDiff } from "./diff";
 import { SideBySideDiffView } from "./SideBySideDiffView";
 import { type DiffLayout, useHistoryNav } from "./historyNav";
-
-function VersionRowButton({
-  subject,
-  committedAt,
-  createdBy,
-  turnPrompt,
-  selected,
-  onClick,
-}: {
-  subject: string;
-  committedAt: string;
-  createdBy: string | null;
-  turnPrompt: string | null;
-  selected: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      aria-pressed={selected}
-      onClick={onClick}
-      style={{
-        display: "block",
-        width: "100%",
-        textAlign: "left",
-        background: selected ? "var(--app-sidebar)" : "transparent",
-        border: "1px solid var(--app-border)",
-        borderRadius: 6,
-        padding: "0.4rem 0.6rem",
-        cursor: "pointer",
-        color: "inherit",
-      }}
-    >
-      <Group gap="xs" wrap="nowrap">
-        <Badge size="sm" variant="light">
-          {createdBy ?? "not recorded"}
-        </Badge>
-        {/* gitio caps a subject at 500 chars, and it carries a user-controlled
-            section heading (editing/save.py:275). Unclamped, a long heading
-            wraps the row and pushes the timestamp out of view. */}
-        <Text size="sm" style={{ flex: 1 }} lineClamp={2}>
-          {subject}
-        </Text>
-        <Text size="xs" c="dimmed">
-          {new Date(committedAt).toLocaleString()}
-        </Text>
-      </Group>
-      {/* The "why" half of goal 1. Rendered only when a turn caused this
-          version; absence is ordinary, so there is no placeholder. */}
-      {turnPrompt && (
-        <Text size="xs" c="dimmed" mt={2}>
-          because you asked: {turnPrompt}
-        </Text>
-      )}
-    </button>
-  );
-}
 
 export function HistoryPanel({ id }: { id: string }) {
   const nav = useHistoryNav();
@@ -148,32 +91,11 @@ export function HistoryPanel({ id }: { id: string }) {
         </Text>
       )}
 
-      {data && data.versions.length > 0 && (
-        <Stack gap="xs">
-          {data.versions.map((v) => (
-            <VersionRowButton
-              key={v.commit_sha}
-              subject={v.subject}
-              committedAt={v.committed_at}
-              createdBy={v.created_by}
-              turnPrompt={v.turn_prompt}
-              selected={v.commit_sha === nav.a || v.commit_sha === nav.b}
-              onClick={() => nav.toggle(v.commit_sha)}
-            />
-          ))}
-          {data.truncated && (
-            <Text size="xs" c="dimmed">
-              {/* No number: it would duplicate the backend's HISTORY_LIMIT
-                  across the wire and silently lie if that constant moved. */}
-              Older versions exist than are shown here.
-            </Text>
-          )}
-        </Stack>
-      )}
-
-      {data && data.versions.length === 1 && (
-        <Text size="xs" c="dimmed">
-          Comparing needs two versions.
+      {/* NEITHER selected — not "fewer than two". One selected renders as a
+          read-only document below, and that behaviour is kept. */}
+      {nav.a == null && nav.b == null && data && data.versions.length > 0 && (
+        <Text size="sm" c="dimmed">
+          Pick two versions from the Versions list in the side pane to compare them.
         </Text>
       )}
 
@@ -185,7 +107,7 @@ export function HistoryPanel({ id }: { id: string }) {
           left a hand-trimmed `?b=` whose read failed rendering nothing. */}
       {!both && (nav.a ?? nav.b) != null && older.isError && (
         <Text size="sm" c="dimmed">
-          That version could not be read. Pick one from the list above.
+          That version could not be read. Pick one from the Versions list in the side pane.
         </Text>
       )}
 
@@ -195,7 +117,8 @@ export function HistoryPanel({ id }: { id: string }) {
           is actually protecting. */}
       {both && (older.isError || newer.isError) && (
         <Text size="sm" c="dimmed">
-          One of those versions could not be read. Pick two from the list above.
+          One of those versions could not be read. Pick two from the Versions list in the side
+          pane.
         </Text>
       )}
       {both && !ordered && !list.isError && list.isLoading && (
@@ -208,7 +131,7 @@ export function HistoryPanel({ id }: { id: string }) {
           is unknowable, so say so rather than waiting on it forever. */}
       {both && !ordered && !list.isError && !list.isLoading && (
         <Text size="sm" c="dimmed">
-          One of the selected versions is not in this list. Pick two from above.
+          One of the selected versions is not in the Versions list. Pick two from the side pane.
         </Text>
       )}
       {both &&
