@@ -86,7 +86,34 @@ The sidebar Versions group stays as it is. It is a glance; History is the surfac
 
 ## 6. Reading a version
 
-### 6.1 Endpoint
+### 6.1 Endpoints
+
+**The list.**
+
+```
+GET /api/workspaces/{workspace_id}/versions?artifact=draft|spec
+    -> { "versions": [ { "commit_sha": str,
+                         "committed_at": str,        # ISO-8601, gitio's %aI
+                         "subject": str,             # may carry gitio's truncation marker
+                         "created_by": str | null,   # overlay; absent when no DB row
+                         "triggering_turn_id": str | null } ],
+         "truncated": bool,
+         "history_available": bool }
+```
+
+- **`limit=200`**, matching `_HISTORY_LIMIT` (`web/api/admin_retention.py:105`),
+  today's only `list_commits` caller. Not a client parameter in slice 1: measured
+  on the 13 live repos, twelve hold **one** commit and the largest holds **15**, so
+  a tunable page size is machinery with no user.
+- Same member gate, same sync `def`, same repo resolution as the single-version
+  read below.
+- `truncated` is `list_commits`'s own second return value, forwarded unchanged.
+- `history_available` is `false` when `list_commits` raised — see §8.
+- The provenance overlay is a left join from the git rows onto `artifact_versions`
+  on `commit_sha`. Every overlay field is nullable and renders "not recorded" when
+  absent (§12).
+
+**One version.**
 
 ```
 GET /api/workspaces/{workspace_id}/versions/{commit_sha}?artifact=draft|spec
@@ -163,16 +190,35 @@ editor — an old version must never look editable.
 
 Every read and every diff needs an artifact, and the git history is **shared**:
 one repo per workspace holds `proposal.md`, `proposal-spec.md` and five more
-files, so a single commit list mixes commits that touched neither.
+files, so the commit list is not per-artifact.
 
 The History panel carries a **Draft / Spec segmented control**, defaulting to
-**Draft**. It drives the `?artifact=` on every read, and it filters the list to
-commits that touched that file — `list_commits` is unscoped, so the filter is
-the endpoint's job, not the client's. A commit that touched neither artifact
-(a bibliography build, a review pass) does not appear under either.
+**Draft**. It drives the `?artifact=` on every read, and it scopes the list to
+commits that touched that file.
 
-The control's value belongs in the URL beside `?tab=history`, so a link to a
-comparison reopens the same one.
+**The scope must be applied inside `git log`, not after it.** `list_commits`
+asks git for `--max-count={limit + 1}` (`gitio.py:478-487`) with no pathspec, so
+filtering its *result* lets unrelated commits consume the limit and hide older
+versions of the artifact the user asked for. Add an optional keyword pathspec to
+`list_commits` and emit `-- <filename>` in the argv; existing callers keep today's
+behaviour by omitting it.
+
+Measured, so nobody mistakes this for urgency: across the 13 live repos,
+**zero** commits touch neither artifact, and the filter's visible effect today is
+narrowing (workspace `312f51e2` is 15 commits on the draft, 1 on the spec).
+Starvation is a mechanism with no live instance yet — the pathspec goes in
+because it is correct by construction and costs one argument, not because the
+list is wrong today. The earlier claim in this section, that the list already
+"mixes commits that touched neither", was **false against the data** and has been
+removed.
+
+**URL state.** `?tab=history` carries the artifact **and both selected shas** —
+e.g. `?tab=history&artifact=draft&a=<older>&b=<newer>` — because §2 promises a
+link reopens the same comparison, and the artifact alone cannot. Each sha is
+validated by the shared validator of §6.2 before any fetch; one that fails
+validation, or that 404s, drops that side of the selection and leaves the list
+usable rather than erroring the tab. `a` and `b` are re-sorted into `older,
+newer` on load, exactly as §7.1 requires of selection order.
 
 ### 6.5 What a row says
 
@@ -224,8 +270,15 @@ convention.
 (`diff.ts:9-14`) — quadratic in the line counts. Both existing callers diff one
 section; this is the first whole-document caller. Today's largest document is 37
 lines, so the matrix is ~1.4k entries and the concern is theoretical — but the
-guard belongs in now, while it is one line: above a line-count ceiling, fall back
-to showing the two versions without a diff and say why.
+guard belongs in now, while it is one line.
+
+**The ceiling is 2,000 lines, applied to each side independently:** if *either*
+document has more than 2,000 lines, skip `lineDiff` entirely and render the two
+versions side by side with a note saying the document is too large to diff. Two
+2,000-line documents allocate a 4M-entry matrix, which is the largest this
+approach should ever attempt; 2,000 is also ~54x today's largest document, so the
+fallback is unreachable from real data and exists for the pathological case only.
+The boundary is inclusive: exactly 2,000 lines still diffs.
 
 ### 7.2 Line granularity is not good enough — measured
 
@@ -329,9 +382,26 @@ Every one of these is reachable today, not hypothetical:
 | One version | common early | the list, with compare disabled and a reason |
 | Version unreadable | `GitCommitError` → 404 | "That version could not be read" on the row, list intact |
 | Sha fails validation | never from the UI; only a hand-typed URL | 422, not 500 |
+| **History unreadable** | `list_commits` raised — no repo dir, or an **unborn HEAD** | "Version history is not available for this workspace yet", list area only; the tab still opens |
+| **List truncated** | `truncated=true` from `list_commits` at `limit=200` | the 200 rows plus a footer: "Showing the 200 most recent versions" |
 
 The zero-version case is the **default experience** for a new workspace and must
 be designed, not left to an empty `<ul>`.
+
+**It does not arrive as an empty list.** Executed on a fresh `git init`:
+`git log --max-count=6 -z --format=...` prints `fatal: your current branch
+'master' does not have any commits yet` and exits **128**, which `list_commits`
+converts to `GitCommitError`. So a workspace with no commits **raises**, and an
+endpoint that assumes `[]` turns the commonest new-workspace state into the
+app-wide 500 of `main.py:713-716`.
+
+The precedent to copy is `web/api/admin_retention.py:291-297`, which already
+handles exactly this: it wraps the `list_commits` call in its own `try`, catches
+`(OSError, GitCommitError)`, and reports `commits, truncated, history_available =
+[], False, False` — a state, not a crash. The versions endpoint does the same and
+returns `history_available: false` with an empty `versions`. The UI distinguishes
+the two: `history_available: false` shows the "not available yet" line above;
+`history_available: true` with zero rows shows the "No versions yet" invitation.
 
 ## 9. Going back to a version — phase 2
 
@@ -385,9 +455,13 @@ concurrent-writer test.
    workspace-scoped and `SpecLockEvent` freezes one `artifact_commit_sha`
    (`web/api/workspaces.py:704-716`). Restoring the spec across a lock boundary
    needs defined behaviour before phase 2.
-3. **Is the actor's name shown, or only their role?** §6.4 shows the role badge
-   and the user id. Showing a *name* means joining `users` and deciding whether
-   every member may see who edited what. Product call, not a technical one.
+3. **Is the actor's *name* shown?** Not in slice 1 — §6.5 decides the slice 1
+   contract: the **role badge** plus the commit subject verbatim, and the
+   individual's id only where the subject already happens to contain it as free
+   text. (An earlier revision cited "§6.4" here, which is the Draft/Spec control,
+   and claimed the user id was displayed as a field. Both were wrong.) Showing a
+   real name means joining `users` and deciding whether every member may see who
+   edited what — a product call, deferred to phase 2.
 
 ## 12. Decided during review — was open, now closed
 
@@ -440,7 +514,17 @@ one commit** — compare needs two, and most existing git fixtures build one.
 - **the git-sourced list contains a commit that has no `artifact_versions` row**
   — the whole reason for §12 — and that row renders with its provenance fields
   absent rather than erroring;
-- the zero-version state renders its message rather than an empty list.
+- the zero-version state renders its message rather than an empty list;
+- **unborn HEAD**: a workspace whose repo has `git init` and no commit returns
+  `history_available: false` with HTTP 200 — **not** the app-wide 500. Break it by
+  removing the `except (OSError, GitCommitError)` and the test must go red;
+- **scope-before-limit**: a repo where the newest `limit` commits touch only the
+  *other* artifact still lists the older commits of the requested one. A fixture
+  whose commits all touch both files cannot fail on this and does not count;
+- **URL round-trip**: loading `?tab=history&artifact=spec&a=<older>&b=<newer>`
+  restores that exact comparison, and a bogus `a` leaves the list usable;
+- **the 2,000-line ceiling**: 2,000 lines diffs, 2,001 falls back to the
+  side-by-side view with its note.
 
 Note the suite's false-pass signature: a broken import shows as mass teardown
 **ERRORs with zero FAILED**. Judge a mutation on FAILED, never ERROR.
