@@ -1,7 +1,9 @@
 # Workspace rail — information architecture
 
 **Date:** 2026-08-28
-**Status:** design, approved in conversation, not implemented
+**Status:** design, revision 2 — outside review round 1, 5/5 findings confirmed. Not
+implemented. Round 1 also found a **live data-loss bug** in shipped code, fixed separately
+in `cc50e0e7` (see §7.3).
 **Supersedes nothing.** Follows `2026-08-28-version-graph-side-pane-design.md`, which moved
 the version list into the side pane and exposed the problem this spec fixes.
 
@@ -50,19 +52,45 @@ leap.
 
 ## 3. The organising rule
 
-> **The pane holds lists you pick from. The middle holds the thing you picked.**
+> **The pane holds workspace context, narrow enough for 276px. The middle holds the
+> artifact you are working on.**
 
-This is stated deliberately in place of an earlier draft rule ("documents in the middle,
-views on the rail"), which was wrong: a Scorecard is a view but is far too wide for a
-276px pane. Sorting by *list vs content* puts everything in the right place, Scorecard
-included.
+Two earlier drafts of this rule were wrong, and both failures are worth keeping:
 
-Applied:
+1. *"Documents in the middle, views on the rail"* — a Scorecard is a view and is far too
+   wide for a 276px pane.
+2. *"The pane holds lists you pick from"* — checked against the code, and it describes
+   only **Outline** and **Versions**. `CockpitSidebar.tsx:104-112` renders References as
+   plain `<li>` rows with **no click handler at all**; `:139-187` renders Members as
+   information plus add/remove controls, a management tool; and every Criteria button at
+   `:123-133` calls `navigate({ top_tab: "scorecard" })`, the **same destination for every
+   row**, so it does not pick that criterion.
 
-| Surface | Holds | Because |
+Rule 2 was a story about the pane, not a description of it. Rule 3 above is what is
+actually true of all five, and of VS Code's own pane — Explorer and Source Control are
+lists, but Run and Debug is state and controls.
+
+| Surface | Holds | Width |
 | --- | --- | --- |
-| Rail + pane | Outline, Versions, References, Criteria, Members | each is a list you pick from |
-| Middle | Draft, Spec, Scorecard, Panel review, a version diff | each is content |
+| Rail + pane | Outline, Versions, References, Criteria, Members | 276px, narrow |
+| Middle | Draft, Spec, Scorecard, Panel review, a version diff | the rest |
+
+### 3.1 The requirement the rule does carry
+
+A weaker rule still forbids the thing that has cost this project real confusion:
+
+> **A pane row that looks clickable must open something specific to that row.**
+
+**Criteria violates this today** and this spec does not fix it. Every criterion opens the
+Scorecard at the top, so the row promises specificity and delivers none — the same species
+of defect as the version messages fixed in `c7c3d8e4`. Fixing it needs an anchor per
+criterion on the Scorecard (`ScorecardPanel.tsx:92` renders `key={c.index}` with no id)
+and a `criterion_index` on `NavTarget` (`nav.ts:3-8` has no such field). That is a
+separate slice; it is named here so it is not mistaken for something this design already
+handles.
+
+**References is not clickable at all**, which is honest — a row that does nothing and
+looks like it does nothing breaks no promise. It stays as it is.
 
 ## 4. The rail
 
@@ -85,8 +113,10 @@ open (`cockpitIdFromPath(pathname)` returns an id — the existing test in
 🛡️  Admin              codicon-shield        /admin             ┘ (admins only)
 ```
 
-Every codicon name above was checked against the installed set
-(`@vscode/codicons@0.0.45`); all fourteen resolve.
+All **ten** codicon names in the diagram were checked against the installed set
+(`@vscode/codicons@0.0.45`) and resolve. Four further names were checked as candidates and
+rejected: `source-control`, `git-commit`, `link`, `edit`. An earlier revision said
+"fourteen", counting the candidates as if they appeared above; they do not.
 
 The dynamic **"Current workspace"** item (`ActivityBar.tsx:102-114`, icon `edit`) is
 removed. The workspace band replaces it: its presence is what signals a workspace is open,
@@ -137,6 +167,21 @@ without adding a permanent tab.
 Selecting **one** version opens it read-only in the middle; selecting **two** opens the
 diff. Both behaviours exist today in `HistoryPanel` and are preserved.
 
+### 6.1 Deselecting must not open anything
+
+Clicking an already-selected version **deselects** it (`historyNav.ts:51-52`), and
+`selectAndOpen` sets the middle destination unconditionally — so emptying the selection
+currently still opens the comparison. `?tab=diff` with no versions selected is a
+destination the user did not ask for.
+
+`selectAndOpen` therefore sets `tab=diff` **only when the resulting selection is
+non-empty**. A click that empties it leaves `?tab` alone, and the user stays where they
+were.
+
+`?tab=diff` with nothing selected remains reachable by hand-editing the URL. It renders
+`HistoryPanel`'s existing empty state, which is correct and — unlike before this design —
+actually followable: the Versions pane it refers to is the pane the user is looking at.
+
 ## 7. URL state
 
 The URL stays the single channel across the AppShell boundary, as it already is
@@ -154,6 +199,47 @@ The URL stays the single channel across the AppShell boundary, as it already is
 `?view` parses exactly like `?tab` does today: anything unrecognised normalises to the
 default rather than erroring, matching `tabFromParams` and `artifactParam`.
 
+### 7.0 The rail must MERGE the query, never replace it
+
+The app-band items are plain paths (`/`, `/cockpit`) handed straight to `<Link to>`
+(`ActivityBar.tsx:51-56`). The workspace-band items are **query-only** destinations, and a
+`<Link to="?view=versions">` resolves to a search string that **replaces** the existing
+one — silently dropping `?tab`, `?sec`, `?artifact`, `?a`, `?b` and `?layout`. Clicking
+Versions would discard the comparison the user was looking at.
+
+Each workspace-band item's `to` is therefore computed from the current params:
+
+```ts
+// Preserve everything, change one key. The rail switches which PANE is showing;
+// it must not decide anything about the middle.
+function viewHref(sp: URLSearchParams, view: View, pathname: string) {
+  const next = new URLSearchParams(sp);
+  next.set("view", view);
+  return { pathname, search: next.toString() };
+}
+```
+
+This is required behaviour, not an implementation note: the test in §11 asserts the
+resulting URL still carries an unrelated param.
+
+### 7.3 Changing the middle must not discard unsaved edits
+
+Changing `?tab` unmounts the artifact editor and discards its per-section buffers. That is
+not a router navigation, so the router blocker cannot see it; `Cockpit.onTab`
+(`Cockpit.tsx:38-42`) calls `confirmDiscardIfDirty()` before allowing it.
+
+Round 1 of the outside review found that `selectAndOpen` — the second way to change that
+destination, created when the version list moved into the side pane — went around that
+guard. Measured: with the editor dirty, clicking a version called `window.confirm` **zero
+times** and moved the URL to `tab=history`. Fixed in `cc50e0e7` by moving the guard into
+`selectAndOpen` itself, so it covers every caller rather than every call site someone
+remembers, and conditional on the destination actually changing.
+
+**That guard must survive this design.** When `selectAndOpen` starts writing `tab=diff`,
+its condition changes with it, and the four tests in `historyNav.test.tsx`
+("selectAndOpen guards unsaved edits") must still pass. Any future writer of `?tab` carries
+the same obligation.
+
 ### 7.1 One write, not two
 
 Picking a version must set `a`/`b` **and** `tab=diff` in a single `setSearchParams` call.
@@ -163,7 +249,7 @@ discards the first. This was measured, and is pinned by a test in `historyNav.te
 ("toggle-then-setTab loses the selection").
 
 `historyNav.selectAndOpen` already does this. Its only change is the value it writes:
-`out.set("tab", "history")` at `historyNav.ts:146` becomes `"diff"`.
+`out.set("tab", "history")` at `historyNav.ts:162` becomes `"diff"`.
 
 ### 7.2 Old links
 
@@ -225,12 +311,24 @@ tab strip (`Cockpit.tsx:86`); add `diff`; point `selectAndOpen` at it; add the
 - **One URL write** — clicking a version in the pane yields a URL carrying `a` **and**
   `tab=diff`. Assert the resulting URL, not that two functions were called: the latter
   passes while the feature is broken. The existing pinned two-writer test stays.
+- **The rail merges** — with `?tab=scorecard&sec=3` in the URL, clicking a workspace-band
+  item yields a URL that still carries **both**, with only `view` changed. A test that
+  only asserts `view=versions` is present passes on the replacing `<Link>` this rule
+  exists to forbid.
+- **Deselect does not open** — clicking the only selected version leaves `?tab` untouched
+  and clears the sha. Assert `tab`, not just the absence of the sha.
+- **The dirty guard survives** — the four `selectAndOpen guards unsaved edits` tests pass
+  against `tab=diff`: asks when the destination changes with a dirty editor, does nothing
+  when refused, proceeds when accepted, and stays silent when the comparison is already
+  open.
+- **Criteria is untouched** — this slice must not make the Criteria rows look more
+  specific than they are (§3.1). No new test; a reviewer check.
 - **The alias** — `?tab=history` resolves to the diff with the versions pane.
 - **Accessibility** — each rail item keeps its `aria-label` and `Tooltip position="right"`
   (`ActivityBar.tsx:76`), and the active item keeps `aria-current="page"`.
 
 Frontend gates unchanged: `pnpm exec tsc --noEmit`, `pnpm vitest run`, `pnpm build`, from
-`frontend/`. Baseline at the time of writing: **116 files / 740 tests**.
+`frontend/`. Baseline at the time of writing: **116 files / 744 tests** (740 plus the four added by `cc50e0e7`).
 
 ## 12. Files
 
@@ -243,7 +341,9 @@ Frontend gates unchanged: `pnpm exec tsc --noEmit`, `pnpm vitest run`, `pnpm bui
 - `frontend/src/cockpit/CockpitSidebar.tsx` — render one view
 - `frontend/src/cockpit/VersionGraph.tsx` — drop `openWhen` and its own `SidebarGroup`;
   head the view with the shared plain header
-- `frontend/src/cockpit/historyNav.ts` — `selectAndOpen` writes `tab=diff`
+- `frontend/src/cockpit/historyNav.ts` — `selectAndOpen` writes `tab=diff`, keeps its
+  dirty-editor guard (§7.3), and only sets the destination when the selection is non-empty
+  (§6.1)
 - `frontend/src/routes/Cockpit.tsx` — tab strip and the `diff` destination
 
 **Delete**
