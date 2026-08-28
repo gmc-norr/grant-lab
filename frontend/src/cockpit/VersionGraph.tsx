@@ -2,6 +2,7 @@ import { Popover, Text } from "@mantine/core";
 import { useEffect, useRef, useState } from "react";
 
 import { useVersions, type VersionRow } from "../api/versions";
+import { useCockpitNav } from "./cockpitNav";
 import { useHistoryNav } from "./historyNav";
 import { SidebarGroup } from "./SidebarGroup";
 import styles from "./VersionGraph.module.css";
@@ -116,12 +117,21 @@ function VersionGraphRow({ v, selected, onSelect }: { v: VersionRow; selected: b
  *  duplication change, not a correctness fix. */
 export function VersionGraph({ id }: { id: string }) {
   const nav = useHistoryNav();
+  const { tab } = useCockpitNav();
   const list = useVersions(id, nav.artifact);
   const data = list.data;
   const rows = data?.versions ?? [];
 
+  // Folded by default, but unfolded by the History tab: that tab's own message
+  // points the user at this list, and a message pointing at a folded group four
+  // down a scrolling pane is not followable.
   return (
-    <SidebarGroup title="Versions" count={rows.length || undefined} defaultOpen={false}>
+    <SidebarGroup
+      title="Versions"
+      count={rows.length || undefined}
+      defaultOpen={false}
+      openWhen={tab === "history"}
+    >
       {/* Each state gets its own words. "Could not load" and "not available"
           and "none yet" are three different situations, and a single empty
           message for all three tells the user nothing about which. */}

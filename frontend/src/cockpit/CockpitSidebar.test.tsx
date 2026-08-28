@@ -311,3 +311,71 @@ it("renders the version GRAPH, not the old plain list", async () => {
   expect(await screen.findByText("abcdef1")).toBeInTheDocument();
   expect(document.querySelector('[data-role="agent"]')).not.toBeNull();
 });
+
+it("opens the Versions group on the History tab, without a click", async () => {
+  // The History tab's own message says "Pick two versions from the Versions
+  // list in the side pane". That list is the FOURTH group and collapsed by
+  // default, so following the instruction meant scrolling to a folded header
+  // the message never mentions. The tab that depends on the list opens it.
+  vi.spyOn(clientMod.api, "GET").mockImplementation((async (p: string) => {
+    if (String(p).includes("/history"))
+      return {
+        data: {
+          versions: [
+            {
+              commit_sha: "b".repeat(40),
+              committed_at: "2026-08-28T10:00:00+00:00",
+              subject: "a version subject",
+              created_by: "user",
+              triggering_turn_id: null,
+              turn_prompt: null,
+            },
+          ],
+          truncated: false,
+          history_available: true,
+        },
+      };
+    return draft;
+  }) as never);
+  renderSidebar("/cockpit/ws-1?tab=history");
+  // The ROWS, not the header: the header is present either way, so asserting it
+  // would pass on the collapsed group this test exists to rule out.
+  expect(await screen.findByRole("list", { name: "Versions" })).toBeInTheDocument();
+  expect(screen.getByText(/a version subject/)).toBeInTheDocument();
+});
+
+it("leaves the Versions group folded on the Draft tab", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(draft as never);
+  renderSidebar("/cockpit/ws-1?tab=draft");
+  await screen.findByRole("button", { name: /Methods/ });
+  expect(screen.queryByRole("list", { name: "Versions" })).toBeNull();
+});
+
+it("a group opened by the tab can still be folded by hand", async () => {
+  vi.spyOn(clientMod.api, "GET").mockImplementation((async (p: string) => {
+    if (String(p).includes("/history"))
+      return {
+        data: {
+          versions: [
+            {
+              commit_sha: "b".repeat(40),
+              committed_at: "2026-08-28T10:00:00+00:00",
+              subject: "a version subject",
+              created_by: "user",
+              triggering_turn_id: null,
+              turn_prompt: null,
+            },
+          ],
+          truncated: false,
+          history_available: true,
+        },
+      };
+    return draft;
+  }) as never);
+  renderSidebar("/cockpit/ws-1?tab=history");
+  await screen.findByRole("list", { name: "Versions" });
+  fireEvent.click(screen.getByRole("button", { name: /versions/i }));
+  // Must STAY folded: an effect that re-opens on every render would make the
+  // header un-collapsible, which is worse than the bug it fixes.
+  expect(screen.queryByRole("list", { name: "Versions" })).toBeNull();
+});

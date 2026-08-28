@@ -38,9 +38,16 @@ function wrap(initial = "/cockpit/ws1?tab=draft") {
       </MemoryRouter>
     </MantineProvider>,
   );
-  // SidebarGroup with defaultOpen={false} mounts children only when open.
-  // Click the group header to expand it so tests can query rows and notes.
-  fireEvent.click(screen.getByRole("button", { name: /versions/i }));
+  // SidebarGroup with defaultOpen={false} mounts children only when open, so
+  // these tests must expand it to query rows and notes. CONDITIONAL, because on
+  // ?tab=history the group now opens itself and an unconditional click would
+  // FOLD it — which is exactly how this helper broke when that landed.
+  //
+  // A conditional click could mask the group failing to open on its own, so
+  // that behaviour is gated where it belongs, in CockpitSidebar.test.tsx
+  // ("opens the Versions group on the History tab, without a click").
+  const header = screen.getByRole("button", { name: /versions/i });
+  if (header.getAttribute("aria-expanded") !== "true") fireEvent.click(header);
   return result;
 }
 
