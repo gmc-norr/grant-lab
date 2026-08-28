@@ -2,6 +2,7 @@ import { useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import type { NavTarget, TopTab } from "./nav";
+import { confirmDiscardIfDirty } from "./editorStore";
 
 export const TOP_TABS: TopTab[] = ["draft", "spec", "scorecard", "review", "history"];
 
@@ -61,14 +62,30 @@ export function useCockpitNav(): CockpitNav {
   );
 
   const navigate = useCallback(
-    (target: NavTarget) =>
+    (target: NavTarget) => {
+      // Changing ?tab unmounts the artifact editor and discards its unsaved
+      // per-section buffers. That is not a router navigation, so the router
+      // blocker cannot see it — the same discard Cockpit.onTab confirms for the
+      // tab strip. navigate() is a SECOND writer of ?tab (every Criteria row
+      // reaches it) and was silent: measured at zero window.confirm calls with
+      // the editor dirty, the URL moving to tab=scorecard.
+      //
+      // Only when the tab actually changes: an Outline row jumping within the
+      // tab it belongs to unmounts nothing, and prompting there would train the
+      // user to dismiss the prompt that matters.
+      //
+      // Read from the render closure, not `prev`: window.confirm must never run
+      // inside a setSearchParams updater, which is expected to be pure and runs
+      // twice under StrictMode.
+      if (target.top_tab && target.top_tab !== tab && !confirmDiscardIfDirty()) return;
       setSp((prev) => {
         const next = new URLSearchParams(prev);
         if (target.top_tab) next.set("tab", target.top_tab);
         if (target.section_index != null) next.set("sec", String(target.section_index));
         return next;
-      }),
-    [setSp],
+      });
+    },
+    [tab, setSp],
   );
 
   return { tab, sec, setTab, setSec, navigate };

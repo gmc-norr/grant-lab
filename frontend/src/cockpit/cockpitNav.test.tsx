@@ -1,8 +1,9 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
-import { expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 
 import { useCockpitNav } from "./cockpitNav";
+import { resetEditorStore, setDirty } from "./editorStore";
 
 function Probe() {
   const nav = useCockpitNav();
@@ -63,4 +64,74 @@ it("cockpitIdFromPath returns the id only for the editor route", () => {
   expect(cockpitIdFromPath("/cockpit/new")).toBe(""); // create route, NOT an id
   expect(cockpitIdFromPath("/cockpit")).toBe(""); // list route
   expect(cockpitIdFromPath("/")).toBe(""); // off cockpit
+});
+
+// --- navigate() and the unsaved-editor guard ---------------------------------
+//
+// Changing ?tab unmounts the artifact editor and discards its per-section
+// buffers. Cockpit.onTab confirms before that discard, but navigate() is a
+// SECOND writer of ?tab and was silent: measured at zero window.confirm calls
+// while the editor was dirty, with the URL moving to tab=scorecard. Reached
+// from every Criteria row (CockpitSidebar.tsx:127).
+
+function GuardProbe({ to }: { to: "scorecard" | "draft" }) {
+  const nav = useCockpitNav();
+  const loc = useLocation();
+  return (
+    <>
+      <button onClick={() => nav.navigate({ top_tab: to, section_index: 2 })}>go</button>
+      <span data-testid="search2">{loc.search}</span>
+    </>
+  );
+}
+
+function clickGo(url: string, to: "scorecard" | "draft") {
+  render(
+    <MemoryRouter initialEntries={[url]}>
+      <GuardProbe to={to} />
+    </MemoryRouter>,
+  );
+  fireEvent.click(screen.getByText("go"));
+  return new URLSearchParams(screen.getByTestId("search2").textContent ?? "");
+}
+
+afterEach(() => {
+  act(() => resetEditorStore());
+  vi.restoreAllMocks();
+});
+
+it("navigate() asks before discarding unsaved edits, and does nothing if refused", () => {
+  act(() => setDirty([1]));
+  const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+  const sp = clickGo("/cockpit/ws1?tab=draft&sec=1", "scorecard");
+  expect(confirmSpy).toHaveBeenCalledTimes(1);
+  expect(sp.get("tab")).toBe("draft");
+  // The section must not move either: a refused discard changes nothing.
+  expect(sp.get("sec")).toBe("1");
+});
+
+it("navigate() proceeds when the discard is accepted", () => {
+  act(() => setDirty([1]));
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  const sp = clickGo("/cockpit/ws1?tab=draft&sec=1", "scorecard");
+  expect(sp.get("tab")).toBe("scorecard");
+  expect(sp.get("sec")).toBe("2");
+});
+
+it("navigate() does NOT ask for a jump within the SAME tab", () => {
+  // An Outline row on the tab it belongs to moves the section without
+  // unmounting anything. Prompting there would train the user to dismiss the
+  // prompt that matters.
+  act(() => setDirty([1]));
+  const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+  const sp = clickGo("/cockpit/ws1?tab=draft&sec=1", "draft");
+  expect(confirmSpy).not.toHaveBeenCalled();
+  expect(sp.get("sec")).toBe("2");
+});
+
+it("navigate() does NOT ask when the editor is clean", () => {
+  const confirmSpy = vi.spyOn(window, "confirm");
+  const sp = clickGo("/cockpit/ws1?tab=draft", "scorecard");
+  expect(confirmSpy).not.toHaveBeenCalled();
+  expect(sp.get("tab")).toBe("scorecard");
 });
