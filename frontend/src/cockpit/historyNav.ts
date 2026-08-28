@@ -2,6 +2,7 @@ import { useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import type { Artifact } from "../api/proposals";
+import { confirmDiscardIfDirty } from "./editorStore";
 
 /** Mirrors ports/shas.py's SHA_RE. A sha arriving from the URL is user input:
  *  the backend rejects a bad one with 422, but there is no reason to spend the
@@ -129,7 +130,22 @@ export function useHistoryNav(): HistoryNav {
   );
 
   const selectAndOpen = useCallback(
-    (sha: string) =>
+    (sha: string) => {
+      // Opening the comparison changes the middle destination, which unmounts
+      // the artifact editor and discards its unsaved per-section buffers. That
+      // is not a router navigation, so the router blocker cannot see it —
+      // Cockpit.onTab confirms for the tab strip, and this is the SECOND way to
+      // change that destination. It was silent, and a click in the side pane
+      // threw the buffers away without asking.
+      //
+      // Only when the destination actually changes: picking a second version
+      // while the comparison is already open discards nothing, and nagging
+      // there would train the user to dismiss the prompt that matters.
+      //
+      // Read from the render closure, not `prev`: window.confirm must never run
+      // inside a setSearchParams updater, which is expected to be pure and runs
+      // twice under StrictMode.
+      if (sp.get("tab") !== "history" && !confirmDiscardIfDirty()) return;
       setSp((prev) => {
         const out = new URLSearchParams(prev);
         // Read from `prev`, not the render closure: this is the one write that
@@ -145,8 +161,9 @@ export function useHistoryNav(): HistoryNav {
         }
         out.set("tab", "history");
         return out;
-      }),
-    [setSp],
+      });
+    },
+    [sp, setSp],
   );
 
   const setLayout = useCallback((x: DiffLayout) => write({ layout: x }), [write]);

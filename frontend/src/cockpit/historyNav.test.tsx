@@ -1,9 +1,10 @@
 import { act, fireEvent, render, renderHook, screen } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 import { MemoryRouter, useSearchParams } from "react-router-dom";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useCockpitNav } from "./cockpitNav";
+import { resetEditorStore, setDirty } from "./editorStore";
 import { nextSelection, useHistoryNav } from "./historyNav";
 
 function wrapperFor(initial: string) {
@@ -303,5 +304,75 @@ describe("sha normalisation", () => {
     });
     expect(result.current.a).toBe("aaaaaaa");
     expect(result.current.b).toBe("bbbbbbb");
+  });
+});
+
+describe("selectAndOpen guards unsaved edits", () => {
+  function Probe() {
+    const hist = useHistoryNav();
+    const [sp] = useSearchParams();
+    return (
+      <>
+        <button onClick={() => hist.selectAndOpen("aaaaaaa")}>pick</button>
+        <output data-testid="url">{sp.toString()}</output>
+      </>
+    );
+  }
+
+  function clickPickAt(url: string) {
+    render(
+      <MemoryRouter initialEntries={[url]}>
+        <Probe />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText("pick"));
+    return screen.getByTestId("url").textContent ?? "";
+  }
+
+  afterEach(() => {
+    act(() => resetEditorStore());
+    vi.restoreAllMocks();
+  });
+
+  it("asks before discarding unsaved edits, and does nothing if refused", () => {
+    // Opening the comparison changes the middle destination, which unmounts the
+    // artifact editor and throws away its per-section buffers — the same discard
+    // Cockpit.onTab already confirms. selectAndOpen is a SECOND way to change
+    // that destination, and it was silent.
+    act(() => setDirty([1]));
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const url = clickPickAt("/cockpit/ws1?tab=draft&sec=1");
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    const parsed = new URLSearchParams(url);
+    expect(parsed.get("tab")).toBe("draft");
+    expect(parsed.get("a")).toBeNull();
+  });
+
+  it("proceeds when the discard is accepted", () => {
+    act(() => setDirty([1]));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const parsed = new URLSearchParams(clickPickAt("/cockpit/ws1?tab=draft&sec=1"));
+    expect(parsed.get("tab")).toBe("history");
+    expect(parsed.get("a")).toBe("aaaaaaa");
+  });
+
+  it("does NOT ask when the editor is clean", () => {
+    const confirmSpy = vi.spyOn(window, "confirm");
+    const parsed = new URLSearchParams(clickPickAt("/cockpit/ws1?tab=draft"));
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(parsed.get("tab")).toBe("history");
+  });
+
+  it("does NOT ask when the comparison is ALREADY open", () => {
+    // Picking a second version while on the comparison changes no destination,
+    // so there is nothing to discard and nagging would be wrong.
+    act(() => setDirty([1]));
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const parsed = new URLSearchParams(clickPickAt("/cockpit/ws1?tab=history&b=bbbbbbb"));
+    expect(confirmSpy).not.toHaveBeenCalled();
+    // `a` was empty, so the rule fills it and leaves `b` alone — checked
+    // against nextSelection rather than guessed.
+    expect(parsed.get("a")).toBe("aaaaaaa");
+    expect(parsed.get("b")).toBe("bbbbbbb");
   });
 });
