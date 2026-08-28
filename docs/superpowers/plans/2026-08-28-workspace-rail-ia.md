@@ -309,8 +309,11 @@ git commit -m "feat(cockpit): ?view picks the pane, and the rail merges rather t
 
 **Interfaces:**
 - Consumes: `View`, `VIEWS`, `viewFromParams`, `viewHref` (Task 1);
-  `cockpitIdFromPath(pathname): string | null` — already exported from `cockpitNav` and
-  already imported by `ActivityBar.tsx:6`.
+  `cockpitIdFromPath(pathname: string): string` — already exported from `cockpitNav`
+  (`cockpitNav.ts:101`) and already imported by `ActivityBar.tsx:6`. It returns the **empty
+  string**, never `null`, when no workspace is open. Test it with truthiness (`if (wsId)`),
+  which is what `ActivityBar.tsx:102` already does — `wsId !== null` would be true for
+  `""` and render the band on every route.
 - Produces: `ACTIVITY_WORKSPACE: WorkspaceItem[]` where
   `WorkspaceItem = { id: View; label: string; icon: string }`.
 
@@ -328,7 +331,11 @@ write a new render helper.
    where there is no workspace band, so it still passes — but strengthen it, because
    References becoming a rail label makes the name ambiguous.
 
-All ten codicon names below resolve against `@vscode/codicons@0.0.45`.
+All ten rail codicons resolve against `@vscode/codicons@0.0.45` — verified against
+`node_modules/@vscode/codicons/dist/codicon.css`. **Five are new and appear below**
+(`list-tree`, `history`, `references`, `checklist`, `organization`); the other five are
+already in `nav-items.ts` and are not restated here (`search`, `folder`, `account`, `gear`,
+`shield`).
 
 - [ ] **Step 1: Deal with the six existing tests, explicitly**
 
@@ -1142,7 +1149,13 @@ if they are not already there.
 - [ ] **Step 2: Run and watch them fail**
 
 Run: `cd frontend && pnpm vitest run src/cockpit/cockpitNav.test.tsx`
-Expected: `tab=diff` parses to `draft`; the sec test returns `1e+25`.
+Expected — **all THREE new tests red**, not two:
+
+| Test | Fails on |
+| --- | --- |
+| `parses the comparison as diff, and TOP_TABS no longer offers history` | `tab=diff` parses to `"draft"` (not in `TOP_TABS` yet), and `TOP_TABS` still ends `"history"`. |
+| `the alias supplies the pane only when ?view is absent` | `viewFromParams(sp("tab=diff"))` returns `"outline"` — **Task 1 set `COMPARISON_TABS = ["history"]`**, so `diff` is not yet a comparison name. Step 4 adds it. |
+| `?sec rejects a value that is not a safe integer` | twenty-five nines returns `1e+25`. |
 
 - [ ] **Step 3: Change the union in `frontend/src/cockpit/nav.ts`**
 
@@ -1331,6 +1344,17 @@ fixed there only — this is its twin, in the file the rename actually lives in.
 
 - Every `wrapperFor("/cockpit/ws1?tab=history…")` in the file — those are inputs, and the
   alias keeps them parsing as the comparison.
+- **`HistoryPanel.test.tsx:406`** — `clearing the comparison empties BOTH shas from the URL`
+  asserts `url.get("tab")` is still `"history"`. `clearSelection` routes through `write`,
+  which only ever sets `artifact`, `a`, `b` and `layout` (`historyNav.ts`), so the legacy
+  `?tab=history` it was given survives untouched. A sweep for the string `"history"` will
+  surface this line — leave it alone; retargeting it breaks a passing test.
+
+**A whole-frontend sweep for the rename was run** (`grep -rn '"history"'`,
+`grep -rn 'setTab('`, `grep -rn 'TopTab'`). The sites above are the complete set. The
+backend is unaffected: its nav target is
+`Literal["draft","spec","scorecard","review"] | None` (`web/activity.py:33`) and never
+emitted `history`, so no activity-feed row targets the comparison.
 
 - [ ] **Step 9: Run and watch them fail**
 
@@ -1340,9 +1364,16 @@ tab-strip test fails on a `toEqual` mismatch listing five tabs with `History` la
 to the artifact tablist, so the nested Section / Full draft tabs are not in the array); the
 two `?tab=diff` / legacy tests fail because `Cockpit` renders nothing for an unknown tab.
 
-The five assertions retargeted in Step 8b are ALSO red at this point, and that is correct —
-they are pinning the old name against new tests that demand the new one. They go green in
-Step 10. Do not "fix" them back.
+Of the five assertions retargeted in Step 8b, **three are red here and two are already
+green** — check which before assuming:
+
+- **Red (go green in Step 11):** `:225`, `:355`, `:363`. All three go through
+  `selectAndOpen`, which still writes `history` until Step 11 replaces its body.
+- **Already green:** `:200` and `:233`, the PINNED two-writer test. It drives
+  `cock.setTab("diff")`, and `TopTab` gained `"diff"` back in Step 3, so it compiles and
+  writes `tab=diff` immediately. Nothing about it waits on Step 11.
+
+Do not "fix" any of the three reds back.
 
 - [ ] **Step 10: Update `frontend/src/routes/Cockpit.tsx`**
 
@@ -1439,7 +1470,8 @@ pnpm vitest run
 
 Change `tabFromParams(sp) === "diff"` to `sp.get("tab") === "diff"` and re-run
 `src/cockpit/historyNav.test.tsx`.
-Expected: **`does NOT prompt from a legacy ?tab=history URL`** fails on
+Expected: **`does NOT ask when the comparison is ALREADY open`** (`historyNav.test.tsx:366`,
+the test Step 8b annotates) fails on
 `expected "spy" not to be called`. Revert.
 
 - [ ] **Step 14: Prove the deselect ordering bites**
