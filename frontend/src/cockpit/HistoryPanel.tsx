@@ -68,7 +68,10 @@ export function HistoryPanel({ id }: { id: string }) {
   // flight and when the request failed, which made `singleInList` false for a
   // perfectly valid sha — so a read that failed first was reported as a stale
   // link, printed beside "Loading versions…". Same class of race as `ordered`.
-  const listReady = !list.isError && data != null;
+  // `history_available` too: a 200 saying git was unreadable carries
+  // `versions: []`, and treating that as authoritative made the panel claim a
+  // selection was absent and the workspace empty — neither of which is known.
+  const listReady = !list.isError && data != null && data.history_available;
   const singleInList = single != null && order.includes(single);
   const singleAbsent = listReady && single != null && !singleInList;
 
@@ -172,7 +175,7 @@ export function HistoryPanel({ id }: { id: string }) {
             That version is not in the Versions list — the link may be stale, or point at the
             other artifact.
           </Text>
-          <ClearComparison onClear={nav.clearSelection} />
+          <ClearComparison onClear={nav.clearSelection} pair={both} />
         </Stack>
       )}
       {/* No "pick one from the list": that instruction does not do what it says.
@@ -183,7 +186,7 @@ export function HistoryPanel({ id }: { id: string }) {
       {!both && single != null && older.isError && !singleAbsent && (
         <Stack gap="xs" align="flex-start">
           <Text size="sm" c="dimmed">That version could not be read.</Text>
-          <ClearComparison onClear={nav.clearSelection} />
+          <ClearComparison onClear={nav.clearSelection} pair={both} />
         </Stack>
       )}
 
@@ -205,14 +208,18 @@ export function HistoryPanel({ id }: { id: string }) {
           <Text size="sm" c="dimmed">
             One of those versions could not be read.
           </Text>
-          <ClearComparison onClear={nav.clearSelection} />
+          <ClearComparison onClear={nav.clearSelection} pair={both} />
         </Stack>
       )}
       {/* Two separate waits, and both must say so: the LIST may still be in
           flight (direction is not yet knowable), or the list is in hand and the
           two payloads are not. The second left the panel blank. */}
       {((both && !ordered && !list.isError && list.isLoading) ||
-        (both && ordered && (older.isLoading || newer.isLoading))) && (
+        (both &&
+          ordered &&
+          !older.isError &&
+          !newer.isError &&
+          (older.isLoading || newer.isLoading))) && (
         <Text size="sm" c="dimmed">
           Loading both versions…
         </Text>
@@ -220,12 +227,12 @@ export function HistoryPanel({ id }: { id: string }) {
       {/* The list is loaded and one of the two selections is not in it — an
           abbreviated sha, a sha from the other artifact, a stale link. Direction
           is unknowable, so say so rather than waiting on it forever. */}
-      {both && !ordered && !list.isError && !list.isLoading && (
+      {both && !ordered && listReady && !list.isLoading && (
         <Stack gap="xs" align="flex-start">
           <Text size="sm" c="dimmed">
             One of the selected versions is not in the Versions list. {pickAdvice}
           </Text>
-          {!canCompare && <ClearComparison onClear={nav.clearSelection} />}
+          {!canCompare && <ClearComparison onClear={nav.clearSelection} pair={both} />}
         </Stack>
       )}
       {both &&
@@ -325,10 +332,12 @@ export function HistoryPanel({ id }: { id: string }) {
  *  The URL is still not rewritten on the user's behalf: they arrived on this
  *  link, and silently changing the address costs them the back button and hides
  *  which link was broken. This makes the correction theirs to make. */
-function ClearComparison({ onClear }: { onClear: () => void }) {
+function ClearComparison({ onClear, pair }: { onClear: () => void; pair: boolean }) {
   return (
     <Button size="xs" variant="default" onClick={onClear}>
-      Clear the comparison
+      {/* `!pair` means there is no comparison — naming one in the visible label
+          and the accessible name describes state that does not exist. */}
+      {pair ? "Clear the comparison" : "Clear selection"}
     </Button>
   );
 }

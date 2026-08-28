@@ -176,9 +176,12 @@ describe("HistoryPanel", () => {
     // getByText(/side pane/) check while still being unfollowable.
     mockList({ versions: [ROW("aaaaaaa", "one")] });
     mockVersion(null);
-    wrap(<HistoryPanel id="ws1" />);
+    const { container } = wrap(<HistoryPanel id="ws1" />);
     expect(screen.getByText(/only one version/i)).toBeInTheDocument();
-    expect(screen.queryByText(/pick two/i)).toBeNull();
+    // Not `queryByText(/pick two/i)`: "Select two versions…" would satisfy that
+    // while leaving the behaviour this test is named for broken. The claim is
+    // that NOTHING in the panel asks for two.
+    expect(container.textContent ?? "").not.toMatch(/\btwo\b/i);
   });
 
   it("still asks for two once a second version exists", () => {
@@ -229,7 +232,7 @@ describe("HistoryPanel", () => {
     // instruction after a failed read was wrong regardless of the count.
     expect(screen.getByText(/could not be read/i)).toBeInTheDocument();
     expect(screen.queryByText(/pick/i)).toBeNull();
-    expect(screen.getAllByRole("button", { name: /clear the comparison/i })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: /clear selection/i })).toHaveLength(1);
   });
 
   it("the same sha in both slots reads one version, it does not diff it against itself", () => {
@@ -290,7 +293,7 @@ describe("HistoryPanel", () => {
     wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=abc1234");
     expect(screen.queryByText(/only version this workspace has/i)).toBeNull();
     expect(screen.getByText(/not in the Versions list/i)).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: /clear the comparison/i })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: /clear selection/i })).toHaveLength(1);
   });
 
   it("still says 'pick two' in those same states when two versions DO exist", () => {
@@ -336,7 +339,7 @@ describe("HistoryPanel", () => {
     wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa");
     expect(screen.getByText(/could not be read/i)).toBeInTheDocument();
     expect(screen.queryByText(/pick one from the Versions list/i)).toBeNull();
-    expect(screen.getAllByRole("button", { name: /clear the comparison/i })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: /clear selection/i })).toHaveLength(1);
   });
 
   it("does not tell ANY workspace to pick one after a failed single read", () => {
@@ -353,7 +356,7 @@ describe("HistoryPanel", () => {
     wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa");
     expect(screen.getByText(/could not be read/i)).toBeInTheDocument();
     expect(screen.queryByText(/pick one/i)).toBeNull();
-    expect(screen.getAllByRole("button", { name: /clear the comparison/i })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: /clear selection/i })).toHaveLength(1);
   });
 
   it("does not call a version absent while the list is still loading", () => {
@@ -439,6 +442,50 @@ describe("HistoryPanel", () => {
     mockVersion(null);
     wrap(<HistoryPanel id="ws1" />);
     expect(screen.getByLabelText(/which artifact/i)).toBeInTheDocument();
+  });
+
+  it("an unavailable history is not reported as an empty one", () => {
+    // history_available:false is "we could not read git", not "there are no
+    // versions". Treating [] as authoritative made the panel say the history
+    // was unavailable AND that a selection was not in the list AND that the
+    // workspace has no versions — three claims, two of them unknowable.
+    mockList({ versions: [], history_available: false });
+    mockVersion(null);
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=abc1234&b=aaaaaaa");
+    expect(screen.getByText(/not available for this workspace yet/i)).toBeInTheDocument();
+    expect(screen.queryByText(/not in the Versions list/i)).toBeNull();
+    expect(screen.queryByText(/no versions to compare/i)).toBeNull();
+  });
+
+  it("does not say it is loading a version that has already failed", () => {
+    // The two payload requests settle independently. One erroring while the
+    // other is still in flight rendered "could not be read" and "Loading both
+    // versions…" at once.
+    mockList({ versions: [ROW("bbbbbbb", "two"), ROW("aaaaaaa", "one")] });
+    vi.spyOn(versionsMod, "useVersion").mockImplementation(
+      ((_id: string, _artifact: string, sha: string | null) => ({
+        data: null,
+        isLoading: sha === "bbbbbbb",
+        isError: sha === "aaaaaaa",
+      })) as never,
+    );
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
+    expect(screen.getByText(/could not be read/i)).toBeInTheDocument();
+    expect(screen.queryByText(/loading both versions/i)).toBeNull();
+  });
+
+  it("calls the control a selection when there is no comparison to clear", () => {
+    // `!both` means there is no pair. "Clear the comparison" names state that
+    // does not exist, in the visible label and in the accessible name.
+    mockList({ versions: [ROW("aaaaaaa", "one")] });
+    vi.spyOn(versionsMod, "useVersion").mockReturnValue({
+      data: null,
+      isLoading: false,
+      isError: true,
+    } as never);
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa");
+    expect(screen.getByRole("button", { name: /clear selection/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /clear the comparison/i })).toBeNull();
   });
 
   it("no message in this panel still says 'above' — scanned from source, not from one render", () => {
@@ -696,7 +743,7 @@ describe("HistoryPanel comparison", () => {
     } as never);
     wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&b=bbbbbbb");
     expect(screen.getByText(/could not be read/i)).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: /clear the comparison/i })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: /clear selection/i })).toHaveLength(1);
   });
 
   it("points the not-in-this-list message at the side pane", () => {
