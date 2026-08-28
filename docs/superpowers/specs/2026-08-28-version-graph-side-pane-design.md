@@ -30,8 +30,10 @@ So a stacked layout makes you scroll 788px of list to reach the diff, and then
 scroll again *inside* it — two nested scrollbars, one above the other. At 50
 versions the list alone is ~2,500px.
 
-Vertical space cannot be widened. Horizontal space can: the side pane is a
-resizable panel and the editor keeps its full width.
+Vertical space in the tab is fixed by the pane height — it cannot be bought
+back. Moving the list to a surface the user can resize, and which does not sit
+on top of the diff, is what removes the 788px. See §2.1 for what this does and
+does not buy.
 
 ### 2.1 What the move buys — and what it does NOT
 
