@@ -12,6 +12,8 @@
 
 ## Global Constraints
 
+- **The routes are `/history`, NOT `/versions`.** `GET /api/workspaces/{workspace_id}/versions` is **already taken** by a DB-sourced route at `src/call_manager/web/api/workspaces.py:1275` (`list[VersionOut]`, `artifact_versions` newest-first capped at 50) that feeds the sidebar's Versions group, consumed by `frontend/src/api/workspace.ts` and covered by `tests/test_api_workspaces.py:1341-1387`. Starlette matches the first full route match, so registering a second handler at that path silently shadows one of them. The spec said the sidebar group "stays as it is" while §6.1 specified the same path — an oversight both spec review rounds missed, found by the Task 3 implementer's RED run. The sidebar route is unchanged; the History tab gets its own path.
+
 - **No new npm package.** `frontend/pnpm-workspace.yaml` sets a 7-day `minimumReleaseAge`; `pnpm add` is refused outright. Only `pnpm install --frozen-lockfile` is permitted.
 - **No database migration.** This slice reads existing tables only. If you find yourself writing an Alembic revision, stop — you have left the slice.
 - **Every new route is a sync `def`, not `async`.** FastAPI then runs the git subprocess in its threadpool instead of blocking the event loop. This matches `proposal_assist/web/review.py`.
@@ -445,8 +447,8 @@ git commit -m "feat(gitio): optional pathspec on list_commits, applied inside gi
 **Interfaces:**
 - Consumes: `is_sha` (Task 1); `list_commits(..., pathspec=...)` (Task 2).
 - Produces: two routes and their wire shapes, which Task 4 generates a client for:
-  - `GET /api/workspaces/{workspace_id}/versions?artifact=draft|spec` → `{"versions": [{"commit_sha": str, "committed_at": str, "subject": str, "created_by": str | null, "triggering_turn_id": str | null, "turn_prompt": str | null}], "truncated": bool, "history_available": bool}`
-  - `GET /api/workspaces/{workspace_id}/versions/{commit_sha}?artifact=draft|spec` → `{"commit_sha": str, "artifact": str, "markdown": str}`
+  - `GET /api/workspaces/{workspace_id}/history?artifact=draft|spec` → `{"versions": [{"commit_sha": str, "committed_at": str, "subject": str, "created_by": str | null, "triggering_turn_id": str | null, "turn_prompt": str | null}], "truncated": bool, "history_available": bool}`
+  - `GET /api/workspaces/{workspace_id}/history/{commit_sha}?artifact=draft|spec` → `{"commit_sha": str, "artifact": str, "markdown": str}`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -505,14 +507,14 @@ def test_list_is_newest_first_and_scoped_to_the_artifact(
     _commit(repo, "proposal.md", "# draft 1\n", "draft 1")
     _commit(repo, "proposal-spec.md", "# spec 0\n", "spec 0")
 
-    r = client_authed_owner.get(f"/api/workspaces/{ws_id}/versions?artifact=draft")
+    r = client_authed_owner.get(f"/api/workspaces/{ws_id}/history?artifact=draft")
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["history_available"] is True
     assert body["truncated"] is False
     assert [v["subject"] for v in body["versions"]] == ["draft 1", "draft 0"]
 
-    r2 = client_authed_owner.get(f"/api/workspaces/{ws_id}/versions?artifact=spec")
+    r2 = client_authed_owner.get(f"/api/workspaces/{ws_id}/history?artifact=spec")
     assert [v["subject"] for v in r2.json()["versions"]] == ["spec 0"]
 
 
@@ -524,7 +526,7 @@ def test_unborn_head_is_a_state_not_a_500(
     endpoint that assumes an empty list turns this into the app-wide 500 from
     main.py:713-716."""
     ws_id = _make_ws(_app, current_user, pg_session_factory, tmp_path)
-    r = client_authed_owner.get(f"/api/workspaces/{ws_id}/versions?artifact=draft")
+    r = client_authed_owner.get(f"/api/workspaces/{ws_id}/history?artifact=draft")
     assert r.status_code == 200, r.text
     assert r.json() == {"versions": [], "truncated": False, "history_available": False}
 
@@ -536,7 +538,7 @@ def test_missing_repo_directory_is_also_a_state(
     import shutil
 
     shutil.rmtree(tmp_path / ws_id / "repo")
-    r = client_authed_owner.get(f"/api/workspaces/{ws_id}/versions?artifact=draft")
+    r = client_authed_owner.get(f"/api/workspaces/{ws_id}/history?artifact=draft")
     assert r.status_code == 200, r.text
     assert r.json()["history_available"] is False
 
@@ -563,7 +565,7 @@ def test_a_commit_with_no_artifact_versions_row_still_lists(
         )
         s.commit()
 
-    body = client_authed_owner.get(f"/api/workspaces/{ws_id}/versions?artifact=draft").json()
+    body = client_authed_owner.get(f"/api/workspaces/{ws_id}/history?artifact=draft").json()
     rows = {v["subject"]: v for v in body["versions"]}
     assert rows["two"]["created_by"] is None
     assert rows["two"]["triggering_turn_id"] is None
@@ -601,7 +603,7 @@ def test_a_version_carries_the_prompt_that_caused_it(
         )
         s.commit()
 
-    row = client_authed_owner.get(f"/api/workspaces/{ws_id}/versions?artifact=draft").json()[
+    row = client_authed_owner.get(f"/api/workspaces/{ws_id}/history?artifact=draft").json()[
         "versions"
     ][0]
     assert row["turn_prompt"] == "Tighten the aims section"
@@ -642,7 +644,7 @@ def test_a_block_list_turn_still_yields_its_text(
         )
         s.commit()
 
-    row = client_authed_owner.get(f"/api/workspaces/{ws_id}/versions?artifact=draft").json()[
+    row = client_authed_owner.get(f"/api/workspaces/{ws_id}/history?artifact=draft").json()[
         "versions"
     ][0]
     assert row["turn_prompt"] == "Use this figure"
@@ -666,7 +668,7 @@ def test_a_version_with_no_turn_has_no_prompt(
             )
         )
         s.commit()
-    row = client_authed_owner.get(f"/api/workspaces/{ws_id}/versions?artifact=draft").json()[
+    row = client_authed_owner.get(f"/api/workspaces/{ws_id}/history?artifact=draft").json()[
         "versions"
     ][0]
     assert row["turn_prompt"] is None
@@ -677,7 +679,7 @@ def test_unknown_artifact_is_422_not_500(
     client_authed_owner, _app, current_user, pg_session_factory, tmp_path
 ):
     ws_id = _make_ws(_app, current_user, pg_session_factory, tmp_path)
-    r = client_authed_owner.get(f"/api/workspaces/{ws_id}/versions?artifact=bogus")
+    r = client_authed_owner.get(f"/api/workspaces/{ws_id}/history?artifact=bogus")
     assert r.status_code == 422, r.text
 
 
@@ -692,7 +694,7 @@ def test_read_returns_the_markdown_at_that_commit(
     old = _commit(repo, "proposal.md", "# draft 0\n", "draft 0")
     _commit(repo, "proposal.md", "# draft 1\n", "draft 1")
 
-    r = client_authed_owner.get(f"/api/workspaces/{ws_id}/versions/{old}?artifact=draft")
+    r = client_authed_owner.get(f"/api/workspaces/{ws_id}/history/{old}?artifact=draft")
     assert r.status_code == 200, r.text
     assert r.json() == {"commit_sha": old, "artifact": "draft", "markdown": "# draft 0\n"}
 
@@ -707,7 +709,7 @@ def test_read_rejects_an_option_shaped_sha_before_git(
     repo = tmp_path / ws_id / "repo"
     _commit(repo, "proposal.md", "# draft\n", "draft")
     r = client_authed_owner.get(
-        f"/api/workspaces/{ws_id}/versions/--output=proposal.md?artifact=draft"
+        f"/api/workspaces/{ws_id}/history/--output=proposal.md?artifact=draft"
     )
     assert r.status_code == 422, r.text
 
@@ -718,7 +720,7 @@ def test_read_of_an_unknown_sha_is_404(
     ws_id = _make_ws(_app, current_user, pg_session_factory, tmp_path)
     repo = tmp_path / ws_id / "repo"
     _commit(repo, "proposal.md", "# draft\n", "draft")
-    r = client_authed_owner.get(f"/api/workspaces/{ws_id}/versions/{'a' * 40}?artifact=draft")
+    r = client_authed_owner.get(f"/api/workspaces/{ws_id}/history/{'a' * 40}?artifact=draft")
     assert r.status_code == 404, r.text
 
 
@@ -728,7 +730,7 @@ def test_read_of_a_commit_that_never_touched_the_artifact_is_404(
     ws_id = _make_ws(_app, current_user, pg_session_factory, tmp_path)
     repo = tmp_path / ws_id / "repo"
     only_spec = _commit(repo, "proposal-spec.md", "# spec\n", "spec")
-    r = client_authed_owner.get(f"/api/workspaces/{ws_id}/versions/{only_spec}?artifact=draft")
+    r = client_authed_owner.get(f"/api/workspaces/{ws_id}/history/{only_spec}?artifact=draft")
     assert r.status_code == 404, r.text
 
 
@@ -741,9 +743,9 @@ def test_non_member_gets_403_not_a_document(
     ws_id = _make_ws(_app, current_user, pg_session_factory, tmp_path)
     repo = tmp_path / ws_id / "repo"
     sha = _commit(repo, "proposal.md", "# draft\n", "draft")
-    assert client_authed_other.get(f"/api/workspaces/{ws_id}/versions").status_code == 403
+    assert client_authed_other.get(f"/api/workspaces/{ws_id}/history").status_code == 403
     assert (
-        client_authed_other.get(f"/api/workspaces/{ws_id}/versions/{sha}").status_code == 403
+        client_authed_other.get(f"/api/workspaces/{ws_id}/history/{sha}").status_code == 403
     )
 ```
 
@@ -882,7 +884,7 @@ def _prompt_text(content: object) -> str | None:
     return text
 
 
-@router.get("/{workspace_id}/versions", response_model=VersionListOut)
+@router.get("/{workspace_id}/history", response_model=VersionListOut)
 def list_versions(
     workspace_id: uuid.UUID,
     request: Request,
@@ -936,7 +938,7 @@ def list_versions(
     return {"versions": versions, "truncated": truncated, "history_available": True}
 
 
-@router.get("/{workspace_id}/versions/{commit_sha}", response_model=VersionReadOut)
+@router.get("/{workspace_id}/history/{commit_sha}", response_model=VersionReadOut)
 def read_version(
     workspace_id: uuid.UUID,
     commit_sha: str,
@@ -1028,7 +1030,7 @@ cd frontend && pnpm gen:api
 git diff --stat src/api/schema.gen.ts
 ```
 
-Expected: `schema.gen.ts` gains the two `/api/workspaces/{workspace_id}/versions` paths. The script pins `EMBEDDING_MODEL=bge-m3`, `SPA_MODE=disabled` and `--python 3.12` itself, so run it exactly as above and do **not** hand-edit the output. If the diff is thousands of lines, you ran a different generator — discard and re-run `pnpm gen:api`.
+Expected: `schema.gen.ts` gains the two `/api/workspaces/{workspace_id}/history` paths. The script pins `EMBEDDING_MODEL=bge-m3`, `SPA_MODE=disabled` and `--python 3.12` itself, so run it exactly as above and do **not** hand-edit the output. If the diff is thousands of lines, you ran a different generator — discard and re-run `pnpm gen:api`.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -1160,13 +1162,13 @@ export type VersionContent = {
   markdown: string;
 };
 
-/** GET /api/workspaces/{id}/versions?artifact=… — the git-sourced version list. */
+/** GET /api/workspaces/{id}/history?artifact=… — the git-sourced version list. */
 export function useVersions(id: string, artifact: Artifact) {
   return useQuery({
     queryKey: ["versions", id, artifact],
     queryFn: async (): Promise<VersionList> => {
       const data = unwrap(
-        await api.GET("/api/workspaces/{workspace_id}/versions", {
+        await api.GET("/api/workspaces/{workspace_id}/history", {
           params: { path: { workspace_id: id }, query: { artifact } },
         }),
       ) as VersionList | undefined;
@@ -1177,7 +1179,7 @@ export function useVersions(id: string, artifact: Artifact) {
   });
 }
 
-/** GET /api/workspaces/{id}/versions/{sha}?artifact=… — one version's markdown.
+/** GET /api/workspaces/{id}/history/{sha}?artifact=… — one version's markdown.
  *  Disabled while no sha is selected, so selecting nothing costs no request. */
 export function useVersion(id: string, artifact: Artifact, sha: string | null) {
   return useQuery({
@@ -1186,7 +1188,7 @@ export function useVersion(id: string, artifact: Artifact, sha: string | null) {
     queryFn: async (): Promise<VersionContent | null> => {
       if (sha == null) return null;
       const data = unwrap(
-        await api.GET("/api/workspaces/{workspace_id}/versions/{commit_sha}", {
+        await api.GET("/api/workspaces/{workspace_id}/history/{commit_sha}", {
           params: {
             path: { workspace_id: id, commit_sha: sha },
             query: { artifact },

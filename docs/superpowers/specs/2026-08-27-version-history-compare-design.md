@@ -91,7 +91,7 @@ The sidebar Versions group stays as it is. It is a glance; History is the surfac
 **The list.**
 
 ```
-GET /api/workspaces/{workspace_id}/versions?artifact=draft|spec
+GET /api/workspaces/{workspace_id}/history?artifact=draft|spec
     -> { "versions": [ { "commit_sha": str,
                          "committed_at": str,        # ISO-8601, gitio's %aI
                          "subject": str,             # may carry gitio's truncation marker
@@ -116,7 +116,7 @@ GET /api/workspaces/{workspace_id}/versions?artifact=draft|spec
 **One version.**
 
 ```
-GET /api/workspaces/{workspace_id}/versions/{commit_sha}?artifact=draft|spec
+GET /api/workspaces/{workspace_id}/history/{commit_sha}?artifact=draft|spec
     -> { "commit_sha": str, "artifact": str, "markdown": str }
 ```
 
