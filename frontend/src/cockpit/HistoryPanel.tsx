@@ -170,15 +170,21 @@ export function HistoryPanel({ id }: { id: string }) {
           renders as text the way ReviewPanel renders a review file — not the
           Tiptap editor. */}
       {!both && older.data && <pre className={styles.reviewDoc}>{older.data.markdown}</pre>}
-      {!both && nav.a != null && older.isError && (
+      {/* Gated on the same expression the FETCH uses. Gating on `nav.a` alone
+          left a hand-trimmed `?b=` whose read failed rendering nothing. */}
+      {!both && (nav.a ?? nav.b) != null && older.isError && (
         <Text size="sm" c="dimmed">
-          That version could not be read.
+          That version could not be read. Pick one from the list above.
         </Text>
       )}
 
+      {/* The selection is deliberately NOT cleared from the URL here: rewriting
+          the address the user arrived on costs them the back button and hides
+          which link was broken. The list below stays usable, which is what §6.4
+          is actually protecting. */}
       {both && (older.isError || newer.isError) && (
         <Text size="sm" c="dimmed">
-          One of those versions could not be read.
+          One of those versions could not be read. Pick two from the list above.
         </Text>
       )}
       {both && !ordered && !list.isError && list.isLoading && (
@@ -201,9 +207,21 @@ export function HistoryPanel({ id }: { id: string }) {
         (tooLargeToDiff(older.data.markdown, newer.data.markdown) ? (
           <Stack gap="xs">
             <Text size="sm" c="dimmed">
-              These versions are too large to compare (over 2,000 lines). Open each one on its own
-              instead.
+              These versions are too large to compare (over 2,000 lines), so they are shown side by
+              side instead.
             </Text>
+            {/* Both payloads are already in hand. A note on its own is a dead
+                end — the user is told the comparison failed and given nothing
+                to read. Older on the left, newer on the right, same order the
+                diff would have used. */}
+            <Group align="flex-start" gap="sm" grow wrap="nowrap">
+              <pre className={styles.reviewDoc} data-testid="version-side">
+                {older.data.markdown}
+              </pre>
+              <pre className={styles.reviewDoc} data-testid="version-side">
+                {newer.data.markdown}
+              </pre>
+            </Group>
           </Stack>
         ) : (
           <div data-testid="version-diff">

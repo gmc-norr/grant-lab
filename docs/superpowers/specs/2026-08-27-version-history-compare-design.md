@@ -215,10 +215,28 @@ removed.
 **URL state.** `?tab=history` carries the artifact **and both selected shas** —
 e.g. `?tab=history&artifact=draft&a=<older>&b=<newer>` — because §2 promises a
 link reopens the same comparison, and the artifact alone cannot. Each sha is
-validated by the shared validator of §6.2 before any fetch; one that fails
-validation, or that 404s, drops that side of the selection and leaves the list
-usable rather than erroring the tab. `a` and `b` are re-sorted into `older,
-newer` on load, exactly as §7.1 requires of selection order.
+validated by the shared validator of §6.2 before any fetch, and one that fails
+validation is dropped.
+
+**Two sentences here were written as mechanism and are corrected to the
+behaviour that shipped, because the mechanism was worse than the goal.**
+
+- A sha that **404s is NOT dropped from the URL.** The goal — "leaves the list
+  usable rather than erroring the tab" — is met by saying so and keeping the
+  list: *"One of those versions could not be read. Pick two from the list
+  above."* Silently rewriting the address the user arrived on costs them the
+  back button and hides which link was broken. The same applies to a sha that
+  is well-formed but absent from this artifact's history (an abbreviation, a
+  sha from the other artifact, a stale link): the panel names that state rather
+  than editing it away.
+- `a` and `b` are **NOT re-sorted in the URL** on load. They are ordered
+  *locally* from the list before the diff is computed, which is what §7.1
+  actually requires — and the diff does not render at all until both shas are
+  found in the loaded list, because before it loads their positions are unknown
+  and the pair would silently diff in URL order. Rewriting the query string on
+  load would also fight the back button for no user-visible gain: the contract
+  is that either selection order produces an identical view, and that is gated
+  by a test.
 
 ### 6.5 What a row says
 

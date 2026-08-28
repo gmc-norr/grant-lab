@@ -287,12 +287,35 @@ describe("HistoryPanel comparison", () => {
     expect(screen.queryByText(/Loading both versions/i)).not.toBeInTheDocument();
   });
 
-  it("falls back with a reason above the 2,000-line ceiling", () => {
+  it("falls back to the two versions SIDE BY SIDE above the ceiling, with a reason", () => {
+    // Spec §7.1 and §11 both require the two versions to be rendered side by
+    // side, not just a sentence. Both payloads are already in hand, and being
+    // told "too large" with nothing to read is a dead end — the older assertion
+    // (note present, no diff) passed happily while showing the user nothing.
     const huge = Array(2001).fill("x").join("\n");
-    mockPair(huge, huge + "\ny");
+    mockPair(huge + "\nOLDMARKER", huge + "\nNEWMARKER");
     wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
     expect(screen.getByText(/too large to compare/i)).toBeInTheDocument();
     expect(document.querySelector("[data-testid='version-diff']")).toBeNull();
+    const panes = document.querySelectorAll("[data-testid='version-side']");
+    expect(panes).toHaveLength(2);
+    expect(panes[0].textContent).toContain("OLDMARKER");
+    expect(panes[1].textContent).toContain("NEWMARKER");
+  });
+
+  it("reports a failed read when only ?b= is set", () => {
+    // The single-version error was gated on `nav.a != null`, but the FETCH falls
+    // back to `nav.a ?? nav.b`. A hand-trimmed `?b=` whose read fails therefore
+    // rendered nothing at all — the dead state the `?? nav.b` fix was meant to
+    // remove, just moved one branch along.
+    mockList({ versions: [ROW("bbbbbbb", "newer")] });
+    vi.spyOn(versionsMod, "useVersion").mockReturnValue({
+      data: null,
+      isLoading: false,
+      isError: true,
+    } as never);
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&b=bbbbbbb");
+    expect(screen.getByText(/could not be read/i)).toBeInTheDocument();
   });
 
   it("exactly 2,000 lines still diffs — the boundary is inclusive", () => {
