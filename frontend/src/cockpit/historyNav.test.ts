@@ -85,4 +85,53 @@ describe("useHistoryNav", () => {
     expect(result.current.a).toBeNull();
     expect(result.current.b).toBeNull();
   });
+
+  it("defaults the layout to split when the parameter is absent", () => {
+    const { result } = renderHook(() => useHistoryNav(), {
+      wrapper: wrapperFor("/cockpit/ws1?tab=history"),
+    });
+    expect(result.current.layout).toBe("split");
+  });
+
+  it("reads layout=unified from the URL", () => {
+    const { result } = renderHook(() => useHistoryNav(), {
+      wrapper: wrapperFor("/cockpit/ws1?tab=history&layout=unified"),
+    });
+    expect(result.current.layout).toBe("unified");
+  });
+
+  it("normalises an unrecognised layout to split rather than rejecting it", () => {
+    const { result } = renderHook(() => useHistoryNav(), {
+      wrapper: wrapperFor("/cockpit/ws1?tab=history&layout=sideways"),
+    });
+    expect(result.current.layout).toBe("split");
+  });
+
+  it("writes the layout to the URL", () => {
+    const { result } = renderHook(() => useHistoryNav(), {
+      wrapper: wrapperFor("/cockpit/ws1?tab=history"),
+    });
+    act(() => result.current.setLayout("unified"));
+    expect(result.current.layout).toBe("unified");
+  });
+
+  it("keeps the layout when the artifact changes", () => {
+    // The layout is how the user reads, not a property of what is selected.
+    // Clearing it here would silently undo their choice mid-session.
+    const { result } = renderHook(() => useHistoryNav(), {
+      wrapper: wrapperFor("/cockpit/ws1?tab=history&layout=unified"),
+    });
+    act(() => result.current.setArtifact("spec"));
+    expect(result.current.artifact).toBe("spec");
+    expect(result.current.layout).toBe("unified");
+  });
+
+  it("keeps the layout when the selection changes", () => {
+    const { result } = renderHook(() => useHistoryNav(), {
+      wrapper: wrapperFor("/cockpit/ws1?tab=history&layout=unified"),
+    });
+    act(() => result.current.toggle("abc1234"));
+    expect(result.current.a).toBe("abc1234");
+    expect(result.current.layout).toBe("unified");
+  });
 });
