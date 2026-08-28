@@ -61,6 +61,9 @@ from call_manager.proposal_assist.web.review import (
 from call_manager.proposal_assist.web.uncited_claims import (
     router as uncited_claims_router,
 )
+from call_manager.proposal_assist.web.versions import (
+    router as versions_router,
+)
 from call_manager.web.api import router as api_router
 from call_manager.web.api.errors import api_error, api_request, code_for
 from call_manager.web.middleware import (
@@ -795,6 +798,7 @@ def create_app() -> FastAPI:
     app.include_router(coherence_router)
     app.include_router(evaluator_router)
     app.include_router(review_router)
+    app.include_router(versions_router)
     app.include_router(problems_router)
     app.include_router(uncited_claims_router)
     app.include_router(activity_router)
