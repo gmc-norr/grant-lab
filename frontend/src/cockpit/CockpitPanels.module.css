@@ -104,6 +104,15 @@
 .proposalDiff div[data-diff="add"] { background: rgba(46, 160, 67, 0.15); }
 .proposalDiff div[data-diff="del"] { background: rgba(248, 81, 73, 0.15); }
 
+/* Word-level spans sit INSIDE an already-tinted row, so they are stronger than
+   the row tint (0.15) to read as "this is the part that changed". A row with no
+   spans keeps the old whole-line appearance. */
+.proposalDiff span[data-span="add"] { background: rgba(46, 160, 67, 0.4); }
+.proposalDiff span[data-span="del"] {
+  background: rgba(248, 81, 73, 0.4);
+  text-decoration: line-through;
+}
+
 /* --- ActivityPanel member-category accent (was .activity-row.category-member) --- */
 .activityRow[data-category="member"] {
   border-left: 2px solid var(--app-accent);

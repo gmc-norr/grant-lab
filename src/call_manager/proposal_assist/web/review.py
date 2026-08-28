@@ -4,7 +4,6 @@ at the run's stored blob SHA."""
 
 from __future__ import annotations
 
-import re
 import uuid
 from typing import Literal
 
@@ -18,6 +17,7 @@ from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
 from call_manager.proposal_assist.citations.gitio import GitCommitError, read_blob
 from call_manager.proposal_assist.evaluator.context import content_sha
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.ports.shas import is_sha
 from call_manager.proposal_assist.review.jobs import (
     active_review_run,
     enqueue_review_run,
@@ -34,7 +34,6 @@ from call_manager.proposal_assist.web._perms import require_member
 router = APIRouter(prefix="/api/workspaces", tags=["review"])
 
 _FILES = {"fit-check.md": "fit_check_sha", "rubric-review.md": "rubric_review_sha"}
-_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +225,7 @@ def review_file(
     if run is None or run.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail="review run not found")
     sha = getattr(run, sha_attr)
-    if not sha or not _SHA_RE.match(sha):
+    if not is_sha(sha):
         raise HTTPException(status_code=404, detail="file not produced for this run")
     repo_dir = workspace_repo_dir(request.app.state.settings.workspaces_dir, workspace_id)
     try:

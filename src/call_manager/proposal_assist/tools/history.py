@@ -10,7 +10,7 @@ Without the scope, commits to sibling phased artifacts
 returned proposal.md history.
 
 SECURITY (Codex round 3): every agent-supplied "sha" argument MUST be
-validated to match ^[0-9a-fA-F]{7,40}$ BEFORE being passed to git.
+validated by ports/shas.py (^[0-9a-fA-F]{7,64}$) BEFORE being passed to git.
 Without the regex guard a value like `--output=proposal.md` would be
 parsed by git as an option (it's recognized before the `--` path
 separator), letting the model overwrite proposal.md via `git diff
@@ -21,29 +21,12 @@ input that could plausibly be a git option.
 
 from __future__ import annotations
 
-import re
 import subprocess
 from typing import Any
 
+from call_manager.proposal_assist.ports.shas import sha_error as _validate_sha
 from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 from call_manager.proposal_assist.tools.registry import ToolContext
-
-# Git allows shas as short as 4 chars (configurable via core.abbrev),
-# but our tools only produce 7+ (matches git's --abbrev-commit default).
-# The upper bound 40 is sha1 full length. sha256-mode repos use 64; if
-# this codebase ever migrates, extend.
-_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{7,40}$")
-
-
-def _validate_sha(sha: str, *, arg_name: str = "commit_sha") -> str | None:
-    """Return an error message if `sha` is unsafe to pass to git, else None.
-
-    Anything not matching the hex-sha pattern is rejected. This blocks
-    git-option injection (e.g. --output=...) — see the module docstring.
-    """
-    if not isinstance(sha, str) or not _SHA_PATTERN.match(sha):
-        return f"{arg_name} must be a hex commit sha (7-40 chars, 0-9a-f); got: {sha!r}"
-    return None
 
 
 async def get_artifact_history_impl(

@@ -5,11 +5,14 @@ workspace. History grows with every save, so the read must be bounded at the
 source rather than trimmed after the fact.
 """
 
+import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
+from call_manager.proposal_assist.citations import gitio
 from call_manager.proposal_assist.citations.gitio import (
     _MAX_SUBJECT_CHARS,
     _SUBJECT_TRUNCATION_MARKER,
@@ -305,7 +308,14 @@ def test_the_reader_caps_each_field_before_it_is_buffered():
     oversized = b"X" * (8 * 1024 * 1024)
     stream = _io.BytesIO(b"sha\x00date\x00" + oversized + b"\x00")
 
-    fields = _read_capped_fields(stream, max_fields=3, repo_dir=Path("/nonexistent"))
+    fields = _read_capped_fields(
+        stream,
+        max_fields=3,
+        repo_dir=Path("/nonexistent"),
+        # Required, so no caller can quietly go unbounded again. A BytesIO
+        # has no descriptor and cannot block, so it is never consulted.
+        deadline=time.monotonic() + 60,
+    )
 
     assert [f[:4] for f in fields[:2]] == [b"sha", b"date"]
     assert len(fields[2]) == _MAX_FIELD_BYTES, (
@@ -327,4 +337,150 @@ def test_the_reader_refuses_a_pathological_stream_rather_than_reading_forever():
     stream = _io.BytesIO(b"X" * (_MAX_SCAN_BYTES + 1024))
 
     with pytest.raises(GitCommitError, match="exceeded"):
-        _read_capped_fields(stream, max_fields=3, repo_dir=Path("/nonexistent"))
+        _read_capped_fields(
+            stream,
+            max_fields=3,
+            repo_dir=Path("/nonexistent"),
+            # Required, so no caller can quietly go unbounded again. A BytesIO
+            # has no descriptor and cannot block, so it is never consulted.
+            deadline=time.monotonic() + 60,
+        )
+
+
+def _repo_two_files(tmp_path: Path) -> Path:
+    """A repo whose NEWEST commits touch only proposal-spec.md.
+
+    This shape is the whole point: with the pathspec applied AFTER git has
+    already capped at --max-count, a small limit returns only spec commits and
+    the draft's history vanishes. A fixture whose commits all touch both files
+    cannot fail on that bug.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "."], cwd=repo, check=True)
+
+    def commit(name: str, body: str, msg: str) -> None:
+        (repo / name).write_text(body, encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", msg],
+            cwd=repo,
+            check=True,
+        )
+
+    commit("proposal.md", "# draft 0\n", "draft 0")
+    commit("proposal.md", "# draft 1\n", "draft 1")
+    for i in range(5):
+        commit("proposal-spec.md", f"# spec {i}\n", f"spec {i}")
+    return repo
+
+
+def test_pathspec_scopes_to_one_file(tmp_path):
+    repo = _repo_two_files(tmp_path)
+    commits, truncated = list_commits(repo, limit=10, pathspec="proposal.md")
+    assert [c.subject for c in commits] == ["draft 1", "draft 0"]
+    assert truncated is False
+
+
+def test_pathspec_is_applied_before_the_limit(tmp_path):
+    """THE gate. The 5 newest commits touch only the spec. With a limit of 3 and
+    the scope applied inside git log, the draft's two commits still come back.
+    Filtering list_commits' RESULT instead would return an empty list."""
+    repo = _repo_two_files(tmp_path)
+    commits, truncated = list_commits(repo, limit=3, pathspec="proposal.md")
+    assert [c.subject for c in commits] == ["draft 1", "draft 0"]
+    assert truncated is False
+
+
+def test_pathspec_matching_nothing_is_empty_not_an_error(tmp_path):
+    repo = _repo_two_files(tmp_path)
+    commits, truncated = list_commits(repo, limit=10, pathspec="does-not-exist.md")
+    assert commits == []
+    assert truncated is False
+
+
+def test_omitting_pathspec_keeps_the_old_unscoped_behaviour(tmp_path):
+    repo = _repo_two_files(tmp_path)
+    commits, _ = list_commits(repo, limit=10)
+    assert len(commits) == 7
+
+
+def test_pathspec_still_reports_truncation(tmp_path):
+    repo = _repo_two_files(tmp_path)
+    commits, truncated = list_commits(repo, limit=1, pathspec="proposal-spec.md")
+    assert [c.subject for c in commits] == ["spec 4"]
+    assert truncated is True
+
+
+def _stalling_git(tmp_path: Path) -> Path:
+    """A `git` that starts, emits nothing, and never exits.
+
+    Stands in for the real stall this bounds: a filesystem that stops answering
+    (NFS, a failing disk) while git holds the pipe open. Every OTHER git call in
+    gitio.py passes `timeout=_GIT_TIMEOUT_SECONDS` to `subprocess.run`, which
+    covers the whole call. `list_commits` alone uses Popen — to cap bytes — and
+    reading its stdout carried no deadline, so `proc.wait(timeout=...)` below the
+    read was unreachable until stdout closed.
+    """
+    bindir = tmp_path / "stallbin"
+    bindir.mkdir()
+    fake = bindir / "git"
+    fake.write_text("#!/bin/bash\nsleep 3600\n", encoding="utf-8")
+    fake.chmod(0o755)
+    return bindir
+
+
+def test_a_stalled_git_raises_instead_of_hanging(tmp_path, monkeypatch):
+    """Executed before the fix: still running at 45s against a 30s contract.
+
+    This matters more than it looks. The history routes are sync `def`, so
+    Starlette runs them in its threadpool — ~40 threads. A request that never
+    returns holds one forever, and enough of them stop the whole app serving
+    ANY route, not just this one.
+    """
+    repo = _repo(tmp_path, 1)
+    monkeypatch.setattr(gitio, "_GIT_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setenv("PATH", f"{_stalling_git(tmp_path)}:{os.environ['PATH']}")
+
+    started = time.monotonic()
+    with pytest.raises(GitCommitError) as exc:
+        list_commits(repo, limit=10)
+    elapsed = time.monotonic() - started
+
+    assert "timed out" in str(exc.value).lower(), str(exc.value)
+    # Bounded by the deadline, with slack for process teardown — and nowhere
+    # near the 3600s the stub would otherwise sleep.
+    assert elapsed < 15, f"took {elapsed:.1f}s; the deadline did not fire"
+
+
+def test_a_stalled_git_is_killed_and_reaped(tmp_path, monkeypatch):
+    """The stub sleeps for an hour. If the deadline fires but the child is not
+    killed and reaped, one process outlives every stalled request.
+
+    Asserts on the actual Popen object rather than counting processes on the box:
+    `poll()` returning non-None is exactly "this child is dead and reaped", and
+    it cannot be confused by anything else running.
+    """
+    repo = _repo(tmp_path, 1)
+    monkeypatch.setattr(gitio, "_GIT_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setenv("PATH", f"{_stalling_git(tmp_path)}:{os.environ['PATH']}")
+
+    spawned = []
+    real_popen = subprocess.Popen
+
+    def _spy(*a, **kw):
+        proc = real_popen(*a, **kw)
+        spawned.append(proc)
+        return proc
+
+    monkeypatch.setattr(gitio.subprocess, "Popen", _spy)
+
+    with pytest.raises(GitCommitError):
+        list_commits(repo, limit=10)
+
+    assert spawned, "no git subprocess was started"
+    assert spawned[0].poll() is not None, (
+        "the stalled git was left running: the deadline fired but the child was "
+        "never killed and reaped"
+    )

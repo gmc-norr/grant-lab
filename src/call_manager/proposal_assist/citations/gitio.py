@@ -9,9 +9,12 @@ failed mutation leaves the working tree exactly as it was.
 
 from __future__ import annotations
 
+import io
 import logging
 import os
+import select
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -416,24 +419,59 @@ _MAX_SCAN_BYTES = 32 * 1024 * 1024
 _READ_CHUNK_BYTES = 64 * 1024
 
 
-def _read_capped_fields(stream, *, max_fields: int, repo_dir: Path) -> list[bytes]:
+def _read_capped_fields(
+    stream, *, max_fields: int, repo_dir: Path, deadline: float
+) -> list[bytes]:
     """Read NUL-separated fields, keeping at most _MAX_FIELD_BYTES of each.
 
     Bytes beyond a field's cap are consumed and dropped rather than buffered, so
     peak memory is max_fields * _MAX_FIELD_BYTES regardless of what git emits.
-    Stops at max_fields, at EOF, or by raising GitCommitError once the total
-    scanned exceeds _MAX_SCAN_BYTES.
+    Stops at max_fields, at EOF, at `deadline`, or by raising GitCommitError once
+    the total scanned exceeds _MAX_SCAN_BYTES.
+
+    **`deadline` is why this reads the fd directly.** Every other git call in
+    this module hands `timeout=_GIT_TIMEOUT_SECONDS` to `subprocess.run`, which
+    covers the whole call. `list_commits` uses Popen instead — to cap bytes — and
+    that traded the timeout away: `proc.wait(timeout=...)` sits BELOW this read
+    and is unreachable until stdout closes, so a git that stalls with the pipe
+    open blocked forever. Executed against a stub git that emits nothing and
+    sleeps: still running at 45s against a documented 30s ceiling.
+
+    `select` reports readiness with a per-wait budget; `os.read` then takes only
+    what is already there. A buffered `stream.read(n)` cannot be used alongside
+    it — that loops until it has n bytes and would block past the deadline even
+    once select said ready.
     """
     fields: list[bytes] = []
     current = bytearray()
     scanned = 0
+
+    # An in-memory stream — the byte-cap tests below this module — has no OS
+    # descriptor and cannot block, so it needs none of the deadline machinery,
+    # and requiring one would make the cap logic untestable without a
+    # subprocess. `deadline` stays a REQUIRED argument regardless, so no future
+    # caller can quietly reintroduce the unbounded read this fixes.
+    try:
+        fd: int | None = stream.fileno()
+    except (AttributeError, OSError, io.UnsupportedOperation):
+        fd = None
+
+    def _next_chunk() -> bytes:
+        if fd is None:
+            return stream.read(_READ_CHUNK_BYTES)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
+            raise GitCommitError(
+                f"git log for {repo_dir} timed out after {_GIT_TIMEOUT_SECONDS}s"
+            )
+        return os.read(fd, _READ_CHUNK_BYTES)
 
     def _close_field() -> None:
         fields.append(bytes(current))
         current.clear()
 
     while len(fields) < max_fields:
-        chunk = stream.read(_READ_CHUNK_BYTES)
+        chunk = _next_chunk()
         if not chunk:
             break
         scanned += len(chunk)
@@ -459,7 +497,9 @@ def _read_capped_fields(stream, *, max_fields: int, repo_dir: Path) -> list[byte
     return fields
 
 
-def list_commits(repo_dir: Path, *, limit: int) -> tuple[list[CommitInfo], bool]:
+def list_commits(
+    repo_dir: Path, *, limit: int, pathspec: str | None = None
+) -> tuple[list[CommitInfo], bool]:
     """Return (commits newest-first, truncated).
 
     Bounded at the source twice over: asks git for `limit + 1` and reports
@@ -471,6 +511,12 @@ def list_commits(repo_dir: Path, *, limit: int) -> tuple[list[CommitInfo], bool]
 
     Individual subjects are truncated to `_MAX_SUBJECT_CHARS` with a visible
     marker.
+
+    `pathspec` scopes the history to commits touching that path. It is passed
+    after a literal `--` so a filename can never be read as an option, and it is
+    applied INSIDE `git log` — scoping the returned list instead would let
+    unrelated commits consume `--max-count` and hide older matching commits.
+    Omitted, the history is unscoped, exactly as before.
 
     Raises GitCommitError if the repository is missing, is not a repository, or
     has no commits (an unborn HEAD).
@@ -485,6 +531,11 @@ def list_commits(repo_dir: Path, *, limit: int) -> tuple[list[CommitInfo], bool]
         "-z",
         "--format=%H%x00%aI%x00%s",
     ]
+    if pathspec is not None:
+        # After `--`, so a filename can never be parsed as an option. git also
+        # enables history simplification here, which is what makes the count
+        # honest: `--max-count` now counts MATCHING commits.
+        argv += ["--", pathspec]
     # Three fields per record, and git emits a trailing NUL after the last one.
     max_fields = 3 * (limit + 1)
     try:
@@ -497,7 +548,12 @@ def list_commits(repo_dir: Path, *, limit: int) -> tuple[list[CommitInfo], bool]
         ) as proc:
             try:
                 raw_fields = _read_capped_fields(
-                    proc.stdout, max_fields=max_fields, repo_dir=repo_dir
+                    proc.stdout,
+                    max_fields=max_fields,
+                    repo_dir=repo_dir,
+                    # One deadline for the whole call, not per-read: N slow reads
+                    # under a per-read budget would still add up to forever.
+                    deadline=time.monotonic() + _GIT_TIMEOUT_SECONDS,
                 )
                 complete = len(raw_fields) < max_fields
                 if complete:

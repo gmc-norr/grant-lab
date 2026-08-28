@@ -68,14 +68,19 @@ it("disables Accept with a hint when the spec is locked", async () => {
   expect(accept).toBeDisabled();
 });
 
-it("renders an add/del line diff of the proposed section", async () => {
+it("renders an add/del line diff of the proposed section, with word-level spans", async () => {
   // current section "## Aims\norig.\n" vs proposed "## Aims\nbetter.\n":
   // the heading line is unchanged, "orig." is deleted, "better." is added.
+  // "orig." and "better." share no common word token, so the whole word on
+  // each side is wrapped in a span (DiffView renders spans, not one text node).
   vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: { items: [ROW] }, error: undefined } as never);
   renderReview();
-  const del = await screen.findByText("- orig.");
-  expect(del).toHaveAttribute("data-diff", "del");
-  expect(screen.getByText("+ better.")).toHaveAttribute("data-diff", "add");
+  const del = await screen.findByText("orig.");
+  expect(del).toHaveAttribute("data-span", "del");
+  expect(del.closest("[data-diff]")).toHaveAttribute("data-diff", "del");
+  const add = screen.getByText("better.");
+  expect(add).toHaveAttribute("data-span", "add");
+  expect(add.closest("[data-diff]")).toHaveAttribute("data-diff", "add");
 });
 
 it("surfaces a reject error in the notice", async () => {

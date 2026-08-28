@@ -9,8 +9,8 @@ import {
   useProposedChanges,
   useRejectProposal,
 } from "../api/proposals";
-import styles from "./CockpitPanels.module.css";
-import { lineDiff } from "./diff";
+import { DiffView } from "./DiffView";
+import { lineDiff, refineRuns } from "./diff";
 
 export function ProposalReview({
   workspaceId,
@@ -69,13 +69,7 @@ export function ProposalReview({
               <Text size="xs" c="dimmed">
                 proposed by the assistant{p.created_at ? ` · ${new Date(p.created_at).toLocaleString()}` : ""}
               </Text>
-              <pre className={styles.proposalDiff}>
-                {lineDiff(currentFor(p.section_index), p.new_text ?? "").map((r, k) => (
-                  <div key={k} data-diff={r.tag}>
-                    {(r.tag === "add" ? "+ " : r.tag === "del" ? "- " : "  ") + r.text}
-                  </div>
-                ))}
-              </pre>
+              <DiffView rows={refineRuns(lineDiff(currentFor(p.section_index), p.new_text ?? ""))} />
               <Group gap="sm">
                 <Button
                   size="xs"
