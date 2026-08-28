@@ -3,7 +3,7 @@ import { useSearchParams } from "react-router-dom";
 
 import type { NavTarget, TopTab } from "./nav";
 
-export const TOP_TABS: TopTab[] = ["draft", "spec", "scorecard", "review"];
+export const TOP_TABS: TopTab[] = ["draft", "spec", "scorecard", "review", "history"];
 
 /** `?tab` parsed to a valid TopTab, defaulting to "draft". */
 export function tabFromParams(sp: URLSearchParams): TopTab {
