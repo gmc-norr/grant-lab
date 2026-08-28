@@ -36,6 +36,17 @@ export function HistoryPanel({ id }: { id: string }) {
   const older = useVersion(id, nav.artifact, both ? olderSha : (nav.a ?? nav.b));
   const newer = useVersion(id, nav.artifact, both ? newerSha : null);
 
+  // One place decides whether comparing is even possible. Three messages used to
+  // say "pick two from the side pane" unconditionally; against a one-version
+  // history all three are unfollowable, because the pane holds one row. `both`
+  // comes from the URL, not from clicking, so a shared or stale link reaches the
+  // recovery messages in a workspace that never had two versions.
+  const shown = data?.versions.length ?? 0;
+  const canCompare = shown > 1;
+  const pickAdvice = canCompare
+    ? "Pick two from the Versions list in the side pane."
+    : "This workspace has only one version — select it in the side pane to read it.";
+
   // The header timestamps come from the LIST row, not the version payload:
   // VersionContent is {commit_sha, artifact, markdown} and carries no
   // committed_at by design. Degrades to the short sha alone when the row is
@@ -98,13 +109,13 @@ export function HistoryPanel({ id }: { id: string }) {
           one-version history, because the side pane has exactly one row to
           click. Both branches point at the same place; only the instruction
           differs. */}
-      {nav.a == null && nav.b == null && data && data.versions.length === 1 && (
+      {nav.a == null && nav.b == null && shown === 1 && (
         <Text size="sm" c="dimmed">
           Only one version so far. Select it in the Versions list in the side pane to read it —
           comparing needs a second one.
         </Text>
       )}
-      {nav.a == null && nav.b == null && data && data.versions.length > 1 && (
+      {nav.a == null && nav.b == null && canCompare && (
         <Text size="sm" c="dimmed">
           Pick two versions from the Versions list in the side pane to compare them.
         </Text>
@@ -128,8 +139,7 @@ export function HistoryPanel({ id }: { id: string }) {
           is actually protecting. */}
       {both && (older.isError || newer.isError) && (
         <Text size="sm" c="dimmed">
-          One of those versions could not be read. Pick two from the Versions list in the side
-          pane.
+          One of those versions could not be read. {pickAdvice}
         </Text>
       )}
       {both && !ordered && !list.isError && list.isLoading && (
@@ -142,7 +152,7 @@ export function HistoryPanel({ id }: { id: string }) {
           is unknowable, so say so rather than waiting on it forever. */}
       {both && !ordered && !list.isError && !list.isLoading && (
         <Text size="sm" c="dimmed">
-          One of the selected versions is not in the Versions list. Pick two from the side pane.
+          One of the selected versions is not in the Versions list. {pickAdvice}
         </Text>
       )}
       {both &&

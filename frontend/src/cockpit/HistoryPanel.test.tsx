@@ -2,6 +2,7 @@ import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { readFileSync } from "node:fs";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -180,13 +181,48 @@ describe("HistoryPanel", () => {
     expect(screen.queryByText(/side pane/i)).toBeNull();
   });
 
-  it("no message in this panel still says 'above'", () => {
-    // A blanket guard: three messages were reworded, and the next one added must
-    // not reintroduce the phrase.
+  it("does not say 'pick two' when a stale link leaves one version unfindable", () => {
+    // `both` comes from the URL, not from clicking: a shared or stale link can
+    // carry two shas into a one-version workspace. The recovery message then
+    // told the user to pick two rows from a pane holding one.
     mockList({ versions: [ROW("aaaaaaa", "one")] });
     mockVersion(null);
-    const { container } = wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=abc1234&b=aaaaaaa");
-    expect(container.textContent ?? "").not.toMatch(/from the list above|from above/i);
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=abc1234&b=aaaaaaa");
+    expect(screen.getByText(/not in the Versions list/i)).toBeInTheDocument();
+    expect(screen.queryByText(/pick two/i)).toBeNull();
+  });
+
+  it("does not say 'pick two' when a one-version workspace fails to read both", () => {
+    mockList({ versions: [ROW("aaaaaaa", "one")] });
+    vi.spyOn(versionsMod, "useVersion").mockReturnValue({
+      data: null,
+      isLoading: false,
+      isError: true,
+    } as never);
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
+    expect(screen.getByText(/could not be read/i)).toBeInTheDocument();
+    expect(screen.queryByText(/pick two/i)).toBeNull();
+  });
+
+  it("still says 'pick two' in those same states when two versions DO exist", () => {
+    // The paired half of the two tests above: the advice must not vanish for
+    // the histories where it is followable.
+    mockList({ versions: [ROW("bbbbbbb", "two"), ROW("aaaaaaa", "one")] });
+    mockVersion(null);
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=abc1234&b=aaaaaaa");
+    expect(screen.getByText(/pick two/i)).toBeInTheDocument();
+  });
+
+  it("no message in this panel still says 'above' — scanned from source, not from one render", () => {
+    // Rendering one state and asserting the absence of a phrase only ever
+    // checks the branches that state happens to reach. This reads the
+    // component source instead, so it covers every message in the file
+    // including ones no test renders.
+    // vitest runs from `frontend/`; import.meta.url is a transformed module
+    // URL here, not a file: URL, so resolve from the project root instead.
+    const src = readFileSync("src/cockpit/HistoryPanel.tsx", "utf8");
+    expect(src).toContain("Version history"); // the read reached the real file
+    expect(src).not.toMatch(/from the list above|from above|list above/i);
   });
 
 });
