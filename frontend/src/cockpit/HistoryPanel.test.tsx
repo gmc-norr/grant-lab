@@ -224,11 +224,12 @@ describe("HistoryPanel", () => {
     } as never);
     wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=aaaaaaa");
     // The same sha in both slots is not a comparison. It reads as a single
-    // selection, so this is the single-read failure, and it names the version
-    // correctly rather than claiming two.
+    // selection, so this is the single-read failure: the fact, and the control.
+    // No count-specific wording — round 6 removed it, because every "pick"
+    // instruction after a failed read was wrong regardless of the count.
     expect(screen.getByText(/could not be read/i)).toBeInTheDocument();
-    expect(screen.getByText(/only version this workspace has/i)).toBeInTheDocument();
-    expect(screen.queryByText(/pick two/i)).toBeNull();
+    expect(screen.queryByText(/pick/i)).toBeNull();
+    expect(screen.getAllByRole("button", { name: /clear the comparison/i })).toHaveLength(1);
   });
 
   it("the same sha in both slots reads one version, it does not diff it against itself", () => {
@@ -335,6 +336,58 @@ describe("HistoryPanel", () => {
     wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa");
     expect(screen.getByText(/could not be read/i)).toBeInTheDocument();
     expect(screen.queryByText(/pick one from the Versions list/i)).toBeNull();
+    expect(screen.getAllByRole("button", { name: /clear the comparison/i })).toHaveLength(1);
+  });
+
+  it("does not tell ANY workspace to pick one after a failed single read", () => {
+    // "Pick one from the Versions list" does not do what it says. From
+    // {a: unreadable, b: null} the next click yields {a: unreadable, b: clicked}
+    // — a COMPARISON containing the unreadable version, not the version the
+    // user clicked. Two versions or twenty, the instruction is wrong.
+    mockList({ versions: [ROW("bbbbbbb", "two"), ROW("aaaaaaa", "one")] });
+    vi.spyOn(versionsMod, "useVersion").mockReturnValue({
+      data: null,
+      isLoading: false,
+      isError: true,
+    } as never);
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa");
+    expect(screen.getByText(/could not be read/i)).toBeInTheDocument();
+    expect(screen.queryByText(/pick one/i)).toBeNull();
+    expect(screen.getAllByRole("button", { name: /clear the comparison/i })).toHaveLength(1);
+  });
+
+  it("does not call a version absent while the list is still loading", () => {
+    // `order` is [] until the list lands, so `singleInList` is false for a
+    // perfectly valid sha. If the version read fails first, the panel claimed
+    // the link was stale while still printing "Loading versions…" beside it.
+    vi.spyOn(versionsMod, "useVersions").mockReturnValue({
+      data: undefined,
+      isLoading: true,
+      isError: false,
+    } as never);
+    vi.spyOn(versionsMod, "useVersion").mockReturnValue({
+      data: null,
+      isLoading: false,
+      isError: true,
+    } as never);
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa");
+    expect(screen.queryByText(/not in the Versions list/i)).toBeNull();
+  });
+
+  it("does not call a version absent when the LIST request is what failed", () => {
+    // Membership is unknowable, not false.
+    vi.spyOn(versionsMod, "useVersions").mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+    } as never);
+    vi.spyOn(versionsMod, "useVersion").mockReturnValue({
+      data: null,
+      isLoading: false,
+      isError: true,
+    } as never);
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa");
+    expect(screen.queryByText(/not in the Versions list/i)).toBeNull();
   });
 
   it("clearing the comparison empties BOTH shas from the URL", async () => {
@@ -629,12 +682,12 @@ describe("HistoryPanel comparison", () => {
     expect(note.textContent).not.toContain("shown side by side instead");
   });
 
-  it("points a failed single read at the side pane, not at a list above", () => {
-    // TWO versions, not one: this test's subject is WHERE the message points,
-    // and pointing at the side pane is only correct when there is another row
-    // to pick. The one-version wording has its own test above ("does not tell a
-    // one-version workspace to pick another"). The "not above" half of this
-    // assertion is now also enforced across the whole file by the source scan.
+  it("gives a failed single read an action, not a direction", () => {
+    // This test used to require the message to say "side pane". Round 6 refuted
+    // that: from {a: unreadable, b: null} the next click builds a COMPARISON
+    // containing the unreadable version, so directing the user at the pane
+    // described something that does not happen. The control replaced it. The
+    // "not above" half is now enforced file-wide by the source scan instead.
     mockList({ versions: [ROW("bbbbbbb", "newer"), ROW("aaaaaaa", "older")] });
     vi.spyOn(versionsMod, "useVersion").mockReturnValue({
       data: null,
@@ -642,9 +695,8 @@ describe("HistoryPanel comparison", () => {
       isError: true,
     } as never);
     wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&b=bbbbbbb");
-    const msg = screen.getByText(/could not be read/i);
-    expect(msg.textContent).toMatch(/side pane/i);
-    expect(msg.textContent).not.toMatch(/above/i);
+    expect(screen.getByText(/could not be read/i)).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /clear the comparison/i })).toHaveLength(1);
   });
 
   it("points the not-in-this-list message at the side pane", () => {

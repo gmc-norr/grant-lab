@@ -64,7 +64,13 @@ export function HistoryPanel({ id }: { id: string }) {
   // workspace's one version is a different sha, and saying otherwise names the
   // wrong thing.
   const single = both ? null : (nav.a ?? nav.b);
+  // Membership is UNKNOWABLE until the list lands. `order` is [] while it is in
+  // flight and when the request failed, which made `singleInList` false for a
+  // perfectly valid sha — so a read that failed first was reported as a stale
+  // link, printed beside "Loading versions…". Same class of race as `ordered`.
+  const listReady = !list.isError && data != null;
   const singleInList = single != null && order.includes(single);
+  const singleAbsent = listReady && single != null && !singleInList;
 
   // useId, not a literal: two HistoryPanels on one page would otherwise share an
   // id and aria-labelledby would resolve to the first one for both.
@@ -160,7 +166,7 @@ export function HistoryPanel({ id }: { id: string }) {
       )}
       {/* Gated on the same expression the FETCH uses. Gating on `nav.a` alone
           left a hand-trimmed `?b=` whose read failed rendering nothing. */}
-      {!both && single != null && older.isError && !singleInList && (
+      {!both && single != null && older.isError && singleAbsent && (
         <Stack gap="xs" align="flex-start">
           <Text size="sm" c="dimmed">
             That version is not in the Versions list — the link may be stale, or point at the
@@ -169,13 +175,16 @@ export function HistoryPanel({ id }: { id: string }) {
           <ClearComparison onClear={nav.clearSelection} />
         </Stack>
       )}
-      {!both && single != null && older.isError && singleInList && (
-        <Text size="sm" c="dimmed">
-          That version could not be read.{" "}
-          {shown > 1
-            ? "Pick one from the Versions list in the side pane."
-            : "It is the only version this workspace has."}
-        </Text>
+      {/* No "pick one from the list": that instruction does not do what it says.
+          From {a: unreadable, b: null} the next click yields
+          {a: unreadable, b: clicked} — a comparison CONTAINING the unreadable
+          version, not the version the user clicked. Clearing first is the only
+          route to reading another one, so the control is the advice. */}
+      {!both && single != null && older.isError && !singleAbsent && (
+        <Stack gap="xs" align="flex-start">
+          <Text size="sm" c="dimmed">That version could not be read.</Text>
+          <ClearComparison onClear={nav.clearSelection} />
+        </Stack>
       )}
 
       {/* The selection is deliberately NOT cleared from the URL here: rewriting
