@@ -1180,73 +1180,129 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 jsdom performs no layout. Every test above can prove two columns *render*; none can prove they sit side by side, that a pair shares a row, or that the header sticks. This is the gap that hid the selection toolbar sitting 2,529px below a 562px viewport while its whole suite was green.
 
 **Files:**
-- Create: `<scratchpad>/gate.mjs` (a scratch file — **not** committed, and **not** placed under `frontend/` or `src/`)
+- Create: `/home/parlar_ai/sbs-run/serve.mjs` and `/home/parlar_ai/sbs-run/gate.mjs` — scratch files in the run directory. **Not** committed, **not** under `frontend/` or `src/`.
 
 **Interfaces:** none. This task produces evidence, not code.
 
-- [ ] **Step 1: Confirm the app is serving**
+**Isolation — this is a hard boundary, not a preference.** A user's app is already serving on port **8000** from the main checkout. This task must not disturb it. Specifically:
+
+| Allowed | Forbidden |
+|---|---|
+| `pnpm build` inside the worktree | restarting, stopping, or reconfiguring the app on 8000 |
+| serving the worktree's own `frontend/dist` on port **8011** | writing to `src/call_manager/web/spa/` anywhere |
+| **GET** requests to the app on 8000 | any POST / PUT / PATCH / DELETE to any endpoint |
+| reading the pre-minted cookie at `/home/parlar_ai/sbs-run/cookie.txt` | minting, printing, or logging any secret |
+| screenshots into the run directory | editing a draft, saving a version, or any workspace mutation |
+
+Crossing any row in the right column is an **ESCALATE**, not a decision.
+
+The SPA is served from the worktree build so the gate measures **this branch's** layout; API reads are rewritten to the already-running app on 8000, so no second backend, no database setup, and no `uv sync` are needed.
+
+- [ ] **Step 1: Build the SPA inside the worktree**
+
+```bash
+cd <ABS_WORKTREE>/frontend && pnpm build
+ls -la <ABS_WORKTREE>/frontend/dist/index.html
+```
+
+Expected: the build succeeds and `dist/index.html` exists. This is the branch's bundle; the main checkout's `src/call_manager/web/spa/` is **not** touched.
+
+- [ ] **Step 2: Confirm the user's app is up, read-only**
 
 ```bash
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8000/
 ```
 
-Expected: `200`. If not, start it:
+Expected: `200`. **If it is not 200, do NOT start it.** Record in `PLAN-DEFECTS.md` that the browser gate could not run because the app was down, and finish the run without it. Starting or restarting the app is forbidden by the isolation table.
 
-```bash
-cd /home/parlar_ai/dev/call-monitor
-tmux new-session -d -s cm-app -c /home/parlar_ai/dev/call-monitor \
-  'set -a; source .env; set +a; SPA_MODE=prod uv run --python 3.12 uvicorn call_manager.main:create_app --factory --host 127.0.0.1 --port 8000 > app.log 2>&1'
+- [ ] **Step 3: Write the static server**
+
+The SPA uses client-side routing, so an unknown path must fall back to `index.html`. `python3 -m http.server` cannot do that and will 404 on `/cockpit/<id>`.
+
+Create `/home/parlar_ai/sbs-run/serve.mjs`:
+
+```js
+// Minimal static server with SPA fallback. Serves the WORKTREE's build, so the
+// gate measures this branch, while the user's app on 8000 is left alone.
+import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+
+const ROOT = process.argv[2];
+const PORT = Number(process.argv[3] ?? 8011);
+const TYPES = {
+  '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css',
+  '.json': 'application/json', '.svg': 'image/svg+xml', '.woff2': 'font/woff2',
+  '.png': 'image/png', '.ico': 'image/x-icon', '.map': 'application/json',
+};
+
+http.createServer((req, res) => {
+  const url = new URL(req.url, 'http://localhost');
+  let file = path.join(ROOT, decodeURIComponent(url.pathname));
+  // Fall back to index.html for any path that is not a real file — that is what
+  // makes /cockpit/<uuid> resolve to the SPA instead of a 404.
+  if (!fs.existsSync(file) || fs.statSync(file).isDirectory()) file = path.join(ROOT, 'index.html');
+  // Refuse to serve outside ROOT.
+  if (!path.resolve(file).startsWith(path.resolve(ROOT))) { res.writeHead(403).end(); return; }
+  res.writeHead(200, { 'content-type': TYPES[path.extname(file)] ?? 'application/octet-stream' });
+  fs.createReadStream(file).pipe(res);
+}).listen(PORT, '127.0.0.1', () => console.log(`serving ${ROOT} on ${PORT}`));
 ```
 
-`SPA_MODE=prod` serves the built bundle from `src/call_manager/web/spa/`, so run `cd frontend && pnpm build` and redeploy the bundle first, or the browser will show the pre-change SPA and the gate will measure the wrong thing.
-
-- [ ] **Step 2: Mint a session cookie**
+Start it in the background and confirm it answers:
 
 ```bash
-cd /home/parlar_ai/dev/call-monitor
-set -a; source .env; set +a
-uv run --python 3.12 python - <<'PY'
-import os, psycopg
-from call_manager.auth.session_cookie import SessionSigner
-url = os.environ["DATABASE_URL"].replace("postgresql+psycopg://", "postgresql://")
-WS = "312f51e2-26d2-4ad8-9526-55222e4db60a"  # the only workspace with >2 versions
-with psycopg.connect(url) as c:
-    uid, epoch = c.execute(
-        "select w.owner_id, coalesce(u.session_epoch, 0) from workspaces w "
-        "join users u on u.id = w.owner_id where w.id = %s", (WS,)).fetchone()
-ck = SessionSigner(secret=os.environ["SESSION_SECRET"]).make(user_id=uid, session_epoch=epoch)
-open("/tmp/gate-cookie.txt", "w").write(ck)
-print("cookie written for user", uid)
-PY
+node /home/parlar_ai/sbs-run/serve.mjs <ABS_WORKTREE>/frontend/dist 8011 &
+sleep 1
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8011/cockpit/312f51e2-26d2-4ad8-9526-55222e4db60a
 ```
 
-Never print the cookie or `SESSION_SECRET` into the transcript.
+Expected: `200` (the SPA fallback, not a 404). Kill this server by its recorded pid when the task ends.
 
-- [ ] **Step 3: Write the gate script**
+- [ ] **Step 4: Write the gate script**
 
-Create `gate.mjs` in the session scratchpad:
+Create `/home/parlar_ai/sbs-run/gate.mjs`:
 
 ```js
 import { chromium } from '/home/parlar_ai/dev/call-monitor/frontend/node_modules/.pnpm/playwright@1.60.0/node_modules/playwright/index.mjs';
-import fs from 'fs';
+import fs from 'node:fs';
 
-const WS = '312f51e2-26d2-4ad8-9526-55222e4db60a';
-const cookie = fs.readFileSync('/tmp/gate-cookie.txt', 'utf8').trim();
+const RUN = '/home/parlar_ai/sbs-run';
+const WS = fs.readFileSync(`${RUN}/workspace.txt`, 'utf8').trim();
+const cookie = fs.readFileSync(`${RUN}/cookie.txt`, 'utf8').trim();
+const APP = 'http://127.0.0.1:8000';
+const SPA = 'http://127.0.0.1:8011';
+
 const b = await chromium.launch();
 const ctx = await b.newContext({ viewport: { width: 1440, height: 900 } });
+// Cookies ignore port, so one entry covers both 8011 (the SPA) and 8000 (the API).
 await ctx.addCookies([{ name: 'session', value: cookie, domain: '127.0.0.1', path: '/' }]);
 const p = await ctx.newPage();
 p.on('pageerror', (e) => console.log('  [pageerror]', String(e).slice(0, 300)));
 
-// Pick the two versions furthest apart, so the comparison is long enough to overflow.
+// The page is served from 8011; its /api calls are rewritten to the live app on
+// 8000. READ-ONLY: any non-GET is aborted rather than forwarded, so an
+// unexpected mutation fails loudly instead of reaching the user's database.
+await p.route('**/api/**', (route) => {
+  const req = route.request();
+  if (req.method() !== 'GET') {
+    console.log('  [BLOCKED non-GET]', req.method(), req.url());
+    return route.abort();
+  }
+  return route.continue({ url: req.url().replace(SPA, APP) });
+});
+
 const list = await (await ctx.request.get(
-  `http://127.0.0.1:8000/api/workspaces/${WS}/history?artifact=draft`)).json();
+  `${APP}/api/workspaces/${WS}/history?artifact=draft`,
+  { headers: { cookie: `session=${cookie}` } })).json();
 const shas = list.versions.map((v) => v.commit_sha);
+if (shas.length < 2) { console.log('FATAL: fewer than two versions to compare'); await b.close(); process.exit(1); }
+// Furthest apart, so the comparison is long enough to overflow the container.
 const [newer, older] = [shas[0], shas[shas.length - 1]];
 
-await p.goto(`http://127.0.0.1:8000/cockpit/${WS}?tab=history&artifact=draft&a=${older}&b=${newer}`,
+await p.goto(`${SPA}/cockpit/${WS}?tab=history&artifact=draft&a=${older}&b=${newer}`,
   { waitUntil: 'networkidle' });
-await p.waitForSelector('[data-testid="side-by-side-diff"]', { timeout: 20000 });
+await p.waitForSelector('[data-testid="side-by-side-diff"]', { timeout: 30000 });
 
 const r = await p.evaluate(() => {
   const box = document.querySelector('[data-testid="side-by-side-diff"]');
@@ -1272,9 +1328,9 @@ const r = await p.evaluate(() => {
   // 2. a REAL pair's two cells share a vertical offset. Both halves must exist:
   //    a missing one is a failure, not a pass.
   const sameRow = ids.slice(0, 20).every((id) => {
-    const [a, b] = halves(id);
-    if (!a || !b) return false;
-    return Math.abs(a.getBoundingClientRect().top - b.getBoundingClientRect().top) < 1;
+    const [a, c] = halves(id);
+    if (!a || !c) return false;
+    return Math.abs(a.getBoundingClientRect().top - c.getBoundingClientRect().top) < 1;
   });
 
   // 3. the header genuinely sticks. A container that does not overflow never
@@ -1283,14 +1339,14 @@ const r = await p.evaluate(() => {
   const headerBefore = header.getBoundingClientRect().top;
 
   // The probe must START inside the scroller's viewport and END outside it.
-  // "its top moved" is not enough: a container that scrolled by two pixels
-  // also moves it, and proves nothing about the header holding position.
+  // "its top moved" is not enough: a container that scrolled by two pixels also
+  // moves it, and proves nothing about the header holding position.
   const probe = [...box.querySelectorAll('[data-side="left"][data-cell]')].find((n) => {
     const t = n.getBoundingClientRect();
     return t.top >= boxRect().top && t.bottom <= boxRect().bottom;
   });
   const probeInsideBefore = !!probe;
-  box.scrollTop = box.scrollHeight - box.clientHeight; // all the way down
+  box.scrollTop = box.scrollHeight - box.clientHeight;
   const pr = probe ? probe.getBoundingClientRect() : null;
   const probeOutsideAfter = !!pr && (pr.bottom <= boxRect().top || pr.top >= boxRect().bottom);
   const headerAfter = header.getBoundingClientRect().top;
@@ -1307,21 +1363,19 @@ const r = await p.evaluate(() => {
   };
 });
 console.log(JSON.stringify(r, null, 1));
-await p.screenshot({ path: '/tmp/gate-split.png' });
+await p.screenshot({ path: `${RUN}/gate-split.png` });
 
 // 4. the toggle switches the view
 await p.getByRole('radio', { name: 'Unified' }).click();
 await p.waitForSelector('[data-testid="version-diff"]', { timeout: 10000 });
 console.log('toggle -> unified: OK');
-await p.screenshot({ path: '/tmp/gate-unified.png' });
+await p.screenshot({ path: `${RUN}/gate-unified.png` });
 await b.close();
 ```
 
-`scrolledForReal` requires three things together: `scrollTop` moved, a probe row **started inside** the scroller's visible area, and that same row **ended outside** it. Only the pair of visibility checks proves the content really travelled — "its top changed by a pixel" is satisfied by a container that barely moved, and a stable header offset then proves nothing.
+- [ ] **Step 5: Run the gate and read every field**
 
-- [ ] **Step 4: Run the gate and read every field**
-
-Run: `node <scratchpad>/gate.mjs`
+Run: `node /home/parlar_ai/sbs-run/gate.mjs`
 
 Required, all of them:
 
@@ -1336,16 +1390,35 @@ Required, all of them:
 | `pairs` | > 20 | enough rows that `sameRow` samples real variety |
 | `headerStuck` | `true` | the header held its viewport offset while content moved |
 | `toggle -> unified: OK` | printed | the control switches the rendered view |
+| `[BLOCKED non-GET]` | **never printed** | the gate performed no mutation |
 
-If `overflows` is `false`, the comparison chosen was too short. Do not relax the check — pick a longer pair or reduce the viewport height.
+`scrolledForReal` requires three things together: `scrollTop` moved, a probe row **started inside** the scroller's visible area, and that same row **ended outside** it. Only the pair of visibility checks proves the content really travelled — "its top changed by a pixel" is satisfied by a container that barely moved, and a stable header offset then proves nothing.
 
-- [ ] **Step 5: Look at the screenshots**
+If `overflows` is `false`, the comparison chosen was too short. Do not relax the check — reduce the viewport height in the script and re-run.
 
-Open `/tmp/gate-split.png` and `/tmp/gate-unified.png` and actually look at them. A green measurement with a blank or visibly broken frame is a failed gate. Confirm: two columns, changed words highlighted rather than whole lines, filler space where one side has no counterpart, and the header naming which side is which.
+- [ ] **Step 6: Prove the gate can fail**
 
-- [ ] **Step 6: Record the evidence**
+A gate that has never gone red is not known to bite. In the worktree, temporarily change `grid-template-columns: 1fr 1fr;` to `grid-template-columns: 1fr;` in `SideBySideDiffView.module.css`, rebuild (`pnpm build`), and re-run the gate.
 
-No commit — this task produces no tracked files. Report in the task report: the JSON from Step 4 verbatim, and what the screenshots showed. Delete `/tmp/gate-cookie.txt` when done.
+Expected: **`adjacent` becomes `false`** — one column means the two cells stack instead of sitting beside each other.
+
+Revert the CSS, rebuild, re-run, and confirm every field is back to its required value. Paste both runs' JSON into `STATUS.md`. **If `adjacent` stays `true` with a single-column grid, the gate is measuring the wrong thing — record that as a defect and say so plainly.**
+
+- [ ] **Step 7: Look at the screenshots**
+
+Read `/home/parlar_ai/sbs-run/gate-split.png` and `/home/parlar_ai/sbs-run/gate-unified.png` with the image reader and actually look at them. A green measurement with a blank or visibly broken frame is a failed gate. Confirm: two columns, changed words highlighted rather than whole lines, filler space where one side has no counterpart, and a header naming which side is which.
+
+- [ ] **Step 8: Stop the static server and record the evidence**
+
+Kill the `serve.mjs` process by the pid recorded in Step 3. Confirm the user's app is still answering:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8000/
+```
+
+Expected: `200` — unchanged from Step 2.
+
+No commit: this task produces no tracked files. In `STATUS.md` record the JSON from Steps 5 and 6 verbatim, what the screenshots showed, and the final 8000 health check. Leave `cookie.txt` in place; do not print its contents anywhere.
 
 ---
 
@@ -1368,7 +1441,7 @@ No commit — this task produces no tracked files. Report in the task report: th
 | §6.1 too-large copy fix | Task 5 Steps 1 and 3 |
 | §7 not built | No task — correct |
 | §8.1 unit + property tests | Tasks 1, 2, 3, 4, 5 |
-| §8.2 browser gate, all four checks, non-vacuous sticky | Task 6 |
+| §8.2 browser gate, all four checks, non-vacuous sticky | Task 6 (Steps 5-6, incl. a fail-proof) |
 
 **Placeholder scan:** none. Every code step carries the code; every command carries its expected output.
 
