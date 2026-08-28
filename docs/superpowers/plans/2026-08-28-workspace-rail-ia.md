@@ -402,9 +402,13 @@ Append to the same file:
 
 ```tsx
 it("shows no workspace band when no workspace is open", () => {
+  // All five, and the divider. Checking two of them passes on an
+  // implementation that still renders the other three.
   renderWithProviders(<ActivityBar />, { route: "/cockpit" });
-  expect(screen.queryByRole("link", { name: "Versions" })).toBeNull();
-  expect(screen.queryByRole("link", { name: "Outline" })).toBeNull();
+  for (const label of ["Outline", "Versions", "References", "Criteria", "Members"]) {
+    expect(screen.queryByRole("link", { name: label })).toBeNull();
+  }
+  expect(screen.queryByTestId("activity-divider")).toBeNull();
   expect(screen.getByRole("link", { name: "Workspaces" })).toBeInTheDocument();
 });
 
@@ -646,34 +650,68 @@ identically.
 `memberAdd`, `criterion`, `criterionName`, `editRubric`). Each pane imports that same
 stylesheet: `import styles from "../CockpitSidebar.module.css";`. Do not split the CSS.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Deal with the ten existing tests that drive the accordion, explicitly**
+
+**`CockpitSidebar.test.tsx` clicks a group header in ten places.** An earlier draft of this
+plan claimed "no existing test should need changing"; that was false, and finding out one
+red test at a time is the expensive way. Work through this table first.
+
+| Line | Test | Action |
+| --- | --- | --- |
+| 129 | `renders References and Criteria groups with a band pill` | **Split into two.** References and Criteria are now different panes and cannot both render. Keep the same API mock in both; route one to `?view=references` asserting `Smith 2021`, the other to `?view=criteria` asserting `Impact` and `Gap`. **+1 test.** |
+| 149 | `clicking a criterion navigates to the Scorecard tab` | **Rewrite:** render at `?view=criteria`, drop the header click. |
+| 165 | `owner sees the named Members list and the Versions commits` | **Split into two.** Same reason. One at `?view=versions` asserting `user spec init`, one at `?view=members` asserting `owner@ki.se`. **+1 test.** |
+| 200 | `a non-owner member sees the member count only (no emails)` | **Rewrite:** `?view=members`, drop the header click. |
+| 221 | `owner can remove a viewer (confirm-gated) from the Members group` | **Rewrite:** `?view=members`, drop the header click. |
+| 255 | `owner can open Edit rubric and save (active phase)` | **Rewrite:** `?view=criteria`, drop the header click. |
+| 277 | `renders the version GRAPH, not the old plain list` | **Rewrite:** `?view=versions`, drop the header click. |
+| 315 | `opens the Versions group on the History tab, without a click` | **Delete.** It tests `openWhen`, which exists only to unfold an accordion. |
+| 347 | `leaves the Versions group folded on the Draft tab` | **Delete.** Same. |
+| 354 | `a group opened by the tab can still be folded by hand` | **Delete.** Same. |
+
+Net from this step: **+2 −3 = −1**.
+
+`renderSidebar(url)` already takes a route (`CockpitSidebar.test.tsx:62`). Use it; do not
+add a helper.
+
+- [ ] **Step 2: Write the failing tests**
 
 Append to `frontend/src/cockpit/CockpitSidebar.test.tsx`:
 
 ```tsx
 it("renders ONLY the view the URL asks for", async () => {
-  // Asserting the chosen view is present is not enough: that passes on the
-  // accordion this task removes. The others must be ABSENT.
-  vi.spyOn(clientMod.api, "GET").mockResolvedValue(draft as never);
-  renderSidebar("/cockpit/ws-1?view=outline");
-  expect(await screen.findByRole("button", { name: /Methods/ })).toBeInTheDocument();
-  expect(screen.queryByRole("list", { name: "References" })).toBeNull();
-  expect(screen.queryByRole("list", { name: "Members" })).toBeNull();
-  expect(screen.queryByRole("list", { name: "Criteria" })).toBeNull();
-  expect(screen.queryByRole("list", { name: "Versions" })).toBeNull();
-});
-
-it("switches the whole pane when ?view changes", async () => {
+  // Asserting the OTHERS are absent on ?view=outline would prove nothing:
+  // SidebarGroup mounts children only when open (SidebarGroup.tsx:44) and
+  // References, Criteria, Members and Versions are all defaultOpen={false}, so
+  // those lists are already absent under the accordion. The gate has to name a
+  // NON-default view and assert the default one is gone.
   vi.spyOn(clientMod.api, "GET").mockResolvedValue(draft as never);
   renderSidebar("/cockpit/ws-1?view=members");
-  expect(await screen.findByText(/member/i)).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: /members/i })).toBeInTheDocument();
+  // Outline is the group the accordion leaves OPEN, so its absence is the
+  // assertion the accordion cannot satisfy.
   expect(screen.queryByRole("list", { name: "Outline" })).toBeNull();
+  expect(screen.queryByRole("button", { name: /Methods/ })).toBeNull();
 });
 
-it("heads every pane with its own name", async () => {
+it("heads EVERY pane with its own name, and shows no other", async () => {
+  // Parameterised: checking one pane's heading lets a missing or wrong heading
+  // on the other four pass.
   vi.spyOn(clientMod.api, "GET").mockResolvedValue(draft as never);
-  renderSidebar("/cockpit/ws-1?view=references");
-  expect(await screen.findByRole("heading", { name: /references/i })).toBeInTheDocument();
+  const pairs = [
+    ["outline", /outline/i],
+    ["versions", /versions/i],
+    ["references", /references/i],
+    ["criteria", /criteria/i],
+    ["members", /members/i],
+  ] as const;
+  for (const [view, title] of pairs) {
+    const { unmount } = renderSidebar(`/cockpit/ws-1?view=${view}`);
+    const headings = await screen.findAllByRole("heading");
+    expect(headings).toHaveLength(1);
+    expect(headings[0].textContent ?? "").toMatch(title);
+    unmount();
+  }
 });
 
 it("has no collapsible group chrome left", async () => {
@@ -687,11 +725,12 @@ it("has no collapsible group chrome left", async () => {
 });
 ```
 
-- [ ] **Step 2: Run and watch them fail**
+- [ ] **Step 2b: Run and watch them fail**
 
 Run: `cd frontend && pnpm vitest run src/cockpit/CockpitSidebar.test.tsx`
-Expected: `renders ONLY the view the URL asks for` fails because References/Members/Criteria
-are all present; `has no collapsible group chrome left` fails on a non-zero length.
+Expected: `renders ONLY the view the URL asks for` fails because the Outline list is present
+alongside; `heads EVERY pane` fails on `expected length 5 to be 1` (all five group headers
+render); `has no collapsible group chrome left` fails on a non-zero length.
 
 - [ ] **Step 3: Create `frontend/src/cockpit/panes/PaneHeader.tsx`**
 
@@ -852,13 +891,21 @@ Expected: **`Test Files 116 passed (116)`** — the four new pane files carry no
 of their own, so the file count does not move. Their behaviour is covered where it already
 was, through `CockpitSidebar.test.tsx`.
 
-Expected: **`Tests 762 passed (762)`** — 758 plus the four added in Step 1.
+Expected: **`Tests 760 passed (760)`**.
 
-This task is a **move**, so no existing test should need changing except `wrap()` in
-`VersionGraph.test.tsx` (Step 7), which is a helper, not an assertion. If any other test
-goes red, the move changed behaviour: find the difference from the original block rather
-than editing the test. If a test genuinely must go, name it and why — do not adjust the
-total to fit.
+| Term | Count |
+| --- | --- |
+| After Task 2 | 758 |
+| Step 1 splits (lines 129 and 165, one test each becomes two) | +2 |
+| Step 1 deletions (lines 315, 347, 354 — the three `openWhen` tests) | −3 |
+| Step 1 rewrites (five tests changed in place) | +0 |
+| Step 2 additions | +3 |
+| **Total** | **760** |
+
+The pane BODIES are a verbatim move, so no test should fail on their content. `wrap()` in
+`VersionGraph.test.tsx` (Step 7) is a helper, not an assertion. If anything else goes red,
+the move changed behaviour: find the difference from the original block rather than editing
+the test. **Never adjust the total to fit.**
 
 - [ ] **Step 12: Commit**
 
@@ -985,8 +1032,8 @@ pnpm exec tsc --noEmit
 pnpm vitest run
 pnpm build
 ```
-Expected: **`Test Files 116 passed (116)`**, **`Tests 764 passed (764)`** — 762, plus three
-added, minus the one deleted in Step 2.
+Expected: **`Test Files 116 passed (116)`**, **`Tests 762 passed (762)`** — 760, plus three
+added in Step 1, minus the one deleted in Step 2.
 
 - [ ] **Step 8: Commit**
 
@@ -1011,7 +1058,8 @@ and nothing is folded. `?tab=history` still works and still renders the comparis
 - Modify: `frontend/src/routes/Cockpit.tsx:82-94`
 - Modify: `frontend/src/cockpit/historyNav.ts`
 - Test: `frontend/src/cockpit/cockpitNav.test.tsx`, `frontend/src/cockpit/historyNav.test.tsx`,
-  `frontend/src/routes/Cockpit.test.tsx`
+  `frontend/src/routes/Cockpit.test.tsx`, `frontend/src/cockpit/VersionGraph.test.tsx`
+  (one assertion renames — Step 11b)
 
 **Why this is ONE task.** Removing `"history"` from the `TopTab` union breaks every
 consumer that writes the literal — `Cockpit.tsx:86,94` and `historyNav.ts:162`. Splitting
@@ -1294,6 +1342,24 @@ Import `tabFromParams` from `./cockpitNav`. The `opens` computed from the render
 decides the *guard*; the `fresh` computed from `prev` decides the *write*. They agree in
 every real case, and only `fresh` may touch the URL.
 
+- [ ] **Step 11b: Fix the one existing test that asserts the old name**
+
+`frontend/src/cockpit/VersionGraph.test.tsx:89` asserts
+`expect(url).toContain("tab=history")` inside
+**`clicking a dot writes BOTH the selection and tab=history to the URL`**. That is the gate
+proving the two-writer clobber is fixed, so it must survive — only the name changes:
+
+```tsx
+  it("clicking a dot writes BOTH the selection and tab=diff to the URL", () => {
+```
+and
+```tsx
+    expect(url).toContain("tab=diff");
+```
+
+Nothing else in that test changes. Add `frontend/src/cockpit/VersionGraph.test.tsx` to this
+task's files and to the Step 16 commit.
+
 - [ ] **Step 12: Run the two files, then the whole suite**
 
 ```
@@ -1323,8 +1389,8 @@ pnpm exec tsc --noEmit
 pnpm vitest run
 pnpm build
 ```
-Expected: **`Test Files 116 passed (116)`**, **`Tests 774 passed (774)`** — 764, plus four
-in Step 1 and six in Step 8. If the total differs, name the term that changed.
+Expected: **`Test Files 116 passed (116)`**, **`Tests 772 passed (772)`** — 762, plus four
+in Step 1 and six in Step 8. Step 11b renames an assertion and adds no test. If the total differs, name the term that changed.
 
 The eight pre-existing dirty-guard tests (four in `historyNav.test.tsx`, four in
 `cockpitNav.test.tsx`) must be among the passes. If any went red, the guard changed shape
@@ -1336,7 +1402,7 @@ rather than name — that is a finding, not a test to edit.
 git add frontend/src/cockpit/nav.ts frontend/src/cockpit/cockpitNav.ts \
         frontend/src/cockpit/cockpitNav.test.tsx frontend/src/cockpit/historyNav.ts \
         frontend/src/cockpit/historyNav.test.tsx frontend/src/routes/Cockpit.tsx \
-        frontend/src/routes/Cockpit.test.tsx
+        frontend/src/routes/Cockpit.test.tsx frontend/src/cockpit/VersionGraph.test.tsx
 git commit -m "feat(cockpit): the comparison is opened from the pane, not tabbed to"
 ```
 
@@ -1347,7 +1413,7 @@ git commit -m "feat(cockpit): the comparison is opened from the pane, not tabbed
 Five tasks. After Task 4, Versions is one rail click away and nothing is folded. After
 Task 5, the History tab is gone and the comparison opens like a document.
 
-**Expected final gate:** `Test Files 116 passed (116)`, `Tests 774 passed (774)`, tsc
+**Expected final gate:** `Test Files 116 passed (116)`, `Tests 772 passed (772)`, tsc
 clean, build clean, `git diff --stat <base>..HEAD -- src/` empty.
 
 **Not in this plan, and named so they are not mistaken for oversights:**
