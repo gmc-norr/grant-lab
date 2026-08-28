@@ -1,6 +1,7 @@
-import { Popover, Text } from "@mantine/core";
+import { Popover, SegmentedControl, Text } from "@mantine/core";
 import { useEffect, useRef, useState } from "react";
 
+import type { Artifact } from "../api/proposals";
 import { useVersions, type VersionRow } from "../api/versions";
 import { useHistoryNav } from "./historyNav";
 import { PaneHeader } from "./panes/PaneHeader";
@@ -122,7 +123,20 @@ export function VersionGraph({ id }: { id: string }) {
 
   return (
     <>
-      <PaneHeader title="Versions" count={rows.length || undefined} />
+      <PaneHeader title="Versions" count={rows.length || undefined}>
+        {/* Lives here, not in the comparison: this decides WHOSE history the
+            list below shows, so it belongs on the list. */}
+        <SegmentedControl
+          size="xs"
+          aria-label="Which artifact"
+          value={nav.artifact}
+          onChange={(v) => nav.setArtifact(v as Artifact)}
+          data={[
+            { label: "Draft", value: "draft" },
+            { label: "Spec", value: "spec" },
+          ]}
+        />
+      </PaneHeader>
       {/* Each state gets its own words. "Could not load" and "not available"
           and "none yet" are three different situations, and a single empty
           message for all three tells the user nothing about which. */}

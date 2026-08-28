@@ -1,7 +1,6 @@
 import { Button, Group, SegmentedControl, Stack, Text, Title } from "@mantine/core";
 import { useId } from "react";
 
-import type { Artifact } from "../api/proposals";
 import { useVersion, useVersions } from "../api/versions";
 import styles from "./CockpitPanels.module.css";
 import { DiffView } from "./DiffView";
@@ -94,16 +93,6 @@ export function HistoryPanel({ id }: { id: string }) {
     <Stack gap="sm" p="sm">
       <Group justify="space-between">
         <Title order={3}>Version history</Title>
-        <SegmentedControl
-          size="xs"
-          aria-label="Which artifact"
-          value={nav.artifact}
-          onChange={(v) => nav.setArtifact(v as Artifact)}
-          data={[
-            { label: "Draft", value: "draft" },
-            { label: "Spec", value: "spec" },
-          ]}
-        />
       </Group>
 
       {list.isLoading && (

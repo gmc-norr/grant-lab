@@ -434,14 +434,11 @@ describe("HistoryPanel", () => {
     expect(screen.getByText(/loading both versions/i)).toBeInTheDocument();
   });
 
-  it("names BOTH selectors, not just the layout one", () => {
-    // "Draft" and "Spec" name the choices; nothing named what they choose.
-    // The layout control below already carries a label, so this was an
-    // inconsistency, not a considered omission.
+  it("no longer carries the artifact switch — the pane that lists them does", () => {
     mockList({ versions: [ROW("aaaaaaa", "one")] });
     mockVersion(null);
     wrap(<HistoryPanel id="ws1" />);
-    expect(screen.getByLabelText(/which artifact/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/which artifact/i)).toBeNull();
   });
 
   it("an unavailable history is not reported as an empty one", () => {

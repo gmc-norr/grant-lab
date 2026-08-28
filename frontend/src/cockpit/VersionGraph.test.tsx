@@ -165,4 +165,26 @@ describe("VersionGraph", () => {
     const card = await screen.findByTestId("version-card-aaaaaaa");
     expect(card.textContent).toContain("because you asked: Tighten the aims section");
   });
+
+  it("offers the Draft/Spec switch in the pane that lists them", () => {
+    mockList({ versions: [ROW("aaaaaaa", "one")] });
+    wrap();
+    expect(screen.getByLabelText(/which artifact/i)).toBeInTheDocument();
+  });
+
+  it("switching artifact clears BOTH shas", async () => {
+    // A sha from the draft's history is not a version of the spec; leaving one
+    // selected would fetch a 404. Pinning the existing setArtifact behaviour at
+    // its new call site.
+    const user = userEvent.setup();
+    mockList({ versions: [ROW("aaaaaaa", "one")] });
+    wrap("/cockpit/ws1?tab=history&view=versions&a=aaaaaaa&b=bbbbbbb");
+    // Mantine's SegmentedControl hides its radio at opacity 0 — Playwright
+    // refuses to click it and userEvent must target the LABEL.
+    await user.click(screen.getByText("Spec"));
+    const url = new URLSearchParams(screen.getByTestId("url").textContent ?? "");
+    expect(url.get("artifact")).toBe("spec");
+    expect(url.get("a")).toBeNull();
+    expect(url.get("b")).toBeNull();
+  });
 });
