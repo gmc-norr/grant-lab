@@ -34,6 +34,24 @@ function layoutParam(sp: URLSearchParams): DiffLayout {
   return sp.get("layout") === "unified" ? "unified" : "split";
 }
 
+/** The selection rule, as a pure function of the current pair.
+ *
+ *  Shared by toggle() and selectAndOpen() so the two can never disagree about
+ *  what a click means — the same reason blocks() is shared by refineRuns and
+ *  pairRows in diff.ts. */
+export function nextSelection(
+  cur: { a: string | null; b: string | null },
+  sha: string,
+): { a: string | null; b: string | null } {
+  if (sha === cur.a) return { a: cur.b, b: null };
+  if (sha === cur.b) return { a: cur.a, b: null };
+  if (cur.a == null) return { a: sha, b: cur.b };
+  if (cur.b == null) return { a: cur.a, b: sha };
+  // Both full: drop the older slot and slide along, so a third click always
+  // means "compare this with the one I picked most recently".
+  return { a: cur.b, b: sha };
+}
+
 export type HistoryNav = {
   artifact: Artifact;
   /** The OLDER selection slot. */
@@ -42,6 +60,15 @@ export type HistoryNav = {
   b: string | null;
   setArtifact: (x: Artifact) => void;
   toggle: (sha: string) => void;
+  /** Apply the selection rule AND open the History tab in ONE
+   *  setSearchParams write.
+   *
+   *  Calling toggle() then setTab() does NOT work: react-router 7.18.2 gives a
+   *  functional updater the params memoised at RENDER time, not a live ref, so
+   *  two writes in one handler both build from the pre-click URL and the second
+   *  discards the first. Measured — see the PINNED test in historyNav.test.tsx
+   *  and spec section 6.1. */
+  selectAndOpen: (sha: string) => void;
   /** How the comparison renders. Not cleared by artifact or selection changes —
    *  it is a display preference, not part of what is selected. */
   layout: DiffLayout;
@@ -86,19 +113,32 @@ export function useHistoryNav(): HistoryNav {
   );
 
   const toggle = useCallback(
-    (sha: string) => {
-      if (sha === a) write({ a: b, b: null });
-      else if (sha === b) write({ b: null });
-      else if (a == null) write({ a: sha });
-      else if (b == null) write({ b: sha });
-      // Both full: drop the older slot and slide along, so a third click always
-      // means "compare this with the one I picked most recently".
-      else write({ a: b, b: sha });
-    },
+    (sha: string) => write(nextSelection({ a, b }, sha)),
     [a, b, write],
+  );
+
+  const selectAndOpen = useCallback(
+    (sha: string) =>
+      setSp((prev) => {
+        const out = new URLSearchParams(prev);
+        // Read from `prev`, not the render closure: this is the one write that
+        // carries both changes, so it must see the params it is about to replace.
+        const next = nextSelection(
+          { a: shaParam(prev, "a"), b: shaParam(prev, "b") },
+          sha,
+        );
+        for (const key of ["a", "b"] as const) {
+          const v = next[key];
+          if (v == null) out.delete(key);
+          else out.set(key, v);
+        }
+        out.set("tab", "history");
+        return out;
+      }),
+    [setSp],
   );
 
   const setLayout = useCallback((x: DiffLayout) => write({ layout: x }), [write]);
 
-  return { artifact, a, b, layout, setArtifact, toggle, setLayout };
+  return { artifact, a, b, layout, setArtifact, toggle, setLayout, selectAndOpen };
 }

@@ -1,8 +1,9 @@
-import { renderHook, act } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useSearchParams } from "react-router-dom";
 import { describe, expect, it } from "vitest";
 
+import { useCockpitNav } from "./cockpitNav";
 import { useHistoryNav } from "./historyNav";
 
 function wrapperFor(initial: string) {
@@ -133,5 +134,102 @@ describe("useHistoryNav", () => {
     act(() => result.current.toggle("abc1234"));
     expect(result.current.a).toBe("abc1234");
     expect(result.current.layout).toBe("unified");
+  });
+
+  it("selectAndOpen fills the first slot AND opens the History tab in one write", () => {
+    const { result } = renderHook(() => useHistoryNav(), {
+      wrapper: wrapperFor("/cockpit/ws1?tab=draft"),
+    });
+    act(() => result.current.selectAndOpen("abc1234"));
+    expect(result.current.a).toBe("abc1234");
+  });
+
+  it("selectAndOpen follows the same rule as toggle for the second slot", () => {
+    const { result } = renderHook(() => useHistoryNav(), {
+      wrapper: wrapperFor("/cockpit/ws1?tab=history&a=abc1234"),
+    });
+    act(() => result.current.selectAndOpen("def5678"));
+    expect(result.current.a).toBe("abc1234");
+    expect(result.current.b).toBe("def5678");
+  });
+
+  it("selectAndOpen deselects a sha that is already selected", () => {
+    const { result } = renderHook(() => useHistoryNav(), {
+      wrapper: wrapperFor("/cockpit/ws1?tab=history&a=abc1234&b=def5678"),
+    });
+    act(() => result.current.selectAndOpen("def5678"));
+    expect(result.current.a).toBe("abc1234");
+    expect(result.current.b).toBeNull();
+  });
+
+  it("selectAndOpen slides the window along when both slots are full", () => {
+    const { result } = renderHook(() => useHistoryNav(), {
+      wrapper: wrapperFor("/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb"),
+    });
+    act(() => result.current.selectAndOpen("ccccccc"));
+    expect(result.current.a).toBe("bbbbbbb");
+    expect(result.current.b).toBe("ccccccc");
+  });
+
+  it("selectAndOpen leaves the artifact alone", () => {
+    const { result } = renderHook(() => useHistoryNav(), {
+      wrapper: wrapperFor("/cockpit/ws1?tab=draft&artifact=spec"),
+    });
+    act(() => result.current.selectAndOpen("abc1234"));
+    expect(result.current.artifact).toBe("spec");
+    expect(result.current.a).toBe("abc1234");
+  });
+});
+
+describe("one URL write, not two — spec section 6.1", () => {
+  // react-router 7.18.2's setSearchParams is NOT a React state setter: the
+  // functional form receives params memoised from location.search AT RENDER
+  // TIME, captured in a useCallback closure. Two calls in one handler both
+  // build from the pre-click URL and the second discards the first.
+  function Probe({ mode }: { mode: "two-writers" | "selectAndOpen" }) {
+    const hist = useHistoryNav();
+    const cock = useCockpitNav();
+    const [sp] = useSearchParams();
+    return (
+      <>
+        <button
+          onClick={() => {
+            if (mode === "two-writers") {
+              hist.toggle("abc1234");
+              cock.setTab("history");
+            } else {
+              hist.selectAndOpen("abc1234");
+            }
+          }}
+        >
+          click
+        </button>
+        <output data-testid="url">{sp.toString()}</output>
+      </>
+    );
+  }
+
+  function urlAfterClick(mode: "two-writers" | "selectAndOpen") {
+    render(
+      <MemoryRouter initialEntries={["/cockpit/ws1?tab=draft"]}>
+        <Probe mode={mode} />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText("click"));
+    return screen.getByTestId("url").textContent ?? "";
+  }
+
+  it("selectAndOpen leaves BOTH the selection and the tab in the URL", () => {
+    const url = urlAfterClick("selectAndOpen");
+    expect(url).toContain("tab=history");
+    expect(url).toContain("a=abc1234");
+  });
+
+  it("PINNED: toggle-then-setTab loses the selection — this is why selectAndOpen exists", () => {
+    // Measured, not assumed. Deleting selectAndOpen and "simplifying" back to
+    // two calls must break something; this is that something.
+    const url = urlAfterClick("two-writers");
+    expect(url).toContain("tab=history");
+    expect(url).not.toContain("a=abc1234");
   });
 });
