@@ -44,11 +44,17 @@ function mockList(data: Partial<versionsMod.VersionList>) {
 }
 
 function mockVersion(markdown: string | null) {
-  vi.spyOn(versionsMod, "useVersion").mockReturnValue({
-    data: markdown == null ? null : { commit_sha: "x", artifact: "draft", markdown },
-    isLoading: false,
-    isError: false,
-  } as never);
+  // mockImplementation, NOT mockReturnValue: the returned spy must record the
+  // arguments the panel passed. `useVersion(id, artifact, sha)` is the whole
+  // mechanism that decides WHETHER and WHICH version is fetched, and a mock
+  // that ignores its arguments cannot fail when that decision is wrong.
+  return vi.spyOn(versionsMod, "useVersion").mockImplementation(
+    (() => ({
+      data: markdown == null ? null : { commit_sha: "x", artifact: "draft", markdown },
+      isLoading: false,
+      isError: false,
+    })) as never,
+  );
 }
 
 describe("HistoryPanel", () => {
@@ -119,6 +125,44 @@ describe("HistoryPanel", () => {
     expect(screen.getByText(/# an old draft/)).toBeInTheDocument();
     // Read-only: no textbox anywhere in the panel.
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+  });
+
+  it("asks for nothing while no row is selected", () => {
+    mockList({ versions: [ROW("aaaaaaa", "one")] });
+    const spy = mockVersion(null);
+    wrap(<HistoryPanel id="ws1" />);
+    expect(spy).toHaveBeenCalledWith("ws1", "draft", null);
+  });
+
+  it("asks for the selected sha when exactly one row is selected", () => {
+    mockList({ versions: [ROW("aaaaaaa", "one")] });
+    const spy = mockVersion("# an old draft\n");
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa");
+    expect(spy).toHaveBeenCalledWith("ws1", "draft", "aaaaaaa");
+  });
+
+  it("stops asking for a single version once TWO rows are selected", () => {
+    // The `nav.b == null ? nav.a : null` arm. Replace that ternary with a bare
+    // `nav.a` and every other test here still passes — this one does not.
+    mockList({ versions: [ROW("bbbbbbb", "newer"), ROW("aaaaaaa", "older")] });
+    const spy = mockVersion(null);
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
+    expect(spy).toHaveBeenCalledWith("ws1", "draft", null);
+    expect(spy).not.toHaveBeenCalledWith("ws1", "draft", "aaaaaaa");
+  });
+
+  it("says so when the version list itself fails to load", () => {
+    // Distinct from history_available:false, which is a successful response.
+    // Without this branch a failed request renders an empty header, which reads
+    // as "no versions yet".
+    vi.spyOn(versionsMod, "useVersions").mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+    } as never);
+    mockVersion(null);
+    wrap(<HistoryPanel id="ws1" />);
+    expect(screen.getByText(/Could not load version history/i)).toBeInTheDocument();
   });
 
   it("selecting a row puts its sha in the URL", async () => {

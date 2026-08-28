@@ -87,6 +87,17 @@ export function HistoryPanel({ id }: { id: string }) {
         </Text>
       )}
 
+      {/* Distinct from `history_available: false`, which is a 200 saying git had
+          nothing readable. This is the request itself failing, and without it the
+          panel shows an empty header — indistinguishable from "no versions".
+          Every sibling panel (DraftPanel, SpecPanel, ProblemsPanel, ClaimsPanel,
+          ActivityPanel, CitationsPanel, LibraryPanel) renders this state. */}
+      {list.isError && (
+        <Text size="sm" c="red">
+          Could not load version history.
+        </Text>
+      )}
+
       {data && !data.history_available && (
         <Text size="sm" c="dimmed">
           Version history is not available for this workspace yet.
