@@ -33,3 +33,9 @@
 .icon .codicon {
   font-size: 22px;
 }
+.divider {
+  width: 24px;
+  height: 1px;
+  margin: 8px 0;
+  background: var(--app-border);
+}

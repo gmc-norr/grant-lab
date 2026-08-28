@@ -1,11 +1,11 @@
 import type { MouseEvent } from "react";
 import { Tooltip } from "@mantine/core";
-import { Link, NavLink, useLocation } from "react-router-dom";
+import { Link, NavLink, useLocation, useSearchParams } from "react-router-dom";
 
 import { useSession } from "../api/session";
-import { cockpitIdFromPath } from "../cockpit/cockpitNav";
+import { cockpitIdFromPath, viewFromParams, viewHref } from "../cockpit/cockpitNav";
 import styles from "./ActivityBar.module.css";
-import { ACTIVITY_BOTTOM, ACTIVITY_TOP, type ActivityItem } from "./nav-items";
+import { ACTIVITY_BOTTOM, ACTIVITY_TOP, ACTIVITY_WORKSPACE, type ActivityItem } from "./nav-items";
 
 function Glyph({ icon }: { icon: string }) {
   return (
@@ -79,6 +79,48 @@ function Item({
   );
 }
 
+function WorkspaceBand({
+  pathname,
+  onToggleSidebar,
+}: {
+  pathname: string;
+  onToggleSidebar?: () => void;
+}) {
+  const [sp] = useSearchParams();
+  const view = viewFromParams(sp);
+  return (
+    <>
+      <div className={styles.divider} data-testid="activity-divider" />
+      <div className={styles.group}>
+        {ACTIVITY_WORKSPACE.map((it) => {
+          const active = it.id === view;
+          return (
+            <Tooltip key={it.id} label={it.label} position="right" withArrow>
+              <Link
+                to={viewHref(sp, it.id, pathname)}
+                aria-label={it.label}
+                aria-current={active ? "page" : undefined}
+                className={active ? `${styles.item} ${styles.active}` : styles.item}
+                onClick={(e) => {
+                  // Same rule as the app band: clicking the ALREADY-ACTIVE item
+                  // collapses the pane instead of navigating. preventDefault
+                  // stops react-router's Link nav, so ?tab/?sec survive.
+                  if (active && onToggleSidebar) {
+                    e.preventDefault();
+                    onToggleSidebar();
+                  }
+                }}
+              >
+                <Glyph icon={it.icon} />
+              </Link>
+            </Tooltip>
+          );
+        })}
+      </div>
+    </>
+  );
+}
+
 export function ActivityBar({ onToggleSidebar }: { onToggleSidebar?: () => void }) {
   const { pathname } = useLocation();
   const { data: session } = useSession();
@@ -99,19 +141,7 @@ export function ActivityBar({ onToggleSidebar }: { onToggleSidebar?: () => void 
             <Item key={it.id} item={it} />
           ),
         )}
-        {wsId && (
-          <Item
-            item={{
-              id: "active-ws",
-              label: "Current workspace",
-              icon: "edit",
-              kind: "spa",
-              to: `/cockpit/${wsId}`,
-            }}
-            active
-            onToggleSidebar={onToggleSidebar}
-          />
-        )}
+        {wsId && <WorkspaceBand pathname={pathname} onToggleSidebar={onToggleSidebar} />}
       </div>
       <div className={styles.spacer} />
       <div className={styles.group}>
