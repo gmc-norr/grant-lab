@@ -15,7 +15,7 @@
 - **Work from `frontend/`** for every frontend command. `cd frontend` persists inside one Bash call but NOT across calls — re-anchor every time.
 - Baseline measured 2026-08-28 by running the suite: **113 files, 658 tests passing**.
 - Frontend gates, all must be clean: `pnpm exec tsc --noEmit`, `pnpm vitest run`, `pnpm build`.
-- **Judge vitest on the printed file and test counts, not on the absence of red.** `include` is `src/**/*.{test,spec}.{ts,tsx}` — a misnamed or misplaced test file is silently uncollected and reports as success. Baseline before this plan: **113 files, 658 tests passing**. Every task must state the new counts.
+- **Judge vitest on the printed file and test counts, not on the absence of red.** `include` is `src/**/*.{test,spec}.{ts,tsx}` — a misnamed or misplaced test file is silently uncollected and reports as success. Every task must state the counts it saw.
 - `pnpm add` is refused by a 7-day `minimumReleaseAge` cooldown. **This plan adds no dependency.** If you believe you need one, stop and escalate.
 - `DiffView.tsx`, `ProposalReview.tsx`, and `InlineProposalReview.tsx` are **not modified by any task**. Their tests must pass unmodified.
 - The 16 existing cases in `diff.test.ts` (4) and `diff.refine.test.ts` (12) must pass **unmodified**. Editing one to accommodate a change is a failed task, not a fix.
