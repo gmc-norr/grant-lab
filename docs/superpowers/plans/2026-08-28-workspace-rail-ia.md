@@ -1245,16 +1245,6 @@ describe("selectAndOpen after the rename", () => {
     expect(clickPickAt("/cockpit/ws1?tab=draft").get("tab")).toBe("diff");
   });
 
-  it("does NOT prompt from a legacy ?tab=history URL", () => {
-    // The guard asks "am I already on the comparison?". Comparing the RAW ?tab
-    // to "diff" would say no for a legacy link and prompt to discard edits that
-    // are not being discarded. It must compare the PARSED destination.
-    act(() => setDirty([1]));
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
-    clickPickAt("/cockpit/ws1?tab=history&b=bbbbbbb");
-    expect(confirmSpy).not.toHaveBeenCalled();
-  });
-
   it("deselecting the last version neither opens the comparison nor prompts", () => {
     // The resulting selection must be computed BEFORE the guard runs. Guarding
     // first prompts "discard your unsaved edits?" and then discovers no
@@ -1277,8 +1267,15 @@ it("the tab strip offers EXACTLY Draft, Spec, Scorecard, Panel review", () => {
   // Asserting only that History is gone would pass on an implementation that
   // renamed it to a visible "Diff" tab — the one thing the spec forbids, since
   // the comparison is reached from the Versions pane, not from the tab strip.
+  //
+  // SCOPED to the artifact tablist. An unscoped getAllByRole("tab") also
+  // collects ArtifactSectionEditor's nested `Tabs.List aria-label="View"`
+  // (Section / Full draft, ArtifactSectionEditor.tsx:211-214), which DraftPanel
+  // renders on ?tab=draft — six tabs, not four. `within` is already imported
+  // in this file.
   renderCockpit("/cockpit/ws-1?tab=draft");
-  expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual([
+  const strip = within(screen.getByRole("tablist", { name: "Artifact" }));
+  expect(strip.getAllByRole("tab").map((t) => t.textContent)).toEqual([
     "Draft",
     "Spec",
     "Scorecard",
@@ -1301,12 +1298,51 @@ it("a legacy ?tab=history renders the comparison too", () => {
 it**, rather than adding a second one. `Cockpit.test.tsx` has 28 tests and already renders
 the route.
 
+- [ ] **Step 8b: Retarget the five existing assertions that pin the OLD tab name**
+
+`historyNav.test.tsx` already pins the old destination name in five places across four
+tests. Renaming the destination makes every one of them wrong, and **one does not even
+compile.** Round 1 found the same problem in `VersionGraph.test.tsx` and it was
+fixed there only — this is its twin, in the file the rename actually lives in.
+
+| Line | Test | What breaks | Change |
+| --- | --- | --- | --- |
+| 200 | `PINNED: toggle-then-setTab loses the selection` | `cock.setTab("history")` — **`"history"` is no longer a `TopTab`, so this is a tsc error, not a red test.** | `cock.setTab("diff")` |
+| 225 | `selectAndOpen leaves BOTH the selection and the tab in the URL` | `expect(url).toContain("tab=history")` | `toContain("tab=diff")` |
+| 233 | `PINNED: toggle-then-setTab loses the selection` | `expect(url).toContain("tab=history")` | `toContain("tab=diff")` |
+| 355 | `proceeds when the discard is accepted` | `expect(parsed.get("tab")).toBe("history")` | `.toBe("diff")` |
+| 363 | `does NOT ask when the editor is clean` | `expect(parsed.get("tab")).toBe("history")` | `.toBe("diff")` |
+
+**Do not touch these three, which are correct as they stand:**
+
+- `historyNav.test.tsx:291` — `clearSelection` PRESERVES whatever `?tab` it was given and
+  never writes one. Its input URL is a legacy `?tab=history`, so `tab` stays `history`.
+  Changing it would break a passing test.
+- `historyNav.test.tsx:366` — `does NOT ask when the comparison is ALREADY open` feeds a
+  legacy `?tab=history` as INPUT. It must keep doing so: that is what proves the guard
+  compares the PARSED destination rather than the raw string. Add this comment to it:
+
+```tsx
+    // The input stays a LEGACY ?tab=history on purpose. The guard asks "am I
+    // already on the comparison?"; comparing the raw ?tab to "diff" would say
+    // no for a legacy link and prompt to discard edits that are not being
+    // discarded. This test is what makes tabFromParams load-bearing there.
+```
+
+- Every `wrapperFor("/cockpit/ws1?tab=history…")` in the file — those are inputs, and the
+  alias keeps them parsing as the comparison.
+
 - [ ] **Step 9: Run and watch them fail**
 
 Run: `cd frontend && pnpm vitest run src/cockpit/historyNav.test.tsx src/routes/Cockpit.test.tsx`
-Expected: the `historyNav` tests fail because `tab` is `history` not `diff`; the tab-strip
-test fails on a `toEqual` mismatch listing five tabs with `History` last; the two
-`?tab=diff` / legacy tests fail because `Cockpit` renders nothing for an unknown tab.
+Expected: the new `historyNav` tests fail because `tab` is `history` not `diff`; the
+tab-strip test fails on a `toEqual` mismatch listing five tabs with `History` last (SCOPED
+to the artifact tablist, so the nested Section / Full draft tabs are not in the array); the
+two `?tab=diff` / legacy tests fail because `Cockpit` renders nothing for an unknown tab.
+
+The five assertions retargeted in Step 8b are ALSO red at this point, and that is correct —
+they are pinning the old name against new tests that demand the new one. They go green in
+Step 10. Do not "fix" them back.
 
 - [ ] **Step 10: Update `frontend/src/routes/Cockpit.tsx`**
 
@@ -1420,12 +1456,16 @@ pnpm exec tsc --noEmit
 pnpm vitest run
 pnpm build
 ```
-Expected: **`Test Files 116 passed (116)`**, **`Tests 772 passed (772)`** — 762, plus four
-in Step 1 and six in Step 8. Step 11b renames an assertion and adds no test. If the total differs, name the term that changed.
+Expected: **`Test Files 116 passed (116)`**, **`Tests 771 passed (771)`** — 762, plus four
+in Step 1 and **five** in Step 8 (two in `historyNav.test.tsx`, three in `Cockpit.test.tsx`).
+Steps 8b and 11b retarget existing assertions and add no test. If the total differs, name
+the term that changed.
 
 The eight pre-existing dirty-guard tests (four in `historyNav.test.tsx`, four in
-`cockpitNav.test.tsx`) must be among the passes. If any went red, the guard changed shape
-rather than name — that is a finding, not a test to edit.
+`cockpitNav.test.tsx`) must be among the passes. **Two of the four in `historyNav.test.tsx`
+were retargeted in Step 8b** (lines 355 and 363, `history` → `diff`); the other two, and all
+four in `cockpitNav.test.tsx`, are untouched. If an UNTOUCHED one went red, the guard
+changed shape rather than name — that is a finding, not a test to edit.
 
 - [ ] **Step 16: Commit**
 
@@ -1444,7 +1484,7 @@ git commit -m "feat(cockpit): the comparison is opened from the pane, not tabbed
 Five tasks. After Task 4, Versions is one rail click away and nothing is folded. After
 Task 5, the History tab is gone and the comparison opens like a document.
 
-**Expected final gate:** `Test Files 116 passed (116)`, `Tests 772 passed (772)`, tsc
+**Expected final gate:** `Test Files 116 passed (116)`, `Tests 771 passed (771)`, tsc
 clean, build clean, `git diff --stat <base>..HEAD -- src/` empty.
 
 **Not in this plan, and named so they are not mistaken for oversights:**
