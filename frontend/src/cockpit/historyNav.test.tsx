@@ -292,3 +292,16 @@ describe("clearSelection", () => {
     expect(url.get("layout")).toBe("unified");
   });
 });
+
+describe("sha normalisation", () => {
+  it("lowercases a sha from the URL so it can match a list row", () => {
+    // SHA_RE accepts A-F, but git's %H is lowercase and every comparison in
+    // HistoryPanel is string identity against it. An uppercase link was
+    // therefore accepted and then reported as "not in the Versions list".
+    const { result } = renderHook(() => useHistoryNav(), {
+      wrapper: wrapperFor("/cockpit/ws1?tab=history&a=AAAAAAA&b=BbBbBbB"),
+    });
+    expect(result.current.a).toBe("aaaaaaa");
+    expect(result.current.b).toBe("bbbbbbb");
+  });
+});

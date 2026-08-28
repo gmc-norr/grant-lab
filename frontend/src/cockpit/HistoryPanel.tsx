@@ -87,6 +87,7 @@ export function HistoryPanel({ id }: { id: string }) {
         <Title order={3}>Version history</Title>
         <SegmentedControl
           size="xs"
+          aria-label="Which artifact"
           value={nav.artifact}
           onChange={(v) => nav.setArtifact(v as Artifact)}
           data={[
@@ -184,7 +185,8 @@ export function HistoryPanel({ id }: { id: string }) {
       {/* Gated on `ordered`, so this and the not-in-list branch below partition
           the `both` failure space instead of overlapping. Ungated, a stale sha
           whose read ALSO failed rendered both messages and two Clear buttons.
-          Reachable with one version via `?a=X&b=X`, where both indices resolve. */}
+          Reached with two DISTINCT listed shas — `both` requires them to differ
+          — one of which cannot be read. */}
       {both && ordered && (older.isError || newer.isError) && (
         <Stack gap="xs" align="flex-start">
           {/* No "pick two" here. Both shas are in the list and one of them
@@ -242,9 +244,13 @@ export function HistoryPanel({ id }: { id: string }) {
                 <Text size="xs" c="dimmed" id={olderPaneId} data-testid="version-side-header-older">
                   older · {labelFor(olderSha)}
                 </Text>
+                {/* role="region": a bare <pre> has no role that accepts a
+                    name, so aria-labelledby on it resolves to nothing. With the
+                    role the heading becomes the pane's accessible name. */}
                 <pre
                   className={styles.reviewDoc}
                   data-testid="version-side"
+                  role="region"
                   aria-labelledby={olderPaneId}
                 >
                   {older.data.markdown}
@@ -257,6 +263,7 @@ export function HistoryPanel({ id }: { id: string }) {
                 <pre
                   className={styles.reviewDoc}
                   data-testid="version-side"
+                  role="region"
                   aria-labelledby={newerPaneId}
                 >
                   {newer.data.markdown}
@@ -295,13 +302,16 @@ export function HistoryPanel({ id }: { id: string }) {
   );
 }
 
-/** The way out of a stale two-sha URL.
+/** The way out of a selection the user cannot fix by clicking.
  *
- *  Clicking the side pane cannot escape one — nextSelection either deselects the
- *  row (leaving the stale sha) or slides it back into the pair, a two-click
- *  cycle with no exit, pinned in historyNav.test.tsx. Offered only when the
- *  history is too short to compare, which is the case where no amount of
- *  clicking produces a valid pair.
+ *  Clicking the side pane cannot escape a stale pair — nextSelection either
+ *  deselects the row (leaving the stale sha) or slides it back into the pair, a
+ *  two-click cycle with no exit, pinned in historyNav.test.tsx.
+ *
+ *  Offered on three states: a stale single selection that is not in the list; an
+ *  ordered pair where a read failed (with two versions there is no readable pair
+ *  left); and a not-in-list pair in a history too short to compare. Not offered
+ *  where picking again genuinely works.
  *
  *  The URL is still not rewritten on the user's behalf: they arrived on this
  *  link, and silently changing the address costs them the back button and hides

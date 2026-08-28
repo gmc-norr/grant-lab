@@ -312,17 +312,14 @@ describe("HistoryPanel", () => {
     expect(screen.queryByText(/only one version/i)).toBeNull();
   });
 
-  it("still says 'pick two' when a TWO-version history fails to read one", () => {
-    // The converse the round-1 tests missed: the failed-read branch, not just
-    // the stale-link branch.
+  it("still says 'pick two' when a stale sha lands in a TWO-version history", () => {
+    // The not-in-list branch, and only it: `ccccccc` is absent, so `ordered` is
+    // false and the read-error branch cannot render. No isError mock — it would
+    // suggest this test covers a failed read, which it does not; the ordered
+    // read failure has its own test above. With two real versions "pick two" is
+    // followable here, so no exit control is needed.
     mockList({ versions: [ROW("bbbbbbb", "two"), ROW("aaaaaaa", "one")] });
-    vi.spyOn(versionsMod, "useVersion").mockReturnValue({
-      data: null,
-      isLoading: false,
-      isError: true,
-    } as never);
-    // A stale THIRD sha, so this is the not-in-list branch: with two real
-    // versions "pick two" is followable there, and no exit control is needed.
+    mockVersion(null);
     wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=ccccccc&b=bbbbbbb");
     expect(screen.getByText(/pick two/i)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /clear the comparison/i })).toBeNull();
@@ -379,6 +376,16 @@ describe("HistoryPanel", () => {
     } as never);
     wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=aaaaaaa&b=bbbbbbb");
     expect(screen.getByText(/loading both versions/i)).toBeInTheDocument();
+  });
+
+  it("names BOTH selectors, not just the layout one", () => {
+    // "Draft" and "Spec" name the choices; nothing named what they choose.
+    // The layout control below already carries a label, so this was an
+    // inconsistency, not a considered omission.
+    mockList({ versions: [ROW("aaaaaaa", "one")] });
+    mockVersion(null);
+    wrap(<HistoryPanel id="ws1" />);
+    expect(screen.getByLabelText(/which artifact/i)).toBeInTheDocument();
   });
 
   it("no message in this panel still says 'above' — scanned from source, not from one render", () => {
@@ -531,12 +538,13 @@ describe("HistoryPanel comparison", () => {
     expect(newer.textContent).toMatch(/newer/i);
     expect(newer.textContent).toContain("bbbbbbb");
 
-    // The heading must be MACHINE-linked to its pane, not merely nearby: a
-    // screen reader lands on the <pre>, not on the text above it.
-    const panes = document.querySelectorAll("[data-testid='version-side']");
-    expect(panes[0].getAttribute("aria-labelledby")).toBe(older.id);
-    expect(panes[1].getAttribute("aria-labelledby")).toBe(newer.id);
-    expect(older.id).not.toBe("");
+    // Queried BY ROLE AND NAME, not by attribute value: aria-labelledby on a
+    // bare <pre> names nothing, because <pre> has no role that takes a name.
+    // Asserting the attribute would have passed on exactly that broken markup.
+    const olderPane = screen.getByRole("region", { name: /older · aaaaaaa/i });
+    const newerPane = screen.getByRole("region", { name: /newer · bbbbbbb/i });
+    expect(olderPane.textContent).toContain("OLDMARKER");
+    expect(newerPane.textContent).toContain("NEWMARKER");
     expect(older.id).not.toBe(newer.id);
   });
 

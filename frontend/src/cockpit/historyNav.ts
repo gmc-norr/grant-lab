@@ -17,7 +17,11 @@ const SHA_RE = /^[0-9a-fA-F]{7,64}$/;
 
 function shaParam(sp: URLSearchParams, key: string): string | null {
   const v = sp.get(key);
-  return v != null && SHA_RE.test(v) ? v : null;
+  // Lowercased: SHA_RE accepts A-F, but git's %H is lowercase and every
+  // comparison in HistoryPanel is string identity against it (indexOf,
+  // includes). An uppercase link was accepted and then reported as "not in the
+  // Versions list" — valid input, wrong answer.
+  return v != null && SHA_RE.test(v) ? v.toLowerCase() : null;
 }
 
 function artifactParam(sp: URLSearchParams): Artifact {
