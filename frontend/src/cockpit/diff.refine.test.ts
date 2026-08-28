@@ -92,6 +92,35 @@ describe("refineRuns", () => {
   });
 });
 
+describe("the word-matrix cap", () => {
+  it("leaves a pair whole rather than diffing an unbounded token matrix", () => {
+    // The 2,000-LINE ceiling does not bound this: `wordDiff` allocates a
+    // (tokens+1)x(tokens+1) matrix PER PAIRED LINE, so a one-line document
+    // passes tooLargeToDiff at any size. Measured on this exact algorithm:
+    // 4,000 tokens = 1.1 s, 8,000 tokens = 4.3 s of blocked main thread, and
+    // 16,000 exhausts a 4 GB heap. Markdown serialises a pasted paragraph to
+    // ONE line, so this is reachable from the editor.
+    const huge = Array.from({ length: 1200 }, (_, i) => `w${i}`).join(" ");
+    const rows = refineRuns([
+      { tag: "del", text: huge },
+      { tag: "add", text: huge.replace("w5 ", "W5 ") },
+    ]);
+    expect(rows).toHaveLength(2);
+    expect(rows[0].spans).toBeUndefined();
+    expect(rows[1].spans).toBeUndefined();
+  });
+
+  it("still refines a pair just under the cap", () => {
+    const ok = Array.from({ length: 300 }, (_, i) => `w${i}`).join(" ");
+    const rows = refineRuns([
+      { tag: "del", text: ok },
+      { tag: "add", text: ok.replace("w5 ", "W5 ") },
+    ]);
+    expect(rows[0].spans).toBeDefined();
+    expect(rows[0].spans?.map((s) => s.text).join("")).toBe(ok);
+  });
+});
+
 describe("tooLargeToDiff", () => {
   it("2,000 lines still diffs and 2,001 does not — the boundary is inclusive", () => {
     const ok = Array(MAX_DIFF_LINES).fill("x").join("\n");

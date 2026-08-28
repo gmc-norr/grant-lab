@@ -43,7 +43,10 @@ function VersionRowButton({
         <Badge size="sm" variant="light">
           {createdBy ?? "not recorded"}
         </Badge>
-        <Text size="sm" style={{ flex: 1 }}>
+        {/* gitio caps a subject at 500 chars, and it carries a user-controlled
+            section heading (editing/save.py:275). Unclamped, a long heading
+            wraps the row and pushes the timestamp out of view. */}
+        <Text size="sm" style={{ flex: 1 }} lineClamp={2}>
           {subject}
         </Text>
         <Text size="xs" c="dimmed">
@@ -73,12 +76,20 @@ export function HistoryPanel({ id }: { id: string }) {
   // identical view — that is a test, not a convention.
   const order = data?.versions.map((v) => v.commit_sha) ?? [];
   const both = nav.a != null && nav.b != null;
-  const [olderSha, newerSha] =
-    both && order.indexOf(nav.a as string) < order.indexOf(nav.b as string)
-      ? [nav.b, nav.a]
-      : [nav.a, nav.b];
+  const ia = order.indexOf(nav.a as string);
+  const ib = order.indexOf(nav.b as string);
+  // BOTH shas must be FOUND in the list before direction is knowable. Before the
+  // list resolves `order` is [] and both indexOf calls return -1 — and `-1 < -1`
+  // is false, which silently orders by whatever the URL happened to say. The two
+  // version payloads are smaller than the list and can win the race, so a deep
+  // link would render every addition as a deletion until the list landed. `ia`
+  // and `ib` are also -1 for a sha that is not in this artifact's history at all.
+  const ordered = both && ia >= 0 && ib >= 0;
+  const [olderSha, newerSha] = ordered && ia < ib ? [nav.b, nav.a] : [nav.a, nav.b];
 
-  const older = useVersion(id, nav.artifact, both ? olderSha : nav.a);
+  // `nav.a ?? nav.b`: a hand-trimmed `?b=` with no `?a=` is otherwise a dead
+  // state — the row highlights and nothing renders.
+  const older = useVersion(id, nav.artifact, both ? olderSha : (nav.a ?? nav.b));
   const newer = useVersion(id, nav.artifact, both ? newerSha : null);
 
   return (
@@ -141,7 +152,9 @@ export function HistoryPanel({ id }: { id: string }) {
           ))}
           {data.truncated && (
             <Text size="xs" c="dimmed">
-              Showing the 200 most recent versions.
+              {/* No number: it would duplicate the backend's HISTORY_LIMIT
+                  across the wire and silently lie if that constant moved. */}
+              Older versions exist than are shown here.
             </Text>
           )}
         </Stack>
@@ -163,17 +176,26 @@ export function HistoryPanel({ id }: { id: string }) {
         </Text>
       )}
 
-      {both && (older.isLoading || newer.isLoading) && (
-        <Text size="sm" c="dimmed">
-          Loading both versions…
-        </Text>
-      )}
       {both && (older.isError || newer.isError) && (
         <Text size="sm" c="dimmed">
           One of those versions could not be read.
         </Text>
       )}
+      {both && !ordered && !list.isError && list.isLoading && (
+        <Text size="sm" c="dimmed">
+          Loading both versions…
+        </Text>
+      )}
+      {/* The list is loaded and one of the two selections is not in it — an
+          abbreviated sha, a sha from the other artifact, a stale link. Direction
+          is unknowable, so say so rather than waiting on it forever. */}
+      {both && !ordered && !list.isError && !list.isLoading && (
+        <Text size="sm" c="dimmed">
+          One of the selected versions is not in this list. Pick two from above.
+        </Text>
+      )}
       {both &&
+        ordered &&
         older.data &&
         newer.data &&
         (tooLargeToDiff(older.data.markdown, newer.data.markdown) ? (

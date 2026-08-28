@@ -83,7 +83,7 @@ describe("HistoryPanel", () => {
     mockList({ versions: [ROW("aaaaaaa", "one")], truncated: true });
     mockVersion(null);
     wrap(<HistoryPanel id="ws1" />);
-    expect(screen.getByText(/200 most recent versions/i)).toBeInTheDocument();
+    expect(screen.getByText(/Older versions exist/i)).toBeInTheDocument();
   });
 
   it("renders a row's role badge and its subject verbatim", () => {
@@ -248,6 +248,43 @@ describe("HistoryPanel comparison", () => {
     const reverseHtml = document.querySelector("[data-testid='version-diff']")?.innerHTML;
 
     expect(reverseHtml).toBe(forwardHtml);
+  });
+
+  it("shows NO diff until the list has loaded — direction comes from the list", () => {
+    // The direction rule reads the version list to learn which sha is older.
+    // Before the list resolves `order` is [], both indexOf calls return -1, and
+    // `-1 < -1` is false — so the panel would fall through to raw URL order and
+    // render every addition as a deletion. The two version payloads are smaller
+    // than the list and can easily win the race, so this is reachable from an
+    // ordinary deep link, and every other comparison test mocks the list as
+    // already loaded and therefore cannot enter this state.
+    vi.spyOn(versionsMod, "useVersions").mockReturnValue({
+      data: undefined,
+      isLoading: true,
+      isError: false,
+    } as never);
+    vi.spyOn(versionsMod, "useVersion").mockImplementation(
+      ((_id: string, _artifact: string, sha: string | null) => ({
+        data: sha == null ? null : { commit_sha: sha, artifact: "draft", markdown: "x\n" },
+        isLoading: false,
+        isError: false,
+      })) as never,
+    );
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=bbbbbbb&b=aaaaaaa");
+    expect(document.querySelector("[data-testid='version-diff']")).toBeNull();
+  });
+
+  it("says a selected version is not in this list instead of loading forever", () => {
+    // Reachable three ways, all from a hand-made or stale URL: an ABBREVIATED
+    // sha (valid to git, resolves server-side, matches no row here), a sha from
+    // the OTHER artifact, and a sha whose commit has since been filtered out.
+    // Without this the panel waits on a direction it can never determine, and
+    // shows "Loading both versions…" indefinitely.
+    mockList({ versions: [ROW("bbbbbbb", "newer"), ROW("aaaaaaa", "older")] });
+    mockVersion(null);
+    wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=abc1234&b=bbbbbbb");
+    expect(screen.getByText(/not in this list/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Loading both versions/i)).not.toBeInTheDocument();
   });
 
   it("falls back with a reason above the 2,000-line ceiling", () => {

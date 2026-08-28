@@ -5,7 +5,14 @@ import type { Artifact } from "../api/proposals";
 
 /** Mirrors ports/shas.py's SHA_RE. A sha arriving from the URL is user input:
  *  the backend rejects a bad one with 422, but there is no reason to spend the
- *  request. */
+ *  request.
+ *
+ *  Deliberately still {7,64}, matching the backend: an ABBREVIATED sha is valid
+ *  to git and resolves server-side, but every comparison in the panel is string
+ *  identity against a full `%H` from the list, so it matches no row. That is one
+ *  case of the general "selected sha is not in this list" state — which also
+ *  covers a sha from the other artifact, or from another workspace — and the
+ *  panel names that state rather than this regex trying to pre-empt one cause. */
 const SHA_RE = /^[0-9a-fA-F]{7,64}$/;
 
 function shaParam(sp: URLSearchParams, key: string): string | null {

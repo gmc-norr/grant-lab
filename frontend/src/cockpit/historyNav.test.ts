@@ -29,6 +29,16 @@ describe("useHistoryNav", () => {
     expect(result.current.b).toBe("def5678");
   });
 
+  it("keeps an abbreviated sha — the panel, not the regex, reports it unknown", () => {
+    // {7,64} matches the backend deliberately. An abbreviation is valid to git
+    // and resolves server-side; it simply matches no row, which is the general
+    // "not in this list" state HistoryPanel names.
+    const { result } = renderHook(() => useHistoryNav(), {
+      wrapper: wrapperFor("/cockpit/ws1?tab=history&a=abc1234"),
+    });
+    expect(result.current.a).toBe("abc1234");
+  });
+
   it("drops a sha that is not sha-shaped rather than fetching it", () => {
     const { result } = renderHook(() => useHistoryNav(), {
       wrapper: wrapperFor("/cockpit/ws1?tab=history&a=--output=x&b=def5678"),

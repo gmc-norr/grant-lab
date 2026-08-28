@@ -139,7 +139,15 @@ def list_versions(
     if commits:
         rows = session.execute(
             select(ArtifactVersion, ChatTurn.content)
-            .outerjoin(ChatTurn, ChatTurn.id == ArtifactVersion.triggering_turn_id)
+            .outerjoin(
+                ChatTurn,
+                # Correlated on workspace too. ArtifactVersion is already scoped
+                # below, so this is only reachable via a mis-set FK — but a
+                # cross-workspace prompt leak is the failure it would be, and
+                # the extra predicate is free.
+                (ChatTurn.id == ArtifactVersion.triggering_turn_id)
+                & (ChatTurn.workspace_id == ArtifactVersion.workspace_id),
+            )
             .where(
                 ArtifactVersion.workspace_id == workspace_id,
                 ArtifactVersion.commit_sha.in_([c.sha for c in commits]),
