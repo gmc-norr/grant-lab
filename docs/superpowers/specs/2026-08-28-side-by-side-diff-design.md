@@ -1,6 +1,6 @@
 # Side-by-Side Version Compare — Design
 
-**Status:** revision 1
+**Status:** revision 2 (round 1 outside review applied)
 **Scope:** the History tab's two-version comparison only.
 **Depends on:** `2026-08-27-version-history-compare-design.md` (slice 1, merged `15f14218`).
 
@@ -57,8 +57,25 @@ Side-by-side needs exactly that pairing to decide which lines sit opposite each
 other. If the two were computed independently and ever disagreed, the columns
 and the colours would describe different edits on the same screen.
 
-So the run-walk is extracted once and both callers use it. Agreement stops being
-something a test has to check repeatedly and becomes structural.
+So the run-walk is extracted once and both callers use it. Agreement on **which
+lines are candidates for each other** stops being something a test has to check
+repeatedly and becomes structural.
+
+**"Candidate" is doing real work in that sentence.** Being opposite and being
+word-highlighted are not the same condition. `refineRuns` applies one further,
+independent gate after pairing: `withinWordCap` (`diff.ts:148`). A pair whose
+token matrix exceeds `MAX_WORD_MATRIX` yields `null` and keeps two whole-line
+rows with no spans — but it is still `dels[k]` paired with `adds[k]`, and
+side-by-side still places it opposite.
+
+So the invariant is one-directional and must be stated that way:
+
+> Every pair `pairRows` places opposite each other is the same pair
+> `refineRuns` considered. Not every such pair receives word spans — the cap
+> may skip one — and that is correct in both layouts.
+
+There is no converse case: `refineRuns` never word-refines a pair that
+`pairRows` would separate.
 
 ### 4.2 The extracted walk
 
@@ -83,8 +100,13 @@ function blocks(rows: DiffRow[]): Block[];
 
 `refineRuns` keeps its exact current signature, its current output, and its
 current tests. Only its internals change: it maps `blocks()` instead of doing
-its own walk. **Every existing test in `diff.test.ts` and `diff.refine.test.ts`
-must pass unmodified** — that is the proof the refactor changed nothing.
+its own walk.
+
+**Every existing test in `diff.test.ts` (4 cases) and `diff.refine.test.ts` (12
+cases) must pass unmodified.** That is a regression check, not a proof: 16
+worked examples cannot establish equivalence over every `DiffRow[]`. The
+equivalence claim is carried by the property test in §8.1 instead, which
+compares the two walks over generated input rather than over hand-picked cases.
 
 ### 4.3 The new function
 
@@ -228,8 +250,20 @@ The fallback's own two-pane rendering is unchanged.
   leftover add, an add-run with no preceding del-run, and `[]`.
 - Spans survive: a paired rewrite arrives with `spans` on both sides, carried
   from `refineRuns`.
-- The refactor is inert: every existing `diff.test.ts` and `diff.refine.test.ts`
-  case passes **unmodified**.
+- The refactor is inert on the known cases: every existing `diff.test.ts` and
+  `diff.refine.test.ts` case passes **unmodified**.
+- The refactor is inert in general — a **property test**. Generate a few hundred
+  random line-sequence pairs (short alphabets, so `same`/`add`/`del` runs of
+  every shape actually occur, including pure insertions, pure deletions, and
+  runs longer on one side than the other). For each, assert:
+  1. `refineRuns(lineDiff(a, b))` deep-equals the output of the **pre-refactor**
+     implementation, kept in the test file for exactly this comparison and
+     deleted once the test has run green in CI once. This is the equivalence
+     evidence that 16 examples cannot give.
+  2. The §4.1 invariant: every row carrying `spans` appears in a `pairRows` pair
+     whose **other side is non-null**. This makes the design's central claim a
+     test rather than a sentence.
+  Property 2 outlives property 1 and stays in the suite.
 - Component: older text renders in the left column, newer in the right; a
   leftover del leaves the right cell empty; filler cells carry no add/del tint.
 - Toggle: `layout=unified` renders the unified `DiffView`; absent or unknown
@@ -249,8 +283,25 @@ the screenshot, that
 
 1. the two columns' bounding boxes are horizontally adjacent, not stacked;
 2. a matching pair's two cells share the same vertical offset;
-3. the header row stays visible after scrolling the container;
+3. the header genuinely sticks — see below;
 4. the toggle switches the rendered view.
+
+**Check 3 must not be able to pass without scrolling.** "The header is still
+visible after scrolling" is trivially true when there is nothing to scroll: a
+container that does not overflow never moves, so a plain, non-sticky header
+would pass it. That is the same shape of empty gate this section exists to
+prevent. The check must therefore, in order:
+
+1. assert `scrollHeight > clientHeight` — **fail the gate if not**, rather than
+   silently checking nothing. Use a comparison long enough to overflow;
+2. record the header's viewport offset;
+3. set `scrollTop` past the header's own height, so a non-sticky header would be
+   pushed out of view;
+4. assert the header's viewport offset is unchanged, and that a content row
+   which *was* visible now is not — proving the container actually scrolled.
+
+Step 4's second half matters: without it, a container that refused to scroll for
+some unrelated reason also reports a stable header offset.
 
 A claim about layout that was not measured in a real browser does not count as
 verified.
