@@ -82,17 +82,44 @@ describe("the blocks() extraction is inert", () => {
   it("covers every block shape across those documents", () => {
     // A guard on the generator itself: if it stopped producing insertions or
     // deletions, the test above would still pass while proving much less.
+    // Classify whole BLOCKS with the same boundaries blocks() uses. Looking at
+    // rows one at a time mislabels: in [del, del, add] the first del has a del
+    // after it and reads as a pure "delete" though it is part of a replacement,
+    // and in [del, add, add] the second add has an add before it and reads as a
+    // pure "insert". A per-row guard can therefore report all four shapes from
+    // input that contains nothing but uneven replacements.
     const rand = mulberry32(20260828);
     const seen = new Set<string>();
     for (let n = 0; n < 300; n++) {
       const rows = lineDiff(randomDoc(rand), randomDoc(rand));
-      for (let i = 0; i < rows.length; i++) {
-        if (rows[i].tag === "del") seen.add(rows[i + 1]?.tag === "add" ? "replace" : "delete");
-        else if (rows[i].tag === "add" && rows[i - 1]?.tag !== "del") seen.add("insert");
-        else if (rows[i].tag === "same") seen.add("same");
+      let i = 0;
+      while (i < rows.length) {
+        if (rows[i].tag !== "del") {
+          seen.add(rows[i].tag === "add" ? "insert" : "same");
+          i += 1;
+          continue;
+        }
+        const delStart = i;
+        while (i < rows.length && rows[i].tag === "del") i += 1;
+        const addStart = i;
+        while (i < rows.length && rows[i].tag === "add") i += 1;
+        const delCount = addStart - delStart;
+        const addCount = i - addStart;
+        if (addCount === 0) seen.add("delete");
+        else if (addCount === delCount) seen.add("replace-even");
+        else seen.add("replace-uneven");
       }
     }
-    expect([...seen].sort()).toEqual(["delete", "insert", "replace", "same"]);
+    // Measured against this seed: all five occur. "insert" here means a single
+    // add row with no del before it — a genuine pure insertion, not an add
+    // that merely happens to follow another add inside a change block.
+    expect([...seen].sort()).toEqual([
+      "delete",
+      "insert",
+      "replace-even",
+      "replace-uneven",
+      "same",
+    ]);
   });
 });
 
@@ -173,6 +200,30 @@ describe("the pairing invariant from spec section 4.1", () => {
         expect(pair, `a spanned row was not in any pair: ${JSON.stringify(row)}`).toBeDefined();
         expect(pair!.left).not.toBeNull();
         expect(pair!.right).not.toBeNull();
+      }
+
+      // "In SOME pair with a partner" is too weak on its own: for
+      // [del a, del b, add A, add B] an implementation that paired a/B and b/A
+      // would satisfy every assertion above while contradicting the dels[k] /
+      // adds[k] rule the whole design rests on. Pin the partner BY INDEX.
+      let cursor = 0;
+      while (cursor < refined.length) {
+        if (refined[cursor].tag !== "del") {
+          cursor += 1;
+          continue;
+        }
+        const delStart = cursor;
+        while (cursor < refined.length && refined[cursor].tag === "del") cursor += 1;
+        const addStart = cursor;
+        while (cursor < refined.length && refined[cursor].tag === "add") cursor += 1;
+        const dels = refined.slice(delStart, addStart);
+        const adds = refined.slice(addStart, cursor);
+        for (let k = 0; k < Math.min(dels.length, adds.length); k++) {
+          const pair = pairs.find((p) => p.left === dels[k]);
+          expect(pair, `del[${k}] of a change block was in no pair`).toBeDefined();
+          // The exact object, not merely a non-null partner.
+          expect(pair!.right).toBe(adds[k]);
+        }
       }
     }
   });

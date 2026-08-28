@@ -275,7 +275,11 @@ describe("HistoryPanel comparison", () => {
       })) as never,
     );
     wrap(<HistoryPanel id="ws1" />, "/cockpit/ws1?tab=history&a=bbbbbbb&b=aaaaaaa");
+    // BOTH renderers, not just the unified one. `version-diff` identifies only
+    // the unified view, and split is now the default — so checking it alone
+    // would let a wrongly-ordered side-by-side diff render here and still pass.
     expect(document.querySelector("[data-testid='version-diff']")).toBeNull();
+    expect(screen.queryByTestId("side-by-side-diff")).toBeNull();
   });
 
   it("says a selected version is not in this list instead of loading forever", () => {

@@ -14,7 +14,15 @@
    there is nothing that can drift. */
 .grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* minmax(0, 1fr), NOT 1fr: a 1fr track's minimum is `auto`, which is the
+     max-content width of its longest UNBREAKABLE item. `pre-wrap` wraps at
+     spaces but never inside a token, so one long unspaced string (a URL, a
+     citation marker, a pasted identifier) blows the track open. Measured in
+     Chromium with a 2,000-character token: `1fr 1fr` gave a 13,653px scroll
+     width inside an 800px box, with the columns at 13,610px and 43px — not
+     "two equal columns" and not "no horizontal scrolling". minmax(0, 1fr)
+     with overflow-wrap below gives 800px and 400px/400px. */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   font-size: 0.85rem;
 }
 
@@ -34,6 +42,11 @@
 .cell,
 .filler {
   white-space: pre-wrap;
+  /* pre-wrap alone breaks at spaces only. `anywhere` is what lets a long
+     unbroken token break mid-token, which is the other half of keeping the
+     columns equal — minmax(0, 1fr) above stops the TRACK growing, this stops
+     the text spilling out of it. */
+  overflow-wrap: anywhere;
   padding: 0.15rem 0.5rem;
   /* A blank filler cell must still occupy its row, or the following rows fall
      out of step with the other column. */
