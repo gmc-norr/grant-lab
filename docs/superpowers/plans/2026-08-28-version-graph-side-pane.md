@@ -39,12 +39,12 @@
 | File | Change |
 |---|---|
 | `frontend/src/cockpit/historyNav.ts` | `nextSelection` helper + `selectAndOpen` |
-| `frontend/src/cockpit/historyNav.test.ts` | Tests for both, incl. the pinned two-writer demonstration |
+| `frontend/src/cockpit/historyNav.test.ts` → **`.tsx`** | Tests for both, incl. the pinned two-writer demonstration. Renamed because it now renders JSX. |
 | `frontend/src/cockpit/CockpitSidebar.tsx` | `Versions` group → `<VersionGraph id={id} />`; drop the `api/workspace` `useVersions` import |
-| `frontend/src/cockpit/CockpitSidebar.test.tsx` | Four `/versions` stubs → `/history` with the new response shape |
+| `frontend/src/cockpit/CockpitSidebar.test.tsx` | Four `/versions` stubs → `/history`, with the row's FIELD NAMES changed too (`message`→`subject`, `created_at`→`committed_at`); one graph-specific test added |
 | `frontend/src/api/workspace.ts` | Delete the now-callerless `useVersions` |
 | `frontend/src/cockpit/HistoryPanel.tsx` | Remove the list + `VersionRowButton`; add the empty state; reword three messages |
-| `frontend/src/cockpit/HistoryPanel.test.tsx` | List tests out, empty-state and copy tests in |
+| `frontend/src/cockpit/HistoryPanel.test.tsx` | Six list tests out, six empty-state and copy tests in |
 
 ---
 
@@ -164,12 +164,20 @@ describe("one URL write, not two — spec section 6.1", () => {
 });
 ```
 
-Add to the file's imports (the first four are new):
+**Replace** the file's first and third import lines — do not add a second block.
+`renderHook`, `act` and `MemoryRouter` are already imported (lines 1 and 3), and
+re-importing them is a duplicate-binding compile error.
 
 ```ts
-import { fireEvent, render, screen, renderHook, act } from "@testing-library/react";
+// was: import { renderHook, act } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen } from "@testing-library/react";
+// was: import { MemoryRouter } from "react-router-dom";
 import { MemoryRouter, useSearchParams } from "react-router-dom";
+```
 
+and add one new import beside the existing `./historyNav` one:
+
+```ts
 import { useCockpitNav } from "./cockpitNav";
 ```
 
@@ -667,17 +675,78 @@ it becomes:
       });
 ```
 
-`includes`, not `endsWith`: the history request carries `?artifact=draft`, so an `endsWith("/history")` stub never matches and the component falls through to the real client. Line 167's stub returns rows rather than `[]` — convert it the same way, wrapping its array in `{ versions: [...], truncated: false, history_available: true }`.
+`includes`, not `endsWith`: the history request carries `?artifact=draft`, so an `endsWith("/history")` stub never matches and the component falls through to the real client.
 
-Then add one new test to the file, using its existing render harness:
+**Line 167's stub needs its FIELD NAMES changed, not just its envelope.** It currently returns a DB-shaped row:
 
 ```ts
-it("renders the version graph, not a plain list", async () => {
-  // The group is the graph now: rows carry a role dot and a short sha.
-  // Asserting only that "Versions" exists would pass with the old list.
-  renderSidebar();  // the file's existing helper
+{ commit_sha: "a".repeat(40), message: "user spec init", created_by: "user", created_at: "2026-06-24T00:00:00Z" }
+```
+
+`VersionGraph` renders `v.subject` and reads `v.committed_at`. Wrapping this row unchanged leaves "user spec init" **unrendered**, and the existing assertion on line 179 (`findByText("user spec init")`) fails. It becomes:
+
+```ts
+    if (path.includes("/history"))
+      return Promise.resolve({
+        data: {
+          versions: [
+            {
+              commit_sha: "a".repeat(40),
+              committed_at: "2026-06-24T00:00:00Z",
+              subject: "user spec init",
+              created_by: "user",
+              triggering_turn_id: null,
+              turn_prompt: null,
+            },
+          ],
+          truncated: false,
+          history_available: true,
+        },
+        error: undefined,
+      });
+```
+
+`message` → `subject`, `created_at` → `committed_at`, plus the two fields `VersionRow` requires. Line 179's assertion then passes unchanged.
+
+Then add one new test, using the file's existing `renderSidebar()` helper (line 62):
+
+```ts
+it("renders the version GRAPH, not the old plain list", async () => {
+  // Must assert something only the graph produces. "No versions yet." is NOT
+  // that: the old sidebar renders those exact words too (CockpitSidebar.tsx:139),
+  // so an empty-list assertion passes either way and proves nothing.
+  vi.spyOn(clientMod.api, "GET").mockImplementation(((path: string) => {
+    if (path.includes("/history"))
+      return Promise.resolve({
+        data: {
+          versions: [
+            {
+              commit_sha: "abcdef1234567890abcdef1234567890abcdef12",
+              committed_at: "2026-06-24T00:00:00Z",
+              subject: "user spec init",
+              created_by: "agent",
+              triggering_turn_id: null,
+              turn_prompt: null,
+            },
+          ],
+          truncated: false,
+          history_available: true,
+        },
+        error: undefined,
+      });
+    if (path.endsWith("/members")) return Promise.resolve({ data: [], error: undefined });
+    if (path.endsWith("/cockpit-meta"))
+      return Promise.resolve({ data: { workspace_title: "W", workspace_deadline: null, current_phase: "active", role: "owner", spec_locked: false, member_count: 1 }, error: undefined });
+    if (path.endsWith("/references")) return Promise.resolve({ data: [], error: undefined });
+    if (path.endsWith("/scorecard")) return Promise.resolve({ data: null, error: undefined });
+    return Promise.resolve(draft as never);
+  }) as never);
+  renderSidebar();
   fireEvent.click(await screen.findByRole("button", { name: /versions/i }));
-  expect(await screen.findByText(/No versions yet/i)).toBeInTheDocument();
+  // Graph-only output: the 7-char sha and a role dot. The old list rendered
+  // neither — it showed the full message and the role as plain text.
+  expect(await screen.findByText("abcdef1")).toBeInTheDocument();
+  expect(document.querySelector('[data-role="agent"]')).not.toBeNull();
 });
 ```
 
@@ -825,7 +894,20 @@ it("no message in this panel still says 'above'", () => {
 });
 ```
 
-Delete from this file the tests that assert list rendering: the role-badge test, the "shows WHY a version exists" test, the "no reason line" test, the "renders a row with no provenance" test, and the truncation test. Those behaviours moved to `VersionGraph.test.tsx` — **do not delete them without checking each has an equivalent there**; the turn-prompt ("because you asked") behaviour has **no** equivalent yet and must be added to `VersionGraph.test.tsx` and to `VersionGraph.tsx` if it is to survive. If it is dropped deliberately, say so in the task report.
+Delete from this file the **six** tests that depend on version rows existing in this panel:
+
+| Test | Equivalent in `VersionGraph.test.tsx`? |
+|---|---|
+| "renders a row's role badge and its subject verbatim" | yes — "renders one row per version…" + "marks the role on the dot" |
+| "shows WHY a version exists when a prompt caused it" | **NO** — see below |
+| "shows no reason line at all when there is no prompt" | **NO** — see below |
+| "renders a row with no provenance as ordinary, not as an error" | yes — "marks the role on the dot, including no provenance" |
+| "says so when the list is truncated" | yes — "says older versions exist when the list is truncated" |
+| **"selecting a row puts its sha in the URL"** (`HistoryPanel.test.tsx:176-190`) | yes — "marks a selected version with aria-pressed" + "clicking a dot writes BOTH…" |
+
+That last one is easy to miss: it calls `getByRole("button", { name: /one/ })`, and Task 4 deletes every `VersionRowButton`, so it cannot pass. It must go.
+
+**The turn-prompt behaviour has no home.** Two of the six tests cover "because you asked: …" — the line showing which instruction produced a version — and `VersionGraph` as written in Task 2 does **not** render `turn_prompt`. The implementer must either add it to `VersionGraph.tsx` and cover it in `VersionGraph.test.tsx` (adjusting the counts below), or record in the task report that it was dropped deliberately. **Silently losing it is a failed task.**
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -895,12 +977,14 @@ Derived, not guessed:
 
 | | Files | Tests |
 |---|---|---|
-| Baseline (master `e142e198`) | 115 | 689 |
+| Baseline (master `e142e198`, measured by running the suite) | 115 | 689 |
 | Task 1 — `historyNav.test.ts` → `.tsx` | +0 (a rename is not a new file) | +7 |
 | Task 2 — `VersionGraph.test.tsx` | +1 | +10 |
 | Task 3 — `CockpitSidebar.test.tsx` | +0 | +1 |
-| Task 4 — `HistoryPanel.test.tsx` | +0 | +6 −5 = +1 |
-| **Total** | **116** | **708** |
+| Task 4 — `HistoryPanel.test.tsx` | +0 | +6 −6 = **0** |
+| **Total** | **116** | **707** |
+
+The Task 4 row is **six** deletions, not five: the sixth is "selecting a row puts its sha in the URL", which cannot survive the removal of `VersionRowButton`. Adding turn-prompt coverage to `VersionGraph` (Task 4 Step 1) would raise both the Task 2 file's count and this total — if you do that, say so and give the new number rather than reporting a mismatch.
 
 **If your total differs, name the term that changed — never adjust the expectation to make it close.** A file count of 115 means `VersionGraph.test.tsx` was not collected and its ten tests never ran; vitest reports that as success.
 
@@ -1010,6 +1094,32 @@ const after = await p.evaluate(() => {
 });
 console.log('AFTER TWO CLICKS:', JSON.stringify(after));
 await p.screenshot({ path: '/home/parlar_ai/sbs-run/graph-gate.png' });
+
+// Spec section 11.2 item 4: dragging the pane wider must show MORE subject.
+// A pane that resizes while the text stays clipped to its old width is a real
+// failure mode (a fixed width on the row, or a missing min-width:0).
+const handle = await p.$('[aria-label="Resize sidebar"]');
+const before = await p.evaluate(() => {
+  const s = document.querySelector('ul[aria-label="Versions"] [class*="subject"]');
+  return { w: Math.round(s.getBoundingClientRect().width), scrollW: s.scrollWidth };
+});
+const hb = await handle.boundingBox();
+await p.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2);
+await p.mouse.down();
+await p.mouse.move(hb.x + 260, hb.y + hb.height / 2, { steps: 10 });
+await p.mouse.up();
+await p.waitForTimeout(400);
+const afterDrag = await p.evaluate(() => {
+  const ul = document.querySelector('ul[aria-label="Versions"]');
+  const s = ul.querySelector('[class*="subject"]');
+  const rows = [...ul.querySelectorAll('button')];
+  return {
+    w: Math.round(s.getBoundingClientRect().width),
+    rowOverflow: rows.some((r) => r.scrollWidth > r.clientWidth + 1),
+  };
+});
+console.log('RESIZE:', JSON.stringify({ subjectWidthBefore: before.w, subjectWidthAfter: afterDrag.w, grew: afterDrag.w > before.w + 20, rowOverflowAfter: afterDrag.rowOverflow }));
+await p.screenshot({ path: '/home/parlar_ai/sbs-run/graph-gate-wide.png' });
 await b.close();
 ```
 
@@ -1028,6 +1138,8 @@ Run: `node <scratchpad>/graph-gate.mjs`
 | `after.diffContainerWidth` | **>= 900** | no-regression vs the recorded baseline |
 | `after.leftColumnWidth` | **>= 449** | ditto |
 | `[BLOCKED non-GET]` | never printed | the gate mutated nothing |
+| `RESIZE.grew` | `true` | dragging the pane wider really shows more subject |
+| `RESIZE.rowOverflowAfter` | `false` | and it still does not overflow at the new width |
 
 The width rows are a **no-regression** check, not a gain. Spec §2.1: this change buys vertical space; the diff container was already 900px. Do not rewrite these as "wider than before" — that is unsatisfiable and would get relaxed.
 

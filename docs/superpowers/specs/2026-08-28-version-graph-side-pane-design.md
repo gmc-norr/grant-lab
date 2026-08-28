@@ -324,8 +324,6 @@ gate that has never gone red is not known to bite.
 
 - `frontend/src/cockpit/CockpitSidebar.tsx` — the `Versions` group becomes the
   graph; drop the `api/workspace` `useVersions` import.
-- `frontend/src/cockpit/CockpitSidebar.module.css` — graph glyph, dot, connector
-  line, truncation.
 - `frontend/src/cockpit/HistoryPanel.tsx` — remove the version list; add the §8
   empty state (gated on neither selected); reword the three §8.1 messages.
 - `frontend/src/cockpit/historyNav.ts` — add `selectAndOpen` (§6.2). `toggle`
@@ -345,5 +343,11 @@ gate that has never gone red is not known to bite.
 
 **Unchanged**
 
-- `frontend/src/cockpit/diff.ts`, `SideBySideDiffView.tsx`, `DiffView.tsx`,
-  `historyNav.ts` (its `toggle` is reused as-is), and every diff test.
+- `frontend/src/cockpit/diff.ts`, `SideBySideDiffView.tsx`, `DiffView.tsx`, and
+  every diff test.
+- `CockpitSidebar.module.css` — the graph's styles live in
+  `VersionGraph.module.css` beside the component, not in the sidebar's shared
+  sheet.
+
+`historyNav.ts` is NOT unchanged — §6.2 adds `selectAndOpen` to it. Only its
+`toggle` and `toggle`'s tests are untouched.
