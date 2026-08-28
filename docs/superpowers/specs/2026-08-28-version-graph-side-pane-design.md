@@ -113,10 +113,23 @@ priority order:
 3. **Short sha**, 7 characters.
 4. **Subject**, truncated to one line with an ellipsis.
 
-The full subject and the exact timestamp are available on hover (`title`), and
-in full in the diff's own column header once the version is selected. Dragging
-the pane wider reveals more of the subject — that is what the resize handle is
-for, and it persists.
+### 5.1 What does not fit goes in a hover card
+
+The row cannot hold the untruncated subject, the timestamp, or the "because you
+asked: …" line that says which instruction produced a version. All three live in
+a Mantine `HoverCard` on the row, opened by hover or keyboard focus.
+
+`position="right-start"` puts it **beside** the pane, which is where there is
+room. Mantine's floating middleware flips it automatically when there is not — a
+widened pane, a narrow window — so no manual positioning logic is needed. Mantine
+9.4.0 is already a dependency and `Tooltip position="right"` is already used in
+`shell/ActivityBar.tsx:76`; this adds nothing to the lockfile.
+
+`turn_prompt` is null for every `reconciled` row and every commit with no DB row,
+so its absence is ordinary: render nothing, never a placeholder.
+
+Dragging the pane wider still reveals more of the subject on the row itself —
+that is what the resize handle is for, and it persists.
 
 Newest at the top, matching the list it replaces and the git-sourced order.
 

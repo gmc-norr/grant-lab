@@ -431,6 +431,38 @@ describe("VersionGraph", () => {
     wrap();
     expect(screen.getByText(/Older versions exist/i)).toBeInTheDocument();
   });
+
+  it("shows the untruncated subject and the timestamp on hover", async () => {
+    const user = userEvent.setup();
+    const long = "a subject far too long to fit inside a 276px side pane without clipping";
+    mockList({ versions: [ROW("aaaaaaa", long)] });
+    wrap();
+    await user.hover(screen.getByRole("button", { name: /aaaaaaa/ }));
+    const card = await screen.findByTestId("version-card-aaaaaaa");
+    expect(card.textContent).toContain(long);
+    expect(card.textContent).toContain("aaaaaaa");
+  });
+
+  it("shows WHY a version exists when a prompt caused it", async () => {
+    const user = userEvent.setup();
+    mockList({
+      versions: [{ ...ROW("aaaaaaa", "agent draft edit", "agent"), turn_prompt: "Tighten the aims section" }],
+    });
+    wrap();
+    await user.hover(screen.getByRole("button", { name: /aaaaaaa/ }));
+    expect(await screen.findByText(/because you asked: Tighten the aims section/i)).toBeInTheDocument();
+  });
+
+  it("shows no reason line at all when there is no prompt", async () => {
+    // Null for every reconciled row and every commit with no DB row. Absence is
+    // ordinary, so there must be no placeholder — and the card still opens.
+    const user = userEvent.setup();
+    mockList({ versions: [ROW("aaaaaaa", "collab checkpoint: draft", null)] });
+    wrap();
+    await user.hover(screen.getByRole("button", { name: /aaaaaaa/ }));
+    await screen.findByTestId("version-card-aaaaaaa");
+    expect(screen.queryByText(/because you asked/i)).toBeNull();
+  });
 });
 ```
 
@@ -543,6 +575,8 @@ Create `frontend/src/cockpit/VersionGraph.module.css`:
 Create `frontend/src/cockpit/VersionGraph.tsx`:
 
 ```tsx
+import { HoverCard, Text } from "@mantine/core";
+
 import { useVersions } from "../api/versions";
 import { useHistoryNav } from "./historyNav";
 import { SidebarGroup } from "./SidebarGroup";
@@ -582,21 +616,49 @@ export function VersionGraph({ id }: { id: string }) {
             const selected = v.commit_sha === nav.a || v.commit_sha === nav.b;
             return (
               <li key={v.commit_sha} className={styles.row}>
-                <button
-                  type="button"
-                  className={styles.button}
-                  aria-pressed={selected}
-                  // The full subject and exact time do not fit at 276px; the
-                  // tooltip is where they live until the pane is dragged wider.
-                  title={`${v.subject} — ${new Date(v.committed_at).toLocaleString()}`}
-                  onClick={() => nav.selectAndOpen(v.commit_sha)}
+                <HoverCard
+                  position="right-start"
+                  withinPortal
+                  openDelay={250}
+                  shadow="md"
+                  width={340}
                 >
-                  <span className={styles.lane} aria-hidden="true">
-                    <span className={styles.dot} data-role={v.created_by ?? "none"} />
-                  </span>
-                  <span className={styles.sha}>{v.commit_sha.slice(0, 7)}</span>
-                  <span className={styles.subject}>{v.subject}</span>
-                </button>
+                  <HoverCard.Target>
+                    <button
+                      type="button"
+                      className={styles.button}
+                      aria-pressed={selected}
+                      onClick={() => nav.selectAndOpen(v.commit_sha)}
+                    >
+                      <span className={styles.lane} aria-hidden="true">
+                        <span className={styles.dot} data-role={v.created_by ?? "none"} />
+                      </span>
+                      <span className={styles.sha}>{v.commit_sha.slice(0, 7)}</span>
+                      <span className={styles.subject}>{v.subject}</span>
+                    </button>
+                  </HoverCard.Target>
+                  {/* What will not fit at 276px lives here. `right-start` puts it
+                      beside the pane; Mantine's floating middleware flips it when
+                      there is no room to the right (a widened pane, a narrow
+                      window), so no manual positioning is needed. */}
+                  <HoverCard.Dropdown data-testid={`version-card-${v.commit_sha.slice(0, 7)}`}>
+                    <Text size="sm" fw={600}>
+                      {v.subject}
+                    </Text>
+                    <Text size="xs" c="dimmed" mt={2}>
+                      {v.created_by ?? "not recorded"} · {v.commit_sha.slice(0, 7)} ·{" "}
+                      {new Date(v.committed_at).toLocaleString()}
+                    </Text>
+                    {/* The "why". Null for every reconciled row and every commit
+                        with no DB row, so absence is ordinary — render nothing,
+                        not a placeholder. */}
+                    {v.turn_prompt && (
+                      <Text size="xs" mt={6}>
+                        because you asked: {v.turn_prompt}
+                      </Text>
+                    )}
+                  </HoverCard.Dropdown>
+                </HoverCard>
               </li>
             );
           })}
@@ -619,7 +681,7 @@ export function VersionGraph({ id }: { id: string }) {
 
 Run: `cd frontend && pnpm vitest run src/cockpit/VersionGraph.test.tsx`
 
-Expected: **10 tests passed**.
+Expected: **13 tests passed**.
 
 - [ ] **Step 6: Prove the click test can fail**
 
@@ -899,15 +961,17 @@ Delete from this file the **six** tests that depend on version rows existing in 
 | Test | Equivalent in `VersionGraph.test.tsx`? |
 |---|---|
 | "renders a row's role badge and its subject verbatim" | yes — "renders one row per version…" + "marks the role on the dot" |
-| "shows WHY a version exists when a prompt caused it" | **NO** — see below |
-| "shows no reason line at all when there is no prompt" | **NO** — see below |
+| "shows WHY a version exists when a prompt caused it" | yes — same-named test in the hover card |
+| "shows no reason line at all when there is no prompt" | yes — same-named test in the hover card |
 | "renders a row with no provenance as ordinary, not as an error" | yes — "marks the role on the dot, including no provenance" |
 | "says so when the list is truncated" | yes — "says older versions exist when the list is truncated" |
 | **"selecting a row puts its sha in the URL"** (`HistoryPanel.test.tsx:176-190`) | yes — "marks a selected version with aria-pressed" + "clicking a dot writes BOTH…" |
 
 That last one is easy to miss: it calls `getByRole("button", { name: /one/ })`, and Task 4 deletes every `VersionRowButton`, so it cannot pass. It must go.
 
-**The turn-prompt behaviour has no home.** Two of the six tests cover "because you asked: …" — the line showing which instruction produced a version — and `VersionGraph` as written in Task 2 does **not** render `turn_prompt`. The implementer must either add it to `VersionGraph.tsx` and cover it in `VersionGraph.test.tsx` (adjusting the counts below), or record in the task report that it was dropped deliberately. **Silently losing it is a failed task.**
+**The turn-prompt behaviour keeps a home — verify it before deleting.** Two of the six tests cover "because you asked: …", the line showing which instruction produced a version. At 276px there is no room for it on the row, so Task 2 puts it in the hover card, along with the untruncated subject and the timestamp. Both tests have same-named equivalents there.
+
+Before deleting either one, **run `VersionGraph.test.tsx` and see its two turn-prompt tests pass**. Deleting coverage on the promise that it exists elsewhere, without looking, is how behaviour disappears between two green suites.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -979,10 +1043,10 @@ Derived, not guessed:
 |---|---|---|
 | Baseline (master `e142e198`, measured by running the suite) | 115 | 689 |
 | Task 1 — `historyNav.test.ts` → `.tsx` | +0 (a rename is not a new file) | +7 |
-| Task 2 — `VersionGraph.test.tsx` | +1 | +10 |
+| Task 2 — `VersionGraph.test.tsx` | +1 | +13 |
 | Task 3 — `CockpitSidebar.test.tsx` | +0 | +1 |
 | Task 4 — `HistoryPanel.test.tsx` | +0 | +6 −6 = **0** |
-| **Total** | **116** | **707** |
+| **Total** | **116** | **710** |
 
 The Task 4 row is **six** deletions, not five: the sixth is "selecting a row puts its sha in the URL", which cannot survive the removal of `VersionRowButton`. Adding turn-prompt coverage to `VersionGraph` (Task 4 Step 1) would raise both the Task 2 file's count and this total — if you do that, say so and give the new number rather than reporting a mismatch.
 
