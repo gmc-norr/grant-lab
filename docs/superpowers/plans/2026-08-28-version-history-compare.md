@@ -1051,7 +1051,11 @@ function wrapper({ children }: { children: ReactNode }) {
 }
 
 describe("useVersions", () => {
-  beforeEach(() => vi.restoreAllMocks());
+  beforeEach(() => {
+    // Block body, not a concise arrow: `restoreAllMocks()` returns VitestUtils,
+    // and `pnpm exec tsc --noEmit` rejects returning it from a void callback.
+    vi.restoreAllMocks();
+  });
 
   it("returns the list payload", async () => {
     vi.spyOn(clientMod.api, "GET").mockResolvedValue({
@@ -1097,7 +1101,11 @@ describe("useVersions", () => {
 });
 
 describe("useVersion", () => {
-  beforeEach(() => vi.restoreAllMocks());
+  beforeEach(() => {
+    // Block body, not a concise arrow: `restoreAllMocks()` returns VitestUtils,
+    // and `pnpm exec tsc --noEmit` rejects returning it from a void callback.
+    vi.restoreAllMocks();
+  });
 
   it("does not fetch when no sha is selected", async () => {
     const spy = vi.spyOn(clientMod.api, "GET");
@@ -1982,7 +1990,11 @@ function mockVersion(markdown: string | null) {
 }
 
 describe("HistoryPanel", () => {
-  beforeEach(() => vi.restoreAllMocks());
+  beforeEach(() => {
+    // Block body, not a concise arrow: `restoreAllMocks()` returns VitestUtils,
+    // and `pnpm exec tsc --noEmit` rejects returning it from a void callback.
+    vi.restoreAllMocks();
+  });
 
   it("shows the zero-version invitation, not an empty list", () => {
     mockList({ versions: [], history_available: true });
@@ -2297,7 +2309,11 @@ Append to `frontend/src/cockpit/HistoryPanel.test.tsx`:
 
 ```tsx
 describe("HistoryPanel comparison", () => {
-  beforeEach(() => vi.restoreAllMocks());
+  beforeEach(() => {
+    // Block body, not a concise arrow: `restoreAllMocks()` returns VitestUtils,
+    // and `pnpm exec tsc --noEmit` rejects returning it from a void callback.
+    vi.restoreAllMocks();
+  });
 
   /** Two versions: the OLDER one is second in the list (newest-first). */
   function mockPair(olderMd: string, newerMd: string) {
