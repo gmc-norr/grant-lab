@@ -72,11 +72,33 @@ export default defineConfig({
     // catch-all would also swallow /@vite, /@id, /@fs, /src, /node_modules and
     // the HMR requests, breaking dev.
     proxy: {
-      "/api/ws": { target: BACKEND.replace(/^http/, "ws"), ws: true, changeOrigin: true },
+      "/api/ws": {
+        target: BACKEND.replace(/^http/, "ws"),
+        ws: true,
+        changeOrigin: true,
+        // The WS handshake has its OWN origin check
+        // (collab/ws_auth.py:check_origin — CSWSH defense; the HTTP CSRF
+        // middleware skips it because an upgrade is a GET). Without this the
+        // socket is rejected, the Yjs doc never syncs, and the editor shows a
+        // blank page while the Outline — plain HTTP — renders fine.
+        configure(proxy) {
+          proxy.on("proxyReqWs", (proxyReq) => proxyReq.setHeader("origin", BACKEND));
+        },
+      },
       "^/": {
         target: BACKEND,
         changeOrigin: true,
         ws: false,
+        // changeOrigin rewrites Host but NOT Origin, and the backend's CSRF
+        // middleware compares Origin against APP_BASE_URL — so every POST from
+        // the dev server was rejected with "origin mismatch" (you cannot log
+        // in). A reverse proxy presenting itself as the backend should rewrite
+        // both. The /api/ws entry above needs the same thing for the same
+        // reason, via its own check. Dev-server config only: never part of a
+        // production bundle.
+        configure(proxy) {
+          proxy.on("proxyReq", (proxyReq) => proxyReq.setHeader("origin", BACKEND));
+        },
         bypass(req) {
           const url = (req.url ?? "/").split("?")[0];
           return shouldServeViaVite(url) ? req.url : undefined;
