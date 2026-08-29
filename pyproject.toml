@@ -233,7 +233,14 @@ line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "SIM"]
+# ASYNC: blocking work inside `async def` runs on the single asyncio loop this
+# instance shares, so one slow call stalls every request, socket and scheduler
+# future. The convention was already applied by hand at the route layer
+# (collab_ws.py) and absent everywhere else, with nothing checking — this is the
+# floor that checks. It cost three fixes in src/ (tools/history.py's git calls,
+# now awaited off the loop) and one pinned exemption (room.py's bounded ops
+# drain).
+select = ["E", "F", "I", "B", "UP", "SIM", "ASYNC"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
@@ -244,3 +251,11 @@ asyncio_mode = "auto"
 # silently. Scoped narrowly to ResourceWarning — we don't want a stray
 # DeprecationWarning from an unrelated library to fail the suite.
 filterwarnings = ["error::ResourceWarning"]
+
+
+[tool.ruff.lint.per-file-ignores]
+# Test setup shells out to git inside async tests. Blocking the loop matters
+# because production shares ONE loop across every request; a test's loop serves
+# only that test, so there is nothing to starve. ASYNC110 and the rest stay
+# armed here — only the subprocess rule is lifted.
+"tests/**" = ["ASYNC221"]

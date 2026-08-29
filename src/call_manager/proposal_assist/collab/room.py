@@ -908,8 +908,15 @@ class RoomManager:
         # room.ops, but one already inside operate() may still be mid-write. Poll
         # ops to zero under a bounded deadline, then proceed regardless (for THESE
         # ops B4's mutex is the durable backstop; overrun is logged, not fatal).
+        #
+        # ruff ASYNC110 wants an asyncio.Event here. Deliberately not taken:
+        # `room.ops` is mutated at four sites on the accept path, and an Event
+        # would have to be set/cleared correctly at every one of them — a
+        # concurrency refactor of the eviction path to save at most a few dozen
+        # 10 ms wakeups on a rare teardown. The wait is already bounded and
+        # proceeds regardless, so the poll cannot hang anything.
         deadline = loop.time() + _RETIRE_OPS_DRAIN_SECONDS
-        while room.ops > 0 and loop.time() < deadline:
+        while room.ops > 0 and loop.time() < deadline:  # noqa: ASYNC110
             await asyncio.sleep(0.01)
         if room.ops > 0:
             logger.warning(

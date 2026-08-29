@@ -342,23 +342,30 @@ PROVEN_NON_COMMIT: tuple[Fingerprint, ...] = (
     # The dynamic parts are sha/limit arguments, not the subcommand itself, but
     # because the list contains non-Constant elements the fail-closed checker
     # cannot prove "log"/"show"/"diff" is in position 1.
+    #
+    # These moved out of the async `*_impl` handlers into sync `_git_*` helpers
+    # so the handlers can await them off the event loop (ruff ASYNC221 — a git
+    # log on a large workspace was blocking the whole single-loop instance).
+    # Only qualname and offset changed: each argv_repr below is byte-identical
+    # to the one that was pinned before the move, which is the evidence that the
+    # git commands themselves did not change.
     # -----------------------------------------------------------------------
-    (  # get_artifact_history_impl: git log -n{limit} ... — reads commit log, no write
+    (  # _git_log_proposal: git log -n{limit} ... — reads commit log, no write
         "call_manager/proposal_assist/tools/history.py",
-        "get_artifact_history_impl",
-        14,
+        "_git_log_proposal",
+        1,
         "List(elts=[Constant(value='git'), Constant(value='log'), JoinedStr(values=[Constant(value='-n'), FormattedValue(value=Name(id='limit', ctx=Load()), conversion=-1)]), Constant(value='--pretty=format:%H%x00%ct%x00%s'), Constant(value='--'), Name(id='PROPOSAL_FILENAME', ctx=Load())], ctx=Load())",  # noqa: E501
     ),
-    (  # read_artifact_at_impl: git show {sha}:{path} — reads a blob, no write
+    (  # _git_show_proposal: git show {sha}:{path} — reads a blob, no write
         "call_manager/proposal_assist/tools/history.py",
-        "read_artifact_at_impl",
-        10,
+        "_git_show_proposal",
+        1,
         "List(elts=[Constant(value='git'), Constant(value='show'), JoinedStr(values=[FormattedValue(value=Name(id='commit_sha', ctx=Load()), conversion=-1), Constant(value=':'), FormattedValue(value=Name(id='PROPOSAL_FILENAME', ctx=Load()), conversion=-1)])], ctx=Load())",  # noqa: E501
     ),
-    (  # diff_artifact_impl: git diff {sha_a} {sha_b} -- file — reads a diff, no write
+    (  # _git_diff_proposal: git diff {sha_a} {sha_b} -- file — reads a diff, no write
         "call_manager/proposal_assist/tools/history.py",
-        "diff_artifact_impl",
-        13,
+        "_git_diff_proposal",
+        1,
         "List(elts=[Constant(value='git'), Constant(value='diff'), Name(id='commit_a', ctx=Load()), Name(id='commit_b', ctx=Load()), Constant(value='--'), Name(id='PROPOSAL_FILENAME', ctx=Load())], ctx=Load())",  # noqa: E501
     ),
     # -----------------------------------------------------------------------
