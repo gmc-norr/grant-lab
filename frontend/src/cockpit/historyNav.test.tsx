@@ -197,7 +197,7 @@ describe("one URL write, not two — spec section 6.1", () => {
           onClick={() => {
             if (mode === "two-writers") {
               hist.toggle("abc1234");
-              cock.setTab("history");
+              cock.setTab("diff");
             } else {
               hist.selectAndOpen("abc1234");
             }
@@ -222,7 +222,7 @@ describe("one URL write, not two — spec section 6.1", () => {
 
   it("selectAndOpen leaves BOTH the selection and the tab in the URL", () => {
     const url = urlAfterClick("selectAndOpen");
-    expect(url).toContain("tab=history");
+    expect(url).toContain("tab=diff");
     expect(url).toContain("a=abc1234");
   });
 
@@ -230,7 +230,7 @@ describe("one URL write, not two — spec section 6.1", () => {
     // Measured, not assumed. Deleting selectAndOpen and "simplifying" back to
     // two calls must break something; this is that something.
     const url = urlAfterClick("two-writers");
-    expect(url).toContain("tab=history");
+    expect(url).toContain("tab=diff");
     expect(url).not.toContain("a=abc1234");
   });
 });
@@ -352,7 +352,7 @@ describe("selectAndOpen guards unsaved edits", () => {
     act(() => setDirty([1]));
     vi.spyOn(window, "confirm").mockReturnValue(true);
     const parsed = new URLSearchParams(clickPickAt("/cockpit/ws1?tab=draft&sec=1"));
-    expect(parsed.get("tab")).toBe("history");
+    expect(parsed.get("tab")).toBe("diff");
     expect(parsed.get("a")).toBe("aaaaaaa");
   });
 
@@ -360,10 +360,14 @@ describe("selectAndOpen guards unsaved edits", () => {
     const confirmSpy = vi.spyOn(window, "confirm");
     const parsed = new URLSearchParams(clickPickAt("/cockpit/ws1?tab=draft"));
     expect(confirmSpy).not.toHaveBeenCalled();
-    expect(parsed.get("tab")).toBe("history");
+    expect(parsed.get("tab")).toBe("diff");
   });
 
   it("does NOT ask when the comparison is ALREADY open", () => {
+    // The input stays a LEGACY ?tab=history on purpose. The guard asks "am I
+    // already on the comparison?"; comparing the raw ?tab to "diff" would say
+    // no for a legacy link and prompt to discard edits that are not being
+    // discarded. This test is what makes tabFromParams load-bearing there.
     // Picking a second version while on the comparison changes no destination,
     // so there is nothing to discard and nagging would be wrong.
     act(() => setDirty([1]));
@@ -374,5 +378,50 @@ describe("selectAndOpen guards unsaved edits", () => {
     // against nextSelection rather than guessed.
     expect(parsed.get("a")).toBe("aaaaaaa");
     expect(parsed.get("b")).toBe("bbbbbbb");
+  });
+});
+
+describe("selectAndOpen after the rename", () => {
+  function Probe() {
+    const hist = useHistoryNav();
+    const [sp] = useSearchParams();
+    return (
+      <>
+        <button onClick={() => hist.selectAndOpen("aaaaaaa")}>pick</button>
+        <output data-testid="url">{sp.toString()}</output>
+      </>
+    );
+  }
+
+  function clickPickAt(url: string) {
+    render(
+      <MemoryRouter initialEntries={[url]}>
+        <Probe />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText("pick"));
+    return new URLSearchParams(screen.getByTestId("url").textContent ?? "");
+  }
+
+  afterEach(() => {
+    act(() => resetEditorStore());
+    vi.restoreAllMocks();
+  });
+
+  it("opens the comparison as tab=diff", () => {
+    expect(clickPickAt("/cockpit/ws1?tab=draft").get("tab")).toBe("diff");
+  });
+
+  it("deselecting the last version neither opens the comparison nor prompts", () => {
+    // The resulting selection must be computed BEFORE the guard runs. Guarding
+    // first prompts "discard your unsaved edits?" and then discovers no
+    // destination change was going to happen — a prompt for nothing, which is
+    // how users learn to dismiss prompts without reading them.
+    act(() => setDirty([1]));
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const url = clickPickAt("/cockpit/ws1?tab=draft&a=aaaaaaa");
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(url.get("tab")).toBe("draft");
+    expect(url.get("a")).toBeNull();
   });
 });

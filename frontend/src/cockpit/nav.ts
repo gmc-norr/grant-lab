@@ -1,4 +1,5 @@
-export type TopTab = "draft" | "spec" | "scorecard" | "review" | "history";
+export type TopTab = "draft" | "spec" | "scorecard" | "review" | "diff";
+export type View = "outline" | "versions" | "references" | "criteria" | "members";
 export type BottomTab = "inbox" | "problems" | "activity" | "library" | "citations" | "claims";
 export type NavTarget = {
   top_tab?: TopTab;

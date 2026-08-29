@@ -83,7 +83,6 @@ export function Cockpit() {
             <Tabs.Tab value="spec">Spec</Tabs.Tab>
             <Tabs.Tab value="scorecard">Scorecard</Tabs.Tab>
             <Tabs.Tab value="review">Panel review</Tabs.Tab>
-            <Tabs.Tab value="history">History</Tabs.Tab>
           </Tabs.List>
         </Tabs>
         <div className={styles.editorScroll} data-testid="editor-scroll">
@@ -91,7 +90,7 @@ export function Cockpit() {
           {tab === "spec" && <SpecPanel id={id} />}
           {tab === "scorecard" && <ScorecardPanel id={id} onNavigate={onNavigate} />}
           {tab === "review" && <ReviewPanel id={id} />}
-          {tab === "history" && <HistoryPanel id={id} />}
+          {tab === "diff" && <HistoryPanel id={id} />}
         </div>
       </Panel>
       <PanelResizeHandle className={styles.vHandle} aria-label="Resize panel" />

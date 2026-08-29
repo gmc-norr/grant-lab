@@ -943,3 +943,33 @@ it("renders the setup view when the workspace is in setup phase", async () => {
   );
   expect(await screen.findByText(/setting up your workspace/i)).toBeInTheDocument();
 });
+
+it("the tab strip offers EXACTLY Draft, Spec, Scorecard, Panel review", () => {
+  // Asserting only that History is gone would pass on an implementation that
+  // renamed it to a visible "Diff" tab — the one thing the spec forbids, since
+  // the comparison is reached from the Versions pane, not from the tab strip.
+  //
+  // SCOPED to the artifact tablist. An unscoped getAllByRole("tab") also
+  // collects ArtifactSectionEditor's nested `Tabs.List aria-label="View"`
+  // (Section / Full draft, ArtifactSectionEditor.tsx:211-214), which DraftPanel
+  // renders on ?tab=draft — six tabs, not four. `within` is already imported
+  // in this file.
+  renderCockpit("/cockpit/ws-1?tab=draft");
+  const strip = within(screen.getByRole("tablist", { name: "Artifact" }));
+  expect(strip.getAllByRole("tab").map((t) => t.textContent)).toEqual([
+    "Draft",
+    "Spec",
+    "Scorecard",
+    "Panel review",
+  ]);
+});
+
+it("?tab=diff renders the comparison even though no tab offers it", () => {
+  renderCockpit("/cockpit/ws-1?tab=diff");
+  expect(screen.getByText(/version history/i)).toBeInTheDocument();
+});
+
+it("a legacy ?tab=history renders the comparison too", () => {
+  renderCockpit("/cockpit/ws-1?tab=history");
+  expect(screen.getByText(/version history/i)).toBeInTheDocument();
+});

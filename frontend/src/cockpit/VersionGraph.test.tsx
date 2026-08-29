@@ -1,5 +1,5 @@
 import { MantineProvider } from "@mantine/core";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, useSearchParams } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
@@ -38,16 +38,6 @@ function wrap(initial = "/cockpit/ws1?tab=draft") {
       </MemoryRouter>
     </MantineProvider>,
   );
-  // SidebarGroup with defaultOpen={false} mounts children only when open, so
-  // these tests must expand it to query rows and notes. CONDITIONAL, because on
-  // ?tab=history the group now opens itself and an unconditional click would
-  // FOLD it — which is exactly how this helper broke when that landed.
-  //
-  // A conditional click could mask the group failing to open on its own, so
-  // that behaviour is gated where it belongs, in CockpitSidebar.test.tsx
-  // ("opens the Versions group on the History tab, without a click").
-  const header = screen.getByRole("button", { name: /versions/i });
-  if (header.getAttribute("aria-expanded") !== "true") fireEvent.click(header);
   return result;
 }
 
@@ -77,7 +67,7 @@ describe("VersionGraph", () => {
     expect(dots).toEqual(["agent", "none"]);
   });
 
-  it("clicking a dot writes BOTH the selection and tab=history to the URL", async () => {
+  it("clicking a dot writes BOTH the selection and tab=diff to the URL", async () => {
     // The whole point of selectAndOpen. Asserting the URL, not the calls:
     // two separate calls both happen while the feature is broken (spec 6.1).
     const user = userEvent.setup();
@@ -86,7 +76,7 @@ describe("VersionGraph", () => {
     await user.click(screen.getByRole("button", { name: /aaaaaaa/ }));
     const url = screen.getByTestId("url").textContent ?? "";
     expect(url).toContain("a=aaaaaaa");
-    expect(url).toContain("tab=history");
+    expect(url).toContain("tab=diff");
   });
 
   it("marks a selected version with aria-pressed", () => {
@@ -174,5 +164,27 @@ describe("VersionGraph", () => {
     act(() => screen.getByRole("button", { name: /aaaaaaa/ }).focus());
     const card = await screen.findByTestId("version-card-aaaaaaa");
     expect(card.textContent).toContain("because you asked: Tighten the aims section");
+  });
+
+  it("offers the Draft/Spec switch in the pane that lists them", () => {
+    mockList({ versions: [ROW("aaaaaaa", "one")] });
+    wrap();
+    expect(screen.getByLabelText(/which artifact/i)).toBeInTheDocument();
+  });
+
+  it("switching artifact clears BOTH shas", async () => {
+    // A sha from the draft's history is not a version of the spec; leaving one
+    // selected would fetch a 404. Pinning the existing setArtifact behaviour at
+    // its new call site.
+    const user = userEvent.setup();
+    mockList({ versions: [ROW("aaaaaaa", "one")] });
+    wrap("/cockpit/ws1?tab=history&view=versions&a=aaaaaaa&b=bbbbbbb");
+    // Mantine's SegmentedControl hides its radio at opacity 0 — Playwright
+    // refuses to click it and userEvent must target the LABEL.
+    await user.click(screen.getByText("Spec"));
+    const url = new URLSearchParams(screen.getByTestId("url").textContent ?? "");
+    expect(url.get("artifact")).toBe("spec");
+    expect(url.get("a")).toBeNull();
+    expect(url.get("b")).toBeNull();
   });
 });
