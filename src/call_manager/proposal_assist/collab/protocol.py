@@ -21,7 +21,6 @@ from pycrdt import (
     create_sync_message,
     create_update_message,
     handle_sync_message,
-    read_message,
     write_var_uint,
 )
 
@@ -36,11 +35,84 @@ __all__ = [
     "is_awareness",
     "extract_update",
     "extract_awareness_update",
+    "safe_read_message",
+    "guard_sync_frame",
     "read_awareness_client_ids",
     "read_awareness_entries",
     "filter_awareness_update",
     "AwarenessEntry",
 ]
+
+
+# --- The one bounded varuint reader -----------------------------------------
+#
+# pycrdt's `read_var_uint` is an unbounded `while True` accumulating
+# `uint |= (byte & 127) << shift`. On a run of continuation bytes (0x80+) that
+# shifts a multi-megabit Python int once per byte: O(n^2). Measured on this
+# codebase — 0.115 s at 32 KB, 1.77 s at 128 KB, 7.4 s at 256 KB, ~106 s at the
+# 1,000,000-byte WebSocket frame cap. This project runs ONE asyncio loop under a
+# single-instance constraint, so those seconds are the whole installation: every
+# HTTP request, every other workspace's socket, every scheduler future.
+#
+# `f535f6c` fixed this once, inside `read_awareness_entries`, as a nested
+# function. The reader stayed reachable through `handle_sync_message`,
+# `extract_update` AND `extract_awareness_update` — including the awareness path
+# that fix was written for, whose hardened entry parser never ran because the
+# extractor in front of it blew up first. So the bound lives here, once, and
+# `read_message` is not imported into this module at all: there is no door left
+# to reach for.
+
+
+def _read_var_uint(buf, pos: int) -> tuple[int, int]:
+    """Decode one varuint from `buf` at `pos`; return (value, next position).
+
+    Capped at 10 bytes — a 64-bit value is at most 10 base-128 groups — and
+    bounds-checked on every byte, so a malformed frame raises PROMPTLY, in
+    O(1), instead of shifting an ever-widening int.
+    """
+    n = len(buf)
+    num = 0
+    shift = 0
+    for _ in range(10):
+        if pos >= n:
+            raise ValueError("y varuint: truncated")
+        b = buf[pos]
+        pos += 1
+        num |= (b & 0x7F) << shift
+        if b < 0x80:
+            return num, pos
+        shift += 7
+    raise ValueError("y varuint: overlong")
+
+
+def safe_read_message(stream: bytes, start: int = 0) -> bytes:
+    """Bounded replacement for `pycrdt.read_message`: the varuint-prefixed
+    payload beginning at `start`.
+
+    Two differences from pycrdt's reader, both deliberate. The length varuint is
+    bounded (above). And a declared length the frame cannot satisfy RAISES,
+    where pycrdt slices past the end and silently returns a short message —
+    a truncated frame is malformed, and the callers all drop malformed frames.
+    """
+    length, pos = _read_var_uint(stream, start)
+    if length > len(stream) - pos:
+        raise ValueError("y frame: declared length exceeds the payload")
+    return stream[pos : pos + length]
+
+
+def guard_sync_frame(message: bytes) -> None:
+    """Raise unless a SYNC frame's varuint-prefixed body is well-formed.
+
+    `pycrdt.handle_sync_message` reads that varuint with the UNBOUNDED reader,
+    and reimplementing its STEP1/STEP2/UPDATE dispatch here would fork the
+    protocol. So the room calls this first: it proves — over a memoryview, no
+    copy — that the varuint is at most 10 bytes and in range, after which
+    pycrdt re-reads the same short varuint in microseconds.
+    """
+    body = memoryview(message)
+    length, pos = _read_var_uint(body, 2)
+    if length > len(body) - pos:
+        raise ValueError("y frame: declared length exceeds the payload")
 
 
 def is_awareness(message: bytes) -> bool:
@@ -74,14 +146,14 @@ def extract_update(message: bytes) -> bytes:
     Strips the 2-byte [SYNC][subtype] header and reads the varuint-prefixed
     payload. Caller is responsible for checking is_sync_write() first.
     """
-    return read_message(message[2:])
+    return safe_read_message(message, 2)
 
 
 def extract_awareness_update(message: bytes) -> bytes:
     """Raw awareness payload from an AWARENESS frame: strip the 1-byte type header,
     read the varuint-prefixed payload. Caller checks is_awareness() first.
     Mirror of extract_update() (which strips the 2-byte SYNC header)."""
-    return read_message(message[1:])
+    return safe_read_message(message, 1)
 
 
 class AwarenessEntry(NamedTuple):
@@ -105,43 +177,25 @@ def read_awareness_entries(payload: bytes) -> list[AwarenessEntry]:
     client [clientID varuint][clock varuint][state varString]. Records each
     entry's byte span so a filter can rebuild a payload from original bytes.
 
-    HARDENED against adversarial frames (f535f6c): every varuint is capped at 10
-    bytes (a 64-bit value is at most 10 base-128 groups) and every read is
+    HARDENED against adversarial frames (f535f6c, generalized): every varuint goes
+    through the module's single bounded `_read_var_uint`, and every read is
     bounds-checked against the payload, so a malformed/oversized frame — e.g. a
     long run of 0x80+ continuation bytes — raises PROMPTLY (O(payload)) instead of
-    shifting a multi-megabit Python int. Without this cap a ~1 MB all-continuation
-    payload (under the WS frame cap) is an O(n^2) CPU stall that blocks the entire
-    single-instance asyncio event loop — a whole-process DoS, since the awareness
-    path is ungated by can_write. The sole caller (room.handle) wraps this in
-    try/except and drops the frame on any exception."""
+    shifting a multi-megabit Python int. See that reader for the measured cost of
+    the unbounded version. The sole caller (room.handle) wraps this in try/except
+    and drops the frame on any exception."""
     n = len(payload)
     pos = 0
-
-    def _rvu() -> int:
-        nonlocal pos
-        num = 0
-        shift = 0
-        for _ in range(10):  # a 64-bit varuint is at most 10 base-128 bytes
-            if pos >= n:
-                raise ValueError("awareness varuint: truncated")
-            b = payload[pos]
-            pos += 1
-            num |= (b & 0x7F) << shift
-            if b < 0x80:
-                return num
-            shift += 7
-        raise ValueError("awareness varuint: overlong")
-
-    count = _rvu()
+    count, pos = _read_var_uint(payload, pos)
     entries: list[AwarenessEntry] = []
     # A conforming frame declares >= 3 bytes per client (id+clock+len), so `count`
     # cannot exceed `n`; a lying count simply raises "truncated" once the body is
     # exhausted (each iteration advances pos by >= 3), keeping this O(n).
     for _ in range(count):
         start = pos
-        client_id = _rvu()
-        _rvu()                        # clock (skip)
-        state_len = _rvu()            # varString byte length
+        client_id, pos = _read_var_uint(payload, pos)
+        _, pos = _read_var_uint(payload, pos)          # clock (skip)
+        state_len, pos = _read_var_uint(payload, pos)  # varString byte length
         if state_len > n - pos:       # never skip past the payload
             raise ValueError("awareness varString: out of range")
         is_null = state_len == 4 and payload[pos : pos + 4] == b"null"

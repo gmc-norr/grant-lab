@@ -179,6 +179,12 @@ class Room:
             # this same lock) cannot mutate room.doc while we read it (Codex H2).
             async with self._lock:
                 try:
+                    # `handle_sync_message` reads the body's length varuint with
+                    # pycrdt's UNBOUNDED reader — O(n^2) on a run of continuation
+                    # bytes, ~106 s at the 1 MB frame cap, with this room's lock
+                    # AND the single asyncio loop held throughout. `guard_sync_frame`
+                    # proves the varuint short and in range first, in O(1).
+                    P.guard_sync_frame(message)
                     reply = P.handle_sync_message(message[1:], self.doc)
                 except Exception:
                     logger.warning(

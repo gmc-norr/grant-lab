@@ -248,3 +248,66 @@ def test_filter_awareness_update_empty_frame_is_all_allowed():
     # an empty frame is worth relaying at all).
     payload = _vu(0)
     assert P.filter_awareness_update(payload, [], []) is payload
+
+
+# --- Every door into the varuint reader, at the WebSocket frame cap ----------
+#
+# `_MAX_FRAME_BYTES` (collab_ws.py) is 1_000_000 and the check is `>`, so a frame
+# of EXACTLY that size reaches Room.handle. pycrdt's `read_var_uint` is an
+# unbounded `while True` shifting a Python int, so a run of continuation bytes is
+# O(n^2): measured here at 0.115 s (32 KB), 1.77 s (128 KB), 7.4 s (256 KB) and
+# ~106 s at the cap — a whole-instance freeze, since this project runs one
+# asyncio loop under a single-instance constraint.
+#
+# `f535f6c` bounded ONE function (`read_awareness_entries`) and left the reader
+# reachable through three others. This table is the regression gate for all of
+# them at once: adding a new decode path without routing it through
+# `safe_read_message` should mean adding a row here that fails.
+_ADVERSARIAL = b"\xff" * 999_998
+
+
+@pytest.mark.parametrize(
+    ("door", "header"),
+    [
+        # room.py STEP1 branch — ungated by can_write: ANY member reaches it.
+        ("guard_sync_frame", b"\x00\x00"),
+        # room.py SYNC write branch — writers only, still a whole-instance freeze.
+        ("extract_update", b"\x00\x02"),
+        # room.py awareness branch — ungated, and the door f535f6c missed: its
+        # hardened entry parser never runs, because this extractor raises first.
+        ("extract_awareness_update", b"\x01"),
+    ],
+)
+def test_every_decode_door_is_bounded_at_the_frame_cap(door, header):
+    import time
+
+    frame = header + _ADVERSARIAL
+    assert len(frame) <= 1_000_000, "the frame must be one the WS cap lets through"
+    t0 = time.perf_counter()
+    with pytest.raises(ValueError):
+        getattr(P, door)(frame)
+    assert time.perf_counter() - t0 < 2.0
+
+
+def test_safe_read_message_matches_pycrdt_on_well_formed_frames():
+    # The bound must not change what a legitimate frame decodes to. Round-trip a
+    # real update frame and an empty payload through both offsets the room uses.
+    msg = _make_update_message("hello world")
+    assert P.extract_update(msg) == P.safe_read_message(msg, 2)
+    payload = b'\x01\x2a\x01\x07{"x":1}'
+    assert P.extract_awareness_update(P.create_awareness_message(payload)) == payload
+    assert P.safe_read_message(b"\x00", 0) == b""  # declared length 0
+
+
+def test_safe_read_message_refuses_a_length_longer_than_the_payload():
+    # pycrdt's reader slices past the end and SILENTLY returns a short message.
+    # A declared length the frame cannot satisfy is malformed; say so.
+    with pytest.raises(ValueError):
+        P.safe_read_message(b"\x05ab", 0)
+
+
+def test_read_message_is_not_reachable_through_this_module():
+    # The unbounded reader must have no door left. Re-importing it here — or
+    # re-exporting it — re-opens the DoS for the next caller who reaches for it.
+    assert not hasattr(P, "read_message")
+    assert "read_message" not in P.__all__

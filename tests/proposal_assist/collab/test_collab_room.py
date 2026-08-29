@@ -402,3 +402,48 @@ async def test_evict_closes_all_client_sockets():
     await mgr.evict(key)
     assert a.closed == 1011 and b.closed == 1011      # server-error close on poison evict
     assert mgr.get(key) is None                        # room removed
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("label", "header", "can_write"),
+    [
+        # The worst of the three: STEP1 is dispatched BEFORE the can_write gate,
+        # so a read-only viewer — anyone with membership — reaches it.
+        ("step1_read_only_viewer", b"\x00\x00", False),
+        ("sync_update_writer", b"\x00\x02", True),
+        # Awareness is ungated too, and is the path f535f6c was written for.
+        ("awareness_read_only_viewer", b"\x01", False),
+    ],
+)
+async def test_a_frame_at_the_ws_cap_cannot_freeze_the_room(label, header, can_write):
+    # The whole-instance DoS, at the production entry point rather than at the
+    # decoder. `_MAX_FRAME_BYTES` is 1_000_000 and collab_ws.py rejects on `>`,
+    # so this frame is one a real client can send. Before the bound, each of
+    # these burned ~106 s of CPU inside the event loop — and for STEP1, inside
+    # `room._lock` as well, stalling that workspace's writers on top of every
+    # other socket, request and scheduler future in the single instance.
+    #
+    # `Room.handle` must swallow the frame, and must do it PROMPTLY. The prior
+    # malformed-frame tests assert only "no persist, no broadcast" — true at
+    # 106 s as well as at 1 ms, which is why they never caught this.
+    import time
+
+    key = (uuid.uuid4(), "draft")
+    room = Room(key)
+    sender, other = FakeClient(), FakeClient()
+    st = ClientState(user_id=1, can_write=can_write)
+    room.clients[sender] = st
+    room.clients[other] = ClientState(user_id=1, can_write=True)
+    log, persist = _persist_sink()
+
+    frame = header + b"\xff" * (1_000_000 - len(header))
+    assert len(frame) == 1_000_000
+    t0 = time.perf_counter()
+    await room.handle(sender=sender, state=st, message=frame, persist=persist)
+    elapsed = time.perf_counter() - t0
+
+    assert elapsed < 2.0, f"{label}: took {elapsed:.1f}s — the decoder is unbounded"
+    assert log == []
+    assert other.sent == []
+    assert sender.sent == []
