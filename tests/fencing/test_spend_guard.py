@@ -1,0 +1,158 @@
+import textwrap
+
+from tests.fencing.spend_guard import (
+    PINNED,
+    llm_spend_constructors,
+    offenders,
+    stale_pins,
+)
+
+
+def _tree(tmp_path, monkeypatch, name, source):
+    import tests.fencing.spend_guard as g
+
+    fake = tmp_path / "call_manager" / name
+    fake.parent.mkdir(parents=True, exist_ok=True)
+    fake.write_text(textwrap.dedent(source))
+    monkeypatch.setattr(g, "SRC", tmp_path)
+    monkeypatch.setattr(g, "PINNED", {})
+    return g
+
+
+def test_no_function_stamps_tokens_without_recording_spend():
+    assert offenders() == []
+
+
+def test_no_pin_is_stale():
+    # Same discipline as sink_guard: the list can only shrink.
+    assert stale_pins() == []
+
+
+def test_every_pin_carries_a_reason():
+    assert all(reason.strip() for reason in PINNED.values())
+
+
+def test_stale_pin_detection_can_actually_fail(monkeypatch):
+    # PINNED has one entry, so the two tests above are nearly vacuous. This is
+    # the one that proves stale_pins() works, by pinning a function that stamps
+    # nothing.
+    import tests.fencing.spend_guard as g
+
+    monkeypatch.setattr(
+        g, "PINNED", {("call_manager/proposal_assist/spend.py", "record_spend"): "x"}
+    )
+    assert g.stale_pins() == ["call_manager/proposal_assist/spend.py::record_spend"]
+
+
+def test_the_guard_can_actually_fail(tmp_path, monkeypatch):
+    # A gate nobody has seen fail is not a gate. Point it at a function that
+    # commits the exact defect and confirm it is reported.
+    g = _tree(
+        tmp_path,
+        monkeypatch,
+        "bad.py",
+        """
+        def f(job, done):
+            job.input_tokens = done.tokens_in or 0
+        """,
+    )
+    assert g.offenders() == ["call_manager/bad.py::f"]
+
+
+def test_the_guard_accepts_a_function_that_records(tmp_path, monkeypatch):
+    # And the other direction, so it is not simply reporting everything.
+    g = _tree(
+        tmp_path,
+        monkeypatch,
+        "good.py",
+        """
+        def f(s, job, done):
+            job.input_tokens = done.tokens_in or 0
+            record_spend(s, workspace_id=job.workspace_id, kind='evaluator', status='ok')
+        """,
+    )
+    assert g.offenders() == []
+
+
+def test_a_sibling_that_records_does_not_bless_this_function(tmp_path, monkeypatch):
+    # THE bypass a module-level guard has. This is the real shape of
+    # evaluator/pass_runner.py after Task 4: a success path that records and a
+    # _fail that must record too.
+    g = _tree(
+        tmp_path,
+        monkeypatch,
+        "two.py",
+        """
+        def _fail(session, job, done):
+            job.input_tokens = done.tokens_in or 0
+
+        def success(session, job, done):
+            job.input_tokens = done.tokens_in or 0
+            record_spend(session, workspace_id=job.workspace_id, kind='evaluator', status='ok')
+        """,
+    )
+    assert g.offenders() == ["call_manager/two.py::_fail"]
+
+
+def test_an_unrelated_record_usage_does_not_bless_a_stamping_function(tmp_path, monkeypatch):
+    # record_usage is the CITATION ledger's writer (citations/usage.py), a
+    # different ledger from the one this plan creates. Name-matching it must not
+    # excuse a function that stamps and never records.
+    g = _tree(
+        tmp_path,
+        monkeypatch,
+        "unrelated.py",
+        """
+        def stamps(job, done):
+            job.output_tokens = done.tokens_out or 0
+
+        def telemetry(session):
+            record_usage(session)
+        """,
+    )
+    assert g.offenders() == ["call_manager/unrelated.py::stamps"]
+
+
+def test_an_aliased_import_writer_is_not_reported(tmp_path, monkeypatch):
+    # Correct code, aliased. Without _spend_writer_names this is a false
+    # positive — reproduced before the helper was added.
+    g = _tree(
+        tmp_path,
+        monkeypatch,
+        "aliased.py",
+        """
+        from call_manager.proposal_assist.spend import record_spend as rs
+
+        def f(session, job, done):
+            job.input_tokens = done.tokens_in or 0
+            rs(session, workspace_id=job.workspace_id, kind='evaluator', status='ok')
+        """,
+    )
+    assert g.offenders() == []
+
+
+def test_a_dead_record_spend_still_satisfies_the_guard_KNOWN_LIMIT(tmp_path, monkeypatch):
+    # Measured, not aspirational: an AST scan cannot do reachability, so a
+    # record_spend under `if False:` passes. What catches that is the RUNTIME
+    # tests in Tasks 3-6, which drive the real path and assert a row exists.
+    # Written down so nobody mistakes this gate for more than it is. If someone
+    # later teaches the guard reachability, this test goes red — update it then.
+    g = _tree(
+        tmp_path,
+        monkeypatch,
+        "dead.py",
+        """
+        def never_records(session, job, done):
+            job.input_tokens = done.tokens_in or 0
+            if False:
+                record_spend(session)
+        """,
+    )
+    assert g.offenders() == []
+
+
+def test_the_ledger_has_exactly_one_writer():
+    # The plan's central claim, asserted for the first time. The stamps/records
+    # rule above would happily accept a second module that both constructed an
+    # LlmSpend row and called record_spend.
+    assert llm_spend_constructors() == ["call_manager/proposal_assist/spend.py"]
