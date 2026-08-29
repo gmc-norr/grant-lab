@@ -77,7 +77,11 @@ def test_create_rejects_a_name_git_rejects(pg_session_factory, tmp_path, bad):
         create_workspace_branch(
             s, stamp=stamp_for(s, wid), workspace_id=wid, name=bad, workspaces_dir=tmp_path
         )
-        # and leaves no partially created ref
+    # and leaves no partially created ref. This assertion is OUTSIDE the
+    # pytest.raises block on purpose: inside it, the raise from
+    # create_workspace_branch exits the with-block immediately and the assert
+    # never runs — a dead gate. Out here it actually verifies no ref leaked.
+    with pg_session_factory() as s:
         assert sorted(list_workspace_branches(s, workspace_id=wid, workspaces_dir=tmp_path)[0]) == [
             "main"
         ]
