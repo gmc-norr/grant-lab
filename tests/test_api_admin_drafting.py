@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 
 from call_manager.db.models import ChatTurn, User, Workspace, WorkspaceEvent
 from call_manager.main import create_app
+from call_manager.proposal_assist.spend import record_spend
 
 
 def _setup(monkeypatch, pg_url, *, drafting_enabled=True):
@@ -150,14 +151,11 @@ def test_drafting_cap_exceeded_reason(monkeypatch, pg_url, pg_session_factory):
         ws = Workspace(owner_id=owner.id, title="OverCapWs")
         s.add(ws)
         s.flush()
-        s.add(
-            ChatTurn(
-                workspace_id=ws.id,
-                role="assistant",
-                content={"type": "text", "text": "x"},
-                tokens_in=1500,
-            )
-        )  # cap_in=1000
+        # The global cap reads the llm_spend ledger now, so seed the 1500 there
+        # rather than as a raw ChatTurn. cap_in=1000.
+        record_spend(
+            s, workspace_id=ws.id, kind="chat_turn", status="ok", tokens_in=1500,
+        )
         s.commit()
     c = _admin(app, pg_session_factory)
     cap = c.get("/api/admin/drafting").json()["global_cap"]
