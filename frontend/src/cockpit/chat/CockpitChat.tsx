@@ -8,6 +8,7 @@ import { turnStreamUrl, useAckDisclosure, useCancelTurn, useTurns } from "../../
 import styles from "./CockpitChat.module.css";
 import { Composer } from "./Composer";
 import { TurnList } from "./TurnList";
+import { invalidateArtifact } from "../../api/invalidateArtifact";
 
 type Turn = {
   id: string;
@@ -52,7 +53,7 @@ export function CockpitChat() {
         qc.invalidateQueries({ queryKey: ["turns", id] });
         qc.invalidateQueries({ queryKey: ["proposed-changes", id, "draft"] });
         qc.invalidateQueries({ queryKey: ["proposed-changes", id, "spec"] });
-        qc.invalidateQueries({ queryKey: ["draft", id] });
+        void invalidateArtifact(qc, id, "draft");
       },
     },
     { resetCursorOnUrlChange: true },

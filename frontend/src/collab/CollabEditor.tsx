@@ -44,7 +44,8 @@ export function CollabEditor(props: CollabEditorProps) {
   // and the cockpit's auth gate guarantees me resolves for anyone who reaches it.
   // The provider retries on its own; this only decides what the user is told.
   // Saying nothing is the worst outcome — a silent blank page reads as data loss.
-  const unreachable = status === "offline" || status === "closed-policy";
+  const unreachable =
+    status === "offline" || status === "offline-permanent" || status === "closed-policy";
   // `synced` — NOT `status`. A connected socket that has not yet delivered the
   // document leaves the Y.Doc empty, and CollabEditorInner renders that empty
   // doc as a blank page: indistinguishable from a draft whose text is gone.

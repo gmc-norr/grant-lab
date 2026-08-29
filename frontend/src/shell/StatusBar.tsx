@@ -19,6 +19,7 @@ const SAVE_LABEL: Record<SaveState, string> = {
   "collab-connecting": "Connecting…",
   "collab-synced": "Synced",
   "collab-offline": "Offline — reconnecting…",
+  "collab-disconnected": "Disconnected — reload to reconnect",
   "collab-readonly": "Read-only",
 };
 const BAND_LABEL: Record<string, string> = {

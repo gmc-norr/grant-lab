@@ -12,9 +12,17 @@ const WS_OPEN = 1;
  *  STEP2 = the reply carrying state; UPDATE = an incremental change. Only the
  *  last two put content into the doc. */
 const SYNC_STEP2 = 1;
-const SYNC_UPDATE = 2;
 
-export type ProviderStatus = "connecting" | "connected" | "offline" | "closed-policy";
+export type ProviderStatus =
+  | "connecting"
+  | "connected"
+  | "offline"
+  // Retries exhausted. TERMINAL: `attempts` resets only in ws.onopen, which by
+  // definition cannot fire again, and connect() is re-entered from nowhere
+  // else. Nothing will reconnect for the life of this mount. Distinct from
+  // "offline" because the UI must stop promising a reconnect that is not coming.
+  | "offline-permanent"
+  | "closed-policy";
 type StatusListener = (s: ProviderStatus) => void;
 type SyncListener = (synced: boolean) => void;
 
@@ -202,7 +210,17 @@ export class CollabProvider {
         const peek = decoding.createDecoder(new Uint8Array(ev.data));
         decoding.readVarUint(peek); // MESSAGE_SYNC
         const syncType = decoding.readVarUint(peek);
-        const carriesContent = syncType === SYNC_STEP2 || syncType === SYNC_UPDATE;
+        // STEP2 ONLY. A SYNC_UPDATE is a peer's incremental edit, not the
+        // document — and the server registers a joining socket in room.clients
+        // BEFORE it sends the initial STEP1 (collab_ws.py), with two threadpool
+        // DB round-trips in between. A peer editing in that window has its
+        // update broadcast to the new socket first; its dependencies are
+        // missing, so Yjs buffers it as pending and the doc stays EMPTY.
+        // Latching on it mounted a blank editable draft over a document with
+        // content — measured in production at 4,347 bytes and seven outline
+        // sections. The client sends STEP1 on open and the server always answers
+        // with a STEP2 (empty doc included), so waiting for it cannot strand us.
+        const carriesContent = syncType === SYNC_STEP2;
         const enc = encoding.createEncoder();
         encoding.writeVarUint(enc, MESSAGE_SYNC);
         // readSyncMessage applies inbound STEP2/UPDATE to the doc with `this` as the
@@ -246,7 +264,11 @@ export class CollabProvider {
       // rejection: a pre-accept server close(1008) (expired cookie / non-member /
       // collab disabled) reaches the browser as a 1006 handshake failure — NOT
       // catchable by the 1008 guard — so without this cap it would retry forever.
-      // Stays "offline"; a remount (page reload / re-navigation) retries.
+      // Say so. This used to return with no setStatus, leaving the status at
+      // "offline" and the StatusBar reading "Offline — reconnecting…" forever —
+      // false from the moment we stop, while the editor stayed mounted and
+      // typeable over a socket that no longer exists.
+      this.setStatus("offline-permanent");
       return;
     }
     const delay = Math.min(this.baseMs * 2 ** this.attempts, this.maxMs);

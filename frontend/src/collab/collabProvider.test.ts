@@ -273,12 +273,16 @@ describe("synced — 'I have the document' is not the same as 'I am connected'",
     return { p, doc, sockets };
   }
 
+  // Was named step2From but wrote sync.writeUpdate — a SYNC_UPDATE, not a
+  // STEP2. The wrong name hid the defect inside the tests meant to pin it: a
+  // peer's update arriving before the server's STEP2 latched `synced` over an
+  // empty doc. Now it writes what it says.
   function step2From(text: string): Uint8Array {
     const remote = new Y.Doc();
     remote.getText("t").insert(0, text);
     const e = encoding.createEncoder();
     encoding.writeVarUint(e, MESSAGE_SYNC);
-    sync.writeUpdate(e, Y.encodeStateAsUpdate(remote));
+    sync.writeSyncStep2(e, remote);
     return encoding.toUint8Array(e);
   }
 
@@ -386,5 +390,117 @@ describe("synced latches on CONTENT, not on any sync frame", () => {
     sockets[0].deliver(encoding.toUint8Array(e));
     expect(p.synced).toBe(true);
     p.destroy();
+  });
+});
+
+describe("a peer's SYNC_UPDATE is not proof the document arrived", () => {
+  function build() {
+    const sockets: FakeSocket[] = [];
+    const doc = new Y.Doc();
+    const p = new CollabProvider({
+      url: "ws://x/y", doc, canWrite: true,
+      WebSocketImpl: class extends FakeSocket {
+        constructor(u: string) { super(u); sockets.push(this); }
+      } as unknown as typeof WebSocket,
+    });
+    return { p, doc, sockets };
+  }
+
+  it("a SYNC_UPDATE arriving BEFORE the server's STEP2 does not latch synced", () => {
+    // The window is real: collab_ws.py registers a joining socket in
+    // room.clients BEFORE it sends the initial STEP1, with two threadpool DB
+    // round-trips in between. A peer editing in that gap has its update
+    // broadcast to the new socket first. The update's dependencies are missing,
+    // so Yjs BUFFERS it as pending and the doc stays empty — and synced latched
+    // true anyway, mounting a blank editable draft over a document with content.
+    // The file's own comment records this in production: "the room held 4,347
+    // bytes and the Outline listed seven sections while the editor showed
+    // nothing at all."
+    const { p, sockets } = build();
+    sockets[0].open();
+
+    // An update whose dependencies this doc has never seen.
+    const peer = new Y.Doc();
+    peer.getText("t").insert(0, "seven sections of real content");
+    const base = Y.encodeStateVector(new Y.Doc());
+    const missingDeps = new Y.Doc();
+    missingDeps.getText("t").insert(0, "earlier");
+    Y.applyUpdate(peer, Y.encodeStateAsUpdate(missingDeps));
+    peer.getText("t").insert(0, "later");
+    const partial = Y.encodeStateAsUpdate(peer, Y.encodeStateAsUpdate(missingDeps, base));
+
+    const e = encoding.createEncoder();
+    encoding.writeVarUint(e, MESSAGE_SYNC);
+    sync.writeUpdate(e, partial);
+    sockets[0].deliver(encoding.toUint8Array(e));
+
+    expect(p.synced).toBe(false);
+    p.destroy();
+  });
+
+  it("the STEP2 that follows still latches it, and the buffered update lands", () => {
+    // The other side of the gate: withholding synced must not strand the editor.
+    const { p, doc, sockets } = build();
+    sockets[0].open();
+
+    const remote = new Y.Doc();
+    remote.getText("t").insert(0, "content");
+    const s2 = encoding.createEncoder();
+    encoding.writeVarUint(s2, MESSAGE_SYNC);
+    sync.writeSyncStep2(s2, remote);
+    sockets[0].deliver(encoding.toUint8Array(s2));
+
+    expect(p.synced).toBe(true);
+    expect(doc.getText("t").toString()).toBe("content");
+    p.destroy();
+  });
+});
+
+describe("giving up on reconnection is told to the user", () => {
+  function build() {
+    const sockets: FakeSocket[] = [];
+    const p = new CollabProvider({
+      url: "ws://x/y", doc: new Y.Doc(), canWrite: true,
+      WebSocketImpl: class extends FakeSocket {
+        constructor(u: string) { super(u); sockets.push(this); }
+      } as unknown as typeof WebSocket,
+    });
+    return { p, sockets };
+  }
+
+  it("the status becomes terminal once retries are exhausted", () => {
+    // maxAttempts is 12 and the backoff sums to 241 seconds. After that
+    // scheduleReconnect returned with NO setStatus, so the status stayed
+    // "offline" and the StatusBar kept saying "Offline — reconnecting…" — false
+    // from second 241 onward, for the life of the mount. `attempts` resets only
+    // in ws.onopen, which by definition cannot fire again.
+    //
+    // Meanwhile synced is latched so the editor stays mounted and typeable,
+    // send() silently no-ops because this.ws is null, and there is no
+    // client-side persistence — every character is destroyed by the next reload.
+    vi.useFakeTimers();
+    const { p, sockets } = build();
+    const seen: string[] = [];
+    p.on("status", (s) => seen.push(s));
+    for (let i = 0; i < 40 && p.status !== "offline-permanent"; i++) {
+      sockets[sockets.length - 1].drop(1006);
+      vi.advanceTimersByTime(60_000);
+    }
+    expect(p.status).toBe("offline-permanent");
+    expect(seen).toContain("offline-permanent");
+    p.destroy();
+    vi.useRealTimers();
+  });
+
+  it("does not reach the terminal state while it is still retrying", () => {
+    // Guards the other direction: a status that went terminal immediately would
+    // pass the test above and be just as untrue.
+    vi.useFakeTimers();
+    const { p, sockets } = build();
+    sockets[0].drop(1006);
+    vi.advanceTimersByTime(60_000);
+    expect(p.status).toBe("offline");
+    p.destroy();
+    vi.useRealTimers();
   });
 });

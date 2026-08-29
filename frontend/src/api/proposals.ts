@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api, unwrap } from "./client";
+import { invalidateArtifact } from "./invalidateArtifact";
 
 export type Artifact = "draft" | "spec";
 
@@ -45,7 +46,7 @@ export function useAcceptProposal(id: string, artifact: Artifact) {
   // that errored means our cached view is stale exactly the same way.
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ["proposed-changes", id, artifact] });
-    qc.invalidateQueries({ queryKey: [artifact, id] });
+    void invalidateArtifact(qc, id, artifact);
     qc.invalidateQueries({ queryKey: ["problems", id] });
   };
   return useMutation({

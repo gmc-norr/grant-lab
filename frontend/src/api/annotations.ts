@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api, unwrap } from "./client";
 import type { components } from "./schema.gen";
+import { invalidateArtifact } from "./invalidateArtifact";
 
 export type AnnotationsResponse = components["schemas"]["AnnotationsOut"];
 export type ClaimSection = components["schemas"]["ClaimSectionOut"];
@@ -41,7 +42,7 @@ export function useInsertAnnotation(id: string) {
     // citation/proposed-change views (prefix-match invalidation).
     onSettled: () => {
       void qc.invalidateQueries({ queryKey: ["annotations", id] });
-      void qc.invalidateQueries({ queryKey: ["draft", id] });
+      void invalidateArtifact(qc, id, "draft");
       void qc.invalidateQueries({ queryKey: ["citation-audit", id] });
       void qc.invalidateQueries({ queryKey: ["proposals", id] });
     },

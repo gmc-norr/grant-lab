@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api, unwrap } from "./client";
+import { invalidateArtifact } from "./invalidateArtifact";
 
 export type SaveSectionVars = {
   index: number;
@@ -42,7 +43,7 @@ export function useSaveSection(id: string) {
           },
         }),
       ),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["draft", id] }),
+    onSuccess: () => invalidateArtifact(qc, id, "draft"),
   });
 }
 
@@ -83,7 +84,7 @@ export function useSaveSpecSection(id: string) {
           },
         }),
       ),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["spec", id] }),
+    onSuccess: () => invalidateArtifact(qc, id, "spec"),
   });
 }
 
@@ -93,7 +94,7 @@ export function useInitSpec(id: string) {
   return useMutation({
     mutationFn: async () =>
       unwrap(await api.POST("/api/workspaces/{workspace_id}/spec", { params: { path: { workspace_id: id } } })),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["spec", id] }),
+    onSuccess: () => invalidateArtifact(qc, id, "spec"),
   });
 }
 
@@ -103,7 +104,7 @@ export function useLockSpec(id: string) {
   return useMutation({
     mutationFn: async () =>
       unwrap(await api.POST("/api/workspaces/{workspace_id}/spec/lock", { params: { path: { workspace_id: id } } })),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["spec", id] }),
+    onSuccess: () => invalidateArtifact(qc, id, "spec"),
   });
 }
 
@@ -113,6 +114,6 @@ export function useUnlockSpec(id: string) {
   return useMutation({
     mutationFn: async () =>
       unwrap(await api.POST("/api/workspaces/{workspace_id}/spec/unlock", { params: { path: { workspace_id: id } } })),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["spec", id] }),
+    onSuccess: () => invalidateArtifact(qc, id, "spec"),
   });
 }

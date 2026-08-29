@@ -2,7 +2,10 @@ import { useSyncExternalStore } from "react";
 
 export type SaveState =
   | "idle" | "saving" | "saved" | "dirty" | "error"
-  | "collab-connecting" | "collab-synced" | "collab-offline" | "collab-readonly";
+  | "collab-connecting" | "collab-synced" | "collab-offline"
+  // Retries exhausted — nothing will reconnect without a reload.
+  | "collab-disconnected"
+  | "collab-readonly";
 export type Cursor = { line: number; col: number };
 export type EditorSnapshot = { dirty: number[]; cursor: Cursor | null; save: SaveState };
 
