@@ -704,4 +704,8 @@ assert, not merely "it works":
 26. **The migration backfills `current_branch` from the repo, not the default**
     (§4.1). Create a workspace repo on a branch other than `main`, run the
     migration, and assert the column holds that branch. Assert also that an
-    unborn or detached HEAD fails the migration loudly.
+    **unborn** HEAD is RECORDED (not failed) — `git symbolic-ref --short HEAD`
+    succeeds there and returns the right name — and that a **detached** HEAD
+    fails the migration loudly. An earlier revision of this criterion required
+    both to fail, which would have blocked the migration on every workspace still
+    in setup.

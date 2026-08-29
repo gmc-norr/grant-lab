@@ -18,6 +18,27 @@
 - **A switch closes editor sockets with 1013, never 1008.** `frontend/src/collab/collabProvider.ts:234` treats 1008 and 1009 as terminal and does not reconnect.
 - **Never adjust an expected number to make it match.** If a count differs from this plan, name the term that changed and record it as a plan defect.
 - Run the suite with `uv run pytest -n 16 --dist loadfile`. Baseline before this work: **3361 passed, 1 skipped**. The `1 skipped` is the signal — it is the real-SDK test gated on `ANTHROPIC_API_KEY`.
+- **Running totals.** Tasks land in order, so every full-suite expectation carries
+  the earlier tasks' tests. Each task's own count includes its parametrised cases.
+
+  | After task | Adds | Python suite total |
+  | --- | --- | --- |
+  | (baseline) | — | 3361 |
+  | 1 gitio primitives | 18 | **3379** |
+  | 2 column + backfill | 4 | **3383** |
+  | 3 hydrate mutex | 3 | **3386** |
+  | 4 close codes | 4 | **3390** |
+  | 5 teardown | 5 | **3395** |
+  | 6 turn lease | 3 | **3398** |
+  | 7 switch sequence | 9 | **3407** |
+  | 8 create/delete | 14 | **3421** |
+  | 9 API | 15 | **3436** |
+  | 10 UI | 0 (frontend only) | **3436** |
+
+  Always `1 skipped`. **These are predictions to check, not targets to hit.** If a
+  total differs, name the term that changed — a task that added a test the plan
+  did not list, or a pre-existing test this work broke. Never edit the number to
+  match the run.
 - Frontend commands run from `frontend/`: `pnpm exec tsc --noEmit`, `pnpm vitest run`, `pnpm build`. **`pnpm add` is blocked** by a 7-day `minimumReleaseAge` — add no dependencies.
 - Lint: `uv run ruff check .` and `uv run ruff format --check .`.
 
@@ -58,6 +79,7 @@ Ten tasks. Tasks 1–6 are prerequisites and each is independently mergeable; ta
   - `create_branch(repo_dir: Path, name: str) -> None`
   - `delete_branch(repo_dir: Path, name: str) -> None`
   - `checkout_branch(repo_dir: Path, name: str) -> None`
+  - `has_commits(repo_dir: Path) -> bool`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -79,6 +101,7 @@ from call_manager.proposal_assist.citations.gitio import (
     create_branch,
     current_branch,
     delete_branch,
+    has_commits,
     is_valid_branch_name,
     list_branches,
 )
@@ -86,7 +109,7 @@ from call_manager.proposal_assist.citations.gitio import (
 
 def _repo(tmp_path, *, commit=True):
     d = tmp_path / "repo"
-    d.mkdir()
+    d.mkdir(parents=True)
     subprocess.run(["git", "init", "-q", "-b", "main", "."], cwd=d, check=True)
     if commit:
         subprocess.run(
@@ -132,6 +155,12 @@ def test_create_on_an_unborn_repo_raises(tmp_path):
     # "fatal: not a valid object name: 'HEAD'".
     with pytest.raises(GitCommitError):
         create_branch(_repo(tmp_path, commit=False), "x")
+
+
+def test_has_commits_distinguishes_unborn_from_born(tmp_path):
+    # current_branch CANNOT make this distinction — it succeeds on both.
+    assert has_commits(_repo(tmp_path)) is True
+    assert has_commits(_repo(tmp_path / "b", commit=False)) is False
 
 
 def test_checkout_moves_head(tmp_path):
@@ -256,6 +285,16 @@ def is_valid_branch_name(name: str) -> bool:
     return proc.returncode == 0
 
 
+def has_commits(repo_dir: Path) -> bool:
+    """Whether HEAD resolves to a commit.
+
+    `current_branch` cannot answer this: `symbolic-ref --short HEAD` succeeds on
+    an UNBORN repo and returns the branch name the first commit will land on.
+    `rev-parse --verify HEAD` is the one that exits non-zero there.
+    """
+    return _git(repo_dir, "rev-parse", "--verify", "--quiet", "HEAD").returncode == 0
+
+
 def create_branch(repo_dir: Path, name: str) -> None:
     """Create *name* at the current HEAD. Does NOT move HEAD.
 
@@ -291,13 +330,15 @@ def checkout_branch(repo_dir: Path, name: str) -> None:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/proposal_assist/test_gitio_branches.py -q`
-Expected: `12 passed`.
+Expected: **`18 passed`** — ten ordinary tests plus five invalid-name and three
+valid-name parametrised cases. Count the parametrised cases; the number of `def`s
+is not the number of tests.
 
 - [ ] **Step 5: Prove `is_valid_branch_name` is not a rubber stamp**
 
 Temporarily replace its body with `return True`, then run the file.
 Expected: `test_invalid_names_are_rejected` FAILS on 5 parametrised cases.
-Restore the real body and re-run — `12 passed`.
+Restore the real body and re-run — `18 passed`.
 
 - [ ] **Step 6: Lint and commit**
 
@@ -336,7 +377,6 @@ hand — it needs an owner and, for some paths, a call.
 """
 
 import subprocess
-import uuid
 
 import pytest
 from sqlalchemy import select
@@ -613,8 +653,6 @@ Create `tests/proposal_assist/collab/test_collab_hydrate_mutex_order.py`:
 before it writes a seed. Spec §4.4 — this is what makes a mid-switch reconnect
 block instead of republishing the old branch's room."""
 
-import uuid
-
 import pytest
 
 from call_manager.proposal_assist.collab import hydrate, store
@@ -805,7 +843,9 @@ Expected: the only production caller is `collab_ws.py`'s `_load` closure passed 
 - [ ] **Step 7: Full suite**
 
 Run: `uv run pytest -n 16 --dist loadfile`
-Expected: `3364 passed, 1 skipped` (the baseline 3361 plus this task's 3). If the count differs, name the term that changed.
+Expected: **`3386 passed, 1 skipped`** — the running-totals table in Global
+Constraints, row "after task 3". An expectation naming only "this task's"
+additions is wrong by construction, because tasks land in order.
 
 - [ ] **Step 8: Lint and commit**
 
@@ -854,6 +894,17 @@ import inspect
 from call_manager.proposal_assist.web import collab_ws
 
 
+def _arm(src: str, header: str) -> str:
+    """The body of one `except` arm, or "" if that arm does not exist.
+
+    Returns "" rather than raising so a missing arm fails the ASSERTION below
+    with a readable message, instead of blowing up on an IndexError that says
+    nothing about what is wrong."""
+    if header not in src:
+        return ""
+    return src.split(header, 1)[1].split("    except ", 1)[0]
+
+
 def test_generation_stale_is_not_grouped_with_retired_and_deleted():
     # The three exceptions had ONE handler; a switch needs the stale arm to close
     # 1013 while the other two keep 1008.
@@ -864,16 +915,14 @@ def test_generation_stale_is_not_grouped_with_retired_and_deleted():
 
 
 def test_the_stale_arm_closes_with_try_again_later():
-    src = inspect.getsource(collab_ws)
-    arm = src.split("except WorkspaceGenerationStale:")[1].split("except ")[0]
+    arm = _arm(inspect.getsource(collab_ws), "except WorkspaceGenerationStale:")
     assert "_WS_TRY_AGAIN_LATER" in arm, "the stale arm must close 1013"
     assert "_WS_POLICY_VIOLATION" not in arm, "1008 is terminal on the client"
 
 
 def test_retired_and_deleted_still_close_with_policy_violation():
-    src = inspect.getsource(collab_ws)
-    arm = src.split("except (WorkspaceRetired, WorkspaceDeleted):")[1].split("except ")[0]
-    assert "_WS_POLICY_VIOLATION" in arm
+    arm = _arm(inspect.getsource(collab_ws), "except (WorkspaceRetired, WorkspaceDeleted):")
+    assert "_WS_POLICY_VIOLATION" in arm, "a deleted workspace must stay terminal"
 
 
 def test_the_codes_are_the_rfc_values():
@@ -889,7 +938,12 @@ behaviour end to end through `prepare_branch_switch`. Keep both.
 - [ ] **Step 2: Run it to verify it fails**
 
 Run: `uv run pytest tests/proposal_assist/collab/test_collab_ws_close_codes.py -q`
-Expected: `2 failed, 2 passed` — the first two fail because today the three exceptions share one `except (WorkspaceRetired, WorkspaceDeleted, WorkspaceGenerationStale):` arm.
+Expected: **`3 failed, 1 passed`**. Today all three exceptions share one
+`except (WorkspaceRetired, WorkspaceDeleted, WorkspaceGenerationStale):` arm, so
+*neither* of the two arm headers exists — `_arm` returns `""` for both, and all
+three arm tests fail on their assertions. Only `test_the_codes_are_the_rfc_values`
+passes. **They must fail on assertions, not on an IndexError**; that is what the
+`_arm` helper is for.
 
 - [ ] **Step 3: Split the arm**
 
@@ -1086,6 +1140,16 @@ In `src/call_manager/proposal_assist/collab/room.py`, change `_retire_room`'s si
             )
 ```
 
+**and change the early return at `room.py:729-730`**, which the new signature
+otherwise breaks — both callers unpack every result, so `return 0` becomes a
+`TypeError` on the no-room path, including `prepare_branch_switch`'s idempotency
+case:
+
+```python
+        if room is None:
+            return 0, True    # nothing to tear down IS a linearized teardown
+```
+
 and change the signature and the close code to:
 
 ```python
@@ -1110,6 +1174,44 @@ and change the signature and the close code to:
 ```
 
 Then, inside, use `close_code` at the close call (replacing `_WS_POLICY_VIOLATION` at line 763) and return `(closed, locked)`. Update `retire_workspace`'s accumulation (`room.py:706-719`) to unpack the tuple and keep summing only `closed` — retirement's contract is unchanged.
+
+**Wrap the body from the pop onward in `try:` / `finally:` so the close, the
+tombstone and the drain happen even if something in between raises.** The room is
+popped at the top; an exception after that would otherwise leave exactly the
+orphan this task exists to prevent — out of the registry, un-tombstoned, sockets
+open, unreachable by a retry. Shape:
+
+```python
+        async with self._lock:
+            room = self._rooms.pop(key, None)
+        if room is None:
+            return 0, True
+        locked = True
+        try:
+            try:
+                await asyncio.wait_for(
+                    _set_evicted_under_lock(room), timeout=_RETIRE_LOCK_WAIT_SECONDS
+                )
+            except TimeoutError:
+                locked = False
+                room.evicted = True
+                logger.warning(...)
+        finally:
+            # Never leave a popped room live, whatever happened above.
+            room.evicted = True
+            async with room.recon_lock:
+                for client, state in list(room.clients.items()):
+                    state.can_write = False
+                    with suppress(Exception):
+                        await client.close(code=close_code)
+                    closed += 1
+        # ... ops drain, unchanged ...
+        return closed, locked
+```
+
+`room.evicted = True` in the `finally` is idempotent and cheap; it is the
+belt-and-braces that makes "the teardown always completes" true on the raising
+path as well as the timeout path.
 
 - [ ] **Step 4: Add `prepare_branch_switch`**
 
@@ -1157,8 +1259,12 @@ class BranchSwitchTeardown:
         locked = True
         for artifact, result in zip(("draft", "spec"), results, strict=True):
             if isinstance(result, BaseException):
-                # A teardown that RAISED tore down an unknown amount. Treat it as
-                # not linearized so the switch aborts — the conservative reading.
+                # A teardown that RAISED still finished its close-and-tombstone
+                # (that work is in a `finally`), so no orphan survives — but it
+                # cannot say whether it linearized. Treat it as NOT linearized so
+                # the switch aborts. `return_exceptions=True` is what keeps "tear
+                # BOTH rooms down" a guarantee rather than an accident: a bare
+                # gather would abandon the sibling task on the first failure.
                 locked = False
                 logger.warning(
                     "collab.branch_switch_teardown_failed",
@@ -1250,6 +1356,9 @@ def test_the_lease_is_taken_BEFORE_the_claim_update():
 def test_claim_turn_job_never_upgrades_to_the_exclusive_mutex():
     # The one deadlock shape this protocol has: two holders of shared, each
     # waiting to upgrade. fencing.acquire_shared_lease's docstring forbids it.
+    #
+    # inspect.getsource() INCLUDES comments, so the implementation's comment must
+    # not name the forbidden function literally — see the note at that comment.
     src = inspect.getsource(processor.claim_turn_job)
     assert "acquire_commit_mutex" not in src
 ```
@@ -1272,9 +1381,13 @@ In `claim_turn_job`, inside the `with session_factory() as s:` block, before the
         # exclusive mutex either wait for this claim or win and leave the
         # correlated generation subquery below to capture the post-switch value.
         #
-        # NEVER upgrade this to acquire_commit_mutex* for the same workspace:
-        # two holders of shared each waiting to upgrade is the one deadlock shape
-        # this protocol has (fencing.acquire_shared_lease's docstring).
+        # NEVER upgrade this to the EXCLUSIVE workspace mutex: two holders of
+        # shared, each waiting to upgrade, is the one deadlock shape this protocol
+        # has (fencing.acquire_shared_lease's docstring says so).
+        #
+        # The wording avoids naming that function literally on purpose — the test
+        # below asserts the identifier is absent from this source, and
+        # inspect.getsource() includes comments.
         acquire_shared_lease(s, _workspace_id_of(s, turn_job_id))
         row = s.execute(...)
 ```
@@ -1306,6 +1419,9 @@ Run: `uv run pytest tests/proposal_assist -q -n 8 --dist loadfile -k "turn or dr
 Expected: all pass. A new lock in the claim path is exactly the change that can deadlock or slow a drain. **If anything hangs rather than fails, record the call path as a plan defect and escalate — do not raise a timeout to make it pass.**
 
 - [ ] **Step 6: Full suite, lint, commit**
+
+Expected from the full suite: **`3398 passed, 1 skipped`** (Global Constraints,
+row "after task 6").
 
 ```bash
 uv run pytest -n 16 --dist loadfile
@@ -1343,7 +1459,6 @@ failures — which are the criteria that decide whether this is safe. Several of
 these assert by BREAKING the mechanism first; those steps are in the plan."""
 
 import subprocess
-import uuid
 
 import pytest
 from sqlalchemy import select
@@ -1365,9 +1480,11 @@ NOT_LOCKED = BranchSwitchTeardown(closed=1, locked=False)
 
 
 def _ws_with_repo(session_factory, tmp_path, *, text="# Aims\n\nold\n"):
+    """Returns (workspace_id, repo_dir, actor_id). The actor matters — see the
+    note under _update_bytes: an unauthored update never produces a commit."""
     with session_factory() as s:
         ws = make_workspace(s, title="w")
-        wid = ws.id
+        wid, actor = ws.id, ws.owner_id
         s.commit()
     repo = workspace_repo_dir(tmp_path, wid)
     init_workspace_repo(repo, text)
@@ -1376,7 +1493,7 @@ def _ws_with_repo(session_factory, tmp_path, *, text="# Aims\n\nold\n"):
             Workspace.__table__.update().where(Workspace.id == wid).values(current_branch="main")
         )
         s.commit()
-    return wid, repo
+    return wid, repo, actor
 
 
 def _rows(session_factory, wid, artifact="draft"):
@@ -1385,7 +1502,7 @@ def _rows(session_factory, wid, artifact="draft"):
 
 
 def test_switch_moves_the_column_and_HEAD(pg_session_factory, tmp_path):
-    wid, repo = _ws_with_repo(pg_session_factory, tmp_path)
+    wid, repo, actor = _ws_with_repo(pg_session_factory, tmp_path)
     create_branch(repo, "short-version")
 
     with pg_session_factory() as s:
@@ -1403,11 +1520,11 @@ def test_switch_moves_the_column_and_HEAD(pg_session_factory, tmp_path):
 
 
 def test_switch_checkpoints_live_edits_to_the_branch_being_LEFT(pg_session_factory, tmp_path):
-    wid, repo = _ws_with_repo(pg_session_factory, tmp_path)
+    wid, repo, actor = _ws_with_repo(pg_session_factory, tmp_path)
     create_branch(repo, "short-version")
     with pg_session_factory() as s:
         state.enable_collab(s, workspace_id=wid, artifact="draft")
-        store.append_update(s, workspace_id=wid, artifact="draft", actor_id=None,
+        store.append_update(s, workspace_id=wid, artifact="draft", actor_id=actor,
                             update=_update_bytes("# Aims\n\nNEW LIVE TEXT\n"))
         s.commit()
 
@@ -1424,11 +1541,11 @@ def test_switch_checkpoints_live_edits_to_the_branch_being_LEFT(pg_session_facto
 
 
 def test_switch_truncates_the_log(pg_session_factory, tmp_path):
-    wid, repo = _ws_with_repo(pg_session_factory, tmp_path)
+    wid, repo, actor = _ws_with_repo(pg_session_factory, tmp_path)
     create_branch(repo, "short-version")
     with pg_session_factory() as s:
         state.enable_collab(s, workspace_id=wid, artifact="draft")
-        store.append_update(s, workspace_id=wid, artifact="draft", actor_id=None,
+        store.append_update(s, workspace_id=wid, artifact="draft", actor_id=actor,
                             update=_update_bytes("# Aims\n\nlive\n"))
         s.commit()
     assert _rows(pg_session_factory, wid) == 1
@@ -1442,7 +1559,7 @@ def test_switch_truncates_the_log(pg_session_factory, tmp_path):
 
 
 def test_switch_bumps_the_generation(pg_session_factory, tmp_path):
-    wid, repo = _ws_with_repo(pg_session_factory, tmp_path)
+    wid, repo, actor = _ws_with_repo(pg_session_factory, tmp_path)
     create_branch(repo, "short-version")
     with pg_session_factory() as s:
         before = s.get(Workspace, wid).lifecycle_generation
@@ -1454,17 +1571,17 @@ def test_switch_bumps_the_generation(pg_session_factory, tmp_path):
 
 
 def test_switch_to_a_branch_that_does_not_exist_raises(pg_session_factory, tmp_path):
-    wid, _ = _ws_with_repo(pg_session_factory, tmp_path)
+    wid, _repo, _actor = _ws_with_repo(pg_session_factory, tmp_path)
     with pg_session_factory() as s, pytest.raises(BranchNotFound):
         switch_branch(s, stamp=stamp_for(s, wid), workspace_id=wid, target="ghost",
                       workspaces_dir=tmp_path, teardown=lambda _wid: OK)
 
 
 def test_switch_to_the_CURRENT_branch_is_a_no_op(pg_session_factory, tmp_path):
-    wid, repo = _ws_with_repo(pg_session_factory, tmp_path)
+    wid, repo, actor = _ws_with_repo(pg_session_factory, tmp_path)
     with pg_session_factory() as s:
         state.enable_collab(s, workspace_id=wid, artifact="draft")
-        store.append_update(s, workspace_id=wid, artifact="draft", actor_id=None,
+        store.append_update(s, workspace_id=wid, artifact="draft", actor_id=actor,
                             update=_update_bytes("# Aims\n\nlive\n"))
         s.commit()
     called = []
@@ -1482,7 +1599,7 @@ def test_switch_to_the_CURRENT_branch_is_a_no_op(pg_session_factory, tmp_path):
 def test_a_teardown_that_could_not_LOCK_aborts_the_switch(pg_session_factory, tmp_path):
     # Spec §4.3: locked=False means a client persist may be in flight, and that
     # persist would ride into the target branch. Refusing is free — the user retries.
-    wid, repo = _ws_with_repo(pg_session_factory, tmp_path)
+    wid, repo, actor = _ws_with_repo(pg_session_factory, tmp_path)
     create_branch(repo, "short-version")
 
     with pg_session_factory() as s, pytest.raises(BranchBusy):
@@ -1501,14 +1618,14 @@ def test_HEAD_is_reconciled_before_the_checkpoint_reads_it(pg_session_factory, t
     # Spec §4.2 step 3. The state a crash between steps 9 and 10 leaves: HEAD on
     # the target, the column still naming the source. Without the reconcile, step
     # 5 commits the SOURCE branch's live log onto the TARGET branch.
-    wid, repo = _ws_with_repo(pg_session_factory, tmp_path)
+    wid, repo, actor = _ws_with_repo(pg_session_factory, tmp_path)
     create_branch(repo, "short-version")
     create_branch(repo, "third")
     subprocess.run(["git", "checkout", "-q", "short-version"], cwd=repo, check=True)
     # The column still says main — the crash state.
     with pg_session_factory() as s:
         state.enable_collab(s, workspace_id=wid, artifact="draft")
-        store.append_update(s, workspace_id=wid, artifact="draft", actor_id=None,
+        store.append_update(s, workspace_id=wid, artifact="draft", actor_id=actor,
                             update=_update_bytes("# Aims\n\nMAIN LIVE TEXT\n"))
         s.commit()
 
@@ -1529,11 +1646,11 @@ def test_a_failure_after_truncate_rolls_the_DATABASE_back(pg_session_factory, tm
     # the source branch. Spec §4.5.
     from call_manager.proposal_assist import branches as B
 
-    wid, repo = _ws_with_repo(pg_session_factory, tmp_path)
+    wid, repo, actor = _ws_with_repo(pg_session_factory, tmp_path)
     create_branch(repo, "short-version")
     with pg_session_factory() as s:
         state.enable_collab(s, workspace_id=wid, artifact="draft")
-        store.append_update(s, workspace_id=wid, artifact="draft", actor_id=None,
+        store.append_update(s, workspace_id=wid, artifact="draft", actor_id=actor,
                             update=_update_bytes("# Aims\n\nlive\n"))
         s.commit()
     head_before = current_head(repo)
@@ -1570,6 +1687,33 @@ def _update_bytes(markdown: str) -> bytes:
 
     return pm_json_to_ydoc(markdown_to_pm_or_empty(markdown)).get_update()
 ```
+
+**`actor_id` MUST be a real user id in every one of these fixtures.**
+`checkpoint_artifact` treats updates whose authors are all `None` as the git-HEAD
+hydration seed: it advances the watermark and **returns without committing**
+(`checkpoint.py:119-135`, `CheckpointResult(committed=False)`). An `actor_id=None`
+fixture therefore produces no git commit at all, and three of the tests above —
+the checkpoint one, the reconcile one, and the rollback one — would fail while the
+implementation was correct.
+
+So each of these tests takes the workspace's owner and seeds with that id:
+
+```python
+    with pg_session_factory() as s:
+        ws = make_workspace(s, title="w")
+        wid, actor = ws.id, ws.owner_id
+        s.commit()
+    ...
+        store.append_update(
+            s, workspace_id=wid, artifact="draft", actor_id=actor,
+            update=_update_bytes("# Aims\n\nNEW LIVE TEXT\n"),
+        )
+```
+
+Have `_ws_with_repo` return `(wid, repo, actor)` and thread `actor` through every
+`store.append_update` call in this file. A checkpoint with no author is a no-op by
+design, not a bug — do not "fix" it by making the checkpoint commit unauthored
+content.
 
 `state.enable_collab(session, *, workspace_id, artifact)` is real and is at `state.py:65`. The collab log is only read back by hydration when collab is enabled for that artifact, which is why these fixtures enable it.
 
@@ -1608,6 +1752,7 @@ from call_manager.proposal_assist.citations.gitio import (
     create_branch as git_create_branch,
     current_branch,
     delete_branch as git_delete_branch,
+    has_commits,
     is_valid_branch_name,
     list_branches,
 )
@@ -1869,6 +2014,8 @@ Expected: this is the ordering the whole design turns on, and **no existing test
 
 - [ ] **Step 9: Full suite, lint, commit**
 
+Expected from the full suite: **`3407 passed, 1 skipped`** (row "after task 7").
+
 ```bash
 uv run pytest -n 16 --dist loadfile
 uv run ruff check src/call_manager/proposal_assist/branches.py src/call_manager/proposal_assist/collab/store.py src/call_manager/proposal_assist/collab/state.py tests/proposal_assist/test_branch_switch.py
@@ -1904,9 +2051,7 @@ Create `tests/proposal_assist/test_branch_create_delete.py`:
 import subprocess
 
 import pytest
-from sqlalchemy import select
 
-from call_manager.db.models import Workspace
 from call_manager.proposal_assist.branches import (
     BranchExists,
     BranchInUse,
@@ -1973,8 +2118,10 @@ def test_create_rejects_a_name_git_rejects(pg_session_factory, tmp_path, bad):
     with pg_session_factory() as s, pytest.raises(BranchNameInvalid):
         create_workspace_branch(s, stamp=stamp_for(s, wid), workspace_id=wid,
                                 name=bad, workspaces_dir=tmp_path)
-    # and leaves no partially created ref
-    assert sorted(list_workspace_branches(None, workspace_id=wid, workspaces_dir=tmp_path)[0]) == ["main"]
+        # and leaves no partially created ref
+        assert sorted(
+            list_workspace_branches(s, workspace_id=wid, workspaces_dir=tmp_path)[0]
+        ) == ["main"]
 
 
 def test_create_refuses_a_duplicate(pg_session_factory, tmp_path):
@@ -2044,7 +2191,8 @@ def test_list_returns_the_names_and_the_current_one(pg_session_factory, tmp_path
         create_workspace_branch(s, stamp=stamp_for(s, wid), workspace_id=wid,
                                 name="b", workspaces_dir=tmp_path)
         s.commit()
-    names, current = list_workspace_branches(None, workspace_id=wid, workspaces_dir=tmp_path)
+    with pg_session_factory() as s:
+        names, current = list_workspace_branches(s, workspace_id=wid, workspaces_dir=tmp_path)
     assert sorted(names) == ["b", "main"]
     assert current == "main"
 ```
@@ -2060,16 +2208,26 @@ Append to `src/call_manager/proposal_assist/branches.py`:
 
 ```python
 def list_workspace_branches(
-    session: Session | None, *, workspace_id: uuid.UUID, workspaces_dir: Path | str
+    session: Session, *, workspace_id: uuid.UUID, workspaces_dir: Path | str
 ) -> tuple[list[str], str]:
-    """(every local branch, the checked-out one). Read-only, no mutex.
+    """(every local branch, the one this workspace is on). Read-only, no mutex.
 
-    `session` is accepted and unused so the three operations share a call shape;
-    reading refs takes no database work and must not take a lock that a switch
-    would then queue behind.
+    `current` comes from the DATABASE, not from `current_branch(repo)`. §4.1
+    makes the column the source of truth and HEAD a cache, so after a crash
+    between steps 9 and 10 the two disagree — and reporting HEAD would show the
+    user the branch the app is about to reconcile AWAY from. The ref LIST is a
+    git read because git is the only place refs live; that is not a
+    source-of-truth question.
+
+    No mutex on purpose: this is on the cockpit's read path and must not queue
+    behind a switch. It does not reconcile either — reconciliation is a write
+    (`git checkout`) and belongs to the operations that take the mutex.
     """
     repo = workspace_repo_dir(workspaces_dir, workspace_id)
-    return list_branches(repo), current_branch(repo)
+    row = session.get(Workspace, workspace_id)
+    if row is None:
+        raise BranchNotFound(str(workspace_id))
+    return list_branches(repo), row.current_branch
 
 
 def create_workspace_branch(
@@ -2097,14 +2255,23 @@ def create_workspace_branch(
     acquire_commit_mutex_at_generation(
         session, workspace_id, generation=stamp.generation, timeout_seconds=10
     )
+    # Reconcile FIRST, like the switch does. `git branch <name> HEAD` founds the
+    # branch on whatever HEAD is, so after a crashed switch left HEAD on the
+    # wrong branch this would silently create the branch from a commit the user
+    # did not choose — §4.1's rule is "before any git read or write", and this is
+    # a git write.
+    _reconcile_head(session, workspace_id=workspace_id, workspaces_dir=workspaces_dir)
+
+    if not has_commits(repo):
+        # A workspace still in setup. Detected explicitly rather than by catching
+        # whatever `git branch` raises: measured, that call exits 128 here, but a
+        # bare `except Exception` would relabel a permissions failure, a missing
+        # git binary or a subprocess timeout as "no commits yet" — a wrong,
+        # confident error message is worse than the real one.
+        raise BranchNotFound(f"{name}: the workspace has no commits yet")
     if branch_exists(repo, name):
         raise BranchExists(name)
-    try:
-        git_create_branch(repo, name)
-    except Exception as exc:
-        # The repo has no commits yet — a workspace still in setup. Measured:
-        # `git branch <name> HEAD` exits 128, "not a valid object name: 'HEAD'".
-        raise BranchNotFound(f"{name}: the workspace has no commits yet") from exc
+    git_create_branch(repo, name)
     logger.info(
         "branches.created",
         extra={"event": "branch_created", "workspace_id": str(workspace_id), "branch": name},
@@ -2134,6 +2301,10 @@ def delete_workspace_branch(
     acquire_commit_mutex_at_generation(
         session, workspace_id, generation=stamp.generation, timeout_seconds=10
     )
+    # Same rule as create: reconcile before any git read or write, so a crashed
+    # switch cannot make `git branch -D` operate against the wrong HEAD.
+    _reconcile_head(session, workspace_id=workspace_id, workspaces_dir=workspaces_dir)
+
     if not branch_exists(repo, name):
         raise BranchNotFound(name)
 
@@ -2299,6 +2470,20 @@ def test_delete_the_current_branch_is_409(
     ).status_code == 409
 
 
+def test_delete_works_for_a_name_containing_a_slash(
+    client_authed_owner, current_user, pg_session_factory, _app
+):
+    # `aims/ambitious` is a valid branch name (task 1). With the default `{name}`
+    # converter this route would 404 — a branch you can create and cannot delete.
+    with pg_session_factory() as s:
+        wid = _seed(s, _app, current_user)
+        s.commit()
+    client_authed_owner.post(f"/api/workspaces/{wid}/branches", json={"name": "aims/ambitious"})
+    assert client_authed_owner.delete(
+        f"/api/workspaces/{wid}/branches/aims/ambitious"
+    ).status_code == 204
+
+
 def test_delete_removes_it(client_authed_owner, current_user, pg_session_factory, _app):
     with pg_session_factory() as s:
         wid = _seed(s, _app, current_user)
@@ -2310,19 +2495,18 @@ def test_delete_removes_it(client_authed_owner, current_user, pg_session_factory
     ).json()["branches"] == ["main"]
 
 
-@pytest.mark.parametrize(
-    "verb,suffix,body",
-    [
-        ("post", "/branches", {"name": "x"}),
-        ("post", "/branches/switch", {"name": "main"}),
-        ("delete", "/branches/main", None),
-    ],
-)
-def test_a_non_owner_cannot_mutate_branches(
+MUTATIONS = [
+    ("post", "/branches", {"name": "x"}),
+    ("post", "/branches/switch", {"name": "main"}),
+    ("delete", "/branches/main", None),
+]
+
+
+@pytest.mark.parametrize("verb,suffix,body", MUTATIONS)
+def test_a_stranger_cannot_mutate_branches(
     client_authed_owner, pg_session_factory, _app, verb, suffix, body
 ):
-    # Spec §7: owner only for create, switch and delete. The workspace belongs to
-    # somebody else; the logged-in user is not its owner.
+    # Not the owner and not a member: refused by either guard.
     with pg_session_factory() as s:
         stranger = make_user(s, email="stranger-branch@ki.se")
         wid = _seed(s, _app, stranger)
@@ -2330,7 +2514,35 @@ def test_a_non_owner_cannot_mutate_branches(
     call = getattr(client_authed_owner, verb)
     r = call(f"/api/workspaces/{wid}{suffix}", **({"json": body} if body is not None else {}))
     assert r.status_code == 403
+
+
+@pytest.mark.parametrize("verb,suffix,body", MUTATIONS)
+def test_a_MEMBER_can_list_but_cannot_mutate(
+    client_authed_owner, current_user, pg_session_factory, _app, verb, suffix, body
+):
+    # THE test that makes the owner gate observable. A stranger is refused by
+    # require_member too, so a stranger-only test passes even if the route were
+    # downgraded to require_member — it would prove nothing about "owner only".
+    # `require_member` = owner OR a workspace_viewers row (_perms.py:29-45).
+    from call_manager.db.models import WorkspaceViewer
+
+    with pg_session_factory() as s:
+        other_owner = make_user(s, email="branch-owner@ki.se")
+        wid = _seed(s, _app, other_owner)
+        s.add(WorkspaceViewer(workspace_id=wid, user_id=current_user.id))
+        s.commit()
+
+    # A member may READ.
+    assert client_authed_owner.get(f"/api/workspaces/{wid}/branches").status_code == 200
+    # And may not WRITE (spec §7: owner only for create, switch, delete).
+    call = getattr(client_authed_owner, verb)
+    r = call(f"/api/workspaces/{wid}{suffix}", **({"json": body} if body is not None else {}))
+    assert r.status_code == 403
 ```
+
+`WorkspaceViewer` is `workspace_viewers` with `workspace_id`, `user_id` and
+`added_at` (`db/models.py:777-792`) — measured, so the two-column construction
+above is complete.
 
 **A member's read access is not asserted here.** `require_member` on the list route
 is the same helper `versions.py:123` already uses, and building a genuine
@@ -2476,7 +2688,8 @@ def list_branches_route(
 ):
     require_member(workspace_id=workspace_id, user=user, session=session)
     names, current = list_workspace_branches(
-        None, workspace_id=workspace_id, workspaces_dir=request.app.state.settings.workspaces_dir
+        session, workspace_id=workspace_id,
+        workspaces_dir=request.app.state.settings.workspaces_dir,
     )
     return BranchListOut(branches=names, current=current)
 
@@ -2544,12 +2757,16 @@ def switch_branch_route(
             )
         _raise_http(exc)
     names, current = list_workspace_branches(
-        None, workspace_id=workspace_id, workspaces_dir=workspaces_dir
+        session, workspace_id=workspace_id, workspaces_dir=workspaces_dir
     )
     return BranchListOut(branches=names, current=current)
 
 
-@router.delete("/{workspace_id}/branches/{name}", status_code=204)
+#: `{name:path}` and NOT `{name}`. `git check-ref-format --branch` accepts a
+#: slash — `aims/ambitious` is a valid branch name and task 1's tests assert it —
+#: while Starlette's default converter stops at a separator, so a branch the
+#: create route accepts would have had NO matching delete route.
+@router.delete("/{workspace_id}/branches/{name:path}", status_code=204)
 def delete_branch_route(
     workspace_id: uuid.UUID,
     name: str,
@@ -2603,12 +2820,18 @@ and beside `app.include_router(versions_router)` (line 801):
 - [ ] **Step 6: Run the tests**
 
 Run: `uv run pytest tests/proposal_assist/test_api_branches.py -q`
-Expected: `11 passed` (3 of them from the parametrised permission test).
+Expected: **`15 passed`** — nine ordinary tests (including the slash-name delete)
+plus two parametrised permission tests of three cases each.
 
 - [ ] **Step 7: Prove the owner gate is real**
 
 Change `require_owner` to `require_member` in `switch_branch_route` and re-run.
-Expected: `test_a_non_owner_member_cannot_mutate_branches[post-/branches/switch-...]` FAILS with `assert 200 == 403`. Restore and re-run — `11 passed`.
+Expected: **`test_a_MEMBER_can_list_but_cannot_mutate[post-/branches/switch-...]`
+FAILS** with `assert 200 == 403`.
+
+`test_a_stranger_cannot_mutate_branches` must **still pass** under that mutation
+— a stranger is refused by `require_member` as well, which is exactly why a
+stranger-only test could not gate this. Restore and re-run.
 
 - [ ] **Step 8: Regenerate the OpenAPI types**
 
@@ -2622,6 +2845,8 @@ cd frontend && pnpm exec openapi-typescript /tmp/openapi.json -o src/api/schema.
 Check `git diff --stat frontend/src/api/schema.gen.ts` shows **additions only** for the four new paths. A diff that removes unrelated paths means the schema was generated from a half-built app — throw it away and fix the environment.
 
 - [ ] **Step 9: Full suite, lint, commit**
+
+Expected from the full suite: **`3436 passed, 1 skipped`** (row "after task 9").
 
 ```bash
 uv run pytest -n 16 --dist loadfile
@@ -2846,13 +3071,14 @@ Add a failing test first — `frontend/src/shell/StatusBar.branch.test.tsx`:
 ```tsx
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { StatusBar } from "./StatusBar";
 
-vi.mock("../api/branches", () => ({
-  useBranches: () => ({ data: { branches: ["main", "v2"], current: "v2" } }),
-}));
+const useBranchesSpy = vi.fn(() => ({ data: { branches: ["main", "v2"], current: "v2" } }));
+vi.mock("../api/branches", () => ({ useBranches: (...a: unknown[]) => useBranchesSpy(...a) }));
+
+beforeEach(() => useBranchesSpy.mockClear());
 
 describe("StatusBar branch", () => {
   it("names the branch beside the commit on the cockpit", () => {
@@ -2864,25 +3090,35 @@ describe("StatusBar branch", () => {
     expect(screen.getByText(/v2/)).toBeInTheDocument();
   });
 
-  it("shows no branch off the cockpit", () => {
+  it("does not FETCH branches off the cockpit", () => {
+    // Asserting the text is absent on /settings would pass before the feature
+    // exists — an absence that is already true is not a gate. Assert the wiring
+    // seam instead: the query must be disabled, which is the same
+    // `enabled: !!id` discipline the rest of this bar already uses.
     render(
       <MemoryRouter initialEntries={["/settings"]}>
         <StatusBar />
       </MemoryRouter>,
     );
-    expect(screen.queryByText(/v2/)).toBeNull();
+    expect(useBranchesSpy).toHaveBeenCalledWith(null, { enabled: false });
   });
 });
 ```
 
 The existing `StatusBar` already derives the workspace id from the URL and gates its queries on it (`enabled: !!id`) — follow that, do not fetch off the cockpit. Render the branch immediately before the existing `{Draft|Spec} · {short(head)}` text.
 
-Run: `pnpm vitest run src/shell/StatusBar.branch.test.tsx` — expect both to fail, then implement, then expect `2 passed`.
+Run: `pnpm vitest run src/shell/StatusBar.branch.test.tsx`.
+Expected before implementing: **both fail** — the first because no branch is
+rendered, the second because `useBranches` is not called at all, so the spy has
+no matching call. (Had the second test asserted absent text instead, it would
+have **passed** before the feature existed and gated nothing.) Then implement,
+then expect `2 passed`.
 
 - [ ] **Step 8: Prove the status-bar gate bites**
 
-Remove the cockpit condition so the branch renders everywhere, and re-run.
-Expected: `shows no branch off the cockpit` FAILS. Restore — `2 passed`.
+Remove the cockpit condition so the query runs everywhere, and re-run.
+Expected: `does not FETCH branches off the cockpit` FAILS on the spy's arguments
+(`enabled: true`, or an id where `null` was expected). Restore — `2 passed`.
 
 This step exists because a status-bar element that renders on every route is a defect this file has had before: it showed `Draft · <sha>` on Scorecard and Review until it was gated.
 
@@ -2909,33 +3145,64 @@ git commit -m "feat(ui): branch picker in the Versions pane, branch name in the 
 
 ## Acceptance — the spec's criteria, mapped
 
-Spec §9 lists 26 criteria. The plan covers them as follows. **A criterion with no task is a plan defect — say so rather than skipping it.**
+Spec §9 lists 26 criteria. **This table distinguishes a criterion a task actually
+asserts from one it merely makes possible.** An earlier revision of this table
+claimed coverage for nine criteria that no test in this plan reaches; that is the
+same defect as a hollow gate, one level up.
 
-| Spec criterion | Where |
+**Covered — a named test asserts the behaviour:**
+
+| Spec criterion | Test |
 | --- | --- |
-| 1 create/switch/switch back keeps both branches | Task 7 `test_switch_moves_the_column_and_HEAD` + Task 8 |
 | 2 a switch checkpoints live edits to the branch left | Task 7 `test_switch_checkpoints_live_edits_to_the_branch_being_LEFT` |
-| 3 refused while a drafting turn runs | Task 7 (`_has_running_turn`, both check sites) |
-| 4 non-owner cannot create/switch/delete | Task 9 `test_a_non_owner_cannot_mutate_branches` |
+| 4 non-owner cannot create/switch/delete | Task 9 `test_a_MEMBER_can_list_but_cannot_mutate` (+ Step 7's mutation) |
 | 5 names validated by git | Task 1 + Task 8 `test_create_rejects_a_name_git_rejects` |
-| 6 current and last branch cannot be deleted | Task 8 |
+| 6 current and last branch cannot be deleted | Task 8 `test_delete_refuses_the_CURRENT_branch`, `test_delete_refuses_the_LAST_branch` |
 | 7 creating disturbs nothing | Task 8 `test_create_makes_the_branch_without_moving_head`, `test_create_does_not_disturb_the_log` |
-| 8 write between truncate and teardown | Task 7 Step 8 (**expected to find no existing gate — record it**) |
-| 9 reconnect during the switch, in two steps | Task 3 `test_a_stale_generation_is_refused_on_the_WARM_path_too` + Task 4 |
-| 10–13 failure at each step | Task 7 `test_a_failure_after_truncate_rolls_the_DATABASE_back` |
-| 14 stale edit form with identical bytes | **Not covered by a task.** Spec §6.1's fence is the generation bump in Task 7 step 7; the *form* path lives in `editing/save.py`. Add a test there or record the gap. |
-| 15 `build_bibliography` and the pass runner refused at a superseded generation | **Not covered.** Spec §6.2 makes fixing those two unfenced writers a requirement and an ESCALATE if skipped. **This plan does not do it** — see below. |
-| 16 reconnect between teardown and truncate | Task 3 |
+| 9 reconnect refused with a stale generation | Task 3 `test_a_stale_generation_is_refused_on_the_WARM_path_too` + Task 4 |
+| 11 failure after truncate | Task 7 `test_a_failure_after_truncate_rolls_the_DATABASE_back` |
 | 17 in-flight persist does not survive teardown | Task 5 `test_reports_locked_False_when_room_lock_is_held` + Step 6 |
-| 18 a timed-out teardown aborts the switch | Task 5 + Task 7 `test_a_teardown_that_could_not_LOCK_aborts_the_switch` |
-| 19 no lock inversion | Task 3 Step 6 |
-| 20 a failed switch still evicts, and clients recover | Task 4 + Task 5 `test_closes_with_1013_so_the_client_reconnects` |
-| 21 partial teardown aborts | Task 5 `prepare_branch_switch` gather + Task 7 |
-| 22 timed-out teardown still tears down | Task 5 `test_still_FINISHES_the_teardown_when_the_lock_times_out` + Step 6 |
+| 18 a timed-out teardown aborts the switch | Task 7 `test_a_teardown_that_could_not_LOCK_aborts_the_switch` + Step 7 |
+| 22 a timed-out teardown still tears down | Task 5 `test_still_FINISHES_the_teardown_when_the_lock_times_out` + Step 6 |
 | 23 HEAD reconciled before the checkpoint | Task 7 `test_HEAD_is_reconciled_before_the_checkpoint_reads_it` + Step 6 |
-| 24 switch closes 1013 | Task 4 + Task 5 |
-| 25 a turn starting after the pre-check is still refused | Task 6 + Task 7's under-mutex re-check |
-| 26 the migration backfills from the repo | Task 2 |
+| 24 switch closes 1013 | Task 4 + Task 5 `test_closes_with_1013_so_the_client_reconnects` |
+| 26 the migration backfills from the repo | Task 2 (see the correction below) |
+
+**NOT covered — the mechanism is built, nothing asserts the criterion.** Each
+needs a test before this feature can claim acceptance. They are listed as work,
+not waved at:
+
+| Spec criterion | What is missing |
+| --- | --- |
+| 1 switch, edit, switch back leaves both branches intact | Task 7 asserts the column and HEAD move. Nothing round-trips content. **Add a test that edits on each branch and reads both back.** |
+| 3 refused while a drafting turn runs | `_has_running_turn` is called twice; no test seeds a `running` TurnJob and asserts `BranchBusy`. |
+| 8 write between truncate and teardown | Task 7 Step 8 predicts **no existing test catches the reordering.** That prediction IS the finding; the criterion needs a real test. |
+| 10 failure after checkpoint, before truncate | Only the post-truncate failure is tested. |
+| 12 failure after checkout, before DB commit | Not tested. Needs the route-level compensating checkout (Task 9). |
+| 13 crash between checkout and DB commit | Not tested. |
+| 14 stale edit form, byte-identical section | Belongs in `editing/save.py`'s suite, where the AND guard at `save.py:235` lives. |
+| 15 `build_bibliography` and the pass runner refused at a superseded generation | Not in this plan at all — see the gap below. |
+| 16 reconnect between teardown and truncate | Task 3 tests the mutex order in isolation; nothing drives a reconnect against a live switch. |
+| 19 no lock inversion | Task 3 Step 6 is a `grep`, not a test. Adequate as a check, not as a criterion. |
+| 20 a failed switch still evicts, and clients recover | Task 5 asserts the close code; nothing asserts recovery after a *failed* switch. |
+| 21 partial teardown aborts | `prepare_branch_switch` handles it; no test makes one room's teardown fail. |
+| 25 a turn starting between the pre-check and the mutex is still refused | Task 6 makes it possible; nothing tests the race. |
+
+**This is thirteen of twenty-six.** That is not a reason to stop — the covered
+half is the half where a defect corrupts data, and every one of those carries a
+mutation step. But **the plan must not be executed under the belief that passing
+its tests means passing the spec.** Either add the missing tests as an eleventh
+task, or record explicitly which criteria ship unasserted.
+
+### Correction to spec criterion 26
+
+Criterion 26 still reads "an unborn or detached HEAD fails the migration loudly."
+**That is wrong and §4.1 was corrected on 2026-08-29 (`423e808d`) without the
+criterion being updated.** Measured: `git symbolic-ref --short HEAD` **succeeds**
+on an unborn repo and returns the branch name, so the migration records it —
+failing there would block the migration on every workspace still in setup. Only a
+**detached** HEAD must fail. Task 2's tests encode the corrected behaviour. Fix
+the criterion in the spec as part of this work.
 
 ### Two known gaps, stated rather than hidden
 
@@ -2953,10 +3220,9 @@ inside the branch feature's review. **This is a decision for the human, not for
 the implementer:** either an eleventh task is added before merge, or the feature
 ships with those two paths knowingly unfenced. Do not merge without an answer.
 
-**Spec criterion 14 (the stale edit form)** needs a test in `editing/save.py`'s
-suite, where the AND guard at `save.py:235` lives. The generation bump in Task 7
-is the mechanism; nothing in this plan asserts it stops a form opened before the
-switch. Add it as part of Task 7's review or record the gap.
+**Criterion 14 (the stale edit form)** needs a test in `editing/save.py`'s suite,
+where the AND guard at `save.py:235` lives. The generation bump in Task 7 is the
+mechanism; nothing in this plan asserts it stops a form opened before the switch.
 
 ---
 
