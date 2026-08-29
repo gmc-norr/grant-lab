@@ -76,8 +76,8 @@ class _ImportAliases(NamedTuple):
     # Set of local names imported directly from subprocess (run, Popen, call, etc.).
     subprocess_member_names: frozenset[str]
     # Set of local names that refer to os.system / os.popen (bare name form).
-    os_system_names: frozenset[str]   # from os import system → {"system"}
-    os_popen_names: frozenset[str]    # from os import popen  → {"popen"}
+    os_system_names: frozenset[str]  # from os import system → {"system"}
+    os_popen_names: frozenset[str]  # from os import popen  → {"popen"}
     # Set of local names that refer to the os MODULE.
     os_module_names: frozenset[str]
     # Set of local names that refer to the asyncio MODULE.
@@ -388,6 +388,30 @@ PROVEN_NON_COMMIT: tuple[Fingerprint, ...] = (
         42,
         "Name(id='argv', ctx=Load())",
     ),
+    # -----------------------------------------------------------------------
+    # citations/gitio.py — branch primitives (2026-08-29-workspace-branches).
+    # Two new fail-closed call sites, both proven non-committing by audit:
+    #   * _git is the shared subprocess helper `git *args`; a Starred argv can
+    #     never be proven statically, but every caller in this module passes a
+    #     read/ref-mutating verb only — symbolic-ref, branch (create/list/-D),
+    #     show-ref, rev-parse, checkout. None create a commit. `git branch` and
+    #     `git checkout` move refs/HEAD but do NOT commit; the commit sink stays
+    #     write_and_commit_files (a declared sink), which _git never invokes.
+    #   * is_valid_branch_name runs `git check-ref-format --branch <name>`, a
+    #     pure name-validation read with no repository write of any kind.
+    # -----------------------------------------------------------------------
+    (  # _git: subprocess.run(["git", *args]) — shared helper, ref reads/moves only, never commits
+        "call_manager/proposal_assist/citations/gitio.py",
+        "_git",
+        4,
+        "List(elts=[Constant(value='git'), Starred(value=Name(id='args', ctx=Load()), ctx=Load())], ctx=Load())",  # noqa: E501
+    ),
+    (  # is_valid_branch_name: git check-ref-format --branch {name} — validates a name, no write
+        "call_manager/proposal_assist/citations/gitio.py",
+        "is_valid_branch_name",
+        9,
+        "List(elts=[Constant(value='git'), Constant(value='check-ref-format'), Constant(value='--branch'), Name(id='name', ctx=Load())], ctx=Load())",  # noqa: E501
+    ),
 )
 
 
@@ -631,9 +655,7 @@ def check_no_shell_true() -> list[str]:
 # ---------------------------------------------------------------------------
 
 _GIT_LIBRARY_NAMES: frozenset[str] = frozenset(["git", "pygit2", "dulwich"])
-_GIT_LIBRARY_MANIFEST_PATTERNS: frozenset[str] = frozenset(
-    ["gitpython", "pygit2", "dulwich"]
-)
+_GIT_LIBRARY_MANIFEST_PATTERNS: frozenset[str] = frozenset(["gitpython", "pygit2", "dulwich"])
 
 
 def _git_library_import_in(source: str, path: str) -> bool:
