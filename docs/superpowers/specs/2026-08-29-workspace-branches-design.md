@@ -49,35 +49,87 @@ cross-workspace problem with no shared history to merge against.
 
 ## 4. Switching a branch
 
-The live truth is the Yjs log; git holds checkpoints. A switch must therefore
-move both. The sequence is:
+### 4.1 The database, not git HEAD, says which branch a workspace is on
 
-1. **Checkpoint** the room to the branch being left, via `checkpoint_artifact`
-   (`checkpoint.py:63`), which takes the per-workspace commit mutex at the
-   caller's stamped generation.
-2. **Truncate** the log (`store.truncate_log`) and **reset the watermark**
+A new column, `workspaces.current_branch` (text, not null, default `'main'`),
+is the **source of truth**. Git HEAD is *reconciled* to it before any git read or
+write on that workspace.
+
+This exists because a crash between moving HEAD and committing the database
+would otherwise leave the two disagreeing with no way to tell which is right —
+and the wrong answer means writing one branch's content onto another. With the
+column, HEAD is a cache: if they differ, HEAD is wrong and gets checked out
+again. Reconciliation is one `git symbolic-ref HEAD` comparison.
+
+### 4.2 The sequence
+
+All of steps 2-8 run inside **one transaction** holding the per-workspace commit
+mutex, taken at the caller's stamped generation.
+
+1. **Refuse** if a drafting turn is `running` (§6.3). Outside the transaction.
+2. **Take the commit mutex** at the caller's generation
+   (`acquire_commit_mutex_at_generation`).
+3. **Evict the room FIRST** — before anything else touches the log.
+4. **Checkpoint** the now-frozen log to the branch being left
+   (`checkpoint_artifact`), for both artifacts.
+5. **Truncate** the log (`store.truncate_log`) and **reset the watermark**
    (`state.reset_checkpoint`).
-3. **Move HEAD** to the target branch.
-4. **Evict** the room so connected clients reconnect.
-5. `load_or_hydrate` (`hydrate.py:25`) then re-seeds an empty store from the new
-   HEAD's markdown on the next connect — its existing `if updates: return
-   updates` guard means it seeds only because step 2 emptied the log.
+6. **Bump** `lifecycle_generation` (`workspaces.py:109`).
+7. **Set** `workspaces.current_branch` to the target.
+8. **Check out** the target branch in git.
+9. **Commit** the transaction. On rollback, check the old branch back out — a
+   compensating action, because step 8 is not transactional.
 
-Steps 1, 2 and 5 are not new. `handover.py` already performs exactly that
-drain-truncate-reset for the kill switch, in **one transaction**, on the stated
-principle that *a truncate can never be visible without its checkpoint*
-(`handover.py:60-62`). The branch switch reuses that ordering; only step 3 (the
-git ref move) and step 4 (eviction) are new.
+`load_or_hydrate` then seeds the empty store from the new HEAD on the next
+connect (`hydrate.py:30-35`).
 
-**The one-transaction rule is a requirement, not an implementation note.** A
-truncate that commits without its checkpoint destroys unsaved work.
+### 4.3 Why evict comes first
+
+**This ordering is a correctness requirement, not a preference.**
+
+`Room.handle` persists a client update inside the room lock, and — in the code's
+own words at `room.py:731-738` — that persist *"commits a YjsUpdate row with NO
+commit mutex and NO soft_deleted_at read, so it is invisible to both room.ops
+and B4."*
+
+A connected client therefore writes to the log **without taking the mutex**. If
+the log were truncated before the room was tombstoned, one keystroke landing in
+that window would make the store non-empty again. `load_or_hydrate` returns
+early when it finds rows (`hydrate.py:30`), so it would never read the new
+branch: **the workspace would show the old branch's text under the new branch's
+name, and the next checkpoint would commit it there.**
+
+`RoomManager.evict` (`room.py:656`) sets the tombstone *under the room lock*,
+which the same comment identifies as the client-write linearization point:
+holding that lock proves no persist is in flight, and every later frame drops at
+the `if self.evicted` check (`room.py:197`). Evicting first is what makes steps
+4 and 5 safe.
+
+### 4.4 Why a reconnect cannot race the switch
+
+A client that reconnects mid-switch would hydrate from whatever HEAD currently
+is. It cannot: `load_or_hydrate` takes the **same commit mutex** before seeding
+(`hydrate.py:55-72`), so it blocks until the switch's transaction ends, and then
+sees the finished state.
+
+### 4.5 Failure at each step
+
+| Fails at | Result | Recovery |
+| --- | --- | --- |
+| 1-3 | Nothing changed | None needed |
+| 4 (checkpoint) | Transaction rolls back; log intact | None needed. The switch did not happen |
+| 5 (truncate) | Rolls back with its checkpoint — the `handover.py:60-62` rule: a truncate is never visible without its checkpoint | None needed |
+| 8 (checkout) | Rolls back; `current_branch` reverts | None needed |
+| 9 (commit) | HEAD may be moved but the DB reverted | Compensating checkout; and §4.1 reconciliation repairs it even after a crash |
+| Crash between 8 and 9 | HEAD on the target, DB on the source | §4.1: the DB wins, HEAD is checked out again on next access |
 
 ## 5. Connected editors
 
-Switching **evicts** every client in the room. `RoomManager.evict`
-(`room.py:656`) sets the `evicted` tombstone under the room lock, so any
-in-flight operation rechecks and aborts rather than persisting into the wrong
-branch (`room.py:197`).
+Switching **evicts** every client in the room, as **step 3** — before the log is
+touched. §4.3 explains why that position is a correctness requirement rather
+than a preference. `RoomManager.evict` (`room.py:656`) sets the `evicted`
+tombstone under the room lock, so any in-flight operation rechecks and aborts
+rather than persisting into the wrong branch (`room.py:197`).
 
 Clients reconnect on their own and re-sync from the new branch. Since
 `a0e215d2` the editor gates content on `synced`, so a reconnecting client shows
@@ -110,13 +162,33 @@ silently.** That is the normal case, not an edge case.
 
 **A branch switch bumps `workspaces.lifecycle_generation`** via
 `bump_lifecycle_generation` (`workspaces.py:109`), which computes `+ 1` in the
-database and never read-modify-writes from Python.
+database and never read-modify-writes from Python. Step 6 of §4.2.
 
-Every write path already reaches the commit mutex through
+Most write paths reach the commit mutex through
 `acquire_commit_mutex_at_generation` (`fencing.py:115`), which refuses when the
-workspace has moved past the caller's stamped generation. One bump therefore
-invalidates every in-flight write at once — including paths neither the spec
-author nor the implementer enumerated.
+workspace has moved past the caller's stamped generation. One bump invalidates
+all of those at once — including paths neither the spec author nor the
+implementer enumerated.
+
+**Two repository writers are NOT fenced, and this must be fixed as part of the
+work.** Measured 2026-08-29 by grepping every `write_and_commit_files` caller
+for `acquire_commit_mutex`:
+
+| Writer | Reached from | Mutex |
+| --- | --- | --- |
+| `citations/bibliography.py:627` (`build_bibliography`) | `export.py:81`, `tools/audit.py:214` (agent-facing) | **none** |
+| `review/pass_runner.py:349` | the review pass background job | **none** |
+
+Both commit to whatever HEAD is, at any moment, with no generation check. After
+a branch switch either could write the previous branch's output onto the new
+branch. Neither is hypothetical: the audit tool is agent-callable and the review
+pass is a scheduled job.
+
+**Requirement:** both take `acquire_commit_mutex_at_generation` at a stamped
+generation before writing, like every other writer. If that proves impossible
+for one of them within this work, it is an ESCALATE, not a decision — a branch
+feature that ships with an unfenced writer can silently cross-contaminate
+branches.
 
 This is the same fence deletion and restore already use (`workspaces.py:237`,
 `:341`). Adding the branch to each form's staleness payload was rejected: it
@@ -147,27 +219,66 @@ reconstruction step and no risk of losing bytes between them.
 Specific Aims produce conflict markers **inside prose the user exports to a
 funder**, and git has no concept of a section.
 
-### 7.2 Matching
+### 7.2 A merge base is required
+
+Comparing the source branch against the target can only say **equal or
+different**. It cannot say *which side changed*, so "changed on one side only"
+is undefined without a third point of reference.
+
+The merge therefore reads the artifact at **three** commits:
+
+- **base** — `git merge-base <target> <source>`, a new `gitio` helper
+- **target** — the branch being merged into
+- **source** — the branch being merged
+
+Each is read with the existing `blob_sha(repo_dir, ref, path)` (`gitio.py:324`,
+which already accepts an arbitrary ref) and `read_blob` (`:346`), then split with
+`split_sections`.
+
+### 7.3 Matching
 
 Sections are matched by **heading**, not by index. Index is positional and shifts
 whenever a section is added or removed; heading survives reordering.
 
-Where a heading appears more than once, sections are matched by
-**(heading, occurrence number)**: the second `## Budget` pairs with the second
-`## Budget`. Nothing in the app prevents duplicate headings, though neither real
-workspace document has any (6/6 and 4/4 unique, measured 2026-08-29).
+Where a heading appears more than once **and the number of occurrences is the
+same in base, source and target**, sections are matched by
+`(heading, occurrence number)`: the second `## Budget` pairs with the second
+`## Budget`.
 
-### 7.3 The three outcomes
+**Where that count differs between any two of the three, every section with that
+heading is surfaced as a conflict for the user to resolve, and none of them is
+paired automatically.** Positional pairing is wrong exactly when it looks
+plausible: if one branch deletes the first of two `## Budget` sections, the
+survivor becomes occurrence 1 and would be silently paired with — and treated as
+an edit of — the other branch's untouched first section.
 
-For each matched pair, compare `Section.sha`:
+Nothing in the app prevents duplicate headings, though neither real workspace
+document has any (6/6 and 4/4 unique, measured 2026-08-29).
 
-| Case | Behaviour |
-| --- | --- |
-| Changed on one side only | Take it. No prompt. |
-| Changed on both sides | The user chooses: theirs, mine, or keep both. |
-| Present on one side only | The user chooses: take the addition, or accept the removal. |
+### 7.4 The three-way outcome
 
-### 7.4 Renames are shown as a delete plus an add
+For each matched section, compare `Section.sha` at base, source and target:
+
+| base vs target | base vs source | Behaviour |
+| --- | --- | --- |
+| same | same | Nothing changed. Keep it. |
+| same | **differs** | Changed on the source only. **Take it.** No prompt. |
+| **differs** | same | Changed on the target only. **Keep it.** No prompt. |
+| **differs** | **differs**, and source ≠ target | Changed on **both**. The user chooses: theirs, mine, or keep both. |
+| **differs** | **differs**, and source == target | Both made the same edit. Keep it. No prompt. |
+
+Presence is resolved the same way against base:
+
+| In base | In target | In source | Behaviour |
+| --- | --- | --- | --- |
+| no | no | yes | Added on the source. User chooses: take it or not. |
+| no | yes | no | Added on the target. Keep it. |
+| yes | yes | no | Deleted on the source. User chooses. |
+| yes | no | yes | Deleted on the target. User chooses. |
+| yes | no | no | Deleted on both. Stays deleted, no prompt. |
+| no | yes | yes | Added on both. Conflict if the bodies differ. |
+
+### 7.4.1 Renames are shown as a delete plus an add
 
 Renaming a heading breaks the match: the tool sees one section removed and
 another added. **This is accepted and displayed honestly** — the user sees both
@@ -189,6 +300,13 @@ branch; if that predecessor does not exist in the target, it goes last.
 The merged content is composed by the app, not by git — but the commit records
 both parents, written by setting `MERGE_HEAD` before committing.
 
+**`MERGE_HEAD` must be removed in a `finally`, on success and on every failure
+path.** It is a state file git leaves in place; `write_and_commit_files` restores
+files and resets only the paths it touched (`gitio.py:216-292`) and knows nothing
+about it. A `MERGE_HEAD` left behind after a failed merge turns the **next**
+ordinary commit — a section save, a checkpoint — into an unintended merge commit
+with a second parent nobody chose.
+
 The graph cannot draw a fork today (§9), so this changes nothing visible. It is
 recorded because **ancestry that is not written down cannot be recovered**, while
 not drawing it yet is a UI gap fixable at any time.
@@ -205,10 +323,18 @@ what every member sees, which is at least as consequential.
 ## 9. Out of scope
 
 - **Graph lanes.** `CommitInfo` carries `sha`, `authored_at`, `subject` only, and
-  `list_commits` formats `%H%x00%aI%x00%s` (`gitio.py:532`) — no parents. The
-  version list stays a linear list of the current branch's history. Teaching it
-  parents and drawing lanes is separate work, and the earlier direction on it
-  stands: run the density query before building the lane layer.
+  `list_commits` formats `%H%x00%aI%x00%s` (`gitio.py:532`) — no parents.
+  Teaching it parents and drawing lanes is separate work, and the earlier
+  direction on it stands: run the density query before building the lane layer.
+
+  **`list_commits` must pass `--first-parent` as part of this work.** It runs
+  `git log` with no revision argument (`gitio.py:525-533`), so it follows HEAD
+  and is branch-scoped today — that part is correct. But once §7.6 writes
+  two-parent commits, `git log` walks BOTH ancestries and interleaves them by
+  date: the moment you merge, the version list silently gains every commit made
+  on the other branch, undated-looking and unexplained. `--first-parent` keeps
+  the list to the branch's own line, which is what a linear list means. This is
+  a one-flag change and it is in scope precisely because §7.6 causes it.
 - **Per-person branch views.** §2.
 - **Rename detection.** §7.4.
 - **Rebase, cherry-pick, force-push, history rewriting.** Recovery is by forward
@@ -216,17 +342,54 @@ what every member sees, which is at least as consequential.
 
 ## 10. Acceptance
 
+Ordinary behaviour:
+
 1. Creating a branch from the current HEAD, switching to it, editing, and
    switching back leaves both branches' content intact in git.
 2. A switch with unsaved live edits checkpoints them to the branch being left —
    verified by reading that branch's HEAD markdown after the switch.
-3. A truncate is never visible without its checkpoint, including when the git
-   step fails.
-4. An edit form opened before a switch is refused after it, **even when the
-   section's bytes are identical on both branches** (§6.1).
-5. A switch is refused while a drafting turn is running.
-6. Merging a branch where one section changed on one side only takes it without
-   prompting; a section changed on both sides prompts.
-7. A renamed heading appears as one removal and one addition.
-8. The merge commit has two parents.
-9. A non-owner cannot create, switch, delete or merge.
+3. A switch is refused while a drafting turn is running.
+4. Merging a branch where one section changed on the source only takes it
+   without prompting; a section changed on both sides prompts.
+5. A renamed heading appears as one removal and one addition.
+6. The merge commit has two parents.
+7. A non-owner cannot create, switch, delete or merge.
+8. After a merge, the version list shows only the target branch's own line — the
+   merged branch's individual commits do not appear in it (§9, `--first-parent`).
+
+Races and failures. **These are the criteria that decide whether the feature is
+safe; the ones above can all pass while it is not.** Each names the state to
+assert, not merely "it works":
+
+9. **Write between truncate and eviction.** With the room NOT evicted, a client
+   update arriving after `truncate_log` must not survive into the target branch.
+   Assert by forcing the eviction to be skipped: the test must FAIL, proving it
+   is the eviction that prevents this and not luck. Then with the specified
+   order, assert the log is empty at commit and the room hydrates from the new
+   HEAD.
+10. **Reconnect during the switch.** A connect attempt racing the switch must
+    block on the commit mutex and then see the finished state — never seed from
+    the pre-switch HEAD.
+11. **Failure after checkpoint, before truncate.** Assert: log intact, HEAD
+    unmoved, generation unchanged, `current_branch` unchanged.
+12. **Failure after truncate, before checkout.** Assert the transaction rolled
+    back: the log is intact AND no checkpoint commit was left on the branch
+    being left. Neither half alone is sufficient — a checkpoint that survived a
+    rolled-back truncate duplicates content on the next switch.
+13. **Failure after checkout, before DB commit.** Assert the compensating
+    checkout restored HEAD, and that `current_branch` still names the source.
+14. **Crash between checkout and DB commit**, simulated by committing the git
+    step and abandoning the transaction. Assert reconciliation (§4.1) returns
+    HEAD to `current_branch` on the next access, and that no content moved.
+15. **An edit form opened before a switch is refused after it, with a section
+    whose bytes are IDENTICAL on both branches** (§6.1). A form whose section
+    differs would be refused by the pre-existing sha check, so it proves
+    nothing; the identical-bytes case is the only one that tests the fence.
+16. **`build_bibliography` and the review pass runner are refused at a
+    superseded generation** (§6.2). Assert by bumping the generation and calling
+    each directly.
+17. **A failed merge leaves no `MERGE_HEAD`** (§7.6), asserted by making the
+    commit fail and then checking that the next ordinary commit has one parent.
+18. **Duplicate headings with differing counts are surfaced as conflicts, not
+    paired** (§7.3): base has two `## Budget`, the source deletes the first, and
+    the merge must not treat the survivor as an edit of the target's first.
