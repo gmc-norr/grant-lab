@@ -32,6 +32,11 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from call_manager.config import Settings
 from call_manager.db.models import ChatSummary, ChatTurn, Workspace
+from call_manager.proposal_assist.spend import record_spend
+from call_manager.proposal_assist.turns.caps import (
+    GlobalTokenCapExceeded,
+    check_global_daily_token_cap,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -144,14 +149,50 @@ def compact_workspace(
     if not turns:
         return None
 
+    # Compaction is a hosted-LLM call like any other. It used to spend past a
+    # ceiling that had already stopped every chat turn, because it was the one
+    # spender that never asked. The read session opened above is already closed
+    # by here, so open our own.
+    with session_factory() as cap_s:
+        cap = check_global_daily_token_cap(cap_s, settings=settings)
+    if not cap.allowed:
+        logger.warning(
+            "compaction.skipped_global_cap",
+            extra={"event": "compaction_skipped_global_cap", "reason": cap.reason},
+        )
+        # RAISE, not return None: compact_workspace already returns None for
+        # "there were no turns to summarize", and a second None would make those
+        # two outcomes indistinguishable to every caller and to the test.
+        raise GlobalTokenCapExceeded(
+            used_in=cap.used_in,
+            used_out=cap.used_out,
+            cap_in=cap.cap_in,
+            cap_out=cap.cap_out,
+            reason=cap.reason or "cap_exceeded",
+        )
+
     formatted_conv = "\n\n".join(
         f"[{t.role}] {json.dumps(t.content, ensure_ascii=False)}" for t in turns
     )
     user_message = _COMPACTION_PROMPT + formatted_conv
 
-    envelope = summarizer_client.chat(
-        messages=[{"role": "user", "content": user_message}],
-    )
+    try:
+        envelope = summarizer_client.chat(
+            messages=[{"role": "user", "content": user_message}],
+        )
+    except Exception:
+        # The summarizer threw, so there is no envelope and no usage. Record the
+        # EXISTENCE of the attempt on a FRESH session: `s` is still bound here
+        # (Python's `with` does not scope its target) but it is the read session
+        # already closed above, and SQLAlchemy 2.0 happily writes through a
+        # closed Session — writing record_spend(s, ...) would silently pass. No
+        # token counts on this path because there are none; record_spend stores 0.
+        with session_factory() as fail_s:
+            record_spend(
+                fail_s, workspace_id=workspace_id, kind="compaction", status="failed"
+            )
+            fail_s.commit()
+        raise
     summary_text = envelope["choices"][0]["message"]["content"]
     used_model = envelope.get("model") or getattr(summarizer_client, "model", "unknown")
 
@@ -185,6 +226,21 @@ def compact_workspace(
             ws = s.scalar(select(Workspace).where(Workspace.id == workspace_id))
             if ws is not None:
                 ws.last_sdk_session_id = None
+
+        # The ledger row records the REAL reported usage, not the character
+        # estimate on ChatSummary.tokens (which the cap never summed). Written in
+        # the SAME transaction as the summary so it lands atomically with it.
+        # If the envelope carries no usage, record None → 0: "we called it and
+        # got no counts" is honest; a character estimate is not.
+        record_spend(
+            s,
+            workspace_id=workspace_id,
+            kind="compaction",
+            status="ok",
+            tokens_in=(envelope.get("usage") or {}).get("prompt_tokens"),
+            tokens_out=(envelope.get("usage") or {}).get("completion_tokens"),
+            model=used_model,
+        )
 
         s.commit()
         s.refresh(new_summary)
@@ -224,6 +280,17 @@ def run_compaction_tick(
                 settings=settings,
             )
             compacted += 1
+        except GlobalTokenCapExceeded:
+            # The cap is org-wide, so once it trips every remaining workspace in
+            # the loop would trip it too — break, don't continue. `compacted` is
+            # NOT incremented, so the tick returns the number actually compacted
+            # before the ceiling. This arm MUST stay above the generic
+            # `except Exception`, or every capped workspace logs a stack trace.
+            logger.warning(
+                "compaction_tick: global daily token cap reached; stopping this tick",
+                extra={"event": "compaction_tick_global_cap"},
+            )
+            break
         except Exception:
             logger.exception(
                 "compaction_tick: compact_workspace failed for %s — continuing",
