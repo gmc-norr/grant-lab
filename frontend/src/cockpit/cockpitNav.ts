@@ -59,6 +59,20 @@ export function viewHref(
 ): { pathname: string; search: string } {
   const next = new URLSearchParams(sp);
   next.set("view", view);
+  // The comparison is reached FROM the Versions pane and belongs with it.
+  // Leaving that pane while the middle shows the comparison used to leave you
+  // with, say, the draft's Outline beside a diff — and the tab strip
+  // highlighting nothing, because the comparison has no tab. Restore the middle
+  // to the artifact that was being compared.
+  //
+  // The selection goes too: a pair left in the URL is the stale-pair trap
+  // nextSelection guards, and "two versions picked" must not survive into a
+  // state that is not the comparison.
+  if (view !== "versions" && COMPARISON_TABS.includes(sp.get("tab") ?? "")) {
+    next.set("tab", sp.get("artifact") === "spec" ? "spec" : "draft");
+    next.delete("a");
+    next.delete("b");
+  }
   return { pathname, search: next.toString() };
 }
 

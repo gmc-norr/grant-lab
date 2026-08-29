@@ -219,3 +219,63 @@ it("?sec rejects a value that is not a safe integer", () => {
   expect(secFromParams(sp("sec=-1"))).toBe(0);
   expect(secFromParams(sp("sec=x"))).toBe(0);
 });
+
+describe("leaving the Versions pane also leaves the comparison", () => {
+  // Reported from use: pick two versions, then click Outline. The pane switched
+  // and the middle stayed on the comparison — you had the draft's outline beside
+  // a diff, and the tab strip highlighted nothing, because ?tab=diff has no tab.
+  // The comparison is reached FROM the Versions pane and belongs with it.
+  it("returns the middle to the artifact that was being compared", () => {
+    const href = viewHref(
+      sp("tab=diff&artifact=draft&a=aaaaaaa&b=bbbbbbb&sec=3&layout=unified&view=versions"),
+      "outline",
+      "/cockpit/ws-1",
+    );
+    const out = sp(href.search);
+    expect(out.get("view")).toBe("outline");
+    expect(out.get("tab")).toBe("draft");
+    // The selection goes with it: a stale pair left in the URL is the
+    // nextSelection trap, and "two picked" must not mean "not comparing".
+    expect(out.get("a")).toBeNull();
+    expect(out.get("b")).toBeNull();
+    // Everything NOT about the comparison survives.
+    expect(out.get("sec")).toBe("3");
+    expect(out.get("layout")).toBe("unified");
+  });
+
+  it("returns to the SPEC when the spec was being compared", () => {
+    const out = sp(
+      viewHref(sp("tab=diff&artifact=spec&a=aaaaaaa"), "members", "/cockpit/ws-1").search,
+    );
+    expect(out.get("tab")).toBe("spec");
+  });
+
+  it("a legacy ?tab=history is the comparison too", () => {
+    const out = sp(
+      viewHref(sp("tab=history&artifact=draft&a=aaaaaaa"), "criteria", "/cockpit/ws-1").search,
+    );
+    expect(out.get("tab")).toBe("draft");
+    expect(out.get("a")).toBeNull();
+  });
+
+  it("clicking VERSIONS from the comparison changes nothing but the view", () => {
+    // You are not leaving; re-selecting the pane you are on must not throw away
+    // the comparison you are looking at.
+    const out = sp(
+      viewHref(sp("tab=diff&artifact=draft&a=aaaaaaa&b=bbbbbbb"), "versions", "/cockpit/ws-1")
+        .search,
+    );
+    expect(out.get("tab")).toBe("diff");
+    expect(out.get("a")).toBe("aaaaaaa");
+    expect(out.get("b")).toBe("bbbbbbb");
+  });
+
+  it("does NOT touch the tab when the middle is not the comparison", () => {
+    // Clicking Versions while editing must not yank you out of the draft.
+    const out = sp(
+      viewHref(sp("tab=scorecard&a=aaaaaaa"), "versions", "/cockpit/ws-1").search,
+    );
+    expect(out.get("tab")).toBe("scorecard");
+    expect(out.get("a")).toBe("aaaaaaa");
+  });
+});
