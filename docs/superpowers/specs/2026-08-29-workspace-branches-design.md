@@ -147,10 +147,24 @@ writes that.
 
 Measured 2026-08-29: **all 16 workspace repos on this instance are on `main`**,
 so the backfill is expected to be a no-op here. It is required anyway — the cost
-is one command per repo, and the failure it prevents is silent and total. Two
-cases the migration must handle explicitly rather than defaulting: an **unborn**
-HEAD (a repo created by setup with no commit yet) and a **detached** HEAD. Both
-should fail the migration loudly rather than write a plausible-looking `'main'`.
+is one command per repo, and the failure it prevents is silent and total.
+
+Two edge states, and they resolve differently — measured, because the obvious
+guess about the first one is wrong:
+
+- **Unborn HEAD** (a repo `git init`-ed by setup with no commit yet).
+  `git symbolic-ref --short HEAD` **succeeds** here and returns the branch name
+  the repo will have — `main`. So the migration records it like any other; there
+  is nothing to fail on. (An earlier revision of this section said unborn should
+  fail the migration. It should not: that would block the migration on every
+  workspace still in setup, and the name it returns is correct.) What *does*
+  fail on an unborn repo is creating a branch — `git branch <name> HEAD` exits
+  128, `fatal: not a valid object name: 'HEAD'` — which is §3.1's third refusal.
+- **Detached HEAD.** `git symbolic-ref --short HEAD` exits 128,
+  `fatal: ref HEAD is not a symbolic ref`. There is no branch name to record and
+  no safe default, so this **must fail the migration loudly**. Nothing in the app
+  detaches HEAD today, so a detached repo means something outside the app did it,
+  and guessing `'main'` would silently discard whatever state that was.
 
 ### 4.2 The sequence
 
