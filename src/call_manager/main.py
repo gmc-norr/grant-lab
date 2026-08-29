@@ -403,11 +403,20 @@ def create_app() -> FastAPI:
     #   rather than console-log their bodies in prod — ConsoleEmailSender stays
     #   dev-only because it logs full message contents.
     # Tests override this with InMemoryEmailSender via app.state after creation.
-    if settings.resend_api_key:
+    # ONE transport decision, shared with the digest client's factory. These used
+    # to be two independent selectors over one setting: this one ignored
+    # EMAIL_TRANSPORT while `build_email_client` read it (defaulting to
+    # "resend"), so an SMTP-only deploy sent its alerts and silently never
+    # scheduled the weekly digest. `resolve_email_transport` is now the only
+    # place that answers "which transport".
+    from call_manager.email.factory import resolve_email_transport
+
+    _transport = resolve_email_transport(settings)
+    if _transport == "resend" and settings.resend_api_key:
         email_sender = ResendEmailSender(
             api_key=settings.resend_api_key, from_address=settings.email_from
         )
-    elif settings.smtp_host:
+    elif _transport == "smtp" and settings.smtp_host:
         email_sender = SMTPEmailSender(
             host=settings.smtp_host,
             port=settings.smtp_port,

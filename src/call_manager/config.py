@@ -640,7 +640,18 @@ class Settings(BaseSettings):
         description="Max remote escalation attempts per Europe/Stockholm day "
         "(counted from ranking_remote_attempts). Guardrail for backfill spikes.",
     )
-    email_transport: str = Field(default="resend", alias="EMAIL_TRANSPORT")
+    email_transport: str = Field(
+        default="",
+        alias="EMAIL_TRANSPORT",
+        description=(
+            "Explicit email transport: 'resend' or 'smtp'. Empty (the default) "
+            "means INFER from whichever credential is set — resend first, then "
+            "smtp — which is what create_app's sender selection already did. "
+            "It used to default to 'resend', so an SMTP-only deploy built its "
+            "alert sender fine and silently never scheduled the weekly digest. "
+            "See email/factory.resolve_email_transport."
+        ),
+    )
     smtp_host: str | None = Field(default=None, alias="SMTP_HOST")
     smtp_port: int = Field(default=587, alias="SMTP_PORT")
     smtp_user: str | None = Field(default=None, alias="SMTP_USER")
