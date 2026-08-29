@@ -55,7 +55,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from sqlalchemy import select, update
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import sessionmaker
 
 from call_manager.db.models import ChatTurn, TurnJob, Workspace, WorkspaceEvent
 from call_manager.proposal_assist.attachments.resolver import (
@@ -138,21 +138,22 @@ class ClaimedTurn(NamedTuple):
     claimed_at_generation: int
 
 
-def _workspace_id_of(session: Session, turn_job_id: uuid.UUID) -> uuid.UUID:
-    """The workspace a turn belongs to, read before the claim so the shared lease
-    can be taken on it. A separate SELECT is correct here: the lease must be held
-    BEFORE the claim, and the claim's own RETURNING is too late."""
-    return session.execute(
-        select(TurnJob.workspace_id).where(TurnJob.id == turn_job_id)
-    ).scalar_one()
-
-
-def claim_turn_job(session_factory: sessionmaker, turn_job_id: uuid.UUID) -> ClaimedTurn | None:
+def claim_turn_job(
+    session_factory: sessionmaker, turn_job_id: uuid.UUID, workspace_id: uuid.UUID
+) -> ClaimedTurn | None:
     """Atomically claim a queued turn and capture the workspace generation.
 
     The generation is a CORRELATED SUBQUERY inside the same UPDATE, so the
     capture and the claim are one statement and one snapshot. Splitting them
     reopens the race this exists to close.
+
+    *workspace_id* is passed IN by the caller — which already read it (to launch
+    the subprocess) — precisely so the shared lease can be taken WITHOUT a second
+    turn_jobs read before the claim. A pre-read would make the UPDATE no longer
+    the first touch of the row, reopening the window in which a lifecycle
+    transition can advance the generation between the claim's start and its
+    stamp; F3a claim identity requires the stamped generation to be the epoch
+    the claim STARTED at (tests/proposal_assist/test_f3a_claim_identity.py).
 
     RETURNING also brings back submitted_by_user_id so the outcome events
     (cloud_turn_completed / cloud_turn_failed) carry actor_id — matches the
@@ -168,9 +169,12 @@ def claim_turn_job(session_factory: sessionmaker, turn_job_id: uuid.UUID) -> Cla
         # Spec §6.3. A branch switch refuses while a turn is running, but this
         # UPDATE used to take no lock at all — so a turn could start inside the
         # switch's own window and then be killed silently by the generation
-        # fence, minutes into model work. The SHARED lease makes the switch's
-        # exclusive mutex either wait for this claim or win and leave the
-        # correlated generation subquery below to capture the post-switch value.
+        # fence, minutes into model work. The SHARED lease, taken BEFORE the
+        # single-statement claim below, makes the switch's exclusive mutex either
+        # wait for this claim (which then stamps the pre-switch generation and is
+        # stale for life once the switch bumps) or win first (this lease waits,
+        # and the claim then stamps the post-switch generation). Either way the
+        # stamp is the epoch this claim actually held the key at.
         #
         # NEVER upgrade this to the EXCLUSIVE workspace mutex: two holders of
         # shared, each waiting to upgrade, is the one deadlock shape this protocol
@@ -179,7 +183,7 @@ def claim_turn_job(session_factory: sessionmaker, turn_job_id: uuid.UUID) -> Cla
         # The wording avoids naming that function literally on purpose — the test
         # below asserts the identifier is absent from this source, and
         # inspect.getsource() includes comments.
-        acquire_shared_lease(s, _workspace_id_of(s, turn_job_id))
+        acquire_shared_lease(s, workspace_id)
         row = s.execute(
             update(TurnJob)
             .where(TurnJob.id == turn_job_id, TurnJob.status == "queued")
@@ -282,7 +286,7 @@ async def process_turn_once(
         return
 
     # Atomic claim AFTER the sweep has run.
-    claimed = claim_turn_job(session_factory, turn_job_id)
+    claimed = claim_turn_job(session_factory, turn_job_id, workspace_id_for_launch)
     if claimed is None:
         logger.info("turn_job %s already claimed or completed; skipping", turn_job_id)
         return
