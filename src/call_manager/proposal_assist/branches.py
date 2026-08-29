@@ -22,6 +22,15 @@ from call_manager.proposal_assist.citations.gitio import (
     branch_exists,
     checkout_branch,
     current_branch,
+    has_commits,
+    is_valid_branch_name,
+    list_branches,
+)
+from call_manager.proposal_assist.citations.gitio import (
+    create_branch as git_create_branch,
+)
+from call_manager.proposal_assist.citations.gitio import (
+    delete_branch as git_delete_branch,
 )
 from call_manager.proposal_assist.collab import state, store
 from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
@@ -231,4 +240,124 @@ def switch_branch(
             "to": target,
             "closed_sockets": result.closed,
         },
+    )
+
+
+def list_workspace_branches(
+    session: Session, *, workspace_id: uuid.UUID, workspaces_dir: Path | str
+) -> tuple[list[str], str]:
+    """(every local branch, the one this workspace is on). Read-only, no mutex.
+
+    `current` comes from the DATABASE, not from `current_branch(repo)`. §4.1
+    makes the column the source of truth and HEAD a cache, so after a crash
+    between steps 9 and 10 the two disagree — and reporting HEAD would show the
+    user the branch the app is about to reconcile AWAY from. The ref LIST is a
+    git read because git is the only place refs live; that is not a
+    source-of-truth question.
+
+    No mutex on purpose: this is on the cockpit's read path and must not queue
+    behind a switch. It does not reconcile either — reconciliation is a write
+    (`git checkout`) and belongs to the operations that take the mutex.
+    """
+    repo = workspace_repo_dir(workspaces_dir, workspace_id)
+    row = session.get(Workspace, workspace_id)
+    if row is None:
+        raise BranchNotFound(str(workspace_id))
+    return list_branches(repo), row.current_branch
+
+
+def create_workspace_branch(
+    session: Session,
+    *,
+    stamp: FenceStamp,
+    workspace_id: uuid.UUID,
+    name: str,
+    workspaces_dir: Path | str,
+) -> None:
+    """Create *name* at the current HEAD. Spec §3.1. Does NOT commit.
+
+    Changes nothing anybody can see: HEAD does not move, the log is untouched,
+    nobody is evicted. It is therefore the only branch operation that is safe
+    while a drafting turn is running.
+
+    It takes the mutex anyway, for one reason: HEAD must not move under it. A
+    checkpoint or section save committing between the read and the `git branch`
+    would silently found the branch on a commit the user did not choose.
+    """
+    if not is_valid_branch_name(name):
+        raise BranchNameInvalid(name)
+    repo = workspace_repo_dir(workspaces_dir, workspace_id)
+
+    acquire_commit_mutex_at_generation(
+        session, workspace_id, generation=stamp.generation, timeout_seconds=10
+    )
+    # Reconcile FIRST, like the switch does. `git branch <name> HEAD` founds the
+    # branch on whatever HEAD is, so after a crashed switch left HEAD on the
+    # wrong branch this would silently create the branch from a commit the user
+    # did not choose — §4.1's rule is "before any git read or write", and this is
+    # a git write.
+    _reconcile_head(session, workspace_id=workspace_id, workspaces_dir=workspaces_dir)
+
+    if not has_commits(repo):
+        # A workspace still in setup. Detected explicitly rather than by catching
+        # whatever `git branch` raises: measured, that call exits 128 here, but a
+        # bare `except Exception` would relabel a permissions failure, a missing
+        # git binary or a subprocess timeout as "no commits yet" — a wrong,
+        # confident error message is worse than the real one.
+        raise BranchNotFound(f"{name}: the workspace has no commits yet")
+    if branch_exists(repo, name):
+        raise BranchExists(name)
+    git_create_branch(repo, name)
+    logger.info(
+        "branches.created",
+        extra={"event": "branch_created", "workspace_id": str(workspace_id), "branch": name},
+    )
+
+
+def delete_workspace_branch(
+    session: Session,
+    *,
+    stamp: FenceStamp,
+    workspace_id: uuid.UUID,
+    name: str,
+    workspaces_dir: Path | str,
+) -> None:
+    """Delete *name*, force. Spec §3.2. Does NOT commit.
+
+    DESTRUCTIVE and not recoverable through the UI: `-D` drops the ref and
+    nothing else in the app names those commits (`list_commits` follows HEAD;
+    ArtifactVersion rows persist but their shas become unreachable). The caller
+    must have warned.
+
+    Takes the mutex for the same reason a switch does: it must not run
+    interleaved with a switch onto the branch it is deleting.
+    """
+    repo = workspace_repo_dir(workspaces_dir, workspace_id)
+
+    acquire_commit_mutex_at_generation(
+        session, workspace_id, generation=stamp.generation, timeout_seconds=10
+    )
+    # Same rule as create: reconcile before any git read or write, so a crashed
+    # switch cannot make `git branch -D` operate against the wrong HEAD.
+    _reconcile_head(session, workspace_id=workspace_id, workspaces_dir=workspaces_dir)
+
+    if not branch_exists(repo, name):
+        raise BranchNotFound(name)
+
+    row = session.get(Workspace, workspace_id)
+    if row is not None and row.current_branch == name:
+        # The DATABASE is the source of truth (§4.1), so refuse against the
+        # column, not against HEAD. git refuses too — "cannot delete branch
+        # 'main' used by worktree" — but that message cannot be shown to a user
+        # and would fire only if the two agreed.
+        raise BranchInUse(name)
+    if len(list_branches(repo)) <= 1:
+        # A repo with no branch has a detached HEAD, and §4.1's reconciliation
+        # then has nothing to reconcile to.
+        raise BranchLast(name)
+
+    git_delete_branch(repo, name)
+    logger.info(
+        "branches.deleted",
+        extra={"event": "branch_deleted", "workspace_id": str(workspace_id), "branch": name},
     )
