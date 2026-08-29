@@ -55,7 +55,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from sqlalchemy import select, update
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
 from call_manager.db.models import ChatTurn, TurnJob, Workspace, WorkspaceEvent
 from call_manager.proposal_assist.attachments.resolver import (
@@ -76,6 +76,7 @@ from call_manager.proposal_assist.drafting.turn_gating import (
     allowed_tools_for_content,
     selection_from_content,
 )
+from call_manager.proposal_assist.fencing import acquire_shared_lease
 from call_manager.proposal_assist.turns.compaction import latest_summary_text
 from call_manager.proposal_assist.turns.outcomes import (
     record_terminal_outcome,
@@ -137,6 +138,15 @@ class ClaimedTurn(NamedTuple):
     claimed_at_generation: int
 
 
+def _workspace_id_of(session: Session, turn_job_id: uuid.UUID) -> uuid.UUID:
+    """The workspace a turn belongs to, read before the claim so the shared lease
+    can be taken on it. A separate SELECT is correct here: the lease must be held
+    BEFORE the claim, and the claim's own RETURNING is too late."""
+    return session.execute(
+        select(TurnJob.workspace_id).where(TurnJob.id == turn_job_id)
+    ).scalar_one()
+
+
 def claim_turn_job(session_factory: sessionmaker, turn_job_id: uuid.UUID) -> ClaimedTurn | None:
     """Atomically claim a queued turn and capture the workspace generation.
 
@@ -155,6 +165,21 @@ def claim_turn_job(session_factory: sessionmaker, turn_job_id: uuid.UUID) -> Cla
         .scalar_subquery()
     )
     with session_factory() as s:
+        # Spec §6.3. A branch switch refuses while a turn is running, but this
+        # UPDATE used to take no lock at all — so a turn could start inside the
+        # switch's own window and then be killed silently by the generation
+        # fence, minutes into model work. The SHARED lease makes the switch's
+        # exclusive mutex either wait for this claim or win and leave the
+        # correlated generation subquery below to capture the post-switch value.
+        #
+        # NEVER upgrade this to the EXCLUSIVE workspace mutex: two holders of
+        # shared, each waiting to upgrade, is the one deadlock shape this protocol
+        # has (fencing.acquire_shared_lease's docstring says so).
+        #
+        # The wording avoids naming that function literally on purpose — the test
+        # below asserts the identifier is absent from this source, and
+        # inspect.getsource() includes comments.
+        acquire_shared_lease(s, _workspace_id_of(s, turn_job_id))
         row = s.execute(
             update(TurnJob)
             .where(TurnJob.id == turn_job_id, TurnJob.status == "queued")
