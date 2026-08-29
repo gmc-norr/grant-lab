@@ -131,3 +131,18 @@ it("does not claim a commit it has not got", async () => {
   expect(await screen.findByText("Markdown")).toBeInTheDocument();
   expect(screen.queryByText(/Draft ·/)).toBeNull();
 });
+
+it.each(["scorecard", "review"])(
+  "says nothing about an artifact on the %s tab — you are not editing one there",
+  async (tab) => {
+    // Measured, not assumed: this printed "Draft · a1b2c3d" on the Scorecard tab,
+    // because `artifact` fell back to "draft" for every tab that was not "spec".
+    // It also fetched the draft on a tab that does not show it.
+    mockHead("a1b2c3d4e5f6");
+    renderAt(`/cockpit/ws-1?tab=${tab}`);
+    await new Promise((r) => setTimeout(r, 50));
+    const bar = document.querySelector("footer")?.textContent ?? "";
+    expect(bar).toContain("Markdown"); // the bar IS rendered
+    expect(bar).not.toMatch(/Draft ·|Spec ·/);
+  },
+);

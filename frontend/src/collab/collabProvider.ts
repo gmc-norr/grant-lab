@@ -8,6 +8,12 @@ const MESSAGE_SYNC = 0;
 const MESSAGE_AWARENESS = 1;
 const WS_OPEN = 1;
 
+/** y-protocols/sync subtypes. STEP1 = "here is my state vector, send me yours";
+ *  STEP2 = the reply carrying state; UPDATE = an incremental change. Only the
+ *  last two put content into the doc. */
+const SYNC_STEP2 = 1;
+const SYNC_UPDATE = 2;
+
 export type ProviderStatus = "connecting" | "connected" | "offline" | "closed-policy";
 type StatusListener = (s: ProviderStatus) => void;
 type SyncListener = (synced: boolean) => void;
@@ -189,6 +195,14 @@ export class CollabProvider {
           return;
         }
         if (messageType !== MESSAGE_SYNC) return;
+        // Peek the sync SUBTYPE before readSyncMessage consumes it. STEP1 is a
+        // state-vector REQUEST: it applies nothing to our doc and only makes us
+        // write a STEP2 reply. Latching on it set synced=true with an empty doc
+        // — measured — which is precisely the state this flag exists to catch.
+        const peek = decoding.createDecoder(new Uint8Array(ev.data));
+        decoding.readVarUint(peek); // MESSAGE_SYNC
+        const syncType = decoding.readVarUint(peek);
+        const carriesContent = syncType === SYNC_STEP2 || syncType === SYNC_UPDATE;
         const enc = encoding.createEncoder();
         encoding.writeVarUint(enc, MESSAGE_SYNC);
         // readSyncMessage applies inbound STEP2/UPDATE to the doc with `this` as the
@@ -196,7 +210,7 @@ export class CollabProvider {
         syncProtocol.readSyncMessage(dec, enc, this.doc, this);
         // First SYNC frame applied: whatever the server has, we now have it —
         // including "nothing", which is a real answer and must unblock the UI.
-        if (!this._synced) {
+        if (carriesContent && !this._synced) {
           this._synced = true;
           for (const l of this.syncListeners) l(true);
         }

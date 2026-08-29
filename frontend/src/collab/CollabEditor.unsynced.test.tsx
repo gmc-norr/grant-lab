@@ -102,3 +102,19 @@ describe("CollabEditor does not render an unsynced document as empty", () => {
     expect(screen.queryByTestId("collab-connecting")).toBeNull();
   });
 });
+
+it("names the artifact it is loading — a spec is not 'the draft'", () => {
+  state.status = "connected";
+  state.synced = false;
+  const doc = new Y.Doc();
+  live.doc = doc;
+  live.provider = {
+    awareness: new awarenessProtocol.Awareness(doc),
+    isSettled: () => true,
+    on: () => () => {},
+  };
+  renderWithProviders(
+    <CollabEditor workspaceId="w" artifact="spec" canWrite actions={ACTIONS} />,
+  );
+  expect(screen.getByTestId("collab-connecting").textContent ?? "").toMatch(/spec/i);
+});

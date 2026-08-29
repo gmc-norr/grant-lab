@@ -329,3 +329,62 @@ describe("synced — 'I have the document' is not the same as 'I am connected'",
     p.destroy();
   });
 });
+
+describe("synced latches on CONTENT, not on any sync frame", () => {
+  function build() {
+    const sockets: FakeSocket[] = [];
+    const doc = new Y.Doc();
+    const p = new CollabProvider({
+      url: "ws://x/y", doc, canWrite: true,
+      WebSocketImpl: class extends FakeSocket {
+        constructor(u: string) { super(u); sockets.push(this); }
+      } as unknown as typeof WebSocket,
+    });
+    return { p, doc, sockets };
+  }
+
+  it("an inbound STEP1 does NOT latch synced", () => {
+    // STEP1 is a state-vector REQUEST: readSyncMessage writes a STEP2 reply and
+    // applies nothing to our doc. Measured before the fix: synced went true with
+    // the doc still empty — which is the whole bug this flag exists to prevent.
+    const { p, doc, sockets } = build();
+    sockets[0].open();
+    const e = encoding.createEncoder();
+    encoding.writeVarUint(e, MESSAGE_SYNC);
+    sync.writeSyncStep1(e, new Y.Doc());
+    sockets[0].deliver(encoding.toUint8Array(e));
+    expect(doc.getText("t").length).toBe(0);
+    expect(p.synced).toBe(false);
+    p.destroy();
+  });
+
+  it("the STEP2 that FOLLOWS a STEP1 does latch it", () => {
+    const { p, sockets } = build();
+    sockets[0].open();
+    const s1 = encoding.createEncoder();
+    encoding.writeVarUint(s1, MESSAGE_SYNC);
+    sync.writeSyncStep1(s1, new Y.Doc());
+    sockets[0].deliver(encoding.toUint8Array(s1));
+    expect(p.synced).toBe(false);
+
+    const remote = new Y.Doc();
+    remote.getText("t").insert(0, "content");
+    const s2 = encoding.createEncoder();
+    encoding.writeVarUint(s2, MESSAGE_SYNC);
+    sync.writeSyncStep2(s2, remote);
+    sockets[0].deliver(encoding.toUint8Array(s2));
+    expect(p.synced).toBe(true);
+    p.destroy();
+  });
+
+  it("an empty STEP2 latches it too — empty is an answer", () => {
+    const { p, sockets } = build();
+    sockets[0].open();
+    const e = encoding.createEncoder();
+    encoding.writeVarUint(e, MESSAGE_SYNC);
+    sync.writeSyncStep2(e, new Y.Doc());
+    sockets[0].deliver(encoding.toUint8Array(e));
+    expect(p.synced).toBe(true);
+    p.destroy();
+  });
+});

@@ -53,14 +53,17 @@ export function StatusBar() {
   //
   // No branch chip: every workspace repo is on `main` and nothing in the app
   // creates another, so it would be a permanent constant, not information.
-  const artifact = tab === "spec" ? "spec" : "draft";
+  // Only the two EDITING tabs have a live artifact. Falling back to "draft" for
+  // every non-spec tab made the bar say "Draft · a1b2c3d" on Scorecard and Panel
+  // review — measured — and fetch the draft on tabs that do not show it.
+  const editing = tab === "draft" || tab === "spec" ? tab : null;
   const comparing = tab === "diff";
   // Fetch the artifact ONLY when the middle is actually editing it: same
   // queryKey as the panel, so React Query dedupes rather than refetches.
-  const wantLive = onCockpit && !comparing;
-  const draft = useDraft(id, { enabled: wantLive && artifact === "draft" });
-  const spec = useSpec(id, { enabled: wantLive && artifact === "spec" });
-  const head = (artifact === "spec" ? spec.data?.head : draft.data?.head) ?? null;
+  const wantLive = onCockpit && editing != null;
+  const draft = useDraft(id, { enabled: wantLive && editing === "draft" });
+  const spec = useSpec(id, { enabled: wantLive && editing === "spec" });
+  const head = (editing === "spec" ? spec.data?.head : editing === "draft" ? draft.data?.head : null) ?? null;
   const a = shaParam(sp, "a");
   const b = shaParam(sp, "b");
   const meta = useCockpitMeta(id).data;
@@ -85,9 +88,9 @@ export function StatusBar() {
             : `Viewing ${short((a ?? b) as string)} (read-only)`}
         </span>
       )}
-      {onCockpit && !comparing && head && (
+      {onCockpit && editing && head && (
         <span className={styles.item}>
-          {artifact === "spec" ? "Spec" : "Draft"} · {short(head)}
+          {editing === "spec" ? "Spec" : "Draft"} · {short(head)}
         </span>
       )}
       <span className={styles.spacer} />

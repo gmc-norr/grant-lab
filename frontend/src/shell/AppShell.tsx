@@ -1,5 +1,5 @@
 import type { ComponentType } from "react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Outlet, useLocation, useMatches } from "react-router-dom";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import type { ImperativePanelHandle } from "react-resizable-panels";
@@ -77,10 +77,26 @@ export function AppShell() {
   // Reveal, not toggle. A rail click that changes ?view must not collapse an
   // already-open pane, and must not leave a collapsed one collapsed — that was
   // a control that moved the highlight and showed nothing.
+  // Reveal must survive a NAVIGATION. From Profiles/Settings/Admin there is no
+  // sidebar to expand yet, so the intent is remembered and honoured when the
+  // destination's pane mounts. Without this, clicking Calls from Settings moved
+  // you to a route whose persisted pane was still collapsed — the exact case the
+  // reveal exists for. The ref survives because AppShell does not remount.
+  const revealWanted = useRef(false);
   const revealSidebar = () => {
     const p = sidebarRef.current;
-    if (p?.isCollapsed()) p.expand();
+    if (p) {
+      if (p.isCollapsed()) p.expand();
+      return;
+    }
+    revealWanted.current = true;
   };
+  useEffect(() => {
+    if (!SidebarContent || !revealWanted.current) return;
+    revealWanted.current = false;
+    const p = sidebarRef.current;
+    if (p?.isCollapsed()) p.expand();
+  }, [SidebarContent]);
   const toggleChat = () => {
     const p = chatRef.current;
     if (!p) return;
@@ -99,7 +115,9 @@ export function AppShell() {
       <div className={styles.body}>
         <ActivityBar
           onToggleSidebar={SidebarContent ? toggleSidebar : undefined}
-          onRevealSidebar={SidebarContent ? revealSidebar : undefined}
+          // NOT gated on SidebarContent: the whole point is to reveal the
+          // DESTINATION's pane, which the source route knows nothing about.
+          onRevealSidebar={revealSidebar}
         />
         <PanelGroup direction="horizontal" autoSaveId="cm-shell" className={styles.panes}>
           {SidebarContent && (

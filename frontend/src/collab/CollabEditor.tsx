@@ -69,7 +69,7 @@ export function CollabEditor(props: CollabEditorProps) {
           <Text size="sm" c={unreachable ? undefined : "dimmed"}>
             {unreachable
               ? "Could not reach the live document — retrying."
-              : "Loading the draft…"}
+              : `Loading the ${props.artifact}…`}
           </Text>
           {props.actions}
         </Group>
