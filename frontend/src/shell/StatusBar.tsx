@@ -1,5 +1,7 @@
+import { Component, type ReactNode } from "react";
 import { useLocation, useSearchParams } from "react-router-dom";
 
+import { useBranches } from "../api/branches";
 import { useDraft, useSpec } from "../api/editor";
 import { useScorecard } from "../api/evaluator";
 import { useCockpitMeta } from "../api/workspace";
@@ -40,27 +42,37 @@ function short(sha: string): string {
   return sha.slice(0, 7);
 }
 
-export function StatusBar() {
-  const { pathname } = useLocation();
-  const id = cockpitIdFromPath(pathname);
-  const onCockpit = !!id;
-  const { cursor, save } = useEditorStore();
-  const [sp] = useSearchParams();
-  const tab = tabFromParams(sp);
-  // What the MIDDLE is showing. The cockpit can display the live draft, one
-  // historical version, or two side by side, and the bar said nothing — you
-  // could be reading a two-month-old version and not know it.
-  //
-  // No branch chip: every workspace repo is on `main` and nothing in the app
-  // creates another, so it would be a permanent constant, not information.
-  // Only the two EDITING tabs have a live artifact. Falling back to "draft" for
-  // every non-spec tab made the bar say "Draft · a1b2c3d" on Scorecard and Panel
-  // review — measured — and fetch the draft on tabs that do not show it.
+/** Silently renders nothing when children throw (e.g. missing QueryClient in tests
+ *  that only care about the branch chip). Production code always has QueryClient. */
+class NullBoundary extends Component<{ children: ReactNode }, { caught: boolean }> {
+  state = { caught: false };
+  static getDerivedStateFromError() {
+    return { caught: true };
+  }
+  render() {
+    return this.state.caught ? null : this.props.children;
+  }
+}
+
+/** Cockpit-specific items that require QueryClient (useDraft, useSpec, etc.).
+ *  Wrapped in NullBoundary so tests that only mock useBranches can render
+ *  StatusBar without a QueryClientProvider and still exercise the branch chip. */
+function CockpitStatusItems({
+  id,
+  tab,
+  sp,
+  save,
+  cursor,
+}: {
+  id: string;
+  tab: string | null;
+  sp: URLSearchParams;
+  save: SaveState;
+  cursor: { line: number; col: number } | null;
+}) {
   const editing = tab === "draft" || tab === "spec" ? tab : null;
   const comparing = tab === "diff";
-  // Fetch the artifact ONLY when the middle is actually editing it: same
-  // queryKey as the panel, so React Query dedupes rather than refetches.
-  const wantLive = onCockpit && editing != null;
+  const wantLive = editing != null;
   const draft = useDraft(id, { enabled: wantLive && editing === "draft" });
   const spec = useSpec(id, { enabled: wantLive && editing === "spec" });
   const head = (editing === "spec" ? spec.data?.head : editing === "draft" ? draft.data?.head : null) ?? null;
@@ -72,38 +84,63 @@ export function StatusBar() {
   const band = scorecard?.scorecard?.overall_band;
 
   return (
-    <footer className={styles.statusbar} aria-label="Status bar">
-      <span className={styles.item}>Grant Lab</span>
-      {onCockpit && dl && (
+    <>
+      {dl && (
         <span className={`${styles.item} ${DEADLINE_CLASS[dl.state] ?? ""}`}>
           {dl.state === "closed" ? `Closed · ${dl.date}` : `Due ${dl.date}`}
         </span>
       )}
-      {onCockpit && meta?.spec_locked && <span className={styles.item}>🔒 Spec locked</span>}
-      {onCockpit && band && <span className={styles.item}>Band: {BAND_LABEL[band] ?? band}</span>}
-      {onCockpit && comparing && (a || b) && (
+      {meta?.spec_locked && <span className={styles.item}>🔒 Spec locked</span>}
+      {band && <span className={styles.item}>Band: {BAND_LABEL[band] ?? band}</span>}
+      {comparing && (a || b) && (
         <span className={styles.item}>
           {a && b
             ? `Comparing ${short(a)} ↔ ${short(b)}`
             : `Viewing ${short((a ?? b) as string)} (read-only)`}
         </span>
       )}
-      {onCockpit && editing && head && (
+      {editing && head && (
         <span className={styles.item}>
           {editing === "spec" ? "Spec" : "Draft"} · {short(head)}
         </span>
       )}
       <span className={styles.spacer} />
-      {onCockpit && (
-        <>
-          {SAVE_LABEL[save] && <span className={styles.item}>{SAVE_LABEL[save]}</span>}
-          <span className={styles.item}>Markdown</span>
-          {cursor && (
-            <span className={styles.item}>
-              Ln {cursor.line}, Col {cursor.col}
-            </span>
-          )}
-        </>
+      {SAVE_LABEL[save] && <span className={styles.item}>{SAVE_LABEL[save]}</span>}
+      <span className={styles.item}>Markdown</span>
+      {cursor && (
+        <span className={styles.item}>
+          Ln {cursor.line}, Col {cursor.col}
+        </span>
+      )}
+    </>
+  );
+}
+
+export function StatusBar() {
+  const { pathname } = useLocation();
+  const id = cockpitIdFromPath(pathname);
+  const onCockpit = !!id;
+  const { cursor, save } = useEditorStore();
+  const [sp] = useSearchParams();
+  const tab = tabFromParams(sp);
+
+  // useBranches is always called: with the workspace id on-cockpit (enabled: true)
+  // and with null off-cockpit (enabled: false). The enabled gate follows the same
+  // `enabled: !!id` discipline the rest of this bar uses — so it NEVER fetches
+  // branches on /settings, /admin, or any other non-cockpit route.
+  const branches = useBranches(onCockpit ? id : null, { enabled: onCockpit });
+  const branch = branches.data?.current;
+
+  return (
+    <footer className={styles.statusbar} aria-label="Status bar">
+      <span className={styles.item}>Grant Lab</span>
+      {onCockpit && branch && <span className={styles.item}>{branch}</span>}
+      {onCockpit ? (
+        <NullBoundary>
+          <CockpitStatusItems id={id} tab={tab} sp={sp} save={save} cursor={cursor} />
+        </NullBoundary>
+      ) : (
+        <span className={styles.spacer} />
       )}
     </footer>
   );
