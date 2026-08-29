@@ -27,6 +27,7 @@ from call_manager.proposal_assist.review.jobs import (
     review_run_cap,
     review_runs_today,
 )
+from call_manager.proposal_assist.turns.caps import check_global_daily_token_cap
 from call_manager.proposal_assist.web._cloud_gate import gate_cloud_llm
 from call_manager.proposal_assist.web._deps import _session_dep
 from call_manager.proposal_assist.web._perms import require_member
@@ -151,6 +152,12 @@ def start_review_run(
     gate_cloud_llm(ws=ws, request=request, session=session, user=user,
                    disclosure_action="running a mock-panel review")
     settings = request.app.state.settings
+    cap = check_global_daily_token_cap(session, settings=settings)
+    if not cap.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="The daily AI usage cap has been reached. Try again tomorrow.",
+        )
     # 1. active-first (create-or-return-active; no cap-check on the existing run)
     active = active_review_run(session, workspace_id=workspace_id)
     if active is None:
