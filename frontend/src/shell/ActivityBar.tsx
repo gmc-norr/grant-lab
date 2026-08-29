@@ -82,9 +82,11 @@ function Item({
 function WorkspaceBand({
   pathname,
   onToggleSidebar,
+  onRevealSidebar,
 }: {
   pathname: string;
   onToggleSidebar?: () => void;
+  onRevealSidebar?: () => void;
 }) {
   const [sp] = useSearchParams();
   const view = viewFromParams(sp);
@@ -108,7 +110,13 @@ function WorkspaceBand({
                   if (active && onToggleSidebar) {
                     e.preventDefault();
                     onToggleSidebar();
+                    return;
                   }
+                  // An INACTIVE click changes ?view, and the pane may be
+                  // collapsed — in which case the highlight moved and nothing
+                  // appeared. Reveal (never toggle: toggling would collapse an
+                  // open pane) and let the navigation proceed.
+                  onRevealSidebar?.();
                 }}
               >
                 <Glyph icon={it.icon} />
@@ -121,7 +129,15 @@ function WorkspaceBand({
   );
 }
 
-export function ActivityBar({ onToggleSidebar }: { onToggleSidebar?: () => void }) {
+export function ActivityBar({
+  onToggleSidebar,
+  onRevealSidebar,
+}: {
+  onToggleSidebar?: () => void;
+  /** Expand the pane if it is collapsed; a no-op when it is already open.
+   *  Deliberately NOT the toggle — see WorkspaceBand's inactive-click branch. */
+  onRevealSidebar?: () => void;
+}) {
   const { pathname } = useLocation();
   const { data: session } = useSession();
   const isAdmin = Boolean(session?.capabilities.admin);
@@ -141,7 +157,13 @@ export function ActivityBar({ onToggleSidebar }: { onToggleSidebar?: () => void 
             <Item key={it.id} item={it} />
           ),
         )}
-        {wsId && <WorkspaceBand pathname={pathname} onToggleSidebar={onToggleSidebar} />}
+        {wsId && (
+          <WorkspaceBand
+            pathname={pathname}
+            onToggleSidebar={onToggleSidebar}
+            onRevealSidebar={onRevealSidebar}
+          />
+        )}
       </div>
       <div className={styles.spacer} />
       <div className={styles.group}>

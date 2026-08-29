@@ -74,6 +74,13 @@ export function AppShell() {
     if (p.isCollapsed()) p.expand();
     else p.collapse();
   };
+  // Reveal, not toggle. A rail click that changes ?view must not collapse an
+  // already-open pane, and must not leave a collapsed one collapsed — that was
+  // a control that moved the highlight and showed nothing.
+  const revealSidebar = () => {
+    const p = sidebarRef.current;
+    if (p?.isCollapsed()) p.expand();
+  };
   const toggleChat = () => {
     const p = chatRef.current;
     if (!p) return;
@@ -90,7 +97,10 @@ export function AppShell() {
         rightPaneLabel={rightPaneLabel}
       />
       <div className={styles.body}>
-        <ActivityBar onToggleSidebar={SidebarContent ? toggleSidebar : undefined} />
+        <ActivityBar
+          onToggleSidebar={SidebarContent ? toggleSidebar : undefined}
+          onRevealSidebar={SidebarContent ? revealSidebar : undefined}
+        />
         <PanelGroup direction="horizontal" autoSaveId="cm-shell" className={styles.panes}>
           {SidebarContent && (
             <>

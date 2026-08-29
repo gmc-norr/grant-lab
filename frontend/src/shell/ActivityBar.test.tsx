@@ -188,3 +188,43 @@ it("no longer renders the Current workspace item", () => {
   renderWithProviders(<ActivityBar />, { route: "/cockpit/ws-1" });
   expect(screen.queryByRole("link", { name: "Current workspace" })).toBeNull();
 });
+
+it("clicking an INACTIVE workspace icon reveals a collapsed pane and still navigates", () => {
+  // The pane can be collapsed while the rail still shows five icons. Without a
+  // reveal, clicking a different view moved the highlight and rewrote ?view but
+  // showed nothing — a control that looks like it worked and did not. VS Code
+  // opens the sidebar on any rail click.
+  const onToggleSidebar = vi.fn();
+  const onRevealSidebar = vi.fn();
+  renderWithProviders(
+    <>
+      <ActivityBar onToggleSidebar={onToggleSidebar} onRevealSidebar={onRevealSidebar} />
+      <LocationEcho />
+    </>,
+    { route: "/cockpit/abc?tab=spec&sec=2&view=versions" },
+  );
+  fireEvent.click(screen.getByRole("link", { name: "Criteria" }));
+  expect(onRevealSidebar).toHaveBeenCalledTimes(1);
+  // Reveal is NOT a toggle: an already-open pane must stay open.
+  expect(onToggleSidebar).not.toHaveBeenCalled();
+  // And the navigation must still happen — reveal does not preventDefault.
+  const url = new URLSearchParams(
+    screen.getByTestId("loc").textContent?.split("?")[1] ?? "",
+  );
+  expect(url.get("view")).toBe("criteria");
+  expect(url.get("tab")).toBe("spec");
+  expect(url.get("sec")).toBe("2");
+});
+
+it("clicking the ACTIVE workspace icon toggles and does NOT reveal", () => {
+  // Otherwise collapsing would immediately re-expand.
+  const onToggleSidebar = vi.fn();
+  const onRevealSidebar = vi.fn();
+  renderWithProviders(
+    <ActivityBar onToggleSidebar={onToggleSidebar} onRevealSidebar={onRevealSidebar} />,
+    { route: "/cockpit/abc?view=versions" },
+  );
+  fireEvent.click(screen.getByRole("link", { name: "Versions" }));
+  expect(onToggleSidebar).toHaveBeenCalledTimes(1);
+  expect(onRevealSidebar).not.toHaveBeenCalled();
+});
