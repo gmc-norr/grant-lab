@@ -1,8 +1,7 @@
 import { useSearchParams } from "react-router-dom";
 
 import { useDraft, useSpec } from "../../api/editor";
-import { tabFromParams } from "../cockpitNav";
-import { useCockpitNav } from "../cockpitNav";
+import { tabFromParams, useCockpitNav } from "../cockpitNav";
 import styles from "../CockpitSidebar.module.css";
 import { useEditorDirty } from "../editorStore";
 import { requestSectionJump } from "../sectionJump";

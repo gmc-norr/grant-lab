@@ -228,3 +228,63 @@ it("clicking the ACTIVE workspace icon toggles and does NOT reveal", () => {
   expect(onToggleSidebar).toHaveBeenCalledTimes(1);
   expect(onRevealSidebar).not.toHaveBeenCalled();
 });
+
+// A modified click is the browser's ("open in a new tab"), not ours. This matters
+// here specifically: the design's answer to "several workspaces at once" is browser
+// tabs, so Cmd/Ctrl-clicking a rail destination is a first-class workflow.
+describe("modified clicks belong to the browser", () => {
+  const MODIFIERS = [
+    ["ctrlKey", { ctrlKey: true }],
+    ["metaKey", { metaKey: true }],
+    ["shiftKey", { shiftKey: true }],
+    ["altKey", { altKey: true }],
+  ] as const;
+
+  it.each(MODIFIERS)("%s + ACTIVE workspace icon does not toggle the pane", (_n, mod) => {
+    const onToggleSidebar = vi.fn();
+    const onRevealSidebar = vi.fn();
+    renderWithProviders(
+      <ActivityBar onToggleSidebar={onToggleSidebar} onRevealSidebar={onRevealSidebar} />,
+      { route: "/cockpit/abc?view=versions" },
+    );
+    fireEvent.click(screen.getByRole("link", { name: "Versions" }), mod);
+    expect(onToggleSidebar).not.toHaveBeenCalled();
+    expect(onRevealSidebar).not.toHaveBeenCalled();
+  });
+
+  it.each(MODIFIERS)("%s + INACTIVE workspace icon does not reveal the pane", (_n, mod) => {
+    const onToggleSidebar = vi.fn();
+    const onRevealSidebar = vi.fn();
+    renderWithProviders(
+      <ActivityBar onToggleSidebar={onToggleSidebar} onRevealSidebar={onRevealSidebar} />,
+      { route: "/cockpit/abc?view=versions" },
+    );
+    fireEvent.click(screen.getByRole("link", { name: "Criteria" }), mod);
+    expect(onRevealSidebar).not.toHaveBeenCalled();
+    expect(onToggleSidebar).not.toHaveBeenCalled();
+  });
+
+  it("ctrl + the ACTIVE APP-band item does not toggle the pane either", () => {
+    // Pre-existing shape, same defect: Item.handleClick preventDefaulted on any
+    // click. Fixed alongside because it is the same helper and the same bug.
+    //
+    // Route "/" so Calls is genuinely ACTIVE. On a cockpit route no app-band
+    // item is active, and this test would pass without the fix — a gate that
+    // cannot fail. Its plain-click twin below is what proves it can.
+    const onToggleSidebar = vi.fn();
+    renderWithProviders(<ActivityBar onToggleSidebar={onToggleSidebar} />, { route: "/" });
+    const calls = screen.getByRole("link", { name: "Calls" });
+    expect(calls).toHaveAttribute("aria-current", "page");
+    fireEvent.click(calls, { ctrlKey: true });
+    expect(onToggleSidebar).not.toHaveBeenCalled();
+  });
+
+  it("a PLAIN click on that same active app-band item still toggles", () => {
+    // The control for the test above: without this, "not called" could mean the
+    // handler is simply never wired on this route.
+    const onToggleSidebar = vi.fn();
+    renderWithProviders(<ActivityBar onToggleSidebar={onToggleSidebar} />, { route: "/" });
+    fireEvent.click(screen.getByRole("link", { name: "Calls" }));
+    expect(onToggleSidebar).toHaveBeenCalledTimes(1);
+  });
+});

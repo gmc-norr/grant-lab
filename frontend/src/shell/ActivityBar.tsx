@@ -15,6 +15,15 @@ function Glyph({ icon }: { icon: string }) {
   );
 }
 
+/** A modified or non-primary click belongs to the BROWSER — "open in a new tab",
+ *  "open in a new window". The rail's sidebar behaviour must not swallow it, and
+ *  must not preventDefault it. This matters more here than in most apps: the
+ *  design's answer to "several workspaces at once" is browser tabs, so
+ *  Cmd/Ctrl-clicking a rail destination is a first-class workflow. */
+function isBrowserClick(e: MouseEvent<HTMLAnchorElement>) {
+  return e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0;
+}
+
 function Item({
   item,
   active,
@@ -30,6 +39,7 @@ function Item({
   // defaultPrevented) so we don't re-navigate to the bare route and drop ?tab/?sec.
   // Only fires when this route actually has a sidebar (onToggleSidebar provided).
   const handleClick = (e: MouseEvent<HTMLAnchorElement>) => {
+    if (isBrowserClick(e)) return;
     if (active && onToggleSidebar) {
       e.preventDefault();
       onToggleSidebar();
@@ -104,6 +114,7 @@ function WorkspaceBand({
                 aria-current={active ? "page" : undefined}
                 className={active ? `${styles.item} ${styles.active}` : styles.item}
                 onClick={(e) => {
+                  if (isBrowserClick(e)) return;
                   // Same rule as the app band: clicking the ALREADY-ACTIVE item
                   // collapses the pane instead of navigating. preventDefault
                   // stops react-router's Link nav, so ?tab/?sec survive.
