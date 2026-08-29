@@ -1,4 +1,3 @@
-import { Component, type ReactNode } from "react";
 import { useLocation, useSearchParams } from "react-router-dom";
 
 import { useBranches } from "../api/branches";
@@ -42,21 +41,10 @@ function short(sha: string): string {
   return sha.slice(0, 7);
 }
 
-/** Silently renders nothing when children throw (e.g. missing QueryClient in tests
- *  that only care about the branch chip). Production code always has QueryClient. */
-class NullBoundary extends Component<{ children: ReactNode }, { caught: boolean }> {
-  state = { caught: false };
-  static getDerivedStateFromError() {
-    return { caught: true };
-  }
-  render() {
-    return this.state.caught ? null : this.props.children;
-  }
-}
-
 /** Cockpit-specific items that require QueryClient (useDraft, useSpec, etc.).
- *  Wrapped in NullBoundary so tests that only mock useBranches can render
- *  StatusBar without a QueryClientProvider and still exercise the branch chip. */
+ *  Deliberately NOT wrapped in an error boundary: one that renders null on any
+ *  throw would hide a real render or QueryClient regression behind a silently
+ *  empty status bar. Tests supply a QueryClientProvider instead. */
 function CockpitStatusItems({
   id,
   tab,
@@ -136,9 +124,7 @@ export function StatusBar() {
       <span className={styles.item}>Grant Lab</span>
       {onCockpit && branch && <span className={styles.item}>{branch}</span>}
       {onCockpit ? (
-        <NullBoundary>
-          <CockpitStatusItems id={id} tab={tab} sp={sp} save={save} cursor={cursor} />
-        </NullBoundary>
+        <CockpitStatusItems id={id} tab={tab} sp={sp} save={save} cursor={cursor} />
       ) : (
         <span className={styles.spacer} />
       )}

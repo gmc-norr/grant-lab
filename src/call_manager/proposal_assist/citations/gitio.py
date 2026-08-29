@@ -359,8 +359,18 @@ def list_branches(repo_dir: Path) -> list[str]:
 
 def branch_exists(repo_dir: Path, name: str) -> bool:
     """Whether a LOCAL branch of this name exists. Uses the full refs/heads/ path
-    so a tag or a commit-ish that happens to share the name cannot answer yes."""
-    return _git(repo_dir, "show-ref", "--verify", "--quiet", f"refs/heads/{name}").returncode == 0
+    so a tag or a commit-ish that happens to share the name cannot answer yes.
+
+    Only exit **1** means "no such branch". Measured 2026-08-29: `show-ref
+    --verify --quiet` exits 0 when the ref exists, 1 when it does not, and **128**
+    for a fatal condition (not a repository, corruption, permissions). Collapsing
+    128 to False would report a broken repo as "branch not found"."""
+    proc = _git(repo_dir, "show-ref", "--verify", "--quiet", f"refs/heads/{name}")
+    if proc.returncode in (0, 1):
+        return proc.returncode == 0
+    raise GitCommitError(
+        f"cannot read refs in {repo_dir} (git exit {proc.returncode}): {proc.stderr.strip()}"
+    )
 
 
 def is_valid_branch_name(name: str) -> bool:
@@ -389,7 +399,12 @@ def has_commits(repo_dir: Path) -> bool:
     an UNBORN repo and returns the branch name the first commit will land on.
     `rev-parse --verify HEAD` is the one that exits non-zero there.
     """
-    return _git(repo_dir, "rev-parse", "--verify", "--quiet", "HEAD").returncode == 0
+    proc = _git(repo_dir, "rev-parse", "--verify", "--quiet", "HEAD")
+    if proc.returncode in (0, 1):
+        return proc.returncode == 0
+    raise GitCommitError(
+        f"cannot resolve HEAD in {repo_dir} (git exit {proc.returncode}): {proc.stderr.strip()}"
+    )
 
 
 def create_branch(repo_dir: Path, name: str) -> None:

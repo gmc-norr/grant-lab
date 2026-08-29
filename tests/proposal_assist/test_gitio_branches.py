@@ -135,3 +135,15 @@ def test_invalid_names_are_rejected(name):
 @pytest.mark.parametrize("name", ["good-name", "aims/ambitious", "v2"])
 def test_valid_names_are_accepted(name):
     assert is_valid_branch_name(name) is True
+
+
+def test_probes_raise_on_a_FATAL_git_failure_rather_than_answering_no(tmp_path):
+    """Measured 2026-08-29: `show-ref`/`rev-parse --verify --quiet` exit 1 for a
+    normal "no" and 128 when the directory is not a repository. Collapsing 128 to
+    False would surface repo corruption as "branch not found" / "no commits yet"."""
+    not_a_repo = tmp_path / "plain"
+    not_a_repo.mkdir()
+    with pytest.raises(GitCommitError):
+        branch_exists(not_a_repo, "main")
+    with pytest.raises(GitCommitError):
+        has_commits(not_a_repo)

@@ -862,12 +862,42 @@ class RoomManager:
         # taking it here for the close loop risks a lock-order inversion. We
         # popped the whole room, so there are no surviving peers and no presence
         # removal is needed.
-        async with room.recon_lock:
-            for client, state in list(room.clients.items()):
-                state.can_write = False
-                with suppress(Exception):
-                    await client.close(code=close_code)
-                closed += 1
+        #
+        # BOTH the lock wait and the closes are BOUNDED, and neither is allowed to
+        # decide whether the teardown completes. Two reasons:
+        #
+        # 1. LOCK ORDER. This class's own note above records that
+        #    `reconcile_client` may run a checkpoint — "a threadpool git commit +
+        #    advisory commit-mutex wait" — while holding recon_lock. So the edge
+        #    `recon_lock -> commit mutex` exists. A branch switch calls this
+        #    teardown while HOLDING the commit mutex, which adds
+        #    `commit mutex -> recon_lock` and closes the cycle. Bounding the wait
+        #    turns a mutual stall into a bounded, logged degradation.
+        # 2. `await client.close()` on a wedged socket is otherwise unbounded, and
+        #    the caller's cross-thread `fut.result(timeout=...)` does NOT cancel
+        #    this coroutine — it only stops the request thread waiting. An
+        #    unbounded close here would keep recon_lock and the client references
+        #    alive indefinitely.
+        #
+        # Safety does not rest on any of this: `room.evicted` is already set
+        # UNCONDITIONALLY in the finally above, and that is what stops writes.
+        # Closing sockets is best-effort liveness (it makes clients reconnect
+        # promptly), and best-effort work must be bounded.
+        try:
+            await asyncio.wait_for(room.recon_lock.acquire(), timeout=_RETIRE_LOCK_WAIT_SECONDS)
+        except TimeoutError:
+            logger.warning(
+                "collab.retire_recon_lock_timeout",
+                extra={"event": "collab_retire_recon_lock_timeout", "room": str(key)},
+            )
+            # Proceed WITHOUT the lock. The room is popped and tombstoned, so no
+            # surviving peer needs presence removal and no write can land.
+            closed += await _close_all(room, close_code)
+        else:
+            try:
+                closed += await _close_all(room, close_code)
+            finally:
+                room.recon_lock.release()
         # Drain any in-flight server op: the room is popped so no NEW op can bump
         # room.ops, but one already inside operate() may still be mid-write. Poll
         # ops to zero under a bounded deadline, then proceed regardless (for THESE
@@ -885,6 +915,32 @@ class RoomManager:
                 },
             )
         return closed, locked
+
+
+async def _close_all(room: Room, close_code: int) -> int:
+    """Close every client socket CONCURRENTLY under one bounded deadline.
+
+    Sequential closes let one wedged socket hold up all the others (and, on the
+    branch-switch path, hold recon_lock while the switch holds the commit mutex).
+    Returns how many sockets were asked to close — the count is for logging, and
+    a socket whose close timed out is still counted: it has been told, its
+    `can_write` is already False, and the room is tombstoned.
+    """
+    clients = list(room.clients.items())
+    for _client, state in clients:
+        state.can_write = False
+
+    async def _one(client) -> None:
+        with suppress(Exception):
+            await client.close(code=close_code)
+
+    if clients:
+        with suppress(TimeoutError):
+            await asyncio.wait_for(
+                asyncio.gather(*(_one(c) for c, _ in clients), return_exceptions=True),
+                timeout=_RETIRE_LOCK_WAIT_SECONDS,
+            )
+    return len(clients)
 
 
 async def _set_evicted_under_lock(room: Room) -> None:
