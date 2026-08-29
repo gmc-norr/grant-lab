@@ -1,3 +1,5 @@
+import pytest
+
 from call_manager.db.models import (
     Call,
     Profile,
@@ -172,3 +174,80 @@ def test_view_dicts_match_api_model_fields(pg_session_factory):
     assert set(view.ranking) == set(RankingOut.model_fields)
     assert set(view.pagination) == set(PaginationOut.model_fields)
     assert set(view.effective) == set(EffectiveOut.model_fields)
+
+
+def _seed_call_with_heavy_columns(pg_session_factory, *, ranked):
+    """A call carrying every column the dashboard read-model must NOT load.
+
+    `ranked` selects which of `build_dashboard_view`'s two mutually exclusive
+    query branches the caller will take, so the defer must be proven on both.
+    """
+    suffix = "r" if ranked else "u"
+    with pg_session_factory() as s:
+        u = User(status="active", email=f"heavy-{suffix}@ki.se")
+        src = Source(slug=f"heavy-src-{suffix}", name="Heavy")
+        s.add_all([u, src])
+        s.flush()
+        pid = None
+        if ranked:
+            p = Profile(
+                name=f"Grp-{suffix}",
+                kind=ProfileKind.ORGANIZATIONAL_UNIT.value,
+                level="group",
+                description="d",
+                structured={},
+                created_by=u.id,
+                is_active=True,
+            )
+            s.add(p)
+            s.flush()
+            pid = p.id
+        s.add(
+            Call(
+                source_id=src.id,
+                external_id=f"ext-heavy-{suffix}",
+                url=f"https://example.test/heavy-{suffix}",
+                title="Heavy call",
+                full_text="f" * 5000,
+                raw={"blob": "r" * 5000},
+                embedding=[0.5] * 1024,
+                embedding_model="bge-m3",
+            )
+        )
+        s.commit()
+        return u.id, pid
+
+
+@pytest.mark.parametrize("ranked", [False, True])
+def test_dashboard_view_never_loads_the_columns_it_never_renders(pg_session_factory, ranked):
+    # `CallOut` (web/api/calls.py) is built from eight scalars; `embedding`,
+    # `full_text` and `raw` are not among them. Loading them cost 71-78% of the
+    # ORM row-load time at 50-200 rows, all of it spent parsing a 1024-dim
+    # vector out of text into Python floats for a payload that never contains it.
+    #
+    # They are deferred with `raiseload=True`, so a future consumer that reads
+    # one off a dashboard row fails HERE rather than silently issuing one extra
+    # SELECT per row. If you need one of these, drop it from the defer list —
+    # do not catch this error.
+    from sqlalchemy.exc import InvalidRequestError
+
+    uid, pid = _seed_call_with_heavy_columns(pg_session_factory, ranked=ranked)
+    with pg_session_factory() as s:
+        view = build_dashboard_view(
+            s,
+            user_id=uid,
+            source=None,
+            sort="newest",
+            profile_id=pid,
+            limit=50,
+            page=1,
+            show_closed=False,
+        )
+        assert len(view.calls) == 1
+        call, _ = view.calls[0]
+        # The scalars CallOut actually reads are present and correct.
+        assert call.title == "Heavy call"
+        assert call.source.slug == f"heavy-src-{'r' if ranked else 'u'}"
+        for attr in ("embedding", "full_text", "raw"):
+            with pytest.raises(InvalidRequestError):
+                getattr(call, attr)

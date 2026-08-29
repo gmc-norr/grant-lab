@@ -22,7 +22,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from sqlalchemy import and_, func, or_, select
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, defer, joinedload
 
 from call_manager.db.models import (
     Call,
@@ -275,13 +275,30 @@ def build_dashboard_view(
         if profile_obj is None:
             profile_id = None
 
+    # `CallOut` (web/api/calls.py) is built from eight scalars; none of them is
+    # `embedding`, `full_text` or `raw`. Selecting them anyway made each row ship
+    # a 1024-dim vector as ~9 kB of text for pgvector's PURE-PYTHON parser to turn
+    # back into 1024 floats — measured at 71% (50 rows) and 78% (200 rows) of the
+    # whole ORM row-load, on data the response never contains.
+    #
+    # `raiseload=True` makes this a contract, not a hope: a consumer that reads
+    # one of these off a dashboard row raises instead of silently issuing one
+    # extra SELECT per row. `build_dashboard_view` has exactly one production
+    # caller (`/api/calls`), so widening this is a deliberate act — drop the
+    # column from the tuple, do not catch the error.
+    _unrendered = (
+        defer(Call.embedding, raiseload=True),
+        defer(Call.full_text, raiseload=True),
+        defer(Call.raw, raiseload=True),
+    )
+
     # When a profile is selected, LEFT JOIN call_rankings for THAT profile and
     # sort by score desc (nulls last). Without a profile, fall back to the
     # unranked sort (newest/deadline).
     if profile_id is not None and profile_obj is not None:
         stmt = (
             select(Call, CallRanking)
-            .options(joinedload(Call.source))
+            .options(joinedload(Call.source), *_unrendered)
             .outerjoin(
                 CallRanking,
                 (CallRanking.call_id == Call.id) & (CallRanking.profile_id == profile_id),
@@ -299,7 +316,7 @@ def build_dashboard_view(
     else:
         stmt = (
             select(Call, None)
-            .options(joinedload(Call.source))
+            .options(joinedload(Call.source), *_unrendered)
             .order_by(closed_expr.asc(), *_order_for(sort))
             .limit(limit)
             .offset(offset)
