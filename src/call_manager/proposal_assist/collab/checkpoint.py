@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 from pycrdt import Doc
 from sqlalchemy.orm import Session
@@ -48,6 +49,58 @@ class CheckpointResult:
 
 def serialize_doc_to_markdown(doc: Doc) -> str:
     return pm_to_markdown(ydoc_to_pm_json(doc))
+
+
+def _reconcile_head_for_checkpoint(session, *, workspace_id, repo) -> None:
+    """Make git HEAD agree with `workspaces.current_branch` before a checkpoint
+    reads it. Caller must already hold the commit mutex.
+
+    Deliberately forgiving: a workspace with no repo, no commits, or a detached
+    HEAD is left alone rather than raising. A checkpoint is not the place to fail
+    a request over repo shape — `_head_or_empty` below already resolves those to
+    a clean no-op, and the branch operations (which DO raise) are where a broken
+    repo should surface.
+    """
+    from call_manager.db.models import Workspace
+    from call_manager.proposal_assist.citations.gitio import checkout_branch, current_branch
+
+    if not Path(repo).is_dir():
+        # No repo on disk at all. `_head_or_empty` below resolves this to a clean
+        # no-op, and two existing tests pin that (`..._repo_missing_is_clean_noop`).
+        # Checked BEFORE any git call: subprocess raises FileNotFoundError on a
+        # missing cwd, which is an OSError, NOT a GitCommitError.
+        return
+    row = session.get(Workspace, workspace_id)
+    if row is None:
+        return
+    recorded = row.current_branch
+    if not recorded:
+        return
+    try:
+        if current_branch(repo) == recorded:
+            return
+    except (GitCommitError, OSError):
+        return  # detached, or the repo went away underneath us
+    try:
+        checkout_branch(repo, recorded)
+    except (GitCommitError, OSError):
+        logger.warning(
+            "collab.checkpoint_head_reconcile_failed",
+            extra={
+                "event": "collab_checkpoint_head_reconcile_failed",
+                "workspace_id": str(workspace_id),
+                "branch": recorded,
+            },
+        )
+        return
+    logger.warning(
+        "collab.checkpoint_head_reconciled",
+        extra={
+            "event": "collab_checkpoint_head_reconciled",
+            "workspace_id": str(workspace_id),
+            "branch": recorded,
+        },
+    )
 
 
 def _head_or_empty(repo) -> str:
@@ -96,9 +149,24 @@ def checkpoint_artifact(
     # re-read here at the write. Teardown/background callers skip on
     # WorkspaceDeleted/WorkspaceGenerationStale; the user-triggered "Save a version"
     # route lets both reach the 404 handler.
-    acquire_commit_mutex_at_generation(
-        session, stamp.workspace_id, generation=stamp.generation
-    )
+    acquire_commit_mutex_at_generation(session, stamp.workspace_id, generation=stamp.generation)
+
+    # Branch design §4.1: `workspaces.current_branch` is the source of truth and
+    # git HEAD is a CACHE. Reconcile before the head read below, because this
+    # function commits to whatever HEAD is.
+    #
+    # Without this, a branch switch that crashed between its checkout and its DB
+    # commit leaves HEAD on the target while the column still names the source —
+    # and the very next checkpoint (a last-leave, the periodic scan, a kernel
+    # accept, the explicit "Save a version" route: ten call sites, most of them
+    # NOT branch operations) would commit the SOURCE branch's log onto the TARGET
+    # branch. §4.1 promises "reconciliation repairs it even after a crash"; that
+    # promise is only true if every git-writing entry point keeps it, not just the
+    # branch operations.
+    #
+    # Under the mutex, so it cannot race a concurrent switch. A no-op when the two
+    # already agree, which is every ordinary call.
+    _reconcile_head_for_checkpoint(session, workspace_id=workspace_id, repo=repo)
 
     # ONE atomic snapshot of the log: doc, max_id, and authors all derive from
     # these rows (fixes the load-doc-then-read-max TOCTOU).

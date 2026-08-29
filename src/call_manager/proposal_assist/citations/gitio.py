@@ -321,6 +321,124 @@ def current_head(repo_dir: Path) -> str:
     return proc.stdout.strip()
 
 
+def _git(repo_dir: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run one git command in *repo_dir*, capturing text output. Never raises on
+    a non-zero exit — callers decide what a failure means, because for some of
+    these (`branch_exists`) a non-zero exit IS the answer."""
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        timeout=_GIT_TIMEOUT_SECONDS,
+        env=_git_env(),
+    )
+
+
+def current_branch(repo_dir: Path) -> str:
+    """The checked-out branch name.
+
+    Succeeds on an UNBORN HEAD (a repo with no commits): git still knows which
+    branch the first commit will land on, and that name is the right answer.
+    Raises GitCommitError on a DETACHED HEAD, where there is no branch name and
+    no safe default.
+    """
+    proc = _git(repo_dir, "symbolic-ref", "--short", "HEAD")
+    if proc.returncode != 0:
+        raise GitCommitError(f"HEAD is not on a branch in {repo_dir}: {proc.stderr.strip()}")
+    return proc.stdout.strip()
+
+
+def list_branches(repo_dir: Path) -> list[str]:
+    """Every local branch, in git's own order. Empty only for a repo with no refs."""
+    proc = _git(repo_dir, "branch", "--format=%(refname:short)")
+    if proc.returncode != 0:
+        raise GitCommitError(f"cannot list branches in {repo_dir}: {proc.stderr.strip()}")
+    return [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+
+
+def branch_exists(repo_dir: Path, name: str) -> bool:
+    """Whether a LOCAL branch of this name exists. Uses the full refs/heads/ path
+    so a tag or a commit-ish that happens to share the name cannot answer yes.
+
+    Only exit **1** means "no such branch". Measured 2026-08-29: `show-ref
+    --verify --quiet` exits 0 when the ref exists, 1 when it does not, and **128**
+    for a fatal condition (not a repository, corruption, permissions). Collapsing
+    128 to False would report a broken repo as "branch not found"."""
+    proc = _git(repo_dir, "show-ref", "--verify", "--quiet", f"refs/heads/{name}")
+    if proc.returncode in (0, 1):
+        return proc.returncode == 0
+    raise GitCommitError(
+        f"cannot read refs in {repo_dir} (git exit {proc.returncode}): {proc.stderr.strip()}"
+    )
+
+
+def is_valid_branch_name(name: str) -> bool:
+    """Delegated to `git check-ref-format --branch`, which owns these rules.
+
+    A hand-rolled check that accepts a name git rejects produces a half-created
+    branch; one that rejects a name git accepts is an unexplainable refusal.
+    This runs without a repository — check-ref-format reads none.
+    """
+    if not name or name != name.strip():
+        return False
+    proc = subprocess.run(
+        ["git", "check-ref-format", "--branch", name],
+        capture_output=True,
+        text=True,
+        timeout=_GIT_TIMEOUT_SECONDS,
+        env=_git_env(),
+    )
+    return proc.returncode == 0
+
+
+def has_commits(repo_dir: Path) -> bool:
+    """Whether HEAD resolves to a commit.
+
+    `current_branch` cannot answer this: `symbolic-ref --short HEAD` succeeds on
+    an UNBORN repo and returns the branch name the first commit will land on.
+    `rev-parse --verify HEAD` is the one that exits non-zero there.
+    """
+    proc = _git(repo_dir, "rev-parse", "--verify", "--quiet", "HEAD")
+    if proc.returncode in (0, 1):
+        return proc.returncode == 0
+    raise GitCommitError(
+        f"cannot resolve HEAD in {repo_dir} (git exit {proc.returncode}): {proc.stderr.strip()}"
+    )
+
+
+def create_branch(repo_dir: Path, name: str) -> None:
+    """Create *name* at the current HEAD. Does NOT move HEAD.
+
+    Fails on a repo with no commits — `git branch <name> HEAD` exits 128 with
+    "not a valid object name: 'HEAD'" — which is the correct refusal for a
+    workspace still in setup.
+    """
+    proc = _git(repo_dir, "branch", name, "HEAD")
+    if proc.returncode != 0:
+        raise GitCommitError(f"cannot create branch {name!r}: {proc.stderr.strip()}")
+
+
+def delete_branch(repo_dir: Path, name: str) -> None:
+    """Delete *name*, FORCE (`-D`).
+
+    `-d` refuses to delete a branch whose commits are unmerged — which is
+    precisely the branch a user throws away, and a refusal that could not be
+    explained in the UI. git still refuses to delete the CHECKED-OUT branch, and
+    that refusal is kept as the floor beneath the app's own check.
+    """
+    proc = _git(repo_dir, "branch", "-D", name)
+    if proc.returncode != 0:
+        raise GitCommitError(f"cannot delete branch {name!r}: {proc.stderr.strip()}")
+
+
+def checkout_branch(repo_dir: Path, name: str) -> None:
+    """Move HEAD to *name*. The working tree follows."""
+    proc = _git(repo_dir, "checkout", "-q", name)
+    if proc.returncode != 0:
+        raise GitCommitError(f"cannot check out branch {name!r}: {proc.stderr.strip()}")
+
+
 def blob_sha(repo_dir: Path, ref: str, path: str) -> str:
     """Return the git blob SHA of *path* at *ref* (e.g. 'HEAD'). Used to pin the
     exact bytes of a committed review file so the read endpoint can fetch them by
@@ -419,9 +537,7 @@ _MAX_SCAN_BYTES = 32 * 1024 * 1024
 _READ_CHUNK_BYTES = 64 * 1024
 
 
-def _read_capped_fields(
-    stream, *, max_fields: int, repo_dir: Path, deadline: float
-) -> list[bytes]:
+def _read_capped_fields(stream, *, max_fields: int, repo_dir: Path, deadline: float) -> list[bytes]:
     """Read NUL-separated fields, keeping at most _MAX_FIELD_BYTES of each.
 
     Bytes beyond a field's cap are consumed and dropped rather than buffered, so
@@ -461,9 +577,7 @@ def _read_capped_fields(
             return stream.read(_READ_CHUNK_BYTES)
         remaining = deadline - time.monotonic()
         if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
-            raise GitCommitError(
-                f"git log for {repo_dir} timed out after {_GIT_TIMEOUT_SECONDS}s"
-            )
+            raise GitCommitError(f"git log for {repo_dir} timed out after {_GIT_TIMEOUT_SECONDS}s")
         return os.read(fd, _READ_CHUNK_BYTES)
 
     def _close_field() -> None:
@@ -580,9 +694,7 @@ def list_commits(
         if isinstance(raw_err, bytes):
             raw_err = raw_err.decode("utf-8", errors="replace")
         detail = raw_err.strip() or str(e)
-        raise GitCommitError(
-            f"cannot list commits in {repo_dir}: {detail}"
-        ) from e
+        raise GitCommitError(f"cannot list commits in {repo_dir}: {detail}") from e
 
     # errors="replace", mirroring read_blob: a commit subject is not guaranteed
     # valid UTF-8 (git stores message bytes verbatim, and an imported or damaged
@@ -617,9 +729,7 @@ def list_commits(
             # clause and becomes a 500 rather than a handled state.
             authored_at = datetime.fromisoformat(authored)
         except ValueError as e:
-            raise GitCommitError(
-                f"unparseable author date in {repo_dir}: {authored!r}"
-            ) from e
+            raise GitCommitError(f"unparseable author date in {repo_dir}: {authored!r}") from e
         if len(subject) > _MAX_SUBJECT_CHARS:
             # Marked, not silently clipped: an admin reading a retention record
             # must be able to tell a short subject from a shortened one.

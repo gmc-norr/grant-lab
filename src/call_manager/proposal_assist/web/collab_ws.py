@@ -118,7 +118,10 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
         def _read():
             with session_factory() as s:
                 updates = load_or_hydrate(
-                    s, stamp=stamp, workspace_id=workspace_id, artifact=artifact,
+                    s,
+                    stamp=stamp,
+                    workspace_id=workspace_id,
+                    artifact=artifact,
                     workspaces_dir=workspaces_dir,
                 )
                 s.commit()  # persist the seed if hydration happened
@@ -142,16 +145,31 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
     state = ClientState(user_id=user.id, can_write=can_write)
     try:
         room = await MANAGER.acquire(key, load=_load, client=websocket, state=state)
-    except (WorkspaceRetired, WorkspaceDeleted, WorkspaceGenerationStale):
+    except (WorkspaceRetired, WorkspaceDeleted):
         # The workspace was retired (soft-deleted) between the membership check and
         # room acquisition — or during cold-start hydration, where load_or_hydrate's
-        # commit-mutex-at-generation guard raises WorkspaceDeleted (still deleted) or
-        # WorkspaceGenerationStale (deleted-and-restored past the connect stamp).
-        # accept() already happened, so a raise would surface as 1011/1006; close
-        # with 1008 (policy) and return WITHOUT entering the try below (no client
-        # registered, nothing to release).
+        # commit-mutex-at-generation guard raises WorkspaceDeleted. accept() already
+        # happened, so a raise would surface as 1011/1006; close with 1008 (policy)
+        # and return WITHOUT entering the try below (no client registered, nothing
+        # to release). 1008 is TERMINAL on the client
+        # (frontend/src/collab/collabProvider.ts:234) and that is correct here:
+        # the artifact is gone, so coming back is pointless.
         with contextlib.suppress(Exception):
             await websocket.close(code=_WS_POLICY_VIOLATION)
+        return
+    except WorkspaceGenerationStale:
+        # The workspace MOVED generation — a branch switch, or a delete-and-restore
+        # — between this connect's authorization stamp and the mutex. Since spec
+        # §4.4 this is reachable on every reconnect, not only a cold seed, because
+        # load_or_hydrate now takes the mutex before reading the log.
+        #
+        # This must NOT be 1008. The artifact still exists and the client SHOULD
+        # come straight back: its next connect is stamped at the new generation,
+        # blocks on nothing, and hydrates the branch that is now current. 1008
+        # would leave every editor dead until a page reload, which is what a
+        # branch switch would look like to everyone except the person switching.
+        with contextlib.suppress(Exception):
+            await websocket.close(code=_WS_TRY_AGAIN_LATER)
         return
     except OperationalError as exc:
         # Slice C3: load_or_hydrate persists the seed INSIDE the mutex-held tail
@@ -171,9 +189,10 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
         return
     except CommitMutexTimeout:
         # The OTHER exception the same hydration guard can raise, and a different
-        # animal: contention, not refusal. It is reachable only on the first-ever
-        # open of a room (load_or_hydrate takes the live commit mutex to persist the
-        # seed) and it means "someone else holds the workspace mutex right now" —
+        # animal: contention, not refusal. It is reachable on every room open on the
+        # cold-start path (load_or_hydrate now takes the live commit mutex before
+        # reading the log) and it means "someone else holds the workspace mutex right
+        # now" —
         # the artifact still exists and the client SHOULD come back. On HTTP this is
         # the house 429. On a WebSocket main.py's handler still RUNS — Starlette
         # dispatches registered handlers in the websocket scope exactly as in the HTTP
@@ -194,8 +213,13 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
         # still releases the client if this raises.
         async with room.recon_lock:
             await reconcile_client(
-                session_factory, workspaces_dir, room, websocket, state,
-                workspace_id=workspace_id, artifact=artifact,
+                session_factory,
+                workspaces_dir,
+                room,
+                websocket,
+                state,
+                workspace_id=workspace_id,
+                artifact=artifact,
             )
             # Straddle epoch/status re-validation (session-revocation #1): a session
             # invalidation (logout / admin-disable / epoch bump) may have committed

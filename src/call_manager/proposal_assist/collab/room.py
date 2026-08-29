@@ -33,6 +33,17 @@ RoomKey = tuple[uuid.UUID, str]
 PersistFn = Callable[[int, bytes], Awaitable[None]]
 LoadFn = Callable[[], Awaitable[list[bytes]]]
 
+
+@dataclass(frozen=True)
+class BranchSwitchTeardown:
+    """What a branch-switch teardown achieved. `locked` False means at least one
+    room was tombstoned WITHOUT room.lock, so a client persist may still be in
+    flight — the switch must abort. The teardown itself always completed."""
+
+    closed: int
+    locked: bool
+
+
 # An empty Yjs update is two zero bytes; nothing to apply/persist/broadcast.
 _EMPTY_UPDATE = b"\x00\x00"
 
@@ -42,6 +53,12 @@ _WS_INTERNAL_ERROR = 1011
 # RFC 6455 close code: policy violation. Retirement closes editors with THIS, not
 # 1011 (server error): a soft-deleted workspace is a policy decision, not a crash.
 _WS_POLICY_VIOLATION = 1008
+
+# RFC 6455 close code: try again later. A branch switch closes editors with THIS
+# (not 1008) because the workspace still exists on another branch — the client
+# must reconnect immediately and will receive a fresh snapshot. 1008 is terminal
+# on the client (frontend/src/collab/collabProvider.ts:234).
+_WS_TRY_AGAIN_LATER = 1013
 
 # Bound on how long retire_workspace waits for an in-flight server op (a kernel
 # accept mid-write) to leave before it declares a room's retirement done. On
@@ -85,6 +102,7 @@ class ClientState:
     and the WS route reads it per message. `awareness_ids` tracks the awareness
     client ids this socket has declared, so its presence can be removed on
     disconnect."""
+
     user_id: int
     can_write: bool
     awareness_ids: set[int] = field(default_factory=set)
@@ -107,11 +125,11 @@ class Room:
         # the victim's same-user reconnect re-claims it freely (R2-2).
         self._awareness_bindings: dict[int, int] = {}
         self.clients: dict = {}
-        self.ops = 0            # in-flight server ops (kernel accepts) — Codex H1
+        self.ops = 0  # in-flight server ops (kernel accepts) — Codex H1
         self.poisoned = False
-        self.evicted = False   # tombstone: in-flight ops recheck & abort (Slice 3b-1)
+        self.evicted = False  # tombstone: in-flight ops recheck & abort (Slice 3b-1)
         self._lock = asyncio.Lock()
-        self._pending_on_evict = None   # deferred last-leave checkpoint (Slice 3a c)
+        self._pending_on_evict = None  # deferred last-leave checkpoint (Slice 3a c)
         # Serialize permission reconciliation per-room (Slice 3a cluster a/b).
         # Lock-acquisition ORDER (deadlock-freedom):
         #   recon_lock → manager._lock (via MANAGER.release/drop_client) → room._lock
@@ -290,16 +308,22 @@ class Room:
                 if stale:
                     logger.info(
                         "collab.awareness_stale_scrub_filtered",
-                        extra={"event": "collab_awareness_stale_scrub_filtered",
-                               "room": str(self.key), "user_id": state.user_id,
-                               "client_ids": stale},
+                        extra={
+                            "event": "collab_awareness_stale_scrub_filtered",
+                            "room": str(self.key),
+                            "user_id": state.user_id,
+                            "client_ids": stale,
+                        },
                     )
                 if spoof:
                     logger.warning(
                         "collab.awareness_foreign_filtered",
-                        extra={"event": "collab_awareness_foreign_filtered",
-                               "room": str(self.key), "user_id": state.user_id,
-                               "client_ids": spoof},
+                        extra={
+                            "event": "collab_awareness_foreign_filtered",
+                            "room": str(self.key),
+                            "user_id": state.user_id,
+                            "client_ids": spoof,
+                        },
                     )
             if not kept:
                 return  # pure-filtered frame (routine stale-scrub) or empty frame
@@ -308,8 +332,7 @@ class Room:
             if new_ids:
                 # Per-user binding quota — see _MAX_AWARENESS_BINDINGS_PER_USER.
                 mine = [
-                    cid for cid, uid in self._awareness_bindings.items()
-                    if uid == state.user_id
+                    cid for cid, uid in self._awareness_bindings.items() if uid == state.user_id
                 ]
                 overflow = len(mine) + len(new_ids) - _MAX_AWARENESS_BINDINGS_PER_USER
                 if overflow > 0:
@@ -333,9 +356,13 @@ class Room:
                     # quota+spoof frame still fires the spoof signal.
                     logger.warning(
                         "collab.awareness_bindings_capped",
-                        extra={"event": "collab_awareness_bindings_capped",
-                               "room": str(self.key), "user_id": state.user_id,
-                               "bound": len(mine), "new": len(new_ids)},
+                        extra={
+                            "event": "collab_awareness_bindings_capped",
+                            "room": str(self.key),
+                            "user_id": state.user_id,
+                            "bound": len(mine),
+                            "new": len(new_ids),
+                        },
                     )
                     kept = [e for e in kept if e.client_id not in new_ids]
                     kept_ids = {e.client_id for e in kept}
@@ -356,8 +383,10 @@ class Room:
                         except ValueError:
                             logger.warning(
                                 "collab.malformed_awareness_update",
-                                extra={"event": "collab_malformed_awareness_update",
-                                       "room": str(self.key)},
+                                extra={
+                                    "event": "collab_malformed_awareness_update",
+                                    "room": str(self.key),
+                                },
                             )
                             return
             # kept is non-empty here, so the filter never returns None.
@@ -369,8 +398,7 @@ class Room:
             except Exception:
                 logger.warning(
                     "collab.malformed_awareness_update",
-                    extra={"event": "collab_malformed_awareness_update",
-                           "room": str(self.key)},
+                    extra={"event": "collab_malformed_awareness_update", "room": str(self.key)},
                 )
                 return  # nothing bound, nothing relayed (bind-after-accept)
             # Bind AFTER a successful apply, and only the new ids pycrdt
@@ -384,9 +412,12 @@ class Room:
                     self._awareness_bindings[cid] = state.user_id
                     logger.info(
                         "collab.awareness_bind",
-                        extra={"event": "collab_awareness_bind",
-                               "room": str(self.key),
-                               "client_id": cid, "user_id": state.user_id},
+                        extra={
+                            "event": "collab_awareness_bind",
+                            "room": str(self.key),
+                            "client_id": cid,
+                            "user_id": state.user_id,
+                        },
                     )
             # Attribute to THIS socket only ids bound to THIS user (drives
             # disconnect removal). The 3b-5b owned_by_other_users guard is
@@ -396,8 +427,7 @@ class Room:
             # id someone else binds later. Attribution from kept ids (not a
             # states-diff) keeps R2-2 same-clientID reconnects working.
             state.awareness_ids |= {
-                cid for cid in kept_ids
-                if self._awareness_bindings.get(cid) == state.user_id
+                cid for cid in kept_ids if self._awareness_bindings.get(cid) == state.user_id
             }
         # Relay the FILTERED payload outside the lock (standard y-awareness
         # relay; a slow client must not block the room).
@@ -567,7 +597,7 @@ class RoomManager:
                         room.ops += 1
                 if room is None:
                     room = Room(key)
-                    for update in await load():   # OUTSIDE the manager lock
+                    for update in await load():  # OUTSIDE the manager lock
                         room.doc.apply_update(update)
                     async with self._lock:
                         # Re-check AFTER load(): retirement may have landed while
@@ -589,7 +619,7 @@ class RoomManager:
                     pending = room._pending_on_evict
                     room._pending_on_evict = None
             if pending is not None:
-                await pending(room)   # OUTSIDE the manager lock (mirrors release)
+                await pending(room)  # OUTSIDE the manager lock (mirrors release)
 
     def get(self, key: RoomKey) -> Room | None:
         return self._rooms.get(key)
@@ -622,7 +652,7 @@ class RoomManager:
             else:
                 evicted = None
                 if room.clients:
-                    survivor = room     # peers remain → drop the leaver's caret
+                    survivor = room  # peers remain → drop the leaver's caret
                 elif on_evict is not None:
                     # Client-empty but an op is in flight: defer the checkpoint to
                     # operate()-exit so a straddling op cannot swallow it (Slice 3a c).
@@ -662,7 +692,7 @@ class RoomManager:
             room = self._rooms.pop(key, None)
         if room is None:
             return
-        room.evicted = True   # tombstone: block any in-flight op's persist/broadcast (Slice 3b-1)
+        room.evicted = True  # tombstone: block any in-flight op's persist/broadcast (Slice 3b-1)
         for client in list(room.clients):
             with suppress(Exception):
                 await client.close(code=_WS_INTERNAL_ERROR)
@@ -715,11 +745,77 @@ class RoomManager:
                     exc_info=result,
                 )
                 continue
-            closed += result
+            n, _got_lock = result
+            closed += n
         return closed
 
-    async def _retire_room(self, workspace_id: uuid.UUID, artifact: str) -> int:
-        """Tear down ONE artifact room for retire_workspace. Returns sockets closed."""
+    async def prepare_branch_switch(self, workspace_id: uuid.UUID) -> BranchSwitchTeardown:
+        """Tear both artifact rooms down for a branch switch (spec §4.2 step 4).
+
+        Differs from `retire_workspace` in exactly two ways, both deliberate:
+        it closes 1013 rather than 1008, and it REPORTS whether it linearized
+        against in-flight client persists instead of swallowing the timeout.
+
+        It does NOT abort on a lock timeout. The teardown pops each room before
+        it reaches for `room.lock`, so returning early would leave a room out of
+        the registry, un-tombstoned, and still writable through the reference its
+        clients already hold — a retry could not find it, and its next keystroke
+        would land after that retry truncated the log. Abort the SWITCH, never
+        the teardown: this finishes, and the caller acts on `locked`.
+
+        Never checkpoints. The switch checkpoints separately, from the frozen
+        LOG, after this returns.
+        """
+        results = await asyncio.gather(
+            *(
+                self._retire_room(workspace_id, artifact, close_code=_WS_TRY_AGAIN_LATER)
+                for artifact in ("draft", "spec")
+            ),
+            return_exceptions=True,
+        )
+        closed = 0
+        locked = True
+        for artifact, result in zip(("draft", "spec"), results, strict=True):
+            if isinstance(result, BaseException):
+                # A teardown that RAISED still finished its close-and-tombstone
+                # (that work is in a `finally`), so no orphan survives — but it
+                # cannot say whether it linearized. Treat it as NOT linearized so
+                # the switch aborts. `return_exceptions=True` is what keeps "tear
+                # BOTH rooms down" a guarantee rather than an accident: a bare
+                # gather would abandon the sibling task on the first failure.
+                locked = False
+                logger.warning(
+                    "collab.branch_switch_teardown_failed",
+                    extra={
+                        "event": "collab_branch_switch_teardown_failed",
+                        "room": str((workspace_id, artifact)),
+                    },
+                    exc_info=result,
+                )
+                continue
+            n, got_lock = result
+            closed += n
+            locked = locked and got_lock
+        return BranchSwitchTeardown(closed=closed, locked=locked)
+
+    async def _retire_room(
+        self, workspace_id: uuid.UUID, artifact: str, *, close_code: int = _WS_POLICY_VIOLATION
+    ) -> tuple[int, bool]:
+        """Tear down ONE artifact room. Returns (sockets closed, got_room_lock).
+
+        `close_code` is a protocol decision the CALLER owns, because the same
+        teardown serves two situations the client must distinguish:
+        retirement closes 1008 (terminal — the workspace is gone, retrying is
+        pointless) and a branch switch closes 1013 (come straight back — the
+        artifact still exists on another branch). 1008 is terminal on the client
+        (frontend/src/collab/collabProvider.ts:234).
+
+        `got_room_lock` is False when the tombstone had to be set without
+        `room.lock`. Retirement ignores it — the straggler's commit lands in a
+        log nobody will read. A branch switch MUST NOT ignore it: that commit
+        would ride into the target branch. Either way this function finishes the
+        teardown; it never returns leaving a popped room live.
+        """
         loop = asyncio.get_running_loop()
         closed = 0
         key = (workspace_id, artifact)
@@ -727,7 +823,7 @@ class RoomManager:
         async with self._lock:
             room = self._rooms.pop(key, None)
         if room is None:
-            return 0
+            return 0, True  # nothing to tear down IS a linearized teardown
         # Tombstone UNDER room.lock — this is the client-write linearization
         # point, not a cosmetic flag set. Room.handle's write path checks
         # `self.evicted` and then awaits persist(...) INSIDE this same lock,
@@ -741,27 +837,67 @@ class RoomManager:
         # Bounded like the ops drain — a wedged DB write must not eat the whole
         # retirement barrier; on timeout we set the flag anyway and log, and
         # the straggler's own commit remains the documented residual.
+        locked = True
         try:
-            await asyncio.wait_for(
-                _set_evicted_under_lock(room), timeout=_RETIRE_LOCK_WAIT_SECONDS
-            )
-        except TimeoutError:
-            room.evicted = True   # unsynchronized fallback; still stops LATER frames
-            logger.warning(
-                "collab.retire_lock_wait_timeout",
-                extra={"event": "collab_retire_lock_wait_timeout", "room": str(key)},
-            )
+            try:
+                await asyncio.wait_for(
+                    _set_evicted_under_lock(room), timeout=_RETIRE_LOCK_WAIT_SECONDS
+                )
+            except TimeoutError:
+                locked = False
+                room.evicted = True  # unsynchronized fallback; still stops LATER frames
+                logger.warning(
+                    "collab.retire_lock_wait_timeout",
+                    extra={"event": "collab_retire_lock_wait_timeout", "room": str(key)},
+                )
+        finally:
+            # Never leave a popped room live, whatever happened above. The close
+            # loop below this try/finally is outside, so an exception or early
+            # return from the lock-wait block would otherwise leave clients open.
+            # This belt ensures the tombstone is always set; the close loop is the
+            # braces that drains the sockets.
+            room.evicted = True
         # Flip can_write + close under recon_lock (parity with
         # revoke_user_sockets), NOT room.lock — Room.handle holds room.lock, so
         # taking it here for the close loop risks a lock-order inversion. We
         # popped the whole room, so there are no surviving peers and no presence
         # removal is needed.
-        async with room.recon_lock:
-            for client, state in list(room.clients.items()):
-                state.can_write = False
-                with suppress(Exception):
-                    await client.close(code=_WS_POLICY_VIOLATION)
-                closed += 1
+        #
+        # BOTH the lock wait and the closes are BOUNDED, and neither is allowed to
+        # decide whether the teardown completes. Two reasons:
+        #
+        # 1. LOCK ORDER. This class's own note above records that
+        #    `reconcile_client` may run a checkpoint — "a threadpool git commit +
+        #    advisory commit-mutex wait" — while holding recon_lock. So the edge
+        #    `recon_lock -> commit mutex` exists. A branch switch calls this
+        #    teardown while HOLDING the commit mutex, which adds
+        #    `commit mutex -> recon_lock` and closes the cycle. Bounding the wait
+        #    turns a mutual stall into a bounded, logged degradation.
+        # 2. `await client.close()` on a wedged socket is otherwise unbounded, and
+        #    the caller's cross-thread `fut.result(timeout=...)` does NOT cancel
+        #    this coroutine — it only stops the request thread waiting. An
+        #    unbounded close here would keep recon_lock and the client references
+        #    alive indefinitely.
+        #
+        # Safety does not rest on any of this: `room.evicted` is already set
+        # UNCONDITIONALLY in the finally above, and that is what stops writes.
+        # Closing sockets is best-effort liveness (it makes clients reconnect
+        # promptly), and best-effort work must be bounded.
+        try:
+            await asyncio.wait_for(room.recon_lock.acquire(), timeout=_RETIRE_LOCK_WAIT_SECONDS)
+        except TimeoutError:
+            logger.warning(
+                "collab.retire_recon_lock_timeout",
+                extra={"event": "collab_retire_recon_lock_timeout", "room": str(key)},
+            )
+            # Proceed WITHOUT the lock. The room is popped and tombstoned, so no
+            # surviving peer needs presence removal and no write can land.
+            closed += await _close_all(room, close_code)
+        else:
+            try:
+                closed += await _close_all(room, close_code)
+            finally:
+                room.recon_lock.release()
         # Drain any in-flight server op: the room is popped so no NEW op can bump
         # room.ops, but one already inside operate() may still be mid-write. Poll
         # ops to zero under a bounded deadline, then proceed regardless (for THESE
@@ -772,10 +908,39 @@ class RoomManager:
         if room.ops > 0:
             logger.warning(
                 "collab.retire_ops_drain_timeout",
-                extra={"event": "collab_retire_ops_drain_timeout",
-                       "room": str(key), "ops": room.ops},
+                extra={
+                    "event": "collab_retire_ops_drain_timeout",
+                    "room": str(key),
+                    "ops": room.ops,
+                },
             )
-        return closed
+        return closed, locked
+
+
+async def _close_all(room: Room, close_code: int) -> int:
+    """Close every client socket CONCURRENTLY under one bounded deadline.
+
+    Sequential closes let one wedged socket hold up all the others (and, on the
+    branch-switch path, hold recon_lock while the switch holds the commit mutex).
+    Returns how many sockets were asked to close — the count is for logging, and
+    a socket whose close timed out is still counted: it has been told, its
+    `can_write` is already False, and the room is tombstoned.
+    """
+    clients = list(room.clients.items())
+    for _client, state in clients:
+        state.can_write = False
+
+    async def _one(client) -> None:
+        with suppress(Exception):
+            await client.close(code=close_code)
+
+    if clients:
+        with suppress(TimeoutError):
+            await asyncio.wait_for(
+                asyncio.gather(*(_one(c) for c, _ in clients), return_exceptions=True),
+                timeout=_RETIRE_LOCK_WAIT_SECONDS,
+            )
+    return len(clients)
 
 
 async def _set_evicted_under_lock(room: Room) -> None:

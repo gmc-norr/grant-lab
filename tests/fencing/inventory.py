@@ -182,6 +182,14 @@ FENCING_IMPORT_FILES: frozenset[str] = frozenset({
     # (shared lease) + Primitive A (live_at_generation) so it cannot write into a
     # soft-deleted workspace.
     "proposal_assist/reconcile.py",
+    # Workspace branches (2026-08-29 Task 6) — claim_turn_job takes Primitive C
+    # (shared lease) so a branch switch's exclusive mutex linearizes against the
+    # queued->running claim instead of racing it (spec §6.3).
+    "proposal_assist/turns/processor.py",
+    # Workspace branches (2026-08-29 Task 7) — branches.py runs the whole switch
+    # sequence under acquire_commit_mutex_at_generation at the caller's stamped
+    # generation (spec §4.2): checkpoint, truncate, bump, checkout are all fenced.
+    "proposal_assist/branches.py",
 })
 
 #: Extra declared keys, preserved verbatim across regeneration — they are what

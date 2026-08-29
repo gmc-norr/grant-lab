@@ -135,9 +135,7 @@ class Source(Base):
     # Set to now() each time an alert is successfully sent for this source.
     # The alerter gates re-alerting on this so repeated runs after the
     # threshold don't spam the admin.
-    last_alerted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    last_alerted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     calls: Mapped[list[Call]] = relationship(back_populates="source")
 
@@ -700,6 +698,10 @@ class Workspace(Base):
         nullable=False,
         server_default=text("0"),
     )
+    #: The branch this workspace is on. The DATABASE is the source of truth;
+    #: git HEAD is reconciled to this value before any git read or write
+    #: (2026-08-29-workspace-branches-design.md §4.1). Never inferred from HEAD.
+    current_branch: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'main'"))
     current_phase: Mapped[str] = mapped_column(
         Text,
         nullable=False,

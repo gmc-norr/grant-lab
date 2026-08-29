@@ -98,9 +98,7 @@ def has_authored_updates(session: Session, *, workspace_id: uuid.UUID, artifact:
     )
 
 
-def find_checkpoint_candidates(
-    session: Session, *, min_tail: int
-) -> list[tuple[uuid.UUID, str]]:
+def find_checkpoint_candidates(session: Session, *, min_tail: int) -> list[tuple[uuid.UUID, str]]:
     """`(workspace_id, artifact)` pairs of LIVE (non-soft-deleted) workspaces whose
     log has at least `min_tail` rows above their checkpoint watermark.
 
@@ -144,8 +142,12 @@ def find_artifacts_with_updates(session: Session) -> list[tuple[uuid.UUID, str]]
 
 
 def truncate_log(session: Session, *, workspace_id: uuid.UUID, artifact: str) -> int:
-    """Delete ALL log rows for one artifact. Kill-switch handover ONLY — the
-    caller must have checkpointed the full log to git IN THE SAME transaction.
+    """Delete ALL log rows for one artifact.
+
+    Two callers, both of which MUST have checkpointed the full log to git in the
+    SAME transaction: the kill-switch handover (handover.py) and a branch switch
+    (branches.py §4.2 step 6).
+
     Returns the number of rows deleted."""
     res = session.execute(
         sa_delete(YjsUpdate).where(

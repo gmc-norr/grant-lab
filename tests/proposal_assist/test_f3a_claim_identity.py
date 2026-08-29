@@ -57,10 +57,11 @@ def test_the_interactive_claim_stores_the_workspaces_current_generation(pg_sessi
     never claimed at."""
     with pg_session_factory() as s:
         job_id = _seed_queued_turn(s, generation=7)
+        ws_id = s.scalar(select(TurnJob.workspace_id).where(TurnJob.id == job_id))
 
     from call_manager.proposal_assist.turns.processor import claim_turn_job
 
-    claimed = claim_turn_job(pg_session_factory, job_id)
+    claimed = claim_turn_job(pg_session_factory, job_id, ws_id)
 
     assert claimed is not None
     assert claimed.claimed_at_generation == 7
@@ -74,11 +75,12 @@ def test_a_second_claim_of_the_same_turn_job_returns_none(pg_session_factory):
     column to .values() could quietly widen what the statement matches."""
     with pg_session_factory() as s:
         job_id = _seed_queued_turn(s, generation=0)
+        ws_id = s.scalar(select(TurnJob.workspace_id).where(TurnJob.id == job_id))
 
     from call_manager.proposal_assist.turns.processor import claim_turn_job
 
-    assert claim_turn_job(pg_session_factory, job_id) is not None
-    assert claim_turn_job(pg_session_factory, job_id) is None
+    assert claim_turn_job(pg_session_factory, job_id, ws_id) is not None
+    assert claim_turn_job(pg_session_factory, job_id, ws_id) is None
 
 
 def test_the_claim_writes_the_generation_in_ONE_statement(pg_session_factory):
@@ -91,6 +93,7 @@ def test_the_claim_writes_the_generation_in_ONE_statement(pg_session_factory):
 
     with pg_session_factory() as s:
         job_id = _seed_queued_turn(s, generation=2)
+        ws_id = s.scalar(select(TurnJob.workspace_id).where(TurnJob.id == job_id))
 
     from call_manager.proposal_assist.turns.processor import claim_turn_job
 
@@ -101,7 +104,7 @@ def test_the_claim_writes_the_generation_in_ONE_statement(pg_session_factory):
         statements.append(" ".join(statement.split()).upper())
 
     try:
-        claim_turn_job(pg_session_factory, job_id)
+        claim_turn_job(pg_session_factory, job_id, ws_id)
     finally:
         event.remove(engine, "before_cursor_execute", _record)
 
@@ -320,7 +323,7 @@ def test_the_interactive_claim_is_immune_to_a_generation_advance_mid_claim(
         _advance_generation_on_another_connection(engine, ws_id)
 
     try:
-        claimed = claim_turn_job(pg_session_factory, job_id)
+        claimed = claim_turn_job(pg_session_factory, job_id, ws_id)
     finally:
         event.remove(engine, "after_cursor_execute", _advance)
 

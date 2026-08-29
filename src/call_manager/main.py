@@ -43,6 +43,7 @@ from call_manager.proposal_assist.web import collab_checkpoint, collab_ws
 from call_manager.proposal_assist.web.activity import (
     router as activity_router,
 )
+from call_manager.proposal_assist.web.branches import router as branches_router
 from call_manager.proposal_assist.web.coherence import (
     router as coherence_router,
 )
@@ -799,6 +800,7 @@ def create_app() -> FastAPI:
     app.include_router(evaluator_router)
     app.include_router(review_router)
     app.include_router(versions_router)
+    app.include_router(branches_router)
     app.include_router(problems_router)
     app.include_router(uncited_claims_router)
     app.include_router(activity_router)

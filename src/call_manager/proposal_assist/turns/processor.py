@@ -76,6 +76,7 @@ from call_manager.proposal_assist.drafting.turn_gating import (
     allowed_tools_for_content,
     selection_from_content,
 )
+from call_manager.proposal_assist.fencing import acquire_shared_lease
 from call_manager.proposal_assist.turns.compaction import latest_summary_text
 from call_manager.proposal_assist.turns.outcomes import (
     record_terminal_outcome,
@@ -137,12 +138,22 @@ class ClaimedTurn(NamedTuple):
     claimed_at_generation: int
 
 
-def claim_turn_job(session_factory: sessionmaker, turn_job_id: uuid.UUID) -> ClaimedTurn | None:
+def claim_turn_job(
+    session_factory: sessionmaker, turn_job_id: uuid.UUID, workspace_id: uuid.UUID
+) -> ClaimedTurn | None:
     """Atomically claim a queued turn and capture the workspace generation.
 
     The generation is a CORRELATED SUBQUERY inside the same UPDATE, so the
     capture and the claim are one statement and one snapshot. Splitting them
     reopens the race this exists to close.
+
+    *workspace_id* is passed IN by the caller — which already read it (to launch
+    the subprocess) — precisely so the shared lease can be taken WITHOUT a second
+    turn_jobs read before the claim. A pre-read would make the UPDATE no longer
+    the first touch of the row, reopening the window in which a lifecycle
+    transition can advance the generation between the claim's start and its
+    stamp; F3a claim identity requires the stamped generation to be the epoch
+    the claim STARTED at (tests/proposal_assist/test_f3a_claim_identity.py).
 
     RETURNING also brings back submitted_by_user_id so the outcome events
     (cloud_turn_completed / cloud_turn_failed) carry actor_id — matches the
@@ -155,6 +166,24 @@ def claim_turn_job(session_factory: sessionmaker, turn_job_id: uuid.UUID) -> Cla
         .scalar_subquery()
     )
     with session_factory() as s:
+        # Spec §6.3. A branch switch refuses while a turn is running, but this
+        # UPDATE used to take no lock at all — so a turn could start inside the
+        # switch's own window and then be killed silently by the generation
+        # fence, minutes into model work. The SHARED lease, taken BEFORE the
+        # single-statement claim below, makes the switch's exclusive mutex either
+        # wait for this claim (which then stamps the pre-switch generation and is
+        # stale for life once the switch bumps) or win first (this lease waits,
+        # and the claim then stamps the post-switch generation). Either way the
+        # stamp is the epoch this claim actually held the key at.
+        #
+        # NEVER upgrade this to the EXCLUSIVE workspace mutex: two holders of
+        # shared, each waiting to upgrade, is the one deadlock shape this protocol
+        # has (fencing.acquire_shared_lease's docstring says so).
+        #
+        # The wording avoids naming that function literally on purpose — the test
+        # below asserts the identifier is absent from this source, and
+        # inspect.getsource() includes comments.
+        acquire_shared_lease(s, workspace_id)
         row = s.execute(
             update(TurnJob)
             .where(TurnJob.id == turn_job_id, TurnJob.status == "queued")
@@ -257,7 +286,7 @@ async def process_turn_once(
         return
 
     # Atomic claim AFTER the sweep has run.
-    claimed = claim_turn_job(session_factory, turn_job_id)
+    claimed = claim_turn_job(session_factory, turn_job_id, workspace_id_for_launch)
     if claimed is None:
         logger.info("turn_job %s already claimed or completed; skipping", turn_job_id)
         return
