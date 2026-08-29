@@ -15,6 +15,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from call_manager.db.models import ChatTurn, TurnJob, WorkspaceEvent
+from call_manager.proposal_assist.spend import record_spend
 
 
 def outcome_message(outcome: str, raw_error: str | None) -> str:
@@ -143,6 +144,27 @@ def record_terminal_outcome(
             },
         )
     )
+    # Every FAILED/CANCELLED chat turn, from all seven call sites in five
+    # modules. `outcome` is 'failed' | 'cancelled'; SpendStatus has no
+    # 'cancelled', and a cancelled turn that consumed input cost exactly what a
+    # failed one did, so both map to "failed".
+    #
+    # This sits BELOW the `if row is None: return False` guard above on purpose.
+    # That guard is the already-terminal case: the conditional UPDATE matched no
+    # row, this call performed no transition, and a row here would be the
+    # double-count the ledger has no unique constraint against. The call is NOT
+    # gated on `consumed`: "we spent nothing" and "we never looked" are exactly
+    # the two facts this ledger exists to tell apart, so a reap or cancel that
+    # consumed nothing writes a truthful zero row rather than nothing at all.
+    record_spend(
+        session,
+        workspace_id=workspace_id,
+        kind="chat_turn",
+        status="failed",
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        ref_id=turn_job_id,
+    )
     return True
 
 
@@ -228,5 +250,23 @@ def stamp_post_terminal_usage(
                 "model": model,
             },
         )
+    )
+    # A turn terminalized mid-stream whose real usage arrived afterwards. Its
+    # record_terminal_outcome row (4b) carried the tokens known at the time — zero
+    # on the usage_unknown soft-delete path, which passes no token counts — and
+    # the ledger is append-only, so this row ADDS the reported usage. The column
+    # write above REPLACES; the ledger SUMS; both end at the same total. This sits
+    # below both early returns above (not-terminal, already-reconciled), which are
+    # this function's hand-rolled double-stamp guard serialized on the TurnJob row
+    # with SELECT ... FOR UPDATE; the ledger inherits that guard by placement.
+    record_spend(
+        session,
+        workspace_id=workspace_id,
+        kind="chat_turn",
+        status="failed",
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        model=model,
+        ref_id=turn_job_id,
     )
     return True

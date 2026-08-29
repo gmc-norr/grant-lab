@@ -77,6 +77,7 @@ from call_manager.proposal_assist.drafting.turn_gating import (
     selection_from_content,
 )
 from call_manager.proposal_assist.fencing import acquire_shared_lease
+from call_manager.proposal_assist.spend import record_spend
 from call_manager.proposal_assist.turns.compaction import latest_summary_text
 from call_manager.proposal_assist.turns.outcomes import (
     record_terminal_outcome,
@@ -628,6 +629,23 @@ def _finalize_success(
                 extra={"event": "turn_finalize_skipped", "turn_job_id": str(turn_job_id)},
             )
             return False  # lost the row (already terminal) — caller may reconcile usage
+        # The conditional running→completed UPDATE above is this turn's
+        # linearization point, so the record goes BELOW it. Recording above would
+        # be discarded: the lost branch calls s.rollback() and returns False
+        # above, and the caller then reconciles through stamp_post_terminal_usage
+        # (see _reconcile_lost_usage), which records instead. Exactly one row on
+        # either branch.
+        record_spend(
+            s,
+            workspace_id=workspace_id,
+            kind="chat_turn",
+            status="ok",
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            model=model,
+            ref_id=turn_job_id,
+            sdk_session_id=session_id,
+        )
         if session_id is not None:
             # Guard the compaction session-reset race: compaction runs as its
             # own tick and may set last_sdk_session_id=NULL while this turn is
