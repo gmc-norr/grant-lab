@@ -288,3 +288,49 @@ describe("modified clicks belong to the browser", () => {
     expect(onToggleSidebar).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("the app band reveals like the workspace band", () => {
+  // Only Calls (/) and Workspaces (/cockpit) lead to a route that HAS a side
+  // pane (router.tsx:64-65; the editor route is the third). Profiles, Settings
+  // and Admin have none, so they are deliberately not wired — revealing for
+  // them would only mutate persisted panel state for some later route.
+  //
+  // This matters because the panel group persists its collapsed state under
+  // autoSaveId="cm-shell": collapsing on the cockpit leaves the Calls filters
+  // collapsed too, so you arrive at a destination showing nothing.
+  it("clicking INACTIVE Workspaces from the editor reveals the pane and navigates", () => {
+    const onToggleSidebar = vi.fn();
+    const onRevealSidebar = vi.fn();
+    renderWithProviders(
+      <>
+        <ActivityBar onToggleSidebar={onToggleSidebar} onRevealSidebar={onRevealSidebar} />
+        <LocationEcho />
+      </>,
+      { route: "/cockpit/abc?tab=draft" },
+    );
+    const ws = screen.getByRole("link", { name: "Workspaces" });
+    expect(ws).not.toHaveAttribute("aria-current");
+    fireEvent.click(ws);
+    expect(onRevealSidebar).toHaveBeenCalledTimes(1);
+    expect(onToggleSidebar).not.toHaveBeenCalled();
+    expect(screen.getByTestId("loc").textContent).toBe("/cockpit");
+  });
+
+  it("clicking INACTIVE Calls reveals the pane too", () => {
+    const onRevealSidebar = vi.fn();
+    renderWithProviders(<ActivityBar onRevealSidebar={onRevealSidebar} />, {
+      route: "/cockpit/abc",
+    });
+    fireEvent.click(screen.getByRole("link", { name: "Calls" }));
+    expect(onRevealSidebar).toHaveBeenCalledTimes(1);
+  });
+
+  it("ctrl + INACTIVE Workspaces does not reveal", () => {
+    const onRevealSidebar = vi.fn();
+    renderWithProviders(<ActivityBar onRevealSidebar={onRevealSidebar} />, {
+      route: "/cockpit/abc",
+    });
+    fireEvent.click(screen.getByRole("link", { name: "Workspaces" }), { ctrlKey: true });
+    expect(onRevealSidebar).not.toHaveBeenCalled();
+  });
+});

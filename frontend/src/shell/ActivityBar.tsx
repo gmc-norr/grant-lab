@@ -28,10 +28,12 @@ function Item({
   item,
   active,
   onToggleSidebar,
+  onRevealSidebar,
 }: {
   item: ActivityItem;
   active?: boolean;
   onToggleSidebar?: () => void;
+  onRevealSidebar?: () => void;
 }) {
   const glyph = <Glyph icon={item.icon} />;
   // VS-Code behaviour: clicking the ALREADY-ACTIVE item toggles the sidebar instead
@@ -43,7 +45,17 @@ function Item({
     if (active && onToggleSidebar) {
       e.preventDefault();
       onToggleSidebar();
+      return;
     }
+    // Same rule as the workspace band: an INACTIVE click leads somewhere whose
+    // pane may be collapsed. The panel group persists its collapsed state under
+    // autoSaveId="cm-shell", so collapsing here leaves the DESTINATION's pane
+    // collapsed too — you arrive and see nothing. Reveal, never toggle, and let
+    // the navigation proceed.
+    //
+    // Only wired for Calls and Workspaces: they are the only app-band items
+    // whose destination has a handle.Sidebar (router.tsx:64-65).
+    onRevealSidebar?.();
   };
   let body;
   if (item.kind !== "spa") {
@@ -69,6 +81,11 @@ function Item({
       </Link>
     );
   } else {
+    // No onClick here, deliberately. Profiles, Settings and Admin have no
+    // handle.Sidebar, so there is no pane to reveal — and because this branch
+    // binds no handler at all, passing onRevealSidebar to a bottom item is
+    // inert. A test asserting "Settings does not reveal" therefore cannot fail;
+    // one was written and deleted rather than kept as a gate that always passes.
     body = (
       <NavLink
         to={item.to}
@@ -161,9 +178,21 @@ export function ActivityBar({
       <div className={styles.group}>
         {ACTIVITY_TOP.map((it) =>
           it.id === "workspaces" ? (
-            <Item key={it.id} item={it} active={onCockpitList} onToggleSidebar={onToggleSidebar} />
+            <Item
+              key={it.id}
+              item={it}
+              active={onCockpitList}
+              onToggleSidebar={onToggleSidebar}
+              onRevealSidebar={onRevealSidebar}
+            />
           ) : it.id === "calls" ? (
-            <Item key={it.id} item={it} active={onCalls} onToggleSidebar={onToggleSidebar} />
+            <Item
+              key={it.id}
+              item={it}
+              active={onCalls}
+              onToggleSidebar={onToggleSidebar}
+              onRevealSidebar={onRevealSidebar}
+            />
           ) : (
             <Item key={it.id} item={it} />
           ),
