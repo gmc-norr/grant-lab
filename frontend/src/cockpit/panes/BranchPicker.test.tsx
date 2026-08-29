@@ -31,7 +31,10 @@ describe("BranchPicker", () => {
   it("switching asks for confirmation before it evicts anybody", async () => {
     renderIt();
     await userEvent.click(screen.getByRole("button", { name: /main/ }));
-    await userEvent.click(screen.getByRole("menuitem", { name: /v2/ }));
+    // Exact name, not /v2/: the menu also has a "Delete v2" menuitem, which /v2/
+    // would match too (RTL then throws "multiple elements"). The switch item's
+    // accessible name is exactly the branch name.
+    await userEvent.click(screen.getByRole("menuitem", { name: "v2" }));
     // A switch disconnects every other editor and throws away unsaved keystrokes.
     // It must not happen on a single stray click.
     expect(state.switchTo).not.toHaveBeenCalled();
