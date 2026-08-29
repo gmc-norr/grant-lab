@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-29
 **Status:** Design agreed with the user; not implemented.
-**Revision 4.** Three outside review rounds, 25 findings, none refuted.
+**Revision 5.** Four outside review rounds, **32 findings, none refuted.**
 
 **Merge was split out** into `2026-08-29-workspace-branch-merge-design.md` after
 round 3. The findings did not land evenly — switch 8, merge 13 — and the switch
@@ -12,9 +12,18 @@ on three subsystems of its own (the editor handover, the citation ledger, sectio
 identity through conflict resolution). It is parked at design; this document is
 not, and branches are useful without it.
 
-The failure mode this document has been most prone to, across all three rounds:
+The failure mode this document has been most prone to, in **every** round:
 **a correct code citation carrying an incorrect guarantee** — a real function at
 a real line, claimed to protect something it does not protect on every path in.
+Round 2: `RoomManager.evict` (does not take `room.lock`) and `load_or_hydrate`
+(mutex on the cold path only). Round 3: `_retire_room` (right, except on its
+timeout path). Round 4: `room.py:196`'s tombstone check (write frames only), and
+"clients reconnect on their own" (they do not — 1008 is terminal, §5.1).
+
+Round 4's findings were, for the first time, mostly about precision rather than
+foundations: two wording defects, one migration hardening, and two real holes —
+both in mechanisms **this revision itself introduced**, which is the expected
+place for them to be.
 **Supersedes, in scope:** the branch-lifecycle half of
 `2026-08-15-branches-merging-history-graph-design.md`.
 That document specifies branches, merging AND the history graph together, with
@@ -129,27 +138,52 @@ and the wrong answer means writing one branch's content onto another. With the
 column, HEAD is a cache: if they differ, HEAD is wrong and gets checked out
 again. Reconciliation is one `git symbolic-ref HEAD` comparison.
 
+**The migration must backfill from each repo's actual HEAD, not from the
+default.** `'main'` is the default for *new* rows only. Backfilling every
+existing workspace to `'main'` would be a guess, and a wrong guess reconciles
+HEAD to a branch that may not exist — turning a working workspace into a broken
+one on deploy. The migration reads `git symbolic-ref --short HEAD` per repo and
+writes that.
+
+Measured 2026-08-29: **all 16 workspace repos on this instance are on `main`**,
+so the backfill is expected to be a no-op here. It is required anyway — the cost
+is one command per repo, and the failure it prevents is silent and total. Two
+cases the migration must handle explicitly rather than defaulting: an **unborn**
+HEAD (a repo created by setup with no commit yet) and a **detached** HEAD. Both
+should fail the migration loudly rather than write a plausible-looking `'main'`.
+
 ### 4.2 The sequence
 
-All of steps 2-8 run inside **one transaction** holding the per-workspace commit
+All of steps 2-9 run inside **one transaction** holding the per-workspace commit
 mutex, taken at the caller's stamped generation.
 
-1. **Refuse** if a drafting turn is `running` (§6.3). Outside the transaction.
+1. **Refuse** if a drafting turn is `running` (§6.3) — **re-checked inside the
+   transaction, under the mutex**, not only before it. See §6.3: the check alone
+   is a TOCTOU gate.
 2. **Take the commit mutex** at the caller's generation
    (`acquire_commit_mutex_at_generation`).
-3. **Tear both artifact rooms down FIRST** — before anything else touches the
+3. **Reconcile git HEAD to `current_branch`** (§4.1), under the mutex, **before
+   any other git read or write.** A previous switch that crashed between steps 9
+   and 10 leaves HEAD on the target while `current_branch` still names the source.
+   Step 5 would then commit the source branch's live log **onto the target
+   branch**: `checkpoint_artifact` reads whatever HEAD is (`checkpoint.py:110`)
+   and `write_and_commit_files` commits to whatever HEAD is. §4.1 already
+   promised this reconciliation "before any git read or write"; an earlier
+   revision of this sequence did not perform it, and the two sections
+   contradicted each other.
+4. **Tear both artifact rooms down FIRST** — before anything else touches the
    log — with a **switch-specific teardown**: `_retire_room`'s structure, but its
    proceed-on-lock-timeout fallback replaced by an abort. Not `RoomManager.evict`,
    and not `_retire_room` unmodified. §4.3 explains why each of those fails.
-4. **Checkpoint** the now-frozen log to the branch being left
+5. **Checkpoint** the now-frozen log to the branch being left
    (`checkpoint_artifact`), for both artifacts.
-5. **Truncate** the log (`store.truncate_log`) and **reset the watermark**
+6. **Truncate** the log (`store.truncate_log`) and **reset the watermark**
    (`state.reset_checkpoint`).
-6. **Bump** `lifecycle_generation` (`workspaces.py:109`).
-7. **Set** `workspaces.current_branch` to the target.
-8. **Check out** the target branch in git.
-9. **Commit** the transaction. On rollback, check the old branch back out — a
-   compensating action, because step 8 is not transactional.
+7. **Bump** `lifecycle_generation` (`workspaces.py:109`).
+8. **Set** `workspaces.current_branch` to the target.
+9. **Check out** the target branch in git.
+10. **Commit** the transaction. On rollback, check the old branch back out — a
+   compensating action, because step 9 is not transactional.
 
 `load_or_hydrate` then seeds the empty store from the new HEAD on the next
 connect (`hydrate.py:30-35`).
@@ -181,8 +215,16 @@ The comment quoted above is `_retire_room`'s, not `evict`'s, and it says exactly
 why the distinction matters: the tombstone is flipped *"UNDER `room.lock` — this
 is the client-write linearization point, not a cosmetic flag set"*
 (`room.py:731-738`). Taking that lock buys two things at once: when you get it,
-no client persist is in flight; and every later frame drops at the
-`if self.evicted` check (`room.py:197`).
+no client persist is in flight; and every later **document-write** frame drops at
+the `if self.evicted` check (`room.py:196`).
+
+Precisely: `Room.handle` tests `evicted` only on the sync-write path
+(`room.py:196`) and again before broadcast (`:218`). A sync **STEP1** is still
+answered from the in-memory doc (`room.py:155-173`) and awareness frames are still
+relayed (`:223-238`). Neither persists anything, so neither can reach the log or
+git — the safety property holds. But an evicted room can still *serve* the old
+branch's text to a socket that has not closed yet, which is why closing the
+sockets is part of the teardown and not an afterthought.
 
 **The switch must use the `_retire_room` teardown** (`room.py:721`): pop under
 the manager lock, then tombstone under `room.lock`, then close every socket and
@@ -190,7 +232,7 @@ drain any in-flight server op. That is the shape workspace retirement already
 uses, and it is the only one in the codebase that establishes the linearization
 point this design depends on. It also already does the right thing about
 checkpointing — it never checkpoints, and this sequence checkpoints separately at
-step 4, from the frozen **log**, not from the room.
+step 5, from the frozen **log**, not from the room.
 
 **But `_retire_room` cannot be reused as-is, and an earlier revision said it
 could.** It waits only `_RETIRE_LOCK_WAIT_SECONDS` for `room.lock`, and on
@@ -201,7 +243,7 @@ commit remains the documented residual."*
 That residual is acceptable for **retirement** — the workspace is dead, the
 straggler's commit lands in a log nobody will read, and B4 refuses it under the
 mutex anyway. It is **not** acceptable for a switch: that same straggler commit
-lands in a live log which step 4 then checkpoints and step 5 truncates, so it
+lands in a live log which step 5 then checkpoints and step 6 truncates, so it
 rides into the target branch. This is the exact corruption the teardown exists to
 prevent, surviving on the timeout path.
 
@@ -216,6 +258,32 @@ under `room.lock` via `_set_evicted_under_lock`, close under `recon_lock` to avo
 the inversion its comment describes, drain `room.ops`). Its **timeout policy** is
 wrong here. Using `evict` is wrong outright; `evict` remains correct for what it
 is documented for — poison recovery, where a lost keystroke is the point.
+
+**Aborting the switch must not abort the teardown.** This is the trap in the
+paragraph above, and an earlier revision fell into it.
+
+The teardown **pops the room first**, under the manager lock (`room.py:726-730`),
+and only then reaches for `room.lock`. So at the moment the lock wait times out
+the room is already **out of the registry, un-tombstoned, and its sockets still
+open**. Its clients hold the room object directly — `collab_ws.py:144` binds it
+to a local and the receive loop calls `room.handle` on that reference for the
+life of the socket — so they keep persisting into the log. And because the room
+is no longer in the registry, a **retry** of the switch cannot find it: the retry
+tears down a *different*, freshly hydrated room, checkpoints, truncates — and
+the orphan's next keystroke repopulates the log afterwards. That is the original
+corruption, reintroduced by the abort.
+
+**So the rule is: abort the *switch*, never the *teardown*.** On lock-wait
+timeout the teardown still closes every socket and still sets the tombstone
+(unsynchronized is acceptable at this point — it only has to stop *later*
+frames), drains what it can, and only then raises to roll the transaction back.
+A room is never left popped, live and writable.
+
+The one persist that caused the timeout still commits, and that is now correct
+rather than corrupting: the switch is being abandoned, `current_branch` still
+names the source, and the update belongs to the source branch's log — where a
+later reconnect will hydrate it. **The straggler is only dangerous when the
+switch proceeds.**
 
 ### 4.4 A reconnect CAN race the switch today — `load_or_hydrate` must change
 
@@ -233,10 +301,10 @@ if updates:
 The mutex is on the **cold seed path only**. A warm load — the log has rows —
 never reaches it.
 
-That is the whole race. Between step 3 (teardown) and step 5 (truncate) the log
+That is the whole race. Between step 4 (teardown) and step 6 (truncate) the log
 still holds the *old* branch's updates. A client reconnecting in that window
 loads those rows without touching the mutex, and `RoomManager` publishes a fresh
-room from them — a room step 3 has already torn down and will not tear down
+room from them — a room step 4 has already torn down and will not tear down
 again. The switch then truncates underneath it. The workspace is left serving the
 old branch's text under the new branch's name, and the next checkpoint commits it
 there: the same corruption §4.3 exists to prevent, arriving through the other
@@ -262,7 +330,7 @@ Two consequences to accept deliberately:
   can happen, not what happens.
 
 **The blocked connect does not then hydrate — it is closed, and that is
-correct.** Step 6 bumps `lifecycle_generation`. A connect stamped before the
+correct.** Step 7 bumps `lifecycle_generation`. A connect stamped before the
 switch therefore wakes from the mutex holding the OLD generation, and
 `acquire_commit_mutex_at_generation` raises `WorkspaceGenerationStale`
 (`fencing.py:168-171`) rather than returning. It never reaches `load_updates`.
@@ -289,29 +357,29 @@ the commit mutex while the switch waits on `room.lock`.
 
 | Fails at | Result | Recovery |
 | --- | --- | --- |
-| 1-2 | Nothing changed | None needed |
-| 3 (teardown) | **Editors are already evicted.** The rooms are popped, tombstoned and every socket closed before any failure below can occur, and none of that is in the transaction | None needed for data. Clients reconnect on their own — to the **unchanged source branch**. See below |
-| 4 (checkpoint) | Transaction rolls back; log intact. Editors stay evicted | None needed for data. The switch did not happen; clients reconnect to the source branch |
-| 5 (truncate) | The **database** rolls back with its checkpoint — the `handover.py:60-62` rule: a truncate is never visible without its checkpoint. The checkpoint's **git commit survives**, and that is correct — see below | None needed |
-| 8 (checkout) | Rolls back; `current_branch` reverts | None needed |
-| 9 (commit) | HEAD may be moved but the DB reverted | Compensating checkout; and §4.1 reconciliation repairs it even after a crash |
-| Crash between 8 and 9 | HEAD on the target, DB on the source | §4.1: the DB wins, HEAD is checked out again on next access |
+| 1-3 | Nothing changed. A reconcile that ran is a repair — it leaves HEAD matching `current_branch`, which is where it should already have been | None needed |
+| 4 (teardown) | **Editors are already evicted.** The rooms are popped, tombstoned and every socket closed before any failure below can occur, and none of that is in the transaction | None needed for data. Clients reconnect on their own — to the **unchanged source branch** — provided the close used §5.1's retryable code. See below |
+| 5 (checkpoint) | Transaction rolls back; log intact. Editors stay evicted | None needed for data. The switch did not happen; clients reconnect to the source branch |
+| 6 (truncate) | The **database** rolls back with its checkpoint — the `handover.py:60-62` rule: a truncate is never visible without its checkpoint. The checkpoint's **git commit survives**, and that is correct — see below | None needed |
+| 9 (checkout) | Rolls back; `current_branch` reverts | None needed |
+| 10 (commit) | HEAD may be moved but the DB reverted | Compensating checkout; and §4.1 reconciliation repairs it even after a crash |
+| Crash between 9 and 10 | HEAD on the target, DB on the source | §4.1: the DB wins, HEAD is checked out again on next access |
 
-**Step 3 is not transactional, and a rolled-back switch still evicts everyone.**
+**Step 4 is not transactional, and a rolled-back switch still evicts everyone.**
 Popping a room, flipping its tombstone and closing sockets are in-memory and
 network effects; no database rollback reverses them. So a switch that fails at
-step 4 or later leaves every editor disconnected even though the branch did not
+step 5 or later leaves every editor disconnected even though the branch did not
 change. This is a **visible interruption with no data cost** — clients reconnect
 automatically, hydrate from the unchanged source HEAD, and see the same document
 they had. It must be stated because it is what a user will report ("it kicked me
-out and nothing happened"), and because a design that assumed steps 1-3 were
+out and nothing happened"), and because a design that assumed steps 1-4 were
 reversible would be wrong about it.
 
 A **partial** teardown — one artifact room torn down, the other failing — leaves
 the two rooms inconsistent. The switch must abort in that case rather than
 proceed on one artifact, and the surviving room is evicted on the retry.
 
-**A rolled-back switch can leave a real commit behind, and must.** Step 4 calls
+**A rolled-back switch can leave a real commit behind, and must.** Step 5 calls
 `checkpoint_artifact`, which calls `write_and_commit_files`
 (`checkpoint.py:144-146`), which runs an actual `git commit` (`gitio.py:197`).
 Git is not enlisted in the database transaction; **no rollback can remove that
@@ -319,7 +387,7 @@ commit.**
 
 This is harmless, and demanding its absence would be demanding the deletion of
 valid work. The commit contains the source branch's own live content, written to
-the source branch — exactly where it belongs, and exactly what step 4 exists to
+the source branch — exactly where it belongs, and exactly what step 5 exists to
 preserve. If the switch is retried, the log is still intact, the checkpoint
 recomputes the same bytes, and `write_and_commit_files` short-circuits on an
 empty diff (`gitio.py:177-195`) and commits nothing the second time.
@@ -334,16 +402,56 @@ benign.
 ## 5. Connected editors
 
 Switching **tears down** both artifact rooms and closes every client socket, as
-**step 3** — before the log is touched. §4.3 explains why that position is a
+**step 4** — before the log is touched. §4.3 explains why that position is a
 correctness requirement rather than a preference, and why the teardown must be
 `_retire_room`'s (`room.py:721`) rather than `RoomManager.evict`'s: only the
 former flips the `evicted` tombstone under `room.lock`, so an in-flight client
 persist is drained instead of landing after the switch (`room.py:197`,
 `:731-738`).
 
-Clients reconnect on their own and re-sync from the new branch. Since
-`a0e215d2` the editor gates content on `synced`, so a reconnecting client shows
-"Loading the draft…" rather than a blank page.
+### 5.1 The close code decides whether anyone comes back
+
+**As the code stands today, a branch switch would leave every other editor dead
+until they reload the page.** This is a requirement, not a detail, and an earlier
+revision asserted the opposite ("clients reconnect on their own") without
+checking the client.
+
+Measured 2026-08-29 in `frontend/src/collab/collabProvider.ts:226-237`:
+
+```ts
+if (ev.code === 1008 || ev.code === 1009) { this.setStatus("closed-policy"); return; }
+this.setStatus("offline");
+this.scheduleReconnect();
+```
+
+**1008 is terminal.** It returns before `scheduleReconnect`, and nothing retries
+until the component remounts. Every other code falls through to exponential
+backoff (`:241-255`, 1s doubling to 30s).
+
+Both paths a switch uses close with **1008** today:
+
+- the teardown closes clients with `_WS_POLICY_VIOLATION = 1008` (`room.py:44`,
+  used at `:763`) — correct for *retirement*, where the workspace is gone and
+  coming back is pointless;
+- a connect refused with `WorkspaceGenerationStale` closes with 1008 as well
+  (`collab_ws.py:48`, used at `:154`).
+
+So: **the switch must close with a retryable code — 1013 (`_WS_TRY_AGAIN_LATER`,
+`collab_ws.py:54`), which the codebase already uses for exactly this shape** (a
+mutex-timeout connect, "the artifact still exists and the client SHOULD come
+back"). 1008 must be reserved for what it means — a policy denial where retrying
+is wrong, such as a revoked member.
+
+This is a real distinction the server must make, not a cosmetic one: the same
+`WorkspaceGenerationStale` exception means "you were revoked, stop" after a
+deletion and "the branch moved, come straight back" after a switch. The close
+code is the only thing that tells the client which.
+
+With 1013, the sequence a collaborator experiences is: socket closes, provider
+goes `offline`, reconnects within about a second, hydrates the new branch. Since
+`a0e215d2` the editor gates content on `synced`, so during that second it shows
+"Loading the draft…" rather than a blank page — which is why the reconnect reads
+as a flicker rather than as data loss.
 
 **Accepted cost:** a collaborator mid-sentence loses that sentence — their
 keystroke can land after the drain. Refusing to switch while anyone else is
@@ -372,7 +480,7 @@ silently.** That is the normal case, not an edge case.
 
 **A branch switch bumps `workspaces.lifecycle_generation`** via
 `bump_lifecycle_generation` (`workspaces.py:109`), which computes `+ 1` in the
-database and never read-modify-writes from Python. Step 6 of §4.2.
+database and never read-modify-writes from Python. Step 7 of §4.2.
 
 Most write paths reach the commit mutex through
 `acquire_commit_mutex_at_generation` (`fencing.py:115`), which refuses when the
@@ -406,6 +514,37 @@ requires finding every write path, and the one missed is a silent wrong-branch
 write.
 
 ### 6.3 Running agent turns
+
+**The refusal is a TOCTOU gate and must be closed deliberately.** Checking
+`turn_jobs.status = 'running'` before the transaction proves nothing about the
+switch's own window: `claim_turn_job` (`turns/processor.py:140-174`) flips a
+queued job to `running` in a single UPDATE that takes **no commit mutex**, so a
+turn can start immediately after the check and run straight through the switch.
+
+What saves correctness is the fence, not the check. That UPDATE captures
+`claimed_at_generation` from a correlated subquery in the same statement, so a
+turn that claimed before step 7's bump is stale for the rest of its life and
+every fenced write it attempts raises `WorkspaceGenerationStale`. **It cannot
+write to the wrong branch.** But it dies silently, minutes into model work — the
+exact loss §6.3 exists to prevent.
+
+Two requirements, in order of cost:
+
+1. **Re-check under the mutex**, inside the transaction (step 1 of §4.2). This
+   catches every turn that was already running when the switch acquired the
+   mutex, which is the common case, and costs one query.
+2. **`claim_turn_job` must take `acquire_shared_lease`** (`fencing.py:174`,
+   Primitive C — "take the workspace's commit-mutex key in SHARED mode ... so a
+   lifecycle transition cannot commit underneath the effect that follows"). This
+   is what makes the re-check *authoritative* rather than merely likely: the
+   switch's exclusive mutex then either waits for an in-flight claim or wins and
+   leaves the claim's own generation predicate to fail. Without it the gate stays
+   probabilistic.
+
+If (2) is deferred, the residual must be stated in the UI rather than hidden: a
+turn claimed in the instant before the switch is killed by the generation fence
+and its work is lost. Nothing is corrupted; something is thrown away.
+
 
 A switch is **refused** while a drafting turn is `running` (there is a unique
 partial index on it, `models.py:891`). A turn is minutes of model work that would
@@ -479,7 +618,7 @@ assert, not merely "it works":
 10. **Failure after checkpoint, before truncate.** Assert: log intact, HEAD
     unmoved, generation unchanged, `current_branch` unchanged.
 11. **Failure after truncate, before checkout.** Assert the DATABASE rolled
-    back — the log is intact, `current_branch` unchanged — and that step 4's
+    back — the log is intact, `current_branch` unchanged — and that step 5's
     checkpoint commit **is still on the branch being left**, because git is not
     in the transaction (§4.5). Then assert it is benign: retry the switch and
     confirm the second checkpoint commits nothing, because the tree is unchanged
@@ -499,7 +638,7 @@ assert, not merely "it works":
     each directly.
 16. **A reconnect between teardown and truncate does not republish the old
     branch's room** (§4.4). Connect while the switch transaction is open, between
-    steps 3 and 5, and assert the connect BLOCKS rather than returning rows.
+    steps 4 and 6, and assert the connect BLOCKS rather than returning rows.
     **Assert by reverting `load_or_hydrate` to acquire the mutex after the
     `load_updates` read: the test must FAIL**, proving it is the moved
     acquisition that prevents this and not timing. Then, with the fix, assert the
@@ -519,8 +658,36 @@ assert, not merely "it works":
 19. **`load_or_hydrate` does not invert the lock order** (§4.4). Assert no call
     path reaches it while `room.lock` is held.
 20. **A switch that fails after teardown still leaves clients evicted, and they
-    recover** (§4.5). Fail step 4, then assert every socket was closed, the
+    recover** (§4.5). Fail step 5, then assert every socket was closed, the
     branch did not change, and a reconnect serves the SOURCE branch's text.
 21. **A partial teardown aborts rather than switching one artifact** (§4.5).
-    Fail the `spec` room's teardown, and assert the `draft` room's branch did not
-    move.
+    Fail the `spec` room's teardown and assert the *workspace* did not move:
+    `current_branch` unchanged, `git symbolic-ref --short HEAD` unchanged, BOTH
+    logs intact, and neither room left in the registry with sockets open. There
+    is no per-room branch to assert — rooms are keyed `(workspace_id, artifact)`
+    with no branch dimension (§2), and an earlier revision of this criterion
+    named one.
+22. **A timed-out teardown still tears down** (§4.3). Hold `room.lock` past the
+    wait budget, and assert that after the switch aborts the room is NOT in the
+    registry, its sockets are closed, and `evicted` is set. **Assert by making
+    the abort path skip the close-and-tombstone: the test must FAIL**, and then
+    assert the sharper consequence — with the room left live, a keystroke
+    delivered after a RETRY's truncate reaches the log. A popped, un-tombstoned,
+    socket-open room is the defect; the abort alone is not.
+23. **HEAD is reconciled before the checkpoint reads it** (§4.2 step 3). Leave
+    HEAD on the target while `current_branch` names the source — the state a
+    crash between steps 9 and 10 produces — then switch. Assert the checkpoint
+    commit landed on the **source** branch. **Assert by removing step 3: the
+    test must FAIL** with the checkpoint on the target branch.
+24. **A switch closes editors with a code that reconnects** (§5.1). Assert the
+    close code is 1013, not 1008, on both the teardown path and a connect
+    refused mid-switch. A test that only asserts "the socket closed" passes on
+    the broken behaviour.
+25. **A turn that starts between the pre-check and the mutex is still refused**
+    (§6.3). Claim a turn after step 1's check and before the mutex is taken, and
+    assert the switch refuses rather than proceeding. **Assert by removing the
+    under-mutex re-check: the test must FAIL.**
+26. **The migration backfills `current_branch` from the repo, not the default**
+    (§4.1). Create a workspace repo on a branch other than `main`, run the
+    migration, and assert the column holds that branch. Assert also that an
+    unborn or detached HEAD fails the migration loudly.
