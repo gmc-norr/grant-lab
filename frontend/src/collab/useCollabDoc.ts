@@ -23,18 +23,28 @@ export function useCollabDoc(opts: {
   workspaceId: string;
   artifact: "draft" | "spec";
   canWrite: boolean;
-}): { doc: Y.Doc | null; provider: CollabProvider | null; status: ProviderStatus } {
+}): {
+  doc: Y.Doc | null;
+  provider: CollabProvider | null;
+  status: ProviderStatus;
+  synced: boolean;
+} {
   const [state, setState] = useState<{ doc: Y.Doc; provider: CollabProvider } | null>(null);
   const [status, setStatus] = useState<ProviderStatus>("connecting");
+  // Separate from status on purpose: see CollabProvider.synced.
+  const [synced, setSynced] = useState(false);
   const { workspaceId, artifact, canWrite } = opts;
   useEffect(() => {
     const doc = new Y.Doc();
     const provider = new CollabProvider({ url: wsUrl(workspaceId, artifact), doc, canWrite });
     setState({ doc, provider });
     setStatus(provider.status);
+    setSynced(provider.synced);
     const off = provider.on("status", setStatus);
+    const offSync = provider.on("sync", setSynced);
     return () => {
       off();
+      offSync();
       provider.destroy();
       doc.destroy();
       setState(null);
@@ -46,5 +56,5 @@ export function useCollabDoc(opts: {
     // editability is a 3b-4 concern.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId, artifact]);
-  return { doc: state?.doc ?? null, provider: state?.provider ?? null, status };
+  return { doc: state?.doc ?? null, provider: state?.provider ?? null, status, synced };
 }

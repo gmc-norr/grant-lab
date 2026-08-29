@@ -252,3 +252,80 @@ describe("CollabProvider", () => {
     expect(users).toContain("Bob");
   });
 });
+
+describe("synced — 'I have the document' is not the same as 'I am connected'", () => {
+  // The editor renders the Y.Doc. An unsynced doc is EMPTY, and an empty
+  // document looks exactly like a document that has not arrived yet. Without a
+  // synced flag the editor draws a blank page for a workspace whose text is
+  // sitting on the server — which reads as data loss. Observed on a real
+  // workspace whose room held 4,347 bytes while the editor showed nothing.
+  function build() {
+    const sockets: FakeSocket[] = [];
+    const doc = new Y.Doc();
+    const p = new CollabProvider({
+      url: "ws://x/y",
+      doc,
+      canWrite: true,
+      WebSocketImpl: class extends FakeSocket {
+        constructor(u: string) { super(u); sockets.push(this); }
+      } as unknown as typeof WebSocket,
+    });
+    return { p, doc, sockets };
+  }
+
+  function step2From(text: string): Uint8Array {
+    const remote = new Y.Doc();
+    remote.getText("t").insert(0, text);
+    const e = encoding.createEncoder();
+    encoding.writeVarUint(e, MESSAGE_SYNC);
+    sync.writeUpdate(e, Y.encodeStateAsUpdate(remote));
+    return encoding.toUint8Array(e);
+  }
+
+  it("is false before the socket opens", () => {
+    const { p } = build();
+    expect(p.synced).toBe(false);
+    p.destroy();
+  });
+
+  it("is STILL false once merely connected — open is not sync", () => {
+    const { p, sockets } = build();
+    sockets[0].open();
+    expect(p.status).toBe("connected");
+    expect(p.synced).toBe(false); // the whole point: connected != has the text
+    p.destroy();
+  });
+
+  it("becomes true on the first sync frame, and notifies listeners once", () => {
+    const { p, sockets } = build();
+    const seen: boolean[] = [];
+    p.on("sync", (v) => seen.push(v));
+    sockets[0].open();
+    sockets[0].deliver(step2From("hello"));
+    expect(p.synced).toBe(true);
+    expect(seen).toEqual([true]);
+    // A second frame must not re-notify — listeners drive a render.
+    sockets[0].deliver(step2From(" more"));
+    expect(seen).toEqual([true]);
+    p.destroy();
+  });
+
+  it("is true for an EMPTY room too — empty is a real answer, not a missing one", () => {
+    // Otherwise a genuinely blank new draft would hang on the loading state.
+    const { p, sockets } = build();
+    sockets[0].open();
+    sockets[0].deliver(step2From(""));
+    expect(p.synced).toBe(true);
+    p.destroy();
+  });
+
+  it("an awareness frame alone does NOT count as synced", () => {
+    // Carets can arrive before the document does; treating any frame as sync
+    // would show an empty editor as authoritative.
+    const { p, sockets } = build();
+    sockets[0].open();
+    sockets[0].deliver(awarenessFrameFor({ name: "Someone", color: "#fff" }));
+    expect(p.synced).toBe(false);
+    p.destroy();
+  });
+});

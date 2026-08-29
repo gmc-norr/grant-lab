@@ -24,6 +24,13 @@ vi.mock("./collabProvider", async () => {
       get status() {
         return "connected";
       }
+      // The editor gates CONTENT on synced, not status: a connected socket that
+      // has not delivered the document leaves the Y.Doc empty, and a blank
+      // editor reads as data loss. These tests exercise the mounted editor, so
+      // the fake reports the document as received.
+      get synced() {
+        return true;
+      }
     },
   };
 });

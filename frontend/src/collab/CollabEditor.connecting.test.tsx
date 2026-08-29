@@ -18,8 +18,8 @@ const session = vi.hoisted(() => ({ user: { id: 1, name: "T", email: "t@ki.se" }
 vi.mock("./useCollabDoc", () => ({
   useCollabDoc: () =>
     doc.ready
-      ? { doc: {}, provider: {}, status: "connected" }
-      : { doc: null, provider: null, status: "connecting" },
+      ? { doc: {}, provider: {}, status: "connected", synced: true }
+      : { doc: null, provider: null, status: "connecting", synced: false },
 }));
 vi.mock("../api/session", () => ({ useSession: () => ({ data: { user: session.user } }) }));
 
@@ -52,7 +52,7 @@ describe("CollabEditor — the actions slot survives the connecting state", () =
     doc.ready = false;
     session.user = { id: 1, name: "T", email: "t@ki.se" };
     renderWithProviders(<CollabEditor workspaceId="w" artifact="draft" canWrite />);
-    expect(screen.getByTestId("collab-connecting")).toHaveTextContent("Connecting…");
+    expect(screen.getByTestId("collab-connecting")).toHaveTextContent("Loading the draft…");
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 });

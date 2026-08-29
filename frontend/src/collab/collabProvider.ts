@@ -10,6 +10,7 @@ const WS_OPEN = 1;
 
 export type ProviderStatus = "connecting" | "connected" | "offline" | "closed-policy";
 type StatusListener = (s: ProviderStatus) => void;
+type SyncListener = (synced: boolean) => void;
 
 export interface CollabProviderOptions {
   url: string;
@@ -34,7 +35,13 @@ export class CollabProvider {
   private readonly maxAttempts: number;
   private ws: WebSocket | null = null;
   private _status: ProviderStatus = "connecting";
+  // "Connected" is NOT "has the document". The Y.Doc is empty until the first
+  // SYNC frame is applied, and an empty doc renders identically to a document
+  // that has not arrived — which reads as data loss. Consumers gate content on
+  // this, never on status.
+  private _synced = false;
   private readonly listeners = new Set<StatusListener>();
+  private readonly syncListeners = new Set<SyncListener>();
   private attempts = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
@@ -88,9 +95,24 @@ export class CollabProvider {
     );
   }
 
-  on(_ev: "status", cb: StatusListener): () => void {
-    this.listeners.add(cb);
-    return () => this.listeners.delete(cb);
+  /** True once the first sync frame has been applied to the doc. Latches: a
+   *  later disconnect leaves it true, because the doc we hold is still the
+   *  document — stale, not absent. */
+  get synced(): boolean {
+    return this._synced;
+  }
+
+  on(ev: "sync", cb: SyncListener): () => void;
+  on(ev: "status", cb: StatusListener): () => void;
+  on(ev: "status" | "sync", cb: StatusListener | SyncListener): () => void {
+    if (ev === "sync") {
+      const c = cb as SyncListener;
+      this.syncListeners.add(c);
+      return () => this.syncListeners.delete(c);
+    }
+    const c = cb as StatusListener;
+    this.listeners.add(c);
+    return () => this.listeners.delete(c);
   }
 
   destroy(): void {
@@ -105,6 +127,7 @@ export class CollabProvider {
     this.doc.off("update", this.onUpdate);
     if (this.ws) { try { this.ws.close(); } catch { /* already closed */ } this.ws = null; }
     this.listeners.clear();
+    this.syncListeners.clear();
   }
 
   private setStatus(s: ProviderStatus): void {
@@ -171,6 +194,12 @@ export class CollabProvider {
         // readSyncMessage applies inbound STEP2/UPDATE to the doc with `this` as the
         // txn origin (origin-tag), and writes a STEP2 reply into `enc` iff it read a STEP1.
         syncProtocol.readSyncMessage(dec, enc, this.doc, this);
+        // First SYNC frame applied: whatever the server has, we now have it —
+        // including "nothing", which is a real answer and must unblock the UI.
+        if (!this._synced) {
+          this._synced = true;
+          for (const l of this.syncListeners) l(true);
+        }
         if (encoding.length(enc) > 1 && this.canWrite) {
           // A STEP2 reply is a WRITE frame — read-only clients suppress it.
           this.send(encoding.toUint8Array(enc));

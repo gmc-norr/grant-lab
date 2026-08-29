@@ -27,7 +27,7 @@ vi.mock("./useCollabDoc", () => ({
         WebSocketImpl: FakeSocket as unknown as typeof WebSocket,
       });
     }
-    return { doc: stashed.doc, provider: stashed, status: "connected" };
+    return { doc: stashed.doc, provider: stashed, status: "connected", synced: true };
   },
 }));
 

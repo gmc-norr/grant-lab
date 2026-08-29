@@ -30,7 +30,7 @@ type CollabEditorProps = {
 };
 
 export function CollabEditor(props: CollabEditorProps) {
-  const { doc, provider, status } = useCollabDoc(props);
+  const { doc, provider, status, synced } = useCollabDoc(props);
   const { data: me } = useSession();
   // Clear the shared editor store on unmount so a stale collab save-status
   // (e.g. "Synced"/"Read-only") does not leak into the StatusBar of the next
@@ -42,7 +42,19 @@ export function CollabEditor(props: CollabEditorProps) {
   // doc/provider are still built + connected above, so sync is not delayed; only the
   // editable surface waits for identity — normally instant (me is app-shell cached),
   // and the cockpit's auth gate guarantees me resolves for anyone who reaches it.
-  if (!doc || !provider || !me?.user) {
+  // The provider retries on its own; this only decides what the user is told.
+  // Saying nothing is the worst outcome — a silent blank page reads as data loss.
+  const unreachable = status === "offline" || status === "closed-policy";
+  // `synced` — NOT `status`. A connected socket that has not yet delivered the
+  // document leaves the Y.Doc empty, and CollabEditorInner renders that empty
+  // doc as a blank page: indistinguishable from a draft whose text is gone.
+  // Observed for real — the room held 4,347 bytes and the Outline listed seven
+  // sections while the editor showed nothing at all.
+  //
+  // `synced` latches on the first sync frame, so an EMPTY room still unblocks
+  // (empty is an answer), and a later disconnect does not throw the user out of
+  // an editor whose content they already have.
+  if (!doc || !provider || !me?.user || !synced) {
     // The `actions` slot must survive this branch. Both panels pass their
     // panel-level button (Export on draft, Check coherence on spec) ONLY as
     // `actions` once collab is on, and neither can see this state — so dropping
@@ -54,8 +66,10 @@ export function CollabEditor(props: CollabEditorProps) {
     return (
       <div data-collab-status={status} data-testid="collab-connecting">
         <Group gap="sm">
-          <Text size="sm" c="dimmed">
-            Connecting…
+          <Text size="sm" c={unreachable ? undefined : "dimmed"}>
+            {unreachable
+              ? "Could not reach the live document — retrying."
+              : "Loading the draft…"}
           </Text>
           {props.actions}
         </Group>
