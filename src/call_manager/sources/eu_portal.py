@@ -178,6 +178,18 @@ class EUPortalAdapter:
                 api_transport = pinned_transport_for(self._base_url)
                 # pinned_transport_for pins the API base URL to prevent DNS rebinding.
                 # Tests always inject self._transport so this branch is production-only.
+                if api_transport is None:
+                    # None is the REFUSAL signal (unsafe scheme, a blocked IP in
+                    # any DNS answer, or DNS failure) — and `httpx.Client(
+                    # transport=None)` builds the DEFAULT transport, so passing
+                    # it through would connect UNPINNED on exactly the inputs the
+                    # check rejected. Fail closed: a refused or unresolvable base
+                    # URL aborts the tick. `sources/extraction.py` already does
+                    # this; these two adapters did not.
+                    raise AdapterError(
+                        f"EU Portal fetch refused: {self._base_url} is unsafe or "
+                        "could not be resolved to a pinnable public address"
+                    )
             with httpx.Client(
                 base_url=self._base_url,
                 transport=api_transport,

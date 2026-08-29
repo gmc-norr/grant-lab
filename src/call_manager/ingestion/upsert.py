@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
@@ -10,6 +11,53 @@ from call_manager.db.models import Call
 from call_manager.sources.types import NormalizedCall, is_safe_url
 
 _logger = logging.getLogger(__name__)
+
+
+# Every value below arrives from upstream JSON. The adapters pass it through
+# without a type check, so the DB column type is the ONLY thing standing between
+# a changed upstream field and a `TypeError`/`DataError` — and that error escapes
+# the upsert loop in `orchestrator.py`, which advances `sources.last_fetched_at`
+# INSIDE the same transaction. The rollback leaves the timestamp unmoved, so the
+# next tick re-fetches from the same `since`, meets the same record, and fails
+# identically. Forever, discarding every other call in the batch each time.
+#
+# Measured before this existed: `currency=0` and `external_id=12345` raised
+# `TypeError: object of type 'int' has no len()` inside the guards written to
+# PREVENT poison records; `programme={"a": 1}` passed the length guard (a 1-key
+# dict has len 1) and reached a VARCHAR(200); and budget/deadline/keywords/raw
+# all reached the DB with a type their column cannot take.
+#
+# So types are settled here, once, before any guard or payload runs.
+
+
+def _as_text(value) -> str | None:
+    """A Text/VARCHAR column's value: None stays None, anything else becomes a
+    string. Non-identity metadata is coerced rather than rejected so the call
+    still ingests — the policy the currency/programme guards below already
+    state."""
+    if value is None:
+        return None
+    return value if isinstance(value, str) else str(value)
+
+
+def _as_int(value) -> int | None:
+    """A BigInteger column's value, or None when it cannot be one. A budget we
+    cannot read is missing data, not a reason to lose the call."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_datetime(value) -> datetime | None:
+    """A timestamptz column's value. Adapters are required to hand over real
+    UTC datetimes (sources/types.py); anything else is dropped rather than
+    parsed here, so a bad upstream format cannot become a wrong DEADLINE."""
+    return value if isinstance(value, datetime) else None
 
 
 def upsert_call(session: Session, *, source_id: int, call: NormalizedCall) -> bool:
@@ -37,6 +85,20 @@ def upsert_call(session: Session, *, source_id: int, call: NormalizedCall) -> bo
     # is_safe_url, a dangerous href (javascript:/data:/etc.) must never reach
     # the DB — it would render as click-to-XSS in the dashboard. `url` is
     # NOT NULL, so we reject the whole record rather than persist a bad href.
+    # Identity columns first, and by REJECTION not coercion: `external_id` is the
+    # dedup key and `url` is what the safety check reads, so a coerced value
+    # would change WHICH call this is or what was validated. Both are NOT NULL.
+    if not isinstance(call.external_id, str) or not isinstance(call.url, str):
+        _logger.warning(
+            "ingestion.upsert.skip_untyped_identity",
+            extra={
+                "event": "skip_untyped_identity",
+                "source_id": source_id,
+                "external_id_type": type(call.external_id).__name__,
+                "url_type": type(call.url).__name__,
+            },
+        )
+        return False
     if not is_safe_url(call.url):
         _logger.warning(
             "ingestion.upsert.skip_unsafe_url",
@@ -67,14 +129,14 @@ def upsert_call(session: Session, *, source_id: int, call: NormalizedCall) -> bo
             },
         )
         return False
-    currency = call.currency
+    currency = _as_text(call.currency)
     if currency is not None and len(currency) > 8:
         _logger.warning(
             "ingestion.upsert.dropped_oversize_currency",
             extra={"event": "dropped_oversize_currency", "external_id": call.external_id},
         )
         currency = None
-    programme = call.programme
+    programme = _as_text(call.programme)
     if programme is not None and len(programme) > 200:
         _logger.warning(
             "ingestion.upsert.truncated_programme",
@@ -86,17 +148,25 @@ def upsert_call(session: Session, *, source_id: int, call: NormalizedCall) -> bo
         "source_id": source_id,
         "external_id": call.external_id,
         "url": call.url,
-        "title": call.title,
-        "summary": call.summary,
-        "full_text": call.full_text,
-        "deadline": call.deadline,
-        "budget_min": call.budget_min,
-        "budget_max": call.budget_max,
+        # `title` is NOT NULL: coerce to "" rather than reject, so a bad title
+        # costs a label and not the call.
+        "title": _as_text(call.title) or "",
+        "summary": _as_text(call.summary),
+        "full_text": _as_text(call.full_text),
+        "deadline": _as_datetime(call.deadline),
+        "budget_min": _as_int(call.budget_min),
+        "budget_max": _as_int(call.budget_max),
         "currency": currency,
         "programme": programme,
-        "keywords": call.keywords,
-        "published_at": call.published_at,
-        "raw": call.raw,
+        # ARRAY(Text) and JSONB: the element type matters as much as the outer
+        # one, and a bare string is iterable — `list("ab")` would silently
+        # become ["a", "b"], so the isinstance check is not redundant.
+        "keywords": (
+            [_as_text(k) or "" for k in call.keywords]
+            if isinstance(call.keywords, (list, tuple))
+            else []
+        ),
+        "raw": call.raw if isinstance(call.raw, dict) else {},
     }
 
     existed = (
