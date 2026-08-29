@@ -80,6 +80,16 @@ def build_citation_llm(settings: Settings) -> StructuredLLM:
             raise CitationLLMConfigError(
                 "CITATION_LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is unset"
             )
+        if not settings.citation_llm_allow_cloud:
+            # Refuse to BUILD, not to send. `build_citation_service` runs inside
+            # `create_app` and is not caught, so this is a boot failure — the
+            # only gate that can cover the unattended claim-analysis ticks,
+            # which reach this service with no request and no user to consent.
+            raise CitationLLMConfigError(
+                "CITATION_LLM_PROVIDER=anthropic uploads proposal and reference text "
+                "to an external API. Set CITATION_LLM_ALLOW_CLOUD=true to permit it, "
+                "or CITATION_LLM_PROVIDER=ollama to keep extraction on-prem."
+            )
         logger.warning(
             "citation LLM provider is 'anthropic' — uploaded reference text will "
             "be sent to an EXTERNAL API. Set CITATION_LLM_PROVIDER=ollama to keep "

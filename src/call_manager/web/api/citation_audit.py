@@ -23,6 +23,10 @@ from call_manager.proposal_assist.citations.ledger import load_ledger
 from call_manager.proposal_assist.citations.usage import check_citation_caps
 from call_manager.proposal_assist.editing.save import CITATIONS_FILENAME
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.web._cloud_gate import (
+    citation_llm_egresses,
+    has_disclosure_ack,
+)
 from call_manager.proposal_assist.web._perms import require_member, require_owner
 from call_manager.web.api.errors import api_error
 
@@ -112,6 +116,26 @@ def citation_audit_deep(
     semantic_available = citation_service is not None
     with sf() as session:
         require_owner(workspace_id=workspace_id, user=user, session=session)
+        # The deep check IS the cloud call — the user asked for it explicitly, so
+        # refuse rather than silently return a weaker answer. No-op under the
+        # default on-prem provider. (The reference routes degrade instead: there
+        # the LLM only enriches metadata for an upload that is not an AI action.)
+        if citation_llm_egresses(settings):
+            if not settings.drafting_enabled:
+                return api_error(
+                    503,
+                    "cloud_llm_disabled",
+                    "AI features are currently disabled by an administrator.",
+                )
+            if not has_disclosure_ack(
+                session=session, workspace_id=workspace_id, user_id=user.id
+            ):
+                return api_error(
+                    403,
+                    "disclosure_not_acknowledged",
+                    "Please acknowledge the data-disclosure notice before running "
+                    "the deep citation check.",
+                )
         repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
         try:
             loaded = _load(repo_dir)

@@ -11,6 +11,7 @@ audit `kind` literals is intentional and pinned by tests on both sides.
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
@@ -39,7 +40,10 @@ from call_manager.proposal_assist.references.uploads import (
     _sanitize_filename,
     _storage_for,
 )
+from call_manager.proposal_assist.web._cloud_gate import citation_cloud_permitted
 from call_manager.proposal_assist.web._perms import require_member
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -52,6 +56,36 @@ class IngestResultOut(BaseModel):
     reference_id: str
     text_status: str
     text_error: str | None = None
+
+
+
+def _citation_service_if_permitted(request, *, workspace_id, user):
+    """`app.state.citation_service`, or None when using it would send this user's
+    reference text off-prem without their consent.
+
+    DEGRADE, do not reject: uploading a PDF is not an AI action, and refusing the
+    upload would break a non-AI feature over an AI consent. `ingest_bytes` and
+    `reprocess_reference` already treat `citation_service=None` as "extract
+    metadata heuristically", so None is an existing, tested path — not a new one.
+    Returns the service unchanged under the default on-prem provider.
+    """
+    sf = request.app.state.session_factory
+    with sf() as gate_session:
+        permitted = citation_cloud_permitted(
+            request=request, session=gate_session, workspace_id=workspace_id, user=user
+        )
+    if permitted:
+        return request.app.state.citation_service
+    logger.warning(
+        "reference metadata extraction skipped — cloud citation LLM not permitted "
+        "for this user/workspace",
+        extra={
+            "event": "citation_cloud_egress_withheld",
+            "workspace_id": str(workspace_id),
+            "user_id": user.id,
+        },
+    )
+    return None
 
 
 @router.post("/workspaces/{workspace_id}/references", response_model=IngestResultOut)
@@ -77,7 +111,9 @@ async def api_upload_reference(
     storage = _storage_for(request)
     embedder = OllamaEmbedderAdapter(request.app.state.embed_client)
     limiter = request.app.state.reference_ingest_limiter
-    citation_service = request.app.state.citation_service
+    citation_service = _citation_service_if_permitted(
+        request, workspace_id=workspace_id, user=user
+    )
     timeout = request.app.state.settings.reference_extract_timeout_seconds
 
     try:
@@ -188,7 +224,9 @@ async def api_fetch_reference(
     storage = _storage_for(request)
     embedder = OllamaEmbedderAdapter(request.app.state.embed_client)
     limiter = request.app.state.reference_ingest_limiter
-    citation_service = request.app.state.citation_service
+    citation_service = _citation_service_if_permitted(
+        request, workspace_id=workspace_id, user=user
+    )
     timeout = request.app.state.settings.reference_extract_timeout_seconds
 
     def _run():
@@ -519,7 +557,9 @@ async def api_reprocess_reference(
     storage = _storage_for(request)
     embedder = OllamaEmbedderAdapter(request.app.state.embed_client)
     limiter = request.app.state.reference_ingest_limiter
-    citation_service = request.app.state.citation_service
+    citation_service = _citation_service_if_permitted(
+        request, workspace_id=workspace_id, user=user
+    )
     timeout = request.app.state.settings.reference_extract_timeout_seconds
 
     def _run():

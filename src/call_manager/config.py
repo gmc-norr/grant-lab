@@ -514,6 +514,19 @@ class Settings(BaseSettings):
         ),
     )
     citation_llm_provider: str = Field(default="ollama", alias="CITATION_LLM_PROVIDER")
+    citation_llm_allow_cloud: bool = Field(
+        default=False,
+        alias="CITATION_LLM_ALLOW_CLOUD",
+        description=(
+            "Operator opt-in for sending citation/reference text off-prem. "
+            "CITATION_LLM_PROVIDER=anthropic uploads proposal text AND uploaded "
+            "reference text to an external API; without this flag the app REFUSES "
+            "TO START with that provider. This is the only gate that reaches the "
+            "unattended claim-analysis ticks, which run with no request and no "
+            "user to consent — the per-request disclosure gate cannot see them. "
+            "Irrelevant to the default on-prem provider (ollama)."
+        ),
+    )
     citation_llm_model: str = Field(
         default="",
         alias="CITATION_LLM_MODEL",
