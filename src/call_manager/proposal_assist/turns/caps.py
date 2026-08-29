@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -28,9 +26,7 @@ from call_manager.db.models import (
     UncitedClaimsJob,
     Workspace,
 )
-
-_STOCKHOLM = ZoneInfo("Europe/Stockholm")
-_UTC = ZoneInfo("UTC")
+from call_manager.timeutil import stockholm_day_start_utc
 
 
 @dataclass
@@ -92,11 +88,7 @@ class GlobalTokenCapExceeded(RuntimeError):
         self.reason = reason
 
 
-def _stockholm_day_start_utc() -> datetime:
-    """Return UTC datetime corresponding to today's 00:00 in Europe/Stockholm."""
-    now_se = datetime.now(_STOCKHOLM)
-    midnight_se = now_se.replace(hour=0, minute=0, second=0, microsecond=0)
-    return midnight_se.astimezone(tz=_UTC)
+
 
 
 def check_daily_token_cap(
@@ -107,7 +99,7 @@ def check_daily_token_cap(
 ) -> CapCheckResult:
     """Sum tokens used today against the effective cap. Read-only — does
     not raise; caller (submit_user_turn) decides how to react."""
-    day_start_utc = _stockholm_day_start_utc()
+    day_start_utc = stockholm_day_start_utc()
 
     sums = session.execute(
         select(
@@ -189,7 +181,7 @@ def check_global_daily_token_cap(
     enforcement becomes a requirement, add `pg_try_advisory_xact_lock`
     on a stable per-day key (e.g. hashtext('global-cap:' || YYYYMMDD)).
     """
-    day_start_utc = _stockholm_day_start_utc()
+    day_start_utc = stockholm_day_start_utc()
     chat = session.execute(
         select(
             func.coalesce(func.sum(ChatTurn.tokens_in), 0),

@@ -234,14 +234,12 @@ def admin_dashboard(
 
 
 def _drafting_panel_context(session, settings) -> dict:
-    from call_manager.proposal_assist.turns.caps import (
-        _stockholm_day_start_utc,
-        check_global_daily_token_cap,
-    )
+    from call_manager.proposal_assist.turns.caps import check_global_daily_token_cap
+    from call_manager.timeutil import stockholm_day_start_utc
 
     global_cap = check_global_daily_token_cap(session, settings=settings)
 
-    day_start_utc = _stockholm_day_start_utc()
+    day_start_utc = stockholm_day_start_utc()
     per_workspace_rows = list(
         session.execute(
             select(

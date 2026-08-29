@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from call_manager.config import Settings
 from call_manager.db.models import ReviewRun, ReviewRunItem, Workspace
-from call_manager.proposal_assist.turns.caps import _stockholm_day_start_utc
+from call_manager.timeutil import stockholm_day_start_utc
 
 
 def active_review_run(session: Session, *, workspace_id: uuid.UUID) -> ReviewRun | None:
@@ -206,7 +206,7 @@ def latest_review_run(session: Session, *, workspace_id: uuid.UUID) -> ReviewRun
 
 
 def review_runs_today(session: Session, *, workspace_id: uuid.UUID) -> int:
-    day_start = _stockholm_day_start_utc()
+    day_start = stockholm_day_start_utc()
     total = session.scalar(
         select(func.count())
         .select_from(ReviewRun)
@@ -227,7 +227,7 @@ def review_dollars_today(session: Session, *, workspace_id: uuid.UUID) -> Decima
     # run *count*) silently undercounts the daily dollar budget. The run count
     # still excludes cancelled (a cancelled run didn't "use up" a run slot); only
     # the dollar accounting counts the spend that actually happened.
-    day_start = _stockholm_day_start_utc()
+    day_start = stockholm_day_start_utc()
     total = session.scalar(
         select(func.coalesce(func.sum(ReviewRun.estimated_dollars), 0)).where(
             ReviewRun.workspace_id == workspace_id,

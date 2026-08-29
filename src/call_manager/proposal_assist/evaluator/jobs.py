@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from call_manager.config import Settings
 from call_manager.db.models import EvaluatorJob, Workspace
-from call_manager.proposal_assist.turns.caps import _stockholm_day_start_utc
+from call_manager.timeutil import stockholm_day_start_utc
 
 
 def enqueue_evaluator_run(
@@ -118,7 +118,7 @@ def evaluator_cap_exceeded(
     session: Session, *, workspace_id: uuid.UUID, settings: Settings
 ) -> bool:
     """True if today's (Stockholm-day) evaluator in+out tokens are at/over the cap."""
-    day_start = _stockholm_day_start_utc()
+    day_start = stockholm_day_start_utc()
     total = session.scalar(
         select(
             func.coalesce(func.sum(EvaluatorJob.input_tokens + EvaluatorJob.output_tokens), 0)

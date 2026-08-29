@@ -135,6 +135,36 @@ def client_unauth(_app, pg_session_factory):
     client.__exit__(None, None, None)
 
 
+@pytest.fixture
+def client_authed_outsider(_app, current_user, pg_session_factory):
+    """TestClient authenticated as a real user who is NOT a member of the
+    workspace under test.
+
+    `client_unauth` cannot test authorization. It has no session cookie, so
+    `get_current_user` rejects it before the route body runs — which means a
+    test using it passes whether or not the route checks membership at all.
+    Measured: deleting `require_member` from BOTH `get_scorecard` and
+    `latest_uncited_claims_run` left the entire suite green at 4084 passed,
+    while in production any authenticated hospital user could then read another
+    research group's scorecard and their verbatim extracted draft claims.
+
+    A membership test needs a user who gets PAST authentication and must be
+    stopped by authorization. That is this fixture.
+    """
+    _app.state.session_factory = pg_session_factory
+    with pg_session_factory() as s:
+        outsider = User(status="active", email="outsider-fixture@ki.se")
+        s.add(outsider)
+        s.commit()
+        oid = outsider.id
+    client = TestClient(_app, raise_server_exceptions=False)
+    client.__enter__()
+    signer: SessionSigner = _app.state.session_signer
+    client.cookies.set("session", signer.make(user_id=oid))
+    yield client
+    client.__exit__(None, None, None)
+
+
 # Alias: the plan uses both names interchangeably.
 client_authed_user = client_authed_owner
 

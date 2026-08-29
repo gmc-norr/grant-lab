@@ -31,9 +31,9 @@ def count_today(session: Session) -> int:
     """Count attempts since the start of the current Europe/Stockholm day.
     Reuses the proposal-assist day-boundary helper so caps share one notion
     of 'today'."""
-    from call_manager.proposal_assist.turns.caps import _stockholm_day_start_utc
+    from call_manager.timeutil import stockholm_day_start_utc
 
-    day_start = _stockholm_day_start_utc()
+    day_start = stockholm_day_start_utc()
     return session.execute(
         select(func.count())
         .select_from(RankingRemoteAttempt)

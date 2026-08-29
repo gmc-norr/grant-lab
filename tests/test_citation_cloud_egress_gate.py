@@ -295,6 +295,55 @@ def test_a_members_upload_without_the_ack_sends_nothing_but_still_succeeds(
     assert r.status_code == 200, r.text
 
 
+def test_a_members_upload_does_not_ride_on_the_OWNERS_ack(
+    monkeypatch, pg_url, tmp_path, pg_session_factory
+):
+    # Consent is per ACTOR, not per workspace. The upload route is
+    # `require_member`, so without the actor predicate in `has_disclosure_ack`
+    # a member's PDF would go to the external API on the owner's consent
+    # record. Measured: deleting that predicate left the whole suite green.
+    from tests.proposal_assist._refs_helpers import (
+        FakeEmbedClient,
+        add_member,
+        authed_client,
+        build_app,
+    )
+    from tests.proposal_assist.conftest import make_user, make_workspace
+
+    for k, v in {
+        "CITATION_LLM_PROVIDER": "anthropic",
+        "ANTHROPIC_API_KEY": "sk-ant-not-a-real-key",
+        "CITATION_LLM_ALLOW_CLOUD": "true",
+    }.items():
+        monkeypatch.setenv(k, v)
+    sent = _record_egress(monkeypatch)
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    app.state.embed_client = FakeEmbedClient()
+
+    with pg_session_factory() as s:
+        owner = make_user(s, email="owner@ki.se")
+        member = make_user(s, email="member@ki.se")
+        ws = make_workspace(s, owner=owner)
+        s.commit()
+        add_member(s, workspace_id=ws.id, user=member)
+        ws_id, member_id, owner_id = ws.id, member.id, owner.id
+        # ONLY the owner acknowledges.
+        s.add(
+            WorkspaceEvent(
+                workspace_id=ws_id, kind="disclosure_acknowledged", actor_id=owner_id
+            )
+        )
+        s.commit()
+
+    r = authed_client(app, user_id=member_id).post(
+        f"/api/workspaces/{ws_id}/references",
+        files={"file": ("p.pdf", _real_pdf_bytes(), "application/pdf")},
+        data={"kind": "paper"},
+    )
+    assert sent == [], "a member's PDF rode on the owner's consent"
+    assert r.status_code == 200, r.text
+
+
 def test_a_members_upload_with_the_ack_still_gets_llm_metadata(
     monkeypatch, pg_url, tmp_path, pg_session_factory
 ):

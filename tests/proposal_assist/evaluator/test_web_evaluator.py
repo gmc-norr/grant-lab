@@ -1,5 +1,6 @@
 import uuid
 
+import pytest
 from sqlalchemy import select
 
 from call_manager.db.models import EvaluatorJob, Workspace, WorkspaceEvent
@@ -80,13 +81,43 @@ def test_scorecard_null_then_value_with_stale_flags(
     assert body["stale"] is False and body["stale_reasons"] == []
 
 
-def test_non_member_403(
+def test_unauthenticated_rejected(
     client_authed_owner, client_unauth, _app, current_user, pg_session_factory, tmp_path
 ):
+    # AUTHENTICATION only. This was named test_non_member_403, but an
+    # unauthenticated client is stopped by get_current_user before the route
+    # body runs — so it passed with `require_member` deleted. See below.
     ws_id = _ws(_app, current_user, pg_session_factory, tmp_path)
-    # an unauthenticated client is rejected by get_current_user (401/403)
     r = client_unauth.get(f"/api/workspaces/{ws_id}/scorecard")
     assert r.status_code in (401, 403)
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("post", "/api/workspaces/{ws}/evaluator-runs"),
+        ("get", "/api/workspaces/{ws}/evaluator-runs/latest"),
+        ("get", "/api/workspaces/{ws}/scorecard"),
+    ],
+)
+def test_an_authenticated_non_member_is_refused_by_every_route(
+    method, path, client_authed_owner, client_authed_outsider,
+    _app, current_user, pg_session_factory, tmp_path,
+):
+    # AUTHORIZATION, which `client_unauth` cannot test: it has no cookie, so
+    # `get_current_user` stops it before the route body runs. Measured, per
+    # route, by replacing that route's `require_member` with a plain workspace
+    # lookup: the scorecard read was the ONLY one any test noticed. The other
+    # two were silent at 86 passed — one of them a POST that starts a hosted-LLM
+    # run in another group's workspace.
+    #
+    # The message is asserted, not just the status: `_gate_cloud_llm` also
+    # raises 403 (missing disclosure ack), so a bare `== 403` would pass on the
+    # POST route with the membership check removed.
+    ws_id = _ws(_app, current_user, pg_session_factory, tmp_path)
+    r = getattr(client_authed_outsider, method)(path.format(ws=ws_id))
+    assert r.status_code == 403, r.text
+    assert "not a workspace member" in r.text
 
 
 def test_enqueue_writes_actor_attributed_trigger_event(

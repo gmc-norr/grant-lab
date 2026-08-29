@@ -7,17 +7,13 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from call_manager.config import Settings
 from call_manager.db.models import CitationLlmUsage
-
-_STOCKHOLM = ZoneInfo("Europe/Stockholm")
-_UTC = ZoneInfo("UTC")
+from call_manager.timeutil import stockholm_day_start_utc
 
 
 @dataclass(frozen=True)
@@ -26,10 +22,7 @@ class CapStatus:
     scope: str | None  # "workspace" | "global" | None
 
 
-def _stockholm_day_start_utc() -> datetime:
-    now_se = datetime.now(_STOCKHOLM)
-    midnight = now_se.replace(hour=0, minute=0, second=0, microsecond=0)
-    return midnight.astimezone(_UTC)
+
 
 
 def record_usage(
@@ -59,7 +52,7 @@ def _sum_today(session: Session, *, workspace_id: uuid.UUID | None) -> tuple[int
     stmt = select(
         func.coalesce(func.sum(CitationLlmUsage.tokens_in), 0),
         func.coalesce(func.sum(CitationLlmUsage.tokens_out), 0),
-    ).where(CitationLlmUsage.created_at >= _stockholm_day_start_utc())
+    ).where(CitationLlmUsage.created_at >= stockholm_day_start_utc())
     if workspace_id is not None:
         stmt = stmt.where(CitationLlmUsage.workspace_id == workspace_id)
     row = session.execute(stmt).one()

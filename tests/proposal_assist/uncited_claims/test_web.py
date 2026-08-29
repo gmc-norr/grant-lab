@@ -1,5 +1,7 @@
 import uuid
 
+import pytest
+
 from call_manager.db.models import UncitedClaimsJob, WorkspaceEvent
 from tests.proposal_assist.conftest import make_workspace
 
@@ -114,9 +116,32 @@ def test_dismiss_writes_event_and_is_idempotent(
         assert events[0].payload["claim_hash"] == "abc123"
 
 
-def test_non_member_rejected(
+def test_unauthenticated_rejected(
     client_authed_owner, client_unauth, _app, current_user, pg_session_factory, tmp_path
 ):
+    # AUTHENTICATION only — see the membership test below for why that is not
+    # the same thing. This was named test_non_member_rejected.
     ws_id = _ws(_app, current_user, pg_session_factory, tmp_path)
     r = client_unauth.get(f"/api/workspaces/{ws_id}/uncited-claims-runs/latest")
     assert r.status_code in (401, 403)
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("post", "/api/workspaces/{ws}/uncited-claims-runs"),
+        ("get", "/api/workspaces/{ws}/uncited-claims-runs/latest"),
+        ("post", "/api/workspaces/{ws}/uncited-claims/abc123/dismiss"),
+    ],
+)
+def test_an_authenticated_non_member_is_refused_by_every_route(
+    method, path, client_authed_owner, client_authed_outsider,
+    _app, current_user, pg_session_factory, tmp_path,
+):
+    # See the evaluator twin for the method. Measured here: only the `latest`
+    # read was noticed by any test; the run-start POST and the dismiss POST —
+    # which MUTATES another group's data — were both silent at 86 passed.
+    ws_id = _ws(_app, current_user, pg_session_factory, tmp_path)
+    r = getattr(client_authed_outsider, method)(path.format(ws=ws_id))
+    assert r.status_code == 403, r.text
+    assert "not a workspace member" in r.text
