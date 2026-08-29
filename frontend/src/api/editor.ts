@@ -10,10 +10,15 @@ export type SaveSectionVars = {
 };
 
 /** GET /api/workspaces/{id}/draft — one read for Outline + editor + pills. */
-export function useDraft(id: string) {
+export function useDraft(id: string, opts?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ["draft", id],
     retry: false,
+    // Default true keeps every existing caller unchanged; the status bar passes
+    // false so it never fetches an artifact off the cockpit, or one the middle
+    // is not showing. Same queryKey, so when it IS enabled React Query dedupes
+    // it with the panel's own query — no second request.
+    enabled: opts?.enabled ?? true,
     queryFn: async () =>
       unwrap(await api.GET("/api/workspaces/{workspace_id}/draft", { params: { path: { workspace_id: id } } })),
   });
@@ -49,10 +54,15 @@ export type SaveSpecSectionVars = {
 };
 
 /** GET /api/workspaces/{id}/spec — outline + section bytes, citation-free. */
-export function useSpec(id: string) {
+export function useSpec(id: string, opts?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ["spec", id],
     retry: false,
+    // Default true keeps every existing caller unchanged; the status bar passes
+    // false so it never fetches an artifact off the cockpit, or one the middle
+    // is not showing. Same queryKey, so when it IS enabled React Query dedupes
+    // it with the panel's own query — no second request.
+    enabled: opts?.enabled ?? true,
     queryFn: async () =>
       unwrap(await api.GET("/api/workspaces/{workspace_id}/spec", { params: { path: { workspace_id: id } } })),
   });

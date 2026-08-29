@@ -17,7 +17,9 @@ import { tabFromParams } from "./cockpitNav";
  *  panel names that state rather than this regex trying to pre-empt one cause. */
 const SHA_RE = /^[0-9a-fA-F]{7,64}$/;
 
-function shaParam(sp: URLSearchParams, key: string): string | null {
+/** Exported so the status bar reads ?a/?b through the SAME parser the history
+ *  nav uses. Reimplementing it is how the uppercase-sha bug happened. */
+export function shaParam(sp: URLSearchParams, key: string): string | null {
   const v = sp.get(key);
   // Lowercased: SHA_RE accepts A-F, but git's %H is lowercase and every
   // comparison in HistoryPanel is string identity against it (indexOf,

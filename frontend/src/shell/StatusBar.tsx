@@ -1,8 +1,10 @@
-import { useLocation } from "react-router-dom";
+import { useLocation, useSearchParams } from "react-router-dom";
 
+import { useDraft, useSpec } from "../api/editor";
 import { useScorecard } from "../api/evaluator";
 import { useCockpitMeta } from "../api/workspace";
-import { cockpitIdFromPath } from "../cockpit/cockpitNav";
+import { cockpitIdFromPath, tabFromParams } from "../cockpit/cockpitNav";
+import { shaParam } from "../cockpit/historyNav";
 import { type SaveState, useEditorStore } from "../cockpit/editorStore";
 import { deadlineView } from "../routes/Deadline";
 import styles from "./StatusBar.module.css";
@@ -33,11 +35,34 @@ const DEADLINE_CLASS: Record<string, string | undefined> = {
 // scorecard band (this plan) + save-state, language, Ln/Col (Phase 3a). It derives the
 // workspace id from the URL and gates its queries (enabled:!!id), so it never fetches off
 // the cockpit — the same global-channel discipline the rest of the cockpit uses.
+/** Git's own display length. The bar is one line; a 40-char sha would own it. */
+function short(sha: string): string {
+  return sha.slice(0, 7);
+}
+
 export function StatusBar() {
   const { pathname } = useLocation();
   const id = cockpitIdFromPath(pathname);
   const onCockpit = !!id;
   const { cursor, save } = useEditorStore();
+  const [sp] = useSearchParams();
+  const tab = tabFromParams(sp);
+  // What the MIDDLE is showing. The cockpit can display the live draft, one
+  // historical version, or two side by side, and the bar said nothing — you
+  // could be reading a two-month-old version and not know it.
+  //
+  // No branch chip: every workspace repo is on `main` and nothing in the app
+  // creates another, so it would be a permanent constant, not information.
+  const artifact = tab === "spec" ? "spec" : "draft";
+  const comparing = tab === "diff";
+  // Fetch the artifact ONLY when the middle is actually editing it: same
+  // queryKey as the panel, so React Query dedupes rather than refetches.
+  const wantLive = onCockpit && !comparing;
+  const draft = useDraft(id, { enabled: wantLive && artifact === "draft" });
+  const spec = useSpec(id, { enabled: wantLive && artifact === "spec" });
+  const head = (artifact === "spec" ? spec.data?.head : draft.data?.head) ?? null;
+  const a = shaParam(sp, "a");
+  const b = shaParam(sp, "b");
   const meta = useCockpitMeta(id).data;
   const scorecard = useScorecard(id).data;
   const dl = meta?.workspace_deadline ? deadlineView(meta.workspace_deadline) : null;
@@ -53,6 +78,18 @@ export function StatusBar() {
       )}
       {onCockpit && meta?.spec_locked && <span className={styles.item}>🔒 Spec locked</span>}
       {onCockpit && band && <span className={styles.item}>Band: {BAND_LABEL[band] ?? band}</span>}
+      {onCockpit && comparing && (a || b) && (
+        <span className={styles.item}>
+          {a && b
+            ? `Comparing ${short(a)} ↔ ${short(b)}`
+            : `Viewing ${short((a ?? b) as string)} (read-only)`}
+        </span>
+      )}
+      {onCockpit && !comparing && head && (
+        <span className={styles.item}>
+          {artifact === "spec" ? "Spec" : "Draft"} · {short(head)}
+        </span>
+      )}
       <span className={styles.spacer} />
       {onCockpit && (
         <>

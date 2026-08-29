@@ -71,3 +71,63 @@ it("does NOT fetch on the cockpit create route (no editor chrome)", () => {
   renderAt("/cockpit/new");
   expect(get).not.toHaveBeenCalled();
 });
+
+// What the middle is SHOWING you. The cockpit can display the live draft, one
+// historical version, or two side by side, and until now the status bar said
+// nothing — you could be reading a two-month-old version and not know it.
+// (Branch is deliberately absent: every workspace repo is on `main` and nothing
+// creates another, so a branch chip would be a permanent constant.)
+
+function mockHead(sha: string) {
+  vi.spyOn(clientMod.api, "GET").mockImplementation((async (path: string) => {
+    if (String(path).endsWith("/draft") || String(path).endsWith("/spec")) {
+      return { data: { head: sha, sections: [], can_edit: true }, error: undefined };
+    }
+    return { data: null, error: undefined };
+  }) as never);
+}
+
+it("editing the draft names the artifact and the commit it is at", async () => {
+  mockHead("a1b2c3d4e5f6");
+  renderAt("/cockpit/ws-1?tab=draft");
+  expect(await screen.findByText(/Draft · a1b2c3d/)).toBeInTheDocument();
+  // Short sha, not the full 40 — the bar is one line.
+  expect(screen.queryByText(/a1b2c3d4e5f6/)).toBeNull();
+});
+
+it("editing the spec says SPEC, not draft", async () => {
+  mockHead("9999999999");
+  renderAt("/cockpit/ws-1?tab=spec");
+  expect(await screen.findByText(/Spec · 9999999/)).toBeInTheDocument();
+});
+
+it("viewing ONE version says viewing, and says read-only", () => {
+  renderAt("/cockpit/ws-1?tab=diff&a=6d22146aaa");
+  expect(screen.getByText(/Viewing 6d22146/)).toBeInTheDocument();
+  expect(screen.getByText(/read-only/i)).toBeInTheDocument();
+});
+
+it("comparing TWO versions names both", () => {
+  renderAt("/cockpit/ws-1?tab=diff&a=6d22146aaa&b=1340282bbb");
+  const t = screen.getByText(/Comparing/).textContent ?? "";
+  expect(t).toMatch(/6d22146/);
+  expect(t).toMatch(/1340282/);
+});
+
+it("a legacy ?tab=history is the comparison too", () => {
+  renderAt("/cockpit/ws-1?tab=history&a=6d22146aaa");
+  expect(screen.getByText(/Viewing 6d22146/)).toBeInTheDocument();
+});
+
+it("off the cockpit it says nothing about commits", () => {
+  renderAt("/");
+  expect(screen.queryByText(/Viewing|Comparing|Draft ·|Spec ·/)).toBeNull();
+});
+
+it("does not claim a commit it has not got", async () => {
+  // The draft query resolving to null must not render "Draft · undefined".
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: null, error: undefined } as never);
+  renderAt("/cockpit/ws-1?tab=draft");
+  expect(await screen.findByText("Markdown")).toBeInTheDocument();
+  expect(screen.queryByText(/Draft ·/)).toBeNull();
+});
