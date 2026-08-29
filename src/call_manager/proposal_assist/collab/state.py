@@ -73,11 +73,7 @@ def enable_collab(session: Session, *, workspace_id: uuid.UUID, artifact: str) -
 
 def get_checkpoint_watermark(session: Session, *, workspace_id: uuid.UUID, artifact: str) -> int:
     row = _get(session, workspace_id, artifact)
-    return (
-        row.last_checkpoint_update_id
-        if row and row.last_checkpoint_update_id is not None
-        else 0
-    )
+    return row.last_checkpoint_update_id if row and row.last_checkpoint_update_id is not None else 0
 
 
 def advance_checkpoint(
@@ -97,10 +93,13 @@ def advance_checkpoint(
 
 
 def reset_checkpoint(session: Session, *, workspace_id: uuid.UUID, artifact: str) -> None:
-    """Kill-switch handover ONLY: return the artifact to the 'never opened'
-    state (the log is truncated separately, same transaction) so a
-    post-kill-switch reconnect hydrates fresh from git HEAD. enabled_at is
-    deliberately untouched (sticky-forward)."""
+    """Return the artifact to the 'never opened' state (the log is truncated
+    separately, same transaction) so a later reconnect hydrates fresh from git
+    HEAD. enabled_at is deliberately untouched (sticky-forward).
+
+    Two callers, both of which MUST have checkpointed the full log to git in the
+    SAME transaction: the kill-switch handover (handover.py) and a branch switch
+    (branches.py §4.2 step 6)."""
     row = _get(session, workspace_id, artifact)
     if row is not None:
         row.last_checkpoint_update_id = None
