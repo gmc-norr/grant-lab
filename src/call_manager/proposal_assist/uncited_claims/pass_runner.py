@@ -21,6 +21,7 @@ from call_manager.db.models import UncitedClaimsJob, Workspace
 from call_manager.proposal_assist.drafting.contract import LaunchContext, TurnDoneEvent
 from call_manager.proposal_assist.passes import PASS_REGISTRY
 from call_manager.proposal_assist.row_locks import bounded_prefix_lock_waits
+from call_manager.proposal_assist.spend import record_spend
 from call_manager.proposal_assist.uncited_claims.agent import build_uncited_claims_adapter
 from call_manager.proposal_assist.uncited_claims.context import assemble_uncited_claims_context
 from call_manager.proposal_assist.uncited_claims.jobs import (
@@ -33,10 +34,32 @@ logger = logging.getLogger(__name__)
 _WS_RE = re.compile(r"\s+")
 
 
-def _fail(session, job: UncitedClaimsJob, message: str) -> None:
+def _fail(
+    session, job: UncitedClaimsJob, message: str, done=None, status: str = "failed"
+) -> None:
     job.status = "failed"
     job.error = message
     job.completed_at = datetime.now(UTC)
+    # Keep the display cache honest on the failure path too. The only column
+    # writers in each family sit on the SUCCESS path, and these columns are NOT
+    # NULL with server_default "0" — so without this the ledger says 21 and the
+    # UI says 0 for every failed run, which is the drift Task 9 exists to
+    # prevent.
+    job.input_tokens = (done.tokens_in or 0) if done is not None else 0
+    job.output_tokens = (done.tokens_out or 0) if done is not None else 0
+    # Spend happened even though the run did not finish. Recording it is the
+    # whole point: the old code left every failed run invisible to the cap.
+    record_spend(
+        session,
+        workspace_id=job.workspace_id,
+        kind="uncited_claims",
+        status=status,
+        tokens_in=done.tokens_in if done else None,
+        tokens_out=done.tokens_out if done else None,
+        model=done.model if done else None,
+        ref_id=job.id,
+        sdk_session_id=done.session_id if done else None,
+    )
     session.flush()
 
 
@@ -136,22 +159,20 @@ async def run_uncited_claims_pass(
         done: TurnDoneEvent | None = None
         try:
 
-            async def _run() -> TurnDoneEvent | None:
-                nonlocal handle
+            async def _run() -> None:
+                nonlocal handle, done
                 # Pre-launch live-status recheck: a soft-delete/cancel may have flipped the job to
                 # 'failed' between the read session and here. Don't spend tokens on a dead job.
                 with session_factory() as s2:
                     live = s2.get(UncitedClaimsJob, job_id)
                     if live is None or live.status != "running":
-                        return None
+                        return
                 handle = await adapter.launch(LaunchContext(workspace_id=workspace_id))
-                last = None
                 async for event in adapter.send_turn(handle, instruction):
                     if isinstance(event, TurnDoneEvent):
-                        last = event
-                return last
+                        done = event  # outer; survives a later raise/cancel
 
-            done = await asyncio.wait_for(
+            await asyncio.wait_for(
                 _run(), timeout=settings.uncited_claims_pass_timeout_seconds
             )
         except Exception as exc:  # noqa: BLE001 — terminal: fail the job, never propagate
@@ -164,7 +185,15 @@ async def run_uncited_claims_pass(
             with session_factory() as s:
                 job = s.get(UncitedClaimsJob, job_id, with_for_update=True)
                 if job is not None and job.status == "running":
-                    _fail(s, job, message)
+                    _fail(
+                        s,
+                        job,
+                        message,
+                        done=done,
+                        status="timeout"
+                        if isinstance(exc, (asyncio.TimeoutError, TimeoutError))
+                        else "failed",
+                    )
                 s.commit()
             return
         finally:
@@ -193,17 +222,41 @@ async def run_uncited_claims_pass(
                 job.model = done.model
                 job.sdk_session_id = done.session_id
             if job.status != "running":
-                # The reaper (TTL) or a soft-delete cancel finalized the job mid-pass. Don't
-                # resurrect it (no status/claims change) — but keep the tokens recorded above.
+                # The reaper or a cancel finalized the job mid-pass. The sub-call
+                # still ran and still reported usage — the comment above says to
+                # keep it — so the ledger must carry it too, or Task 7's cap will
+                # not see spend the display columns just recorded.
+                record_spend(
+                    s,
+                    workspace_id=job.workspace_id,
+                    kind="uncited_claims",
+                    status="failed",
+                    tokens_in=done.tokens_in if done else None,
+                    tokens_out=done.tokens_out if done else None,
+                    model=done.model if done else None,
+                    ref_id=job.id,
+                    sdk_session_id=done.session_id if done else None,
+                )
                 s.commit()
                 return
             if job.claims is None:
-                _fail(s, job, "uncited-claims pass produced no result")
+                _fail(s, job, "uncited-claims pass produced no result", done=done)
                 s.commit()
                 return
             job.claims = _finalize_claims(job.claims, section_texts)
             job.status = "completed"
             job.completed_at = datetime.now(UTC)
+            record_spend(
+                s,
+                workspace_id=job.workspace_id,
+                kind="uncited_claims",
+                status="ok",
+                tokens_in=done.tokens_in if done else None,
+                tokens_out=done.tokens_out if done else None,
+                model=done.model if done else None,
+                ref_id=job.id,
+                sdk_session_id=done.session_id if done else None,
+            )
             s.commit()
 
 async def drain_uncited_claims_queue_tick(

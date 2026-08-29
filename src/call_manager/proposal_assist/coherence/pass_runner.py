@@ -24,6 +24,7 @@ from call_manager.proposal_assist.coherence.jobs import (
 from call_manager.proposal_assist.drafting.contract import LaunchContext, TurnDoneEvent
 from call_manager.proposal_assist.passes import PASS_REGISTRY
 from call_manager.proposal_assist.row_locks import bounded_prefix_lock_waits
+from call_manager.proposal_assist.spend import record_spend
 
 logger = logging.getLogger(__name__)
 
@@ -98,19 +99,17 @@ async def run_coherence_pass(
         done: TurnDoneEvent | None = None
         try:
 
-            async def _run() -> TurnDoneEvent | None:
-                nonlocal handle
+            async def _run() -> None:
+                nonlocal handle, done
                 # launch is INSIDE the wait_for so a hung SDK connect is bounded too — not
                 # just the streaming turn. wait_for cancels this coroutine on timeout,
                 # raising CancelledError at whichever await is live (launch or the loop).
                 handle = await adapter.launch(LaunchContext(workspace_id=workspace_id))
-                last = None
                 async for event in adapter.send_turn(handle, instruction):
                     if isinstance(event, TurnDoneEvent):
-                        last = event
-                return last
+                        done = event  # outer; survives a later raise/cancel
 
-            done = await asyncio.wait_for(_run(), timeout=settings.coherence_pass_timeout_seconds)
+            await asyncio.wait_for(_run(), timeout=settings.coherence_pass_timeout_seconds)
         except Exception as exc:  # noqa: BLE001 — terminal: fail the job, never propagate
             logger.exception("coherence pass failed for job %s", job_id)
             # Member-visible: surface only a sanitized, generic message (full detail
@@ -125,7 +124,15 @@ async def run_coherence_pass(
                 # have already failed this job during a hang; don't double-finalize.
                 job = s.get(CoherenceJob, job_id, with_for_update=True)
                 if job is not None and job.status == "running":
-                    _fail(s, job, message)
+                    _fail(
+                        s,
+                        job,
+                        message,
+                        done=done,
+                        status="timeout"
+                        if isinstance(exc, (asyncio.TimeoutError, TimeoutError))
+                        else "failed",
+                    )
                     supersede_own_coherence(s, workspace_id=workspace_id, job_id=job_id)
                 s.commit()
             return
@@ -172,12 +179,45 @@ async def run_coherence_pass(
                 job.output_tokens = done.tokens_out or 0
                 job.model = done.model
                 job.sdk_session_id = done.session_id
+            record_spend(
+                s,
+                workspace_id=job.workspace_id,
+                kind="coherence",
+                status="ok",
+                tokens_in=done.tokens_in if done else None,
+                tokens_out=done.tokens_out if done else None,
+                model=done.model if done else None,
+                ref_id=job.id,
+                sdk_session_id=done.session_id if done else None,
+            )
             s.commit()
 
-def _fail(session, job: CoherenceJob, message: str) -> None:
+def _fail(
+    session, job: CoherenceJob, message: str, done=None, status: str = "failed"
+) -> None:
     job.status = "failed"
     job.error = message
     job.completed_at = datetime.now(UTC)
+    # Keep the display cache honest on the failure path too. The only column
+    # writers in each family sit on the SUCCESS path, and these columns are NOT
+    # NULL with server_default "0" — so without this the ledger says 21 and the
+    # UI says 0 for every failed run, which is the drift Task 9 exists to
+    # prevent.
+    job.input_tokens = (done.tokens_in or 0) if done is not None else 0
+    job.output_tokens = (done.tokens_out or 0) if done is not None else 0
+    # Spend happened even though the run did not finish. Recording it is the
+    # whole point: the old code left every failed run invisible to the cap.
+    record_spend(
+        session,
+        workspace_id=job.workspace_id,
+        kind="coherence",
+        status=status,
+        tokens_in=done.tokens_in if done else None,
+        tokens_out=done.tokens_out if done else None,
+        model=done.model if done else None,
+        ref_id=job.id,
+        sdk_session_id=done.session_id if done else None,
+    )
     session.flush()
 
 

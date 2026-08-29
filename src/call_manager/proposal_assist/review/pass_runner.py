@@ -48,6 +48,7 @@ from call_manager.proposal_assist.review.personas import (
     WAVE1_KINDS,
 )
 from call_manager.proposal_assist.row_locks import bounded_prefix_lock_waits
+from call_manager.proposal_assist.spend import record_spend
 
 logger = logging.getLogger(__name__)
 
@@ -119,16 +120,14 @@ async def _run_one_call(
         error: str | None = None
         try:
 
-            async def _drive() -> TurnDoneEvent | None:
-                nonlocal handle
+            async def _drive() -> None:
+                nonlocal handle, done
                 handle = await adapter.launch(LaunchContext(workspace_id=workspace_id))
-                last = None
                 async for event in adapter.send_turn(handle, instruction):
                     if isinstance(event, TurnDoneEvent):
-                        last = event
-                return last
+                        done = event  # outer; survives a later raise/cancel
 
-            done = await asyncio.wait_for(_drive(), timeout=settings.review_persona_timeout_seconds)
+            await asyncio.wait_for(_drive(), timeout=settings.review_persona_timeout_seconds)
         except Exception as exc:  # noqa: BLE001 — terminal for THIS sub-call
             logger.exception("review sub-call %s failed for run %s", kind, run_id)
             error = (
@@ -188,6 +187,25 @@ async def _run_one_call(
             else:
                 item.status = "failed"
                 item.error_message = error or "no review submitted"
+            # One row per sub-call. `status` reads the item's settled terminal
+            # state, plus the timeout the except block at :132-138 already
+            # distinguished and stored in `error`.
+            record_spend(
+                s,
+                workspace_id=workspace_id,
+                kind="review",
+                status=(
+                    "timeout"
+                    if error == "timed out"
+                    else "ok"
+                    if item.status == "done"
+                    else "failed"
+                ),
+                tokens_in=done.tokens_in if done else None,
+                tokens_out=done.tokens_out if done else None,
+                model=done.model if done else None,
+                ref_id=item.id,
+            )
             s.commit()
 
 
