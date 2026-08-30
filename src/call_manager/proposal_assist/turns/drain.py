@@ -20,6 +20,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
+from call_manager.config import Settings
 from call_manager.db.models import TurnJob, Workspace
 from call_manager.proposal_assist.drafting.controller import WorkspaceController
 from call_manager.proposal_assist.turns.processor import process_turn_once
@@ -34,6 +35,7 @@ async def drain_turn_queue_tick(
     workspaces_dir: Path | None = None,
     drafting_enabled: bool = True,
     turn_max_seconds: float | None = None,
+    settings: Settings | None = None,
 ) -> int:
     """Find workspaces with queued turn_jobs; pick the oldest queued
     job per workspace; dispatch process_turn_once for each. Returns the
@@ -93,6 +95,7 @@ async def drain_turn_queue_tick(
                 controller=controller,
                 turn_job_id=turn_id,
                 workspaces_dir=workspaces_dir,
+                settings=settings,
             )
             # Bound each turn in-loop. asyncio.wait_for cancels the coroutine
             # on timeout, which raises CancelledError at the streaming await

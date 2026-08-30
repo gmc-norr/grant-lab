@@ -3,19 +3,10 @@ global ceiling, no new submit is accepted regardless of per-workspace
 remaining budget. The cap is a guardrail against runaway org-wide
 spend; small overshoot from concurrent submits is acceptable."""
 
-from datetime import UTC, datetime, timedelta
-from decimal import Decimal
-
 import pytest
 
 from call_manager.config import Settings
-from call_manager.db.models import (
-    ChatTurn,
-    CoherenceJob,
-    EvaluatorJob,
-    ReviewRun,
-    UncitedClaimsJob,
-)
+from call_manager.proposal_assist.spend import record_spend
 from call_manager.proposal_assist.turns.caps import (
     GlobalTokenCapExceeded,
     check_global_daily_token_cap,
@@ -37,23 +28,16 @@ def test_check_global_cap_sums_across_workspaces(pg_session_factory, _settings_e
         ws_a = make_workspace(s, owner=owner, title="A", ack_disclosure=True)
         ws_b = make_workspace(s, owner=owner, title="B", ack_disclosure=True)
         s.commit()
-        s.add_all(
-            [
-                ChatTurn(
-                    workspace_id=ws_a.id,
-                    role="assistant",
-                    content={"type": "text", "text": "x"},
-                    tokens_in=400,
-                    tokens_out=10,
-                ),
-                ChatTurn(
-                    workspace_id=ws_b.id,
-                    role="assistant",
-                    content={"type": "text", "text": "y"},
-                    tokens_in=300,
-                    tokens_out=20,
-                ),
-            ]
+        # Source of truth is the ledger now, not the ChatTurn rows themselves —
+        # seed both workspaces' spend there. Intent unchanged: the global sum
+        # must span workspaces.
+        record_spend(
+            s, workspace_id=ws_a.id, kind="chat_turn", status="ok",
+            tokens_in=400, tokens_out=10,
+        )
+        record_spend(
+            s, workspace_id=ws_b.id, kind="chat_turn", status="ok",
+            tokens_in=300, tokens_out=20,
         )
         s.commit()
 
@@ -77,15 +61,10 @@ def test_submit_raises_global_cap_exceeded(pg_session_factory, _settings_env, mo
         ws_a = make_workspace(s, owner=owner, title="A", ack_disclosure=True)
         ws_b = make_workspace(s, owner=owner, title="B", ack_disclosure=True)
         s.commit()
-        # Seed: ws_a already used 500 input today via a completed turn.
-        s.add(
-            ChatTurn(
-                workspace_id=ws_a.id,
-                role="assistant",
-                content={"type": "text", "text": "x"},
-                tokens_in=500,
-                created_at=datetime.now(UTC) - timedelta(minutes=1),
-            )
+        # Seed: ws_a already used 500 input today. The cap reads the ledger,
+        # so record it there.
+        record_spend(
+            s, workspace_id=ws_a.id, kind="chat_turn", status="ok", tokens_in=500,
         )
         s.commit()
         wsid_b, owner_id = ws_b.id, owner.id
@@ -107,8 +86,9 @@ def test_global_cap_counts_background_job_spend(
 ):
     """The org-wide backstop must see EVERY member-triggerable cloud consumer, not
     just chat turns. The four background queues — coherence, evaluator, mock-panel
-    review, uncited-claims — each track tokens on their own table; the global cap
-    UNIONs all four so a bg-job runaway can't slip under it."""
+    review, uncited-claims — each record their tokens to the llm_spend ledger; the
+    ledger is the single source of truth the global cap sums, so a bg-job runaway
+    can't slip under it."""
     monkeypatch.setenv("GLOBAL_DAILY_TOKEN_CAP_INPUT", "100000")
     monkeypatch.setenv("GLOBAL_DAILY_TOKEN_CAP_OUTPUT", "100000")
     settings = Settings()
@@ -118,46 +98,28 @@ def test_global_cap_counts_background_job_spend(
         s.commit()
         ws = make_workspace(s, owner=owner, ack_disclosure=True)
         s.commit()
-        # No chat turns at all — only background-job spend.
-        s.add(
-            CoherenceJob(
-                workspace_id=ws.id,
-                status="completed",
-                input_tokens=100,
-                output_tokens=10,
-            )
+        # No chat turns at all — only background-job spend, recorded to the ledger.
+        record_spend(
+            s, workspace_id=ws.id, kind="coherence", status="ok",
+            tokens_in=100, tokens_out=10,
         )
-        s.add(
-            EvaluatorJob(
-                workspace_id=ws.id,
-                status="completed",
-                input_tokens=200,
-                output_tokens=20,
-            )
+        record_spend(
+            s, workspace_id=ws.id, kind="evaluator", status="ok",
+            tokens_in=200, tokens_out=20,
         )
-        s.add(
-            ReviewRun(
-                workspace_id=ws.id,
-                status="done",
-                draft_sha="a" * 64,
-                input_tokens=300,
-                output_tokens=30,
-                estimated_dollars=Decimal("0.0010"),
-            )
+        record_spend(
+            s, workspace_id=ws.id, kind="review", status="ok",
+            tokens_in=300, tokens_out=30,
         )
-        s.add(
-            UncitedClaimsJob(
-                workspace_id=ws.id,
-                status="completed",
-                input_tokens=400,
-                output_tokens=40,
-            )
+        record_spend(
+            s, workspace_id=ws.id, kind="uncited_claims", status="ok",
+            tokens_in=400, tokens_out=40,
         )
         s.commit()
 
     with pg_session_factory() as s:
         result = check_global_daily_token_cap(s, settings=settings)
-    # Without the UNION this would be 0/0 (all spend invisible to the cap).
+    # The ledger sums all four background consumers' spend.
     assert result.used_in == 1000
     assert result.used_out == 100
 

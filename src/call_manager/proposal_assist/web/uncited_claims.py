@@ -18,6 +18,7 @@ from call_manager.db.models import UncitedClaimsJob, Workspace, WorkspaceEvent
 from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
 from call_manager.proposal_assist.evaluator.context import content_sha
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.turns.caps import check_global_daily_token_cap
 from call_manager.proposal_assist.uncited_claims.jobs import (
     enqueue_uncited_claims_run,
     latest_uncited_claims_job,
@@ -101,6 +102,12 @@ def start_uncited_claims_run(
         user=user,
         disclosure_action="checking for uncited claims",
     )
+    cap = check_global_daily_token_cap(session, settings=request.app.state.settings)
+    if not cap.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="The daily AI usage cap has been reached. Try again tomorrow.",
+        )
     # active-first: return the in-flight job if any; otherwise cap-gate the NEW run.
     active = _active_job(session, workspace_id)
     if active is not None:

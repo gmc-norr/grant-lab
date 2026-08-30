@@ -48,11 +48,22 @@ from call_manager.proposal_assist.review.personas import (
     WAVE1_KINDS,
 )
 from call_manager.proposal_assist.row_locks import bounded_prefix_lock_waits
+from call_manager.proposal_assist.spend import record_spend
+from call_manager.proposal_assist.turns.caps import check_global_daily_token_cap
 
 logger = logging.getLogger(__name__)
 
 _FIT_CHECK_FILE = "fit-check.md"
 _RUBRIC_REVIEW_FILE = "rubric-review.md"
+
+
+class _GlobalCapReached(Exception):
+    """Raised inside a review sub-call when the org ceiling is already reached.
+
+    An Exception on purpose: the existing handler records the (zero-token) spend,
+    marks the item failed and never launches, which is exactly the wanted
+    behaviour — no special-casing needed anywhere else.
+    """
 
 
 def _now() -> datetime:
@@ -115,27 +126,42 @@ async def _run_one_call(
         )
         _entry.bind_adapter(adapter)
         handle = None
+        terminate_cancelled = False
         done: TurnDoneEvent | None = None
         error: str | None = None
+        cancelled = False
         try:
 
-            async def _drive() -> TurnDoneEvent | None:
-                nonlocal handle
+            async def _drive() -> None:
+                nonlocal handle, done
+                # The pass-start recheck happens ONCE, before five concurrent
+                # wave-1 calls. Consolidation then runs after those five have
+                # already committed their spend, and a semaphore-queued wave-1
+                # call can launch long after the check too. So the ceiling is
+                # tested here, immediately before this sub-call's own launch.
+                with session_factory() as cap_s:
+                    if not check_global_daily_token_cap(cap_s, settings=settings).allowed:
+                        raise _GlobalCapReached
                 handle = await adapter.launch(LaunchContext(workspace_id=workspace_id))
-                last = None
                 async for event in adapter.send_turn(handle, instruction):
                     if isinstance(event, TurnDoneEvent):
-                        last = event
-                return last
+                        done = event  # outer; survives a later raise/cancel
 
-            done = await asyncio.wait_for(_drive(), timeout=settings.review_persona_timeout_seconds)
-        except Exception as exc:  # noqa: BLE001 — terminal for THIS sub-call
+            await asyncio.wait_for(_drive(), timeout=settings.review_persona_timeout_seconds)
+        # Exception PLUS CancelledError, not BaseException. CancelledError is a
+        # BaseException, so a cancelled sub-call used to skip the finalize block below
+        # and lose its spend — but catching BaseException wholesale would turn
+        # KeyboardInterrupt and SystemExit into ordinary failed sub-calls. We fall
+        # through, record, and re-raise cancellation afterwards.
+        except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 — terminal
             logger.exception("review sub-call %s failed for run %s", kind, run_id)
-            error = (
-                "timed out"
-                if isinstance(exc, (asyncio.TimeoutError, TimeoutError))
-                else "sub-call failed"
-            )
+            cancelled = isinstance(exc, asyncio.CancelledError)
+            if isinstance(exc, _GlobalCapReached):
+                error = "global daily token cap reached"
+            elif isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+                error = "timed out"
+            else:
+                error = "sub-call failed"
         finally:
             if handle is not None:
                 try:
@@ -143,8 +169,14 @@ async def _run_one_call(
                         adapter.terminate(handle),
                         timeout=settings.review_terminate_timeout_seconds,
                     )
-                except Exception:  # noqa: BLE001
+                # CancelledError too: a cancel landing during adapter teardown used to
+                # escape the finally BEFORE the finalize block below, so a call that had
+                # already completed and reported usage recorded nothing. Hold it, let the
+                # ledger write happen, then re-raise it after the finalize.
+                except (Exception, asyncio.CancelledError) as term_exc:  # noqa: BLE001
                     logger.exception("review adapter terminate failed (%s, run %s)", kind, run_id)
+                    if isinstance(term_exc, asyncio.CancelledError):
+                        terminate_cancelled = True
 
         with session_factory() as s:
             # LOCK ORDER: review_runs < review_run_items (normative). The run is taken
@@ -155,6 +187,28 @@ async def _run_one_call(
             run = s.get(ReviewRun, run_id, with_for_update=True)
             item = s.get(ReviewRunItem, item_id, with_for_update=True)
             if item is None:
+                # The item was deleted while its sub-call was in flight. There is
+                # no row left to stamp, but the hosted call still happened and
+                # still cost money, so the ledger must carry it or the spend is
+                # invisible to the cap. `ref_id` stays the item id even though the
+                # item is gone — it is the call's identity, not a foreign key.
+                record_spend(
+                    s,
+                    workspace_id=workspace_id,
+                    kind="review",
+                    status="timeout" if error == "timed out" else "failed",
+                    tokens_in=done.tokens_in if done else None,
+                    tokens_out=done.tokens_out if done else None,
+                    model=done.model if done else None,
+                    ref_id=item_id,
+                    sdk_session_id=done.session_id if done else None,
+                )
+                s.commit()
+                # This early return sits ABOVE the re-raise at the end of the
+                # function, so cancellation would be swallowed here. The spend is
+                # durable now; let it propagate.
+                if cancelled or terminate_cancelled:
+                    raise asyncio.CancelledError()
                 return
             item.completed_at = _now()
             if done is not None:
@@ -188,7 +242,32 @@ async def _run_one_call(
             else:
                 item.status = "failed"
                 item.error_message = error or "no review submitted"
+            # One row per sub-call. `status` reads the item's settled terminal
+            # state, plus the timeout the except block at :132-138 already
+            # distinguished and stored in `error`.
+            record_spend(
+                s,
+                workspace_id=workspace_id,
+                kind="review",
+                status=(
+                    "timeout"
+                    if error == "timed out"
+                    else "ok"
+                    if item.status == "done"
+                    else "failed"
+                ),
+                tokens_in=done.tokens_in if done else None,
+                tokens_out=done.tokens_out if done else None,
+                model=done.model if done else None,
+                ref_id=item.id,
+            )
             s.commit()
+
+        # The spend is now durable; cancellation may resume propagating. Re-raised
+        # AFTER the finalize block (not inside the handler) so the ledger row is
+        # written first — that ordering is the whole point of widening the catch.
+        if cancelled or terminate_cancelled:
+            raise asyncio.CancelledError()
 
 
 def _markdown_of(session, run_id, kind) -> str | None:
@@ -255,9 +334,14 @@ async def run_review_pass(
                 session=s, workspace_id=workspace_id, workspaces_dir=settings.workspaces_dir
             )
             run.draft_sha = ctx.draft_sha
-            # pass-start cap recheck (a long queue wait may have pushed the ws over budget)
+            # pass-start cap recheck (a long queue wait may have pushed the ws over
+            # budget). The GLOBAL ceiling joins the same recheck: the endpoint tested
+            # it at enqueue time and that answer is stale by now, so without this a
+            # run accepted before the org hit its ceiling still spends past it — six
+            # hosted calls' worth, in this family's case.
             over = (
-                review_runs_today(s, workspace_id=workspace_id) > review_run_cap(ws, settings)
+                not check_global_daily_token_cap(s, settings=settings).allowed
+                or review_runs_today(s, workspace_id=workspace_id) > review_run_cap(ws, settings)
                 or review_dollars_today(s, workspace_id=workspace_id)
                 >= review_dollar_cap(ws, settings)
             )

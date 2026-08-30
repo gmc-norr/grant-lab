@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from call_manager.config import Settings
 from call_manager.db.models import CitationLlmUsage
+from call_manager.proposal_assist.spend import record_spend
 from call_manager.timeutil import stockholm_day_start_utc
 
 
@@ -45,6 +46,20 @@ def record_usage(
             tokens_out=tokens_out,
             model=model,
         )
+    )
+    # Also the global ledger. `citation_llm_usage` keeps its own per-op caps —
+    # this is what makes citation spend count toward the GLOBAL daily cap, which
+    # never summed it and was therefore not global at all. One writer, so the two
+    # cannot drift.
+    record_spend(
+        session,
+        workspace_id=workspace_id,
+        kind="citation",
+        status=status,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        model=model,
+        ref_id=op,
     )
 
 

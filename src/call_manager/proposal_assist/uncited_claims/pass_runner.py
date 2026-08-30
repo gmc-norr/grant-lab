@@ -21,6 +21,8 @@ from call_manager.db.models import UncitedClaimsJob, Workspace
 from call_manager.proposal_assist.drafting.contract import LaunchContext, TurnDoneEvent
 from call_manager.proposal_assist.passes import PASS_REGISTRY
 from call_manager.proposal_assist.row_locks import bounded_prefix_lock_waits
+from call_manager.proposal_assist.spend import record_spend
+from call_manager.proposal_assist.turns.caps import check_global_daily_token_cap
 from call_manager.proposal_assist.uncited_claims.agent import build_uncited_claims_adapter
 from call_manager.proposal_assist.uncited_claims.context import assemble_uncited_claims_context
 from call_manager.proposal_assist.uncited_claims.jobs import (
@@ -33,10 +35,32 @@ logger = logging.getLogger(__name__)
 _WS_RE = re.compile(r"\s+")
 
 
-def _fail(session, job: UncitedClaimsJob, message: str) -> None:
+def _fail(
+    session, job: UncitedClaimsJob, message: str, done=None, status: str = "failed"
+) -> None:
     job.status = "failed"
     job.error = message
     job.completed_at = datetime.now(UTC)
+    # Keep the display cache honest on the failure path too. The only column
+    # writers in each family sit on the SUCCESS path, and these columns are NOT
+    # NULL with server_default "0" — so without this the ledger says 21 and the
+    # UI says 0 for every failed run, which is the drift Task 9 exists to
+    # prevent.
+    job.input_tokens = (done.tokens_in or 0) if done is not None else 0
+    job.output_tokens = (done.tokens_out or 0) if done is not None else 0
+    # Spend happened even though the run did not finish. Recording it is the
+    # whole point: the old code left every failed run invisible to the cap.
+    record_spend(
+        session,
+        workspace_id=job.workspace_id,
+        kind="uncited_claims",
+        status=status,
+        tokens_in=done.tokens_in if done else None,
+        tokens_out=done.tokens_out if done else None,
+        model=done.model if done else None,
+        ref_id=job.id,
+        sdk_session_id=done.session_id if done else None,
+    )
     session.flush()
 
 
@@ -51,6 +75,13 @@ def _finalize_claims(raw: list[dict], section_texts: dict[int, str]) -> list[dic
     out: list[dict] = []
     seen: set[str] = set()
     for c in raw or []:
+        # Model output crossing a tool boundary is not guaranteed to be a list of
+        # dicts. `c.get(...)` on a str or int raises AttributeError — and this runs
+        # BETWEEN the hosted call and its record_spend, so one malformed element
+        # used to lose the whole run's spend. Skipping is right on its own terms
+        # too: an element with no claim_text could never survive the check below.
+        if not isinstance(c, dict):
+            continue
         text = c.get("claim_text") or ""
         si = c.get("section_index")
         section = section_texts.get(si, "")
@@ -109,6 +140,16 @@ async def run_uncited_claims_pass(
                 return
             workspace_id = job.workspace_id
             requested_by = job.requested_by
+            # The endpoint checked the GLOBAL cap when this job was enqueued; the
+            # queue delay means that check is stale by now. Without a recheck here a
+            # job accepted before the ceiling was reached still spends past it —
+            # the same 'contributes to the total, never consults it' shape this
+            # branch exists to remove. Checked before the per-family budget because
+            # the org ceiling is the harder stop.
+            if not check_global_daily_token_cap(s, settings=settings).allowed:
+                _fail(s, job, "global daily token cap reached")
+                s.commit()
+                return
             if uncited_claims_cap_exceeded(s, workspace_id=workspace_id, settings=settings):
                 _fail(s, job, "daily uncited-claims budget reached")
                 s.commit()
@@ -133,28 +174,36 @@ async def run_uncited_claims_pass(
         )
         _entry.bind_adapter(adapter)
         handle = None
+        terminate_cancelled = False
+        spend_is_durable = False
         done: TurnDoneEvent | None = None
         try:
 
-            async def _run() -> TurnDoneEvent | None:
-                nonlocal handle
+            async def _run() -> None:
+                nonlocal handle, done
                 # Pre-launch live-status recheck: a soft-delete/cancel may have flipped the job to
                 # 'failed' between the read session and here. Don't spend tokens on a dead job.
                 with session_factory() as s2:
                     live = s2.get(UncitedClaimsJob, job_id)
                     if live is None or live.status != "running":
-                        return None
+                        return
                 handle = await adapter.launch(LaunchContext(workspace_id=workspace_id))
-                last = None
                 async for event in adapter.send_turn(handle, instruction):
                     if isinstance(event, TurnDoneEvent):
-                        last = event
-                return last
+                        done = event  # outer; survives a later raise/cancel
 
-            done = await asyncio.wait_for(
+            await asyncio.wait_for(
                 _run(), timeout=settings.uncited_claims_pass_timeout_seconds
             )
-        except Exception as exc:  # noqa: BLE001 — terminal: fail the job, never propagate
+        # BaseException, deliberately — but the two concerns are separated rather
+        # than traded off. Round 4 narrowed this to (Exception, CancelledError) so
+        # KeyboardInterrupt and SystemExit would not become ordinary failed jobs;
+        # round 8 pointed out that narrowing loses their spend, which is real money.
+        # Both are satisfiable: RECORD on every BaseException, but only mark the job
+        # `failed` for an Exception, and re-raise anything that is not one. A
+        # shutdown signal leaves the job `running` for the reaper, with its spend on
+        # the ledger.
+        except BaseException as exc:  # noqa: BLE001 — terminal; non-Exception re-raised
             logger.exception("uncited-claims pass failed for job %s", job_id)
             message = (
                 "Uncited-claims check timed out."
@@ -163,9 +212,57 @@ async def run_uncited_claims_pass(
             )
             with session_factory() as s:
                 job = s.get(UncitedClaimsJob, job_id, with_for_update=True)
-                if job is not None and job.status == "running":
-                    _fail(s, job, message)
+                # `not isinstance(exc, Exception)` joins this branch: a shutdown
+                # signal must record its spend WITHOUT flipping a still-running job
+                # to failed — the reaper owns that job after the process dies.
+                if job is not None and (
+                    job.status != "running" or not isinstance(exc, Exception)
+                ):
+                    # The reaper or a cancel already finalized this job. Don't
+                    # resurrect it — but the call still ran and still spent, and
+                    # `_fail` below is skipped on this branch, so without this the
+                    # spend is invisible to the cap. Same shape as the finalize
+                    # block's late-spend path — including the column stamp, or the
+                    # display cache reads 0 while the ledger reads the truth.
+                    if done is not None:
+                        job.input_tokens = done.tokens_in or 0
+                        job.output_tokens = done.tokens_out or 0
+                        job.model = done.model
+                        job.sdk_session_id = done.session_id
+                    record_spend(
+                        s,
+                        workspace_id=job.workspace_id,
+                        kind="uncited_claims",
+                        status="timeout"
+                        if isinstance(exc, (asyncio.TimeoutError, TimeoutError))
+                        else "failed",
+                        tokens_in=done.tokens_in if done else None,
+                        tokens_out=done.tokens_out if done else None,
+                        model=done.model if done else None,
+                        ref_id=job.id,
+                        sdk_session_id=done.session_id if done else None,
+                    )
+                if (
+                    job is not None
+                    and job.status == "running"
+                    and isinstance(exc, Exception)
+                ):
+                    _fail(
+                        s,
+                        job,
+                        message,
+                        done=done,
+                        status="timeout"
+                        if isinstance(exc, (asyncio.TimeoutError, TimeoutError))
+                        else "failed",
+                    )
                 s.commit()
+            # Cancellation and shutdown must still propagate — the caller's wait_for
+            # and the scheduler both rely on it. We only widened the catch so the
+            # spend above is recorded first.
+            spend_is_durable = True  # the handler above committed it
+            if not isinstance(exc, Exception):
+                raise
             return
         finally:
             if handle is not None:
@@ -174,8 +271,20 @@ async def run_uncited_claims_pass(
                         adapter.terminate(handle),
                         timeout=settings.uncited_claims_terminate_timeout_seconds,
                     )
-                except Exception:  # noqa: BLE001
+                # CancelledError too: a cancel landing during adapter teardown used to
+                # escape the finally BEFORE the finalize block below, so a call that had
+                # already completed and reported usage recorded nothing. Hold it, let the
+                # ledger write happen, then re-raise it after the finalize.
+                except (Exception, asyncio.CancelledError) as term_exc:  # noqa: BLE001
                     logger.exception("uncited-claims adapter terminate failed for job %s", job_id)
+                    if isinstance(term_exc, asyncio.CancelledError):
+                        terminate_cancelled = True
+            # If the handler above already committed and returned, that return
+            # is IN FLIGHT: the flag check after the finalize block will never
+            # run, so a teardown cancel has to escape from here. Safe only
+            # because the spend is already durable on that path.
+            if terminate_cancelled and spend_is_durable:
+                raise asyncio.CancelledError()
 
         # 2. Finalize under a row lock. ALWAYS record token/session accounting when a
         #    TurnDoneEvent arrived — even if the reaper/cancel already failed the job
@@ -186,6 +295,10 @@ async def run_uncited_claims_pass(
             job = s.get(UncitedClaimsJob, job_id, with_for_update=True)
             if job is None:
                 s.commit()
+                # Held terminate-cancel must escape from EVERY finalize exit, not just the
+                # fall-through one — that was the round-4 fix's own gap.
+                if terminate_cancelled:
+                    raise asyncio.CancelledError()
                 return
             if done is not None:
                 job.input_tokens = done.tokens_in or 0
@@ -193,18 +306,55 @@ async def run_uncited_claims_pass(
                 job.model = done.model
                 job.sdk_session_id = done.session_id
             if job.status != "running":
-                # The reaper (TTL) or a soft-delete cancel finalized the job mid-pass. Don't
-                # resurrect it (no status/claims change) — but keep the tokens recorded above.
+                # The reaper or a cancel finalized the job mid-pass. The sub-call
+                # still ran and still reported usage — the comment above says to
+                # keep it — so the ledger must carry it too, or Task 7's cap will
+                # not see spend the display columns just recorded.
+                record_spend(
+                    s,
+                    workspace_id=job.workspace_id,
+                    kind="uncited_claims",
+                    status="failed",
+                    tokens_in=done.tokens_in if done else None,
+                    tokens_out=done.tokens_out if done else None,
+                    model=done.model if done else None,
+                    ref_id=job.id,
+                    sdk_session_id=done.session_id if done else None,
+                )
                 s.commit()
+                # Held terminate-cancel must escape from EVERY finalize exit, not just the
+                # fall-through one — that was the round-4 fix's own gap.
+                if terminate_cancelled:
+                    raise asyncio.CancelledError()
                 return
             if job.claims is None:
-                _fail(s, job, "uncited-claims pass produced no result")
+                _fail(s, job, "uncited-claims pass produced no result", done=done)
                 s.commit()
+                # Held terminate-cancel must escape from EVERY finalize exit, not just the
+                # fall-through one — that was the round-4 fix's own gap.
+                if terminate_cancelled:
+                    raise asyncio.CancelledError()
                 return
             job.claims = _finalize_claims(job.claims, section_texts)
             job.status = "completed"
             job.completed_at = datetime.now(UTC)
+            record_spend(
+                s,
+                workspace_id=job.workspace_id,
+                kind="uncited_claims",
+                status="ok",
+                tokens_in=done.tokens_in if done else None,
+                tokens_out=done.tokens_out if done else None,
+                model=done.model if done else None,
+                ref_id=job.id,
+                sdk_session_id=done.session_id if done else None,
+            )
             s.commit()
+
+        # A cancel that landed during adapter teardown was held so the ledger write
+        # above could happen. The spend is durable now; let it propagate.
+        if terminate_cancelled:
+            raise asyncio.CancelledError()
 
 async def drain_uncited_claims_queue_tick(
     *,

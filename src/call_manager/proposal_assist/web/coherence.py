@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -16,6 +16,7 @@ from call_manager.proposal_assist.coherence.jobs import (
     enqueue_coherence_run,
     latest_coherence_job,
 )
+from call_manager.proposal_assist.turns.caps import check_global_daily_token_cap
 from call_manager.proposal_assist.web._cloud_gate import gate_cloud_llm
 from call_manager.proposal_assist.web._deps import _session_dep
 from call_manager.proposal_assist.web._perms import require_member
@@ -61,6 +62,12 @@ def start_coherence_run(
     # narrow this to owner or add a per-actor sub-cap.
     ws = require_member(workspace_id=workspace_id, user=user, session=session)
     _gate_cloud_llm(ws=ws, request=request, session=session, user=user)
+    cap = check_global_daily_token_cap(session, settings=request.app.state.settings)
+    if not cap.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="The daily AI usage cap has been reached. Try again tomorrow.",
+        )
     # Detect a freshly-created run BEFORE enqueue (which is create-or-return-active)
     # so the trigger event fires ONCE per run, never on the active-first re-POST —
     # mirrors review_run_triggered / uncited_claims_run_triggered.

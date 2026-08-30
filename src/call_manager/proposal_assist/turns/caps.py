@@ -18,14 +18,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from call_manager.config import Settings
-from call_manager.db.models import (
-    ChatTurn,
-    CoherenceJob,
-    EvaluatorJob,
-    ReviewRun,
-    UncitedClaimsJob,
-    Workspace,
-)
+from call_manager.db.models import ChatTurn, Workspace
+from call_manager.proposal_assist.spend import sum_spend_today
 from call_manager.timeutil import stockholm_day_start_utc
 
 
@@ -157,21 +151,16 @@ def check_global_daily_token_cap(
     """Sum today's input/output tokens across ALL workspaces against the
     global ceiling. Read-only; caller (submit_user_turn) raises.
 
-    Coverage (B9): this org-wide backstop UNIONs ALL FIVE cloud-spend tables,
-    not just chat turns. Each of the four background queues — coherence,
-    evaluator, mock-panel review, uncited-claims — tracks its tokens on its OWN
-    table (the member-triggerable fan-outs in web/coherence.py, web/evaluator.py,
-    web/review.py, web/uncited_claims.py), so summing only ChatTurn left the bulk
-    of cloud consumers invisible to the global guardrail. We coalesce-sum each
-    table's today rows and add the five totals:
-      - ChatTurn.tokens_{in,out}              (created_at  >= day start)
-      - CoherenceJob.{input,output}_tokens    (queued_at   >= day start)
-      - EvaluatorJob.{input,output}_tokens    (queued_at   >= day start)
-      - ReviewRun.{input,output}_tokens       (triggered_at >= day start;
-        run-level totals already roll up per-item spend, incl. reaped runs)
-      - UncitedClaimsJob.{input,output}_tokens (queued_at  >= day start)
-    Each table is queried separately (no SQL JOIN) so unrelated row counts can't
-    fan out and multiply the sums.
+    Coverage (B9): this org-wide backstop reads the llm_spend LEDGER, the one
+    place hosted-LLM spend is recorded. It used to UNION five cloud-spend tables
+    on three different timestamp columns (ChatTurn, plus the four background
+    queues coherence/evaluator/mock-panel review/uncited-claims, each tracking
+    tokens on its own table) — a design where every new hosted feature had to
+    remember two columns, a write on every terminal path, and a SELECT here, and
+    six sites had already got it wrong, all in the same direction: spend that
+    happened and was not counted. The per-job token columns still exist and are
+    still written; they are the UI's display cache. The ledger is the source of
+    truth, so this cap sees a failed run's spend the display cache never did.
 
     Concurrency: NO global advisory lock. The cap is a guardrail
     against runaway org-wide spend, not an exact ledger. Two concurrent
@@ -181,43 +170,16 @@ def check_global_daily_token_cap(
     enforcement becomes a requirement, add `pg_try_advisory_xact_lock`
     on a stable per-day key (e.g. hashtext('global-cap:' || YYYYMMDD)).
     """
-    day_start_utc = stockholm_day_start_utc()
-    chat = session.execute(
-        select(
-            func.coalesce(func.sum(ChatTurn.tokens_in), 0),
-            func.coalesce(func.sum(ChatTurn.tokens_out), 0),
-        ).where(ChatTurn.created_at >= day_start_utc)
-    ).one()
-    coherence = session.execute(
-        select(
-            func.coalesce(func.sum(CoherenceJob.input_tokens), 0),
-            func.coalesce(func.sum(CoherenceJob.output_tokens), 0),
-        ).where(CoherenceJob.queued_at >= day_start_utc)
-    ).one()
-    evaluator = session.execute(
-        select(
-            func.coalesce(func.sum(EvaluatorJob.input_tokens), 0),
-            func.coalesce(func.sum(EvaluatorJob.output_tokens), 0),
-        ).where(EvaluatorJob.queued_at >= day_start_utc)
-    ).one()
-    review = session.execute(
-        select(
-            func.coalesce(func.sum(ReviewRun.input_tokens), 0),
-            func.coalesce(func.sum(ReviewRun.output_tokens), 0),
-        ).where(ReviewRun.triggered_at >= day_start_utc)
-    ).one()
-    uncited = session.execute(
-        select(
-            func.coalesce(func.sum(UncitedClaimsJob.input_tokens), 0),
-            func.coalesce(func.sum(UncitedClaimsJob.output_tokens), 0),
-        ).where(UncitedClaimsJob.queued_at >= day_start_utc)
-    ).one()
-    used_in = (
-        int(chat[0]) + int(coherence[0]) + int(evaluator[0]) + int(review[0]) + int(uncited[0])
-    )
-    used_out = (
-        int(chat[1]) + int(coherence[1]) + int(evaluator[1]) + int(review[1]) + int(uncited[1])
-    )
+    # ONE table. This used to sum five, on three different timestamp columns —
+    # ChatTurn.created_at, CoherenceJob.queued_at, EvaluatorJob.queued_at,
+    # ReviewRun.triggered_at, UncitedClaimsJob.queued_at — so every new hosted
+    # feature had to remember two columns, a write on every terminal path, and a
+    # SELECT here. Six sites had already got it wrong, all in the same
+    # direction: spend that happened and was not counted.
+    #
+    # The per-job token columns still exist and are still written. They are the
+    # UI's display cache; this is the source of truth.
+    used_in, used_out = sum_spend_today(session)
     cap_in = settings.global_daily_token_cap_input
     cap_out = settings.global_daily_token_cap_output
     reason: str | None = None

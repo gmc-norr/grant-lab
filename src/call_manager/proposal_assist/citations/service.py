@@ -16,6 +16,7 @@ from sqlalchemy.orm import sessionmaker
 from call_manager.config import Settings
 from call_manager.proposal_assist.citations.llm import LLMUsage, StructuredLLM
 from call_manager.proposal_assist.citations.usage import check_citation_caps, record_usage
+from call_manager.proposal_assist.turns.caps import check_global_daily_token_cap
 
 logger = logging.getLogger(__name__)
 
@@ -72,9 +73,20 @@ class CitationLLMService:
 
         with self._session_factory() as s:
             cap = check_citation_caps(s, workspace_id, settings=self._settings)
+            # The GLOBAL ceiling, checked in the same session. Citation spend was
+            # unified INTO the global total by this branch, but the service only ever
+            # consulted its own per-op caps — making it a sixth family that adds to
+            # the number and never reads it, which is the exact violation the ledger
+            # exists to remove. Refused the same way as a per-op cap, so the caller's
+            # existing cap_exceeded handling covers it and no call is made.
+            global_cap = check_global_daily_token_cap(s, settings=self._settings)
         if cap.exceeded:
             return CitationLLMResult(
                 data=None, usage=None, model=None, cap_exceeded=True, cap_scope=cap.scope
+            )
+        if not global_cap.allowed:
+            return CitationLLMResult(
+                data=None, usage=None, model=None, cap_exceeded=True, cap_scope="global"
             )
 
         try:
@@ -84,10 +96,10 @@ class CitationLLMService:
             # timeouts as LLMError (httpx.TimeoutException does NOT subclass
             # builtin TimeoutError), so this branch only fires for clients that
             # propagate TimeoutError directly. Refinement deferred to Slice 3.
-            self._safe_record(workspace_id, op, "timeout", 0, 0, None)
+            self._note_record(self._safe_record(workspace_id, op, "timeout", 0, 0, None))
             raise
         except Exception:
-            self._safe_record(workspace_id, op, "failed", 0, 0, None)
+            self._note_record(self._safe_record(workspace_id, op, "failed", 0, 0, None))
             raise
 
         # Success: record usage. If the ledger write fails here the tokens were
@@ -98,10 +110,8 @@ class CitationLLMService:
         ok = self._safe_record(
             workspace_id, op, "ok", result.usage.tokens_in, result.usage.tokens_out, result.model
         )
-        if ok:
-            self._consecutive_record_failures = 0
-        else:
-            self._consecutive_record_failures += 1
+        self._note_record(ok)
+        if not ok:
             logger.error(
                 "citation ledger write FAILED after a successful LLM call — "
                 "tokens spent but unaccounted (workspace=%s op=%s streak=%d)",
@@ -110,6 +120,20 @@ class CitationLLMService:
                 self._consecutive_record_failures,
             )
         return CitationLLMResult(data=result.data, usage=result.usage, model=result.model)
+
+    def _note_record(self, ok: bool) -> None:
+        """Move the breaker streak for EVERY ledger write, not just the success one.
+
+        The failure and timeout branches used to discard `_safe_record`'s result,
+        so a ledger that was down for every call never tripped the breaker — the
+        one mechanism that stops us calling the LLM while spend is unaccounted.
+        The rows on those paths carry zero tokens, but a write failing there means
+        the ledger is broken, which is exactly what the breaker is for.
+        """
+        if ok:
+            self._consecutive_record_failures = 0
+        else:
+            self._consecutive_record_failures += 1
 
     def _safe_record(self, workspace_id, op, status, tokens_in, tokens_out, model) -> bool:
         try:

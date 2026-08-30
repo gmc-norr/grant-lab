@@ -24,6 +24,8 @@ from call_manager.proposal_assist.coherence.jobs import (
 from call_manager.proposal_assist.drafting.contract import LaunchContext, TurnDoneEvent
 from call_manager.proposal_assist.passes import PASS_REGISTRY
 from call_manager.proposal_assist.row_locks import bounded_prefix_lock_waits
+from call_manager.proposal_assist.spend import record_spend
+from call_manager.proposal_assist.turns.caps import check_global_daily_token_cap
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +78,16 @@ async def run_coherence_pass(
             workspace_id = job.workspace_id
             requested_by = job.requested_by
             locked = ws.spec_locked_at is not None
+            # The endpoint checked the GLOBAL cap when this job was enqueued; the
+            # queue delay means that check is stale by now. Without a recheck here a
+            # job accepted before the ceiling was reached still spends past it —
+            # the same 'contributes to the total, never consults it' shape this
+            # branch exists to remove. Checked before the per-family budget because
+            # the org ceiling is the harder stop.
+            if not check_global_daily_token_cap(s, settings=settings).allowed:
+                _fail(s, job, "global daily token cap reached")
+                s.commit()
+                return
             if coherence_cap_exceeded(s, workspace_id=workspace_id, settings=settings):
                 _fail(s, job, "daily coherence budget reached")
                 s.commit()
@@ -95,23 +107,41 @@ async def run_coherence_pass(
         )
         _entry.bind_adapter(adapter)
         handle = None
+        terminate_cancelled = False
+        spend_is_durable = False
         done: TurnDoneEvent | None = None
         try:
 
-            async def _run() -> TurnDoneEvent | None:
-                nonlocal handle
+            async def _run() -> None:
+                nonlocal handle, done
+                # Pre-launch live-status recheck: a soft-delete/cancel may have flipped the
+                # job to 'failed' between the read session and here. Don't spend tokens (or
+                # send deleted-workspace content) on a job that's no longer running — this
+                # narrows the delete-races-launch window. evaluator and uncited_claims have
+                # had this since SP2b-2c; coherence did not, which is money spent on a job
+                # nobody is waiting for.
+                with session_factory() as s2:
+                    live = s2.get(CoherenceJob, job_id)
+                    if live is None or live.status != "running":
+                        return
                 # launch is INSIDE the wait_for so a hung SDK connect is bounded too — not
                 # just the streaming turn. wait_for cancels this coroutine on timeout,
                 # raising CancelledError at whichever await is live (launch or the loop).
                 handle = await adapter.launch(LaunchContext(workspace_id=workspace_id))
-                last = None
                 async for event in adapter.send_turn(handle, instruction):
                     if isinstance(event, TurnDoneEvent):
-                        last = event
-                return last
+                        done = event  # outer; survives a later raise/cancel
 
-            done = await asyncio.wait_for(_run(), timeout=settings.coherence_pass_timeout_seconds)
-        except Exception as exc:  # noqa: BLE001 — terminal: fail the job, never propagate
+            await asyncio.wait_for(_run(), timeout=settings.coherence_pass_timeout_seconds)
+        # BaseException, deliberately — but the two concerns are separated rather
+        # than traded off. Round 4 narrowed this to (Exception, CancelledError) so
+        # KeyboardInterrupt and SystemExit would not become ordinary failed jobs;
+        # round 8 pointed out that narrowing loses their spend, which is real money.
+        # Both are satisfiable: RECORD on every BaseException, but only mark the job
+        # `failed` for an Exception, and re-raise anything that is not one. A
+        # shutdown signal leaves the job `running` for the reaper, with its spend on
+        # the ledger.
+        except BaseException as exc:  # noqa: BLE001 — terminal; non-Exception re-raised
             logger.exception("coherence pass failed for job %s", job_id)
             # Member-visible: surface only a sanitized, generic message (full detail
             # already in the logs above); distinguish the expected timeout outcome.
@@ -124,10 +154,58 @@ async def run_coherence_pass(
                 # Lock the row + guard on status=='running': the separate reaper may
                 # have already failed this job during a hang; don't double-finalize.
                 job = s.get(CoherenceJob, job_id, with_for_update=True)
-                if job is not None and job.status == "running":
-                    _fail(s, job, message)
+                # `not isinstance(exc, Exception)` joins this branch: a shutdown
+                # signal must record its spend WITHOUT flipping a still-running job
+                # to failed — the reaper owns that job after the process dies.
+                if job is not None and (
+                    job.status != "running" or not isinstance(exc, Exception)
+                ):
+                    # The reaper or a cancel already finalized this job. Don't
+                    # resurrect it — but the call still ran and still spent, and
+                    # `_fail` below is skipped on this branch, so without this the
+                    # spend is invisible to the cap. Same shape as the finalize
+                    # block's late-spend path — including the column stamp, or the
+                    # display cache reads 0 while the ledger reads the truth.
+                    if done is not None:
+                        job.input_tokens = done.tokens_in or 0
+                        job.output_tokens = done.tokens_out or 0
+                        job.model = done.model
+                        job.sdk_session_id = done.session_id
+                    record_spend(
+                        s,
+                        workspace_id=job.workspace_id,
+                        kind="coherence",
+                        status="timeout"
+                        if isinstance(exc, (asyncio.TimeoutError, TimeoutError))
+                        else "failed",
+                        tokens_in=done.tokens_in if done else None,
+                        tokens_out=done.tokens_out if done else None,
+                        model=done.model if done else None,
+                        ref_id=job.id,
+                        sdk_session_id=done.session_id if done else None,
+                    )
+                if (
+                    job is not None
+                    and job.status == "running"
+                    and isinstance(exc, Exception)
+                ):
+                    _fail(
+                        s,
+                        job,
+                        message,
+                        done=done,
+                        status="timeout"
+                        if isinstance(exc, (asyncio.TimeoutError, TimeoutError))
+                        else "failed",
+                    )
                     supersede_own_coherence(s, workspace_id=workspace_id, job_id=job_id)
                 s.commit()
+            # Cancellation and shutdown must still propagate — the caller's wait_for
+            # and the scheduler both rely on it. We only widened the catch so the
+            # spend above is recorded first.
+            spend_is_durable = True  # the handler above committed it
+            if not isinstance(exc, Exception):
+                raise
             return
         finally:
             if handle is not None:
@@ -139,8 +217,20 @@ async def run_coherence_pass(
                         adapter.terminate(handle),
                         timeout=settings.coherence_terminate_timeout_seconds,
                     )
-                except Exception:  # noqa: BLE001
+                # CancelledError too: a cancel landing during adapter teardown used to
+                # escape the finally BEFORE the finalize block below, so a call that had
+                # already completed and reported usage recorded nothing. Hold it, let the
+                # ledger write happen, then re-raise it after the finalize.
+                except (Exception, asyncio.CancelledError) as term_exc:  # noqa: BLE001
                     logger.exception("coherence adapter terminate failed for job %s", job_id)
+                    if isinstance(term_exc, asyncio.CancelledError):
+                        terminate_cancelled = True
+            # If the handler above already committed and returned, that return
+            # is IN FLIGHT: the flag check after the finalize block will never
+            # run, so a teardown cancel has to escape from here. Safe only
+            # because the spend is already durable on that path.
+            if terminate_cancelled and spend_is_durable:
+                raise asyncio.CancelledError()
 
         # 2. Success: claim the terminal transition under a row lock; ONLY finalize if
         #    the job is still 'running' (the reaper may have failed it during a hang —
@@ -151,8 +241,41 @@ async def run_coherence_pass(
             from call_manager.db.models import ProposedChange
 
             job = s.get(CoherenceJob, job_id, with_for_update=True)
-            if job is None or job.status != "running":
+            if job is None:
                 s.commit()
+                # Held terminate-cancel must escape from EVERY finalize exit, not just the
+                # fall-through one — that was the round-4 fix's own gap.
+                if terminate_cancelled:
+                    raise asyncio.CancelledError()
+                return
+            if job.status != "running":
+                # The reaper or a cancel finalized this job mid-pass. Do NOT
+                # resurrect it — but the sub-call still ran and still reported
+                # usage, and after the cap moved to the ledger a `return` here
+                # loses that spend entirely. uncited_claims already had this
+                # path; coherence and evaluator did not, which is how an outside
+                # review found it. Keep the display columns honest too.
+                if done is not None:
+                    job.input_tokens = done.tokens_in or 0
+                    job.output_tokens = done.tokens_out or 0
+                    job.model = done.model
+                    job.sdk_session_id = done.session_id
+                record_spend(
+                    s,
+                    workspace_id=job.workspace_id,
+                    kind="coherence",
+                    status="failed",
+                    tokens_in=done.tokens_in if done else None,
+                    tokens_out=done.tokens_out if done else None,
+                    model=done.model if done else None,
+                    ref_id=job.id,
+                    sdk_session_id=done.session_id if done else None,
+                )
+                s.commit()
+                # Held terminate-cancel must escape from EVERY finalize exit, not just the
+                # fall-through one — that was the round-4 fix's own gap.
+                if terminate_cancelled:
+                    raise asyncio.CancelledError()
                 return
             supersede_prior_coherence(s, workspace_id=workspace_id, job_id=job_id)
             n = s.scalar(
@@ -172,12 +295,50 @@ async def run_coherence_pass(
                 job.output_tokens = done.tokens_out or 0
                 job.model = done.model
                 job.sdk_session_id = done.session_id
+            record_spend(
+                s,
+                workspace_id=job.workspace_id,
+                kind="coherence",
+                status="ok",
+                tokens_in=done.tokens_in if done else None,
+                tokens_out=done.tokens_out if done else None,
+                model=done.model if done else None,
+                ref_id=job.id,
+                sdk_session_id=done.session_id if done else None,
+            )
             s.commit()
 
-def _fail(session, job: CoherenceJob, message: str) -> None:
+        # A cancel that landed during adapter teardown was held so the ledger write
+        # above could happen. The spend is durable now; let it propagate.
+        if terminate_cancelled:
+            raise asyncio.CancelledError()
+
+def _fail(
+    session, job: CoherenceJob, message: str, done=None, status: str = "failed"
+) -> None:
     job.status = "failed"
     job.error = message
     job.completed_at = datetime.now(UTC)
+    # Keep the display cache honest on the failure path too. The only column
+    # writers in each family sit on the SUCCESS path, and these columns are NOT
+    # NULL with server_default "0" — so without this the ledger says 21 and the
+    # UI says 0 for every failed run, which is the drift Task 9 exists to
+    # prevent.
+    job.input_tokens = (done.tokens_in or 0) if done is not None else 0
+    job.output_tokens = (done.tokens_out or 0) if done is not None else 0
+    # Spend happened even though the run did not finish. Recording it is the
+    # whole point: the old code left every failed run invisible to the cap.
+    record_spend(
+        session,
+        workspace_id=job.workspace_id,
+        kind="coherence",
+        status=status,
+        tokens_in=done.tokens_in if done else None,
+        tokens_out=done.tokens_out if done else None,
+        model=done.model if done else None,
+        ref_id=job.id,
+        sdk_session_id=done.session_id if done else None,
+    )
     session.flush()
 
 
