@@ -4,7 +4,7 @@ import pytest
 
 from tests.fencing.spend_guard import (
     PINNED,
-    llm_spend_constructors,
+    llm_spend_writers,
     offenders,
     stale_pins,
 )
@@ -268,7 +268,12 @@ def test_an_unrelated_attribute_call_does_not_bless_the_module(tmp_path, monkeyp
             """,
         ),
         (
-            "usage_writer",
+            # Inside the citations package on purpose: record_usage writes the
+            # CITATION ledger and counts as a writer only there. Outside it, a
+            # function could stamp an evaluator job while recording unrelated
+            # citation spend — a bypass an outside review found and the next
+            # test pins.
+            "proposal_assist/citations/usage_writer",
             """
             from call_manager.proposal_assist.citations.usage import record_usage
 
@@ -315,9 +320,29 @@ def test_real_import_shapes_are_still_accepted(tmp_path, monkeypatch, label, sou
                 return LlmSpend(**k)
             """,
         ),
+        (
+            "core_insert",
+            """
+            from sqlalchemy import insert
+
+            from call_manager.db.models import LlmSpend
+
+            def mk(s, **k):
+                return s.execute(insert(LlmSpend).values(**k))
+            """,
+        ),
+        (
+            "bulk_mappings",
+            """
+            from call_manager.db.models import LlmSpend
+
+            def mk(s, rows):
+                return s.bulk_insert_mappings(LlmSpend, rows)
+            """,
+        ),
     ],
 )
-def test_every_constructor_shape_is_seen(tmp_path, monkeypatch, label, source):
+def test_every_write_shape_is_seen(tmp_path, monkeypatch, label, source):
     """The "exactly one writer" claim only holds if the check can SEE a second one.
 
     It matched ast.Name("LlmSpend") only, so `models.LlmSpend(...)` and
@@ -325,11 +350,62 @@ def test_every_constructor_shape_is_seen(tmp_path, monkeypatch, label, source):
     have existed and this assertion would still have passed.
     """
     g = _tree(tmp_path, monkeypatch, f"{label}.py", source, writer_import=False)
-    assert g.llm_spend_constructors() == [f"call_manager/{label}.py"]
+    assert g.llm_spend_writers() == [f"call_manager/{label}.py"]
+
+
+def test_record_usage_does_not_bless_a_non_citation_module(tmp_path, monkeypatch):
+    """record_usage writes the CITATION ledger, not this one.
+
+    Found by round 3 of the outside review: the writer set was the same
+    everywhere, so a function could stamp `job.input_tokens` on an evaluator job
+    and satisfy the gate with an unrelated `record_usage(...)` call for citation
+    spend. It now counts only for modules under proposal_assist/citations/.
+    """
+    g = _tree(
+        tmp_path,
+        monkeypatch,
+        "cross_writer.py",
+        """
+        from call_manager.proposal_assist.citations.usage import record_usage
+
+        def f(s, job, done):
+            job.input_tokens = done.tokens_in
+            record_usage(s, op="metadata")
+        """,
+        writer_import=False,
+    )
+    assert g.offenders() == ["call_manager/cross_writer.py::f"]
+
+
+def test_a_fully_qualified_writer_import_is_accepted(tmp_path, monkeypatch):
+    # The false positive in the same round: `import a.b.c` binds `a`, and the
+    # real call is the whole dotted chain. Legitimate code, must not be reported.
+    g = _tree(
+        tmp_path,
+        monkeypatch,
+        "fq.py",
+        """
+        import call_manager.proposal_assist.spend
+
+        def f(s, job, done):
+            job.input_tokens = done.tokens_in
+            call_manager.proposal_assist.spend.record_spend(s)
+        """,
+        writer_import=False,
+    )
+    assert g.offenders() == []
 
 
 def test_the_ledger_has_exactly_one_writer():
     # The plan's central claim, asserted for the first time. The stamps/records
     # rule above would happily accept a second module that both constructed an
     # LlmSpend row and called record_spend.
-    assert llm_spend_constructors() == ["call_manager/proposal_assist/spend.py"]
+    # Reference-level, not constructor-level: a second writer using
+    # `session.execute(insert(LlmSpend)...)` or `bulk_insert_mappings` builds no
+    # LlmSpend object, so a constructor check could never have seen it. models.py
+    # is the declaration; spend.py is the writer. Anything else appearing here is
+    # a second module touching the ledger class and needs a reason.
+    assert llm_spend_writers() == [
+        "call_manager/db/models.py",
+        "call_manager/proposal_assist/spend.py",
+    ]

@@ -106,7 +106,22 @@ WRITER_MODULES = frozenset(
 )
 
 
-def _spend_writer_names(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]:
+# `record_usage` writes the CITATION ledger. It counts as a spend writer only for
+# modules inside the citations package. Elsewhere it was a real bypass: a function
+# could stamp `job.input_tokens` on an evaluator job while recording unrelated
+# citation spend, and the gate went green.
+CITATION_PREFIX = "call_manager/proposal_assist/citations/"
+
+
+def _writers_for(rel: str) -> frozenset[str]:
+    if rel.startswith(CITATION_PREFIX):
+        return SPEND_WRITERS
+    return frozenset({"record_spend"})
+
+
+def _spend_writer_names(
+    tree: ast.AST, allowed: frozenset[str]
+) -> tuple[frozenset[str], frozenset[str]]:
     """Resolve which names in this module actually mean "record spend".
 
     Returns (bare_names, module_aliases): a Call counts if it is `name(...)` with
@@ -127,7 +142,7 @@ def _spend_writer_names(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]:
             mod = node.module or ""
             if mod in WRITER_MODULES:
                 for alias in node.names:
-                    if alias.name in SPEND_WRITERS:
+                    if alias.name in allowed:
                         names.add(alias.asname or alias.name)
             # `from call_manager.proposal_assist import spend` -> `spend.record_spend`
             for alias in node.names:
@@ -135,10 +150,14 @@ def _spend_writer_names(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]:
                     module_aliases.add(alias.asname or alias.name)
         elif isinstance(node, ast.Import):
             for alias in node.names:
-                # `import a.b.c as x` binds x; plain `import a.b.c` binds `a`,
-                # which we cannot match on attribute shape, so require asname.
-                if alias.name in WRITER_MODULES and alias.asname:
-                    module_aliases.add(alias.asname)
+                if alias.name not in WRITER_MODULES:
+                    continue
+                # `import a.b.c as x` binds x -> match `x.record_spend(...)`.
+                # Plain `import a.b.c` binds `a` and the real call is the fully
+                # qualified `a.b.c.record_spend(...)`. Record the dotted path so
+                # _dotted_name can match that chain — without this, legitimate
+                # fully-qualified code was reported as an offender (measured).
+                module_aliases.add(alias.asname or alias.name)
     return frozenset(names), frozenset(module_aliases)
 
 
@@ -177,22 +196,36 @@ def _stamp_lines(nodes: list[ast.AST]) -> list[int]:
     return sorted(lines)
 
 
-def _records_spend(nodes: list[ast.AST], writers: tuple[frozenset[str], frozenset[str]]) -> bool:
+def _dotted_name(node: ast.AST) -> str | None:
+    """`a.b.c` -> "a.b.c" for Name/Attribute chains; None for anything else."""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def _records_spend(
+    nodes: list[ast.AST],
+    writers: tuple[frozenset[str], frozenset[str]],
+    bare_writers: frozenset[str],
+) -> bool:
     bare, module_aliases = writers
     for node in nodes:
         if isinstance(node, ast.Call):
             func = node.func
             if isinstance(func, ast.Name) and func.id in bare:
                 return True
-            # Only `<imported module alias>.record_spend(...)`. An arbitrary
+            # Only `<imported module>.record_spend(...)`, where the module part
+            # is a name or dotted chain bound by a real import. An arbitrary
             # attribute call that merely ENDS in record_spend does not count.
-            if (
-                isinstance(func, ast.Attribute)
-                and func.attr in SPEND_WRITERS
-                and isinstance(func.value, ast.Name)
-                and func.value.id in module_aliases
-            ):
-                return True
+            if isinstance(func, ast.Attribute) and func.attr in bare_writers:
+                base = _dotted_name(func.value)
+                if base is not None and base in module_aliases:
+                    return True
     return False
 
 
@@ -202,12 +235,13 @@ def offenders() -> list[str]:
     for path in sorted(SRC.rglob("*.py")):
         rel = str(path.relative_to(SRC))
         tree = ast.parse(path.read_text())
-        writer_names = _spend_writer_names(tree)
+        allowed = _writers_for(rel)
+        writer_names = _spend_writer_names(tree, allowed)
         for qname, func in _collect_functions(tree, ""):
             if (rel, qname) in PINNED:
                 continue
             nodes = _own_nodes(func)
-            if _stamp_lines(nodes) and not _records_spend(nodes, writer_names):
+            if _stamp_lines(nodes) and not _records_spend(nodes, writer_names, allowed):
                 out.append(f"{rel}::{qname}")
     return sorted(out)
 
@@ -228,20 +262,25 @@ def stale_pins() -> list[str]:
     return sorted(stale)
 
 
-def llm_spend_constructors() -> list[str]:
-    """Modules under src/ that CONSTRUCT an `LlmSpend` row.
+def llm_spend_writers() -> list[str]:
+    """Modules under src/ that touch the `LlmSpend` class at all.
 
-    The plan's central claim is "exactly one writer". Nothing checked it: the
-    stamps/records rule above would be satisfied by a second module that both
-    constructed a row and called record_spend. This is the claim, asserted.
+    The plan's central claim is "exactly one writer". Checking for a
+    `LlmSpend(...)` CONSTRUCTOR call could never assert that: an ORM constructor
+    is only one of the ways to write a row. `session.execute(insert(LlmSpend)...)`
+    and `bulk_insert_mappings(LlmSpend, ...)` contain no constructor call and
+    named no offender.
+
+    So this does not look for a call shape at all — it reports any module that
+    REFERENCES the name, however it was imported (bare, aliased, or qualified as
+    `models.LlmSpend`). That over-reports by design: a module that merely reads
+    the table is also reported, and the test's expected list is the audit. Two
+    modules are allowed: `db/models.py` declares the class, and
+    `proposal_assist/spend.py` is the writer.
     """
     out: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
         tree = ast.parse(path.read_text())
-        # Resolve how THIS module refers to the class. Matching only
-        # ast.Name("LlmSpend") missed `models.LlmSpend(...)` and
-        # `from ...models import LlmSpend as SpendRow` — both measured against the
-        # shipped guard, both silently absent from the "exactly one writer" claim.
         local_names: set[str] = set()
         module_aliases: set[str] = set()
         for node in ast.walk(tree):
@@ -254,18 +293,18 @@ def llm_spend_constructors() -> list[str]:
                         module_aliases.add(alias.asname or alias.name)
             elif isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.name == "call_manager.db.models" and alias.asname:
-                        module_aliases.add(alias.asname)
+                    if alias.name == "call_manager.db.models":
+                        module_aliases.add(alias.asname or alias.name)
+        hit = False
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            hit = (isinstance(func, ast.Name) and func.id in local_names) or (
-                isinstance(func, ast.Attribute)
-                and func.attr == "LlmSpend"
-                and isinstance(func.value, ast.Name)
-                and func.value.id in module_aliases
-            )
+            if isinstance(node, ast.Name) and node.id in local_names or (
+                isinstance(node, ast.Attribute)
+                and node.attr == "LlmSpend"
+                and _dotted_name(node.value) in module_aliases
+            ):
+                hit = True
+            elif isinstance(node, ast.ClassDef) and node.name == "LlmSpend":
+                hit = True  # the declaration itself
             if hit:
                 out.append(str(path.relative_to(SRC)))
                 break

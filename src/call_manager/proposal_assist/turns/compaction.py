@@ -200,6 +200,30 @@ def compact_workspace(
             fail_s.commit()
         raise
 
+    # The ledger row is committed BEFORE the summary transaction, on its own
+    # session, and deliberately NOT atomically with it. Atomicity is the wrong
+    # priority here: the hosted call already happened and already cost money, so
+    # a failure while persisting the summary must not roll the spend back with
+    # it. The old ordering did exactly that — tokens spent, row gone, cap blind.
+    # The reverse risk (spend recorded, summary lost) is the safe direction: the
+    # ledger over-reports nothing, and compaction simply runs again.
+    #
+    # Records the REAL reported usage, not the character estimate on
+    # ChatSummary.tokens (which the cap never summed). If the envelope carries no
+    # usage, record None → 0: "we called it and got no counts" is honest; a
+    # character estimate is not.
+    with session_factory() as spend_s:
+        record_spend(
+            spend_s,
+            workspace_id=workspace_id,
+            kind="compaction",
+            status="ok",
+            tokens_in=(envelope.get("usage") or {}).get("prompt_tokens"),
+            tokens_out=(envelope.get("usage") or {}).get("completion_tokens"),
+            model=used_model,
+        )
+        spend_s.commit()
+
     with session_factory() as s:
         new_summary = ChatSummary(
             workspace_id=workspace_id,
@@ -230,21 +254,6 @@ def compact_workspace(
             ws = s.scalar(select(Workspace).where(Workspace.id == workspace_id))
             if ws is not None:
                 ws.last_sdk_session_id = None
-
-        # The ledger row records the REAL reported usage, not the character
-        # estimate on ChatSummary.tokens (which the cap never summed). Written in
-        # the SAME transaction as the summary so it lands atomically with it.
-        # If the envelope carries no usage, record None → 0: "we called it and
-        # got no counts" is honest; a character estimate is not.
-        record_spend(
-            s,
-            workspace_id=workspace_id,
-            kind="compaction",
-            status="ok",
-            tokens_in=(envelope.get("usage") or {}).get("prompt_tokens"),
-            tokens_out=(envelope.get("usage") or {}).get("completion_tokens"),
-            model=used_model,
-        )
 
         s.commit()
         s.refresh(new_summary)
