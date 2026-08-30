@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import uuid
 from pathlib import Path
 from typing import NamedTuple
 
@@ -59,7 +60,9 @@ def _real_refs(repo: Path) -> list[str]:
     return [name for name in list_branches(repo) if branch_exists(repo, name)]
 
 
-def backfill_branch_entities(session: Session, *, workspaces_dir: Path) -> BackfillResult:
+def backfill_branch_entities(
+    session: Session, *, workspaces_dir: Path, workspace_id: uuid.UUID | None = None
+) -> BackfillResult:
     """Make `branches` agree with each workspace's local refs, and set the root
     pointer. Returns counts. Does NOT commit.
 
@@ -94,9 +97,19 @@ def backfill_branch_entities(session: Session, *, workspaces_dir: Path) -> Backf
     Skipped without raising: no repo directory, or a repo git cannot read. One bad
     workspace out of 500 must not leave the other 499 half-founded — but the count
     is RETURNED so the caller can report it rather than imply success.
+
+    *workspace_id* narrows the pass to ONE workspace. Phase 0 uses it to found a
+    freshly-initialised workspace's first branch row and root pointer, in the same
+    transaction that creates the repo (spec §8 S1 step 4). Reusing this function
+    rather than writing a second founding path is deliberate: ref filtering, the
+    detached-HEAD case and the orphan sweep are all already tested here, and a
+    parallel implementation would be the one that drifts.
     """
     created = deleted = rooted = skipped = 0
-    rows = session.execute(select(Workspace.id, Workspace.last_sdk_session_id)).all()
+    query = select(Workspace.id, Workspace.last_sdk_session_id)
+    if workspace_id is not None:
+        query = query.where(Workspace.id == workspace_id)
+    rows = session.execute(query).all()
     for wid, sdk_session_id in rows:
         repo = workspace_repo_dir(workspaces_dir, wid)
         if not (repo / ".git").exists():

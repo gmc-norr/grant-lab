@@ -45,6 +45,7 @@ from call_manager.db.models import (
     WorkspaceEvent,
     WorkspaceSetupJob,
 )
+from call_manager.proposal_assist.branch_entity_backfill import backfill_branch_entities
 from call_manager.proposal_assist.drafting.locking import (
     WorkspaceDeleted,
 )
@@ -409,6 +410,20 @@ class Phase0Worker:
             pinned = source_text_hash(call.full_text or "")
 
             self._init_repo(ws.id)
+
+            # Found this workspace's first branch row and root pointer, in the same
+            # transaction that creates the repo (spec §8 S1 step 4). `_init_repo`
+            # has just run `git init -b main` and committed, so the ref exists.
+            #
+            # Without this, a workspace created AFTER migration 0068 has a repo, no
+            # branch row, and a NULL root pointer — the migration's backfill only
+            # ever saw the workspaces that existed when it ran. S2 resolves every
+            # filesystem path through that pointer, so a null one is not cosmetic.
+            #
+            # The reconciler is reused rather than reimplemented: it already handles
+            # ref filtering, a detached HEAD and orphaned rows, and a second founding
+            # path is the one that would drift.
+            backfill_branch_entities(s, workspaces_dir=self.workspaces_dir, workspace_id=ws.id)
 
             ws.call_body_snapshot = (call.summary or "") + "\n\n" + (call.full_text or "")
             if ws.profile_id is not None:

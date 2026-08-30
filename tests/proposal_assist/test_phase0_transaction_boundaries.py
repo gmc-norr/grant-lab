@@ -62,9 +62,7 @@ class _StubClient:
         ]
         payload["funder_notes"] = "notes"
         return {
-            "choices": [
-                {"message": {"role": "assistant", "content": json.dumps(payload)}}
-            ],
+            "choices": [{"message": {"role": "assistant", "content": json.dumps(payload)}}],
             "model": self.model,
         }
 
@@ -331,6 +329,80 @@ def test_m1_creates_the_repo_and_pins_the_call_hash(
         assert s.get(Workspace, ws_id).snapshot_refreshed_at is not None
 
 
+def test_m1_founds_the_first_branch_row_and_the_root_pointer(
+    pg_session_factory, current_user, tmp_path, phase0_client
+):
+    """A workspace created AFTER migration 0068 must not be born rootless.
+
+    The migration's backfill only ever saw the workspaces that existed when it
+    ran. `_init_repo` does `git init -b main` and nothing else, so without this
+    every new workspace has a repo, no `branches` row, and a NULL
+    `root_branch_id` — and S2 resolves every filesystem path through that pointer.
+
+    Asserted as exact set equality against the repo's real refs, not membership:
+    a membership check passes with an extra row sitting beside `main`.
+    """
+    from sqlalchemy import select
+
+    from call_manager.db.models import Branch
+    from call_manager.proposal_assist.citations.gitio import list_branches
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        job = WorkspaceSetupJob(workspace_id=ws.id, status="running")
+        s.add(job)
+        s.commit()
+        job_id, ws_id = job.id, ws.id
+
+    _worker(pg_session_factory, tmp_path, phase0_client)._m1(job_id, ws_id, claimed_generation=0)
+
+    repo = tmp_path / str(ws_id) / "repo"
+    with pg_session_factory() as s:
+        rows = sorted(
+            n for (n,) in s.execute(select(Branch.name).where(Branch.workspace_id == ws_id)).all()
+        )
+        assert rows == sorted(list_branches(repo))
+        root_id = s.get(Workspace, ws_id).root_branch_id
+        assert root_id is not None, "a new workspace was born with a NULL root pointer"
+        assert s.get(Branch, root_id).name == "main"
+
+
+def test_m1_founds_the_branch_in_the_SAME_transaction_as_the_repo(
+    pg_session_factory, current_user, tmp_path, phase0_client
+):
+    """Control for the test above, and the reason it is not enough on its own.
+
+    If the founding ran in its own session it could commit while `_m1` later
+    rolled back, leaving a branch row for a workspace whose repo creation was
+    undone. `_m1` refuses a soft-deleted workspace and creates nothing — so a
+    row appearing here would prove the founding escaped `_m1`'s transaction.
+    """
+    from sqlalchemy import select
+
+    from call_manager.db.models import Branch
+    from call_manager.proposal_assist.drafting.locking import WorkspaceDeleted
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        job = WorkspaceSetupJob(workspace_id=ws.id, status="running")
+        s.add(job)
+        ws.soft_deleted_at = datetime.now(UTC)
+        s.commit()
+        job_id, ws_id = job.id, ws.id
+
+    with pytest.raises(WorkspaceDeleted):
+        _worker(pg_session_factory, tmp_path, phase0_client)._m1(
+            job_id, ws_id, claimed_generation=0
+        )
+
+    with pg_session_factory() as s:
+        assert s.execute(select(Branch).where(Branch.workspace_id == ws_id)).first() is None, (
+            "a branch row survived a rolled-back _m1"
+        )
+
+
 def test_m1_refuses_a_deleted_workspace_and_creates_nothing(
     pg_session_factory, current_user, tmp_path, phase0_client
 ):
@@ -492,9 +564,7 @@ def test_m2_raises_when_the_call_changed_under_it(
             s.commit()
         return result
 
-    monkeypatch.setattr(
-        setup_mod, "compute_section_extracts", _compute_then_reingest_the_call
-    )
+    monkeypatch.setattr(setup_mod, "compute_section_extracts", _compute_then_reingest_the_call)
 
     with pytest.raises(CallSourceChanged):
         w._m2(job_id, ws_id, pinned)
@@ -574,9 +644,7 @@ def test_m2_discards_a_payload_another_worker_made_redundant(
             s.commit()
         return result
 
-    monkeypatch.setattr(
-        setup_mod, "compute_section_extracts", _compute_then_another_worker_wins
-    )
+    monkeypatch.setattr(setup_mod, "compute_section_extracts", _compute_then_another_worker_wins)
 
     w._m2(job_id, ws_id, pinned)
 
@@ -1150,7 +1218,7 @@ def test_delete_route_returns_promptly_while_phase0_runs_its_extractors(
     t = threading.Thread(target=_run_m2)
     t.start()
     try:
-        assert started.wait(timeout=10)          # the LLM call is in flight
+        assert started.wait(timeout=10)  # the LLM call is in flight
         began = time.monotonic()
         resp = client_authed_owner.delete(f"/api/workspaces/{ws_id}")
         elapsed = time.monotonic() - began
@@ -1183,7 +1251,7 @@ def test_recovery_after_a_crash_between_m1_and_m2(
     pinned_first = w._m1(job_id, ws_id, claimed_generation=0)
     head_before = _run_git_head(tmp_path / str(ws_id) / "repo")
 
-    pinned_again = w._m1(job_id, ws_id, claimed_generation=0)          # the re-run
+    pinned_again = w._m1(job_id, ws_id, claimed_generation=0)  # the re-run
     assert pinned_again == pinned_first
     assert _run_git_head(tmp_path / str(ws_id) / "repo") == head_before
 
@@ -1216,8 +1284,8 @@ def test_recovery_after_a_crash_between_m2_and_m3_makes_no_second_llm_call(
     after_m2 = calls["n"]
     assert after_m2 > 0
 
-    w._m2(job_id, ws_id, pinned)                 # the re-run
-    assert calls["n"] == after_m2                # no second cloud call
+    w._m2(job_id, ws_id, pinned)  # the re-run
+    assert calls["n"] == after_m2  # no second cloud call
 
     w._m3(job_id, ws_id, pinned)
     with pg_session_factory() as s:
