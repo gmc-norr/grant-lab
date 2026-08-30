@@ -79,9 +79,15 @@ branches cost roughly 40 KB. Ten branches get ten permanent folders.
 
 ```
 <workspaces_dir>/<workspace_id>/
-  repo/                    # the repository; also the worktree for the root branch
-  worktrees/<branch>/      # one per additional branch
+  repo/                    # the repository. BARE of working files; nobody edits here
+  worktrees/<branch_id>/   # one per branch, INCLUDING the root branch
 ```
+
+Every branch gets a worktree, the root included, and `repo/` holds no checkout of its
+own. Otherwise promote would have to physically move the root branch into `repo/` — and
+§7.3 says promote is a pointer move. Path resolution must not depend on which branch the
+root pointer names. (Review finding 6: the first draft said both "a worktree swap" and
+"a one-row write", which cannot both be true.)
 
 ## 3. What is branch-scoped and what is shared
 
@@ -138,7 +144,8 @@ resume one remote session; doing so would interleave two branches' turns into a 
 conversation upstream.
 
 **Rule: a fork copies the chat rows and sets `last_sdk_session_id` to NULL on the new
-branch.** The next turn there starts a fresh hosted session and re-injects the copied
+branch.** (The copy is NOT trivial — see §4.1; three other tables reference `ChatTurn.id`
+and must be remapped.) The next turn there starts a fresh hosted session and re-injects the copied
 history as context.
 
 This needs no new machinery. Compaction already does exactly this reset for its own
@@ -147,13 +154,37 @@ with re-injection (`turns/compaction.py:138,258`). The fork reuses that proven p
 Because `last_sdk_session_id` lives on the workspace row, it must also move to
 per-`(workspace, branch)` state along with branch selection (§5).
 
+### 3.2 A branch has an identity, not just a name
+
+Two independent review findings converge here, so this is a data-model requirement, not
+a detail.
+
+**A branch is a row with an immutable id.** The name is a mutable label on it. Every
+branch-scoped row and every job carries the **id**, never the name.
+
+Why it is forced:
+
+- **Delete-then-recreate under the same name.** The fence validates the workspace's
+  lifecycle generation only. Refusing to delete a branch a *user* is on (§7.2) does not
+  stop a *running job*: delete `new_ideas`, recreate `new_ideas`, and the in-flight job
+  still passes the workspace fence and writes into the replacement. Names are not
+  identities. (Review finding 3.)
+- **Slashes are legal in branch names.** `is_valid_branch_name` delegates to
+  `git check-ref-format --branch`, which accepts `aims/ambitious` — the delete route
+  already needs `{name:path}` rather than `{name}` for exactly this reason
+  (`web/branches.py:210`), and there is a test for it. A branch segment in the WebSocket
+  URL would hit the same wall. An opaque id sidesteps it. (Review finding 7.)
+
+So §7.2's "refuse to delete a branch someone is on" stays, and the branch id is what
+makes it safe rather than merely likely.
+
 ## 4. How a branch ends
 
 Three endings, and only one of them is work:
 
 | Ending | Cost |
 |---|---|
-| **Promote** — `new_ideas` becomes the new main | Near zero: a ref move and a worktree swap |
+| **Promote** — `new_ideas` becomes the new root | Near zero: move the root pointer (§7.3) |
 | **Bin** — discard `new_ideas` | Near zero: remove the worktree, delete the ref, cascade its rows |
 | **Copy sections across** | **The real feature** |
 
@@ -164,6 +195,34 @@ reconciling two edits to one paragraph.
 That is fortunate, because automatic merge is not available here anyway:
 `apply_pm_section_to_fragment` is delete-then-reinsert, so two branches editing one
 section converge on a **duplicated section**, silently, with both sides agreeing.
+
+### 4.1 What "a full copy" actually costs
+
+Three review findings say the fork is not a row copy. All three were verified.
+
+**A fork barrier is required.** A connected client persists inside `room.lock`
+**without** the commit mutex — which is precisely why today's switch tears the rooms down
+first and aborts if it cannot quiesce them (`branches.py:184-188`). A fork that copies
+rows while clients are typing races the same way and produces a log and a watermark that
+disagree. **The fork must quiesce each source room, or copy every branch-scoped row from
+one explicitly protected snapshot.** Holding the workspace mutex is not sufficient,
+because the racing writer does not take it. (Review finding 2.)
+
+**Chat rows need id remapping, so §3.1's "the copy is trivial" was wrong.**
+`ChatTurn.id` is a primary key that three other columns reference:
+`ChatSummary.summarized_through` (`models.py:1121`),
+`ArtifactVersion.triggering_turn_id` (`models.py:1166`) and
+`ProposedChange.triggering_turn_id` (`models.py:1225`). Copied turns need new ids and
+**every dependent reference remapped in the same transaction** — keeping the old ids
+would couple the two branches through the very rows that are supposed to be independent.
+(Review finding 4.)
+
+**Only terminal results fork; active jobs do not.** The AI-analysis tables are job queues
+with `queued`/`running` statuses, `claimed_at_generation`, SDK session ids and partial
+unique indexes on `status IN ('queued','running')` (e.g. `models.py:954-960`). Copying a
+running row creates a phantom job nobody is executing, or trips the active-uniqueness
+index. **The fork copies completed results only and enqueues fresh work if the new branch
+needs any.** (Review finding 5.)
 
 **v1 granularity: whole sections.** Sections are already first-class objects, and it
 matches how people talk about a proposal ("our Methods is better on the new branch").
@@ -281,8 +340,10 @@ general one, not an exception: the chat is a document like any other.)*
 **7.1 — Does the commit mutex become per-branch? DECIDED: NO. It stays per-workspace.**
 
 The mutex is `pg_advisory_xact_lock` on `_advisory_lock_key("commit", workspace_id)`
-(`drafting/locking.py:132-140`), taken at **26 call sites**, and it *"serializes every
-writer for the workspace"* (`fencing.py:129`).
+(`drafting/locking.py:132-140`) and it *"serializes every writer for the workspace"*
+(`fencing.py:129`). **25 callers outside `fencing.py`** (26 counting its own internal
+delegation at `fencing.py:160`) — recounted, because a comment at `locking.py:234` says
+"27" and the two disagree; that comment is prose from an earlier slice.
 
 The original *reason* for one mutex does dissolve here — it existed because there was one
 working tree and one HEAD, and §2 proves two worktrees commit concurrently without
@@ -350,21 +411,38 @@ observable changes. This is where trap 1 is closed: the seven commit sites that 
 reconcile HEAD must be made to name a branch explicitly, and the gate is that passing no
 branch becomes a type error rather than a silent wrong-branch write.
 
-**S2 — One worktree per branch.** Create a worktree on branch create, remove it on
-delete. Still one branch active per workspace; still one room. Proves the git layer in
-production without touching the rooms.
+**S2 — Attach worktrees AND retire checkout-based switching, together.** These cannot
+be separate stages, and the first draft of this spec had them separate — a CRITICAL
+review finding, confirmed by experiment:
+
+```
+$ git worktree add ../wt new_ideas     # S2 as first drafted
+$ git checkout new_ideas               # what switch_branch still does
+fatal: 'new_ideas' is already used by worktree at '…/wt'
+```
+
+The same property that makes the design safe (§2 claim 4: git refuses one branch in two
+worktrees) breaks the old switch the moment a branch is attached. So:
+
+**Constraint: no branch may be attached to a worktree while
+`switch_branch`'s `checkout_branch(repo, target)` still runs.** Attachment and the
+removal of checkout-based switching land in ONE stage. Switching becomes "resolve a
+different worktree path"; it still moves the whole workspace at this point, so nothing is
+user-visible yet.
 
 **S3 — Per-branch rooms.** `RoomKey` becomes a 3-tuple; the log and watermark carry the
-branch; the WebSocket route gains a branch. Two branches can now be edited at once —
-but a switch still moves everybody, so no user-visible change yet.
+branch **id** (§3.2, not the name — the route cannot carry a slash); each room
+checkpoints into its own branch's worktree. Two branches can now be edited at once, but
+selection is still workspace-wide, so still no user-visible change.
 
 **S4 — Per-user branch selection.** Branch moves off the workspace row into per-user
 state; the switch sequence and its teardown are deleted; the frontend cache keys and the
 picker change. **This is the stage the user actually asked for**; everything before it is
 groundwork.
 
-**S5 — Fork-copy and section transfer.** Create becomes a real fork (rows copied, chat
-copied, SDK handle nulled). Then section-level copy between branches.
+**S5 — Fork-copy and section transfer.** Create becomes a real fork, to §4.1's rules:
+quiesce or snapshot first, remap the chat ids, copy terminal results only, null the SDK
+handle. Then section-level copy between branches.
 
 S1 is the largest and the least rewarding: it touches the most files and delivers nothing
 a user can see. It is also where the two traps that would break the first fork are
@@ -383,3 +461,47 @@ were created by `test_api_branches.py` and `test_branch_create_delete.py`.
 **There was never any evidence about branch usage.** The isolation fix is `7c6b5499`;
 the cleanup left 8 real directories. Any future survey of that directory is now
 meaningful. The previous one was not.
+
+
+## 10. Outside review — round 1
+
+Reviewed by `gpt-5.6-sol` via GitHub Copilot on 2026-08-30 against revision `e82a04c8`.
+Package: spec plus `branches.py`, `fencing.py`, `paths.py`, `retirement.py`,
+`drafting/locking.py`, `collab/hydrate.py`, `db/models.py` (184,721 chars).
+`collab/room.py` and `citations/gitio.py` were deliberately excluded and the reviewer
+was told so.
+
+**Eight findings. All eight verified against the code. None refuted.** Every one is
+folded into the text above; this section records what changed and why, so a later reader
+does not have to re-derive it.
+
+| # | Severity | Finding | Where it landed |
+|---|---|---|---|
+| 1 | CRITICAL | S2 attaches a worktree to a branch the old switch then tries to `git checkout` — it fails | §8 S2, restaged; **confirmed by experiment** |
+| 2 | HIGH | Fork has no snapshot protocol; clients persist without the commit mutex | §4.1, fork barrier |
+| 3 | HIGH | Delete-then-recreate under one name lets a stale job write to the replacement | §3.2, immutable branch id |
+| 4 | HIGH | Chat copy needs id remapping — three tables reference `ChatTurn.id` | §4.1 and §3.1 |
+| 5 | HIGH | Copying active job rows makes phantom jobs / trips active-uniqueness | §4.1, terminal results only |
+| 6 | MEDIUM | Promote specified twice, incompatibly ("worktree swap" vs "one-row write") | §2 layout + §4 table |
+| 7 | MEDIUM | Branch names contain `/`; a `{branch}` route segment cannot carry them | §3.2, opaque id |
+| 8 | LOW | Mutex call-site count contradicted a comment in the source | §7.1, recounted |
+
+Three things are worth keeping in view.
+
+**Finding 1 was reachable from facts already in the spec.** §2 claim 4 records that git
+refuses one branch in two worktrees; §8 S2 attached a worktree while the old
+`checkout_branch` switch still ran. Both were written by the same author on the same day
+and never joined. A measured fact in one section does not defend a plan in another.
+
+**Findings 3 and 7 converge on the same fix from opposite directions** — one about stale
+jobs after a delete, one about slashes in URLs — and the answer to both is that a branch
+needs an identity separate from its name. Neither alone would obviously have justified a
+`branches` table; together they force it.
+
+**Finding 8 disputed a number and neither side was right.** The spec said 26, a source
+comment said 27. Recounting gave **25 callers outside `fencing.py`**. The lesson is the
+standing one: when a review disputes a count, measure it — do not swap one guess for
+another.
+
+§7.1 survived: the reviewer agreed that keeping the mutex per-workspace *"serializes
+branches but does not make writes incorrect"*.
