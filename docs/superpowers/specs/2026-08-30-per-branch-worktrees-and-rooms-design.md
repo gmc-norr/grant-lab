@@ -131,10 +131,14 @@ casing, no "shared history with a cutoff" — the branch simply has its own chat
 opening content is a copy.
 
 `chat_turns` is `(workspace_id, role, content, position, created_at)` with no reference
-to artifact or commit state (`models.py:843-865`), so the copy is trivial. There are 145
+to artifact or commit state (`models.py:843-865`), There are 145
 chat turns in the entire instance, so a fork-time copy costs nothing and beats a
-pointer-plus-cutoff scheme on simplicity. `ix_chat_turns_ws_position` means `position` is
-a per-workspace sequence and becomes per-`(workspace, branch)`. `chat_summaries`
+pointer-plus-cutoff scheme on simplicity. (The copy is *not* trivial for a different
+reason — see §4.1.) `position` is **not** a per-workspace sequence: it defaults from the
+global `chat_turns_position_seq` and `ix_chat_turns_ws_position` is a plain, non-unique
+index that merely orders within a workspace (`models.py:874-877`). Copied turns therefore
+keep their source positions verbatim — the ordering survives, and nothing needs a dense
+per-branch allocator. (Round-2 finding 6.) `chat_summaries`
 (compaction output) is derived from the chat and forks with it.
 
 **The one thing that is NOT a document: `workspaces.last_sdk_session_id`**
@@ -209,10 +213,12 @@ one explicitly protected snapshot.** Holding the workspace mutex is not sufficie
 because the racing writer does not take it. (Review finding 2.)
 
 **Chat rows need id remapping, so §3.1's "the copy is trivial" was wrong.**
-`ChatTurn.id` is a primary key that three other columns reference:
+`ChatTurn.id` is a primary key that **four** other columns reference:
 `ChatSummary.summarized_through` (`models.py:1121`),
-`ArtifactVersion.triggering_turn_id` (`models.py:1166`) and
-`ProposedChange.triggering_turn_id` (`models.py:1225`). Copied turns need new ids and
+`ArtifactVersion.triggering_turn_id` (`models.py:1166`),
+`ProposedChange.triggering_turn_id` (`models.py:1225`) and
+`TurnJob.user_turn_id` (`models.py:907-912`, `ON DELETE SET NULL` — round-2 finding 3;
+round 1 found only three). Copied turns need new ids and
 **every dependent reference remapped in the same transaction** — keeping the old ids
 would couple the two branches through the very rows that are supposed to be independent.
 (Review finding 4.)
@@ -238,13 +244,14 @@ Counts below were measured, not estimated.
 ### Hard
 
 - **`workspace_repo_dir` becomes branch-aware.** It hardcodes
-  `<workspaces_dir>/<workspace_id>/repo` (`paths.py:9-12`). **59 call sites across 33
+  `<workspaces_dir>/<workspace_id>/repo` (`paths.py:9-12`). **58 call sites across 32
   files** must each decide which branch's tree they mean. This is the largest surface in
   the migration.
 - **`RoomKey` becomes a 3-tuple** and the branch threads through every manager method
   and the WebSocket route `/api/ws/workspaces/{workspace_id}/{artifact}`, which has no
-  branch segment (`web/collab_ws.py:61,114`). Three sites read the key **positionally**
-  (`key[0]`), so they break loudly rather than silently — which is the good case.
+  branch segment (`web/collab_ws.py:61,114`). **Two** sites read the key **positionally**
+  (`key[0]` at `room.py:529` and `room.py:579`), so they break loudly rather than
+  silently — which is the good case. Everything else passes `RoomKey` whole.
 - **The live log gains a branch dimension.** `yjs_updates` and `collab_artifact_state`
   are keyed `(workspace_id, artifact)` throughout. Two branches editing at once would
   otherwise interleave into one log. Needs a migration plus a backfill onto the current
@@ -398,18 +405,35 @@ makes promote a one-row write rather than a rename, and avoids a magic string.
 
 This is not a slice. It is a subsystem change touching the room registry, the durable
 log, the git layer, the schema, the fence, six background pass families, and the frontend
-cache keys — with 59 path call sites and a silent-failure mode on seven commit sites.
+cache keys — with 58 path call sites and a silent-failure mode on seven commit sites.
 
 The design is settled; what remains is sequencing. Five stages, each landing on a green
 suite with the product still working:
 
-**S1 — Branch-aware paths and schema, behaviour unchanged.** Add the branch column to
-the branch-scoped tables (including the `artifact_versions` unique key — trap 2), add
-`git worktree` primitives to gitio, and make `workspace_repo_dir` branch-aware at all 59
-call sites. Every caller passes the workspace's single current branch, so nothing
-observable changes. This is where trap 1 is closed: the seven commit sites that do not
-reconcile HEAD must be made to name a branch explicitly, and the gate is that passing no
-branch becomes a type error rather than a silent wrong-branch write.
+**S1 — The branch entity, branch-aware paths, behaviour unchanged.**
+
+*There is no branch entity today.* `workspaces.current_branch` is a plain `Text` column
+(`models.py:704`) and `grep '^class .*Branch' db/models.py` returns nothing. §3.2 requires
+an immutable **id**, so S1 must create the table before anything can carry a foreign key
+to it. In order:
+
+1. Create `branches` — `(id, workspace_id, name, created_at)`, unique on
+   `(workspace_id, name)`, `name` mutable, `id` never reused.
+2. **Backfill one row per existing local ref, not just the current one.** A workspace may
+   already have several branches: `create_workspace_branch` has shipped since `880ea243`
+   and does nothing but `git branch`. Enumerate every local ref in every workspace repo
+   and give each a row; a ref with no row is invisible to every later stage. (Round-2
+   finding 4.)
+3. Add the branch-id column to the branch-scoped tables — including the
+   `artifact_versions` unique key (trap 2) — backfilling every existing row onto the
+   workspace's current branch.
+4. Add `git worktree` primitives to gitio, and make `workspace_repo_dir` branch-aware at
+   all 58 call sites. Every caller passes the workspace's single current branch, so
+   nothing observable changes.
+
+This is also where trap 1 is closed: the seven commit sites that do not reconcile HEAD
+must name a branch explicitly, and the gate is that passing no branch becomes a **type
+error** rather than a silent wrong-branch write.
 
 **S2 — Attach worktrees AND retire checkout-based switching, together.** These cannot
 be separate stages, and the first draft of this spec had them separate — a CRITICAL
@@ -430,23 +454,59 @@ removal of checkout-based switching land in ONE stage. Switching becomes "resolv
 different worktree path"; it still moves the whole workspace at this point, so nothing is
 user-visible yet.
 
+**And `repo/` is never attached.** The same git rule bites a second time, from the other
+side — round 2 caught it, also by experiment:
+
+```
+$ git -C repo branch --show-current        # master
+$ git worktree add ../wt-root master
+fatal: 'master' is already used by worktree at '/tmp/wtexp/repo'
+```
+
+So S2 does not "attach a worktree for every branch". `repo/` **is** the worktree of
+whichever branch it currently holds, and that branch is the workspace's root pointer
+(§7.3). Only the *other* branches get `worktrees/<branch-id>/`. Path resolution is
+therefore `repo/` when the branch is the root and `worktrees/<id>/` otherwise — which is
+exactly the resolution §7.3 already requires promote to respect, so promote moves the
+pointer and nothing on disk moves. (Round-2 finding 1.)
+
 **S3 — Per-branch rooms.** `RoomKey` becomes a 3-tuple; the log and watermark carry the
 branch **id** (§3.2, not the name — the route cannot carry a slash); each room
 checkpoints into its own branch's worktree. Two branches can now be edited at once, but
 selection is still workspace-wide, so still no user-visible change.
 
-**S4 — Per-user branch selection.** Branch moves off the workspace row into per-user
-state; the switch sequence and its teardown are deleted; the frontend cache keys and the
-picker change. **This is the stage the user actually asked for**; everything before it is
-groundwork.
+**S4 — Per-user branch selection, and create becomes a real fork.** Branch moves off the
+workspace row into per-user state; the frontend cache keys and the picker change. **This
+is the stage the user actually asked for.** Three things ride with it that a first draft
+put elsewhere:
 
-**S5 — Fork-copy and section transfer.** Create becomes a real fork, to §4.1's rules:
-quiesce or snapshot first, remap the chat ids, copy terminal results only, null the SDK
-handle. Then section-level copy between branches.
+- **Fork-copy cannot wait for S5.** §1 promises that a new branch *"starts as a full
+  copy"*, and today's `create_workspace_branch` is a bare `git branch` whose own docstring
+  says it *"changes nothing anybody can see"*. Ship per-user selection on top of that and
+  a user switches into a branch with an empty chat and no analysis — the headline promise,
+  broken, in the first stage a user can see. §4.1's fork rules (quiesce or snapshot, remap
+  the four chat references, terminal results only, null the SDK handle) land **here**.
+  (Round-2 finding 2.)
+- **Switching must stop being owner-only.** `switch_branch_route` calls `require_owner`
+  (`web/branches.py:172`). The requirement is that *different users work on different
+  branches at the same time*, which that check makes impossible. Selection becomes
+  membership-gated; create, delete and promote may stay owner-only.
+  (Round-2 finding 5.)
+- **The teardown is retargeted, not deleted.** Switching no longer evicts anyone, so the
+  *switch sequence* goes — but `MANAGER.prepare_branch_switch` (`room.py:758`), its
+  cross-thread bridge (`web/branches.py:58-100`) and the `locked` proof it returns are the
+  only quiesce-and-prove primitive in the codebase, and §4.1's fork barrier depends on it.
+  It is currently workspace-wide (it takes only a `workspace_id` and retires both
+  artifacts); after S3 it must take a branch. Deleting it here and rebuilding it for the
+  fork would repeat exactly the mistake round 1 found in S2.
+
+**S5 — Section transfer between branches.** Whole-section copy, to §4's rules. This is
+the only part of the old S5 that can genuinely follow the user-visible stage, because
+nothing about the branch model depends on it.
 
 S1 is the largest and the least rewarding: it touches the most files and delivers nothing
-a user can see. It is also where the two traps that would break the first fork are
-closed, so it cannot be skipped or deferred.
+a user can see. It is also where the branch entity is founded and the two traps that would
+break the first fork are closed, so it cannot be skipped or deferred.
 
 ## 9. What made this design possible
 
@@ -505,3 +565,52 @@ another.
 
 §7.1 survived: the reviewer agreed that keeping the mutex per-workspace *"serializes
 branches but does not make writes incorrect"*.
+
+## 11. Outside review — round 2
+
+Reviewed by `gpt-5.6-sol` via GitHub Copilot on 2026-08-30 against revision `0a5d5f3a`.
+Package: the revised spec plus `branches.py`, `web/branches.py`, `fencing.py`, `paths.py`,
+`retirement.py`, `drafting/locking.py`, `collab/hydrate.py`, `collab/room.py`,
+`citations/gitio.py`, `db/models.py` (297,415 chars). `room.py` and `gitio.py` were added
+**because** round 1 could not check the fork barrier or the worktree paths without them —
+the blind spot round 1 flagged was closed rather than carried.
+
+**Six findings from the reviewer, all six verified against the code, none refuted. Four
+more found independently while the review ran.** Ten in total, all folded in above.
+
+| # | Source | Severity | Finding | Where it landed |
+|---|---|---|---|---|
+| 1 | review | CRITICAL | S2 cannot attach the branch `repo/` already holds | §8 S2; **confirmed by experiment** |
+| 2 | review | HIGH | S4 ships branch selection while create is still ref-only | §8 S4, fork-copy moved in |
+| 3 | review | HIGH | `TurnJob.user_turn_id` is a fourth reference to `ChatTurn.id` | §4.1, three → four |
+| 4 | review | HIGH | S1 backfills only the current branch; other refs get no row | §8 S1 step 2 |
+| 5 | review | MEDIUM | `switch_branch_route` is `require_owner` — the core requirement is impossible | §8 S4 |
+| 6 | review | LOW | `position` is a global sequence, not a per-workspace one | §3.1 |
+| 7 | own | HIGH | No `branches` table exists; S1 had nothing for an id to reference | §8 S1 step 1 |
+| 8 | own | HIGH | S4 deleted the only quiesce primitive S5's fork barrier needs | §8 S4, retargeted |
+| 9 | own | LOW | 59 path call sites across 33 files — measured **58 across 32** | §5, §8 |
+| 10 | own | LOW | "Three sites read the key positionally" — measured **two** | §5 |
+
+Four things are worth keeping in view.
+
+**Round 1's CRITICAL had a mirror image, and round 1 missed it.** Round 1 found that
+attaching a worktree breaks the old `git checkout` switch. Round 2 found the same git rule
+firing from the other side: you cannot attach a worktree for the branch `repo/` is already
+sitting on. One property, two failure directions, two rounds to see both — which is the
+argument for the second round, not against the first.
+
+**Findings 9 and 10 are the same error round 1's finding 8 was.** Both counts were high by
+exactly one, and in the path case the cause is identifiable: the count included
+`paths.py`'s own definition as if it were a call site. A count taken by eye is a guess
+wearing a number's clothes. Every count in this revision was re-run.
+
+**Finding 7 shows what "verified" bought and what it did not.** Round 1's finding 3
+correctly established that a branch needs an immutable id, and §3.2 was written to say so.
+Nobody then asked what table the id lives in — the fix was verified against the *finding*
+rather than against the *codebase*, and `models.py` has no branch entity at all. A
+verified fix to a verified finding can still be unbuildable.
+
+**Findings 2, 7 and 8 are all one shape:** a stage whose precondition a neighbouring stage
+never establishes, or destroys. That is the shape of round 1's CRITICAL too. Four
+instances across two rounds says the staging — not the design — is where this spec's
+remaining risk lives, and it is where a round 3 should look first.
