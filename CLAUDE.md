@@ -23,6 +23,10 @@ The v1 design spec (`docs/superpowers/specs/2026-04-14-call-monitor-design.md`) 
   `git show <commit>^:<path>`. **Specs are kept** — they carry the *why*, which the code
   does not.
 - **Specs:** saved to `docs/superpowers/specs/YYYY-MM-DD-<name>.md`.
+- **Prior investigations:** `docs/superpowers/INVESTIGATIONS.md` indexes all 25 spikes,
+  multi-agent reviews and outside opinions in `notes/` and `reviews/` **by the question
+  each answers**. **Check it before measuring anything** — two sessions have re-derived
+  findings already recorded there. Completeness is pinned by `tests/architecture/`.
 
 ## Stack
 
