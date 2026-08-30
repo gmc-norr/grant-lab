@@ -57,6 +57,7 @@ from typing import Any, NamedTuple
 from sqlalchemy import select, update
 from sqlalchemy.orm import sessionmaker
 
+from call_manager.config import Settings
 from call_manager.db.models import ChatTurn, TurnJob, Workspace, WorkspaceEvent
 from call_manager.proposal_assist.attachments.resolver import (
     AttachmentResolutionError,
@@ -78,6 +79,7 @@ from call_manager.proposal_assist.drafting.turn_gating import (
 )
 from call_manager.proposal_assist.fencing import acquire_shared_lease
 from call_manager.proposal_assist.spend import record_spend
+from call_manager.proposal_assist.turns.caps import check_global_daily_token_cap
 from call_manager.proposal_assist.turns.compaction import latest_summary_text
 from call_manager.proposal_assist.turns.outcomes import (
     record_terminal_outcome,
@@ -210,6 +212,7 @@ async def process_turn_once(
     controller: WorkspaceController,
     turn_job_id: uuid.UUID,
     workspaces_dir: Path | None = None,
+    settings: Settings | None = None,
 ) -> None:
     """Process one queued turn. No-op if the row is not in 'queued' state.
 
@@ -295,6 +298,40 @@ async def process_turn_once(
     user_turn_id = claimed.user_turn_id
     submitted_by_user_id = claimed.submitted_by_user_id
     claimed_generation = claimed.claimed_at_generation
+
+    # Recheck the org-wide cap AFTER the claim and BEFORE any hosted call.
+    # submit_user_turn checked it at enqueue time, but a queued row can wait
+    # arbitrarily long: a launch failure leaves the row `queued` and the next
+    # drain tick retries it, so the enqueue-time decision can be hours stale by
+    # the time we get here. The four pass runners already recheck at pass start;
+    # chat was the one hosted family that did not. Denied means terminalize —
+    # _finalize_failed records a zero-token ledger row on the way out — WITHOUT
+    # calling the model.
+    #
+    # settings=None means "build from env": the drain tick passes the app's
+    # Settings, and a caller that omits it still gets the cap checked, never
+    # skipped.
+    effective_settings = settings if settings is not None else Settings()
+    with session_factory() as s:
+        cap = check_global_daily_token_cap(s, settings=effective_settings)
+    if not cap.allowed:
+        logger.warning(
+            "process_turn_once: turn_job %s denied by the global daily token cap "
+            "after claim; not calling the model",
+            turn_job_id,
+            extra={"event": "turn_global_cap_denied", "turn_job_id": str(turn_job_id)},
+        )
+        _finalize_failed(
+            session_factory,
+            turn_job_id=turn_job_id,
+            workspace_id=workspace_id,
+            submitted_by_user_id=submitted_by_user_id,
+            error="global daily token cap reached",
+            tokens_in=0,
+            tokens_out=0,
+            user_turn_id=user_turn_id,
+        )
+        return
 
     with session_factory() as s:
         user_turn = s.scalar(select(ChatTurn).where(ChatTurn.id == user_turn_id))

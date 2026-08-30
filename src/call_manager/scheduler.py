@@ -752,6 +752,7 @@ def build_scheduler(
             workspaces_dir=Path(settings.workspaces_dir),
             drafting_enabled=settings.drafting_enabled,
             turn_max_seconds=settings.turn_max_seconds,
+            settings=settings,
         )
         if app_loop is None:
             try:

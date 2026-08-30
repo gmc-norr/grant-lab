@@ -367,6 +367,27 @@ def _local_bindings(nodes: list[ast.AST], func: ast.AST) -> frozenset[str]:
                     _bind(item.optional_vars)
         elif isinstance(node, ast.ExceptHandler) and node.name:
             out.add(node.name)
+        elif isinstance(node, ast.Import):
+            # A function-local `import fake as record_spend` rebinds the name for
+            # THIS function while the module-level import stays live in `writer_names`.
+            # Without this branch the function's unrelated call satisfied the gate.
+            # Writer modules are excluded for the same reason as at module level:
+            # a local `import call_manager.proposal_assist.spend` ESTABLISHES the
+            # writer, and shadowing it would break the very path it opens.
+            for alias in node.names:
+                if alias.name in WRITER_MODULES:
+                    continue
+                out.add((alias.asname or alias.name).split(".", 1)[0])
+        elif isinstance(node, ast.ImportFrom):
+            # Same for `from unrelated import record_spend`, skipping BOTH shapes
+            # that establish a writer — a name imported FROM a writer module, and a
+            # name that IS one. Handling ast.Import alone left half of it open; that
+            # exact asymmetry was the module-level bug this mirrors.
+            mod = node.module or ""
+            for alias in node.names:
+                if mod in WRITER_MODULES or f"{mod}.{alias.name}" in WRITER_MODULES:
+                    continue
+                out.add(alias.asname or alias.name)
     return frozenset(out)
 
 

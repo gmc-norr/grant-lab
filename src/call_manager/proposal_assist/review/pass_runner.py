@@ -57,6 +57,15 @@ _FIT_CHECK_FILE = "fit-check.md"
 _RUBRIC_REVIEW_FILE = "rubric-review.md"
 
 
+class _GlobalCapReached(Exception):
+    """Raised inside a review sub-call when the org ceiling is already reached.
+
+    An Exception on purpose: the existing handler records the (zero-token) spend,
+    marks the item failed and never launches, which is exactly the wanted
+    behaviour — no special-casing needed anywhere else.
+    """
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
@@ -125,6 +134,14 @@ async def _run_one_call(
 
             async def _drive() -> None:
                 nonlocal handle, done
+                # The pass-start recheck happens ONCE, before five concurrent
+                # wave-1 calls. Consolidation then runs after those five have
+                # already committed their spend, and a semaphore-queued wave-1
+                # call can launch long after the check too. So the ceiling is
+                # tested here, immediately before this sub-call's own launch.
+                with session_factory() as cap_s:
+                    if not check_global_daily_token_cap(cap_s, settings=settings).allowed:
+                        raise _GlobalCapReached
                 handle = await adapter.launch(LaunchContext(workspace_id=workspace_id))
                 async for event in adapter.send_turn(handle, instruction):
                     if isinstance(event, TurnDoneEvent):
@@ -139,11 +156,12 @@ async def _run_one_call(
         except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 — terminal
             logger.exception("review sub-call %s failed for run %s", kind, run_id)
             cancelled = isinstance(exc, asyncio.CancelledError)
-            error = (
-                "timed out"
-                if isinstance(exc, (asyncio.TimeoutError, TimeoutError))
-                else "sub-call failed"
-            )
+            if isinstance(exc, _GlobalCapReached):
+                error = "global daily token cap reached"
+            elif isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+                error = "timed out"
+            else:
+                error = "sub-call failed"
         finally:
             if handle is not None:
                 try:

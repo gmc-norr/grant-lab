@@ -26,7 +26,7 @@ from call_manager.proposal_assist.drafting.contract import (
 from call_manager.proposal_assist.drafting.controller import WorkspaceController
 from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
 from call_manager.proposal_assist.drafting.registry import SubprocessRegistry
-from call_manager.proposal_assist.spend import sum_spend_today
+from call_manager.proposal_assist.spend import record_spend, sum_spend_today
 from call_manager.proposal_assist.turns.outcomes import record_terminal_outcome
 from call_manager.proposal_assist.turns.processor import process_turn_once
 from call_manager.proposal_assist.turns.reaper import reap_stuck_turns
@@ -284,3 +284,87 @@ def test_an_already_terminal_turn_records_nothing_twice(
         rows = _chat_rows(s)
         assert len(rows) == 1
         assert (rows[0].tokens_in, rows[0].tokens_out) == (4, 2)
+
+
+def test_a_CLAIMED_chat_turn_refuses_when_the_global_cap_is_reached(
+    pg_session_factory, _settings_env, monkeypatch
+):
+    """submit_user_turn checked the global cap at ENQUEUE time. That answer goes
+    stale: a launch failure leaves the row `queued` and the next drain tick
+    retries it, so the accepted-at decision can be hours old by dispatch.
+
+    The four pass runners recheck before launching; chat was the one hosted
+    family that did not — the "contributes to the total, never consults it"
+    shape this branch exists to remove, surviving inside the branch that removes
+    it. The cap is seeded over the ceiling AFTER submit, so only the processor's
+    own recheck can stop it, and the adapter raises if it is ever reached.
+    """
+    settings = Settings()
+    with pg_session_factory() as s:
+        user = make_user(s)
+        ws = make_workspace(s, owner=user)
+        s.commit()
+        uid, wsid = user.id, ws.id
+    with pg_session_factory() as s:
+        job = submit_user_turn(
+            session=s,
+            workspace_id=wsid,
+            content_text="Hi",
+            submitted_by_user_id=uid,
+            settings=settings,
+        )
+        s.commit()
+        job_id = job.id
+
+    # Over the ceiling only NOW — after the enqueue-time check has passed.
+    monkeypatch.setenv("GLOBAL_DAILY_TOKEN_CAP_INPUT", "100")
+    with pg_session_factory() as s:
+        record_spend(
+            s,
+            workspace_id=wsid,
+            kind="chat_turn",
+            status="ok",
+            tokens_in=5000,
+            tokens_out=0,
+        )
+        s.commit()
+
+    adapter = FakeAgentAdapter()
+
+    async def _must_not_run(handle, msg):
+        # NB: this message must not contain the word the assertion below greps
+        # for. A first draft said "despite the global cap" — the processor
+        # wraps a raised exception into turn_jobs.error, so the mutant's
+        # `processor_failure: ...global...` satisfied a substring assert and
+        # the mutation stayed green.
+        raise AssertionError("send_turn reached; the ceiling was not consulted")
+        yield  # pragma: no cover — makes this an async generator
+
+    adapter.send_turn = _must_not_run  # type: ignore[method-assign]
+    registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
+    controller = WorkspaceController(
+        registry=registry, session_factory=pg_session_factory
+    )
+
+    asyncio.run(
+        process_turn_once(
+            session_factory=pg_session_factory,
+            controller=controller,
+            turn_job_id=job_id,
+        )
+    )
+
+    with pg_session_factory() as s:
+        turn_job = s.get(TurnJob, job_id)
+        assert turn_job.status == "failed"
+        assert turn_job.error == "global daily token cap reached"
+        rows = (
+            s.execute(
+                select(LlmSpend).where(
+                    LlmSpend.kind == "chat_turn", LlmSpend.ref_id == str(job_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert [(r.tokens_in, r.tokens_out) for r in rows] == [(0, 0)], rows

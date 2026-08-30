@@ -538,6 +538,28 @@ def test_a_non_model_call_with_a_token_keyword_is_not_reported(tmp_path, monkeyp
                 record_spend(s)
             """,
         ),
+        (
+            "local_import_as_shadow",
+            """
+            from call_manager.proposal_assist.spend import record_spend
+
+            def f(s, job, done):
+                import unrelated as record_spend
+                job.input_tokens = done.tokens_in
+                record_spend(s)
+            """,
+        ),
+        (
+            "local_from_import_shadow",
+            """
+            from call_manager.proposal_assist.spend import record_spend
+
+            def f(s, job, done):
+                from unrelated import record_spend
+                job.input_tokens = done.tokens_in
+                record_spend(s)
+            """,
+        ),
     ],
 )
 def test_every_shadowing_form_invalidates_the_writer(tmp_path, monkeypatch, label, source):
@@ -614,3 +636,43 @@ def test_the_ledger_has_exactly_one_writer():
         "call_manager/db/models.py",
         "call_manager/proposal_assist/spend.py",
     ]
+
+
+@pytest.mark.parametrize(
+    ("label", "source"),
+    [
+        (
+            "local_establishing_from",
+            """
+            def f(s, job, done):
+                from call_manager.proposal_assist.spend import record_spend
+                job.input_tokens = done.tokens_in
+                record_spend(s)
+            """,
+        ),
+        (
+            "local_establishing_alias",
+            """
+            def f(s, job, done):
+                import call_manager.proposal_assist.spend as spend
+                job.input_tokens = done.tokens_in
+                spend.record_spend(s)
+            """,
+        ),
+    ],
+)
+def test_a_function_local_import_that_ESTABLISHES_the_writer_still_counts(
+    tmp_path, monkeypatch, label, source
+):
+    """The control for the local-import shadow rule, and the trap it must not fall into.
+
+    Both module-level import branches hit this once already: the first attempt at
+    each shadowed the very name it establishes, because a writer-module import
+    looks exactly like a rebinding one until you check where it comes from. A
+    function-local import is a real pattern here — the processor imports its
+    registry inside the function to break a cycle — so a rule that flagged these
+    would fire on correct code, and a gate that fires on correct code gets
+    disabled.
+    """
+    g = _tree(tmp_path, monkeypatch, f"{label}.py", source, writer_import=False)
+    assert g.offenders() == []

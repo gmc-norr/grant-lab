@@ -36,7 +36,8 @@ from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
 from call_manager.proposal_assist.evaluator.pass_runner import run_evaluator_pass
 from call_manager.proposal_assist.review.jobs import enqueue_review_run
 from call_manager.proposal_assist.review.pass_runner import run_review_pass
-from call_manager.proposal_assist.spend import record_spend
+from call_manager.proposal_assist.review.personas import WAVE1_KINDS
+from call_manager.proposal_assist.spend import record_spend, sum_spend_today
 from call_manager.proposal_assist.uncited_claims.pass_runner import run_uncited_claims_pass
 from tests.proposal_assist.conftest import make_user, make_workspace
 
@@ -461,3 +462,105 @@ def test_the_run_rollup_writes_no_ledger_row(pg_session_factory, run_review):
         # hollow-gate shape this plan keeps catching.
         assert len(rows) == n_calls
         assert all(r.ref_id != str(run_id) for r in rows), "no run-level review row"
+
+
+def test_review_CONSOLIDATION_refuses_after_wave_one_exhausts_the_global_cap(
+    tmp_path, pg_session_factory, _settings_env, monkeypatch
+):
+    """The pass-start recheck runs ONCE, before the five wave-1 calls.
+
+    Consolidation launches after those five have committed their spend, so a run
+    that was legitimately under the ceiling at pass start could still make a
+    sixth hosted call after crossing it. Only the per-sub-call check inside
+    `_drive` can stop that.
+
+    The arithmetic is pinned so the denial lands on consolidation and nowhere
+    else: concurrency 1 makes wave-1 strictly sequential, five calls at 21 input
+    tokens run the total 0 -> 84 (each still under the 100 ceiling when it
+    checks) and leave it at 105. Consolidation is the first call to see a total
+    at or over the cap.
+
+    A first draft seeded 90 and let wave-1 deny ITSELF: every persona failed,
+    consolidation was skipped as "all personas failed", and the test passed
+    without the cap check existing. Hence the exact-set assertion below — the
+    five wave-1 calls must all have reached the model.
+    """
+    # The ceiling is set RELATIVE to what today's ledger already holds. A fixed
+    # "100" passed this file alone and failed the full run: xdist gives each
+    # worker one Postgres and `--dist loadfile` puts many files on it, so every
+    # other test that records spend lands in the same Stockholm day and the cap
+    # was already blown before pass start. Reading the total here makes the
+    # arithmetic below hold wherever this test runs in the order.
+    with pg_session_factory() as s:
+        used_in, _ = sum_spend_today(s)
+    monkeypatch.setenv("GLOBAL_DAILY_TOKEN_CAP_INPUT", str(used_in + 100))
+    settings = Settings()
+    settings.workspaces_dir = str(tmp_path)
+    settings.review_persona_concurrency = 1
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, current_phase="active")
+        ws.rubric_criteria = [
+            {"name": "Scientific quality", "description": "Rigour", "weight": 1.0},
+        ]
+        s.flush()
+        ws_id = ws.id
+        s.commit()
+
+    draft_sha = _review_repo(tmp_path, ws_id)
+    with pg_session_factory() as s:
+        run = enqueue_review_run(s, workspace_id=ws_id, draft_sha=draft_sha)
+        run.status = "running"
+        s.commit()
+        run_id = run.id
+
+    reached: list[str] = []
+    inner = _review_builder(pg_session_factory, outcome="ok", tokens_in=21, tokens_out=0)
+
+    def counting_builder(**kwargs):
+        adapter = inner(**kwargs)
+        kind = kwargs["kind"]
+        real_send = adapter.send_turn
+
+        async def send_turn(handle, instruction):
+            reached.append(kind)
+            async for event in real_send(handle, instruction):
+                yield event
+
+        adapter.send_turn = send_turn
+        return adapter
+
+    asyncio.run(
+        run_review_pass(
+            run_id=run_id,
+            claimed_generation=0,
+            session_factory=pg_session_factory,
+            settings=settings,
+            adapter_builder=counting_builder,
+        )
+    )
+
+    # All five wave-1 calls ran; consolidation is the ONLY one denied. Without
+    # this exact set, "consolidation never ran" is also true when wave-1 failed
+    # and consolidation was skipped for having nothing to consolidate.
+    assert sorted(reached) == sorted(WAVE1_KINDS), reached
+
+    with pg_session_factory() as s:
+        cons = s.scalar(
+            select(ReviewRunItem).where(
+                ReviewRunItem.review_run_id == run_id,
+                ReviewRunItem.kind == "consolidation",
+            )
+        )
+        assert cons.status == "failed", (cons.status, cons.error_message)
+        # Named, not just "failed": any sub-call exception also lands as failed,
+        # so a bare status assert would pass on an unrelated break.
+        assert cons.error_message == "global daily token cap reached"
+        row = s.scalar(
+            select(LlmSpend).where(
+                LlmSpend.kind == "review", LlmSpend.ref_id == str(cons.id)
+            )
+        )
+        # Denied is still a terminal path, so it still writes a row — a zero one.
+        assert row is not None, "denied consolidation wrote no ledger row"
+        assert (row.tokens_in, row.tokens_out) == (0, 0), row
