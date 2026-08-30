@@ -384,7 +384,9 @@ def test_running_it_twice_changes_nothing(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
         r = backfill_branch_entities(s, workspaces_dir=tmp_path)
         s.commit()
-        assert (r.created, r.deleted, r.rooted) == (0, 0, 1)
+        # rooted is 0, not 1: the pointer was already founded, and this function
+        # founds roots rather than maintaining them (§7.3 — promote moves it).
+        assert (r.created, r.deleted, r.rooted) == (0, 0, 0)
         assert _names(s, wid) == ["main", "new_ideas"]
 
 
@@ -596,3 +598,56 @@ def test_the_migration_calls_the_backfill_inside_upgrade():
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
     }
     assert "backfill_branch_entities" in called, sorted(called)
+
+
+def test_reconciling_after_a_switch_does_not_move_the_root(pg_session_factory, tmp_path):
+    """§7.3 gives moving the root to promote alone. `switch_branch` correctly
+    leaves the pointer be — so a reconciler that re-derived it from git HEAD would
+    hand that power to whoever switched last.
+
+    Measured before the guard existed: switch to `new_ideas`, re-run, and the
+    pointer moved to `new_ideas`, reporting `created=0, deleted=0, rooted=1`. The
+    workspace's real root then became deletable, and `git branch -D` is not
+    recoverable through the UI.
+
+    The delete at the end is the point. Asserting only that the pointer did not
+    move would pass against a fix that moved it somewhere else harmless; what
+    actually matters is that the root stays undeletable.
+    """
+    with pg_session_factory() as s:
+        wid = make_workspace(s, title="w", owner=make_user(s, email="noswitch@ki.se")).id
+        s.commit()
+    repo = _repo(tmp_path, wid, "main", extra=("new_ideas",))
+
+    with pg_session_factory() as s:
+        backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+        founded = s.get(Branch, s.get(Workspace, wid).root_branch_id).name
+    assert founded == "main"
+
+    subprocess.run(["git", "checkout", "-q", "new_ideas"], cwd=repo, check=True)
+
+    with pg_session_factory() as s:
+        r = backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+        assert r.rooted == 0, "a re-run re-founded a root that was already set"
+        assert s.get(Branch, s.get(Workspace, wid).root_branch_id).name == "main", (
+            "the reconciler moved the root to whatever repo/ was checked out on"
+        )
+
+
+def test_a_workspace_with_no_repo_is_counted_absent_not_silently_zero(pg_session_factory, tmp_path):
+    """`WORKSPACES_DIR` unset, resolved against the wrong cwd, or an unmounted
+    volume makes EVERY workspace look like one still in setup — and the run then
+    prints the same clean zero an empty instance prints. Counting them is what
+    makes those two distinguishable in the migration's output."""
+    with pg_session_factory() as s:
+        a = make_workspace(s, title="a", owner=make_user(s, email="abs-a@ki.se")).id
+        make_workspace(s, title="b", owner=make_user(s, email="abs-b@ki.se"))
+        s.commit()
+    _repo(tmp_path, a, "main")  # one real repo, one workspace with none
+
+    with pg_session_factory() as s:
+        r = backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+        assert (r.created, r.rooted, r.skipped, r.absent) == (1, 1, 0, 1)

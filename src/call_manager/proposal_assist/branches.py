@@ -322,6 +322,13 @@ def create_workspace_branch(
     # `last_sdk_session_id` is deliberately left NULL: a new branch has held no
     # hosted conversation, and inheriting the parent's handle would let two
     # branches resume one remote session (§3.1).
+    # `branch_exists` has just answered NO for this name, so any row carrying it
+    # is by definition an orphan — a delete whose commit failed after `git branch
+    # -D`, or a restore whose database snapshot is newer than the repo volume.
+    # Without this, `uq_branches_ws_name` fires on the caller's commit, `_STATUS`
+    # has no mapping for IntegrityError, and a create that USED to return 201
+    # returns a 500 — while git has already made the ref. Measured.
+    session.execute(delete(Branch).where(Branch.workspace_id == workspace_id, Branch.name == name))
     session.add(Branch(workspace_id=workspace_id, name=name))
     logger.info(
         "branches.created",

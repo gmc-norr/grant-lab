@@ -40,6 +40,11 @@ class BackfillResult(NamedTuple):
     deleted: int
     rooted: int
     skipped: int
+    #: Workspaces with no repo directory at all. Correct for one still in setup —
+    #: but if `WORKSPACES_DIR` is unset, resolved against the wrong cwd, or the
+    #: volume is not mounted, EVERY workspace looks like that and the run reports
+    #: a clean zero. Counted so "0 of 0" and "0 of 500" cannot print identically.
+    absent: int
 
 
 def _real_refs(repo: Path) -> list[str]:
@@ -61,7 +66,7 @@ def _real_refs(repo: Path) -> list[str]:
 
 
 def backfill_branch_entities(
-    session: Session, *, workspaces_dir: Path, workspace_id: uuid.UUID | None = None
+    session: Session, *, workspaces_dir: Path | str, workspace_id: uuid.UUID | None = None
 ) -> BackfillResult:
     """Make `branches` agree with each workspace's local refs, and set the root
     pointer. Returns counts. Does NOT commit.
@@ -105,7 +110,7 @@ def backfill_branch_entities(
     detached-HEAD case and the orphan sweep are all already tested here, and a
     parallel implementation would be the one that drifts.
     """
-    created = deleted = rooted = skipped = 0
+    created = deleted = rooted = skipped = absent = 0
     query = select(Workspace.id, Workspace.last_sdk_session_id)
     if workspace_id is not None:
         query = query.where(Workspace.id == workspace_id)
@@ -113,7 +118,10 @@ def backfill_branch_entities(
     for wid, sdk_session_id in rows:
         repo = workspace_repo_dir(workspaces_dir, wid)
         if not (repo / ".git").exists():
-            continue  # still in setup; nothing to found a branch on, and not a failure
+            # Still in setup: nothing to found a branch on, and not a failure.
+            # Counted anyway — see BackfillResult.absent.
+            absent += 1
+            continue
         try:
             names = _real_refs(repo)
         except (GitCommitError, OSError, subprocess.TimeoutExpired):
@@ -155,7 +163,21 @@ def backfill_branch_entities(
         #
         # RESTRICT did its job — it refused to let a caller silently orphan the
         # root pointer. This function was that caller.
-        if head in names:
+        # The root pointer is FOUNDED here, never MAINTAINED here. §7.3 gives
+        # moving it to promote alone, and `switch_branch` deliberately leaves it
+        # be — so a reconciler that re-derived it from HEAD would hand that power
+        # to whoever switched last. Measured before this guard existed: switch to
+        # `new_ideas`, re-run, and the pointer moved, which made the workspace's
+        # real root deletable (`delete_workspace_branch` guards the root, and `-D`
+        # is not recoverable through the UI).
+        #
+        # So assign only when the pointer is VACANT: never set, or naming a row
+        # whose git ref has just vanished.
+        rooted_at = session.get(Workspace, wid).root_branch_id
+        held = session.get(Branch, rooted_at) if rooted_at is not None else None
+        vacant = held is None or held.name in orphans
+
+        if vacant and head in names:
             root = session.execute(
                 select(Branch).where(Branch.workspace_id == wid, Branch.name == head)
             ).scalar_one()
@@ -163,19 +185,17 @@ def backfill_branch_entities(
                 update(Workspace).where(Workspace.id == wid).values(root_branch_id=root.id)
             )
             rooted += 1
-        elif orphans:
-            # No new root is knowable (detached HEAD, or HEAD on a ref that is
-            # somehow absent) AND rows are about to go. Clear the pointer only if
-            # it names one of the doomed rows: a workspace whose root survived
-            # keeps it, and one whose root's ref vanished is left honestly
-            # rootless rather than pointed at a branch that no longer exists.
-            rooted_at = session.get(Workspace, wid).root_branch_id
-            if rooted_at is not None:
-                doomed = session.get(Branch, rooted_at)
-                if doomed is not None and doomed.name in orphans:
-                    session.execute(
-                        update(Workspace).where(Workspace.id == wid).values(root_branch_id=None)
-                    )
+        elif vacant and held is not None:
+            # The old root's ref is gone and no new root is knowable (detached
+            # HEAD). Clearing is the honest answer; promoting a survivor is not
+            # this function's decision to make.
+            #
+            # This must run BEFORE the delete below: the FK is ON DELETE RESTRICT,
+            # so deleting a row the workspace still points at raises
+            # ForeignKeyViolation, and one transaction covers every workspace.
+            session.execute(
+                update(Workspace).where(Workspace.id == wid).values(root_branch_id=None)
+            )
 
         if orphans:
             session.execute(
@@ -202,4 +222,6 @@ def backfill_branch_entities(
                 "root": head,
             },
         )
-    return BackfillResult(created=created, deleted=deleted, rooted=rooted, skipped=skipped)
+    return BackfillResult(
+        created=created, deleted=deleted, rooted=rooted, skipped=skipped, absent=absent
+    )

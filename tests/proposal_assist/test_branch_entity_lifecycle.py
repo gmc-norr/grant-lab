@@ -247,3 +247,33 @@ def test_deleting_a_branch_with_no_row_still_drops_the_ref(pg_session_factory, t
     assert not branch_exists(repo, "orphan")
     with pg_session_factory() as s:
         assert _rows(s, wid) == ["main"]
+
+
+def test_create_over_an_orphaned_row_still_returns_a_branch(pg_session_factory, tmp_path):
+    """An orphan row — a delete whose commit failed after `git branch -D`, or a
+    restore whose database snapshot is newer than the repo volume — used to make
+    the NEXT create of that name blow up on `uq_branches_ws_name`. `_STATUS` has
+    no mapping for IntegrityError, so a create that returned 201 before this
+    branch returned a 500, with git having already made the ref.
+
+    `branch_exists` has just answered NO, so any row of that name is by
+    definition stale and is cleared first.
+    """
+    wid, repo = _ws(pg_session_factory, tmp_path)
+    with pg_session_factory() as s:
+        s.add(Branch(workspace_id=wid, name="new_ideas"))  # row, no ref
+        s.commit()
+
+    with pg_session_factory() as s:
+        create_workspace_branch(
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            name="new_ideas",
+            workspaces_dir=tmp_path,
+        )
+        s.commit()  # must not raise IntegrityError
+
+    assert branch_exists(repo, "new_ideas")
+    with pg_session_factory() as s:
+        assert _rows(s, wid) == sorted(list_branches(repo))

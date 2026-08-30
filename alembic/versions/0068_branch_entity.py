@@ -72,8 +72,15 @@ def upgrade() -> None:
     # silent, or "the migration succeeded" reads as "every workspace was founded".
     print(
         f"0068: founded {result.created} branch rows, removed {result.deleted} orphans, "
-        f"set {result.rooted} root pointers, SKIPPED {result.skipped} unreadable repos"
+        f"set {result.rooted} root pointers, SKIPPED {result.skipped} unreadable repos, "
+        f"{result.absent} workspaces with no repo directory"
     )
+    # `absent` is the one to read on a deploy. A workspace still in setup has no
+    # repo and is correctly skipped — but if WORKSPACES_DIR is unset, resolved
+    # against the wrong cwd, or the volume is not mounted here, EVERY workspace
+    # looks that way and every other counter prints a clean zero. `absent` equal
+    # to the workspace count means this migration founded nothing and nobody was
+    # told. There is no automatic repair: re-run the reconciler before S2.
 
 
 def downgrade() -> None:
