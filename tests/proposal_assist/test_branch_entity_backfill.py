@@ -572,3 +572,27 @@ def test_a_surviving_root_pointer_is_not_cleared_by_an_unrelated_orphan(
         s.commit()
         assert r.deleted == 1
         assert s.get(Workspace, wid).root_branch_id == root_before, "unrooted a healthy workspace"
+
+
+def test_the_migration_calls_the_backfill_inside_upgrade():
+    """The migration body cannot be executed in a unit test — it needs a live
+    Alembic op context — so pin the wiring by PARSING it.
+
+    A substring search would not do: `assert "backfill_branch_entities" in source`
+    is satisfied by the import line alone, by a comment, or by dead code after a
+    `return`. That is the exact shape of a gate that passes because its subject is
+    already present. This walks the AST of `upgrade()` and requires an actual Call
+    whose callee is named `backfill_branch_entities`.
+    """
+    import ast
+    import pathlib
+
+    src = pathlib.Path("alembic/versions/0068_branch_entity.py").read_text()
+    tree = ast.parse(src)
+    upgrade = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade")
+    called = {
+        n.func.id
+        for n in ast.walk(upgrade)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+    assert "backfill_branch_entities" in called, sorted(called)

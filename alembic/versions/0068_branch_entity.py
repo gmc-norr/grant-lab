@@ -53,6 +53,28 @@ def upgrade() -> None:
         ondelete="RESTRICT",
     )
 
+    # Then found the branches from each repo. Same split as 0066: the migration is
+    # untestable in place, so the half that can be wrong lives in a module with
+    # tests. `branches` and `root_branch_id` both exist by this point.
+    import os
+
+    from sqlalchemy.orm import Session
+
+    from call_manager.proposal_assist.branch_entity_backfill import backfill_branch_entities
+
+    workspaces_dir = os.environ.get("WORKSPACES_DIR", "var/workspaces")
+    with Session(bind=op.get_bind()) as s:
+        result = backfill_branch_entities(s, workspaces_dir=workspaces_dir)
+        s.commit()
+    # Say what happened. A workspace whose repo could not be read is left with no
+    # rows and no root pointer, and the migration still succeeds — that is the
+    # right trade (one bad repo must not block a deploy) but it must not be
+    # silent, or "the migration succeeded" reads as "every workspace was founded".
+    print(
+        f"0068: founded {result.created} branch rows, removed {result.deleted} orphans, "
+        f"set {result.rooted} root pointers, SKIPPED {result.skipped} unreadable repos"
+    )
+
 
 def downgrade() -> None:
     op.drop_constraint("fk_workspaces_root_branch_id", "workspaces", type_="foreignkey")
