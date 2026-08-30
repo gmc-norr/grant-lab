@@ -779,6 +779,10 @@ def test_a_row_whose_ref_is_gone_is_deleted(pg_session_factory, tmp_path):
         s.commit()
     _repo(tmp_path, wid, "main")
     with pg_session_factory() as s:
+        # `main` needs its row ALREADY, or the reconciler creates it in the same
+        # pass and `created` is 1 — which would make the assertion below about two
+        # things at once instead of isolating the delete path.
+        s.add(Branch(workspace_id=wid, name="main"))
         s.add(Branch(workspace_id=wid, name="deleted_behind_our_back"))
         s.commit()
 
@@ -898,8 +902,11 @@ def test_one_broken_repo_does_not_halt_the_rest(pg_session_factory, tmp_path):
     """A migration that dies on workspace 7 of 500 leaves the database half
     founded, and the unique key makes the retry fail differently."""
     with pg_session_factory() as s:
-        good = make_workspace(s, title="good").id
-        bad = make_workspace(s, title="bad").id
+        # Distinct owners: `make_user`'s default email is the fixed literal
+        # "owner@ki.se" and two calls in one session collide on `uq_users_email`
+        # (`tests/proposal_assist/conftest.py:200-204`).
+        good = make_workspace(s, title="good", owner=make_user(s, email="good@ki.se")).id
+        bad = make_workspace(s, title="bad", owner=make_user(s, email="bad@ki.se")).id
         s.commit()
     _repo(tmp_path, good, "main")
     broken = workspace_repo_dir(tmp_path, bad)
@@ -1111,15 +1118,25 @@ Expected: `23 passed` (8 from Task 1, 15 added here).
 
 Run each mutation, record which tests redden, and revert before the next.
 
-**Mutation A — swap the two sources.** Replace `head = current_branch(repo)` with
-`head = session.get(Workspace, wid).current_branch`, and the SDK block's
-`current = session.get(Workspace, wid).current_branch` with `current = head`.
+**Mutation A — swap the two sources.** Both halves must be swapped INDEPENDENTLY:
 
-Expected: `test_the_root_pointer_follows_git_not_the_column` FAILS with
-`root followed the column, not repo/`, **and**
-`test_the_sdk_handle_follows_the_column_not_git` FAILS. Both fixtures are the same
-disagreeing repo, so a mutation that reddens only one means the other is not reading what
-it claims.
+```python
+            head = session.get(Workspace, wid).current_branch   # was: current_branch(repo)
+        current = current_branch(repo)                          # was: the column
+```
+
+**Do not write `current = head`.** Once `head` reads the column, `current = head` is still
+the column — the SDK half is unchanged and its test stays green, which reads as "that test
+is hollow" when the mutation is simply not a swap. Measured: the correct swap above reddens
+five tests, including both named below.
+
+Expected: **five** tests fail — `test_the_root_pointer_follows_git_not_the_column` with
+`root followed the column, not repo/`, `test_the_sdk_handle_follows_the_column_not_git`,
+`test_the_root_pointer_names_the_branch_repo_actually_holds`,
+`test_a_detached_head_still_founds_the_refs_but_no_root` and
+`test_a_detached_head_founds_no_pseudo_branch`. The first two are the point: they share one
+fixture where HEAD and the column disagree, so a mutation reddening only one would mean the
+other is not reading what it claims.
 
 **Mutation B — drop the ref filter.** Change `_real_refs` to `return list_branches(repo)`.
 
