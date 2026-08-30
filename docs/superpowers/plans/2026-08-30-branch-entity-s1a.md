@@ -37,20 +37,52 @@ sweeps that consume that object and would each drown this plan's review surface.
 Copied from `docs/superpowers/specs/2026-08-30-per-branch-worktrees-and-rooms-design.md`
 (rev `1235c8bb`). These bind every task.
 
-- **Behaviour must not change.** No route, no response body, no user-visible string moves
-  in this plan. Nothing reads `branches` or `root_branch_id` yet.
+- **Behaviour must not change, with ONE stated exception.** No route, no response body,
+  no user-visible string moves. Nothing reads `branches` yet.
+  **The exception, and it is deliberate:** `delete_workspace_branch` starts refusing the
+  **root** branch (§7.3). Today it refuses only the *current* branch, so a user who
+  switched away could delete the branch `repo/` was founded on. That is the hole §7.3
+  closes, and closing it is a behaviour change with a user-visible 409. Task 5 pins it at
+  the API level; nothing else in this plan may change behaviour.
 - **The id is the identity; the name is a mutable label** (§3.2). Never key anything on
   the name.
-- **`root_branch_id` is DISTINCT from `current_branch`** (§8 S1 step 2). `current_branch`
-  still moves on every switch until S4. Resolving a path through a pointer that moves
-  would send a commit to `repo/` while `repo/` held a different branch.
+- **`root_branch_id` is the workspace's ROOT BRANCH, moved only by promote** (§7.3) —
+  **not** "whatever `repo/` currently holds". Those coincide at migration time and then
+  drift, because `switch_branch` step 9 still runs `checkout_branch(repo, target)`
+  (`branches.py:224-226`) and physically moves `repo/` on every switch until S2.
+  **This plan must not chase that drift.** A root pointer that followed every switch would
+  be `current_branch` under another name, and the whole point of §7.3 is that promote —
+  not switching — moves the root. The pointer records where the workspace's root is; S2's
+  first act is to check that branch back out into `repo/` and stop the wandering, which is
+  recorded as a required S2 step in the spec's §8.
 - **`last_sdk_session_id` is branch state, not workspace state** (§3.1, §8 S1 step 1).
-  Two branches cannot resume one hosted conversation. The workspace column **stays** in
-  this plan and is dropped in S4 when its last reader goes.
+  Two branches cannot resume one hosted conversation. It is copied onto the row named by
+  **`workspaces.current_branch`** — the conversation belongs to the branch the *user* was
+  on, and §4.1 makes the database the source of truth for that, not git HEAD. (Those two
+  differ after a crashed switch; the root pointer follows HEAD, the SDK handle follows the
+  column, and a test pins each.) The workspace column **stays** in this plan and is
+  dropped in S4 when its last reader (`turns/processor.py:389`) goes.
 - **Backfill every local ref, not just the current one** (§8 S1 step 3). A ref with no row
-  is invisible to every later stage.
+  is invisible to every later stage. **Filter what `list_branches` returns.** Measured on a
+  detached HEAD it emits a pseudo-entry before the real refs:
+
+  ```
+  $ git branch --format='%(refname:short)'
+  (HEAD detached at 777c52e)
+  main
+  ```
+
+  Founding a row from that line creates a branch literally named
+  `(HEAD detached at 777c52e)`. Every name must be confirmed with `branch_exists` before
+  a row is written.
 - **Create and delete maintain rows from this stage on** (§8 S1 step 4). A one-time
   backfill is not enough.
+- **Rows and refs are NOT atomic, and this plan does not pretend otherwise.** `git branch`
+  is not transactional. A commit that fails *after* the git call leaves a ref with no row
+  (create) or a row with no ref (delete). No ordering fixes this without two-phase commit.
+  The mitigation is that `backfill_branch_entities` is a **two-way reconciler** — it adds
+  missing rows and removes orphaned ones — and is safe to re-run at any time; S2 runs it
+  again before it attaches anything. Task 2 tests both directions.
 - **Do NOT touch any `checkout_branch` call site.** That is S2's work
   (`branches.py:226`, `branches.py:124`, `checkpoint.py:85`). Touching it here would
   attach half of S2 to a stage that does not attach worktrees.
@@ -342,13 +374,21 @@ In `src/call_manager/db/models.py`, inside `class Workspace`, immediately after 
 `current_branch` column (line 704), add:
 
 ```python
-    #: The branch whose worktree IS `repo/` (§7.3). **Distinct from
-    #: `current_branch` on purpose**: `current_branch` moves on every switch until
-    #: S4, and resolving a filesystem path through a pointer that moves would send
-    #: a commit to `repo/` while `repo/` held a different branch. Moved only by
-    #: promote. Nullable because a workspace still in setup has no repo and so no
-    #: branch to point at; `tests/architecture/test_branch_entity_invariants.py`
-    #: pins that a workspace WITH a repo is never left null.
+    #: The workspace's ROOT branch (§7.3) — the one whose worktree will BE `repo/`
+    #: once S2 stops checkout-based switching, and the only branch that cannot be
+    #: deleted. **Moved only by promote.** Deliberately NOT `current_branch`:
+    #: switching is not promoting, and a pointer that followed every switch would
+    #: be `current_branch` under another name.
+    #:
+    #: Until S2 lands, `switch_branch` step 9 still runs `checkout_branch(repo,
+    #: target)` (`branches.py:224-226`), so what `repo/` physically holds drifts
+    #: away from this pointer between a switch and S2. That is expected and
+    #: harmless here — nothing resolves a path through this column yet — and S2
+    #: checks the root back out before it attaches any worktree.
+    #:
+    #: Nullable because a workspace still in setup has no repo and so no branch to
+    #: point at; `tests/architecture/test_branch_entity_invariants.py` pins that a
+    #: workspace WITH a repo is never left null.
     root_branch_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         # use_alter: `workspaces` and `branches` reference each other (this
@@ -515,18 +555,35 @@ ARCHITECTURE.md regenerated in the same commit that moved the model."
 **Interfaces:**
 - Consumes: `Branch`, `Workspace.root_branch_id` from Task 1.
 - Produces:
-  `backfill_branch_entities(session: Session, *, workspaces_dir: Path) -> tuple[int, int]`
-  returning `(branch rows created, root pointers set)`. Does **not** commit.
+  `backfill_branch_entities(session: Session, *, workspaces_dir: Path) -> BackfillResult`
+  — a `NamedTuple` with fields `created: int`, `deleted: int`, `rooted: int`,
+  `skipped: int`. Does **not** commit.
+
+**It is a reconciler, not a one-shot backfill.** Rows and refs cannot be kept atomic (git
+is not transactional), so this function must be safe and useful to run at any time: it
+adds a row for every ref that lacks one AND deletes every row whose ref is gone. That is
+what repairs a create or delete whose commit failed after the git call, and it is what S2
+runs before it attaches anything.
+
+**`skipped` is returned, not swallowed.** A workspace whose repo cannot be read is left
+without rows, and the caller has to be able to say so. Counting it is what stops
+"the migration succeeded" from meaning "every workspace was founded".
 
 **Why a separate module.** The migration is untestable in place, and this is the half that
 can be wrong. `branch_backfill.py` already established exactly this split for
 `current_branch`; follow it.
 
-**Why the root pointer reads git HEAD, not `current_branch`.** §7.3 makes the root *the
-branch that physically lives in `repo/`*. `current_branch` is the database's belief about
-where the **user** is, and after a crashed switch the two disagree
-(`branches.py:100-126` exists precisely because they can). Path resolution follows the
-files, so the pointer must too.
+**The two columns split, and each follows a different source.** After a crashed switch,
+git HEAD and `workspaces.current_branch` disagree — `_reconcile_head`
+(`branches.py:100-126`) exists precisely because they can. At migration time:
+
+| What | Follows | Why |
+|---|---|---|
+| `workspaces.root_branch_id` | **git HEAD** | The root is founded on what `repo/` actually is. A pointer founded on the column would name a tree nobody has. |
+| `branches.last_sdk_session_id` | **`workspaces.current_branch`** | It is a *conversation*, and it belongs to the branch the **user** was on. §4.1 makes the database the source of truth for that. Spec §8 S1 step 1 says so explicitly. |
+
+Getting these the same way round is not a detail — a test pins each, and they use the
+same fixture with HEAD and the column deliberately disagreeing.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -579,10 +636,26 @@ def test_every_local_ref_gets_a_row_not_just_the_current_one(pg_session_factory,
     _repo(tmp_path, wid, "main", extra=("new_ideas", "eu_version"))
 
     with pg_session_factory() as s:
-        created, rooted = backfill_branch_entities(s, workspaces_dir=tmp_path)
+        r = backfill_branch_entities(s, workspaces_dir=tmp_path)
         s.commit()
-        assert (created, rooted) == (3, 1)
+        assert (r.created, r.deleted, r.rooted, r.skipped) == (3, 0, 1, 0)
         assert _names(s, wid) == ["eu_version", "main", "new_ideas"]
+
+
+def test_a_slashed_branch_name_round_trips(pg_session_factory, tmp_path):
+    """`git check-ref-format --branch` accepts `aims/ambitious`, and
+    `test_api_branches.py:114-121` already relies on it — the delete route uses
+    `{name:path}` for exactly this. §3.2 makes slashes the reason a branch needs an
+    id at all, so a slashed name must survive the row it is founded into."""
+    with pg_session_factory() as s:
+        wid = make_workspace(s, title="w").id
+        s.commit()
+    _repo(tmp_path, wid, "main", extra=("aims/ambitious",))
+
+    with pg_session_factory() as s:
+        backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+        assert _names(s, wid) == ["aims/ambitious", "main"]
 
 
 def test_the_root_pointer_names_the_branch_repo_actually_holds(pg_session_factory, tmp_path):
@@ -600,20 +673,25 @@ def test_the_root_pointer_names_the_branch_repo_actually_holds(pg_session_factor
         assert s.get(Branch, root_id).name == "aims-ambitious"
 
 
-def test_the_root_pointer_follows_git_not_the_current_branch_column(pg_session_factory, tmp_path):
-    """The two disagree after a crashed switch — `_reconcile_head` exists because
-    of it. §7.3 makes the root the branch that physically lives in `repo/`, and a
-    path resolves to files, so the pointer must follow the files. Reading
-    `current_branch` here would point the root at a tree nobody has."""
-    with pg_session_factory() as s:
-        ws = make_workspace(s, title="w")
-        wid = ws.id
+def _head_and_column_disagree(session_factory, tmp_path):
+    """The state a crashed switch leaves: `repo/` is on main, the column says
+    new_ideas. `_reconcile_head` (branches.py:100-126) exists because of it."""
+    with session_factory() as s:
+        wid = make_workspace(s, title="w").id
         s.commit()
     _repo(tmp_path, wid, "main", extra=("new_ideas",))
-
-    with pg_session_factory() as s:
-        s.get(Workspace, wid).current_branch = "new_ideas"  # the DB's stale belief
+    with session_factory() as s:
+        ws = s.get(Workspace, wid)
+        ws.current_branch = "new_ideas"
+        ws.last_sdk_session_id = "sess-abc"
         s.commit()
+    return wid
+
+
+def test_the_root_pointer_follows_git_not_the_column(pg_session_factory, tmp_path):
+    """§7.3 founds the root on what `repo/` actually is. Reading `current_branch`
+    here would point the root at a tree nobody has."""
+    wid = _head_and_column_disagree(pg_session_factory, tmp_path)
 
     with pg_session_factory() as s:
         backfill_branch_entities(s, workspaces_dir=tmp_path)
@@ -624,15 +702,12 @@ def test_the_root_pointer_follows_git_not_the_current_branch_column(pg_session_f
         assert s.get(Branch, root_id).name == "main", "root followed the column, not repo/"
 
 
-def test_the_sdk_handle_lands_on_the_root_branch_only(pg_session_factory, tmp_path):
-    """§3.1: it is one hosted conversation, and it belongs to the branch that
-    conversation was held on. Copying it to every branch would let two branches
-    resume the same remote session."""
-    with pg_session_factory() as s:
-        wid = make_workspace(s, title="w").id
-        s.get(Workspace, wid).last_sdk_session_id = "sess-abc"
-        s.commit()
-    _repo(tmp_path, wid, "main", extra=("new_ideas",))
+def test_the_sdk_handle_follows_the_column_not_git(pg_session_factory, tmp_path):
+    """The mirror image, on the SAME disagreeing fixture. A conversation belongs to
+    the branch the USER was on, and §4.1 makes the column the source of truth for
+    that (spec §8 S1 step 1). Getting these two the same way round would put the
+    handle on a branch the user was never talking on."""
+    wid = _head_and_column_disagree(pg_session_factory, tmp_path)
 
     with pg_session_factory() as s:
         backfill_branch_entities(s, workspaces_dir=tmp_path)
@@ -641,14 +716,33 @@ def test_the_sdk_handle_lands_on_the_root_branch_only(pg_session_factory, tmp_pa
     with pg_session_factory() as s:
         rows = s.execute(select(Branch).where(Branch.workspace_id == wid)).scalars().all()
         assert {b.name: b.last_sdk_session_id for b in rows} == {
-            "main": "sess-abc",
-            "new_ideas": None,
+            "main": None,
+            "new_ideas": "sess-abc",
         }
 
 
+def test_the_sdk_handle_lands_on_one_branch_only(pg_session_factory, tmp_path):
+    """§3.1: copying it to every branch would let two branches resume the same
+    remote session."""
+    with pg_session_factory() as s:
+        wid = make_workspace(s, title="w").id
+        s.get(Workspace, wid).last_sdk_session_id = "sess-abc"
+        s.commit()
+    _repo(tmp_path, wid, "main", extra=("new_ideas", "eu_version"))
+
+    with pg_session_factory() as s:
+        backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+
+    with pg_session_factory() as s:
+        rows = s.execute(select(Branch).where(Branch.workspace_id == wid)).scalars().all()
+        carried = [b.name for b in rows if b.last_sdk_session_id == "sess-abc"]
+        assert carried == ["main"]
+
+
 def test_the_workspace_column_is_left_alone(pg_session_factory, tmp_path):
-    """Control. S4 drops it, not this stage — `turns/processor.py:389` is still
-    the only reader and it still reads the workspace. Nulling it here would break
+    """Control. S4 drops it, not this stage — `turns/processor.py:389` is still the
+    only reader and it still reads the workspace. Nulling it here would break
     conversation resume for every workspace with no test noticing."""
     with pg_session_factory() as s:
         wid = make_workspace(s, title="w").id
@@ -664,7 +758,46 @@ def test_the_workspace_column_is_left_alone(pg_session_factory, tmp_path):
         assert s.get(Workspace, wid).last_sdk_session_id == "sess-abc"
 
 
-def test_running_it_twice_creates_nothing_new(pg_session_factory, tmp_path):
+def test_a_row_whose_ref_is_gone_is_deleted(pg_session_factory, tmp_path):
+    """The other half of the repair. `git branch -D` is not transactional, so a
+    delete whose commit failed afterwards leaves a row with no ref — and nothing
+    else would ever remove it."""
+    with pg_session_factory() as s:
+        wid = make_workspace(s, title="w").id
+        s.commit()
+    _repo(tmp_path, wid, "main")
+    with pg_session_factory() as s:
+        s.add(Branch(workspace_id=wid, name="deleted_behind_our_back"))
+        s.commit()
+
+    with pg_session_factory() as s:
+        r = backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+        assert (r.created, r.deleted) == (0, 1)
+        assert _names(s, wid) == ["main"]
+
+
+def test_an_unreadable_repo_deletes_nothing(pg_session_factory, tmp_path):
+    """The dangerous direction of the reconciler. A transient git failure must
+    never read as 'this workspace has no branches any more' and wipe its rows."""
+    with pg_session_factory() as s:
+        wid = make_workspace(s, title="w").id
+        s.commit()
+    repo = _repo(tmp_path, wid, "main", extra=("new_ideas",))
+    with pg_session_factory() as s:
+        backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+    (repo / ".git" / "HEAD").write_text("garbage\n")
+
+    with pg_session_factory() as s:
+        r = backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+        assert r.deleted == 0
+        assert r.skipped == 1
+        assert _names(s, wid) == ["main", "new_ideas"]
+
+
+def test_running_it_twice_changes_nothing(pg_session_factory, tmp_path):
     """A migration can be re-run against a partially-migrated database, and the
     unique key would turn that into a hard failure rather than a no-op."""
     with pg_session_factory() as s:
@@ -673,56 +806,80 @@ def test_running_it_twice_creates_nothing_new(pg_session_factory, tmp_path):
     _repo(tmp_path, wid, "main", extra=("new_ideas",))
 
     with pg_session_factory() as s:
-        assert backfill_branch_entities(s, workspaces_dir=tmp_path) == (2, 1)
+        r = backfill_branch_entities(s, workspaces_dir=tmp_path)
         s.commit()
+        assert (r.created, r.deleted, r.rooted) == (2, 0, 1)
 
     with pg_session_factory() as s:
-        assert backfill_branch_entities(s, workspaces_dir=tmp_path) == (0, 1)
+        r = backfill_branch_entities(s, workspaces_dir=tmp_path)
         s.commit()
+        assert (r.created, r.deleted, r.rooted) == (0, 0, 1)
         assert _names(s, wid) == ["main", "new_ideas"]
 
 
-def test_a_workspace_with_no_repo_is_skipped(pg_session_factory, tmp_path):
+def test_a_workspace_with_no_repo_is_skipped_and_not_a_failure(pg_session_factory, tmp_path):
     """Still in setup. There is nothing to found a branch on, and inventing a
-    'main' row would create a row for a ref that does not exist."""
+    'main' row would create a row for a ref that does not exist. It is not a
+    failure either, so it must not inflate `skipped`."""
     with pg_session_factory() as s:
         wid = make_workspace(s, title="w").id
         s.commit()
 
     with pg_session_factory() as s:
-        assert backfill_branch_entities(s, workspaces_dir=tmp_path) == (0, 0)
+        r = backfill_branch_entities(s, workspaces_dir=tmp_path)
         s.commit()
+        assert (r.created, r.rooted, r.skipped) == (0, 0, 0)
         assert _names(s, wid) == []
         assert s.get(Workspace, wid).root_branch_id is None
 
 
 def test_a_repo_with_no_commits_is_skipped(pg_session_factory, tmp_path):
-    """`git init` with no commit has a branch name but no ref — `list_branches`
-    returns empty, so there is no ref to found a row on."""
+    """`git init` with no commit has a branch name but no ref — there is no ref to
+    found a row on."""
     with pg_session_factory() as s:
         wid = make_workspace(s, title="w").id
         s.commit()
     _repo(tmp_path, wid, "main", commit=False)
 
     with pg_session_factory() as s:
-        assert backfill_branch_entities(s, workspaces_dir=tmp_path) == (0, 0)
+        r = backfill_branch_entities(s, workspaces_dir=tmp_path)
         s.commit()
+        assert (r.created, r.rooted) == (0, 0)
         assert _names(s, wid) == []
 
 
-def test_a_detached_head_is_skipped_not_guessed(pg_session_factory, tmp_path):
-    """There is no branch in `repo/`, so there is no root. Guessing 'main' would
-    point the root at a tree that is not checked out, and every later path would
-    resolve there."""
+def test_a_detached_head_still_founds_the_refs_but_no_root(pg_session_factory, tmp_path):
+    """Step 3 says every local ref gets a row, and detaching HEAD removes no ref —
+    `main` is still there. Only the ROOT is unknown, so only the root is left
+    unset. Skipping the whole workspace would violate step 3."""
+    with pg_session_factory() as s:
+        wid = make_workspace(s, title="w").id
+        s.commit()
+    _repo(tmp_path, wid, "main", extra=("new_ideas",), detach=True)
+
+    with pg_session_factory() as s:
+        r = backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+        assert (r.created, r.rooted) == (2, 0)
+        assert _names(s, wid) == ["main", "new_ideas"]
+        assert s.get(Workspace, wid).root_branch_id is None
+
+
+def test_a_detached_head_founds_no_pseudo_branch(pg_session_factory, tmp_path):
+    """`git branch --format=%(refname:short)` emits a pseudo-entry on a detached
+    HEAD — measured, it prints `(HEAD detached at <sha>)` ABOVE the real refs.
+    Founding a row from that line creates a branch every later stage would try to
+    resolve to a worktree. Asserted as exact set equality: a membership check
+    ('main is in there') would pass with the pseudo-row sitting beside it."""
     with pg_session_factory() as s:
         wid = make_workspace(s, title="w").id
         s.commit()
     _repo(tmp_path, wid, "main", detach=True)
 
     with pg_session_factory() as s:
-        assert backfill_branch_entities(s, workspaces_dir=tmp_path) == (0, 0)
+        backfill_branch_entities(s, workspaces_dir=tmp_path)
         s.commit()
-        assert s.get(Workspace, wid).root_branch_id is None
+        assert _names(s, wid) == ["main"]
 
 
 def test_one_broken_repo_does_not_halt_the_rest(pg_session_factory, tmp_path):
@@ -738,9 +895,9 @@ def test_one_broken_repo_does_not_halt_the_rest(pg_session_factory, tmp_path):
     (broken / ".git").write_text("not a git dir")
 
     with pg_session_factory() as s:
-        created, rooted = backfill_branch_entities(s, workspaces_dir=tmp_path)
+        r = backfill_branch_entities(s, workspaces_dir=tmp_path)
         s.commit()
-        assert (created, rooted) == (1, 1)
+        assert (r.created, r.rooted, r.skipped) == (1, 1, 1)
         assert _names(s, good) == ["main"]
         assert _names(s, bad) == []
 ```
@@ -759,24 +916,31 @@ Expected: collection error — `ModuleNotFoundError: No module named
 Create `src/call_manager/proposal_assist/branch_entity_backfill.py`:
 
 ```python
-"""Found the branch entity from what git already has.
+"""Reconcile the branch entity against what git actually has.
 
 A separate module, not migration-local, for the same reason `branch_backfill.py`
 is: the migration is untestable in place, and this is the half that can be wrong.
 The migration imports it.
+
+Written as a RECONCILER rather than a one-shot backfill because rows and refs
+cannot be kept atomic — `git branch` is not transactional, so a commit that fails
+after the git call leaves a ref with no row or a row with no ref. Running this
+repairs either. S2 runs it again before it attaches any worktree.
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import NamedTuple
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from call_manager.db.models import Branch, Workspace
 from call_manager.proposal_assist.citations.gitio import (
     GitCommitError,
+    branch_exists,
     current_branch,
     list_branches,
 )
@@ -785,58 +949,87 @@ from call_manager.proposal_assist.paths import workspace_repo_dir
 logger = logging.getLogger(__name__)
 
 
-def backfill_branch_entities(session: Session, *, workspaces_dir: Path) -> tuple[int, int]:
-    """Create one `branches` row per existing local ref, and point each workspace's
-    `root_branch_id` at the branch its `repo/` actually has checked out.
+class BackfillResult(NamedTuple):
+    """Counts, so the caller can say what happened rather than assume it did."""
 
-    Returns `(branch rows created, root pointers set)`. Does NOT commit.
+    created: int
+    deleted: int
+    rooted: int
+    skipped: int
 
-    **Every local ref, not just the current one.** `create_workspace_branch` has
-    shipped since 880ea243 and does nothing but `git branch`, so a workspace can
-    already hold several refs. A ref with no row is invisible to every later stage.
 
-    **The root pointer reads git HEAD, never `workspaces.current_branch`.** §7.3
-    makes the root the branch that physically lives in `repo/`. `current_branch` is
-    the database's belief about where the *user* is, and after a crashed switch the
-    two disagree — `_reconcile_head` (`branches.py:100-126`) exists for exactly that
-    case. A path resolves to files, so the pointer follows the files.
+def _real_refs(repo: Path) -> list[str]:
+    """The local branch names, with git's non-ref output filtered out.
 
-    **`last_sdk_session_id` lands on the root branch only** (§3.1). It is one hosted
-    conversation and it belongs to the branch it was held on; copying it to every
-    branch would let two branches resume the same remote session. The workspace
-    column is left untouched — `turns/processor.py:389` is still its only reader,
-    and it is dropped in S4.
+    `git branch --format=%(refname:short)` emits a pseudo-entry on a detached
+    HEAD. Measured 2026-08-30:
 
-    Idempotent: a workspace whose refs already have rows contributes 0 created, and
-    its root pointer is simply re-set to the same value. A migration can be re-run
-    against a partially-migrated database, and the unique key would otherwise turn
-    that into a hard failure.
+        $ git branch --format='%(refname:short)'
+        (HEAD detached at 777c52e)
+        main
 
-    Skipped without raising: no repo directory, no refs at all (a `git init` with no
-    commit), a detached HEAD, or an unreadable repo. One bad workspace out of 500
-    must not leave the other 499 half-founded.
+    Founding a row from that first line would create a branch literally named
+    `(HEAD detached at 777c52e)`, which every later stage would then try to
+    resolve to a worktree. `branch_exists` uses `show-ref --verify
+    refs/heads/<name>`, so it answers no for anything that is not a real ref.
     """
-    created = 0
-    rooted = 0
+    return [name for name in list_branches(repo) if branch_exists(repo, name)]
+
+
+def backfill_branch_entities(session: Session, *, workspaces_dir: Path) -> BackfillResult:
+    """Make `branches` agree with each workspace's local refs, and set the root
+    pointer. Returns counts. Does NOT commit.
+
+    **Every local ref gets a row, not just the current one.**
+    `create_workspace_branch` has shipped since 880ea243 and does nothing but
+    `git branch`, so a workspace can already hold several refs. A ref with no row
+    is invisible to every later stage.
+
+    **Rows whose ref is gone are deleted.** That is the other half of the repair,
+    and it is why a delete whose commit failed after `git branch -D` does not
+    leave a permanent orphan. A row is only ever removed for a workspace whose
+    refs were read successfully — an unreadable repo skips the whole workspace, so
+    a transient git failure can never be mistaken for "every branch was deleted".
+
+    **The root pointer follows git HEAD.** §7.3 founds the root on what `repo/`
+    actually is; a pointer founded on `current_branch` could name a tree nobody
+    has. A detached HEAD leaves the pointer alone — the rows are still written,
+    because the refs exist regardless of what HEAD points at.
+
+    **`last_sdk_session_id` follows `workspaces.current_branch`,** not HEAD
+    (spec §8 S1 step 1). It is one hosted conversation and it belongs to the
+    branch the *user* was on; §4.1 makes the database the source of truth for
+    that. Copying it to every branch would let two branches resume the same remote
+    session (§3.1). The workspace column is left untouched —
+    `turns/processor.py:389` is still its only reader, and it is dropped in S4.
+
+    Idempotent: a second run over an unchanged repo returns `created=0,
+    deleted=0`, and re-sets each root pointer to the value it already had. A
+    migration can be re-run against a partially-migrated database, and the unique
+    key would otherwise turn that into a hard failure.
+
+    Skipped without raising: no repo directory, or a repo git cannot read. One bad
+    workspace out of 500 must not leave the other 499 half-founded — but the count
+    is RETURNED so the caller can report it rather than imply success.
+    """
+    created = deleted = rooted = skipped = 0
     rows = session.execute(select(Workspace.id, Workspace.last_sdk_session_id)).all()
     for wid, sdk_session_id in rows:
         repo = workspace_repo_dir(workspaces_dir, wid)
         if not (repo / ".git").exists():
-            continue
+            continue  # still in setup; nothing to found a branch on, and not a failure
         try:
-            names = list_branches(repo)
-            head = current_branch(repo)  # raises on a detached HEAD
+            names = _real_refs(repo)
         except (GitCommitError, OSError):
+            skipped += 1
             logger.warning(
-                "branches.entity_backfill_skipped",
-                extra={"event": "branch_entity_backfill_skipped", "workspace_id": str(wid)},
+                "branches.entity_reconcile_skipped",
+                extra={"event": "branch_entity_reconcile_skipped", "workspace_id": str(wid)},
                 exc_info=True,
             )
             continue
-        if head not in names:
-            # No ref to found the root on. Never guess: the root decides which
-            # branch resolves to `repo/`, and a wrong guess sends every path there.
-            continue
+        if not names:
+            continue  # `git init` with no commit: a branch name, but no ref
 
         existing = {
             n
@@ -849,26 +1042,49 @@ def backfill_branch_entities(session: Session, *, workspaces_dir: Path) -> tuple
                 continue
             session.add(Branch(workspace_id=wid, name=name))
             created += 1
-        session.flush()  # assign ids before the root pointer reads one back
+        orphans = existing - set(names)
+        if orphans:
+            session.execute(
+                delete(Branch).where(
+                    Branch.workspace_id == wid, Branch.name.in_(orphans)
+                )
+            )
+            deleted += len(orphans)
+        session.flush()  # assign ids before anything reads one back
 
-        root = session.execute(
-            select(Branch).where(Branch.workspace_id == wid, Branch.name == head)
-        ).scalar_one()
-        root.last_sdk_session_id = sdk_session_id
-        session.execute(
-            update(Workspace).where(Workspace.id == wid).values(root_branch_id=root.id)
-        )
-        rooted += 1
+        # The root pointer: git HEAD. Detached leaves it alone rather than guessing.
+        try:
+            head = current_branch(repo)
+        except (GitCommitError, OSError):
+            head = None
+        if head in names:
+            root = session.execute(
+                select(Branch).where(Branch.workspace_id == wid, Branch.name == head)
+            ).scalar_one()
+            session.execute(
+                update(Workspace).where(Workspace.id == wid).values(root_branch_id=root.id)
+            )
+            rooted += 1
+
+        # The SDK handle: workspaces.current_branch. A column naming a branch that
+        # no longer exists has no row to carry it; leaving it on the workspace is
+        # correct, because S4 is what finally drops that column.
+        current = session.get(Workspace, wid).current_branch
+        if current in names:
+            session.execute(
+                select(Branch).where(Branch.workspace_id == wid, Branch.name == current)
+            ).scalar_one().last_sdk_session_id = sdk_session_id
+
         logger.info(
-            "branches.entity_backfill",
+            "branches.entity_reconciled",
             extra={
-                "event": "branch_entity_backfill",
+                "event": "branch_entity_reconciled",
                 "workspace_id": str(wid),
                 "refs": len(names),
                 "root": head,
             },
         )
-    return created, rooted
+    return BackfillResult(created=created, deleted=deleted, rooted=rooted, skipped=skipped)
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
@@ -877,29 +1093,35 @@ def backfill_branch_entities(session: Session, *, workspaces_dir: Path) -> tuple
 uv run pytest tests/proposal_assist/test_branch_entity_backfill.py -q
 ```
 
-Expected: `18 passed`.
+Expected: `23 passed` (8 from Task 1, 15 added here).
 
-- [ ] **Step 5: Prove the root-pointer test bites**
+- [ ] **Step 5: Prove the three tests that can be hollow actually bite**
 
-`test_the_root_pointer_follows_git_not_the_current_branch_column` is the one test that
-separates a correct root pointer from a plausible one. Temporarily replace
-`head = current_branch(repo)` with:
+Run each mutation, record which tests redden, and revert before the next.
 
-```python
-        head = session.get(Workspace, wid).current_branch
-```
+**Mutation A — swap the two sources.** Replace `head = current_branch(repo)` with
+`head = session.get(Workspace, wid).current_branch`, and the SDK block's
+`current = session.get(Workspace, wid).current_branch` with `current = head`.
 
-Run:
+Expected: `test_the_root_pointer_follows_git_not_the_column` FAILS with
+`root followed the column, not repo/`, **and**
+`test_the_sdk_handle_follows_the_column_not_git` FAILS. Both fixtures are the same
+disagreeing repo, so a mutation that reddens only one means the other is not reading what
+it claims.
 
-```bash
-uv run pytest tests/proposal_assist/test_branch_entity_backfill.py -q
-```
+**Mutation B — drop the ref filter.** Change `_real_refs` to `return list_branches(repo)`.
 
-Expected: exactly `test_the_root_pointer_follows_git_not_the_current_branch_column` FAILS
-with `root followed the column, not repo/`. Note which other tests survive — if the
-detached-HEAD test also passes with the mutation, it is not testing what it claims.
+Expected: `test_a_detached_head_founds_no_pseudo_branch` FAILS, showing a row named
+`(HEAD detached at ...)` in the set.
 
-Revert and re-run — `18 passed`.
+**Mutation C — make the reconciler one-way.** Delete the `orphans` block.
+
+Expected: `test_a_row_whose_ref_is_gone_is_deleted` FAILS with
+`assert (0, 0) == (0, 1)`, and `test_an_unreadable_repo_deletes_nothing` still PASSES —
+if that one also fails, it is being satisfied by the deletion path rather than by the
+skip.
+
+Revert all three and re-run — `23 passed`.
 
 - [ ] **Step 6: Lint and commit**
 
@@ -941,38 +1163,44 @@ be wrong."
 Append to `tests/proposal_assist/test_branch_entity_backfill.py`:
 
 ```python
-def test_the_migration_calls_the_backfill(pg_session_factory, tmp_path, monkeypatch):
-    """The migration body cannot be executed in a unit test, so pin the wiring
-    instead: the module must reach for the backfill by name. A migration that
-    creates the table and forgets to call this leaves every existing workspace
-    branchless, and nothing else in the suite would notice."""
-    import importlib
+def test_the_migration_calls_the_backfill_inside_upgrade():
+    """The migration body cannot be executed in a unit test — it needs a live
+    Alembic op context — so pin the wiring by PARSING it.
 
-    mod = importlib.import_module("alembic.versions.0068_branch_entity")
-    source = Path(mod.__file__).read_text()
-    assert "backfill_branch_entities" in source
-    assert "WORKSPACES_DIR" in source
+    A substring search would not do: `assert "backfill_branch_entities" in source`
+    is satisfied by the import line alone, by a comment, or by dead code after a
+    `return`. That is the exact shape of a gate that passes because its subject is
+    already present. This walks the AST of `upgrade()` and requires an actual Call
+    whose callee is named `backfill_branch_entities`.
+    """
+    import ast
+    import pathlib
+
+    src = pathlib.Path("alembic/versions/0068_branch_entity.py").read_text()
+    tree = ast.parse(src)
+    upgrade = next(
+        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade"
+    )
+    called = {
+        n.func.id
+        for n in ast.walk(upgrade)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+    assert "backfill_branch_entities" in called, sorted(called)
 ```
 
-**Note on the import:** a module name starting with a digit cannot be imported with
-`import`. If `importlib.import_module` rejects it, read the file by path instead:
-
-```python
-def test_the_migration_calls_the_backfill():
-    source = Path("alembic/versions/0068_branch_entity.py").read_text()
-    assert "backfill_branch_entities" in source
-    assert "WORKSPACES_DIR" in source
-```
-
-Use whichever form runs. The path form is the safe default.
+**Why by path and not by import:** a module name starting with a digit is not a valid
+Python identifier, so `import alembic.versions.0068_branch_entity` is a syntax error and
+`importlib.import_module` on it also fails. Reading the file is the only form that runs.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
 ```bash
-uv run pytest tests/proposal_assist/test_branch_entity_backfill.py::test_the_migration_calls_the_backfill -q
+uv run pytest "tests/proposal_assist/test_branch_entity_backfill.py::test_the_migration_calls_the_backfill_inside_upgrade" -q
 ```
 
-Expected: FAIL with `assert 'backfill_branch_entities' in source`.
+Expected: FAIL with `assert 'backfill_branch_entities' in ['create_foreign_key',
+'create_index', 'create_table', ...]` — the callee list `upgrade()` currently has.
 
 - [ ] **Step 3: Wire the backfill into the migration**
 
@@ -990,8 +1218,16 @@ In `alembic/versions/0068_branch_entity.py`, append to the end of `upgrade()`:
 
     workspaces_dir = os.environ.get("WORKSPACES_DIR", "var/workspaces")
     with Session(bind=op.get_bind()) as s:
-        backfill_branch_entities(s, workspaces_dir=workspaces_dir)
+        result = backfill_branch_entities(s, workspaces_dir=workspaces_dir)
         s.commit()
+    # Say what happened. A workspace whose repo could not be read is left with no
+    # rows and no root pointer, and the migration still succeeds — that is the
+    # right trade (one bad repo must not block a deploy) but it must not be
+    # silent, or "the migration succeeded" reads as "every workspace was founded".
+    print(
+        f"0068: founded {result.created} branch rows, removed {result.deleted} orphans, "
+        f"set {result.rooted} root pointers, SKIPPED {result.skipped} unreadable repos"
+    )
 ```
 
 - [ ] **Step 4: Run the test to verify it passes**
@@ -1000,7 +1236,7 @@ In `alembic/versions/0068_branch_entity.py`, append to the end of `upgrade()`:
 uv run pytest tests/proposal_assist/test_branch_entity_backfill.py -q
 ```
 
-Expected: `19 passed`.
+Expected: `24 passed`.
 
 - [ ] **Step 5: Run the migration against a real database**
 
@@ -1205,8 +1441,15 @@ def test_rows_and_refs_agree_after_a_create(pg_session_factory, tmp_path):
 uv run pytest tests/proposal_assist/test_branch_entity_lifecycle.py -q
 ```
 
-Expected: `test_create_writes_a_row_beside_the_ref` FAILS with
-`assert ['main'] == ['main', 'new_ideas']`, and the other three fail the same way.
+Expected: all four fail, but **not all with the same message** — check each, because a
+test that fails for the wrong reason is not a test:
+
+| Test | Expected failure |
+|---|---|
+| `test_create_writes_a_row_beside_the_ref` | `assert ['main'] == ['main', 'new_ideas']` |
+| `test_the_new_row_carries_a_fresh_id_and_no_sdk_handle` | `KeyError: 'new_ideas'` — `by_name` is dereferenced before any equality assertion |
+| `test_a_refused_create_writes_no_row` | `assert ['main'] == ['main', 'new_ideas']` — the `BranchExists` half already passes today |
+| `test_rows_and_refs_agree_after_a_create` | `assert ['main'] == ['eu_version', 'main', 'new_ideas']` |
 
 - [ ] **Step 3: Write the row inside `create_workspace_branch`**
 
@@ -1227,9 +1470,13 @@ with:
     # The row is founded in the same call as the ref (spec §8 S1 step 4). A
     # one-time backfill goes stale the moment the next branch is created, and a
     # ref with no row is invisible to the branch-aware resolver S2 installs.
-    # After git_create_branch, so a ref git refused leaves no orphan row behind;
-    # the caller's transaction covers the reverse (a row with no ref) by rolling
-    # back — git_create_branch raises before this line on any failure.
+    #
+    # These two are NOT atomic and no ordering makes them so: `git branch` is not
+    # transactional, so a commit that fails after it leaves a ref with no row.
+    # Placing the add after the git call at least means a ref git REFUSED leaves
+    # no row (git_create_branch raises before this line). The residual window is
+    # repaired by `backfill_branch_entities`, which is a two-way reconciler and is
+    # safe to re-run; S2 runs it again before it attaches anything.
     #
     # `last_sdk_session_id` is deliberately left NULL: a new branch has held no
     # hosted conversation, and inheriting the parent's handle would let two
@@ -1427,15 +1674,49 @@ def test_deleting_a_branch_with_no_row_still_drops_the_ref(pg_session_factory, t
         assert _rows(s, wid) == ["main"]
 ```
 
+Also append the API-level test, because this is the one intended behaviour change in the
+whole plan and a unit-level `pytest.raises` does not prove what a user sees:
+
+```python
+def test_the_api_refuses_to_delete_the_root_branch(client_authed_owner, pg_session_factory, tmp_path):
+    """The ONE deliberate behaviour change in this plan (see Global Constraints).
+    Today a user who switched away from the root can delete it; §7.3 closes that.
+    Pinned at the API because the response code is what actually changed — and
+    `{name:path}` means the route itself is easy to get wrong.
+
+    Mirrors the setup in `test_api_branches.py`; `client_authed_owner` is that
+    file's fixture."""
+    wid = _api_workspace(client_authed_owner, pg_session_factory, tmp_path)
+    client_authed_owner.post(f"/api/workspaces/{wid}/branches", json={"name": "new_ideas"})
+    client_authed_owner.post(
+        f"/api/workspaces/{wid}/branches/switch", json={"name": "new_ideas"}
+    )
+
+    resp = client_authed_owner.delete(f"/api/workspaces/{wid}/branches/main")
+    assert resp.status_code == 409, resp.text
+```
+
+**Before writing it, read `tests/proposal_assist/test_api_branches.py`** and reuse its
+workspace-setup helper and its `client_authed_owner` fixture verbatim rather than
+inventing `_api_workspace` — the name above is a placeholder for whatever that file
+already calls it. Check what status `_raise_http` maps `BranchInUse` to and assert that
+code; if it is not 409, assert the real one rather than changing the mapping.
+
 - [ ] **Step 2: Run the tests to verify they fail**
 
 ```bash
 uv run pytest tests/proposal_assist/test_branch_entity_lifecycle.py -q
 ```
 
-Expected: `test_delete_removes_the_row_with_the_ref` FAILS with
-`assert ['main', 'new_ideas'] == ['main']`, and `test_delete_refuses_the_root_branch`
-FAILS with `DID NOT RAISE <class '...BranchInUse'>`.
+Expected, per test:
+
+| Test | Expected failure |
+|---|---|
+| `test_delete_removes_the_row_with_the_ref` | `assert ['main', 'new_ideas'] == ['main']` |
+| `test_delete_refuses_the_root_branch` | `DID NOT RAISE <class '...BranchInUse'>` |
+| `test_rows_and_refs_agree_after_a_delete` | `assert ['eu_version', 'main', 'new_ideas'] == ['main', 'new_ideas']` |
+| `test_deleting_a_branch_with_no_row_still_drops_the_ref` | PASSES already — it is a control for the change, not a driver of it |
+| `test_the_api_refuses_to_delete_the_root_branch` | `assert 204 == 409` — today the delete succeeds |
 
 - [ ] **Step 3: Add the root guard and the row delete**
 
@@ -1475,10 +1756,14 @@ with:
 
 ```python
     git_delete_branch(repo, name)
-    # Drop the row with the ref (spec §8 S1 step 4), so a row can never outlive
-    # the branch it names. A ref created before this stage — or with `git branch`
-    # outside the app — has no row; deleting nothing is correct, not an error,
-    # and raising here would strand that ref forever.
+    # Drop the row with the ref (spec §8 S1 step 4). A ref created before this
+    # stage — or with `git branch` outside the app — has no row; deleting nothing
+    # is correct, not an error, and raising here would strand that ref forever.
+    #
+    # Not atomic, and this direction is the worse one: `git branch -D` is
+    # irreversible, so a commit that fails after it leaves a row whose ref is
+    # gone. `backfill_branch_entities` deletes such orphans — that is why it is a
+    # reconciler and not a one-shot backfill.
     session.execute(
         delete(Branch).where(Branch.workspace_id == workspace_id, Branch.name == name)
     )
@@ -1652,10 +1937,15 @@ def test_a_workspace_with_a_repo_always_has_a_root_pointer(pg_session_factory, t
 
 
 def test_the_root_pointer_never_names_another_workspaces_branch(pg_session_factory, tmp_path):
-    """Control for the assertion above. `root_branch_id` is a bare FK to
-    `branches.id` with no workspace correlation in the constraint, so nothing in
-    the schema stops a cross-workspace pointer — only the backfill's own scoping
-    does, and this is what would catch it regressing."""
+    """`root_branch_id` is a bare FK to `branches.id` with no workspace
+    correlation in the constraint, so nothing in the schema stops a
+    cross-workspace pointer — only the backfill's own scoping does.
+
+    Asserted by loading each pointer and checking the branch it names BELONGS to
+    the workspace holding it. `assert ra != rb` would not do: two SWAPPED pointers
+    are still unequal, so that form passes on precisely the bug it names. Both
+    workspaces use the same branch name, which is what a scoping bug would confuse.
+    """
     with pg_session_factory() as s:
         a = make_workspace(s, title="a").id
         b = make_workspace(s, title="b").id
@@ -1668,9 +1958,9 @@ def test_the_root_pointer_never_names_another_workspaces_branch(pg_session_facto
         s.commit()
 
     with pg_session_factory() as s:
-        ra = s.get(Workspace, a).root_branch_id
-        rb = s.get(Workspace, b).root_branch_id
-        assert ra != rb
+        for wid in (a, b):
+            root = s.get(Branch, s.get(Workspace, wid).root_branch_id)
+            assert root.workspace_id == wid, f"{wid}'s root belongs to {root.workspace_id}"
 ```
 
 - [ ] **Step 2: Run the tests to verify they pass**
@@ -1767,7 +2057,9 @@ removing the root write reddens the second."
 - Deleting the root branch raises `BranchInUse`, proved not to be the old
   `current_branch` guard.
 - Full suite green with **`1 skipped`**; `docs/ARCHITECTURE.md` regenerated.
-- **No behaviour changed.** `test_api_branches.py` unmoved.
+- **One behaviour change, and only one:** the API refuses to delete the root branch,
+  pinned at the API level. Every other route and response body unmoved —
+  `test_api_branches.py` passes apart from any case that deleted the root.
 
 ## Deliberately NOT in this plan
 
