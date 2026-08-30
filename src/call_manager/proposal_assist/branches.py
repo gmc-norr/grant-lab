@@ -13,7 +13,7 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy import update as sql_update
 from sqlalchemy.orm import Session
 
@@ -360,6 +360,14 @@ def delete_workspace_branch(
         raise BranchNotFound(name)
 
     row = session.get(Workspace, workspace_id)
+    if row is not None and row.root_branch_id is not None:
+        # §7.3: the branch the root pointer names cannot be deleted — its worktree
+        # IS `repo/`. The database enforces this too (fk_workspaces_root_branch_id
+        # is ON DELETE RESTRICT), but an IntegrityError is not an error a user can
+        # read. Raise the readable one first and leave RESTRICT as the backstop.
+        root = session.get(Branch, row.root_branch_id)
+        if root is not None and root.name == name:
+            raise BranchInUse(name)
     if row is not None and row.current_branch == name:
         # The DATABASE is the source of truth (§4.1), so refuse against the
         # column, not against HEAD. git refuses too — "cannot delete branch
@@ -372,6 +380,15 @@ def delete_workspace_branch(
         raise BranchLast(name)
 
     git_delete_branch(repo, name)
+    # Drop the row with the ref (spec §8 S1 step 4). A ref created before this
+    # stage — or with `git branch` outside the app — has no row; deleting nothing
+    # is correct, not an error, and raising here would strand that ref forever.
+    #
+    # Not atomic, and this direction is the worse one: `git branch -D` is
+    # irreversible, so a commit that fails after it leaves a row whose ref is
+    # gone. `backfill_branch_entities` deletes such orphans — that is why it is a
+    # reconciler and not a one-shot backfill.
+    session.execute(delete(Branch).where(Branch.workspace_id == workspace_id, Branch.name == name))
     logger.info(
         "branches.deleted",
         extra={"event": "branch_deleted", "workspace_id": str(workspace_id), "branch": name},

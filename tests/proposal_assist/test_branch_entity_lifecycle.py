@@ -4,11 +4,18 @@ A one-time backfill goes stale the moment the next branch is created, and the ap
 keeps serving POST /branches between this stage and S2 (spec §8 S1 step 4).
 """
 
+import subprocess
+
 import pytest
 from sqlalchemy import select
 
 from call_manager.db.models import Branch, Workspace
-from call_manager.proposal_assist.branches import BranchExists, create_workspace_branch
+from call_manager.proposal_assist.branches import (
+    BranchExists,
+    BranchInUse,
+    create_workspace_branch,
+    delete_workspace_branch,
+)
 from call_manager.proposal_assist.citations.gitio import branch_exists, list_branches
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from tests.proposal_assist.conftest import init_workspace_repo, make_workspace, stamp_for
@@ -133,3 +140,110 @@ def test_rows_and_refs_agree_after_a_create(pg_session_factory, tmp_path):
 
     with pg_session_factory() as s:
         assert _rows(s, wid) == sorted(list_branches(repo))
+
+
+def test_delete_removes_the_row_with_the_ref(pg_session_factory, tmp_path):
+    wid, repo = _ws(pg_session_factory, tmp_path)
+    with pg_session_factory() as s:
+        create_workspace_branch(
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            name="new_ideas",
+            workspaces_dir=tmp_path,
+        )
+        s.commit()
+
+    with pg_session_factory() as s:
+        delete_workspace_branch(
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            name="new_ideas",
+            workspaces_dir=tmp_path,
+        )
+        s.commit()
+
+    assert not branch_exists(repo, "new_ideas")
+    with pg_session_factory() as s:
+        assert _rows(s, wid) == ["main"]
+
+
+def test_delete_refuses_the_root_branch(pg_session_factory, tmp_path):
+    """§7.3: the branch the root pointer names cannot be deleted. Raised as
+    BranchInUse — the error a user can read — with the database RESTRICT as the
+    backstop behind it."""
+    wid, repo = _ws(pg_session_factory, tmp_path)
+    with pg_session_factory() as s:
+        create_workspace_branch(
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            name="new_ideas",
+            workspaces_dir=tmp_path,
+        )
+        s.get(Workspace, wid).current_branch = "new_ideas"  # so the OLD guard cannot fire
+        s.commit()
+
+    with pg_session_factory() as s:
+        with pytest.raises(BranchInUse):
+            delete_workspace_branch(
+                s,
+                stamp=stamp_for(s, wid),
+                workspace_id=wid,
+                name="main",
+                workspaces_dir=tmp_path,
+            )
+        s.rollback()
+
+    assert branch_exists(repo, "main"), "the ref was destroyed before the refusal"
+    with pg_session_factory() as s:
+        assert _rows(s, wid) == ["main", "new_ideas"]
+
+
+def test_rows_and_refs_agree_after_a_delete(pg_session_factory, tmp_path):
+    wid, repo = _ws(pg_session_factory, tmp_path)
+    with pg_session_factory() as s:
+        for name in ("new_ideas", "eu_version"):
+            create_workspace_branch(
+                s,
+                stamp=stamp_for(s, wid),
+                workspace_id=wid,
+                name=name,
+                workspaces_dir=tmp_path,
+            )
+        s.commit()
+
+    with pg_session_factory() as s:
+        delete_workspace_branch(
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            name="eu_version",
+            workspaces_dir=tmp_path,
+        )
+        s.commit()
+
+    with pg_session_factory() as s:
+        assert _rows(s, wid) == sorted(list_branches(repo))
+
+
+def test_deleting_a_branch_with_no_row_still_drops_the_ref(pg_session_factory, tmp_path):
+    """A ref created before this stage — or by `git branch` outside the app — has
+    no row. Delete must not raise on the missing row and strand the ref forever."""
+    wid, repo = _ws(pg_session_factory, tmp_path)
+    subprocess.run(["git", "branch", "orphan"], cwd=repo, check=True)
+
+    with pg_session_factory() as s:
+        delete_workspace_branch(
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            name="orphan",
+            workspaces_dir=tmp_path,
+        )
+        s.commit()
+
+    assert not branch_exists(repo, "orphan")
+    with pg_session_factory() as s:
+        assert _rows(s, wid) == ["main"]
