@@ -495,6 +495,20 @@ So S2 does not "attach a worktree for every branch". `repo/` **is** the worktree
 branch named by `workspaces.root_branch_id` (S1 step 2). Only the *other* branches get
 `worktrees/<branch-id>/`. (Round-2 finding 1.)
 
+**So S2 opens with one last `git checkout`, and it is the last one ever.** Between S1 and
+S2 the old switch keeps running `checkout_branch(repo, target)`, so `repo/` may be sitting
+on any branch by the time S2 lands, while `root_branch_id` still names the root. S2's
+first act is therefore to check the root back out into `repo/`. It cannot be the other way
+round — redefining the root as "whatever `repo/` happens to hold" would let the last person
+to switch decide which branch is undeletable, and §7.3 gives that power to promote alone.
+The order inside S2 is fixed:
+
+1. `checkout_branch(repo, <root>)` — the final checkout, restoring the invariant.
+2. Remove all three `checkout_branch` sites and the five `_reconcile_head` callers.
+3. Attach `worktrees/<branch-id>/` for every non-root branch.
+
+Doing 3 before 1 fails: git refuses to check out a branch that a worktree already holds.
+
 **Create and delete become worktree operations here.** Creating a branch creates its
 worktree, or it is unreachable under the new resolver. Deleting one must
 `git worktree remove` **before** `git branch -D`, because git refuses otherwise —
