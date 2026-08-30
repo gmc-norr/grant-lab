@@ -1350,14 +1350,23 @@ def test_the_migration_calls_the_backfill_inside_upgrade():
 Python identifier, so `import alembic.versions.0068_branch_entity` is a syntax error and
 `importlib.import_module` on it also fails. Reading the file is the only form that runs.
 
+**After pasting this test, run `uv run ruff format tests/proposal_assist/test_branch_entity_backfill.py`.**
+The block above does not satisfy `ruff format --check` as written — one wrapped line gets
+collapsed. Formatting changes no assertion; skipping it fails the lint gate.
+
 - [ ] **Step 2: Run the test to verify it fails**
 
 ```bash
 uv run pytest "tests/proposal_assist/test_branch_entity_backfill.py::test_the_migration_calls_the_backfill_inside_upgrade" -q
 ```
 
-Expected: FAIL with `assert 'backfill_branch_entities' in ['create_foreign_key',
-'create_index', 'create_table', ...]` — the callee list `upgrade()` currently has.
+Expected: FAIL with `assert 'backfill_branch_entities' in {'UUID'}` — measured.
+
+The set is that short because the walk collects only `ast.Name` callees, and every
+`op.create_table(...)` / `op.create_index(...)` is an `ast.Attribute` call. That is fine
+for this test's job (`backfill_branch_entities` IS a bare name) but it means the failure
+message will not list the migration's `op.*` calls. Do not "fix" the test when the set
+looks short.
 
 - [ ] **Step 3: Wire the backfill into the migration**
 
@@ -1397,8 +1406,15 @@ Expected: `27 passed`.
 
 - [ ] **Step 5: Run the migration against a real database**
 
-The unit tests build their schema from the models, so they never execute this migration.
-Run it for real:
+The unit tests never execute this migration's body — the AST test above only parses it.
+Run it for real.
+
+**First find out which database `alembic.ini` / `DATABASE_URL` resolves to.** This repo's
+main tree runs the user's live app against `call-monitor-db-1` on port 5432. **Never
+migrate that.** If the resolved URL is the live database, stop and say so. The safe route,
+used when this plan was executed, is a throwaway Postgres from the repo's own
+`docker-compose.yml` under a distinct Compose project name and port, torn down afterwards.
+Verify afterwards with `docker ps` that nothing was left running.
 
 ```bash
 uv run alembic upgrade head
