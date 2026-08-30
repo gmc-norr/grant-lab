@@ -486,3 +486,77 @@ Measured underneath it:
 **Decision (user, 2026-08-30): unify the pass families FIRST**, then land Directions as one
 column on one table. Building Directions on the duplication means writing the job migration
 five times and then undoing it. The unification gets its own spec and its own review round.
+
+---
+
+## 12. Correction to §11 — the sequencing consequence was WRONG
+
+**Status: this spec is UNBLOCKED by the pass-family work. It remains open on the
+storage question (see §13).**
+
+§11 concluded "F9 shows the five pass families each carry a *different* active-uniqueness
+predicate, so Directions is five bespoke migrations rather than one", and the user
+sequenced the pass-family unification ahead of this spec on that basis.
+
+**That conclusion was mine, not the reviewer's, and it is false.** Re-measured:
+
+- `models.py:960, 1007, 1063, 1544` carry a **byte-identical**
+  `postgresql_where=text("status IN ('queued','running')")`. Line 1316 is the same
+  predicate with different whitespace. **Five families share one predicate.**
+- The genuine outliers are **two**: `uq_turn_jobs_running` (`status = 'running'`,
+  models.py:893) and `uq_claim_analysis_jobs_ws_sha_queued`
+  (`(workspace_id, section_sha) WHERE status='queued'`, models.py:1869).
+- `alembic/versions/0064_claimed_at_generation.py` is a **52-line file that already
+  performs the seven-table sweep as one loop over a frozen `FENCED_TABLES` tuple**, with
+  a comment explaining why `attachment_jobs` is excluded. The precedent exists.
+
+So the job-table half of Directions is **one loop migration over a
+(table, predicate) tuple, plus three exceptions a human must decide either way**:
+turn_jobs (is the running-turn slot per-application or per-direction?),
+claim_analysis_jobs (should two directions sharing a section body share one analysis
+job?), and workspace_setup_jobs (application-level, no `direction_id` — errata F6).
+Merging the tables **relocates** those three judgments into branches inside one partial
+index; it does not remove them.
+
+What the reviewer actually established was narrower and still stands: §4's claim that
+active-uniqueness moves uniformly across six families "preserving today's semantics
+exactly" is false, because two families genuinely differ. Extrapolating that to "five
+bespoke migrations" without reading the other four `__table_args__` blocks was an
+unmeasured inference.
+
+### The one finding to carry into this spec regardless
+
+**`direction_id` on the job tables MUST be `NOT NULL` with a composite FK**
+`(workspace_id, direction_id) → directions(workspace_id, id)` — exactly as §2 states.
+Measured independently on PG16 by two reviewers: a **nullable** `direction_id` added to
+an active-uniqueness key **silently disarms it** — three concurrently active jobs for one
+workspace, accepted, no error, because NULLs are distinct in a unique index.
+`enqueue_coherence_run`'s docstring says verbatim that it is "Race-safe against the
+`uq_coherence_jobs_active` partial-unique index", and its SAVEPOINT branch exists to catch
+that violation; widening the index the nullable way turns create-or-return-active back
+into a read-then-insert race in a family that burns hosted tokens. The backfill is free:
+11 workspaces, 0 CoherenceJobs, 0 ReviewRuns, 1 EvaluatorJob ever.
+
+### On the pass families
+
+The 23-agent design exercise scored all four unification designs 4.0-5.3 with a FATAL
+from at least one lens each, and recommends **not merging the tables**: today `family`
+IS the table, enforced by SQL and by mypy and impossible to forget, and every merge
+replaces that with a forgettable `WHERE family =` guarded by convention. This repo
+prefers a constraint to a convention.
+
+What is real is the **runner** duplication — measured at **89.2% identity** (deeper than
+the 76% recorded in §11), with `_fail`, the drain ticks and two reapers byte-identical.
+That is worth collapsing on its own merits, in its own spec, and it does **not** block
+this one.
+
+### One reviewer alarm CHECKED AND REFUTED
+
+The exercise reported that "two fence allowlists accept fabricated paths with 239 tests
+green". Verified against HEAD and **false** for `TOOLS_NOT_YET_CONVERTED`:
+`import_gate.py:120-131`'s `tool_key()` docstring says explicitly *"Never `path.name`"*
+and explains the exact nested-basename hole it prevents;
+`test_import_gate.py:308-313` (`test_every_exemption_names_a_module_that_exists`) asserts
+every allowlist key resolves to a module on disk; and `test_import_gate.py:358` is a
+control test proving a nested module does not inherit a top-level pin. The other
+allowlists were not checked.
