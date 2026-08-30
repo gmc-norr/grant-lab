@@ -96,19 +96,50 @@ def _own_nodes(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.AST]:
     return out
 
 
-def _spend_writer_names(tree: ast.AST) -> frozenset[str]:
-    """Local names that refer to a spend writer, honouring `as` aliases.
+# The modules a real spend writer can come from. A call only counts if its name
+# was BOUND by an import from one of these — see _spend_writer_names.
+WRITER_MODULES = frozenset(
+    {
+        "call_manager.proposal_assist.spend",
+        "call_manager.proposal_assist.citations.usage",
+    }
+)
 
-    Without this, `from ...spend import record_spend as rs` is a false POSITIVE
-    on correct code — reproduced before this was added.
+
+def _spend_writer_names(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]:
+    """Resolve which names in this module actually mean "record spend".
+
+    Returns (bare_names, module_aliases): a Call counts if it is `name(...)` with
+    name in bare_names, or `alias.record_spend(...)` with alias in module_aliases.
+
+    Accepting the bare string `record_spend` was a real bypass, measured against
+    the shipped guard: a module that defined its own local `def record_spend`, or
+    called an unrelated `something.record_spend()`, blessed every token stamp in
+    it and the gate stayed green. The name must be BOUND BY AN IMPORT from a
+    module in WRITER_MODULES. Honouring `as` aliases is the other direction —
+    `from ...spend import record_spend as rs` was a false positive on correct
+    code before it was handled.
     """
-    names = set(SPEND_WRITERS)
+    names: set[str] = set()
+    module_aliases: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if mod in WRITER_MODULES:
+                for alias in node.names:
+                    if alias.name in SPEND_WRITERS:
+                        names.add(alias.asname or alias.name)
+            # `from call_manager.proposal_assist import spend` -> `spend.record_spend`
             for alias in node.names:
-                if alias.name in SPEND_WRITERS and alias.asname:
-                    names.add(alias.asname)
-    return frozenset(names)
+                if f"{mod}.{alias.name}" in WRITER_MODULES:
+                    module_aliases.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                # `import a.b.c as x` binds x; plain `import a.b.c` binds `a`,
+                # which we cannot match on attribute shape, so require asname.
+                if alias.name in WRITER_MODULES and alias.asname:
+                    module_aliases.add(alias.asname)
+    return frozenset(names), frozenset(module_aliases)
 
 
 def _target_stamps(target: ast.AST) -> bool:
@@ -146,12 +177,21 @@ def _stamp_lines(nodes: list[ast.AST]) -> list[int]:
     return sorted(lines)
 
 
-def _records_spend(nodes: list[ast.AST], writer_names: frozenset[str]) -> bool:
+def _records_spend(nodes: list[ast.AST], writers: tuple[frozenset[str], frozenset[str]]) -> bool:
+    bare, module_aliases = writers
     for node in nodes:
         if isinstance(node, ast.Call):
             func = node.func
-            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-            if name in writer_names:
+            if isinstance(func, ast.Name) and func.id in bare:
+                return True
+            # Only `<imported module alias>.record_spend(...)`. An arbitrary
+            # attribute call that merely ENDS in record_spend does not count.
+            if (
+                isinstance(func, ast.Attribute)
+                and func.attr in SPEND_WRITERS
+                and isinstance(func.value, ast.Name)
+                and func.value.id in module_aliases
+            ):
                 return True
     return False
 
@@ -198,12 +238,35 @@ def llm_spend_constructors() -> list[str]:
     out: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
         tree = ast.parse(path.read_text())
+        # Resolve how THIS module refers to the class. Matching only
+        # ast.Name("LlmSpend") missed `models.LlmSpend(...)` and
+        # `from ...models import LlmSpend as SpendRow` — both measured against the
+        # shipped guard, both silently absent from the "exactly one writer" claim.
+        local_names: set[str] = set()
+        module_aliases: set[str] = set()
         for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "LlmSpend"
-            ):
+            if isinstance(node, ast.ImportFrom):
+                mod = node.module or ""
+                for alias in node.names:
+                    if mod == "call_manager.db.models" and alias.name == "LlmSpend":
+                        local_names.add(alias.asname or alias.name)
+                    elif f"{mod}.{alias.name}" == "call_manager.db.models":
+                        module_aliases.add(alias.asname or alias.name)
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "call_manager.db.models" and alias.asname:
+                        module_aliases.add(alias.asname)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            hit = (isinstance(func, ast.Name) and func.id in local_names) or (
+                isinstance(func, ast.Attribute)
+                and func.attr == "LlmSpend"
+                and isinstance(func.value, ast.Name)
+                and func.value.id in module_aliases
+            )
+            if hit:
                 out.append(str(path.relative_to(SRC)))
                 break
     return sorted(out)

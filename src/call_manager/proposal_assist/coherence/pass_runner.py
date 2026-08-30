@@ -101,6 +101,16 @@ async def run_coherence_pass(
 
             async def _run() -> None:
                 nonlocal handle, done
+                # Pre-launch live-status recheck: a soft-delete/cancel may have flipped the
+                # job to 'failed' between the read session and here. Don't spend tokens (or
+                # send deleted-workspace content) on a job that's no longer running — this
+                # narrows the delete-races-launch window. evaluator and uncited_claims have
+                # had this since SP2b-2c; coherence did not, which is money spent on a job
+                # nobody is waiting for.
+                with session_factory() as s2:
+                    live = s2.get(CoherenceJob, job_id)
+                    if live is None or live.status != "running":
+                        return
                 # launch is INSIDE the wait_for so a hung SDK connect is bounded too — not
                 # just the streaming turn. wait_for cancels this coroutine on timeout,
                 # raising CancelledError at whichever await is live (launch or the loop).
@@ -110,10 +120,12 @@ async def run_coherence_pass(
                         done = event  # outer; survives a later raise/cancel
 
             await asyncio.wait_for(_run(), timeout=settings.coherence_pass_timeout_seconds)
-        # BaseException, not Exception: asyncio.CancelledError is a BaseException,
-        # so a cancelled pass used to skip _fail entirely and lose its spend. We
-        # record, then re-raise cancellation at the end of this handler.
-        except BaseException as exc:  # noqa: BLE001 — terminal; CancelledError re-raised below
+        # Exception PLUS CancelledError, not BaseException. CancelledError is a
+        # BaseException, so a cancelled pass used to skip _fail and lose its spend —
+        # but catching BaseException wholesale would turn KeyboardInterrupt and
+        # SystemExit into ordinary failed jobs. Name the two we mean; cancellation is
+        # re-raised at the end of this handler.
+        except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 — terminal
             logger.exception("coherence pass failed for job %s", job_id)
             # Member-visible: surface only a sanitized, generic message (full detail
             # already in the logs above); distinguish the expected timeout outcome.
@@ -131,7 +143,13 @@ async def run_coherence_pass(
                     # resurrect it — but the call still ran and still spent, and
                     # `_fail` below is skipped on this branch, so without this the
                     # spend is invisible to the cap. Same shape as the finalize
-                    # block's late-spend path.
+                    # block's late-spend path — including the column stamp, or the
+                    # display cache reads 0 while the ledger reads the truth.
+                    if done is not None:
+                        job.input_tokens = done.tokens_in or 0
+                        job.output_tokens = done.tokens_out or 0
+                        job.model = done.model
+                        job.sdk_session_id = done.session_id
                     record_spend(
                         s,
                         workspace_id=job.workspace_id,

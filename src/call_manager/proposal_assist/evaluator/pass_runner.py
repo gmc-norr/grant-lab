@@ -158,10 +158,12 @@ async def run_evaluator_pass(
                         done = event  # outer; survives a later raise/cancel
 
             await asyncio.wait_for(_run(), timeout=settings.evaluator_pass_timeout_seconds)
-        # BaseException, not Exception: asyncio.CancelledError is a BaseException,
-        # so a cancelled pass used to skip _fail entirely and lose its spend. We
-        # record, then re-raise cancellation at the end of this handler.
-        except BaseException as exc:  # noqa: BLE001 — terminal; CancelledError re-raised below
+        # Exception PLUS CancelledError, not BaseException. CancelledError is a
+        # BaseException, so a cancelled pass used to skip _fail and lose its spend —
+        # but catching BaseException wholesale would turn KeyboardInterrupt and
+        # SystemExit into ordinary failed jobs. Name the two we mean; cancellation is
+        # re-raised at the end of this handler.
+        except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 — terminal
             logger.exception("evaluator pass failed for job %s", job_id)
             # Member-visible: surface only a sanitized, generic message (full detail
             # already in the logs above); distinguish the expected timeout outcome.
@@ -179,7 +181,13 @@ async def run_evaluator_pass(
                     # resurrect it — but the call still ran and still spent, and
                     # `_fail` below is skipped on this branch, so without this the
                     # spend is invisible to the cap. Same shape as the finalize
-                    # block's late-spend path.
+                    # block's late-spend path — including the column stamp, or the
+                    # display cache reads 0 while the ledger reads the truth.
+                    if done is not None:
+                        job.input_tokens = done.tokens_in or 0
+                        job.output_tokens = done.tokens_out or 0
+                        job.model = done.model
+                        job.sdk_session_id = done.session_id
                     record_spend(
                         s,
                         workspace_id=job.workspace_id,

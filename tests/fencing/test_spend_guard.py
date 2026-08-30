@@ -9,13 +9,22 @@ from tests.fencing.spend_guard import (
     stale_pins,
 )
 
+# Every fixture that CALLS record_spend must also IMPORT it, exactly as real code
+# does. The guard resolves writer names through imports (a bare name match let a
+# module define its own `def record_spend` and bless every stamp in it), so a
+# fixture without this header is not a faithful stand-in for the code under gate.
+_WRITER_IMPORT = "from call_manager.proposal_assist.spend import record_spend\n"
 
-def _tree(tmp_path, monkeypatch, name, source):
+
+def _tree(tmp_path, monkeypatch, name, source, writer_import=True):
     import tests.fencing.spend_guard as g
 
     fake = tmp_path / "call_manager" / name
     fake.parent.mkdir(parents=True, exist_ok=True)
-    fake.write_text(textwrap.dedent(source))
+    body = textwrap.dedent(source)
+    if writer_import and "record_spend" in body and "import record_spend" not in body:
+        body = _WRITER_IMPORT + body
+    fake.write_text(body)
     monkeypatch.setattr(g, "SRC", tmp_path)
     monkeypatch.setattr(g, "PINNED", {})
     return g
@@ -200,6 +209,123 @@ def test_a_dead_record_spend_still_satisfies_the_guard_KNOWN_LIMIT(tmp_path, mon
         """,
     )
     assert g.offenders() == []
+
+
+def test_a_locally_defined_record_spend_does_not_bless_the_module(tmp_path, monkeypatch):
+    """Round 2 of the outside review found this against the shipped guard.
+
+    The writer set was seeded with the bare strings, so ANY call named
+    record_spend counted — including one the module defined itself. A module
+    could shadow the name with a no-op and every token stamp in it went green.
+    """
+    g = _tree(
+        tmp_path,
+        monkeypatch,
+        "shadow.py",
+        """
+        def record_spend(*a, **k):
+            pass
+
+        def f(s, job, done):
+            job.input_tokens = done.tokens_in
+            record_spend(s)
+        """,
+        writer_import=False,
+    )
+    assert g.offenders() == ["call_manager/shadow.py::f"]
+
+
+def test_an_unrelated_attribute_call_does_not_bless_the_module(tmp_path, monkeypatch):
+    # Same family: `whatever.record_spend(...)` matched on the attribute name
+    # alone. Only an alias bound by an import from a writer module counts now.
+    g = _tree(
+        tmp_path,
+        monkeypatch,
+        "attr.py",
+        """
+        import unrelated
+
+        def f(s, job, done):
+            job.input_tokens = done.tokens_in
+            unrelated.record_spend(s)
+        """,
+        writer_import=False,
+    )
+    assert g.offenders() == ["call_manager/attr.py::f"]
+
+
+@pytest.mark.parametrize(
+    ("label", "source"),
+    [
+        (
+            "module_alias",
+            """
+            from call_manager.proposal_assist import spend
+
+            def f(s, job, done):
+                job.input_tokens = done.tokens_in
+                spend.record_spend(s)
+            """,
+        ),
+        (
+            "usage_writer",
+            """
+            from call_manager.proposal_assist.citations.usage import record_usage
+
+            def f(s, job, done):
+                job.tokens_in = done.tokens_in
+                record_usage(s)
+            """,
+        ),
+    ],
+)
+def test_real_import_shapes_are_still_accepted(tmp_path, monkeypatch, label, source):
+    # The other direction: tightening resolution must not report correct code.
+    g = _tree(tmp_path, monkeypatch, f"{label}.py", source, writer_import=False)
+    assert g.offenders() == []
+
+
+@pytest.mark.parametrize(
+    ("label", "source"),
+    [
+        (
+            "qualified",
+            """
+            from call_manager.db import models
+
+            def mk(**k):
+                return models.LlmSpend(**k)
+            """,
+        ),
+        (
+            "aliased",
+            """
+            from call_manager.db.models import LlmSpend as SpendRow
+
+            def mk(**k):
+                return SpendRow(**k)
+            """,
+        ),
+        (
+            "plain",
+            """
+            from call_manager.db.models import LlmSpend
+
+            def mk(**k):
+                return LlmSpend(**k)
+            """,
+        ),
+    ],
+)
+def test_every_constructor_shape_is_seen(tmp_path, monkeypatch, label, source):
+    """The "exactly one writer" claim only holds if the check can SEE a second one.
+
+    It matched ast.Name("LlmSpend") only, so `models.LlmSpend(...)` and
+    `import LlmSpend as SpendRow` were both invisible — a second writer could
+    have existed and this assertion would still have passed.
+    """
+    g = _tree(tmp_path, monkeypatch, f"{label}.py", source, writer_import=False)
+    assert g.llm_spend_constructors() == [f"call_manager/{label}.py"]
 
 
 def test_the_ledger_has_exactly_one_writer():

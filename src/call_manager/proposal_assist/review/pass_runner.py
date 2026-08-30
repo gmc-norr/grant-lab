@@ -129,10 +129,12 @@ async def _run_one_call(
                         done = event  # outer; survives a later raise/cancel
 
             await asyncio.wait_for(_drive(), timeout=settings.review_persona_timeout_seconds)
-        # BaseException, not Exception: asyncio.CancelledError is a BaseException, so a
-        # cancelled sub-call used to skip the finalize block below entirely and lose its
-        # spend. We fall through, record, and re-raise cancellation afterwards.
-        except BaseException as exc:  # noqa: BLE001 — terminal for THIS sub-call
+        # Exception PLUS CancelledError, not BaseException. CancelledError is a
+        # BaseException, so a cancelled sub-call used to skip the finalize block below
+        # and lose its spend — but catching BaseException wholesale would turn
+        # KeyboardInterrupt and SystemExit into ordinary failed sub-calls. We fall
+        # through, record, and re-raise cancellation afterwards.
+        except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 — terminal
             logger.exception("review sub-call %s failed for run %s", kind, run_id)
             cancelled = isinstance(exc, asyncio.CancelledError)
             error = (
@@ -176,6 +178,11 @@ async def _run_one_call(
                     sdk_session_id=done.session_id if done else None,
                 )
                 s.commit()
+                # This early return sits ABOVE the re-raise at the end of the
+                # function, so cancellation would be swallowed here. The spend is
+                # durable now; let it propagate.
+                if cancelled:
+                    raise asyncio.CancelledError()
                 return
             item.completed_at = _now()
             if done is not None:
