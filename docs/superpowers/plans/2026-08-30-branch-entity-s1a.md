@@ -2034,6 +2034,141 @@ cannot be what refuses; verified by commenting the new block out."
 
 ---
 
+### Task 5b: Phase 0 founds a new workspace's first branch row
+
+**Added during execution.** The plan had no task for this and it is a real gap: migration
+0068's backfill only ever sees the workspaces that exist when it runs.
+`phases/setup.py:_init_repo` does `git init -q -b main` and nothing else, so **every
+workspace created after the migration has a repo, no `branches` row, and a NULL
+`root_branch_id`.**
+
+It breaks nothing in S1 — nothing reads the table yet. It matters because S2 resolves
+every filesystem path through that pointer, and because Task 6's invariant test would
+have passed while being false for every new workspace: it only exercises backfilled ones.
+
+Spec §8 S1 step 4 says create and delete maintain the rows from this stage on. That reads
+naturally as "creating a SECOND branch" and misses the path that creates the FIRST one.
+
+**Files:**
+- Modify: `src/call_manager/proposal_assist/branch_entity_backfill.py` (add an optional
+  `workspace_id` filter)
+- Modify: `src/call_manager/proposal_assist/phases/setup.py` (call it from `_m1`, after
+  `self._init_repo(ws.id)`)
+- Test: `tests/proposal_assist/test_phase0_transaction_boundaries.py` (append two tests)
+
+**Interfaces:**
+- Consumes: `backfill_branch_entities` from Task 2.
+- Produces: `backfill_branch_entities(session, *, workspaces_dir, workspace_id=None)`.
+  Existing callers are unaffected — the default is a full pass.
+
+**Why reuse the reconciler rather than write a founding path.** Ref filtering, the
+detached-HEAD case and the orphan sweep are all already tested in Task 2. A second
+implementation is the one that drifts. Adding a filter is three lines.
+
+**Why inside `_m1`'s transaction.** A separate session would let a branch row commit while
+`_m1` later rolls back, leaving a row for a workspace whose repo creation was undone.
+`_m1` refuses a soft-deleted workspace and creates nothing, so a control test that
+soft-deletes and asserts no row survives proves the founding did not escape the
+transaction.
+
+- [ ] **Step 1: Add the `workspace_id` filter**
+
+In `branch_entity_backfill.py`, change the signature to:
+
+```python
+def backfill_branch_entities(
+    session: Session, *, workspaces_dir: Path, workspace_id: uuid.UUID | None = None
+) -> BackfillResult:
+```
+
+Add `import uuid` to the imports. Replace the workspace query with:
+
+```python
+    query = select(Workspace.id, Workspace.last_sdk_session_id)
+    if workspace_id is not None:
+        query = query.where(Workspace.id == workspace_id)
+    rows = session.execute(query).all()
+```
+
+- [ ] **Step 2: Call it from Phase 0**
+
+In `phases/setup.py`, add to the imports:
+
+```python
+from call_manager.proposal_assist.branch_entity_backfill import backfill_branch_entities
+```
+
+and immediately after `self._init_repo(ws.id)` in `_m1`:
+
+```python
+            backfill_branch_entities(s, workspaces_dir=self.workspaces_dir, workspace_id=ws.id)
+```
+
+with the comment explaining the gap, the transaction requirement, and why the reconciler
+is reused rather than reimplemented.
+
+- [ ] **Step 3: Write the tests**
+
+Append to `tests/proposal_assist/test_phase0_transaction_boundaries.py`, before
+`test_m1_refuses_a_deleted_workspace_and_creates_nothing`, using that file's existing
+`_worker`, `make_workspace`, `WorkspaceSetupJob` and `phase0_client` idioms:
+
+- `test_m1_founds_the_first_branch_row_and_the_root_pointer` — asserts the rows equal
+  `sorted(list_branches(repo))` as **exact set equality** (a membership check passes with
+  an extra row beside `main`), and that `root_branch_id` names `main`.
+- `test_m1_rolls_the_founded_branch_back_with_the_rest_of_m1` — monkeypatches
+  `setup.datetime` so `datetime.now(UTC)` at `setup.py:433` raises, which is the only
+  statement between the founding and `s.commit()`. Asserts no `Branch` row survives and
+  `root_branch_id` is still NULL.
+
+  **Do not write this as "soft-delete the workspace and expect `WorkspaceDeleted`".** That
+  was the first version and it is vacuous: `_m1`'s first statement is
+  `acquire_commit_mutex_at_generation`, which raises before `_init_repo` and before the
+  founding ever runs, so the assertion is trivially true.
+
+  Also worth knowing: the "separate session" form of this bug cannot ship silently. `_m1`
+  holds the workspace row `with_for_update=True`, so a second session's
+  `UPDATE workspaces SET root_branch_id` blocks on that lock while the outer session waits
+  in Python — a mutual wait Postgres cannot see as a deadlock. It HANGS. The mutation to
+  use for Step 5 is therefore an early `s.commit()` after the founding, not a second
+  session.
+
+- [ ] **Step 4: Run the tests**
+
+```bash
+uv run pytest tests/proposal_assist/test_phase0_transaction_boundaries.py -q
+```
+
+Expected: `28 passed`.
+
+- [ ] **Step 5: Prove the founding test bites**
+
+Replace the `backfill_branch_entities(...)` call in `setup.py` with `pass`.
+
+Expected: `test_m1_founds_the_first_branch_row_and_the_root_pointer` FAILS with
+`a new workspace was born with a NULL root pointer`, and **nothing else** — measured
+`1 failed, 27 passed`. Revert.
+
+Then a second mutation for the control test: add `s.commit()` immediately after the
+founding call, so it escapes `_m1`'s rollback. Expected:
+`test_m1_rolls_the_founded_branch_back_with_the_rest_of_m1` FAILS with `the founded branch
+row outlived a rolled-back _m1` — measured. Revert.
+
+- [ ] **Step 6: Lint and commit**
+
+```bash
+uv run ruff check src tests
+git add src/call_manager/proposal_assist/branch_entity_backfill.py \
+        src/call_manager/proposal_assist/phases/setup.py \
+        tests/proposal_assist/test_phase0_transaction_boundaries.py
+git commit -m "feat(branches): Phase 0 founds a new workspace's first branch row"
+```
+
+`ruff format --check` reports pre-existing drift in `setup.py` at lines ~98 and ~196,
+nowhere near this change. Leave it.
+
+---
+
 ### Task 6: Pin the invariants and regenerate the architecture map
 
 **Files:**
