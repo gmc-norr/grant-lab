@@ -25,8 +25,15 @@ from call_manager.proposal_assist.citations.gitio import (
     write_and_commit_files,
 )
 from call_manager.proposal_assist.drafting.contract import LaunchContext, TurnDoneEvent
+from call_manager.proposal_assist.fencing import (
+    CommitMutexTimeout,
+    WorkspaceDeleted,
+    WorkspaceGenerationStale,
+    acquire_commit_mutex_at_generation,
+)
 from call_manager.proposal_assist.passes import PASS_REGISTRY
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.ports.stamp import FenceStamp
 from call_manager.proposal_assist.review.agent import build_review_adapter
 from call_manager.proposal_assist.review.context import (
     assemble_review_context,
@@ -281,10 +288,37 @@ def _markdown_of(session, run_id, kind) -> str | None:
     return None
 
 
+
+def _fail_unfenced_run(session_factory, *, run_id: uuid.UUID, reason: str) -> None:
+    """Terminalize a run whose finalize was refused by the fence.
+
+    A SEPARATE session, because the refusal rolled the fenced one back — and the
+    mutex is released at that ROLLBACK, so this transaction is not holding it and
+    cannot self-deadlock. Deliberately DB-only: the whole point of the refusal is
+    that nothing may be written to git for a workspace that has moved on.
+
+    Conditional on status='running' so it cannot resurrect a row the delete path
+    or the reaper already terminalized while the six hosted calls were in flight.
+    """
+    with session_factory() as s:
+        run = s.get(ReviewRun, run_id, with_for_update=True)
+        if run is None or run.status != "running":
+            s.commit()
+            return
+        for it in s.scalars(select(ReviewRunItem).where(ReviewRunItem.review_run_id == run_id)):
+            if it.status == "running":
+                it.status = "failed"
+            if it.kind == "consolidation":
+                it.error_message = f"workspace moved on before finalize: {reason}"
+        run.status = "failed"
+        run.completed_at = _now()
+        s.commit()
+
+
 async def run_review_pass(
     *,
     run_id: uuid.UUID,
-    claimed_generation: int,
+    stamp: FenceStamp,
     session_factory: sessionmaker,
     settings: Settings,
     adapter_builder=build_review_adapter,
@@ -297,6 +331,18 @@ async def run_review_pass(
         if run0 is None or run0.status != "running":
             return
         tracked_ws = run0.workspace_id
+
+    # The stamp names a workspace and so does the run. Nothing downstream checks
+    # they agree, and `checkpoint_artifact` has the same latent split: it LOCKS
+    # stamp.workspace_id while READING and WRITING a separately-supplied
+    # workspace_id. A mismatch would fence one workspace and commit into another,
+    # which is precisely the failure the fence exists to prevent — so it is an
+    # assert, not a convention.
+    if stamp.workspace_id != tracked_ws:
+        raise ValueError(
+            f"stamp names workspace {stamp.workspace_id} but review run {run_id} "
+            f"belongs to {tracked_ws}"
+        )
 
     async with PASS_REGISTRY.track(tracked_ws):
         # 1. Short read session: guard running, pre-create the 6 items FIRST, pin context,
@@ -371,7 +417,7 @@ async def run_review_pass(
                     session_factory=session_factory,
                     settings=settings,
                     adapter_builder=adapter_builder,
-                    lifecycle_generation=claimed_generation,
+                    lifecycle_generation=stamp.generation,
                 )
 
         wave1 = [_guarded(kind, persona_instruction(kind, ctx)) for kind in WAVE1_KINDS]
@@ -392,7 +438,7 @@ async def run_review_pass(
                 session_factory=session_factory,
                 settings=settings,
                 adapter_builder=adapter_builder,
-                lifecycle_generation=claimed_generation,
+                lifecycle_generation=stamp.generation,
             )
         else:
             with session_factory() as s:
@@ -407,9 +453,45 @@ async def run_review_pass(
                 it.completed_at = _now()
                 s.commit()
 
-        # 4. Write artifacts + finalize (row-locked, still-running guard).
+        # 4. Write artifacts + finalize (mutex-fenced, row-locked, still-running).
         repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
         with session_factory() as s:
+            # LOCK ORDER: the mutex (M) is taken BEFORE the ReviewRun row (J).
+            # Putting it after the FOR UPDATE below would make this finalize
+            # J->M while the delete path runs M->J — a real 40P01, which is
+            # exactly what fencing.py:139-145 forbids.
+            #
+            # This is the only production git-commit sink that took no mutex and
+            # no fence at all, and `git commit` carries NO PATHSPEC
+            # (gitio.py:198): it commits the whole index. So an unfenced writer
+            # here does not merely commit to the wrong branch — it can hand the
+            # next checkpoint a commit it did not author. The six hosted calls
+            # above take minutes, and a switch, delete or retirement can land in
+            # that window; the generation check is what notices.
+            #
+            # Safe to take here: this runner holds no shared lease (the upgrade
+            # deadlock the protocol warns about needs one), and every LLM call is
+            # already finished, so the mutex is never held across one.
+            try:
+                acquire_commit_mutex_at_generation(
+                    s, workspace_id, generation=stamp.generation
+                )
+            except (WorkspaceDeleted, WorkspaceGenerationStale, CommitMutexTimeout) as exc:
+                logger.warning(
+                    "review finalize refused for run %s: %s", run_id, exc,
+                    extra={"event": "review_finalize_fenced", "review_run_id": str(run_id)},
+                )
+                s.rollback()
+                _fail_unfenced_run(session_factory, run_id=run_id, reason=str(exc))
+                # DELIBERATELY REDUNDANT, and a mutation cannot prove it: deleting
+                # this `return` leaves all tests green, because _fail_unfenced_run
+                # has just flipped the row out of 'running' and the status check
+                # below then returns anyway. It stays because the rollback above
+                # RELEASED the mutex — falling through would reach the git write
+                # holding nothing, and the only thing stopping it would be a guard
+                # fifteen lines away that exists for a different reason. Two doors
+                # on the same exit is the point.
+                return
             run = s.get(ReviewRun, run_id, with_for_update=True)
             if run is None or run.status != "running":
                 s.commit()
@@ -468,13 +550,26 @@ async def drain_review_queue_tick(
     with session_factory() as s:
         run = claim_next_review_run(s)
         s.commit()
+        # The stamp is built HERE, from the values the claiming statement itself
+        # captured (F3a claim identity), not re-read later. `origin_job_id` is the
+        # review run: it IS this actor's own background job row, which is the role
+        # FenceStamp documents for the submit_* effects.
+        stamp = (
+            None
+            if run is None
+            else FenceStamp(
+                workspace_id=run.workspace_id,
+                generation=run.claimed_at_generation,
+                active_turn_job_id=None,
+                origin_job_id=run.id,
+            )
+        )
         run_id = run.id if run is not None else None
-        claimed_generation = run.claimed_at_generation if run is not None else None
-    if run_id is None:
+    if run_id is None or stamp is None:
         return
     await run_review_pass(
         run_id=run_id,
-        claimed_generation=claimed_generation,
+        stamp=stamp,
         session_factory=session_factory,
         settings=settings,
         adapter_builder=adapter_builder,

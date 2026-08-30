@@ -388,3 +388,26 @@ def make_workspace_repo(tmp_path):
         return _S(tmp_path), wid
 
     return _make
+
+
+def review_stamp(session_factory, run_id, generation: int = 0):
+    """Build the FenceStamp a review pass would have been claimed with.
+
+    Production builds this in `drain_review_queue_tick` from the values the
+    claiming statement captured. Tests set the run to 'running' by hand, so this
+    reconstructs the same shape and reads workspace_id from the run rather than
+    taking it as an argument — `run_review_pass` asserts the two agree, and a
+    helper that let a caller pass a mismatching pair would make that assert
+    untestable from the outside.
+    """
+    from call_manager.db.models import ReviewRun
+    from call_manager.proposal_assist.ports.stamp import FenceStamp
+
+    with session_factory() as s:
+        run = s.get(ReviewRun, run_id)
+        return FenceStamp(
+            workspace_id=run.workspace_id,
+            generation=generation,
+            active_turn_job_id=None,
+            origin_job_id=run_id,
+        )

@@ -57,7 +57,7 @@ from call_manager.db.models import (
     UncitedClaimsJob,
 )
 from call_manager.proposal_assist.passes import PASS_REGISTRY, PassRegistry
-from tests.proposal_assist.conftest import make_workspace
+from tests.proposal_assist.conftest import make_workspace, review_stamp
 
 
 @pytest.fixture(autouse=True)
@@ -193,7 +193,9 @@ def _invoke(site, *, row_id, ws_id, session_factory, settings, adapter_builder):
     if site == "uncited":
         return m.run_uncited_claims_pass(job_id=row_id, claimed_generation=0, **common)
     if site == "review_parent":
-        return m.run_review_pass(run_id=row_id, claimed_generation=0, **common)
+        return m.run_review_pass(
+            run_id=row_id, stamp=review_stamp(session_factory, row_id, 0), **common
+        )
     return m._run_one_call(
         kind="fit_check", instruction="x", run_id=row_id, workspace_id=ws_id,
         lifecycle_generation=0, **common

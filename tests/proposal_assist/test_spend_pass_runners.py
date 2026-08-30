@@ -39,7 +39,7 @@ from call_manager.proposal_assist.review.pass_runner import run_review_pass
 from call_manager.proposal_assist.review.personas import WAVE1_KINDS
 from call_manager.proposal_assist.spend import record_spend, sum_spend_today
 from call_manager.proposal_assist.uncited_claims.pass_runner import run_uncited_claims_pass
-from tests.proposal_assist.conftest import make_user, make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace, review_stamp
 
 FAMILIES = ["coherence", "evaluator", "uncited_claims"]
 
@@ -381,7 +381,7 @@ def run_review(tmp_path, pg_session_factory, _settings_env):
         asyncio.run(
             run_review_pass(
                 run_id=run_id,
-                claimed_generation=0,
+                stamp=review_stamp(pg_session_factory, run_id, 0),
                 session_factory=pg_session_factory,
                 settings=settings,
                 adapter_builder=_review_builder(
@@ -534,7 +534,7 @@ def test_review_CONSOLIDATION_refuses_after_wave_one_exhausts_the_global_cap(
     asyncio.run(
         run_review_pass(
             run_id=run_id,
-            claimed_generation=0,
+            stamp=review_stamp(pg_session_factory, run_id, 0),
             session_factory=pg_session_factory,
             settings=settings,
             adapter_builder=counting_builder,

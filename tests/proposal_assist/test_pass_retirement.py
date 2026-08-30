@@ -20,7 +20,7 @@ from call_manager.proposal_assist.coherence.pass_runner import run_coherence_pas
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.review.pass_runner import run_review_pass
 from call_manager.workspaces import soft_delete_workspace_db
-from tests.proposal_assist.conftest import make_workspace
+from tests.proposal_assist.conftest import make_workspace, review_stamp
 
 
 def _now_utc() -> datetime:
@@ -536,7 +536,7 @@ def test_the_review_parent_prefix_writes_nothing_for_a_deleted_workspace(
     asyncio.run(
         run_review_pass(
             run_id=run_id,
-            claimed_generation=0,
+            stamp=review_stamp(pg_session_factory, run_id, 0),
             session_factory=pg_session_factory,
             settings=Settings(),
             adapter_builder=_never_called_adapter_builder,
@@ -600,6 +600,20 @@ def _runner_for(kind):
     return m.run_review_pass, "run_id", m, "assemble_review_context"
 
 
+
+def _fence_kwargs(kind, pg_session_factory, row_id):
+    """The fence argument each runner takes.
+
+    Review is the odd one out: it is the only pass that commits to git, so it is
+    the only one converted to a threaded FenceStamp. Its three siblings still take
+    a bare `claimed_generation` int. That asymmetry is real and is why this helper
+    exists — a uniform driver cannot pass one kwarg to all four any more.
+    """
+    if kind == "review":
+        return {"stamp": review_stamp(pg_session_factory, row_id, 0)}
+    return {"claimed_generation": 0}
+
+
 def _hold_workspace_row(pg_session_factory, ws_id, holding, release):
     """Take the workspace row FOR UPDATE from a separate connection and sit on it."""
 
@@ -658,7 +672,7 @@ def test_a_prefix_gives_up_instead_of_pinning_a_workspace_row_it_cannot_get(
                     session_factory=pg_session_factory,
                     settings=Settings(),
                     adapter_builder=_stub_adapter_builder,
-                    claimed_generation=0,
+                    **_fence_kwargs(kind, pg_session_factory, row_id),
                     **{id_kwarg: row_id},
                 )
             )
@@ -724,7 +738,7 @@ def test_a_prefix_holds_the_workspace_row_then_releases_it(
                     session_factory=pg_session_factory,
                     settings=Settings(),
                     adapter_builder=_stub_adapter_builder,
-                    claimed_generation=0,
+                    **_fence_kwargs(kind, pg_session_factory, row_id),
                     **{id_kwarg: row_id},
                 )
             )
@@ -871,7 +885,7 @@ def test_no_git_commit_lands_for_a_workspace_deleted_mid_review_pass(
             asyncio.run(
                 run_review_pass(
                     run_id=run_id,
-                    claimed_generation=0,
+                    stamp=review_stamp(pg_session_factory, run_id, 0),
                     session_factory=pg_session_factory,
                     settings=Settings(),
                     adapter_builder=_completing_then_parking_adapter_builder(gate, entered),

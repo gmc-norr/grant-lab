@@ -182,6 +182,15 @@ FENCING_IMPORT_FILES: frozenset[str] = frozenset({
     # (shared lease) + Primitive A (live_at_generation) so it cannot write into a
     # soft-deleted workspace.
     "proposal_assist/reconcile.py",
+    # Review finalize (2026-08-30) — the LAST unfenced production git-commit sink.
+    # Measured before the fix: review/pass_runner.py contained zero occurrences of
+    # `acquire_commit_mutex`, `acquire_shared_lease`, `live_at_generation` or any
+    # fencing import, while committing artifacts to git; the other three pass
+    # runners call write_and_commit_files zero times. It now takes Primitive B at
+    # the generation its CLAIM stamped (threaded as a FenceStamp from
+    # drain_review_queue_tick, not re-read), ABOVE the ReviewRun FOR UPDATE — below
+    # it the finalize would run J->M against the delete path's M->J.
+    "proposal_assist/review/pass_runner.py",
     # Workspace branches (2026-08-29 Task 6) — claim_turn_job takes Primitive C
     # (shared lease) so a branch switch's exclusive mutex linearizes against the
     # queued->running claim instead of racing it (spec §6.3).
