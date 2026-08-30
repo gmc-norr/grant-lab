@@ -478,3 +478,97 @@ def test_one_broken_repo_does_not_halt_the_rest(pg_session_factory, tmp_path):
         assert (r.created, r.rooted, r.skipped) == (1, 1, 1)
         assert _names(s, good) == ["main"]
         assert _names(s, bad) == []
+
+
+def test_reconciling_survives_the_root_branchs_ref_being_deleted(pg_session_factory, tmp_path):
+    """`fk_workspaces_root_branch_id` is ON DELETE RESTRICT, so deleting a row the
+    workspace still points at raises ForeignKeyViolation — and this function holds
+    ONE transaction for every workspace, so that would abort the whole batch and
+    discard every workspace already reconciled.
+
+    Not a contrived state: today's delete route guards only `current_branch`
+    (`branches.py:348`), so switching off `main` and deleting it is allowed.
+
+    The second workspace is the point. It is reconciled BEFORE the broken one in
+    the same call, so if the delete raises, its rows roll back with everything
+    else — asserting only on the broken workspace would miss the collateral.
+    """
+    with pg_session_factory() as s:
+        broken = make_workspace(s, title="broken", owner=make_user(s, email="br@ki.se")).id
+        other = make_workspace(s, title="other", owner=make_user(s, email="ot@ki.se")).id
+        s.commit()
+    for wid in (broken, other):
+        _repo(tmp_path, wid, "main", extra=("new_ideas",))
+
+    with pg_session_factory() as s:
+        backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+
+    d = workspace_repo_dir(tmp_path, broken)
+    subprocess.run(["git", "checkout", "-q", "new_ideas"], cwd=d, check=True)
+    subprocess.run(["git", "branch", "-D", "main"], cwd=d, check=True)
+
+    with pg_session_factory() as s:
+        r = backfill_branch_entities(s, workspaces_dir=tmp_path)  # must not raise
+        s.commit()
+        assert r.deleted == 1
+        assert _names(s, broken) == ["new_ideas"]
+        assert _names(s, other) == ["main", "new_ideas"], "the healthy workspace rolled back"
+        # repo/ is on new_ideas now, so that is the root the reconciler resolves.
+        assert s.get(Branch, s.get(Workspace, broken).root_branch_id).name == "new_ideas"
+
+
+def test_a_rootless_workspace_whose_root_ref_vanished_is_left_honestly_rootless(
+    pg_session_factory, tmp_path
+):
+    """The other branch of the same fix: no new root is knowable AND the old root's
+    ref is gone. Clearing the pointer is the honest answer — pointing it at a
+    surviving branch would silently promote something nobody chose, and §7.3 gives
+    that power to promote alone."""
+    with pg_session_factory() as s:
+        wid = make_workspace(s, title="w", owner=make_user(s, email="rootless@ki.se")).id
+        s.commit()
+    _repo(tmp_path, wid, "main", extra=("new_ideas",))
+
+    with pg_session_factory() as s:
+        backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+
+    d = workspace_repo_dir(tmp_path, wid)
+    subprocess.run(["git", "checkout", "-q", "--detach", "HEAD"], cwd=d, check=True)
+    subprocess.run(["git", "branch", "-D", "main"], cwd=d, check=True)
+
+    with pg_session_factory() as s:
+        r = backfill_branch_entities(s, workspaces_dir=tmp_path)  # must not raise
+        s.commit()
+        assert (r.deleted, r.rooted) == (1, 0)
+        assert _names(s, wid) == ["new_ideas"]
+        assert s.get(Workspace, wid).root_branch_id is None
+
+
+def test_a_surviving_root_pointer_is_not_cleared_by_an_unrelated_orphan(
+    pg_session_factory, tmp_path
+):
+    """Control for the test above. The clear must fire ONLY when the doomed row is
+    the one the pointer names — a blanket 'detached plus orphans, so null it'
+    would silently unroot every healthy workspace that happened to have a stale
+    row lying around."""
+    with pg_session_factory() as s:
+        wid = make_workspace(s, title="w", owner=make_user(s, email="survive@ki.se")).id
+        s.commit()
+    _repo(tmp_path, wid, "main")
+
+    with pg_session_factory() as s:
+        backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.add(Branch(workspace_id=wid, name="stale_unrelated"))
+        s.commit()
+        root_before = s.get(Workspace, wid).root_branch_id
+
+    d = workspace_repo_dir(tmp_path, wid)
+    subprocess.run(["git", "checkout", "-q", "--detach", "HEAD"], cwd=d, check=True)
+
+    with pg_session_factory() as s:
+        r = backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+        assert r.deleted == 1
+        assert s.get(Workspace, wid).root_branch_id == root_before, "unrooted a healthy workspace"

@@ -13,6 +13,7 @@ repairs either. S2 runs it again before it attaches any worktree.
 from __future__ import annotations
 
 import logging
+import subprocess
 from pathlib import Path
 from typing import NamedTuple
 
@@ -102,7 +103,7 @@ def backfill_branch_entities(session: Session, *, workspaces_dir: Path) -> Backf
             continue  # still in setup; nothing to found a branch on, and not a failure
         try:
             names = _real_refs(repo)
-        except (GitCommitError, OSError):
+        except (GitCommitError, OSError, subprocess.TimeoutExpired):
             skipped += 1
             logger.warning(
                 "branches.entity_reconcile_skipped",
@@ -122,19 +123,25 @@ def backfill_branch_entities(session: Session, *, workspaces_dir: Path) -> Backf
                 continue
             session.add(Branch(workspace_id=wid, name=name))
             created += 1
-        orphans = existing - set(names)
-        if orphans:
-            session.execute(
-                delete(Branch).where(Branch.workspace_id == wid, Branch.name.in_(orphans))
-            )
-            deleted += len(orphans)
         session.flush()  # assign ids before anything reads one back
+        orphans = existing - set(names)
 
         # The root pointer: git HEAD. Detached leaves it alone rather than guessing.
         try:
             head = current_branch(repo)
-        except (GitCommitError, OSError):
+        except (GitCommitError, OSError, subprocess.TimeoutExpired):
             head = None
+
+        # THE POINTER MOVES BEFORE THE DELETE, and that order is load-bearing.
+        # `fk_workspaces_root_branch_id` is ON DELETE RESTRICT, so deleting a row
+        # the workspace still points at raises ForeignKeyViolation — and because
+        # this function holds ONE transaction for every workspace, that aborts the
+        # whole batch and discards every workspace already reconciled. Reproduced:
+        # switch off `main`, `git branch -D main` (today's delete route allows it,
+        # `branches.py:348` guards only `current_branch`), then reconcile.
+        #
+        # RESTRICT did its job — it refused to let a caller silently orphan the
+        # root pointer. This function was that caller.
         if head in names:
             root = session.execute(
                 select(Branch).where(Branch.workspace_id == wid, Branch.name == head)
@@ -143,6 +150,26 @@ def backfill_branch_entities(session: Session, *, workspaces_dir: Path) -> Backf
                 update(Workspace).where(Workspace.id == wid).values(root_branch_id=root.id)
             )
             rooted += 1
+        elif orphans:
+            # No new root is knowable (detached HEAD, or HEAD on a ref that is
+            # somehow absent) AND rows are about to go. Clear the pointer only if
+            # it names one of the doomed rows: a workspace whose root survived
+            # keeps it, and one whose root's ref vanished is left honestly
+            # rootless rather than pointed at a branch that no longer exists.
+            rooted_at = session.get(Workspace, wid).root_branch_id
+            if rooted_at is not None:
+                doomed = session.get(Branch, rooted_at)
+                if doomed is not None and doomed.name in orphans:
+                    session.execute(
+                        update(Workspace).where(Workspace.id == wid).values(root_branch_id=None)
+                    )
+
+        if orphans:
+            session.execute(
+                delete(Branch).where(Branch.workspace_id == wid, Branch.name.in_(orphans))
+            )
+            deleted += len(orphans)
+        session.flush()
 
         # The SDK handle: workspaces.current_branch. A column naming a branch that
         # no longer exists has no row to carry it; leaving it on the workspace is
