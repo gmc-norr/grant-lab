@@ -173,11 +173,16 @@ Net: **18 of 20** record sites and **8 of 14** cap checks go through the slot.
 ## 6. Interface
 
 Module location: **`src/call_manager/spend.py`** (top level). The current module
-is `call_manager.proposal_assist.spend`, but `ranking/` and
-`proposal_assist/extractors/` are not under `proposal_assist`, and a
-`proposal_assist` module imported by `ranking` would invert the dependency.
-The import-fence gate has pinned exemptions keyed by path — moving the module
-will require re-deriving those pins (see `reference_call_monitor_gotchas`).
+is `call_manager.proposal_assist.spend`. Two of the three new spenders
+(`proposal_assist/phases/setup.py`, `proposal_assist/extractors/refresh.py`) are
+inside `proposal_assist` and would be fine where it is — but `ranking/` is not,
+and `ranking` importing a `proposal_assist` module inverts the dependency:
+ranking is the older, independent subsystem and nothing in it currently imports
+proposal_assist. That single caller is the whole reason to move the module.
+
+The import-fence gate has pinned exemptions keyed by path, so moving the module
+requires re-deriving those pins with `_fingerprints_for_file` rather than
+hand-editing them (see `reference_call_monitor_gotchas`).
 
 ```python
 class SpendCapReached(Exception):
