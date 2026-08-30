@@ -180,6 +180,12 @@ def compact_workspace(
         envelope = summarizer_client.chat(
             messages=[{"role": "user", "content": user_message}],
         )
+        # Decoding lives INSIDE the try on purpose. It used to sit below, so a
+        # malformed envelope raised AFTER the hosted call had already spent
+        # tokens and recorded nothing — the exact shape this ledger exists to
+        # remove. Found by an outside review of the shipped branch.
+        summary_text = envelope["choices"][0]["message"]["content"]
+        used_model = envelope.get("model") or getattr(summarizer_client, "model", "unknown")
     except Exception:
         # The summarizer threw, so there is no envelope and no usage. Record the
         # EXISTENCE of the attempt on a FRESH session: `s` is still bound here
@@ -193,8 +199,6 @@ def compact_workspace(
             )
             fail_s.commit()
         raise
-    summary_text = envelope["choices"][0]["message"]["content"]
-    used_model = envelope.get("model") or getattr(summarizer_client, "model", "unknown")
 
     with session_factory() as s:
         new_summary = ChatSummary(

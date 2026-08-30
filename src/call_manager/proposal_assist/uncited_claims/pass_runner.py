@@ -175,7 +175,10 @@ async def run_uncited_claims_pass(
             await asyncio.wait_for(
                 _run(), timeout=settings.uncited_claims_pass_timeout_seconds
             )
-        except Exception as exc:  # noqa: BLE001 — terminal: fail the job, never propagate
+        # BaseException, not Exception: asyncio.CancelledError is a BaseException,
+        # so a cancelled pass used to skip _fail entirely and lose its spend. We
+        # record, then re-raise cancellation at the end of this handler.
+        except BaseException as exc:  # noqa: BLE001 — terminal; CancelledError re-raised below
             logger.exception("uncited-claims pass failed for job %s", job_id)
             message = (
                 "Uncited-claims check timed out."
@@ -184,6 +187,25 @@ async def run_uncited_claims_pass(
             )
             with session_factory() as s:
                 job = s.get(UncitedClaimsJob, job_id, with_for_update=True)
+                if job is not None and job.status != "running":
+                    # The reaper or a cancel already finalized this job. Don't
+                    # resurrect it — but the call still ran and still spent, and
+                    # `_fail` below is skipped on this branch, so without this the
+                    # spend is invisible to the cap. Same shape as the finalize
+                    # block's late-spend path.
+                    record_spend(
+                        s,
+                        workspace_id=job.workspace_id,
+                        kind="uncited_claims",
+                        status="timeout"
+                        if isinstance(exc, (asyncio.TimeoutError, TimeoutError))
+                        else "failed",
+                        tokens_in=done.tokens_in if done else None,
+                        tokens_out=done.tokens_out if done else None,
+                        model=done.model if done else None,
+                        ref_id=job.id,
+                        sdk_session_id=done.session_id if done else None,
+                    )
                 if job is not None and job.status == "running":
                     _fail(
                         s,
@@ -195,6 +217,11 @@ async def run_uncited_claims_pass(
                         else "failed",
                     )
                 s.commit()
+            # Cancellation must still propagate — the caller's wait_for and the
+            # scheduler both rely on it. We only widened the catch so the spend
+            # above is recorded first.
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             return
         finally:
             if handle is not None:

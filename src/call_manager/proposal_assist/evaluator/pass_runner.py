@@ -158,7 +158,10 @@ async def run_evaluator_pass(
                         done = event  # outer; survives a later raise/cancel
 
             await asyncio.wait_for(_run(), timeout=settings.evaluator_pass_timeout_seconds)
-        except Exception as exc:  # noqa: BLE001 — terminal: fail the job, never propagate
+        # BaseException, not Exception: asyncio.CancelledError is a BaseException,
+        # so a cancelled pass used to skip _fail entirely and lose its spend. We
+        # record, then re-raise cancellation at the end of this handler.
+        except BaseException as exc:  # noqa: BLE001 — terminal; CancelledError re-raised below
             logger.exception("evaluator pass failed for job %s", job_id)
             # Member-visible: surface only a sanitized, generic message (full detail
             # already in the logs above); distinguish the expected timeout outcome.
@@ -171,6 +174,25 @@ async def run_evaluator_pass(
                 # Lock the row + guard on status=='running': the separate reaper may
                 # have already failed this job during a hang; don't double-finalize.
                 job = s.get(EvaluatorJob, job_id, with_for_update=True)
+                if job is not None and job.status != "running":
+                    # The reaper or a cancel already finalized this job. Don't
+                    # resurrect it — but the call still ran and still spent, and
+                    # `_fail` below is skipped on this branch, so without this the
+                    # spend is invisible to the cap. Same shape as the finalize
+                    # block's late-spend path.
+                    record_spend(
+                        s,
+                        workspace_id=job.workspace_id,
+                        kind="evaluator",
+                        status="timeout"
+                        if isinstance(exc, (asyncio.TimeoutError, TimeoutError))
+                        else "failed",
+                        tokens_in=done.tokens_in if done else None,
+                        tokens_out=done.tokens_out if done else None,
+                        model=done.model if done else None,
+                        ref_id=job.id,
+                        sdk_session_id=done.session_id if done else None,
+                    )
                 if job is not None and job.status == "running":
                     _fail(
                         s,
@@ -182,6 +204,11 @@ async def run_evaluator_pass(
                         else "failed",
                     )
                 s.commit()
+            # Cancellation must still propagate — the caller's wait_for and the
+            # scheduler both rely on it. We only widened the catch so the spend
+            # above is recorded first.
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             return
         finally:
             if handle is not None:
@@ -200,7 +227,32 @@ async def run_evaluator_pass(
         #    written (the reaper may have failed it during a hang — don't resurrect it).
         with session_factory() as s:
             job = s.get(EvaluatorJob, job_id, with_for_update=True)
-            if job is None or job.status != "running":
+            if job is None:
+                s.commit()
+                return
+            if job.status != "running":
+                # The reaper or a cancel finalized this job mid-pass. Do NOT
+                # resurrect it — but the sub-call still ran and still reported
+                # usage, and after the cap moved to the ledger a `return` here
+                # loses that spend entirely. uncited_claims already had this
+                # path; coherence and evaluator did not, which is how an outside
+                # review found it. Keep the display columns honest too.
+                if done is not None:
+                    job.input_tokens = done.tokens_in or 0
+                    job.output_tokens = done.tokens_out or 0
+                    job.model = done.model
+                    job.sdk_session_id = done.session_id
+                record_spend(
+                    s,
+                    workspace_id=job.workspace_id,
+                    kind="evaluator",
+                    status="failed",
+                    tokens_in=done.tokens_in if done else None,
+                    tokens_out=done.tokens_out if done else None,
+                    model=done.model if done else None,
+                    ref_id=job.id,
+                    sdk_session_id=done.session_id if done else None,
+                )
                 s.commit()
                 return
             if job.scorecard is None:

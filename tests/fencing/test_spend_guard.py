@@ -1,5 +1,7 @@
 import textwrap
 
+import pytest
+
 from tests.fencing.spend_guard import (
     PINNED,
     llm_spend_constructors,
@@ -68,6 +70,55 @@ def test_the_guard_accepts_a_function_that_records(tmp_path, monkeypatch):
         """
         def f(s, job, done):
             job.input_tokens = done.tokens_in or 0
+            record_spend(s, workspace_id=job.workspace_id, kind='evaluator', status='ok')
+        """,
+    )
+    assert g.offenders() == []
+
+
+@pytest.mark.parametrize(
+    ("label", "body"),
+    [
+        (
+            "tuple_unpack",
+            "(job.input_tokens, job.output_tokens) = (done.tokens_in, done.tokens_out)",
+        ),
+        ("annotated", "job.input_tokens: int = done.tokens_in"),
+        ("augmented", "job.input_tokens += done.tokens_in"),
+        ("chained", "job.input_tokens = other.input_tokens = done.tokens_in"),
+    ],
+)
+def test_every_assignment_form_that_stamps_is_reported(tmp_path, monkeypatch, label, body):
+    """An outside review found three of these live in the shipped guard.
+
+    `_stamp_lines` matched only a bare `ast.Attribute` target, so tuple-unpack,
+    annotated and augmented assignment were all invisible: a function could write
+    `job.input_tokens += done.tokens_in`, record nothing, and the gate stayed
+    green. Measured against the real guard before the fix, not theorised. `+=` is
+    the one that matters — accumulating a token total is a natural way to write
+    exactly the code this gate exists to catch.
+    """
+    g = _tree(
+        tmp_path,
+        monkeypatch,
+        f"{label}.py",
+        f"""
+        def f(job, other, done):
+            {body}
+        """,
+    )
+    assert g.offenders() == [f"call_manager/{label}.py::f"]
+
+
+def test_a_widened_form_still_passes_when_it_records(tmp_path, monkeypatch):
+    # The other direction: widening the target walk must not report correct code.
+    g = _tree(
+        tmp_path,
+        monkeypatch,
+        "good_aug.py",
+        """
+        def f(s, job, done):
+            job.input_tokens += done.tokens_in
             record_spend(s, workspace_id=job.workspace_id, kind='evaluator', status='ok')
         """,
     )

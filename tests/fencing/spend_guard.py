@@ -111,13 +111,38 @@ def _spend_writer_names(tree: ast.AST) -> frozenset[str]:
     return frozenset(names)
 
 
+def _target_stamps(target: ast.AST) -> bool:
+    """True if this assignment target writes a token field.
+
+    Recursive because a target can NEST: `(job.input_tokens, job.output_tokens)
+    = pair` is a Tuple of Attributes, and `[a.tokens_in] = xs` is a List. An
+    earlier version matched only a bare `ast.Attribute`, so all three of
+    tuple-unpack, annotated and augmented assignment slipped through the gate —
+    measured, not theorised. `+=` matters most: accumulating a token total is a
+    natural way to write exactly the code this gate exists to catch.
+    """
+    if isinstance(target, ast.Attribute):
+        return target.attr in TOKEN_FIELDS
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return any(_target_stamps(el) for el in target.elts)
+    if isinstance(target, ast.Starred):
+        return _target_stamps(target.value)
+    return False
+
+
 def _stamp_lines(nodes: list[ast.AST]) -> list[int]:
     lines: list[int] = []
     for node in nodes:
+        # Assign has a LIST of targets (`a = b = value`); AnnAssign and AugAssign
+        # each have exactly one. All three write the attribute.
         if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Attribute) and target.attr in TOKEN_FIELDS:
-                    lines.append(node.lineno)
+            targets: list[ast.AST] = list(node.targets)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
+        else:
+            continue
+        if any(_target_stamps(t) for t in targets):
+            lines.append(node.lineno)
     return sorted(lines)
 
 

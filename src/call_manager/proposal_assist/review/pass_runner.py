@@ -118,6 +118,7 @@ async def _run_one_call(
         handle = None
         done: TurnDoneEvent | None = None
         error: str | None = None
+        cancelled = False
         try:
 
             async def _drive() -> None:
@@ -128,8 +129,12 @@ async def _run_one_call(
                         done = event  # outer; survives a later raise/cancel
 
             await asyncio.wait_for(_drive(), timeout=settings.review_persona_timeout_seconds)
-        except Exception as exc:  # noqa: BLE001 — terminal for THIS sub-call
+        # BaseException, not Exception: asyncio.CancelledError is a BaseException, so a
+        # cancelled sub-call used to skip the finalize block below entirely and lose its
+        # spend. We fall through, record, and re-raise cancellation afterwards.
+        except BaseException as exc:  # noqa: BLE001 — terminal for THIS sub-call
             logger.exception("review sub-call %s failed for run %s", kind, run_id)
+            cancelled = isinstance(exc, asyncio.CancelledError)
             error = (
                 "timed out"
                 if isinstance(exc, (asyncio.TimeoutError, TimeoutError))
@@ -154,6 +159,23 @@ async def _run_one_call(
             run = s.get(ReviewRun, run_id, with_for_update=True)
             item = s.get(ReviewRunItem, item_id, with_for_update=True)
             if item is None:
+                # The item was deleted while its sub-call was in flight. There is
+                # no row left to stamp, but the hosted call still happened and
+                # still cost money, so the ledger must carry it or the spend is
+                # invisible to the cap. `ref_id` stays the item id even though the
+                # item is gone — it is the call's identity, not a foreign key.
+                record_spend(
+                    s,
+                    workspace_id=workspace_id,
+                    kind="review",
+                    status="timeout" if error == "timed out" else "failed",
+                    tokens_in=done.tokens_in if done else None,
+                    tokens_out=done.tokens_out if done else None,
+                    model=done.model if done else None,
+                    ref_id=item_id,
+                    sdk_session_id=done.session_id if done else None,
+                )
+                s.commit()
                 return
             item.completed_at = _now()
             if done is not None:
@@ -207,6 +229,12 @@ async def _run_one_call(
                 ref_id=item.id,
             )
             s.commit()
+
+        # The spend is now durable; cancellation may resume propagating. Re-raised
+        # AFTER the finalize block (not inside the handler) so the ledger row is
+        # written first — that ordering is the whole point of widening the catch.
+        if cancelled:
+            raise asyncio.CancelledError()
 
 
 def _markdown_of(session, run_id, kind) -> str | None:
