@@ -7,9 +7,11 @@ false. `record_usage` is the one writer, so it gains one insert.
 
 from sqlalchemy import select
 
+from call_manager.config import Settings
 from call_manager.db.models import CitationLlmUsage, LlmSpend, User, Workspace
+from call_manager.proposal_assist.citations.service import CitationLLMService
 from call_manager.proposal_assist.citations.usage import record_usage
-from call_manager.proposal_assist.spend import sum_spend_today
+from call_manager.proposal_assist.spend import record_spend, sum_spend_today
 
 
 def _ws(session):
@@ -66,3 +68,40 @@ def test_the_two_ledgers_cannot_drift_because_there_is_one_writer(pg_session_fac
 
     src = inspect.getsource(mod)
     assert src.count("CitationLlmUsage(") == 1, "a second citation writer would drift"
+
+
+def test_citation_refuses_when_the_GLOBAL_cap_is_reached(
+    pg_session_factory, monkeypatch, _settings_env
+):
+    """Citation spend was unified INTO the global total by this branch — but the
+    service only ever consulted its own per-op caps.
+
+    That made it a sixth family that adds to the number and never reads it, which
+    is precisely the violation the ledger exists to remove, recreated inside the
+    branch removing it. The LLM must not be called at all: `_Boom` raises if it is.
+    """
+    monkeypatch.setenv("GLOBAL_DAILY_TOKEN_CAP_INPUT", "100")
+
+    class _Boom:
+        model = "gemma"
+
+        def complete_json(self, *, system, user):  # pragma: no cover - must not run
+            raise AssertionError("the LLM was called despite the global cap")
+
+    with pg_session_factory() as s:
+        ws_id = _ws(s)
+        record_spend(
+            s, workspace_id=ws_id, kind="chat_turn", status="ok", tokens_in=5000, tokens_out=0
+        )
+        s.commit()
+
+    svc = CitationLLMService(
+        session_factory=pg_session_factory, llm=_Boom(), settings=Settings()
+    )
+    result = svc.complete_json(workspace_id=ws_id, op="metadata", system="s", user="u")
+
+    assert result.cap_exceeded is True
+    assert result.cap_scope == "global"
+    assert result.data is None
+    with pg_session_factory() as s:
+        assert s.execute(select(LlmSpend).where(LlmSpend.kind == "citation")).first() is None

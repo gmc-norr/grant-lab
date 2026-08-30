@@ -193,6 +193,20 @@ def _spend_writer_names(
                 if alias.name in WRITER_MODULES:
                     continue
                 shadowed.add((alias.asname or alias.name).split(".", 1)[0])
+        elif isinstance(node, ast.ImportFrom):
+            # The same for `from unrelated import record_spend`. Only imports from a
+            # WRITER module establish a writer; one from anywhere else REPLACES it,
+            # and handling ast.Import but not ast.ImportFrom left that half open.
+            mod = node.module or ""
+            for alias in node.names:
+                # Skip BOTH shapes that establish a writer: a name imported FROM a
+                # writer module, and a name that IS one (`from call_manager
+                # .proposal_assist import spend`). Without the second, this rule
+                # shadowed the very module alias it establishes — the same trap the
+                # ast.Import branch above hit, caught by the same control test.
+                if mod in WRITER_MODULES or f"{mod}.{alias.name}" in WRITER_MODULES:
+                    continue
+                shadowed.add(alias.asname or alias.name)
 
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):

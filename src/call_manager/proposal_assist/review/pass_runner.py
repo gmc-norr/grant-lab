@@ -49,6 +49,7 @@ from call_manager.proposal_assist.review.personas import (
 )
 from call_manager.proposal_assist.row_locks import bounded_prefix_lock_waits
 from call_manager.proposal_assist.spend import record_spend
+from call_manager.proposal_assist.turns.caps import check_global_daily_token_cap
 
 logger = logging.getLogger(__name__)
 
@@ -315,9 +316,14 @@ async def run_review_pass(
                 session=s, workspace_id=workspace_id, workspaces_dir=settings.workspaces_dir
             )
             run.draft_sha = ctx.draft_sha
-            # pass-start cap recheck (a long queue wait may have pushed the ws over budget)
+            # pass-start cap recheck (a long queue wait may have pushed the ws over
+            # budget). The GLOBAL ceiling joins the same recheck: the endpoint tested
+            # it at enqueue time and that answer is stale by now, so without this a
+            # run accepted before the org hit its ceiling still spends past it — six
+            # hosted calls' worth, in this family's case.
             over = (
-                review_runs_today(s, workspace_id=workspace_id) > review_run_cap(ws, settings)
+                not check_global_daily_token_cap(s, settings=settings).allowed
+                or review_runs_today(s, workspace_id=workspace_id) > review_run_cap(ws, settings)
                 or review_dollars_today(s, workspace_id=workspace_id)
                 >= review_dollar_cap(ws, settings)
             )

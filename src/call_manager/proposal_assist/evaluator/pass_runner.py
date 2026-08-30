@@ -25,6 +25,7 @@ from call_manager.proposal_assist.evaluator.jobs import (
 from call_manager.proposal_assist.passes import PASS_REGISTRY
 from call_manager.proposal_assist.row_locks import bounded_prefix_lock_waits
 from call_manager.proposal_assist.spend import record_spend
+from call_manager.proposal_assist.turns.caps import check_global_daily_token_cap
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,16 @@ async def run_evaluator_pass(
                 return
             workspace_id = job.workspace_id
             requested_by = job.requested_by
+            # The endpoint checked the GLOBAL cap when this job was enqueued; the
+            # queue delay means that check is stale by now. Without a recheck here a
+            # job accepted before the ceiling was reached still spends past it —
+            # the same 'contributes to the total, never consults it' shape this
+            # branch exists to remove. Checked before the per-family budget because
+            # the org ceiling is the harder stop.
+            if not check_global_daily_token_cap(s, settings=settings).allowed:
+                _fail(s, job, "global daily token cap reached")
+                s.commit()
+                return
             if evaluator_cap_exceeded(s, workspace_id=workspace_id, settings=settings):
                 _fail(s, job, "daily evaluation budget reached")
                 s.commit()
@@ -160,12 +171,15 @@ async def run_evaluator_pass(
                         done = event  # outer; survives a later raise/cancel
 
             await asyncio.wait_for(_run(), timeout=settings.evaluator_pass_timeout_seconds)
-        # Exception PLUS CancelledError, not BaseException. CancelledError is a
-        # BaseException, so a cancelled pass used to skip _fail and lose its spend —
-        # but catching BaseException wholesale would turn KeyboardInterrupt and
-        # SystemExit into ordinary failed jobs. Name the two we mean; cancellation is
-        # re-raised at the end of this handler.
-        except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 — terminal
+        # BaseException, deliberately — but the two concerns are separated rather
+        # than traded off. Round 4 narrowed this to (Exception, CancelledError) so
+        # KeyboardInterrupt and SystemExit would not become ordinary failed jobs;
+        # round 8 pointed out that narrowing loses their spend, which is real money.
+        # Both are satisfiable: RECORD on every BaseException, but only mark the job
+        # `failed` for an Exception, and re-raise anything that is not one. A
+        # shutdown signal leaves the job `running` for the reaper, with its spend on
+        # the ledger.
+        except BaseException as exc:  # noqa: BLE001 — terminal; non-Exception re-raised
             logger.exception("evaluator pass failed for job %s", job_id)
             # Member-visible: surface only a sanitized, generic message (full detail
             # already in the logs above); distinguish the expected timeout outcome.
@@ -178,7 +192,12 @@ async def run_evaluator_pass(
                 # Lock the row + guard on status=='running': the separate reaper may
                 # have already failed this job during a hang; don't double-finalize.
                 job = s.get(EvaluatorJob, job_id, with_for_update=True)
-                if job is not None and job.status != "running":
+                # `not isinstance(exc, Exception)` joins this branch: a shutdown
+                # signal must record its spend WITHOUT flipping a still-running job
+                # to failed — the reaper owns that job after the process dies.
+                if job is not None and (
+                    job.status != "running" or not isinstance(exc, Exception)
+                ):
                     # The reaper or a cancel already finalized this job. Don't
                     # resurrect it — but the call still ran and still spent, and
                     # `_fail` below is skipped on this branch, so without this the
@@ -203,7 +222,11 @@ async def run_evaluator_pass(
                         ref_id=job.id,
                         sdk_session_id=done.session_id if done else None,
                     )
-                if job is not None and job.status == "running":
+                if (
+                    job is not None
+                    and job.status == "running"
+                    and isinstance(exc, Exception)
+                ):
                     _fail(
                         s,
                         job,
@@ -214,11 +237,11 @@ async def run_evaluator_pass(
                         else "failed",
                     )
                 s.commit()
-            # Cancellation must still propagate — the caller's wait_for and the
-            # scheduler both rely on it. We only widened the catch so the spend
-            # above is recorded first.
+            # Cancellation and shutdown must still propagate — the caller's wait_for
+            # and the scheduler both rely on it. We only widened the catch so the
+            # spend above is recorded first.
             spend_is_durable = True  # the handler above committed it
-            if isinstance(exc, asyncio.CancelledError):
+            if not isinstance(exc, Exception):
                 raise
             return
         finally:

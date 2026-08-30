@@ -36,8 +36,9 @@ from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
 from call_manager.proposal_assist.evaluator.pass_runner import run_evaluator_pass
 from call_manager.proposal_assist.review.jobs import enqueue_review_run
 from call_manager.proposal_assist.review.pass_runner import run_review_pass
+from call_manager.proposal_assist.spend import record_spend
 from call_manager.proposal_assist.uncited_claims.pass_runner import run_uncited_claims_pass
-from tests.proposal_assist.conftest import make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace
 
 FAMILIES = ["coherence", "evaluator", "uncited_claims"]
 
@@ -157,6 +158,54 @@ def run_pass(tmp_path, pg_session_factory, _settings_env):
         return ws_id, job_id
 
     return _run
+
+
+@pytest.mark.parametrize("family", FAMILIES)
+def test_a_QUEUED_job_refuses_when_the_global_cap_is_reached(
+    pg_session_factory, run_pass, monkeypatch, family
+):
+    """The endpoint checked the global cap at ENQUEUE time. That answer is stale by
+    the time the drain tick runs.
+
+    Without a recheck here, a job accepted before the org hit its ceiling still
+    spends past it — the "contributes to the total, never consults it" shape this
+    whole branch exists to remove, surviving inside the branch that removes it.
+    Seeded over the ceiling BEFORE the pass runs, so only the runner's own recheck
+    can stop it.
+    """
+    monkeypatch.setenv("GLOBAL_DAILY_TOKEN_CAP_INPUT", "100")
+    with pg_session_factory() as s:
+        # A distinct owner: run_pass creates its own workspace with the default
+        # owner email, and users.email is unique.
+        ws = make_workspace(s, owner=make_user(s, email=f"capseed-{family}@ki.se"))
+        s.flush()
+        record_spend(
+            s,
+            workspace_id=ws.id,
+            kind="chat_turn",
+            status="ok",
+            tokens_in=5000,
+            tokens_out=0,
+        )
+        s.commit()
+
+    ws_id, job_id = run_pass(family, outcome="ok", tokens_in=21, tokens_out=34)
+
+    with pg_session_factory() as s:
+        job = s.get(JOB_MODEL[family], job_id)
+        assert job.status == "failed"
+        assert "global" in (job.error or "").lower()
+        # The hosted call never happened, so no row for THIS job's own spend.
+        rows = (
+            s.execute(
+                select(LlmSpend).where(
+                    LlmSpend.kind == family, LlmSpend.ref_id == str(job_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert [r.tokens_in for r in rows] == [0], rows
 
 
 @pytest.mark.parametrize("family", FAMILIES)

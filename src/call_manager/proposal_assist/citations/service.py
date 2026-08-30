@@ -16,6 +16,7 @@ from sqlalchemy.orm import sessionmaker
 from call_manager.config import Settings
 from call_manager.proposal_assist.citations.llm import LLMUsage, StructuredLLM
 from call_manager.proposal_assist.citations.usage import check_citation_caps, record_usage
+from call_manager.proposal_assist.turns.caps import check_global_daily_token_cap
 
 logger = logging.getLogger(__name__)
 
@@ -72,9 +73,20 @@ class CitationLLMService:
 
         with self._session_factory() as s:
             cap = check_citation_caps(s, workspace_id, settings=self._settings)
+            # The GLOBAL ceiling, checked in the same session. Citation spend was
+            # unified INTO the global total by this branch, but the service only ever
+            # consulted its own per-op caps — making it a sixth family that adds to
+            # the number and never reads it, which is the exact violation the ledger
+            # exists to remove. Refused the same way as a per-op cap, so the caller's
+            # existing cap_exceeded handling covers it and no call is made.
+            global_cap = check_global_daily_token_cap(s, settings=self._settings)
         if cap.exceeded:
             return CitationLLMResult(
                 data=None, usage=None, model=None, cap_exceeded=True, cap_scope=cap.scope
+            )
+        if not global_cap.allowed:
+            return CitationLLMResult(
+                data=None, usage=None, model=None, cap_exceeded=True, cap_scope="global"
             )
 
         try:
