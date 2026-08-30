@@ -117,10 +117,21 @@ reserve commit must land before the hosted call starts, or the guarantee is void
 `llm_spend` gains:
 
 ```
-attempt_id  UUID  NOT NULL  UNIQUE
+attempt_id  UUID  NULL  UNIQUE          -- Slice 1
+attempt_id  UUID  NOT NULL  UNIQUE      -- Slice 5, once every writer is converted
 ```
 
 The slot mints an `attempt_id` in `__enter__`. Settling is an UPDATE on that key.
+
+**It must be nullable in Slice 1.** Slice 1 converts nothing, so all 20 legacy
+`record_spend` sites stay live — and `record_spend` (`spend.py:67-77`) constructs
+`LlmSpend` with no `attempt_id`. A `NOT NULL` column with no default would make
+every existing write fail, and Slice 1 would be un-mergeable rather than
+"converts nothing". A `UNIQUE` index tolerates multiple NULLs in PostgreSQL, so
+the constraint still does its job for slot-written rows from day one. The
+`NOT NULL` tightening lands in Slice 5, when the last legacy writer is gone, and
+that tightening is itself the proof that no writer was missed: it fails loudly if
+one remains. Existing rows need no backfill — they keep NULL.
 
 Today "exactly once" is guaranteed by **placement**: each `record_spend` sits
 directly below a conditional `UPDATE ... WHERE status='running'` that is the
@@ -128,17 +139,58 @@ call's linearization point. That is correct, and it is also a rule a human must
 apply correctly at 20 sites — the class of thing that broke repeatedly.
 
 With `attempt_id`, `outcomes.py` stops writing a second row. Its two sites become
-**settle**, not record:
+**settle**, not record.
+
+### Merge semantics: the slot owns USAGE, the settler owns OUTCOME
+
+A naive "settle only while `in_flight`" loses money, and a naive "settle
+unconditionally by `attempt_id`" lies about the outcome. Both orderings really
+happen, because the reaper races the turn's own finalize by design:
+
+| interleaving | naive `WHERE status='in_flight'` | naive unconditional |
+|---|---|---|
+| call spends 21 → reaper settles `failed`/0 → slot exits | slot matches 0 rows; **21 tokens lost** | slot overwrites `failed` with `ok`; ledger claims a turn succeeded that was orphaned |
+| call spends 21 → slot exits `ok` → reaper settles | fine | reaper overwrites `ok` with `failed` |
+
+So the two writers own **different columns**:
 
 ```sql
-UPDATE llm_spend SET status = :s, tokens_in = :i, tokens_out = :o
+-- the SLOT, on exit. Always writes usage; claims the outcome only if unclaimed.
+UPDATE llm_spend
+   SET tokens_in = :i, tokens_out = :o, model = :m, sdk_session_id = :sid,
+       status = CASE WHEN status = 'in_flight' THEN :new_status ELSE status END
+ WHERE attempt_id = :attempt
+
+-- an EXTERNAL settler (reaper, orphan sweep, delete, web/api/turns.py).
+-- Claims the outcome only if the slot has not. Never touches usage.
+UPDATE llm_spend SET status = :terminal
  WHERE kind = :kind AND ref_id = :ref AND status = 'in_flight'
 ```
 
+Both orderings then end at: real usage recorded, first terminal outcome wins.
+Slice 3 must test **both** orderings explicitly — the reaper landing before the
+slot's exit, and after it.
+
 For chat, `ref_id` is the `TurnJob` id and one `TurnJob` is one hosted call, so
-this is unambiguous. The reaper, the orphan sweep, the delete path, and
-`web/api/turns.py` all reach `record_terminal_outcome`; all of them settle a row
-that already exists rather than appending one that might duplicate.
+this is unambiguous.
+
+**Not every terminalization has a reservation to settle.** `processor.py:271-280`
+calls `record_terminal_outcome` with `expected_status="queued"` when the
+workspace has been soft-deleted — before `controller.launch`, before any slot,
+before any hosted call. There is no `in_flight` row, and an UPDATE would match
+zero rows and silently record nothing where today a zero row is written. The same
+applies to any future terminalization of a job that never reached a slot.
+
+So `record_terminal_outcome` takes an explicit mode rather than inferring one:
+
+- `expected_status="running"` → **settle**; a slot was opened, a row exists.
+- `expected_status="queued"` → **append** a `denied`-shaped zero row; no call was
+  ever made. (Keeping a row here is deliberate: "we cancelled a queued turn" and
+  "nothing ever happened" are different facts, which is the same reasoning that
+  makes the ledger record `tokens=None`.)
+
+A settle that matches zero rows when it expected one must log loudly, not pass
+silently. Slice 3 must test the queued-cancel path directly.
 
 **Known limit, stated deliberately:** citation spend uses the operation name as
 `ref_id` (`op`, a string), so several citation calls share one `ref_id`. Settling
@@ -281,11 +333,33 @@ Ollama client, so the caller declares which it is — a local call opens no slot
 Today `ranking/` counts attempts but no tokens, and the other two record nothing
 at all, so "every hosted call writes a row" is currently false app-wide.
 
-**Slice 5 — flip the AST gate.**
-New rule: a call to a hosted client method must be lexically inside a
-`with spend_slot(...)`. This is a far simpler question than the current gate's
-"which assignment forms stamp a token field", and it is the rule that actually
-matches the guarantee. Keep the existing stamp rule for the display cache.
+**Slice 5 — flip the AST gate; tighten `attempt_id` to `NOT NULL`.**
+
+"A call to a hosted client method must be inside a slot" is **not statically
+checkable as written**, and specifying it that way would produce a gate that
+looks strict and proves nothing. `rank_pair.py:197` calls `remote_client.chat(...)`
+where `remote_client` is a parameter; `phases/setup.py` and `extractors/refresh.py`
+call `client.chat(...)` through a `Protocol` matched by *both* the hosted
+Anthropic client and the local Ollama client. AST inspection cannot infer a
+runtime backend, and "the caller declares it" is not a rule a gate can read.
+
+The anchor that *is* static is **construction**. Measured: the two hosted client
+classes are constructed at exactly **8 sites**, all as literal
+`AnthropicClient(...)` / `ClaudeAgentSDKAdapter(...)` calls —
+`scheduler.py:324,578,1043`, `citations/llm.py:102`, `drafting/factory.py:107`,
+`review/agent.py:52`, `coherence/agent.py:57`, `uncited_claims/agent.py:53`.
+
+So the rule becomes: **a hosted client class may only be constructed inside a
+pinned factory allowlist, and each factory must return it wrapped in the
+recording proxy.** That is a name-match on a constructor — the same shape as the
+existing armed import gate, and it cannot be dodged by passing the object through
+another helper, because the object was already wrapped before it was passed.
+
+Residual gap, stated rather than papered over: this proves every hosted client
+*object* records; it does not prove the surrounding `with` block carried the right
+`workspace_id`/`ref_id`. That remains a correctness property of each call site,
+covered by the per-family tests, not by the gate. Keep the existing "stamps a
+token field must record spend" rule for the display cache.
 
 ## 8. Testing
 
@@ -331,7 +405,47 @@ It is specified separately because it needs an Admin API credential
 (`sk-ant-admin01-…`; workspace keys are rejected), which is a distinct
 security decision, and because neither piece of work blocks the other.
 
-## 10. Open risk
+## 10. Open decision — Slice 4 cannot be built as specified
+
+**`llm_spend.workspace_id` is `NOT NULL` with an FK to `workspaces`
+(`models.py:2091-2094`), and two of the three new spenders have no workspace at
+all.** Measured occurrences of the string "workspace":
+
+| spender | mentions | has an identity? |
+|---|---|---|
+| `proposal_assist/phases/setup.py` | 63 | yes — `WorkspaceSetupJob` |
+| `ranking/rank_pair.py` | **0** | no — ranks a `Call` against a `Profile` |
+| `proposal_assist/extractors/refresh.py` | **0** | no — operates on a `Call` |
+
+Ranking and extraction are org-wide background work with no proposal workspace
+behind them. As the table stands they physically cannot write a ledger row, so
+Slice 4 is blocked until this is decided. Three options:
+
+1. **Make `workspace_id` nullable.** Truthful — this spend really has no
+   workspace. Touches the per-workspace cap query and the admin per-workspace
+   view, both of which must then decide what an unattributed row means. Also
+   removes the CASCADE for those rows, which is arguably more correct for a cost
+   ledger but is a behaviour change against a **settled** point (the CASCADE was
+   reviewed and ruled intended, not a regression).
+2. **A synthetic "system" workspace row.** No schema change, cap arithmetic
+   unaffected. But it invents a workspace that does not exist and would appear in
+   the admin view, and the CASCADE then means deleting it erases the spend.
+3. **Leave ranking and extraction out of `llm_spend`.** Smallest change, and
+   ranking already has its own `count_today` remote-call cap. But it means "every
+   hosted call writes a row" stays false, which is the sentence this whole design
+   exists to make true.
+
+Recommendation: **option 1.** The other two preserve the schema by making the
+data say something untrue, and this design's entire premise is that the ledger
+should be the honest answer to "what did we spend". The cap query becomes
+`WHERE workspace_id = :ws` for the per-workspace cap (unattributed rows correctly
+excluded) and unchanged for the global one (they correctly count).
+
+This is a product decision about whether ranking spend counts against the same
+daily ceiling as proposal drafting. It is the same money, so it should — but the
+human should say so.
+
+## 11. Open risk
 
 Slice 3 changes the exactly-once mechanism for chat turns, which is the most
 concurrency-sensitive path in the application (the conditional `running→completed`
