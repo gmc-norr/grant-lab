@@ -22,6 +22,33 @@ def _isolate_settings_from_dotenv(monkeypatch):
 
 
 @pytest.fixture(scope="session")
+def _test_workspaces_root(tmp_path_factory):
+    """One throwaway root for every workspace repo the suite creates."""
+    return tmp_path_factory.mktemp("workspaces")
+
+
+@pytest.fixture(autouse=True)
+def _workspaces_dir_is_never_the_real_one(monkeypatch, _test_workspaces_root):
+    """Point WORKSPACES_DIR at a temp root for every test.
+
+    Settings.workspaces_dir defaults to "var/workspaces" — the SAME directory a
+    real deployment uses, and the one this repo's own .env names. Tests that build
+    a Settings() (or an app) without overriding it therefore created real workspace
+    repos in the operator's live data directory: a measured 16 per full-suite run,
+    which had accumulated to 488 of the 497 directories there. Nothing was
+    corrupted (tests use their own database and fresh UUIDs), but it made the
+    directory useless as evidence — a survey of "how many workspaces have branches"
+    was really counting test fixtures.
+
+    `_isolate_settings_from_dotenv` above does not cover this: the value came from
+    the field DEFAULT, not from .env. An env var beats both.
+
+    Pinned by tests/architecture/test_workspaces_dir_isolation.py.
+    """
+    monkeypatch.setenv("WORKSPACES_DIR", str(_test_workspaces_root))
+
+
+@pytest.fixture(scope="session")
 def pg_container():
     # driver="psycopg" makes get_connection_url() emit `postgresql+psycopg://...`
     # directly. No post-hoc URL rewrite, so the fixture is robust if testcontainers
