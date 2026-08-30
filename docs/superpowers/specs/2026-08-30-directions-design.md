@@ -148,7 +148,7 @@ at `collab_ws.py:54,183,200`), `hydrate`'s per-open commit mutex (`truncate_log`
 kill-switch-handover caller), and `claim_turn_job`'s shared lease (removing a fence needs
 its own proof).
 
-## 7. Prerequisite — the unfenced commit sink
+## 7. Prerequisite — the unfenced commit sink (DONE, `ab3c3a3d`)
 
 `review/pass_runner.py:433` commits to git with **no mutex and no fencing at all** —
 measured: zero occurrences of `branch`, `acquire_commit_mutex`, `acquire_shared_lease`,
@@ -158,7 +158,8 @@ consults `workspaces.current_branch`; four of the rest are inert because they ab
 `CollabSeveranceConflict` once collab is enabled, and `bibliography.py:627` is unreachable
 (both production callers pass `commit=False`).
 
-This must be fixed **before** anything else, and it matters independently of Directions:
+**Fixed 2026-08-30 in `ab3c3a3d`**, ahead of any Directions work, because it matters
+independently of Directions:
 `git commit` carries no pathspec (`gitio.py:198`), so it commits the whole index and an
 unmutexed writer can hand a checkpoint a commit it did not author.
 
@@ -179,6 +180,48 @@ The version graph draws **nothing** from `ProposedChange` — it is `git log` vi
 `list_commits`, rendering a flat `<ul>`, and `gitio.py:646` requests
 `%H%x00%aI%x00%s` with **no `%P`**. There is no parent data in the API at all, so any real
 fork visualisation needs that format string changed first.
+
+## 8b. Reconciling two directions — "take concepts from both"
+
+§3 rules out an automatic merge. That answers *"which bytes win?"*, but it is not
+what the request means. "Take A's framing and B's methods" is not a merge at all —
+**it is a writing problem**, and no merge algorithm of any kind (CRDT, git,
+three-way) can answer it. It needs an author.
+
+This app already has one. So reconciliation is **a drafting turn with two
+sources**:
+
+```
+"Reconcile the Aims section: A's framing, B's methods."
+        │
+        ▼  the drafting agent writes ONE new section
+        │
+   ProposedChange  ──▶  human accepts or rejects   (the existing flow)
+```
+
+Three consequences, all of them why this is the right shape rather than a
+workaround:
+
+1. **It cannot hit the duplication in §3.** The output is one new text applied as
+   one section replacement through the existing propose/accept path. Two Yjs logs
+   are never merged, so `apply_pm_section_to_fragment`'s delete-then-reinsert is
+   only ever applied once.
+2. **The review gate already exists.** The blend is seen before it lands, like
+   every other agent proposal.
+3. **Citations survive it, because of D3.** Both directions cite from one
+   keyspace, so a blended paragraph carries markers from both sides with no
+   remapping — the outcome the abandoned citekey-identity slice existed to buy.
+
+**Cost:** a two-workspace context assembler, and D5's read check applied to the
+*other* direction as well (blending requires read access to both sides). The
+propose/accept machinery, the staleness guard, the citation system and the diff
+view are all already built.
+
+**Honest limit:** the agent is interpreting, not merging, so it can drop a nuance
+one side had. That makes the diff view more load-bearing here, not less — the user
+reviews a *proposal*, never accepts a *merge*. For a grant application, "the
+machine silently combined two versions of your Aims" is a strictly worse outcome
+than "the machine drafted a blend and showed it to you".
 
 ## 9. Still open
 
