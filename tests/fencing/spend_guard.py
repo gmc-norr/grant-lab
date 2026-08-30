@@ -37,6 +37,24 @@ SPEND_WRITERS = frozenset({"record_spend", "record_usage"})
 # every sibling function in the same file forever.
 PINNED: dict[tuple[str, str], str] = {
     (
+        "call_manager/proposal_assist/spend.py",
+        "record_spend",
+    ): (
+        "this IS the writer — it constructs the LlmSpend row, which the ORM-constructor "
+        "rule sees as a token stamp. Requiring it to call itself is nonsense; the "
+        "one-writer property is asserted separately by llm_spend_writers()"
+    ),
+    (
+        "call_manager/proposal_assist/turns/submit.py",
+        "submit_user_turn",
+    ): (
+        "writes an ESTIMATE, not spend: ChatTurn(tokens_in=...) at submit time is "
+        "sum(attachment.tokens_estimate) + len(text)//4, computed before any hosted "
+        "call is made. The real usage supersedes it at finalize (processor.py) and "
+        "outcomes.py clears it, and both of those DO record. A ledger row here would "
+        "charge the cap for a call that has not happened yet"
+    ),
+    (
         "call_manager/proposal_assist/review/jobs.py",
         "rollup_run_totals",
     ): (
@@ -142,17 +160,44 @@ def _spend_writer_names(
     # record_spend` followed by `def record_spend(...)` passed the gate while
     # calling a local no-op. A rebound name is dropped from the writer set.
     shadowed: set[str] = set()
+
+    def _bind(target: ast.AST) -> None:
+        """Every name this target binds, however nested."""
+        if isinstance(target, ast.Name):
+            shadowed.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for el in target.elts:
+                _bind(el)
+        elif isinstance(target, ast.Starred):
+            _bind(target.value)
+
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             shadowed.add(node.name)
+            # Parameters shadow too: `def f(record_spend=None)` rebinds the name
+            # for the whole body while the module-level import still exists.
+            a = node.args if not isinstance(node, ast.ClassDef) else None
+            if a is not None:
+                for arg in [
+                    *a.posonlyargs, *a.args, *a.kwonlyargs,
+                    *([a.vararg] if a.vararg else []),
+                    *([a.kwarg] if a.kwarg else []),
+                ]:
+                    shadowed.add(arg.arg)
         elif isinstance(node, ast.Assign):
             for target in node.targets:
-                if isinstance(target, ast.Name):
-                    shadowed.add(target.id)
-        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and isinstance(
-            node.target, ast.Name
-        ):
-            shadowed.add(node.target.id)
+                _bind(target)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.For, ast.AsyncFor)):
+            _bind(node.target)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    _bind(item.optional_vars)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            shadowed.add(node.name)
+        elif isinstance(node, (ast.Lambda,)):
+            for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]:
+                shadowed.add(arg.arg)
         if isinstance(node, ast.ImportFrom):
             mod = node.module or ""
             if mod in WRITER_MODULES:
@@ -173,7 +218,14 @@ def _spend_writer_names(
                 # _dotted_name can match that chain — without this, legitimate
                 # fully-qualified code was reported as an offender (measured).
                 module_aliases.add(alias.asname or alias.name)
-    return frozenset(names - shadowed), frozenset(module_aliases - shadowed)
+    # A dotted alias is only as good as its root: `import a.b.spend` binds `a`, so
+    # `a = fake` invalidates the whole `a.b.spend.record_spend` path even though the
+    # dotted string itself was never rebound. Plain set subtraction missed that.
+    live_aliases = {
+        alias for alias in module_aliases
+        if alias not in shadowed and alias.split(".", 1)[0] not in shadowed
+    }
+    return frozenset(names - shadowed), frozenset(live_aliases)
 
 
 def _target_stamps(target: ast.AST) -> bool:
@@ -195,7 +247,7 @@ def _target_stamps(target: ast.AST) -> bool:
     return False
 
 
-def _non_assignment_stamp(node: ast.AST) -> bool:
+def _non_assignment_stamp(node: ast.AST, model_names: frozenset[str]) -> bool:
     """Token writes that are not Python assignments at all.
 
     An outside review found three, none of which `_stamp_lines` could see because
@@ -221,6 +273,22 @@ def _non_assignment_stamp(node: ast.AST) -> bool:
                 for key in kw.value.keys:
                     if isinstance(key, ast.Constant) and key.value in TOKEN_FIELDS:
                         return True
+                # KNOWN LIMIT, measured. `fields = {...}; .values(**fields)` hides
+                # its keys, and flagging every opaque `**` was tried and reverted:
+                # it reported FOUR unrelated functions (`values(**payload)` on
+                # calls, alerts and annotations — tables with no token columns)
+                # to catch a shape nobody writes. Pins are how gates rot, so the
+                # honest limit beats four standing pins. An inline dict IS caught.
+    # Model(input_tokens=n) — building a ROW with token fields. Restricted to
+    # classes imported from call_manager.db.models, because "any call with a
+    # tokens_in= keyword" is far too wide: it reported twelve legitimate
+    # functions, `record_spend` itself among them, since `tokens_in` IS in
+    # TOKEN_FIELDS. Measured against the real tree, not reasoned about — the
+    # first draft of this rule shipped a comment asserting the opposite.
+    if model_names and any(kw.arg in TOKEN_FIELDS for kw in node.keywords if kw.arg):
+        called = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+        if called in model_names:
+            return True
     # setattr(obj, "input_tokens", value) — only a literal name is checkable
     if isinstance(func, ast.Name) and func.id == "setattr" and len(node.args) >= 2:
         target = node.args[1]
@@ -237,10 +305,22 @@ def _non_assignment_stamp(node: ast.AST) -> bool:
     return False
 
 
-def _stamp_lines(nodes: list[ast.AST]) -> list[int]:
+def _model_names(tree: ast.AST) -> frozenset[str]:
+    """Names bound by an import from call_manager.db.models — the ORM rows."""
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (node.module or "") == (
+            "call_manager.db.models"
+        ):
+            for alias in node.names:
+                out.add(alias.asname or alias.name)
+    return frozenset(out)
+
+
+def _stamp_lines(nodes: list[ast.AST], model_names: frozenset[str]) -> list[int]:
     lines: list[int] = []
     for node in nodes:
-        if _non_assignment_stamp(node):
+        if _non_assignment_stamp(node, model_names):
             lines.append(node.lineno)
             continue
         # Assign has a LIST of targets (`a = b = value`); AnnAssign and AugAssign
@@ -297,11 +377,12 @@ def offenders() -> list[str]:
         tree = ast.parse(path.read_text())
         allowed = _writers_for(rel)
         writer_names = _spend_writer_names(tree, allowed)
+        models = _model_names(tree)
         for qname, func in _collect_functions(tree, ""):
             if (rel, qname) in PINNED:
                 continue
             nodes = _own_nodes(func)
-            if _stamp_lines(nodes) and not _records_spend(nodes, writer_names, allowed):
+            if _stamp_lines(nodes, models) and not _records_spend(nodes, writer_names, allowed):
                 out.append(f"{rel}::{qname}")
     return sorted(out)
 
@@ -317,7 +398,7 @@ def stale_pins() -> list[str]:
         tree = ast.parse(path.read_text())
         funcs = dict(_collect_functions(tree, ""))
         func = funcs.get(qname)
-        if func is None or not _stamp_lines(_own_nodes(func)):
+        if func is None or not _stamp_lines(_own_nodes(func), _model_names(tree)):
             stale.append(f"{rel}::{qname}")
     return sorted(stale)
 

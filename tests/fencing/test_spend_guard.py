@@ -44,15 +44,19 @@ def test_every_pin_carries_a_reason():
 
 
 def test_stale_pin_detection_can_actually_fail(monkeypatch):
-    # PINNED has one entry, so the two tests above are nearly vacuous. This is
-    # the one that proves stale_pins() works, by pinning a function that stamps
-    # nothing.
+    # The real PINNED entries all genuinely stamp, so the two tests above cannot
+    # go red on their own. This is the one that proves stale_pins() works, by
+    # pinning a function that stamps nothing. `sum_spend_today` READS the ledger
+    # and writes no token field — pinning it is exactly the stale state the
+    # shrink-only rule exists to catch. (It previously pinned `record_spend`,
+    # which stopped working the moment the guard learned to see ORM constructors:
+    # record_spend builds the LlmSpend row, so it stamps.)
     import tests.fencing.spend_guard as g
 
     monkeypatch.setattr(
-        g, "PINNED", {("call_manager/proposal_assist/spend.py", "record_spend"): "x"}
+        g, "PINNED", {("call_manager/proposal_assist/spend.py", "sum_spend_today"): "x"}
     )
-    assert g.stale_pins() == ["call_manager/proposal_assist/spend.py::record_spend"]
+    assert g.stale_pins() == ["call_manager/proposal_assist/spend.py::sum_spend_today"]
 
 
 def test_the_guard_can_actually_fail(tmp_path, monkeypatch):
@@ -456,6 +460,97 @@ def test_a_shadowed_writer_import_does_not_count(tmp_path, monkeypatch):
         writer_import=False,
     )
     assert g.offenders() == ["call_manager/shadowed_import.py::f"]
+
+
+def test_an_orm_constructor_with_token_fields_is_seen(tmp_path, monkeypatch):
+    """`EvaluatorJob(input_tokens=n)` — building a row, the natural shape.
+
+    Same family as `+=`: not an evasion, just a form nobody had written down.
+    Restricted to classes imported from call_manager.db.models on purpose — the
+    first draft flagged ANY call with a `tokens_in=` keyword and reported twelve
+    legitimate functions, `record_spend` itself among them.
+    """
+    g = _tree(
+        tmp_path,
+        monkeypatch,
+        "ctor.py",
+        """
+        from call_manager.db.models import EvaluatorJob
+
+        def f(s, n):
+            s.add(EvaluatorJob(input_tokens=n))
+        """,
+        writer_import=False,
+    )
+    assert g.offenders() == ["call_manager/ctor.py::f"]
+
+
+def test_a_non_model_call_with_a_token_keyword_is_not_reported(tmp_path, monkeypatch):
+    # The control for the above. `TurnDoneEvent(tokens_in=...)` and record_spend's
+    # own keywords are not row writes; flagging them was the twelve-offender bug.
+    g = _tree(
+        tmp_path,
+        monkeypatch,
+        "not_a_model.py",
+        """
+        def f(n):
+            return SomeEvent(tokens_in=n)
+        """,
+        writer_import=False,
+    )
+    assert g.offenders() == []
+
+
+@pytest.mark.parametrize(
+    ("label", "source"),
+    [
+        (
+            "root_shadow",
+            """
+            import call_manager.proposal_assist.spend
+
+            call_manager = object()
+
+            def f(s, job, done):
+                job.input_tokens = done.tokens_in
+                call_manager.proposal_assist.spend.record_spend(s)
+            """,
+        ),
+        (
+            "param_shadow",
+            """
+            from call_manager.proposal_assist.spend import record_spend
+
+            def f(s, job, done, record_spend=None):
+                job.input_tokens = done.tokens_in
+                record_spend(s)
+            """,
+        ),
+        (
+            "for_shadow",
+            """
+            from call_manager.proposal_assist.spend import record_spend
+
+            def f(s, job, done, xs):
+                for record_spend in xs:
+                    pass
+                job.input_tokens = done.tokens_in
+                record_spend(s)
+            """,
+        ),
+    ],
+)
+def test_every_shadowing_form_invalidates_the_writer(tmp_path, monkeypatch, label, source):
+    """An import is not a promise the name still means the writer.
+
+    Round 5 caught `def` and simple assignment. Round 5's own fix missed
+    parameters, `for` targets, `with ... as`, except-handler names, tuple targets,
+    and — the subtle one — a DOTTED alias whose ROOT name is rebound:
+    `import a.b.spend` binds `a`, so `a = fake` kills the whole path while plain
+    set subtraction kept it.
+    """
+    g = _tree(tmp_path, monkeypatch, f"{label}.py", source, writer_import=False)
+    assert g.offenders() == [f"call_manager/{label}.py::f"]
 
 
 def test_the_ledger_has_exactly_one_writer():
