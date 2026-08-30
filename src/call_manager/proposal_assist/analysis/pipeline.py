@@ -45,6 +45,7 @@ from call_manager.proposal_assist.citations.quotes import (
     find_quote_offsets,
 )
 from call_manager.proposal_assist.citations.trust import neutralize_trust_delimiters
+from call_manager.proposal_assist.collab.canonical import current_artifact_text_and_sha
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
 
@@ -340,9 +341,17 @@ def analyze_job(
     should_abort=None,
 ) -> None:
     repo = workspace_repo_dir(workspaces_dir, job.workspace_id)
-    doc = _read_optional(repo / "proposal.md")
-    if doc is None:
-        logger.info("claim-analysis: repo/proposal.md missing for job %s → superseded", job.id)
+    # The document as it is RIGHT NOW — the room-canonical projection of the durable
+    # Yjs log when collab is on for the draft, raw git HEAD when it is off. Reading
+    # git unconditionally resolved every job's section_sha against prose the
+    # researcher had already rewritten, so a job enqueued for a live section was
+    # superseded on arrival and the live section was never analysed. The reconcile
+    # tick enqueues from this same basis; the two are one mechanism.
+    doc, _ = current_artifact_text_and_sha(
+        session, workspace_id=job.workspace_id, artifact="draft", repo_dir=repo
+    )
+    if not doc:
+        logger.info("claim-analysis: no draft content for job %s → superseded", job.id)
         mark_superseded(session, job)
         return
 

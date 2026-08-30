@@ -12,6 +12,7 @@ from sqlalchemy import select
 from call_manager.db.models import Workspace
 from call_manager.proposal_assist.analysis.queue import enqueue_uncovered_sections
 from call_manager.proposal_assist.citations.gitio import GitCommitError, current_head
+from call_manager.proposal_assist.collab.canonical import current_artifact_text_and_sha
 from call_manager.proposal_assist.paths import workspace_repo_dir
 
 logger = logging.getLogger(__name__)
@@ -21,11 +22,22 @@ def reconcile_analysis_coverage(*, session_factory, workspaces_dir) -> int:
     """Enqueue an analysis job for every live HEAD section that has no
     queued/running/done job. Returns the number of jobs inserted.
 
-    One session, one commit at the end. Workspaces that are soft-deleted,
-    have no proposal.md, or have an unreadable HEAD are skipped without
-    raising — the next tick retries. The covered/uncovered predicate lives
-    in queue.enqueue_uncovered_sections (shared with the collab checkpoint
-    hook, 3b-5d.D3).
+    "Live HEAD section" means a section of the document as it is RIGHT NOW: the
+    room-canonical projection of the durable Yjs log when collab is on for the draft,
+    raw git HEAD when it is off (`current_artifact_text_and_sha`). Reading git
+    unconditionally enqueued work for prose the researcher had already rewritten and
+    never enqueued the sections they could see — and `analyze_job` resolves the
+    job's section against the SAME basis, so the two must move together or every job
+    this tick creates is superseded on arrival.
+
+    `commit_sha` stays git HEAD: nothing reads it back, it is provenance for "the git
+    state when this job was created", and it is pinned as a real 40-hex sha.
+
+    One session, one commit at the end. Workspaces that are soft-deleted, have no
+    draft yet, or have an unreadable HEAD are skipped without raising — the next
+    tick retries. The covered/uncovered predicate lives in
+    queue.enqueue_uncovered_sections (shared with the collab checkpoint hook,
+    3b-5d.D3).
     """
     inserted = 0
     with session_factory() as session:
@@ -37,9 +49,22 @@ def reconcile_analysis_coverage(*, session_factory, workspaces_dir) -> int:
         for ws_id in ws_ids:
             repo = workspace_repo_dir(Path(workspaces_dir), ws_id)
             try:
-                doc = (repo / "proposal.md").read_text(encoding="utf-8")
-            except OSError:
-                # No repo / no proposal yet (workspace still in setup) — skip.
+                doc, _ = current_artifact_text_and_sha(
+                    session, workspace_id=ws_id, artifact="draft", repo_dir=repo
+                )
+            except Exception:
+                # One workspace must not halt coverage for every other workspace.
+                # The pre-canonical read could only raise OSError; projecting the
+                # durable log adds markdown/ProseMirror parse failures, and this
+                # tick's whole contract is "skip it, the next tick retries".
+                logger.exception(
+                    "analysis reconcile: cannot read the draft for workspace %s — skipped",
+                    ws_id,
+                )
+                continue
+            if not doc:
+                # No repo / no proposal yet (workspace still in setup), or an empty
+                # document — nothing to cover either way.
                 continue
             try:
                 head = current_head(repo)
