@@ -475,10 +475,11 @@ def test_review_CONSOLIDATION_refuses_after_wave_one_exhausts_the_global_cap(
     `_drive` can stop that.
 
     The arithmetic is pinned so the denial lands on consolidation and nowhere
-    else: concurrency 1 makes wave-1 strictly sequential, five calls at 21 input
-    tokens run the total 0 -> 84 (each still under the 100 ceiling when it
-    checks) and leave it at 105. Consolidation is the first call to see a total
-    at or over the cap.
+    else. Writing T for whatever today's ledger already holds, the ceiling is set
+    at T+100: concurrency 1 makes wave-1 strictly sequential, and its five calls
+    at 21 input tokens each check at T, T+21 ... T+84 — all under — leaving the
+    total at T+105. Consolidation is the first call to see a total at or over
+    the cap (`check_global_daily_token_cap` denies on `used_in >= cap_in`).
 
     A first draft seeded 90 and let wave-1 deny ITSELF: every persona failed,
     consolidation was skipped as "all personas failed", and the test passed
