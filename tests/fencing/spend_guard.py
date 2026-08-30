@@ -171,33 +171,30 @@ def _spend_writer_names(
         elif isinstance(target, ast.Starred):
             _bind(target.value)
 
-    for node in ast.walk(tree):
+    # MODULE-LEVEL bindings only — `tree.body`, not `ast.walk`. Walking the whole
+    # tree pooled every function's parameters and locals into one set, so a single
+    # helper with a parameter named `record_spend` invalidated the import for every
+    # sibling in the file. Function-local bindings are handled per function by
+    # _local_bindings, which is the scope Python actually uses.
+    for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             shadowed.add(node.name)
-            # Parameters shadow too: `def f(record_spend=None)` rebinds the name
-            # for the whole body while the module-level import still exists.
-            a = node.args if not isinstance(node, ast.ClassDef) else None
-            if a is not None:
-                for arg in [
-                    *a.posonlyargs, *a.args, *a.kwonlyargs,
-                    *([a.vararg] if a.vararg else []),
-                    *([a.kwarg] if a.kwarg else []),
-                ]:
-                    shadowed.add(arg.arg)
         elif isinstance(node, ast.Assign):
             for target in node.targets:
                 _bind(target)
-        elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.For, ast.AsyncFor)):
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
             _bind(node.target)
-        elif isinstance(node, (ast.With, ast.AsyncWith)):
-            for item in node.items:
-                if item.optional_vars is not None:
-                    _bind(item.optional_vars)
-        elif isinstance(node, ast.ExceptHandler) and node.name:
-            shadowed.add(node.name)
-        elif isinstance(node, (ast.Lambda,)):
-            for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]:
-                shadowed.add(arg.arg)
+        elif isinstance(node, ast.Import):
+            # `import fake as record_spend` rebinds the name to something that is
+            # not the writer. The writer modules are excluded, or
+            # `import call_manager.proposal_assist.spend` would shadow the very
+            # path it establishes — the control test caught exactly that.
+            for alias in node.names:
+                if alias.name in WRITER_MODULES:
+                    continue
+                shadowed.add((alias.asname or alias.name).split(".", 1)[0])
+
+    for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             mod = node.module or ""
             if mod in WRITER_MODULES:
@@ -317,6 +314,48 @@ def _model_names(tree: ast.AST) -> frozenset[str]:
     return frozenset(out)
 
 
+def _local_bindings(nodes: list[ast.AST], func: ast.AST) -> frozenset[str]:
+    """Names bound INSIDE one function — its parameters and its own bindings.
+
+    Kept separate from the module-level shadow set because pooling them was a
+    false-positive generator: one helper with a parameter named `record_spend`
+    invalidated the import for every sibling function in the file. A local
+    binding shadows the writer in ITS function and nowhere else.
+    """
+    out: set[str] = set()
+
+    def _bind(target: ast.AST) -> None:
+        if isinstance(target, ast.Name):
+            out.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for el in target.elts:
+                _bind(el)
+        elif isinstance(target, ast.Starred):
+            _bind(target.value)
+
+    args = getattr(func, "args", None)
+    if args is not None:
+        for arg in [
+            *args.posonlyargs, *args.args, *args.kwonlyargs,
+            *([args.vararg] if args.vararg else []),
+            *([args.kwarg] if args.kwarg else []),
+        ]:
+            out.add(arg.arg)
+    for node in nodes:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                _bind(target)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.For, ast.AsyncFor)):
+            _bind(node.target)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    _bind(item.optional_vars)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            out.add(node.name)
+    return frozenset(out)
+
+
 def _stamp_lines(nodes: list[ast.AST], model_names: frozenset[str]) -> list[int]:
     lines: list[int] = []
     for node in nodes:
@@ -382,7 +421,12 @@ def offenders() -> list[str]:
             if (rel, qname) in PINNED:
                 continue
             nodes = _own_nodes(func)
-            if _stamp_lines(nodes, models) and not _records_spend(nodes, writer_names, allowed):
+            local = _local_bindings(nodes, func)
+            live = (
+                frozenset(writer_names[0] - local),
+                frozenset(a for a in writer_names[1] if a.split(".", 1)[0] not in local),
+            )
+            if _stamp_lines(nodes, models) and not _records_spend(nodes, live, allowed):
                 out.append(f"{rel}::{qname}")
     return sorted(out)
 

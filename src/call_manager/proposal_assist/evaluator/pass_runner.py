@@ -136,6 +136,7 @@ async def run_evaluator_pass(
         _entry.bind_adapter(adapter)
         handle = None
         terminate_cancelled = False
+        spend_is_durable = False
         done: TurnDoneEvent | None = None
         try:
 
@@ -216,6 +217,7 @@ async def run_evaluator_pass(
             # Cancellation must still propagate — the caller's wait_for and the
             # scheduler both rely on it. We only widened the catch so the spend
             # above is recorded first.
+            spend_is_durable = True  # the handler above committed it
             if isinstance(exc, asyncio.CancelledError):
                 raise
             return
@@ -237,6 +239,12 @@ async def run_evaluator_pass(
                     logger.exception("evaluator adapter terminate failed for job %s", job_id)
                     if isinstance(term_exc, asyncio.CancelledError):
                         terminate_cancelled = True
+            # If the handler above already committed and returned, that return
+            # is IN FLIGHT: the flag check after the finalize block will never
+            # run, so a teardown cancel has to escape from here. Safe only
+            # because the spend is already durable on that path.
+            if terminate_cancelled and spend_is_durable:
+                raise asyncio.CancelledError()
 
         # 2. Success finalize under a row lock; ONLY if still running AND a scorecard was
         #    written (the reaper may have failed it during a hang — don't resurrect it).

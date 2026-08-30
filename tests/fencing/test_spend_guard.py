@@ -553,6 +553,54 @@ def test_every_shadowing_form_invalidates_the_writer(tmp_path, monkeypatch, labe
     assert g.offenders() == [f"call_manager/{label}.py::f"]
 
 
+def test_a_sibling_parameter_does_not_invalidate_this_functions_import(tmp_path, monkeypatch):
+    """The false positive the shadowing rule created for itself.
+
+    Round 6 pooled every function's parameters and locals into ONE module-wide
+    set, so a helper with a parameter named `record_spend` invalidated the import
+    for every sibling in the file — real, correct code reported as unrecorded.
+    Shadowing is per-function now, which is the scope Python actually uses.
+    """
+    g = _tree(
+        tmp_path,
+        monkeypatch,
+        "sibling.py",
+        """
+        from call_manager.proposal_assist.spend import record_spend
+
+        def helper(record_spend=None):
+            return record_spend
+
+        def f(s, job, done):
+            job.input_tokens = done.tokens_in
+            record_spend(s)
+        """,
+        writer_import=False,
+    )
+    assert g.offenders() == []
+
+
+def test_an_import_rebinding_the_writer_name_shadows_it(tmp_path, monkeypatch):
+    # `import json as record_spend` binds the name to something that is not the
+    # writer. An import binds like an assignment and was the one binding form the
+    # collector did not treat as one.
+    g = _tree(
+        tmp_path,
+        monkeypatch,
+        "import_shadow.py",
+        """
+        from call_manager.proposal_assist.spend import record_spend
+        import json as record_spend
+
+        def f(s, job, done):
+            job.input_tokens = done.tokens_in
+            record_spend(s)
+        """,
+        writer_import=False,
+    )
+    assert g.offenders() == ["call_manager/import_shadow.py::f"]
+
+
 def test_the_ledger_has_exactly_one_writer():
     # The plan's central claim, asserted for the first time. The stamps/records
     # rule above would happily accept a second module that both constructed an
