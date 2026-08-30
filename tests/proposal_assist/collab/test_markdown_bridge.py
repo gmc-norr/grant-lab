@@ -509,3 +509,101 @@ def test_the_full_citation_marker_still_becomes_one_atom():
     kinds = [n["type"] for n in doc["content"][0]["content"]]
     assert "citation" in kinds, kinds
     assert pm_to_markdown(doc).strip() == md
+
+
+# --------------------------------------------------------------------------- #
+# Whitespace at an emphasis boundary. CommonMark will not pair a `**` that is
+# followed by whitespace (opening) or preceded by it (closing), so emitting
+# `**bold **tail` produces a document whose asterisks re-parse as LITERAL TEXT
+# and are then escaped permanently: the bold is destroyed and the researcher is
+# left looking at raw `**`. Silent, and it survives every checkpoint.
+#
+# This is also how a bold citation corrupts itself. y-prosemirror drops marks on
+# inline atoms (createTypeFromElementNode writes node.attrs only) and our bridge
+# matches it deliberately, so the atom splits its run and leaves `**bold **`
+# behind — the same defect, arrived at from the CRDT side.
+# --------------------------------------------------------------------------- #
+
+
+def _para(*nodes):
+    return {"type": "doc", "content": [{"type": "paragraph", "content": list(nodes)}]}
+
+
+def _t(text, *marks):
+    node = {"type": "text", "text": text}
+    if marks:
+        node["marks"] = [{"type": m, "attrs": {}} for m in marks]
+    return node
+
+
+def _survives(doc):
+    """Serialize, re-parse, re-serialize. Returns (markdown, stable?)."""
+    once = pm_to_markdown(doc)
+    twice = pm_to_markdown(markdown_to_pm(once))
+    return once, once == twice
+
+
+def test_whitespace_never_lands_inside_an_emphasis_delimiter():
+    cases = {
+        "trailing space in strong": _para(_t("bold ", "strong"), _t("tail")),
+        "leading space in strong": _para(_t("head"), _t(" bold", "strong")),
+        # Mid-paragraph: a leading space at the very START of a paragraph is
+        # stripped by CommonMark itself and is not representable either way.
+        "both sides": _para(_t("head"), _t(" bold ", "strong"), _t("tail")),
+        "trailing space in em": _para(_t("it ", "em"), _t("tail")),
+        "wholly-whitespace strong": _para(_t("a"), _t(" ", "strong"), _t("b")),
+        "strikethrough": _para(_t("gone ", "strikethrough"), _t("tail")),
+    }
+    broken = {}
+    for name, doc in cases.items():
+        md, stable = _survives(doc)
+        if "\\*" in md or "\\~" in md or not stable:
+            broken[name] = md
+    assert broken == {}, broken
+
+
+def test_a_bold_citation_does_not_corrupt_its_own_paragraph():
+    """The end-to-end shape. A round trip through the CRDT strips the atom's mark;
+    serializing must still emit markdown that means what it says."""
+    from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc, ydoc_to_pm_json
+
+    md = "**bold [@jones2020]<!-- ev:ev-111111111111 --> tail**\n"
+    once = pm_to_markdown(ydoc_to_pm_json(pm_json_to_ydoc(markdown_to_pm(md))))
+    # It must re-parse at all (this used to raise "Invalid collection of marks
+    # for node citation: ['strong', 'strong']") and then hold still.
+    twice = pm_to_markdown(ydoc_to_pm_json(pm_json_to_ydoc(markdown_to_pm(once))))
+    assert once == twice, (once, twice)
+    assert "\\*" not in once, once
+    assert "[@jones2020]<!-- ev:ev-111111111111 -->" in once, once
+
+
+def test_the_expelled_space_keeps_the_marks_it_is_still_inside():
+    """`**a *b***` — the space is inside strong and outside em, so it must stay
+    bold. Expelling it all the way out would silently unbold it."""
+    doc = _para(_t("a", "strong"), _t(" b", "strong", "em"))
+    md, stable = _survives(doc)
+    assert stable, md
+    assert md.strip() == "**a *b***", md
+
+
+def test_emphasis_without_boundary_whitespace_is_untouched():
+    """Control. The fix must not churn documents that were already correct —
+    every one of these is a byte-for-byte no-op."""
+    for md in ["**bold** tail\n", "*it* tail\n", "***both*** x\n", "a **b** c\n"]:
+        assert pm_to_markdown(markdown_to_pm(md)) == md, md
+
+
+def test_whitespace_inside_a_code_span_is_left_alone():
+    """Control. Code spans are verbatim — their whitespace is content, not padding.
+
+    It must carry `strong` TOO. A `code`-only run has no fixed-delimiter mark, so it
+    is already skipped by the delimiter check and cannot exercise the code guard at
+    all; `strong` + `code` is legal in this schema (code.excludes is None) and is the
+    only shape that reaches it.
+    """
+    doc = _para(_t("x "), _t("a  b ", "strong", "code"), _t(" y"))
+    md, stable = _survives(doc)
+    assert stable, md
+    body = markdown_to_pm(md)["content"][0]["content"]
+    kept = [n["text"] for n in body if "code" in [m["type"] for m in (n.get("marks") or [])]]
+    assert kept == ["a  b "], kept

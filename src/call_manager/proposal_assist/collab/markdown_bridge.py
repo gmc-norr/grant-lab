@@ -409,12 +409,107 @@ def _escape_text(text: str) -> str:
     return "".join(out)
 
 
+def _mark_key(mark: dict) -> tuple:
+    """Value identity for a mark, so runs can be grouped and intersected."""
+    attrs = mark.get("attrs") or {}
+    return (mark["type"], tuple(sorted(attrs.items(), key=lambda kv: kv[0])))
+
+
+def _marks_shared_with(marks: list[dict], neighbour: list[dict]) -> list[dict]:
+    keys = {_mark_key(m) for m in neighbour}
+    return [m for m in marks if _mark_key(m) in keys]
+
+
+def _opens_a_delimiter_against(marks: list[dict], neighbour: list[dict]) -> bool:
+    """True if a fixed delimiter would be written at this boundary — i.e. some
+    delimiter mark is on this run and not already open on the neighbour."""
+    keys = {_mark_key(m) for m in neighbour}
+    return any(m["type"] in _MARK_DELIM and _mark_key(m) not in keys for m in marks)
+
+
+def _text_node(text: str, marks: list[dict]) -> dict:
+    node: dict = {"type": "text", "text": text}
+    if marks:
+        node["marks"] = list(marks)
+    return node
+
+
+def _expel_enclosing_whitespace(nodes: list[dict]) -> list[dict]:
+    """Move whitespace out from just inside an emphasis delimiter.
+
+    CommonMark will not pair a delimiter run that is followed by whitespace (as an
+    opener) or preceded by it (as a closer). So ``**bold **tail`` is not bold at
+    all: re-parsing yields four literal asterisks, which we then escape, and the
+    formatting is destroyed permanently in a document nobody edited. The same
+    shape arrives from the CRDT — y-prosemirror drops marks on inline atoms, so a
+    bold citation splits its run and strands ``**bold **`` behind it.
+
+    The expelled whitespace keeps the marks it is STILL inside: the ones shared
+    with the neighbour on that side, which stay open across the boundary. That is
+    what turns ``**a * b***`` (broken) into ``**a *b***`` rather than unbolding
+    the space. With no neighbour, or nothing shared, it comes out unmarked.
+
+    Runs carrying ``code`` are skipped: a code span is verbatim, so its whitespace
+    is content. Runs with no fixed-delimiter mark are returned untouched, which
+    keeps already-correct documents byte-identical.
+    """
+    if not nodes:
+        return nodes
+
+    runs: list[tuple[list[dict], list[dict]]] = []
+    for node in nodes:
+        marks = node.get("marks") or []
+        if runs and [_mark_key(m) for m in runs[-1][0]] == [_mark_key(m) for m in marks]:
+            runs[-1][1].append(node)
+        else:
+            runs.append((marks, [node]))
+
+    out: list[dict] = []
+    for i, (marks, group) in enumerate(runs):
+        prev_marks = runs[i - 1][0] if i else []
+        next_marks = runs[i + 1][0] if i + 1 < len(runs) else []
+        if any(m["type"] == "code" for m in marks) or not any(
+            m["type"] in _MARK_DELIM for m in marks
+        ):
+            out.extend(group)
+            continue
+
+        group = list(group)
+        lead = trail = ""
+        if _opens_a_delimiter_against(marks, prev_marks) and group[0].get("type") == "text":
+            text = group[0]["text"]
+            body = text.lstrip()
+            lead = text[: len(text) - len(body)]
+            group[0] = {**group[0], "text": body}
+        if _opens_a_delimiter_against(marks, next_marks) and group[-1].get("type") == "text":
+            text = group[-1]["text"]
+            body = text.rstrip()
+            trail = text[len(body) :]
+            group[-1] = {**group[-1], "text": body}
+        group = [n for n in group if n.get("type") != "text" or n["text"]]
+
+        if not group:
+            # The whole run was whitespace, so both neighbours are now adjacent and
+            # only the marks BOTH still hold remain open around it.
+            both = _marks_shared_with(_marks_shared_with(marks, prev_marks), next_marks)
+            if lead or trail:
+                out.append(_text_node(lead + trail, both))
+            continue
+        if lead:
+            out.append(_text_node(lead, _marks_shared_with(marks, prev_marks)))
+        out.extend(group)
+        if trail:
+            out.append(_text_node(trail, _marks_shared_with(marks, next_marks)))
+    return out
+
+
 def _serialize_inline(nodes: list[dict], *, in_cell: bool = False) -> str:
     """Serialize an inline node list, opening/closing marks as the active set
     changes between adjacent nodes (mirrors the parse-time mark stack).
 
     ``in_cell`` degrades ``hard_break`` to a single space (a ``\\``-newline
     would split a table row); it is otherwise unused here."""
+    nodes = _expel_enclosing_whitespace(nodes)
     out: list[str] = []
     active: list[dict] = []
 
