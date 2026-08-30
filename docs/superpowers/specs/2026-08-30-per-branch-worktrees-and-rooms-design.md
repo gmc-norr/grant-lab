@@ -97,6 +97,7 @@ branches cost roughly 40 KB. Ten branches get ten permanent folders.
 | All AI analysis — evaluator, review, coherence, uncited claims, claim analysis | A score for `main`'s text is meaningless on `new_ideas` |
 | Comments / annotations | They are anchored to text that now differs |
 | Pending proposed changes | Same reason |
+| The AI chat (`chat_turns`, `chat_summaries`) | See §3.1 |
 
 **Shared** — properties of the workspace, not of a document:
 
@@ -110,6 +111,41 @@ branches cost roughly 40 KB. Ten branches get ten permanent folders.
 Citations fall out correctly for free: the markers live in the artifact text and the
 ledger is `citations.json`, a file in git. **Which papers you have cited branches
 automatically, while the papers themselves stay shared.**
+
+### 3.1 The chat is a document, not a special case
+
+Decided. In the user's words:
+
+> The branches should have their own chats. Whatever existed before the branch was
+> created follows into the branch. Just like any other document.
+
+So the chat obeys exactly the rule the draft obeys: **everything up to the fork point
+comes with you; after that the two conversations diverge and never meet.** No special
+casing, no "shared history with a cutoff" — the branch simply has its own chat, whose
+opening content is a copy.
+
+`chat_turns` is `(workspace_id, role, content, position, created_at)` with no reference
+to artifact or commit state (`models.py:843-865`), so the copy is trivial. There are 145
+chat turns in the entire instance, so a fork-time copy costs nothing and beats a
+pointer-plus-cutoff scheme on simplicity. `ix_chat_turns_ws_position` means `position` is
+a per-workspace sequence and becomes per-`(workspace, branch)`. `chat_summaries`
+(compaction output) is derived from the chat and forks with it.
+
+**The one thing that is NOT a document: `workspaces.last_sdk_session_id`**
+(`models.py:760`). It is a resume handle for a conversation living on the hosted side —
+`turns/processor.py:389` passes `resume=<id>` when it is non-NULL. Two branches cannot
+resume one remote session; doing so would interleave two branches' turns into a single
+conversation upstream.
+
+**Rule: a fork copies the chat rows and sets `last_sdk_session_id` to NULL on the new
+branch.** The next turn there starts a fresh hosted session and re-injects the copied
+history as context.
+
+This needs no new machinery. Compaction already does exactly this reset for its own
+reasons — *"clear `workspaces.last_sdk_session_id` … clearing it forces"* a new session
+with re-injection (`turns/compaction.py:138,258`). The fork reuses that proven path.
+Because `last_sdk_session_id` lives on the workspace row, it must also move to
+per-`(workspace, branch)` state along with branch selection (§5).
 
 ## 4. How a branch ends
 
@@ -156,7 +192,8 @@ Counts below were measured, not estimated.
   branch.
 - **`create_workspace_branch` becomes a fork.** Today it is one command,
   `git branch <name> HEAD`, and a test explicitly pins that it copies nothing. It must
-  now add a worktree and copy the branch-scoped rows.
+  now add a worktree and copy the branch-scoped rows — including the chat (§3.1), whose
+  copy must also NULL the new branch's `last_sdk_session_id`.
 
 ### Moderate
 
@@ -235,31 +272,18 @@ Verified against the code, in rough order of danger.
 
 ## 7. Open decisions
 
-**7.1 — Does the AI chat history fork with the branch?**
+*(The chat question that stood here is decided — see §3.1. The rule turned out to be the
+general one, not an exception: the chat is a document like any other.)*
 
-`chat_turns` is `(workspace_id, role, content, position, created_at)` with no reference
-to artifact or commit state (`models.py:843-865`), so either answer is cheap. Note
-`ix_chat_turns_ws_position` — `position` is a per-workspace sequence and would become
-per-`(workspace, branch)`.
-
-- *Take it with you.* You branched in order to keep thinking; losing the conversation at
-  that exact moment is backwards, and "the branch has everything the original had" is the
-  promise the whole design opens with.
-- *Leave it behind.* A new direction deserves a clean slate, and `main`'s history should
-  not fill with talk about a branch that got binned.
-
-**Recommendation: take it with you, by copying the rows at fork time.** A pointer-plus-
-cutoff scheme is tidier in principle, but there are 145 chat turns in the entire instance
-— copying is free and far simpler.
-
-**7.2 — Does the commit mutex become per-branch?** Trap 5. Per-branch is obviously right
+**7.1 — Does the commit mutex become per-branch?** Trap 5. Per-branch is obviously right
 for throughput and obviously more dangerous: the fence's ordering guarantees are built on
 a single per-workspace mutex.
 
-**7.3 — What happens to a user sitting on a branch someone else deletes?** Today's
-equivalent cannot arise. Needs a defined behaviour, not an accident.
+**7.2 — What happens to a user sitting on a branch someone else deletes?** Today's
+equivalent cannot arise. Needs a defined behaviour, not an accident. Related: trap 3,
+where the switch's early return would silently accept a branch that no longer exists.
 
-**7.4 — Can the root branch be deleted, and what is "promote" exactly?** A ref move is
+**7.3 — Can the root branch be deleted, and what is "promote" exactly?** A ref move is
 easy; the question is whether `main` is a distinguished name or just the fork root.
 
 ## 8. Sizing
@@ -268,7 +292,7 @@ This is not a slice. It is a subsystem change touching the room registry, the du
 log, the git layer, the schema, the fence, six background pass families, and the frontend
 cache keys — with 59 path call sites and a silent-failure mode on seven commit sites.
 
-**Do not start it until §7.1–7.4 are decided**, and expect to stage it: schema and paths
+**Do not start it until §7.1–7.3 are decided**, and expect to stage it: schema and paths
 first (with the old single-branch behaviour preserved), then per-branch rooms, then
 per-user selection, then fork-copy, then section transfer.
 
