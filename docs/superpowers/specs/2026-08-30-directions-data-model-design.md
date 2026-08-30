@@ -424,3 +424,65 @@ Move the citation evidence ledger from per-repo `citations.json` into a corpus-s
 table. Under one repo per application the ledger is already atomic, so this buys nothing
 today. It is the piece that lets one library serve many applications later without a
 cross-repo scan. Written down so a future reader does not rediscover it as a blocker.
+
+---
+
+## 11. Errata — outside review, round 1 (Sol / gpt-5.6-sol, 2026-08-30)
+
+**Status change: this spec is BLOCKED, not ready to plan.** Ten findings, zero refuted.
+All verified against the tree before being recorded here.
+
+### F1 [CRITICAL] — the load-bearing claim in §1 is FALSE as written
+
+§1 reason 1 said a cross-workspace blend is unsafe *by construction* because the protocol
+"forbids taking the source's mutex". It does not. `fencing.py:30-31, 195-201` forbids
+**upgrading** — holding the shared lease then taking the exclusive mutex **for the same
+workspace** — and forbids holding the mutex across context assembly or an LLM call. It says
+nothing about two mutexes on two different workspaces. And the reviewer's constructive
+alternative works: checkpoint the source under its mutex, release it, then blend from that
+immutable commit SHA while holding only the target's mutex. Never two at once.
+
+**Correction:** the honest claim is "materially simpler", NOT "possible vs impossible".
+A cross-workspace blend is constructible; it needs a checkpoint-release-capture-SHA dance,
+tolerates a stale source, and adds a failure mode (the source repo retired between capture
+and read) that the single-repo blend does not have.
+
+Reasons 2-5 of §1 are untouched and still stand. **Reason 2 (promotion is one UPDATE) is
+now the strongest surviving argument** and should lead. The reviewer's proposed remedy —
+"replace with the two-table split" — does not engage reasons 2-5 and is not adopted on the
+strength of F1 alone.
+
+### F2-F10 — defects in this document
+
+| # | Sev | Defect |
+|---|---|---|
+| F2 | HIGH | `main_direction_id` → `directions(id)` is a plain FK; workspace A may point at a direction of workspace B. Needs a composite FK `(workspaces.id, main_direction_id)` → `directions(workspace_id, id)`. |
+| F3 | HIGH | Nothing prevents archiving Main. ON DELETE RESTRICT covers deletion, not an `archived_at` UPDATE, so §6's "always resolvable" guarantee breaks and `require_direction` then rejects Main. Refuse to archive Main, or require atomic promotion first. |
+| F4 | HIGH | `live_direction()` is an SQL predicate and cannot be embedded in a git or filesystem effect. §8's "every direction-scoped effect carries it in its own statement" cannot cover the non-DB effects. Needs an under-mutex direction re-read primitive, pinned separately. |
+| F5 | HIGH | §4 says "`retire_epoch` is inside the fence predicate" but the signature given is `live_direction(workspace_id, direction_id, generation)` — no epoch parameter. Internal contradiction. |
+| F6 | HIGH | `WorkspaceSetupJob` is one of the seven `claimed_at_generation` stamp sites but is deliberately kept application-level with no `direction_id`, so it has no direction epoch to stamp. Stamp only the six direction-scoped families. |
+| F7 | HIGH | Fork is required to checkpoint first; **blend is not**. Git HEAD lags the Yjs log, so a blend can draft from stale source text — the exact data loss §4 identifies for fork. Both blend sources must be checkpointed before their SHAs are captured. |
+| F8 | HIGH | §4 references a `forked_at` cutoff that §2 never defines (only `forked_at_sha`), and §2 omits `last_sdk_session_id` from `directions` while §4 prescribes its reset. |
+| F9 | MED | "Active-uniqueness moves to `(workspace_id, direction_id)` for all six families — preserving today's semantics exactly" is **false**. Verified: `uq_turn_jobs_running` is partial on `status='running'` only, so multiple QUEUED are already allowed; `uq_claim_analysis_jobs_ws_sha_queued` is `(workspace_id, section_sha)` where `status='queued'`. Each family has its own predicate; `direction_id` must be appended to each, not imposed uniformly. |
+| F10 | MED | §2 claims `directions` owns 11 tables and names 8 plus "the three per-document caches". Name all eleven with their replacement FK and uniqueness key. |
+
+### The sequencing consequence — this spec now waits
+
+F9 is not merely a wording defect. It shows the five pass families each carry a *different*
+active-uniqueness predicate, so Directions is five bespoke migrations rather than one.
+Measured underneath it:
+
+- 7 workspace pass tables share `id`, `workspace_id`, `status`, `claimed_at_generation`
+  (**all 7**), plus `completed_at` 6/7, `queued_at` 6/7, `started_at` 5/7, and
+  `error` / `input_tokens` / `output_tokens` 4/7.
+- `coherence/pass_runner.py` and `evaluator/pass_runner.py` are **both exactly 365 lines**
+  and ~**76% identical** after normalising family names. `uncited_claims` is 379,
+  `review` 576.
+- Five separate enqueue helpers (170-260 lines each), five separate web routes
+  (102-242 lines each), twelve separate daily-cap settings.
+- **`claimed_at_generation` is 7/7** — the fence layer already treats these as one kind of
+  thing. The tables never caught up.
+
+**Decision (user, 2026-08-30): unify the pass families FIRST**, then land Directions as one
+column on one table. Building Directions on the duplication means writing the job migration
+five times and then undoing it. The unification gets its own spec and its own review round.
