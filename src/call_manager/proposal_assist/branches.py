@@ -17,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy import update as sql_update
 from sqlalchemy.orm import Session
 
-from call_manager.db.models import TurnJob, Workspace
+from call_manager.db.models import Branch, TurnJob, Workspace
 from call_manager.proposal_assist.citations.gitio import (
     branch_exists,
     checkout_branch,
@@ -308,6 +308,21 @@ def create_workspace_branch(
     if branch_exists(repo, name):
         raise BranchExists(name)
     git_create_branch(repo, name)
+    # The row is founded in the same call as the ref (spec §8 S1 step 4). A
+    # one-time backfill goes stale the moment the next branch is created, and a
+    # ref with no row is invisible to the branch-aware resolver S2 installs.
+    #
+    # These two are NOT atomic and no ordering makes them so: `git branch` is not
+    # transactional, so a commit that fails after it leaves a ref with no row.
+    # Placing the add after the git call at least means a ref git REFUSED leaves
+    # no row (git_create_branch raises before this line). The residual window is
+    # repaired by `backfill_branch_entities`, which is a two-way reconciler and is
+    # safe to re-run; S2 runs it again before it attaches anything.
+    #
+    # `last_sdk_session_id` is deliberately left NULL: a new branch has held no
+    # hosted conversation, and inheriting the parent's handle would let two
+    # branches resume one remote session (§3.1).
+    session.add(Branch(workspace_id=workspace_id, name=name))
     logger.info(
         "branches.created",
         extra={"event": "branch_created", "workspace_id": str(workspace_id), "branch": name},
