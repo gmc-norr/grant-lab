@@ -270,21 +270,66 @@ Verified against the code, in rough order of danger.
    describe this feature at all — so `scripts/gen_architecture.py` will need to learn it,
    or the map will confidently omit the thing being built.
 
-## 7. Open decisions
+## 7. Decisions (7.2 and 7.3 await the user's confirmation)
 
 *(The chat question that stood here is decided — see §3.1. The rule turned out to be the
 general one, not an exception: the chat is a document like any other.)*
 
-**7.1 — Does the commit mutex become per-branch?** Trap 5. Per-branch is obviously right
-for throughput and obviously more dangerous: the fence's ordering guarantees are built on
-a single per-workspace mutex.
+**7.1 — Does the commit mutex become per-branch? RECOMMENDATION: NO. Keep it
+per-workspace.**
 
-**7.2 — What happens to a user sitting on a branch someone else deletes?** Today's
-equivalent cannot arise. Needs a defined behaviour, not an accident. Related: trap 3,
-where the switch's early return would silently accept a branch that no longer exists.
+The mutex is `pg_advisory_xact_lock` on `_advisory_lock_key("commit", workspace_id)`
+(`drafting/locking.py:132-140`), taken at **26 call sites**, and it *"serializes every
+writer for the workspace"* (`fencing.py:129`).
 
-**7.3 — Can the root branch be deleted, and what is "promote" exactly?** A ref move is
-easy; the question is whether `main` is a distinguished name or just the fork root.
+The original *reason* for one mutex does dissolve here — it existed because there was one
+working tree and one HEAD, and §2 proves two worktrees commit concurrently without
+contention. So splitting it is tempting. Three arguments say don't:
+
+1. **Deletion must stop every branch at once.** Retirement is built on a barrier
+   (`retirement.py:68`, `_RETIREMENT_BARRIER_SECONDS = 6.0`) and a single lock that halts
+   all writers. Per-branch mutexes force the delete path to acquire N locks in a defined
+   order — and this protocol documents that it has *exactly one* deadlock shape today
+   (`fencing.py:197-201`). Adding N-lock acquisition to a fence that took roughly ten
+   merged slices to get right is how that correctness gets lost.
+2. **Keeping it costs throughput, never correctness.** Every guarantee the fence makes
+   survives a workspace-wide mutex unchanged. The reverse is not true.
+3. **The contention does not exist.** Holds are short by rule — *"never hold this across
+   context assembly or an LLM call"* (`fencing.py:143`) — so the held section is a git
+   commit, milliseconds. Two branches contend only if two commits land in the same
+   instant.
+
+The one real cost: hydration takes the mutex on every room open (`hydrate.py:58`), so
+opening a room on branch A can queue behind a commit on branch B. Milliseconds, and only
+while someone is actively committing.
+
+**Revisit trigger, not a guess:** if `CommitMutexTimeout` starts appearing in logs, or a
+room open is measurably delayed by another branch, split it then — with the delete path's
+N-lock ordering designed first, as its own piece of work.
+
+**7.2 — What happens to a user sitting on a branch someone else deletes?
+RECOMMENDATION: refuse the delete.**
+
+Mirror the guard that already exists — today `delete_workspace_branch` refuses the
+*current* branch (`branches.py:344-359`); this generalises it to *"is any user on this
+branch right now."* Least surprising, smallest change, and trivial to explain: you cannot
+delete a room somebody is sitting in. The error should name who, or it is a dead end.
+
+This also disarms trap 3 by construction: if a branch cannot be deleted while someone is
+recorded on it, the switch can never resolve a user onto a ref that no longer exists.
+
+**7.3 — Can the root branch be deleted, and what is "promote"?
+RECOMMENDATION: `main` is not special; the ROOT POINTER is.**
+
+Give the workspace a root-branch pointer. Rules:
+
+- The branch the pointer names cannot be deleted. Every other branch can.
+- **Promote = move the pointer.** `new_ideas` becomes the root; the old root becomes an
+  ordinary branch, deletable like any other.
+- The name `main` is never hardcoded — a workspace whose root is called `v2` is fine.
+
+This keeps exactly one branch that cannot vanish (so the workspace is always resolvable),
+makes promote a one-row write rather than a rename, and avoids a magic string.
 
 ## 8. Sizing
 
@@ -292,7 +337,8 @@ This is not a slice. It is a subsystem change touching the room registry, the du
 log, the git layer, the schema, the fence, six background pass families, and the frontend
 cache keys — with 59 path call sites and a silent-failure mode on seven commit sites.
 
-**Do not start it until §7.1–7.3 are decided**, and expect to stage it: schema and paths
+**Do not start until §7.2 and §7.3 are confirmed** (§7.1 is settled: the mutex stays
+per-workspace), and expect to stage it: schema and paths
 first (with the old single-branch behaviour preserved), then per-branch rooms, then
 per-user selection, then fork-copy, then section transfer.
 
