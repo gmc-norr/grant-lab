@@ -437,3 +437,75 @@ def test_empty_only_item_keeps_its_paragraph_and_roundtrips():
     twice = pm_to_markdown(markdown_to_pm(once))
     assert once == twice
     assert markdown_to_pm(once) == markdown_to_pm(twice)
+
+
+# --- Round-trip fidelity for real grant-proposal prose -------------------------
+#
+# The 2026-06-17 editor round-trip spike (docs/superpowers/notes/) recorded these as
+# Break 1 and Break 3 and they were never fixed. Both are reachable from a LIVE path:
+# apply_citation_to_room (collab/kernel.py:99) serialises the room to markdown, mutates
+# it, and re-parses a section back INTO the live CRDT, so whatever the projection loses
+# becomes permanent in the document the researcher is looking at.
+
+
+def test_gene_names_in_angle_brackets_survive():
+    """`<TP53>` parsed as inline HTML and dropped silently deletes the gene name."""
+    md = "Variants in <TP53> and <BRCA1> were enriched in the cohort."
+    assert pm_to_markdown(markdown_to_pm(md)).strip() == md
+
+
+def test_snake_case_identifiers_are_not_backslash_escaped():
+    """`sample_id` -> `sample\\_id` on disk makes `grep -c sample_id` return 0.
+
+    markdown-it does not treat an INTRAWORD underscore as emphasis (CommonMark
+    left/right-flanking), so escaping it was never necessary.
+    """
+    md = "We join on sample_id, patient_age and n_reads across cohorts."
+    out = pm_to_markdown(markdown_to_pm(md))
+    assert "\\_" not in out, out
+    assert out.strip() == md
+
+
+def test_snake_case_headings_keep_their_identity():
+    """A section heading IS the section's identity; escaping it renames the section."""
+    md = "## Aims_and_Objectives\n\nBody text.\n"
+    out = pm_to_markdown(markdown_to_pm(md))
+    assert "Aims_and_Objectives" in out, out
+    assert "\\_" not in out, out
+
+
+def test_angle_bracket_placeholders_survive():
+    md = "Replace <COHORT_NAME> before submission."
+    assert pm_to_markdown(markdown_to_pm(md)).strip() == md
+
+
+def test_a_literal_asterisk_in_TEXT_is_still_escaped():
+    """Control: `*` IS intraword emphasis in CommonMark (`a*b*c` parses as em), so a
+    literal `*` inside a text node must keep its backslash or the next parse invents
+    emphasis the researcher never wrote. Relaxing the UNDERSCORE rule must not be
+    over-applied to the asterisk.
+
+    Driven from a PM doc rather than markdown, because `5*3*2` in markdown is already
+    emphasis — the only way to hold a literal `*` is to put it in a text node.
+    """
+    doc = {
+        "type": "doc",
+        "content": [{"type": "paragraph", "content": [
+            {"type": "text", "text": "The formula 5*3*2 equals 30."}
+        ]}],
+    }
+    out = pm_to_markdown(doc)
+    assert "\\*" in out, out
+    # and it must survive: re-parsing gives back the literal asterisks, not emphasis
+    back = pm_to_markdown(markdown_to_pm(out))
+    assert back.strip() == out.strip()
+    assert "5*3*2" in markdown_to_pm(out)["content"][0]["content"][0]["text"]
+
+
+def test_the_full_citation_marker_still_becomes_one_atom():
+    """Control: the marker must keep winning over the generic parse."""
+    md = "As shown [@smith2021]<!-- ev:ev-abc123 --> the effect holds."
+    doc = markdown_to_pm(md)
+    kinds = [n["type"] for n in doc["content"][0]["content"]]
+    assert "citation" in kinds, kinds
+    assert pm_to_markdown(doc).strip() == md

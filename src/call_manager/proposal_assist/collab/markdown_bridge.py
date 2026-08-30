@@ -22,7 +22,15 @@ The serializer's output is the canonical normal form: ``markdown_to_pm`` is
 many-to-one (tight and loose source both normalise to the same doc), so applying
 the round-trip twice is a no-op.
 
-Raw HTML is INTENTIONALLY unrepresentable. The constrained :data:`SCHEMA`
+Raw HTML is INTENTIONALLY unrepresentable, and since 2026-08-30 the parser is
+built with ``html=False`` so markdown-it never TOKENISES it in the first place:
+``<TP53>``, ``<COHORT_NAME>`` and ``<a.b@x.se>`` are literal text that survives
+the round trip. Previously they were emitted as ``html_inline`` and dropped by
+the walker, silently deleting gene symbols from a grant proposal. An orphan
+``<!-- ev:… -->`` with no ``[@key]`` now SURVIVES as visible literal text rather
+than vanishing — visible junk is preferable to silent loss.
+
+The older statement, kept because it still describes the SCHEMA: The constrained :data:`SCHEMA`
 models no raw-HTML node or mark, so ``markdown_to_pm`` *drops* every kind of
 non-citation HTML it encounters: block-level HTML, inline HTML tags, and HTML
 comments. The ONE HTML construct we recognise is the FULL citation marker
@@ -90,7 +98,13 @@ def _citation_rule(state: StateInline, silent: bool) -> bool:
 
 
 def _make_parser() -> MarkdownIt:
-    md = MarkdownIt("commonmark").enable(["strikethrough", "table"])
+    # html=False: `<TP53>`, `<COHORT_NAME>`, `<a.b@x.se>` are LITERAL TEXT, not
+    # inline HTML to be dropped. With html=True markdown-it emits html_inline for
+    # them and the walker discards it, silently deleting gene symbols and
+    # placeholders from a grant proposal. The citation rule below is registered on
+    # the inline ruler and is unaffected — the FULL marker still wins over the
+    # generic parse (asserted by test_the_full_citation_marker_still_becomes_one_atom).
+    md = MarkdownIt("commonmark", {"html": False}).enable(["strikethrough", "table"])
     # Register before "link": both trigger on "[", and we must win so the full
     # marker is consumed as a single citation atom rather than a link attempt
     # followed by an html_inline comment.
@@ -365,7 +379,34 @@ def _escape_text(text: str) -> str:
     it). ``*``/``_``/`` ` ``/``~``/``\\`` are escaped so emphasis-like runs in
     body text do not re-parse into marks on the next round-trip.
     """
-    return "".join(_INLINE_ESCAPE.get(ch, ch) for ch in text)
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "_":
+            # CommonMark opens/closes `_` emphasis only at a word boundary, so an
+            # underscore RUN with alphanumerics on both sides can never be emphasis
+            # and must not be escaped: `sample\_id` on disk makes `grep sample_id`
+            # return nothing, and `## Aims\_and\_Objectives` renames the section
+            # whose heading is its identity. Verified against markdown-it: `a_b_c`
+            # parses as a single text token, while `a*b*c` DOES parse as emphasis —
+            # which is why the asterisk keeps its escape.
+            j = i
+            while j < n and text[j] == "_":
+                j += 1
+            before = text[i - 1] if i else ""
+            after = text[j] if j < n else ""
+            if before.isalnum() and after.isalnum():
+                out.append(text[i:j])
+                i = j
+                continue
+            out.append("\\_" * (j - i))
+            i = j
+            continue
+        out.append(_INLINE_ESCAPE.get(ch, ch))
+        i += 1
+    return "".join(out)
 
 
 def _serialize_inline(nodes: list[dict], *, in_cell: bool = False) -> str:
