@@ -898,6 +898,100 @@ def test_a_detached_head_founds_no_pseudo_branch(pg_session_factory, tmp_path):
         assert _names(s, wid) == ["main"]
 
 
+def test_reconciling_survives_the_root_branchs_ref_being_deleted(pg_session_factory, tmp_path):
+    """`fk_workspaces_root_branch_id` is ON DELETE RESTRICT, so deleting a row the
+    workspace still points at raises ForeignKeyViolation — and this function holds
+    ONE transaction for every workspace, so that would abort the whole batch and
+    discard every workspace already reconciled.
+
+    Not a contrived state: today's delete route guards only `current_branch`
+    (`branches.py:348`), so switching off `main` and deleting it is allowed.
+
+    The second workspace is the point. It is reconciled BEFORE the broken one in
+    the same call, so if the delete raises, its rows roll back with everything
+    else — asserting only on the broken workspace would miss the collateral.
+    """
+    with pg_session_factory() as s:
+        broken = make_workspace(s, title="broken", owner=make_user(s, email="br@ki.se")).id
+        other = make_workspace(s, title="other", owner=make_user(s, email="ot@ki.se")).id
+        s.commit()
+    for wid in (broken, other):
+        _repo(tmp_path, wid, "main", extra=("new_ideas",))
+
+    with pg_session_factory() as s:
+        backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+
+    d = workspace_repo_dir(tmp_path, broken)
+    subprocess.run(["git", "checkout", "-q", "new_ideas"], cwd=d, check=True)
+    subprocess.run(["git", "branch", "-D", "main"], cwd=d, check=True)
+
+    with pg_session_factory() as s:
+        r = backfill_branch_entities(s, workspaces_dir=tmp_path)  # must not raise
+        s.commit()
+        assert r.deleted == 1
+        assert _names(s, broken) == ["new_ideas"]
+        assert _names(s, other) == ["main", "new_ideas"], "the healthy workspace rolled back"
+        # repo/ is on new_ideas now, so that is the root the reconciler resolves.
+        assert s.get(Branch, s.get(Workspace, broken).root_branch_id).name == "new_ideas"
+
+
+def test_a_rootless_workspace_whose_root_ref_vanished_is_left_honestly_rootless(
+    pg_session_factory, tmp_path
+):
+    """The other branch of the same fix: no new root is knowable AND the old root's
+    ref is gone. Clearing the pointer is the honest answer — pointing it at a
+    surviving branch would silently promote something nobody chose, and §7.3 gives
+    that power to promote alone."""
+    with pg_session_factory() as s:
+        wid = make_workspace(s, title="w", owner=make_user(s, email="rootless@ki.se")).id
+        s.commit()
+    _repo(tmp_path, wid, "main", extra=("new_ideas",))
+
+    with pg_session_factory() as s:
+        backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+
+    d = workspace_repo_dir(tmp_path, wid)
+    subprocess.run(["git", "checkout", "-q", "--detach", "HEAD"], cwd=d, check=True)
+    subprocess.run(["git", "branch", "-D", "main"], cwd=d, check=True)
+
+    with pg_session_factory() as s:
+        r = backfill_branch_entities(s, workspaces_dir=tmp_path)  # must not raise
+        s.commit()
+        assert (r.deleted, r.rooted) == (1, 0)
+        assert _names(s, wid) == ["new_ideas"]
+        assert s.get(Workspace, wid).root_branch_id is None
+
+
+def test_a_surviving_root_pointer_is_not_cleared_by_an_unrelated_orphan(
+    pg_session_factory, tmp_path
+):
+    """Control for the test above. The clear must fire ONLY when the doomed row is
+    the one the pointer names — a blanket 'detached plus orphans, so null it'
+    would silently unroot every healthy workspace that happened to have a stale
+    row lying around."""
+    with pg_session_factory() as s:
+        wid = make_workspace(s, title="w", owner=make_user(s, email="survive@ki.se")).id
+        s.commit()
+    _repo(tmp_path, wid, "main")
+
+    with pg_session_factory() as s:
+        backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.add(Branch(workspace_id=wid, name="stale_unrelated"))
+        s.commit()
+        root_before = s.get(Workspace, wid).root_branch_id
+
+    d = workspace_repo_dir(tmp_path, wid)
+    subprocess.run(["git", "checkout", "-q", "--detach", "HEAD"], cwd=d, check=True)
+
+    with pg_session_factory() as s:
+        r = backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+        assert r.deleted == 1
+        assert s.get(Workspace, wid).root_branch_id == root_before, "unrooted a healthy workspace"
+
+
 def test_one_broken_repo_does_not_halt_the_rest(pg_session_factory, tmp_path):
     """A migration that dies on workspace 7 of 500 leaves the database half
     founded, and the unique key makes the retry fail differently."""
@@ -950,6 +1044,7 @@ repairs either. S2 runs it again before it attaches any worktree.
 from __future__ import annotations
 
 import logging
+import subprocess
 from pathlib import Path
 from typing import NamedTuple
 
@@ -1039,7 +1134,7 @@ def backfill_branch_entities(session: Session, *, workspaces_dir: Path) -> Backf
             continue  # still in setup; nothing to found a branch on, and not a failure
         try:
             names = _real_refs(repo)
-        except (GitCommitError, OSError):
+        except (GitCommitError, OSError, subprocess.TimeoutExpired):
             skipped += 1
             logger.warning(
                 "branches.entity_reconcile_skipped",
@@ -1052,30 +1147,32 @@ def backfill_branch_entities(session: Session, *, workspaces_dir: Path) -> Backf
 
         existing = {
             n
-            for (n,) in session.execute(
-                select(Branch.name).where(Branch.workspace_id == wid)
-            ).all()
+            for (n,) in session.execute(select(Branch.name).where(Branch.workspace_id == wid)).all()
         }
         for name in names:
             if name in existing:
                 continue
             session.add(Branch(workspace_id=wid, name=name))
             created += 1
-        orphans = existing - set(names)
-        if orphans:
-            session.execute(
-                delete(Branch).where(
-                    Branch.workspace_id == wid, Branch.name.in_(orphans)
-                )
-            )
-            deleted += len(orphans)
         session.flush()  # assign ids before anything reads one back
+        orphans = existing - set(names)
 
         # The root pointer: git HEAD. Detached leaves it alone rather than guessing.
         try:
             head = current_branch(repo)
-        except (GitCommitError, OSError):
+        except (GitCommitError, OSError, subprocess.TimeoutExpired):
             head = None
+
+        # THE POINTER MOVES BEFORE THE DELETE, and that order is load-bearing.
+        # `fk_workspaces_root_branch_id` is ON DELETE RESTRICT, so deleting a row
+        # the workspace still points at raises ForeignKeyViolation — and because
+        # this function holds ONE transaction for every workspace, that aborts the
+        # whole batch and discards every workspace already reconciled. Reproduced:
+        # switch off `main`, `git branch -D main` (today's delete route allows it,
+        # `branches.py:348` guards only `current_branch`), then reconcile.
+        #
+        # RESTRICT did its job — it refused to let a caller silently orphan the
+        # root pointer. This function was that caller.
         if head in names:
             root = session.execute(
                 select(Branch).where(Branch.workspace_id == wid, Branch.name == head)
@@ -1084,6 +1181,26 @@ def backfill_branch_entities(session: Session, *, workspaces_dir: Path) -> Backf
                 update(Workspace).where(Workspace.id == wid).values(root_branch_id=root.id)
             )
             rooted += 1
+        elif orphans:
+            # No new root is knowable (detached HEAD, or HEAD on a ref that is
+            # somehow absent) AND rows are about to go. Clear the pointer only if
+            # it names one of the doomed rows: a workspace whose root survived
+            # keeps it, and one whose root's ref vanished is left honestly
+            # rootless rather than pointed at a branch that no longer exists.
+            rooted_at = session.get(Workspace, wid).root_branch_id
+            if rooted_at is not None:
+                doomed = session.get(Branch, rooted_at)
+                if doomed is not None and doomed.name in orphans:
+                    session.execute(
+                        update(Workspace).where(Workspace.id == wid).values(root_branch_id=None)
+                    )
+
+        if orphans:
+            session.execute(
+                delete(Branch).where(Branch.workspace_id == wid, Branch.name.in_(orphans))
+            )
+            deleted += len(orphans)
+        session.flush()
 
         # The SDK handle: workspaces.current_branch. A column naming a branch that
         # no longer exists has no row to carry it; leaving it on the workspace is
@@ -1106,13 +1223,14 @@ def backfill_branch_entities(session: Session, *, workspaces_dir: Path) -> Backf
     return BackfillResult(created=created, deleted=deleted, rooted=rooted, skipped=skipped)
 ```
 
+
 - [ ] **Step 4: Run the tests to verify they pass**
 
 ```bash
 uv run pytest tests/proposal_assist/test_branch_entity_backfill.py -q
 ```
 
-Expected: `23 passed` (8 from Task 1, 15 added here).
+Expected: `26 passed` (8 from Task 1, 18 added here).
 
 - [ ] **Step 5: Prove the three tests that can be hollow actually bite**
 
@@ -1150,7 +1268,17 @@ Expected: `test_a_row_whose_ref_is_gone_is_deleted` FAILS with
 if that one also fails, it is being satisfied by the deletion path rather than by the
 skip.
 
-Revert all three and re-run — `23 passed`.
+**Mutation D — put the delete back before the pointer move.** Move the `if orphans:` /
+`delete(Branch)` block above the `if head in names:` block.
+
+Expected: `test_reconciling_survives_the_root_branchs_ref_being_deleted` and
+`test_a_rootless_workspace_whose_root_ref_vanished_is_left_honestly_rootless` both FAIL
+with `ForeignKeyViolation ... fk_workspaces_root_branch_id`. This is the ordering that
+shipped in the first draft of this plan and was caught in review — `ON DELETE RESTRICT`
+refused to let the reconciler orphan the root pointer, and because the function holds ONE
+transaction for every workspace, the violation aborted the entire batch.
+
+Revert all four and re-run — `26 passed`.
 
 - [ ] **Step 6: Lint and commit**
 
@@ -1265,7 +1393,7 @@ In `alembic/versions/0068_branch_entity.py`, append to the end of `upgrade()`:
 uv run pytest tests/proposal_assist/test_branch_entity_backfill.py -q
 ```
 
-Expected: `24 passed`.
+Expected: `27 passed`.
 
 - [ ] **Step 5: Run the migration against a real database**
 
