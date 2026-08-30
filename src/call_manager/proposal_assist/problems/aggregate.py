@@ -16,10 +16,12 @@ from sqlalchemy import exists, func, select
 from sqlalchemy.orm import Session
 
 from call_manager.db.models import CoherenceJob, ProposedChange
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
 from call_manager.proposal_assist.citations.audit import validate_citations_deterministic
 from call_manager.proposal_assist.citations.ledger import load_ledger
-from call_manager.proposal_assist.collab.canonical import current_artifact_sha
+from call_manager.proposal_assist.collab.canonical import (
+    current_artifact_sha,
+    current_artifact_text_and_sha,
+)
 from call_manager.proposal_assist.editing.save import CITATIONS_FILENAME
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.evaluator.jobs import latest_completed_evaluator_job
@@ -72,15 +74,24 @@ def assemble_problems(
 ) -> dict:
     rows: list[dict] = []
 
-    # Read+split the draft DEFENSIVELY too: an unreadable path (permissions, a
-    # directory) or invalid UTF-8 must not 500 the endpoint. On failure the draft is
-    # treated as empty (the citation + over-length signals then contribute nothing).
+    # ONE read of the draft, and every signal below is judged against it — the text
+    # AND the sha the staleness flags compare. Reading git here while hashing the room
+    # below made this one function judge two different documents: it reported broken
+    # citations the researcher had already fixed (the deleted marker survives in git)
+    # and missed over-length sections they could see (git has not caught up).
+    #
+    # Read DEFENSIVELY: an unreadable path (permissions, a directory), invalid UTF-8
+    # or an unprojectable log must not 500 the endpoint. On failure the draft is
+    # treated as empty, so the citation + over-length signals contribute nothing and
+    # the sha comparisons below report the scorecard as stale — "we could not confirm
+    # this is current" is the honest degradation, never a silent "it is current".
     try:
-        draft_path = repo_dir / PROPOSAL_FILENAME
-        draft_text = draft_path.read_text() if draft_path.exists() else ""
+        draft_text, draft_sha = current_artifact_text_and_sha(
+            session, workspace_id=workspace_id, artifact="draft", repo_dir=repo_dir
+        )
     except Exception:
         logger.exception("problems: draft read failed")
-        draft_text = ""
+        draft_text, draft_sha = "", ""
     sections = split_sections(draft_text)  # pure/total over a str (cannot raise)
 
     # 1. broken citations — absent ledger STILL runs the validator (orphan markers
@@ -110,9 +121,7 @@ def assemble_problems(
         job = latest_completed_evaluator_job(session, workspace_id=workspace_id)
         scorecard = job.scorecard if job is not None else None
         if job is not None:
-            if job.evaluated_draft_sha != current_artifact_sha(
-                session, workspace_id=workspace_id, artifact="draft", repo_dir=repo_dir
-            ):
+            if job.evaluated_draft_sha != draft_sha:
                 scorecard_stale.append("draft")
             if job.evaluated_spec_sha != current_artifact_sha(
                 session, workspace_id=workspace_id, artifact="spec", repo_dir=repo_dir
@@ -144,9 +153,7 @@ def assemble_problems(
         uc_job = latest_completed_uncited_claims_job(session, workspace_id=workspace_id)
         if uc_job is not None:
             dismissed = dismissed_claim_hashes(session, workspace_id=workspace_id)
-            uncited_claims_stale = uc_job.evaluated_draft_sha != current_artifact_sha(
-                session, workspace_id=workspace_id, artifact="draft", repo_dir=repo_dir
-            )
+            uncited_claims_stale = uc_job.evaluated_draft_sha != draft_sha
             rows += uncited_claim_problems(uc_job.claims or [], dismissed)
     except Exception:
         logger.exception("problems: uncited_claim signal failed")

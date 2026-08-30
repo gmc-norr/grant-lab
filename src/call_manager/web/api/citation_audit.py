@@ -14,13 +14,13 @@ from pydantic import BaseModel
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import User
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
 from call_manager.proposal_assist.citations.audit import (
     validate_citations_deterministic,
     validate_citations_semantic_capped,
 )
 from call_manager.proposal_assist.citations.ledger import load_ledger
 from call_manager.proposal_assist.citations.usage import check_citation_caps
+from call_manager.proposal_assist.collab.canonical import current_artifact_text_and_sha
 from call_manager.proposal_assist.editing.save import CITATIONS_FILENAME
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.web._cloud_gate import (
@@ -65,15 +65,31 @@ def _counts(issues: list[dict]) -> tuple[int, int]:
     return err, warn
 
 
-def _load(repo_dir):
+def _load(session, workspace_id, repo_dir):
     """Return (proposal_text, ledger) or None if there is no draft. Raises ValueError
-    on a corrupt citations.json."""
-    proposal = repo_dir / PROPOSAL_FILENAME
-    if not proposal.exists():
+    on a corrupt citations.json.
+
+    The draft is the document as it is RIGHT NOW — the room-canonical projection of
+    the durable Yjs log when collab is on, raw git HEAD when it is off. Reading git
+    unconditionally reported orphan markers the researcher had already deleted, and
+    missed the ones they had just written.
+
+    The ledger stays on disk deliberately: citations.json is canonical in git, and the
+    collab citation path co-commits it under the same mutex that appends the room
+    update, so a marker in the live draft always has its ledger row.
+
+    "No draft" now also covers an EXISTING but empty proposal.md (previously
+    draft_present=True with nothing to audit) — the same convention
+    current_artifact_text_and_sha uses, where "" means "no artifact".
+    """
+    proposal_text, _ = current_artifact_text_and_sha(
+        session, workspace_id=workspace_id, artifact="draft", repo_dir=repo_dir
+    )
+    if not proposal_text:
         return None
     citations = repo_dir / CITATIONS_FILENAME
     ledger = load_ledger(citations.read_text() if citations.exists() else None)
-    return proposal.read_text(), ledger
+    return proposal_text, ledger
 
 
 @router.get("/workspaces/{workspace_id}/citation-audit", response_model=CitationAuditOut)
@@ -87,7 +103,7 @@ def citation_audit(
         require_member(workspace_id=workspace_id, user=user, session=session)
         repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
         try:
-            loaded = _load(repo_dir)
+            loaded = _load(session, workspace_id, repo_dir)
         except ValueError as exc:
             return api_error(
                 409, "citation_ledger_invalid", f"citations.json could not be read: {exc}"
@@ -138,7 +154,7 @@ def citation_audit_deep(
                 )
         repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
         try:
-            loaded = _load(repo_dir)
+            loaded = _load(session, workspace_id, repo_dir)
         except ValueError as exc:
             return api_error(
                 409, "citation_ledger_invalid", f"citations.json could not be read: {exc}"
