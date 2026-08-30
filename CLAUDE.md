@@ -16,6 +16,12 @@ The v1 design spec (`docs/superpowers/specs/2026-04-14-call-monitor-design.md`) 
 
 - **Worktree directory:** `.worktrees/` (project-local, gitignored). Use this for any feature or plan work requiring isolation.
 - **Plans:** saved to `docs/superpowers/plans/YYYY-MM-DD-<name>.md`.
+  Executed plans are **pruned**: a plan is scaffolding, and once its work is merged the
+  code is the result. The 2026-08-30 cleanup removed 60 executed plans and the 3
+  superseded branch specs (~88k lines). Recover any of them from git history:
+  `git log --all --diff-filter=D --name-only --format= -- 'docs/superpowers/**'` then
+  `git show <commit>^:<path>`. **Specs are kept** — they carry the *why*, which the code
+  does not.
 - **Specs:** saved to `docs/superpowers/specs/YYYY-MM-DD-<name>.md`.
 
 ## Stack
