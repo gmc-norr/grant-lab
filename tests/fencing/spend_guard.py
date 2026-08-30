@@ -180,9 +180,49 @@ def _target_stamps(target: ast.AST) -> bool:
     return False
 
 
+def _non_assignment_stamp(node: ast.AST) -> bool:
+    """Token writes that are not Python assignments at all.
+
+    An outside review found three, none of which `_stamp_lines` could see because
+    none produces an assignment target:
+      * `update(Job).values(input_tokens=n)` — a Core UPDATE
+      * `setattr(job, "input_tokens", n)` — the dynamic form
+      * `bulk_update_mappings(Job, [{"input_tokens": n}])` — a dict key
+    A second writer using any of these could omit record_spend and the gate would
+    stay green, which is the one thing this gate must never do.
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    # .values(input_tokens=...) / .values(**{...}) on any chain
+    if (
+        isinstance(func, ast.Attribute)
+        and func.attr == "values"
+        and any(kw.arg in TOKEN_FIELDS for kw in node.keywords if kw.arg)
+    ):
+        return True
+    # setattr(obj, "input_tokens", value) — only a literal name is checkable
+    if isinstance(func, ast.Name) and func.id == "setattr" and len(node.args) >= 2:
+        target = node.args[1]
+        if isinstance(target, ast.Constant) and target.value in TOKEN_FIELDS:
+            return True
+    # bulk_*_mappings(Model, [{"input_tokens": n}]) — dict-literal keys anywhere
+    # in the call's arguments.
+    if isinstance(func, ast.Attribute) and func.attr.startswith("bulk_"):
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Dict):
+                for key in sub.keys:
+                    if isinstance(key, ast.Constant) and key.value in TOKEN_FIELDS:
+                        return True
+    return False
+
+
 def _stamp_lines(nodes: list[ast.AST]) -> list[int]:
     lines: list[int] = []
     for node in nodes:
+        if _non_assignment_stamp(node):
+            lines.append(node.lineno)
+            continue
         # Assign has a LIST of targets (`a = b = value`); AnnAssign and AugAssign
         # each have exactly one. All three write the attribute.
         if isinstance(node, ast.Assign):

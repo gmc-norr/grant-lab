@@ -116,6 +116,7 @@ async def _run_one_call(
         )
         _entry.bind_adapter(adapter)
         handle = None
+        terminate_cancelled = False
         done: TurnDoneEvent | None = None
         error: str | None = None
         cancelled = False
@@ -149,8 +150,14 @@ async def _run_one_call(
                         adapter.terminate(handle),
                         timeout=settings.review_terminate_timeout_seconds,
                     )
-                except Exception:  # noqa: BLE001
+                # CancelledError too: a cancel landing during adapter teardown used to
+                # escape the finally BEFORE the finalize block below, so a call that had
+                # already completed and reported usage recorded nothing. Hold it, let the
+                # ledger write happen, then re-raise it after the finalize.
+                except (Exception, asyncio.CancelledError) as term_exc:  # noqa: BLE001
                     logger.exception("review adapter terminate failed (%s, run %s)", kind, run_id)
+                    if isinstance(term_exc, asyncio.CancelledError):
+                        terminate_cancelled = True
 
         with session_factory() as s:
             # LOCK ORDER: review_runs < review_run_items (normative). The run is taken
@@ -181,7 +188,7 @@ async def _run_one_call(
                 # This early return sits ABOVE the re-raise at the end of the
                 # function, so cancellation would be swallowed here. The spend is
                 # durable now; let it propagate.
-                if cancelled:
+                if cancelled or terminate_cancelled:
                     raise asyncio.CancelledError()
                 return
             item.completed_at = _now()
@@ -240,7 +247,7 @@ async def _run_one_call(
         # The spend is now durable; cancellation may resume propagating. Re-raised
         # AFTER the finalize block (not inside the handler) so the ledger row is
         # written first — that ordering is the whole point of widening the catch.
-        if cancelled:
+        if cancelled or terminate_cancelled:
             raise asyncio.CancelledError()
 
 

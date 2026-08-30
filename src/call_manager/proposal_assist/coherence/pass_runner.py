@@ -96,6 +96,7 @@ async def run_coherence_pass(
         )
         _entry.bind_adapter(adapter)
         handle = None
+        terminate_cancelled = False
         done: TurnDoneEvent | None = None
         try:
 
@@ -191,8 +192,14 @@ async def run_coherence_pass(
                         adapter.terminate(handle),
                         timeout=settings.coherence_terminate_timeout_seconds,
                     )
-                except Exception:  # noqa: BLE001
+                # CancelledError too: a cancel landing during adapter teardown used to
+                # escape the finally BEFORE the finalize block below, so a call that had
+                # already completed and reported usage recorded nothing. Hold it, let the
+                # ledger write happen, then re-raise it after the finalize.
+                except (Exception, asyncio.CancelledError) as term_exc:  # noqa: BLE001
                     logger.exception("coherence adapter terminate failed for job %s", job_id)
+                    if isinstance(term_exc, asyncio.CancelledError):
+                        terminate_cancelled = True
 
         # 2. Success: claim the terminal transition under a row lock; ONLY finalize if
         #    the job is still 'running' (the reaper may have failed it during a hang —
@@ -261,6 +268,11 @@ async def run_coherence_pass(
                 sdk_session_id=done.session_id if done else None,
             )
             s.commit()
+
+        # A cancel that landed during adapter teardown was held so the ledger write
+        # above could happen. The spend is durable now; let it propagate.
+        if terminate_cancelled:
+            raise asyncio.CancelledError()
 
 def _fail(
     session, job: CoherenceJob, message: str, done=None, status: str = "failed"

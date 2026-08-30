@@ -84,10 +84,10 @@ class CitationLLMService:
             # timeouts as LLMError (httpx.TimeoutException does NOT subclass
             # builtin TimeoutError), so this branch only fires for clients that
             # propagate TimeoutError directly. Refinement deferred to Slice 3.
-            self._safe_record(workspace_id, op, "timeout", 0, 0, None)
+            self._note_record(self._safe_record(workspace_id, op, "timeout", 0, 0, None))
             raise
         except Exception:
-            self._safe_record(workspace_id, op, "failed", 0, 0, None)
+            self._note_record(self._safe_record(workspace_id, op, "failed", 0, 0, None))
             raise
 
         # Success: record usage. If the ledger write fails here the tokens were
@@ -98,10 +98,8 @@ class CitationLLMService:
         ok = self._safe_record(
             workspace_id, op, "ok", result.usage.tokens_in, result.usage.tokens_out, result.model
         )
-        if ok:
-            self._consecutive_record_failures = 0
-        else:
-            self._consecutive_record_failures += 1
+        self._note_record(ok)
+        if not ok:
             logger.error(
                 "citation ledger write FAILED after a successful LLM call — "
                 "tokens spent but unaccounted (workspace=%s op=%s streak=%d)",
@@ -110,6 +108,20 @@ class CitationLLMService:
                 self._consecutive_record_failures,
             )
         return CitationLLMResult(data=result.data, usage=result.usage, model=result.model)
+
+    def _note_record(self, ok: bool) -> None:
+        """Move the breaker streak for EVERY ledger write, not just the success one.
+
+        The failure and timeout branches used to discard `_safe_record`'s result,
+        so a ledger that was down for every call never tripped the breaker — the
+        one mechanism that stops us calling the LLM while spend is unaccounted.
+        The rows on those paths carry zero tokens, but a write failing there means
+        the ledger is broken, which is exactly what the breaker is for.
+        """
+        if ok:
+            self._consecutive_record_failures = 0
+        else:
+            self._consecutive_record_failures += 1
 
     def _safe_record(self, workspace_id, op, status, tokens_in, tokens_out, model) -> bool:
         try:

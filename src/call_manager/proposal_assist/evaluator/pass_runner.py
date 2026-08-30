@@ -135,6 +135,7 @@ async def run_evaluator_pass(
         )
         _entry.bind_adapter(adapter)
         handle = None
+        terminate_cancelled = False
         done: TurnDoneEvent | None = None
         try:
 
@@ -228,8 +229,14 @@ async def run_evaluator_pass(
                         adapter.terminate(handle),
                         timeout=settings.evaluator_terminate_timeout_seconds,
                     )
-                except Exception:  # noqa: BLE001
+                # CancelledError too: a cancel landing during adapter teardown used to
+                # escape the finally BEFORE the finalize block below, so a call that had
+                # already completed and reported usage recorded nothing. Hold it, let the
+                # ledger write happen, then re-raise it after the finalize.
+                except (Exception, asyncio.CancelledError) as term_exc:  # noqa: BLE001
                     logger.exception("evaluator adapter terminate failed for job %s", job_id)
+                    if isinstance(term_exc, asyncio.CancelledError):
+                        terminate_cancelled = True
 
         # 2. Success finalize under a row lock; ONLY if still running AND a scorecard was
         #    written (the reaper may have failed it during a hang — don't resurrect it).
@@ -286,6 +293,11 @@ async def run_evaluator_pass(
                 sdk_session_id=done.session_id if done else None,
             )
             s.commit()
+
+        # A cancel that landed during adapter teardown was held so the ledger write
+        # above could happen. The spend is durable now; let it propagate.
+        if terminate_cancelled:
+            raise asyncio.CancelledError()
 
 async def drain_evaluator_queue_tick(
     *,

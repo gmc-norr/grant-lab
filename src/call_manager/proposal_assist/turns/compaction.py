@@ -176,6 +176,12 @@ def compact_workspace(
     )
     user_message = _COMPACTION_PROMPT + formatted_conv
 
+    # Bound before the try so the failure branch can tell "the call never
+    # returned" (envelope is None, no usage exists) from "the call returned and
+    # we failed to decode it" (envelope holds real usage that was really spent).
+    # Moving the decode inside the try fixed one bug and created this one:
+    # the handler recorded a zero-token row over usage sitting right there.
+    envelope: dict | None = None
     try:
         envelope = summarizer_client.chat(
             messages=[{"role": "user", "content": user_message}],
@@ -187,15 +193,26 @@ def compact_workspace(
         summary_text = envelope["choices"][0]["message"]["content"]
         used_model = envelope.get("model") or getattr(summarizer_client, "model", "unknown")
     except Exception:
-        # The summarizer threw, so there is no envelope and no usage. Record the
-        # EXISTENCE of the attempt on a FRESH session: `s` is still bound here
-        # (Python's `with` does not scope its target) but it is the read session
-        # already closed above, and SQLAlchemy 2.0 happily writes through a
-        # closed Session — writing record_spend(s, ...) would silently pass. No
-        # token counts on this path because there are none; record_spend stores 0.
+        # Record the attempt on a FRESH session: `s` is still bound here (Python's
+        # `with` does not scope its target) but it is the read session already
+        # closed above, and SQLAlchemy 2.0 happily writes through a closed
+        # Session — writing record_spend(s, ...) would silently pass.
+        #
+        # Carry whatever usage the envelope holds. If the CALL threw there is no
+        # envelope and these are None -> stored 0, which is honest. If the call
+        # SUCCEEDED and decoding threw, the tokens were really spent and are
+        # right here; recording zero would be the same undercount this ledger
+        # exists to remove.
+        usage = (envelope or {}).get("usage") or {}
         with session_factory() as fail_s:
             record_spend(
-                fail_s, workspace_id=workspace_id, kind="compaction", status="failed"
+                fail_s,
+                workspace_id=workspace_id,
+                kind="compaction",
+                status="failed",
+                tokens_in=usage.get("prompt_tokens"),
+                tokens_out=usage.get("completion_tokens"),
+                model=(envelope or {}).get("model"),
             )
             fail_s.commit()
         raise

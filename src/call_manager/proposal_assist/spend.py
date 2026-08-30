@@ -10,8 +10,13 @@ Rules for callers:
     errored after consuming input tokens cost real money.
   * Record even when the token counts are None. "We spent nothing" and "we never
     looked" are different facts; a missing row cannot express the second.
-  * The caller commits. This only adds to the session, so the row lands in the
-    same transaction as the job's own status change and cannot half-happen.
+  * The caller commits. This only adds to the session, so the row normally lands
+    in the same transaction as the job's own status change and cannot half-happen.
+  * ONE deliberate exception: turns/compaction.py commits its success row on its
+    own session BEFORE writing the summary. Atomicity is the wrong priority once
+    the money is already spent — a failure persisting the summary must not roll
+    the row back with it. Prefer the same transaction; break it only where the
+    spend would otherwise be lost, and say so at the call site.
 """
 
 from __future__ import annotations
