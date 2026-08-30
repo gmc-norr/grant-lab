@@ -368,39 +368,64 @@ def test_m1_founds_the_first_branch_row_and_the_root_pointer(
         assert s.get(Branch, root_id).name == "main"
 
 
-def test_m1_founds_the_branch_in_the_SAME_transaction_as_the_repo(
-    pg_session_factory, current_user, tmp_path, phase0_client
+def test_m1_rolls_the_founded_branch_back_with_the_rest_of_m1(
+    pg_session_factory, current_user, tmp_path, phase0_client, monkeypatch
 ):
-    """Control for the test above, and the reason it is not enough on its own.
+    """The founding must share `_m1`'s transaction, so a later failure undoes it.
 
-    If the founding ran in its own session it could commit while `_m1` later
-    rolled back, leaving a branch row for a workspace whose repo creation was
-    undone. `_m1` refuses a soft-deleted workspace and creates nothing — so a
-    row appearing here would prove the founding escaped `_m1`'s transaction.
+    The first version of this test soft-deleted the workspace and asserted no row
+    survived. That was VACUOUS: `_m1`'s first statement is
+    `acquire_commit_mutex_at_generation`, which raises `WorkspaceDeleted` before
+    `_init_repo` and before the founding ever runs (`setup.py:397-400`,
+    `fencing.py:160-166`). The assertion was trivially true.
+
+    So fail AFTER the founding instead. `datetime.now(UTC)` at `setup.py:433` is
+    the only statement between the founding and `s.commit()`; making it raise
+    exits the `with self.session_factory() as s` block without a commit. If the
+    founding shared that session the row is rolled back with everything else; if
+    it had committed on a session of its own, the row survives and this reddens.
+
+    Worth recording: the "separate session" variant cannot actually ship
+    unnoticed. `_m1` holds the workspace row `with_for_update=True`
+    (`setup.py:401`), so a second session's `UPDATE workspaces SET
+    root_branch_id=...` blocks on that row lock while the outer session waits in
+    Python for it to return — a permanent mutual wait Postgres cannot see as a
+    deadlock. It hangs rather than failing. That is a worse CI signal than a red
+    test, which is the other reason this test exists.
     """
     from sqlalchemy import select
 
     from call_manager.db.models import Branch
-    from call_manager.proposal_assist.drafting.locking import WorkspaceDeleted
+    from call_manager.proposal_assist.phases import setup as setup_mod
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
         s.flush()
         job = WorkspaceSetupJob(workspace_id=ws.id, status="running")
         s.add(job)
-        ws.soft_deleted_at = datetime.now(UTC)
         s.commit()
         job_id, ws_id = job.id, ws.id
 
-    with pytest.raises(WorkspaceDeleted):
+    class _NoClock:
+        """Raises where `_m1` stamps snapshot_refreshed_at — after the founding,
+        before the commit. `datetime` is used nowhere else inside `_m1`."""
+
+        @staticmethod
+        def now(*_a, **_k):
+            raise RuntimeError("boom after the founding")
+
+    monkeypatch.setattr(setup_mod, "datetime", _NoClock)
+
+    with pytest.raises(RuntimeError, match="boom after the founding"):
         _worker(pg_session_factory, tmp_path, phase0_client)._m1(
             job_id, ws_id, claimed_generation=0
         )
 
     with pg_session_factory() as s:
         assert s.execute(select(Branch).where(Branch.workspace_id == ws_id)).first() is None, (
-            "a branch row survived a rolled-back _m1"
+            "the founded branch row outlived a rolled-back _m1"
         )
+        assert s.get(Workspace, ws_id).root_branch_id is None
 
 
 def test_m1_refuses_a_deleted_workspace_and_creates_nothing(
