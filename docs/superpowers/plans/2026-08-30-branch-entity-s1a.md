@@ -1485,7 +1485,12 @@ from call_manager.db.models import Branch, Workspace
 from call_manager.proposal_assist.branches import BranchExists, create_workspace_branch
 from call_manager.proposal_assist.citations.gitio import branch_exists, list_branches
 from call_manager.proposal_assist.paths import workspace_repo_dir
-from tests.proposal_assist.conftest import init_workspace_repo, make_workspace, stamp_for
+from tests.proposal_assist.conftest import (
+    init_workspace_repo,
+    make_user,
+    make_workspace,
+    stamp_for,
+)
 
 
 def _ws(session_factory, tmp_path):
@@ -2206,7 +2211,12 @@ from call_manager.proposal_assist.branch_entity_backfill import backfill_branch_
 from call_manager.proposal_assist.branches import create_workspace_branch
 from call_manager.proposal_assist.citations.gitio import list_branches
 from call_manager.proposal_assist.paths import workspace_repo_dir
-from tests.proposal_assist.conftest import init_workspace_repo, make_workspace, stamp_for
+from tests.proposal_assist.conftest import (
+    init_workspace_repo,
+    make_user,
+    make_workspace,
+    stamp_for,
+)
 
 
 def test_every_ref_has_a_row_after_backfill_and_after_a_create(pg_session_factory, tmp_path):
@@ -2249,8 +2259,10 @@ def test_a_workspace_with_a_repo_always_has_a_root_pointer(pg_session_factory, t
     """S2 resolves `repo/` versus `worktrees/<id>/` through this pointer. A null
     one after backfill means every path for that workspace resolves nowhere."""
     with pg_session_factory() as s:
-        a = make_workspace(s, title="a").id
-        b = make_workspace(s, title="b").id
+        # Distinct owners: `make_user`'s default email is the fixed literal
+        # "owner@ki.se" and two calls in one session collide on `uq_users_email`.
+        a = make_workspace(s, title="a", owner=make_user(s, email="inv-a@ki.se")).id
+        b = make_workspace(s, title="b", owner=make_user(s, email="inv-b@ki.se")).id
         s.commit()
     init_workspace_repo(workspace_repo_dir(tmp_path, a), "# A\n")
     init_workspace_repo(workspace_repo_dir(tmp_path, b), "# B\n")
@@ -2277,8 +2289,10 @@ def test_the_root_pointer_never_names_another_workspaces_branch(pg_session_facto
     workspaces use the same branch name, which is what a scoping bug would confuse.
     """
     with pg_session_factory() as s:
-        a = make_workspace(s, title="a").id
-        b = make_workspace(s, title="b").id
+        # Distinct owners: `make_user`'s default email is the fixed literal
+        # "owner@ki.se" and two calls in one session collide on `uq_users_email`.
+        a = make_workspace(s, title="a", owner=make_user(s, email="inv-a@ki.se")).id
+        b = make_workspace(s, title="b", owner=make_user(s, email="inv-b@ki.se")).id
         s.commit()
     init_workspace_repo(workspace_repo_dir(tmp_path, a), "# A\n")
     init_workspace_repo(workspace_repo_dir(tmp_path, b), "# B\n")
@@ -2309,14 +2323,21 @@ Expected: `3 passed`.
 A gate that reddens nothing is a finding, not a pass. Run both mutations and record the
 result of each:
 
-**Mutation A** — in `branch_entity_backfill.py`, change the ref loop to found only the
+**Mutation A** — in `branch_entity_backfill.py`, make `_real_refs` return only the
 checked-out branch:
 
 ```python
-        for name in [head]:
+def _real_refs(repo: Path) -> list[str]:
+    return [current_branch(repo)]
 ```
 
-Expected: `test_every_ref_has_a_row_after_backfill_and_after_a_create` FAILS.
+Expected: `test_every_ref_has_a_row_after_backfill_and_after_a_create` FAILS with
+`Extra items in the right set: 'made_before_s1'` — measured.
+
+**Do not mutate the creation loop to `for name in [head]:`.** `head` is resolved AFTER
+that loop (the ordering fix in `3ea34b25` moved it), so that form raises
+`UnboundLocalError` and reddens all three tests for the wrong reason — it proves the
+tests run, not that they check anything.
 
 **Mutation B** — in `branch_entity_backfill.py`, remove the root pointer write by deleting
 the `session.execute(update(Workspace)...)` call.
