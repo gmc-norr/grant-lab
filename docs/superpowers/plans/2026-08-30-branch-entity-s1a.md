@@ -100,6 +100,10 @@ Copied from `docs/superpowers/specs/2026-08-30-per-branch-worktrees-and-rooms-de
   `tests.proposal_assist.conftest`: `make_workspace(session, title=...)`,
   `init_workspace_repo(repo, content)`, `stamp_for(session, workspace_id)`. Never
   construct a `Workspace` by hand — it needs an owner.
+- **The test schema is built by `alembic upgrade head`** (`tests/conftest.py:90-92`),
+  NOT `Base.metadata.create_all`. So a constraint mutation in `models.py` alone changes
+  nothing the database enforces and every test still passes — measured. Any mutation check
+  on a constraint must edit **both** the model and the migration, or it proves nothing.
 - **`tmp_path` is the `workspaces_dir`** in these tests. An autouse fixture forces
   `WORKSPACES_DIR` to a temp dir so the suite can never write to `var/workspaces`
   (`tests/conftest.py`).
@@ -162,14 +166,13 @@ it needs an owner.
 """
 
 import uuid
-from pathlib import Path
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from call_manager.db.models import Branch, Workspace
-from tests.proposal_assist.conftest import make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace
 
 
 def test_a_branch_row_can_be_created_and_read_back(pg_session_factory):
@@ -213,8 +216,12 @@ def test_the_same_name_in_two_workspaces_is_fine(pg_session_factory):
     every workspace has a 'main', and a global unique key would break the
     second one silently at backfill time."""
     with pg_session_factory() as s:
-        a = make_workspace(s, title="a").id
-        b = make_workspace(s, title="b").id
+        # Distinct owner emails: `make_user`'s default is the fixed literal
+        # "owner@ki.se", so two `make_workspace` calls in one session with no
+        # explicit owner collide on `uq_users_email`
+        # (`tests/proposal_assist/conftest.py:200-204` documents this).
+        a = make_workspace(s, title="a", owner=make_user(s, email="a@ki.se")).id
+        b = make_workspace(s, title="b", owner=make_user(s, email="b@ki.se")).id
         s.commit()
 
     with pg_session_factory() as s:
@@ -515,9 +522,14 @@ uv run python scripts/gen_architecture.py
 uv run pytest tests/architecture/test_architecture_map_is_current.py -q
 ```
 
-Expected: the map gains the `branches` table, `uq_branches_ws_name`, and both new foreign
-keys with their ON DELETE behaviour; the test passes. **If `git diff docs/ARCHITECTURE.md`
-is empty, the generator did not see the model and something in Steps 3-4 is wrong.**
+Expected: the map gains the `branches` table and both new foreign keys with their ON
+DELETE behaviour, and the test passes. **If `git diff docs/ARCHITECTURE.md` is empty, the
+generator did not see the model and something in Steps 3-4 is wrong.**
+
+`uq_branches_ws_name` will NOT appear: `scripts/gen_architecture.py` tracks partial unique
+*indexes* (`Index(..., unique=True, postgresql_where=...)`) and does not read
+`UniqueConstraint(...)` at all — measured, `grep -c UniqueConstraint scripts/gen_architecture.py`
+is 0. Its absence is not a bug.
 
 - [ ] **Step 9: Lint and commit**
 
