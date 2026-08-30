@@ -1478,17 +1478,11 @@ A one-time backfill goes stale the moment the next branch is created, and the ap
 keeps serving POST /branches between this stage and S2 (spec §8 S1 step 4).
 """
 
-import subprocess
-
 import pytest
 from sqlalchemy import select
 
 from call_manager.db.models import Branch, Workspace
-from call_manager.proposal_assist.branches import (
-    BranchExists,
-    create_workspace_branch,
-    delete_workspace_branch,
-)
+from call_manager.proposal_assist.branches import BranchExists, create_workspace_branch
 from call_manager.proposal_assist.citations.gitio import branch_exists, list_branches
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from tests.proposal_assist.conftest import init_workspace_repo, make_workspace, stamp_for
@@ -1734,10 +1728,31 @@ becomes the backstop rather than the message.
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `tests/proposal_assist/test_branch_entity_lifecycle.py`:
+Append to `tests/proposal_assist/test_branch_entity_lifecycle.py`.
+
+**Task 5 needs three imports Task 4 deliberately left out** — `ruff check` fails on an
+import no test body uses, so they belong here, with the tests that use them. Change the
+file's existing import block to:
 
 ```python
-from call_manager.proposal_assist.branches import BranchInUse
+import subprocess
+
+import pytest
+from sqlalchemy import select
+
+from call_manager.db.models import Branch, Workspace
+from call_manager.proposal_assist.branches import (
+    BranchExists,
+    BranchInUse,
+    create_workspace_branch,
+    delete_workspace_branch,
+)
+from call_manager.proposal_assist.citations.gitio import branch_exists, list_branches
+```
+
+Then append:
+
+```python
 
 
 def test_delete_removes_the_row_with_the_ref(pg_session_factory, tmp_path):
