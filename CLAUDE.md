@@ -6,6 +6,14 @@ The v1 design spec (`docs/superpowers/specs/2026-04-14-call-monitor-design.md`) 
 
 ## Conventions
 
+- **Architecture map:** `docs/ARCHITECTURE.md` is **generated** from the source by
+  `scripts/gen_architecture.py` (via `ast` — the app is never imported) and pinned by
+  `tests/architecture/`. **Read it before asserting a structural fact**: it carries every
+  partial-unique index with its exact predicate, every status vocabulary, every FK and
+  ON DELETE, the fence primitives with their contracts, the armed-gate allowlist sizes,
+  and every cap setting. Regenerate in the same commit that moves the code:
+  `uv run python scripts/gen_architecture.py`. Do not hand-edit it.
+
 - **Worktree directory:** `.worktrees/` (project-local, gitignored). Use this for any feature or plan work requiring isolation.
 - **Plans:** saved to `docs/superpowers/plans/YYYY-MM-DD-<name>.md`.
 - **Specs:** saved to `docs/superpowers/specs/YYYY-MM-DD-<name>.md`.
