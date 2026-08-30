@@ -255,7 +255,8 @@ Verified against the code, in rough order of danger.
 5. **The commit mutex is per-workspace** and "serializes every writer for the workspace"
    (`fencing.py:129`). Every room open takes it. With branches committing independently,
    this becomes a workspace-wide bottleneck across branches that have nothing to do with
-   each other. Whether it becomes per-branch is an open decision (§7).
+   each other. DECIDED (§7.1): it stays per-workspace — the cost is throughput, and
+   the delete path's single-lock guarantee is worth more than the throughput.
 
 6. **`bump_lifecycle_generation` is a single per-workspace integer** (`models.py:696-700`)
    with only three writers. Making the fence per-branch is a **separate** schema change,
@@ -270,13 +271,14 @@ Verified against the code, in rough order of danger.
    describe this feature at all — so `scripts/gen_architecture.py` will need to learn it,
    or the map will confidently omit the thing being built.
 
-## 7. Decisions (7.2 and 7.3 await the user's confirmation)
+## 7. Decisions
+
+All three settled. Nothing in this spec is open.
 
 *(The chat question that stood here is decided — see §3.1. The rule turned out to be the
 general one, not an exception: the chat is a document like any other.)*
 
-**7.1 — Does the commit mutex become per-branch? RECOMMENDATION: NO. Keep it
-per-workspace.**
+**7.1 — Does the commit mutex become per-branch? DECIDED: NO. It stays per-workspace.**
 
 The mutex is `pg_advisory_xact_lock` on `_advisory_lock_key("commit", workspace_id)`
 (`drafting/locking.py:132-140`), taken at **26 call sites**, and it *"serializes every
@@ -308,7 +310,7 @@ room open is measurably delayed by another branch, split it then — with the de
 N-lock ordering designed first, as its own piece of work.
 
 **7.2 — What happens to a user sitting on a branch someone else deletes?
-RECOMMENDATION: refuse the delete.**
+DECIDED: refuse the delete.**
 
 Mirror the guard that already exists — today `delete_workspace_branch` refuses the
 *current* branch (`branches.py:344-359`); this generalises it to *"is any user on this
@@ -319,7 +321,7 @@ This also disarms trap 3 by construction: if a branch cannot be deleted while so
 recorded on it, the switch can never resolve a user onto a ref that no longer exists.
 
 **7.3 — Can the root branch be deleted, and what is "promote"?
-RECOMMENDATION: `main` is not special; the ROOT POINTER is.**
+DECIDED: `main` is not special; the ROOT POINTER is.**
 
 Give the workspace a root-branch pointer. Rules:
 
@@ -337,10 +339,36 @@ This is not a slice. It is a subsystem change touching the room registry, the du
 log, the git layer, the schema, the fence, six background pass families, and the frontend
 cache keys — with 59 path call sites and a silent-failure mode on seven commit sites.
 
-**Do not start until §7.2 and §7.3 are confirmed** (§7.1 is settled: the mutex stays
-per-workspace), and expect to stage it: schema and paths
-first (with the old single-branch behaviour preserved), then per-branch rooms, then
-per-user selection, then fork-copy, then section transfer.
+The design is settled; what remains is sequencing. Five stages, each landing on a green
+suite with the product still working:
+
+**S1 — Branch-aware paths and schema, behaviour unchanged.** Add the branch column to
+the branch-scoped tables (including the `artifact_versions` unique key — trap 2), add
+`git worktree` primitives to gitio, and make `workspace_repo_dir` branch-aware at all 59
+call sites. Every caller passes the workspace's single current branch, so nothing
+observable changes. This is where trap 1 is closed: the seven commit sites that do not
+reconcile HEAD must be made to name a branch explicitly, and the gate is that passing no
+branch becomes a type error rather than a silent wrong-branch write.
+
+**S2 — One worktree per branch.** Create a worktree on branch create, remove it on
+delete. Still one branch active per workspace; still one room. Proves the git layer in
+production without touching the rooms.
+
+**S3 — Per-branch rooms.** `RoomKey` becomes a 3-tuple; the log and watermark carry the
+branch; the WebSocket route gains a branch. Two branches can now be edited at once —
+but a switch still moves everybody, so no user-visible change yet.
+
+**S4 — Per-user branch selection.** Branch moves off the workspace row into per-user
+state; the switch sequence and its teardown are deleted; the frontend cache keys and the
+picker change. **This is the stage the user actually asked for**; everything before it is
+groundwork.
+
+**S5 — Fork-copy and section transfer.** Create becomes a real fork (rows copied, chat
+copied, SDK handle nulled). Then section-level copy between branches.
+
+S1 is the largest and the least rewarding: it touches the most files and delivers nothing
+a user can see. It is also where the two traps that would break the first fork are
+closed, so it cannot be skipped or deferred.
 
 ## 9. What made this design possible
 
