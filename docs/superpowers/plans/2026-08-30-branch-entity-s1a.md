@@ -2116,8 +2116,22 @@ Append to `tests/proposal_assist/test_phase0_transaction_boundaries.py`, before
 - `test_m1_founds_the_first_branch_row_and_the_root_pointer` — asserts the rows equal
   `sorted(list_branches(repo))` as **exact set equality** (a membership check passes with
   an extra row beside `main`), and that `root_branch_id` names `main`.
-- `test_m1_founds_the_branch_in_the_SAME_transaction_as_the_repo` — soft-deletes the
-  workspace, expects `WorkspaceDeleted`, and asserts no `Branch` row survives.
+- `test_m1_rolls_the_founded_branch_back_with_the_rest_of_m1` — monkeypatches
+  `setup.datetime` so `datetime.now(UTC)` at `setup.py:433` raises, which is the only
+  statement between the founding and `s.commit()`. Asserts no `Branch` row survives and
+  `root_branch_id` is still NULL.
+
+  **Do not write this as "soft-delete the workspace and expect `WorkspaceDeleted`".** That
+  was the first version and it is vacuous: `_m1`'s first statement is
+  `acquire_commit_mutex_at_generation`, which raises before `_init_repo` and before the
+  founding ever runs, so the assertion is trivially true.
+
+  Also worth knowing: the "separate session" form of this bug cannot ship silently. `_m1`
+  holds the workspace row `with_for_update=True`, so a second session's
+  `UPDATE workspaces SET root_branch_id` blocks on that lock while the outer session waits
+  in Python — a mutual wait Postgres cannot see as a deadlock. It HANGS. The mutation to
+  use for Step 5 is therefore an early `s.commit()` after the founding, not a second
+  session.
 
 - [ ] **Step 4: Run the tests**
 
@@ -2134,6 +2148,11 @@ Replace the `backfill_branch_entities(...)` call in `setup.py` with `pass`.
 Expected: `test_m1_founds_the_first_branch_row_and_the_root_pointer` FAILS with
 `a new workspace was born with a NULL root pointer`, and **nothing else** — measured
 `1 failed, 27 passed`. Revert.
+
+Then a second mutation for the control test: add `s.commit()` immediately after the
+founding call, so it escapes `_m1`'s rollback. Expected:
+`test_m1_rolls_the_founded_branch_back_with_the_rest_of_m1` FAILS with `the founded branch
+row outlived a rolled-back _m1` — measured. Revert.
 
 - [ ] **Step 6: Lint and commit**
 
