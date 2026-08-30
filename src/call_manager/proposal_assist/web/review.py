@@ -13,9 +13,8 @@ from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import ReviewRun, ReviewRunItem, WorkspaceEvent
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
 from call_manager.proposal_assist.citations.gitio import GitCommitError, read_blob
-from call_manager.proposal_assist.evaluator.context import content_sha
+from call_manager.proposal_assist.collab.canonical import current_artifact_sha
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.ports.shas import is_sha
 from call_manager.proposal_assist.review.jobs import (
@@ -176,7 +175,9 @@ def start_review_run(
                 detail="Daily mock-panel review budget reached for this workspace.",
             )
         repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
-        draft_sha = content_sha(repo_dir / PROPOSAL_FILENAME)
+        draft_sha = current_artifact_sha(
+                session, workspace_id=workspace_id, artifact="draft", repo_dir=repo_dir
+            )
         run = enqueue_review_run(session, workspace_id=workspace_id, draft_sha=draft_sha)
         session.add(WorkspaceEvent(
             workspace_id=workspace_id, kind="review_run_triggered", actor_id=user.id, payload={},
@@ -186,7 +187,9 @@ def start_review_run(
         run = active
     items = session.query(ReviewRunItem).filter_by(review_run_id=run.id).all()
     repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
-    stale = run.draft_sha != content_sha(repo_dir / PROPOSAL_FILENAME)
+    stale = run.draft_sha != current_artifact_sha(
+                session, workspace_id=workspace_id, artifact="draft", repo_dir=repo_dir
+            )
     return _serialize(
         run, items, stale=stale, budget=_budget(session, ws, settings, workspace_id=workspace_id)
     )
@@ -206,7 +209,9 @@ def latest_review(
     settings = request.app.state.settings
     items = session.query(ReviewRunItem).filter_by(review_run_id=run.id).all()
     repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
-    stale = run.draft_sha != content_sha(repo_dir / PROPOSAL_FILENAME)
+    stale = run.draft_sha != current_artifact_sha(
+                session, workspace_id=workspace_id, artifact="draft", repo_dir=repo_dir
+            )
     return _serialize(
         run, items, stale=stale, budget=_budget(session, ws, settings, workspace_id=workspace_id)
     )

@@ -11,7 +11,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from call_manager.db.models import Workspace
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME, SPEC_FILENAME
+from call_manager.proposal_assist.collab.canonical import current_artifact_text_and_sha
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
 
@@ -51,16 +51,17 @@ def content_sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _read_artifact(repo_dir: Path, filename: str) -> tuple[str, str]:
-    """Read the file's bytes EXACTLY ONCE; return (decoded_text, content_sha).
-    Reading once closes the TOCTOU gap where a concurrent edit between hashing and
-    re-reading would make the recorded sha disagree with the assembled bytes.
-    Missing file -> ('', '') so '' marks 'no artifact' on both sides of staleness."""
-    path = repo_dir / filename
-    if not path.exists():
-        return "", ""
-    raw = path.read_bytes()
-    return raw.decode(), hashlib.sha256(raw).hexdigest()
+def _read_artifact(session, workspace_id, repo_dir: Path, artifact: str) -> tuple[str, str]:
+    """The artifact's CURRENT text and sha — the live room when collab is on, raw
+    HEAD when it is off. Text and sha come from one call so they cannot disagree.
+
+    Was a direct disk read. Git HEAD lags the Yjs log until a checkpoint fires, so
+    that sent a stale document to a hosted model on every evaluator and review pass.
+    Missing/empty -> ('', '') so '' still marks 'no artifact' on both sides of
+    staleness."""
+    return current_artifact_text_and_sha(
+        session, workspace_id=workspace_id, artifact=artifact, repo_dir=repo_dir
+    )
 
 
 def _render_criteria(rubric: list[dict]) -> str:
@@ -87,8 +88,8 @@ def assemble_evaluator_context(
     rubric = list(ws.rubric_criteria) if ws and ws.rubric_criteria else []
     funder_notes = (ws.rubric_funder_notes if ws else None) or "(none)"
     repo_dir = workspace_repo_dir(workspaces_dir, workspace_id)
-    draft_text, draft_sha = _read_artifact(repo_dir, PROPOSAL_FILENAME)
-    spec_text, spec_sha = _read_artifact(repo_dir, SPEC_FILENAME)
+    draft_text, draft_sha = _read_artifact(session, workspace_id, repo_dir, "draft")
+    spec_text, spec_sha = _read_artifact(session, workspace_id, repo_dir, "spec")
     # split_sections ALWAYS returns >=1 section (section 0 is the preamble, possibly
     # empty). For an empty/whitespace artifact we render the "(empty)" placeholder and
     # count 0 (nothing to deep-link); for real content we keep the sectionizer's exact

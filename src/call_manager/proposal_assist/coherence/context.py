@@ -10,7 +10,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from call_manager.db.models import Workspace
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME, SPEC_FILENAME
+from call_manager.proposal_assist.collab.canonical import current_artifact_text_and_sha
 from call_manager.proposal_assist.paths import workspace_repo_dir
 
 _ROLE = (
@@ -30,9 +30,13 @@ _LOCKED = (
 )
 
 
-def _read(repo_dir: Path, filename: str) -> str:
-    path = repo_dir / filename
-    return path.read_text() if path.exists() else ""
+def _read(session, workspace_id, repo_dir: Path, artifact: str) -> str:
+    """The artifact's CURRENT text: the live room when collab is on, raw HEAD when
+    off. Was a direct disk read, which handed the coherence keeper a document the
+    researcher had already moved past."""
+    return current_artifact_text_and_sha(
+        session, workspace_id=workspace_id, artifact=artifact, repo_dir=repo_dir
+    )[0]
 
 
 def assemble_coherence_context(
@@ -43,8 +47,8 @@ def assemble_coherence_context(
     criteria = json.dumps(ws.rubric_criteria, indent=2) if ws and ws.rubric_criteria else "[]"
     funder_notes = (ws.rubric_funder_notes if ws else None) or "(none)"
     repo_dir = workspace_repo_dir(workspaces_dir, workspace_id)
-    draft = _read(repo_dir, PROPOSAL_FILENAME) or "(draft is empty)"
-    spec = _read(repo_dir, SPEC_FILENAME) or "(spec is empty)"
+    draft = _read(session, workspace_id, repo_dir, "draft") or "(draft is empty)"
+    spec = _read(session, workspace_id, repo_dir, "spec") or "(spec is empty)"
 
     return (
         f"{_ROLE}{_LOCKED if locked else _UNLOCKED}"

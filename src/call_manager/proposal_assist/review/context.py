@@ -11,7 +11,6 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from call_manager.db.models import Workspace
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME, SPEC_FILENAME
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.evaluator.context import (
     _read_artifact,
@@ -38,8 +37,8 @@ def assemble_review_context(
     rubric = list(ws.rubric_criteria) if ws and ws.rubric_criteria else []
     funder_notes = (ws.rubric_funder_notes if ws else None) or "(none)"
     repo_dir = workspace_repo_dir(workspaces_dir, workspace_id)
-    draft_text, draft_sha = _read_artifact(repo_dir, PROPOSAL_FILENAME)
-    spec_text, _ = _read_artifact(repo_dir, SPEC_FILENAME)
+    draft_text, draft_sha = _read_artifact(session, workspace_id, repo_dir, "draft")
+    spec_text, _ = _read_artifact(session, workspace_id, repo_dir, "spec")
     return ReviewContext(
         draft_text=draft_text,
         spec_text=spec_text,

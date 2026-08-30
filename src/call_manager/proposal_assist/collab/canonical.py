@@ -9,6 +9,7 @@ gate on ``is_collab_enabled``; the flag-off paths keep reading raw git.
 """
 from __future__ import annotations
 
+import hashlib
 import uuid
 from pathlib import Path
 
@@ -73,3 +74,42 @@ def canonical_artifact_markdown(
         # "" (no blocks), so the base captured here is byte-identical to the live SHA.
         return ""
     return pm_to_markdown(markdown_to_pm_or_empty(md))
+
+
+def current_artifact_text_and_sha(
+    session, *, workspace_id: uuid.UUID, artifact: str, repo_dir
+) -> tuple[str, str]:
+    """The artifact's CURRENT text and its content sha — one read, one basis.
+
+    Collab ON  -> the room-canonical projection of the durable log (the text the
+                  researcher is actually looking at).
+    Collab OFF -> the raw HEAD bytes, byte-for-byte as before.
+
+    Missing / empty -> ``("", "")``, preserving the convention that ``""`` marks
+    "no artifact" on BOTH sides of every staleness comparison.
+
+    Why one function and not two: the sha MUST be taken from the very text that was
+    assembled. Hashing the file while sending the room's text reopens exactly the
+    TOCTOU gap ``_read_artifact``'s docstring said it closed, and it also makes every
+    staleness comparison permanently unequal — which would turn an unattended pass
+    into an unattended spend loop. Every caller that assembles content and every
+    caller that later re-checks it must go through here.
+    """
+    from call_manager.proposal_assist.collab.state import is_collab_enabled
+
+    if is_collab_enabled(session, workspace_id=workspace_id, artifact=artifact):
+        text = canonical_artifact_markdown(
+            session, workspace_id=workspace_id, artifact=artifact, repo_dir=repo_dir
+        )
+    else:
+        text = read_head_markdown(repo_dir, artifact) or ""
+    if not text:
+        return "", ""
+    return text, hashlib.sha256(text.encode()).hexdigest()
+
+
+def current_artifact_sha(session, *, workspace_id: uuid.UUID, artifact: str, repo_dir) -> str:
+    """The sha half of :func:`current_artifact_text_and_sha`, for the re-check sites."""
+    return current_artifact_text_and_sha(
+        session, workspace_id=workspace_id, artifact=artifact, repo_dir=repo_dir
+    )[1]

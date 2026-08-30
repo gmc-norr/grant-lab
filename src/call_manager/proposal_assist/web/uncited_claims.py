@@ -15,8 +15,7 @@ from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import UncitedClaimsJob, Workspace, WorkspaceEvent
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
-from call_manager.proposal_assist.evaluator.context import content_sha
+from call_manager.proposal_assist.collab.canonical import current_artifact_sha
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.turns.caps import check_global_daily_token_cap
 from call_manager.proposal_assist.uncited_claims.jobs import (
@@ -152,7 +151,9 @@ def latest_uncited_claims_run(
         return None
     if job.status == "completed":
         repo_dir = workspace_repo_dir(request.app.state.settings.workspaces_dir, workspace_id)
-        stale = job.evaluated_draft_sha != content_sha(repo_dir / PROPOSAL_FILENAME)
+        stale = job.evaluated_draft_sha != current_artifact_sha(
+                session, workspace_id=workspace_id, artifact="draft", repo_dir=repo_dir
+            )
         claims = job.claims or []
     else:
         stale = False

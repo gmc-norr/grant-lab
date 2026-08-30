@@ -4,14 +4,13 @@ content sha (for staleness). Pure (DB read + one file read)."""
 
 from __future__ import annotations
 
-import hashlib
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
+from call_manager.proposal_assist.collab.canonical import current_artifact_text_and_sha
 from call_manager.proposal_assist.editing.sectionizer import split_sections
 from call_manager.proposal_assist.paths import workspace_repo_dir
 
@@ -40,14 +39,14 @@ class UncitedClaimsContext:
     draft_sha: str
 
 
-def _read_draft(repo_dir: Path) -> tuple[str, str]:
-    """Read proposal.md bytes EXACTLY ONCE; return (decoded_text, content_sha). Missing ->
-    ('', '') so '' marks 'no draft' on both sides of staleness."""
-    path = repo_dir / PROPOSAL_FILENAME
-    if not path.exists():
-        return "", ""
-    raw = path.read_bytes()
-    return raw.decode(), hashlib.sha256(raw).hexdigest()
+def _read_draft(session, workspace_id, repo_dir: Path) -> tuple[str, str]:
+    """The draft's CURRENT text and sha — the live room when collab is on, raw HEAD
+    when off, from one call so they cannot disagree. Was a direct disk read, which
+    made uncited-claims flag claims that had been cited since the last checkpoint.
+    Missing -> ('', '') so '' still marks 'no draft' on both sides of staleness."""
+    return current_artifact_text_and_sha(
+        session, workspace_id=workspace_id, artifact="draft", repo_dir=repo_dir
+    )
 
 
 def _render_sections(sections: list) -> str:
@@ -58,7 +57,7 @@ def assemble_uncited_claims_context(
     *, session: Session, workspace_id: uuid.UUID, workspaces_dir: Path | str
 ) -> UncitedClaimsContext:
     repo_dir = workspace_repo_dir(workspaces_dir, workspace_id)
-    draft_text, draft_sha = _read_draft(repo_dir)
+    draft_text, draft_sha = _read_draft(session, workspace_id, repo_dir)
     sections = split_sections(draft_text) if draft_text.strip() else []
     section_texts = {s.index: s.text for s in sections}
     draft_block = _render_sections(sections) if sections else "(draft is empty)"

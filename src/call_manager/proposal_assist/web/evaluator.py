@@ -12,8 +12,7 @@ from sqlalchemy.orm import Session
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import EvaluatorJob, Workspace, WorkspaceEvent
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME, SPEC_FILENAME
-from call_manager.proposal_assist.evaluator.context import content_sha
+from call_manager.proposal_assist.collab.canonical import current_artifact_sha
 from call_manager.proposal_assist.evaluator.jobs import (
     enqueue_evaluator_run,
     latest_completed_evaluator_job,
@@ -113,9 +112,13 @@ def get_scorecard(
         return None
     repo_dir = workspace_repo_dir(request.app.state.settings.workspaces_dir, workspace_id)
     reasons: list[str] = []
-    if job.evaluated_draft_sha != content_sha(repo_dir / PROPOSAL_FILENAME):
+    if job.evaluated_draft_sha != current_artifact_sha(
+                session, workspace_id=workspace_id, artifact="draft", repo_dir=repo_dir
+            ):
         reasons.append("draft")
-    if job.evaluated_spec_sha != content_sha(repo_dir / SPEC_FILENAME):
+    if job.evaluated_spec_sha != current_artifact_sha(
+                session, workspace_id=workspace_id, artifact="spec", repo_dir=repo_dir
+            ):
         reasons.append("spec")
     if job.evaluated_rubric_updated_at != ws.rubric_updated_at:
         reasons.append("rubric")

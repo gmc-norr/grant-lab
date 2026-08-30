@@ -16,12 +16,12 @@ from sqlalchemy import exists, func, select
 from sqlalchemy.orm import Session
 
 from call_manager.db.models import CoherenceJob, ProposedChange
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME, SPEC_FILENAME
+from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
 from call_manager.proposal_assist.citations.audit import validate_citations_deterministic
 from call_manager.proposal_assist.citations.ledger import load_ledger
+from call_manager.proposal_assist.collab.canonical import current_artifact_sha
 from call_manager.proposal_assist.editing.save import CITATIONS_FILENAME
 from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.evaluator.context import content_sha
 from call_manager.proposal_assist.evaluator.jobs import latest_completed_evaluator_job
 from call_manager.proposal_assist.problems.builders import (
     broken_citation_problems,
@@ -110,9 +110,13 @@ def assemble_problems(
         job = latest_completed_evaluator_job(session, workspace_id=workspace_id)
         scorecard = job.scorecard if job is not None else None
         if job is not None:
-            if job.evaluated_draft_sha != content_sha(repo_dir / PROPOSAL_FILENAME):
+            if job.evaluated_draft_sha != current_artifact_sha(
+                session, workspace_id=workspace_id, artifact="draft", repo_dir=repo_dir
+            ):
                 scorecard_stale.append("draft")
-            if job.evaluated_spec_sha != content_sha(repo_dir / SPEC_FILENAME):
+            if job.evaluated_spec_sha != current_artifact_sha(
+                session, workspace_id=workspace_id, artifact="spec", repo_dir=repo_dir
+            ):
                 scorecard_stale.append("spec")
             if job.evaluated_rubric_updated_at != ws_rubric_updated_at:
                 scorecard_stale.append("rubric")
@@ -140,8 +144,8 @@ def assemble_problems(
         uc_job = latest_completed_uncited_claims_job(session, workspace_id=workspace_id)
         if uc_job is not None:
             dismissed = dismissed_claim_hashes(session, workspace_id=workspace_id)
-            uncited_claims_stale = uc_job.evaluated_draft_sha != content_sha(
-                repo_dir / PROPOSAL_FILENAME
+            uncited_claims_stale = uc_job.evaluated_draft_sha != current_artifact_sha(
+                session, workspace_id=workspace_id, artifact="draft", repo_dir=repo_dir
             )
             rows += uncited_claim_problems(uc_job.claims or [], dismissed)
     except Exception:
