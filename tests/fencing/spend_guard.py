@@ -137,7 +137,22 @@ def _spend_writer_names(
     """
     names: set[str] = set()
     module_aliases: set[str] = set()
+    # Names the module REBINDS after importing them. An import is not a promise
+    # that the name still means the writer at the call site: `from ...spend import
+    # record_spend` followed by `def record_spend(...)` passed the gate while
+    # calling a local no-op. A rebound name is dropped from the writer set.
+    shadowed: set[str] = set()
     for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            shadowed.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    shadowed.add(target.id)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and isinstance(
+            node.target, ast.Name
+        ):
+            shadowed.add(node.target.id)
         if isinstance(node, ast.ImportFrom):
             mod = node.module or ""
             if mod in WRITER_MODULES:
@@ -158,7 +173,7 @@ def _spend_writer_names(
                 # _dotted_name can match that chain — without this, legitimate
                 # fully-qualified code was reported as an offender (measured).
                 module_aliases.add(alias.asname or alias.name)
-    return frozenset(names), frozenset(module_aliases)
+    return frozenset(names - shadowed), frozenset(module_aliases - shadowed)
 
 
 def _target_stamps(target: ast.AST) -> bool:
@@ -194,13 +209,18 @@ def _non_assignment_stamp(node: ast.AST) -> bool:
     if not isinstance(node, ast.Call):
         return False
     func = node.func
-    # .values(input_tokens=...) / .values(**{...}) on any chain
-    if (
-        isinstance(func, ast.Attribute)
-        and func.attr == "values"
-        and any(kw.arg in TOKEN_FIELDS for kw in node.keywords if kw.arg)
-    ):
-        return True
+    # .values(input_tokens=...) and .values(**{"input_tokens": ...}) on any chain.
+    # The unpacked form has kw.arg is None and the names live in the dict literal —
+    # an earlier comment here claimed to cover it while the code filtered it out,
+    # which is worse than not claiming it.
+    if isinstance(func, ast.Attribute) and func.attr == "values":
+        for kw in node.keywords:
+            if kw.arg in TOKEN_FIELDS:
+                return True
+            if kw.arg is None and isinstance(kw.value, ast.Dict):
+                for key in kw.value.keys:
+                    if isinstance(key, ast.Constant) and key.value in TOKEN_FIELDS:
+                        return True
     # setattr(obj, "input_tokens", value) — only a literal name is checkable
     if isinstance(func, ast.Name) and func.id == "setattr" and len(node.args) >= 2:
         target = node.args[1]

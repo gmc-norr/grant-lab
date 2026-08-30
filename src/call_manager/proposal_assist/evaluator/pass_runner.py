@@ -244,6 +244,10 @@ async def run_evaluator_pass(
             job = s.get(EvaluatorJob, job_id, with_for_update=True)
             if job is None:
                 s.commit()
+                # Held terminate-cancel must escape from EVERY finalize exit, not just the
+                # fall-through one — that was the round-4 fix's own gap.
+                if terminate_cancelled:
+                    raise asyncio.CancelledError()
                 return
             if job.status != "running":
                 # The reaper or a cancel finalized this job mid-pass. Do NOT
@@ -269,10 +273,18 @@ async def run_evaluator_pass(
                     sdk_session_id=done.session_id if done else None,
                 )
                 s.commit()
+                # Held terminate-cancel must escape from EVERY finalize exit, not just the
+                # fall-through one — that was the round-4 fix's own gap.
+                if terminate_cancelled:
+                    raise asyncio.CancelledError()
                 return
             if job.scorecard is None:
                 _fail(s, job, "evaluator produced no scorecard", done=done)
                 s.commit()
+                # Held terminate-cancel must escape from EVERY finalize exit, not just the
+                # fall-through one — that was the round-4 fix's own gap.
+                if terminate_cancelled:
+                    raise asyncio.CancelledError()
                 return
             job.status = "completed"
             job.completed_at = datetime.now(UTC)

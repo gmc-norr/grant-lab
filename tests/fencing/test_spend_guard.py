@@ -396,6 +396,68 @@ def test_a_fully_qualified_writer_import_is_accepted(tmp_path, monkeypatch):
     assert g.offenders() == []
 
 
+def test_unpacked_values_kwargs_are_seen(tmp_path, monkeypatch):
+    """`.values(**{"input_tokens": n})` — the form the comment claimed and the
+    code excluded. `kw.arg` is None for an unpacked mapping, so the `if kw.arg`
+    filter dropped it. A comment promising a guarantee the code does not deliver
+    is worse than not claiming it."""
+    g = _tree(
+        tmp_path,
+        monkeypatch,
+        "kwargs_values.py",
+        """
+        from sqlalchemy import update
+
+        def f(s, n):
+            s.execute(update(Job).values(**{"input_tokens": n}))
+        """,
+        writer_import=False,
+    )
+    assert g.offenders() == ["call_manager/kwargs_values.py::f"]
+
+
+def test_unpacked_values_on_an_unrelated_field_is_not_reported(tmp_path, monkeypatch):
+    g = _tree(
+        tmp_path,
+        monkeypatch,
+        "kwargs_unrelated.py",
+        """
+        from sqlalchemy import update
+
+        def f(s, n):
+            s.execute(update(Job).values(**{"status": n}))
+        """,
+        writer_import=False,
+    )
+    assert g.offenders() == []
+
+
+def test_a_shadowed_writer_import_does_not_count(tmp_path, monkeypatch):
+    """An import is not a promise the name still means the writer.
+
+    `from ...spend import record_spend` followed by a local `def record_spend`
+    passed the gate while calling a no-op. A name rebound anywhere in the module
+    is dropped from the writer set.
+    """
+    g = _tree(
+        tmp_path,
+        monkeypatch,
+        "shadowed_import.py",
+        """
+        from call_manager.proposal_assist.spend import record_spend
+
+        def record_spend(*a, **k):
+            pass
+
+        def f(s, job, done):
+            job.input_tokens = done.tokens_in
+            record_spend(s)
+        """,
+        writer_import=False,
+    )
+    assert g.offenders() == ["call_manager/shadowed_import.py::f"]
+
+
 def test_the_ledger_has_exactly_one_writer():
     # The plan's central claim, asserted for the first time. The stamps/records
     # rule above would happily accept a second module that both constructed an

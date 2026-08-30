@@ -212,6 +212,10 @@ async def run_coherence_pass(
             job = s.get(CoherenceJob, job_id, with_for_update=True)
             if job is None:
                 s.commit()
+                # Held terminate-cancel must escape from EVERY finalize exit, not just the
+                # fall-through one — that was the round-4 fix's own gap.
+                if terminate_cancelled:
+                    raise asyncio.CancelledError()
                 return
             if job.status != "running":
                 # The reaper or a cancel finalized this job mid-pass. Do NOT
@@ -237,6 +241,10 @@ async def run_coherence_pass(
                     sdk_session_id=done.session_id if done else None,
                 )
                 s.commit()
+                # Held terminate-cancel must escape from EVERY finalize exit, not just the
+                # fall-through one — that was the round-4 fix's own gap.
+                if terminate_cancelled:
+                    raise asyncio.CancelledError()
                 return
             supersede_prior_coherence(s, workspace_id=workspace_id, job_id=job_id)
             n = s.scalar(

@@ -257,6 +257,10 @@ async def run_uncited_claims_pass(
             job = s.get(UncitedClaimsJob, job_id, with_for_update=True)
             if job is None:
                 s.commit()
+                # Held terminate-cancel must escape from EVERY finalize exit, not just the
+                # fall-through one — that was the round-4 fix's own gap.
+                if terminate_cancelled:
+                    raise asyncio.CancelledError()
                 return
             if done is not None:
                 job.input_tokens = done.tokens_in or 0
@@ -280,10 +284,18 @@ async def run_uncited_claims_pass(
                     sdk_session_id=done.session_id if done else None,
                 )
                 s.commit()
+                # Held terminate-cancel must escape from EVERY finalize exit, not just the
+                # fall-through one — that was the round-4 fix's own gap.
+                if terminate_cancelled:
+                    raise asyncio.CancelledError()
                 return
             if job.claims is None:
                 _fail(s, job, "uncited-claims pass produced no result", done=done)
                 s.commit()
+                # Held terminate-cancel must escape from EVERY finalize exit, not just the
+                # fall-through one — that was the round-4 fix's own gap.
+                if terminate_cancelled:
+                    raise asyncio.CancelledError()
                 return
             job.claims = _finalize_claims(job.claims, section_texts)
             job.status = "completed"
