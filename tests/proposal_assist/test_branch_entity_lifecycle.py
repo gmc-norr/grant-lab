@@ -103,6 +103,13 @@ def test_a_refused_create_writes_no_row(pg_session_factory, tmp_path):
                 name="new_ideas",
                 workspaces_dir=tmp_path,
             )
+        # Assert BEFORE the rollback, on the session's PENDING set. Asserting on
+        # committed rows after a rollback proves nothing: the rollback discards a
+        # wrongly-queued row wherever in the function it was added, so the
+        # committed state looks identical either way. Measured — moving
+        # `session.add` above the refusal check reddens no test without this.
+        pending = [o for o in s.new if isinstance(o, Branch)]
+        assert pending == [], f"a refused create queued {[b.name for b in pending]}"
         s.rollback()
 
     with pg_session_factory() as s:
