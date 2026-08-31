@@ -50,12 +50,17 @@ class BackfillResult(NamedTuple):
 def _real_refs(repo: Path) -> list[str]:
     """The local branch names, with git's non-ref output filtered out.
 
-    `git branch --format=%(refname:short)` emits a pseudo-entry on a detached
-    HEAD. Measured 2026-08-30:
+    `git branch --format=...` emits a pseudo-entry on a detached HEAD, under every
+    format. Measured 2026-08-31 (`list_branches` now asks for `%(refname)` and
+    strips, because `:short` is ambiguity-dependent — see gitio.py):
 
-        $ git branch --format='%(refname:short)'
-        (HEAD detached at 777c52e)
-        main
+        $ git branch --format='%(refname)'
+        (HEAD detached at 7ee4363)
+        refs/heads/feature
+        refs/heads/main
+
+    The pseudo-entry carries NO `refs/heads/` prefix, so stripping leaves it
+    intact and the `branch_exists` filter below still rejects it.
 
     Founding a row from that first line would create a branch literally named
     `(HEAD detached at 777c52e)`, which every later stage would then try to

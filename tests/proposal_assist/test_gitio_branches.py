@@ -253,3 +253,27 @@ def test_the_ceiling_leaves_a_HEALTHY_repo_alone(tmp_path):
     assert head_branch(inner) == "main"
     assert branch_exists(inner, "feature")
     assert not branch_exists(inner, "enclosing"), "the enclosing repo must be invisible"
+
+
+def test_a_TAG_sharing_a_branchs_name_does_not_hide_the_branch(tmp_path):
+    """`%(refname:short)` shortens to the shortest UNAMBIGUOUS name, so what git
+    calls a branch depends on what OTHER refs exist.
+
+    Measured 2026-08-31 with a branch `feature` and a tag also called `feature`:
+
+        --format='%(refname:short)'  ->  heads/feature
+        show-ref --verify refs/heads/heads/feature  ->  rc=1
+
+    So the branch reported a name its own existence check answers NO for.
+    `_real_refs` filters on exactly that, so the reconciler stopped seeing the
+    branch, deleted its row as an orphan, and cleared the root pointer if it
+    named it.
+    """
+    d = _repo(tmp_path)
+    subprocess.run(["git", "branch", "feature"], cwd=d, check=True)
+    subprocess.run(["git", "tag", "feature"], cwd=d, check=True)
+
+    assert sorted(list_branches(d)) == ["feature", "main"]
+    # The real point: every name this returns must survive its own existence check.
+    for name in list_branches(d):
+        assert branch_exists(d, name), f"list_branches returned {name!r}, which it denies exists"

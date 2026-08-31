@@ -407,12 +407,31 @@ def head_branch(repo_dir: Path) -> str | None:
     return proc.stdout.strip()
 
 
+#: The prefix `%(refname)` puts on every local branch.
+_HEADS_PREFIX = "refs/heads/"
+
+
 def list_branches(repo_dir: Path) -> list[str]:
-    """Every local branch, in git's own order. Empty only for a repo with no refs."""
-    proc = _git(repo_dir, "branch", "--format=%(refname:short)")
+    """Every local branch, in git's own order. Empty only for a repo with no refs.
+
+    `%(refname)` and strip, NOT `%(refname:short)`. The `:short` form shortens to
+    the shortest UNAMBIGUOUS name, so it depends on what other refs exist.
+    Measured 2026-08-31 with a branch `feature` and a TAG also called `feature`:
+
+        git branch --format='%(refname:short)'   ->  heads/feature
+        git show-ref --verify refs/heads/heads/feature  ->  rc=1
+
+    So the branch reported its own name as one `branch_exists` answers NO for.
+    `_real_refs` filters on exactly that, so the branch vanished from the
+    reconciler's view, its row was deleted as an orphan, and if it was the root
+    the pointer was cleared. `%(refname)` is always the full path:
+
+        git branch --format='%(refname)'  ->  refs/heads/feature
+    """
+    proc = _git(repo_dir, "branch", "--format=%(refname)")
     if proc.returncode != 0:
         raise GitCommitError(f"cannot list branches in {repo_dir}: {proc.stderr.strip()}")
-    return [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+    return [ln.strip().removeprefix(_HEADS_PREFIX) for ln in proc.stdout.splitlines() if ln.strip()]
 
 
 def branch_exists(repo_dir: Path, name: str) -> bool:
