@@ -14,9 +14,18 @@ from call_manager.proposal_assist.citations.gitio import (
     current_branch,
     delete_branch,
     has_commits,
+    head_branch,
     is_valid_branch_name,
     list_branches,
 )
+
+_GIT_ENV = {
+    "GIT_AUTHOR_NAME": "t",
+    "GIT_AUTHOR_EMAIL": "t@t",
+    "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@t",
+    "PATH": "/usr/bin:/bin",
+}
 
 
 def _repo(tmp_path, *, commit=True):
@@ -147,3 +156,212 @@ def test_probes_raise_on_a_FATAL_git_failure_rather_than_answering_no(tmp_path):
         branch_exists(not_a_repo, "main")
     with pytest.raises(GitCommitError):
         has_commits(not_a_repo)
+
+
+def test_head_branch_returns_the_name_when_head_is_ATTACHED(tmp_path):
+    assert head_branch(_repo(tmp_path)) == "main"
+
+
+def test_head_branch_returns_None_on_a_DETACHED_head(tmp_path):
+    """The whole point of this function. `current_branch` RAISES here, and it
+    raises the same GitCommitError it raises for a broken repository — so a
+    caller that catches it cannot tell "no branch" from "no git"."""
+    d = _repo(tmp_path)
+    subprocess.run(["git", "checkout", "-q", "--detach", "HEAD"], cwd=d, check=True)
+    assert head_branch(d) is None
+    with pytest.raises(GitCommitError):
+        current_branch(d)  # the contrast that makes head_branch necessary
+
+
+def test_head_branch_works_on_an_UNBORN_head(tmp_path):
+    """Same surprise as `current_branch`: git knows the name the first commit
+    will land on, and exit 0 means that name is real."""
+    assert head_branch(_repo(tmp_path, commit=False)) == "main"
+
+
+def test_head_branch_RAISES_on_a_fatal_failure_rather_than_saying_detached(tmp_path):
+    """The discrimination, asserted where it can actually go wrong.
+
+    Measured 2026-08-31: `symbolic-ref --short -q HEAD` exits **1** on a detached
+    HEAD and **128** when it is not a repository — and without `-q` a detached
+    HEAD exits 128 too, which is exactly why the lenient form cannot be used.
+    Returning None here would tell the reconciler "detached", and the reconciler
+    CLEARS a root pointer on detached.
+    """
+    not_a_repo = tmp_path / "plain"
+    not_a_repo.mkdir()  # exists, so git actually runs and exits 128
+    with pytest.raises(GitCommitError):
+        head_branch(not_a_repo)
+
+
+def test_git_reads_do_not_ESCAPE_a_broken_repo_into_the_enclosing_one(tmp_path):
+    """git discovery walks UPWARD until it finds any repository.
+
+    On this deployment `var/workspaces/` sits inside the application's own
+    checkout, so a workspace repo whose `.git` is corrupt used to answer with the
+    SERVER'S branches — exit 0, no error. The reconciler would then found rows
+    named after the server's branches and delete the workspace's real ones.
+
+    Measured 2026-08-31 before the ceiling existed:
+        corrupt .git   -> prints the enclosing repo's branch, rc=0
+        no .git at all -> prints the enclosing repo's branch, rc=0
+
+    `_list_commits_env` already fenced `list_commits` and `current_head` fences
+    itself — but `_git`, which every other primitive here goes through, did not.
+    """
+    outer = tmp_path / "outer"
+    (outer / "ws" / "repo").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "enclosing", "."], cwd=outer, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "--allow-empty", "-m", "x"], cwd=outer, check=True, env=_GIT_ENV
+    )
+
+    inner = outer / "ws" / "repo"
+    (inner / ".git").mkdir()
+    (inner / ".git" / "HEAD").write_text("CORRUPT\n")
+
+    # Every read primitive must refuse, not answer with the enclosing repo.
+    with pytest.raises(GitCommitError):
+        list_branches(inner)
+    with pytest.raises(GitCommitError):
+        head_branch(inner)
+    with pytest.raises(GitCommitError):
+        branch_exists(inner, "enclosing")
+    with pytest.raises(GitCommitError):
+        has_commits(inner)
+
+
+def test_the_ceiling_leaves_a_HEALTHY_repo_alone(tmp_path):
+    """The control. A ceiling that broke real repos would be caught by the whole
+    suite, but it must be pinned here beside the test that motivates it: the
+    ceiling is the repo's PARENT, so a real repo still finds its own `.git`."""
+    outer = tmp_path / "outer"
+    (outer / "ws" / "repo").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "enclosing", "."], cwd=outer, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "--allow-empty", "-m", "x"], cwd=outer, check=True, env=_GIT_ENV
+    )
+
+    inner = outer / "ws" / "repo"
+    subprocess.run(["git", "init", "-q", "-b", "main", "."], cwd=inner, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "--allow-empty", "-m", "y"], cwd=inner, check=True, env=_GIT_ENV
+    )
+    subprocess.run(["git", "branch", "feature"], cwd=inner, check=True)
+
+    assert sorted(list_branches(inner)) == ["feature", "main"]
+    assert head_branch(inner) == "main"
+    assert branch_exists(inner, "feature")
+    assert not branch_exists(inner, "enclosing"), "the enclosing repo must be invisible"
+
+
+def test_a_TAG_sharing_a_branchs_name_does_not_hide_the_branch(tmp_path):
+    """`%(refname:short)` shortens to the shortest UNAMBIGUOUS name, so what git
+    calls a branch depends on what OTHER refs exist.
+
+    Measured 2026-08-31 with a branch `feature` and a tag also called `feature`:
+
+        --format='%(refname:short)'  ->  heads/feature
+        show-ref --verify refs/heads/heads/feature  ->  rc=1
+
+    So the branch reported a name its own existence check answers NO for.
+    `_real_refs` filters on exactly that, so the reconciler stopped seeing the
+    branch, deleted its row as an orphan, and cleared the root pointer if it
+    named it.
+    """
+    d = _repo(tmp_path)
+    subprocess.run(["git", "branch", "feature"], cwd=d, check=True)
+    subprocess.run(["git", "tag", "feature"], cwd=d, check=True)
+
+    assert sorted(list_branches(d)) == ["feature", "main"]
+    # The real point: every name this returns must survive its own existence check.
+    for name in list_branches(d):
+        assert branch_exists(d, name), f"list_branches returned {name!r}, which it denies exists"
+
+
+def test_branch_SHORTHAND_is_rejected_even_though_git_exits_zero(tmp_path, monkeypatch):
+    """`--branch` EXPANDS shorthand and prints the result, so the exit code alone
+    says yes to a name that means a different branch.
+
+    Measured 2026-08-31 with `other` as the previous branch:
+
+        git check-ref-format --branch '@{-1}'  ->  rc=0, prints "other"
+        git branch '@{-1}'                     ->  acts on `other`
+
+    A user could POST this, pass validation, and have git create or collide with
+    a branch the `branches` row does not name — exactly the row/ref divergence
+    this entity exists to prevent.
+
+    `is_valid_branch_name` runs git in the PROCESS cwd, so the shorthand only
+    expands when that cwd is a repo with a previous branch. Chdir'ing into one is
+    what makes this test able to fail — run from anywhere else, `@{-1}` is
+    rejected by the exit code alone and the assertion passes without the fix.
+    """
+    d = _repo(tmp_path)
+    subprocess.run(["git", "checkout", "-q", "-b", "other"], cwd=d, check=True)
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=d, check=True)
+    monkeypatch.chdir(d)
+
+    # The premise: git really does expand it here.
+    expanded = subprocess.run(
+        ["git", "check-ref-format", "--branch", "@{-1}"], cwd=d, capture_output=True, text=True
+    )
+    assert expanded.returncode == 0 and expanded.stdout.strip() == "other", expanded
+
+    assert not is_valid_branch_name("@{-1}")
+
+
+def test_ordinary_names_still_pass_and_git_specific_ones_still_fail():
+    """The control for the check above. Comparing stdout to the input must not
+    start rejecting normal names, and must keep the rules `--branch` adds over
+    the bare form — the bare `check-ref-format refs/heads/HEAD` exits 0."""
+    for good in ("main", "feat/x", "new_ideas", "a-b.c"):
+        assert is_valid_branch_name(good), good
+    for bad in ("HEAD", "-", "", " x", "x ", "a..b", "a b"):
+        assert not is_valid_branch_name(bad), bad
+
+
+def test_a_BROKEN_ref_raises_instead_of_silently_shortening_the_list(tmp_path):
+    """`git branch` exits ZERO on a corrupt ref file, warns on stderr, and omits
+    that branch. Measured 2026-08-31:
+
+        $ echo garbage > .git/refs/heads/feature
+        $ git branch --format='%(refname)'
+        warning: ignoring broken ref refs/heads/feature
+        refs/heads/main
+        rc=0
+
+    An incomplete listing that reports success is worse than a failure:
+    `backfill_branch_entities` treats every name it does not see as an ORPHAN and
+    DELETES its row, clearing the root pointer if it named one. The ref file is
+    still on disk — only the reader lost it.
+    """
+    d = _repo(tmp_path)
+    subprocess.run(["git", "branch", "feature"], cwd=d, check=True)
+    (d / ".git" / "refs" / "heads" / "feature").write_text("garbage\n")
+
+    with pytest.raises(GitCommitError, match="broken ref"):
+        list_branches(d)
+
+
+def test_a_healthy_repo_still_lists_normally(tmp_path):
+    """The control. Raising on any stderr at all would break every listing that
+    git decorates with an unrelated warning, so the check is on the specific
+    phrase and must not fire here."""
+    d = _repo(tmp_path)
+    subprocess.run(["git", "branch", "feature"], cwd=d, check=True)
+    assert sorted(list_branches(d)) == ["feature", "main"]
+
+
+def test_gitio_git_runs_hermetically(tmp_path):
+    """`_m1` calls `backfill_branch_entities`, whose git reads come through
+    `gitio._git` — so `phases/setup.py:_git_env`'s claim that "nothing an
+    operator configures can introduce a hook, a signing helper or an interactive
+    prompt into M1's locked region" depends on THIS environment too.
+    """
+    from call_manager.proposal_assist.citations.gitio import _git_env
+
+    env = _git_env(tmp_path)
+    assert env["GIT_CONFIG_GLOBAL"] == "/dev/null"
+    assert env["GIT_CONFIG_SYSTEM"] == "/dev/null"
+    assert env["GIT_TERMINAL_PROMPT"] == "0"

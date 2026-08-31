@@ -13,11 +13,11 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy import update as sql_update
 from sqlalchemy.orm import Session
 
-from call_manager.db.models import TurnJob, Workspace
+from call_manager.db.models import Branch, TurnJob, Workspace
 from call_manager.proposal_assist.citations.gitio import (
     branch_exists,
     checkout_branch,
@@ -71,7 +71,21 @@ class BranchBusy(BranchError):
 
 
 class BranchInUse(BranchError):
-    """Refused because the branch is the one currently checked out."""
+    """Refused because the branch is load-bearing: it is the one currently
+    checked out, or it is the workspace's ROOT.
+
+    Two distinct reasons since the root guard landed, so every raise site passes
+    a message saying WHICH — `_raise_http` puts `str(exc)` straight into the 409
+    body, and "main" alone tells the user nothing about why they cannot delete
+    it."""
+
+
+class BranchRepoNotReady(BranchError):
+    """The workspace exists but Phase 0 has not created its repo yet.
+
+    Distinct from a repo git cannot READ, which stays a 500: that is a server
+    fault and saying "still setting up" would hide corruption.
+    """
 
 
 class BranchLast(BranchError):
@@ -263,6 +277,16 @@ def list_workspace_branches(
     row = session.get(Workspace, workspace_id)
     if row is None:
         raise BranchNotFound(str(workspace_id))
+    if not (repo / ".git").exists():
+        # A workspace still in setup. Without this the cockpit's read path gets a
+        # bare FileNotFoundError from `subprocess.run(cwd=...)` (measured), which
+        # `_STATUS` cannot map, so main.py's generic handler answers 500 — for a
+        # workspace that is simply young. Same probe the reconciler uses.
+        #
+        # Deliberately NOT a catch-all around `list_branches`: a repo that EXISTS
+        # and git cannot read is corruption, and reporting that as "still setting
+        # up" would hide it. That stays a 500.
+        raise BranchRepoNotReady(str(workspace_id))
     return list_branches(repo), row.current_branch
 
 
@@ -307,7 +331,52 @@ def create_workspace_branch(
         raise BranchNotFound(f"{name}: the workspace has no commits yet")
     if branch_exists(repo, name):
         raise BranchExists(name)
+    # De-orphan BEFORE the git call, not after. `branch_exists` has just answered
+    # NO for this name, so any row carrying it is by definition an orphan — a
+    # delete whose commit failed after `git branch -D`, or a restore whose
+    # database snapshot is newer than the repo volume. Without this,
+    # `uq_branches_ws_name` fires on the caller's commit, `_STATUS` has no mapping
+    # for IntegrityError, and a create that USED to return 201 returns a 500.
+    #
+    # And if the orphan is the row `root_branch_id` names, the delete itself
+    # raises: `fk_workspaces_root_branch_id` is ON DELETE RESTRICT. Clear the
+    # pointer first. Clearing rather than re-pointing at the replacement is
+    # deliberate — `git branch <name>` does not move HEAD, so the new ref is not
+    # known to be the root; `backfill_branch_entities` re-roots it when HEAD
+    # agrees. Reproduced 2026-08-31: ForeignKeyViolation on
+    # fk_workspaces_root_branch_id, with the ref ALREADY created.
+    #
+    # Both run before `git_create_branch` so that a failure here leaves git
+    # untouched — a database error is recoverable, a stray ref is not. The row is
+    # still ADDED after the git call, so a ref git REFUSED leaves no row behind.
+    ws = session.get(Workspace, workspace_id)
+    if ws is not None and ws.root_branch_id is not None:
+        held = session.get(Branch, ws.root_branch_id)
+        if held is not None and held.name == name:
+            session.execute(
+                sql_update(Workspace)
+                .where(Workspace.id == workspace_id)
+                .values(root_branch_id=None)
+            )
+    session.execute(delete(Branch).where(Branch.workspace_id == workspace_id, Branch.name == name))
+    session.flush()
+
     git_create_branch(repo, name)
+    # The row is founded in the same call as the ref (spec §8 S1 step 4). A
+    # one-time backfill goes stale the moment the next branch is created, and a
+    # ref with no row is invisible to the branch-aware resolver S2 installs.
+    #
+    # These two are NOT atomic and no ordering makes them so: `git branch` is not
+    # transactional, so a commit that fails after it leaves a ref with no row.
+    # Placing the add after the git call at least means a ref git REFUSED leaves
+    # no row (git_create_branch raises before this line). The residual window is
+    # repaired by `backfill_branch_entities`, which is a two-way reconciler and is
+    # safe to re-run; S2 runs it again before it attaches anything.
+    #
+    # `last_sdk_session_id` is deliberately left NULL: a new branch has held no
+    # hosted conversation, and inheriting the parent's handle would let two
+    # branches resume one remote session (§3.1).
+    session.add(Branch(workspace_id=workspace_id, name=name))
     logger.info(
         "branches.created",
         extra={"event": "branch_created", "workspace_id": str(workspace_id), "branch": name},
@@ -344,17 +413,59 @@ def delete_workspace_branch(
     if not branch_exists(repo, name):
         raise BranchNotFound(name)
 
-    row = session.get(Workspace, workspace_id)
+    # `populate_existing=True` FORCES SQL. Without it this returns the instance
+    # `require_owner` (web/_perms.py:18-24) already loaded into the identity map
+    # before the route called us, so the guard below judges a snapshot taken
+    # BEFORE the mutex was acquired. `acquire_commit_mutex_at_generation` is
+    # `pg_advisory_xact_lock` — it takes no row lock and never refreshes the ORM —
+    # so any writer committing in that window is invisible, and the wait itself
+    # can be up to 10 seconds (Phase 0's `_m1` holds the mutex across `_init_repo`
+    # and `backfill_branch_entities`, and founds this very pointer).
+    #
+    # Reproduced 2026-08-31: pointer vacant at load, founded by a second session
+    # during the wait, guard skipped, `git branch -D main` destroyed the root ref,
+    # and only THEN did RESTRICT raise — a rollback git cannot undo. The one-line
+    # control was `session.expunge_all()` before the guard, which turned the same
+    # interleaving into the correct BranchInUse refusal with the ref intact.
+    row = session.get(Workspace, workspace_id, populate_existing=True)
+    if row is not None and row.root_branch_id is not None:
+        # WORKTREES §7.3 (2026-08-30-per-branch-worktrees-and-rooms-design.md):
+        # the branch the root pointer names cannot be deleted — its worktree
+        # IS `repo/`. The database enforces this too (fk_workspaces_root_branch_id
+        # is ON DELETE RESTRICT), but an IntegrityError is not an error a user can
+        # read. Raise the readable one first and leave RESTRICT as the backstop.
+        root = session.get(Branch, row.root_branch_id)
+        if root is not None and root.name == name:
+            raise BranchInUse(f"{name}: this is the workspace's root branch")
     if row is not None and row.current_branch == name:
         # The DATABASE is the source of truth (§4.1), so refuse against the
         # column, not against HEAD. git refuses too — "cannot delete branch
         # 'main' used by worktree" — but that message cannot be shown to a user
         # and would fire only if the two agreed.
-        raise BranchInUse(name)
+        raise BranchInUse(f"{name}: this is the branch the workspace is on")
     if len(list_branches(repo)) <= 1:
         # A repo with no branch has a detached HEAD, and §4.1's reconciliation
         # then has nothing to reconcile to.
         raise BranchLast(name)
+
+    # THE ROW GOES FIRST, and that order is the whole point of calling RESTRICT a
+    # "backstop" above. `git branch -D` is irreversible; a database error is not.
+    # With the git call first, a root pointer this transaction did not see meant
+    # the ref was already destroyed by the time RESTRICT fired — the backstop
+    # fired after the thing it was supposed to protect was gone. Deleting the row
+    # first makes the FK raise while git is still untouched, so the guard above
+    # and the constraint below now protect the same thing in the same order.
+    #
+    # A ref created before this stage — or with `git branch` outside the app — has
+    # no row; deleting nothing is correct, not an error, and raising here would
+    # strand that ref forever.
+    #
+    # Still not atomic in the other direction: a commit that fails after
+    # `git_delete_branch` leaves a row-less ref. `backfill_branch_entities`
+    # founds such refs — that is why it is a reconciler and not a one-shot
+    # backfill.
+    session.execute(delete(Branch).where(Branch.workspace_id == workspace_id, Branch.name == name))
+    session.flush()  # make the FK adjudicate NOW, while git is still untouched
 
     git_delete_branch(repo, name)
     logger.info(

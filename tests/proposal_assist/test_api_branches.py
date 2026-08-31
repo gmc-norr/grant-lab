@@ -11,6 +11,7 @@ Fixture shapes, measured from tests/proposal_assist/conftest.py:
 
 import pytest
 
+from call_manager.db.models import Branch, Workspace
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from tests.proposal_assist.conftest import init_workspace_repo, make_user, make_workspace
 
@@ -175,3 +176,55 @@ def test_a_MEMBER_can_list_but_cannot_mutate(
     call = getattr(client_authed_owner, verb)
     r = call(f"/api/workspaces/{wid}{suffix}", **({"json": body} if body is not None else {}))
     assert r.status_code == 403
+
+
+def test_the_api_refuses_to_delete_the_root_branch(
+    client_authed_owner, current_user, pg_session_factory, _app
+):
+    """The ONE deliberate behaviour change in this plan (see Global Constraints).
+    Today a user who switched away from the root can delete it; §7.3 closes that.
+    Pinned at the API because the response code is what actually changed — and
+    `{name:path}` means the route itself is easy to get wrong.
+
+    `_seed` only runs `init_workspace_repo` (a bare `git init`); it does not found
+    a root branch row for the new workspace (a known gap, handled by a later
+    task). So the root is established explicitly here, in the Arrange step, where
+    it is visible — this test is about the root, so the root should not be hidden
+    in a helper.
+    """
+    with pg_session_factory() as s:
+        wid = _seed(s, _app, current_user)
+        s.flush()
+        root = Branch(workspace_id=wid, name="main")
+        s.add(root)
+        s.flush()
+        s.get(Workspace, wid).root_branch_id = root.id
+        s.commit()
+
+    client_authed_owner.post(f"/api/workspaces/{wid}/branches", json={"name": "new_ideas"})
+    client_authed_owner.post(f"/api/workspaces/{wid}/branches/switch", json={"name": "new_ideas"})
+
+    resp = client_authed_owner.delete(f"/api/workspaces/{wid}/branches/main")
+    assert resp.status_code == 409, resp.text
+
+
+def test_listing_branches_for_a_workspace_still_in_setup_is_409_not_500(
+    client_authed_owner, current_user, pg_session_factory, _app
+):
+    """A workspace whose repo Phase 0 has not created yet is YOUNG, not broken.
+
+    `list_branches_route` used to be the one route in this module with no
+    exception handler, so `subprocess.run(cwd=<missing dir>)` raised a bare
+    FileNotFoundError (measured) straight into main.py's generic handler. The
+    cockpit's read path answered 500 for every workspace between creation and
+    `_init_repo`.
+
+    409, not 404: the workspace is real, it is just not ready — a 404 would tell
+    the SPA to stop asking.
+    """
+    with pg_session_factory() as s:
+        # Deliberately NOT `_seed`: no repo is the whole point.
+        wid = make_workspace(s, title="young", owner=current_user).id
+        s.commit()
+    r = client_authed_owner.get(f"/api/workspaces/{wid}/branches")
+    assert r.status_code == 409, r.text

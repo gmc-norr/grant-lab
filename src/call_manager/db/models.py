@@ -702,6 +702,55 @@ class Workspace(Base):
     #: git HEAD is reconciled to this value before any git read or write
     #: (2026-08-29-workspace-branches-design.md §4.1). Never inferred from HEAD.
     current_branch: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'main'"))
+    #: The workspace's ROOT branch (§7.3) — the one whose worktree will BE `repo/`
+    #: once S2 stops checkout-based switching, and the only branch that cannot be
+    #: deleted. **Moved only by promote.** Deliberately NOT `current_branch`:
+    #: switching is not promoting, and a pointer that followed every switch would
+    #: be `current_branch` under another name.
+    #:
+    #: Until S2 lands, `switch_branch` step 9 still runs `checkout_branch(repo,
+    #: target)` (`branches.py:224-226`), so what `repo/` physically holds drifts
+    #: away from this pointer between a switch and S2. That is expected and
+    #: harmless here — nothing resolves a path through this column yet — and S2
+    #: checks the root back out before it attaches any worktree.
+    #:
+    #: Nullable in several legitimate states. A workspace still in setup has no repo and
+    #: so no branch to point at — and a repo on a DETACHED HEAD has refs but no
+    #: knowable root, so `backfill_branch_entities` leaves the pointer alone rather
+    #: than guessing which survivor is the root
+    #: (`test_a_detached_head_still_founds_the_refs_but_no_root`).
+    #:
+    #: `tests/architecture/test_branch_entity_invariants.py` therefore pins the
+    #: narrower claim that actually holds, and the qualifier is AFTER A SUCCESSFUL
+    #: RECONCILE, not merely "has a repo": `backfill_branch_entities` leaves an
+    #: attached HEAD with a pointer. Between reconciles it can legitimately be
+    #: null with HEAD attached — `create_workspace_branch` clears it when it
+    #: de-orphans the row the pointer named, and a workspace the reconciler
+    #: SKIPPED (unreadable HEAD) never got one.
+    #:
+    #: S2 must therefore reconcile before it dereferences this, and handle a
+    #: rootless repo explicitly. A repo directory does not imply a pointer.
+    root_branch_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        # use_alter: `workspaces` and `branches` reference each other (this
+        # column, and branches.workspace_id -> workspaces.id), so SQLAlchemy
+        # cannot order the two for whole-metadata DDL. Deferring THIS side to a
+        # post-create ALTER breaks the cycle; it has to be this side because it
+        # is the nullable one — branches.workspace_id is NOT NULL and cannot
+        # wait. Same shape as fk_users_default_profile_id (models.py:100-112).
+        #
+        # RESTRICT, not SET NULL: §7.3 says the root branch cannot be deleted,
+        # and a database guarantee cannot be forgotten by a future caller the way
+        # an `if` can. Safe because nothing hard-deletes a Workspace row —
+        # retention is freeze-only (ef8ccb3) — so no cascade collides with it.
+        ForeignKey(
+            "branches.id",
+            ondelete="RESTRICT",
+            name="fk_workspaces_root_branch_id",
+            use_alter=True,
+        ),
+        nullable=True,
+    )
     current_phase: Mapped[str] = mapped_column(
         Text,
         nullable=False,
@@ -774,6 +823,46 @@ class Workspace(Base):
         nullable=False,
         server_default="vancouver",
     )
+
+
+class Branch(Base):
+    """One branch of one workspace (spec 2026-08-30-per-branch-worktrees §3.2).
+
+    The **id** is the identity; `name` is a mutable label on it. Every
+    branch-scoped row and every job carries the id, never the name — otherwise a
+    delete-then-recreate under the same name lets an in-flight job pass the
+    workspace fence and write into the replacement. Names are also allowed to
+    contain `/` (`git check-ref-format --branch`), which no single URL path
+    segment can carry.
+    """
+
+    __tablename__ = "branches"
+    __table_args__ = (UniqueConstraint("workspace_id", "name", name="uq_branches_ws_name"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    #: The hosted-conversation resume handle for THIS branch (§3.1). Two branches
+    #: cannot resume one remote session — `turns/processor.py:389` passes
+    #: `resume=<id>`, and sharing one would interleave two branches' turns into a
+    #: single upstream conversation. `workspaces.last_sdk_session_id` still exists
+    #: and is still the only one read; it is dropped in S4 when its last reader
+    #: goes.
+    last_sdk_session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class WorkspaceViewer(Base):
@@ -2075,12 +2164,8 @@ class LlmSpend(Base):
             "'uncited_claims','citation')",
             name="ck_llm_spend_kind",
         ),
-        CheckConstraint(
-            "status IN ('ok','failed','timeout')", name="ck_llm_spend_status"
-        ),
-        CheckConstraint(
-            "tokens_in >= 0 AND tokens_out >= 0", name="ck_llm_spend_tokens_nonneg"
-        ),
+        CheckConstraint("status IN ('ok','failed','timeout')", name="ck_llm_spend_status"),
+        CheckConstraint("tokens_in >= 0 AND tokens_out >= 0", name="ck_llm_spend_tokens_nonneg"),
         # The two reads the caps make: whole-instance by day, and per-workspace
         # by day. Both filter on created_at first.
         Index("ix_llm_spend_created", "created_at"),

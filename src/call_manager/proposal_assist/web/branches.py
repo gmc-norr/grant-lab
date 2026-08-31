@@ -25,12 +25,14 @@ from call_manager.proposal_assist.branches import (
     BranchLast,
     BranchNameInvalid,
     BranchNotFound,
+    BranchRepoNotReady,
     create_workspace_branch,
     delete_workspace_branch,
     list_workspace_branches,
     switch_branch,
 )
 from call_manager.proposal_assist.collab.room import MANAGER, BranchSwitchTeardown
+from call_manager.proposal_assist.ports.errors import CommitMutexTimeout
 from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
 from call_manager.proposal_assist.web._deps import _session_dep
 from call_manager.proposal_assist.web._perms import require_member, require_owner
@@ -111,6 +113,14 @@ _STATUS = {
     BranchInUse: 409,
     BranchLast: 409,
     BranchBusy: 409,
+    #: A workspace whose repo Phase 0 has not created yet. 409, not 404: the
+    #: workspace is real, it is just not ready — 404 would tell the SPA to stop
+    #: asking.
+    BranchRepoNotReady: 409,
+    #: Routine contention, not a bug. `acquire_commit_mutex_at_generation` gives
+    #: up after 10s; without this the caller cannot tell "try again" from "the
+    #: server is broken".
+    CommitMutexTimeout: 409,
 }
 
 
@@ -129,11 +139,17 @@ def list_branches_route(
     user=Depends(get_current_user),  # noqa: B008
 ):
     require_member(workspace_id=workspace_id, user=user, session=session)
-    names, current = list_workspace_branches(
-        session,
-        workspace_id=workspace_id,
-        workspaces_dir=request.app.state.settings.workspaces_dir,
-    )
+    # Wrapped like every other route here. It used to be the ONE route with no
+    # handler at all, so every refusal it could raise reached main.py's generic
+    # handler as a 500.
+    try:
+        names, current = list_workspace_branches(
+            session,
+            workspace_id=workspace_id,
+            workspaces_dir=request.app.state.settings.workspaces_dir,
+        )
+    except Exception as exc:
+        _raise_http(exc)
     return BranchListOut(branches=names, current=current)
 
 

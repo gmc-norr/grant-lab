@@ -36,8 +36,47 @@ logger = logging.getLogger(__name__)
 _GIT_TIMEOUT_SECONDS = 30.0
 
 
-def _git_env() -> dict[str, str]:
+def _git_env(repo_dir: Path | None = None) -> dict[str, str]:
+    """The environment every git subprocess runs in.
+
+    *repo_dir* fences git's repository DISCOVERY to that directory. Without it git
+    walks UPWARD until it finds any repository, so a workspace repo whose `.git`
+    is corrupt answers with whatever repo encloses it — and `var/workspaces/` sits
+    inside the application's own checkout, so the answer is the SERVER'S branches,
+    with exit 0 and no error. The reconciler would then found rows named after the
+    server's branches and delete the workspace's real ones. Measured 2026-08-31:
+
+        workspace repo, corrupt .git     -> prints the enclosing branch, rc=0
+        workspace repo, no .git at all   -> prints the enclosing branch, rc=0
+        either one, WITH the ceiling     -> "fatal: not a git repository", rc=128
+        a HEALTHY repo, WITH the ceiling -> unchanged, rc=0
+
+    The hazard was already known here: `_list_commits_env` (gitio.py:475) and
+    `current_head` (gitio.py:305) each set this ceiling for themselves. `_git` —
+    which every other primitive in this module goes through — did not. Fixing the
+    shared primitive is what closes the remaining doors.
+
+    The ceiling is the repo's PARENT: git searches `repo_dir` itself and stops
+    before the parent, so a real repo still finds its own `.git` at cwd.
+
+    Absolute, via `resolve()`: GIT_CEILING_DIRECTORIES silently IGNORES a relative
+    entry, and `workspace_repo_dir` builds on WORKSPACES_DIR, which defaults to the
+    relative "var/workspaces". A relative ceiling would look like a fix and be
+    inert.
+    """
     env = os.environ.copy()
+    # Hermetic, matching `phases/setup.py:_git_env`. `_m1` calls
+    # `backfill_branch_entities`, whose git reads come through HERE — so without
+    # this, an operator's global git config reaches inside M1's locked region and
+    # setup.py's docstring claim ("nothing an operator configures can introduce a
+    # hook, a signing helper or an interactive prompt into M1's locked region")
+    # is false. These reads are on workspace repos the app created itself, so
+    # site and global config have nothing legitimate to contribute.
+    env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    env["GIT_CONFIG_SYSTEM"] = "/dev/null"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    if repo_dir is not None:
+        env["GIT_CEILING_DIRECTORIES"] = str(Path(repo_dir).resolve().parent)
     env.setdefault("GIT_AUTHOR_NAME", "call-manager")
     env.setdefault("GIT_AUTHOR_EMAIL", "call-manager@local")
     env.setdefault("GIT_COMMITTER_NAME", "call-manager")
@@ -331,7 +370,7 @@ def _git(repo_dir: Path, *args: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         timeout=_GIT_TIMEOUT_SECONDS,
-        env=_git_env(),
+        env=_git_env(repo_dir),
     )
 
 
@@ -349,12 +388,78 @@ def current_branch(repo_dir: Path) -> str:
     return proc.stdout.strip()
 
 
+def head_branch(repo_dir: Path) -> str | None:
+    """The checked-out branch name, or None when HEAD is DETACHED.
+
+    `current_branch` cannot answer this: it raises GitCommitError for a detached
+    HEAD and for a broken repository alike, so a caller that catches it treats a
+    git failure as "detached" and acts on it. In the reconciler that meant a
+    transient failure CLEARED a healthy root pointer.
+
+    `-q` is what makes the two separable, and the exit codes are measured
+    (2026-08-31, git on this box):
+
+        attached            -> 0, prints the name
+        DETACHED, with -q   -> 1, prints nothing
+        DETACHED, without -q-> 128 ("fatal: ref HEAD is not a symbolic ref")
+        not a repository    -> 128
+        unborn HEAD         -> 0, prints the name the first commit will land on
+
+    So only exit 1 means detached. Same discipline as `branch_exists`, and for
+    the same reason: collapsing 128 into the benign answer reports a broken repo
+    as a normal state.
+    """
+    proc = _git(repo_dir, "symbolic-ref", "--short", "-q", "HEAD")
+    if proc.returncode == 1:
+        return None
+    if proc.returncode != 0:
+        raise GitCommitError(f"cannot read HEAD in {repo_dir}: {proc.stderr.strip()}")
+    return proc.stdout.strip()
+
+
+#: The prefix `%(refname)` puts on every local branch.
+_HEADS_PREFIX = "refs/heads/"
+
+
 def list_branches(repo_dir: Path) -> list[str]:
-    """Every local branch, in git's own order. Empty only for a repo with no refs."""
-    proc = _git(repo_dir, "branch", "--format=%(refname:short)")
+    """Every local branch, in git's own order. Empty only for a repo with no refs.
+
+    `%(refname)` and strip, NOT `%(refname:short)`. The `:short` form shortens to
+    the shortest UNAMBIGUOUS name, so it depends on what other refs exist.
+    Measured 2026-08-31 with a branch `feature` and a TAG also called `feature`:
+
+        git branch --format='%(refname:short)'   ->  heads/feature
+        git show-ref --verify refs/heads/heads/feature  ->  rc=1
+
+    So the branch reported its own name as one `branch_exists` answers NO for.
+    `_real_refs` filters on exactly that, so the branch vanished from the
+    reconciler's view, its row was deleted as an orphan, and if it was the root
+    the pointer was cleared. `%(refname)` is always the full path:
+
+        git branch --format='%(refname)'  ->  refs/heads/feature
+    """
+    proc = _git(repo_dir, "branch", "--format=%(refname)")
     if proc.returncode != 0:
         raise GitCommitError(f"cannot list branches in {repo_dir}: {proc.stderr.strip()}")
-    return [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+    if "broken ref" in proc.stderr:
+        # A corrupt ref file makes `git branch` exit ZERO, warn on stderr, and
+        # silently OMIT that branch. Measured 2026-08-31:
+        #
+        #     $ echo garbage > .git/refs/heads/feature
+        #     $ git branch --format='%(refname)'
+        #     warning: ignoring broken ref refs/heads/feature
+        #     refs/heads/main
+        #     rc=0
+        #
+        # An incomplete listing that reports success is worse than a failure:
+        # `backfill_branch_entities` treats every name it does not see as an
+        # ORPHAN and DELETES its row — and clears the root pointer if it named
+        # one. The ref file is still on disk; only the reader lost it. Raising
+        # makes the reconciler skip the whole workspace, which is what its own
+        # docstring already promises ("a row is only ever removed for a workspace
+        # whose refs were read successfully").
+        raise GitCommitError(f"broken ref in {repo_dir}: {proc.stderr.strip()}")
+    return [ln.strip().removeprefix(_HEADS_PREFIX) for ln in proc.stdout.splitlines() if ln.strip()]
 
 
 def branch_exists(repo_dir: Path, name: str) -> bool:
@@ -379,6 +484,21 @@ def is_valid_branch_name(name: str) -> bool:
     A hand-rolled check that accepts a name git rejects produces a half-created
     branch; one that rejects a name git accepts is an unexplainable refusal.
     This runs without a repository — check-ref-format reads none.
+
+    The exit code ALONE is not enough. `--branch` also EXPANDS branch shorthand
+    and prints the result, so it answers "yes" for a name that means something
+    else. Measured 2026-08-31 in a repo whose previous branch was `other`:
+
+        git check-ref-format --branch '@{-1}'  ->  rc=0, prints "other"
+        git branch '@{-1}'                     ->  "a branch named 'other'
+                                                    already exists"
+
+    So a user could POST `@{-1}`, pass validation, and have git act on a
+    DIFFERENT branch than the one the `branches` row records — the row/ref
+    divergence this whole entity exists to prevent. Requiring the output to equal
+    the input closes it while keeping every git-branch-specific rule
+    (`--branch` alone rejects `HEAD` and `-`; the bare form accepts `HEAD`, so
+    neither is right on its own).
     """
     if not name or name != name.strip():
         return False
@@ -389,7 +509,7 @@ def is_valid_branch_name(name: str) -> bool:
         timeout=_GIT_TIMEOUT_SECONDS,
         env=_git_env(),
     )
-    return proc.returncode == 0
+    return proc.returncode == 0 and proc.stdout.strip() == name
 
 
 def has_commits(repo_dir: Path) -> bool:

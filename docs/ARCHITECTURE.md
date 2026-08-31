@@ -41,13 +41,14 @@ Read this before claiming two tables share, or do not share, a rule.
 
 ## Tables
 
-43 mapped tables.
+44 mapped tables.
 
 | table | class | cols | FKs | CHECKs | indexes |
 |---|---|---|---|---|---|
 | `artifact_versions` | `ArtifactVersion` | 7 | 2 | 1 | 2 |
 | `attachment_jobs` | `AttachmentJob` | 9 | 2 | 2 | 2 |
 | `attachments` | `Attachment` | 12 | 2 | 1 | 1 |
+| `branches` | `Branch` | 5 | 1 | 0 | 0 |
 | `call_ranking_criteria` | `CallRankingCriterion` | 7 | 2 | 0 | 0 |
 | `call_rankings` | `CallRanking` | 17 | 2 | 0 | 1 |
 | `call_rubrics` | `CallRubric` | 7 | 1 | 0 | 0 |
@@ -86,7 +87,7 @@ Read this before claiming two tables share, or do not share, a rule.
 | `workspace_events` | `WorkspaceEvent` | 6 | 2 | 0 | 2 |
 | `workspace_setup_jobs` | `WorkspaceSetupJob` | 10 | 1 | 2 | 0 |
 | `workspace_viewers` | `WorkspaceViewer` | 3 | 2 | 0 | 0 |
-| `workspaces` | `Workspace` | 28 | 4 | 3 | 1 |
+| `workspaces` | `Workspace` | 29 | 5 | 3 | 1 |
 | `yjs_updates` | `YjsUpdate` | 6 | 2 | 1 | 1 |
 
 ### Status vocabularies
@@ -122,6 +123,7 @@ Every CHECK constraining a `status`-like column. Divergence here is a real defec
 | `artifact_versions` | `workspace_id` → `workspaces.id` (CASCADE)<br>`triggering_turn_id` → `chat_turns.id` (SET NULL) |
 | `attachment_jobs` | `workspace_id` → `workspaces.id` (CASCADE)<br>`attachment_id` → `attachments.id` (CASCADE) |
 | `attachments` | `workspace_id` → `workspaces.id` (CASCADE)<br>`uploaded_by` → `users.id` (RESTRICT) |
+| `branches` | `workspace_id` → `workspaces.id` (CASCADE) |
 | `call_ranking_criteria` | `call_id` → `calls.id` (CASCADE)<br>`profile_id` → `profiles.id` (CASCADE) |
 | `call_rankings` | `call_id` → `calls.id` (CASCADE)<br>`profile_id` → `profiles.id` (CASCADE) |
 | `call_rubrics` | `call_id` → `calls.id` (CASCADE) |
@@ -159,7 +161,7 @@ Every CHECK constraining a `status`-like column. Divergence here is a real defec
 | `workspace_events` | `workspace_id` → `workspaces.id` (CASCADE)<br>`actor_id` → `users.id` (SET NULL) |
 | `workspace_setup_jobs` | `workspace_id` → `workspaces.id` (CASCADE) |
 | `workspace_viewers` | `workspace_id` → `workspaces.id` (CASCADE)<br>`user_id` → `users.id` (CASCADE) |
-| `workspaces` | `owner_id` → `users.id` (RESTRICT)<br>`call_id` → `calls.id` (SET NULL)<br>`profile_id` → `profiles.id` (SET NULL)<br>`spec_locked_by` → `users.id` (SET NULL) |
+| `workspaces` | `owner_id` → `users.id` (RESTRICT)<br>`call_id` → `calls.id` (SET NULL)<br>`profile_id` → `profiles.id` (SET NULL)<br>`root_branch_id` → `branches.id` (RESTRICT)<br>`spec_locked_by` → `users.id` (SET NULL) |
 | `yjs_updates` | `workspace_id` → `workspaces.id` (CASCADE)<br>`actor_id` → `users.id` (SET NULL) |
 
 ## The epoch fence
