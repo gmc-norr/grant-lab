@@ -156,6 +156,7 @@ def test_accept_does_not_clobber_human_edit_race(pg_session_factory, tmp_path):
             base_commit_sha=base_commit,
             base_section_sha=base_section,
             workspaces_dir=str(tmp_path),
+            base_branch=None,
         )
         s.flush()
 

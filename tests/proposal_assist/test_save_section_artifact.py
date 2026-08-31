@@ -50,6 +50,7 @@ def test_spec_save_commits_spec_file_and_skips_tier1_tier2(pg_session_factory, t
             base_section_sha=sec_sha,
             workspaces_dir=str(tmp_path),
             artifact=Artifact.SPEC,
+            base_branch=None,
         )
         s.flush()
 
@@ -91,6 +92,7 @@ def test_spec_save_still_enforces_structure_guard(pg_session_factory, tmp_path):
                 base_section_sha=sec_sha,
                 workspaces_dir=str(tmp_path),
                 artifact=Artifact.SPEC,
+                base_branch=None,
             )
 
 
@@ -129,6 +131,7 @@ def test_raw_draft_string_still_runs_draft_pipeline(pg_session_factory, tmp_path
             base_section_sha=sec_sha,
             workspaces_dir=str(tmp_path),
             artifact="draft",  # raw string, not the enum member
+            base_branch=None,
         )
         assert any(i["type"] == "bare_marker" for i in result.issues)
 
@@ -161,6 +164,7 @@ def test_spec_save_survives_cross_artifact_head_move(pg_session_factory, tmp_pat
             base_section_sha=sec_sha,  # spec section UNCHANGED -> not stale
             workspaces_dir=str(tmp_path),
             artifact=Artifact.SPEC,
+            base_branch=None,
         )
         assert result.changed is True
 
@@ -188,6 +192,7 @@ def test_spec_save_stale_section_raises(pg_session_factory, tmp_path):
             base_section_sha=sec_sha,
             workspaces_dir=str(tmp_path),
             artifact=Artifact.SPEC,
+            base_branch=None,
         )
         s.flush()
         # A second save with the ORIGINAL (now stale) base hits
@@ -204,4 +209,5 @@ def test_spec_save_stale_section_raises(pg_session_factory, tmp_path):
                 base_section_sha=sec_sha,
                 workspaces_dir=str(tmp_path),
                 artifact=Artifact.SPEC,
+                base_branch=None,
             )

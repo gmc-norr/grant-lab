@@ -175,6 +175,7 @@ def test_save_section_refuses_a_deleted_workspace(pg_session_factory, tmp_path):
                 base_commit_sha=head,
                 base_section_sha="0" * 64,
                 workspaces_dir=str(tmp_path),
+                base_branch=None,
             )
         s.rollback()
 

@@ -3532,6 +3532,8 @@ export interface components {
         };
         /** SaveSectionIn */
         SaveSectionIn: {
+            /** Base Branch */
+            base_branch: string;
             /** Base Commit Sha */
             base_commit_sha: string;
             /** Base Section Sha */

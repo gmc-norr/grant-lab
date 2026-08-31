@@ -77,6 +77,7 @@ async def test_propose_edit_uses_read_time_base_not_live(
             base_commit_sha=base_commit,
             base_section_sha=base_section,
             workspaces_dir=str(tmp_path),
+            base_branch=None,
         )
         s.commit()
 

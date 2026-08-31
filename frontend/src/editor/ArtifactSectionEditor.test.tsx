@@ -5,6 +5,7 @@ import type { EditorView } from "@codemirror/view";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 
+import { ApiError } from "../api/client";
 import * as citationsApi from "../api/citations";
 import { resetEditorStore } from "../cockpit/editorStore";
 import { theme } from "../theme/theme";
@@ -119,9 +120,9 @@ it("drops a save result that arrives after the branch changed underneath it", as
   // the result arrives branchChanged has gone false again anyway -- so the leak
   // would read as ordinary content.
   //
-  // This guards the CACHE only. The request itself still reaches the server and
-  // is still accepted there; see
-  // tests/test_editing_save.py::test_KNOWN_DEFECT_a_form_loaded_on_another_branch_still_writes_here
+  // This guards the CACHE. The request is refused separately, by the server —
+  // tests/test_editing_save.py::test_a_form_loaded_on_another_branch_cannot_write_here —
+  // and the test below covers what the user is shown when it is.
   const qc = new QueryClient();
   let releaseSave: ((v: { head: string; section_sha: string }) => void) | undefined;
   const save = {
@@ -186,6 +187,69 @@ it("drops a save result that arrives after the branch changed underneath it", as
   expect(cached.sections[0].text).not.toContain("LEAKED");
   expect(cached.sections[0].sha).toBe("t0");
   expect(cached.head).toBe("head-3");
+});
+
+it("hands back the text of a save the server refused for the wrong branch", async () => {
+  // The switch has already wiped the buffers by the time this lands, so the
+  // rejected text is the ONLY remaining copy. It must be shown, and it must
+  // survive the branch change that destroyed the buffers -- that is why the
+  // branch effect does not reset it.
+  const qc = new QueryClient();
+  const save = {
+    mutateAsync: vi
+      .fn()
+      .mockRejectedValue(
+        new ApiError(
+          "branch_mismatch",
+          "this edit belongs to branch 'main'; the workspace is now on 'v2' — it was not saved",
+        ),
+      ),
+    isPending: false,
+  };
+  const source = [{ index: 0, heading: "", text: "source branch\n", sha: "s0" }];
+  const target = [{ index: 0, heading: "", text: "target branch\n", sha: "t0" }];
+  const ui = (branch: string, sections: typeof source) => (
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <MemoryRouter initialEntries={["/cockpit/ws-1"]}>
+        <QueryClientProvider client={qc}>
+          <ArtifactSectionEditor
+            workspaceId="ws-1"
+            branch={branch}
+            queryKey={["draft", "ws-1"]}
+            head="head-1"
+            canEdit
+            sections={sections}
+            save={save}
+            refetch={() => {}}
+          />
+        </QueryClientProvider>
+      </MemoryRouter>
+    </MantineProvider>
+  );
+
+  const rendered = render(ui("main", source));
+  const editorNode = rendered.container.querySelector(".cm-editor") as HTMLElement & {
+    __cmView?: EditorView;
+  };
+  const view = editorNode.__cmView!;
+  act(() => view.dispatch({ changes: { from: view.state.doc.length, insert: "MY WORK" } }));
+  fireEvent.click(screen.getByRole("button", { name: "Save section" }));
+
+  // The branch it was made on is named, and so is the one we are on now.
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent(/belongs to branch 'main'/);
+  expect(alert).toHaveTextContent(/now on 'v2'/);
+  // NOT the stale-section prompt: "reload and re-apply" is wrong advice here.
+  expect(alert).not.toHaveTextContent(/changed underneath you/);
+
+  // The text itself, verbatim.
+  const kept = screen.getByLabelText("the edit that was not saved");
+  expect(kept).toHaveTextContent("MY WORK");
+
+  // And it is still there after the branch change wipes everything else.
+  rendered.rerender(ui("v2", target));
+  await waitFor(() => expect(view.state.doc.toString()).toBe("target branch\n"));
+  expect(screen.getByLabelText("the edit that was not saved")).toHaveTextContent("MY WORK");
 });
 
 it("citations={false} renders no Cite control", () => {

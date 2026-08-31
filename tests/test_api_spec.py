@@ -97,6 +97,7 @@ def test_save_spec_section_owner_commits(
             "content": "## Aims\nbe truly great.\n",
             "base_commit_sha": spec["head"],
             "base_section_sha": aims["sha"],
+            "base_branch": "main",
         },
     )
     assert r.status_code == 200
@@ -121,6 +122,7 @@ def test_save_spec_section_structure_guard_is_400(
             "content": "be great.\n",  # dropped the ## heading
             "base_commit_sha": spec["head"],
             "base_section_sha": aims["sha"],
+            "base_branch": "main",
         },
     )
     assert r.status_code == 400
@@ -137,6 +139,7 @@ def test_save_spec_section_member_forbidden(monkeypatch, pg_url, pg_session_fact
             "content": "## Aims\ny\n",
             "base_commit_sha": spec["head"],
             "base_section_sha": spec["sections"][1]["sha"],
+            "base_branch": "main",
         },
     )
     assert r.status_code == 403
@@ -162,6 +165,7 @@ def test_save_spec_section_stale_is_409(monkeypatch, pg_url, pg_session_factory,
             "content": "## Aims\nmy late edit.\n",
             "base_commit_sha": spec["head"],
             "base_section_sha": aims["sha"],
+            "base_branch": "main",
         },
     )
     assert r.status_code == 409
@@ -182,6 +186,7 @@ def test_save_spec_section_bad_index_is_404(
             "content": "## X\nbody.\n",
             "base_commit_sha": spec["head"],
             "base_section_sha": "0" * 64,
+            "base_branch": "main",
         },
     )
     assert r.status_code == 404
@@ -215,6 +220,7 @@ def test_save_spec_section_busy_is_429(
             "content": "## Aims\nrewritten.\n",
             "base_commit_sha": spec["head"],
             "base_section_sha": spec["sections"][1]["sha"],
+            "base_branch": "main",
         },
     )
     assert r.status_code == 429

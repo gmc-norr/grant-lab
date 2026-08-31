@@ -345,6 +345,66 @@ def test_the_spec_reports_the_branch_it_is_actually_on(
     assert r.json()["branch"] == "v2"
 
 
+def test_a_save_from_the_previous_branch_is_refused_with_both_names(
+    client_authed_owner, current_user, pg_session_factory, _app
+):
+    """The HTTP half of the cross-branch write guard.
+
+    Every sha sent here is CORRECT for the target branch -- `v2` is made from
+    HEAD, so section 1's bytes are identical on both and `base_commit_sha` is
+    still the live head. That is deliberate: it means a 409 can only have come
+    from the branch check. With valid shas and no branch field, save.py's stale
+    guard is an AND that does not fire, and the write lands.
+
+    `/draft` is never fetched, because the first read of an artifact flips
+    collab on (enable-on-touch) and a collab-enabled artifact answers every
+    git-first save with its own 409 -- which would make this test pass for
+    entirely the wrong reason.
+    """
+    from call_manager.proposal_assist.citations.gitio import current_head
+    from call_manager.proposal_assist.editing.sectionizer import split_sections
+
+    with pg_session_factory() as s:
+        wid = _seed(s, _app, current_user)
+        s.commit()
+    repo = workspace_repo_dir(_app.state.settings.workspaces_dir, wid)
+    head = current_head(repo)
+    section = split_sections((repo / "proposal.md").read_text())[0]
+
+    assert (
+        client_authed_owner.post(
+            f"/api/workspaces/{wid}/branches", json={"name": "v2"}
+        ).status_code
+        == 201
+    )
+    assert (
+        client_authed_owner.post(
+            f"/api/workspaces/{wid}/branches/switch", json={"name": "v2"}
+        ).status_code
+        == 200
+    )
+
+    r = client_authed_owner.post(
+        f"/api/workspaces/{wid}/sections/0",
+        json={
+            "content": "# Aims\n\nedited on main\n",
+            "base_commit_sha": head,
+            "base_section_sha": section.sha,
+            "base_branch": "main",
+        },
+    )
+    assert r.status_code == 409, r.text
+    body = r.json()["error"]
+    # Its OWN code, not the status-derived "conflict": a stale section is also a
+    # 409, and the two need opposite answers in the UI.
+    assert body["code"] == "branch_mismatch"
+    # Both names, so the user can tell what happened to their text.
+    assert "main" in body["message"]
+    assert "v2" in body["message"]
+    # And nothing was written.
+    assert "edited on main" not in (repo / "proposal.md").read_text()
+
+
 def test_KNOWN_DEFECT_the_worktree_changes_before_the_branch_rename_commits(
     client_authed_owner, current_user, pg_session_factory, _app, monkeypatch
 ):

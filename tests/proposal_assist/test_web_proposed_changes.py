@@ -329,6 +329,7 @@ def _seed_pending_then_move_section(s, ws, current_user, tmp_path):
         base_commit_sha=base_commit,
         base_section_sha=base_section,
         workspaces_dir=str(tmp_path),
+        base_branch=None,
     )
     return pc
 

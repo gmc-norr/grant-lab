@@ -171,3 +171,18 @@
   border-radius: 4px;
   padding: 0.4rem;
 }
+
+/* The text of a save the server refused because the branch moved. Selectable
+   and scrollable rather than truncated: it is the only remaining copy of what
+   the user typed, so they have to be able to read and copy all of it. */
+.rejectedEdit {
+  background: var(--app-editor);
+  border: 1px solid var(--app-border);
+  border-radius: 4px;
+  padding: 0.4rem;
+  margin-top: 0.25rem;
+  max-height: 30vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  user-select: text;
+}

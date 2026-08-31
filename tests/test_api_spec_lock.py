@@ -143,6 +143,7 @@ def test_locked_spec_save_is_409(monkeypatch, pg_url, pg_session_factory, tmp_pa
             "content": "## Aims\nedited.\n",
             "base_commit_sha": spec["head"],
             "base_section_sha": aims["sha"],
+            "base_branch": "main",
         },
     )
     assert r.status_code == 409
@@ -180,6 +181,7 @@ def test_draft_unaffected_by_spec_lock(
             "content": "## Methods\nm2.\n",
             "base_commit_sha": draft["head"],
             "base_section_sha": methods["sha"],
+            "base_branch": "main",
         },
     )
     assert r.status_code == 200 and r.json()["changed"] is True
@@ -202,6 +204,7 @@ def test_unlock_reenables_spec_save(
             "content": "## Aims\nedited after unlock.\n",
             "base_commit_sha": spec["head"],
             "base_section_sha": aims["sha"],
+            "base_branch": "main",
         },
     )
     assert r.status_code == 200 and r.json()["changed"] is True

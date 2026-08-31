@@ -59,6 +59,7 @@ it("useSaveSection invalidates ['draft', id] on success", async () => {
     content: "## A\nx\n",
     base_commit_sha: "a".repeat(40),
     base_section_sha: "s",
+    base_branch: "main",
   });
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ["draft", "ws-1"] });
 });
@@ -112,12 +113,18 @@ it("useSaveSpecSection posts content to the spec route + invalidates ['spec', id
     content: "## Aims\nx\n",
     base_commit_sha: "a".repeat(40),
     base_section_sha: "s",
+    base_branch: "main",
   });
   expect(post).toHaveBeenCalledWith(
     "/api/workspaces/{workspace_id}/spec/sections/{index}",
     expect.objectContaining({
       params: { path: { workspace_id: "ws-1", index: 1 } },
-      body: { content: "## Aims\nx\n", base_commit_sha: "a".repeat(40), base_section_sha: "s" },
+      body: {
+        content: "## Aims\nx\n",
+        base_commit_sha: "a".repeat(40),
+        base_section_sha: "s",
+        base_branch: "main",
+      },
     }),
   );
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ["spec", "ws-1"] });
@@ -164,6 +171,7 @@ it("a 409 save surfaces an ApiError with code 'conflict'", async () => {
       content: "## A\nx\n",
       base_commit_sha: "a".repeat(40),
       base_section_sha: "s",
+      base_branch: "main",
     }),
   ).rejects.toMatchObject({ name: "ApiError", code: "conflict" });
 });

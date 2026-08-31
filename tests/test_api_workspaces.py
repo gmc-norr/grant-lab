@@ -353,6 +353,7 @@ def test_save_section_happy_path_commits_and_changes(
             "content": "## Methods\nrewritten body.\n",
             "base_commit_sha": base_commit,
             "base_section_sha": base_section,
+            "base_branch": "main",
         },
     )
     assert r.status_code == 200, r.text
@@ -387,6 +388,7 @@ def test_save_section_no_op_returns_changed_false(
             "content": "## Methods\noriginal.\n",  # identical to live
             "base_commit_sha": base_commit,
             "base_section_sha": base_section,
+            "base_branch": "main",
         },
     )
     assert r.status_code == 200, r.text
@@ -418,6 +420,7 @@ def test_save_section_stale_is_409(monkeypatch, pg_url, pg_session_factory, tmp_
             "content": "## Methods\nmy late edit.\n",
             "base_commit_sha": base_commit,
             "base_section_sha": base_section,
+            "base_branch": "main",
         },
     )
     assert r.status_code == 409
@@ -437,6 +440,7 @@ def test_save_section_structure_violation_is_400(monkeypatch, pg_url, pg_session
             "content": "no heading any more\n",  # deletes the ## boundary
             "base_commit_sha": base_commit,
             "base_section_sha": base_section,
+            "base_branch": "main",
         },
     )
     assert r.status_code == 400
@@ -456,6 +460,7 @@ def test_save_section_bad_index_is_404(monkeypatch, pg_url, pg_session_factory, 
             "content": "## X\nbody.\n",
             "base_commit_sha": base_commit,
             "base_section_sha": "0" * 64,
+            "base_branch": "main",
         },
     )
     assert r.status_code == 404
@@ -475,6 +480,7 @@ def test_save_section_non_owner_member_is_403(monkeypatch, pg_url, pg_session_fa
             "content": "## Methods\nmember tried to edit.\n",
             "base_commit_sha": base_commit,
             "base_section_sha": base_section,
+            "base_branch": "main",
         },
     )
     assert r.status_code == 403
@@ -505,6 +511,7 @@ def test_save_section_no_proposal_file_is_404(monkeypatch, pg_url, pg_session_fa
             "content": "## Methods\nbody.\n",
             "base_commit_sha": "0" * 40,
             "base_section_sha": "0" * 64,
+            "base_branch": "main",
         },
     )
     assert r.status_code == 404
@@ -539,6 +546,7 @@ def test_save_section_non_owner_no_proposal_is_403_not_404(
             "content": "## Methods\nbody.\n",
             "base_commit_sha": "0" * 40,
             "base_section_sha": "0" * 64,
+            "base_branch": "main",
         },
     )
     assert r.status_code == 403
@@ -576,6 +584,7 @@ def test_save_section_busy_is_retriable_429_with_message(
             "content": "## Methods\nrewritten body.\n",
             "base_commit_sha": base_commit,
             "base_section_sha": base_section,
+            "base_branch": "main",
         },
     )
     assert r.status_code == 429

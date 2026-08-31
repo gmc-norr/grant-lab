@@ -133,6 +133,7 @@ def test_blocked_save_section_refuses_and_leaves_git_untouched(pg_session_factor
                     base_commit_sha=head,
                     base_section_sha=base_sha,
                     workspaces_dir=str(tmp_path),
+                    base_branch=None,
                 )
                 out["r"] = "committed"
             except WorkspaceDeleted:

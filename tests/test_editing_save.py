@@ -19,6 +19,7 @@ from call_manager.db.models import (
 from call_manager.proposal_assist.artifacts import Artifact
 from call_manager.proposal_assist.citations.gitio import _git_env, current_head
 from call_manager.proposal_assist.editing.save import (
+    BranchMismatchError,
     SaveResult,
     SectionStructureError,
     SpecLockedError,
@@ -74,6 +75,7 @@ def test_happy_path_save(pg_session_factory, tmp_path):
             base_commit_sha=head,
             base_section_sha=_section_sha(repo, 1),
             workspaces_dir=tmp_path,
+            base_branch=None,
         )
         s.commit()
 
@@ -126,6 +128,7 @@ def test_turn_in_flight_no_longer_blocks_save(pg_session_factory, tmp_path):
             base_commit_sha=head,
             base_section_sha=_section_sha(repo, 1),
             workspaces_dir=tmp_path,
+            base_branch=None,
         )
         assert result.commit_sha  # no TurnInFlightError raised
 
@@ -154,6 +157,7 @@ def test_stale_section_rejected_but_unrelated_head_move_allowed(pg_session_facto
             base_commit_sha=old_head,
             base_section_sha=old_s1,
             workspaces_dir=tmp_path,
+            base_branch=None,
         )
         s.commit()
         assert res.changed is True
@@ -171,40 +175,33 @@ def test_stale_section_rejected_but_unrelated_head_move_allowed(pg_session_facto
                 base_commit_sha=old_head,
                 base_section_sha=old_s2,
                 workspaces_dir=tmp_path,
+                base_branch=None,
             )
         s.rollback()
 
 
-def test_KNOWN_DEFECT_a_form_loaded_on_another_branch_still_writes_here(
-    pg_session_factory, tmp_path
-):
-    """PINS A DEFECT. This test passing is the bug; it should be inverted when fixed.
+def test_a_form_loaded_on_another_branch_cannot_write_here(pg_session_factory, tmp_path):
+    """A save carries the branch it was loaded from, and is refused if it moved.
 
-    A save must carry the branch it was loaded from, or it cannot be judged.
     `test_stale_section_rejected_but_unrelated_head_move_allowed` above pins the
     intended SAME-BRANCH rule: HEAD may move as long as THIS section's bytes did
-    not. Across branches that rule is wrong. A branch made from HEAD has every
-    section byte-identical, so `live.sha == base_section_sha` holds on the
-    TARGET and the AND at save.py:235 never fires -- the source branch's text
-    lands on the target branch's file. branches.py step 7 says byte-identical
-    sections are "the normal case right after branching".
+    not. Across branches that rule is wrong, and the two sha assertions below say
+    why in the strongest form available: the head guard fires, the section guard
+    does NOT, and because save.py's stale check is an AND that combination is a
+    pass. A branch made from HEAD has every section byte-identical -- branches.py
+    step 7 calls that the normal case right after branching -- so the shas alone
+    can never see this. Measured 2026-09-01: before `base_branch` existed, this
+    exact call succeeded and put the source branch's text in the target branch's
+    proposal.md, beside that branch's own content.
 
-    The client cannot catch it either: `ArtifactSectionEditor.onSave` writes the
-    result into `qc.setQueryData(["draft", id])`, a cache key with no branch in
-    it, so the leaked text is painted under the target branch's name.
-
-    Asserted POSITIVELY rather than as an xfail on purpose: an xfail is satisfied
-    by any failure, including a different exception, so it would not prove the
-    write actually happened. Measured 2026-09-01 -- it does.
-
-    When the guard learns about branches this test goes red. That is the point:
-    replace its body with `pytest.raises(StaleSectionError)` and drop the
-    KNOWN_DEFECT prefix.
+    The DB column is moved as well as the worktree, because that is what a real
+    switch does and it is the column the guard reads.
     """
     with pg_session_factory() as s:
         ws, user = _ws(s)
         repo = _init_repo(tmp_path, ws.id)
         env = _git_env()
+        source_branch = ws.current_branch
         source_head = current_head(repo)
         section1_sha = _section_sha(repo, 1)  # what the edit form was rendered from
 
@@ -216,24 +213,31 @@ def test_KNOWN_DEFECT_a_form_loaded_on_another_branch_still_writes_here(
         subprocess.run(
             ["git", "commit", "-aqm", "other branch edit"], cwd=repo, check=True, env=env
         )
+        ws.current_branch = "other"
+        s.flush()
         assert current_head(repo) != source_head  # the head guard WILL fire
         assert _section_sha(repo, 1) == section1_sha  # ...and the section guard will not
 
-        res = save_section(
-            session=s,
-            workspace=ws,
-            stamp=stamp_for_workspace(ws),
-            user_id=user.id,
-            section_index=1,
-            new_text="## Background\nLEAKED FROM THE SOURCE BRANCH\n",
-            base_commit_sha=source_head,
-            base_section_sha=section1_sha,
-            workspaces_dir=tmp_path,
-        )
-        s.commit()
-        assert res.changed is True
-        assert "LEAKED FROM THE SOURCE BRANCH" in (repo / "proposal.md").read_text()
-        assert "other-branch aims" in (repo / "proposal.md").read_text()
+        with pytest.raises(BranchMismatchError) as caught:
+            save_section(
+                session=s,
+                workspace=ws,
+                stamp=stamp_for_workspace(ws),
+                user_id=user.id,
+                section_index=1,
+                new_text="## Background\nLEAKED FROM THE SOURCE BRANCH\n",
+                base_commit_sha=source_head,
+                base_section_sha=section1_sha,
+                workspaces_dir=tmp_path,
+                base_branch=source_branch,
+            )
+        # Both names, because the UI shows both.
+        assert caught.value.base_branch == source_branch
+        assert caught.value.current_branch == "other"
+        # Refused BEFORE any git side-effect: the target branch is untouched.
+        text = (repo / "proposal.md").read_text()
+        assert "LEAKED FROM THE SOURCE BRANCH" not in text
+        assert "other-branch aims" in text
         s.rollback()
 
 
@@ -252,6 +256,7 @@ def test_tier1_flags_bare_marker_and_missing_newline_glue(pg_session_factory, tm
             base_commit_sha=head,
             base_section_sha=_section_sha(repo, 1),
             workspaces_dir=tmp_path,
+            base_branch=None,
         )
         s.commit()
 
@@ -280,6 +285,7 @@ def test_no_change_save_short_circuits(pg_session_factory, tmp_path):
             base_commit_sha=head,
             base_section_sha=live.sha,
             workspaces_dir=tmp_path,
+            base_branch=None,
         )
         s.commit()
 
@@ -312,6 +318,7 @@ def test_heading_deletion_rejected_middle_section(pg_session_factory, tmp_path):
                 base_commit_sha=head,
                 base_section_sha=_section_sha(repo, 1),
                 workspaces_dir=tmp_path,
+                base_branch=None,
             )
         # nothing committed, nothing enqueued
         assert current_head(repo) == head
@@ -335,6 +342,7 @@ def test_preamble_gaining_heading_rejected(pg_session_factory, tmp_path):
                 base_commit_sha=head,
                 base_section_sha=_section_sha(repo, 0),
                 workspaces_dir=tmp_path,
+                base_branch=None,
             )
 
 
@@ -352,6 +360,7 @@ def test_heading_rename_allowed(pg_session_factory, tmp_path):
             base_commit_sha=current_head(repo),
             base_section_sha=_section_sha(repo, 1),
             workspaces_dir=tmp_path,
+            base_branch=None,
         )
         s.commit()
         assert result.changed is True
@@ -372,6 +381,7 @@ def test_extra_heading_split_allowed(pg_session_factory, tmp_path):
             base_commit_sha=current_head(repo),
             base_section_sha=_section_sha(repo, 1),
             workspaces_dir=tmp_path,
+            base_branch=None,
         )
         s.commit()
         assert result.changed is True and result.job_enqueued is True
@@ -409,6 +419,7 @@ def test_save_section_blocks_locked_spec(pg_session_factory, tmp_path):
                 base_section_sha="0" * 64,
                 workspaces_dir=tmp_path,
                 artifact=Artifact.SPEC,
+                base_branch=None,
             )
 
 
@@ -431,6 +442,7 @@ def test_save_section_allows_draft_while_spec_locked(pg_session_factory, tmp_pat
             base_section_sha=_section_sha(repo, 1),
             workspaces_dir=tmp_path,
             artifact=Artifact.DRAFT,
+            base_branch=None,
         )
         s.commit()
         assert draft.changed is True  # draft is unaffected by a spec lock

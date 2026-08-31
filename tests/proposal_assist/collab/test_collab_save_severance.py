@@ -44,6 +44,7 @@ def _save_payload(repo, fname="proposal.md", index=1, content="## Body\nrewritte
         "content": content,
         "base_commit_sha": current_head(repo),
         "base_section_sha": sec.sha,
+        "base_branch": "main",
     }
 
 

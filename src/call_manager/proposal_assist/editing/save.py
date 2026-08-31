@@ -64,6 +64,26 @@ class SpecLockedError(RuntimeError):
     refused until it is unlocked. Web routes map this to 409."""
 
 
+class BranchMismatchError(RuntimeError):
+    """The edit form was rendered on one branch and the workspace is now on
+    another. The write is refused: the section the user edited is not the
+    section this branch holds, whatever their shas say.
+
+    Deliberately NOT a StaleSectionError. That one means "reload and re-apply",
+    and offers "keep editing" — neither answer exists here, because the document
+    the user was editing is no longer on screen at all. Web routes map this to
+    409 with its own detail so the UI can name both branches.
+    """
+
+    def __init__(self, base_branch: str, current_branch: str) -> None:
+        self.base_branch = base_branch
+        self.current_branch = current_branch
+        super().__init__(
+            f"this edit was made on branch {base_branch!r}; "
+            f"the workspace is now on {current_branch!r}"
+        )
+
+
 @dataclass
 class SaveResult:
     commit_sha: str
@@ -152,6 +172,7 @@ def save_section(
     new_text: str,
     base_commit_sha: str,
     base_section_sha: str,
+    base_branch: str | None,
     workspaces_dir: Path | str,
     artifact: Artifact = Artifact.DRAFT,
 ) -> SaveResult:
@@ -169,13 +190,17 @@ def save_section(
     transition that committed after the check aborts this save before any effect
     (WorkspaceDeleted / WorkspaceGenerationStale, pre-commit).
 
+    ``base_branch`` is the branch the edit form was rendered on, or None when
+    there was no form (the agent-proposal path). It has no default: every caller
+    must decide, because a silently omitted branch is a silently skipped check.
+
     Caller owns the transaction: rows are added but NOT committed here, and
     the commit mutex is released by the caller's COMMIT/ROLLBACK. Raises
     CommitMutexTimeout, WorkspaceDeleted, WorkspaceGenerationStale (all three
-    pre-commit — no git side-effect), StaleSectionError, SectionStructureError
-    (pre-commit — no git side-effect), IndexError (section_index out of
-    range), GitCommitError, SpecLockedError (pre-commit — the spec
-    artifact is locked).
+    pre-commit — no git side-effect), BranchMismatchError, StaleSectionError,
+    SectionStructureError (pre-commit — no git side-effect), IndexError
+    (section_index out of range), GitCommitError, SpecLockedError (pre-commit
+    — the spec artifact is locked).
 
     SectionStructureError is raised when the first line of ``new_text`` is
     not an H2 heading for a non-preamble section, or IS an H2 heading for
@@ -201,6 +226,29 @@ def save_section(
     # route maps CollabSeveranceConflict to the same 409 as its pre-mutex guard.
     # No-op when the flag is off / kill-switch armed (flag-off is byte-for-byte).
     raise_if_collab_severed(session, workspace_id=workspace.id, artifact=str(artifact))
+
+    # 2. Branch identity, refreshed UNDER the mutex.
+    #
+    # The generation fence does NOT cover this. A branch switch does bump the
+    # generation, but this route mints its stamp at request time, so a request
+    # that ARRIVES after the switch committed carries the NEW generation and
+    # takes the mutex cleanly.
+    #
+    # And the stale-form check at step 4 cannot see it either: it is an AND, and
+    # a branch made from HEAD has every section byte-identical -- branches.py
+    # step 7 calls that the normal case right after branching -- so
+    # `live.sha == base_section_sha` holds on the TARGET and nothing fires. The
+    # source branch's text then lands on the target branch's file.
+    #
+    # `base_branch=None` means "there was no edit form": the agent-proposal path
+    # in proposals/accepting.py, which has no rendered snapshot to compare and is
+    # fenced by the generation instead. It is passed explicitly at those call
+    # sites so that omitting it is impossible rather than merely unlikely --
+    # this parameter has no default.
+    if base_branch is not None:
+        session.refresh(workspace, ["current_branch"])
+        if workspace.current_branch != base_branch:
+            raise BranchMismatchError(base_branch, workspace.current_branch)
 
     # Spec-lock guard: a lock may have committed while we waited on the mutex,
     # so re-read the row under the lock before deciding. Gated on SPEC so the

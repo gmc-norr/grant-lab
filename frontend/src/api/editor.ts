@@ -8,6 +8,7 @@ export type SaveSectionVars = {
   content: string;
   base_commit_sha: string;
   base_section_sha: string;
+  base_branch: string;
 };
 
 /** GET /api/workspaces/{id}/draft — one read for Outline + editor + pills. */
@@ -40,6 +41,7 @@ export function useSaveSection(id: string) {
             content: vars.content,
             base_commit_sha: vars.base_commit_sha,
             base_section_sha: vars.base_section_sha,
+            base_branch: vars.base_branch,
           },
         }),
       ),
@@ -52,6 +54,7 @@ export type SaveSpecSectionVars = {
   content: string;
   base_commit_sha: string;
   base_section_sha: string;
+  base_branch: string;
 };
 
 /** GET /api/workspaces/{id}/spec — outline + section bytes, citation-free. */
@@ -81,6 +84,7 @@ export function useSaveSpecSection(id: string) {
             content: vars.content,
             base_commit_sha: vars.base_commit_sha,
             base_section_sha: vars.base_section_sha,
+            base_branch: vars.base_branch,
           },
         }),
       ),

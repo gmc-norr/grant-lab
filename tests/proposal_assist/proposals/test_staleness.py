@@ -67,6 +67,7 @@ def test_refresh_marks_moved_section_stale_only(pg_session_factory, tmp_path):
             base_commit_sha=head,
             base_section_sha=split_sections(content)[1].sha,
             workspaces_dir=str(tmp_path),
+            base_branch=None,
         )
         s.flush()
 

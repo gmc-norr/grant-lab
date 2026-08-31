@@ -22,6 +22,9 @@ type SaveVars = {
   content: string;
   base_commit_sha: string;
   base_section_sha: string;
+  /** The branch the form was rendered on. The server refuses the write if the
+   *  workspace has moved since, which the shas alone cannot detect. */
+  base_branch: string;
 };
 type SaveResultLike = { head: string; section_sha: string };
 
@@ -86,6 +89,10 @@ export function ArtifactSectionEditor({
     null,
   );
   const [composerOpen, setComposerOpen] = useState(false);
+  /** A save the server refused because the branch moved, plus the text it
+   *  refused. Survives the branch reset below on purpose: the switch has
+   *  already wiped the buffers, so this is the only remaining copy. */
+  const [rejectedEdit, setRejectedEdit] = useState<{ message: string; text: string } | null>(null);
   const previousBranch = useRef(branch);
   const branchChanged = previousBranch.current !== branch;
   const peek = useCitationSource(workspaceId, peekEv);
@@ -103,6 +110,10 @@ export function ArtifactSectionEditor({
     setPeekEv(null);
     setPinnedEv(null);
     setView("section");
+    // `rejectedEdit` is deliberately NOT reset here. It exists precisely because
+    // a branch change threw the user's text away, and this effect is the thing
+    // that threw it. Clearing it would race the refused save and lose the only
+    // copy; the user dismisses it themselves.
   }, [branch]);
 
   const byIndex = useMemo(() => new Map(sections.map((s) => [s.index, s])), [sections]);
@@ -197,6 +208,7 @@ export function ArtifactSectionEditor({
         content,
         base_commit_sha: head,
         base_section_sha: activeSection.sha,
+        base_branch: branch,
       });
       // The branch can have moved while this was in flight. `queryKey` carries
       // no branch, so one cache entry is shared by every branch, and writing
@@ -231,6 +243,17 @@ export function ArtifactSectionEditor({
       });
       setStaleSection(null);
     } catch (e) {
+      // Its own arm, ahead of "conflict": both are 409s and they need opposite
+      // answers. A stale section says "reload and re-apply" and the text is
+      // still on screen. A branch mismatch has no reload that helps -- the
+      // switch has already replaced the document under the editor and wiped the
+      // buffers -- so the ONLY copy of what the user typed is `content`, held in
+      // this closure. Hand it back to them rather than dropping it.
+      if (e instanceof ApiError && e.code === "branch_mismatch") {
+        setRejectedEdit({ message: saveErrorMessage(e), text: content });
+        setStaleSection(null);
+        return;
+      }
       if (e instanceof ApiError && e.code === "conflict") {
         setStaleSection(index);
         return;
@@ -268,6 +291,29 @@ export function ArtifactSectionEditor({
                   Keep editing
                 </Button>
               </Text>
+            )}
+
+            {/* Not a variant of the stale-section prompt: there is no "reload"
+                that helps, because the document this text belongs to is on
+                another branch. Show what happened and hand the text back. */}
+            {rejectedEdit !== null && (
+              <Box role="alert" mb="xs">
+                <Text c="red" size="sm">
+                  {rejectedEdit.message} Copy anything you need — switching branch
+                  replaced the editor's contents.{" "}
+                  <Button size="xs" variant="subtle" onClick={() => setRejectedEdit(null)}>
+                    Dismiss
+                  </Button>
+                </Text>
+                <Text
+                  component="pre"
+                  size="xs"
+                  aria-label="the edit that was not saved"
+                  className={styles.rejectedEdit}
+                >
+                  {rejectedEdit.text}
+                </Text>
+              </Box>
             )}
 
             {saveError !== null && (

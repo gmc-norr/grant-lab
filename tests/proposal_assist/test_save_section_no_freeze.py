@@ -45,5 +45,6 @@ def test_save_section_succeeds_while_turn_in_flight(pg_session_factory, tmp_path
             base_commit_sha=head,
             base_section_sha=sec_sha,
             workspaces_dir=str(tmp_path),
+            base_branch=None,
         )
         assert result.commit_sha  # no TurnInFlightError raised

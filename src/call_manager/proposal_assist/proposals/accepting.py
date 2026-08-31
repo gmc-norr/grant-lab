@@ -96,6 +96,11 @@ def accept_proposed_change(
                 new_text=pc.payload["new_text"],
                 base_commit_sha=pc.base_commit_sha,
                 base_section_sha=pc.base_section_sha,
+                # No edit form: a ProposedChange is not rendered on a branch, so
+                # there is no branch to compare against. This path is fenced by
+                # the generation carried in `stamp` instead. Passed explicitly
+                # because save_section gives this parameter no default.
+                base_branch=None,
                 workspaces_dir=workspaces_dir,
                 artifact=Artifact.SPEC,
             )
@@ -129,6 +134,11 @@ def accept_proposed_change(
                 new_text=pc.payload["new_text"],
                 base_commit_sha=pc.base_commit_sha,
                 base_section_sha=pc.base_section_sha,
+                # No edit form: a ProposedChange is not rendered on a branch, so
+                # there is no branch to compare against. This path is fenced by
+                # the generation carried in `stamp` instead. Passed explicitly
+                # because save_section gives this parameter no default.
+                base_branch=None,
                 workspaces_dir=workspaces_dir,
             )
         except StaleSectionError:

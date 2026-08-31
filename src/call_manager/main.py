@@ -37,6 +37,7 @@ from call_manager.proposal_assist.drafting.locking import (
     WorkspaceDeleted,
     is_lock_timeout,
 )
+from call_manager.proposal_assist.editing.save import BranchMismatchError
 from call_manager.proposal_assist.ports.errors import WorkspaceGenerationStale
 from call_manager.proposal_assist.references.admission import IngestLimiter
 from call_manager.proposal_assist.web import collab_checkpoint, collab_ws
@@ -535,6 +536,27 @@ def create_app() -> FastAPI:
         if api_request(request):
             return api_error(404, "workspace_deleted", DELETED_ERROR_MESSAGE)
         return JSONResponse(status_code=404, content={"detail": DELETED_ERROR_MESSAGE})
+
+    @app.exception_handler(BranchMismatchError)
+    async def _branch_mismatch(request: Request, exc: BranchMismatchError):
+        # A save whose edit form was rendered on a different branch. Raised by
+        # save_section BEFORE any git or row work, so nothing was mutated — the
+        # route's `with sf() as session` closes and rolls back on the way out,
+        # which is why this propagates instead of being caught per-route (same
+        # shape as WorkspaceDeleted above).
+        #
+        # Its OWN code, not the generic status-derived "conflict": the client has
+        # to tell this apart from a stale section, whose answer is "reload and
+        # re-apply". There is no reload that helps here — the document the user
+        # was editing is on another branch — so the UI names both branches and
+        # keeps the text on screen instead of offering to discard it.
+        message = (
+            f"this edit belongs to branch '{exc.base_branch}'; the workspace is "
+            f"now on '{exc.current_branch}' — it was not saved"
+        )
+        if api_request(request):
+            return api_error(409, "branch_mismatch", message)
+        return JSONResponse(status_code=409, content={"detail": message})
 
     @app.exception_handler(WorkspaceRetired)
     async def _workspace_retired(request: Request, exc: WorkspaceRetired):

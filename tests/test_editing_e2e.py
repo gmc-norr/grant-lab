@@ -59,6 +59,7 @@ def _save(session, ws, user_id, repo, tmp_path, *, section_index, new_text):
         base_commit_sha=current_head(repo),
         base_section_sha=secs[section_index].sha,
         workspaces_dir=tmp_path,
+        base_branch=None,
     )
 
 

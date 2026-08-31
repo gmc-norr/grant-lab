@@ -156,6 +156,11 @@ class SaveSectionIn(BaseModel):
     content: str
     base_commit_sha: str
     base_section_sha: str
+    # REQUIRED, not `str | None = None`: an optional branch is a silently
+    # skipped check, and this field exists precisely because the other two
+    # cannot tell a branch switch from an ordinary head move. The SPA ships with
+    # the server, so a 422 on a client that omits it is the correct answer.
+    base_branch: str
 
 
 class SaveResultOut(BaseModel):
@@ -422,6 +427,7 @@ def post_save_spec_section(
                 new_text=body.content,
                 base_commit_sha=body.base_commit_sha,
                 base_section_sha=body.base_section_sha,
+                base_branch=body.base_branch,
                 workspaces_dir=settings.workspaces_dir,
                 artifact=Artifact.SPEC,
             )
@@ -992,6 +998,7 @@ def post_save_section(
                 new_text=body.content,
                 base_commit_sha=body.base_commit_sha,
                 base_section_sha=body.base_section_sha,
+                base_branch=body.base_branch,
                 workspaces_dir=settings.workspaces_dir,
             )
             session.commit()

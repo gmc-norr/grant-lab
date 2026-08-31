@@ -73,6 +73,7 @@ def test_collab_modify_relocates_against_live_room(
                 "section_index": 1,
                 "base_commit_sha": "0" * 40,
                 "base_section_sha": "stale" * 8,  # git sha the room is ahead of
+                "base_branch": "main",
                 "anchor": "diagnostic",           # present in LIVE, absent from git HEAD
                 "from_offset": 999,               # bogus client offsets — must be recomputed
                 "to_offset": 1009,
