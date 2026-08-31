@@ -423,7 +423,8 @@ def delete_workspace_branch(
     # interleaving into the correct BranchInUse refusal with the ref intact.
     row = session.get(Workspace, workspace_id, populate_existing=True)
     if row is not None and row.root_branch_id is not None:
-        # §7.3: the branch the root pointer names cannot be deleted — its worktree
+        # WORKTREES §7.3 (2026-08-30-per-branch-worktrees-and-rooms-design.md):
+        # the branch the root pointer names cannot be deleted — its worktree
         # IS `repo/`. The database enforces this too (fk_workspaces_root_branch_id
         # is ON DELETE RESTRICT), but an IntegrityError is not an error a user can
         # read. Raise the readable one first and leave RESTRICT as the backstop.

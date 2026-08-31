@@ -714,7 +714,7 @@ class Workspace(Base):
     #: harmless here — nothing resolves a path through this column yet — and S2
     #: checks the root back out before it attaches any worktree.
     #:
-    #: Nullable in TWO states, not one. A workspace still in setup has no repo and
+    #: Nullable in several legitimate states. A workspace still in setup has no repo and
     #: so no branch to point at — and a repo on a DETACHED HEAD has refs but no
     #: knowable root, so `backfill_branch_entities` leaves the pointer alone rather
     #: than guessing which survivor is the root
@@ -2164,12 +2164,8 @@ class LlmSpend(Base):
             "'uncited_claims','citation')",
             name="ck_llm_spend_kind",
         ),
-        CheckConstraint(
-            "status IN ('ok','failed','timeout')", name="ck_llm_spend_status"
-        ),
-        CheckConstraint(
-            "tokens_in >= 0 AND tokens_out >= 0", name="ck_llm_spend_tokens_nonneg"
-        ),
+        CheckConstraint("status IN ('ok','failed','timeout')", name="ck_llm_spend_status"),
+        CheckConstraint("tokens_in >= 0 AND tokens_out >= 0", name="ck_llm_spend_tokens_nonneg"),
         # The two reads the caps make: whole-instance by day, and per-workspace
         # by day. Both filter on created_at first.
         Index("ix_llm_spend_created", "created_at"),

@@ -489,8 +489,10 @@ def test_reconciling_survives_the_root_branchs_ref_being_deleted(pg_session_fact
     ONE transaction for every workspace, so that would abort the whole batch and
     discard every workspace already reconciled.
 
-    Not a contrived state: today's delete route guards only `current_branch`
-    (`branches.py:348`), so switching off `main` and deleting it is allowed.
+    Not a contrived state — though no longer via the delete route, which this
+    same branch gave a root guard. The reachable producers are `git branch -D` run
+    outside the app, and a restore whose database snapshot is newer than the repo
+    volume.
 
     The second workspace is the point. It is reconciled BEFORE the broken one in
     the same call, so if the delete raises, its rows roll back with everything

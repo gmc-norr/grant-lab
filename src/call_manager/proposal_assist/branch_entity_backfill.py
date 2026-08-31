@@ -4,6 +4,16 @@ A separate module, not migration-local, for the same reason `branch_backfill.py`
 is: the migration is untestable in place, and this is the half that can be wrong.
 The migration imports it.
 
+SECTION CITATIONS IN THIS FILE. Two specs are in play and their numbering
+COLLIDES — `§3.1` is "Creating a branch" in one and "The chat is a document" in
+the other — so every reference below names its spec. `WORKTREES` is
+`docs/superpowers/specs/2026-08-30-per-branch-worktrees-and-rooms-design.md`.
+`BRANCHES` is `2026-08-29-workspace-branches-design.md`, PRUNED from the tree in
+the 2026-08-30 cleanup; recover it with
+`git log --all --diff-filter=D --name-only --format= -- 'docs/superpowers/**'`.
+A bare `§4.1` resolves against WORKTREES, where it is "What a full copy actually
+costs" — the wrong section — so bare numbers are not safe here.
+
 Written as a RECONCILER rather than a one-shot backfill because rows and refs
 cannot be kept atomic — `git branch` is not transactional, so a commit that fails
 after the git call leaves a ref with no row or a row with no ref. Running this
@@ -87,22 +97,31 @@ def backfill_branch_entities(
     refs were read successfully — an unreadable repo skips the whole workspace, so
     a transient git failure can never be mistaken for "every branch was deleted".
 
-    **The root pointer follows git HEAD.** §7.3 founds the root on what `repo/`
-    actually is; a pointer founded on `current_branch` could name a tree nobody
-    has. A detached HEAD leaves the pointer alone — the rows are still written,
-    because the refs exist regardless of what HEAD points at.
+    **The root pointer is FOUNDED from git HEAD, never MOVED.** WORKTREES §7.3
+    founds the root on what `repo/` actually is; a pointer founded on
+    `current_branch` could name a tree nobody has. But the assignment happens ONLY
+    when the pointer is VACANT — never set, or naming a row whose ref has just
+    vanished. A reconciler that re-derived it from HEAD every run would hand the
+    power to move the root to whoever switched last, and §7.3 gives that to
+    promote alone. A detached HEAD leaves the pointer alone; the rows are still
+    written, because the refs exist regardless of what HEAD points at.
 
     **`last_sdk_session_id` follows `workspaces.current_branch`,** not HEAD
-    (spec §8 S1 step 1). It is one hosted conversation and it belongs to the
-    branch the *user* was on; §4.1 makes the database the source of truth for
+    (WORKTREES §8 S1 step 1). It is one hosted conversation and it belongs to the
+    branch the *user* was on; BRANCHES §4.1 ("The database, not git HEAD, says
+    which branch a workspace is on") makes the database the source of truth for
     that. Copying it to every branch would let two branches resume the same remote
-    session (§3.1). The workspace column is left untouched —
-    `turns/processor.py:389` is still its only reader, and it is dropped in S4.
+    session (WORKTREES §3.1, "The chat is a document, not a special case").
+
+    The workspace column is left untouched. It has TWO live readers, not one:
+    `turns/processor.py:389` and `drafting/controller.py:159`, which reads it to
+    build `resume_session_id`. Both are dropped in S4.
 
     Idempotent: a second run over an unchanged repo returns `created=0,
-    deleted=0`, and re-sets each root pointer to the value it already had. A
-    migration can be re-run against a partially-migrated database, and the unique
-    key would otherwise turn that into a hard failure.
+    deleted=0, rooted=0` and LEAVES each root pointer alone — it does not re-set
+    it, because a pointer that is already set is not vacant. A migration can be
+    re-run against a partially-migrated database, and the unique key would
+    otherwise turn that into a hard failure.
 
     Skipped without raising: no repo directory, or a repo git cannot read. One bad
     workspace out of 500 must not leave the other 499 half-founded — but the count
@@ -179,8 +198,11 @@ def backfill_branch_entities(
         # the workspace still points at raises ForeignKeyViolation — and because
         # this function holds ONE transaction for every workspace, that aborts the
         # whole batch and discards every workspace already reconciled. Reproduced:
-        # switch off `main`, `git branch -D main` (today's delete route allows it,
-        # `branches.py:348` guards only `current_branch`), then reconcile.
+        # switch off `main`, destroy its ref, then reconcile. NOT via the delete
+        # route — this same branch gave `delete_workspace_branch` a root guard, so
+        # the app refuses it. The reachable producers are `git branch -D` run
+        # outside the app, and a restore whose database snapshot is newer than the
+        # repo volume.
         #
         # RESTRICT did its job — it refused to let a caller silently orphan the
         # root pointer. This function was that caller.
@@ -233,7 +255,8 @@ def backfill_branch_entities(
         # `current_branch` and deliberately does not touch
         # `workspaces.last_sdk_session_id`, so a reconcile, a switch, and a second
         # reconcile used to leave the SAME id on both branches — the exact thing
-        # §3.1 forbids, because two branches would then resume one remote session.
+        # WORKTREES §3.1 forbids, because two branches would then resume one
+        # remote session.
         # Reproduced 2026-08-31: {'feature': 'sess-X', 'main': 'sess-X'}.
         #
         # `is_distinct_from`, not `!=`: with a NULL `current_branch`, `name != NULL`
@@ -260,7 +283,10 @@ def backfill_branch_entities(
                 "event": "branch_entity_reconciled",
                 "workspace_id": str(wid),
                 "refs": len(names),
-                "root": head,
+                # git HEAD, which is only the root when the pointer was vacant
+                # this run. Named for what it IS — calling it "root" made an
+                # operator reading the log think the pointer had moved.
+                "head": head,
             },
         )
     return BackfillResult(
