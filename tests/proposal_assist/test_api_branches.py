@@ -289,6 +289,145 @@ def test_create_from_an_unknown_sha_is_404(
     assert r.status_code == 404, r.text
 
 
+def test_the_draft_reports_the_branch_it_is_actually_on(
+    client_authed_owner, current_user, pg_session_factory, _app
+):
+    """`branch` must come from the workspace row, not a constant.
+
+    Every other assertion of this field in the suite compares it to "main" --
+    which is BOTH the server_default of `workspaces.current_branch`
+    (models.py:704) and the branch `init_workspace_repo` creates. So replacing
+    `branch=branch` with `branch="main"` at all four DraftOut/SpecOut
+    construction sites passes every one of them. Only a workspace that is NOT on
+    the default can tell a real read from a hardcoded string.
+    """
+    with pg_session_factory() as s:
+        wid = _seed(s, _app, current_user)
+        s.commit()
+
+    r = client_authed_owner.post(f"/api/workspaces/{wid}/branches", json={"name": "v2"})
+    assert r.status_code == 201, r.text
+    r = client_authed_owner.post(f"/api/workspaces/{wid}/branches/switch", json={"name": "v2"})
+    assert r.status_code == 200, r.text
+
+    r = client_authed_owner.get(f"/api/workspaces/{wid}/draft")
+    assert r.status_code == 200, r.text
+    assert r.json()["branch"] == "v2"
+
+
+def test_the_spec_reports_the_branch_it_is_actually_on(
+    client_authed_owner, current_user, pg_session_factory, _app
+):
+    """The same gate for SpecOut, which has three construction sites of its own.
+
+    The spec file is committed BEFORE the branch is created, so it exists on
+    both branches and GET /spec answers 200 after the switch.
+    """
+    import subprocess
+
+    with pg_session_factory() as s:
+        wid = _seed(s, _app, current_user)
+        s.commit()
+    repo = workspace_repo_dir(_app.state.settings.workspaces_dir, wid)
+    (repo / "proposal-spec.md").write_text("# Spec\n\nbody\n", encoding="utf-8")
+    for argv in (["add", "proposal-spec.md"], ["commit", "-q", "-m", "spec"]):
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t", *argv], cwd=repo, check=True
+        )
+
+    r = client_authed_owner.post(f"/api/workspaces/{wid}/branches", json={"name": "v2"})
+    assert r.status_code == 201, r.text
+    r = client_authed_owner.post(f"/api/workspaces/{wid}/branches/switch", json={"name": "v2"})
+    assert r.status_code == 200, r.text
+
+    r = client_authed_owner.get(f"/api/workspaces/{wid}/spec")
+    assert r.status_code == 200, r.text
+    assert r.json()["branch"] == "v2"
+
+
+def test_KNOWN_DEFECT_the_worktree_changes_before_the_branch_rename_commits(
+    client_authed_owner, current_user, pg_session_factory, _app, monkeypatch
+):
+    """PINS A DEFECT. This test passing is the bug; invert it when fixed.
+
+    `switch_branch` sets `workspaces.current_branch` (branches.py step 8) and
+    then runs `checkout_branch` (step 9) INSIDE the transaction; the commit
+    happens afterwards, in `switch_branch_route` (web/branches.py:212). So
+    between those two lines the git worktree already holds the TARGET branch's
+    bytes while every other connection still reads the SOURCE branch's name.
+
+    `get_draft` (workspaces.py:273-286) reads exactly that pair -- `branch` from
+    its own session, `head` and the file from the worktree -- and takes no
+    mutex, so it can answer with the old branch name and the new branch's
+    content. The client then sees `branch` unchanged, so the new `branchChanged`
+    guard reads false, buffers and undo survive, and the other branch's text is
+    rendered as if it were this one's. That is the leak `branch` was added to
+    prevent, in the one ordering it does not cover.
+
+    Rather than race a second HTTP request against the switch (nested TestClient
+    portals deadlock), this peeks at the seam: a fresh session opened at the
+    exact instant between step 9 and the commit, reading the same two sources
+    `get_draft` reads.
+
+    Closing the window -- committing before the checkout, or making the read
+    take the commit mutex -- turns the assertions below red.
+    """
+    import subprocess
+
+    from call_manager.proposal_assist import branches as branches_mod
+    from call_manager.proposal_assist.citations.gitio import current_head
+
+    with pg_session_factory() as s:
+        wid = _seed(s, _app, current_user)
+        s.commit()
+    repo = workspace_repo_dir(_app.state.settings.workspaces_dir, wid)
+    text_v2 = (repo / "proposal.md").read_text()
+    older = current_head(repo)
+
+    # main moves on, so the two branches hold DIFFERENT bytes and a stale read
+    # is visible rather than a coincidence.
+    text_main = "# Aims\n\nmain moved on\n"
+    (repo / "proposal.md").write_text(text_main, encoding="utf-8")
+    for argv in (["add", "proposal.md"], ["commit", "-q", "-m", "main moves"]):
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t", *argv], cwd=repo, check=True
+        )
+    assert (repo / "proposal.md").read_text() != text_v2
+
+    r = client_authed_owner.post(
+        f"/api/workspaces/{wid}/branches", json={"name": "v2", "from_sha": older}
+    )
+    assert r.status_code == 201, r.text
+
+    seen: dict[str, object] = {}
+    real_checkout = branches_mod.checkout_branch
+
+    def checkout_then_peek(repo_dir, name):
+        real_checkout(repo_dir, name)
+        # `_reconcile_head` (step 3) also checks out; only the step-9 call for
+        # the target is the window under test.
+        if name != "v2" or seen:
+            return
+        with pg_session_factory() as peek:
+            row = peek.get(Workspace, wid)
+            seen["branch"] = row.current_branch
+            seen["head"] = current_head(repo_dir)
+            seen["text"] = (repo_dir / "proposal.md").read_text()
+
+    monkeypatch.setattr(branches_mod, "checkout_branch", checkout_then_peek)
+
+    r = client_authed_owner.post(f"/api/workspaces/{wid}/branches/switch", json={"name": "v2"})
+    assert r.status_code == 200, r.text
+    assert seen, "the step-9 checkout never ran; the seam moved"
+
+    # The window: the name is still the source branch's...
+    assert seen["branch"] == "main"
+    # ...while the bytes and HEAD are already the target's.
+    assert seen["text"] == text_v2
+    assert seen["text"] != text_main
+    assert seen["head"] == older
+
+
 def test_the_switch_response_carries_real_tips_not_an_empty_map(
     client_authed_owner, current_user, pg_session_factory, _app
 ):

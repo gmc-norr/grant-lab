@@ -60,4 +60,39 @@ describe("useCollabDoc document identity", () => {
     expect(onDestroy).toHaveBeenCalledOnce();
     expect(FakeSocket.instances).toHaveLength(2);
   });
+
+  it("KNOWN GAP: every replacement builds a new socket, with no cap and no backoff", async () => {
+    // PINS A GAP. This test passing is the problem; invert it when bounded.
+    //
+    // collabProvider.ts:267-274 returns BEFORE scheduleReconnect(), so the 4409
+    // path skips both the exponential backoff and the maxReconnectAttempts
+    // ceiling (12) that bound every other close code. useCollabDoc then bumps
+    // documentGeneration, and the replacement provider connects inside its own
+    // constructor. A server that keeps answering 4409 -- repeated branch
+    // switches, or a generation that stays stale -- therefore gets one fresh
+    // Y.Doc and one fresh socket per round trip, with nothing counting or
+    // delaying them.
+    vi.stubGlobal("WebSocket", FakeSocket);
+    const { result } = renderHook(() =>
+      useCollabDoc({ workspaceId: "w", artifact: "draft", canWrite: true }),
+    );
+    await waitFor(() => expect(result.current.provider).not.toBeNull());
+
+    const ROUNDS = 20;
+    for (let i = 0; i < ROUNDS; i++) {
+      const socket = FakeSocket.instances[FakeSocket.instances.length - 1];
+      act(() => socket.drop(WS_DOCUMENT_REPLACED));
+      // Asserted every round, so a loop that silently stopped advancing would
+      // fail HERE rather than quietly satisfying the count below.
+      await waitFor(() =>
+        expect(FakeSocket.instances[FakeSocket.instances.length - 1]).not.toBe(socket),
+      );
+    }
+
+    // One socket per round plus the original: nothing ever stopped it.
+    expect(FakeSocket.instances).toHaveLength(ROUNDS + 1);
+    // And the status never reaches the terminal state maxReconnectAttempts
+    // produces on the 1013/1006 path, so the UI keeps promising a reconnect.
+    expect(result.current.status).not.toBe("offline-permanent");
+  });
 });

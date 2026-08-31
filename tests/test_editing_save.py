@@ -175,6 +175,68 @@ def test_stale_section_rejected_but_unrelated_head_move_allowed(pg_session_facto
         s.rollback()
 
 
+def test_KNOWN_DEFECT_a_form_loaded_on_another_branch_still_writes_here(
+    pg_session_factory, tmp_path
+):
+    """PINS A DEFECT. This test passing is the bug; it should be inverted when fixed.
+
+    A save must carry the branch it was loaded from, or it cannot be judged.
+    `test_stale_section_rejected_but_unrelated_head_move_allowed` above pins the
+    intended SAME-BRANCH rule: HEAD may move as long as THIS section's bytes did
+    not. Across branches that rule is wrong. A branch made from HEAD has every
+    section byte-identical, so `live.sha == base_section_sha` holds on the
+    TARGET and the AND at save.py:235 never fires -- the source branch's text
+    lands on the target branch's file. branches.py step 7 says byte-identical
+    sections are "the normal case right after branching".
+
+    The client cannot catch it either: `ArtifactSectionEditor.onSave` writes the
+    result into `qc.setQueryData(["draft", id])`, a cache key with no branch in
+    it, so the leaked text is painted under the target branch's name.
+
+    Asserted POSITIVELY rather than as an xfail on purpose: an xfail is satisfied
+    by any failure, including a different exception, so it would not prove the
+    write actually happened. Measured 2026-09-01 -- it does.
+
+    When the guard learns about branches this test goes red. That is the point:
+    replace its body with `pytest.raises(StaleSectionError)` and drop the
+    KNOWN_DEFECT prefix.
+    """
+    with pg_session_factory() as s:
+        ws, user = _ws(s)
+        repo = _init_repo(tmp_path, ws.id)
+        env = _git_env()
+        source_head = current_head(repo)
+        section1_sha = _section_sha(repo, 1)  # what the edit form was rendered from
+
+        # A branch off the same commit: every section byte-identical.
+        subprocess.run(["git", "checkout", "-q", "-b", "other"], cwd=repo, check=True, env=env)
+        # Move the TARGET's head by touching a DIFFERENT section, so the two
+        # branches have different heads while section 1 still matches on both.
+        (repo / "proposal.md").write_text(DOC.replace("aims\n", "other-branch aims\n"))
+        subprocess.run(
+            ["git", "commit", "-aqm", "other branch edit"], cwd=repo, check=True, env=env
+        )
+        assert current_head(repo) != source_head  # the head guard WILL fire
+        assert _section_sha(repo, 1) == section1_sha  # ...and the section guard will not
+
+        res = save_section(
+            session=s,
+            workspace=ws,
+            stamp=stamp_for_workspace(ws),
+            user_id=user.id,
+            section_index=1,
+            new_text="## Background\nLEAKED FROM THE SOURCE BRANCH\n",
+            base_commit_sha=source_head,
+            base_section_sha=section1_sha,
+            workspaces_dir=tmp_path,
+        )
+        s.commit()
+        assert res.changed is True
+        assert "LEAKED FROM THE SOURCE BRANCH" in (repo / "proposal.md").read_text()
+        assert "other-branch aims" in (repo / "proposal.md").read_text()
+        s.rollback()
+
+
 def test_tier1_flags_bare_marker_and_missing_newline_glue(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
         ws, user = _ws(s)
