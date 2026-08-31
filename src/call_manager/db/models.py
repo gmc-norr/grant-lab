@@ -721,9 +721,15 @@ class Workspace(Base):
     #: (`test_a_detached_head_still_founds_the_refs_but_no_root`).
     #:
     #: `tests/architecture/test_branch_entity_invariants.py` therefore pins the
-    #: narrower claim that actually holds: a repo whose HEAD is ATTACHED is never
-    #: left null. S2 must handle a rootless repo explicitly; it cannot assume a
-    #: repo directory implies a pointer.
+    #: narrower claim that actually holds, and the qualifier is AFTER A SUCCESSFUL
+    #: RECONCILE, not merely "has a repo": `backfill_branch_entities` leaves an
+    #: attached HEAD with a pointer. Between reconciles it can legitimately be
+    #: null with HEAD attached — `create_workspace_branch` clears it when it
+    #: de-orphans the row the pointer named, and a workspace the reconciler
+    #: SKIPPED (unreadable HEAD) never got one.
+    #:
+    #: S2 must therefore reconcile before it dereferences this, and handle a
+    #: rootless repo explicitly. A repo directory does not imply a pointer.
     root_branch_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         # use_alter: `workspaces` and `branches` reference each other (this

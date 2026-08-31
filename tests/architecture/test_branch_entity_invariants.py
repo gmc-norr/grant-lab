@@ -12,7 +12,7 @@ from sqlalchemy import select
 from call_manager.db.models import Branch, Workspace
 from call_manager.proposal_assist.branch_entity_backfill import backfill_branch_entities
 from call_manager.proposal_assist.branches import create_workspace_branch
-from call_manager.proposal_assist.citations.gitio import list_branches
+from call_manager.proposal_assist.citations.gitio import head_branch, list_branches
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from tests.proposal_assist.conftest import (
     init_workspace_repo,
@@ -57,14 +57,20 @@ def test_every_ref_has_a_row_after_backfill_and_after_a_create(pg_session_factor
     assert rows == set(list_branches(repo))
 
 
-def test_a_workspace_whose_head_is_attached_always_has_a_root_pointer(pg_session_factory, tmp_path):
+def test_reconciliation_leaves_an_attached_head_with_a_root_pointer(pg_session_factory, tmp_path):
     """S2 resolves `repo/` versus `worktrees/<id>/` through this pointer. A null
     one after backfill means every path for that workspace resolves nowhere.
 
-    ATTACHED is the whole qualification, and it is not decoration: a repo on a
-    detached HEAD gets its rows but keeps a null pointer, deliberately — see the
-    control below. Claiming the broader "a workspace with a repo is never null"
-    would be a guarantee this test does not give and the reconciler does not make.
+    Two qualifiers, both load-bearing, both established by the controls below.
+    ATTACHED: a detached HEAD gets its rows but keeps a null pointer, on purpose.
+    AFTER RECONCILIATION: between reconciles the pointer can be null with HEAD
+    attached, because `create_workspace_branch` clears it when it de-orphans the
+    row the pointer named.
+
+    Claiming the broader "a workspace with a repo is never null" would be a
+    guarantee this test does not give and the reconciler does not make — S2
+    resolves paths through this pointer, so an overclaim here is a null deref
+    there.
     """
     with pg_session_factory() as s:
         # Distinct owners: make_workspace defaults to make_user(session) with no
@@ -145,3 +151,51 @@ def test_a_detached_head_is_the_documented_exception(pg_session_factory, tmp_pat
     # `_real_refs` filters it. Comparing against the raw listing would demand a row
     # for a name that is not a ref.
     assert rows == {"main"}, "the refs must still be founded"
+
+
+def test_a_create_that_de_orphans_the_root_leaves_it_null_until_the_next_reconcile(
+    pg_session_factory, tmp_path
+):
+    """The second control, and the one that contradicts the looser wording this
+    file used to carry: HEAD stays ATTACHED throughout and the pointer still ends
+    up null.
+
+    Recorded here rather than only in the lifecycle tests because this is the file
+    S2 reads to learn what it may assume. The second half is the actual contract:
+    a reconcile restores the pointer, which is why S2 reconciling first is enough.
+    """
+    with pg_session_factory() as s:
+        wid = make_workspace(s, title="c").id
+        s.commit()
+    repo = workspace_repo_dir(tmp_path, wid)
+    init_workspace_repo(repo, "# C\n")
+    subprocess.run(["git", "branch", "side"], cwd=repo, check=True)
+
+    with pg_session_factory() as s:
+        backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+
+    # Leave main and destroy its ref out of band. HEAD is attached to `side`.
+    subprocess.run(["git", "checkout", "-q", "side"], cwd=repo, check=True)
+    subprocess.run(["git", "branch", "-q", "-D", "main"], cwd=repo, check=True)
+    with pg_session_factory() as s:
+        s.get(Workspace, wid).current_branch = "side"
+        s.commit()
+
+    with pg_session_factory() as s:
+        create_workspace_branch(
+            s, stamp=stamp_for(s, wid), workspace_id=wid, name="main", workspaces_dir=tmp_path
+        )
+        s.commit()
+
+    with pg_session_factory() as s:
+        assert head_branch(repo) == "side", "HEAD must still be attached for this to bite"
+        assert s.get(Workspace, wid).root_branch_id is None
+
+    with pg_session_factory() as s:
+        backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+
+    with pg_session_factory() as s:
+        root = s.get(Branch, s.get(Workspace, wid).root_branch_id)
+    assert root is not None and root.name == "side", "the reconcile must restore it"

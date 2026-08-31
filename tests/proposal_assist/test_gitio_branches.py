@@ -14,6 +14,7 @@ from call_manager.proposal_assist.citations.gitio import (
     current_branch,
     delete_branch,
     has_commits,
+    head_branch,
     is_valid_branch_name,
     list_branches,
 )
@@ -147,3 +148,39 @@ def test_probes_raise_on_a_FATAL_git_failure_rather_than_answering_no(tmp_path):
         branch_exists(not_a_repo, "main")
     with pytest.raises(GitCommitError):
         has_commits(not_a_repo)
+
+
+def test_head_branch_returns_the_name_when_head_is_ATTACHED(tmp_path):
+    assert head_branch(_repo(tmp_path)) == "main"
+
+
+def test_head_branch_returns_None_on_a_DETACHED_head(tmp_path):
+    """The whole point of this function. `current_branch` RAISES here, and it
+    raises the same GitCommitError it raises for a broken repository — so a
+    caller that catches it cannot tell "no branch" from "no git"."""
+    d = _repo(tmp_path)
+    subprocess.run(["git", "checkout", "-q", "--detach", "HEAD"], cwd=d, check=True)
+    assert head_branch(d) is None
+    with pytest.raises(GitCommitError):
+        current_branch(d)  # the contrast that makes head_branch necessary
+
+
+def test_head_branch_works_on_an_UNBORN_head(tmp_path):
+    """Same surprise as `current_branch`: git knows the name the first commit
+    will land on, and exit 0 means that name is real."""
+    assert head_branch(_repo(tmp_path, commit=False)) == "main"
+
+
+def test_head_branch_RAISES_on_a_fatal_failure_rather_than_saying_detached(tmp_path):
+    """The discrimination, asserted where it can actually go wrong.
+
+    Measured 2026-08-31: `symbolic-ref --short -q HEAD` exits **1** on a detached
+    HEAD and **128** when it is not a repository — and without `-q` a detached
+    HEAD exits 128 too, which is exactly why the lenient form cannot be used.
+    Returning None here would tell the reconciler "detached", and the reconciler
+    CLEARS a root pointer on detached.
+    """
+    not_a_repo = tmp_path / "plain"
+    not_a_repo.mkdir()  # exists, so git actually runs and exits 128
+    with pytest.raises(GitCommitError):
+        head_branch(not_a_repo)

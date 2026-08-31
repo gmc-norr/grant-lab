@@ -25,7 +25,7 @@ from call_manager.db.models import Branch, Workspace
 from call_manager.proposal_assist.citations.gitio import (
     GitCommitError,
     branch_exists,
-    current_branch,
+    head_branch,
     list_branches,
 )
 from call_manager.proposal_assist.paths import workspace_repo_dir
@@ -122,8 +122,19 @@ def backfill_branch_entities(
             # Counted anyway — see BackfillResult.absent.
             absent += 1
             continue
+        # BOTH git reads happen here, before anything is written for this
+        # workspace, and a failure in EITHER skips the whole workspace. That is
+        # what makes the promise three paragraphs up true: "a row is only ever
+        # removed for a workspace whose refs were read successfully".
+        #
+        # `head_branch`, not `current_branch`: the latter raises the same
+        # GitCommitError for a detached HEAD and for a broken repo, so catching it
+        # made every operational failure look detached — and a detached-looking
+        # workspace has its root pointer CLEARED. A timeout could destroy a
+        # healthy pointer and still report success, because nothing counted it.
         try:
             names = _real_refs(repo)
+            head = head_branch(repo)  # None ONLY for a genuinely detached HEAD
         except (GitCommitError, OSError, subprocess.TimeoutExpired):
             skipped += 1
             logger.warning(
@@ -155,11 +166,8 @@ def backfill_branch_entities(
         session.flush()  # assign ids before anything reads one back
         orphans = existing - set(names)
 
-        # The root pointer: git HEAD. Detached leaves it alone rather than guessing.
-        try:
-            head = current_branch(repo)
-        except (GitCommitError, OSError, subprocess.TimeoutExpired):
-            head = None
+        # The root pointer: git HEAD, read above. Detached (head is None) leaves
+        # it alone rather than guessing.
 
         # THE POINTER MOVES BEFORE THE DELETE, and that order is load-bearing.
         # `fk_workspaces_root_branch_id` is ON DELETE RESTRICT, so deleting a row

@@ -349,6 +349,35 @@ def current_branch(repo_dir: Path) -> str:
     return proc.stdout.strip()
 
 
+def head_branch(repo_dir: Path) -> str | None:
+    """The checked-out branch name, or None when HEAD is DETACHED.
+
+    `current_branch` cannot answer this: it raises GitCommitError for a detached
+    HEAD and for a broken repository alike, so a caller that catches it treats a
+    git failure as "detached" and acts on it. In the reconciler that meant a
+    transient failure CLEARED a healthy root pointer.
+
+    `-q` is what makes the two separable, and the exit codes are measured
+    (2026-08-31, git on this box):
+
+        attached            -> 0, prints the name
+        DETACHED, with -q   -> 1, prints nothing
+        DETACHED, without -q-> 128 ("fatal: ref HEAD is not a symbolic ref")
+        not a repository    -> 128
+        unborn HEAD         -> 0, prints the name the first commit will land on
+
+    So only exit 1 means detached. Same discipline as `branch_exists`, and for
+    the same reason: collapsing 128 into the benign answer reports a broken repo
+    as a normal state.
+    """
+    proc = _git(repo_dir, "symbolic-ref", "--short", "-q", "HEAD")
+    if proc.returncode == 1:
+        return None
+    if proc.returncode != 0:
+        raise GitCommitError(f"cannot read HEAD in {repo_dir}: {proc.stderr.strip()}")
+    return proc.stdout.strip()
+
+
 def list_branches(repo_dir: Path) -> list[str]:
     """Every local branch, in git's own order. Empty only for a repo with no refs."""
     proc = _git(repo_dir, "branch", "--format=%(refname:short)")

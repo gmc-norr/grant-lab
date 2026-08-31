@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 
 from call_manager.db.models import Branch, Workspace
 from call_manager.proposal_assist.branch_entity_backfill import backfill_branch_entities
+from call_manager.proposal_assist.citations.gitio import GitCommitError
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from tests.proposal_assist.conftest import make_user, make_workspace
 
@@ -853,3 +854,58 @@ def test_a_fresh_repo_with_no_commit_is_still_a_no_op(pg_session_factory, tmp_pa
     with pg_session_factory() as s:
         assert s.execute(select(Branch).where(Branch.workspace_id == wid)).all() == []
         assert s.get(Workspace, wid).root_branch_id is None
+
+
+def test_an_unreadable_HEAD_skips_the_workspace_instead_of_clearing_its_root(
+    pg_session_factory, tmp_path, monkeypatch
+):
+    """An operational git failure must not be read as "detached HEAD".
+
+    `current_branch` raises the same GitCommitError for a detached HEAD and for a
+    broken repo, so catching it made a timeout look detached — and detached is
+    the branch that CLEARS the root pointer. A transient failure could therefore
+    destroy healthy state and still report success, because nothing counted it.
+
+    Set up on the destructive path: the root's ref is gone, so a successful run
+    WOULD clear the pointer (`test_a_rootless_workspace_whose_root_ref_vanished_
+    is_left_honestly_rootless` pins that). Here git cannot read HEAD, so the run
+    must change nothing at all and say so.
+    """
+    with pg_session_factory() as s:
+        w = make_workspace(s, title="w")
+        wid = w.id
+        w.current_branch = "main"
+        s.commit()
+    _repo(tmp_path, wid, "main", extra=("side",))
+    d = workspace_repo_dir(tmp_path, wid)
+
+    with pg_session_factory() as s:
+        backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+        root_before = s.get(Workspace, wid).root_branch_id
+    assert root_before is not None
+
+    subprocess.run(["git", "checkout", "-q", "side"], cwd=d, check=True)
+    subprocess.run(["git", "branch", "-q", "-D", "main"], cwd=d, check=True)
+    subprocess.run(["git", "branch", "third"], cwd=d, check=True)
+
+    def _unreadable(_repo_dir):
+        raise GitCommitError("cannot read HEAD")
+
+    monkeypatch.setattr(
+        "call_manager.proposal_assist.branch_entity_backfill.head_branch", _unreadable
+    )
+
+    with pg_session_factory() as s:
+        r = backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+    assert (r.skipped, r.created, r.deleted, r.rooted) == (1, 0, 0, 0), r
+
+    with pg_session_factory() as s:
+        # The pointer survives, the orphan survives, and the NEW ref got no row —
+        # the whole workspace was skipped, which is what `skipped` now means.
+        assert s.get(Workspace, wid).root_branch_id == root_before
+        rows = {
+            n for (n,) in s.execute(select(Branch.name).where(Branch.workspace_id == wid)).all()
+        }
+    assert rows == {"main", "side"}, rows
