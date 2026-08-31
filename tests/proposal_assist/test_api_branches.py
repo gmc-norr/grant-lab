@@ -293,11 +293,37 @@ def test_the_switch_response_carries_real_tips_not_an_empty_map(
     client_authed_owner, current_user, pg_session_factory, _app
 ):
     """Without this, the switch route can return `tips: {}` forever and every
-    other test still passes -- they only ever read ["current"]."""
+    other test still passes -- they only ever read ["current"].
+
+    The branches must DIVERGE, and each response is compared against the exact
+    expected map rather than against the other. `switched == listed` is not a
+    test: both routes call the same helper, so any corruption inside it agrees
+    with itself. Measured 2026-08-31 -- collapsing every tip to a single sha
+    left the earlier version of this test green, because `_seed` builds one
+    commit and both branches pointed at it.
+    """
+    import subprocess
+
+    from call_manager.proposal_assist.citations.gitio import current_head
+
     with pg_session_factory() as s:
         wid = _seed(s, _app, current_user)
         s.commit()
-    client_authed_owner.post(f"/api/workspaces/{wid}/branches", json={"name": "v2"})
+    repo = workspace_repo_dir(_app.state.settings.workspaces_dir, wid)
+    older = current_head(repo)
+
+    (repo / "proposal.md").write_text("# Aims\n\nmore\n", encoding="utf-8")
+    for argv in (["add", "proposal.md"], ["commit", "-q", "-m", "newer"]):
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t", *argv], cwd=repo, check=True
+        )
+    newer = current_head(repo)
+    assert older != newer
+
+    r = client_authed_owner.post(
+        f"/api/workspaces/{wid}/branches", json={"name": "v2", "from_sha": older}
+    )
+    assert r.status_code == 201, r.text
 
     switched = client_authed_owner.post(
         f"/api/workspaces/{wid}/branches/switch", json={"name": "v2"}
@@ -305,5 +331,5 @@ def test_the_switch_response_carries_real_tips_not_an_empty_map(
     listed = client_authed_owner.get(f"/api/workspaces/{wid}/branches")
 
     assert switched.status_code == 200, switched.text
-    assert switched.json()["tips"] == listed.json()["tips"]
-    assert set(switched.json()["tips"]) == {"main", "v2"}
+    assert switched.json()["tips"] == {"main": newer, "v2": older}
+    assert listed.json()["tips"] == {"main": newer, "v2": older}

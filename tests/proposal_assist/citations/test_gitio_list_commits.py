@@ -638,10 +638,46 @@ def test_all_branches_still_includes_a_detached_head(tmp_path):
     assert "made while detached" in [c.subject for c in every]
 
 
+def _commit_at(repo: Path, name: str, body: str, message: str, when: str) -> str:
+    """`_commit`, but with an explicit author AND committer date.
+
+    Needed because `--topo-order` only shows its hand where date order and
+    topological order DISAGREE, and git's default is reverse-chronological by
+    committer date. A back-dated child is the smallest way to make them differ.
+    """
+    (repo / name).write_text(body, encoding="utf-8")
+    _git(repo, "add", name)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", message],
+        cwd=repo,
+        check=True,
+        env={**os.environ, "GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when},
+    )
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
 def test_all_branches_orders_children_before_parents(tmp_path):
+    """A back-dated child on a side branch, so date order and topological order
+    disagree.
+
+    A LINEAR history cannot test this at all: plain `git log` already emits it
+    child-first, so the earlier version of this test stayed green with
+    `--topo-order` deleted. Measured 2026-08-31 on this exact shape --
+    `git log --branches HEAD` alone emits A, B, root (parent BEFORE child);
+    adding `--topo-order` emits B, A, root. The lane algorithm reads the list in
+    order and assumes children come first, so the wrong order draws the wrong
+    graph.
+    """
     repo = _empty_repo(tmp_path)
-    root = _commit(repo, "proposal.md", "v1", "root")
-    _commit(repo, "proposal.md", "v2", "child")
+    root = _commit_at(repo, "proposal.md", "v1", "root", "2020-01-01T00:00:00")
+    a = _commit_at(repo, "proposal.md", "v2", "A", "2020-01-03T00:00:00")
+    _git(repo, "checkout", "-q", "-b", "side")
+    b = _commit_at(repo, "proposal.md", "v3", "B", "2020-01-02T00:00:00")
+
     every, _ = list_commits(repo, limit=10, all_branches=True)
-    assert [c.subject for c in every] == ["child", "root"]
-    assert every[0].parents == (root,)
+    assert [c.subject for c in every] == ["B", "A", "root"]
+    assert [c.sha for c in every] == [b, a, root]
+    assert every[0].parents == (a,)
+    assert every[1].parents == (root,)
