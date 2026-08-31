@@ -911,3 +911,66 @@ def test_an_unreadable_HEAD_skips_the_workspace_instead_of_clearing_its_root(
             n for (n,) in s.execute(select(Branch.name).where(Branch.workspace_id == wid)).all()
         }
     assert rows == {"main", "side"}, rows
+
+
+def test_an_unreadable_directory_skips_one_workspace_not_the_batch(pg_session_factory, tmp_path):
+    """`Path.exists()` RAISES on EACCES — measured 2026-08-31, it does not return
+    False. The probe sat outside the try, so ONE unreadable directory aborted the
+    whole batch; in migration 0068 that is a failed deploy.
+
+    Unreadable counts as `skipped`, not `absent`: the repo may well be there.
+    """
+    import os
+
+    with pg_session_factory() as s:
+        bad = make_workspace(s, title="bad", owner=make_user(s, email="bad@ki.se")).id
+        good = make_workspace(s, title="good", owner=make_user(s, email="good@ki.se")).id
+        s.commit()
+    _repo(tmp_path, good, "main")
+
+    locked = workspace_repo_dir(tmp_path, bad)
+    locked.mkdir(parents=True)
+    (locked / ".git").mkdir()
+    os.chmod(locked, 0o000)
+    try:
+        with pg_session_factory() as s:
+            r = backfill_branch_entities(s, workspaces_dir=tmp_path)
+            s.commit()
+    finally:
+        os.chmod(locked, 0o755)
+
+    assert r.skipped == 1, r
+    assert r.created == 1, f"the healthy workspace was not founded: {r}"
+    with pg_session_factory() as s:
+        assert s.get(Workspace, good).root_branch_id is not None
+
+
+def test_the_reconciler_never_selects_a_whole_workspace_row():
+    """Migration 0068 runs this function, so its SQL must name only the columns
+    the schema had AT 0068. A `session.get(Workspace, ...)` emits a SELECT over
+    every column models.py maps TODAY — so the next column added to `workspaces`
+    would break the upgrade path for every database below 0068.
+
+    Pinned by parsing rather than by mocking: an entity load is a source-level
+    property, and a mock that returned the right value would hide it.
+    """
+    import ast
+    import pathlib
+
+    src = pathlib.Path("src/call_manager/proposal_assist/branch_entity_backfill.py").read_text()
+    offenders = []
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        # session.get(Workspace, ...) / session.get(Branch, ...)
+        if isinstance(f, ast.Attribute) and f.attr == "get" and node.args:
+            a0 = node.args[0]
+            if isinstance(a0, ast.Name) and a0.id in {"Workspace", "Branch"}:
+                offenders.append(f"session.get({a0.id}, ...) at line {node.lineno}")
+        # select(Workspace) / select(Branch) — the entity, not a column
+        if isinstance(f, ast.Name) and f.id == "select":
+            for a in node.args:
+                if isinstance(a, ast.Name) and a.id in {"Workspace", "Branch"}:
+                    offenders.append(f"select({a.id}) at line {node.lineno}")
+    assert offenders == [], offenders

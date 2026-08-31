@@ -141,7 +141,21 @@ def backfill_branch_entities(
     rows = session.execute(query).all()
     for wid, sdk_session_id in rows:
         repo = workspace_repo_dir(workspaces_dir, wid)
-        if not (repo / ".git").exists():
+        try:
+            has_git = (repo / ".git").exists()
+        except OSError:
+            # `Path.exists()` RAISES on EACCES — measured 2026-08-31, it does not
+            # return False. Outside the try this aborted the WHOLE batch on one
+            # unreadable directory, which in the migration means a failed deploy.
+            # Unreadable is `skipped`, not `absent`: the repo may well be there.
+            skipped += 1
+            logger.warning(
+                "branches.entity_reconcile_skipped",
+                extra={"event": "branch_entity_reconcile_skipped", "workspace_id": str(wid)},
+                exc_info=True,
+            )
+            continue
+        if not has_git:
             # Still in setup: nothing to found a branch on, and not a failure.
             # Counted anyway — see BackfillResult.absent.
             absent += 1
@@ -216,19 +230,31 @@ def backfill_branch_entities(
         #
         # So assign only when the pointer is VACANT: never set, or naming a row
         # whose git ref has just vanished.
-        rooted_at = session.get(Workspace, wid).root_branch_id
-        held = session.get(Branch, rooted_at) if rooted_at is not None else None
-        vacant = held is None or held.name in orphans
+        # COLUMNS, never whole entities. `session.get(Workspace, ...)` emits a
+        # SELECT over every column models.py maps TODAY, but this function runs
+        # inside migration 0068 — so the next column added to `workspaces` would
+        # make 0068 select a column that does not exist yet, breaking the upgrade
+        # path for every database below 0068. Naming the columns pins the SQL to
+        # the schema this migration actually created.
+        rooted_at = session.execute(
+            select(Workspace.root_branch_id).where(Workspace.id == wid)
+        ).scalar_one()
+        held_name = (
+            session.execute(select(Branch.name).where(Branch.id == rooted_at)).scalar_one_or_none()
+            if rooted_at is not None
+            else None
+        )
+        vacant = held_name is None or held_name in orphans
 
         if vacant and head in names:
-            root = session.execute(
-                select(Branch).where(Branch.workspace_id == wid, Branch.name == head)
+            root_id = session.execute(
+                select(Branch.id).where(Branch.workspace_id == wid, Branch.name == head)
             ).scalar_one()
             session.execute(
-                update(Workspace).where(Workspace.id == wid).values(root_branch_id=root.id)
+                update(Workspace).where(Workspace.id == wid).values(root_branch_id=root_id)
             )
             rooted += 1
-        elif vacant and held is not None:
+        elif vacant and rooted_at is not None:
             # The old root's ref is gone and no new root is knowable (detached
             # HEAD). Clearing is the honest answer; promoting a survivor is not
             # this function's decision to make.
@@ -266,7 +292,9 @@ def backfill_branch_entities(
         # (`test_current_branch_is_not_nullable_so_the_null_path_is_unreachable`
         # pins the reason); S4 drops this column, and `!=` would be the wrong shape
         # to leave behind for whatever replaces it.
-        current = session.get(Workspace, wid).current_branch
+        current = session.execute(
+            select(Workspace.current_branch).where(Workspace.id == wid)
+        ).scalar_one()
         session.execute(
             update(Branch)
             .where(Branch.workspace_id == wid, Branch.name.is_distinct_from(current))
@@ -274,8 +302,10 @@ def backfill_branch_entities(
         )
         if current in names:
             session.execute(
-                select(Branch).where(Branch.workspace_id == wid, Branch.name == current)
-            ).scalar_one().last_sdk_session_id = sdk_session_id
+                update(Branch)
+                .where(Branch.workspace_id == wid, Branch.name == current)
+                .values(last_sdk_session_id=sdk_session_id)
+            )
 
         logger.info(
             "branches.entity_reconciled",
