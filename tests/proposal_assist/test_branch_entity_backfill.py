@@ -974,3 +974,32 @@ def test_the_reconciler_never_selects_a_whole_workspace_row():
                 if isinstance(a, ast.Name) and a.id in {"Workspace", "Branch"}:
                     offenders.append(f"select({a.id}) at line {node.lineno}")
     assert offenders == [], offenders
+
+
+def test_founding_the_root_does_not_restamp_updated_at(pg_session_factory, tmp_path):
+    """`Workspace.updated_at` has `onupdate=func.now()`, and SQLAlchemy fires
+    that for any column NOT named in values(). Founding the pointer therefore
+    restamped every workspace — and `workspaces.py:1440` sorts the user's
+    workspace list by `updated_at DESC`, so a deploy reordered the whole list and
+    made every workspace look freshly touched.
+
+    Asserted on the exact timestamp, not on ordering: an ordering assertion
+    passes whenever two workspaces happen to keep their relative positions.
+    """
+    with pg_session_factory() as s:
+        wid = make_workspace(s, title="w").id
+        s.commit()
+    _repo(tmp_path, wid, "main")
+
+    with pg_session_factory() as s:
+        before = s.get(Workspace, wid).updated_at
+
+    with pg_session_factory() as s:
+        r = backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+    assert r.rooted == 1, r  # the founding really happened
+
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, wid)
+        assert ws.root_branch_id is not None
+        assert ws.updated_at == before, "the deploy restamped updated_at"

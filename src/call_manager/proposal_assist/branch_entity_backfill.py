@@ -251,7 +251,16 @@ def backfill_branch_entities(
                 select(Branch.id).where(Branch.workspace_id == wid, Branch.name == head)
             ).scalar_one()
             session.execute(
-                update(Workspace).where(Workspace.id == wid).values(root_branch_id=root_id)
+                update(Workspace)
+                .where(Workspace.id == wid)
+                # `updated_at` is carried FORWARD, not refreshed. The column has
+                # `onupdate=func.now()`, and SQLAlchemy fires that for any column
+                # not named in values() — so founding the pointer would restamp
+                # every workspace. `workspaces.py:1440` sorts the workspace list by
+                # `updated_at DESC`, so a deploy would reorder the user's whole
+                # list and make every workspace look freshly touched. Naming the
+                # column with its own value suppresses the onupdate.
+                .values(root_branch_id=root_id, updated_at=Workspace.updated_at)
             )
             rooted += 1
         elif vacant and rooted_at is not None:
@@ -263,7 +272,11 @@ def backfill_branch_entities(
             # so deleting a row the workspace still points at raises
             # ForeignKeyViolation, and one transaction covers every workspace.
             session.execute(
-                update(Workspace).where(Workspace.id == wid).values(root_branch_id=None)
+                update(Workspace)
+                .where(Workspace.id == wid)
+                # Same reason as the founding branch above: do not restamp
+                # `updated_at` and reorder the user's workspace list.
+                .values(root_branch_id=None, updated_at=Workspace.updated_at)
             )
 
         if orphans:

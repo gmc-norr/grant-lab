@@ -71,7 +71,13 @@ class BranchBusy(BranchError):
 
 
 class BranchInUse(BranchError):
-    """Refused because the branch is the one currently checked out."""
+    """Refused because the branch is load-bearing: it is the one currently
+    checked out, or it is the workspace's ROOT.
+
+    Two distinct reasons since the root guard landed, so every raise site passes
+    a message saying WHICH — `_raise_http` puts `str(exc)` straight into the 409
+    body, and "main" alone tells the user nothing about why they cannot delete
+    it."""
 
 
 class BranchRepoNotReady(BranchError):
@@ -430,13 +436,13 @@ def delete_workspace_branch(
         # read. Raise the readable one first and leave RESTRICT as the backstop.
         root = session.get(Branch, row.root_branch_id)
         if root is not None and root.name == name:
-            raise BranchInUse(name)
+            raise BranchInUse(f"{name}: this is the workspace's root branch")
     if row is not None and row.current_branch == name:
         # The DATABASE is the source of truth (§4.1), so refuse against the
         # column, not against HEAD. git refuses too — "cannot delete branch
         # 'main' used by worktree" — but that message cannot be shown to a user
         # and would fire only if the two agreed.
-        raise BranchInUse(name)
+        raise BranchInUse(f"{name}: this is the branch the workspace is on")
     if len(list_branches(repo)) <= 1:
         # A repo with no branch has a detached HEAD, and §4.1's reconciliation
         # then has nothing to reconcile to.
