@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+import re
 import select
 import subprocess
 import time
@@ -613,6 +614,10 @@ class CommitInfo:
     sha: str
     authored_at: datetime
     subject: str
+    #: Parent shas, first-parent first. Empty for a root commit, and for the
+    #: OLDEST returned commit when the history was truncated -- in both cases the
+    #: graph simply has no edge to draw downward, which is honest.
+    parents: tuple[str, ...] = ()
 
 
 # NUL framing. Commit subjects are user-controlled, and git stores ASCII control
@@ -731,6 +736,37 @@ def _read_capped_fields(stream, *, max_fields: int, repo_dir: Path, deadline: fl
     return fields
 
 
+#: A sha is hex and exactly as long as the sha the same record reported for
+#: itself -- not a hard-coded 40, so a sha-256 repository needs no code change.
+#: Same reasoning as ports/shas.py's 7-64 range.
+_HEX_RE = re.compile(r"[0-9a-fA-F]+")
+
+
+def _parse_parents(field: str, *, sha_len: int) -> tuple[str, ...]:
+    """The `%P` field, with anything that is not a whole sha discarded.
+
+    `_read_capped_fields` keeps at most _MAX_FIELD_BYTES of EVERY field, so a
+    parent list longer than about 48 shas is cut, and the cut can land mid-sha.
+    A bare `.split()` would hand that fragment on as a real parent, and the
+    version graph would open a lane for a commit that does not exist and never
+    close it.
+
+    Dropping is the conservative direction: a missing edge draws nothing, an
+    invented edge draws a line to nowhere.
+    """
+    raw = field.split()
+    kept = tuple(p for p in raw if len(p) == sha_len and _HEX_RE.fullmatch(p))
+    if len(kept) != len(raw):
+        logger.warning(
+            "gitio.dropped_malformed_parents",
+            extra={
+                "event": "gitio_dropped_malformed_parents",
+                "dropped": len(raw) - len(kept),
+            },
+        )
+    return kept
+
+
 def list_commits(
     repo_dir: Path, *, limit: int, pathspec: str | None = None
 ) -> tuple[list[CommitInfo], bool]:
@@ -759,19 +795,25 @@ def list_commits(
         "git",
         "log",
         f"--max-count={limit + 1}",
-        # -z terminates each commit with NUL; %x00 separates the three
+        # ALWAYS passed, pathspec or not. Under a pathspec git REWRITES parent
+        # links, and %P only reports the rewritten parents when --parents is
+        # given -- without it the graph draws edges to commits that were
+        # filtered out. Measured; pinned by
+        # test_pathspec_history_rewrites_the_parent_link.
+        "--parents",
+        # -z terminates each commit with NUL; %x00 separates the four
         # fields within one. Both are the same byte, so the stream is a
-        # flat run of NUL-separated fields, parsed three at a time below.
+        # flat run of NUL-separated fields, parsed four at a time below.
         "-z",
-        "--format=%H%x00%aI%x00%s",
+        "--format=%H%x00%P%x00%aI%x00%s",
     ]
     if pathspec is not None:
         # After `--`, so a filename can never be parsed as an option. git also
         # enables history simplification here, which is what makes the count
         # honest: `--max-count` now counts MATCHING commits.
         argv += ["--", pathspec]
-    # Three fields per record, and git emits a trailing NUL after the last one.
-    max_fields = 3 * (limit + 1)
+    # Four fields per record, and git emits a trailing NUL after the last one.
+    max_fields = 4 * (limit + 1)
     try:
         with subprocess.Popen(
             argv,
@@ -833,15 +875,15 @@ def list_commits(
     # swallow an empty subject and shift every field after it.
     if fields and fields[-1] == "":
         fields.pop()
-    if len(fields) % 3 != 0:
+    if len(fields) % 4 != 0:
         raise GitCommitError(
             f"malformed git log output for {repo_dir}: {len(fields)} NUL-separated "
-            f"fields is not a multiple of 3"
+            f"fields is not a multiple of 4"
         )
-    records = [tuple(fields[i : i + 3]) for i in range(0, len(fields), 3)]
+    records = [tuple(fields[i : i + 4]) for i in range(0, len(fields), 4)]
     truncated = len(records) > limit
     commits: list[CommitInfo] = []
-    for sha, authored, subject in records[:limit]:
+    for sha, parents_field, authored, subject in records[:limit]:
         try:
             # %aI is strict ISO-8601 with an offset; fromisoformat handles it on
             # 3.12. A parse failure means the framing shifted — fail loudly, but
@@ -854,7 +896,14 @@ def list_commits(
             # Marked, not silently clipped: an admin reading a retention record
             # must be able to tell a short subject from a shortened one.
             subject = subject[:_MAX_SUBJECT_CHARS] + _SUBJECT_TRUNCATION_MARKER
-        commits.append(CommitInfo(sha=sha, authored_at=authored_at, subject=subject))
+        commits.append(
+            CommitInfo(
+                sha=sha,
+                authored_at=authored_at,
+                subject=subject,
+                parents=_parse_parents(parents_field, sha_len=len(sha)),
+            )
+        )
     return commits, truncated
 
 

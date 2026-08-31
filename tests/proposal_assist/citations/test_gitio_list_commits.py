@@ -211,7 +211,11 @@ def test_an_unparseable_author_date_raises_gitcommiterror_not_valueerror(tmp_pat
     monkeypatch.setattr(
         gitio,
         "_read_capped_fields",
-        lambda stream, **kw: [b"a" * 40, b"not-a-date", b"subject"],
+        # sha, PARENTS (empty -- a root commit), date, subject. Four fields
+        # since list_commits started reading %P; three would now be caught by
+        # the "not a multiple of 4" guard instead, which is a different failure
+        # from the one this test is about.
+        lambda stream, **kw: [b"a" * 40, b"", b"not-a-date", b"subject"],
     )
 
     with pytest.raises(GitCommitError, match="unparseable author date"):
@@ -484,3 +488,115 @@ def test_a_stalled_git_is_killed_and_reaped(tmp_path, monkeypatch):
         "the stalled git was left running: the deadline fired but the child was "
         "never killed and reaped"
     )
+
+
+# --- parents (version-graph lanes) ------------------------------------------
+
+
+def _empty_repo(tmp_path: Path) -> Path:
+    """Like `_repo(tmp_path, 0)` but with a named initial branch, so the
+    branch-aware tests below have something deterministic to check out from."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", "."], cwd=repo, check=True)
+    return repo
+
+
+def _git(repo: Path, *argv: str) -> None:
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", *argv], cwd=repo, check=True
+    )
+
+
+def _commit(repo: Path, name: str, body: str, message: str) -> str:
+    """Commit *body* to *name* and return the resulting full sha."""
+    (repo / name).write_text(body, encoding="utf-8")
+    _git(repo, "add", name)
+    _git(repo, "commit", "-q", "-m", message)
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def test_a_root_commit_has_no_parents(tmp_path):
+    repo = _empty_repo(tmp_path)
+    _commit(repo, "proposal.md", "v1", "c1")
+    commits, _ = list_commits(repo, limit=10)
+    assert commits[0].parents == ()
+
+
+def test_a_child_commit_names_its_parent(tmp_path):
+    repo = _empty_repo(tmp_path)
+    first = _commit(repo, "proposal.md", "v1", "c1")
+    _commit(repo, "proposal.md", "v2", "c2")
+    commits, _ = list_commits(repo, limit=10)
+    assert commits[0].parents == (first,)
+
+
+def test_a_merge_commit_names_both_parents(tmp_path):
+    repo = _empty_repo(tmp_path)
+    _commit(repo, "proposal.md", "a\n", "base")
+    _git(repo, "checkout", "-q", "-b", "feature")
+    feature = _commit(repo, "proposal.md", "a\nF\n", "feature edit")
+    _git(repo, "checkout", "-q", "main")
+    main = _commit(repo, "proposal.md", "M\na\n", "main edit")
+    _git(repo, "merge", "--no-ff", "-q", "-m", "merge", "-X", "ours", "feature")
+    commits, _ = list_commits(repo, limit=10)
+    merge = commits[0]
+    assert merge.subject == "merge"
+    assert set(merge.parents) == {main, feature}
+    # ORDER matters to the lane algorithm: the first parent inherits the lane.
+    assert merge.parents[0] == main
+
+
+def test_pathspec_history_rewrites_the_parent_link(tmp_path):
+    """THE --parents gate. Spec section 3.2.
+
+    Oldest first: c1 touches the artifact, c2 touches something else, c3 touches
+    the artifact. Under a pathspec git returns only c1 and c3, and REWRITES the
+    NEWER one's parent to point at the older MATCHING commit.
+
+    Without `--parents` in the argv, git reports c3's parent as c2 -- a commit
+    that is not in the returned list, so the graph would draw an edge to a row
+    that is not on screen. Delete `--parents` from `list_commits` and this test
+    must go red.
+    """
+    repo = _empty_repo(tmp_path)
+    c1 = _commit(repo, "proposal.md", "v1", "c1 artifact")
+    _commit(repo, "other.md", "o1", "c2 unrelated")
+    _commit(repo, "proposal.md", "v2", "c3 artifact")
+
+    commits, _ = list_commits(repo, limit=10, pathspec="proposal.md")
+    assert [c.subject for c in commits] == ["c3 artifact", "c1 artifact"]
+    assert commits[0].parents == (c1,), (
+        "c3's parent must be rewritten to c1; got a parent that is not in the list"
+    )
+
+
+def test_a_malformed_parent_token_is_dropped_not_half_parsed(tmp_path, caplog):
+    """Guards the _MAX_FIELD_BYTES cut (2000 bytes ~ 48 parents).
+
+    A cut lands mid-sha, and a partial sha becomes a lane waiting for a commit
+    that will never arrive. Exercised through the parse helper rather than by
+    building a 49-parent octopus, which git makes needlessly painful.
+    """
+    import logging
+
+    from call_manager.proposal_assist.citations.gitio import _parse_parents
+
+    good = "a" * 40
+    assert _parse_parents("", sha_len=40) == ()
+    assert _parse_parents(f"{good} {'Z' * 40}", sha_len=40) == (good,)
+
+    # And it must SAY SO. Without this assertion, deleting the logger.warning
+    # leaves the test green -- the silent drop is the failure mode that makes a
+    # damaged repo look merely uninteresting.
+    #
+    # NOT `... in r.message or r.msg` -- `r.msg` is a non-empty string, so the
+    # `or` short-circuits and the assertion passes on an empty log.
+    with caplog.at_level(logging.WARNING):
+        assert _parse_parents(f"{good} {'b' * 17}", sha_len=40) == (good,)
+    assert any(
+        r.levelname == "WARNING" and "dropped_malformed_parents" in r.getMessage()
+        for r in caplog.records
+    ), "a dropped parent must be logged"
