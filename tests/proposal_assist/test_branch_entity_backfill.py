@@ -606,13 +606,26 @@ def _live_statements(body):
     for stmt in body:
         out.append(stmt)
         if isinstance(stmt, ast.If) and isinstance(stmt.test, ast.Constant):
+            # `if False:` / `if 0:` / `if None:` — only the taken side is live.
             out.extend(_live_statements(stmt.body if stmt.test.value else stmt.orelse))
+        elif isinstance(stmt, ast.While) and isinstance(stmt.test, ast.Constant):
+            out.extend(_live_statements(stmt.body if stmt.test.value else stmt.orelse))
+        elif isinstance(stmt, ast.For) and isinstance(
+            stmt.iter, ast.Constant | ast.Tuple | ast.List
+        ):
+            empty = (
+                not stmt.iter.elts
+                if isinstance(stmt.iter, ast.Tuple | ast.List)
+                else not stmt.iter.value
+            )
+            out.extend(_live_statements([] if empty else stmt.body))
+            out.extend(_live_statements(stmt.orelse))
         else:
             for field in ("body", "orelse", "finalbody", "handlers"):
                 inner = getattr(stmt, field, None)
                 if isinstance(inner, list):
                     out.extend(_live_statements(inner))
-        if isinstance(stmt, ast.Return | ast.Raise):
+        if isinstance(stmt, ast.Return | ast.Raise | ast.Continue | ast.Break):
             break  # nothing after this at this level ever runs
     return out
 
@@ -691,13 +704,21 @@ def test_the_migration_gate_rejects_a_call_it_cannot_reach():
     """
     import ast
 
-    after_return = ast.parse("def upgrade():\n    return\n    backfill_branch_entities(s)\n")
-    in_dead_branch = ast.parse(
-        "def upgrade():\n    if False:\n        backfill_branch_entities(s)\n"
-    )
-    for tree in (after_return, in_dead_branch):
-        live = _live_statements(tree.body[0].body)
-        assert _call_index(live, "backfill_branch_entities") is None, ast.dump(tree)
+    C = "        backfill_branch_entities(s)\n"
+    dead = {
+        "after a return": "def upgrade():\n    return\n    backfill_branch_entities(s)\n",
+        "after a raise": "def upgrade():\n    raise X\n    backfill_branch_entities(s)\n",
+        "if False": "def upgrade():\n    if False:\n" + C,
+        # `if 0` is a ONE-TOKEN twin of the control above: a gate special-casing
+        # the literal `False` rather than the constant's truthiness passes it.
+        "if 0": "def upgrade():\n    if 0:\n" + C,
+        "while False": "def upgrade():\n    while False:\n" + C,
+        "for over ()": "def upgrade():\n    for _ in ():\n" + C,
+        "else of if True": "def upgrade():\n    if True:\n        pass\n    else:\n" + C,
+    }
+    for label, src in dead.items():
+        live = _live_statements(ast.parse(src).body[0].body)
+        assert _call_index(live, "backfill_branch_entities") is None, label
 
     reachable = ast.parse("def upgrade():\n    backfill_branch_entities(s)\n")
     assert _call_index(_live_statements(reachable.body[0].body), "backfill_branch_entities") == 0
