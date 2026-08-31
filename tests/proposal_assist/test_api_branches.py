@@ -206,3 +206,25 @@ def test_the_api_refuses_to_delete_the_root_branch(
 
     resp = client_authed_owner.delete(f"/api/workspaces/{wid}/branches/main")
     assert resp.status_code == 409, resp.text
+
+
+def test_listing_branches_for_a_workspace_still_in_setup_is_409_not_500(
+    client_authed_owner, current_user, pg_session_factory, _app
+):
+    """A workspace whose repo Phase 0 has not created yet is YOUNG, not broken.
+
+    `list_branches_route` used to be the one route in this module with no
+    exception handler, so `subprocess.run(cwd=<missing dir>)` raised a bare
+    FileNotFoundError (measured) straight into main.py's generic handler. The
+    cockpit's read path answered 500 for every workspace between creation and
+    `_init_repo`.
+
+    409, not 404: the workspace is real, it is just not ready — a 404 would tell
+    the SPA to stop asking.
+    """
+    with pg_session_factory() as s:
+        # Deliberately NOT `_seed`: no repo is the whole point.
+        wid = make_workspace(s, title="young", owner=current_user).id
+        s.commit()
+    r = client_authed_owner.get(f"/api/workspaces/{wid}/branches")
+    assert r.status_code == 409, r.text

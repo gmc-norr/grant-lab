@@ -74,6 +74,14 @@ class BranchInUse(BranchError):
     """Refused because the branch is the one currently checked out."""
 
 
+class BranchRepoNotReady(BranchError):
+    """The workspace exists but Phase 0 has not created its repo yet.
+
+    Distinct from a repo git cannot READ, which stays a 500: that is a server
+    fault and saying "still setting up" would hide corruption.
+    """
+
+
 class BranchLast(BranchError):
     """Refused because it is the only branch left."""
 
@@ -263,6 +271,16 @@ def list_workspace_branches(
     row = session.get(Workspace, workspace_id)
     if row is None:
         raise BranchNotFound(str(workspace_id))
+    if not (repo / ".git").exists():
+        # A workspace still in setup. Without this the cockpit's read path gets a
+        # bare FileNotFoundError from `subprocess.run(cwd=...)` (measured), which
+        # `_STATUS` cannot map, so main.py's generic handler answers 500 — for a
+        # workspace that is simply young. Same probe the reconciler uses.
+        #
+        # Deliberately NOT a catch-all around `list_branches`: a repo that EXISTS
+        # and git cannot read is corruption, and reporting that as "still setting
+        # up" would hide it. That stays a 500.
+        raise BranchRepoNotReady(str(workspace_id))
     return list_branches(repo), row.current_branch
 
 
