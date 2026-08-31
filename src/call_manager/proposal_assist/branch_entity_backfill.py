@@ -132,8 +132,16 @@ def backfill_branch_entities(
                 exc_info=True,
             )
             continue
-        if not names:
-            continue  # `git init` with no commit: a branch name, but no ref
+        # NO early return on an empty ref set. `git init` with no commit reaches
+        # here with names == [], and so does a repo whose last ref was deleted
+        # under a detached HEAD — and the second one still has rows and a root
+        # pointer to clear. Skipping the sweep left them behind FOREVER, because
+        # nothing else ever revisits them. Reproduced 2026-08-31: detach, delete
+        # the only ref, re-run — result was (0,0,0,0,0) with the stale row and the
+        # stale pointer both intact.
+        #
+        # An empty set is a no-op for a repo that never had rows, which is the
+        # `git init` case, so falling through costs that case nothing.
 
         existing = {
             n
@@ -207,7 +215,27 @@ def backfill_branch_entities(
         # The SDK handle: workspaces.current_branch. A column naming a branch that
         # no longer exists has no row to carry it; leaving it on the workspace is
         # correct, because S4 is what finally drops that column.
+        # It is ONE handle, so at most one row may hold it. Clearing the others
+        # first is what makes that true across runs: `switch_branch` moves
+        # `current_branch` and deliberately does not touch
+        # `workspaces.last_sdk_session_id`, so a reconcile, a switch, and a second
+        # reconcile used to leave the SAME id on both branches — the exact thing
+        # §3.1 forbids, because two branches would then resume one remote session.
+        # Reproduced 2026-08-31: {'feature': 'sess-X', 'main': 'sess-X'}.
+        #
+        # `is_distinct_from`, not `!=`: with a NULL `current_branch`, `name != NULL`
+        # is NULL and the UPDATE would match nothing, leaving every stale handle in
+        # place in precisely the case where none of them can be right. The column
+        # is NOT NULL today so that path is unreachable and deliberately untested
+        # (`test_current_branch_is_not_nullable_so_the_null_path_is_unreachable`
+        # pins the reason); S4 drops this column, and `!=` would be the wrong shape
+        # to leave behind for whatever replaces it.
         current = session.get(Workspace, wid).current_branch
+        session.execute(
+            update(Branch)
+            .where(Branch.workspace_id == wid, Branch.name.is_distinct_from(current))
+            .values(last_sdk_session_id=None)
+        )
         if current in names:
             session.execute(
                 select(Branch).where(Branch.workspace_id == wid, Branch.name == current)

@@ -307,6 +307,36 @@ def create_workspace_branch(
         raise BranchNotFound(f"{name}: the workspace has no commits yet")
     if branch_exists(repo, name):
         raise BranchExists(name)
+    # De-orphan BEFORE the git call, not after. `branch_exists` has just answered
+    # NO for this name, so any row carrying it is by definition an orphan — a
+    # delete whose commit failed after `git branch -D`, or a restore whose
+    # database snapshot is newer than the repo volume. Without this,
+    # `uq_branches_ws_name` fires on the caller's commit, `_STATUS` has no mapping
+    # for IntegrityError, and a create that USED to return 201 returns a 500.
+    #
+    # And if the orphan is the row `root_branch_id` names, the delete itself
+    # raises: `fk_workspaces_root_branch_id` is ON DELETE RESTRICT. Clear the
+    # pointer first. Clearing rather than re-pointing at the replacement is
+    # deliberate — `git branch <name>` does not move HEAD, so the new ref is not
+    # known to be the root; `backfill_branch_entities` re-roots it when HEAD
+    # agrees. Reproduced 2026-08-31: ForeignKeyViolation on
+    # fk_workspaces_root_branch_id, with the ref ALREADY created.
+    #
+    # Both run before `git_create_branch` so that a failure here leaves git
+    # untouched — a database error is recoverable, a stray ref is not. The row is
+    # still ADDED after the git call, so a ref git REFUSED leaves no row behind.
+    ws = session.get(Workspace, workspace_id)
+    if ws is not None and ws.root_branch_id is not None:
+        held = session.get(Branch, ws.root_branch_id)
+        if held is not None and held.name == name:
+            session.execute(
+                sql_update(Workspace)
+                .where(Workspace.id == workspace_id)
+                .values(root_branch_id=None)
+            )
+    session.execute(delete(Branch).where(Branch.workspace_id == workspace_id, Branch.name == name))
+    session.flush()
+
     git_create_branch(repo, name)
     # The row is founded in the same call as the ref (spec §8 S1 step 4). A
     # one-time backfill goes stale the moment the next branch is created, and a
@@ -322,13 +352,6 @@ def create_workspace_branch(
     # `last_sdk_session_id` is deliberately left NULL: a new branch has held no
     # hosted conversation, and inheriting the parent's handle would let two
     # branches resume one remote session (§3.1).
-    # `branch_exists` has just answered NO for this name, so any row carrying it
-    # is by definition an orphan — a delete whose commit failed after `git branch
-    # -D`, or a restore whose database snapshot is newer than the repo volume.
-    # Without this, `uq_branches_ws_name` fires on the caller's commit, `_STATUS`
-    # has no mapping for IntegrityError, and a create that USED to return 201
-    # returns a 500 — while git has already made the ref. Measured.
-    session.execute(delete(Branch).where(Branch.workspace_id == workspace_id, Branch.name == name))
     session.add(Branch(workspace_id=workspace_id, name=name))
     logger.info(
         "branches.created",

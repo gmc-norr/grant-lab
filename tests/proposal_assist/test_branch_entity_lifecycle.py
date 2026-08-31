@@ -277,3 +277,85 @@ def test_create_over_an_orphaned_row_still_returns_a_branch(pg_session_factory, 
     assert branch_exists(repo, "new_ideas")
     with pg_session_factory() as s:
         assert _rows(s, wid) == sorted(list_branches(repo))
+
+
+def test_create_over_an_orphaned_ROOT_row_still_returns_a_branch(pg_session_factory, tmp_path):
+    """The sibling of the test above, for the one orphan the FK will not let go.
+
+    `fk_workspaces_root_branch_id` is ON DELETE RESTRICT, so when the orphan being
+    replaced is the row `root_branch_id` names, the de-orphan delete raises
+    ForeignKeyViolation. Reproduced 2026-08-31 with the ref ALREADY created — a
+    201 turned into a 500 AND left git changed, which is the exact failure the
+    de-orphan step exists to prevent, one state further in.
+
+    Reachable without a bug: `git branch -D` run outside the app, or a restore
+    whose database snapshot is newer than the repo volume.
+    """
+    wid, repo = _ws(pg_session_factory, tmp_path)
+    subprocess.run(["git", "branch", "side"], cwd=repo, check=True)
+    # Leave main and destroy its ref. The root row now names a ref that is gone.
+    subprocess.run(["git", "checkout", "-q", "side"], cwd=repo, check=True)
+    subprocess.run(["git", "branch", "-q", "-D", "main"], cwd=repo, check=True)
+    with pg_session_factory() as s:
+        s.get(Workspace, wid).current_branch = "side"
+        s.commit()
+
+    with pg_session_factory() as s:
+        create_workspace_branch(
+            s, stamp=stamp_for(s, wid), workspace_id=wid, name="main", workspaces_dir=tmp_path
+        )
+        s.commit()
+
+    with pg_session_factory() as s:
+        # Only `main`: `side` was made with raw git in this test and never had a
+        # row. Founding it is the reconciler's job, not create's.
+        assert _rows(s, wid) == ["main"]
+        # The pointer is CLEARED, not moved to the replacement: `git branch main`
+        # does not move HEAD, so the new ref is not known to be the root.
+        # `backfill_branch_entities` re-roots it once HEAD agrees.
+        assert s.get(Workspace, wid).root_branch_id is None
+    assert branch_exists(repo, "main")
+
+
+def test_the_orphaned_root_is_cleared_before_git_runs(pg_session_factory, tmp_path):
+    """Ordering, not just outcome. If the pointer clear ran AFTER
+    `git_create_branch`, a database failure would leave a ref behind that the
+    caller's rollback cannot undo — git is not transactional and this function's
+    caller commits later.
+
+    Proved by making git fail: the ref is destroyed under the call, so the create
+    raises, and nothing may have been left half-done in either store.
+    """
+    wid, repo = _ws(pg_session_factory, tmp_path)
+    subprocess.run(["git", "branch", "side"], cwd=repo, check=True)
+    subprocess.run(["git", "checkout", "-q", "side"], cwd=repo, check=True)
+    subprocess.run(["git", "branch", "-q", "-D", "main"], cwd=repo, check=True)
+    with pg_session_factory() as s:
+        s.get(Workspace, wid).current_branch = "side"
+        s.commit()
+
+    import call_manager.proposal_assist.branches as branches_mod
+
+    def _boom(*a, **k):
+        raise RuntimeError("git said no")
+
+    real = branches_mod.git_create_branch
+    branches_mod.git_create_branch = _boom
+    try:
+        with pg_session_factory() as s:
+            with pytest.raises(RuntimeError):
+                create_workspace_branch(
+                    s,
+                    stamp=stamp_for(s, wid),
+                    workspace_id=wid,
+                    name="main",
+                    workspaces_dir=tmp_path,
+                )
+            s.rollback()
+    finally:
+        branches_mod.git_create_branch = real
+
+    assert not branch_exists(repo, "main"), "git must be untouched when the row work fails"
+    with pg_session_factory() as s:
+        # The rollback undoes the pointer clear too — both stores are as they were.
+        assert s.get(Workspace, wid).root_branch_id is not None

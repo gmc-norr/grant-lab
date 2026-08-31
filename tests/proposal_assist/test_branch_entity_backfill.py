@@ -576,15 +576,76 @@ def test_a_surviving_root_pointer_is_not_cleared_by_an_unrelated_orphan(
         assert s.get(Workspace, wid).root_branch_id == root_before, "unrooted a healthy workspace"
 
 
+def _live_statements(body):
+    """The statements in *body* that can actually run, flattened, in order.
+
+    `ast.walk` is the wrong tool for a reachability question: it yields every
+    node in the subtree, so a call parked after an unconditional `return`, or
+    inside `if False:`, is still "found". Both are one-line mutations, and both
+    left the gate below green when it used `ast.walk`. Measured 2026-08-31:
+    inserting a bare `return` above the call, the test passed in 0.07s.
+
+    So: stop at the first `return`/`raise` at each level, and drop the branch of
+    an `if` whose test is a literal that decides it.
+    """
+    import ast
+
+    out = []
+    for stmt in body:
+        out.append(stmt)
+        if isinstance(stmt, ast.If) and isinstance(stmt.test, ast.Constant):
+            out.extend(_live_statements(stmt.body if stmt.test.value else stmt.orelse))
+        else:
+            for field in ("body", "orelse", "finalbody", "handlers"):
+                inner = getattr(stmt, field, None)
+                if isinstance(inner, list):
+                    out.extend(_live_statements(inner))
+        if isinstance(stmt, ast.Return | ast.Raise):
+            break  # nothing after this at this level ever runs
+    return out
+
+
+def _own_nodes(stmt):
+    """*stmt* and its expression descendants, NOT descending into nested statements.
+
+    Load-bearing: a compound statement (`if`, `with`, `try`) carries its whole
+    body in its subtree, so a plain `ast.walk` over it would find a call inside a
+    dead branch that `_live_statements` had already excluded. Every live nested
+    statement appears in that list on its own, so nothing reachable is lost.
+    """
+    import ast
+
+    yield stmt
+    for child in ast.iter_child_nodes(stmt):
+        if isinstance(child, ast.stmt):
+            continue
+        yield from _own_nodes(child)
+
+
+def _call_index(statements, callee):
+    """Index of the first live statement containing a call to *callee*, or None."""
+    import ast
+
+    for i, stmt in enumerate(statements):
+        for node in _own_nodes(stmt):
+            if isinstance(node, ast.Call):
+                func = node.func
+                fname = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+                if fname == callee:
+                    return i
+    return None
+
+
 def test_the_migration_calls_the_backfill_inside_upgrade():
     """The migration body cannot be executed in a unit test — it needs a live
     Alembic op context — so pin the wiring by PARSING it.
 
     A substring search would not do: `assert "backfill_branch_entities" in source`
-    is satisfied by the import line alone, by a comment, or by dead code after a
-    `return`. That is the exact shape of a gate that passes because its subject is
-    already present. This walks the AST of `upgrade()` and requires an actual Call
-    whose callee is named `backfill_branch_entities`.
+    is satisfied by the import line alone, or by a comment. Nor would an
+    `ast.walk` over the whole function: that yields dead code too, and a call the
+    migration can never reach founds nothing. So this asks the two questions that
+    actually matter — is the call REACHABLE, and does it run AFTER the table it
+    populates exists.
     """
     import ast
     import pathlib
@@ -592,12 +653,37 @@ def test_the_migration_calls_the_backfill_inside_upgrade():
     src = pathlib.Path("alembic/versions/0068_branch_entity.py").read_text()
     tree = ast.parse(src)
     upgrade = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade")
-    called = {
-        n.func.id
-        for n in ast.walk(upgrade)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-    }
-    assert "backfill_branch_entities" in called, sorted(called)
+    live = _live_statements(upgrade.body)
+
+    backfill_at = _call_index(live, "backfill_branch_entities")
+    assert backfill_at is not None, "the backfill call in upgrade() is unreachable or absent"
+
+    create_at = _call_index(live, "create_table")
+    assert create_at is not None, "upgrade() no longer creates the table"
+    assert create_at < backfill_at, (
+        f"the backfill runs at statement {backfill_at}, before create_table at {create_at}"
+    )
+
+
+def test_the_migration_gate_rejects_a_call_it_cannot_reach():
+    """The control for the test above — without this, `_live_statements` could
+    return everything and nobody would notice.
+
+    Two shapes, because they are the two one-line mutations that a reviewer
+    reaches for first, and the `ast.walk` version this replaced survived both.
+    """
+    import ast
+
+    after_return = ast.parse("def upgrade():\n    return\n    backfill_branch_entities(s)\n")
+    in_dead_branch = ast.parse(
+        "def upgrade():\n    if False:\n        backfill_branch_entities(s)\n"
+    )
+    for tree in (after_return, in_dead_branch):
+        live = _live_statements(tree.body[0].body)
+        assert _call_index(live, "backfill_branch_entities") is None, ast.dump(tree)
+
+    reachable = ast.parse("def upgrade():\n    backfill_branch_entities(s)\n")
+    assert _call_index(_live_statements(reachable.body[0].body), "backfill_branch_entities") == 0
 
 
 def test_reconciling_after_a_switch_does_not_move_the_root(pg_session_factory, tmp_path):
@@ -651,3 +737,119 @@ def test_a_workspace_with_no_repo_is_counted_absent_not_silently_zero(pg_session
         r = backfill_branch_entities(s, workspaces_dir=tmp_path)
         s.commit()
         assert (r.created, r.rooted, r.skipped, r.absent) == (1, 1, 0, 1)
+
+
+def test_the_sdk_handle_lands_on_exactly_one_branch_after_a_switch(pg_session_factory, tmp_path):
+    """§3.1: one hosted conversation, so at most one branch may name it.
+
+    The trap is that `switch_branch` moves `current_branch` and deliberately does
+    NOT clear `workspaces.last_sdk_session_id`. So reconcile, switch, reconcile
+    used to leave the SAME id on both rows — measured
+    `{'feature': 'sess-X', 'main': 'sess-X'}` — and two branches would resume one
+    remote session. The docstring named that harm; the code did not prevent it.
+
+    Reachable the moment S2 lands: this function's own contract says "S2 runs it
+    again before it attaches any worktree".
+    """
+    with pg_session_factory() as s:
+        w = make_workspace(s, title="w")
+        wid = w.id
+        w.current_branch = "main"
+        w.last_sdk_session_id = "sess-X"
+        s.commit()
+    _repo(tmp_path, wid, "main", extra=("feature",))
+
+    with pg_session_factory() as s:
+        backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+
+    with pg_session_factory() as s:  # what switch_branch leaves behind
+        s.get(Workspace, wid).current_branch = "feature"
+        s.commit()
+
+    with pg_session_factory() as s:
+        backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+
+    with pg_session_factory() as s:
+        held = {
+            n: sid
+            for n, sid in s.execute(
+                select(Branch.name, Branch.last_sdk_session_id).where(Branch.workspace_id == wid)
+            ).all()
+        }
+    # Asserted over the WHOLE map, not `held["feature"] == "sess-X"`: that form
+    # passes with main still holding it, which is the entire bug.
+    assert held == {"feature": "sess-X", "main": None}, held
+
+
+def test_current_branch_is_not_nullable_so_the_null_path_is_unreachable():
+    """Why there is no NULL-`current_branch` test above.
+
+    `is_distinct_from` rather than `!=` in the clearing UPDATE is deliberate —
+    `name != NULL` is NULL in SQL, so a `!=` predicate would match no rows and
+    leave every stale handle in place. But the column is NOT NULL today, so that
+    path cannot be reached, and a test that sets it to NULL fails on the
+    constraint rather than exercising anything (measured: NotNullViolation).
+
+    Pinned as a fact instead. If S4 ever relaxes this column, this test goes red
+    and the NULL case becomes reachable and worth writing.
+    """
+    assert Workspace.__table__.c.current_branch.nullable is False
+
+
+def test_a_repo_whose_last_ref_vanished_is_swept(pg_session_factory, tmp_path):
+    """A readable repo with ZERO refs still needs the sweep.
+
+    It used to `continue` before the rows were even loaded, so a repo whose final
+    ref was deleted under a detached HEAD kept its stale row and its stale root
+    pointer forever — nothing else revisits an established workspace. Measured
+    before the fix: `BackfillResult(0, 0, 0, 0, 0)`, row `['main']` still present,
+    pointer still set.
+    """
+    with pg_session_factory() as s:
+        w = make_workspace(s, title="w")
+        wid = w.id
+        w.current_branch = "main"
+        s.commit()
+    _repo(tmp_path, wid, "main")
+    d = workspace_repo_dir(tmp_path, wid)
+
+    with pg_session_factory() as s:
+        backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+        assert s.get(Workspace, wid).root_branch_id is not None
+
+    subprocess.run(["git", "checkout", "-q", "--detach", "HEAD"], cwd=d, check=True)
+    subprocess.run(["git", "branch", "-q", "-D", "main"], cwd=d, check=True)
+
+    with pg_session_factory() as s:
+        r = backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+    assert r.deleted == 1, r
+
+    with pg_session_factory() as s:
+        rows = [
+            n for (n,) in s.execute(select(Branch.name).where(Branch.workspace_id == wid)).all()
+        ]
+        assert rows == []
+        assert s.get(Workspace, wid).root_branch_id is None
+
+
+def test_a_fresh_repo_with_no_commit_is_still_a_no_op(pg_session_factory, tmp_path):
+    """The control for the test above. Removing the early `continue` must not turn
+    `git init` with no commit — which also has zero refs — into a founding or a
+    delete. Same input shape, opposite expectation."""
+    with pg_session_factory() as s:
+        wid = make_workspace(s, title="w").id
+        s.commit()
+    _repo(tmp_path, wid, "main", commit=False)
+
+    with pg_session_factory() as s:
+        r = backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+    assert (r.created, r.deleted, r.rooted, r.skipped, r.absent) == (0, 0, 0, 0, 0), r
+
+    with pg_session_factory() as s:
+        assert s.execute(select(Branch).where(Branch.workspace_id == wid)).all() == []
+        assert s.get(Workspace, wid).root_branch_id is None

@@ -57,9 +57,15 @@ def test_every_ref_has_a_row_after_backfill_and_after_a_create(pg_session_factor
     assert rows == set(list_branches(repo))
 
 
-def test_a_workspace_with_a_repo_always_has_a_root_pointer(pg_session_factory, tmp_path):
+def test_a_workspace_whose_head_is_attached_always_has_a_root_pointer(pg_session_factory, tmp_path):
     """S2 resolves `repo/` versus `worktrees/<id>/` through this pointer. A null
-    one after backfill means every path for that workspace resolves nowhere."""
+    one after backfill means every path for that workspace resolves nowhere.
+
+    ATTACHED is the whole qualification, and it is not decoration: a repo on a
+    detached HEAD gets its rows but keeps a null pointer, deliberately — see the
+    control below. Claiming the broader "a workspace with a repo is never null"
+    would be a guarantee this test does not give and the reconciler does not make.
+    """
     with pg_session_factory() as s:
         # Distinct owners: make_workspace defaults to make_user(session) with no
         # email, and that default is the fixed literal "owner@ki.se" — a second
@@ -110,3 +116,32 @@ def test_the_root_pointer_never_names_another_workspaces_branch(pg_session_facto
         for wid in (a, b):
             root = s.get(Branch, s.get(Workspace, wid).root_branch_id)
             assert root.workspace_id == wid, f"{wid}'s root belongs to {root.workspace_id}"
+
+
+def test_a_detached_head_is_the_documented_exception(pg_session_factory, tmp_path):
+    """The control for the invariant above, in the same file S2 will read.
+
+    Without it, "attached" in that test's name is an unchecked word: the
+    invariant would read as universal and S2 would dereference a null pointer.
+    """
+    with pg_session_factory() as s:
+        wid = make_workspace(s, title="d").id
+        s.commit()
+    repo = workspace_repo_dir(tmp_path, wid)
+    init_workspace_repo(repo, "# D\n")
+    subprocess.run(["git", "checkout", "-q", "--detach", "HEAD"], cwd=repo, check=True)
+
+    with pg_session_factory() as s:
+        backfill_branch_entities(s, workspaces_dir=tmp_path)
+        s.commit()
+
+    with pg_session_factory() as s:
+        assert s.get(Workspace, wid).root_branch_id is None
+        rows = {
+            n for (n,) in s.execute(select(Branch.name).where(Branch.workspace_id == wid)).all()
+        }
+    # Not `set(list_branches(repo))`: on a detached HEAD git's own output carries
+    # a pseudo-entry — measured here as `(HEAD detached at 893c11d)` — and
+    # `_real_refs` filters it. Comparing against the raw listing would demand a row
+    # for a name that is not a ref.
+    assert rows == {"main"}, "the refs must still be founded"

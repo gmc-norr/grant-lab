@@ -714,9 +714,16 @@ class Workspace(Base):
     #: harmless here — nothing resolves a path through this column yet — and S2
     #: checks the root back out before it attaches any worktree.
     #:
-    #: Nullable because a workspace still in setup has no repo and so no branch to
-    #: point at; `tests/architecture/test_branch_entity_invariants.py` pins that a
-    #: workspace WITH a repo is never left null.
+    #: Nullable in TWO states, not one. A workspace still in setup has no repo and
+    #: so no branch to point at — and a repo on a DETACHED HEAD has refs but no
+    #: knowable root, so `backfill_branch_entities` leaves the pointer alone rather
+    #: than guessing which survivor is the root
+    #: (`test_a_detached_head_still_founds_the_refs_but_no_root`).
+    #:
+    #: `tests/architecture/test_branch_entity_invariants.py` therefore pins the
+    #: narrower claim that actually holds: a repo whose HEAD is ATTACHED is never
+    #: left null. S2 must handle a rootless repo explicitly; it cannot assume a
+    #: repo directory implies a pointer.
     root_branch_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         # use_alter: `workspaces` and `branches` reference each other (this
