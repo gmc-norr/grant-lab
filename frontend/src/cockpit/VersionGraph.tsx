@@ -130,6 +130,12 @@ function VersionGraphRow({
           <button
             type="button"
             className={styles.button}
+            // The sha leaves the visible row but NOT the accessible name.
+            // Subjects repeat -- "collab checkpoint: draft" appears on every
+            // checkpoint -- so the subject alone cannot name a row, and a
+            // screen-reader user would hear the same label several times with
+            // no way to tell the versions apart.
+            aria-label={`${sha7} ${v.subject}`}
             aria-pressed={selected}
             onClick={onSelect}
             onMouseEnter={handleMouseEnter}
@@ -137,7 +143,11 @@ function VersionGraphRow({
             onFocus={handleFocus}
             onBlur={handleBlur}
           >
-            <span className={styles.sha}>{sha7}</span>
+            {/* No sha column. At the pane's 276px default the sha plus a
+                branch pill left about 60px for the subject, which rendered as
+                "col…" -- measured on a real screenshot. VS Code's source
+                control graph does not show it either: it lives in the hover
+                card and in the row menu's "Copy commit id". */}
             <span className={styles.subject}>{v.subject}</span>
             <span className={styles.when}>{shortAge(v.committed_at, now)}</span>
           </button>

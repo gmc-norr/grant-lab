@@ -48,15 +48,27 @@ describe("VersionLane", () => {
     expect(container.querySelector("svg")?.getAttribute("height")).toBe(String(ROW_H));
   });
 
-  it("colours the dot by provenance, and rings it when selected", () => {
-    const { container: agent } = render(
-      <VersionLane row={rows[0]} columns={1} role="agent" selected={false} />,
+  it("colours the dot by its LANE, not by provenance", () => {
+    // rows[1] sits in lane 1, so lane colour and the old provenance colour
+    // differ. Asserting on rows[0] would pass either way -- lane 0's colour is
+    // the same token the old "agent" mapping used.
+    expect(rows[1].lane).toBe(1);
+    const { container } = render(
+      <VersionLane row={rows[1]} columns={2} role="agent" selected={false} />,
+    );
+    expect(container.querySelector("circle")).toHaveAttribute("fill", "var(--app-lane-1)");
+    // Provenance is still exposed for CSS and tests, just not as the fill.
+    expect(container.querySelector("circle")).toHaveAttribute("data-role", "agent");
+  });
+
+  it("rings the dot when the version is selected", () => {
+    const { container: plain } = render(
+      <VersionLane row={rows[0]} columns={1} role={null} selected={false} />,
     );
     const { container: picked } = render(
-      <VersionLane row={rows[0]} columns={1} role="agent" selected />,
+      <VersionLane row={rows[0]} columns={1} role={null} selected />,
     );
-    expect(agent.querySelector("circle")).toHaveAttribute("fill", "var(--app-lane-0)");
-    expect(agent.querySelector("circle")).toHaveAttribute("stroke", "var(--app-editor)");
+    expect(plain.querySelector("circle")).toHaveAttribute("stroke", "var(--app-editor)");
     expect(picked.querySelector("circle")).toHaveAttribute("stroke", "var(--app-accent-bright)");
   });
 });

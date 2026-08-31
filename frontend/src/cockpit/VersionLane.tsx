@@ -35,16 +35,6 @@ export function pathFor(link: LaneLink, lane: number): string {
   );
 }
 
-/** Provenance colour for the dot. Kept as an explicit map rather than a lane
- *  colour: the lane says WHICH branch, the dot says WHO made the commit, and
- *  collapsing the two would lose one of them. */
-function dotFill(role: string | null): string {
-  if (role === "agent") return "var(--app-lane-0)";
-  if (role === "user") return "var(--app-lane-1)";
-  if (role === "reconciled") return "var(--app-lane-2)";
-  return "var(--app-muted)";
-}
-
 /** One row of the commit graph. Purely decorative: the row's meaning is carried
  *  by the sha, subject and branch pills beside it, so this is aria-hidden. */
 export function VersionLane({
@@ -79,12 +69,17 @@ export function VersionLane({
           stroke={`var(--app-lane-${link.color % LANE_COLORS})`}
         />
       ))}
+      {/* The dot takes its LANE's colour, not a provenance colour. Both were
+          drawn from the same six-colour palette, so a dot could come out green
+          on a blue line -- which reads as a rendering fault, because in a commit
+          graph colour means "which branch". Provenance keeps its data-role hook
+          and is stated in words in the hover card. */}
       <circle
         cx={x(row.lane)}
         cy={ROW_H / 2}
         r={DOT_R}
         data-role={role ?? "none"}
-        fill={dotFill(role)}
+        fill={`var(--app-lane-${row.lane % LANE_COLORS})`}
         stroke={selected ? "var(--app-accent-bright)" : "var(--app-editor)"}
         strokeWidth={2}
       />

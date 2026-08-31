@@ -66,20 +66,32 @@ describe("VersionGraph", () => {
     }
   });
 
-  it("renders one row per version, newest first, with sha and subject", () => {
+  it("renders one row per version, newest first, showing the subject", () => {
     mockList({ versions: [ROW("aaaaaaa", "newer one"), ROW("bbbbbbb", "older one")] });
     wrap();
     const rows = screen.getAllByRole("button", { name: /^aaaaaaa|^bbbbbbb/ });
     expect(rows).toHaveLength(2);
-    expect(rows[0].textContent).toContain("aaaaaaa");
+    // The sha is no longer PRINTED in the row -- at 276px it left about 60px
+    // for the subject. It is still in the accessible name above.
+    expect(rows[0].textContent).not.toContain("aaaaaaa");
     expect(rows[0].textContent).toContain("newer one");
-    expect(rows[1].textContent).toContain("bbbbbbb");
+    expect(rows[1].textContent).toContain("older one");
   });
 
-  it("shortens the sha to 7 characters", () => {
-    mockList({ versions: [ROW("0123456789abcdef0123456789abcdef01234567", "s")] });
+  it("keeps the 7-character sha in each row's accessible name", () => {
+    // Subjects repeat -- every checkpoint says "collab checkpoint: draft" -- so
+    // without the sha two rows would carry the SAME accessible name and a
+    // screen-reader user could not tell them apart. This is the assertion that
+    // fails if the sha is dropped from the label as well as from the view.
+    mockList({
+      versions: [
+        ROW("0123456789abcdef0123456789abcdef01234567", "collab checkpoint"),
+        ROW("fedcba9876543210fedcba9876543210fedcba98", "collab checkpoint"),
+      ],
+    });
     wrap();
-    expect(screen.getByText("0123456")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "0123456 collab checkpoint" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "fedcba9 collab checkpoint" })).toBeInTheDocument();
   });
 
   it("marks the role on the dot, including no provenance", () => {

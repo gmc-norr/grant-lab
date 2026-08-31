@@ -76,12 +76,6 @@
   opacity: 1;
 }
 
-.sha {
-  flex: 0 0 auto;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.78rem;
-  color: var(--app-muted);
-}
 /* `min-width: 0` is load-bearing: without it a flex item refuses to shrink below
    its content and the row overflows the pane instead of ellipsising. */
 .subject {
