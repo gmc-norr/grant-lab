@@ -167,7 +167,9 @@ def test_list_returns_the_names_and_the_current_one(pg_session_factory, tmp_path
         )
         s.commit()
     with pg_session_factory() as s:
-        names, current = list_workspace_branches(s, workspace_id=wid, workspaces_dir=tmp_path)
+        names, current, _tips = list_workspace_branches(
+            s, workspace_id=wid, workspaces_dir=tmp_path
+        )
     assert sorted(names) == ["b", "main"]
     assert current == "main"
 

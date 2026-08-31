@@ -52,6 +52,10 @@ _TEARDOWN_BARRIER_SECONDS = 15.0
 class BranchListOut(BaseModel):
     branches: list[str]
     current: str
+    #: Branch name -> the full sha its tip points at. NO default value: with
+    #: `= {}` the switch route could return an empty map and nothing would
+    #: notice, because its test reads only ["current"].
+    tips: dict[str, str]
 
 
 class BranchIn(BaseModel):
@@ -151,14 +155,14 @@ def list_branches_route(
     # handler at all, so every refusal it could raise reached main.py's generic
     # handler as a 500.
     try:
-        names, current = list_workspace_branches(
+        names, current, tips = list_workspace_branches(
             session,
             workspace_id=workspace_id,
             workspaces_dir=request.app.state.settings.workspaces_dir,
         )
     except Exception as exc:
         _raise_http(exc)
-    return BranchListOut(branches=names, current=current)
+    return BranchListOut(branches=names, current=current, tips=tips)
 
 
 @router.post("/{workspace_id}/branches", status_code=201)
@@ -226,10 +230,10 @@ def switch_branch_route(
                 exc_info=True,
             )
         _raise_http(exc)
-    names, current = list_workspace_branches(
+    names, current, tips = list_workspace_branches(
         session, workspace_id=workspace_id, workspaces_dir=workspaces_dir
     )
-    return BranchListOut(branches=names, current=current)
+    return BranchListOut(branches=names, current=current, tips=tips)
 
 
 #: `{name:path}` and NOT `{name}`. `git check-ref-format --branch` accepts a

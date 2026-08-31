@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from call_manager.db.models import Branch, TurnJob, Workspace
 from call_manager.proposal_assist.citations.gitio import (
     branch_exists,
+    branch_tips,
     checkout_branch,
     commit_exists,
     current_branch,
@@ -269,8 +270,9 @@ def switch_branch(
 
 def list_workspace_branches(
     session: Session, *, workspace_id: uuid.UUID, workspaces_dir: Path | str
-) -> tuple[list[str], str]:
-    """(every local branch, the one this workspace is on). Read-only, no mutex.
+) -> tuple[list[str], str, dict[str, str]]:
+    """(every local branch, the one this workspace is on, each branch's tip sha).
+    Read-only, no mutex.
 
     `current` comes from the DATABASE, not from `current_branch(repo)`. §4.1
     makes the column the source of truth and HEAD a cache, so after a crash
@@ -297,7 +299,11 @@ def list_workspace_branches(
         # and git cannot read is corruption, and reporting that as "still setting
         # up" would hide it. That stays a 500.
         raise BranchRepoNotReady(str(workspace_id))
-    return list_branches(repo), row.current_branch
+    # ONE listing operation for BOTH routes. A second, hand-built response body
+    # for the switch route is how the two would drift apart -- and a `tips`
+    # nobody populated is invisible, because the switch test reads only
+    # ["current"].
+    return list_branches(repo), row.current_branch, branch_tips(repo)
 
 
 def create_workspace_branch(

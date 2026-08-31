@@ -29,12 +29,23 @@ def _seed(session, app, owner):
 def test_list_returns_branches_and_current(
     client_authed_owner, current_user, pg_session_factory, _app
 ):
+    """Deliberately EXACT equality, not a subset check. This is the only
+    assertion in the file that notices a response-shape change at all, and a
+    subset assertion is a gate that cannot fail."""
+    from call_manager.proposal_assist.citations.gitio import branch_tips
+
     with pg_session_factory() as s:
         wid = _seed(s, _app, current_user)
         s.commit()
+    repo = workspace_repo_dir(_app.state.settings.workspaces_dir, wid)
+
     r = client_authed_owner.get(f"/api/workspaces/{wid}/branches")
     assert r.status_code == 200
-    assert r.json() == {"branches": ["main"], "current": "main"}
+    assert r.json() == {
+        "branches": ["main"],
+        "current": "main",
+        "tips": {"main": branch_tips(repo)["main"]},
+    }
 
 
 def test_create_then_list(client_authed_owner, current_user, pg_session_factory, _app):
@@ -276,3 +287,23 @@ def test_create_from_an_unknown_sha_is_404(
         f"/api/workspaces/{wid}/branches", json={"name": "v2", "from_sha": "0" * 40}
     )
     assert r.status_code == 404, r.text
+
+
+def test_the_switch_response_carries_real_tips_not_an_empty_map(
+    client_authed_owner, current_user, pg_session_factory, _app
+):
+    """Without this, the switch route can return `tips: {}` forever and every
+    other test still passes -- they only ever read ["current"]."""
+    with pg_session_factory() as s:
+        wid = _seed(s, _app, current_user)
+        s.commit()
+    client_authed_owner.post(f"/api/workspaces/{wid}/branches", json={"name": "v2"})
+
+    switched = client_authed_owner.post(
+        f"/api/workspaces/{wid}/branches/switch", json={"name": "v2"}
+    )
+    listed = client_authed_owner.get(f"/api/workspaces/{wid}/branches")
+
+    assert switched.status_code == 200, switched.text
+    assert switched.json()["tips"] == listed.json()["tips"]
+    assert set(switched.json()["tips"]) == {"main", "v2"}
