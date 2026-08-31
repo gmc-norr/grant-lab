@@ -277,3 +277,30 @@ def test_a_TAG_sharing_a_branchs_name_does_not_hide_the_branch(tmp_path):
     # The real point: every name this returns must survive its own existence check.
     for name in list_branches(d):
         assert branch_exists(d, name), f"list_branches returned {name!r}, which it denies exists"
+
+
+@pytest.mark.parametrize("name", ["@{-1}", "@{-2}"])
+def test_branch_SHORTHAND_is_rejected_even_though_git_exits_zero(name):
+    """`--branch` EXPANDS shorthand and prints the result, so the exit code alone
+    says yes to a name that means a different branch.
+
+    Measured 2026-08-31 with `other` as the previous branch:
+
+        git check-ref-format --branch '@{-1}'  ->  rc=0, prints "other"
+        git branch '@{-1}'                     ->  acts on `other`
+
+    A user could POST this, pass validation, and have git create or collide with
+    a branch the `branches` row does not name — exactly the row/ref divergence
+    this entity exists to prevent.
+    """
+    assert not is_valid_branch_name(name)
+
+
+def test_ordinary_names_still_pass_and_git_specific_ones_still_fail():
+    """The control for the check above. Comparing stdout to the input must not
+    start rejecting normal names, and must keep the rules `--branch` adds over
+    the bare form — the bare `check-ref-format refs/heads/HEAD` exits 0."""
+    for good in ("main", "feat/x", "new_ideas", "a-b.c"):
+        assert is_valid_branch_name(good), good
+    for bad in ("HEAD", "-", "", " x", "x ", "a..b", "a b"):
+        assert not is_valid_branch_name(bad), bad

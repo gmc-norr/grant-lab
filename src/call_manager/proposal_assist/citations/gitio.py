@@ -456,6 +456,21 @@ def is_valid_branch_name(name: str) -> bool:
     A hand-rolled check that accepts a name git rejects produces a half-created
     branch; one that rejects a name git accepts is an unexplainable refusal.
     This runs without a repository — check-ref-format reads none.
+
+    The exit code ALONE is not enough. `--branch` also EXPANDS branch shorthand
+    and prints the result, so it answers "yes" for a name that means something
+    else. Measured 2026-08-31 in a repo whose previous branch was `other`:
+
+        git check-ref-format --branch '@{-1}'  ->  rc=0, prints "other"
+        git branch '@{-1}'                     ->  "a branch named 'other'
+                                                    already exists"
+
+    So a user could POST `@{-1}`, pass validation, and have git act on a
+    DIFFERENT branch than the one the `branches` row records — the row/ref
+    divergence this whole entity exists to prevent. Requiring the output to equal
+    the input closes it while keeping every git-branch-specific rule
+    (`--branch` alone rejects `HEAD` and `-`; the bare form accepts `HEAD`, so
+    neither is right on its own).
     """
     if not name or name != name.strip():
         return False
@@ -466,7 +481,7 @@ def is_valid_branch_name(name: str) -> bool:
         timeout=_GIT_TIMEOUT_SECONDS,
         env=_git_env(),
     )
-    return proc.returncode == 0
+    return proc.returncode == 0 and proc.stdout.strip() == name
 
 
 def has_commits(repo_dir: Path) -> bool:
