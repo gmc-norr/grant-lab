@@ -389,7 +389,21 @@ def delete_workspace_branch(
     if not branch_exists(repo, name):
         raise BranchNotFound(name)
 
-    row = session.get(Workspace, workspace_id)
+    # `populate_existing=True` FORCES SQL. Without it this returns the instance
+    # `require_owner` (web/_perms.py:18-24) already loaded into the identity map
+    # before the route called us, so the guard below judges a snapshot taken
+    # BEFORE the mutex was acquired. `acquire_commit_mutex_at_generation` is
+    # `pg_advisory_xact_lock` — it takes no row lock and never refreshes the ORM —
+    # so any writer committing in that window is invisible, and the wait itself
+    # can be up to 10 seconds (Phase 0's `_m1` holds the mutex across `_init_repo`
+    # and `backfill_branch_entities`, and founds this very pointer).
+    #
+    # Reproduced 2026-08-31: pointer vacant at load, founded by a second session
+    # during the wait, guard skipped, `git branch -D main` destroyed the root ref,
+    # and only THEN did RESTRICT raise — a rollback git cannot undo. The one-line
+    # control was `session.expunge_all()` before the guard, which turned the same
+    # interleaving into the correct BranchInUse refusal with the ref intact.
+    row = session.get(Workspace, workspace_id, populate_existing=True)
     if row is not None and row.root_branch_id is not None:
         # §7.3: the branch the root pointer names cannot be deleted — its worktree
         # IS `repo/`. The database enforces this too (fk_workspaces_root_branch_id
@@ -409,16 +423,26 @@ def delete_workspace_branch(
         # then has nothing to reconcile to.
         raise BranchLast(name)
 
-    git_delete_branch(repo, name)
-    # Drop the row with the ref (spec §8 S1 step 4). A ref created before this
-    # stage — or with `git branch` outside the app — has no row; deleting nothing
-    # is correct, not an error, and raising here would strand that ref forever.
+    # THE ROW GOES FIRST, and that order is the whole point of calling RESTRICT a
+    # "backstop" above. `git branch -D` is irreversible; a database error is not.
+    # With the git call first, a root pointer this transaction did not see meant
+    # the ref was already destroyed by the time RESTRICT fired — the backstop
+    # fired after the thing it was supposed to protect was gone. Deleting the row
+    # first makes the FK raise while git is still untouched, so the guard above
+    # and the constraint below now protect the same thing in the same order.
     #
-    # Not atomic, and this direction is the worse one: `git branch -D` is
-    # irreversible, so a commit that fails after it leaves a row whose ref is
-    # gone. `backfill_branch_entities` deletes such orphans — that is why it is a
-    # reconciler and not a one-shot backfill.
+    # A ref created before this stage — or with `git branch` outside the app — has
+    # no row; deleting nothing is correct, not an error, and raising here would
+    # strand that ref forever.
+    #
+    # Still not atomic in the other direction: a commit that fails after
+    # `git_delete_branch` leaves a row-less ref. `backfill_branch_entities`
+    # founds such refs — that is why it is a reconciler and not a one-shot
+    # backfill.
     session.execute(delete(Branch).where(Branch.workspace_id == workspace_id, Branch.name == name))
+    session.flush()  # make the FK adjudicate NOW, while git is still untouched
+
+    git_delete_branch(repo, name)
     logger.info(
         "branches.deleted",
         extra={"event": "branch_deleted", "workspace_id": str(workspace_id), "branch": name},

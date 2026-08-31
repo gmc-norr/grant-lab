@@ -8,6 +8,7 @@ import subprocess
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy import update as sql_update
 
 from call_manager.db.models import Branch, Workspace
 from call_manager.proposal_assist.branches import (
@@ -364,3 +365,100 @@ def test_the_orphaned_root_is_cleared_before_git_runs(pg_session_factory, tmp_pa
         "the de-orphan step is after the git call again"
     )
     assert branch_exists(repo, "main")
+
+
+def test_a_root_pointer_founded_during_the_mutex_wait_still_refuses(pg_session_factory, tmp_path):
+    """The guard must judge the CURRENT row, not the one the route already loaded.
+
+    `require_owner` (web/_perms.py:18-24) loads the Workspace into the session's
+    identity map before the route calls us, so a plain `session.get` returns that
+    instance with no SQL. `acquire_commit_mutex_at_generation` is
+    `pg_advisory_xact_lock`: no row lock, no ORM refresh — so a writer committing
+    during a wait of up to 10s is invisible to the guard.
+
+    Reproduced before the fix: the root ref was DESTROYED, and only then did
+    RESTRICT raise — a rollback git cannot undo.
+    """
+    wid, repo = _ws(pg_session_factory, tmp_path)
+    subprocess.run(["git", "branch", "new_ideas"], cwd=repo, check=True)
+    with pg_session_factory() as s:
+        s.add(Branch(workspace_id=wid, name="new_ideas"))
+        w = s.get(Workspace, wid)
+        w.current_branch = "new_ideas"
+        w.root_branch_id = None  # vacant, as create-over-an-orphaned-root leaves it
+        s.commit()
+
+    with pg_session_factory() as route:
+        # Exactly what require_owner does: this caches the instance.
+        loaded = route.scalar(select(Workspace).where(Workspace.id == wid))
+        assert loaded.root_branch_id is None
+
+        with pg_session_factory() as other:  # another request, commits underneath
+            root = other.execute(
+                select(Branch).where(Branch.workspace_id == wid, Branch.name == "main")
+            ).scalar_one()
+            other.execute(
+                sql_update(Workspace).where(Workspace.id == wid).values(root_branch_id=root.id)
+            )
+            other.commit()
+
+        with pytest.raises(BranchInUse):
+            delete_workspace_branch(
+                route,
+                stamp=stamp_for(route, wid),
+                workspace_id=wid,
+                name="main",
+                workspaces_dir=tmp_path,
+            )
+        route.rollback()
+
+    assert branch_exists(repo, "main"), "the root ref was destroyed before the refusal"
+
+
+def test_the_row_delete_runs_before_git_so_RESTRICT_protects_the_ref(pg_session_factory, tmp_path):
+    """The backstop, proved by ORDER rather than by outcome.
+
+    The obvious test — set the pointer at the branch and expect the FK to refuse —
+    is hollow: the readable guard above catches that case first, so git never runs
+    for the guard's reason and the assertion passes without the ordering mattering
+    at all. Caught 2026-08-31 while writing it.
+
+    So probe the intermediate state instead: delete an ordinary branch that
+    succeeds, and ask FROM INSIDE the git call whether the row is already gone.
+    If it is, the FK has already had its chance while git was still untouched.
+    """
+    wid, repo = _ws(pg_session_factory, tmp_path)
+    subprocess.run(["git", "branch", "new_ideas"], cwd=repo, check=True)
+    with pg_session_factory() as s:
+        s.add(Branch(workspace_id=wid, name="new_ideas"))
+        s.commit()
+
+    import call_manager.proposal_assist.branches as branches_mod
+
+    real = branches_mod.git_delete_branch
+    seen = {}
+
+    with pg_session_factory() as s:
+
+        def _spy(r, n):
+            seen["rows_when_git_ran"] = _rows(s, wid)
+            return real(r, n)
+
+        branches_mod.git_delete_branch = _spy
+        try:
+            delete_workspace_branch(
+                s,
+                stamp=stamp_for(s, wid),
+                workspace_id=wid,
+                name="new_ideas",
+                workspaces_dir=tmp_path,
+            )
+            s.commit()
+        finally:
+            branches_mod.git_delete_branch = real
+
+    assert seen["rows_when_git_ran"] == ["main"], (
+        "the row was still present when git ran — the FK cannot protect a ref "
+        f"that git has already destroyed (saw {seen['rows_when_git_ran']})"
+    )
+    assert not branch_exists(repo, "new_ideas")
