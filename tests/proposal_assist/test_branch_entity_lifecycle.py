@@ -319,12 +319,15 @@ def test_create_over_an_orphaned_ROOT_row_still_returns_a_branch(pg_session_fact
 
 def test_the_orphaned_root_is_cleared_before_git_runs(pg_session_factory, tmp_path):
     """Ordering, not just outcome. If the pointer clear ran AFTER
-    `git_create_branch`, a database failure would leave a ref behind that the
-    caller's rollback cannot undo — git is not transactional and this function's
-    caller commits later.
+    `git_create_branch`, a failure in the row work would leave a ref behind that
+    the caller's rollback cannot undo — git is not transactional and this
+    function's caller commits later.
 
-    Proved by making git fail: the ref is destroyed under the call, so the create
-    raises, and nothing may have been left half-done in either store.
+    Probed by reading the pointer FROM INSIDE the git call. The obvious test —
+    make git raise and check nothing was half-done — is vacuous: after the
+    rollback both orderings look identical, and it passed with the fix reverted.
+    Measured 2026-08-31, which is why this one reads the intermediate state
+    instead of the final one.
     """
     wid, repo = _ws(pg_session_factory, tmp_path)
     subprocess.run(["git", "branch", "side"], cwd=repo, check=True)
@@ -336,26 +339,28 @@ def test_the_orphaned_root_is_cleared_before_git_runs(pg_session_factory, tmp_pa
 
     import call_manager.proposal_assist.branches as branches_mod
 
-    def _boom(*a, **k):
-        raise RuntimeError("git said no")
-
     real = branches_mod.git_create_branch
-    branches_mod.git_create_branch = _boom
-    try:
-        with pg_session_factory() as s:
-            with pytest.raises(RuntimeError):
-                create_workspace_branch(
-                    s,
-                    stamp=stamp_for(s, wid),
-                    workspace_id=wid,
-                    name="main",
-                    workspaces_dir=tmp_path,
-                )
-            s.rollback()
-    finally:
-        branches_mod.git_create_branch = real
+    seen = {}
 
-    assert not branch_exists(repo, "main"), "git must be untouched when the row work fails"
     with pg_session_factory() as s:
-        # The rollback undoes the pointer clear too — both stores are as they were.
-        assert s.get(Workspace, wid).root_branch_id is not None
+
+        def _spy(r, n):
+            # Same session, so this sees the flushed-but-uncommitted UPDATE.
+            s.expire_all()
+            seen["root_when_git_ran"] = s.get(Workspace, wid).root_branch_id
+            return real(r, n)
+
+        branches_mod.git_create_branch = _spy
+        try:
+            create_workspace_branch(
+                s, stamp=stamp_for(s, wid), workspace_id=wid, name="main", workspaces_dir=tmp_path
+            )
+            s.commit()
+        finally:
+            branches_mod.git_create_branch = real
+
+    assert seen["root_when_git_ran"] is None, (
+        "git ran while the workspace still pointed at the orphan — "
+        "the de-orphan step is after the git call again"
+    )
+    assert branch_exists(repo, "main")
