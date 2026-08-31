@@ -14,9 +14,10 @@ from sqlalchemy.exc import IntegrityError
 
 from call_manager.db.models import Branch, Workspace
 from call_manager.proposal_assist.branch_entity_backfill import backfill_branch_entities
-from call_manager.proposal_assist.citations.gitio import GitCommitError
+from call_manager.proposal_assist.branches import BranchInUse, delete_workspace_branch
+from call_manager.proposal_assist.citations.gitio import GitCommitError, branch_exists
 from call_manager.proposal_assist.paths import workspace_repo_dir
-from tests.proposal_assist.conftest import make_user, make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 
 def test_a_branch_row_can_be_created_and_read_back(pg_session_factory):
@@ -759,6 +760,21 @@ def test_reconciling_after_a_switch_does_not_move_the_root(pg_session_factory, t
             "the reconciler moved the root to whatever repo/ was checked out on"
         )
 
+    # The delete the docstring promises, which was missing: asserting only that
+    # the pointer did not move passes against a fix that moved it somewhere else
+    # harmless. What actually matters is that the root stays undeletable.
+    with pg_session_factory() as s:
+        with pytest.raises(BranchInUse):
+            delete_workspace_branch(
+                s,
+                stamp=stamp_for(s, wid),
+                workspace_id=wid,
+                name="main",
+                workspaces_dir=tmp_path,
+            )
+        s.rollback()
+    assert branch_exists(repo, "main")
+
 
 def test_a_workspace_with_no_repo_is_counted_absent_not_silently_zero(pg_session_factory, tmp_path):
     """`WORKSPACES_DIR` unset, resolved against the wrong cwd, or an unmounted
@@ -1081,3 +1097,31 @@ def test_timeout_is_not_an_OSError_which_is_why_both_are_listed():
     handler would be redundant — and if someone 'simplified' the tuple on the
     assumption it already IS true, a git timeout would escape."""
     assert not issubclass(subprocess.TimeoutExpired, OSError)
+
+
+def test_the_workspace_id_narrowing_touches_only_that_workspace(pg_session_factory, tmp_path):
+    """Phase 0 passes `workspace_id=` so founding one workspace cannot walk the
+    whole table. Nothing pinned that: every other test either omits the argument
+    or has only one workspace, so dropping the `.where()` reddened nothing.
+
+    Two workspaces, only one named. The other must be left completely untouched —
+    no rows, no pointer — and the counts must describe one workspace, not two.
+    """
+    with pg_session_factory() as s:
+        mine = make_workspace(s, title="mine", owner=make_user(s, email="narrow-a@ki.se")).id
+        other = make_workspace(s, title="other", owner=make_user(s, email="narrow-b@ki.se")).id
+        s.commit()
+    _repo(tmp_path, mine, "main")
+    _repo(tmp_path, other, "main", extra=("new_ideas",))
+
+    with pg_session_factory() as s:
+        r = backfill_branch_entities(s, workspaces_dir=tmp_path, workspace_id=mine)
+        s.commit()
+
+    # (1, 1) not (3, 2): `other` has two refs and would have been founded too.
+    assert (r.created, r.rooted, r.absent) == (1, 1, 0), r
+    with pg_session_factory() as s:
+        assert _names(s, mine) == ["main"]
+        assert _names(s, other) == [], "the narrowing leaked into another workspace"
+        assert s.get(Workspace, mine).root_branch_id is not None
+        assert s.get(Workspace, other).root_branch_id is None
