@@ -2,7 +2,6 @@ import { useParams, useSearchParams } from "react-router-dom";
 
 import { viewFromParams } from "./cockpitNav";
 import styles from "./CockpitSidebar.module.css";
-import { BranchPicker } from "./panes/BranchPicker";
 import { CriteriaPane } from "./panes/CriteriaPane";
 import { MembersPane } from "./panes/MembersPane";
 import { OutlinePane } from "./panes/OutlinePane";
@@ -21,12 +20,9 @@ export function CockpitSidebar() {
   return (
     <div className={styles.sidebar}>
       {view === "outline" && <OutlinePane id={id} />}
-      {view === "versions" && (
-        <>
-          <BranchPicker id={id} />
-          <VersionGraph id={id} />
-        </>
-      )}
+      {/* The branch bar lives INSIDE VersionGraph now: the branch is the
+          pane's subject, not a separate control stacked above it. */}
+      {view === "versions" && <VersionGraph id={id} />}
       {view === "references" && <ReferencesPane id={id} />}
       {view === "criteria" && <CriteriaPane id={id} />}
       {view === "members" && <MembersPane id={id} />}
