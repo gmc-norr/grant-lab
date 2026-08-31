@@ -65,6 +65,16 @@ def _git_env(repo_dir: Path | None = None) -> dict[str, str]:
     inert.
     """
     env = os.environ.copy()
+    # Hermetic, matching `phases/setup.py:_git_env`. `_m1` calls
+    # `backfill_branch_entities`, whose git reads come through HERE — so without
+    # this, an operator's global git config reaches inside M1's locked region and
+    # setup.py's docstring claim ("nothing an operator configures can introduce a
+    # hook, a signing helper or an interactive prompt into M1's locked region")
+    # is false. These reads are on workspace repos the app created itself, so
+    # site and global config have nothing legitimate to contribute.
+    env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    env["GIT_CONFIG_SYSTEM"] = "/dev/null"
+    env["GIT_TERMINAL_PROMPT"] = "0"
     if repo_dir is not None:
         env["GIT_CEILING_DIRECTORIES"] = str(Path(repo_dir).resolve().parent)
     env.setdefault("GIT_AUTHOR_NAME", "call-manager")
@@ -431,6 +441,24 @@ def list_branches(repo_dir: Path) -> list[str]:
     proc = _git(repo_dir, "branch", "--format=%(refname)")
     if proc.returncode != 0:
         raise GitCommitError(f"cannot list branches in {repo_dir}: {proc.stderr.strip()}")
+    if "broken ref" in proc.stderr:
+        # A corrupt ref file makes `git branch` exit ZERO, warn on stderr, and
+        # silently OMIT that branch. Measured 2026-08-31:
+        #
+        #     $ echo garbage > .git/refs/heads/feature
+        #     $ git branch --format='%(refname)'
+        #     warning: ignoring broken ref refs/heads/feature
+        #     refs/heads/main
+        #     rc=0
+        #
+        # An incomplete listing that reports success is worse than a failure:
+        # `backfill_branch_entities` treats every name it does not see as an
+        # ORPHAN and DELETES its row — and clears the root pointer if it named
+        # one. The ref file is still on disk; only the reader lost it. Raising
+        # makes the reconciler skip the whole workspace, which is what its own
+        # docstring already promises ("a row is only ever removed for a workspace
+        # whose refs were read successfully").
+        raise GitCommitError(f"broken ref in {repo_dir}: {proc.stderr.strip()}")
     return [ln.strip().removeprefix(_HEADS_PREFIX) for ln in proc.stdout.splitlines() if ln.strip()]
 
 

@@ -319,3 +319,49 @@ def test_ordinary_names_still_pass_and_git_specific_ones_still_fail():
         assert is_valid_branch_name(good), good
     for bad in ("HEAD", "-", "", " x", "x ", "a..b", "a b"):
         assert not is_valid_branch_name(bad), bad
+
+
+def test_a_BROKEN_ref_raises_instead_of_silently_shortening_the_list(tmp_path):
+    """`git branch` exits ZERO on a corrupt ref file, warns on stderr, and omits
+    that branch. Measured 2026-08-31:
+
+        $ echo garbage > .git/refs/heads/feature
+        $ git branch --format='%(refname)'
+        warning: ignoring broken ref refs/heads/feature
+        refs/heads/main
+        rc=0
+
+    An incomplete listing that reports success is worse than a failure:
+    `backfill_branch_entities` treats every name it does not see as an ORPHAN and
+    DELETES its row, clearing the root pointer if it named one. The ref file is
+    still on disk — only the reader lost it.
+    """
+    d = _repo(tmp_path)
+    subprocess.run(["git", "branch", "feature"], cwd=d, check=True)
+    (d / ".git" / "refs" / "heads" / "feature").write_text("garbage\n")
+
+    with pytest.raises(GitCommitError, match="broken ref"):
+        list_branches(d)
+
+
+def test_a_healthy_repo_still_lists_normally(tmp_path):
+    """The control. Raising on any stderr at all would break every listing that
+    git decorates with an unrelated warning, so the check is on the specific
+    phrase and must not fire here."""
+    d = _repo(tmp_path)
+    subprocess.run(["git", "branch", "feature"], cwd=d, check=True)
+    assert sorted(list_branches(d)) == ["feature", "main"]
+
+
+def test_gitio_git_runs_hermetically(tmp_path):
+    """`_m1` calls `backfill_branch_entities`, whose git reads come through
+    `gitio._git` — so `phases/setup.py:_git_env`'s claim that "nothing an
+    operator configures can introduce a hook, a signing helper or an interactive
+    prompt into M1's locked region" depends on THIS environment too.
+    """
+    from call_manager.proposal_assist.citations.gitio import _git_env
+
+    env = _git_env(tmp_path)
+    assert env["GIT_CONFIG_GLOBAL"] == "/dev/null"
+    assert env["GIT_CONFIG_SYSTEM"] == "/dev/null"
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
