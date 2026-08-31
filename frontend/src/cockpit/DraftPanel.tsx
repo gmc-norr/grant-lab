@@ -81,6 +81,7 @@ export function DraftPanel({ id, openPeek }: { id: string; openPeek?: { ev: stri
           <ArtifactSectionEditor
             key={`draft:${id}`}
             workspaceId={id}
+            branch={draft.data.branch}
             queryKey={["draft", id]}
             head={head}
             canEdit={can_edit}

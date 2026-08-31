@@ -4,7 +4,7 @@ import * as sync from "y-protocols/sync";
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import * as awarenessProtocol from "y-protocols/awareness";
-import { CollabProvider } from "./collabProvider";
+import { CollabProvider, WS_DOCUMENT_REPLACED } from "./collabProvider";
 
 const MESSAGE_SYNC = 0;
 const MESSAGE_AWARENESS = 1;
@@ -50,7 +50,10 @@ function frameType(b: Uint8Array): { msg: number; sub: number } {
   return { msg, sub };
 }
 
-function makeProvider(canWrite: boolean, extra: { maxReconnectAttempts?: number } = {}) {
+function makeProvider(
+  canWrite: boolean,
+  extra: { maxReconnectAttempts?: number; onDocumentReplaced?: () => void } = {},
+) {
   const sockets: FakeSocket[] = [];
   const WS = class extends FakeSocket { constructor(u: string) { super(u); sockets.push(this); } } as unknown as typeof WebSocket;
   const doc = new Y.Doc();
@@ -126,6 +129,22 @@ describe("CollabProvider", () => {
     sockets1009[0].open(); sockets1009[0].drop(1009);
     vi.advanceTimersByTime(1000);
     expect(sockets1009).toHaveLength(1); // no new socket
+    vi.useRealTimers();
+  });
+
+  it("requests a fresh document and does not reconnect the old one on replacement", () => {
+    vi.useFakeTimers();
+    const onDocumentReplaced = vi.fn();
+    const { p, sockets } = makeProvider(true, { onDocumentReplaced });
+    sockets[0].open();
+
+    sockets[0].drop(WS_DOCUMENT_REPLACED);
+    vi.advanceTimersByTime(60_000);
+
+    expect(onDocumentReplaced).toHaveBeenCalledOnce();
+    expect(sockets).toHaveLength(1);
+    expect(p.status).toBe("offline");
+    p.destroy();
     vi.useRealTimers();
   });
 

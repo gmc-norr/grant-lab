@@ -33,10 +33,24 @@ export function useCollabDoc(opts: {
   const [status, setStatus] = useState<ProviderStatus>("connecting");
   // Separate from status on purpose: see CollabProvider.synced.
   const [synced, setSynced] = useState(false);
+  const [documentGeneration, setDocumentGeneration] = useState(0);
   const { workspaceId, artifact, canWrite } = opts;
   useEffect(() => {
     const doc = new Y.Doc();
-    const provider = new CollabProvider({ url: wsUrl(workspaceId, artifact), doc, canWrite });
+    const provider = new CollabProvider({
+      url: wsUrl(workspaceId, artifact),
+      doc,
+      canWrite,
+      onDocumentReplaced: () => {
+        // A branch switch changes the document behind the stable room URL.
+        // Hide the stale doc immediately; effect cleanup destroys it before a
+        // fresh pair connects and hydrates the newly selected branch.
+        setState(null);
+        setStatus("connecting");
+        setSynced(false);
+        setDocumentGeneration((generation) => generation + 1);
+      },
+    });
     setState({ doc, provider });
     setStatus(provider.status);
     setSynced(provider.synced);
@@ -55,6 +69,6 @@ export function useCollabDoc(opts: {
     // the Y.Doc out from under the bound editor; full client-side mid-session
     // editability is a 3b-4 concern.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId, artifact]);
+  }, [workspaceId, artifact, documentGeneration]);
   return { doc: state?.doc ?? null, provider: state?.provider ?? null, status, synced };
 }

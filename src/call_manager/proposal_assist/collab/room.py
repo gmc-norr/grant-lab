@@ -54,11 +54,13 @@ _WS_INTERNAL_ERROR = 1011
 # 1011 (server error): a soft-deleted workspace is a policy decision, not a crash.
 _WS_POLICY_VIOLATION = 1008
 
-# RFC 6455 close code: try again later. A branch switch closes editors with THIS
-# (not 1008) because the workspace still exists on another branch — the client
-# must reconnect immediately and will receive a fresh snapshot. 1008 is terminal
-# on the client (frontend/src/collab/collabProvider.ts:234).
-_WS_TRY_AGAIN_LATER = 1013
+# RFC 6455 reserves 4000-4999 for private application protocols. A branch switch
+# means the document identity behind an otherwise unchanged room URL was replaced;
+# clients MUST discard their old Y.Doc before reconnecting. This must stay distinct
+# from 1013 (ordinary transient contention, where retaining the Y.Doc is correct).
+# Public because the WebSocket edge maps a generation straddle to the same protocol
+# event, and the frontend must use this exact numeric contract.
+WS_DOCUMENT_REPLACED = 4409
 
 # Bound on how long retire_workspace waits for an in-flight server op (a kernel
 # accept mid-write) to leave before it declares a room's retirement done. On
@@ -759,8 +761,9 @@ class RoomManager:
         """Tear both artifact rooms down for a branch switch (spec §4.2 step 4).
 
         Differs from `retire_workspace` in exactly two ways, both deliberate:
-        it closes 1013 rather than 1008, and it REPORTS whether it linearized
-        against in-flight client persists instead of swallowing the timeout.
+        it closes with the document-replaced application code rather than 1008,
+        and it REPORTS whether it linearized against in-flight client persists
+        instead of swallowing the timeout.
 
         It does NOT abort on a lock timeout. The teardown pops each room before
         it reaches for `room.lock`, so returning early would leave a room out of
@@ -774,7 +777,7 @@ class RoomManager:
         """
         results = await asyncio.gather(
             *(
-                self._retire_room(workspace_id, artifact, close_code=_WS_TRY_AGAIN_LATER)
+                self._retire_room(workspace_id, artifact, close_code=WS_DOCUMENT_REPLACED)
                 for artifact in ("draft", "spec")
             ),
             return_exceptions=True,
@@ -812,9 +815,9 @@ class RoomManager:
         `close_code` is a protocol decision the CALLER owns, because the same
         teardown serves two situations the client must distinguish:
         retirement closes 1008 (terminal — the workspace is gone, retrying is
-        pointless) and a branch switch closes 1013 (come straight back — the
-        artifact still exists on another branch). 1008 is terminal on the client
-        (frontend/src/collab/collabProvider.ts:234).
+        pointless) and a branch switch closes 4409 (discard the old Y.Doc, then
+        reconnect — the artifact now names another branch). 1008 is terminal on
+        the client (frontend/src/collab/collabProvider.ts).
 
         `got_room_lock` is False when the tombstone had to be set without
         `room.lock`. Retirement ignores it — the straggler's commit lands in a

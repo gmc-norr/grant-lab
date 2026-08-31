@@ -121,6 +121,7 @@ class CitationSourceOut(BaseModel):
 
 class DraftOut(BaseModel):
     head: str
+    branch: str
     can_edit: bool
     sections: list[SectionOut]
     # ev_id -> citation display fields, computed over the WHOLE proposal.
@@ -131,6 +132,7 @@ class DraftOut(BaseModel):
 
 class SpecOut(BaseModel):
     head: str
+    branch: str
     can_edit: bool
     sections: list[SectionOut]  # no citations: the spec is citation-free
     # Lock fields are required-nullable: every handler that builds a SpecOut
@@ -271,6 +273,7 @@ def get_draft(
     with sf() as session:
         ws = require_member(workspace_id=workspace_id, user=user, session=session)
         stamp = stamp_for_workspace(ws)  # minted at the access check (endgame Task 5)
+        branch = ws.current_branch
         can_edit = ws.owner_id == user.id
         repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
         proposal = repo_dir / PROPOSAL_FILENAME
@@ -303,6 +306,7 @@ def get_draft(
         )
     return DraftOut(
         head=head,
+        branch=branch,
         can_edit=can_edit,
         sections=sections,
         citations=citations,
@@ -323,6 +327,7 @@ def get_spec(
     with sf() as session:
         ws = require_member(workspace_id=workspace_id, user=user, session=session)
         stamp = stamp_for_workspace(ws)  # minted at the access check (endgame Task 5)
+        branch = ws.current_branch
         is_owner = ws.owner_id == user.id
         locked = ws.spec_locked_at is not None
         can_edit = is_owner and not locked
@@ -358,6 +363,7 @@ def get_spec(
         )
     return SpecOut(
         head=head,
+        branch=branch,
         can_edit=can_edit,
         sections=sections,
         locked=locked,
@@ -489,19 +495,20 @@ async def post_init_spec(
     enabled = await run_in_threadpool(_route)
 
     if enabled:
-        def _gate() -> FenceStamp:
+        def _gate() -> tuple[FenceStamp, str]:
             with sf() as session:
                 ws = require_owner(workspace_id=workspace_id, user=user, session=session)
                 # Mint the fence stamp at the owner access check (endgame Task 5):
                 # kernel_init_spec re-validates THIS generation under the commit
                 # mutex, in a separate session, never a read at the write.
                 stamp = stamp_for_workspace(ws)
+                branch = ws.current_branch
             if not (
                 workspace_repo_dir(settings.workspaces_dir, workspace_id) / SPEC_FILENAME
             ).exists():
                 raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
-            return stamp
-        stamp = await run_in_threadpool(_gate)
+            return stamp, branch
+        stamp, branch = await run_in_threadpool(_gate)
         try:
             head, md = await init_spec_via_kernel(
                 session_factory=sf, workspaces_dir=settings.workspaces_dir,
@@ -526,6 +533,7 @@ async def post_init_spec(
             ) from e
         return SpecOut(
             head=head,
+            branch=branch,
             can_edit=True,
             sections=_sections_out(md),
             locked=False,
@@ -540,6 +548,7 @@ async def post_init_spec(
         with sf() as session:
             ws = require_owner(workspace_id=workspace_id, user=user, session=session)
             stamp = stamp_for_workspace(ws)  # minted at the access check (endgame Task 4)
+            branch = ws.current_branch
             repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
             spec = repo_dir / SPEC_FILENAME
             if not spec.exists():
@@ -633,6 +642,7 @@ async def post_init_spec(
         # because require_owner above guarantees the caller owns the workspace.
         return SpecOut(
             head=head,
+            branch=branch,
             can_edit=True,
             sections=sections,
             locked=False,

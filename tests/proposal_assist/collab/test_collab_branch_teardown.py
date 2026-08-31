@@ -9,7 +9,7 @@ import uuid
 
 import pytest
 
-from call_manager.proposal_assist.collab.room import MANAGER, ClientState
+from call_manager.proposal_assist.collab.room import MANAGER, WS_DOCUMENT_REPLACED, ClientState
 from tests.proposal_assist.collab.test_collab_room import FakeClient
 
 
@@ -45,13 +45,13 @@ async def test_tears_down_both_artifact_rooms():
 
 
 @pytest.mark.anyio
-async def test_closes_with_1013_so_the_client_reconnects():
-    # 1008 is TERMINAL on the client (collabProvider.ts:234). A switch that used
-    # it would leave every other editor dead until a page reload.
+async def test_closes_with_document_replaced_so_the_client_discards_its_old_doc():
+    # Reconnecting the retained Y.Doc would merge the source branch into the
+    # target. The application code tells the client to rebuild before reconnecting.
     wid = uuid.uuid4()
     _, client = await _open((wid, "draft"))
     await MANAGER.prepare_branch_switch(wid)
-    assert client.closed == 1013
+    assert client.closed == WS_DOCUMENT_REPLACED
 
 
 @pytest.mark.anyio
@@ -81,7 +81,7 @@ async def test_still_FINISHES_the_teardown_when_the_lock_times_out():
     assert res.locked is False
     assert MANAGER._rooms.get((wid, "draft")) is None  # popped
     assert room.evicted is True  # AND tombstoned
-    assert client.closed == 1013  # AND socket closed
+    assert client.closed == WS_DOCUMENT_REPLACED  # AND socket closed
 
 
 @pytest.mark.anyio

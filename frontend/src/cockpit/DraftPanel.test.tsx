@@ -15,6 +15,7 @@ vi.mock("../api/editor", () => ({
     isError: false,
     data: {
       head: "h",
+      branch: "main",
       can_edit: true,
       can_write: true,
       collab_enabled: flags.collab,

@@ -102,6 +102,7 @@ def test_draft_returns_server_split_sections_and_head(
     r = c.get(f"/api/workspaces/{ws_id}/draft")
     assert r.status_code == 200
     body = r.json()
+    assert body["branch"] == "main"
     assert body["can_edit"] is True
     assert isinstance(body["head"], str) and len(body["head"]) == 40
     # Server split: preamble (index 0) + Methods (index 1). Byte round-trip.

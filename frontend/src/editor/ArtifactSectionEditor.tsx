@@ -1,6 +1,6 @@
 import { Box, Button, Group, Tabs, Text } from "@mantine/core";
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 
@@ -27,6 +27,8 @@ type SaveResultLike = { head: string; section_sha: string };
 
 export type ArtifactSectionEditorProps = {
   workspaceId: string;
+  /** Current git branch; unlike head, changes only when the logical document changes. */
+  branch: string;
   /** TanStack cache key for this artifact, e.g. ["draft", id] | ["spec", id]. */
   queryKey: [string, string];
   head: string;
@@ -54,6 +56,7 @@ function saveErrorMessage(e: unknown): string {
 
 export function ArtifactSectionEditor({
   workspaceId,
+  branch,
   queryKey,
   head,
   canEdit,
@@ -83,8 +86,24 @@ export function ArtifactSectionEditor({
     null,
   );
   const [composerOpen, setComposerOpen] = useState(false);
+  const previousBranch = useRef(branch);
+  const branchChanged = previousBranch.current !== branch;
   const peek = useCitationSource(workspaceId, peekEv);
   const pinned = useCitationSource(workspaceId, pinnedEv);
+
+  useEffect(() => {
+    const previous = previousBranch.current;
+    previousBranch.current = branch;
+    if (previous === branch) return;
+    setBuffers({});
+    setStaleSection(null);
+    setSaveError(null);
+    setSelection(null);
+    setComposerOpen(false);
+    setPeekEv(null);
+    setPinnedEv(null);
+    setView("section");
+  }, [branch]);
 
   const byIndex = useMemo(() => new Map(sections.map((s) => [s.index, s])), [sections]);
   // Clamp the URL section to one that exists in THIS artifact. An out-of-range ?sec
@@ -110,24 +129,33 @@ export function ArtifactSectionEditor({
   const activeSection = activeIndex >= 0 ? byIndex.get(activeIndex) : undefined;
   const fullText = sections.map((s) => s.text).join("");
   const editorValue =
-    view === "full" ? fullText : (buffers[activeIndex] ?? activeSection?.text ?? "");
+    view === "full"
+      ? fullText
+      : branchChanged
+        ? (activeSection?.text ?? "")
+        : (buffers[activeIndex] ?? activeSection?.text ?? "");
 
   const isDirty = (idx: number) =>
-    buffers[idx] !== undefined && buffers[idx] !== byIndex.get(idx)?.text;
+    !branchChanged && buffers[idx] !== undefined && buffers[idx] !== byIndex.get(idx)?.text;
 
   // Publish the dirty section set (for the sidebar Outline • markers). Recompute when
   // buffers or the fetched sections change.
   useEffect(() => {
     setDirty(
-      sections.filter((s) => buffers[s.index] !== undefined && buffers[s.index] !== s.text).map((s) => s.index),
+      branchChanged
+        ? []
+        : sections
+            .filter((s) => buffers[s.index] !== undefined && buffers[s.index] !== s.text)
+            .map((s) => s.index),
     );
-  }, [buffers, sections]);
+  }, [branchChanged, buffers, sections]);
 
   // Publish save-state for the status bar. Compute the active section's dirty boolean
   // INLINE (not via isDirty, whose byIndex closure is omitted from the deps) so a
   // refetch that mutates `sections`/`byIndex` re-runs this effect — otherwise the
   // status bar would lag after a refetch canonicalises the served bytes.
   const activeDirty =
+    !branchChanged &&
     activeIndex >= 0 &&
     buffers[activeIndex] !== undefined &&
     buffers[activeIndex] !== byIndex.get(activeIndex)?.text;
@@ -241,9 +269,10 @@ export function ArtifactSectionEditor({
               // controlled push clears undo history — no cross-section undo
               // corruption) but stays stable on a same-section save/refetch (so a
               // background refetch does NOT wipe the user's in-section undo stack).
-              // Each artifact (draft/spec) has its own editor instance, so the
-              // section index alone is a sufficient document identity here.
-              docKey={view === "section" ? activeIndex : "full"}
+              // The branch is part of the logical identity so undo can never
+              // cross branches; head is deliberately excluded because saves
+              // advance it without replacing the document.
+              docKey={`${branch}:${view === "section" ? activeIndex : "full"}`}
               onChange={view === "full" ? () => {} : onEditorChange}
               requireHeading={view === "section" && activeIndex > 0}
               readOnly={view === "full" || !canEdit}

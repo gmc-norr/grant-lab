@@ -1,6 +1,5 @@
-"""A close code is a protocol decision, not a detail: the client retries every
-code EXCEPT 1008/1009 (frontend/src/collab/collabProvider.ts:234). A workspace
-that merely moved generation must not be closed with the code that means stop."""
+"""WebSocket close codes distinguish terminal policy, transient contention,
+and a document identity change that requires rebuilding the client Y.Doc."""
 
 import inspect
 
@@ -20,16 +19,17 @@ def _arm(src: str, header: str) -> str:
 
 def test_generation_stale_is_not_grouped_with_retired_and_deleted():
     # The three exceptions had ONE handler; a switch needs the stale arm to close
-    # 1013 while the other two keep 1008.
+    # with document-replaced while the other two keep 1008.
     src = inspect.getsource(collab_ws)
     assert "except WorkspaceGenerationStale:" in src, (
-        "WorkspaceGenerationStale must have its own arm so it can close 1013"
+        "WorkspaceGenerationStale must have its own document-replaced arm"
     )
 
 
-def test_the_stale_arm_closes_with_try_again_later():
+def test_the_stale_arm_closes_with_document_replaced():
     arm = _arm(inspect.getsource(collab_ws), "except WorkspaceGenerationStale:")
-    assert "_WS_TRY_AGAIN_LATER" in arm, "the stale arm must close 1013"
+    assert "WS_DOCUMENT_REPLACED" in arm, "the stale arm must discard the old Y.Doc"
+    assert "_WS_TRY_AGAIN_LATER" not in arm, "1013 would reconnect the retained Y.Doc"
     assert "_WS_POLICY_VIOLATION" not in arm, "1008 is terminal on the client"
 
 
@@ -39,5 +39,6 @@ def test_retired_and_deleted_still_close_with_policy_violation():
 
 
 def test_the_codes_are_the_rfc_values():
+    assert collab_ws.WS_DOCUMENT_REPLACED == 4409
     assert collab_ws._WS_TRY_AGAIN_LATER == 1013
     assert collab_ws._WS_POLICY_VIOLATION == 1008

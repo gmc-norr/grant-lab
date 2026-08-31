@@ -24,7 +24,12 @@ from call_manager.proposal_assist.collab.permissions import (
     make_checkpoint_on_evict,
     reconcile_client,
 )
-from call_manager.proposal_assist.collab.room import MANAGER, ClientState, PersistError
+from call_manager.proposal_assist.collab.room import (
+    MANAGER,
+    WS_DOCUMENT_REPLACED,
+    ClientState,
+    PersistError,
+)
 from call_manager.proposal_assist.collab.ws_auth import (
     WSAuthError,
     check_origin,
@@ -163,13 +168,12 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
         # §4.4 this is reachable on every reconnect, not only a cold seed, because
         # load_or_hydrate now takes the mutex before reading the log.
         #
-        # This must NOT be 1008. The artifact still exists and the client SHOULD
-        # come straight back: its next connect is stamped at the new generation,
-        # blocks on nothing, and hydrates the branch that is now current. 1008
-        # would leave every editor dead until a page reload, which is what a
-        # branch switch would look like to everyone except the person switching.
+        # Retrying this socket's retained Y.Doc would merge the previous branch
+        # into the new one. Tell the client to discard it and reconnect with a
+        # fresh document. This stays distinct from transient mutex contention,
+        # which uses 1013 below and safely retains the current Y.Doc.
         with contextlib.suppress(Exception):
-            await websocket.close(code=_WS_TRY_AGAIN_LATER)
+            await websocket.close(code=WS_DOCUMENT_REPLACED)
         return
     except OperationalError as exc:
         # Slice C3: load_or_hydrate persists the seed INSIDE the mutex-held tail

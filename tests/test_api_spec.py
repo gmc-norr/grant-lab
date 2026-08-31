@@ -59,6 +59,7 @@ def test_get_spec_returns_sections_no_citations(monkeypatch, pg_url, pg_session_
     assert r.status_code == 200
     body = r.json()
     assert "citations" not in body  # SpecOut has no citations field
+    assert body["branch"] == "main"
     assert body["can_edit"] is True
     assert [s["index"] for s in body["sections"]] == [0, 1]  # empty preamble + Aims
     assert body["sections"][1]["heading"] == "Aims"

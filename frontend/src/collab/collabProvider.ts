@@ -13,6 +13,13 @@ const WS_OPEN = 1;
  *  last two put content into the doc. */
 const SYNC_STEP2 = 1;
 
+/**
+ * Private-use close code: the server replaced the document behind this socket
+ * (currently a workspace branch switch). Reconnecting the same Y.Doc is unsafe:
+ * its STEP2 would merge the previous branch back into the new one.
+ */
+export const WS_DOCUMENT_REPLACED = 4409;
+
 export type ProviderStatus =
   | "connecting"
   | "connected"
@@ -36,6 +43,11 @@ export interface CollabProviderOptions {
   reconnectMaxMs?: number;
   /** Give up after this many CONSECUTIVE failed connects (reset on open). */
   maxReconnectAttempts?: number;
+  /**
+   * Called when the server says this Y.Doc's identity is no longer current.
+   * The owner must destroy this provider/doc and construct a fresh pair.
+   */
+  onDocumentReplaced?: () => void;
 }
 
 export class CollabProvider {
@@ -47,6 +59,7 @@ export class CollabProvider {
   private readonly baseMs: number;
   private readonly maxMs: number;
   private readonly maxAttempts: number;
+  private readonly onDocumentReplaced?: () => void;
   private ws: WebSocket | null = null;
   private _status: ProviderStatus = "connecting";
   // "Connected" is NOT "has the document". The Y.Doc is empty until the first
@@ -75,6 +88,7 @@ export class CollabProvider {
     this.baseMs = opts.reconnectBaseMs ?? 1000;
     this.maxMs = opts.reconnectMaxMs ?? 30000;
     this.maxAttempts = opts.maxReconnectAttempts ?? 12;
+    this.onDocumentReplaced = opts.onDocumentReplaced;
     this.onUpdate = (update, origin) => {
       // Origin-tag guard: an update we applied FROM the socket carries `this` as
       // its transaction origin — never echo it back (infinite loop otherwise).
@@ -250,6 +264,15 @@ export class CollabProvider {
       const remote = [...this.awareness.getStates().keys()].filter((id) => id !== this.doc.clientID);
       if (remote.length) awarenessProtocol.removeAwarenessStates(this.awareness, remote, this);
       if (ev.code === 1008 || ev.code === 1009) { this.setStatus("closed-policy"); return; }
+      if (ev.code === WS_DOCUMENT_REPLACED) {
+        // Never reconnect this provider. Yjs sync is a merge protocol, not a
+        // replace protocol: taking an old branch's Doc into the new room would
+        // upload its sections again (and repeated switches duplicate headings).
+        // Even without a callback, stopping is safer than cross-document writes.
+        this.setStatus("offline");
+        this.onDocumentReplaced?.();
+        return;
+      }
       this.setStatus("offline");
       this.scheduleReconnect();
     };

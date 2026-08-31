@@ -116,6 +116,7 @@ export function SpecPanel({ id }: { id: string }) {
             // leak across workspaces (a param nav keeps Cockpit + this editor mounted).
             key={`spec:${id}`}
             workspaceId={id}
+            branch={spec.data.branch}
             queryKey={["spec", id]}
             head={head}
             canEdit={can_edit}

@@ -30,6 +30,7 @@ function renderPanel() {
 const EMPTY = {
   data: {
     head: "a".repeat(40),
+    branch: "main",
     can_edit: true,
     locked: false,
     locked_at: null,
@@ -42,6 +43,7 @@ const EMPTY = {
 const SEEDED = {
   data: {
     head: "b".repeat(40),
+    branch: "main",
     can_edit: true,
     locked: false,
     locked_at: null,
@@ -78,6 +80,7 @@ it("a non-empty spec renders the editor with a 'Full spec' tab", async () => {
 const LOCKED = {
   data: {
     head: "c".repeat(40),
+    branch: "main",
     can_edit: false,
     locked: true,
     locked_at: "2026-06-20T10:00:00Z",

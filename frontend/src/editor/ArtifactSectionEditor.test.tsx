@@ -1,6 +1,7 @@
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
+import type { EditorView } from "@codemirror/view";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 
@@ -30,6 +31,7 @@ function renderEditor(
               element={
                 <ArtifactSectionEditor
                   workspaceId="ws-1"
+                  branch="main"
                   queryKey={["spec", "ws-1"]}
                   head={"a".repeat(40)}
                   canEdit={true}
@@ -64,6 +66,45 @@ it("resolves the active section by section.index, not array position", async () 
   await waitFor(() =>
     expect(container.querySelector(".cm-content")?.textContent).toContain("## Approach"),
   );
+});
+
+it("keeps buffers on same-branch saves and drops them when the branch changes", async () => {
+  const qc = new QueryClient();
+  const save = { mutateAsync: vi.fn(), isPending: false };
+  const source = [{ index: 0, heading: "", text: "source branch\n", sha: "s0" }];
+  const target = [{ index: 0, heading: "", text: "target branch\n", sha: "t0" }];
+  const ui = (branch: string, head: string, sections: typeof source) => (
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <MemoryRouter initialEntries={["/cockpit/ws-1"]}>
+        <QueryClientProvider client={qc}>
+          <ArtifactSectionEditor
+            workspaceId="ws-1"
+            branch={branch}
+            queryKey={["draft", "ws-1"]}
+            head={head}
+            canEdit
+            sections={sections}
+            save={save}
+            refetch={() => {}}
+          />
+        </QueryClientProvider>
+      </MemoryRouter>
+    </MantineProvider>
+  );
+  const rendered = render(ui("main", "head-1", source));
+  const editorNode = rendered.container.querySelector(".cm-editor") as HTMLElement & {
+    __cmView?: EditorView;
+  };
+  const view = editorNode.__cmView!;
+  act(() => view.dispatch({ changes: { from: view.state.doc.length, insert: "LOCAL" } }));
+  expect(view.state.doc.toString()).toContain("LOCAL");
+
+  rendered.rerender(ui("main", "head-2", source));
+  expect(view.state.doc.toString()).toContain("LOCAL");
+
+  rendered.rerender(ui("short-version", "head-3", target));
+  await waitFor(() => expect(view.state.doc.toString()).toBe("target branch\n"));
+  expect(view.state.doc.toString()).not.toContain("LOCAL");
 });
 
 it("citations={false} renders no Cite control", () => {
@@ -101,6 +142,7 @@ it("openPeek prop opens the citation source peek panel", async () => {
               element={
                 <ArtifactSectionEditor
                   workspaceId="ws-1"
+                  branch="main"
                   queryKey={["draft", "ws-1"]}
                   head={"a".repeat(40)}
                   canEdit={true}
@@ -155,6 +197,7 @@ function renderDraftEditor(openPeek?: { ev: string; n: number }) {
               element={
                 <ArtifactSectionEditor
                   workspaceId="ws-1"
+                  branch="main"
                   queryKey={["draft", "ws-1"]}
                   head={"a".repeat(40)}
                   canEdit={true}

@@ -2761,6 +2761,8 @@ export interface components {
         };
         /** DraftOut */
         DraftOut: {
+            /** Branch */
+            branch: string;
             /** Can Edit */
             can_edit: boolean;
             /** Can Write */
@@ -3639,6 +3641,8 @@ export interface components {
         };
         /** SpecOut */
         SpecOut: {
+            /** Branch */
+            branch: string;
             /** Can Edit */
             can_edit: boolean;
             /** Can Manage Lock */

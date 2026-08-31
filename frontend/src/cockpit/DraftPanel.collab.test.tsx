@@ -25,6 +25,7 @@ import { DraftPanel } from "./DraftPanel";
 
 const BASE_DATA = {
   head: "h",
+  branch: "main",
   can_edit: false,
   sections: [],
   citations: {},
