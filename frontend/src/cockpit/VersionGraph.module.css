@@ -1,15 +1,26 @@
-/* The lane: a dot per version, joined by a vertical line. One lane — measured
-   across all 14 workspace repos, every one has a single branch and zero merge
-   commits, so the graph is a straight line today (spec section 10). */
+/* One row of the commit graph. Height is FIXED: the SVG lane strips only join
+   into continuous lines when every row is exactly ROW_H (22px) tall, which is
+   also why the subject ellipsises instead of wrapping. */
 .row {
-  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  height: 22px;
+  padding-right: 0.4rem;
 }
+.row:hover {
+  background: var(--app-hover);
+}
+
+/* The clickable middle. NOT wrapping the whole row: the branch pills and the
+   actions menu are buttons too, and a button inside a button is invalid. */
 .button {
   display: flex;
   align-items: center;
   gap: 0.4rem;
-  width: 100%;
-  padding: 0.2rem 0.5rem 0.2rem 0.5rem;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
   background: transparent;
   border: 0;
   text-align: left;
@@ -17,51 +28,53 @@
   font-size: 0.85rem;
   cursor: pointer;
 }
-.button:hover {
-  background: var(--app-hover, rgba(255, 255, 255, 0.06));
-}
 .button[aria-pressed="true"] {
-  background: var(--app-sidebar);
+  background: var(--app-selected);
   outline: 1px solid var(--app-accent);
   outline-offset: -1px;
 }
 
-/* Fixed-width lane so every dot lines up regardless of sha or subject length. */
-.lane {
-  position: relative;
-  flex: 0 0 12px;
-  align-self: stretch;
-  min-height: 1.4em;
+.pill {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 5px;
+  border-radius: 8px;
+  font-size: 0.7rem;
+  line-height: 15px;
+  border: 1px solid var(--app-border-strong);
+  background: transparent;
+  color: var(--app-muted);
+  cursor: pointer;
 }
-/* The connector. Drawn on the lane rather than between rows so the last row
-   simply has no line below it — no special case, no :last-child rule. */
-.lane::before {
-  content: "";
-  position: absolute;
-  left: 5px;
-  top: 0;
-  bottom: -0.4rem;
-  width: 2px;
-  background: var(--app-border);
+.pill[data-current="true"] {
+  background: var(--app-accent);
+  border-color: var(--app-accent);
+  color: var(--app-editor);
+  cursor: default;
 }
-.row:last-child .lane::before {
-  bottom: 50%;
+/* The row actions trigger. Always in the DOM — a control that only exists while
+   the mouse is over it cannot be reached by keyboard — but visually quiet until
+   the row is hovered or the button itself is focused. */
+.kebab {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--app-muted);
+  cursor: pointer;
+  padding: 0 3px;
+  line-height: 1;
+  opacity: 0;
 }
-.dot {
-  position: absolute;
-  left: 1px;
-  top: calc(50% - 5px);
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--app-muted);
-  border: 2px solid var(--app-editor);
-  box-sizing: border-box;
+.row:hover .kebab,
+.kebab:focus-visible {
+  opacity: 1;
 }
-.dot[data-role="agent"] { background: #4c8dff; }
-.dot[data-role="user"] { background: #3fb950; }
-.dot[data-role="reconciled"] { background: #d29922; }
-.dot[data-role="none"] { background: var(--app-muted); }
 
 .sha {
   flex: 0 0 auto;
@@ -69,15 +82,19 @@
   font-size: 0.78rem;
   color: var(--app-muted);
 }
-/* 276px is the pane's default width; the subject is what gives way. `min-width:
-   0` is load-bearing — without it a flex item refuses to shrink below its
-   content and the row overflows the pane instead of ellipsising. */
+/* `min-width: 0` is load-bearing: without it a flex item refuses to shrink below
+   its content and the row overflows the pane instead of ellipsising. */
 .subject {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.when {
+  flex: 0 0 auto;
+  font-size: 0.72rem;
+  color: var(--app-dim);
 }
 .note {
   color: var(--app-muted);

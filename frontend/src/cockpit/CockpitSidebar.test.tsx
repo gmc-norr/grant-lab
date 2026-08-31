@@ -182,6 +182,9 @@ it("owner sees the Versions commits", async () => {
               commit_sha: "a".repeat(40),
               committed_at: "2026-06-24T00:00:00Z",
               subject: "user spec init",
+              // The real /history always sends this; a mock that omits it is
+              // not the API, and assignLanes reads it.
+              parents: [],
               created_by: "user",
               triggering_turn_id: null,
               turn_prompt: null,
@@ -313,6 +316,8 @@ it("renders the version GRAPH, not the old plain list", async () => {
               commit_sha: "abcdef1234567890abcdef1234567890abcdef12",
               committed_at: "2026-06-24T00:00:00Z",
               subject: "user spec init",
+              // The real /history always sends this; assignLanes reads it.
+              parents: [],
               created_by: "agent",
               triggering_turn_id: null,
               turn_prompt: null,

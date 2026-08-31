@@ -432,7 +432,10 @@ def test_commit_exists_is_false_for_a_tree_that_is_not_a_commit(tmp_path):
     repo = _repo(tmp_path)
     tree = subprocess.run(
         ["git", "rev-parse", "HEAD^{tree}"],
-        cwd=repo, capture_output=True, text=True, check=True,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
 
     assert commit_exists(repo, tree) is False

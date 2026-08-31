@@ -233,16 +233,15 @@ def test_create_with_no_sha_still_branches_at_head(pg_session_factory, tmp_path)
 
 def test_create_from_a_sha_that_is_not_in_this_repo_is_refused(pg_session_factory, tmp_path):
     wid, repo = _ws(pg_session_factory, tmp_path)
-    with pg_session_factory() as s:
-        with pytest.raises(BranchStartUnknown):
-            create_workspace_branch(
-                s,
-                stamp=stamp_for(s, wid),
-                workspace_id=wid,
-                name="ghost",
-                workspaces_dir=tmp_path,
-                from_sha="0" * 40,
-            )
+    with pg_session_factory() as s, pytest.raises(BranchStartUnknown):
+        create_workspace_branch(
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            name="ghost",
+            workspaces_dir=tmp_path,
+            from_sha="0" * 40,
+        )
     assert "ghost" not in branch_tips(repo)
 
 
@@ -251,14 +250,13 @@ def test_create_from_a_non_sha_is_refused_before_git_sees_it(pg_session_factory,
     any `--` separator, so an unvalidated value in argv is an option-injection
     vector -- the reason ports/shas.py exists."""
     wid, repo = _ws(pg_session_factory, tmp_path)
-    with pg_session_factory() as s:
-        with pytest.raises(BranchStartUnknown):
-            create_workspace_branch(
-                s,
-                stamp=stamp_for(s, wid),
-                workspace_id=wid,
-                name="evil",
-                workspaces_dir=tmp_path,
-                from_sha="--output=/tmp/pwned",
-            )
+    with pg_session_factory() as s, pytest.raises(BranchStartUnknown):
+        create_workspace_branch(
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            name="evil",
+            workspaces_dir=tmp_path,
+            from_sha="--output=/tmp/pwned",
+        )
     assert "evil" not in branch_tips(repo)

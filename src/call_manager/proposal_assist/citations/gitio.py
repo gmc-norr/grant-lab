@@ -519,8 +519,7 @@ def commit_exists(repo_dir: Path, sha: str) -> bool:
     if proc.returncode in (0, 1):
         return proc.returncode == 0
     raise GitCommitError(
-        f"cannot resolve {sha!r} in {repo_dir} (git exit {proc.returncode}): "
-        f"{proc.stderr.strip()}"
+        f"cannot resolve {sha!r} in {repo_dir} (git exit {proc.returncode}): {proc.stderr.strip()}"
     )
 
 
