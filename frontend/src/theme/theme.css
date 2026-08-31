@@ -27,6 +27,14 @@
   --app-warn: #cca700;
   --app-bad: #f14c4c;
   --app-heading: #4dc4d9;
+  /* Version-graph lanes. Six, cycled by column index, the way VS Code's source
+     control graph does. Chosen to sit on --app-editor and --app-sidebar. */
+  --app-lane-0: #4c8dff;
+  --app-lane-1: #3fb950;
+  --app-lane-2: #d29922;
+  --app-lane-3: #bc8cff;
+  --app-lane-4: #4ec9b0;
+  --app-lane-5: #f78166;
   --app-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
   color-scheme: dark;
 }
