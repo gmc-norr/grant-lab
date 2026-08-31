@@ -98,6 +98,7 @@ class SetupRowLockTimeout(RowLockTimeout):
     it waits; letting the wait be unbounded is the bug this exists to avoid.
     """
 
+
 # A setup job that's been 'running' longer than this is presumed abandoned —
 # the worker process crashed between the status='running' commit and a terminal
 # transition. Phase-0 extraction (a couple of LLM calls) is well under this, so
@@ -195,9 +196,7 @@ def _git_env() -> dict[str, str]:
     return env
 
 
-def _run_git(
-    args: list[str], *, cwd: Path, check: bool = True
-) -> subprocess.CompletedProcess[str]:
+def _run_git(args: list[str], *, cwd: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
     """Run one git command hermetically and bounded. Raises
     subprocess.TimeoutExpired on overrun, which M1 turns into a rollback that
     releases both the mutex and the row lock."""
@@ -395,9 +394,7 @@ class Phase0Worker:
             origin_job_id=job_id,
         )
         with self.session_factory() as s:
-            acquire_commit_mutex_at_generation(
-                s, stamp.workspace_id, generation=stamp.generation
-            )
+            acquire_commit_mutex_at_generation(s, stamp.workspace_id, generation=stamp.generation)
             ws = s.get(Workspace, workspace_id, with_for_update=True)
             if ws is None:
                 raise RuntimeError(f"workspace {workspace_id} vanished")
@@ -423,7 +420,27 @@ class Phase0Worker:
             # The reconciler is reused rather than reimplemented: it already handles
             # ref filtering, a detached HEAD and orphaned rows, and a second founding
             # path is the one that would drift.
-            backfill_branch_entities(s, workspaces_dir=self.workspaces_dir, workspace_id=ws.id)
+            # The RESULT IS CHECKED. `_init_repo` has just run `git init -b main`
+            # and committed, so a founding that founds nothing means git could not
+            # be read — and the reconciler reports that by SKIPPING, not raising
+            # (one bad repo out of 500 must not halt a migration). Discarding the
+            # counters here turned that into a silent success: the workspace
+            # shipped with a NULL root pointer, nothing re-runs the reconciler for
+            # an established workspace, and S2 resolves every path through that
+            # pointer. Failing the setup job is recoverable — it retries up to 5
+            # times; a permanently rootless workspace is not.
+            #
+            # Asserted on the POINTER, not on `rooted == 1`. `_m1` is documented
+            # re-run-safe, and on a second pass the pointer is already set, so the
+            # reconciler correctly reports `rooted=0` — a count check would fail a
+            # healthy retry.
+            result = backfill_branch_entities(
+                s, workspaces_dir=self.workspaces_dir, workspace_id=ws.id
+            )
+            if s.get(Workspace, ws.id).root_branch_id is None:
+                raise RuntimeError(
+                    f"workspace {ws.id}: the branch founding produced no root pointer ({result})"
+                )
 
             ws.call_body_snapshot = (call.summary or "") + "\n\n" + (call.full_text or "")
             if ws.profile_id is not None:
@@ -443,20 +460,15 @@ class Phase0Worker:
         if not (repo_dir / ".git").is_dir():
             _run_git(["init", "-q", "-b", "main"], cwd=repo_dir)
 
-        commit_count_proc = _run_git(
-            ["rev-list", "--count", "HEAD"], cwd=repo_dir, check=False
-        )
+        commit_count_proc = _run_git(["rev-list", "--count", "HEAD"], cwd=repo_dir, check=False)
         has_initial_commit = (
-            commit_count_proc.returncode == 0
-            and commit_count_proc.stdout.strip() not in ("", "0")
+            commit_count_proc.returncode == 0 and commit_count_proc.stdout.strip() not in ("", "0")
         )
         if not has_initial_commit:
             for fname in self._PHASE_ARTIFACT_FILES:
                 (repo_dir / fname).write_text("")
             _run_git(["add", "-A"], cwd=repo_dir)
-            _run_git(
-                ["commit", "-q", "-m", "phase0: initialize empty artifacts"], cwd=repo_dir
-            )
+            _run_git(["commit", "-q", "-m", "phase0: initialize empty artifacts"], cwd=repo_dir)
 
     def _assert_live(self, job_id: uuid.UUID, workspace_id: uuid.UUID) -> None:
         """Short, lock-free liveness read. Used BEFORE computing so a deleted
@@ -581,9 +593,7 @@ class Phase0Worker:
             # job → ws → call: see the docstring's "Lock order" note.
             job = s.get(WorkspaceSetupJob, job_id, with_for_update=True)
             if job is None or job.status != "running":
-                raise WorkspaceGoneDuringSetup(
-                    f"job {job_id} is no longer running (a cancel won)"
-                )
+                raise WorkspaceGoneDuringSetup(f"job {job_id} is no longer running (a cancel won)")
 
             ws = s.get(Workspace, workspace_id, with_for_update=True)
             if ws is None or ws.soft_deleted_at is not None:
@@ -673,8 +683,10 @@ class Phase0Worker:
             #
             # `gone` is separated from `deleted` because a NULL soft_deleted_at
             # means "live" OR "no such row", and only the first may return here.
-            if not gone and deleted is None and isinstance(
-                exc, (WorkspaceGoneDuringSetup, WorkspaceDeleted)
+            if (
+                not gone
+                and deleted is None
+                and isinstance(exc, (WorkspaceGoneDuringSetup, WorkspaceDeleted))
             ):
                 return
 

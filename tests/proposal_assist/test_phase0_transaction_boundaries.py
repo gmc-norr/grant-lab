@@ -1321,3 +1321,47 @@ def test_recovery_after_a_crash_between_m2_and_m3_makes_no_second_llm_call(
             )
         ).all()
         assert len(events) == 1
+
+
+def test_m1_FAILS_when_the_founding_produces_no_root_pointer(
+    pg_session_factory, current_user, tmp_path, phase0_client, monkeypatch
+):
+    """A founding that founds nothing must fail the job, not ship the workspace.
+
+    `_init_repo` has just run `git init -b main` and committed, so if the
+    reconciler founds no pointer it is because git could not be read — and the
+    reconciler reports that by SKIPPING, not raising (one bad repo out of 500
+    must not halt a migration). `_m1` used to DISCARD those counters, so the
+    workspace shipped with a NULL root pointer, nothing re-runs the reconciler for
+    an established workspace, and S2 resolves every path through it.
+
+    Failing is recoverable — the job retries up to 5 times. A permanently
+    rootless workspace is not.
+
+    Simulated at the git boundary rather than by stubbing the reconciler, so the
+    test exercises the reconciler's real skip path.
+    """
+    from call_manager.proposal_assist.citations.gitio import GitCommitError
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=current_user, with_call=True)
+        s.flush()
+        job = WorkspaceSetupJob(workspace_id=ws.id, status="running")
+        s.add(job)
+        s.commit()
+        job_id, ws_id = job.id, ws.id
+
+    def _unreadable(_repo_dir):
+        raise GitCommitError("cannot list branches")
+
+    monkeypatch.setattr(
+        "call_manager.proposal_assist.branch_entity_backfill.list_branches", _unreadable
+    )
+
+    with pytest.raises(RuntimeError, match="no root pointer"):
+        _worker(pg_session_factory, tmp_path, phase0_client)._m1(
+            job_id, ws_id, claimed_generation=0
+        )
+
+    with pg_session_factory() as s:
+        assert s.get(Workspace, ws_id).root_branch_id is None
