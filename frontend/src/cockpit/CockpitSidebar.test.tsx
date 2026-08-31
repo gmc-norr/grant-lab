@@ -336,10 +336,14 @@ it("renders the version GRAPH, not the old plain list", async () => {
     return Promise.resolve(draft as never);
   }) as never);
   renderSidebar("/cockpit/ws-1?view=versions");
-  // Graph-only output: the 7-char sha and a role dot. The old list rendered
-  // neither — it showed the full message and the role as plain text.
-  expect(await screen.findByText("abcdef1")).toBeInTheDocument();
-  expect(document.querySelector('[data-role="agent"]')).not.toBeNull();
+  // Graph-only output: an SVG lane strip with a dot in it, plus the row's
+  // accessible name carrying the 7-char sha. The old list rendered neither — it
+  // showed the full message and the role as plain text, in no SVG at all.
+  //
+  // The sha is no longer PRINTED in the row (it left about 60px for the subject
+  // at 276px), so asserting visible text would now be asserting the old design.
+  expect(await screen.findByRole("button", { name: /^abcdef1 / })).toBeInTheDocument();
+  expect(document.querySelector('svg circle[data-role="agent"]')).not.toBeNull();
 });
 
 it("renders ONLY the view the URL asks for", async () => {
