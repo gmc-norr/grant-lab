@@ -19,6 +19,14 @@ from call_manager.proposal_assist.citations.gitio import (
     list_branches,
 )
 
+_GIT_ENV = {
+    "GIT_AUTHOR_NAME": "t",
+    "GIT_AUTHOR_EMAIL": "t@t",
+    "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@t",
+    "PATH": "/usr/bin:/bin",
+}
+
 
 def _repo(tmp_path, *, commit=True):
     d = tmp_path / "repo"
@@ -184,3 +192,64 @@ def test_head_branch_RAISES_on_a_fatal_failure_rather_than_saying_detached(tmp_p
     not_a_repo.mkdir()  # exists, so git actually runs and exits 128
     with pytest.raises(GitCommitError):
         head_branch(not_a_repo)
+
+
+def test_git_reads_do_not_ESCAPE_a_broken_repo_into_the_enclosing_one(tmp_path):
+    """git discovery walks UPWARD until it finds any repository.
+
+    On this deployment `var/workspaces/` sits inside the application's own
+    checkout, so a workspace repo whose `.git` is corrupt used to answer with the
+    SERVER'S branches — exit 0, no error. The reconciler would then found rows
+    named after the server's branches and delete the workspace's real ones.
+
+    Measured 2026-08-31 before the ceiling existed:
+        corrupt .git   -> prints the enclosing repo's branch, rc=0
+        no .git at all -> prints the enclosing repo's branch, rc=0
+
+    `_list_commits_env` already fenced `list_commits` and `current_head` fences
+    itself — but `_git`, which every other primitive here goes through, did not.
+    """
+    outer = tmp_path / "outer"
+    (outer / "ws" / "repo").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "enclosing", "."], cwd=outer, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "--allow-empty", "-m", "x"], cwd=outer, check=True, env=_GIT_ENV
+    )
+
+    inner = outer / "ws" / "repo"
+    (inner / ".git").mkdir()
+    (inner / ".git" / "HEAD").write_text("CORRUPT\n")
+
+    # Every read primitive must refuse, not answer with the enclosing repo.
+    with pytest.raises(GitCommitError):
+        list_branches(inner)
+    with pytest.raises(GitCommitError):
+        head_branch(inner)
+    with pytest.raises(GitCommitError):
+        branch_exists(inner, "enclosing")
+    with pytest.raises(GitCommitError):
+        has_commits(inner)
+
+
+def test_the_ceiling_leaves_a_HEALTHY_repo_alone(tmp_path):
+    """The control. A ceiling that broke real repos would be caught by the whole
+    suite, but it must be pinned here beside the test that motivates it: the
+    ceiling is the repo's PARENT, so a real repo still finds its own `.git`."""
+    outer = tmp_path / "outer"
+    (outer / "ws" / "repo").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "enclosing", "."], cwd=outer, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "--allow-empty", "-m", "x"], cwd=outer, check=True, env=_GIT_ENV
+    )
+
+    inner = outer / "ws" / "repo"
+    subprocess.run(["git", "init", "-q", "-b", "main", "."], cwd=inner, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "--allow-empty", "-m", "y"], cwd=inner, check=True, env=_GIT_ENV
+    )
+    subprocess.run(["git", "branch", "feature"], cwd=inner, check=True)
+
+    assert sorted(list_branches(inner)) == ["feature", "main"]
+    assert head_branch(inner) == "main"
+    assert branch_exists(inner, "feature")
+    assert not branch_exists(inner, "enclosing"), "the enclosing repo must be invisible"

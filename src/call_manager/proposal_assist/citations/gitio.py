@@ -36,8 +36,37 @@ logger = logging.getLogger(__name__)
 _GIT_TIMEOUT_SECONDS = 30.0
 
 
-def _git_env() -> dict[str, str]:
+def _git_env(repo_dir: Path | None = None) -> dict[str, str]:
+    """The environment every git subprocess runs in.
+
+    *repo_dir* fences git's repository DISCOVERY to that directory. Without it git
+    walks UPWARD until it finds any repository, so a workspace repo whose `.git`
+    is corrupt answers with whatever repo encloses it — and `var/workspaces/` sits
+    inside the application's own checkout, so the answer is the SERVER'S branches,
+    with exit 0 and no error. The reconciler would then found rows named after the
+    server's branches and delete the workspace's real ones. Measured 2026-08-31:
+
+        workspace repo, corrupt .git     -> prints the enclosing branch, rc=0
+        workspace repo, no .git at all   -> prints the enclosing branch, rc=0
+        either one, WITH the ceiling     -> "fatal: not a git repository", rc=128
+        a HEALTHY repo, WITH the ceiling -> unchanged, rc=0
+
+    The hazard was already known here: `_list_commits_env` (gitio.py:475) and
+    `current_head` (gitio.py:305) each set this ceiling for themselves. `_git` —
+    which every other primitive in this module goes through — did not. Fixing the
+    shared primitive is what closes the remaining doors.
+
+    The ceiling is the repo's PARENT: git searches `repo_dir` itself and stops
+    before the parent, so a real repo still finds its own `.git` at cwd.
+
+    Absolute, via `resolve()`: GIT_CEILING_DIRECTORIES silently IGNORES a relative
+    entry, and `workspace_repo_dir` builds on WORKSPACES_DIR, which defaults to the
+    relative "var/workspaces". A relative ceiling would look like a fix and be
+    inert.
+    """
     env = os.environ.copy()
+    if repo_dir is not None:
+        env["GIT_CEILING_DIRECTORIES"] = str(Path(repo_dir).resolve().parent)
     env.setdefault("GIT_AUTHOR_NAME", "call-manager")
     env.setdefault("GIT_AUTHOR_EMAIL", "call-manager@local")
     env.setdefault("GIT_COMMITTER_NAME", "call-manager")
@@ -331,7 +360,7 @@ def _git(repo_dir: Path, *args: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         timeout=_GIT_TIMEOUT_SECONDS,
-        env=_git_env(),
+        env=_git_env(repo_dir),
     )
 
 
