@@ -7,6 +7,9 @@ export type VersionRow = {
   commit_sha: string;
   committed_at: string;
   subject: string;
+  /** Parent shas, first-parent first. Empty for a root commit and for the
+   *  oldest row of a truncated history. Feeds versionLanes. */
+  parents: string[];
   created_by: string | null;
   triggering_turn_id: string | null;
   /** The user's words from the turn that caused this version. Null wherever

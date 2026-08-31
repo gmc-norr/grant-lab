@@ -351,11 +351,13 @@ def test_the_orphaned_root_is_cleared_before_git_runs(pg_session_factory, tmp_pa
 
     with pg_session_factory() as s:
 
-        def _spy(r, n):
+        def _spy(r, n, start="HEAD"):
+            # `start` since create_branch learned an explicit start point; named
+            # rather than *args so a further signature change is still caught.
             # Same session, so this sees the flushed-but-uncommitted UPDATE.
             s.expire_all()
             seen["root_when_git_ran"] = s.get(Workspace, wid).root_branch_id
-            return real(r, n)
+            return real(r, n, start)
 
         branches_mod.git_create_branch = _spy
         try:
@@ -488,7 +490,7 @@ def test_a_create_GIT_refuses_writes_no_row(pg_session_factory, tmp_path):
 
     real = branches_mod.git_create_branch
 
-    def _refuse(r, n):
+    def _refuse(r, n, start="HEAD"):
         raise GitCommitError("cannot lock ref refs/heads/new_ideas")
 
     branches_mod.git_create_branch = _refuse

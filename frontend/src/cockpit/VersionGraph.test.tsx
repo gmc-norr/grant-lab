@@ -7,10 +7,16 @@ import { describe, expect, it, vi } from "vitest";
 import * as versionsMod from "../api/versions";
 import { VersionGraph } from "./VersionGraph";
 
-const ROW = (sha: string, subject: string, created_by: string | null = "user") => ({
+const ROW = (
+  sha: string,
+  subject: string,
+  created_by: string | null = "user",
+  parents: string[] = [],
+) => ({
   commit_sha: sha,
   committed_at: "2026-08-28T10:00:00+00:00",
   subject,
+  parents,
   created_by,
   triggering_turn_id: null,
   turn_prompt: null,

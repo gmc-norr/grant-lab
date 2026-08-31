@@ -2285,6 +2285,8 @@ export interface components {
         };
         /** BranchIn */
         BranchIn: {
+            /** From Sha */
+            from_sha?: string | null;
             /** Name */
             name: string;
         };
@@ -2294,6 +2296,10 @@ export interface components {
             branches: string[];
             /** Current */
             current: string;
+            /** Tips */
+            tips: {
+                [key: string]: string;
+            };
         };
         /** CallDetailCallOut */
         CallDetailCallOut: {
@@ -3862,6 +3868,11 @@ export interface components {
             committed_at: string;
             /** Created By */
             created_by?: string | null;
+            /**
+             * Parents
+             * @default []
+             */
+            parents: string[];
             /** Subject */
             subject: string;
             /** Triggering Turn Id */

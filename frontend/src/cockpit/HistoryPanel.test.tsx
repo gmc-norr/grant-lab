@@ -31,6 +31,9 @@ const ROW = (
   commit_sha: sha,
   committed_at: "2026-08-28T10:00:00+00:00",
   subject,
+  // The graph reads this; HistoryPanel does not, so an empty list is honest
+  // here rather than a placeholder pretending to be topology.
+  parents: [] as string[],
   created_by,
   triggering_turn_id: turn_prompt == null ? null : "turn-1",
   turn_prompt,

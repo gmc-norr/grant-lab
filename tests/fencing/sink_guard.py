@@ -389,10 +389,13 @@ PROVEN_NON_COMMIT: tuple[Fingerprint, ...] = (
         # — reads history, no write. The optional pathspec is appended after a
         # literal `--`, so a filename can never be parsed as an option. Offset
         # moved 29 -> 42 when that pathspec block and its docstring paragraph
-        # went in above the Popen; the call itself is unchanged.
+        # went in above the Popen, then 42 -> 67 when `--parents`, the
+        # `all_branches` block and their docstring paragraphs went in. DERIVED
+        # from `pristine_stray_git_report()`, not counted by hand. The call
+        # itself is unchanged, and `git log` still writes nothing.
         "call_manager/proposal_assist/citations/gitio.py",
         "list_commits",
-        42,
+        67,
         "Name(id='argv', ctx=Load())",
     ),
     # -----------------------------------------------------------------------
