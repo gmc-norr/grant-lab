@@ -107,21 +107,20 @@ it("keeps buffers on same-branch saves and drops them when the branch changes", 
   expect(view.state.doc.toString()).not.toContain("LOCAL");
 });
 
-it("KNOWN DEFECT: a save that resolves after a branch switch writes into the new branch's cache", async () => {
-  // PINS A DEFECT. This test passing is the bug; invert the last assertion when
-  // it is fixed.
+it("drops a save result that arrives after the branch changed underneath it", async () => {
+  // `onSave` captures `content` from `buffers` BEFORE its await, then writes it
+  // into `qc.setQueryData(queryKey, ...)`. `queryKey` is ["draft", id] -- no
+  // branch in it -- so ONE cache entry is shared by every branch, and without
+  // the guard a save begun on one branch lands on whichever is current when it
+  // resolves.
   //
-  // `onSave` (ArtifactSectionEditor.tsx:189) captures `content` from `buffers`
-  // BEFORE its await, then writes it into `qc.setQueryData(queryKey, ...)` at
-  // :201. `queryKey` is ["draft", id] -- no branch in it -- so one cache entry
-  // is shared by every branch and a save begun on one lands on whichever is
-  // current when it resolves.
+  // `branchChanged` cannot cover this: it masks editorValue, isDirty, setDirty
+  // and activeDirty, but `onSave` reads `buffers[index]` raw, and by the time
+  // the result arrives branchChanged has gone false again anyway -- so the leak
+  // would read as ordinary content.
   //
-  // `branchChanged` cannot stop it: it masks editorValue, isDirty, setDirty and
-  // activeDirty, but `onSave` reads `buffers[index]` raw, and by then the click
-  // has already happened anyway.
-  //
-  // The server does not stop it either -- see
+  // This guards the CACHE only. The request itself still reaches the server and
+  // is still accepted there; see
   // tests/test_editing_save.py::test_KNOWN_DEFECT_a_form_loaded_on_another_branch_still_writes_here
   const qc = new QueryClient();
   let releaseSave: ((v: { head: string; section_sha: string }) => void) | undefined;
@@ -182,10 +181,11 @@ it("KNOWN DEFECT: a save that resolves after a branch switch writes into the new
     head: string;
     sections: typeof source;
   };
-  // Should be "target branch\n". It is the source branch's text.
-  expect(cached.sections[0].text).toContain("LEAKED");
-  expect(cached.sections[0].sha).toBe("leaked-sha");
-  expect(cached.head).toBe("head-9");
+  // Untouched: still the target branch's own section, sha and head.
+  expect(cached.sections[0].text).toBe("target branch\n");
+  expect(cached.sections[0].text).not.toContain("LEAKED");
+  expect(cached.sections[0].sha).toBe("t0");
+  expect(cached.head).toBe("head-3");
 });
 
 it("citations={false} renders no Cite control", () => {

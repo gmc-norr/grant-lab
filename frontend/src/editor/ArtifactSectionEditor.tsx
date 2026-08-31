@@ -198,6 +198,22 @@ export function ArtifactSectionEditor({
         base_commit_sha: head,
         base_section_sha: activeSection.sha,
       });
+      // The branch can have moved while this was in flight. `queryKey` carries
+      // no branch, so one cache entry is shared by every branch, and writing
+      // here would paint THIS branch's text and sha under whichever branch is
+      // now current. Nothing downstream would notice: `branchChanged` has gone
+      // false again by the time the refetch lands, so the buffers-and-undo
+      // guard reads the leak as ordinary content.
+      //
+      // `branch` is this closure's value, captured at the click; the ref always
+      // holds the latest. Dropping the update is right either way -- the
+      // refetch that follows a switch is authoritative.
+      //
+      // This stops the CACHE being polluted. It cannot stop the request: at the
+      // click the client was legitimately on the old branch, so only the server
+      // can refuse the write. See
+      // tests/test_editing_save.py::test_KNOWN_DEFECT_a_form_loaded_on_another_branch_still_writes_here
+      if (branch !== previousBranch.current) return;
       qc.setQueryData(queryKey, (prev: { head: string; sections: Section[] } | undefined) => {
         if (!prev) return prev;
         return {
