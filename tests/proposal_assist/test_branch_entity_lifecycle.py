@@ -17,7 +17,11 @@ from call_manager.proposal_assist.branches import (
     create_workspace_branch,
     delete_workspace_branch,
 )
-from call_manager.proposal_assist.citations.gitio import branch_exists, list_branches
+from call_manager.proposal_assist.citations.gitio import (
+    GitCommitError,
+    branch_exists,
+    list_branches,
+)
 from call_manager.proposal_assist.paths import workspace_repo_dir
 from tests.proposal_assist.conftest import init_workspace_repo, make_workspace, stamp_for
 
@@ -89,8 +93,10 @@ def test_the_new_row_carries_a_fresh_id_and_no_sdk_handle(pg_session_factory, tm
 
 
 def test_a_refused_create_writes_no_row(pg_session_factory, tmp_path):
-    """The ref and the row must fail together. A row for a branch git refused to
-    create is exactly the divergence this task exists to prevent."""
+    """The APP's own pre-check. `branch_exists` answers yes, so `BranchExists` is
+    raised and `git_create_branch` is never called — this covers the refusal path
+    that does not reach git at all. The case where GIT itself refuses is a
+    different code path and has its own test below."""
     wid, _ = _ws(pg_session_factory, tmp_path)
     with pg_session_factory() as s:
         create_workspace_branch(
@@ -462,3 +468,49 @@ def test_the_row_delete_runs_before_git_so_RESTRICT_protects_the_ref(pg_session_
         f"that git has already destroyed (saw {seen['rows_when_git_ran']})"
     )
     assert not branch_exists(repo, "new_ideas")
+
+
+def test_a_create_GIT_refuses_writes_no_row(pg_session_factory, tmp_path):
+    """The refusal that actually reaches git, which the test above does not.
+
+    `test_a_refused_create_writes_no_row` trips the app's own `branch_exists`
+    pre-check, so `git_create_branch` never runs — it cannot exercise the
+    ordering the code comment is about ("placing the add after the git call at
+    least means a ref git REFUSED leaves no row"). Only a failure INSIDE the git
+    call does.
+
+    Reachable for real: a stale `index.lock`, a full disk, a ref name git accepts
+    from the API's validator but rejects itself.
+    """
+    wid, repo = _ws(pg_session_factory, tmp_path)
+
+    import call_manager.proposal_assist.branches as branches_mod
+
+    real = branches_mod.git_create_branch
+
+    def _refuse(r, n):
+        raise GitCommitError("cannot lock ref refs/heads/new_ideas")
+
+    branches_mod.git_create_branch = _refuse
+    try:
+        with pg_session_factory() as s:
+            with pytest.raises(GitCommitError):
+                create_workspace_branch(
+                    s,
+                    stamp=stamp_for(s, wid),
+                    workspace_id=wid,
+                    name="new_ideas",
+                    workspaces_dir=tmp_path,
+                )
+            # On the PENDING set, before the rollback — a rollback discards a
+            # wrongly-queued row wherever it was added, so the committed state
+            # looks identical either way.
+            pending = [o for o in s.new if isinstance(o, Branch)]
+            assert pending == [], f"a git-refused create queued {[b.name for b in pending]}"
+            s.rollback()
+    finally:
+        branches_mod.git_create_branch = real
+
+    assert not branch_exists(repo, "new_ideas")
+    with pg_session_factory() as s:
+        assert _rows(s, wid) == ["main"]

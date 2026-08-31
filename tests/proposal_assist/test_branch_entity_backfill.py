@@ -1017,3 +1017,46 @@ def test_founding_the_root_does_not_restamp_updated_at(pg_session_factory, tmp_p
         ws = s.get(Workspace, wid)
         assert ws.root_branch_id is not None
         assert ws.updated_at == before, "the deploy restamped updated_at"
+
+
+@pytest.mark.parametrize(
+    "boom",
+    [
+        pytest.param(OSError("disk gone"), id="OSError"),
+        pytest.param(subprocess.TimeoutExpired(cmd=["git"], timeout=30.0), id="TimeoutExpired"),
+    ],
+)
+def test_every_arm_of_the_skip_handler_is_reachable(pg_session_factory, tmp_path, boom):
+    """The handler catches three exception types and only `GitCommitError` had a
+    test. The other two are not interchangeable:
+    `subprocess.TimeoutExpired` is NOT a subclass of `OSError` (verified), so
+    dropping it from the tuple would let a 30s git timeout escape and abort the
+    whole batch — and in migration 0068 that is a failed deploy.
+
+    Parametrised so each arm fails on its own, rather than one test that passes
+    while an arm is missing.
+    """
+    with pg_session_factory() as s:
+        wid = make_workspace(s, title="w", owner=make_user(s, email="arm@ki.se")).id
+        s.commit()
+    _repo(tmp_path, wid, "main")
+
+    import call_manager.proposal_assist.branch_entity_backfill as mod
+
+    real = mod.list_branches
+    mod.list_branches = lambda _d: (_ for _ in ()).throw(boom)
+    try:
+        with pg_session_factory() as s:
+            r = backfill_branch_entities(s, workspaces_dir=tmp_path)
+            s.commit()
+    finally:
+        mod.list_branches = real
+
+    assert (r.skipped, r.created, r.rooted) == (1, 0, 0), r
+
+
+def test_timeout_is_not_an_OSError_which_is_why_both_are_listed():
+    """The fact the test above rests on. If this ever became true, one arm of the
+    handler would be redundant — and if someone 'simplified' the tuple on the
+    assumption it already IS true, a git timeout would escape."""
+    assert not issubclass(subprocess.TimeoutExpired, OSError)
