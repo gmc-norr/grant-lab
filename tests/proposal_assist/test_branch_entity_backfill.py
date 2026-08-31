@@ -513,12 +513,21 @@ def test_reconciling_survives_the_root_branchs_ref_being_deleted(pg_session_fact
     subprocess.run(["git", "checkout", "-q", "new_ideas"], cwd=d, check=True)
     subprocess.run(["git", "branch", "-D", "main"], cwd=d, check=True)
 
+    # The healthy workspace must have NEW work to lose in the second call.
+    # Asserting its original two rows would be hollow: an earlier transaction
+    # already committed those, so they survive a total rollback and the assertion
+    # could never fail on the bug it names. This third ref exists only in the
+    # second call, so it disappears if the batch aborts.
+    subprocess.run(["git", "branch", "third"], cwd=workspace_repo_dir(tmp_path, other), check=True)
+
     with pg_session_factory() as s:
         r = backfill_branch_entities(s, workspaces_dir=tmp_path)  # must not raise
         s.commit()
         assert r.deleted == 1
         assert _names(s, broken) == ["new_ideas"]
-        assert _names(s, other) == ["main", "new_ideas"], "the healthy workspace rolled back"
+        assert _names(s, other) == ["main", "new_ideas", "third"], (
+            "the healthy workspace rolled back"
+        )
         # repo/ is on new_ideas now, so that is the root the reconciler resolves.
         assert s.get(Branch, s.get(Workspace, broken).root_branch_id).name == "new_ideas"
 
@@ -661,11 +670,16 @@ def test_the_migration_calls_the_backfill_inside_upgrade():
     backfill_at = _call_index(live, "backfill_branch_entities")
     assert backfill_at is not None, "the backfill call in upgrade() is unreachable or absent"
 
-    create_at = _call_index(live, "create_table")
-    assert create_at is not None, "upgrade() no longer creates the table"
-    assert create_at < backfill_at, (
-        f"the backfill runs at statement {backfill_at}, before create_table at {create_at}"
-    )
+    # BOTH pieces of schema the data pass writes, not just the table. The
+    # reconciler sets `workspaces.root_branch_id`, which `op.add_column` creates —
+    # so a gate that pinned only `create_table` would pass with the backfill
+    # hoisted above the column it populates.
+    for op_name in ("create_table", "add_column"):
+        at = _call_index(live, op_name)
+        assert at is not None, f"upgrade() no longer calls {op_name}"
+        assert at < backfill_at, (
+            f"the backfill runs at statement {backfill_at}, before {op_name} at {at}"
+        )
 
 
 def test_the_migration_gate_rejects_a_call_it_cannot_reach():
