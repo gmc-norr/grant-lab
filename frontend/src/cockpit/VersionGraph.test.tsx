@@ -1,5 +1,5 @@
 import { MantineProvider } from "@mantine/core";
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, createEvent, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, useSearchParams } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -272,12 +272,33 @@ describe("VersionGraph", () => {
     expect(await screen.findByRole("menuitem", { name: "Branch from here…" })).toBeInTheDocument();
   });
 
-  it("right-clicking a row opens the same actions menu", async () => {
+  it("right-clicking a row opens the same actions menu AND suppresses the browser's", async () => {
     mockList({ versions: [ROW("aaaaaaa1", "newer")] });
     mockBranches("main", { main: "aaaaaaa1" });
     wrap();
-    fireEvent.contextMenu(screen.getByText("newer"));
+    // The event is built by hand so its defaultPrevented can be read afterwards.
+    // Without this second assertion, deleting `e.preventDefault()` leaves the
+    // test green while the native context menu opens on top of ours -- measured
+    // 2026-08-31.
+    const ev = createEvent.contextMenu(screen.getByText("newer"));
+    fireEvent(screen.getByText("newer"), ev);
     expect(await screen.findByRole("menuitem", { name: "Branch from here…" })).toBeInTheDocument();
+    expect(ev.defaultPrevented).toBe(true);
+  });
+
+  it("offers Branch from here as DISABLED when the branch list cannot be read", async () => {
+    // The user has to see why nothing happens. BranchBar refuses the request
+    // too, but a silently dead menu item reads as a broken app.
+    mockList({ versions: [ROW("aaaaaaa1", "newer")] });
+    vi.spyOn(branchesMod, "useBranches").mockReturnValue({
+      data: undefined,
+      isError: true,
+    } as never);
+    wrap();
+    fireEvent.click(screen.getByRole("button", { name: "Actions for aaaaaaa" }));
+    expect(await screen.findByRole("menuitem", { name: "Branch from here…" })).toBeDisabled();
+    // Copying a sha needs no branch list, so it stays live.
+    expect(screen.getByRole("menuitem", { name: "Copy commit id" })).not.toBeDisabled();
   });
 
   it("Branch from here opens the new-branch dialog for THAT commit", async () => {

@@ -28,10 +28,16 @@ export function pathFor(link: LaneLink, lane: number): string {
   const endY = link.bottom != null ? ROW_H : mid;
 
   if (topX === botX) return `M ${topX} ${startY} L ${botX} ${endY}`;
+  // The bend's control heights must never run PAST an end that is the dot.
+  // With a fixed `mid * 1.5`, a line arriving at the dot was drawn to 5.5px
+  // BELOW it and then back up -- a 1.5px stub of the arriving branch's colour
+  // poking out under a 4px dot. Same overshoot upwards for a line leaving one.
+  const y1 = link.top != null ? mid * 0.5 : startY;
+  const y2 = link.bottom != null ? mid * 1.5 : endY;
   return (
-    `M ${topX} ${startY} L ${topX} ${mid * 0.5} ` +
+    `M ${topX} ${startY} L ${topX} ${y1} ` +
     `Q ${topX} ${mid} ${(topX + botX) / 2} ${mid} ` +
-    `Q ${botX} ${mid} ${botX} ${mid * 1.5} L ${botX} ${endY}`
+    `Q ${botX} ${mid} ${botX} ${y2} L ${botX} ${endY}`
   );
 }
 

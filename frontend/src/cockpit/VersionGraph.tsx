@@ -40,6 +40,7 @@ function VersionGraphRow({
   currentBranch,
   onSwitch,
   onBranchFrom,
+  branchesUnavailable,
   now,
 }: {
   v: VersionRow;
@@ -52,6 +53,9 @@ function VersionGraphRow({
   currentBranch: string | undefined;
   onSwitch: (name: string) => void;
   onBranchFrom: () => void;
+  /** The branch list could not be read. Branching needs it -- it is what says
+   *  which names are already taken -- so the item is offered but inert. */
+  branchesUnavailable: boolean;
   now: number;
 }) {
   const [opened, setOpened] = useState(false);
@@ -184,7 +188,9 @@ function VersionGraphRow({
           </button>
         </Menu.Target>
         <Menu.Dropdown>
-          <Menu.Item onClick={onBranchFrom}>Branch from here…</Menu.Item>
+          <Menu.Item onClick={onBranchFrom} disabled={branchesUnavailable}>
+            Branch from here…
+          </Menu.Item>
           <Menu.Item onClick={() => navigator.clipboard?.writeText(v.commit_sha)}>
             Copy commit id
           </Menu.Item>
@@ -273,6 +279,7 @@ export function VersionGraph({ id }: { id: string }) {
               currentBranch={branches.data?.current}
               onSwitch={setSwitchTo}
               onBranchFrom={() => setBranchFrom({ sha: v.commit_sha, subject: v.subject })}
+              branchesUnavailable={branches.isError}
               now={now}
               selected={v.commit_sha === nav.a || v.commit_sha === nav.b}
               onSelect={() => nav.selectAndOpen(v.commit_sha)}

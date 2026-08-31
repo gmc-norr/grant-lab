@@ -40,16 +40,31 @@ export function BranchBar({
   const [newOpen, setNewOpen] = useState(false);
   const [newName, setNewName] = useState("");
 
-  // A row asking to branch from a commit opens the same dialog the menu opens.
+  // A row asking to branch from a commit opens the same dialog the menu opens --
+  // but NOT while the branch list is unreadable. That list is what says which
+  // names are taken; a create dialog on top of it would be guessing, and the
+  // create would fail against the same server that just refused the list. The
+  // request is CLEARED rather than left pending, or the dialog would spring
+  // open by itself the moment the list recovered.
   useEffect(() => {
-    if (branchFrom) setNewOpen(true);
-  }, [branchFrom]);
+    if (!branchFrom) return;
+    if (isError) {
+      onBranchFromHandled();
+      return;
+    }
+    setNewOpen(true);
+  }, [branchFrom, isError, onBranchFromHandled]);
 
   // A pill click asks for a switch; the dialog and its state stay here, so there
-  // is ONE copy of the warning rather than two.
+  // is ONE copy of the warning rather than two. Same refusal while unreadable.
   useEffect(() => {
-    if (switchTo) setConfirm({ kind: "switch", name: switchTo });
-  }, [switchTo]);
+    if (!switchTo) return;
+    if (isError) {
+      onSwitchHandled();
+      return;
+    }
+    setConfirm({ kind: "switch", name: switchTo });
+  }, [switchTo, isError, onSwitchHandled]);
 
   const current = data?.current ?? "…";
   const others = (data?.branches ?? []).filter((b) => b !== current);
@@ -120,7 +135,7 @@ export function BranchBar({
       {/* `opened` keys off `confirm`, never off `switchTo`: the two update in
           different renders, so keying off the request would flash the dialog
           open with a null name. */}
-      <Modal opened={confirm?.kind === "switch"} onClose={closeSwitch} title="Switch branch">
+      <Modal opened={!isError && confirm?.kind === "switch"} onClose={closeSwitch} title="Switch branch">
         <Text size="sm">
           Switching to <strong>{confirm?.name}</strong> will disconnect every open editor. Unsaved
           keystrokes will be lost.
@@ -141,7 +156,7 @@ export function BranchBar({
         </Group>
       </Modal>
 
-      <Modal opened={confirm?.kind === "delete"} onClose={() => setConfirm(null)} title="Delete branch">
+      <Modal opened={!isError && confirm?.kind === "delete"} onClose={() => setConfirm(null)} title="Delete branch">
         <Text size="sm">
           Delete <strong>{confirm?.name}</strong>? This cannot be undone — the commits on this branch
           will be permanently lost.
@@ -163,7 +178,7 @@ export function BranchBar({
         </Group>
       </Modal>
 
-      <Modal opened={newOpen} onClose={closeNew} title="New branch">
+      <Modal opened={!isError && newOpen} onClose={closeNew} title="New branch">
         {branchFrom && (
           <Text size="xs" c="dimmed" mb="xs">
             Branching from {branchFrom.sha.slice(0, 7)} · {branchFrom.subject}

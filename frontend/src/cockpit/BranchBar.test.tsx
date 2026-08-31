@@ -174,10 +174,36 @@ describe("BranchBar", () => {
       data: undefined,
       isError: true,
     } as never);
-    mockMutations();
-    setup(<BranchBar id="w1" {...NOOP} />);
+    const { create, switchTo: doSwitch } = mockMutations();
+    const onBranchFromHandled = vi.fn();
+    const onSwitchHandled = vi.fn();
+    // Both pending requests are supplied, because both arrive as PROPS from
+    // VersionGraph and neither goes through the disabled button.
+    setup(
+      <BranchBar
+        id="w1"
+        branchFrom={{ sha: "a".repeat(40), subject: "a commit" }}
+        onBranchFromHandled={onBranchFromHandled}
+        switchTo="main"
+        onSwitchHandled={onSwitchHandled}
+      />,
+    );
     // A workspace still in setup answers 409. That is ordinary, not an error to
     // shout about -- but the bar must not vanish and leave a headless pane.
     expect(screen.getByRole("button", { name: /^Branch:/ })).toBeDisabled();
+
+    // "Inert" has to mean the whole component. Asserting only that the button
+    // is disabled was a gate that could not fail: until 2026-08-31 either
+    // pending request opened a fully enabled dialog whose action fired a
+    // mutation at the same server that had just refused the branch list.
+    expect(screen.queryByRole("dialog", { name: "New branch" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "Switch branch" })).toBeNull();
+    expect(create).not.toHaveBeenCalled();
+    expect(doSwitch).not.toHaveBeenCalled();
+
+    // And both requests are cleared, so neither springs open by itself the
+    // moment the list recovers.
+    expect(onBranchFromHandled).toHaveBeenCalled();
+    expect(onSwitchHandled).toHaveBeenCalled();
   });
 });
