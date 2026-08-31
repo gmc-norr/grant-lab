@@ -17,8 +17,12 @@ The cockpit's Versions view renders two unrelated components stacked:
   one pane that missed the app-wide Mantine sweep, so it has no `PaneHeader`, no
   dropdown affordance, and no visual relationship to what sits below it.
 - `frontend/src/cockpit/VersionGraph.tsx` — properly styled, but draws a single
-  hard-coded lane. Its own CSS says so: *"One lane — measured across all 14
-  workspace repos, every one has a single branch"*.
+  hard-coded lane. `VersionGraph.module.css:1-3` justifies that with *"One lane
+  — measured across all 14 workspace repos, every one has a single branch"*.
+  **That comment is now stale on both counts** and is deleted by this work: the
+  survey in §3.1 finds eight repos with a `.git`, and one of them has two
+  branches. It is quoted here only to show why the single lane exists, not as a
+  current fact.
 
 Two further defects in the picker:
 
@@ -144,7 +148,30 @@ parser, not a conditional one. Consequences, each of which the plan must carry:
 - `--parents` is always passed (§3.2; harmless without a pathspec)
 - `max_fields = 4 * (limit + 1)`
 - the malformed-output guard changes from `% 3` to `% 4`, message text included
-- records are 4-tuples; `parents` is `tuple(p.split())`, empty string → `()`
+- records are 4-tuples
+
+**The parents field must be parsed defensively, not with a bare `.split()`.**
+`_read_capped_fields` caps *every* field at `_MAX_FIELD_BYTES`
+(`gitio.py:655` — `_MAX_SUBJECT_CHARS * 4` = 2000 bytes). At 41 bytes per
+sha-1-plus-space that is **48 parents**; a longer list is cut, and the cut can
+land mid-sha. A partial sha would become a lane that waits for a commit that
+does not exist — a line running off the bottom of the graph for no reason.
+
+No code path in this application creates a merge at all (there is no merge UI,
+and §4 keeps it that way), so this is a defence for imported or damaged repos —
+which `list_commits`'s own docstring names as the population it exists to
+inspect. The parse:
+
+```python
+raw = parents_field.split()
+parents = tuple(p for p in raw if len(p) == len(sha) and _HEX_RE.fullmatch(p))
+if len(parents) != len(raw):
+    logger.warning("dropped %d malformed parent(s) for %s in %s", ...)
+```
+
+Same-length-as-`sha` rather than a fixed 40, so a sha-256 repository is handled
+without a code change — the same reasoning `ports/shas.py` uses for its 7–64
+range. An empty field yields `()`.
 
 The only other caller, `web/api/admin_retention.py`, ignores the new field. Its
 behaviour must not otherwise change.
@@ -259,8 +286,19 @@ both `GET /branches` and `POST /branches/switch`, so both gain the field:
 class BranchListOut(BaseModel):
     branches: list[str]
     current: str
-    tips: dict[str, str] = {}   # branch name -> full sha
+    tips: dict[str, str]   # branch name -> full sha. NO default: see below.
 ```
+
+**`tips` takes no default.** With `= {}` the field is satisfiable by silence:
+`POST /branches/switch` builds its own response and would return an empty map
+that nobody notices, because the switch test only reads `["current"]`. A
+required field makes the omission a construction error at the one place that
+can still be fixed.
+
+Both responses must come from **one** listing operation.
+`list_workspace_branches` gains `tips` in its return value, and both routes
+return whatever it produced — a second, hand-built response body for the switch
+route is exactly how the two would drift apart.
 
 `BranchRepoNotReady` still answers 409 before any of this is computed.
 
@@ -317,10 +355,12 @@ For each commit `c`:
    Leftmost claim wins, which keeps a long-lived lane in its column.
 2. Set `lanes[j] = null` for every `j` in `claimed` — every one of those lines
    ends at this dot.
-3. For each parent `p` at index `k`:
-   - if some lane already waits for `p`, reuse it (two children of one parent);
-   - else take `own` when `k === 0`, otherwise `firstFreeSlot(lanes)`;
-   - record the chosen lane and set `lanes[lane] = p`.
+3. For each parent `p` at index `k`: take `own` when `k === 0`, otherwise
+   `firstFreeSlot(lanes)`; set `lanes[lane] = p`; record the lane.
+   **Do NOT check whether some lane already waits for `p`.** Several lanes may
+   hold the same sha at once; that is how two branches stay in separate columns
+   until they meet. See the note below — this is the one step where the obvious
+   optimisation is wrong.
 4. Pop trailing `null`s so the graph narrows again.
 5. Emit links:
    - **pass-through** `{top: j, bottom: j}` for every `j` that was occupied
@@ -330,21 +370,57 @@ For each commit `c`:
    `color = (bottom ?? top) % PALETTE.length`.
 6. `columns = max(lanesAbove.length, lanesBelow.length, own + 1)`.
 
+### 6.2.1 Why step 3 must not deduplicate — measured
+
+An earlier revision of this spec said *"if some lane already waits for `p`,
+reuse it."* It is wrong, and it is wrong in a way that still produces a picture
+where every line joins up. Prototyped both ways over the eight cases in §8 and
+5000 randomly generated DAGs. For `A→C`, `B→C`, `C→∅`:
+
+```
+  with dedup            without dedup (correct)
+    *   A                 *      A
+    *   B                 |  *   B
+    *   C                 *  /   C
+```
+
+With the dedup, `B`'s edge is absorbed into `A`'s lane inside **B's own row**,
+so the graph claims `B` merged into `A`. Without it, `B` keeps its column until
+`C`'s dot, which is where the two histories actually meet.
+
+**The checker that caught it is the deliverable, not the fix.** A continuity
+check — "every line entering a row was left by the row above" — passes the
+buggy version, because the lines do join up. The property that fails is
+**fidelity**: for every parent edge in the input, some lane must carry it
+continuously from the child's row to the parent's row and be consumed at the
+parent's dot. `versionLanes.test.ts` must assert fidelity, not continuity.
+Measured after the fix: 5000 random DAGs, 0 continuity failures, 0 fidelity
+failures, and `claimed.length` reaches **9** — so multi-lane convergence is
+routine, and step 1's "leftmost wins" is load-bearing rather than decorative.
+
 Consequences that are correct and must be pinned by tests, not "fixed":
 
 - A **truncated** history leaves lanes waiting for parents that never arrive.
   Those lines run off the bottom of the last row. That is honest — the pane
   already says "Older versions exist than are shown here."
-- A **fork** (two commits sharing one rewritten parent, §3.4) draws two incoming
-  links into the parent's row.
 - A lane freed in step 2 and reused in step 3 produces both an incoming and an
-  outgoing link on the same column. The renderer draws both through the dot;
-  that is a branch ending and another starting, which is what happened.
+  outgoing link on the same column. That is the ordinary case of a commit
+  continuing in its own lane, not an exotic one.
+- Two adjacent rows may both put a dot in column 1 with no line between them,
+  when the first row's lane closed and the column was recycled. Correct, and
+  what VS Code does.
 
 ### 6.3 Rendering
 
 `frontend/src/cockpit/VersionLane.tsx` — one `<svg>` per row, `aria-hidden`,
-width `columns * LANE_W`, height = the row height.
+height = the row height.
+
+**Width is list-wide, not per-row.** `VersionGraph` computes
+`maxColumns = Math.max(...rows.map(r => r.columns))` **once** and passes it to
+every `VersionLane`. Sizing each strip by its own `columns` would move the pills
+and the subject horizontally from row to row as the graph narrows — the
+`LaneRow.columns` field exists to feed that maximum, not to size anything on its
+own.
 
 - `LANE_W = 14`, row height `22px` (VS Code's SCM row height). The row height is
   **fixed** so consecutive strips join into continuous lines; the current CSS
@@ -475,14 +551,24 @@ state of a workspace still in setup.
 - `all_branches=True` returns a commit that is on a non-checked-out branch and
   that `all_branches=False` omits. This is the test that makes the flag
   observable — a test that only checks the default proves nothing.
-- **The `--parents` gate:** a repo where a commit between two matching commits
-  touches a different file. Assert the older matching commit's parent is the
-  *previous matching commit*. Removing `--parents` must redden this test. (§3.2
-  is the measurement; the test is the pin.)
+- **The `--parents` gate:** a repo whose commits, oldest first, are
+  `c1` (touches the artifact), `c2` (touches a different file), `c3` (touches
+  the artifact). Assert **`c3`'s parent is `c1`** — the newer matching commit is
+  the one whose parent git rewrites; `c1` does not point forward at `c3`.
+  Removing `--parents` makes `c3`'s parent come back as `c2`, which is not in
+  the returned list, and must redden this test. (§3.2 is the measurement; this
+  is the pin.)
 - **The detached-HEAD gate:** commit on a detached HEAD, assert it appears.
   Removing `HEAD` from the argv must redden it (§3.3).
 - `branch_tips` maps name → full sha for two branches; a name colliding with a
   tag still yields the plain branch name.
+- **The switch response carries real tips.** `POST /branches/switch` returns the
+  same exact `tips` map as `GET /branches` for the same repo. Without this the
+  switch route can return `{}` forever and every test still passes.
+- A parents field containing a token that is not a full-length hex sha yields a
+  `CommitInfo` without it, and logs. Build the case by feeding
+  `_read_capped_fields`' output shape directly rather than trying to make git
+  emit 49 parents.
 - `POST /branches` with `from_sha` creates the branch at that commit — assert
   via `branch_tips`, not via the response body.
 - `from_sha` that is not hex → 404 `BranchStartUnknown`; hex but absent → 404.
@@ -504,9 +590,27 @@ line.
 
 **Frontend**
 
-- `versionLanes.test.ts` covers, each as its own case: a straight line; a fork;
-  a two-parent merge; two children of one parent; a truncated tail whose parent
-  is absent; lane reuse after a branch ends; an empty list.
+- `versionLanes.test.ts` has **two layers**, and the second is the one that
+  matters:
+
+  1. **Eight worked cases**, each asserting the exact `LaneRow[]`: a straight
+     line; a fork (`A→C`, `B→C`, `C→∅`); a two-parent merge; three concurrent
+     branches; a merge whose second parent is an ancestor of its first; an
+     octopus with three parents; a truncated tail whose parent is absent; an
+     empty list.
+  2. **A fidelity property test.** Generate DAGs with a seeded PRNG (no
+     `Math.random` — the failure must be reproducible), 14 commits, ~20% of them
+     with two parents, several thousand seeds. Assert for every one:
+     - **continuity** — every line entering a row at column `j` was left by the
+       row above at column `j`, and vice versa;
+     - **fidelity** — for every parent edge whose parent is in the set, some
+       lane carries it from the child's row to the parent's row without
+       interruption and is consumed at the parent's dot; and every commit's dot
+       claims exactly as many lanes as it has children in the set.
+
+     Fidelity is the gate. **Continuity alone passes the deduplicating version
+     of step 3 that §6.2.1 rejects** — that is measured, not supposed. A test
+     suite with only the continuity check is a hollow gate for this module.
 - `VersionGraph.test.tsx`: the current branch's pill is marked current; clicking
   a pill opens the switch confirm and only then mutates; the row `⋯` menu is in
   the DOM before hover; *Branch from here…* posts the row's sha.
@@ -535,3 +639,13 @@ Anthropic API call ran.
   acceptable if the logic lived in the component.
 - **Row height becomes load-bearing.** A subject that wraps breaks the lane
   joins. `white-space: nowrap` + ellipsis (already present) must stay.
+- **Graph width is unbounded in principle.** The prototype's random DAGs reached
+  13 columns from 14 commits, because random graphs have many independent tips.
+  Real width is bounded by the number of simultaneously-open branch edges, which
+  for `refs/heads` on these repos is the branch count (1 or 2 today, §3.1) plus
+  merge fan-out — and this application creates no merges. No cap is specified:
+  clamping columns would break fidelity, and the pane already scrolls. If a
+  repository ever does produce a wide graph, the lane strip is the thing that
+  grows and the subject is the thing that ellipsises, which is the right
+  trade — but revisit this before adding any import path that could bring in
+  foreign history.
