@@ -209,12 +209,25 @@ def test_a_malformed_parent_token_is_dropped_not_half_parsed(tmp_path, caplog):
     that will never arrive. Exercised through the parse helper rather than by
     building a 49-parent octopus, which git makes needlessly painful.
     """
+    import logging
+
     from call_manager.proposal_assist.citations.gitio import _parse_parents
 
     good = "a" * 40
-    assert _parse_parents(f"{good} {'b' * 17}", sha_len=40) == (good,)
     assert _parse_parents("", sha_len=40) == ()
     assert _parse_parents(f"{good} {'Z' * 40}", sha_len=40) == (good,)
+
+    # And it must SAY SO. Without this assertion, deleting the logger.warning
+    # leaves the test green -- the silent-drop is the failure mode that makes a
+    # damaged repo look merely uninteresting.
+    with caplog.at_level(logging.WARNING):
+        assert _parse_parents(f"{good} {'b' * 17}", sha_len=40) == (good,)
+    # NOT `... in r.message or r.msg` -- `r.msg` is a non-empty string, so the
+    # `or` short-circuits and the assertion passes on an empty log.
+    assert any(
+        r.levelname == "WARNING" and "dropped_malformed_parents" in r.getMessage()
+        for r in caplog.records
+    ), "a dropped parent must be logged"
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
@@ -632,12 +645,29 @@ def commit_exists(repo_dir: Path, sha: str) -> bool:
     tree or a blob sha, and `git branch <name> <tree>` then fails inside
     create_branch with a git message no status code maps onto.
 
+    Only exit **1** means "no such commit", exactly as `branch_exists` and
+    `has_commits` above. Measured 2026-08-31 with `rev-parse --verify --quiet`:
+
+        an existing commit        -> 0
+        a TREE sha, via ^{commit} -> 1
+        a sha of nothing          -> 1
+        not a repository          -> 128
+
+    Collapsing 128 to False would report a broken or missing repository as
+    "that commit does not exist", and the route would answer 404 -- telling the
+    user their commit is gone when the repository is the thing that is broken.
+
     The caller MUST have validated *sha* with ports.shas.is_sha first. git parses
     `--output=...` as an option before it reaches `--`, so an unvalidated value
     reaching argv is an option-injection vector.
     """
     proc = _git(repo_dir, "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}")
-    return proc.returncode == 0
+    if proc.returncode in (0, 1):
+        return proc.returncode == 0
+    raise GitCommitError(
+        f"cannot resolve {sha!r} in {repo_dir} (git exit {proc.returncode}): "
+        f"{proc.stderr.strip()}"
+    )
 ```
 
 - [ ] **Step 4: Run the tests**
@@ -801,21 +831,40 @@ In `tests/proposal_assist/test_api_branches.py`:
 
 ```python
 def test_create_from_sha_at_the_api(client_authed_owner, current_user, pg_session_factory, _app):
-    from call_manager.proposal_assist.citations.gitio import branch_tips, list_commits
+    """The route must FORWARD from_sha, so the branch has to land somewhere HEAD
+    is not.
+
+    `_seed` builds a repo with ONE commit. Branching from that commit's sha is
+    the same as branching from HEAD, so a route that drops `from_sha` entirely
+    and lets the service default to HEAD would pass. A second commit is what
+    makes the assertion mean anything.
+    """
+    import subprocess
+
+    from call_manager.proposal_assist.citations.gitio import branch_tips, current_head
     from call_manager.proposal_assist.paths import workspace_repo_dir
 
     with pg_session_factory() as s:
         wid = _seed(s, _app, current_user)
         s.commit()
     repo = workspace_repo_dir(_app.state.settings.workspaces_dir, wid)
-    commits, _ = list_commits(repo, limit=10)
-    target = commits[0].sha
+    older = current_head(repo)
+
+    (repo / "proposal.md").write_text("# Aims\n\nmore\n", encoding="utf-8")
+    for argv in (["add", "proposal.md"], ["commit", "-q", "-m", "newer"]):
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t", *argv], cwd=repo, check=True
+        )
+    newer = current_head(repo)
+    assert older != newer
 
     r = client_authed_owner.post(
-        f"/api/workspaces/{wid}/branches", json={"name": "v2", "from_sha": target}
+        f"/api/workspaces/{wid}/branches", json={"name": "v2", "from_sha": older}
     )
     assert r.status_code == 201, r.text
-    assert branch_tips(repo)["v2"] == target
+    tips = branch_tips(repo)
+    assert tips["v2"] == older, "the route dropped from_sha and branched at HEAD"
+    assert tips["main"] == newer
 
 
 def test_create_from_an_unknown_sha_is_404(client_authed_owner, current_user, pg_session_factory, _app):
@@ -1484,7 +1533,12 @@ function fidelityProblems(commits: GraphCommit[], rows: LaneRow[]): string[] {
 
   for (let m = 0; m < rows.length; m++) {
     const want = childEdges.get(rows[m].sha) ?? 0;
-    const got = tops(rows[m]).filter((t) => !bottoms(rows[m]).includes(t)).length;
+    // A link that arrives from above and does NOT continue below is one that
+    // ENDS at this dot. Do not compute this as "columns in tops but not in
+    // bottoms": an ordinary commit continuing in its own column contributes an
+    // incoming link AND an outgoing link on the SAME column, so that
+    // formulation counts zero and reports a false problem on a straight line.
+    const got = rows[m].links.filter((l) => l.top != null && l.bottom === null).length;
     if (want !== got) out.push(`${rows[m].sha}: ${want} child edge(s) but ${got} lane(s) end at its dot`);
   }
 
@@ -1716,7 +1770,7 @@ export function assignLanes(commits: GraphCommit[]): LaneRow[] {
 cd frontend && pnpm vitest run src/cockpit/versionLanes.test.ts
 ```
 
-Expected: PASS, 10 tests.
+Expected: PASS, 9 tests (8 worked cases + the generated-graph property).
 
 - [ ] **Step 5: Prove the fidelity check is not decorative**
 
@@ -2169,10 +2223,9 @@ export function BranchBar({
           <Menu.Target>
             <Button
               variant="subtle"
-              size="compact-xs"
+              size="xs"
               disabled={isError}
               aria-label={`Branch: ${current}`}
-              styles={{ label: { fontWeight: 500 } }}
             >
               ⑂ {current} ▾
             </Button>
@@ -2275,8 +2328,11 @@ export function BranchBar({
 }
 ```
 
-Mantine `Modal` renders `role="dialog"` with the `title` as its accessible name,
-which is what the tests query.
+**Verified 2026-08-31, not assumed:** on Mantine 9.4.0 a `<Modal opened title="Switch branch">`
+renders `<section role="dialog" …>` and IS found by
+`getByRole("dialog", { name: "Switch branch" })`. No existing test in this
+codebase queries a Modal that way, so it was probed with a throwaway test before
+being written into this plan.
 
 - [ ] **Step 4: Run the tests**
 
@@ -2373,7 +2429,10 @@ const ROW = (
 });
 ```
 
-Add a branches mock beside the existing `mockList`:
+Add `fireEvent` to the file's existing `@testing-library/react` import (it
+currently pulls `act, render, screen`) — the context-menu case needs it, and
+`userEvent` has no right-click helper. Then add a branches mock beside the
+existing `mockList`:
 
 ```tsx
 import * as branchesMod from "../api/branches";
@@ -2395,7 +2454,10 @@ it("puts a pill on the commit each branch tip points at", () => {
   wrap();
   expect(screen.getByRole("button", { name: "Switch to main" })).toBeInTheDocument();
   // The branch you are already on is labelled, not offered as a switch.
-  expect(screen.getByText("test")).toBeInTheDocument();
+  // Queried by accessible name, NOT getByText("test"): the pill renders
+  // `⑂ {name}`, so its text content is "⑂ test" and an exact text query misses.
+  const own = screen.getByRole("button", { name: "test" });
+  expect(own).toBeDisabled();
   expect(screen.queryByRole("button", { name: "Switch to test" })).toBeNull();
 });
 
@@ -2433,6 +2495,52 @@ it("offers Branch from here without needing a hover first", async () => {
   expect(screen.getByRole("menuitem", { name: "Branch from here…" })).toBeInTheDocument();
 });
 
+it("clicking a branch pill confirms first, and only then switches", async () => {
+  // Spec section 8. Without this, the entire pill-to-dialog wiring is untested
+  // and a pill that silently did nothing would ship green.
+  const switchTo = vi.fn();
+  vi.spyOn(branchesMod, "useSwitchBranch").mockReturnValue({
+    mutate: switchTo,
+    isPending: false,
+  } as never);
+  mockList({ versions: [ROW("aaaaaaa1", "newer"), ROW("bbbbbbb2", "older")] });
+  mockBranches("test", { test: "aaaaaaa1", main: "bbbbbbb2" });
+  wrap();
+
+  await userEvent.click(screen.getByRole("button", { name: "Switch to main" }));
+  expect(switchTo).not.toHaveBeenCalled();
+  expect(screen.getByRole("dialog", { name: "Switch branch" })).toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole("button", { name: "Switch branch" }));
+  expect(switchTo).toHaveBeenCalledWith("main");
+});
+
+it("a pill cancelled once still opens the dialog when clicked again", async () => {
+  // The concrete failure the `onSwitchHandled` clearing exists to prevent:
+  // `switchTo` is a string, so a stale value makes the second click a no-op.
+  vi.spyOn(branchesMod, "useSwitchBranch").mockReturnValue({
+    mutate: vi.fn(),
+    isPending: false,
+  } as never);
+  mockList({ versions: [ROW("aaaaaaa1", "newer"), ROW("bbbbbbb2", "older")] });
+  mockBranches("test", { test: "aaaaaaa1", main: "bbbbbbb2" });
+  wrap();
+
+  await userEvent.click(screen.getByRole("button", { name: "Switch to main" }));
+  await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  await userEvent.click(screen.getByRole("button", { name: "Switch to main" }));
+
+  expect(screen.getByRole("dialog", { name: "Switch branch" })).toBeInTheDocument();
+});
+
+it("right-clicking a row opens the same actions menu", async () => {
+  mockList({ versions: [ROW("aaaaaaa1", "newer")] });
+  mockBranches("main", { main: "aaaaaaa1" });
+  wrap();
+  fireEvent.contextMenu(screen.getByText("newer"));
+  expect(await screen.findByRole("menuitem", { name: "Branch from here…" })).toBeInTheDocument();
+});
+
 it("Branch from here opens the new-branch dialog for THAT commit", async () => {
   mockList({ versions: [ROW("aaaaaaa1", "newer"), ROW("bbbbbbb2", "the older one")] });
   mockBranches("main", { main: "aaaaaaa1" });
@@ -2454,7 +2562,7 @@ result**, so `const { container } = wrap()` works without changing it.
 cd frontend && pnpm vitest run src/cockpit/VersionGraph.test.tsx
 ```
 
-Expected: the five new cases fail; the existing ones still pass.
+Expected: the eight new cases fail; the existing ones still pass.
 
 - [ ] **Step 3: Rewrite the CSS module**
 
@@ -2640,8 +2748,16 @@ After the Popover, still inside the `<li>`:
 
 ```tsx
       {/* Always in the DOM, not revealed on hover: a control that only exists
-          while the mouse is over it cannot be reached by keyboard. */}
-      <Menu position="bottom-end" withinPortal>
+          while the mouse is over it cannot be reached by keyboard.
+
+          CONTROLLED (`opened`/`onChange`) rather than uncontrolled, because the
+          row's own right-click must be able to open it too -- design section
+          6.4. Put `onContextMenu={(e) => { e.preventDefault(); setMenuOpen(true); }}`
+          on the enclosing <li>, and declare
+          `const [menuOpen, setMenuOpen] = useState(false);` at the top of
+          VersionGraphRow. Without preventDefault the browser's own menu opens
+          on top of it. */}
+      <Menu position="bottom-end" withinPortal opened={menuOpen} onChange={setMenuOpen}>
         <Menu.Target>
           <button type="button" className={styles.pill} aria-label={`Actions for ${sha7}`}>
             ⋯
@@ -2705,10 +2821,60 @@ immediately after `<PaneHeader …>`, and pass the new props through in the `.ma
           ))}
 ```
 
-A pill click sets `switchTo`; wire that to `BranchBar` by lifting the same
-confirm the bar already owns — pass `switchTo` and `onSwitchHandled` through as
-two more props on `BranchBar`, mirroring `branchFrom`, so there is **one** switch
-confirm dialog in the pane rather than two implementations of the same warning.
+**The pill-click wiring, exactly.** There must be ONE switch confirm dialog in
+the pane, and `BranchBar` already owns it. `VersionGraph` holds the request;
+`BranchBar` keeps its own `confirm` state and copies the request into it.
+
+In `VersionGraph`:
+
+```tsx
+  const [switchTo, setSwitchTo] = useState<string | null>(null);
+```
+
+```tsx
+      <BranchBar
+        id={id}
+        branchFrom={branchFrom}
+        onBranchFromHandled={() => setBranchFrom(null)}
+        switchTo={switchTo}
+        onSwitchHandled={() => setSwitchTo(null)}
+      />
+```
+
+and the pill's `onClick` is `() => onSwitch(name)` with `onSwitch={setSwitchTo}`,
+already in the `.map` above.
+
+In `BranchBar`, two more props and one effect:
+
+```tsx
+  switchTo: string | null;
+  onSwitchHandled: () => void;
+```
+
+```tsx
+  // A pill click asks for a switch; the dialog and its state stay here.
+  useEffect(() => {
+    if (switchTo) setConfirm({ kind: "switch", name: switchTo });
+  }, [switchTo]);
+
+  function closeSwitch() {
+    setConfirm(null);
+    onSwitchHandled();
+  }
+```
+
+`closeSwitch` replaces `setConfirm(null)` on **all three** exits of the switch
+Modal — its `onClose`, its Cancel button, and after `switchBranch.mutate(...)`.
+
+**Clearing is not tidiness.** `switchTo` is a plain string, so if it is left set,
+clicking the same pill a second time assigns the same value, React sees no
+change, the effect does not re-run, and the dialog never opens. `branchFrom`
+escapes this only because it is a fresh object literal on every click — an
+accident, not a design, and not one to copy.
+
+The Modal's `opened` stays `confirm?.kind === "switch"` and its body renders
+`confirm?.name`. Do not switch it to `opened={switchTo !== null}`: the two states
+update in different renders, so the dialog would flash open with a null name.
 
 Import `useMemo` and `useState` from React (`useState` is already imported).
 
