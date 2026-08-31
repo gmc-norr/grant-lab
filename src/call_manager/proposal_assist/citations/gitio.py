@@ -463,6 +463,67 @@ def list_branches(repo_dir: Path) -> list[str]:
     return [ln.strip().removeprefix(_HEADS_PREFIX) for ln in proc.stdout.splitlines() if ln.strip()]
 
 
+def branch_tips(repo_dir: Path) -> dict[str, str]:
+    """Every local branch mapped to the FULL sha its tip points at.
+
+    `%(refname)` and strip, never `%(refname:short)` -- the short form shortens
+    to the shortest UNAMBIGUOUS name, so a tag sharing a branch's name makes it
+    report `heads/feature`. Same trap `list_branches` documents at length.
+
+    Raises GitCommitError on a broken ref rather than returning a short map.
+    Measured 2026-08-31: `for-each-ref` behaves exactly like `git branch` here --
+    a corrupt ref file makes it warn "ignoring broken ref" on stderr, exit ZERO,
+    and omit that branch. A caller that believed the short map would mark a live
+    branch as missing.
+    """
+    proc = _git(repo_dir, "for-each-ref", "--format=%(objectname)%00%(refname)", "refs/heads")
+    if proc.returncode != 0:
+        raise GitCommitError(f"cannot list branch tips in {repo_dir}: {proc.stderr.strip()}")
+    if "broken ref" in proc.stderr:
+        raise GitCommitError(f"broken ref in {repo_dir}: {proc.stderr.strip()}")
+    tips: dict[str, str] = {}
+    for line in proc.stdout.splitlines():
+        if not line.strip():
+            continue
+        sha, _, refname = line.partition("\0")
+        name = refname.strip().removeprefix(_HEADS_PREFIX)
+        if name:
+            tips[name] = sha.strip()
+    return tips
+
+
+def commit_exists(repo_dir: Path, sha: str) -> bool:
+    """True if *sha* resolves to a COMMIT in this repository.
+
+    `^{commit}` is not decoration: a bare `rev-parse --verify` happily accepts a
+    tree or a blob sha, and `git branch <name> <tree>` then fails inside
+    create_branch with a git message no status code maps onto.
+
+    Only exit **1** means "no such commit", exactly as `branch_exists` and
+    `has_commits` below. Measured 2026-08-31 with `rev-parse --verify --quiet`:
+
+        an existing commit        -> 0
+        a TREE sha, via ^{commit} -> 1
+        a sha of nothing          -> 1
+        not a repository          -> 128
+
+    Collapsing 128 to False would report a broken or missing repository as
+    "that commit does not exist", and the route would answer 404 -- telling the
+    user their commit is gone when the repository is the thing that is broken.
+
+    The caller MUST have validated *sha* with ports.shas.is_sha first. git parses
+    `--output=...` as an option before it reaches `--`, so an unvalidated value
+    reaching argv is an option-injection vector.
+    """
+    proc = _git(repo_dir, "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}")
+    if proc.returncode in (0, 1):
+        return proc.returncode == 0
+    raise GitCommitError(
+        f"cannot resolve {sha!r} in {repo_dir} (git exit {proc.returncode}): "
+        f"{proc.stderr.strip()}"
+    )
+
+
 def branch_exists(repo_dir: Path, name: str) -> bool:
     """Whether a LOCAL branch of this name exists. Uses the full refs/heads/ path
     so a tag or a commit-ish that happens to share the name cannot answer yes.

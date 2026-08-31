@@ -9,7 +9,9 @@ import pytest
 from call_manager.proposal_assist.citations.gitio import (
     GitCommitError,
     branch_exists,
+    branch_tips,
     checkout_branch,
+    commit_exists,
     create_branch,
     current_branch,
     delete_branch,
@@ -365,3 +367,82 @@ def test_gitio_git_runs_hermetically(tmp_path):
     assert env["GIT_CONFIG_GLOBAL"] == "/dev/null"
     assert env["GIT_CONFIG_SYSTEM"] == "/dev/null"
     assert env["GIT_TERMINAL_PROMPT"] == "0"
+
+
+# --- branch_tips / commit_exists (version-graph lanes) -----------------------
+
+
+def _git(repo, *argv) -> None:
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", *argv], cwd=repo, check=True
+    )
+
+
+def _head(repo) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def test_branch_tips_maps_each_branch_to_its_full_sha(tmp_path):
+    repo = _repo(tmp_path)
+    main = _head(repo)
+    _git(repo, "checkout", "-q", "-b", "side")
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "on side")
+    side = _head(repo)
+    _git(repo, "checkout", "-q", "main")
+
+    assert branch_tips(repo) == {"main": main, "side": side}
+    assert main != side
+
+
+def test_branch_tips_is_not_confused_by_a_tag_of_the_same_name(tmp_path):
+    """`%(refname:short)` answers `heads/feature` here -- the trap list_branches
+    documents at length. `%(refname)` is unambiguous."""
+    repo = _repo(tmp_path)
+    _git(repo, "branch", "feature")
+    _git(repo, "tag", "feature")
+
+    assert set(branch_tips(repo)) == {"main", "feature"}
+
+
+def test_branch_tips_refuses_a_broken_ref_rather_than_omitting_it(tmp_path):
+    """Measured 2026-08-31: `git for-each-ref` behaves exactly like `git branch`
+    here -- it warns "ignoring broken ref" on stderr, exits ZERO, and omits the
+    branch. A short map that reports success is worse than a failure, because
+    the reconciler treats an unseen name as an orphan and deletes its row."""
+    repo = _repo(tmp_path)
+    _git(repo, "branch", "feature")
+    (repo / ".git" / "refs" / "heads" / "feature").write_text("garbage\n")
+
+    with pytest.raises(GitCommitError, match="broken ref"):
+        branch_tips(repo)
+
+
+def test_commit_exists(tmp_path):
+    repo = _repo(tmp_path)
+    assert commit_exists(repo, _head(repo)) is True
+    assert commit_exists(repo, "0" * 40) is False
+
+
+def test_commit_exists_is_false_for_a_tree_that_is_not_a_commit(tmp_path):
+    """`^{commit}` is load-bearing: a bare `rev-parse --verify` accepts a TREE
+    or a BLOB sha, and `git branch <name> <tree>` would then fail deep inside
+    create_branch with a message no status code maps onto."""
+    repo = _repo(tmp_path)
+    tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"],
+        cwd=repo, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    assert commit_exists(repo, tree) is False
+
+
+def test_commit_exists_raises_rather_than_answering_no_outside_a_repository(tmp_path):
+    """Exit 128 is "this is not a repository", not "that commit is missing".
+    Collapsing it to False makes the route answer 404 and tell the user their
+    commit is gone when the repository is the thing that is broken."""
+    not_a_repo = tmp_path / "plain"
+    not_a_repo.mkdir()
+    with pytest.raises(GitCommitError):
+        commit_exists(not_a_repo, "0" * 40)
