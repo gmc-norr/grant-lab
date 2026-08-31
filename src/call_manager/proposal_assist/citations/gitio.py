@@ -768,7 +768,11 @@ def _parse_parents(field: str, *, sha_len: int) -> tuple[str, ...]:
 
 
 def list_commits(
-    repo_dir: Path, *, limit: int, pathspec: str | None = None
+    repo_dir: Path,
+    *,
+    limit: int,
+    pathspec: str | None = None,
+    all_branches: bool = False,
 ) -> tuple[list[CommitInfo], bool]:
     """Return (commits newest-first, truncated).
 
@@ -781,6 +785,11 @@ def list_commits(
 
     Individual subjects are truncated to `_MAX_SUBJECT_CHARS` with a visible
     marker.
+
+    `all_branches` widens the query from HEAD's history to every local branch
+    plus HEAD (so a detached HEAD's own commits are still included), in
+    topological order. It does NOT widen which FILES are considered -- `pathspec`
+    still applies.
 
     `pathspec` scopes the history to commits touching that path. It is passed
     after a literal `--` so a filename can never be read as an option, and it is
@@ -807,6 +816,16 @@ def list_commits(
         "-z",
         "--format=%H%x00%P%x00%aI%x00%s",
     ]
+    if all_branches:
+        # `--branches` is refs/heads ONLY -- no tags, no remotes, which is what
+        # the version pane wants. The bare `HEAD` is NOT redundant: measured,
+        # `--branches` alone OMITS a commit made on a detached HEAD, so the pane
+        # would show a history missing its own tip.
+        #
+        # `--topo-order` guarantees children before parents, which the lane
+        # algorithm depends on. Applied only here, so the default path stays
+        # byte-identical for admin_retention.
+        argv += ["--branches", "HEAD", "--topo-order"]
     if pathspec is not None:
         # After `--`, so a filename can never be parsed as an option. git also
         # enables history simplification here, which is what makes the count

@@ -600,3 +600,48 @@ def test_a_malformed_parent_token_is_dropped_not_half_parsed(tmp_path, caplog):
         r.levelname == "WARNING" and "dropped_malformed_parents" in r.getMessage()
         for r in caplog.records
     ), "a dropped parent must be logged"
+
+
+# --- all_branches ------------------------------------------------------------
+
+
+def test_all_branches_returns_commits_off_the_checked_out_branch(tmp_path):
+    repo = _empty_repo(tmp_path)
+    _commit(repo, "proposal.md", "v1", "base")
+    _git(repo, "checkout", "-q", "-b", "side")
+    _commit(repo, "proposal.md", "v2", "only on side")
+    _git(repo, "checkout", "-q", "main")
+
+    default, _ = list_commits(repo, limit=10)
+    assert "only on side" not in [c.subject for c in default]
+
+    every, _ = list_commits(repo, limit=10, all_branches=True)
+    assert "only on side" in [c.subject for c in every]
+
+
+def test_all_branches_still_includes_a_detached_head(tmp_path):
+    """THE `HEAD` gate. Spec section 3.3.
+
+    `git log --branches` lists refs/heads only, so a commit made on a detached
+    HEAD belongs to no branch and vanishes -- the pane would show a history
+    missing its own tip. `--branches HEAD` is the union. Measured.
+
+    Delete the bare "HEAD" argument from the all_branches argv and this must go
+    red.
+    """
+    repo = _empty_repo(tmp_path)
+    _commit(repo, "proposal.md", "v1", "base")
+    _git(repo, "checkout", "-q", "--detach", "HEAD")
+    _commit(repo, "proposal.md", "v2", "made while detached")
+
+    every, _ = list_commits(repo, limit=10, all_branches=True)
+    assert "made while detached" in [c.subject for c in every]
+
+
+def test_all_branches_orders_children_before_parents(tmp_path):
+    repo = _empty_repo(tmp_path)
+    root = _commit(repo, "proposal.md", "v1", "root")
+    _commit(repo, "proposal.md", "v2", "child")
+    every, _ = list_commits(repo, limit=10, all_branches=True)
+    assert [c.subject for c in every] == ["child", "root"]
+    assert every[0].parents == (root,)
