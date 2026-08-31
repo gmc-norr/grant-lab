@@ -279,8 +279,7 @@ def test_a_TAG_sharing_a_branchs_name_does_not_hide_the_branch(tmp_path):
         assert branch_exists(d, name), f"list_branches returned {name!r}, which it denies exists"
 
 
-@pytest.mark.parametrize("name", ["@{-1}", "@{-2}"])
-def test_branch_SHORTHAND_is_rejected_even_though_git_exits_zero(name):
+def test_branch_SHORTHAND_is_rejected_even_though_git_exits_zero(tmp_path, monkeypatch):
     """`--branch` EXPANDS shorthand and prints the result, so the exit code alone
     says yes to a name that means a different branch.
 
@@ -292,8 +291,24 @@ def test_branch_SHORTHAND_is_rejected_even_though_git_exits_zero(name):
     A user could POST this, pass validation, and have git create or collide with
     a branch the `branches` row does not name — exactly the row/ref divergence
     this entity exists to prevent.
+
+    `is_valid_branch_name` runs git in the PROCESS cwd, so the shorthand only
+    expands when that cwd is a repo with a previous branch. Chdir'ing into one is
+    what makes this test able to fail — run from anywhere else, `@{-1}` is
+    rejected by the exit code alone and the assertion passes without the fix.
     """
-    assert not is_valid_branch_name(name)
+    d = _repo(tmp_path)
+    subprocess.run(["git", "checkout", "-q", "-b", "other"], cwd=d, check=True)
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=d, check=True)
+    monkeypatch.chdir(d)
+
+    # The premise: git really does expand it here.
+    expanded = subprocess.run(
+        ["git", "check-ref-format", "--branch", "@{-1}"], cwd=d, capture_output=True, text=True
+    )
+    assert expanded.returncode == 0 and expanded.stdout.strip() == "other", expanded
+
+    assert not is_valid_branch_name("@{-1}")
 
 
 def test_ordinary_names_still_pass_and_git_specific_ones_still_fail():

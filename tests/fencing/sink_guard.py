@@ -416,7 +416,7 @@ PROVEN_NON_COMMIT: tuple[Fingerprint, ...] = (
     (  # is_valid_branch_name: git check-ref-format --branch {name} — validates a name, no write
         "call_manager/proposal_assist/citations/gitio.py",
         "is_valid_branch_name",
-        9,
+        24,
         "List(elts=[Constant(value='git'), Constant(value='check-ref-format'), Constant(value='--branch'), Name(id='name', ctx=Load())], ctx=Load())",  # noqa: E501
     ),
 )
