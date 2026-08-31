@@ -763,8 +763,17 @@ def test_reconciling_after_a_switch_does_not_move_the_root(pg_session_factory, t
     # The delete the docstring promises, which was missing: asserting only that
     # the pointer did not move passes against a fix that moved it somewhere else
     # harmless. What actually matters is that the root stays undeletable.
+    #
+    # `current_branch` must be moved off `main` first, or the ROOT guard is never
+    # what refuses — the current-branch guard two lines below it catches the
+    # delete and the assertion passes with the root guard removed entirely.
+    # Measured: mutating the root guard to `pass` left this test green.
     with pg_session_factory() as s:
-        with pytest.raises(BranchInUse):
+        s.get(Workspace, wid).current_branch = "new_ideas"
+        s.commit()
+
+    with pg_session_factory() as s:
+        with pytest.raises(BranchInUse, match="root branch"):
             delete_workspace_branch(
                 s,
                 stamp=stamp_for(s, wid),
