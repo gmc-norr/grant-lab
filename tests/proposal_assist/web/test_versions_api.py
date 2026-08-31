@@ -326,3 +326,69 @@ def test_non_member_gets_403_not_a_document(
     assert (
         client_authed_owner.get(f"/api/workspaces/{ws_id}/history/{sha}").status_code == 403
     )
+
+
+# --- parents / all branches (version-graph lanes) ---------------------------
+
+
+def _git(repo: Path, *argv: str) -> None:
+    subprocess.run(["git", *argv], cwd=repo, check=True)
+
+
+def test_history_rows_carry_parents(
+    client_authed_owner, _app, current_user, pg_session_factory, tmp_path
+):
+    ws_id = _make_ws(_app, current_user, pg_session_factory, tmp_path)
+    repo = tmp_path / ws_id / "repo"
+    root = _commit(repo, "proposal.md", "# draft 0\n", "draft 0")
+    _commit(repo, "proposal.md", "# draft 1\n", "draft 1")
+
+    rows = client_authed_owner.get(
+        f"/api/workspaces/{ws_id}/history?artifact=draft"
+    ).json()["versions"]
+
+    assert [r["subject"] for r in rows] == ["draft 1", "draft 0"]
+    assert rows[0]["parents"] == [root]
+    assert rows[1]["parents"] == []
+
+
+def test_history_includes_commits_on_other_branches(
+    client_authed_owner, _app, current_user, pg_session_factory, tmp_path
+):
+    """The pane draws lanes, and a lane needs the commits that are ON the other
+    branch. Drop `all_branches=True` from the route and this goes red."""
+    ws_id = _make_ws(_app, current_user, pg_session_factory, tmp_path)
+    repo = tmp_path / ws_id / "repo"
+    _commit(repo, "proposal.md", "# draft 0\n", "draft 0")
+    _git(repo, "checkout", "-q", "-b", "side")
+    _commit(repo, "proposal.md", "# on side\n", "only on side")
+    _git(repo, "checkout", "-q", "-")
+
+    subjects = [
+        r["subject"]
+        for r in client_authed_owner.get(
+            f"/api/workspaces/{ws_id}/history?artifact=draft"
+        ).json()["versions"]
+    ]
+    assert "only on side" in subjects
+
+
+def test_history_still_scopes_to_the_artifact_across_branches(
+    client_authed_owner, _app, current_user, pg_session_factory, tmp_path
+):
+    """`all_branches` widens WHICH BRANCHES, not which files. Without this, a
+    change that dropped the pathspec entirely would still pass the test above."""
+    ws_id = _make_ws(_app, current_user, pg_session_factory, tmp_path)
+    repo = tmp_path / ws_id / "repo"
+    _commit(repo, "proposal.md", "# draft 0\n", "draft 0")
+    _git(repo, "checkout", "-q", "-b", "side")
+    _commit(repo, "proposal-spec.md", "# spec\n", "spec only, on side")
+    _git(repo, "checkout", "-q", "-")
+
+    subjects = [
+        r["subject"]
+        for r in client_authed_owner.get(
+            f"/api/workspaces/{ws_id}/history?artifact=draft"
+        ).json()["versions"]
+    ]
+    assert "spec only, on side" not in subjects

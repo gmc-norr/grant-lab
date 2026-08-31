@@ -4,6 +4,10 @@ Read-only and member-gated, modelled on `review.py`'s `review_file`: a sync
 `def` so FastAPI runs the git subprocess in its threadpool, and NO commit mutex
 (this is a read; taking one would queue reads behind writers for no benefit).
 
+The list spans EVERY local branch, not just HEAD's history: the cockpit draws it
+as a commit graph with a lane per branch, and a lane needs the commits that are
+on the other branch. It stays scoped to one artifact file.
+
 The list is sourced from GIT, not from `artifact_versions`. Four routine commit
 paths write no row, and `reconcile` fires only on agent launch, so a collab-only
 workspace's DB list can lag git indefinitely. `artifact_versions` is a
@@ -51,6 +55,11 @@ class VersionRow(BaseModel):
     commit_sha: str
     committed_at: str
     subject: str
+    #: Parent shas, first-parent first, as returned by THIS query — under a
+    #: pathspec git rewrites them to the nearest matching ancestors, so they are
+    #: always shas the client also received, except at a truncated tail where
+    #: the graph correctly runs off the bottom.
+    parents: list[str] = []
     #: Overlay fields. Absent means "no artifact_versions row for this commit",
     #: which is ORDINARY — render "not recorded", never an error.
     created_by: str | None = None
@@ -125,7 +134,15 @@ def list_versions(
     filename = filename_for(Artifact(artifact))
 
     try:
-        commits, truncated = list_commits(repo_dir, limit=HISTORY_LIMIT, pathspec=filename)
+        commits, truncated = list_commits(
+            repo_dir,
+            limit=HISTORY_LIMIT,
+            pathspec=filename,
+            # The pane draws a GRAPH, so it needs every branch — not just the
+            # one HEAD is on. Which branch you are on is shown by which tip
+            # carries the current-branch pill, not by which commits are present.
+            all_branches=True,
+        )
     except (OSError, GitCommitError):
         # Legitimate, and the commonest new-workspace state: the repo may not
         # exist yet, or exist with no commits. `git log` on an unborn HEAD exits
@@ -164,6 +181,7 @@ def list_versions(
                 "commit_sha": c.sha,
                 "committed_at": c.authored_at.isoformat(),
                 "subject": c.subject,
+                "parents": list(c.parents),
                 "created_by": av.created_by if av else None,
                 "triggering_turn_id": (
                     str(av.triggering_turn_id) if av and av.triggering_turn_id else None
