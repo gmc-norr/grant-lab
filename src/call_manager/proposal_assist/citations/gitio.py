@@ -589,14 +589,18 @@ def has_commits(repo_dir: Path) -> bool:
     )
 
 
-def create_branch(repo_dir: Path, name: str) -> None:
-    """Create *name* at the current HEAD. Does NOT move HEAD.
+def create_branch(repo_dir: Path, name: str, start: str = "HEAD") -> None:
+    """Create *name* at *start* (default: the current HEAD). Does NOT move HEAD.
 
     Fails on a repo with no commits — `git branch <name> HEAD` exits 128 with
     "not a valid object name: 'HEAD'" — which is the correct refusal for a
     workspace still in setup.
+
+    *start* reaches git as an argument. A caller passing anything but the default
+    MUST have validated it with ports.shas.is_sha and confirmed it with
+    commit_exists first.
     """
-    proc = _git(repo_dir, "branch", name, "HEAD")
+    proc = _git(repo_dir, "branch", name, start)
     if proc.returncode != 0:
         raise GitCommitError(f"cannot create branch {name!r}: {proc.stderr.strip()}")
 

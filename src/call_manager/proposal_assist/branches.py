@@ -21,6 +21,7 @@ from call_manager.db.models import Branch, TurnJob, Workspace
 from call_manager.proposal_assist.citations.gitio import (
     branch_exists,
     checkout_branch,
+    commit_exists,
     current_branch,
     has_commits,
     is_valid_branch_name,
@@ -37,6 +38,7 @@ from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
 from call_manager.proposal_assist.collab.room import BranchSwitchTeardown
 from call_manager.proposal_assist.fencing import acquire_commit_mutex_at_generation
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from call_manager.proposal_assist.ports.shas import is_sha
 from call_manager.proposal_assist.ports.stamp import FenceStamp
 
 logger = logging.getLogger(__name__)
@@ -85,6 +87,14 @@ class BranchRepoNotReady(BranchError):
 
     Distinct from a repo git cannot READ, which stays a 500: that is a server
     fault and saying "still setting up" would hide corruption.
+    """
+
+
+class BranchStartUnknown(BranchError):
+    """The requested start commit is not a commit in this repository.
+
+    404, not 422: the request was well-formed, the thing it names does not
+    exist -- the same distinction BranchNotFound draws for a branch name.
     """
 
 
@@ -297,16 +307,22 @@ def create_workspace_branch(
     workspace_id: uuid.UUID,
     name: str,
     workspaces_dir: Path | str,
+    from_sha: str | None = None,
 ) -> None:
-    """Create *name* at the current HEAD. Spec §3.1. Does NOT commit.
+    """Create *name* at *from_sha*, or at the current HEAD when it is None.
+    Spec §3.1. Does NOT commit.
 
     Changes nothing anybody can see: HEAD does not move, the log is untouched,
     nobody is evicted. It is therefore the only branch operation that is safe
     while a drafting turn is running.
 
-    It takes the mutex anyway, for one reason: HEAD must not move under it. A
-    checkpoint or section save committing between the read and the `git branch`
-    would silently found the branch on a commit the user did not choose.
+    It takes the mutex for two reasons. The row work — clearing a root pointer,
+    deleting a stale row — must be serialised against the other branch
+    operations. And when `from_sha` is None the start point is HEAD, which must
+    not move underneath the read: a checkpoint or section save committing
+    between the read and the `git branch` would silently found the branch on a
+    commit the user did not choose. With an explicit `from_sha` that second race
+    does not apply — the caller pinned the commit.
     """
     if not is_valid_branch_name(name):
         raise BranchNameInvalid(name)
@@ -361,7 +377,18 @@ def create_workspace_branch(
     session.execute(delete(Branch).where(Branch.workspace_id == workspace_id, Branch.name == name))
     session.flush()
 
-    git_create_branch(repo, name)
+    start = "HEAD"
+    if from_sha is not None:
+        # is_sha FIRST: git parses `--output=...` as an option before it reaches
+        # any `--` separator, so an unvalidated value in argv is an
+        # option-injection vector (ports/shas.py). commit_exists SECOND: a
+        # well-formed sha naming a TREE, or naming nothing at all, would
+        # otherwise fail inside git with a message no status code maps onto.
+        if not is_sha(from_sha) or not commit_exists(repo, from_sha):
+            raise BranchStartUnknown(f"{from_sha!r} is not a commit in this workspace")
+        start = from_sha
+
+    git_create_branch(repo, name, start)
     # The row is founded in the same call as the ref (spec §8 S1 step 4). A
     # one-time backfill goes stale the moment the next branch is created, and a
     # ref with no row is invisible to the branch-aware resolver S2 installs.

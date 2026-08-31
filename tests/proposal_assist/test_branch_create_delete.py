@@ -10,12 +10,14 @@ from call_manager.proposal_assist.branches import (
     BranchLast,
     BranchNameInvalid,
     BranchNotFound,
+    BranchStartUnknown,
     create_workspace_branch,
     delete_workspace_branch,
     list_workspace_branches,
 )
 from call_manager.proposal_assist.citations.gitio import (
     branch_exists,
+    branch_tips,
     current_branch,
     current_head,
 )
@@ -168,3 +170,93 @@ def test_list_returns_the_names_and_the_current_one(pg_session_factory, tmp_path
         names, current = list_workspace_branches(s, workspace_id=wid, workspaces_dir=tmp_path)
     assert sorted(names) == ["b", "main"]
     assert current == "main"
+
+
+# --- from_sha: branch from a chosen commit ----------------------------------
+
+
+def _extra_commit(repo, body: str, message: str) -> str:
+    (repo / "proposal.md").write_text(body, encoding="utf-8")
+    for argv in (["add", "proposal.md"], ["commit", "-q", "-m", message]):
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t", *argv], cwd=repo, check=True
+        )
+    return current_head(repo)
+
+
+def test_create_from_an_explicit_sha_puts_the_branch_there(pg_session_factory, tmp_path):
+    """The whole point of the feature: branch from the version you are looking
+    at, not from wherever HEAD happens to be."""
+    wid, repo = _ws(pg_session_factory, tmp_path)
+    older = current_head(repo)
+    newer = _extra_commit(repo, "# Aims\n\nmore\n", "newer")
+    assert older != newer
+
+    with pg_session_factory() as s:
+        create_workspace_branch(
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            name="from-older",
+            workspaces_dir=tmp_path,
+            from_sha=older,
+        )
+        s.commit()
+
+    assert branch_tips(repo)["from-older"] == older
+    # And HEAD did not move, so this is not just "it branched at HEAD".
+    assert branch_tips(repo)["main"] == newer
+
+
+def test_create_with_no_sha_still_branches_at_head(pg_session_factory, tmp_path):
+    """The control. Without it, an implementation that always used from_sha and
+    crashed on None would pass every other test here, because they all pass a
+    sha."""
+    wid, repo = _ws(pg_session_factory, tmp_path)
+    _extra_commit(repo, "# Aims\n\nmore\n", "newer")
+    head = current_head(repo)
+
+    with pg_session_factory() as s:
+        create_workspace_branch(
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            name="at-head",
+            workspaces_dir=tmp_path,
+        )
+        s.commit()
+
+    assert branch_tips(repo)["at-head"] == head
+
+
+def test_create_from_a_sha_that_is_not_in_this_repo_is_refused(pg_session_factory, tmp_path):
+    wid, repo = _ws(pg_session_factory, tmp_path)
+    with pg_session_factory() as s:
+        with pytest.raises(BranchStartUnknown):
+            create_workspace_branch(
+                s,
+                stamp=stamp_for(s, wid),
+                workspace_id=wid,
+                name="ghost",
+                workspaces_dir=tmp_path,
+                from_sha="0" * 40,
+            )
+    assert "ghost" not in branch_tips(repo)
+
+
+def test_create_from_a_non_sha_is_refused_before_git_sees_it(pg_session_factory, tmp_path):
+    """`--output=/tmp/pwned` is not a sha. git parses options before it reaches
+    any `--` separator, so an unvalidated value in argv is an option-injection
+    vector -- the reason ports/shas.py exists."""
+    wid, repo = _ws(pg_session_factory, tmp_path)
+    with pg_session_factory() as s:
+        with pytest.raises(BranchStartUnknown):
+            create_workspace_branch(
+                s,
+                stamp=stamp_for(s, wid),
+                workspace_id=wid,
+                name="evil",
+                workspaces_dir=tmp_path,
+                from_sha="--output=/tmp/pwned",
+            )
+    assert "evil" not in branch_tips(repo)

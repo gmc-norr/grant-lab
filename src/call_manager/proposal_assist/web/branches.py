@@ -26,6 +26,7 @@ from call_manager.proposal_assist.branches import (
     BranchNameInvalid,
     BranchNotFound,
     BranchRepoNotReady,
+    BranchStartUnknown,
     create_workspace_branch,
     delete_workspace_branch,
     list_workspace_branches,
@@ -55,6 +56,10 @@ class BranchListOut(BaseModel):
 
 class BranchIn(BaseModel):
     name: str = Field(min_length=1, max_length=200)
+    #: Optional start point for a create. None means HEAD, which is the
+    #: behaviour every existing caller relies on. Ignored by the switch route,
+    #: which shares this model.
+    from_sha: str | None = None
 
 
 def _teardown_via_loop(request: Request):
@@ -111,6 +116,9 @@ _STATUS = {
     BranchNotFound: 404,
     BranchExists: 409,
     BranchInUse: 409,
+    #: The request named a start commit that is not in this repository. 404, not
+    #: 422: the body was well-formed, the thing it names does not exist.
+    BranchStartUnknown: 404,
     BranchLast: 409,
     BranchBusy: 409,
     #: A workspace whose repo Phase 0 has not created yet. 409, not 404: the
@@ -169,6 +177,7 @@ def create_branch_route(
             workspace_id=workspace_id,
             name=body.name,
             workspaces_dir=request.app.state.settings.workspaces_dir,
+            from_sha=body.from_sha,
         )
         session.commit()
     except Exception as exc:

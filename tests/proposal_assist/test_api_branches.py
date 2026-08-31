@@ -228,3 +228,51 @@ def test_listing_branches_for_a_workspace_still_in_setup_is_409_not_500(
         s.commit()
     r = client_authed_owner.get(f"/api/workspaces/{wid}/branches")
     assert r.status_code == 409, r.text
+
+
+def test_create_from_sha_at_the_api(client_authed_owner, current_user, pg_session_factory, _app):
+    """The route must FORWARD from_sha, so the branch has to land somewhere HEAD
+    is not.
+
+    `_seed` builds a repo with ONE commit. Branching from that commit's sha is
+    the same as branching from HEAD, so a route that drops `from_sha` entirely
+    and lets the service default to HEAD would pass. A second commit is what
+    makes the assertion mean anything.
+    """
+    import subprocess
+
+    from call_manager.proposal_assist.citations.gitio import branch_tips, current_head
+
+    with pg_session_factory() as s:
+        wid = _seed(s, _app, current_user)
+        s.commit()
+    repo = workspace_repo_dir(_app.state.settings.workspaces_dir, wid)
+    older = current_head(repo)
+
+    (repo / "proposal.md").write_text("# Aims\n\nmore\n", encoding="utf-8")
+    for argv in (["add", "proposal.md"], ["commit", "-q", "-m", "newer"]):
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t", *argv], cwd=repo, check=True
+        )
+    newer = current_head(repo)
+    assert older != newer
+
+    r = client_authed_owner.post(
+        f"/api/workspaces/{wid}/branches", json={"name": "v2", "from_sha": older}
+    )
+    assert r.status_code == 201, r.text
+    tips = branch_tips(repo)
+    assert tips["v2"] == older, "the route dropped from_sha and branched at HEAD"
+    assert tips["main"] == newer
+
+
+def test_create_from_an_unknown_sha_is_404(
+    client_authed_owner, current_user, pg_session_factory, _app
+):
+    with pg_session_factory() as s:
+        wid = _seed(s, _app, current_user)
+        s.commit()
+    r = client_authed_owner.post(
+        f"/api/workspaces/{wid}/branches", json={"name": "v2", "from_sha": "0" * 40}
+    )
+    assert r.status_code == 404, r.text
