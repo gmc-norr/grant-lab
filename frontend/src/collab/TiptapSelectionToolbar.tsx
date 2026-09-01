@@ -1,6 +1,7 @@
 // frontend/src/collab/TiptapSelectionToolbar.tsx
 import { Button, Group, Menu, Paper, Text } from "@mantine/core";
 import type { Editor } from "@tiptap/core";
+import { BubbleMenu, type BubbleMenuProps } from "@tiptap/react/menus";
 import { useEffect, useState } from "react";
 
 import { ApiError } from "../api/client";
@@ -9,6 +10,7 @@ import { CitationComposer, type ClaimContext } from "../cockpit/CitationComposer
 import { toCodePointOffset, type SelectionContext } from "../cockpit/selection";
 import type { CollabProvider } from "./collabProvider";
 import { deriveClaimAnchor } from "./selectionAnchor";
+import styles from "./TiptapSelectionToolbar.module.css";
 import { useSettled } from "./useSettled";
 
 // The full turn payload frozen for an ack-retry — never rebuilt from the live claim.
@@ -22,6 +24,20 @@ const EDIT_PRESETS = [
   { label: "Shorten", text: "Shorten the selected text without losing meaning." },
   { label: "Rephrase", text: "Rephrase the selected text more clearly." },
 ];
+
+const BUBBLE_OPTIONS = {
+  strategy: "fixed",
+  placement: "top",
+  offset: 8,
+  flip: true,
+  shift: { padding: 8 },
+  inline: true,
+} as const;
+
+const shouldShowSelectionToolbar: NonNullable<BubbleMenuProps["shouldShow"]> = ({ state }) =>
+  deriveClaimAnchor(state) !== null;
+
+const appendToBody = () => document.body;
 
 export type TiptapSelectionToolbarProps = {
   editor: Editor;
@@ -51,25 +67,27 @@ export function TiptapSelectionToolbar(props: TiptapSelectionToolbarProps) {
     return () => { editor.off("selectionUpdate", update); };
   }, [editor]);
 
-  if (!claim) return null;
-
   // Locate the section in the sections array
-  const section = sections[claim.sectionIndex];
+  const section = claim ? sections[claim.sectionIndex] : undefined;
   const sectionSha = section?.sha ?? "";
 
   // Compute section-local code-point offsets against the canonical section text.
   // Reject a NON-UNIQUE anchor: indexOf returns the FIRST occurrence, which would
   // silently target the wrong duplicate (the backend text[from:to]==anchor check
   // still passes). Refuse rather than mis-target (review C#1).
-  const utf16Idx = section ? section.text.indexOf(claim.anchor) : -1;
-  const anchorUnique = utf16Idx >= 0 && utf16Idx === section!.text.lastIndexOf(claim.anchor);
-  const anchorable = claim.singleSection && !!sectionSha && anchorUnique;
+  const utf16Idx = claim && section ? section.text.indexOf(claim.anchor) : -1;
+  const anchorUnique = !!claim
+    && utf16Idx >= 0
+    && utf16Idx === section!.text.lastIndexOf(claim.anchor);
+  const anchorable = !!claim && claim.singleSection && !!sectionSha && anchorUnique;
   const fromOffset = anchorable ? toCodePointOffset(section!.text, utf16Idx) : 0;
-  const toOffset = anchorable ? toCodePointOffset(section!.text, utf16Idx + claim.anchor.length) : 0;
+  const toOffset = anchorable
+    ? toCodePointOffset(section!.text, utf16Idx + claim!.anchor.length)
+    : 0;
 
   // Gate checks — when not anchorable we disable all actions to avoid sending bad offsets
   const askReady = anchorable;
-  const writeReady = settled && anchorable && !claim.headingOnly;
+  const writeReady = settled && anchorable && !claim?.headingOnly;
 
   // submitTurn owns mutate + error handling. On a disclosure 403 it freezes the WHOLE
   // payload (content + the selection_context captured at submit time) into needsAck, so
@@ -92,14 +110,14 @@ export function TiptapSelectionToolbar(props: TiptapSelectionToolbarProps) {
   }
 
   function runTurn(requestType: "ask" | "modify", instruction: string) {
-    if (!instruction.trim() || submit.isPending) return;
+    if (!claim || !instruction.trim() || submit.isPending) return;
     const selection_context: SelectionContext = {
       request_type: requestType,
       target_artifact: "draft",
-      section_index: claim!.sectionIndex,
+      section_index: claim.sectionIndex,
       base_commit_sha: head,
       base_section_sha: sectionSha,
-      anchor: claim!.anchor,
+      anchor: claim.anchor,
       from_offset: fromOffset,
       to_offset: toOffset,
     };
@@ -116,17 +134,35 @@ export function TiptapSelectionToolbar(props: TiptapSelectionToolbarProps) {
     });
   }
 
-  const claimCtx: ClaimContext = {
-    section_index: claim.sectionIndex,
-    base_commit_sha: head,
-    base_section_sha: sectionSha,
-    anchor: claim.anchor,
-  };
+  const claimCtx: ClaimContext | null = claim
+    ? {
+        section_index: claim.sectionIndex,
+        base_commit_sha: head,
+        base_section_sha: sectionSha,
+        anchor: claim.anchor,
+      }
+    : null;
 
   return (
     <>
-      <Paper withBorder p="xs" role="toolbar" aria-label="Selection actions">
-        <Group gap="xs" wrap="nowrap">
+      <BubbleMenu
+        editor={editor}
+        pluginKey="draft-selection-actions"
+        updateDelay={0}
+        appendTo={appendToBody}
+        shouldShow={shouldShowSelectionToolbar}
+        options={BUBBLE_OPTIONS}
+        className={styles.anchor}
+      >
+        {claim && (
+          <Paper
+            className={styles.toolbar}
+            withBorder
+            p="xs"
+            role="toolbar"
+            aria-label="Selection actions"
+          >
+            <Group gap="xs" wrap="nowrap">
           {/* Ask — always visible, enabled when anchorable */}
           <Menu position="bottom-start" disabled={!askReady}>
             <Menu.Target>
@@ -173,27 +209,29 @@ export function TiptapSelectionToolbar(props: TiptapSelectionToolbarProps) {
               Cite
             </Button>
           )}
-        </Group>
+            </Group>
 
-        {needsAck && (
-          <Group gap="xs" mt={4} wrap="nowrap" role="alert">
-            <Text size="xs">
-              Answers use a hosted model. Don&apos;t paste patient-identifiable data.
-            </Text>
-            <Button size="xs" onClick={ackAndRetry} disabled={ack.isPending}>
-              I understand — ask
-            </Button>
-          </Group>
+            {needsAck && (
+              <Group gap="xs" mt={4} wrap="nowrap" role="alert">
+                <Text size="xs">
+                  Answers use a hosted model. Don&apos;t paste patient-identifiable data.
+                </Text>
+                <Button size="xs" onClick={ackAndRetry} disabled={ack.isPending}>
+                  I understand — ask
+                </Button>
+              </Group>
+            )}
+            {turnError && (
+              <Text size="xs" c="red" mt={4} role="alert">
+                {turnError}
+              </Text>
+            )}
+          </Paper>
         )}
-        {turnError && (
-          <Text size="xs" c="red" mt={4} role="alert">
-            {turnError}
-          </Text>
-        )}
-      </Paper>
+      </BubbleMenu>
 
       {/* Citation composer rendered when Cite is clicked */}
-      {citeOpen && (
+      {citeOpen && claimCtx && (
         <CitationComposer
           workspaceId={workspaceId}
           claim={claimCtx}

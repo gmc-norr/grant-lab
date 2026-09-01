@@ -297,6 +297,25 @@ test.describe("collab two-browser (distinct users)", () => {
     });
     const citeBtn = A.page.getByRole("button", { name: "Cite" });
     await expect(citeBtn).toBeEnabled({ timeout: 8_000 });
+    const selectionToolbar = A.page.getByRole("toolbar", { name: "Selection actions" });
+    await expect(selectionToolbar).toBeVisible();
+    const toolbarBox = await selectionToolbar.boundingBox();
+    const selectionBox = await A.page.evaluate(() => {
+      const selection = window.getSelection();
+      if (!selection || selection.rangeCount === 0) throw new Error("selection disappeared");
+      const rect = selection.getRangeAt(0).getBoundingClientRect();
+      return { top: rect.top, bottom: rect.bottom };
+    });
+    const viewport = A.page.viewportSize();
+    expect(toolbarBox).not.toBeNull();
+    expect(viewport).not.toBeNull();
+    expect(toolbarBox!.y).toBeGreaterThanOrEqual(0);
+    expect(toolbarBox!.y + toolbarBox!.height).toBeLessThanOrEqual(viewport!.height);
+    const verticalGap = Math.min(
+      Math.abs(toolbarBox!.y + toolbarBox!.height - selectionBox.top),
+      Math.abs(toolbarBox!.y - selectionBox.bottom),
+    );
+    expect(verticalGap).toBeLessThanOrEqual(24);
     await citeBtn.click();
 
     const composer = A.page.getByRole("complementary", { name: /add a citation/i });

@@ -3,6 +3,7 @@ import { MantineProvider } from "@mantine/core";
 import type { Editor } from "@tiptap/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "../api/client";
@@ -27,6 +28,18 @@ vi.mock("./selectionAnchor", () => ({
 // Controllable submit/ack mocks — hoisted so the vi.mock factory can reference them.
 // Tests drive the mutate options (onSuccess/onError) to exercise disclosure + errors.
 const { submitMock, ackMock } = vi.hoisted(() => ({ submitMock: vi.fn(), ackMock: vi.fn() }));
+const { bubbleMenuMock } = vi.hoisted(() => ({ bubbleMenuMock: vi.fn() }));
+type BubbleMenuTestProps = {
+  children?: ReactNode;
+  options?: Record<string, unknown>;
+  shouldShow?: (props: { state: unknown }) => boolean;
+};
+vi.mock("@tiptap/react/menus", () => ({
+  BubbleMenu: (props: BubbleMenuTestProps) => {
+    bubbleMenuMock(props);
+    return <div data-testid="bubble-menu">{props.children}</div>;
+  },
+}));
 vi.mock("../api/turns", () => ({
   useSubmitTurn: () => ({ mutate: submitMock, isPending: false }),
   useAckDisclosure: () => ({ mutate: ackMock, isPending: false }),
@@ -108,6 +121,23 @@ function renderToolbar(overrides: {
 // ---------------------------------------------------------------------------
 
 describe("TiptapSelectionToolbar gates", () => {
+  it("renders the actions inside a viewport-aware Tiptap bubble menu", () => {
+    renderToolbar();
+
+    const bubble = screen.getByTestId("bubble-menu");
+    expect(bubble).toContainElement(screen.getByRole("toolbar", { name: "Selection actions" }));
+    const props = bubbleMenuMock.mock.lastCall![0] as BubbleMenuTestProps;
+    expect(props.options).toMatchObject({
+      strategy: "fixed",
+      placement: "top",
+      offset: 8,
+      flip: true,
+      shift: { padding: 8 },
+      inline: true,
+    });
+    expect(props.shouldShow?.({ state: {} })).toBe(true);
+  });
+
   it("owner-writer settled: Ask + Edit + Cite all visible and enabled", () => {
     renderToolbar({ canEdit: true, canWrite: true, settled: true });
     expect(screen.getByRole("button", { name: /ask/i })).toBeInTheDocument();
