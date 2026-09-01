@@ -3,7 +3,8 @@ import time
 
 import httpx
 import pytest
-from authlib.jose import JsonWebKey, jwt
+from joserfc import jwt
+from joserfc.jwk import RSAKey
 
 from call_manager.auth.oidc import (
     IdTokenInvalid,
@@ -15,7 +16,15 @@ from call_manager.auth.oidc import (
 ISS = "https://accounts.google.com"
 AUD = "test-client-id"
 DISCOVERY = "https://accounts.google.com/.well-known/openid-configuration"
-_KEY = JsonWebKey.generate_key("RSA", 2048, is_private=True)
+
+
+def _rsa_key() -> RSAKey:
+    key = RSAKey.generate_key(2048)
+    key.ensure_kid()
+    return key
+
+
+_KEY = _rsa_key()
 
 
 def _meta():
@@ -28,11 +37,11 @@ def _meta():
 
 
 def _id_token(claims: dict, key=_KEY) -> str:
-    return jwt.encode({"alg": "RS256", "kid": key.kid}, claims, key).decode("ascii")
+    return jwt.encode({"alg": "RS256", "kid": key.kid}, claims, key, algorithms=["RS256"])
 
 
-def _make_client(token_response=None, keys=None, alg="RS256"):
-    jwks = {"keys": [(keys or _KEY).as_dict(is_private=False)]}
+def _make_client(token_response=None, keys=None):
+    jwks = {"keys": [(keys or _KEY).as_dict(private=False)]}
 
     def handler(request):
         url = str(request.url)
@@ -129,8 +138,8 @@ def test_array_aud_without_our_id_rejected():
 
 def test_unknown_kid_triggers_jwks_refetch():
     # First the client caches a JWKS with KEY1; then Google "rotates" to KEY2.
-    key1 = JsonWebKey.generate_key("RSA", 2048, is_private=True)
-    key2 = JsonWebKey.generate_key("RSA", 2048, is_private=True)
+    key1 = _rsa_key()
+    key2 = _rsa_key()
     state = {"key": key1}
 
     def handler(request):
@@ -138,7 +147,7 @@ def test_unknown_kid_triggers_jwks_refetch():
         if url == DISCOVERY:
             return httpx.Response(200, json=_meta())
         if url == _meta()["jwks_uri"]:
-            return httpx.Response(200, json={"keys": [state["key"].as_dict(is_private=False)]})
+            return httpx.Response(200, json={"keys": [state["key"].as_dict(private=False)]})
         return httpx.Response(404)
 
     http = httpx.Client(transport=httpx.MockTransport(handler))

@@ -95,6 +95,20 @@ function LocationEcho() {
   return <output data-testid="loc">{loc.pathname + loc.search}</output>;
 }
 
+function fireBrowserClick(link: HTMLElement, modifier: Record<string, boolean>) {
+  let componentPrevented: boolean | undefined;
+  document.addEventListener(
+    "click",
+    (event) => {
+      componentPrevented = event.defaultPrevented;
+      event.preventDefault();
+    },
+    { once: true },
+  );
+  fireEvent.click(link, modifier);
+  expect(componentPrevented).toBe(false);
+}
+
 it("clicking the ACTIVE workspace icon toggles the pane and keeps the query", () => {
   // VS Code behaviour, previously carried by the Current-workspace item. Without
   // it, the only way to collapse the pane from the rail disappears with that
@@ -247,7 +261,7 @@ describe("modified clicks belong to the browser", () => {
       <ActivityBar onToggleSidebar={onToggleSidebar} onRevealSidebar={onRevealSidebar} />,
       { route: "/cockpit/abc?view=versions" },
     );
-    fireEvent.click(screen.getByRole("link", { name: "Versions" }), mod);
+    fireBrowserClick(screen.getByRole("link", { name: "Versions" }), mod);
     expect(onToggleSidebar).not.toHaveBeenCalled();
     expect(onRevealSidebar).not.toHaveBeenCalled();
   });
@@ -259,7 +273,7 @@ describe("modified clicks belong to the browser", () => {
       <ActivityBar onToggleSidebar={onToggleSidebar} onRevealSidebar={onRevealSidebar} />,
       { route: "/cockpit/abc?view=versions" },
     );
-    fireEvent.click(screen.getByRole("link", { name: "Criteria" }), mod);
+    fireBrowserClick(screen.getByRole("link", { name: "Criteria" }), mod);
     expect(onRevealSidebar).not.toHaveBeenCalled();
     expect(onToggleSidebar).not.toHaveBeenCalled();
   });
@@ -275,7 +289,7 @@ describe("modified clicks belong to the browser", () => {
     renderWithProviders(<ActivityBar onToggleSidebar={onToggleSidebar} />, { route: "/" });
     const calls = screen.getByRole("link", { name: "Calls" });
     expect(calls).toHaveAttribute("aria-current", "page");
-    fireEvent.click(calls, { ctrlKey: true });
+    fireBrowserClick(calls, { ctrlKey: true });
     expect(onToggleSidebar).not.toHaveBeenCalled();
   });
 
@@ -330,7 +344,7 @@ describe("the app band reveals like the workspace band", () => {
     renderWithProviders(<ActivityBar onRevealSidebar={onRevealSidebar} />, {
       route: "/cockpit/abc",
     });
-    fireEvent.click(screen.getByRole("link", { name: "Workspaces" }), { ctrlKey: true });
+    fireBrowserClick(screen.getByRole("link", { name: "Workspaces" }), { ctrlKey: true });
     expect(onRevealSidebar).not.toHaveBeenCalled();
   });
 });

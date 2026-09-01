@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from fastapi.testclient import TestClient
 
 from call_manager.db.models import Call, CallRanking, Profile, ProfileKind, Source, User
@@ -17,7 +18,9 @@ def _app(monkeypatch, pg_url):
     return create_app()
 
 
-def _login(app, pg_session_factory):
+@pytest.fixture
+def authed_client(monkeypatch, pg_url, pg_session_factory):
+    app = _app(monkeypatch, pg_url)
     with pg_session_factory() as s:
         u = User(status="active", email="u@ki.se")
         s.add(u)
@@ -33,14 +36,13 @@ def _login(app, pg_session_factory):
         s.add(p)
         s.commit()
         uid, pid = u.id, p.id
-    c = TestClient(app)
-    c.cookies.set("session", app.state.session_signer.make(user_id=uid))
-    return c, uid, pid
+    with TestClient(app) as client:
+        client.cookies.set("session", app.state.session_signer.make(user_id=uid))
+        yield client, uid, pid
 
 
-def test_api_calls_is_read_only(monkeypatch, pg_url, pg_session_factory):
-    app = _app(monkeypatch, pg_url)
-    c, uid, pid = _login(app, pg_session_factory)
+def test_api_calls_is_read_only(authed_client, pg_session_factory):
+    c, uid, pid = authed_client
     r = c.get(f"/api/calls?profile={pid}")
     assert r.status_code == 200
     body = r.json()
@@ -49,9 +51,8 @@ def test_api_calls_is_read_only(monkeypatch, pg_url, pg_session_factory):
         assert s.get(User, uid).default_profile_id is None
 
 
-def test_api_calls_returns_seeded_call_shape(monkeypatch, pg_url, pg_session_factory):
-    app = _app(monkeypatch, pg_url)
-    c, uid, pid = _login(app, pg_session_factory)
+def test_api_calls_returns_seeded_call_shape(authed_client, pg_session_factory):
+    c, uid, pid = authed_client
     now = datetime.now(UTC)
     with pg_session_factory() as s:
         src = Source(name="Seeded Source", slug="seeded-source-api-test")
@@ -104,9 +105,8 @@ def test_api_calls_returns_seeded_call_shape(monkeypatch, pg_url, pg_session_fac
     assert set(body["effective"]) == {"source", "sort", "profile_id", "show_closed"}
 
 
-def test_post_default_profile_persists(monkeypatch, pg_url, pg_session_factory):
-    app = _app(monkeypatch, pg_url)
-    c, uid, pid = _login(app, pg_session_factory)
+def test_post_default_profile_persists(authed_client, pg_session_factory):
+    c, uid, pid = authed_client
     r = c.post(
         "/api/me/default-profile",
         headers={"origin": "http://testserver"},
@@ -124,9 +124,8 @@ def test_post_default_profile_persists(monkeypatch, pg_url, pg_session_factory):
         assert s.get(User, uid).default_profile_id is None
 
 
-def test_set_default_profile_invalid_404(monkeypatch, pg_url, pg_session_factory):
-    app = _app(monkeypatch, pg_url)
-    c, uid, pid = _login(app, pg_session_factory)
+def test_set_default_profile_invalid_404(authed_client, pg_session_factory):
+    c, uid, pid = authed_client
     # Establish a valid stored default first.
     r = c.post(
         "/api/me/default-profile",

@@ -1,7 +1,5 @@
 """JSON /api citation-audit endpoints (Cockpit Slice F)."""
 
-from fastapi.testclient import TestClient
-
 from call_manager.db.models import User, Workspace, WorkspaceViewer
 from call_manager.main import create_app
 from call_manager.proposal_assist.citations.ledger import dump_ledger, empty_ledger
@@ -49,17 +47,19 @@ def _write(tmp_path, ws_id, *, proposal=None, citations=None):
         (repo / "citations.json").write_text(citations)
 
 
-def _client(app, user_id):
-    c = TestClient(app)
+def _client(app, user_id, test_client_factory):
+    c = test_client_factory(app)
     c.cookies.set("session", app.state.session_signer.make(user_id=user_id))
     return c
 
 
-def test_audit_orphan_marker(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_audit_orphan_marker(
+    monkeypatch, pg_url, pg_session_factory, tmp_path, test_client_factory
+):
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, ws_id = _seed(pg_session_factory)
     _write(tmp_path, ws_id, proposal=ORPHAN_DRAFT, citations=dump_ledger(empty_ledger()))
-    r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/citation-audit")
+    r = _client(app, owner_id, test_client_factory).get(f"/api/workspaces/{ws_id}/citation-audit")
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["draft_present"] is True
@@ -68,59 +68,78 @@ def test_audit_orphan_marker(monkeypatch, pg_url, pg_session_factory, tmp_path):
     assert body["error_count"] + body["warning_count"] == len(body["issues"])
 
 
-def test_audit_no_draft(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_audit_no_draft(monkeypatch, pg_url, pg_session_factory, tmp_path, test_client_factory):
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, ws_id = _seed(pg_session_factory)
-    r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/citation-audit")
+    r = _client(app, owner_id, test_client_factory).get(f"/api/workspaces/{ws_id}/citation-audit")
     assert r.status_code == 200
     body = r.json()
     assert body["draft_present"] is False
     assert body["issues"] == []
 
 
-def test_audit_corrupt_ledger_409(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_audit_corrupt_ledger_409(
+    monkeypatch, pg_url, pg_session_factory, tmp_path, test_client_factory
+):
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, ws_id = _seed(pg_session_factory)
     _write(tmp_path, ws_id, proposal="x\n", citations="{ not json")
-    r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/citation-audit")
+    r = _client(app, owner_id, test_client_factory).get(f"/api/workspaces/{ws_id}/citation-audit")
     assert r.status_code == 409
     assert r.json()["error"]["code"] == "citation_ledger_invalid"
 
 
-def test_deep_check_corrupt_ledger_409(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_deep_check_corrupt_ledger_409(
+    monkeypatch, pg_url, pg_session_factory, tmp_path, test_client_factory
+):
     # The deep handler has its OWN corrupt-ledger branch (citation_audit.py); the spec
     # pins 409 citation_ledger_invalid for GET AND deep-check, so guard it explicitly.
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, ws_id = _seed(pg_session_factory)
     _write(tmp_path, ws_id, proposal="x\n", citations="{ not json")
-    r = _client(app, owner_id).post(f"/api/workspaces/{ws_id}/citation-audit/deep")
+    r = _client(app, owner_id, test_client_factory).post(
+        f"/api/workspaces/{ws_id}/citation-audit/deep"
+    )
     assert r.status_code == 409
     assert r.json()["error"]["code"] == "citation_ledger_invalid"
 
 
-def test_audit_viewer_can_read(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_audit_viewer_can_read(
+    monkeypatch, pg_url, pg_session_factory, tmp_path, test_client_factory
+):
     app = _app(monkeypatch, pg_url, tmp_path)
     _, viewer_id, ws_id = _seed(pg_session_factory)
     _write(tmp_path, ws_id, proposal="x\n", citations=dump_ledger(empty_ledger()))
-    assert _client(app, viewer_id).get(f"/api/workspaces/{ws_id}/citation-audit").status_code == 200
+    assert (
+        _client(app, viewer_id, test_client_factory)
+        .get(f"/api/workspaces/{ws_id}/citation-audit")
+        .status_code
+        == 200
+    )
 
 
-def test_deep_check_viewer_forbidden(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_deep_check_viewer_forbidden(
+    monkeypatch, pg_url, pg_session_factory, tmp_path, test_client_factory
+):
     app = _app(monkeypatch, pg_url, tmp_path)
     _, viewer_id, ws_id = _seed(pg_session_factory)
     _write(tmp_path, ws_id, proposal="x\n", citations=dump_ledger(empty_ledger()))
-    r = _client(app, viewer_id).post(f"/api/workspaces/{ws_id}/citation-audit/deep")
+    r = _client(app, viewer_id, test_client_factory).post(
+        f"/api/workspaces/{ws_id}/citation-audit/deep"
+    )
     assert r.status_code == 403
 
 
 def test_deep_check_no_service_deterministic_only(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    monkeypatch, pg_url, pg_session_factory, tmp_path, test_client_factory
 ):
     app = _app(monkeypatch, pg_url, tmp_path)
     app.state.citation_service = None  # offline override → deterministic only
     owner_id, _, ws_id = _seed(pg_session_factory)
     _write(tmp_path, ws_id, proposal=ORPHAN_DRAFT, citations=dump_ledger(empty_ledger()))
-    r = _client(app, owner_id).post(f"/api/workspaces/{ws_id}/citation-audit/deep")
+    r = _client(app, owner_id, test_client_factory).post(
+        f"/api/workspaces/{ws_id}/citation-audit/deep"
+    )
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["semantic_available"] is False
@@ -129,7 +148,9 @@ def test_deep_check_no_service_deterministic_only(
     assert "orphan_marker" in {i["type"] for i in body["issues"]}
 
 
-def test_deep_check_semantic_flags(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_deep_check_semantic_flags(
+    monkeypatch, pg_url, pg_session_factory, tmp_path, test_client_factory
+):
     """A judgeable citation with a contradicts stub produces a semantic issue."""
     from call_manager.db.models import Reference, ReferenceChunk
     from call_manager.proposal_assist.citations import CitationLLMResult
@@ -229,7 +250,9 @@ def test_deep_check_semantic_flags(monkeypatch, pg_url, pg_session_factory, tmp_
 
     app.state.citation_service = _StubCitationService(_verdict_result("contradicts"))
 
-    r = _client(app, owner_id).post(f"/api/workspaces/{ws_id}/citation-audit/deep")
+    r = _client(app, owner_id, test_client_factory).post(
+        f"/api/workspaces/{ws_id}/citation-audit/deep"
+    )
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["semantic_available"] is True
@@ -237,7 +260,9 @@ def test_deep_check_semantic_flags(monkeypatch, pg_url, pg_session_factory, tmp_
     assert any(i["type"].startswith("semantic_") for i in body["issues"])
 
 
-def test_deep_check_cap_exceeded(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_deep_check_cap_exceeded(
+    monkeypatch, pg_url, pg_session_factory, tmp_path, test_client_factory
+):
     """Seeding citation_llm_usage rows past the workspace cap makes cap_exceeded=True."""
     from call_manager.proposal_assist.citations.usage import record_usage
 
@@ -259,7 +284,9 @@ def test_deep_check_cap_exceeded(monkeypatch, pg_url, pg_session_factory, tmp_pa
         )
         s.commit()
 
-    r = _client(app, owner_id).post(f"/api/workspaces/{ws_id}/citation-audit/deep")
+    r = _client(app, owner_id, test_client_factory).post(
+        f"/api/workspaces/{ws_id}/citation-audit/deep"
+    )
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["cap_exceeded"] is True

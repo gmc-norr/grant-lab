@@ -2,15 +2,17 @@
 import time
 from urllib.parse import parse_qs, urlparse
 
-from authlib.jose import JsonWebKey, jwt
 from fastapi.testclient import TestClient
+from joserfc import jwt
+from joserfc.jwk import RSAKey
+from joserfc.jwt import JWTClaimsRegistry
 
 from call_manager.db.models import User
 from call_manager.main import create_app
 
 ISS = "https://accounts.google.com"
 AUD = "test-client-id"
-_KEY = JsonWebKey.generate_key("RSA", 2048, is_private=True)
+_KEY = RSAKey.generate_key(2048, {"kid": "web-oauth-google"})
 
 
 class FakeOIDC:
@@ -31,20 +33,23 @@ class FakeOIDC:
             raise OIDCError("bad code")
         return {
             "id_token": jwt.encode(
-                {"alg": "RS256", "kid": _KEY.kid}, self._codes[code], _KEY
-            ).decode()
+                {"alg": "RS256", "kid": _KEY.kid},
+                self._codes[code],
+                _KEY,
+                algorithms=["RS256"],
+            )
         }
 
     def validate_id_token(self, id_token, *, expected_nonce):
         from call_manager.auth.oidc import IdTokenInvalid
 
-        claims = jwt.decode(id_token, {"keys": [_KEY.as_dict(is_private=False)]})
-        claims.validate()
+        claims = jwt.decode(id_token, _KEY, algorithms=["RS256"]).claims
+        JWTClaimsRegistry().validate(claims)
         if claims.get("nonce") != expected_nonce:
             raise IdTokenInvalid("nonce")
         if claims.get("email_verified") is not True:
             raise IdTokenInvalid("email not verified")
-        return dict(claims)
+        return claims
 
 
 def _setup(monkeypatch, pg_url):

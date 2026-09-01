@@ -7,8 +7,10 @@ import secrets
 from urllib.parse import urlencode
 
 import httpx
-from authlib.jose import JsonWebKey, JsonWebToken
-from authlib.jose.errors import JoseError
+from joserfc import jwt
+from joserfc.errors import JoseError
+from joserfc.jwk import KeySet
+from joserfc.jwt import JWTClaimsRegistry
 
 _MAX_CLAIM_LEN = 4096  # reject absurdly long string claims
 
@@ -48,9 +50,7 @@ class OIDCClient:
         self._client_secret = client_secret
         self._http = http_client or httpx.Client(timeout=10.0)
         self._metadata: dict | None = None
-        self._jwks = None
-        # Pin algorithms: never let the token header pick (alg-confusion defense).
-        self._jwt = JsonWebToken(["RS256"])
+        self._jwks: KeySet | None = None
 
     def _meta(self) -> dict:
         if self._metadata is None:
@@ -67,8 +67,8 @@ class OIDCClient:
             try:
                 r = self._http.get(self._meta()["jwks_uri"])
                 r.raise_for_status()
-                self._jwks = JsonWebKey.import_key_set(r.json())
-            except (httpx.HTTPError, ValueError, KeyError) as e:
+                self._jwks = KeySet.import_key_set(r.json())
+            except (httpx.HTTPError, JoseError, ValueError, KeyError) as e:
                 raise OIDCError(f"jwks fetch failed: {e}") from e
         return self._jwks
 
@@ -101,15 +101,13 @@ class OIDCClient:
         except (httpx.HTTPError, ValueError) as e:
             raise OIDCError(f"token exchange failed: {e}") from e
 
-    def _decode(self, id_token: str, claims_options: dict):
+    def _decode(self, id_token: str):
         # Decode with the cached JWKS; on an unknown signing key (rotation),
         # refetch the JWKS ONCE and retry.
         try:
-            return self._jwt.decode(id_token, self._jwk_set(), claims_options=claims_options)
+            return jwt.decode(id_token, self._jwk_set(), algorithms=["RS256"])
         except (JoseError, ValueError, KeyError):
-            return self._jwt.decode(
-                id_token, self._jwk_set(force=True), claims_options=claims_options
-            )
+            return jwt.decode(id_token, self._jwk_set(force=True), algorithms=["RS256"])
 
     def validate_id_token(self, id_token: str, *, expected_nonce: str) -> dict:
         issuer = self._meta()["issuer"]
@@ -122,12 +120,12 @@ class OIDCClient:
             "aud": {"essential": True},
         }
         try:
-            claims = self._decode(id_token, claims_options)
+            claims = self._decode(id_token).claims
             # leeway tolerates modest server/Google clock skew so a token with
             # iat a few seconds in the future (or exp just past) isn't spuriously
-            # rejected; without it (authlib default 0) skew causes intermittent
+            # rejected; without it, skew causes intermittent
             # sign-in failures.
-            claims.validate(leeway=60)  # exp / iat / essential presence
+            JWTClaimsRegistry(leeway=60, **claims_options).validate(claims)
         except (JoseError, ValueError, KeyError) as e:
             raise IdTokenInvalid(f"decode/validate failed: {e}") from e
 

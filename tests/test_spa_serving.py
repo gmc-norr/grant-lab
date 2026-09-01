@@ -1,5 +1,4 @@
 import pytest
-from fastapi.testclient import TestClient
 
 from call_manager.config import Settings
 from call_manager.main import create_app
@@ -34,12 +33,12 @@ def _env(monkeypatch, pg_url, **extra):
         monkeypatch.setenv(k, v)
 
 
-def test_disabled_mode_serves_no_spa(monkeypatch, pg_url, pg_session_factory):
+def test_disabled_mode_serves_no_spa(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     # The SPA route is `/` (Plan 3 Task 9 flip). In disabled mode nothing serves
     # it, and with the Jinja calls_index handler retired there is no `GET /`
     # handler either — so the root is a real 404 (no SPA shell, no dashboard).
     _env(monkeypatch, pg_url, SPA_MODE="disabled")
-    c = TestClient(create_app())
+    c = test_client_factory(create_app())
     assert c.get("/").status_code == 404
 
 
@@ -52,7 +51,9 @@ def test_prod_mode_missing_build_fails_fast(monkeypatch, pg_url, pg_session_fact
         create_app()
 
 
-def test_prod_mode_serves_index_for_spa_routes(monkeypatch, pg_url, pg_session_factory, tmp_path):
+def test_prod_mode_serves_index_for_spa_routes(
+    monkeypatch, pg_url, pg_session_factory, tmp_path, test_client_factory
+):
     import call_manager.web.spa_serving as spa_serving
 
     spa_dir = tmp_path / "spa"
@@ -61,7 +62,7 @@ def test_prod_mode_serves_index_for_spa_routes(monkeypatch, pg_url, pg_session_f
     (spa_dir / "index.html").write_text("<!doctype html><title>spa</title>")
     monkeypatch.setattr(spa_serving, "SPA_DIR", spa_dir)
     _env(monkeypatch, pg_url, SPA_MODE="prod")
-    c = TestClient(create_app())
+    c = test_client_factory(create_app())
     # The SPA route is `/` (Plan 3 Task 9 flip): the catch-all serves index.html
     # for the root, while unknown paths stay real 404s.
     assert "<title>spa</title>" in c.get("/").text
@@ -116,9 +117,9 @@ def test_prod_mode_serves_index_for_spa_routes(monkeypatch, pg_url, pg_session_f
     assert "ws:" not in connect_src.replace("ws://testserver", "")
 
 
-def test_dev_mode_relaxes_csp(monkeypatch, pg_url, pg_session_factory):
+def test_dev_mode_relaxes_csp(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     _env(monkeypatch, pg_url, SPA_MODE="dev")
-    c = TestClient(create_app())
+    c = test_client_factory(create_app())
     csp = c.get("/healthz").headers.get("content-security-policy", "")
     # Dev must allow BOTH Vite relaxations: the HMR WebSocket (connect-src ws:)
     # and the injected inline dev bootstrap (script-src 'unsafe-inline').
@@ -126,9 +127,11 @@ def test_dev_mode_relaxes_csp(monkeypatch, pg_url, pg_session_factory):
     assert "script-src 'self' 'unsafe-inline'" in csp
 
 
-def test_disabled_mode_keeps_strict_script_src(monkeypatch, pg_url, pg_session_factory):
+def test_disabled_mode_keeps_strict_script_src(
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
+):
     _env(monkeypatch, pg_url, SPA_MODE="disabled")
-    c = TestClient(create_app())
+    c = test_client_factory(create_app())
     csp = c.get("/healthz").headers.get("content-security-policy", "")
     assert "script-src 'self'" in csp and "script-src 'self' 'unsafe-inline'" not in csp
 
@@ -137,7 +140,10 @@ def test_disabled_mode_keeps_strict_script_src(monkeypatch, pg_url, pg_session_f
 # Defect 8b: immutable Cache-Control for /assets/*
 # ---------------------------------------------------------------------------
 
-def test_assets_have_immutable_cache_control(monkeypatch, pg_url, pg_session_factory, tmp_path):
+
+def test_assets_have_immutable_cache_control(
+    monkeypatch, pg_url, pg_session_factory, tmp_path, test_client_factory
+):
     """Vite-hashed assets under /assets/ must carry Cache-Control: public,
     max-age=31536000, immutable so browsers and CDNs cache them for 1 year."""
     import call_manager.web.spa_serving as spa_serving
@@ -148,7 +154,7 @@ def test_assets_have_immutable_cache_control(monkeypatch, pg_url, pg_session_fac
     (spa_dir / "index.html").write_text("<!doctype html><title>spa</title>")
     monkeypatch.setattr(spa_serving, "SPA_DIR", spa_dir)
     _env(monkeypatch, pg_url, SPA_MODE="prod")
-    c = TestClient(create_app())
+    c = test_client_factory(create_app())
 
     resp = c.get("/assets/main.AbCdEfGh.js")
     assert resp.status_code == 200
@@ -159,7 +165,7 @@ def test_assets_have_immutable_cache_control(monkeypatch, pg_url, pg_session_fac
 
 
 def test_index_html_does_not_have_immutable_cache_control(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
+    monkeypatch, pg_url, pg_session_factory, tmp_path, test_client_factory
 ):
     """index.html is NOT content-hashed so must NOT receive the immutable header.
     It should be served without a long-lived cache directive."""
@@ -170,7 +176,7 @@ def test_index_html_does_not_have_immutable_cache_control(
     (spa_dir / "index.html").write_text("<!doctype html><title>spa</title>")
     monkeypatch.setattr(spa_serving, "SPA_DIR", spa_dir)
     _env(monkeypatch, pg_url, SPA_MODE="prod")
-    c = TestClient(create_app())
+    c = test_client_factory(create_app())
 
     resp = c.get("/")
     assert resp.status_code == 200
@@ -182,7 +188,10 @@ def test_index_html_does_not_have_immutable_cache_control(
 # Defect 9: SPA fallback short-circuit for backend paths
 # ---------------------------------------------------------------------------
 
-def test_backend_path_404_does_not_walk_routes(monkeypatch, pg_url, pg_session_factory, tmp_path):
+
+def test_backend_path_404_does_not_walk_routes(
+    monkeypatch, pg_url, pg_session_factory, tmp_path, test_client_factory
+):
     """An unknown /api/* path must return 404 without walking all app routes
     (the /api/ short-circuit fires first). Unknown non-SPA, non-/api paths
     (e.g. /workspaces/unknown) also 404 via the route walk finding no match."""
@@ -193,7 +202,7 @@ def test_backend_path_404_does_not_walk_routes(monkeypatch, pg_url, pg_session_f
     (spa_dir / "index.html").write_text("<!doctype html><title>spa</title>")
     monkeypatch.setattr(spa_serving, "SPA_DIR", spa_dir)
     _env(monkeypatch, pg_url, SPA_MODE="prod")
-    c = TestClient(create_app())
+    c = test_client_factory(create_app())
 
     # Unknown /api/ subpath must be 404, not 405 or the SPA shell.
     resp = c.get("/api/totally-unknown-endpoint")

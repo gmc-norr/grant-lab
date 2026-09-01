@@ -1,5 +1,3 @@
-from fastapi.testclient import TestClient
-
 from call_manager.db.models import ChatTurn, User, Workspace, WorkspaceEvent
 from call_manager.main import create_app
 from call_manager.proposal_assist.spend import record_spend
@@ -16,19 +14,19 @@ def _setup(monkeypatch, pg_url, *, drafting_enabled=True):
     return create_app()
 
 
-def _admin(app, sf, *, email="root@ki.se"):
+def _admin(app, sf, test_client_factory, *, email="root@ki.se"):
     with sf() as s:
         u = User(status="active", email=email, is_admin=True)
         s.add(u)
         s.commit()
         s.refresh(u)
         uid = u.id
-    c = TestClient(app)
+    c = test_client_factory(app)
     c.cookies.set("session", app.state.session_signer.make(user_id=uid))
     return c
 
 
-def test_drafting_requires_admin(monkeypatch, pg_url, pg_session_factory):
+def test_drafting_requires_admin(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     app = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
         u = User(status="active", email="alice@ki.se", is_admin=False)
@@ -36,14 +34,14 @@ def test_drafting_requires_admin(monkeypatch, pg_url, pg_session_factory):
         s.commit()
         s.refresh(u)
         uid = u.id
-    c = TestClient(app)
+    c = test_client_factory(app)
     c.cookies.set("session", app.state.session_signer.make(user_id=uid))
     assert c.get("/api/admin/drafting").status_code == 403
 
 
-def test_drafting_kill_switch_and_cap(monkeypatch, pg_url, pg_session_factory):
+def test_drafting_kill_switch_and_cap(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     app = _setup(monkeypatch, pg_url, drafting_enabled=True)
-    c = _admin(app, pg_session_factory)
+    c = _admin(app, pg_session_factory, test_client_factory)
     body = c.get("/api/admin/drafting").json()
     assert body["drafting_enabled"] is True
     assert body["global_cap"]["cap_in"] == 1000
@@ -51,13 +49,13 @@ def test_drafting_kill_switch_and_cap(monkeypatch, pg_url, pg_session_factory):
     assert body["global_cap"]["allowed"] is True
 
 
-def test_drafting_kill_switch_off(monkeypatch, pg_url, pg_session_factory):
+def test_drafting_kill_switch_off(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     app = _setup(monkeypatch, pg_url, drafting_enabled=False)
-    c = _admin(app, pg_session_factory)
+    c = _admin(app, pg_session_factory, test_client_factory)
     assert c.get("/api/admin/drafting").json()["drafting_enabled"] is False
 
 
-def test_drafting_per_workspace_usage(monkeypatch, pg_url, pg_session_factory):
+def test_drafting_per_workspace_usage(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     app = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
         owner = User(status="active", email="owner@ki.se")
@@ -76,7 +74,7 @@ def test_drafting_per_workspace_usage(monkeypatch, pg_url, pg_session_factory):
             )
         )
         s.commit()
-    c = _admin(app, pg_session_factory)
+    c = _admin(app, pg_session_factory, test_client_factory)
     rows = c.get("/api/admin/drafting").json()["per_workspace"]
     row = next(r for r in rows if r["title"] == "VisibleInPanel")
     assert row["owner_email"] == "owner@ki.se"
@@ -84,7 +82,9 @@ def test_drafting_per_workspace_usage(monkeypatch, pg_url, pg_session_factory):
     assert isinstance(row["id"], str)  # UUID serialized as string for /cockpit/:id links
 
 
-def test_drafting_per_workspace_desc_by_used_in(monkeypatch, pg_url, pg_session_factory):
+def test_drafting_per_workspace_desc_by_used_in(
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
+):
     app = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
         owner = User(status="active", email="o@ki.se")
@@ -111,12 +111,14 @@ def test_drafting_per_workspace_desc_by_used_in(monkeypatch, pg_url, pg_session_
             )
         )
         s.commit()
-    c = _admin(app, pg_session_factory)
+    c = _admin(app, pg_session_factory, test_client_factory)
     titles = [r["title"] for r in c.get("/api/admin/drafting").json()["per_workspace"]]
     assert titles.index("Big") < titles.index("Small")  # used_in desc
 
 
-def test_drafting_recent_failed_events(monkeypatch, pg_url, pg_session_factory):
+def test_drafting_recent_failed_events(
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
+):
     app = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
         owner = User(status="active", email="o@ki.se")
@@ -134,7 +136,7 @@ def test_drafting_recent_failed_events(monkeypatch, pg_url, pg_session_factory):
             )
         )
         s.commit()
-    c = _admin(app, pg_session_factory)
+    c = _admin(app, pg_session_factory, test_client_factory)
     events = c.get("/api/admin/drafting").json()["recent_events"]
     assert any(
         e["kind"] == "cloud_turn_failed" and e["payload"]["error"] == "distinctive_test_error"
@@ -142,7 +144,7 @@ def test_drafting_recent_failed_events(monkeypatch, pg_url, pg_session_factory):
     )
 
 
-def test_drafting_cap_exceeded_reason(monkeypatch, pg_url, pg_session_factory):
+def test_drafting_cap_exceeded_reason(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     app = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
         owner = User(status="active", email="o@ki.se")
@@ -154,10 +156,14 @@ def test_drafting_cap_exceeded_reason(monkeypatch, pg_url, pg_session_factory):
         # The global cap reads the llm_spend ledger now, so seed the 1500 there
         # rather than as a raw ChatTurn. cap_in=1000.
         record_spend(
-            s, workspace_id=ws.id, kind="chat_turn", status="ok", tokens_in=1500,
+            s,
+            workspace_id=ws.id,
+            kind="chat_turn",
+            status="ok",
+            tokens_in=1500,
         )
         s.commit()
-    c = _admin(app, pg_session_factory)
+    c = _admin(app, pg_session_factory, test_client_factory)
     cap = c.get("/api/admin/drafting").json()["global_cap"]
     assert cap["allowed"] is False
     assert cap["reason"] == "input_cap_exceeded"

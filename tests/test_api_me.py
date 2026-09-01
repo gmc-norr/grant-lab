@@ -1,5 +1,3 @@
-from fastapi.testclient import TestClient
-
 from call_manager.db.models import User
 from call_manager.main import create_app
 
@@ -15,27 +13,29 @@ def _app(monkeypatch, pg_url):
     return create_app()
 
 
-def _login(app, pg_session_factory):
+def _login(app, pg_session_factory, test_client_factory):
     with pg_session_factory() as s:
         u = User(status="active", email="u@ki.se")
         s.add(u)
         s.commit()
         uid = u.id
-    c = TestClient(app)
+    c = test_client_factory(app)
     c.cookies.set("session", app.state.session_signer.make(user_id=uid))
     return c, uid
 
 
-def test_me_unauthenticated_is_envelope_401(monkeypatch, pg_url):
-    c = TestClient(_app(monkeypatch, pg_url))
+def test_me_unauthenticated_is_envelope_401(
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
+):
+    c = test_client_factory(_app(monkeypatch, pg_url))
     r = c.get("/api/me")
     assert r.status_code == 401
     assert r.json()["error"]["code"] == "unauthorized"
 
 
-def test_me_returns_user(monkeypatch, pg_url, pg_session_factory):
+def test_me_returns_user(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     app = _app(monkeypatch, pg_url)
-    c, uid = _login(app, pg_session_factory)
+    c, uid = _login(app, pg_session_factory, test_client_factory)
     r = c.get("/api/me")
     assert r.status_code == 200
     body = r.json()
@@ -49,14 +49,14 @@ def test_me_returns_user(monkeypatch, pg_url, pg_session_factory):
     assert body["capabilities"] == {"admin": False, "retention_inspection": False}
 
 
-def test_me_admin_capability(monkeypatch, pg_url, pg_session_factory):
+def test_me_admin_capability(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     app = _app(monkeypatch, pg_url)
     with pg_session_factory() as s:
         u = User(status="active", email="admin@ki.se", is_admin=True)
         s.add(u)
         s.commit()
         uid = u.id
-    c = TestClient(app)
+    c = test_client_factory(app)
     c.cookies.set("session", app.state.session_signer.make(user_id=uid))
     r = c.get("/api/me")
     assert r.status_code == 200
@@ -66,28 +66,28 @@ def test_me_admin_capability(monkeypatch, pg_url, pg_session_factory):
     assert r.json()["capabilities"] == {"admin": True, "retention_inspection": False}
 
 
-def test_me_exposes_user_name(monkeypatch, pg_url, pg_session_factory):
+def test_me_exposes_user_name(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     app = _app(monkeypatch, pg_url)
     with pg_session_factory() as s:
         u = User(status="active", email="named@ki.se", name="Dr. Named")
         s.add(u)
         s.commit()
         uid = u.id
-    c = TestClient(app)
+    c = test_client_factory(app)
     c.cookies.set("session", app.state.session_signer.make(user_id=uid))
     r = c.get("/api/me")
     assert r.status_code == 200
     assert r.json()["user"]["name"] == "Dr. Named"
 
 
-def test_me_name_is_null_when_unset(monkeypatch, pg_url, pg_session_factory):
+def test_me_name_is_null_when_unset(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     app = _app(monkeypatch, pg_url)
     with pg_session_factory() as s:
         u = User(status="active", email="anon@ki.se")
         s.add(u)
         s.commit()
         uid = u.id
-    c = TestClient(app)
+    c = test_client_factory(app)
     c.cookies.set("session", app.state.session_signer.make(user_id=uid))
     r = c.get("/api/me")
     assert r.status_code == 200

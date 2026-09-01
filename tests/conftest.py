@@ -1,5 +1,8 @@
+from contextlib import ExitStack
+
 import pytest
 from alembic.config import Config
+from fastapi.testclient import TestClient
 from sqlalchemy import text
 from testcontainers.postgres import PostgresContainer
 
@@ -19,6 +22,17 @@ def _isolate_settings_from_dotenv(monkeypatch):
     rely solely on monkeypatch.setenv()."""
     # SettingsConfigDict is a TypedDict; mutate via dict-item assignment.
     monkeypatch.setitem(Settings.model_config, "env_file", None)
+
+
+@pytest.fixture
+def test_client_factory():
+    """Create entered TestClients and close their app lifespans after each test."""
+    with ExitStack() as stack:
+
+        def create(app, **kwargs):
+            return stack.enter_context(TestClient(app, **kwargs))
+
+        yield create
 
 
 @pytest.fixture(scope="session")

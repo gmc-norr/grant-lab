@@ -140,7 +140,9 @@ it.each(["scorecard", "review"])(
     // It also fetched the draft on a tab that does not show it.
     mockHead("a1b2c3d4e5f6");
     renderAt(`/cockpit/ws-1?tab=${tab}`);
-    await new Promise((r) => setTimeout(r, 50));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
     const bar = document.querySelector("footer")?.textContent ?? "";
     expect(bar).toContain("Markdown"); // the bar IS rendered
     expect(bar).not.toMatch(/Draft ·|Spec ·/);

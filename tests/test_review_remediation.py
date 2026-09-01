@@ -132,7 +132,7 @@ def test_login_rehashes_on_param_upgrade(pg_url, monkeypatch, pg_session_factory
 
     app = _app(monkeypatch, pg_url)
     original_hash = hash_password("correct-horse-1")
-    with app.state.session_factory() as s:
+    with pg_session_factory() as s:
         u = User(email="rh@ki.se", status="active", password_hash=original_hash)
         s.add(u)
         s.commit()
@@ -152,7 +152,7 @@ def test_login_rehashes_on_param_upgrade(pg_url, monkeypatch, pg_session_factory
         r = c.post("/api/auth/login", json={"email": "rh@ki.se", "password": "correct-horse-1"})
     assert r.status_code == 200
 
-    with app.state.session_factory() as s:
+    with pg_session_factory() as s:
         u = s.get(User, uid)
         assert u.password_hash != original_hash  # hash was updated
 
@@ -166,11 +166,13 @@ def test_connect_google_off_domain_rejected(pg_url, monkeypatch, pg_session_fact
     import time
     from urllib.parse import parse_qs, urlparse
 
-    from authlib.jose import JsonWebKey, jwt
+    from joserfc import jwt
+    from joserfc.jwk import RSAKey
+    from joserfc.jwt import JWTClaimsRegistry
 
     from call_manager.db.models import User
 
-    _KEY = JsonWebKey.generate_key("RSA", 2048, is_private=True)
+    _KEY = RSAKey.generate_key(2048, {"kid": "review-remediation"})
 
     class FakeOIDC:
         def __init__(self):
@@ -185,14 +187,17 @@ def test_connect_google_off_domain_rejected(pg_url, monkeypatch, pg_session_fact
         def exchange_code(self, *, code, code_verifier, redirect_uri):
             return {
                 "id_token": jwt.encode(
-                    {"alg": "RS256", "kid": _KEY.kid}, self._codes[code], _KEY
-                ).decode()
+                    {"alg": "RS256", "kid": _KEY.kid},
+                    self._codes[code],
+                    _KEY,
+                    algorithms=["RS256"],
+                )
             }
 
         def validate_id_token(self, id_token, *, expected_nonce):
-            claims = jwt.decode(id_token, {"keys": [_KEY.as_dict(is_private=False)]})
-            claims.validate()
-            return dict(claims)
+            claims = jwt.decode(id_token, _KEY, algorithms=["RS256"]).claims
+            JWTClaimsRegistry().validate(claims)
+            return claims
 
     for k, v in {
         "DATABASE_URL": pg_url,

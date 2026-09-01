@@ -1,6 +1,5 @@
 from datetime import UTC, datetime
 
-from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from call_manager.db.models import (
@@ -23,14 +22,14 @@ def _setup(monkeypatch, pg_url):
     return create_app()
 
 
-def _admin(app, sf, *, email="root@ki.se"):
+def _admin(app, sf, test_client_factory, *, email="root@ki.se"):
     with sf() as s:
         u = User(status="active", email=email, is_admin=True)
         s.add(u)
         s.commit()
         s.refresh(u)
         uid = u.id
-    c = TestClient(app)
+    c = test_client_factory(app)
     c.cookies.set("session", app.state.session_signer.make(user_id=uid))
     return c, uid
 
@@ -59,7 +58,7 @@ def _seed_call_profile(sf, uid):
         return c.id, p.id
 
 
-def test_golden_set_requires_admin(monkeypatch, pg_url, pg_session_factory):
+def test_golden_set_requires_admin(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     app = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
         u = User(status="active", email="alice@ki.se", is_admin=False)
@@ -67,14 +66,14 @@ def test_golden_set_requires_admin(monkeypatch, pg_url, pg_session_factory):
         s.commit()
         s.refresh(u)
         uid = u.id
-    c = TestClient(app)
+    c = test_client_factory(app)
     c.cookies.set("session", app.state.session_signer.make(user_id=uid))
     assert c.get("/api/admin/golden-set").status_code == 403
 
 
-def test_add_then_read_then_delete(monkeypatch, pg_url, pg_session_factory):
+def test_add_then_read_then_delete(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     app = _setup(monkeypatch, pg_url)
-    c, uid = _admin(app, pg_session_factory)
+    c, uid = _admin(app, pg_session_factory, test_client_factory)
     cid, pid = _seed_call_profile(pg_session_factory, uid)
     r = c.post(
         "/api/admin/golden-set",
@@ -99,9 +98,11 @@ def test_add_then_read_then_delete(monkeypatch, pg_url, pg_session_factory):
         assert s.execute(select(GoldenSetTriple)).first() is None
 
 
-def test_add_rejects_out_of_range_score(monkeypatch, pg_url, pg_session_factory):
+def test_add_rejects_out_of_range_score(
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
+):
     app = _setup(monkeypatch, pg_url)
-    c, uid = _admin(app, pg_session_factory)
+    c, uid = _admin(app, pg_session_factory, test_client_factory)
     cid, pid = _seed_call_profile(pg_session_factory, uid)
     r = c.post(
         "/api/admin/golden-set", json={"call_id": cid, "profile_id": pid, "expected_score": 150}
@@ -109,9 +110,11 @@ def test_add_rejects_out_of_range_score(monkeypatch, pg_url, pg_session_factory)
     assert r.status_code == 400
 
 
-def test_add_unknown_fk_is_400_not_500(monkeypatch, pg_url, pg_session_factory):
+def test_add_unknown_fk_is_400_not_500(
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
+):
     app = _setup(monkeypatch, pg_url)
-    c, _ = _admin(app, pg_session_factory)
+    c, _ = _admin(app, pg_session_factory, test_client_factory)
     r = c.post(
         "/api/admin/golden-set",
         json={"call_id": 999999, "profile_id": 999999, "expected_score": 50},
@@ -120,11 +123,11 @@ def test_add_unknown_fk_is_400_not_500(monkeypatch, pg_url, pg_session_factory):
     assert "unknown call or profile" in r.json()["error"]["message"]
 
 
-def test_add_duplicate_pair_is_409(monkeypatch, pg_url, pg_session_factory):
+def test_add_duplicate_pair_is_409(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     # A second triple for the same (call, profile) hits uq_golden_set_triples_pair.
     # It must be a 409 with a "duplicate" message — NOT the FK "unknown" 400.
     app = _setup(monkeypatch, pg_url)
-    c, uid = _admin(app, pg_session_factory)
+    c, uid = _admin(app, pg_session_factory, test_client_factory)
     cid, pid = _seed_call_profile(pg_session_factory, uid)
     first = c.post(
         "/api/admin/golden-set", json={"call_id": cid, "profile_id": pid, "expected_score": 65}
@@ -137,15 +140,19 @@ def test_add_duplicate_pair_is_409(monkeypatch, pg_url, pg_session_factory):
     assert "already exists" in dup.json()["error"]["message"]
 
 
-def test_delete_absent_is_204_idempotent(monkeypatch, pg_url, pg_session_factory):
+def test_delete_absent_is_204_idempotent(
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
+):
     app = _setup(monkeypatch, pg_url)
-    c, _ = _admin(app, pg_session_factory)
+    c, _ = _admin(app, pg_session_factory, test_client_factory)
     assert c.request("DELETE", "/api/admin/golden-set/999999").status_code == 204
 
 
-def test_escalation_disagreement_candidate_appears(monkeypatch, pg_url, pg_session_factory):
+def test_escalation_disagreement_candidate_appears(
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
+):
     app = _setup(monkeypatch, pg_url)
-    c, uid = _admin(app, pg_session_factory)
+    c, uid = _admin(app, pg_session_factory, test_client_factory)
     with pg_session_factory() as s:
         p = Profile(
             name="P",

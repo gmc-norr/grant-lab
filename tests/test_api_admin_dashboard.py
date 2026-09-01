@@ -1,6 +1,5 @@
 from datetime import UTC, datetime, timedelta
 
-from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from call_manager.db.models import (
@@ -25,46 +24,48 @@ def _setup(monkeypatch, pg_url, *, model="bge-m3"):
     return create_app()
 
 
-def _admin(app, sf, *, email="root@ki.se"):
+def _admin(app, sf, test_client_factory, *, email="root@ki.se"):
     with sf() as s:
         u = User(status="active", email=email, is_admin=True)
         s.add(u)
         s.commit()
         s.refresh(u)
         uid = u.id
-    c = TestClient(app)
+    c = test_client_factory(app)
     c.cookies.set("session", app.state.session_signer.make(user_id=uid))
     return c, uid
 
 
-def _nonadmin(app, sf, *, email="alice@ki.se"):
+def _nonadmin(app, sf, test_client_factory, *, email="alice@ki.se"):
     with sf() as s:
         u = User(status="active", email=email, is_admin=False)
         s.add(u)
         s.commit()
         s.refresh(u)
         uid = u.id
-    c = TestClient(app)
+    c = test_client_factory(app)
     c.cookies.set("session", app.state.session_signer.make(user_id=uid))
     return c
 
 
-def test_dashboard_requires_admin(monkeypatch, pg_url, pg_session_factory):
+def test_dashboard_requires_admin(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     app = _setup(monkeypatch, pg_url)
-    c = _nonadmin(app, pg_session_factory)
+    c = _nonadmin(app, pg_session_factory, test_client_factory)
     assert c.get("/api/admin/dashboard").status_code == 403
 
 
-def test_dashboard_requires_auth(monkeypatch, pg_url, pg_session_factory):
+def test_dashboard_requires_auth(monkeypatch, pg_url, test_client_factory):
     app = _setup(monkeypatch, pg_url)
-    r = TestClient(app).get("/api/admin/dashboard")
+    r = test_client_factory(app).get("/api/admin/dashboard")
     assert r.status_code == 401
     assert r.json()["error"]["code"] == "unauthorized"
 
 
-def test_dashboard_lists_sources_with_call_counts(monkeypatch, pg_url, pg_session_factory):
+def test_dashboard_lists_sources_with_call_counts(
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
+):
     app = _setup(monkeypatch, pg_url)
-    c, _ = _admin(app, pg_session_factory)
+    c, _ = _admin(app, pg_session_factory, test_client_factory)
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
         src.last_fetched_at = datetime(2026, 4, 16, 3, 15, tzinfo=UTC)
@@ -78,7 +79,7 @@ def test_dashboard_lists_sources_with_call_counts(monkeypatch, pg_url, pg_sessio
 
 
 def test_dashboard_queue_counts_default_zero(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    monkeypatch, pg_url, pg_session_factory, profile_factory, test_client_factory
 ):
     profile_id, _ = profile_factory()
     with pg_session_factory() as s:
@@ -89,13 +90,13 @@ def test_dashboard_queue_counts_default_zero(
         s.add(RankingJob(call_id=c0.id, profile_id=profile_id, status=RankingJobStatus.PENDING))
         s.commit()
     app = _setup(monkeypatch, pg_url)
-    c, _ = _admin(app, pg_session_factory)
+    c, _ = _admin(app, pg_session_factory, test_client_factory)
     counts = c.get("/api/admin/dashboard").json()["queue_counts"]
     assert counts == {"pending": 1, "running": 0, "done": 0, "failed": 0}
 
 
 def test_dashboard_rerank_estimate_is_product(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
+    monkeypatch, pg_url, pg_session_factory, profile_factory, test_client_factory
 ):
     profile_factory()
     profile_factory(name="Group B")
@@ -113,7 +114,7 @@ def test_dashboard_rerank_estimate_is_product(
             )
         s.commit()
     app = _setup(monkeypatch, pg_url)
-    c, _ = _admin(app, pg_session_factory)
+    c, _ = _admin(app, pg_session_factory, test_client_factory)
     body = c.get("/api/admin/dashboard").json()
     assert body["active_profiles_count"] == 2
     assert body["recent_calls_count"] == 3
@@ -121,9 +122,9 @@ def test_dashboard_rerank_estimate_is_product(
     assert body["backfill_days"] == 90
 
 
-def test_dashboard_digest_panel(monkeypatch, pg_url, pg_session_factory):
+def test_dashboard_digest_panel(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     app = _setup(monkeypatch, pg_url)
-    c, uid = _admin(app, pg_session_factory)
+    c, uid = _admin(app, pg_session_factory, test_client_factory)
     now = datetime.now(UTC)
     with pg_session_factory() as s:
         s.add(DigestRun(user_id=uid, sent_at=now, included_call_ids=[1, 2]))
@@ -143,9 +144,9 @@ def test_dashboard_digest_panel(monkeypatch, pg_url, pg_session_factory):
     assert set(d["disabled_user_rows"][0]) == {"id", "email", "disabled_at"}
 
 
-def test_dashboard_embedding_coverage(monkeypatch, pg_url, pg_session_factory):
+def test_dashboard_embedding_coverage(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     app = _setup(monkeypatch, pg_url)
-    c, _ = _admin(app, pg_session_factory)
+    c, _ = _admin(app, pg_session_factory, test_client_factory)
     vec = [0.0] * 1024
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
@@ -215,10 +216,10 @@ def test_dashboard_embedding_coverage(monkeypatch, pg_url, pg_session_factory):
 
 
 def test_dashboard_coverage_excludes_blank_profiles_counts_areas_only(
-    monkeypatch, pg_url, pg_session_factory
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
 ):
     app = _setup(monkeypatch, pg_url)
-    c, _ = _admin(app, pg_session_factory)
+    c, _ = _admin(app, pg_session_factory, test_client_factory)
     with pg_session_factory() as s:
         owner = User(status="active", email="owner2@ki.se")
         s.add(owner)
@@ -253,16 +254,20 @@ def test_dashboard_coverage_excludes_blank_profiles_counts_areas_only(
     assert cov["profile_stale"] == 1
 
 
-def test_dashboard_golden_set_report_null(monkeypatch, pg_url, pg_session_factory):
+def test_dashboard_golden_set_report_null(
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
+):
     # load_last_report reads a sidecar file whose path is fixed at import time,
     # so monkeypatch the function (the endpoint lazy-imports it) for determinism.
     monkeypatch.setattr("call_manager.ranking.eval.load_last_report", lambda: None)
     app = _setup(monkeypatch, pg_url)
-    c, _ = _admin(app, pg_session_factory)
+    c, _ = _admin(app, pg_session_factory, test_client_factory)
     assert c.get("/api/admin/dashboard").json()["golden_set_report"] is None
 
 
-def test_dashboard_golden_set_report_present(monkeypatch, pg_url, pg_session_factory):
+def test_dashboard_golden_set_report_present(
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
+):
     from call_manager.ranking.eval import GoldenSetReport
 
     monkeypatch.setattr(
@@ -270,20 +275,24 @@ def test_dashboard_golden_set_report_present(monkeypatch, pg_url, pg_session_fac
         lambda: GoldenSetReport(n_fixture=5, n_compared=4, tau=0.812),
     )
     app = _setup(monkeypatch, pg_url)
-    c, _ = _admin(app, pg_session_factory)
+    c, _ = _admin(app, pg_session_factory, test_client_factory)
     rep = c.get("/api/admin/dashboard").json()["golden_set_report"]
     assert rep == {"n_fixture": 5, "n_compared": 4, "tau": 0.812}
 
 
-def test_dashboard_calibration_warning(monkeypatch, pg_url, pg_session_factory):
+def test_dashboard_calibration_warning(
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
+):
     app = _setup(monkeypatch, pg_url, model="mxbai-embed-large")
     assert app.state.embedding_calibration_warning is not None
-    c, _ = _admin(app, pg_session_factory)
+    c, _ = _admin(app, pg_session_factory, test_client_factory)
     w = c.get("/api/admin/dashboard").json()["calibration_warning"]
     assert w is not None and "EMBEDDING_HARD_FAIL_THRESHOLD" in w
 
 
-def test_dashboard_no_calibration_warning_known_model(monkeypatch, pg_url, pg_session_factory):
+def test_dashboard_no_calibration_warning_known_model(
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
+):
     app = _setup(monkeypatch, pg_url, model="bge-m3")
-    c, _ = _admin(app, pg_session_factory)
+    c, _ = _admin(app, pg_session_factory, test_client_factory)
     assert c.get("/api/admin/dashboard").json()["calibration_warning"] is None

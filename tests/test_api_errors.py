@@ -1,5 +1,3 @@
-from fastapi.testclient import TestClient
-
 from call_manager.db.models import Profile, ProfileKind, User
 from call_manager.main import create_app
 
@@ -15,7 +13,7 @@ def _app(monkeypatch, pg_url):
     return create_app()
 
 
-def _login(app, pg_session_factory):
+def _login(app, pg_session_factory, test_client_factory):
     with pg_session_factory() as s:
         u = User(status="active", email="u@ki.se")
         s.add(u)
@@ -31,13 +29,15 @@ def _login(app, pg_session_factory):
         s.add(p)
         s.commit()
         uid, pid = u.id, p.id
-    c = TestClient(app)
+    c = test_client_factory(app)
     c.cookies.set("session", app.state.session_signer.make(user_id=uid))
     return c, uid, pid
 
 
-def test_api_unknown_path_returns_envelope_404(monkeypatch, pg_url, pg_session_factory):
-    c = TestClient(_app(monkeypatch, pg_url))
+def test_api_unknown_path_returns_envelope_404(
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
+):
+    c = test_client_factory(_app(monkeypatch, pg_url))
     r = c.get("/api/does-not-exist")
     assert r.status_code == 404
     body = r.json()
@@ -45,28 +45,32 @@ def test_api_unknown_path_returns_envelope_404(monkeypatch, pg_url, pg_session_f
     assert body["error"]["code"] == "not_found"
 
 
-def test_non_api_404_is_unchanged(monkeypatch, pg_url, pg_session_factory):
-    c = TestClient(_app(monkeypatch, pg_url))
+def test_non_api_404_is_unchanged(monkeypatch, pg_url, pg_session_factory, test_client_factory):
+    c = test_client_factory(_app(monkeypatch, pg_url))
     r = c.get("/totally-unknown-html-path", headers={"accept": "application/json"})
     assert r.status_code == 404
     assert "error" not in r.json()
 
 
-def test_api_500_is_sanitized_envelope(monkeypatch, pg_url, pg_session_factory):
+def test_api_500_is_sanitized_envelope(
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
+):
     app = _app(monkeypatch, pg_url)
 
     @app.get("/api/_boom")
     def _boom():
         raise RuntimeError("secret internals")
 
-    c = TestClient(app, raise_server_exceptions=False)
+    c = test_client_factory(app, raise_server_exceptions=False)
     r = c.get("/api/_boom")
     assert r.status_code == 500
     assert r.json()["error"]["code"] == "internal_error"
     assert "secret internals" not in r.text
 
 
-def test_api_5xx_httpexception_detail_is_not_leaked(monkeypatch, pg_url, pg_session_factory):
+def test_api_5xx_httpexception_detail_is_not_leaked(
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
+):
     from fastapi import HTTPException
 
     app = _app(monkeypatch, pg_url)
@@ -75,7 +79,7 @@ def test_api_5xx_httpexception_detail_is_not_leaked(monkeypatch, pg_url, pg_sess
     def _unavailable():
         raise HTTPException(status_code=503, detail="db unavailable: secret path /var/db")
 
-    c = TestClient(app, raise_server_exceptions=False)
+    c = test_client_factory(app, raise_server_exceptions=False)
     r = c.get("/api/_unavailable")
     assert r.status_code == 503
     body = r.json()
@@ -83,7 +87,9 @@ def test_api_5xx_httpexception_detail_is_not_leaked(monkeypatch, pg_url, pg_sess
     assert "secret path" not in r.text and "db unavailable" not in r.text
 
 
-def test_api_4xx_httpexception_detail_is_echoed(monkeypatch, pg_url, pg_session_factory):
+def test_api_4xx_httpexception_detail_is_echoed(
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
+):
     from fastapi import HTTPException
 
     app = _app(monkeypatch, pg_url)
@@ -92,7 +98,7 @@ def test_api_4xx_httpexception_detail_is_echoed(monkeypatch, pg_url, pg_session_
     def _teapot():
         raise HTTPException(status_code=418, detail="i am a teapot")
 
-    c = TestClient(app, raise_server_exceptions=False)
+    c = test_client_factory(app, raise_server_exceptions=False)
     r = c.get("/api/_teapot")
     assert r.status_code == 418
     body = r.json()
@@ -101,7 +107,7 @@ def test_api_4xx_httpexception_detail_is_echoed(monkeypatch, pg_url, pg_session_
 
 
 def test_api_4xx_structured_httpexception_preserves_envelope(
-    monkeypatch, pg_url, pg_session_factory
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
 ):
     from fastapi import HTTPException
 
@@ -119,7 +125,7 @@ def test_api_4xx_structured_httpexception_preserves_envelope(
             headers={"X-Conflict": "draft"},
         )
 
-    c = TestClient(app, raise_server_exceptions=False)
+    c = test_client_factory(app, raise_server_exceptions=False)
     r = c.get("/api/_structured-conflict")
     assert r.status_code == 409
     assert r.headers["X-Conflict"] == "draft"
@@ -132,22 +138,24 @@ def test_api_4xx_structured_httpexception_preserves_envelope(
     }
 
 
-def test_non_api_500_is_plain_text(monkeypatch, pg_url, pg_session_factory):
+def test_non_api_500_is_plain_text(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     app = _app(monkeypatch, pg_url)
 
     @app.get("/_boom")
     def _boom():
         raise RuntimeError("secret internals")
 
-    c = TestClient(app, raise_server_exceptions=False)
+    c = test_client_factory(app, raise_server_exceptions=False)
     r = c.get("/_boom")
     assert r.status_code == 500
     assert r.text == "Internal Server Error"
     assert "error" not in r.headers.get("content-type", "")
 
 
-def test_api_csrf_rejection_is_envelope(monkeypatch, pg_url, pg_session_factory):
-    c = TestClient(_app(monkeypatch, pg_url))
+def test_api_csrf_rejection_is_envelope(
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
+):
+    c = test_client_factory(_app(monkeypatch, pg_url))
     # A cross-origin POST to an /api path: bad Origin → CSRF 403.
     # CSRF middleware runs before routing, so the route need not exist yet —
     # a bad Origin is rejected regardless.
@@ -156,8 +164,10 @@ def test_api_csrf_rejection_is_envelope(monkeypatch, pg_url, pg_session_factory)
     assert r.json()["error"]["code"] == "forbidden"
 
 
-def test_api_405_is_envelope_with_allow_header(monkeypatch, pg_url, pg_session_factory):
-    c = TestClient(_app(monkeypatch, pg_url))
+def test_api_405_is_envelope_with_allow_header(
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
+):
+    c = test_client_factory(_app(monkeypatch, pg_url))
     # /api/me is GET-only; POST with a valid Origin passes CSRF, then routing 405s.
     r = c.post("/api/me", headers={"origin": "http://testserver"})
     assert r.status_code == 405
@@ -165,9 +175,11 @@ def test_api_405_is_envelope_with_allow_header(monkeypatch, pg_url, pg_session_f
     assert "GET" in r.headers.get("allow", "")
 
 
-def test_api_body_too_large_is_envelope(monkeypatch, pg_url, pg_session_factory):
+def test_api_body_too_large_is_envelope(
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
+):
     monkeypatch.setenv("MAX_REQUEST_BODY_BYTES", "16")
-    c = TestClient(_app(monkeypatch, pg_url))
+    c = test_client_factory(_app(monkeypatch, pg_url))
     r = c.post(
         "/api/me/default-profile",
         headers={"origin": "http://testserver", "content-type": "application/json"},
@@ -177,9 +189,11 @@ def test_api_body_too_large_is_envelope(monkeypatch, pg_url, pg_session_factory)
     assert r.json()["error"]["code"] == "payload_too_large"
 
 
-def test_api_validation_error_is_envelope(monkeypatch, pg_url, pg_session_factory):
+def test_api_validation_error_is_envelope(
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
+):
     app = _app(monkeypatch, pg_url)
-    c, _uid, _pid = _login(app, pg_session_factory)
+    c, _uid, _pid = _login(app, pg_session_factory, test_client_factory)
     r = c.post(
         "/api/me/default-profile",
         headers={"origin": "http://testserver"},
@@ -190,14 +204,16 @@ def test_api_validation_error_is_envelope(monkeypatch, pg_url, pg_session_factor
     assert body["error"]["code"] == "validation_error"
 
 
-def test_api_inactive_account_is_envelope(monkeypatch, pg_url, pg_session_factory):
+def test_api_inactive_account_is_envelope(
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
+):
     app = _app(monkeypatch, pg_url)
     with pg_session_factory() as s:
         u = User(status="pending", email="pending@ki.se")
         s.add(u)
         s.commit()
         uid = u.id
-    c = TestClient(app)
+    c = test_client_factory(app)
     c.cookies.set("session", app.state.session_signer.make(user_id=uid))
     r = c.get("/api/me")
     assert r.status_code == 403
