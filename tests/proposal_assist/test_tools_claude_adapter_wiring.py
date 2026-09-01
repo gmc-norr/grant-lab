@@ -42,7 +42,7 @@ def test_factory_wires_tools_into_adapter(monkeypatch, _settings_env):
 def test_adapter_launch_passes_mcp_servers_and_allowed_tools(monkeypatch):
     """When tools_factory is set, adapter.launch passes
     ClaudeAgentOptions(mcp_servers=..., tools=[], strict_mcp_config=True,
-    allowed_tools=<bare names>)."""
+    allowed_tools=<fully-qualified MCP names>)."""
     from call_manager.proposal_assist.drafting import claude_adapter as ca
     from call_manager.proposal_assist.drafting.contract import LaunchContext
 
@@ -88,9 +88,8 @@ def test_adapter_launch_passes_mcp_servers_and_allowed_tools(monkeypatch):
 
     allowed = captured.get("allowed_tools")
     assert allowed is not None
-    # Bare names per SDK docstring example (see Task 7 Step 0).
-    # NO mcp__ prefix — confirm we're using the bare form.
-    assert not any(t.startswith("mcp__") for t in allowed)
+    prefix = "mcp__proposal_assist__"
+    assert all(t.startswith(prefix) for t in allowed)
     # Full allowlist coverage: 21 tools — 19 post-SP2a-2 (6 mutating tools removed,
     # propose_edit + propose_citation added) plus SP2b-2b's read_spec + propose_spec_edit.
     expected_tools = {
@@ -122,7 +121,7 @@ def test_adapter_launch_passes_mcp_servers_and_allowed_tools(monkeypatch):
         # Slice 4 — bibliography rendering
         "build_bibliography",
     }
-    assert set(allowed) == expected_tools
+    assert set(allowed) == {f"{prefix}{name}" for name in expected_tools}
 
 
 def test_options_strip_builtin_tools_even_without_tools_factory():
@@ -210,6 +209,10 @@ def test_every_collected_tool_is_allowlisted(_settings_env):
     )
     kwargs = adapter._build_options_kwargs(LaunchContext(workspace_id=wsid))
     allowed = set(kwargs["allowed_tools"])
+    qualified_interactive = {
+        f"mcp__proposal_assist__{name}" for name in collected - background_only
+    }
+    allowed_bare = {name.removeprefix("mcp__proposal_assist__") for name in allowed}
 
     # The background-only tools really are in the shared MCP server (so the
     # background adapters can call them) ...
@@ -218,7 +221,7 @@ def test_every_collected_tool_is_allowlisted(_settings_env):
     )
     # ... and the interactive default allowlist is exactly the rest. No collected
     # tool is silently unreachable.
-    assert allowed == collected - background_only
-    missing = collected - allowed - background_only
+    assert allowed == qualified_interactive
+    missing = collected - allowed_bare - background_only
     assert missing == set(), f"collected tools reachable by no adapter: {missing}"
     assert len(allowed) == 21

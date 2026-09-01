@@ -257,4 +257,4 @@ def test_validate_citations_in_allowed_tools():
         tools_factory=lambda repo_dir, wsid: object(),  # type: ignore[arg-type]
     )
     opts = adapter._build_options_kwargs(LaunchContext(workspace_id=uuid.uuid4()))
-    assert "validate_citations" in opts["allowed_tools"]
+    assert "mcp__proposal_assist__validate_citations" in opts["allowed_tools"]

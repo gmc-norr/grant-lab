@@ -16,6 +16,12 @@ from call_manager.proposal_assist.tools.registry import (
     _safe_tool,
 )
 
+_MCP_PREFIX = "mcp__proposal_assist__"
+
+
+def _qualified(tool_name: str) -> str:
+    return f"{_MCP_PREFIX}{tool_name}"
+
 
 def _build_options_for_role(allowed_tools: list[str]) -> dict:
     """Build ClaudeAgentOptions kwargs for a background role with a
@@ -52,11 +58,17 @@ def test_evaluator_disallowed_tools_excludes_fetch_reference_and_propose():
     kwargs = _build_options_for_role(["submit_scorecard"])
 
     disallowed = set(kwargs.get("disallowed_tools", []))
-    assert "fetch_reference" in disallowed, "fetch_reference must be hard-denied for evaluator"
-    assert "propose_edit" in disallowed, "propose_edit must be hard-denied for evaluator"
-    assert "propose_spec_edit" in disallowed, "propose_spec_edit must be hard-denied for evaluator"
+    assert _qualified("fetch_reference") in disallowed, (
+        "fetch_reference must be hard-denied for evaluator"
+    )
+    assert _qualified("propose_edit") in disallowed, (
+        "propose_edit must be hard-denied for evaluator"
+    )
+    assert _qualified("propose_spec_edit") in disallowed, (
+        "propose_spec_edit must be hard-denied for evaluator"
+    )
     # The only allowed tool must NOT be in the disallowed set
-    assert "submit_scorecard" not in disallowed
+    assert _qualified("submit_scorecard") not in disallowed
 
 
 def test_review_disallowed_tools_excludes_dangerous_tools():
@@ -64,9 +76,9 @@ def test_review_disallowed_tools_excludes_dangerous_tools():
     kwargs = _build_options_for_role(["submit_review"])
 
     disallowed = set(kwargs.get("disallowed_tools", []))
-    assert "fetch_reference" in disallowed
-    assert "propose_edit" in disallowed
-    assert "submit_review" not in disallowed
+    assert _qualified("fetch_reference") in disallowed
+    assert _qualified("propose_edit") in disallowed
+    assert _qualified("submit_review") not in disallowed
 
 
 def test_uncited_claims_disallowed_tools_excludes_dangerous_tools():
@@ -74,9 +86,9 @@ def test_uncited_claims_disallowed_tools_excludes_dangerous_tools():
     kwargs = _build_options_for_role(["submit_uncited_claims"])
 
     disallowed = set(kwargs.get("disallowed_tools", []))
-    assert "fetch_reference" in disallowed
-    assert "propose_edit" in disallowed
-    assert "submit_uncited_claims" not in disallowed
+    assert _qualified("fetch_reference") in disallowed
+    assert _qualified("propose_edit") in disallowed
+    assert _qualified("submit_uncited_claims") not in disallowed
 
 
 def test_disallowed_plus_allowed_covers_all_mcp_tools():
@@ -88,7 +100,7 @@ def test_disallowed_plus_allowed_covers_all_mcp_tools():
 
     allowed = set(kwargs["allowed_tools"])
     disallowed = set(kwargs.get("disallowed_tools", []))
-    all_mcp = collect_mcp_tool_names()
+    all_mcp = {_qualified(name) for name in collect_mcp_tool_names()}
 
     assert allowed | disallowed == all_mcp, (
         f"gap: {all_mcp - allowed - disallowed}  overlap: {allowed & disallowed}"

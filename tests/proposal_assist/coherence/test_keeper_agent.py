@@ -31,7 +31,7 @@ def test_keeper_adapter_uses_lock_aware_allowlist(tmp_path, pg_session_factory, 
         lifecycle_generation=0,
     )
     kwargs = adapter._build_options_kwargs(LaunchContext(workspace_id=ws_id))
-    assert "propose_spec_edit" not in kwargs["allowed_tools"]
-    assert "propose_edit" in kwargs["allowed_tools"]
+    assert "mcp__proposal_assist__propose_spec_edit" not in kwargs["allowed_tools"]
+    assert "mcp__proposal_assist__propose_edit" in kwargs["allowed_tools"]
     # No resume → fresh session.
     assert "resume" not in kwargs

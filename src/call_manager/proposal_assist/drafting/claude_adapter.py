@@ -76,6 +76,12 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["ClaudeAgentSDKAdapter", "SDKTurnError"]
 
+_MCP_SERVER_NAME = "proposal_assist"
+
+
+def _qualified_mcp_tool_name(tool_name: str) -> str:
+    return f"mcp__{_MCP_SERVER_NAME}__{tool_name}"
+
 # App secrets that must NOT reach the drafting subprocess. The SDK *merges*
 # ClaudeAgentOptions.env over the inherited process environment (it cannot
 # delete inherited keys — see subprocess_cli.py), so we neutralize each by
@@ -286,14 +292,14 @@ class ClaudeAgentSDKAdapter:
         }
         if self._tools_factory is not None:
             mcp_server = self._tools_factory(repo_dir, workspace_id)
-            options_kwargs["mcp_servers"] = {"proposal_assist": mcp_server}
-            # Bare tool names per the SDK's docstring example
-            # (claude_agent_sdk/__init__.py:352 — "allowed_tools=['add','multiply']"
-            # paired with mcp_servers={'calc': calculator}). The SDK forwards the
-            # list verbatim to the CLI's --allowedTools flag.
+            options_kwargs["mcp_servers"] = {_MCP_SERVER_NAME: mcp_server}
+            # The SDK forwards these values verbatim to the CLI's --allowedTools
+            # flag. MCP calls arrive as mcp__<server>__<tool>, so bare names do not
+            # match and the headless subprocess reports an ungrantable permission
+            # prompt instead of dispatching the tool.
             # `or` falls back to the interactive default when None; callers must pass
             # a NON-EMPTY list (an empty [] would collapse to the full default below).
-            options_kwargs["allowed_tools"] = self._allowed_tools or [
+            bare_allowed_tools = self._allowed_tools or [
                 "read_proposal",
                 # SP2a-2 — propose-only mutation (no direct repo writes)
                 "propose_edit",
@@ -323,6 +329,9 @@ class ClaudeAgentSDKAdapter:
                 # draft/spec section mutation; spec removes only prose+citation)
                 "build_bibliography",
             ]
+            options_kwargs["allowed_tools"] = [
+                _qualified_mcp_tool_name(name) for name in bare_allowed_tools
+            ]
             # DEFECT 1 FIX: Defense-in-depth for background sub-agents.
             # allowed_tools alone gates prompting only. Non-allowlisted MCP
             # tools are ALSO hard-denied via disallowed_tools (stripped from
@@ -337,11 +346,13 @@ class ClaudeAgentSDKAdapter:
                     collect_mcp_tool_names,
                 )
 
-                _allowed_set = frozenset(options_kwargs["allowed_tools"])
+                _allowed_set = frozenset(self._allowed_tools)
                 _all_mcp = collect_mcp_tool_names()
                 _denied = sorted(_all_mcp - _allowed_set)
                 if _denied:
-                    options_kwargs["disallowed_tools"] = _denied
+                    options_kwargs["disallowed_tools"] = [
+                        _qualified_mcp_tool_name(name) for name in _denied
+                    ]
 
                 async def _can_use_tool(
                     tool_name: str,
