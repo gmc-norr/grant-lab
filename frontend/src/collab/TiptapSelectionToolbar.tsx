@@ -1,5 +1,5 @@
 // frontend/src/collab/TiptapSelectionToolbar.tsx
-import { Button, Group, Menu, Paper, Text } from "@mantine/core";
+import { Button, Group, Menu, Paper, Popover, Text, TextInput } from "@mantine/core";
 import type { Editor } from "@tiptap/core";
 import { BubbleMenu, type BubbleMenuProps } from "@tiptap/react/menus";
 import { useEffect, useState } from "react";
@@ -60,6 +60,8 @@ export function TiptapSelectionToolbar(props: TiptapSelectionToolbarProps) {
   const ack = useAckDisclosure(workspaceId);
   const [needsAck, setNeedsAck] = useState<TurnPayload | null>(null);
   const [turnError, setTurnError] = useState<string | null>(null);
+  const [editMenuOpen, setEditMenuOpen] = useState(false);
+  const [customInstruction, setCustomInstruction] = useState("");
 
   useEffect(() => {
     const update = () => setClaim(deriveClaimAnchor(editor.state));
@@ -93,11 +95,12 @@ export function TiptapSelectionToolbar(props: TiptapSelectionToolbarProps) {
   // payload (content + the selection_context captured at submit time) into needsAck, so
   // ackAndRetry re-submits the ORIGINAL selection — immune to the user changing/clearing
   // the selection between the 403 and the ack.
-  function submitTurn(payload: TurnPayload) {
+  function submitTurn(payload: TurnPayload, onSuccess?: () => void) {
     submit.mutate(payload, {
       onSuccess: () => {
         setNeedsAck(null);
         setTurnError(null);
+        onSuccess?.();
       },
       onError: (e) => {
         if (e instanceof ApiError && /disclosure/i.test(e.message)) {
@@ -109,7 +112,7 @@ export function TiptapSelectionToolbar(props: TiptapSelectionToolbarProps) {
     });
   }
 
-  function runTurn(requestType: "ask" | "modify", instruction: string) {
+  function runTurn(requestType: "ask" | "modify", instruction: string, onSuccess?: () => void) {
     if (!claim || !instruction.trim() || submit.isPending) return;
     const selection_context: SelectionContext = {
       request_type: requestType,
@@ -121,7 +124,7 @@ export function TiptapSelectionToolbar(props: TiptapSelectionToolbarProps) {
       from_offset: fromOffset,
       to_offset: toOffset,
     };
-    submitTurn({ content: instruction, selection_context });
+    submitTurn({ content: instruction.trim(), selection_context }, onSuccess);
   }
 
   function ackAndRetry() {
@@ -181,20 +184,66 @@ export function TiptapSelectionToolbar(props: TiptapSelectionToolbarProps) {
 
           {/* Edit — only when canEdit; disabled when not writeReady */}
           {canEdit && (
-            <Menu position="bottom-start" disabled={!writeReady}>
-              <Menu.Target>
-                <Button size="xs" variant="default" disabled={!writeReady} aria-label="Edit">
+            <Popover
+              opened={editMenuOpen}
+              onChange={setEditMenuOpen}
+              position="bottom-start"
+              shadow="md"
+              withinPortal={false}
+            >
+              <Popover.Target>
+                <Button
+                  size="xs"
+                  variant="default"
+                  disabled={!writeReady}
+                  aria-label="Edit"
+                  onClick={() => setEditMenuOpen((open) => !open)}
+                >
                   Edit
                 </Button>
-              </Menu.Target>
-              <Menu.Dropdown>
-                {EDIT_PRESETS.map((p) => (
-                  <Menu.Item key={p.label} onClick={() => runTurn("modify", p.text)}>
-                    {p.label}
-                  </Menu.Item>
-                ))}
-              </Menu.Dropdown>
-            </Menu>
+              </Popover.Target>
+              <Popover.Dropdown className={styles.editPanel}>
+                <Text size="xs" fw={600}>Edit selection</Text>
+                <Group gap={4} mt={6} wrap="wrap">
+                  {EDIT_PRESETS.map((preset) => (
+                    <Button
+                      key={preset.label}
+                      size="compact-xs"
+                      variant="default"
+                      onClick={() => runTurn("modify", preset.text, () => setEditMenuOpen(false))}
+                    >
+                      {preset.label}
+                    </Button>
+                  ))}
+                </Group>
+                <form
+                  className={styles.customEdit}
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    runTurn("modify", customInstruction, () => {
+                      setCustomInstruction("");
+                      setEditMenuOpen(false);
+                    });
+                  }}
+                  onKeyDown={(event) => event.stopPropagation()}
+                >
+                  <TextInput
+                    size="xs"
+                    aria-label="Custom edit instruction"
+                    placeholder="Describe the change…"
+                    value={customInstruction}
+                    onChange={(event) => setCustomInstruction(event.currentTarget.value)}
+                  />
+                  <Button
+                    size="xs"
+                    type="submit"
+                    disabled={!customInstruction.trim() || submit.isPending}
+                  >
+                    Apply
+                  </Button>
+                </form>
+              </Popover.Dropdown>
+            </Popover>
           )}
 
           {/* Cite — only when canWrite; disabled when not writeReady */}

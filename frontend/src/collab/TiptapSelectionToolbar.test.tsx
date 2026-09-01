@@ -219,6 +219,34 @@ describe("TiptapSelectionToolbar gates", () => {
   });
 });
 
+describe("TiptapSelectionToolbar custom edits", () => {
+  beforeEach(() => {
+    submitMock.mockReset();
+    ackMock.mockReset();
+    vi.mocked(deriveClaimAnchor).mockReturnValue(fixedClaim);
+  });
+
+  it("submits a custom instruction as a modify turn for the selected text", async () => {
+    renderToolbar({ settled: true });
+
+    fireEvent.click(screen.getByRole("button", { name: /^edit$/i }));
+    const input = await screen.findByRole("textbox", { name: /custom edit instruction/i });
+    fireEvent.change(input, { target: { value: "  Make this persuasive for a clinical audience.  " } });
+    fireEvent.submit(input.closest("form")!);
+
+    expect(submitMock).toHaveBeenCalledTimes(1);
+    expect(submitMock.mock.calls[0][0]).toMatchObject({
+      content: "Make this persuasive for a clinical audience.",
+      selection_context: {
+        request_type: "modify",
+        target_artifact: "draft",
+        section_index: 0,
+        anchor: "Test claim.",
+      },
+    });
+  });
+});
+
 describe("TiptapSelectionToolbar Ask errors", () => {
   beforeEach(() => {
     submitMock.mockReset();

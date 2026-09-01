@@ -489,6 +489,21 @@ def test_build_options_appends_citation_instruction():
     assert ca._CITATION_INSTRUCTION in append
 
 
+def test_build_options_appends_selection_modify_response_contract():
+    """One-click selection edits hand off to the inline review instead of
+    repeating the diff or expanding into unrelated editorial advice."""
+    from call_manager.proposal_assist.drafting import claude_adapter as ca
+
+    adapter = ClaudeAgentSDKAdapter(model="claude-haiku-4-5", workspaces_dir="/tmp/x")
+    kwargs = adapter._build_options_kwargs(LaunchContext(workspace_id=uuid.uuid4()))
+    append = kwargs["system_prompt"]["append"]
+
+    assert ca._SELECTION_ACTION_INSTRUCTION in append
+    assert "selection edit is ready for review" in append
+    assert "Do not repeat the before/after text" in append
+    assert "unrelated issues" in append
+
+
 @pytest.mark.asyncio
 async def test_set_turn_provenance_stamps_retained_ctx_after_launch():
     """The real adapter retains the per-workspace ToolContext the factory built

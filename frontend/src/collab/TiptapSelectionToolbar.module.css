@@ -8,3 +8,14 @@
   background: var(--app-editor);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
 }
+
+.editPanel {
+  width: min(22rem, calc(100vw - 1rem));
+}
+
+.customEdit {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}

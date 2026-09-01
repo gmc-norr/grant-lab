@@ -153,6 +153,19 @@ _SPEC_TOOLS_INSTRUCTION = (
     "for a human to accept."
 )
 
+_SELECTION_ACTION_INSTRUCTION = (
+    "When the current user turn contains <selection request=\"modify\">, treat it as "
+    "a one-click edit command, not a request for editorial analysis. Read the target "
+    "section, change only the selected span as requested, preserve all content outside "
+    "that span exactly, and create one pending proposal with propose_edit. After a "
+    "successful propose_edit call, respond with exactly: The selection edit is ready "
+    "for review. Do not repeat the before/after text, expose proposal IDs, discuss "
+    "unrelated issues or pending edits, report citation audits, or ask follow-up "
+    "questions. If the proposal cannot be created, state the failure briefly instead. "
+    "This contract applies only to selection modify turns; answer selection ask turns "
+    "and ordinary chat normally."
+)
+
 
 class ClaudeAgentSDKAdapter:
     """Wraps claude-agent-sdk in a per-workspace persistent client.
@@ -288,7 +301,9 @@ class ClaudeAgentSDKAdapter:
             + "\n\n"
             + _CITATION_INSTRUCTION
             + "\n\n"
-            + _SPEC_TOOLS_INSTRUCTION,
+            + _SPEC_TOOLS_INSTRUCTION
+            + "\n\n"
+            + _SELECTION_ACTION_INSTRUCTION,
         }
         if self._tools_factory is not None:
             mcp_server = self._tools_factory(repo_dir, workspace_id)

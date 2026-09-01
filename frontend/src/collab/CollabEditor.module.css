@@ -1,6 +1,10 @@
 /* First real stylesheet for the collab editor surface — tables need visible
    structure (spec §F). Everything scoped under the hashed .editor class per
    repo convention (never bare element selectors in a .module.css). */
+.editor[data-artifact="draft"] :global(.ProseMirror) {
+  padding: 0.5rem clamp(1rem, 3vw, 2rem) 2rem;
+}
+
 .editor :global(.ProseMirror) table {
   border-collapse: collapse;
   width: 100%;

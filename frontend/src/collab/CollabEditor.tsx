@@ -117,7 +117,11 @@ function CollabEditorInner(
   }, [editor, label, color]);
 
   return (
-    <div data-collab-status={props.status} className={styles.editor}>
+    <div
+      data-collab-status={props.status}
+      data-artifact={props.artifact}
+      className={styles.editor}
+    >
       <EditorToolbar
         editor={editor}
         canWrite={props.canWrite}
