@@ -1,0 +1,51 @@
+project:
+  title: "Task-aware LLM routing for proposal-assist UX"
+  domain: "AI product design and LLM orchestration"
+  started: "2026-09-01"
+  status: surveyed
+
+field_understanding:
+  sota_summary: "Current products combine low-friction automatic behavior with compact expert controls. Production routers constrain candidate models and report the actual model. Research optimizes task quality and cost, with newer work adding workload-sensitive TTFT; model identity alone is not a latency measurement."
+  key_papers:
+    - title: "RouteLLM: Learning to Route LLMs with Preference Data"
+      url: "https://arxiv.org/abs/2406.18665"
+      contribution: "Learns strong-versus-weak model routing from preference data to trade quality against cost."
+    - title: "Beyond Accuracy and Cost: Latency-Aware LLM Query Routing for Dynamic Workloads"
+      url: "https://arxiv.org/html/2607.18253"
+      contribution: "Adds workload-sensitive TTFT to joint quality, cost, and latency routing."
+  open_problems:
+    - "Task-specific quality labels for proposal edits are not yet defined."
+    - "Current end-to-end latency has not been decomposed into queue, startup, provider, tools, and commit stages."
+    - "Prompt-cache behavior and safe switching boundaries for the persistent Claude client are unmeasured."
+    - "Hospital compliance constraints have not yet been converted into a model allowlist."
+  underexplored_areas:
+    - "Routing between a constrained editing workflow and a general agent, before routing between models."
+    - "User-facing capability policies with exact requested-versus-actual model auditability."
+
+hypotheses:
+  - id: H1
+    statement: "Mature AI products commonly hide task-to-model routing behind an automatic mode rather than requiring a model choice for every action."
+    parent: null
+    motivation: "An automatic default could preserve an uncluttered selection-edit workflow."
+    status: supported_with_qualification
+    evidence: "GitHub Copilot task-optimized Auto, OpenRouter Auto Router, and ChatGPT automatic reasoning reduce per-request model decisions. Claude and expert coding tools still retain direct controls, and some Auto modes optimize availability rather than task fit."
+    implication: "Use Auto as the default only with explicit routing semantics; do not require selection-toolbar model choice."
+  - id: H2
+    statement: "Products that expose model choice keep it to a small, secondary control and explain choices by capability or speed rather than model identifiers alone."
+    parent: null
+    motivation: "A secondary override may support expert users without burdening routine edits."
+    status: supported_with_qualification
+    evidence: "Claude places model/effort/thinking in one compact composer menu; GitHub and Cursor use secondary model pickers; OpenAI and Cursor expose reasoning, speed, cost, balance, or intelligence concepts. Raw model names remain available in expert products."
+    implication: "Put any override in conversation or workspace settings, label normal choices by outcome, and keep exact allowlisted models available as advanced detail."
+  - id: H3
+    statement: "Engineering guidance evaluates routing jointly on quality, latency, and cost rather than using model family as a latency proxy."
+    parent: null
+    motivation: "The proposal-assist routing decision needs measured task outcomes, not assumptions about model names."
+    status: supported
+    evidence: "RouteLLM evaluates quality against cost. Latency-aware routing jointly evaluates quality, cost, and TTFT and shows TTFT depends on queueing, prefill, serving load, and scheduling. NVIDIA defines separate first-token, inter-token, and end-to-end metrics."
+    implication: "Instrument and evaluate the complete interaction before introducing routing; never infer latency from a model family name."
+
+decision:
+  status: evidence_ready_for_measurement
+  recommendation: "Default to a task-aware policy, retain an optional compact advanced override away from selection actions, constrain eligible models, record the actual model, and promote routing only after task-specific quality/cost/latency evaluation."
+  next_gate: "Measure the current Opus agent path and compare it with a constrained selected-edit workflow on matched tasks."
