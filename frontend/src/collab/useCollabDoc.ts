@@ -1,6 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as Y from "yjs";
 import { CollabProvider, type ProviderStatus } from "./collabProvider";
+
+const MAX_DOCUMENT_REPLACEMENTS = 8;
+const DOCUMENT_REPLACEMENT_BASE_MS = 100;
+const DOCUMENT_REPLACEMENT_MAX_MS = 2_000;
 
 function wsUrl(workspaceId: string, artifact: string): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -34,7 +38,16 @@ export function useCollabDoc(opts: {
   // Separate from status on purpose: see CollabProvider.synced.
   const [synced, setSynced] = useState(false);
   const [documentGeneration, setDocumentGeneration] = useState(0);
+  const replacementAttempts = useRef(0);
+  const replacementTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { workspaceId, artifact, canWrite } = opts;
+  useEffect(() => {
+    replacementAttempts.current = 0;
+    return () => {
+      if (replacementTimer.current) clearTimeout(replacementTimer.current);
+      replacementTimer.current = null;
+    };
+  }, [workspaceId, artifact]);
   useEffect(() => {
     const doc = new Y.Doc();
     const provider = new CollabProvider({
@@ -46,16 +59,32 @@ export function useCollabDoc(opts: {
         // Hide the stale doc immediately; effect cleanup destroys it before a
         // fresh pair connects and hydrates the newly selected branch.
         setState(null);
-        setStatus("connecting");
         setSynced(false);
-        setDocumentGeneration((generation) => generation + 1);
+        if (replacementAttempts.current >= MAX_DOCUMENT_REPLACEMENTS) {
+          setStatus("offline-permanent");
+          return;
+        }
+        const delay = Math.min(
+          DOCUMENT_REPLACEMENT_BASE_MS * 2 ** replacementAttempts.current,
+          DOCUMENT_REPLACEMENT_MAX_MS,
+        );
+        replacementAttempts.current += 1;
+        setStatus("offline");
+        replacementTimer.current = setTimeout(() => {
+          replacementTimer.current = null;
+          setStatus("connecting");
+          setDocumentGeneration((generation) => generation + 1);
+        }, delay);
       },
     });
     setState({ doc, provider });
     setStatus(provider.status);
     setSynced(provider.synced);
     const off = provider.on("status", setStatus);
-    const offSync = provider.on("sync", setSynced);
+    const offSync = provider.on("sync", (isSynced) => {
+      setSynced(isSynced);
+      if (isSynced) replacementAttempts.current = 0;
+    });
     return () => {
       off();
       offSync();

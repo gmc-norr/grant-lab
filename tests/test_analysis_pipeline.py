@@ -63,6 +63,9 @@ def _init_repo(tmp_path, ws_id, doc, citations_json=None):
         (repo / "citations.json").write_text(citations_json)
     env = _git_env()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True, env=env)
+    subprocess.run(
+        ["git", "symbolic-ref", "HEAD", "refs/heads/main"], cwd=repo, check=True, env=env
+    )
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True, env=env)
     subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, check=True, env=env)
     return repo

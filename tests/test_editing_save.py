@@ -41,6 +41,9 @@ def _init_repo(tmp_path, ws_id, doc=DOC):
     (repo / "proposal.md").write_text(doc)
     env = _git_env()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True, env=env)
+    subprocess.run(
+        ["git", "symbolic-ref", "HEAD", "refs/heads/main"], cwd=repo, check=True, env=env
+    )
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True, env=env)
     subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, check=True, env=env)
     return repo

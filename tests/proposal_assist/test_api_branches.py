@@ -405,10 +405,10 @@ def test_a_save_from_the_previous_branch_is_refused_with_both_names(
     assert "edited on main" not in (repo / "proposal.md").read_text()
 
 
-def test_KNOWN_DEFECT_the_worktree_changes_before_the_branch_rename_commits(
+def test_artifact_snapshot_stays_on_the_recorded_branch_during_checkout(
     client_authed_owner, current_user, pg_session_factory, _app, monkeypatch
 ):
-    """PINS A DEFECT. This test passing is the bug; invert it when fixed.
+    """A read at the checkout-before-commit seam stays on the recorded branch.
 
     `switch_branch` sets `workspaces.current_branch` (branches.py step 8) and
     then runs `checkout_branch` (step 9) INSIDE the transaction; the commit
@@ -416,26 +416,15 @@ def test_KNOWN_DEFECT_the_worktree_changes_before_the_branch_rename_commits(
     between those two lines the git worktree already holds the TARGET branch's
     bytes while every other connection still reads the SOURCE branch's name.
 
-    `get_draft` (workspaces.py:273-286) reads exactly that pair -- `branch` from
-    its own session, `head` and the file from the worktree -- and takes no
-    mutex, so it can answer with the old branch name and the new branch's
-    content. The client then sees `branch` unchanged, so the new `branchChanged`
-    guard reads false, buffers and undo survive, and the other branch's text is
-    rendered as if it were this one's. That is the leak `branch` was added to
-    prevent, in the one ordering it does not cover.
-
     Rather than race a second HTTP request against the switch (nested TestClient
-    portals deadlock), this peeks at the seam: a fresh session opened at the
-    exact instant between step 9 and the commit, reading the same two sources
-    `get_draft` reads.
-
-    Closing the window -- committing before the checkout, or making the read
-    take the commit mutex -- turns the assertions below red.
+    portals deadlock), this peeks at the seam and uses the same DB-selected,
+    immutable branch snapshot as the endpoint. HEAD itself is already on the
+    target, so a worktree read would fail these assertions.
     """
     import subprocess
 
     from call_manager.proposal_assist import branches as branches_mod
-    from call_manager.proposal_assist.citations.gitio import current_head
+    from call_manager.proposal_assist.citations.gitio import current_head, read_branch_file
 
     with pg_session_factory() as s:
         wid = _seed(s, _app, current_user)
@@ -452,6 +441,7 @@ def test_KNOWN_DEFECT_the_worktree_changes_before_the_branch_rename_commits(
         subprocess.run(
             ["git", "-c", "user.email=t@t", "-c", "user.name=t", *argv], cwd=repo, check=True
         )
+        main_head = current_head(repo)
     assert (repo / "proposal.md").read_text() != text_v2
 
     r = client_authed_owner.post(
@@ -471,8 +461,9 @@ def test_KNOWN_DEFECT_the_worktree_changes_before_the_branch_rename_commits(
         with pg_session_factory() as peek:
             row = peek.get(Workspace, wid)
             seen["branch"] = row.current_branch
-            seen["head"] = current_head(repo_dir)
-            seen["text"] = (repo_dir / "proposal.md").read_text()
+            seen["head"], seen["text"] = read_branch_file(
+                repo_dir, row.current_branch, "proposal.md"
+            )
 
     monkeypatch.setattr(branches_mod, "checkout_branch", checkout_then_peek)
 
@@ -480,12 +471,10 @@ def test_KNOWN_DEFECT_the_worktree_changes_before_the_branch_rename_commits(
     assert r.status_code == 200, r.text
     assert seen, "the step-9 checkout never ran; the seam moved"
 
-    # The window: the name is still the source branch's...
     assert seen["branch"] == "main"
-    # ...while the bytes and HEAD are already the target's.
-    assert seen["text"] == text_v2
-    assert seen["text"] != text_main
-    assert seen["head"] == older
+    assert seen["text"] == text_main
+    assert seen["text"] != text_v2
+    assert seen["head"] == main_head
 
 
 def test_the_switch_response_carries_real_tips_not_an_empty_map(

@@ -53,7 +53,12 @@ def read_head_markdown(repo_dir, artifact: str) -> str | None:
 
 
 def canonical_artifact_markdown(
-    session, *, workspace_id: uuid.UUID, artifact: str, repo_dir
+    session,
+    *,
+    workspace_id: uuid.UUID,
+    artifact: str,
+    repo_dir,
+    head_markdown: str | None = None,
 ) -> str:
     """Room-canonical (normalized) markdown for a collab-enabled artifact.
 
@@ -68,7 +73,7 @@ def canonical_artifact_markdown(
     updates = store.load_updates(session, workspace_id=workspace_id, artifact=artifact)
     if updates:
         return pm_to_markdown(ydoc_to_pm_json(build_doc(updates)))
-    md = read_head_markdown(repo_dir, artifact)
+    md = head_markdown if head_markdown is not None else read_head_markdown(repo_dir, artifact)
     if md is None:
         # Absent file: mirror hydration's no-seed rule. An empty room serializes to
         # "" (no blocks), so the base captured here is byte-identical to the live SHA.

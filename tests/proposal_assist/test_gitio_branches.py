@@ -6,6 +6,7 @@ import subprocess
 
 import pytest
 
+from call_manager.proposal_assist.citations import gitio
 from call_manager.proposal_assist.citations.gitio import (
     GitCommitError,
     branch_exists,
@@ -96,6 +97,33 @@ def test_checkout_moves_head(tmp_path):
     create_branch(d, "short-version")
     checkout_branch(d, "short-version")
     assert current_branch(d) == "short-version"
+
+
+def test_read_branch_file_keeps_the_resolved_commit_when_the_branch_moves(
+    tmp_path, monkeypatch
+):
+    d = _repo(tmp_path)
+    proposal = d / "proposal.md"
+    proposal.write_text("old\n")
+    subprocess.run(["git", "add", "proposal.md"], cwd=d, check=True, env=_GIT_ENV)
+    subprocess.run(["git", "commit", "-qm", "old"], cwd=d, check=True, env=_GIT_ENV)
+    old_head = gitio.current_head(d)
+    real_read = gitio.read_file_at_commit
+
+    def move_branch_then_read(repo_dir, commit_sha, path):
+        proposal.write_text("new\n")
+        subprocess.run(
+            ["git", "commit", "-qam", "new"], cwd=d, check=True, env=_GIT_ENV
+        )
+        return real_read(repo_dir, commit_sha, path)
+
+    monkeypatch.setattr(gitio, "read_file_at_commit", move_branch_then_read)
+
+    head, text = gitio.read_branch_file(d, "main", "proposal.md")
+
+    assert gitio.current_head(d) != old_head
+    assert head == old_head
+    assert text == "old\n"
 
 
 def test_delete_removes_the_ref(tmp_path):

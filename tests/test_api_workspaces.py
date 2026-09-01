@@ -10,11 +10,14 @@ and writes+commits proposal.md at `workspace_repo_dir(tmp_path, ws_id)`.
 from __future__ import annotations
 
 import subprocess
+import threading
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.orm import Session
 
 from call_manager.db.models import (
     ArtifactVersion,
@@ -29,6 +32,8 @@ from call_manager.db.models import (
     WorkspaceViewer,
 )
 from call_manager.main import create_app
+from call_manager.proposal_assist import row_locks
+from call_manager.proposal_assist.artifacts import SPEC_FILENAME
 from call_manager.proposal_assist.citations.gitio import _git_env
 from call_manager.proposal_assist.citations.ledger import dump_ledger, empty_ledger
 from call_manager.proposal_assist.editing.save import CITATIONS_FILENAME, PROPOSAL_FILENAME
@@ -114,6 +119,96 @@ def test_draft_returns_server_split_sections_and_head(
     # sha is sha256 of the section text bytes (64 hex chars).
     assert all(len(s["sha"]) == 64 for s in sections)
     assert body["citations"] == {}
+
+
+@pytest.mark.parametrize(
+    ("artifact", "filename"),
+    [("draft", PROPOSAL_FILENAME), ("spec", SPEC_FILENAME)],
+)
+def test_artifact_read_waits_for_an_uncommitted_branch_transition(
+    monkeypatch, pg_url, pg_session_factory, tmp_path, artifact, filename
+):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "## Aims\n\nmain.\n"
+    )
+    repo = workspace_repo_dir(str(tmp_path), ws_id)
+    if artifact == "spec":
+        (repo / SPEC_FILENAME).write_text("## Aims\n\nmain.\n")
+        subprocess.run(["git", "add", SPEC_FILENAME], cwd=repo, check=True, env=_git_env())
+        subprocess.run(
+            ["git", "commit", "-qm", "main spec"], cwd=repo, check=True, env=_git_env()
+        )
+    subprocess.run(["git", "checkout", "-qb", "v2"], cwd=repo, check=True, env=_git_env())
+    (repo / filename).write_text("## Aims\n\ntarget.\n")
+    subprocess.run(
+        ["git", "commit", "-qam", "target"], cwd=repo, check=True, env=_git_env()
+    )
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=repo, check=True, env=_git_env())
+
+    lock_attempted = threading.Event()
+    finished = threading.Event()
+    result: dict[str, object] = {}
+    real_refresh = Session.refresh
+
+    def tracked_refresh(self, instance, *args, **kwargs):
+        if isinstance(instance, Workspace) and kwargs.get("with_for_update") == {"read": True}:
+            lock_attempted.set()
+        return real_refresh(self, instance, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "refresh", tracked_refresh)
+
+    def read_artifact():
+        client = _client(app, owner_id)
+        try:
+            result["response"] = client.get(f"/api/workspaces/{ws_id}/{artifact}")
+        except BaseException as exc:  # pragma: no cover - asserted below
+            result["error"] = exc
+        finally:
+            client.close()
+            finished.set()
+
+    with pg_session_factory() as switching:
+        switching.execute(
+            update(Workspace).where(Workspace.id == ws_id).values(current_branch="v2")
+        )
+        thread = threading.Thread(target=read_artifact)
+        thread.start()
+        assert lock_attempted.wait(timeout=5), "artifact read never requested the share lock"
+        assert not finished.is_set(), "artifact read crossed an uncommitted branch transition"
+        switching.commit()
+        thread.join(timeout=20)
+
+    assert finished.is_set(), "artifact read stayed blocked after the transition committed"
+    assert "error" not in result
+    response = result["response"]
+    assert response.status_code == 200
+    body = response.json()
+    assert body["branch"] == "v2"
+    assert "target." in "".join(section["text"] for section in body["sections"])
+    app.state.engine.dispose()
+
+
+def test_artifact_snapshot_lock_timeout_is_retryable(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "## Aims\n\nmain.\n"
+    )
+    monkeypatch.setattr(row_locks, "WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS", 0.05)
+
+    with pg_session_factory() as holding:
+        holding.execute(
+            update(Workspace).where(Workspace.id == ws_id).values(title="locked")
+        )
+        client = _client(app, owner_id)
+        response = client.get(f"/api/workspaces/{ws_id}/draft")
+        client.close()
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "2"
+    app.state.engine.dispose()
 
 
 def test_draft_member_can_read_but_can_edit_false(

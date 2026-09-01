@@ -54,6 +54,13 @@ generation fence for disable, restore and purge.
 
 ## Whole-project architecture reviews
 
+**[reviews/2026-09-01-whole-project-review.md](reviews/2026-09-01-whole-project-review.md)**
+*What remains after the August 29 remediation wave and the branch-identity work?*
+Read-only current-tree review with measured backend/frontend validation. Finds an incomplete
+`base_branch` rollout, two remaining branch-switch consistency gaps, blocking work on the
+application loop, an unmonitored scheduler lock, a forgeable ranking delimiter, and SSE
+revocation drift. Confirms the prior critical CRDT decoder issue is fixed.
+
 **[reviews/2026-08-29-third-pass-expansion.md](reviews/2026-08-29-third-pass-expansion.md)**
 **The review of record.** Supersedes the second pass's severity ranking. Start here.
 

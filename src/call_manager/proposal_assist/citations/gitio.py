@@ -671,6 +671,30 @@ def read_blob(repo_dir: Path, sha: str) -> str:
     return proc.stdout.decode(errors="replace")
 
 
+def read_file_at_commit(repo_dir: Path, commit_sha: str, path: str) -> str:
+    """Read *path* from one immutable commit, independent of the worktree."""
+    return read_blob(repo_dir, blob_sha(repo_dir, commit_sha, path))
+
+
+def read_branch_file(repo_dir: Path, branch: str, path: str) -> tuple[str, str]:
+    """Return ``(commit_sha, text)`` for *path* on one local branch snapshot.
+
+    Resolve the branch once, then address the file through that immutable commit.
+    A checkout or commit racing the later blob reads therefore cannot mix a head
+    from one branch state with bytes from another.
+    """
+    ref = f"refs/heads/{branch}"
+    try:
+        proc = _git(repo_dir, "rev-parse", "--verify", f"{ref}^{{commit}}")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _log_if_timeout(exc)
+        raise GitCommitError(f"cannot resolve branch {branch!r}: {exc}") from exc
+    if proc.returncode != 0:
+        raise GitCommitError(f"cannot resolve branch {branch!r}: {proc.stderr.strip()}")
+    commit_sha = proc.stdout.strip()
+    return commit_sha, read_file_at_commit(repo_dir, commit_sha, path)
+
+
 @dataclass(frozen=True)
 class CommitInfo:
     """One entry of a workspace repository's history."""

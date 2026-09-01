@@ -31,6 +31,7 @@ from call_manager.db.models import (
     WorkspaceSetupJob,
     WorkspaceViewer,
 )
+from call_manager.proposal_assist import row_locks
 from call_manager.proposal_assist.artifacts import SPEC_FILENAME, SPEC_SKELETON, Artifact
 from call_manager.proposal_assist.citations import reader as citation_reader
 from call_manager.proposal_assist.citations.collab_cite import (
@@ -40,6 +41,8 @@ from call_manager.proposal_assist.citations.collab_cite import (
 from call_manager.proposal_assist.citations.gitio import (
     GitCommitError,
     current_head,
+    read_branch_file,
+    read_file_at_commit,
     write_and_commit_files,
 )
 from call_manager.proposal_assist.citations.human_cite import (
@@ -204,7 +207,9 @@ class AddCitationOut(BaseModel):
     commit_sha: str
 
 
-def _citation_map(session, settings, workspace_id: uuid.UUID, raw: str) -> dict[str, CitationOut]:
+def _citation_map(
+    session, workspace_id: uuid.UUID, raw: str, ledger_text: str | None
+) -> dict[str, CitationOut]:
     """Build {ev_id: CitationOut} over the WHOLE proposal `raw`.
 
     number_by_ev/stance_by_ev are proposal-wide; citekey comes from the marker;
@@ -212,11 +217,9 @@ def _citation_map(session, settings, workspace_id: uuid.UUID, raw: str) -> dict[
     corrupt ledger yields an EMPTY map (never raises) — same degrade rule as
     _citation_render_maps_for.
     """
-    repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
-    citations_path = repo_dir / CITATIONS_FILENAME
     try:
-        ledger = load_ledger(citations_path.read_text() if citations_path.exists() else None)
-    except (ValueError, OSError):
+        ledger = load_ledger(ledger_text)
+    except ValueError:
         return {}
     number_by_ev = citation_reader.build_citation_numbering(raw, ledger)
     stance_by_ev = citation_reader.build_citation_stances(ledger)
@@ -257,6 +260,22 @@ def _sections_out(raw: str) -> list[SectionOut]:
     ]
 
 
+def _lock_artifact_read_snapshot(session, workspace: Workspace) -> None:
+    try:
+        with row_locks.bounded_lock_waits(
+            session,
+            timeout_seconds=row_locks.WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS,
+            message="timed out waiting for a stable artifact snapshot",
+        ):
+            session.refresh(workspace, with_for_update={"read": True})
+    except row_locks.RowLockTimeout as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=BUSY_ERROR_MESSAGE,
+            headers={"Retry-After": "2"},
+        ) from exc
+
+
 def _locker_email(session, user_id: int | None) -> str | None:
     """Display string for a spec locker. user_id is non-null only while the row
     is set, and the FK is SET NULL on user delete, so the lookup never dangles."""
@@ -277,18 +296,22 @@ def get_draft(
     sf = request.app.state.session_factory
     with sf() as session:
         ws = require_member(workspace_id=workspace_id, user=user, session=session)
+        # Pair the authoritative branch with its collab log in one committed
+        # workspace state. A switch either waits before its row update or this
+        # refresh waits until the checkout + log handover commits.
+        _lock_artifact_read_snapshot(session, ws)
         stamp = stamp_for_workspace(ws)  # minted at the access check (endgame Task 5)
         branch = ws.current_branch
         can_edit = ws.owner_id == user.id
         repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
-        proposal = repo_dir / PROPOSAL_FILENAME
-        if not proposal.exists():
-            raise HTTPException(status_code=404, detail="no proposal.md yet")
         try:
-            head = current_head(repo_dir)
+            head, raw_disk = read_branch_file(repo_dir, branch, PROPOSAL_FILENAME)
         except GitCommitError as e:
             raise HTTPException(status_code=404, detail="no proposal.md yet") from e
-        raw_disk = proposal.read_text()
+        try:
+            ledger_text = read_file_at_commit(repo_dir, head, CITATIONS_FILENAME)
+        except GitCommitError:
+            ledger_text = None
         # 3b-5d.D4 enable-on-touch: the first read of an artifact flips collab
         # on (sticky, per-artifact, kill-switch-suppressed) and THIS response
         # already reports collab_enabled=true.
@@ -300,12 +323,16 @@ def get_draft(
         )
         if collab_enabled:
             raw = canonical_artifact_markdown(
-                session, workspace_id=workspace_id, artifact="draft", repo_dir=repo_dir
+                session,
+                workspace_id=workspace_id,
+                artifact="draft",
+                repo_dir=repo_dir,
+                head_markdown=raw_disk,
             )
         else:
             raw = raw_disk
         sections = _sections_out(raw)
-        citations = _citation_map(session, settings, workspace_id, raw)
+        citations = _citation_map(session, workspace_id, raw, ledger_text)
         _, can_write = resolve_access(
             session, user=user, workspace_id=workspace_id, artifact="draft"
         )
@@ -331,20 +358,17 @@ def get_spec(
     sf = request.app.state.session_factory
     with sf() as session:
         ws = require_member(workspace_id=workspace_id, user=user, session=session)
+        _lock_artifact_read_snapshot(session, ws)
         stamp = stamp_for_workspace(ws)  # minted at the access check (endgame Task 5)
         branch = ws.current_branch
         is_owner = ws.owner_id == user.id
         locked = ws.spec_locked_at is not None
         can_edit = is_owner and not locked
         repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
-        spec = repo_dir / SPEC_FILENAME
-        if not spec.exists():
-            raise HTTPException(status_code=404, detail="no proposal-spec.md yet")
         try:
-            head = current_head(repo_dir)
+            head, raw_disk = read_branch_file(repo_dir, branch, SPEC_FILENAME)
         except GitCommitError as e:
             raise HTTPException(status_code=404, detail="no proposal-spec.md yet") from e
-        raw_disk = spec.read_text()
         collab_enabled = maybe_auto_enable(
             session,
             stamp=stamp,
@@ -353,7 +377,11 @@ def get_spec(
         )
         raw = (
             canonical_artifact_markdown(
-                session, workspace_id=workspace_id, artifact="spec", repo_dir=repo_dir
+                session,
+                workspace_id=workspace_id,
+                artifact="spec",
+                repo_dir=repo_dir,
+                head_markdown=raw_disk,
             )
             if collab_enabled
             else raw_disk
