@@ -1,6 +1,6 @@
 # Prior investigations — read this before measuring anything
 
-25 documents in `notes/` and `reviews/` record work already done: spikes with verdicts,
+26 documents in `notes/` and `reviews/` record work already done: spikes with verdicts,
 multi-agent reviews with verified defect tallies, and outside opinions. They are indexed
 here **by the question they answer**, because they are named by date and slice, which is
 useless when you are trying to find out whether someone has already looked at something.
@@ -53,6 +53,19 @@ The same ask, answered independently at 615 lines: structural alternatives to th
 generation fence for disable, restore and purge.
 
 ## Whole-project architecture reviews
+
+**[reviews/2026-09-02-thorough-project-review.md](reviews/2026-09-02-thorough-project-review.md)**
+*What does the whole project look like when every gate is mutated, every prior open
+finding is re-verified, and the modules no reviewer had opened are read?* Eleven
+worktree-isolated reviewers plus independent re-execution of the headline probes.
+**16/16 mutations against the core security and fence gates were caught.** New: three
+reproduced collab data-corruption paths (stale-doc merge after a branch switch, mark
+mis-nesting, empty blockquote bricks the artifact), a `published_at` ingestion regression
+from `8a297db1`, four member-reachable resource exhaustions in reference upload/fetch, and
+an unattached safety net (no git remote, so CI has never run; README migration step fails
+as written; `--workers 2` boots healthy). 43 prior open findings: 8 fixed, 3 partial, 1
+refuted (Referrer-Policy comment is correct), 31 open. Appendices carry every reviewer's
+full report with probe commands.
 
 **[reviews/2026-09-01-security-and-performance-review.md](reviews/2026-09-01-security-and-performance-review.md)**
 *Does the current tree hold up against OWASP Top 10, and where does non-LLM latency
