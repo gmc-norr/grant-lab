@@ -19,7 +19,7 @@ import { expect, test, type Page } from "@playwright/test";
 async function login(page: Page): Promise<void> {
   await page.goto("/login");
   await page.getByLabel(/email/i).fill("e2e@ki.se");
-  await page.getByLabel(/password/i).fill("correct-horse-1");
+  await page.getByRole("textbox", { name: /password/i }).fill("correct-horse-1");
   await Promise.all([
     page.waitForURL("**/"),
     page.getByRole("button", { name: /sign in|log in/i }).click(),
