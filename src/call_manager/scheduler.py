@@ -87,6 +87,10 @@ class SchedulerLock:
                     text("SELECT pg_advisory_unlock(hashtext(:name))"),
                     {"name": SCHEDULER_LOCK_NAME},
                 )
+            invalidate = getattr(self._connection, "invalidate", None)
+            if invalidate is not None:
+                with contextlib.suppress(Exception):
+                    invalidate()
             self._connection.close()
         except Exception:  # noqa: BLE001
             _logger.warning("scheduler lock release: connection close failed", exc_info=True)
@@ -185,6 +189,7 @@ def _drain_pass_future(fut, *, pass_name: str, timeout: float) -> None:
         )
     except Exception:
         _logger.exception("%s tick failed", pass_name)
+
 
 def build_scheduler(
     *,

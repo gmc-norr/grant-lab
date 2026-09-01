@@ -51,6 +51,7 @@ class _FakeConn:
 
     def __init__(self, acquired: bool):
         self._acquired = acquired
+        self.invalidated = False
         self.closed = False
 
     def execute(self, *_a, **_kw):
@@ -60,6 +61,9 @@ class _FakeConn:
 
     def close(self):
         self.closed = True
+
+    def invalidate(self):
+        self.invalidated = True
 
 
 class _FakeEngine:
@@ -84,6 +88,7 @@ def test_try_acquire_returns_lock_when_acquired():
     assert engine.conn is not None and engine.conn.closed is False
     # Releasing closes the connection.
     lock.release()
+    assert engine.conn.invalidated is True
     assert engine.conn.closed is True
 
 

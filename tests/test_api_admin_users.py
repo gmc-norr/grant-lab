@@ -1,9 +1,18 @@
-
+import pytest
 from fastapi.testclient import TestClient
 
 from call_manager.auth.passwords import verify_password
 from call_manager.db.models import User
 from call_manager.main import create_app
+
+_CREATED_APPS = []
+
+
+@pytest.fixture(autouse=True)
+def _dispose_created_app_engines():
+    yield
+    while _CREATED_APPS:
+        _CREATED_APPS.pop().state.engine.dispose()
 
 
 def _setup(monkeypatch, pg_url):
@@ -14,7 +23,9 @@ def _setup(monkeypatch, pg_url):
         "APP_BASE_URL": "http://testserver",
     }.items():
         monkeypatch.setenv(k, v)
-    return create_app()
+    app = create_app()
+    _CREATED_APPS.append(app)
+    return app
 
 
 def _admin(app, sf, email="admin@ki.se"):

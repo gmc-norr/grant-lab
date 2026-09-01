@@ -6,6 +6,9 @@ Retention Slice B. Reads only; this endpoint can remove nothing.
 from datetime import UTC, datetime
 
 from call_manager.db.models import Workspace
+from tests.admin_retention_helpers import (
+    _dispose_created_app_engines as _dispose_created_app_engines,
+)
 from tests.admin_retention_helpers import client_for, setup_app, soft_delete
 from tests.proposal_assist.conftest import make_user, make_workspace
 
@@ -122,9 +125,7 @@ def test_pagination_caps_the_limit(monkeypatch, pg_url, pg_session_factory, tmp_
     assert r.status_code == 422, "an uncapped limit lets one request read the whole table"
 
 
-def test_returns_total_count_and_honours_offset(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
-):
+def test_returns_total_count_and_honours_offset(monkeypatch, pg_url, pg_session_factory, tmp_path):
     app = setup_app(monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
     with pg_session_factory() as s:
@@ -145,9 +146,7 @@ def test_returns_total_count_and_honours_offset(
     assert not ({r["id"] for r in first["items"]} & {r["id"] for r in second["items"]})
 
 
-def test_the_route_is_documented_with_the_shared_error_envelope(
-    monkeypatch, pg_url, tmp_path
-):
+def test_the_route_is_documented_with_the_shared_error_envelope(monkeypatch, pg_url, tmp_path):
     """These routes must go through web/api/__init__.py's router, which declares
     responses={code: ApiError} for every status the /api surface emits. Mounting
     them directly on the app instead advertises FastAPI's stock

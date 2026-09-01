@@ -26,6 +26,9 @@ import pytest
 from call_manager.db.models import Workspace, WorkspaceEvent
 from call_manager.proposal_assist.citations.gitio import GitCommitError
 from call_manager.proposal_assist.paths import workspace_repo_dir
+from tests.admin_retention_helpers import (
+    _dispose_created_app_engines as _dispose_created_app_engines,
+)
 from tests.admin_retention_helpers import client_for, setup_app, soft_delete
 from tests.proposal_assist.conftest import make_user, make_workspace
 
@@ -416,9 +419,7 @@ def test_inspection_writes_exactly_one_audit_event_naming_the_admin(
     }
 
 
-def test_a_second_read_appends_a_second_event(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
-):
+def test_a_second_read_appends_a_second_event(monkeypatch, pg_url, pg_session_factory, tmp_path):
     """The trace is per-read, not per-workspace. An implementation that
     de-duplicated would hide repeat access to someone's draft."""
     app = setup_app(monkeypatch, pg_url, tmp_path)
@@ -502,9 +503,7 @@ def test_the_audit_write_precedes_response_construction(
     assert order == ["audit", "body"]
 
 
-def test_inspection_starts_no_collab_room(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
-):
+def test_inspection_starts_no_collab_room(monkeypatch, pg_url, pg_session_factory, tmp_path):
     """A deleted workspace has no live collab room and must not acquire one.
     Inspection that spun up a room would resurrect machinery deletion tore
     down, and Slice E's purge would then have a reader nothing knows about."""
@@ -682,9 +681,7 @@ def test_inspection_is_refused_when_the_capability_is_disabled(
     )
 
 
-def test_a_refused_inspection_serves_no_content(
-    monkeypatch, pg_url, pg_session_factory, tmp_path
-):
+def test_a_refused_inspection_serves_no_content(monkeypatch, pg_url, pg_session_factory, tmp_path):
     """The whole point of the gate. Asserted on the BODY, not just the status:
     a 403 that still carried the draft would pass a status-only test."""
     app = _disabled_app(monkeypatch, pg_url, tmp_path)

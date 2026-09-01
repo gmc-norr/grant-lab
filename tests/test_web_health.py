@@ -24,9 +24,13 @@ def test_healthz_returns_503_when_db_unreachable(pg_url, monkeypatch):
     """Outage path: simulate a dead database by swapping app.state.engine."""
     _set_min_env(monkeypatch, pg_url)
     app = create_app()
+    live_engine = app.state.engine
     # Replace the engine with one pointing at a closed port (fast TCP refusal).
     app.state.engine = make_engine("postgresql+psycopg://x:x@127.0.0.1:1/x")
-    with TestClient(app) as client:
-        r = client.get("/healthz")
+    try:
+        with TestClient(app) as client:
+            r = client.get("/healthz")
+    finally:
+        live_engine.dispose()
     assert r.status_code == 503
     assert "db unavailable" in r.json()["detail"]

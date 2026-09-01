@@ -64,6 +64,9 @@ from call_manager.proposal_assist.phases.setup import (
     claim_next_setup_job,
 )
 from call_manager.workspaces import restore_workspace_db
+from tests.admin_retention_helpers import (
+    _dispose_created_app_engines as _dispose_created_app_engines,
+)
 from tests.admin_retention_helpers import client_for, setup_app, soft_delete
 from tests.proposal_assist.conftest import make_user, make_workspace
 from tests.workspace_delete_helper import soft_delete_workspace_for_test
@@ -80,16 +83,12 @@ def _seed_deleted_with_setup_job(
     the DB half of the delete (bumps the lifecycle generation, cancels turns).
     Returns (ws_id, owner_id, job_id)."""
     with pg_session_factory() as s:
-        owner = make_user(
-            s, email=owner_email or f"owner-{uuid.uuid4().hex[:8]}@ki.se"
-        )
+        owner = make_user(s, email=owner_email or f"owner-{uuid.uuid4().hex[:8]}@ki.se")
         ws = make_workspace(s, owner=owner, current_phase="setup")
         s.flush()
         ws_id = ws.id
         owner_id = owner.id
-        job = WorkspaceSetupJob(
-            workspace_id=ws_id, status=status, cancelled_from=cancelled_from
-        )
+        job = WorkspaceSetupJob(workspace_id=ws_id, status=status, cancelled_from=cancelled_from)
         s.add(job)
         s.commit()
         job_id = job.id
@@ -130,9 +129,7 @@ def test_deleted_while_running_is_claimable_immediately_after_restore(
     back 'queued' and a worker's REAL claim path picks it up on the next tick —
     it does not wait out STUCK_SETUP_AFTER. Asserting status=='queued' alone
     would not prove claimability; claim_next_setup_job is the proof."""
-    ws_id, admin_id, job_id = _seed_deleted_with_setup_job(
-        pg_session_factory, status="running"
-    )
+    ws_id, admin_id, job_id = _seed_deleted_with_setup_job(pg_session_factory, status="running")
 
     with pg_session_factory() as s:
         outcome = restore_workspace_db(s, workspace_id=ws_id, admin_id=admin_id)
@@ -250,19 +247,13 @@ def test_the_late_apply_landing_after_the_retry_leaves_the_workspace_live(
 
         # First apply: parked, barrier expires → bridge reports False.
         monkeypatch.setattr(lifecycle, "apply", _slow_first_apply)
-        monkeypatch.setattr(
-            "call_manager.proposal_assist.lifecycle._RESTORE_BARRIER_SECONDS", 0.2
-        )
-        assert (
-            signal_workspace_restored(req, workspace_id=ws, generation=5) is False
-        )
+        monkeypatch.setattr("call_manager.proposal_assist.lifecycle._RESTORE_BARRIER_SECONDS", 0.2)
+        assert signal_workspace_restored(req, workspace_id=ws, generation=5) is False
         assert lifecycle.applied_generation(ws) == 0, "the slow apply must not have landed"
 
         # The retry uses the real (fast) apply and lands generation 5.
         monkeypatch.setattr(lifecycle, "apply", real_apply)
-        assert (
-            signal_workspace_restored(req, workspace_id=ws, generation=5) is True
-        )
+        assert signal_workspace_restored(req, workspace_id=ws, generation=5) is True
         assert lifecycle.applied_generation(ws) == 5
         assert lifecycle.is_retired(ws) is False
 
@@ -283,6 +274,7 @@ def test_the_late_apply_landing_after_the_retry_leaves_the_workspace_live(
         release.set()
         loop.call_soon_threadsafe(loop.stop)
         t.join(timeout=5)
+        loop.close()
 
 
 # ===========================================================================
@@ -293,9 +285,7 @@ def test_the_late_apply_landing_after_the_retry_leaves_the_workspace_live(
 def test_restore_after_the_retirement_hook_cancelled_the_job(pg_session_factory):
     """Cancellation path 1 (the hook). cancel_setup_jobs_for_workspace records
     cancelled_from='running'; restore maps it back to a progressing 'queued'."""
-    ws_id, admin_id, job_id = _seed_deleted_with_setup_job(
-        pg_session_factory, status="running"
-    )
+    ws_id, admin_id, job_id = _seed_deleted_with_setup_job(pg_session_factory, status="running")
     # The hook cancels at the deletion generation (bumped by the delete).
     with pg_session_factory() as s:
         gen = s.execute(
@@ -315,9 +305,7 @@ def test_restore_after_the_retirement_hook_cancelled_the_job(pg_session_factory)
 def test_restore_after_reconciliation_cancelled_the_job(pg_session_factory):
     """Cancellation path 2 (reconciliation). reconcile_cancelled_jobs terminalizes
     a soft-deleted workspace's setup job; restore maps it back."""
-    ws_id, admin_id, job_id = _seed_deleted_with_setup_job(
-        pg_session_factory, status="queued"
-    )
+    ws_id, admin_id, job_id = _seed_deleted_with_setup_job(pg_session_factory, status="queued")
     with pg_session_factory() as s:
         jr.reconcile_cancelled_jobs(s)
         s.commit()
@@ -330,14 +318,10 @@ def test_restore_after_reconciliation_cancelled_the_job(pg_session_factory):
     assert _job(pg_session_factory, job_id).status == "queued"
 
 
-def test_restore_after_the_worker_self_cancelled_the_job(
-    pg_session_factory, tmp_path
-):
+def test_restore_after_the_worker_self_cancelled_the_job(pg_session_factory, tmp_path):
     """Cancellation path 3 (the worker). Phase0Worker._fail on a deleted
     workspace records cancelled_from and cancels; restore maps it back."""
-    ws_id, admin_id, job_id = _seed_deleted_with_setup_job(
-        pg_session_factory, status="running"
-    )
+    ws_id, admin_id, job_id = _seed_deleted_with_setup_job(pg_session_factory, status="running")
     worker = _make_worker(pg_session_factory, tmp_path)
     worker._fail(job_id, WorkspaceGoneDuringSetup("workspace deleted"))
     assert _job(pg_session_factory, job_id).status == "cancelled"
@@ -363,9 +347,7 @@ def test_cancelled_turns_stay_cancelled_after_restore(pg_session_factory):
         s.flush()
         ws_id = ws.id
         admin_id = owner.id
-        ut = ChatTurn(
-            workspace_id=ws_id, role="user", content={"type": "text", "text": "hi"}
-        )
+        ut = ChatTurn(workspace_id=ws_id, role="user", content={"type": "text", "text": "hi"})
         s.add(ut)
         s.flush()
         tj = TurnJob(
@@ -389,9 +371,7 @@ def test_cancelled_turns_stay_cancelled_after_restore(pg_session_factory):
         restore_workspace_db(s, workspace_id=ws_id, admin_id=admin_id)
 
     with pg_session_factory() as s:
-        assert s.get(TurnJob, tj_id).status == "cancelled", (
-            "restore resurrected a cancelled turn"
-        )
+        assert s.get(TurnJob, tj_id).status == "cancelled", "restore resurrected a cancelled turn"
 
 
 # ===========================================================================
@@ -420,9 +400,7 @@ def test_the_owner_can_open_the_workspace_again_after_restore(
 
     # The owner's authenticated client (a distinct helper account is the admin).
     owner_client = client_for(app, pg_session_factory, email="junk@ki.se", is_admin=False)[0]
-    owner_client.cookies.set(
-        "session", app.state.session_signer.make(user_id=owner_id)
-    )
+    owner_client.cookies.set("session", app.state.session_signer.make(user_id=owner_id))
     admin_client, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
 
     cockpit = f"/api/workspaces/{ws_id}/cockpit-meta"
@@ -435,9 +413,7 @@ def test_the_owner_can_open_the_workspace_again_after_restore(
 
     # Admin restores.
     with admin_client:
-        r_restore = admin_client.post(
-            f"/api/admin/workspaces/deleted/{ws_id}/restore"
-        )
+        r_restore = admin_client.post(f"/api/admin/workspaces/deleted/{ws_id}/restore")
     assert r_restore.status_code == 204, r_restore.text
 
     # Owner can open it again → 200.
@@ -493,9 +469,7 @@ def test_the_retirement_hook_racing_the_restore_cannot_leave_it_cancelled(
     to catch. The M → W → J inversion does NOT — it is equivalent for this
     property; see the module docstring.
     """
-    ws_id, admin_id, job_id = _seed_deleted_with_setup_job(
-        pg_session_factory, status="queued"
-    )
+    ws_id, admin_id, job_id = _seed_deleted_with_setup_job(pg_session_factory, status="queued")
     with pg_session_factory() as s:
         del_gen = s.execute(
             select(Workspace.lifecycle_generation).where(Workspace.id == ws_id)
@@ -544,9 +518,7 @@ def test_reconciliation_racing_the_restore_cannot_leave_it_cancelled(
     reconcile_cancelled_jobs. Same seam: fire on the `UPDATE workspaces` clear,
     so under M → J → W restore holds the job lock and reconciliation's SKIP
     LOCKED passes over it."""
-    ws_id, admin_id, job_id = _seed_deleted_with_setup_job(
-        pg_session_factory, status="queued"
-    )
+    ws_id, admin_id, job_id = _seed_deleted_with_setup_job(pg_session_factory, status="queued")
 
     state = {"fired": False}
 
@@ -623,9 +595,7 @@ def test_a_late_fail_after_restore_does_not_re_cancel(pg_session_factory, tmp_pa
     re-cancel the job: _fail's FRESH read sees the workspace live and returns
     without a write, so the job stays 'queued' (charged no attempt), not
     'cancelled'."""
-    ws_id, admin_id, job_id = _seed_deleted_with_setup_job(
-        pg_session_factory, status="running"
-    )
+    ws_id, admin_id, job_id = _seed_deleted_with_setup_job(pg_session_factory, status="running")
 
     # Restore first: the workspace is live and the job is 'queued' again.
     with pg_session_factory() as s:
@@ -639,8 +609,7 @@ def test_a_late_fail_after_restore_does_not_re_cancel(pg_session_factory, tmp_pa
 
     job = _job(pg_session_factory, job_id)
     assert job.status == "queued", (
-        f"a stale WorkspaceGoneDuringSetup re-cancelled a restored job "
-        f"(status={job.status!r})"
+        f"a stale WorkspaceGoneDuringSetup re-cancelled a restored job (status={job.status!r})"
     )
     assert job.cancelled_from is None
     assert job.attempts == attempts_before, "the stale exception charged an attempt"
@@ -678,9 +647,7 @@ def test_a_restore_that_loses_the_mutex_race_returns_the_winners_generation(
     locks at that instant, so A acquires the same mutex, commits and releases it
     inside the callback without deadlocking.
     """
-    ws_id, admin_id, job_id = _seed_deleted_with_setup_job(
-        pg_session_factory, status="queued"
-    )
+    ws_id, admin_id, job_id = _seed_deleted_with_setup_job(pg_session_factory, status="queued")
     with pg_session_factory() as s:
         del_gen = s.execute(
             select(Workspace.lifecycle_generation).where(Workspace.id == ws_id)
@@ -694,9 +661,7 @@ def test_a_restore_that_loses_the_mutex_race_returns_the_winners_generation(
         if state["fired"] or "pg_advisory_xact_lock" not in statement:
             return
         state["fired"] = True
-        state["winner_gen"] = _restore_from_another_connection(
-            pg_session_factory, ws_id, admin_id
-        )
+        state["winner_gen"] = _restore_from_another_connection(pg_session_factory, ws_id, admin_id)
 
     event.listen(migrated_engine, "before_cursor_execute", _before)
     try:
@@ -727,10 +692,14 @@ def test_a_restore_that_loses_the_mutex_race_returns_the_winners_generation(
     with pg_session_factory() as s:
         assert s.get(Workspace, ws_id).soft_deleted_at is None
         assert s.get(WorkspaceSetupJob, job_id).status == "queued"
-        events = s.execute(
-            select(WorkspaceEvent).where(
-                WorkspaceEvent.workspace_id == ws_id,
-                WorkspaceEvent.kind == "admin_deleted_workspace_restored",
+        events = (
+            s.execute(
+                select(WorkspaceEvent).where(
+                    WorkspaceEvent.workspace_id == ws_id,
+                    WorkspaceEvent.kind == "admin_deleted_workspace_restored",
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     assert len(events) == 1, f"expected exactly one restore audit row, got {len(events)}"

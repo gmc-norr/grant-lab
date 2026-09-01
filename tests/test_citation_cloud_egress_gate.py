@@ -93,6 +93,14 @@ from call_manager.proposal_assist.paths import workspace_repo_dir  # noqa: E402
 CHUNK_TEXT = "Adjuvant therapy reduces recurrence by 30% in the treated cohort."
 EV_ID = "ev-aaaaaaaaaaaa"
 CITEKEY = "smith2021"
+_CREATED_APPS = []
+
+
+@pytest.fixture(autouse=True)
+def _dispose_created_app_engines():
+    yield
+    while _CREATED_APPS:
+        _CREATED_APPS.pop().state.engine.dispose()
 
 
 def _cloud_app(monkeypatch, pg_url, tmp_path, *, drafting="true"):
@@ -108,6 +116,7 @@ def _cloud_app(monkeypatch, pg_url, tmp_path, *, drafting="true"):
     }.items():
         monkeypatch.setenv(k, v)
     app = create_app()
+    _CREATED_APPS.append(app)
     app.state.settings.workspaces_dir = str(tmp_path)
     return app
 
@@ -142,17 +151,29 @@ def _seed_deep_check(pg_session_factory, tmp_path, *, acknowledged: bool):
                 )
             )
         ref = Reference(
-            workspace_id=ws_id, kind="paper", source_type="uploaded", filename="s.pdf",
-            storage_path="s/s.pdf", mime_type="application/pdf", citekey=CITEKEY,
+            workspace_id=ws_id,
+            kind="paper",
+            source_type="uploaded",
+            filename="s.pdf",
+            storage_path="s/s.pdf",
+            mime_type="application/pdf",
+            citekey=CITEKEY,
             metadata_status="approved",
         )
         s.add(ref)
         s.flush()
         rid = ref.id
-        s.add(ReferenceChunk(
-            reference_id=rid, workspace_id=ws_id, chunk_index=0, section_path="Results",
-            text=CHUNK_TEXT, embedding=[0.0] * 1024, embedding_model="fake",
-        ))
+        s.add(
+            ReferenceChunk(
+                reference_id=rid,
+                workspace_id=ws_id,
+                chunk_index=0,
+                section_path="Results",
+                text=CHUNK_TEXT,
+                embedding=[0.0] * 1024,
+                embedding_model="fake",
+            )
+        )
         s.commit()
 
     repo = workspace_repo_dir(tmp_path, ws_id)
@@ -161,13 +182,21 @@ def _seed_deep_check(pg_session_factory, tmp_path, *, acknowledged: bool):
         f"# P\n\nAdjuvant therapy cuts recurrence{build_marker(CITEKEY, EV_ID)}.\n"
     )
     row = build_evidence_row(
-        ev_id=EV_ID, citekey=CITEKEY, reference_id=str(rid), chunk_index=0,
-        section_path="Results", source_content_hash=None,
+        ev_id=EV_ID,
+        citekey=CITEKEY,
+        reference_id=str(rid),
+        chunk_index=0,
+        section_path="Results",
+        source_content_hash=None,
         chunk_content_hash=chunk_content_sha(CHUNK_TEXT),
-        evidence_quote="reduces recurrence by 30%", evidence_quote_offsets=[0, 0],
-        stance="supports", confidence=None, claim_context_text="placeholder",
+        evidence_quote="reduces recurrence by 30%",
+        evidence_quote_offsets=[0, 0],
+        stance="supports",
+        confidence=None,
+        claim_context_text="placeholder",
         claim_context_hash=claim_context_sha("placeholder"),
-        citation_snapshot="Smith 2021", created_at="2026-01-01T00:00:00+00:00",
+        citation_snapshot="Smith 2021",
+        created_at="2026-01-01T00:00:00+00:00",
         updated_at="2026-01-01T00:00:00+00:00",
     )
     (repo / "citations.json").write_text(dump_ledger(append_evidence(empty_ledger(), row)))
@@ -328,11 +357,7 @@ def test_a_members_upload_does_not_ride_on_the_OWNERS_ack(
         add_member(s, workspace_id=ws.id, user=member)
         ws_id, member_id, owner_id = ws.id, member.id, owner.id
         # ONLY the owner acknowledges.
-        s.add(
-            WorkspaceEvent(
-                workspace_id=ws_id, kind="disclosure_acknowledged", actor_id=owner_id
-            )
-        )
+        s.add(WorkspaceEvent(workspace_id=ws_id, kind="disclosure_acknowledged", actor_id=owner_id))
         s.commit()
 
     r = authed_client(app, user_id=member_id).post(

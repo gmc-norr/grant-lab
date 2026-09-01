@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { invalidateArtifact } from "./invalidateArtifact";
 
 describe("invalidateArtifact", () => {
-  it("refreshes the version list, not just the artifact", () => {
+  it("refreshes the artifact, version list, and branch tips", () => {
     // The defect: `useSaveVersion` invalidated ["draft", id] while the version
     // list lives under ["versions", id, artifact] — a key that appeared in NO
     // invalidateQueries call anywhere in the frontend. The version the user had
@@ -17,6 +17,7 @@ describe("invalidateArtifact", () => {
     const keys = spy.mock.calls.map((c) => JSON.stringify(c[0]?.queryKey));
     expect(keys).toContain(JSON.stringify(["draft", "ws-1"]));
     expect(keys).toContain(JSON.stringify(["versions", "ws-1"]));
+    expect(keys).toContain(JSON.stringify(["branches", "ws-1"]));
   });
 
   it("uses the versions PREFIX so both artifacts' lists refresh", () => {

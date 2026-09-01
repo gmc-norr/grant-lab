@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import hashlib
 
+import pytest
+
 from call_manager.db.models import EvaluatorJob, UncitedClaimsJob, Workspace
 from call_manager.proposal_assist.collab import state, store
 from call_manager.proposal_assist.collab.canonical import current_artifact_text_and_sha
@@ -34,6 +36,16 @@ from call_manager.proposal_assist.paths import workspace_repo_dir
 from call_manager.proposal_assist.problems.aggregate import assemble_problems
 from tests.proposal_assist.collab.test_collab_kernel_accept import _init_repo
 from tests.proposal_assist.conftest import make_user, make_workspace
+
+_CREATED_APPS = []
+
+
+@pytest.fixture(autouse=True)
+def _dispose_created_app_engines():
+    yield
+    while _CREATED_APPS:
+        _CREATED_APPS.pop().state.engine.dispose()
+
 
 # A marker whose ledger row does not exist -> one deterministic broken-citation issue.
 GHOST = "[@ghost]<!-- ev:ev-abcdef123456 -->"
@@ -115,6 +127,7 @@ def _audit_types(monkeypatch, pg_url, tmp_path, pg_session_factory, *, collab):
     }.items():
         monkeypatch.setenv(k, v)
     app = create_app()
+    _CREATED_APPS.append(app)
     app.state.settings.workspaces_dir = str(tmp_path)
 
     with pg_session_factory() as s:
@@ -177,9 +190,7 @@ def _stale_flags(pg_session_factory, wid, tmp_path, ws_rubric_updated_at):
     return out["scorecard_stale"], out["uncited_claims_stale"]
 
 
-def test_a_pass_that_evaluated_the_live_draft_is_not_reported_stale(
-    pg_session_factory, tmp_path
-):
+def test_a_pass_that_evaluated_the_live_draft_is_not_reported_stale(pg_session_factory, tmp_path):
     """Both flags, both directions, against the LIVE sha.
 
     Kills two mutations at once: hardwiring the flags on (the live-sha job would be
@@ -224,9 +235,7 @@ def test_a_pass_that_evaluated_the_live_draft_is_not_reported_stale(
     assert uncited_stale is False
 
 
-def test_a_pass_that_evaluated_the_stale_disk_draft_is_reported_stale(
-    pg_session_factory, tmp_path
-):
+def test_a_pass_that_evaluated_the_stale_disk_draft_is_reported_stale(pg_session_factory, tmp_path):
     """The other direction, so the flags are not simply hardwired off."""
     wid = _setup(pg_session_factory, tmp_path, "stale-flags-disk@ki.se")
     disk_sha = hashlib.sha256(STALE_DISK.encode()).hexdigest()

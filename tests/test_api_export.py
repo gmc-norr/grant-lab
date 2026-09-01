@@ -11,11 +11,15 @@ from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
 from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
 from call_manager.proposal_assist.paths import workspace_repo_dir
 
+_CREATED_APPS = []
+
 
 @pytest.fixture(autouse=True)
 def _reset_kill_switch():
     yield
     state.set_kill_switch(False)
+    while _CREATED_APPS:
+        _CREATED_APPS.pop().state.engine.dispose()
 
 
 def _append_authored_room_edit(pg_session_factory, ws_id, actor_id, md):
@@ -41,6 +45,7 @@ def _app(monkeypatch, pg_url, tmp_path):
     }.items():
         monkeypatch.setenv(k, v)
     app = create_app()
+    _CREATED_APPS.append(app)
     app.state.settings.workspaces_dir = str(tmp_path)
     return app
 

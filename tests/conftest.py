@@ -1,15 +1,35 @@
+import asyncio
 from contextlib import ExitStack
 
 import pytest
 from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import text
+from sqlalchemy.orm import close_all_sessions
 from testcontainers.postgres import PostgresContainer
 
 from alembic import command
 from call_manager.config import Settings
 from call_manager.db.base import Base
 from call_manager.db.session import make_engine, make_session_factory
+
+
+class _ExplicitEventLoopPolicy(asyncio.DefaultEventLoopPolicy):
+    def get_event_loop(self):
+        loop = getattr(self._local, "_loop", None)
+        if loop is None:
+            raise RuntimeError("There is no current event loop")
+        return loop
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _require_explicit_event_loops():
+    previous_policy = asyncio.get_event_loop_policy()
+    asyncio.set_event_loop_policy(_ExplicitEventLoopPolicy())
+    try:
+        yield
+    finally:
+        asyncio.set_event_loop_policy(previous_policy)
 
 
 @pytest.fixture(autouse=True)
@@ -111,6 +131,10 @@ def migrated_engine(db_engine, pg_url):
 def pg_session_factory(migrated_engine):
     SessionLocal = make_session_factory(migrated_engine)
     yield SessionLocal
+    # Controllers keep one session checked out for each live subprocess advisory
+    # lock. Engine.dispose() cannot close checked-out sessions, so close every
+    # session before resetting the database and pool at the test boundary.
+    close_all_sessions()
     # Truncate every table Base knows about, sorted for determinism. Future
     # plans that add tables get isolation for free without having to remember
     # to update this fixture. CASCADE handles FK ordering; RESTART IDENTITY

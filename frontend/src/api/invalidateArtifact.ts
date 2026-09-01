@@ -21,6 +21,10 @@ export type ArtifactKey = "draft" | "spec";
  * matches by prefix, so this refreshes both artifacts' lists. A branch switch
  * already did exactly this (api/branches.ts); it was the only caller that did.
  *
+ * A commit also advances the current branch tip. Refreshing history without
+ * refreshing branches leaves its pill on the previous commit, making the graph
+ * look as though the new commit landed on another branch.
+ *
  * Call this instead of invalidating the artifact key by hand. The gate in
  * `invalidateArtifact.test.ts` fails any source file that does the latter.
  */
@@ -32,5 +36,6 @@ export function invalidateArtifact(
   return Promise.all([
     qc.invalidateQueries({ queryKey: [artifact, id] }),
     qc.invalidateQueries({ queryKey: ["versions", id] }),
+    qc.invalidateQueries({ queryKey: ["branches", id] }),
   ]).then(() => undefined);
 }

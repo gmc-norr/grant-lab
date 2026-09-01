@@ -18,12 +18,16 @@ from sqlalchemy import select
 
 from call_manager.db.models import Workspace, WorkspaceEvent
 from call_manager.web.api import admin_retention as ws_api
+from tests.admin_retention_helpers import (
+    _dispose_created_app_engines as _dispose_created_app_engines,
+)
 from tests.admin_retention_helpers import client_for, setup_app, soft_delete
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _seed_workspace(sf):
     """Create a plain workspace (not deleted). Returns workspace_id."""
@@ -36,11 +40,15 @@ def _seed_workspace(sf):
 
 def _audit_rows(sf, workspace_id):
     with sf() as s:
-        rows = s.execute(
-            select(WorkspaceEvent)
-            .where(WorkspaceEvent.workspace_id == workspace_id)
-            .where(WorkspaceEvent.kind == "admin_deleted_workspace_restored")
-        ).scalars().all()
+        rows = (
+            s.execute(
+                select(WorkspaceEvent)
+                .where(WorkspaceEvent.workspace_id == workspace_id)
+                .where(WorkspaceEvent.kind == "admin_deleted_workspace_restored")
+            )
+            .scalars()
+            .all()
+        )
         return rows
 
 
@@ -51,6 +59,7 @@ def _path(ws_id):
 # ---------------------------------------------------------------------------
 # Test 1: happy path
 # ---------------------------------------------------------------------------
+
 
 def test_admin_restores_deleted_workspace(monkeypatch, pg_url, pg_session_factory, tmp_path):
     """Admin POSTing restore on a deleted workspace → 204, row is live, audit row written."""
@@ -78,6 +87,7 @@ def test_admin_restores_deleted_workspace(monkeypatch, pg_url, pg_session_factor
 # ---------------------------------------------------------------------------
 # Test 2: missing, non-admin, live
 # ---------------------------------------------------------------------------
+
 
 def test_missing_workspace_returns_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
     app = setup_app(monkeypatch, pg_url, tmp_path)
@@ -120,6 +130,7 @@ def test_live_workspace_returns_204_without_audit(
 # Test 3: idempotent second restore (workspace is now live)
 # ---------------------------------------------------------------------------
 
+
 def test_second_restore_is_204_with_exactly_one_audit_row(
     monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
@@ -145,6 +156,7 @@ def test_second_restore_is_204_with_exactly_one_audit_row(
 # ---------------------------------------------------------------------------
 # Test 4: CommitMutexTimeout → 429
 # ---------------------------------------------------------------------------
+
 
 def test_commit_mutex_timeout_is_429(monkeypatch, pg_url, pg_session_factory, tmp_path):
     """CommitMutexTimeout must surface as 429 + Retry-After: 2 with BUSY_ERROR_MESSAGE."""
@@ -173,6 +185,7 @@ def test_commit_mutex_timeout_is_429(monkeypatch, pg_url, pg_session_factory, tm
 # ---------------------------------------------------------------------------
 # Test 5: generation forwarding
 # ---------------------------------------------------------------------------
+
 
 def test_route_forwards_the_generation_it_received_not_a_re_read(
     monkeypatch, pg_url, pg_session_factory, tmp_path
@@ -226,6 +239,7 @@ def test_route_forwards_the_generation_it_received_not_a_re_read(
 # Test 6: fault injection — 503 then retry succeeds, exactly one audit row
 # ---------------------------------------------------------------------------
 
+
 def test_fault_injection_503_then_retry_with_real_bridge(
     monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
@@ -273,6 +287,7 @@ def test_fault_injection_503_then_retry_with_real_bridge(
 # Test 7: route is NOT gated by RETENTION_INSPECTION_ENABLED
 # ---------------------------------------------------------------------------
 
+
 def test_restore_works_without_retention_inspection_enabled(
     monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
@@ -296,6 +311,7 @@ def test_restore_works_without_retention_inspection_enabled(
 # ---------------------------------------------------------------------------
 # Test 8: OpenAPI schema advertises 204 (not 200)
 # ---------------------------------------------------------------------------
+
 
 def test_openapi_schema_advertises_204_not_200(monkeypatch, pg_url, pg_session_factory, tmp_path):
     """The route decorator must carry status_code=204 so FastAPI builds the correct

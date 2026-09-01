@@ -41,6 +41,15 @@ from call_manager.proposal_assist.paths import workspace_repo_dir
 from tests.proposal_assist.conftest import stamp_for
 from tests.test_editing_save import _init_repo
 
+_CREATED_APPS = []
+
+
+@pytest.fixture(autouse=True)
+def _dispose_created_app_engines():
+    yield
+    while _CREATED_APPS:
+        _CREATED_APPS.pop().state.engine.dispose()
+
 
 def _app(monkeypatch, pg_url, tmp_path):
     for k, v in {
@@ -54,6 +63,7 @@ def _app(monkeypatch, pg_url, tmp_path):
     # Redirect the workspace filesystem root at the per-test tmp dir so
     # workspace_repo_dir(settings.workspaces_dir, ws.id) == tmp_path/<ws.id>/repo.
     app.state.settings.workspaces_dir = str(tmp_path)
+    _CREATED_APPS.append(app)
     return app
 
 
@@ -129,21 +139,15 @@ def test_artifact_read_waits_for_an_uncommitted_branch_transition(
     monkeypatch, pg_url, pg_session_factory, tmp_path, artifact, filename
 ):
     app = _app(monkeypatch, pg_url, tmp_path)
-    owner_id, _, _, ws_id = _seed(
-        app, pg_session_factory, tmp_path, "## Aims\n\nmain.\n"
-    )
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "## Aims\n\nmain.\n")
     repo = workspace_repo_dir(str(tmp_path), ws_id)
     if artifact == "spec":
         (repo / SPEC_FILENAME).write_text("## Aims\n\nmain.\n")
         subprocess.run(["git", "add", SPEC_FILENAME], cwd=repo, check=True, env=_git_env())
-        subprocess.run(
-            ["git", "commit", "-qm", "main spec"], cwd=repo, check=True, env=_git_env()
-        )
+        subprocess.run(["git", "commit", "-qm", "main spec"], cwd=repo, check=True, env=_git_env())
     subprocess.run(["git", "checkout", "-qb", "v2"], cwd=repo, check=True, env=_git_env())
     (repo / filename).write_text("## Aims\n\ntarget.\n")
-    subprocess.run(
-        ["git", "commit", "-qam", "target"], cwd=repo, check=True, env=_git_env()
-    )
+    subprocess.run(["git", "commit", "-qam", "target"], cwd=repo, check=True, env=_git_env())
     subprocess.run(["git", "checkout", "-q", "main"], cwd=repo, check=True, env=_git_env())
 
     lock_attempted = threading.Event()
@@ -193,15 +197,11 @@ def test_artifact_snapshot_lock_timeout_is_retryable(
     monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     app = _app(monkeypatch, pg_url, tmp_path)
-    owner_id, _, _, ws_id = _seed(
-        app, pg_session_factory, tmp_path, "## Aims\n\nmain.\n"
-    )
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "## Aims\n\nmain.\n")
     monkeypatch.setattr(row_locks, "WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS", 0.05)
 
     with pg_session_factory() as holding:
-        holding.execute(
-            update(Workspace).where(Workspace.id == ws_id).values(title="locked")
-        )
+        holding.execute(update(Workspace).where(Workspace.id == ws_id).values(title="locked"))
         client = _client(app, owner_id)
         response = client.get(f"/api/workspaces/{ws_id}/draft")
         client.close()
@@ -408,8 +408,11 @@ def test_draft_collab_returns_room_canonical_sections(
     # Hydrate then apply a LIVE, uncheckpointed edit to the room (git stays "original.").
     with pg_session_factory() as s:
         updates = load_or_hydrate(
-            s, stamp=stamp_for(s, ws_id), workspace_id=ws_id, artifact="draft",
-            workspaces_dir=str(tmp_path)
+            s,
+            stamp=stamp_for(s, ws_id),
+            workspace_id=ws_id,
+            artifact="draft",
+            workspaces_dir=str(tmp_path),
         )
         s.commit()
         room = build_doc(updates)
@@ -1186,18 +1189,22 @@ def test_post_citation_no_proposal_is_404(monkeypatch, pg_url, pg_session_factor
 
 # --- Collab cite: flag-on routes to live room (any writer); flag-off = owner-only --
 
+
 def _room_base_sha(app, pg_session_factory, tmp_path, ws_id, section_index=1):
     from call_manager.proposal_assist.collab.canonical import canonical_artifact_markdown
     from call_manager.proposal_assist.editing.sectionizer import split_sections
     from call_manager.proposal_assist.paths import workspace_repo_dir
+
     with pg_session_factory() as s:
-        raw = canonical_artifact_markdown(s, workspace_id=ws_id, artifact="draft",
-                                          repo_dir=workspace_repo_dir(tmp_path, ws_id))
+        raw = canonical_artifact_markdown(
+            s, workspace_id=ws_id, artifact="draft", repo_dir=workspace_repo_dir(tmp_path, ws_id)
+        )
     return split_sections(raw)[section_index].sha
 
 
 def _enable_collab(pg_session_factory, ws_id):
     from call_manager.proposal_assist.collab import state
+
     with pg_session_factory() as s:
         state.enable_collab(s, workspace_id=ws_id, artifact="draft")
         s.commit()
@@ -1206,12 +1213,13 @@ def _enable_collab(pg_session_factory, ws_id):
 def test_post_citation_collab_any_writer_allowed(monkeypatch, pg_url, pg_session_factory, tmp_path):
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, member_id, _stranger_id, ws_id = _seed(
-        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n")
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
     rid = _seed_source_reference(pg_session_factory, tmp_path, ws_id, chunk_text="azure sky")
     _enable_collab(pg_session_factory, ws_id)
-    bc, _ = _capture(tmp_path, ws_id, 1)          # git head (base_commit_sha, not the gate)
+    bc, _ = _capture(tmp_path, ws_id, 1)  # git head (base_commit_sha, not the gate)
     bs = _room_base_sha(app, pg_session_factory, tmp_path, ws_id)
-    c = _client(app, member_id)                   # a NON-owner writer
+    c = _client(app, member_id)  # a NON-owner writer
     r = c.post(f"/api/workspaces/{ws_id}/citations", json=_cite_body(bc, bs, rid))
     assert r.status_code == 200, r.text
     assert set(r.json()) == {"ev_id", "citekey", "commit_sha"}
@@ -1220,8 +1228,9 @@ def test_post_citation_collab_any_writer_allowed(monkeypatch, pg_url, pg_session
 def test_post_citation_flag_off_still_owner_only(monkeypatch, pg_url, pg_session_factory, tmp_path):
     # Parity: with collab OFF, a member is still 403 (unchanged git path).
     app = _app(monkeypatch, pg_url, tmp_path)
-    owner_id, member_id, _s, ws_id = _seed(app, pg_session_factory, tmp_path,
-                                           "preamble\n\n## Methods\noriginal.\n")
+    owner_id, member_id, _s, ws_id = _seed(
+        app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
+    )
     rid = _seed_source_reference(pg_session_factory, tmp_path, ws_id, chunk_text="azure sky")
     bc, bs = _capture(tmp_path, ws_id, 1)
     r = _client(app, member_id).post(
