@@ -17,17 +17,22 @@ class _FakeAdapter:
     slug = "vinnova"
 
     def fetch_new_calls(self, since):
-        yield NormalizedCall(
-            external_id="E2E-1",
-            url="https://example.org/e2e/1",
-            title="End-to-end call one",
-            published_at=datetime(2026, 4, 10, tzinfo=UTC),
-        )
+        # The NEWER call is yielded first so it gets the LOWER id: the feed's
+        # `published_at DESC` order then disagrees with the `id DESC` tiebreak,
+        # and the ordering assertion below can only pass if published_at was
+        # actually persisted (it was silently dropped from the upsert payload
+        # between 8a297db1 and the fix pinned here).
         yield NormalizedCall(
             external_id="E2E-2",
             url="https://example.org/e2e/2",
             title="End-to-end call two",
             published_at=datetime(2026, 4, 12, tzinfo=UTC),
+        )
+        yield NormalizedCall(
+            external_id="E2E-1",
+            url="https://example.org/e2e/1",
+            title="End-to-end call one",
+            published_at=datetime(2026, 4, 10, tzinfo=UTC),
         )
 
 
@@ -69,8 +74,14 @@ def test_end_to_end_ingest_and_browse(monkeypatch, pg_url, pg_session_factory):
     with client:
         r = client.get("/api/calls")
         assert r.status_code == 200
-        titles = [item["title"] for item in r.json()["items"]]
+        items = r.json()["items"]
+        titles = [item["title"] for item in items]
+        by_title = {item["title"]: item for item in items}
     assert "End-to-end call one" in titles
     assert "End-to-end call two" in titles
-    # Newest first by published_at: call two (Apr 12) before call one (Apr 10).
+    # The column itself is read back through the API, not only its effect on order.
+    assert by_title["End-to-end call one"]["published_at"] == "2026-04-10T00:00:00Z"
+    assert by_title["End-to-end call two"]["published_at"] == "2026-04-12T00:00:00Z"
+    # Newest first by published_at: call two (Apr 12) before call one (Apr 10),
+    # even though call one has the higher id.
     assert titles.index("End-to-end call two") < titles.index("End-to-end call one")

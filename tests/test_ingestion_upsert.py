@@ -182,3 +182,40 @@ def test_upsert_rejects_unsafe_url_centrally(pg_session_factory):
             assert was_new is False
             rows = s.execute(select(Call).where(Call.external_id == "XSS-1")).scalars().all()
         assert rows == []
+
+
+def test_upsert_round_trips_published_at(pg_session_factory):
+    # `8a297db1` rewrote the payload through typed wrappers and dropped this key.
+    # Both adapters set it, backfill/queue filter `published_at >= cutoff` (NULL is
+    # never >= anything) and the dashboard sorts by it NULLS LAST — so a call
+    # ingested without it is never ranked and sinks below every old call.
+    with pg_session_factory() as s:
+        sid = _vinnova_id(s)
+        upsert_call(
+            s,
+            source_id=sid,
+            call=NormalizedCall(
+                external_id="V-1",
+                url="https://example.org/u",
+                title="T",
+                published_at=datetime(2026, 4, 10, tzinfo=UTC),
+            ),
+        )
+        s.commit()
+        row = s.execute(select(Call).where(Call.external_id == "V-1")).scalar_one()
+        assert row.published_at == datetime(2026, 4, 10, tzinfo=UTC)
+        # A re-encounter carries the new value through the ON CONFLICT update set.
+        upsert_call(
+            s,
+            source_id=sid,
+            call=NormalizedCall(
+                external_id="V-1",
+                url="https://example.org/u",
+                title="T",
+                published_at=datetime(2026, 4, 12, tzinfo=UTC),
+            ),
+        )
+        s.commit()
+        s.expire_all()
+        row = s.execute(select(Call).where(Call.external_id == "V-1")).scalar_one()
+        assert row.published_at == datetime(2026, 4, 12, tzinfo=UTC)

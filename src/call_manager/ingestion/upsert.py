@@ -154,6 +154,9 @@ def upsert_call(session: Session, *, source_id: int, call: NormalizedCall) -> bo
         "summary": _as_text(call.summary),
         "full_text": _as_text(call.full_text),
         "deadline": _as_datetime(call.deadline),
+        # Dropped by 8a297db1's typed-wrapper rewrite: backfill/queue filter on
+        # it and the dashboard sorts by it, so its absence = never ranked.
+        "published_at": _as_datetime(call.published_at),
         "budget_min": _as_int(call.budget_min),
         "budget_max": _as_int(call.budget_max),
         "currency": currency,
