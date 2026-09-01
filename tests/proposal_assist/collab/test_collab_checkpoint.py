@@ -328,3 +328,119 @@ def test_checkpoint_co_commits_extra_files(pg_session_factory, tmp_path):
             .all()
         )
         assert len(ev) == 1
+
+
+# ---------------------------------------------------------------------------
+# Review 2026-09-02 §2.3: the checkpoint must never commit bytes the reader
+# refuses — that bricked the artifact on its next hydration.
+# ---------------------------------------------------------------------------
+import pytest  # noqa: E402
+
+from call_manager.proposal_assist.collab import checkpoint as checkpoint_module  # noqa: E402
+from call_manager.proposal_assist.collab.checkpoint import (  # noqa: E402
+    CheckpointProjectionUnreadable,
+)
+
+
+def _collab_workspace(pg_session_factory, tmp_path, *, email: str):
+    with pg_session_factory() as s:
+        o = make_user(s, email=email)
+        ws = make_workspace(s, owner=o)
+        s.commit()
+        wid, oid = ws.id, o.id
+    _init_repo(Path(tmp_path) / str(wid) / "repo", "## Background\noriginal.\n")
+    with pg_session_factory() as s:
+        state.enable_collab(s, workspace_id=wid, artifact="draft")
+        s.commit()
+    return wid, oid
+
+
+def _git_head(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def test_checkpoint_of_an_empty_blockquote_commits_readable_markdown(
+    pg_session_factory, tmp_path
+):
+    # Tiptap: typing "> " and moving on leaves blockquote[paragraph()]. This
+    # used to checkpoint as a bare ">" that markdown_to_pm refused, so the next
+    # GET of the draft 500ed and the git-first save answered 409.
+    wid, oid = _collab_workspace(pg_session_factory, tmp_path, email="cp-bq@ki.se")
+    t = lambda s: {"type": "text", "text": s}  # noqa: E731
+    doc = pm_json_to_ydoc(
+        {
+            "type": "doc",
+            "content": [
+                {"type": "heading", "attrs": {"level": 2}, "content": [t("Aims")]},
+                {"type": "paragraph", "content": [t("intro")]},
+                {"type": "blockquote", "content": [{"type": "paragraph"}]},
+                {"type": "paragraph", "content": [t("after")]},
+            ],
+        }
+    )
+    with pg_session_factory() as s:
+        store.append_update(
+            s, workspace_id=wid, artifact="draft", actor_id=oid, update=doc.get_update()
+        )
+        s.commit()
+    with pg_session_factory() as s:
+        res = checkpoint_artifact(
+            s, stamp=stamp_for(s, wid), workspace_id=wid, artifact="draft",
+            workspaces_dir=str(tmp_path),
+        )
+        s.commit()
+    assert res.committed is True
+    disk = (Path(tmp_path) / str(wid) / "repo" / PROPOSAL_FILENAME).read_text()
+    assert disk == "## Aims\n\nintro\n\n>\n\nafter\n"
+    # The hydrate step that used to raise on exactly these bytes:
+    assert markdown_to_pm(disk)["content"][2] == {
+        "type": "blockquote", "content": [{"type": "paragraph"}],
+    }
+
+
+def test_checkpoint_refuses_a_projection_the_reader_cannot_parse(
+    pg_session_factory, tmp_path, monkeypatch
+):
+    # No shape the serializer emits is unreadable any more (that is the point of
+    # the §2.3 fixes), so the reader's refusal is simulated; what is real is
+    # everything the guard must guarantee: no commit, no version row, watermark
+    # unmoved, and the SAME log checkpoints normally once the reader accepts it.
+    wid, oid = _collab_workspace(pg_session_factory, tmp_path, email="cp-refuse@ki.se")
+    repo = Path(tmp_path) / str(wid) / "repo"
+    _seed_room_with_edit(pg_session_factory, wid, oid, "## Background\n\nedited.\n")
+    head_before = _git_head(repo)
+
+    def _reader_refuses(md: str):
+        raise ValueError("Invalid content for node blockquote: <>")
+
+    monkeypatch.setattr(checkpoint_module, "markdown_to_pm_or_empty", _reader_refuses)
+    with pg_session_factory() as s:
+        with pytest.raises(CheckpointProjectionUnreadable):
+            checkpoint_artifact(
+                s, stamp=stamp_for(s, wid), workspace_id=wid, artifact="draft",
+                workspaces_dir=str(tmp_path),
+            )
+        s.rollback()
+    assert _git_head(repo) == head_before
+    assert (repo / PROPOSAL_FILENAME).read_text() == "## Background\noriginal.\n"
+    with pg_session_factory() as s:
+        assert state.get_checkpoint_watermark(s, workspace_id=wid, artifact="draft") == 0
+        assert (
+            s.execute(select(ArtifactVersion).where(ArtifactVersion.workspace_id == wid))
+            .scalars()
+            .all()
+            == []
+        )
+
+    monkeypatch.undo()
+    with pg_session_factory() as s:
+        res = checkpoint_artifact(
+            s, stamp=stamp_for(s, wid), workspace_id=wid, artifact="draft",
+            workspaces_dir=str(tmp_path),
+        )
+        s.commit()
+    assert res.committed is True
+    assert _git_head(repo) != head_before
+    assert "edited." in (repo / PROPOSAL_FILENAME).read_text()

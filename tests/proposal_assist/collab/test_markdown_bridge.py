@@ -607,3 +607,225 @@ def test_whitespace_inside_a_code_span_is_left_alone():
     body = markdown_to_pm(md)["content"][0]["content"]
     kept = [n["text"] for n in body if "code" in [m["type"] for m in (n.get("marks") or [])]]
     assert kept == ["a  b "], kept
+
+
+# ---------------------------------------------------------------------------
+# Review 2026-09-02 §2.2–2.3: shapes the EDITOR produces (not markdown-it output)
+# that the checkpoint serializer used to corrupt or emit unreadably. Every case
+# goes through the Yjs reader, because Yjs stores marks as an unordered attr
+# dict and the reader re-sorts them into schema order — the order the parser
+# produced is gone by the time the checkpoint serializes.
+# ---------------------------------------------------------------------------
+import itertools  # noqa: E402
+import re  # noqa: E402
+
+import pytest  # noqa: E402
+
+from call_manager.proposal_assist.collab.markdown_bridge import _mark_key  # noqa: E402
+from call_manager.proposal_assist.collab.yjs_bridge import (  # noqa: E402
+    pm_json_to_ydoc,
+    ydoc_to_pm_json,
+)
+
+
+def _via_yjs(md: str) -> str:
+    """md -> PM -> Yjs -> PM -> md: exactly hydrate + checkpoint."""
+    return pm_to_markdown(ydoc_to_pm_json(pm_json_to_ydoc(markdown_to_pm(md))))
+
+
+@pytest.mark.parametrize(
+    ("md", "expected"),
+    [
+        # em ends before strong: ': text' used to gain italic (`***Aim 1: text***`)
+        ("**_Aim 1_: text**\n", "***Aim 1*: text**\n"),
+        # link ends before strong: the link used to widen over ': text'
+        ("**[Aim 1](https://x.se): text**\n", "**[Aim 1](https://x.se): text**\n"),
+        ("**bold** then *italic*\n", "**bold** then *italic*\n"),
+        ("*a **b** c*\n", "*a **b** c*\n"),
+        ("**a *b*** *c*\n", "**a *b*** *c*\n"),
+    ],
+)
+def test_nested_marks_do_not_widen_through_yjs(md, expected):
+    # The EXACT bytes matter, not only the marks: the longer-lived mark must be
+    # the outer one, or every checkpoint after an upgrade rewrites the document
+    # into an equivalent-but-different form (a spurious diff on every doc with
+    # nested marks). The Yjs path must also agree with the direct parser path.
+    out = _via_yjs(md)
+    assert out == expected
+    assert out == pm_to_markdown(markdown_to_pm(md))
+    assert _runs(markdown_to_pm(out)) == _runs(markdown_to_pm(md))
+    assert _via_yjs(out) == out
+
+
+def _runs(doc: dict) -> list[list[tuple[str, frozenset]]]:
+    """Per block: adjacent same-mark text merged into (text, mark-key set) runs.
+    This is the SEMANTIC content — what the user sees — independent of how
+    many text nodes carry it or in which order the marks are listed. Whitespace
+    is compared unmarked: a bold space is invisible, and markdown cannot hold
+    one next to a delimiter anyway (the serializer moves it outside)."""
+    blocks = []
+    for block in doc["content"]:
+        if block["type"] not in ("paragraph", "heading"):
+            continue
+        runs: list[tuple[str, frozenset]] = []
+        for node in block.get("content", []):
+            assert node["type"] == "text", node
+            keys = frozenset(_mark_key(m) for m in node.get("marks", []))
+            for piece in re.findall(r"\s+|\S+", node["text"]):
+                piece_keys = frozenset() if piece.isspace() else keys
+                if runs and runs[-1][1] == piece_keys:
+                    runs[-1] = (runs[-1][0] + piece, piece_keys)
+                else:
+                    runs.append((piece, piece_keys))
+        blocks.append(runs)
+    return blocks
+
+
+_MARK_PAIRS = [
+    ({"type": "strong"}, {"type": "em"}),
+    ({"type": "strong"}, {"type": "link", "attrs": {"href": "https://x.se", "title": None}}),
+    ({"type": "em"}, {"type": "link", "attrs": {"href": "https://x.se", "title": None}}),
+    ({"type": "strong"}, {"type": "strikethrough"}),
+    ({"type": "em"}, {"type": "strikethrough"}),
+]
+
+
+def _layouts():
+    # Three words; each word carries any subset of the two marks. 4^3 = 64 layouts
+    # per pair, which covers nested, adjacent, crossing and identical ranges.
+    for a, b in _MARK_PAIRS:
+        for combo in itertools.product(range(4), repeat=3):
+            marks = [
+                ([a] if bits & 1 else []) + ([b] if bits & 2 else []) for bits in combo
+            ]
+            yield a["type"], b["type"], marks
+
+
+@pytest.mark.parametrize(("a", "b", "marks"), list(_layouts()))
+def test_every_two_mark_layout_survives_the_checkpoint_round_trip(a, b, marks):
+    # The words are separated by spaces that carry the marks BOTH neighbours
+    # share (the form the whitespace-expulsion rule produces anyway).
+    words = ["alpha", "beta", "gamma"]
+    content = []
+    for i, (word, m) in enumerate(zip(words, marks, strict=True)):
+        if i:
+            shared = [x for x in marks[i - 1] if x in m]
+            content.append({"type": "text", "text": " ", **({"marks": shared} if shared else {})})
+        content.append({"type": "text", "text": word, **({"marks": m} if m else {})})
+    doc = {"type": "doc", "content": [{"type": "paragraph", "content": content}]}
+    yjs_view = ydoc_to_pm_json(pm_json_to_ydoc(doc))
+    md = pm_to_markdown(yjs_view)
+    assert _runs(markdown_to_pm(md)) == _runs(yjs_view), md
+    assert pm_to_markdown(markdown_to_pm(md)) == md, "not idempotent"
+
+
+def test_empty_blockquote_is_readable_again():
+    # Tiptap's blockquote is block+; typing "> " and moving on leaves
+    # blockquote[paragraph()], which serializes as a bare ">" line. That line
+    # used to fail node.check() on rehydration: the artifact 500ed on every GET
+    # and the git-first save path answered 409 — unreadable and unsaveable.
+    doc = {
+        "type": "doc",
+        "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": "intro"}]},
+            {"type": "blockquote", "content": [{"type": "paragraph"}]},
+            {"type": "paragraph", "content": [{"type": "text", "text": "after"}]},
+        ],
+    }
+    md = pm_to_markdown(doc)
+    assert md == "intro\n\n>\n\nafter\n"
+    assert markdown_to_pm(md) == doc
+    # And the exact bytes an already-committed document carries parse too.
+    assert markdown_to_pm(">\n") == {
+        "type": "doc",
+        "content": [{"type": "blockquote", "content": [{"type": "paragraph"}]}],
+    }
+
+
+def test_code_block_containing_a_fence_line_does_not_swallow_the_document():
+    doc = {
+        "type": "doc",
+        "content": [
+            {"type": "code_block", "content": [{"type": "text", "text": "x\n```\ny"}]},
+            {
+                "type": "heading",
+                "attrs": {"level": 2},
+                "content": [{"type": "text", "text": "Later"}],
+            },
+            {"type": "paragraph", "content": [{"type": "text", "text": "body"}]},
+        ],
+    }
+    md = pm_to_markdown(doc)
+    assert md == "````\nx\n```\ny\n````\n\n## Later\n\nbody\n"
+    assert markdown_to_pm(md) == doc
+    assert [s.heading for s in split_sections(md) if s.heading] == ["Later"]
+
+
+def test_block_final_hard_break_is_dropped_not_a_literal_backslash():
+    hb = {"type": "hard_break"}
+    t = lambda s: {"type": "text", "text": s}  # noqa: E731
+    doc = {
+        "type": "doc",
+        "content": [
+            {"type": "paragraph", "content": [t("line"), hb]},
+            {"type": "paragraph", "content": [t("next")]},
+            {
+                "type": "bullet_list",
+                "content": [
+                    {
+                        "type": "list_item",
+                        "content": [{"type": "paragraph", "content": [t("item"), hb, hb]}],
+                    },
+                ],
+            },
+        ],
+    }
+    md = pm_to_markdown(doc)
+    assert md == "line\n\nnext\n\n- item\n"
+    assert "\\" not in md
+    assert _runs(markdown_to_pm(md))[0] == [("line", frozenset())]
+
+
+def test_hard_break_inside_a_heading_becomes_a_space_and_keeps_the_section_name():
+    hb = {"type": "hard_break"}
+    t = lambda s: {"type": "text", "text": s}  # noqa: E731
+    doc = {
+        "type": "doc",
+        "content": [
+            {"type": "heading", "attrs": {"level": 2}, "content": [t("Aims"), hb, t("more")]},
+            {"type": "paragraph", "content": [t("body")]},
+        ],
+    }
+    md = pm_to_markdown(doc)
+    assert md == "## Aims more\n\nbody\n"
+    assert [s.heading for s in split_sections(md) if s.heading] == ["Aims more"]
+    assert markdown_to_pm(md)["content"][0]["content"] == [t("Aims more")]
+
+
+@pytest.mark.parametrize(
+    ("md", "text"),
+    [
+        ("*a *b* c*\n", "a b c"),
+        ("**a **b** c**\n", "a b c"),
+        # What the serializer emits for intraword mixed emphasis; CommonMark's
+        # flanking rules leave some delimiters literal here, so only "parses,
+        # one mark per type" is asserted, not the text.
+        ("*al***ph*a***\n", None),
+        ("**~~al~~**ph**a**\n", None),
+    ],
+)
+def test_nested_same_type_emphasis_parses_with_one_mark(md, text):
+    # CommonMark nests em inside em (and markdown-it emits both opens); a PM
+    # node carries a mark once. This used to raise "Invalid collection of
+    # marks" from node.check() — an artifact holding such text 500ed on every
+    # hydration.
+    doc = markdown_to_pm(md)
+    for node in doc["content"][0]["content"]:
+        keys = [_mark_key(m) for m in node.get("marks", [])]
+        assert len(keys) == len(set(keys)), node
+    if text is not None:
+        assert "".join(n["text"] for n in doc["content"][0]["content"]) == text
+        assert all(
+            {m["type"] for m in n.get("marks", [])} == {"em" if md[1] != "*" else "strong"}
+            for n in doc["content"][0]["content"]
+        )
