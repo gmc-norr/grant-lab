@@ -83,9 +83,9 @@ def is_safe_url(url: str) -> bool:
 
     Adapters use this to drop records whose URL would render as a
     `javascript:` (or `data:`, etc.) link in the dashboard — those would
-    execute on click as stored XSS. Doing the check at ingest time is
-    defense-in-depth: the dashboard template is also Jinja-autoescaped,
-    but autoescape doesn't strip dangerous URL schemes from `href=...`.
+    execute on click as stored XSS. Validating at ingest keeps stored links
+    safe independently of the renderer; output escaping does not strip
+    dangerous URL schemes from `href=...`.
     """
     lower = url.lower()
     return lower.startswith(("http://", "https://"))

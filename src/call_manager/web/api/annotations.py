@@ -1,8 +1,7 @@
 """Claim-analysis "Claims" tab /api surface. Re-exposes the existing annotation
 workflow (read findings, insert, dismiss, reanalyze) as typed JSON for the React
-cockpit, at parity with the doomed Jinja web/annotations.py strip — but
-self-contained on KEPT primitives only (no import of the doomed Jinja helpers).
-No new business logic, no schema change."""
+cockpit. The endpoints are self-contained on shared domain primitives and add no
+business logic or schema changes."""
 
 from __future__ import annotations
 

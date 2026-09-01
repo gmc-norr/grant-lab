@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { isSpaRoute, isViteAsset, shouldServeViaVite } from "./dev-proxy";
 
-describe("isSpaRoute (shipped manifest = ['/'] after the Plan-3 Task-9 flip)", () => {
+describe("isSpaRoute (generated application-route manifest)", () => {
   it("owns the root, the /calls prefix, the /me prefix, and the /profiles prefix", () => {
     expect(isSpaRoute("/")).toBe(true);
     expect(isSpaRoute("/calls/1")).toBe(true);

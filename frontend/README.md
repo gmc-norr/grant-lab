@@ -1,9 +1,9 @@
 # Call Manager — Frontend (React SPA)
 
-Vite + React + TypeScript SPA, built and served per **Plan 2**
-(`docs/superpowers/plans/2026-06-15-react-spa-foundation-2-serving.md`). The
-live Jinja dashboard at `/` is untouched until Plan 3; this SPA mounts at the
-temporary `/app` route.
+Vite + React + TypeScript SPA. It owns all browser page routes, including the
+calls dashboard, proposal-assist workspace, admin, auth, profiles, and settings.
+FastAPI provides the JSON APIs, OAuth endpoints, file responses, collaboration
+transport, and production bundle serving.
 
 ## Toolchain
 
@@ -55,9 +55,9 @@ pnpm run test     # vitest — e.g. the dev-proxy carve-out logic (src/dev-proxy
 ## Known gap (not silently skipped)
 
 The dev front-door **routing decision** (SPA route vs Vite asset vs proxy-to-backend)
-is unit-tested in `src/dev-proxy.test.ts`, including the Plan-3 root flip. The
+is unit-tested in `src/dev-proxy.test.ts`, including the root-route special case. The
 full **two-process** end-to-end (CSRF POST through Vite passes; a backend route
-like `/login` is not hijacked by Vite; an unknown path returns FastAPI's JSON
+like `/healthz` is not hijacked by Vite; an unknown path returns FastAPI's JSON
 404) is verified by running the recipe above manually. A CI integration that
 stands up uvicorn (with Postgres) + Vite together is intentionally deferred — it
 is heavy and flaky relative to the value over the unit-level coverage.

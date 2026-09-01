@@ -4,7 +4,7 @@ export interface ActivityItem {
   id: string;
   label: string;
   icon: string; // Codicon name without the "codicon-" prefix
-  kind: NavKind; // "spa" -> react-router NavLink; "external" -> Jinja page <a>
+  kind: NavKind; // "spa" -> react-router NavLink; "external" -> browser navigation
   to: string;
 }
 

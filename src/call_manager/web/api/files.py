@@ -1,10 +1,7 @@
 """JSON /api surface for image attachments (Cockpit Library Files, Slice C-media).
 
 Owner-gated writes (upload/delete) + member-gated list + member-gated byte
-serve, REUSING the relocated files helpers (_probe_image_format, _read_capped,
-AttachmentStorage, estimate_image_tokens) and inlining the Jinja upload_file
-flow. The byte serve (GET /workspaces/{id}/files/{aid}) was added in the Jinja
-teardown G1; the parallel Jinja serve coexists until G2 deletes it.
+serve, using the shared file-validation, storage, and token-estimation helpers.
 """
 
 from __future__ import annotations

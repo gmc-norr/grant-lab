@@ -1,6 +1,5 @@
 // Dev-server route carve-out for vite.config.ts. Built from the generated
-// manifest (routes.gen.ts), never a hand-edited regex, so Plan 3's flip to
-// SPA_ROUTES=["/"] is just a regenerate. Mirrors is_spa_route /
+// manifest (routes.gen.ts), never a hand-edited regex. Mirrors is_spa_route /
 // is_backend_route in src/call_manager/web/spa_routes.py.
 //
 // Dev posture: Vite forwards EVERYTHING to uvicorn by default and carves out
@@ -25,10 +24,10 @@ export function isViteAsset(url: string): boolean {
 }
 
 // EXACT/owned-route match against the manifest — NOT a generic startsWith("/").
-// Root "/" owns ONLY itself, so after Plan 3 flips SPA_ROUTES to ["/"] this does
-// NOT collapse to "match everything" (a naive startsWith(r.replace(/\/$/,"")+"/")
-// would, since "/" -> "" -> matches every path). Unknown/typo paths then fall
-// through to the default proxy -> uvicorn -> FastAPI real 404.
+// Root "/" owns ONLY itself, so including it in SPA_ROUTES does NOT collapse to
+// "match everything" (a naive startsWith(r.replace(/\/$/,"")+"/") would, since
+// "/" -> "" -> matches every path). Unknown/typo paths then fall through to the
+// default proxy -> uvicorn -> FastAPI real 404.
 export function isSpaRoute(path: string, routes: readonly string[] = SPA_ROUTES): boolean {
   return routes.some((r) =>
     r === "/" ? path === "/" : path === r || path.startsWith(r.replace(/\/$/, "") + "/"),

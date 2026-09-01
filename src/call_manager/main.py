@@ -818,7 +818,7 @@ def create_app() -> FastAPI:
         capacity=settings.reference_ingest_concurrency
     )
 
-    # Vendored static assets (only favicon.svg after htmx/Pico deletion). Serving
+    # Vendored static assets (only favicon.svg after the legacy UI deletion). Serving
     # locally avoids an unreviewed third-party CDN dependency on every page load,
     # which in a hospital-internal context is unacceptable — a CDN compromise would
     # execute attacker JS on every logged-in request.

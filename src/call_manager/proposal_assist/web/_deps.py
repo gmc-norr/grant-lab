@@ -1,9 +1,6 @@
 """Neutral FastAPI dependency wiring shared by the JSON /api workspace modules.
 
-``_session_dep`` historically lived in the (now-doomed) Jinja ``workspaces.py``.
-It is relocated here so the kept JSON modules import it from a module that has
-no template/Jinja coupling and survives the Jinja teardown (G2). Definition is
-copied verbatim from ``proposal_assist/web/workspaces.py``.
+This module has no presentation-layer coupling.
 """
 
 from __future__ import annotations

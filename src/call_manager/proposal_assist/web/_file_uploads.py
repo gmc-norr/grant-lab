@@ -1,9 +1,6 @@
 """Image attachment upload/serve helpers (neutral, no Jinja templates).
 
-Relocated verbatim from the (now-doomed) Jinja ``files.py`` so the kept
-``web/api/files.py`` (Slice C-media + the G1 binary serve) imports them from a
-module that survives the Jinja teardown (G2). The doomed ``files.py`` keeps its
-own copies until G2.
+Shared by the JSON attachment endpoints in ``web/api/files.py``.
 """
 
 from __future__ import annotations

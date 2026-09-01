@@ -1,7 +1,7 @@
-"""Export orchestration — raw + composed Markdown. Thin wrappers over the
-existing citations helpers, kept OUT of the web/ package so the Jinja routes can
-be deleted (Slice F teardown) without touching this module. Consumed by
-web/api/export.py."""
+"""Export orchestration for raw and citation-composed Markdown.
+
+Thin wrappers over the citation helpers, consumed by ``web/api/export.py``.
+"""
 
 from __future__ import annotations
 

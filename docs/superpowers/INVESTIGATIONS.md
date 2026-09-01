@@ -54,6 +54,14 @@ generation fence for disable, restore and purge.
 
 ## Whole-project architecture reviews
 
+**[reviews/2026-09-01-security-and-performance-review.md](reviews/2026-09-01-security-and-performance-review.md)**
+*Does the current tree hold up against OWASP Top 10, and where does non-LLM latency
+come from (backend queries/scheduler, frontend rendering/polling)?* No High-severity,
+currently-exploitable security issue found; auth/CSRF/CSWSH/fencing/SSRF all held up
+under direct inspection. Independent verification refuted several performance severities
+and recommendations. Confirmed work: Unicode-safe download filenames, then cursor-paginate
+`GET /turns`; profile editor and scheduler costs before optimizing them.
+
 **[reviews/2026-09-01-whole-project-review.md](reviews/2026-09-01-whole-project-review.md)**
 *What remains after the August 29 remediation wave and the branch-identity work?*
 Read-only current-tree review with measured backend/frontend validation. Finds an incomplete

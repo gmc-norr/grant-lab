@@ -1,8 +1,6 @@
 """Workspace-settings validation constants + parser (neutral, no templates).
 
-Relocated verbatim from the (now-doomed) Jinja ``workspaces.py`` so the kept
-``web/api/settings.py`` does not import from a module slated for deletion (G2).
-``_CITATION_STYLES`` is NOT relocated here — it is a re-export of
+``_CITATION_STYLES`` is not defined here; it is a re-export of
 ``citations.bibliography.CITATION_STYLES``; importers should use that canonical
 name directly.
 """

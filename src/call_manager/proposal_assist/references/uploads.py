@@ -1,12 +1,9 @@
 """Reference upload/serve/metadata helpers (neutral, no Jinja templates).
 
-Relocated verbatim from the (now-doomed) Jinja ``proposal_assist/web/references.py``
-so the kept ``web/api/references.py`` (Slice C-refs + the G1 raw serve) imports
-them from a module that survives the Jinja teardown (G2). The doomed
-``references.py`` keeps its own copies until G2. The upload helpers here are
-distinct from the image helpers in ``proposal_assist/web/_file_uploads.py``
-(different MIME allowlist, size cap, and sanitizer); ``_parse_authors`` is the
-CSL author-list parser used by the metadata-approval route.
+The upload helpers are distinct from the image helpers in
+``proposal_assist/web/_file_uploads.py`` (different MIME allowlist, size cap,
+and sanitizer). ``_parse_authors`` is the CSL author-list parser used by the
+metadata-approval route.
 """
 
 from __future__ import annotations

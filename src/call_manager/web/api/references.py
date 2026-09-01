@@ -2,10 +2,8 @@
 
 Member-gated mutations that REUSE the existing reference service functions
 (ingest_bytes, dispatch_fetch, delete_or_tombstone_reference, reprocess_reference,
-generate_citekey, _parse_authors) and inline the same per-route orchestration the
-Jinja routes use (limiter slot, dedup, 50 MB cap, audit). The Jinja reference
-routes coexist until Slice G deletes them; the short-lived duplication of the
-audit `kind` literals is intentional and pinned by tests on both sides.
+generate_citekey, _parse_authors) with route-level orchestration for the limiter
+slot, deduplication, 50 MB cap, and audit events.
 """
 
 from __future__ import annotations

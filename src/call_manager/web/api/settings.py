@@ -1,10 +1,7 @@
 """JSON /api surface for workspace settings + collaborators (Cockpit Slice D).
 
-OWNER-GATED. Reuses the Jinja validation constants/parser (_WORKSPACE_STATUSES,
-_CITATION_STYLES, _parse_deadline_form, _MAX_WORKSPACE_TITLE_LEN) and the
-require_owner guard, inlining the same orchestration the Jinja post_settings /
-add_viewer / remove_viewer handlers run. No new shared helper; the Jinja routes
-are deleted at Slice G. No DB schema change.
+Owner-gated endpoints use the shared workspace validation constants and
+``require_owner`` guard. No database schema changes are introduced here.
 """
 
 from __future__ import annotations

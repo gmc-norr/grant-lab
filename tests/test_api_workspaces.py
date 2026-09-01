@@ -584,10 +584,9 @@ def test_save_section_non_owner_member_is_403(monkeypatch, pg_url, pg_session_fa
 
 def test_save_section_no_proposal_file_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
     """The workspace EXISTS and the caller is the owner (require_owner passes),
-    but there is no proposal.md / no git HEAD yet. The API save route must mirror
-    the HTMX route's pre-read 404 (sections.py:73-89, used at sections.py:240)
-    instead of letting save_section surface a raw FileNotFoundError / GitCommitError
-    (save.py:168-170). Seeds its own owner+workspace WITHOUT `_init_repo`, like
+    but there is no proposal.md / no git HEAD yet. The API save route must return
+    404 instead of letting save_section surface a raw FileNotFoundError or
+    GitCommitError. Seeds its own owner+workspace WITHOUT `_init_repo`, like
     test_draft_no_proposal_file_is_404."""
     app = _app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
@@ -619,8 +618,7 @@ def test_save_section_non_owner_no_proposal_is_403_not_404(
     """AUTHZ-ORDERING regression: a non-owner probing an existing workspace that has
     NO proposal.md yet must get 403 (owner only) — NOT 404 ('no proposal.md yet').
     The pre-read 404 precheck must run AFTER require_owner so the draft-lifecycle
-    state is never disclosed to non-owners (matches the HTMX sibling sections.py:233
-    then :240, which authorizes before any repo I/O)."""
+    state is never disclosed to non-owners."""
     app = _app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         owner = User(status="active", email="owner@ki.se")

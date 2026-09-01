@@ -985,20 +985,16 @@ def post_save_section(
     settings = request.app.state.settings
     sf = request.app.state.session_factory
     with sf() as session:
-        # Authorize BEFORE touching any repo/proposal state, mirroring the HTMX
-        # sibling (sections.py:233 require_owner, then :240 read). Doing the
-        # pre-read probe first would let a non-owner distinguish "no proposal.md
-        # yet" (404) from "owner only" (403) and leak the draft-lifecycle state of
-        # any workspace UUID they can name — so require_owner runs first.
+        # Authorize BEFORE touching any repo/proposal state. Doing the pre-read
+        # probe first would let a non-owner distinguish "no proposal.md yet" (404)
+        # from "owner only" (403) and leak the draft-lifecycle state of any
+        # workspace UUID they can name — so require_owner runs first.
         ws = require_owner(workspace_id=workspace_id, user=user, session=session)
         stamp = stamp_for_workspace(ws)  # minted at the access check (endgame Task 6)
-        # Mirror the HTMX route's pre-read 404 (sections.py:73-89, used at
-        # sections.py:240): before touching save_section, reject a workspace that
-        # has no proposal.md yet OR no git HEAD yet with the SAME user-facing 404 as
-        # export_markdown / _read_sections. save_section reads HEAD + proposal.md
-        # directly (save.py:168-170) and would otherwise surface a raw
-        # FileNotFoundError / GitCommitError (500), not a 404. Cover BOTH the same
-        # way _read_sections does: .exists() first, then catch GitCommitError.
+        # Before touching save_section, reject a workspace that has no proposal.md
+        # or no git HEAD with the same user-facing 404 as the other proposal read
+        # paths. save_section reads both directly and would otherwise surface a raw
+        # FileNotFoundError or GitCommitError as a 500.
         repo_dir = workspace_repo_dir(settings.workspaces_dir, workspace_id)
         if not (repo_dir / PROPOSAL_FILENAME).exists():
             raise HTTPException(status_code=404, detail="no proposal.md yet")
@@ -1544,7 +1540,7 @@ def create_workspace_api(
 ) -> WorkspaceCreatedOut:
     """From-call workspace creation. Validates first (clean 400, not a FK 500),
     then reuses create_workspace (sets current_phase='setup' + enqueues Phase-0).
-    Returns the new id; the SPA hands off to the Jinja setup flow."""
+    Returns the new id so the SPA can navigate to ``/cockpit/{id}``."""
     title = body.title.strip()
     if not title or len(title) > _MAX_WORKSPACE_TITLE_LEN:
         raise HTTPException(status_code=400, detail="invalid title")

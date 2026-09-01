@@ -12,8 +12,8 @@ const BACKEND = "http://localhost:8000";
 
 // Serve index.html for SPA-owned document routes; let everything else fall
 // through to the default-to-backend proxy below (-> uvicorn -> FastAPI real 404
-// for unknowns). Built from the generated manifest, so Plan 3's flip is just a
-// regenerate. configureServer runs in dev only (vite build never calls it).
+// for unknowns). Route ownership comes from the generated manifest.
+// configureServer runs in dev only (vite build never calls it).
 function spaIndexFallback(): PluginOption {
   return {
     name: "spa-index-fallback",

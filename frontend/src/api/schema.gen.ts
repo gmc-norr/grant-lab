@@ -714,7 +714,7 @@ export interface paths {
          * Create Workspace Api
          * @description From-call workspace creation. Validates first (clean 400, not a FK 500),
          *     then reuses create_workspace (sets current_phase='setup' + enqueues Phase-0).
-         *     Returns the new id; the SPA hands off to the Jinja setup flow.
+         *     Returns the new id so the SPA can navigate to ``/cockpit/{id}``.
          */
         post: operations["create_workspace_api_api_workspaces_post"];
         delete?: never;
