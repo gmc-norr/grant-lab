@@ -69,5 +69,5 @@ it("shows ONE generic message for every failure mode (anti-enumeration)", async 
 it("ApiError message strips to the bare server message", () => {
   // Pins the strip helper contract used by the component.
   const e = new ApiError("bad_request", "Invalid email or password.");
-  expect(e.message.slice(e.code.length + 2)).toBe("Invalid email or password.");
+  expect(e.userMessage).toBe("Invalid email or password.");
 });

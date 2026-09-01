@@ -100,6 +100,38 @@ def test_api_4xx_httpexception_detail_is_echoed(monkeypatch, pg_url, pg_session_
     assert body["error"]["message"] == "i am a teapot"
 
 
+def test_api_4xx_structured_httpexception_preserves_envelope(
+    monkeypatch, pg_url, pg_session_factory
+):
+    from fastapi import HTTPException
+
+    app = _app(monkeypatch, pg_url)
+
+    @app.get("/api/_structured-conflict")
+    def _structured_conflict():
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "custom_conflict",
+                "message": "resolve the conflict",
+                "detail": {"field": "draft"},
+            },
+            headers={"X-Conflict": "draft"},
+        )
+
+    c = TestClient(app, raise_server_exceptions=False)
+    r = c.get("/api/_structured-conflict")
+    assert r.status_code == 409
+    assert r.headers["X-Conflict"] == "draft"
+    assert r.json() == {
+        "error": {
+            "code": "custom_conflict",
+            "message": "resolve the conflict",
+            "detail": {"field": "draft"},
+        }
+    }
+
+
 def test_non_api_500_is_plain_text(monkeypatch, pg_url, pg_session_factory):
     app = _app(monkeypatch, pg_url)
 

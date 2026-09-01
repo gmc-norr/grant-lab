@@ -109,10 +109,10 @@ describe("CitationComposer", () => {
     await waitFor(() => expect(onDone).toHaveBeenCalled());
   });
 
-  it("shows the server error (code-stripped) when the POST fails", async () => {
+  it("shows the server error detail when the POST fails", async () => {
     mockApi();
     // unwrap() reads res.error.error.{code,message} (the Plan-1 nested envelope) and
-    // throws ApiError(code, message); the catch then strips the "<code>: " prefix.
+    // throws ApiError(code, message); the catch displays its structured detail.
     vi.spyOn(clientMod.api, "POST").mockResolvedValue({
       data: undefined,
       error: { error: { code: "conflict", message: "this section changed — reopen and re-cite" } },

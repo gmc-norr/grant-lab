@@ -23,7 +23,8 @@ def test_gate_403_message_uses_disclosure_action(monkeypatch):
         gate_cloud_llm(ws=ws, request=_req(), session=_S(), user=user,
                        disclosure_action="running a mock-panel review")
     assert ei.value.status_code == 403
-    assert "running a mock-panel review" in ei.value.detail
+    assert ei.value.detail["code"] == "disclosure_required"
+    assert "running a mock-panel review" in ei.value.detail["message"]
 
 
 def test_gate_409_setup_and_503_drafting():

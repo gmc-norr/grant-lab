@@ -88,10 +88,10 @@ it("free-text Edit is disabled when dirty; free-text Ask remains enabled", async
 
 it("member: a disclosure 403 shows ack-and-retry, then submits on ack", async () => {
   const post = vi.spyOn(clientMod.api, "POST")
-    // 1) the ask -> 403 carrying a "disclosure" message (unwrap throws ApiError)
+    // 1) the ask -> structured disclosure 403 (unwrap throws ApiError)
     .mockResolvedValueOnce({
       data: undefined,
-      error: { error: { code: "error", message: "Please acknowledge the data-disclosure notice before asking." } },
+      error: { error: { code: "disclosure_required", message: "Please acknowledge the data-disclosure notice before asking." } },
       response: { status: 403, ok: false } as Response,
     } as never)
     .mockResolvedValueOnce({ data: { acknowledged: true }, error: undefined } as never)  // 2) ack

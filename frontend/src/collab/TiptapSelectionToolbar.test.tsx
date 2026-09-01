@@ -264,7 +264,6 @@ describe("TiptapSelectionToolbar Ask errors", () => {
 
   it("disclosure 403 → inline ack banner → ack + retry re-submits", async () => {
     // First submit rejects with a disclosure error via the onError option.
-    // ApiError(code: string, message: string); .message is `${code}: ${message}`.
     submitMock.mockImplementationOnce((_vars, opts) =>
       opts.onError(new ApiError("disclosure_required", "hosted-model disclosure not acknowledged")),
     );

@@ -103,7 +103,7 @@ export function TiptapSelectionToolbar(props: TiptapSelectionToolbarProps) {
         onSuccess?.();
       },
       onError: (e) => {
-        if (e instanceof ApiError && /disclosure/i.test(e.message)) {
+        if (e instanceof ApiError && e.code === "disclosure_required") {
           setNeedsAck(payload);
         } else {
           setTurnError("Couldn't do that — please try again.");

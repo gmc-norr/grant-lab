@@ -3,7 +3,7 @@ import { useState } from "react";
 import { Box, Button, Group, Stack, Text } from "@mantine/core";
 
 import { useAddCitation, useReferenceChunks, useReferences } from "../api/citations";
-import { ApiError } from "../api/client";
+import { apiErrorMessage } from "../api/client";
 import { toCodePointOffset } from "./selection";
 import styles from "./CockpitPanels.module.css";
 
@@ -87,11 +87,7 @@ export function CitationComposer({ workspaceId, claim, onDone, onCancel }: Props
       });
       onDone();
     } catch (e) {
-      setError(
-        e instanceof ApiError
-          ? e.message.replace(`${e.code}: `, "")
-          : "Could not add the citation — please try again.",
-      );
+      setError(apiErrorMessage(e, "Could not add the citation — please try again."));
     }
   }
 

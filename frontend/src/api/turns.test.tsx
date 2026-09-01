@@ -1,21 +1,13 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { type ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 
+import { queryWrapper as wrap } from "../test-utils";
 import * as clientMod from "./client";
 import { turnStreamUrl, useTurns, useSubmitTurn } from "./turns";
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
-
-function wrap() {
-  const qc = new QueryClient();
-  return ({ children }: { children: ReactNode }) => (
-    <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-  );
-}
 
 it("useTurns fetches the read-model", async () => {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue({

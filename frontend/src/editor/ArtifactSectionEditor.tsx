@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 
 import { useCitationSource } from "../api/citations";
-import { ApiError } from "../api/client";
+import { ApiError, apiErrorMessage } from "../api/client";
 import { useCockpitNav } from "../cockpit/cockpitNav";
 import { CitationComposer } from "../cockpit/CitationComposer";
 import { resetEditorStore, setCursor, setDirty, setSave } from "../cockpit/editorStore";
@@ -48,13 +48,8 @@ export type ArtifactSectionEditorProps = {
   openPeek?: { ev: string; n: number } | null;
 };
 
-// ApiError.message is "code: detail"; strip the code prefix, show the human detail.
 function saveErrorMessage(e: unknown): string {
-  if (e instanceof ApiError) {
-    const prefix = `${e.code}: `;
-    return e.message.startsWith(prefix) ? e.message.slice(prefix.length) : e.message;
-  }
-  return "Save failed — please try again.";
+  return apiErrorMessage(e, "Save failed — please try again.");
 }
 
 export function ArtifactSectionEditor({

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { unwrap } from "./client";
+import { ApiError, apiErrorMessage, unwrap } from "./client";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -80,5 +80,17 @@ describe("unwrap", () => {
       response: new Response(null, { status: 200 }),
     });
     expect(result).toEqual({ id: 1 });
+  });
+});
+
+describe("apiErrorMessage", () => {
+  it("returns the human detail without the machine-code prefix", () => {
+    expect(apiErrorMessage(new ApiError("forbidden", "not allowed"), "fallback")).toBe(
+      "not allowed",
+    );
+  });
+
+  it("returns the fallback for non-API errors", () => {
+    expect(apiErrorMessage(new Error("boom"), "fallback")).toBe("fallback");
   });
 });

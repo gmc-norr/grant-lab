@@ -4,13 +4,10 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Alert, Anchor, Button, PasswordInput, Stack, Text, TextInput, Title } from "@mantine/core";
 
 import { useAuthConfig, useLogin } from "../api/auth";
-import { ApiError } from "../api/client";
+import { apiErrorMessage } from "../api/client";
 
 function errorMessage(err: unknown): string {
-  // unwrap throws ApiError(code, "code: message"); strip the code prefix so the
-  // form shows the bare server message (always the generic one for a 400).
-  if (err instanceof ApiError) return err.message.slice(err.code.length + 2);
-  return "Something went wrong. Please try again.";
+  return apiErrorMessage(err, "Something went wrong. Please try again.");
 }
 
 export function Login() {

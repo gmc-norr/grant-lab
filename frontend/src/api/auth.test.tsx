@@ -1,20 +1,14 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
-import type { ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 
+import { queryWrapper as wrapper } from "../test-utils";
 import * as clientMod from "./client";
 import { useAuthConfig, useLogin, useLogout, useRegister } from "./auth";
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
-
-function wrapper(qc: QueryClient) {
-  return ({ children }: { children: ReactNode }) => (
-    <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-  );
-}
 
 it("useAuthConfig GETs /api/auth/config", async () => {
   const get = vi.spyOn(clientMod.api, "GET").mockResolvedValue({

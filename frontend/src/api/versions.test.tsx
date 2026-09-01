@@ -1,14 +1,13 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
-import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { queryWrapper } from "../test-utils";
 import * as clientMod from "./client";
 import { useVersion, useVersions } from "./versions";
 
-function wrapper({ children }: { children: ReactNode }) {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
+function wrapper() {
+  return queryWrapper(new QueryClient({ defaultOptions: { queries: { retry: false } } }));
 }
 
 describe("useVersions", () => {
@@ -36,7 +35,7 @@ describe("useVersions", () => {
       response: new Response(),
     } as never);
 
-    const { result } = renderHook(() => useVersions("ws1", "draft"), { wrapper });
+    const { result } = renderHook(() => useVersions("ws1", "draft"), { wrapper: wrapper() });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data?.versions[0].subject).toBe("draft 1");
     expect(result.current.data?.history_available).toBe(true);
@@ -49,7 +48,7 @@ describe("useVersions", () => {
       response: new Response(),
     } as never);
 
-    const { result } = renderHook(() => useVersions("ws1", "draft"), { wrapper });
+    const { result } = renderHook(() => useVersions("ws1", "draft"), { wrapper: wrapper() });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data).toEqual({
       versions: [],
@@ -66,7 +65,7 @@ describe("useVersion", () => {
 
   it("does not fetch when no sha is selected", async () => {
     const spy = vi.spyOn(clientMod.api, "GET");
-    const { result } = renderHook(() => useVersion("ws1", "draft", null), { wrapper });
+    const { result } = renderHook(() => useVersion("ws1", "draft", null), { wrapper: wrapper() });
     await waitFor(() => expect(result.current.fetchStatus).toBe("idle"));
     expect(spy).not.toHaveBeenCalled();
   });
@@ -78,7 +77,7 @@ describe("useVersion", () => {
       response: new Response(),
     } as never);
 
-    const { result } = renderHook(() => useVersion("ws1", "draft", "abc1234"), { wrapper });
+    const { result } = renderHook(() => useVersion("ws1", "draft", "abc1234"), { wrapper: wrapper() });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data?.markdown).toBe("# hi\n");
   });

@@ -1,8 +1,8 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
-import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 
+import { queryWrapper as wrapper } from "../test-utils";
 import * as clientMod from "./client";
 import {
   useAddCitation,
@@ -10,12 +10,6 @@ import {
   useReferenceChunks,
   useReferences,
 } from "./citations";
-
-function wrapper(qc: QueryClient) {
-  return ({ children }: { children: ReactNode }) => (
-    <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-  );
-}
 
 const SOURCE = {
   evidence_id: "ev-abc123def456",

@@ -1,18 +1,10 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
-import { type ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
+import { queryWrapper as wrap } from "../test-utils";
 import * as clientMod from "./client";
 import { useFetchReference, useUpdateKind } from "./references";
 
 afterEach(() => { vi.restoreAllMocks(); });
-
-function wrap() {
-  const qc = new QueryClient();
-  return ({ children }: { children: ReactNode }) => (
-    <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-  );
-}
 
 it("useUpdateKind PATCHes and returns the new kind", async () => {
   const spy = vi

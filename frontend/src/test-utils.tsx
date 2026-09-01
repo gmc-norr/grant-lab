@@ -8,6 +8,12 @@ import { theme } from "./theme/theme";
 
 type Options = { route?: string } & Omit<RenderOptions, "wrapper">;
 
+export function queryWrapper(queryClient = new QueryClient()) {
+  return function QueryWrapper({ children }: { children: ReactNode }) {
+    return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+  };
+}
+
 // Single source of truth for rendering components that need the app providers.
 // MantineProvider is forced to the dark scheme to match production. Components
 // using useLocation / NavLink get a MemoryRouter at `route` (default "/").

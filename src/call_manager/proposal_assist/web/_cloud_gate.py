@@ -82,5 +82,11 @@ def gate_cloud_llm(
     if not has_disclosure_ack(session=session, workspace_id=ws.id, user_id=user.id):
         raise HTTPException(
             status_code=403,
-            detail=f"Please acknowledge the data-disclosure notice before {disclosure_action}.",
+            detail={
+                "code": "disclosure_required",
+                "message": (
+                    "Please acknowledge the data-disclosure notice before "
+                    f"{disclosure_action}."
+                ),
+            },
         )

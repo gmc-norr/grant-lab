@@ -78,6 +78,7 @@ def test_submit_turn_needs_disclosure_403(monkeypatch, pg_url, pg_session_factor
     # workspace is in active phase by default (seeded state);
     # no disclosure ack → disclosure gate fires 403
     assert r.status_code == 403
+    assert r.json()["error"]["code"] == "disclosure_required"
 
 
 def test_submit_turn_token_cap_429(monkeypatch, pg_url, pg_session_factory, tmp_path):

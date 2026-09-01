@@ -86,7 +86,7 @@ it("renders an add/del line diff of the proposed section, with word-level spans"
 it("surfaces a reject error in the notice", async () => {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: { items: [ROW] }, error: undefined } as never);
   // The /api error envelope is { error: { code, message } }; unwrap throws ApiError,
-  // and onReject strips the machine code prefix before showing the message.
+  // and onReject shows its structured human detail.
   vi.spyOn(clientMod.api, "POST").mockResolvedValue({
     data: undefined,
     error: { error: { code: "conflict", message: "already resolved" } },

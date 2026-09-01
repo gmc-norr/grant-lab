@@ -7,13 +7,19 @@ export const api = createClient<paths>({ baseUrl: "", credentials: "same-origin"
 
 export class ApiError extends Error {
   code: string;
+  userMessage: string;
   constructor(code: string, message: string) {
     // Put the machine code in the message too, so an ErrorBoundary / log shows
     // it and `toThrowError(/code/)` matches; `.code` stays the structured field.
     super(`${code}: ${message}`);
     this.name = "ApiError";
     this.code = code;
+    this.userMessage = message;
   }
+}
+
+export function apiErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof ApiError ? error.userMessage : fallback;
 }
 
 // Full-page nav to /login (now a React pre-auth page), preserving where we were

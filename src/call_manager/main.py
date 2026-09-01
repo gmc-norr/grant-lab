@@ -516,6 +516,18 @@ def create_app() -> FastAPI:
                 return api_error(
                     exc.status_code, "internal_error", "internal server error", headers=hdrs
                 )
+            if (
+                isinstance(exc.detail, dict)
+                and isinstance(exc.detail.get("code"), str)
+                and isinstance(exc.detail.get("message"), str)
+            ):
+                return api_error(
+                    exc.status_code,
+                    exc.detail["code"],
+                    exc.detail["message"],
+                    detail=exc.detail.get("detail"),
+                    headers=hdrs,
+                )
             return api_error(exc.status_code, code_for(exc.status_code), exc.detail, headers=hdrs)
         # Non-/api: every surviving non-/api route is public (oauth/health) or an
         # SPA path served at 200; none can 401 a browser any more, so the backend

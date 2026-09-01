@@ -1,7 +1,7 @@
 import { Box, Button, Group, Stack, Text, Title } from "@mantine/core";
 import { useState } from "react";
 
-import { ApiError } from "../api/client";
+import { apiErrorMessage } from "../api/client";
 import {
   type Artifact,
   type ProposalRow,
@@ -41,7 +41,7 @@ export function ProposalReview({
         setNotice("That proposal went stale (the section moved) — reloading.");
       }
     } catch (e) {
-      setNotice(e instanceof ApiError ? e.message.replace(/^[a-z_]+: /, "") : "Accept failed.");
+      setNotice(apiErrorMessage(e, "Accept failed."));
     }
   }
 
@@ -50,7 +50,7 @@ export function ProposalReview({
     try {
       await reject.mutateAsync(p.id);
     } catch (e) {
-      setNotice(e instanceof ApiError ? e.message.replace(/^[a-z_]+: /, "") : "Reject failed.");
+      setNotice(apiErrorMessage(e, "Reject failed."));
     }
   }
 

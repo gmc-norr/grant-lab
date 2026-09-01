@@ -57,6 +57,7 @@ def test_missing_disclosure_returns_403(
         ws_id = str(ws.id)
     r = client_authed_owner.post(f"/api/workspaces/{ws_id}/coherence-runs")
     assert r.status_code == 403
+    assert r.json()["error"]["code"] == "disclosure_required"
 
 
 def test_latest_returns_null_then_job(

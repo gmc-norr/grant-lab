@@ -61,7 +61,7 @@ export function SelectionToolbar(props: SelectionToolbarProps) {
       {
         onSuccess: (r) => { setFree(""); setNeedsAck(null); props.onSubmitted?.(r.job_id); },
         onError: (e) => {
-          if (e instanceof ApiError && /disclosure/i.test(e.message)) {
+          if (e instanceof ApiError && e.code === "disclosure_required") {
             setNeedsAck({ rt: requestType, text: instruction });
           }
         },

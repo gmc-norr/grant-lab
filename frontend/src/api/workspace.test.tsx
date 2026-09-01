@@ -1,8 +1,7 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, renderHook, waitFor } from "@testing-library/react";
-import { type ReactNode } from "react";
 import { expect, it, vi } from "vitest";
 
+import { queryWrapper as wrap } from "../test-utils";
 import * as clientMod from "./client";
 import { useCockpitMeta, useCreateWorkspace, useWorkspaces } from "./workspace";
 
@@ -11,12 +10,7 @@ function Probe({ id }: { id: string }) {
   return <span data-testid="title">{q.data?.workspace_title ?? "—"}</span>;
 }
 function renderWith(id: string) {
-  const qc = new QueryClient();
-  return render(
-    <QueryClientProvider client={qc}>
-      <Probe id={id} />
-    </QueryClientProvider>,
-  );
+  return render(<Probe id={id} />, { wrapper: wrap() });
 }
 
 it("useCockpitMeta does NOT fetch when id is empty (off-cockpit gating)", () => {
@@ -33,13 +27,6 @@ it("useCockpitMeta fetches and returns the header when id is present", async () 
   const { getByTestId } = renderWith("ws-1");
   await waitFor(() => expect(getByTestId("title").textContent).toBe("My WS"));
 });
-
-function wrap() {
-  const qc = new QueryClient();
-  return ({ children }: { children: ReactNode }) => (
-    <QueryClientProvider client={qc}>{children}</QueryClientProvider>
-  );
-}
 
 it("useWorkspaces fetches the list with an empty query when status is null", async () => {
   const get = vi.spyOn(clientMod.api, "GET").mockResolvedValue({
