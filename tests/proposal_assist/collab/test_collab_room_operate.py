@@ -169,3 +169,59 @@ async def test_last_client_release_during_op_checkpoints_on_op_exit():
     # operate() exited: ops->0, no clients → evict + fire stashed on_evict
     assert mgr.get(key) is None
     assert fired["n"] == 1
+
+
+# --- The room learns its epoch at cold start (spec 2026-09-02 doc-epoch §3.2) ---
+
+
+def _hydration(epoch: int):
+    from call_manager.proposal_assist.collab.hydrate import Hydration
+
+    async def load():
+        return Hydration([], doc_epoch=epoch)
+
+    return load
+
+
+async def test_acquire_records_the_loaders_epoch_on_the_room():
+    mgr = RoomManager()
+    key = (uuid.uuid4(), "draft")
+    room = await mgr.acquire(
+        key, load=_hydration(3), client=FakeClient(), state=ClientState(user_id=1, can_write=True)
+    )
+    assert room.doc_epoch == 3
+
+
+async def test_operate_records_the_loaders_epoch_on_the_room():
+    mgr = RoomManager()
+    key = (uuid.uuid4(), "draft")
+    async with mgr.operate(key, load=_hydration(5)) as room:
+        assert room.doc_epoch == 5
+
+
+async def test_a_warm_join_keeps_the_rooms_epoch_and_does_not_reload():
+    # The second acquire finds the room and must NOT call its loader: the
+    # epoch (like the doc) is the room's, learned once at cold start. Both
+    # truncate callers tear rooms down before bumping, so a live room is
+    # never behind its row.
+    mgr = RoomManager()
+    key = (uuid.uuid4(), "draft")
+    c1, c2 = FakeClient(), FakeClient()
+    await mgr.acquire(
+        key, load=_hydration(3), client=c1, state=ClientState(user_id=1, can_write=True)
+    )
+    room = await mgr.acquire(
+        key, load=_hydration(9), client=c2, state=ClientState(user_id=2, can_write=True)
+    )
+    assert room.doc_epoch == 3
+
+
+async def test_a_plain_list_loader_yields_epoch_zero():
+    # Every fake loader in the suite returns a bare list; that must keep working
+    # and read as epoch 0 (the value an artifact that was never reset has).
+    mgr = RoomManager()
+    key = (uuid.uuid4(), "draft")
+    room = await mgr.acquire(
+        key, load=_load, client=FakeClient(), state=ClientState(user_id=1, can_write=True)
+    )
+    assert room.doc_epoch == 0
