@@ -311,3 +311,31 @@ def test_read_message_is_not_reachable_through_this_module():
     # re-exporting it — re-opens the DoS for the next caller who reaches for it.
     assert not hasattr(P, "read_message")
     assert "read_message" not in P.__all__
+
+
+# --- Document epoch frame (spec 2026-09-02-collab-doc-epoch-design.md §3.4) ---
+
+
+@pytest.mark.parametrize("epoch", [0, 1, 127, 128, 2**32, 2**62])
+def test_doc_epoch_message_round_trips_through_the_bounded_reader(epoch):
+    frame = P.create_doc_epoch_message(epoch)
+    assert frame[0] == P.MESSAGE_DOC_EPOCH == 4
+    assert P.read_doc_epoch_message(frame) == epoch
+
+
+def test_doc_epoch_frame_is_neither_sync_nor_awareness():
+    frame = P.create_doc_epoch_message(3)
+    assert not P.is_sync_step1(frame)
+    assert not P.is_sync_write(frame)
+    assert not P.is_awareness(frame)
+
+
+def test_read_doc_epoch_message_refuses_other_types_and_malformed_bodies():
+    with pytest.raises(ValueError):
+        P.read_doc_epoch_message(bytes([0, 0]))  # a SYNC frame
+    with pytest.raises(ValueError):
+        P.read_doc_epoch_message(bytes([4]))  # no epoch at all
+    with pytest.raises(ValueError):
+        P.read_doc_epoch_message(bytes([4]) + b"\x80" * 11)  # overlong varuint
+    with pytest.raises(ValueError):
+        P.read_doc_epoch_message(bytes([4, 5, 9]))  # trailing bytes after the epoch
