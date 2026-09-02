@@ -2128,6 +2128,13 @@ class CollabArtifactState(Base):
     enabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_checkpoint_update_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     last_checkpoint_commit_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The document epoch (spec 2026-09-02-collab-doc-epoch-design.md): bumped by
+    # state.reset_checkpoint every time the log is truncated, shown to every
+    # client on connect, presented back on reconnect. A mismatch is a Y.Doc from
+    # a previous document and is refused (4409) before it can send its state.
+    doc_epoch: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default="0", default=0
+    )
 
     __table_args__ = (
         CheckConstraint("artifact IN ('draft','spec')", name="ck_collab_artifact_state_artifact"),
