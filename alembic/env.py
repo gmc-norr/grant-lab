@@ -1,10 +1,10 @@
-import os
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool
 
 from alembic import context
 from call_manager.db.base import Base
+from call_manager.db.url import resolve_database_url
 
 config = context.config
 if config.config_file_name is not None:
@@ -21,18 +21,14 @@ target_metadata = Base.metadata
 
 def _resolve_database_url() -> str:
     """Prefer an explicit URL injected via ``cfg.set_main_option(...)`` (the
-    test fixture path); fall back to ``DATABASE_URL`` env. Resolved lazily so
-    metadata-only commands (``alembic heads``, ``history``, ``branches``)
+    test fixture path); then ``DATABASE_URL`` in the environment; then the
+    app's own ``.env`` via ``Settings()`` (call_manager.db.url), so the README's
+    ``uv run alembic upgrade head`` works with nothing exported. Resolved lazily
+    so metadata-only commands (``alembic heads``, ``history``, ``branches``)
     don't require a database URL — only commands that actually run migrations
     do.
     """
-    url = config.get_main_option("sqlalchemy.url") or os.environ.get("DATABASE_URL")
-    if not url:
-        raise RuntimeError(
-            "No database URL: set DATABASE_URL in the environment "
-            "or inject via cfg.set_main_option('sqlalchemy.url', ...)"
-        )
-    return url
+    return resolve_database_url(config.get_main_option("sqlalchemy.url"))
 
 
 def run_migrations_offline() -> None:

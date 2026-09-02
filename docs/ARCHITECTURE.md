@@ -217,7 +217,7 @@ sibling paths is the shape of a real defect.
 | `reference_max_batch_bytes` | `Field(default=200 * 1024 * 1024, ge=1, description='Client-enforced max total bytes per drag-drop batch.')` |
 | `reference_max_batch_files` | `Field(default=25, ge=1, description='Client-enforced max PDFs per drag-drop batch.')` |
 | `review_dollar_cap_default` | `Field(default=Decimal('5.000'), alias='REVIEW_DOLLAR_CAP_DEFAULT', description='Global per-workspace daily $ cap on mock-panel runs; overridable per workspace via Workspace.review_dollar_cap_override.')` |
-| `session_max_age_seconds` | `Field(default=30 * 24 * 3600, alias='SESSION_MAX_AGE_SECONDS')` |
+| `session_max_age_seconds` | `Field(default=30 * 24 * 3600, alias='SESSION_MAX_AGE_SECONDS', description='Session cookie lifetime. 30 days by default; an organisational policy choice.')` |
 | `turn_max_seconds` | `Field(default=600, alias='TURN_MAX_SECONDS', description="Hard wall-clock bound on a single turn's processing inside the drain tick. A turn that exceeds this is cancelled in-loop and finalized as failed, releasing the workspace's running-row cleanly. MUST stay comfortably below the reaper TTL (reaper.DEFAULT_REAP_TTL_SECONDS) so a slow-but-live turn is bounded by this clean path, not reaped while still streaming.")` |
 | `uncited_claims_daily_token_cap` | `Field(default=200000, alias='UNCITED_CLAIMS_DAILY_TOKEN_CAP', description='Per-workspace daily ceiling on combined input+output tokens spent by uncited-claims passes (Europe/Stockholm day). A pass is blocked pre-run once reached.')` |
 

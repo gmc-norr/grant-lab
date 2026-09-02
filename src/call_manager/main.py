@@ -334,6 +334,32 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        # Drafting subprocesses FIRST (review 2026-09-02 §2.6f): the scheduler
+        # wait below is bounded by the longest tick (up to ~16 minutes), and a
+        # service manager that SIGKILLs before it returns used to skip this
+        # block entirely, leaking every SDK subprocess and its advisory-lock
+        # session. Terminating them before the wait also lets in-flight turns
+        # end promptly instead of running to their timeout.
+        # B6-residuals: terminate every live drafting subprocess before
+        # disposing the engine. Without this, each `lifespan` exit leaks
+        # SDK subprocesses + the per-workspace pg advisory-lock sessions
+        # the registry holds open for handle lifetime (see
+        # proposal_assist/drafting/registry.py — `_Entry.lock_session`).
+        # Run sequentially to avoid hammering the SDK during shutdown.
+        ctrl = getattr(app.state, "workspace_controller", None)
+        if ctrl is not None:
+            live_ids = list(ctrl._registry._entries.keys())
+            for wsid in live_ids:
+                try:
+                    await ctrl.terminate(wsid)
+                except Exception:
+                    import logging
+
+                    logging.getLogger(__name__).warning(
+                        "lifespan teardown: controller.terminate failed for %s",
+                        wsid,
+                        exc_info=True,
+                    )
         # wait=True so an in-flight rank-drain or ingest job completes
         # against the still-open pool — Plan 3 made the rank tick 60s, so
         # mid-flight at shutdown is plausible (was daily-only before).
@@ -356,26 +382,6 @@ async def lifespan(app: FastAPI):
         # engine.dispose() below — the lock holds its own connection.
         if scheduler_lock is not None:
             scheduler_lock.release()
-        # B6-residuals: terminate every live drafting subprocess before
-        # disposing the engine. Without this, each `lifespan` exit leaks
-        # SDK subprocesses + the per-workspace pg advisory-lock sessions
-        # the registry holds open for handle lifetime (see
-        # proposal_assist/drafting/registry.py — `_Entry.lock_session`).
-        # Run sequentially to avoid hammering the SDK during shutdown.
-        ctrl = getattr(app.state, "workspace_controller", None)
-        if ctrl is not None:
-            live_ids = list(ctrl._registry._entries.keys())
-            for wsid in live_ids:
-                try:
-                    await ctrl.terminate(wsid)
-                except Exception:
-                    import logging
-
-                    logging.getLogger(__name__).warning(
-                        "lifespan teardown: controller.terminate failed for %s",
-                        wsid,
-                        exc_info=True,
-                    )
         # Foundation v1 review-fixes added engine.dispose() here. Preserve it:
         # without disposal, repeated test-side create_app() calls leak DBAPI
         # connections to the GC, which psycopg surfaces as ResourceWarning
@@ -417,8 +423,9 @@ def _derive_ws_origin(app_base_url: str) -> str:
 
 
 def create_app() -> FastAPI:
-    configure_logging()
+    configure_logging()  # JSON from the first line, even if Settings() refuses to load
     settings = Settings()
+    configure_logging(settings.log_level)  # idempotent: re-levels, keeps the handler
 
     # 3b-5d.D4: arm the collab kill-switch BEFORE any request can consult the
     # flag. Module-level on purpose — see collab/state.py.

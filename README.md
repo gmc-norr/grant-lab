@@ -203,12 +203,40 @@ TLS-terminating reverse proxy:
 
 ```bash
 uv run alembic upgrade head
-uv run uvicorn call_manager.main:create_app --factory --host 127.0.0.1 --port 8000
+uv run uvicorn call_manager.main:create_app --factory --host 127.0.0.1 --port 8000 \
+  --timeout-graceful-shutdown 30
 ```
+
+`--timeout-graceful-shutdown` bounds how long Uvicorn waits for in-flight requests (an
+SSE stream can otherwise hold shutdown open for as long as the turn runs). The lifespan
+teardown then terminates drafting subprocesses first and waits for scheduler ticks last,
+so give the service manager a stop timeout above that: `TimeoutStopSec=120` in a systemd
+unit. A SIGKILL before the teardown finishes leaks the drafting subprocesses.
 
 Keep the database and `WORKSPACES_DIR` on persistent storage. Configure the reverse proxy
 to forward WebSockets, disable response buffering for SSE, cap request bodies, and set the
 trusted-proxy settings to match the real proxy topology.
+
+### Backup and retention
+
+Three things hold state, and all three must be in the backup:
+
+- **PostgreSQL** — every table, including the collaborative-editing update log
+  (`yjs_updates`), which is the live document between checkpoints. `pg_dump` of the
+  database is sufficient.
+- **`WORKSPACES_DIR`** — one directory per workspace: `repo/` (the proposal markdown and
+  its full git history, the only copy), `references/` (uploaded reference files and their
+  extracted text) and attachments. Back it up as files; the git repositories inside it are
+  plain repositories.
+- **`.env`** — the configuration, including the session-signing secret. Rotating
+  `SESSION_SECRET` signs every user out.
+
+Nothing is pruned automatically. A deleted workspace is a soft delete: the database rows
+and every byte under `WORKSPACES_DIR` stay, an admin can inspect the deleted workspace
+when `RETENTION_INSPECTION_ENABLED` is true, and removing it for real is a deliberate
+admin action, not a timer. Sizing guidance: the database grows with calls, rankings and
+chat turns; `WORKSPACES_DIR` grows with uploaded references (capped at 50 MiB each) and
+proposal history.
 
 ## Repository layout
 

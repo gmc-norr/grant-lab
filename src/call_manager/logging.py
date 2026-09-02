@@ -52,8 +52,19 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, default=str)
 
 
-def configure_logging(level: int = logging.INFO) -> None:
+# Loggers held at WARNING whatever the root level: APScheduler logs "Running
+# job" / "executed successfully" at INFO for every tick of every job — measured
+# at 32 MB/day (review 2026-09-02 §2.6h) — and says nothing an operator acts on
+# below WARNING.
+QUIET_LOGGERS: tuple[str, ...] = ("apscheduler",)
+
+
+def configure_logging(level: int | str = logging.INFO) -> None:
     """Install a JsonFormatter stdout handler on the root logger.
+
+    `level` may be a logging constant or a level NAME (Settings.log_level). The
+    loggers in QUIET_LOGGERS are pinned to WARNING (or the root level, if that
+    is higher).
 
     Writes to stdout to match the v1 design spec's observability contract
     (`Structured JSON logs to stdout`). Most container runtimes capture
@@ -67,7 +78,13 @@ def configure_logging(level: int = logging.INFO) -> None:
     handlers, which would silently drop records from `caplog` or any other
     test-side handler attached between calls.
     """
+    if isinstance(level, str):
+        level = logging.getLevelName(level.strip().upper())
+        if not isinstance(level, int):
+            raise ValueError(f"unknown log level name: {level!r}")
     root = logging.getLogger()
+    for name in QUIET_LOGGERS:
+        logging.getLogger(name).setLevel(max(logging.WARNING, level))
     if any(isinstance(h.formatter, JsonFormatter) for h in root.handlers):
         root.setLevel(level)
         return

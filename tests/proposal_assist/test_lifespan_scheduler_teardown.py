@@ -91,3 +91,48 @@ def test_teardown_survives_the_lock_not_acquired_path(_app, pg_session_factory, 
     client.__enter__()
     assert not _app.state.scheduler.running  # the not-started path is live
     client.__exit__(None, None, None)  # must not raise
+
+
+def test_drafting_subprocesses_are_terminated_before_the_scheduler_wait(
+    _app, pg_session_factory, monkeypatch
+):
+    """Review 2026-09-02 §2.6f: the teardown waited for scheduler ticks (bounded
+    at up to ~16 minutes) BEFORE terminating drafting subprocesses, so a service
+    manager that SIGKILLed first skipped the termination and leaked every SDK
+    subprocess. The order is the property."""
+    import uuid
+
+    from call_manager import scheduler as scheduler_module
+
+    # Standby path (no advisory lock → inert scheduler): a RUNNING scheduler's
+    # registry-reconcile tick sees the fake entry below as a deleted workspace
+    # and terminates it itself, racing this test. The order under test is the
+    # teardown's own, and an inert scheduler still goes through shutdown().
+    monkeypatch.setattr(
+        scheduler_module, "probe_scheduler_lock", lambda _e: (None, "held_elsewhere")
+    )
+    _app.state.session_factory = pg_session_factory
+    order: list[str] = []
+    real_shutdown = scheduler_module._SafeBackgroundScheduler.shutdown
+
+    def _shutdown(self, wait=True):
+        order.append("scheduler.shutdown")
+        return real_shutdown(self, wait=wait)
+
+    monkeypatch.setattr(scheduler_module._SafeBackgroundScheduler, "shutdown", _shutdown)
+
+    client = TestClient(_app)
+    client.__enter__()
+    ctrl = _app.state.workspace_controller
+
+    async def _terminate(wsid):
+        order.append("terminate")
+        ctrl._registry._entries.pop(wsid, None)
+
+    monkeypatch.setattr(ctrl, "terminate", _terminate)
+    ctrl._registry._entries[uuid.uuid4()] = (
+        object()
+    )  # one live subprocess, as far as teardown knows
+    client.__exit__(None, None, None)
+
+    assert order == ["terminate", "scheduler.shutdown"], order
