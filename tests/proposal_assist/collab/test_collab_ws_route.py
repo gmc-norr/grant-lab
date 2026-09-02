@@ -455,6 +455,8 @@ def test_the_reviews_reproduction_is_refused_before_step1(_app, pg_session_facto
     import pytest
     from starlette.websockets import WebSocketDisconnect
 
+    from call_manager.proposal_assist.collab.room import MANAGER
+
     client, wid, oid = _epoch_setup(_app, pg_session_factory, "route-epoch-stale@ki.se")
     try:
         with client.websocket_connect(f"/api/ws/workspaces/{wid}/draft") as wsconn:
@@ -471,6 +473,10 @@ def test_the_reviews_reproduction_is_refused_before_step1(_app, pg_session_facto
         ):
             wsconn.receive_bytes()  # the first thing to arrive is the close
         assert exc.value.code == 4409
+        # The refusal sits INSIDE the try that owns `finally: release`, so the
+        # refused socket is deregistered and the room (its only client) is
+        # gone. Hoisting the check above the try would leave a phantom client.
+        assert MANAGER.get((wid, "draft")) is None
         assert _body_text(pg_session_factory, wid) == "new aims"  # unchanged
         events = [r.__dict__.get("event") for r in caplog.records]
         assert "collab_stale_doc_refused" in events
@@ -496,9 +502,10 @@ def test_a_socket_presenting_the_current_epoch_is_accepted_and_can_persist(
             wsconn.send_bytes(_update_frame(" plus edit"))
     finally:
         client.__exit__(None, None, None)
-    with pg_session_factory() as s:
-        rows = s.execute(select(YjsUpdate).where(YjsUpdate.workspace_id == wid)).scalars().all()
-    assert len(rows) == 2  # the new-document row + this socket's edit
+    # Read back from the LOG, not the room: this socket's edit was persisted.
+    # (A row count would be environment-coupled: an evict checkpoint compacts
+    # rows once the workspace has a git repo.)
+    assert " plus edit" in _body_text(pg_session_factory, wid)
 
 
 def test_a_malformed_epoch_closes_1008_before_any_frame(_app, pg_session_factory):
