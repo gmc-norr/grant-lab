@@ -17,6 +17,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.websockets import WebSocketDisconnect
 
 from call_manager.db.models import Workspace
+from call_manager.proposal_assist.collab import protocol as P
 from call_manager.proposal_assist.collab import state as collab_state
 from call_manager.proposal_assist.collab import store
 from call_manager.proposal_assist.collab.hydrate import load_or_hydrate
@@ -63,9 +64,28 @@ _WS_TRY_AGAIN_LATER = 1013
 _MAX_FRAME_BYTES = 1_000_000
 
 
+def _parse_client_epoch(raw: str | None) -> int | None:
+    """`?epoch=` as the client presents it (spec 2026-09-02 doc-epoch §3.3).
+
+    Absent → None (a fresh doc, which can merge nothing). A non-negative
+    decimal integer → that value. Anything else → ValueError; the route closes
+    1008 like any other malformed request."""
+    if raw is None:
+        return None
+    if not (raw.isascii() and raw.isdigit()):
+        raise ValueError(raw)
+    return int(raw)
+
+
 @router.websocket("/api/ws/workspaces/{workspace_id}/{artifact}")
 async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str) -> None:
     if artifact not in _VALID_ARTIFACTS:
+        await websocket.close(code=_WS_POLICY_VIOLATION)
+        return
+
+    try:
+        client_epoch = _parse_client_epoch(websocket.query_params.get("epoch"))
+    except ValueError:
         await websocket.close(code=_WS_POLICY_VIOLATION)
         return
 
@@ -209,6 +229,29 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
             await websocket.close(code=_WS_TRY_AGAIN_LATER)
         return
     try:
+        # Document epoch (spec 2026-09-02-collab-doc-epoch-design.md §3.3): a
+        # client that presents an epoch holds a Y.Doc that synced against THAT
+        # document. If the room is on a different one — a branch switch or the
+        # kill-switch handover truncated the log while this client was in
+        # reconnect backoff and never saw the 4409 — its STEP2 would merge the
+        # old document into the new one (review 2026-09-02 §2.1, reproduced).
+        # Refuse BEFORE STEP1, so no STEP2 is ever solicited. Inside this try so
+        # `finally` deregisters the client. 4409 makes the provider discard the
+        # doc and the hook build a fresh pair, which connects with no epoch.
+        if client_epoch is not None and client_epoch != room.doc_epoch:
+            logger.info(
+                "collab.stale_doc_refused",
+                extra={
+                    "event": "collab_stale_doc_refused",
+                    "workspace_id": str(workspace_id),
+                    "artifact": artifact,
+                    "client_epoch": client_epoch,
+                    "room_epoch": room.doc_epoch,
+                },
+            )
+            with contextlib.suppress(Exception):
+                await websocket.close(code=WS_DOCUMENT_REPLACED)
+            return
         # Close the connect-straddle TOCTOU (Slice 3a b): a permission mutation that
         # committed while we were mid-acquire may have fired its refresh BEFORE this
         # client was registered. Re-resolve THIS client now, under the recon lock so
@@ -241,6 +284,10 @@ async def collab_ws(websocket: WebSocket, workspace_id: uuid.UUID, artifact: str
                     await MANAGER.drop_client(key, websocket)
         if websocket not in room.clients:
             return  # reconcile OR straddle re-validation revoked + deregistered this client
+        # Teach the epoch BEFORE the STEP1 so a client that drops mid-handshake
+        # still presents the right value next time; an old client ignores the
+        # unknown type (spec §5).
+        await websocket.send_bytes(P.create_doc_epoch_message(room.doc_epoch))
         async with room.lock:
             initial = room.initial_message()
         await websocket.send_bytes(initial)
