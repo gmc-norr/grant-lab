@@ -306,3 +306,39 @@ def test_a_failure_after_truncate_rolls_the_DATABASE_back(
         )  # column intact
     assert current_head(repo) != head_before  # checkpoint commit SURVIVED
     assert current_branch(repo) == "main"  # on the source branch
+
+
+def test_switch_moves_the_document_epoch_of_BOTH_artifacts(pg_session_factory, tmp_path):
+    # Spec 2026-09-02-collab-doc-epoch-design.md §3.1: step 6 resets both
+    # artifacts, and a reset is a new document. The spec artifact has no state
+    # row here — it must still move, or a spec client from before the switch
+    # presents 0, the room says 0, and its old text is merged into the branch.
+    wid, repo, actor = _ws_with_repo(pg_session_factory, tmp_path)
+    create_branch(repo, "short-version")
+    with pg_session_factory() as s:
+        state.enable_collab(s, workspace_id=wid, artifact="draft")
+        store.append_update(
+            s,
+            workspace_id=wid,
+            artifact="draft",
+            actor_id=actor,
+            update=_update_bytes("# Aims\n\nlive\n"),
+        )
+        s.commit()
+        assert state.get_doc_epoch(s, workspace_id=wid, artifact="draft") == 0
+        assert state.get_doc_epoch(s, workspace_id=wid, artifact="spec") == 0
+
+    with pg_session_factory() as s:
+        switch_branch(
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            target="short-version",
+            workspaces_dir=tmp_path,
+            teardown=lambda _wid: OK,
+        )
+        s.commit()
+
+    with pg_session_factory() as s:
+        assert state.get_doc_epoch(s, workspace_id=wid, artifact="draft") == 1
+        assert state.get_doc_epoch(s, workspace_id=wid, artifact="spec") == 1

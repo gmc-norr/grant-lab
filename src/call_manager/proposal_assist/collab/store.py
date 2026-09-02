@@ -146,7 +146,9 @@ def truncate_log(session: Session, *, workspace_id: uuid.UUID, artifact: str) ->
 
     Two callers, both of which MUST have checkpointed the full log to git in the
     SAME transaction: the kill-switch handover (handover.py) and a branch switch
-    (branches.py §4.2 step 6).
+    (branches.py §4.2 step 6). Both ALSO call state.reset_checkpoint in that
+    transaction: a truncated log is a new document, and reset_checkpoint is
+    what bumps `doc_epoch` so a client from before the truncate is refused.
 
     Returns the number of rows deleted."""
     res = session.execute(

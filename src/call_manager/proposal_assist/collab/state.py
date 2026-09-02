@@ -76,6 +76,15 @@ def get_checkpoint_watermark(session: Session, *, workspace_id: uuid.UUID, artif
     return row.last_checkpoint_update_id if row and row.last_checkpoint_update_id is not None else 0
 
 
+def get_doc_epoch(session: Session, *, workspace_id: uuid.UUID, artifact: str) -> int:
+    """The document epoch (spec 2026-09-02-collab-doc-epoch-design.md): the
+    number of times this artifact's log has been truncated. 0 when there is no
+    row — an artifact never enabled, or never reset. Callers read it in the
+    SAME session as the log rows it labels (hydrate.load_or_hydrate)."""
+    row = _get(session, workspace_id, artifact)
+    return int(row.doc_epoch) if row is not None and row.doc_epoch is not None else 0
+
+
 def advance_checkpoint(
     session: Session,
     *,
@@ -97,10 +106,22 @@ def reset_checkpoint(session: Session, *, workspace_id: uuid.UUID, artifact: str
     separately, same transaction) so a later reconnect hydrates fresh from git
     HEAD. enabled_at is deliberately untouched (sticky-forward).
 
+    A truncated log is a NEW DOCUMENT, so this also moves `doc_epoch` by one —
+    and creates the row if there is none, so an artifact truncated before it
+    ever had a state row still moves off epoch 0. A client holding a Y.Doc from
+    before the truncate presents the old epoch on reconnect and is refused
+    (web/collab_ws.py, close 4409) instead of merging the old document into the
+    new one (review 2026-09-02 §2.1).
+
     Two callers, both of which MUST have checkpointed the full log to git in the
     SAME transaction: the kill-switch handover (handover.py) and a branch switch
     (branches.py §4.2 step 6)."""
     row = _get(session, workspace_id, artifact)
-    if row is not None:
-        row.last_checkpoint_update_id = None
-        row.last_checkpoint_commit_sha = None
+    if row is None:
+        row = CollabArtifactState(workspace_id=workspace_id, artifact=artifact)
+        session.add(row)
+    row.last_checkpoint_update_id = None
+    row.last_checkpoint_commit_sha = None
+    # A row added in this session has no epoch yet before flush (the ORM default
+    # applies at INSERT); treat it as 0.
+    row.doc_epoch = (row.doc_epoch or 0) + 1
