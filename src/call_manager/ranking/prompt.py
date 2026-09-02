@@ -156,6 +156,16 @@ CALL_BODY>>>
 """
 
 
+def _neutralise_fence(field: str) -> str:
+    """Call text is untrusted; a value containing the fence markers closed the
+    untrusted region early and reopened it, so injected text sat OUTSIDE the
+    fence (review 2026-09-02, measured: 2 closing and 2 opening markers). The
+    marker tokens cannot appear inside a field: `CALL_BODY` becomes `CALL-BODY`
+    wherever it touches the fence brackets, which keeps the text readable and
+    the fence unforgeable."""
+    return field.replace("<<<CALL_BODY", "<<<CALL-BODY").replace("CALL_BODY>>>", "CALL-BODY>>>")
+
+
 def _eligibility_block(structured: dict) -> str:
     """Format the new namespaced eligibility/org/funding/geo fields for the
     PROFILE block. Skips empty fields; returns a placeholder when nothing is
@@ -224,13 +234,13 @@ def build_messages(*, profile, call, enable_analysis: bool = False) -> list[dict
     if len(text_source) > CALL_TEXT_LIMIT:
         text_source = text_source[:CALL_TEXT_LIMIT]
     user = _USER_TEMPLATE.format(
-        title=call.title or "",
-        programme=call.programme or "",
+        title=_neutralise_fence(call.title or ""),
+        programme=_neutralise_fence(call.programme or ""),
         deadline=call.deadline.isoformat() if call.deadline else "(none)",
         budget_min=call.budget_min if call.budget_min is not None else "?",
         budget_max=call.budget_max if call.budget_max is not None else "?",
         currency=call.currency or "",
-        text=text_source or "(no text)",
+        text=_neutralise_fence(text_source or "(no text)"),
     )
     return [
         {"role": "system", "content": sys},

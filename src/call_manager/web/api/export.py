@@ -18,6 +18,7 @@ from call_manager.proposal_assist.export import (
 )
 from call_manager.proposal_assist.web._perms import require_member
 from call_manager.web.api.errors import api_error
+from call_manager.web.http_headers import content_disposition
 
 router = APIRouter()
 
@@ -38,7 +39,7 @@ def export_markdown(
     return Response(
         content=data,
         media_type="text/markdown",
-        headers={"Content-Disposition": f'attachment; filename="{title}.md"'},
+        headers={"Content-Disposition": content_disposition("attachment", f"{title}.md")},
     )
 
 
@@ -77,5 +78,5 @@ def export_composed(
     return Response(
         content=composed,
         media_type="text/markdown",
-        headers={"Content-Disposition": f'attachment; filename="{title}-composed.md"'},
+        headers={"Content-Disposition": content_disposition("attachment", f"{title}-composed.md")},
     )

@@ -30,6 +30,7 @@ from call_manager.proposal_assist.web._file_uploads import (
     _storage_for,
 )
 from call_manager.proposal_assist.web._perms import require_member, require_owner
+from call_manager.web.http_headers import content_disposition
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +209,6 @@ def api_serve_file(
         headers={
             # private: a shared proxy MUST NOT cache and serve to another user.
             "Cache-Control": "private, max-age=300",
-            "Content-Disposition": f'inline; filename="{safe_filename}"',
+            "Content-Disposition": content_disposition("inline", safe_filename),
         },
     )

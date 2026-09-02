@@ -315,11 +315,169 @@ def test_turn_stream_response_carries_sse_anti_buffer_headers(
         s.commit()
         job_id = job.id
 
-    r = _client(app, owner_id).get(
-        f"/api/workspaces/{ws_id}/turns/{job_id}/stream"
-    )
+    r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/turns/{job_id}/stream")
     assert r.status_code == 200
     assert r.headers.get("x-accel-buffering") == "no", (
         "SSE prod stream missing X-Accel-Buffering: no — Nginx will buffer chunks"
     )
     assert r.headers.get("cache-control") == "no-cache"
+
+
+# --- Review 2026-09-02 §3 web API (carried): list_turns unbounded; SSE outlives revocation
+
+
+def _three_turns(pg_session_factory, ws_id):
+    from call_manager.db.models import ChatTurn as CT
+
+    with pg_session_factory() as s:
+        for i in range(3):
+            s.add(CT(workspace_id=ws_id, role="user", content={"type": "text", "text": f"t{i}"}))
+        s.commit()
+        return [
+            p
+            for p in s.scalars(
+                select(CT.position).where(CT.workspace_id == ws_id).order_by(CT.position)
+            )
+        ]
+
+
+def test_list_turns_is_paginated_newest_last(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
+    positions = _three_turns(pg_session_factory, ws_id)
+    c = _client(app, owner_id)
+
+    page = c.get(f"/api/workspaces/{ws_id}/turns?limit=2").json()
+    assert [t["position"] for t in page["turns"]] == positions[-2:]
+    assert page["has_more"] is True
+    assert page["next_before"] == positions[-2]
+
+    older = c.get(f"/api/workspaces/{ws_id}/turns?limit=2&before={page['next_before']}").json()
+    assert [t["position"] for t in older["turns"]] == positions[:1]
+    assert older["has_more"] is False and older["next_before"] is None
+
+    everything = c.get(f"/api/workspaces/{ws_id}/turns").json()
+    assert [t["position"] for t in everything["turns"]] == positions
+    assert everything["has_more"] is False
+    assert c.get(f"/api/workspaces/{ws_id}/turns?limit=0").status_code == 422
+    assert c.get(f"/api/workspaces/{ws_id}/turns?limit=100000").status_code == 422
+
+
+def _running_job(pg_session_factory, ws_id):
+    from call_manager.db.models import ChatTurn as CT
+
+    with pg_session_factory() as s:
+        u = CT(workspace_id=ws_id, role="user", content={"type": "text", "text": "hi"})
+        s.add(u)
+        s.flush()
+        job = TurnJob(workspace_id=ws_id, user_turn_id=u.id, status="running")
+        s.add(job)
+        s.commit()
+        return job.id, u.position
+
+
+# The revocation lands on the poll right after the first chunk, so a working
+# re-check ends the stream within a handful of chunks; anything past this is a
+# stream that is not re-checking at all.
+_MAX_STREAM_CHUNKS = 20
+
+
+def _stream_until_done(
+    pg_session_factory, ws_id, job_id, since, *, user_id, session_epoch, on_first_poll
+):
+    """Drive the generator; call `on_first_poll` after the first poll so the
+    revocation lands while the stream is open (the case that was never checked)."""
+    from call_manager.web.api.turns import _json_turn_stream
+
+    async def _collect():
+        out = []
+        fired = False
+        gen = _json_turn_stream(
+            session_factory=pg_session_factory,
+            workspace_id=ws_id,
+            turn_job_id=job_id,
+            since_position=since,
+            poll_seconds=0.0,
+            request=None,
+            user_id=user_id,
+            session_epoch=session_epoch,
+        )
+        # Bounded: the job stays RUNNING for the whole test, so a stream that
+        # never re-checks the identity emits keepalives forever. Without this
+        # cap the assertion below is unreachable and a broken re-check hangs
+        # the suite instead of failing it.
+        async for chunk in gen:
+            out.append(chunk)
+            if "event: done" in chunk:
+                break
+            if len(out) >= _MAX_STREAM_CHUNKS:
+                await gen.aclose()
+                break
+            if not fired:
+                fired = True
+                on_first_poll()
+        return out
+
+    return "".join(asyncio.run(_collect()))
+
+
+def test_turn_stream_ends_when_the_session_is_revoked_mid_stream(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    """The stream authorized once at connect and then outlived logout, admin
+    disable and membership removal. It re-checks the identity it was opened
+    with on every poll and ends with a terminal `done` when it no longer holds."""
+    from call_manager.db.models import User
+
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
+    job_id, pos = _running_job(pg_session_factory, ws_id)
+    with pg_session_factory() as s:
+        epoch = s.get(User, owner_id).session_epoch
+
+    def _logout_everywhere():
+        with pg_session_factory() as s:
+            u = s.get(User, owner_id)
+            u.session_epoch = (u.session_epoch or 0) + 1
+            s.commit()
+
+    # A keepalive comment is emitted on idle polls so the loop has a chunk to
+    # hand back before anything happened; the revocation lands after it.
+    joined = _stream_until_done(
+        pg_session_factory,
+        ws_id,
+        job_id,
+        pos,
+        user_id=owner_id,
+        session_epoch=epoch,
+        on_first_poll=_logout_everywhere,
+    )
+    assert joined.rstrip().endswith('event: done\ndata: {"status": "unauthorized"}')
+
+
+def test_turn_stream_ends_when_the_account_is_disabled_mid_stream(
+    monkeypatch, pg_url, pg_session_factory, tmp_path
+):
+    from call_manager.db.models import User
+
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
+    job_id, pos = _running_job(pg_session_factory, ws_id)
+    with pg_session_factory() as s:
+        epoch = s.get(User, owner_id).session_epoch
+
+    def _disable():
+        with pg_session_factory() as s:
+            s.get(User, owner_id).status = "disabled"
+            s.commit()
+
+    joined = _stream_until_done(
+        pg_session_factory,
+        ws_id,
+        job_id,
+        pos,
+        user_id=owner_id,
+        session_epoch=epoch,
+        on_first_poll=_disable,
+    )
+    assert '"status": "unauthorized"' in joined

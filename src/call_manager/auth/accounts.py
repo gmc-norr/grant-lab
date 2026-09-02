@@ -35,7 +35,23 @@ def resolve_google_account(
         # single owner of last_login_at and only stamps it for active logins.
         return AccountResolution("matched", existing)
 
-    if session.execute(select(User).where(User.email == email)).scalar_one_or_none():
+    holder = session.execute(select(User).where(User.email == email)).scalar_one_or_none()
+    if holder is not None:
+        # An unauthenticated password registration can park a PENDING row on any
+        # allowed-domain address with neither a Google identity nor a password
+        # hash — a squat that used to block the real person's verified Google
+        # sign-in forever (review 2026-09-02 A11 F1). Google's email_verified is
+        # exactly the proof that registration never had: attach the identity to
+        # that row and keep it pending for the admin. Anything that already
+        # carries a credential, or is not pending, stays a collision — never
+        # auto-link a real account.
+        if holder.status == "pending" and holder.oidc_sub is None and holder.password_hash is None:
+            holder.oidc_iss = iss
+            holder.oidc_sub = sub
+            if name and not holder.name:
+                holder.name = name[:200]
+            session.flush()
+            return AccountResolution("matched", holder)
         return AccountResolution("email_collision", None)
 
     user = User(

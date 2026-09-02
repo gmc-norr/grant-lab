@@ -217,3 +217,22 @@ def test_export_composed_blocked_lists_refs(monkeypatch, pg_url, pg_session_fact
     assert body["error"]["code"] == "export_blocked"
     blocked = body["error"]["detail"]["blocked"]
     assert any(b["citekey"] == "smith2021" for b in blocked)
+
+
+def test_export_with_a_cjk_title_is_not_a_500(monkeypatch, pg_url, pg_session_factory, tmp_path):
+    """Review 2026-09-02 A1 item 8: `safe_title("研究")` kept the characters and
+    the header encode raised UnicodeEncodeError → 500 for any member exporting a
+    workspace with a CJK, en-dash or emoji title."""
+    app = _app(monkeypatch, pg_url, tmp_path)
+    owner_id, _, _, ws_id = _seed(pg_session_factory)
+    with pg_session_factory() as s:
+        s.get(Workspace, ws_id).title = "研究 – proposal"
+        s.commit()
+    _write_repo(tmp_path, ws_id, proposal="# Draft\n")
+    r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/export.md")
+    assert r.status_code == 200, r.text
+    cd = r.headers["content-disposition"]
+    assert cd.startswith('attachment; filename="')
+    assert "filename*=UTF-8''%E7%A0%94%E7%A9%B6" in cd
+    r2 = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/export-composed.md")
+    assert r2.status_code in (200, 404, 409), r2.text  # anything but a 500
