@@ -71,6 +71,13 @@ jobs:
       - name: Frontend deps (frozen, scripts off)
         run: cd frontend && pnpm install --frozen-lockfile
 
+      # Review 2026-09-02 A7 F5: there was NO frontend lint gate at all — no
+      # eslint/oxlint/biome config anywhere, so five `eslint-disable` directives
+      # in src/ suppressed rules that had never run. oxlint is zero-config and
+      # one dev dep. `--deny-warnings` makes it a gate, not a report.
+      - name: Frontend lint (oxlint)
+        run: cd frontend && pnpm run lint
+
       - name: Frontend unit tests (vitest)
         run: cd frontend && pnpm run test
 

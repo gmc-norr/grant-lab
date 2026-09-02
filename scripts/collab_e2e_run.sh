@@ -169,4 +169,10 @@ echo "[run] running collab e2e (E2E_SPA_MODE=$E2E_SPA_MODE)…"
 cd frontend
 # E2E_MODE drives playwright.config.ts's baseURL switch (shared with the Plan-3
 # dashboard e2e): "prod" -> http://localhost:8000 (no proxy), else :5173.
-E2E_MODE="$E2E_SPA_MODE" pnpm exec playwright test e2e/collab.spec.ts "$@"
+# Which specs to run. Default is the collab round-trip (what this script was
+# written for); E2E_SPECS lets CI — or a local run — ask for the dashboard spec
+# too, now that the seeder creates its password user and a call (review
+# 2026-09-02 A6 finding 6: dashboard.spec.ts was unrunnable and wired nowhere).
+E2E_SPECS="${E2E_SPECS:-e2e/collab.spec.ts}"
+# shellcheck disable=SC2086  # deliberate word-splitting: E2E_SPECS is a spec list
+E2E_MODE="$E2E_SPA_MODE" pnpm exec playwright test $E2E_SPECS "$@"

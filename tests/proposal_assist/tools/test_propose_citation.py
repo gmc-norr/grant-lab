@@ -25,7 +25,7 @@ from call_manager.proposal_assist.tools.proposal import (
     read_proposal_impl,
 )
 from call_manager.proposal_assist.tools.registry import ToolContext, snapshot_invocation
-from tests.proposal_assist.conftest import make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace
 
 EMBED_DIM = 1024
 CHUNK_TEXT = (
@@ -379,7 +379,7 @@ async def test_a_tombstoned_reference_is_refused_and_writes_nothing(
         sess.get(Reference, ref_id).tombstoned_at = datetime.now(UTC)
         sess.commit()
 
-    await read_proposal_impl(ctx)          # populates ctx.agent_view_* — required
+    await read_proposal_impl(ctx)  # populates ctx.agent_view_* — required
     # _build_ctx sets lifecycle_generation=0 (Invocation.stamp() raises UnfencedInvocation
     # on None; generation 0 is REAL, so it tests for None not falsiness).
     invocation = snapshot_invocation(ctx)
@@ -397,3 +397,49 @@ async def test_a_tombstoned_reference_is_refused_and_writes_nothing(
 
     with pg_session_factory() as sess:
         assert sess.query(ProposedChange).filter_by(workspace_id=ws_id).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_propose_citation_refuses_a_reference_from_ANOTHER_workspace(
+    pg_session_factory, _settings_env, tmp_path
+):
+    """Review 2026-09-02 A6 F7: the workspace scope on the reference lookup
+    (`ref.workspace_id != ctx.workspace_id`) had no pin in ANY of seven test
+    files — dropping it left 57 tests green.
+
+    It is not redundant with the chunk lookup below it. That one is
+    workspace-scoped too, so today a foreign reference merely degrades to
+    "chunk not found" — a different error for the same refusal, and only for as
+    long as BOTH scopes survive. The guard says a reference you do not own is
+    not yours to cite; this pins that sentence, by its own message.
+    """
+    ctx, wsid, _repo = _build_ctx(pg_session_factory, tmp_path)
+    # A second workspace with a reference AND a matching chunk, so the only
+    # thing standing between the caller and a foreign citation is the scope.
+    with pg_session_factory() as s:
+        # A distinct owner: make_user's default email is a fixed literal, so a
+        # second default-owner workspace collides on uq_users_email.
+        other = make_workspace(s, owner=make_user(s, email="other-owner@ki.se"))
+        s.commit()
+        other_id = other.id
+    foreign_rid = _seed_reference(pg_session_factory, other_id, chunks=[(0, "Results", CHUNK_TEXT)])
+    await read_proposal_impl(ctx)
+
+    result = await propose_citation_impl(
+        ctx,
+        ports=ctx.ports,
+        invocation=snapshot_invocation(ctx),
+        reference_id=str(foreign_rid),
+        anchor=ANCHOR,
+        chunk_index=0,
+        evidence_quote="reduces recurrence by 30%",
+        stance="supports",
+    )
+
+    assert result == {"error": "reference not found"}, (
+        "a reference owned by another workspace was accepted"
+    )
+    # And nothing was written: an error return that still left a row would be
+    # worse than the refusal being absent.
+    with pg_session_factory() as s:
+        assert s.query(ProposedChange).filter_by(workspace_id=wsid).count() == 0

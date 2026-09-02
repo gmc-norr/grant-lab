@@ -136,7 +136,16 @@ def test_reenable_already_enabled_noop(
         s.commit()
         s.refresh(u)
         tid = u.id
-    assert c.post("/api/admin/digest/reenable", json={"user_id": tid}).status_code == 200
+    r = c.post("/api/admin/digest/reenable", json={"user_id": tid})
+    # Review 2026-09-02 A6 F3: this asserted only `== 200`, so a "reenable" that
+    # unconditionally stamps `digest_disabled_at = now()` on an already-enabled
+    # user passed the very test whose name says it is a NO-OP. The sibling above
+    # makes exactly this assertion for the disable->enable case.
+    assert r.status_code == 200 and r.json() == {"id": tid}
+    with pg_session_factory() as s:
+        assert s.get(User, tid).digest_disabled_at is None, (
+            "reenabling an already-enabled user disabled their digest"
+        )
 
 
 def test_reenable_unknown_404(monkeypatch, pg_url, pg_session_factory, test_client_factory):

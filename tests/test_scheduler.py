@@ -1,7 +1,9 @@
-from unittest.mock import MagicMock
+from datetime import timedelta
+from unittest.mock import MagicMock, patch
 
 import pytest
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.interval import IntervalTrigger
 
 from call_manager.config import Settings
 from call_manager.scheduler import build_scheduler
@@ -200,7 +202,37 @@ def test_build_scheduler_includes_turn_reaper_job(_settings_env):
         workspace_controller=workspace_controller,
         start=False,
     )
-    assert sched.get_job("turn_reaper") is not None
+    job = sched.get_job("turn_reaper")
+    assert job is not None
+
+    # Review 2026-09-02 A6 F4: the id-only assertion was the whole test, and an
+    # id is exactly what wiring does NOT prove — a job registered under
+    # "turn_reaper" with the wrong callable or a once-a-year trigger passed.
+    #
+    # The callable is a closure over session_factory, so there is no importable
+    # symbol to compare it to. Calling it is the proof: patch the reaper and
+    # check the job actually reaps, with the factory the scheduler was built on.
+    assert isinstance(job.trigger, IntervalTrigger)
+    assert job.trigger.interval == timedelta(seconds=300), (
+        f"turn_reaper cadence is {job.trigger.interval}, not the intended 5 minutes"
+    )
+
+    calls: list[object] = []
+    with patch(
+        "call_manager.proposal_assist.turns.reaper.reap_stuck_turns",
+        side_effect=lambda **kw: calls.append(kw["session_factory"]),
+    ):
+        job.func()
+    assert calls == [session_factory], "the job under id 'turn_reaper' does not reap"
+
+    # And a failing tick must not kill the scheduler thread: the wrapper logs
+    # and swallows, which is what lets the next tick run at all.
+    with patch(
+        "call_manager.proposal_assist.turns.reaper.reap_stuck_turns",
+        side_effect=RuntimeError("db down"),
+    ):
+        job.func()  # must not raise
+
     sched.shutdown(wait=False)
 
 
@@ -351,12 +383,13 @@ def test_build_scheduler_wires_collab_checkpoint_job(_settings_env, monkeypatch)
     # ...and the job fn passes the configured session_factory / workspaces_dir / min_tail.
     captured = {}
     monkeypatch.setattr(
-        cp, "checkpoint_active_tails",
+        cp,
+        "checkpoint_active_tails",
         lambda sf, *, workspaces_dir, min_tail: captured.update(
             sf=sf, workspaces_dir=workspaces_dir, min_tail=min_tail
         ),
     )
-    job.func()   # the closure lazy-imports checkpoint_active_tails → picks up the patch
+    job.func()  # the closure lazy-imports checkpoint_active_tails → picks up the patch
     assert captured == {
         "sf": session_factory,
         "workspaces_dir": settings.workspaces_dir,

@@ -6,6 +6,17 @@ The v1 design spec (`docs/superpowers/specs/2026-04-14-call-monitor-design.md`) 
 
 ## Conventions
 
+- **Commit titles name the change, not the activity.** `fix(collab): refuse a stale
+  Y.Doc on reconnect` is findable; `Refactor and enhance codebase for clarity and
+  performance` is not. The 2026-08-31 drift produced five such titles in a row, and one
+  of them ("Refactor tests to use test_client_factory … and update dependencies")
+  actually swapped the OIDC JWT library and rewrote claim validation — a
+  security-relevant change a future reader would never find from its subject line
+  (review 2026-09-02 §12). A title that would fit any commit in the repo is the tell.
+
+- **Research artefacts live in `docs/research/`**, not the repo root. `README.pdf` is a
+  rendered copy of the README and is gitignored — do not re-add it.
+
 - **Architecture map:** `docs/ARCHITECTURE.md` is **generated** from the source by
   `scripts/gen_architecture.py` (via `ast` — the app is never imported) and pinned by
   `tests/architecture/`. **Read it before asserting a structural fact**: it carries every
