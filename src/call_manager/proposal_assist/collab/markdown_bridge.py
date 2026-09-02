@@ -47,6 +47,7 @@ drops are deliberate, not accidental; the drop sites below restate this.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from markdown_it import MarkdownIt
@@ -121,10 +122,25 @@ def _inline_to_pm(tokens: list[Any]) -> list[dict]:
     out: list[dict] = []
     marks: list[dict] = []  # active marks, in open order
 
+    def distinct_marks() -> list[dict]:
+        # CommonMark nests same-type emphasis (``*a *b* c*`` is em inside em)
+        # and markdown-it emits both opens, but a ProseMirror node may carry
+        # each mark once: the duplicate raised "Invalid collection of marks"
+        # from node.check() and bricked the artifact on hydration (review
+        # 2026-09-02 §2.3 class). The first occurrence wins.
+        seen: set[tuple] = set()
+        kept: list[dict] = []
+        for m in marks:
+            key = _mark_key(m)
+            if key not in seen:
+                seen.add(key)
+                kept.append(dict(m))
+        return kept
+
     def with_marks(node: dict) -> dict:
         if marks:
             node = dict(node)
-            node["marks"] = [dict(m) for m in marks]
+            node["marks"] = distinct_marks()
         return node
 
     for tok in tokens:
@@ -145,7 +161,7 @@ def _inline_to_pm(tokens: list[Any]) -> list[dict]:
                 )
             )
         elif ttype == "code_inline":
-            code_marks = [dict(m) for m in marks] + [{"type": "code"}]
+            code_marks = distinct_marks() + [{"type": "code"}]
             out.append({"type": "text", "text": tok.content, "marks": code_marks})
         elif ttype == "softbreak":
             out.append(with_marks({"type": "text", "text": "\n"}))
@@ -217,6 +233,14 @@ def _block_to_pm(tokens: list[Any], i: int) -> tuple[dict | None, int]:
 
     if ttype == "blockquote_open":
         children, j = _blocks_until(tokens, i + 1, "blockquote_close")
+        # blockquote content is "block+". A bare ">" line — exactly what an
+        # EMPTY editor blockquote (Tiptap: blockquote[paragraph()]) serializes
+        # to — has no children and failed node.check(), which made every
+        # rehydration of such a document raise (review 2026-09-02 §2.3).
+        # Synthesize the empty paragraph, as the list-item rule below does;
+        # the serializer emits ">" for it again, so the round-trip is idempotent.
+        if not children:
+            children = [{"type": "paragraph"}]
         node = {"type": "blockquote", "content": children}
         return node, j + 1
 
@@ -350,9 +374,12 @@ def markdown_to_pm(md: str) -> dict:
 # ProseMirror JSON -> markdown
 # ---------------------------------------------------------------------------
 
-# Mark delimiters for the "wrap" style marks. Order matters for nesting output
-# but our corpus never stacks these in a way the order changes; we emit
-# innermost-last consistently.
+# Mark delimiters for the "wrap" style marks. Nesting ORDER is decided by
+# ``_serialize_inline`` from how far each mark persists, never from the order
+# the marks arrive in: Yjs stores marks as an unordered attr dict and the reader
+# re-sorts them into schema order (link < em < strong), which used to put a
+# short ``em`` OUTSIDE a longer ``strong`` and widen it on every checkpoint
+# (review 2026-09-02 §2.2).
 _MARK_DELIM = {
     "strong": ("**", "**"),
     "em": ("*", "*"),
@@ -364,20 +391,76 @@ _MARK_DELIM = {
     # mark open/close logic emits nothing for it.
 }
 
+# Alternate delimiters, used ONLY when a mark is re-opened right after a close
+# that ends in the same character. Two crossing ranges (``a`` bold, ``b`` bold
+# and italic, ``c`` italic) must close italic+bold and re-open italic; with
+# ``*`` for both that emits one ``****`` run, and CommonMark's rule of three
+# then refuses to match the bold at all (``**a*b****c*`` parses as literal
+# ``**``). ``_`` keeps the runs apart. It is not used for ordinary opens because
+# ``_`` cannot open or close inside a word, where ``*`` can.
+_ALT_DELIM = {
+    "strong": ("__", "__"),
+    "em": ("_", "_"),
+}
+
 # Characters that begin a markdown construct and so must be escaped when they
 # start a block of plain text, plus a couple that are escaped inline. We keep
 # this deliberately minimal: enough to keep our own serialized output stable and
 # re-parseable, while NOT escaping "[" so bare ``[@key]`` markers stay literal.
 _INLINE_ESCAPE = {"*": "\\*", "_": "\\_", "`": "\\`", "~": "\\~", "\\": "\\\\"}
 
+# Plain text that LOOKS like markdown re-parses as markdown, and the text is
+# gone: ``[x](y)`` becomes a link whose text is ``x``, ``<https://x.se>`` an
+# autolink, and a line starting ``2024. Results`` an ordered list numbered
+# 2024 (second-opinion round on the 2026-09-02 review; all reproduced). The
+# checkpoint's dry-run reader cannot see any of these — they parse fine. So
+# the serializer escapes the ONE character that turns each construct on, and
+# nothing more, to keep already-correct documents byte-identical.
+_AUTOLINK_RE = re.compile(
+    r"<(?:[A-Za-z][A-Za-z0-9+.\-]{1,31}:[^\s<>]*|[\w.+\-]+@[\w\-]+(?:\.[\w\-]+)+)>"
+)
+# Constructs that are only recognised at the START of a line. ``*``, ``_``,
+# ``~`` and the backtick are already escaped by the per-character pass, so a
+# ``* `` bullet, a ``***`` rule, a ``___`` rule and a fence cannot occur here.
+_BLOCK_START_RE = re.compile(
+    r"""^(?:
+        \#{1,6}(?=[ \t]|$)                      # ATX heading
+      | >                                       # blockquote
+      | [-+](?=[ \t]|$)                         # bullet
+      | (?:-[ \t]*){3,}$                        # thematic break
+      | (?:=+|-+)[ \t]*$                        # setext underline
+      | \|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$   # table delimiter row
+    )""",
+    re.X,
+)
+_ORDERED_START_RE = re.compile(r"^(\d{1,9})([.)])(?=[ \t]|$)")
+_REFDEF_START_RE = re.compile(r"^(\[[^\]]*\]):(?=[ \t]|$)")
 
-def _escape_text(text: str) -> str:
-    """Escape inline-markdown-significant characters in plain text.
+
+def _escape_block_start(line: str) -> str:
+    if _BLOCK_START_RE.match(line):
+        return "\\" + line
+    m = _ORDERED_START_RE.match(line)
+    if m:
+        return f"{m.group(1)}\\{m.group(2)}{line[m.end():]}"
+    m = _REFDEF_START_RE.match(line)
+    if m:
+        return f"{m.group(1)}\\:{line[m.end():]}"
+    return line
+
+
+def _escape_text(text: str, *, at_line_start: bool = False) -> str:
+    """Escape markdown-significant characters in plain text.
 
     We deliberately do NOT escape ``[`` so a bare ``[@x9]`` citekey marker
     survives as literal, UNESCAPED text (the bare-marker scan must still match
     it). ``*``/``_``/`` ` ``/``~``/``\\`` are escaped so emphasis-like runs in
-    body text do not re-parse into marks on the next round-trip.
+    body text do not re-parse into marks on the next round-trip. ``](`` and an
+    autolink's ``<`` are escaped so literal link syntax stays text, and a
+    line-start construct (heading, bullet, ordered-list number, quote, rule,
+    setext underline, table delimiter row, reference definition) is escaped at
+    the start of every line inside the text and, when ``at_line_start``, at the
+    start of the text itself.
     """
     out: list[str] = []
     i = 0
@@ -406,7 +489,12 @@ def _escape_text(text: str) -> str:
             continue
         out.append(_INLINE_ESCAPE.get(ch, ch))
         i += 1
-    return "".join(out)
+    escaped = "".join(out).replace("](", "]\\(")
+    escaped = _AUTOLINK_RE.sub(lambda m: "\\" + m.group(0), escaped)
+    lines = escaped.split("\n")
+    return "\n".join(
+        _escape_block_start(line) if (k or at_line_start) else line for k, line in enumerate(lines)
+    )
 
 
 def _mark_key(mark: dict) -> tuple:
@@ -415,139 +503,195 @@ def _mark_key(mark: dict) -> tuple:
     return (mark["type"], tuple(sorted(attrs.items(), key=lambda kv: kv[0])))
 
 
-def _marks_shared_with(marks: list[dict], neighbour: list[dict]) -> list[dict]:
-    keys = {_mark_key(m) for m in neighbour}
-    return [m for m in marks if _mark_key(m) in keys]
+def _persists_for(mark_key: tuple, nodes: list[dict], i: int) -> int:
+    """How many of the nodes AFTER ``i`` carry ``mark_key`` without a gap."""
+    n = 0
+    for node in nodes[i + 1 :]:
+        if mark_key not in {_mark_key(m) for m in node.get("marks", [])}:
+            break
+        n += 1
+    return n
 
 
-def _opens_a_delimiter_against(marks: list[dict], neighbour: list[dict]) -> bool:
-    """True if a fixed delimiter would be written at this boundary — i.e. some
-    delimiter mark is on this run and not already open on the neighbour."""
-    keys = {_mark_key(m) for m in neighbour}
-    return any(m["type"] in _MARK_DELIM and _mark_key(m) not in keys for m in marks)
+def _is_plain_text(node: dict) -> bool:
+    """A text node whose whitespace may be moved across a delimiter: code-marked
+    text is a verbatim span, so its whitespace is content."""
+    return node["type"] == "text" and not any(m["type"] == "code" for m in node.get("marks", []))
 
 
-def _text_node(text: str, marks: list[dict]) -> dict:
-    node: dict = {"type": "text", "text": text}
-    if marks:
-        node["marks"] = list(marks)
-    return node
-
-
-def _expel_enclosing_whitespace(nodes: list[dict]) -> list[dict]:
-    """Move whitespace out from just inside an emphasis delimiter.
-
-    CommonMark will not pair a delimiter run that is followed by whitespace (as an
-    opener) or preceded by it (as a closer). So ``**bold **tail`` is not bold at
-    all: re-parsing yields four literal asterisks, which we then escape, and the
-    formatting is destroyed permanently in a document nobody edited. The same
-    shape arrives from the CRDT — y-prosemirror drops marks on inline atoms, so a
-    bold citation splits its run and strands ``**bold **`` behind it.
-
-    The expelled whitespace keeps the marks it is STILL inside: the ones shared
-    with the neighbour on that side, which stay open across the boundary. That is
-    what turns ``**a * b***`` (broken) into ``**a *b***`` rather than unbolding
-    the space. With no neighbour, or nothing shared, it comes out unmarked.
-
-    Runs carrying ``code`` are skipped: a code span is verbatim, so its whitespace
-    is content. Runs with no fixed-delimiter mark are returned untouched, which
-    keeps already-correct documents byte-identical.
-    """
-    if not nodes:
-        return nodes
-
-    runs: list[tuple[list[dict], list[dict]]] = []
-    for node in nodes:
-        marks = node.get("marks") or []
-        if runs and [_mark_key(m) for m in runs[-1][0]] == [_mark_key(m) for m in marks]:
-            runs[-1][1].append(node)
-        else:
-            runs.append((marks, [node]))
-
-    out: list[dict] = []
-    for i, (marks, group) in enumerate(runs):
-        prev_marks = runs[i - 1][0] if i else []
-        next_marks = runs[i + 1][0] if i + 1 < len(runs) else []
-        if any(m["type"] == "code" for m in marks) or not any(
-            m["type"] in _MARK_DELIM for m in marks
-        ):
-            out.extend(group)
-            continue
-
-        group = list(group)
-        lead = trail = ""
-        if _opens_a_delimiter_against(marks, prev_marks) and group[0].get("type") == "text":
-            text = group[0]["text"]
-            body = text.lstrip()
-            lead = text[: len(text) - len(body)]
-            group[0] = {**group[0], "text": body}
-        if _opens_a_delimiter_against(marks, next_marks) and group[-1].get("type") == "text":
-            text = group[-1]["text"]
-            body = text.rstrip()
-            trail = text[len(body) :]
-            group[-1] = {**group[-1], "text": body}
-        group = [n for n in group if n.get("type") != "text" or n["text"]]
-
-        if not group:
-            # The whole run was whitespace, so both neighbours are now adjacent and
-            # only the marks BOTH still hold remain open around it.
-            both = _marks_shared_with(_marks_shared_with(marks, prev_marks), next_marks)
-            if lead or trail:
-                out.append(_text_node(lead + trail, both))
-            continue
-        if lead:
-            out.append(_text_node(lead, _marks_shared_with(marks, prev_marks)))
-        out.extend(group)
-        if trail:
-            out.append(_text_node(trail, _marks_shared_with(marks, next_marks)))
-    return out
-
-
-def _serialize_inline(nodes: list[dict], *, in_cell: bool = False) -> str:
+def _serialize_inline(
+    nodes: list[dict], *, single_line: bool = False, line_start: bool = True
+) -> str:
     """Serialize an inline node list, opening/closing marks as the active set
-    changes between adjacent nodes (mirrors the parse-time mark stack).
+    changes between adjacent nodes.
 
-    ``in_cell`` degrades ``hard_break`` to a single space (a ``\\``-newline
-    would split a table row); it is otherwise unused here."""
-    nodes = _expel_enclosing_whitespace(nodes)
+    **Nesting.** Marks are opened outermost-first by how far they PERSIST into
+    the following nodes, so a mark that ends sooner always nests inside one
+    that continues — whatever order the marks arrived in (Yjs stores them as an
+    unordered attr dict; the reader's schema order put a short ``em`` OUTSIDE a
+    longer ``strong`` and widened it on every checkpoint — review 2026-09-02
+    §2.2). At a boundary, every active mark from the OUTERMOST one the next
+    node lacks is closed, innermost first, and the still-wanted inner ones are
+    re-opened. A close-and-re-open therefore happens only for genuinely
+    crossing ranges.
+
+    **Whitespace.** CommonMark will not pair a delimiter run that is followed
+    by whitespace (as an opener) or preceded by it (as a closer), so
+    ``**bold **tail`` is not bold at all: re-parsing yields four literal
+    asterisks, which are then escaped, and the formatting is destroyed
+    permanently in a document nobody edited. The same shape arrives from the
+    CRDT — y-prosemirror drops marks on inline atoms, so a bold citation splits
+    its run and strands ``**bold **`` behind it. Whitespace at the edge of a
+    text node is therefore held back and written only once it is known what
+    follows: OUTSIDE any delimiter that closes or opens at that boundary, INSIDE
+    everything that stays open (``**a *b* c**``, not ``**a** *b* **c**``). This
+    is decided here, after nesting, because a crossing re-open is a delimiter
+    too — a pre-pass over the node list could not see it. Nodes without a
+    fixed-delimiter mark at either edge come out byte-identical.
+
+    ``single_line`` degrades ``hard_break`` (and a newline inside text) to a
+    single space — a line break would split a table row or end a heading (spec
+    §C; review 2026-09-02 §2.3). ``line_start=False`` says the text does not
+    begin a line of the document (a heading's ``## `` or a cell's ``| `` comes
+    first), so a leading ``1. `` or ``#`` is not a list or heading and must not
+    be escaped: ``## 1. Aims`` is the section's identity and stays byte-identical."""
     out: list[str] = []
-    active: list[dict] = []
+    active: list[dict] = []  # open marks, outermost first
+    opened_with: list[tuple[str, str]] = []  # (open, close) each active mark used
+    pend = ""  # edge whitespace held back until we know what follows it
+    last_close = ""  # the close delimiter written last; "" once anything follows
+    # line_start: nothing but whitespace written since the last newline (or, when
+    # the caller says so, since a prefix such as "## " that is not text).
 
-    def close_to(target: list[dict]) -> None:
-        nonlocal active
-        # Close marks not present in target, from innermost outward.
-        while active and active[-1] not in target:
-            out.append(_close_mark(active.pop()))
+    def emit(s: str) -> None:
+        nonlocal last_close, line_start
+        if not s or (not out and not s.strip()):
+            # Block-leading whitespace has no markdown form (the reader drops
+            # it, and four spaces would make an indented code block), so the
+            # canonical form omits it.
+            return
+        out.append(s)
+        last_close = ""
+        if s.endswith("\n"):
+            line_start = True
+        elif s.strip():
+            line_start = False
 
-    def open_from(target: list[dict]) -> None:
-        nonlocal active
-        for m in target:
-            if m not in active:
-                out.append(_open_mark(m))
-                active.append(m)
+    def close(pairs: list[tuple[dict, tuple[str, str]]]) -> None:
+        nonlocal last_close, line_start
+        for m, delim in pairs:
+            out.append(_close_mark(m, delim))
+            last_close = delim[1]
+            line_start = False
 
-    for node in nodes:
+    def transition(closes, held: str) -> None:
+        # Held whitespace lands OUTSIDE a fixed delimiter closing here, and
+        # stays INSIDE a link (its text is bracketed, not delimited).
+        if any(m["type"] in _MARK_DELIM for m, _ in closes):
+            close(closes)
+            emit(held)
+        else:
+            emit(held)
+            close(closes)
+
+    for i, node in enumerate(nodes):
         node_marks = node.get("marks", [])
-        close_to(node_marks)
-        open_from(node_marks)
-        out.append(_serialize_inline_atom(node, in_cell=in_cell))
+        node_keys = {_mark_key(m) for m in node_marks}
+        cut = next((k for k, m in enumerate(active) if _mark_key(m) not in node_keys), None)
+        closes = (
+            list(zip(reversed(active[cut:]), reversed(opened_with[cut:]), strict=True))
+            if cut is not None
+            else []
+        )
+        transition(closes, pend)
+        pend = ""
+        if cut is not None:
+            del active[cut:]
+            del opened_with[cut:]
 
-    close_to([])
+        lead = ""
+        body = None
+        if _is_plain_text(node):
+            text = node["text"].replace("\n", " ") if single_line else node["text"]
+            body = text.strip()
+            if not body:
+                pend = text  # whitespace-only: nothing to wrap, hold it back
+                continue
+            lead = text[: len(text) - len(text.lstrip())]
+            pend = text[len(text.rstrip()) :]
+
+        active_keys = {_mark_key(m) for m in active}
+        reopened = {_mark_key(m) for m, _ in closes}
+        to_open = [m for m in node_marks if _mark_key(m) not in active_keys]
+        to_open.sort(
+            key=lambda m: (-_persists_for(_mark_key(m), nodes, i), _MARK_RANK.get(m["type"], 99))
+        )
+        if any(m["type"] in _MARK_DELIM for m in to_open):
+            emit(lead)  # outside the delimiter about to open, inside what is open
+            lead = ""
+        for m in to_open:
+            delim = _MARK_DELIM.get(m["type"], ("", ""))
+            if _mark_key(m) in reopened and _needs_alternate(delim, last_close):
+                # A crossing re-open right after a same-character close: the two
+                # runs would merge into one and CommonMark's rule of three would
+                # refuse the match. ``_`` keeps them apart — unless the re-opened
+                # span ends inside a word, where ``_`` cannot close either. That
+                # shape has no markdown form at all: the span is emitted
+                # unmarked (formatting lost on a few characters) rather than as
+                # literal delimiters that would be escaped forever.
+                alt = _ALT_DELIM.get(m["type"])
+                if alt is None or _ends_inside_a_word(_mark_key(m), nodes, i):
+                    continue
+                delim = alt
+            emit(_open_mark(m, delim))
+            active.append(m)
+            opened_with.append(delim)
+        emit(lead)
+        if body is not None:
+            # Escaped at emission time: a line-start construct is only escaped
+            # when the text really starts a line — ``**1. Aim**`` is not a list.
+            emit(_escape_text(body, at_line_start=line_start))
+        else:
+            emit(_serialize_inline_atom(node, single_line=single_line))
+
+    # Block-final whitespace has no markdown form either: the reader drops it,
+    # so writing it would make the projection non-canonical.
+    transition(list(zip(reversed(active), reversed(opened_with), strict=True)), "")
     return "".join(out)
 
 
-def _open_mark(m: dict) -> str:
-    delim = _MARK_DELIM.get(m["type"])
-    if delim:
+# Tie-break for marks that persist equally far: schema order, outermost first —
+# the same order the Yjs reader already produced, so unchanged documents stay
+# byte-identical.
+_MARK_RANK: dict[str, int] = {name: i for i, name in enumerate(SCHEMA.marks)}
+
+
+def _needs_alternate(delim: tuple[str, str], last_close: str) -> bool:
+    """True when opening with ``delim`` would extend the close delimiter written
+    immediately before it into one longer run."""
+    return bool(delim[0] and last_close and last_close[-1] == delim[0][0])
+
+
+def _ends_inside_a_word(mark_key: tuple, nodes: list[dict], i: int) -> bool:
+    """True when the run of ``mark_key`` starting at ``i`` is followed directly
+    by a letter or digit — where ``_`` cannot act as a closing delimiter."""
+    j = i + 1 + _persists_for(mark_key, nodes, i)
+    if j >= len(nodes) or not _is_plain_text(nodes[j]):
+        return False
+    text = nodes[j]["text"]
+    return bool(text) and text[0].isalnum()
+
+
+def _open_mark(m: dict, delim: tuple[str, str]) -> str:
+    if delim[0]:
         return delim[0]
     if m["type"] == "link":
         return "["
     return ""
 
 
-def _close_mark(m: dict) -> str:
-    delim = _MARK_DELIM.get(m["type"])
-    if delim:
+def _close_mark(m: dict, delim: tuple[str, str]) -> str:
+    if delim[1]:
         return delim[1]
     if m["type"] == "link":
         attrs = m.get("attrs", {})
@@ -557,6 +701,18 @@ def _close_mark(m: dict) -> str:
             return f']({href} "{title}")'
         return f"]({href})"
     return ""
+
+
+def _longest_backtick_run(text: str) -> int:
+    longest = 0
+    run = 0
+    for ch in text:
+        if ch == "`":
+            run += 1
+            longest = max(longest, run)
+        else:
+            run = 0
+    return longest
 
 
 def _wrap_inline_code(text: str) -> str:
@@ -569,24 +725,26 @@ def _wrap_inline_code(text: str) -> str:
     is entirely backticks/whitespace), a single space is padded on each side so
     the leading/trailing backtick is not eaten as part of the delimiter; one of
     those padding spaces is stripped again on parse, leaving the body intact and
-    keeping the round-trip idempotent.
+    keeping the round-trip idempotent. A body with a space at BOTH ends gets the
+    same one-space padding, because CommonMark strips one space from each end
+    of such a span.
     """
-    longest = 0
-    run = 0
-    for ch in text:
-        if ch == "`":
-            run += 1
-            longest = max(longest, run)
-        else:
-            run = 0
-    fence = "`" * (longest + 1)
-    body = text
+    fence = "`" * (_longest_backtick_run(text) + 1)
+    # CommonMark converts a line ending inside a code span to a space — and the
+    # block parser runs first, so a continuation line starting with "## " would
+    # END the span and start a heading. Write the space the reader would produce.
+    body = text.replace("\n", " ")
     if body.startswith("`") or body.endswith("`") or body.strip("`") == "":
+        body = f" {body} "
+    elif body.startswith(" ") and body.endswith(" ") and body.strip():
+        # CommonMark strips ONE space from each end of a code span whose body
+        # starts and ends with a space (and is not all spaces) — so `` ` a ` ``
+        # re-read as ``a``. Pad once more; the reader strips it back off.
         body = f" {body} "
     return f"{fence}{body}{fence}"
 
 
-def _serialize_inline_atom(node: dict, *, in_cell: bool = False) -> str:
+def _serialize_inline_atom(node: dict, *, single_line: bool = False) -> str:
     ntype = node["type"]
     if ntype == "text":
         # code-marked text is its own self-contained span: the ``code`` mark is
@@ -601,14 +759,17 @@ def _serialize_inline_atom(node: dict, *, in_cell: bool = False) -> str:
         attrs = node["attrs"]
         return build_marker(attrs["citekey"], attrs["ev_id"])
     if ntype == "hard_break":
-        # In a table cell a "\"-newline would split the row: degrade to a
-        # single space (spec §C). Outside cells, unchanged.
-        return " " if in_cell else "\\\n"
+        # In a table cell a "\"-newline would split the row, and in a heading
+        # it would END the heading and rename the section: degrade to a single
+        # space (spec §C; review 2026-09-02 §2.3). Elsewhere, unchanged.
+        return " " if single_line else "\\\n"
     if ntype == "image":
         attrs = node.get("attrs", {})
-        alt = attrs.get("alt") or ""
+        alt = (attrs.get("alt") or "").replace("\n", " ")
         src = attrs.get("src", "")
         title = attrs.get("title")
+        if title:
+            title = title.replace("\n", " ")
         if title:
             return f'![{alt}]({src} "{title}")'
         return f"![{alt}]({src})"
@@ -619,15 +780,22 @@ def _serialize_block(node: dict) -> str:
     """Serialize one block node to markdown text (no trailing block separator)."""
     ntype = node["type"]
     if ntype == "paragraph":
-        body = _serialize_inline(node.get("content", []))
-        return body
+        return _serialize_inline(_without_block_final_breaks(node.get("content", [])))
     if ntype == "heading":
         level = node.get("attrs", {}).get("level", 1)
-        body = _serialize_inline(node.get("content", []))
+        body = _serialize_inline(
+            _without_block_final_breaks(node.get("content", [])),
+            single_line=True,
+            line_start=False,
+        )
         return f"{'#' * level} {body}"
     if ntype == "code_block":
         body = _code_block_text(node)
-        return f"```\n{body}\n```" if body else "```\n```"
+        # The fence must be longer than any backtick run in the body, or a
+        # "```" line inside the code closes the block early and every later
+        # section is swallowed into a new one (review 2026-09-02 §2.3).
+        fence = "`" * max(3, _longest_backtick_run(body) + 1)
+        return f"{fence}\n{body}\n{fence}" if body else f"{fence}\n{fence}"
     if ntype == "horizontal_rule":
         return "---"
     if ntype == "blockquote":
@@ -643,6 +811,25 @@ def _serialize_block(node: dict) -> str:
 def _code_block_text(node: dict) -> str:
     content = node.get("content", [])
     return "".join(c.get("text", "") for c in content)
+
+
+def _without_block_final_breaks(nodes: list[dict]) -> list[dict]:
+    """A ``hard_break`` that ends a block has no markdown form: ``\\`` before a
+    block boundary is a LITERAL backslash on re-parse (review 2026-09-02 §2.3).
+    It carries no text, so dropping it loses nothing the reader can see. A
+    whitespace-only text node after it is block-final too — the reader drops
+    block-final whitespace — so it must not hide the break (second-opinion
+    finding: ``line\\\n   `` followed by a blank line kept the backslash)."""
+    end = len(nodes)
+    while end:
+        node = nodes[end - 1]
+        if node.get("type") == "hard_break" or (
+            _is_plain_text(node) and not node.get("text", "").strip()
+        ):
+            end -= 1
+        else:
+            break
+    return nodes[:end]
 
 
 def _serialize_list(node: dict) -> str:
@@ -679,7 +866,11 @@ def _cell_text(cell: dict) -> str:
     """
     parts: list[str] = []
     for block in cell.get("content", []):
-        text = _serialize_inline(block.get("content", []), in_cell=True)
+        text = _serialize_inline(
+            _without_block_final_breaks(block.get("content", [])),
+            single_line=True,
+            line_start=False,
+        )
         if text:
             parts.append(text)
     return " ".join(parts).replace("\n", " ").replace("|", "\\|")

@@ -607,3 +607,400 @@ def test_whitespace_inside_a_code_span_is_left_alone():
     body = markdown_to_pm(md)["content"][0]["content"]
     kept = [n["text"] for n in body if "code" in [m["type"] for m in (n.get("marks") or [])]]
     assert kept == ["a  b "], kept
+
+
+# ---------------------------------------------------------------------------
+# Review 2026-09-02 §2.2–2.3: shapes the EDITOR produces (not markdown-it output)
+# that the checkpoint serializer used to corrupt or emit unreadably. Every case
+# goes through the Yjs reader, because Yjs stores marks as an unordered attr
+# dict and the reader re-sorts them into schema order — the order the parser
+# produced is gone by the time the checkpoint serializes.
+# ---------------------------------------------------------------------------
+import itertools  # noqa: E402
+import re  # noqa: E402
+
+import pytest  # noqa: E402
+
+from call_manager.proposal_assist.collab.markdown_bridge import _mark_key  # noqa: E402
+from call_manager.proposal_assist.collab.yjs_bridge import (  # noqa: E402
+    pm_json_to_ydoc,
+    ydoc_to_pm_json,
+)
+
+
+def _via_yjs(md: str) -> str:
+    """md -> PM -> Yjs -> PM -> md: exactly hydrate + checkpoint."""
+    return pm_to_markdown(ydoc_to_pm_json(pm_json_to_ydoc(markdown_to_pm(md))))
+
+
+@pytest.mark.parametrize(
+    ("md", "expected"),
+    [
+        # em ends before strong: ': text' used to gain italic (`***Aim 1: text***`)
+        ("**_Aim 1_: text**\n", "***Aim 1*: text**\n"),
+        # link ends before strong: the link used to widen over ': text'
+        ("**[Aim 1](https://x.se): text**\n", "**[Aim 1](https://x.se): text**\n"),
+        ("**bold** then *italic*\n", "**bold** then *italic*\n"),
+        ("*a **b** c*\n", "*a **b** c*\n"),
+        ("**a *b*** *c*\n", "**a *b*** *c*\n"),
+    ],
+)
+def test_nested_marks_do_not_widen_through_yjs(md, expected):
+    # The EXACT bytes matter, not only the marks: the longer-lived mark must be
+    # the outer one, or every checkpoint after an upgrade rewrites the document
+    # into an equivalent-but-different form (a spurious diff on every doc with
+    # nested marks). The Yjs path must also agree with the direct parser path.
+    out = _via_yjs(md)
+    assert out == expected
+    assert out == pm_to_markdown(markdown_to_pm(md))
+    assert _runs(markdown_to_pm(out)) == _runs(markdown_to_pm(md))
+    assert _via_yjs(out) == out
+
+
+def _runs(doc: dict) -> list[list[tuple[str, frozenset]]]:
+    """Per block: adjacent same-mark text merged into (text, mark-key set) runs.
+    This is the SEMANTIC content — what the user sees — independent of how
+    many text nodes carry it or in which order the marks are listed. Whitespace
+    is compared unmarked: a bold space is invisible, and markdown cannot hold
+    one next to a delimiter anyway (the serializer moves it outside)."""
+    blocks = []
+    for block in doc["content"]:
+        if block["type"] not in ("paragraph", "heading"):
+            continue
+        runs: list[tuple[str, frozenset]] = []
+        for node in block.get("content", []):
+            assert node["type"] == "text", node
+            keys = frozenset(_mark_key(m) for m in node.get("marks", []))
+            for piece in re.findall(r"\s+|\S+", node["text"]):
+                piece_keys = frozenset() if piece.isspace() else keys
+                if runs and runs[-1][1] == piece_keys:
+                    runs[-1] = (runs[-1][0] + piece, piece_keys)
+                else:
+                    runs.append((piece, piece_keys))
+        blocks.append(runs)
+    return blocks
+
+
+_MARK_PAIRS = [
+    ({"type": "strong"}, {"type": "em"}),
+    ({"type": "strong"}, {"type": "link", "attrs": {"href": "https://x.se", "title": None}}),
+    ({"type": "em"}, {"type": "link", "attrs": {"href": "https://x.se", "title": None}}),
+    ({"type": "strong"}, {"type": "strikethrough"}),
+    ({"type": "em"}, {"type": "strikethrough"}),
+]
+
+
+def _layouts():
+    # Three words; each word carries any subset of the two marks. 4^3 = 64 layouts
+    # per pair, which covers nested, adjacent, crossing and identical ranges.
+    for a, b in _MARK_PAIRS:
+        for combo in itertools.product(range(4), repeat=3):
+            marks = [
+                ([a] if bits & 1 else []) + ([b] if bits & 2 else []) for bits in combo
+            ]
+            yield a["type"], b["type"], marks
+
+
+@pytest.mark.parametrize(("a", "b", "marks"), list(_layouts()))
+def test_every_two_mark_layout_survives_the_checkpoint_round_trip(a, b, marks):
+    # The words are separated by spaces that carry the marks BOTH neighbours
+    # share (the form the whitespace-expulsion rule produces anyway).
+    words = ["alpha", "beta", "gamma"]
+    content = []
+    for i, (word, m) in enumerate(zip(words, marks, strict=True)):
+        if i:
+            shared = [x for x in marks[i - 1] if x in m]
+            content.append({"type": "text", "text": " ", **({"marks": shared} if shared else {})})
+        content.append({"type": "text", "text": word, **({"marks": m} if m else {})})
+    doc = {"type": "doc", "content": [{"type": "paragraph", "content": content}]}
+    yjs_view = ydoc_to_pm_json(pm_json_to_ydoc(doc))
+    md = pm_to_markdown(yjs_view)
+    assert _runs(markdown_to_pm(md)) == _runs(yjs_view), md
+    assert pm_to_markdown(markdown_to_pm(md)) == md, "not idempotent"
+
+
+def test_empty_blockquote_is_readable_again():
+    # Tiptap's blockquote is block+; typing "> " and moving on leaves
+    # blockquote[paragraph()], which serializes as a bare ">" line. That line
+    # used to fail node.check() on rehydration: the artifact 500ed on every GET
+    # and the git-first save path answered 409 — unreadable and unsaveable.
+    doc = {
+        "type": "doc",
+        "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": "intro"}]},
+            {"type": "blockquote", "content": [{"type": "paragraph"}]},
+            {"type": "paragraph", "content": [{"type": "text", "text": "after"}]},
+        ],
+    }
+    md = pm_to_markdown(doc)
+    assert md == "intro\n\n>\n\nafter\n"
+    assert markdown_to_pm(md) == doc
+    # And the exact bytes an already-committed document carries parse too.
+    assert markdown_to_pm(">\n") == {
+        "type": "doc",
+        "content": [{"type": "blockquote", "content": [{"type": "paragraph"}]}],
+    }
+
+
+def test_code_block_containing_a_fence_line_does_not_swallow_the_document():
+    doc = {
+        "type": "doc",
+        "content": [
+            {"type": "code_block", "content": [{"type": "text", "text": "x\n```\ny"}]},
+            {
+                "type": "heading",
+                "attrs": {"level": 2},
+                "content": [{"type": "text", "text": "Later"}],
+            },
+            {"type": "paragraph", "content": [{"type": "text", "text": "body"}]},
+        ],
+    }
+    md = pm_to_markdown(doc)
+    assert md == "````\nx\n```\ny\n````\n\n## Later\n\nbody\n"
+    assert markdown_to_pm(md) == doc
+    assert [s.heading for s in split_sections(md) if s.heading] == ["Later"]
+
+
+def test_block_final_hard_break_is_dropped_not_a_literal_backslash():
+    hb = {"type": "hard_break"}
+    t = lambda s: {"type": "text", "text": s}  # noqa: E731
+    doc = {
+        "type": "doc",
+        "content": [
+            {"type": "paragraph", "content": [t("line"), hb]},
+            {"type": "paragraph", "content": [t("next")]},
+            {
+                "type": "bullet_list",
+                "content": [
+                    {
+                        "type": "list_item",
+                        "content": [{"type": "paragraph", "content": [t("item"), hb, hb]}],
+                    },
+                ],
+            },
+        ],
+    }
+    md = pm_to_markdown(doc)
+    assert md == "line\n\nnext\n\n- item\n"
+    assert "\\" not in md
+    assert _runs(markdown_to_pm(md))[0] == [("line", frozenset())]
+
+
+def test_hard_break_inside_a_heading_becomes_a_space_and_keeps_the_section_name():
+    hb = {"type": "hard_break"}
+    t = lambda s: {"type": "text", "text": s}  # noqa: E731
+    doc = {
+        "type": "doc",
+        "content": [
+            {"type": "heading", "attrs": {"level": 2}, "content": [t("Aims"), hb, t("more")]},
+            {"type": "paragraph", "content": [t("body")]},
+        ],
+    }
+    md = pm_to_markdown(doc)
+    assert md == "## Aims more\n\nbody\n"
+    assert [s.heading for s in split_sections(md) if s.heading] == ["Aims more"]
+    assert markdown_to_pm(md)["content"][0]["content"] == [t("Aims more")]
+
+
+@pytest.mark.parametrize(
+    ("md", "text"),
+    [
+        ("*a *b* c*\n", "a b c"),
+        ("**a **b** c**\n", "a b c"),
+        # What the serializer emits for intraword mixed emphasis; CommonMark's
+        # flanking rules leave some delimiters literal here, so only "parses,
+        # one mark per type" is asserted, not the text.
+        ("*al***ph*a***\n", None),
+        ("**~~al~~**ph**a**\n", None),
+    ],
+)
+def test_nested_same_type_emphasis_parses_with_one_mark(md, text):
+    # CommonMark nests em inside em (and markdown-it emits both opens); a PM
+    # node carries a mark once. This used to raise "Invalid collection of
+    # marks" from node.check() — an artifact holding such text 500ed on every
+    # hydration.
+    doc = markdown_to_pm(md)
+    for node in doc["content"][0]["content"]:
+        keys = [_mark_key(m) for m in node.get("marks", [])]
+        assert len(keys) == len(set(keys)), node
+    if text is not None:
+        assert "".join(n["text"] for n in doc["content"][0]["content"]) == text
+        assert all(
+            {m["type"] for m in n.get("marks", [])} == {"em" if md[1] != "*" else "strong"}
+            for n in doc["content"][0]["content"]
+        )
+
+
+# ---------------------------------------------------------------------------
+# Second-opinion round on the 2026-09-02 fix: text that LOOKS like markdown
+# must come back as the same text. None of these raise, so the checkpoint's
+# dry-run reader cannot see them.
+# ---------------------------------------------------------------------------
+_HBN = {"type": "hard_break"}
+
+
+def _tn(s: str, **marks) -> dict:
+    node = {"type": "text", "text": s}
+    if marks.get("marks"):
+        node["marks"] = marks["marks"]
+    return node
+
+
+def _pn(*content) -> dict:
+    return {"type": "doc", "content": [{"type": "paragraph", "content": list(content)}]}
+
+
+def _text_of_n(doc: dict) -> str:
+    return "".join(
+        n.get("text", "") if n["type"] == "text" else f"<{n['type']}>"
+        for block in doc["content"]
+        for n in block.get("content", [])
+    )
+
+
+@pytest.mark.parametrize(
+    "s",
+    [
+        "see [x](y) here",
+        "an ![img](s.png) too",
+        "<https://x.se> and <a.b@x.se>",
+        "ref [x][y] and [z] alone",
+        "bare [@x9] marker",
+        "<TP53> is a gene",
+    ],
+)
+def test_literal_inline_syntax_in_plain_text_stays_text(s):
+    md = pm_to_markdown(_pn(_tn(s)))
+    back = markdown_to_pm(md)
+    assert back == _pn(_tn(s)), md
+    assert pm_to_markdown(back) == md
+    if "[@x9]" in s:
+        assert "[@x9]" in md  # the bare marker stays unescaped: the scan must match it
+    if "<TP53>" in s:
+        assert "<TP53>" in md  # not an autolink, not escaped
+
+
+@pytest.mark.parametrize(
+    "s",
+    [
+        "# not a heading",
+        "###### six",
+        "- not a bullet",
+        "+ plus",
+        "1. not a list",
+        "2024. Results were",
+        "7) seven",
+        "> not a quote",
+        "---",
+        "***",
+        "===",
+        "| --- |",
+        "|---|---|",
+        "[x]: y",
+    ],
+)
+def test_line_start_block_syntax_in_plain_text_stays_text(s):
+    for content in ([_tn(s)], [_tn("line"), _HBN, _tn(s)], [_tn("line\n" + s)]):
+        doc = _pn(*content)
+        md = pm_to_markdown(doc)
+        back = markdown_to_pm(md)
+        assert [b["type"] for b in back["content"]] == ["paragraph"], md
+        assert _text_of_n(back) == _text_of_n(doc), md
+        assert pm_to_markdown(back) == md
+
+
+def test_block_syntax_after_a_delimiter_is_not_escaped():
+    # `**1. Aim**` is not a list; escaping it would rewrite every such document.
+    strong = [{"type": "strong"}]
+    assert pm_to_markdown(_pn(_tn("1. Aim", marks=strong))) == "**1. Aim**\n"
+    # ...but a bullet-looking run INSIDE a paragraph after a newline is escaped.
+    assert pm_to_markdown(_pn(_tn("a\n- b"))) == "a\n\\- b\n"
+
+
+def test_hard_break_before_trailing_whitespace_is_block_final():
+    # Second opinion (Sonnet): "line", Shift+Enter, trailing spaces — the
+    # break's backslash landed right before the blank line and stayed literal.
+    for tail in ([_tn("   ")], [_tn("  ", marks=[{"type": "strong"}])], [_tn(" "), _HBN]):
+        doc = {
+            "type": "doc",
+            "content": [
+                {"type": "paragraph", "content": [_tn("line"), _HBN, *tail]},
+                {"type": "paragraph", "content": [_tn("next")]},
+            ],
+        }
+        md = pm_to_markdown(doc)
+        assert md == "line\n\nnext\n", md
+        assert "\\" not in md
+
+
+def test_block_edge_whitespace_is_dropped_canonically():
+    strong = [{"type": "strong"}]
+    assert pm_to_markdown(_pn(_tn("  lead"))) == "lead\n"
+    assert pm_to_markdown(_pn(_tn("trail  "))) == "trail\n"
+    assert pm_to_markdown(_pn(_tn(" ", marks=strong), _tn("a", marks=strong))) == "**a**\n"
+    assert pm_to_markdown(_pn(_tn("a", marks=strong), _tn(" ", marks=strong))) == "**a**\n"
+    # a heading's inner hard break becomes a space but a trailing one vanishes
+    doc = {
+        "type": "doc",
+        "content": [{"type": "heading", "attrs": {"level": 2}, "content": [_tn("Aims"), _HBN]}],
+    }
+    assert pm_to_markdown(doc) == "## Aims\n"
+
+
+@pytest.mark.parametrize("body", [" a ", "  a  ", " `a ", " ", "a", " a", "a "])
+def test_code_span_with_edge_spaces_round_trips(body):
+    # Second opinion (Sol): CommonMark strips one space from each end of a code
+    # span whose body starts AND ends with a space, so `` ` a ` `` re-read as ``a``.
+    doc = _pn(_tn("x "), _tn(body, marks=[{"type": "code"}]), _tn(" y"))
+    md = pm_to_markdown(doc)
+    back = markdown_to_pm(md)
+    code = [n["text"] for n in back["content"][0]["content"] if n.get("marks")]
+    assert code == [body], md
+    assert pm_to_markdown(back) == md
+
+
+def test_numbered_and_hash_headings_stay_byte_identical():
+    # A heading's text does not start a line — "## " does — so "1. " or "#"
+    # there is not a list or heading and must not be escaped: the heading
+    # text is the section's identity (split_sections keys on it).
+    for md in ["## 1. Aims\n", "## # not nested\n", "## - dash first\n", "## > quoted\n"]:
+        assert pm_to_markdown(markdown_to_pm(md)) == md
+    # ...while inside a list item the same text WOULD nest a list, so it is escaped.
+    li = {"type": "doc", "content": [{"type": "bullet_list", "content": [
+        {"type": "list_item", "content": [{"type": "paragraph", "content": [_tn("1. x")]}]},
+    ]}]}
+    md = pm_to_markdown(li)
+    assert md == "- 1\\. x\n"
+    assert markdown_to_pm(md) == li
+
+
+def test_newlines_inside_code_spans_and_headings_become_spaces():
+    # CommonMark parses blocks before inline code: a code span whose next line
+    # starts "## " ENDS the span and starts a heading (a phantom section). The
+    # reader turns a line ending inside a code span into a space anyway.
+    doc = _pn(_tn("x "), _tn("a\n## FAKE", marks=[{"type": "code"}]))
+    md = pm_to_markdown(doc)
+    assert md == "x `a ## FAKE`\n"
+    assert [b["type"] for b in markdown_to_pm(md)["content"]] == ["paragraph"]
+    assert [s.heading for s in split_sections(md) if s.heading] == []
+    heading = {"type": "doc", "content": [
+        {"type": "heading", "attrs": {"level": 2}, "content": [_tn("Aims\n## not")]},
+    ]}
+    assert pm_to_markdown(heading) == "## Aims ## not\n"
+    # Second opinion (Grok): a newline-ONLY text node and a newline inside a run
+    # both ended the heading; the rest became a paragraph and the section was
+    # renamed. Both are one space now, and the heading is idempotent.
+    for content in (
+        [_tn("Aims"), _tn("\n"), _tn("more")],
+        [_tn("Aim\ns", marks=[{"type": "em"}])],
+    ):
+        h = {
+            "type": "doc",
+            "content": [{"type": "heading", "attrs": {"level": 2}, "content": content}],
+        }
+        md = pm_to_markdown(h)
+        assert "\n" not in md.rstrip("\n"), md
+        assert [b["type"] for b in markdown_to_pm(md)["content"]] == ["heading"], md
+        assert pm_to_markdown(markdown_to_pm(md)) == md
+    image = _pn({"type": "image", "attrs": {"src": "s.png", "alt": "a\n## b", "title": None}})
+    assert pm_to_markdown(image) == "![a ## b](s.png)\n"

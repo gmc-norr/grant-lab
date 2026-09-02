@@ -21,6 +21,7 @@ from call_manager.proposal_assist.citations.gitio import (
     write_and_commit_files,
 )
 from call_manager.proposal_assist.collab import state, store
+from call_manager.proposal_assist.collab.canonical import markdown_to_pm_or_empty
 from call_manager.proposal_assist.collab.hydrate import build_doc
 from call_manager.proposal_assist.collab.markdown_bridge import pm_to_markdown
 from call_manager.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
@@ -49,6 +50,36 @@ class CheckpointResult:
 
 def serialize_doc_to_markdown(doc: Doc) -> str:
     return pm_to_markdown(ydoc_to_pm_json(doc))
+
+
+class CheckpointProjectionUnreadable(RuntimeError):
+    """The serializer emitted markdown that the reader (``markdown_to_pm``)
+    refuses. Committing it would brick the artifact: the next hydration raises
+    on the committed bytes, every GET of the draft answers 500 and the git-first
+    save path answers 409 (review 2026-09-02 §2.3 — an empty blockquote did
+    exactly this). Refusing keeps the durable log and the live room intact; the
+    next trigger retries once the document has changed. A serializer defect, so
+    it is logged at ERROR with the reader's message."""
+
+
+def _refuse_unreadable_projection(md: str, *, workspace_id: uuid.UUID, artifact: str) -> None:
+    """Dry-run the reader on what is about to be committed (review §2.3). The
+    parser is 60 lines from the serializer and would have refused every shape
+    that bricked an artifact; this makes it refuse at COMMIT time, before the
+    bytes exist anywhere but this call."""
+    try:
+        markdown_to_pm_or_empty(md)
+    except ValueError as exc:
+        logger.error(
+            "collab.checkpoint_projection_unreadable",
+            extra={
+                "event": "collab_checkpoint_projection_unreadable",
+                "workspace_id": str(workspace_id),
+                "artifact": artifact,
+                "error": str(exc),
+            },
+        )
+        raise CheckpointProjectionUnreadable(f"{artifact}: {exc}") from exc
 
 
 def _reconcile_head_for_checkpoint(session, *, workspace_id, repo) -> None:
@@ -204,6 +235,7 @@ def checkpoint_artifact(
 
     doc = build_doc([b for (_, _, b) in rows])
     md = serialize_doc_to_markdown(doc)
+    _refuse_unreadable_projection(md, workspace_id=workspace_id, artifact=artifact)
     fname = filename_for(_ARTIFACT[artifact])
     author_tag = ",".join(str(a) for a in authors)
     files = {fname: md}
