@@ -614,6 +614,21 @@ def _finalize_success(
     workspace deletion), so this call's token stamps were rolled back — the
     caller may need to reconcile genuinely-reported usage separately."""
     with session_factory() as s:
+        # LOCK ORDER (review 2026-09-02 A10 F2): the workspace row FIRST, before
+        # the chat_turns stamps and the turn_jobs UPDATE. The delete path is
+        # M → W → J (its `UPDATE workspaces` autoflushes before the job-table
+        # UPDATEs), and this finalize used to be J → W — a real Postgres 40P01
+        # in which the finalize was the victim: the token stamp, the
+        # spend_ledger row and the cloud_turn_completed event rolled back, and
+        # the delete then cancelled the turn with usage_unknown=True. FOR NO KEY
+        # UPDATE is the lock an UPDATE takes, so this queues behind an in-flight
+        # delete instead of crossing it, and the conditional running→completed
+        # UPDATE below then sees the row the delete terminalized. The
+        # last_sdk_session_id UPDATE further down is conditional and may match
+        # nothing, which is why it cannot be the thing that takes W.
+        s.execute(
+            select(Workspace.id).where(Workspace.id == workspace_id).with_for_update(key_share=True)
+        )
         user_turn = s.scalar(select(ChatTurn).where(ChatTurn.id == user_turn_id))
         if last_assistant_id is not None:
             turn = s.scalar(select(ChatTurn).where(ChatTurn.id == last_assistant_id))

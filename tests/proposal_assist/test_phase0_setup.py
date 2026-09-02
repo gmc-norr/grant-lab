@@ -73,12 +73,16 @@ def test_phase0_worker_runs_milestones_in_order_on_success(
         monkeypatch.setattr(
             Phase0Worker,
             "_m2",
-            lambda self, job_id, workspace_id, pinned: calls.append(("m2", pinned)),
+            lambda self, job_id, workspace_id, pinned, claimed_generation=None: calls.append(
+                ("m2", pinned, claimed_generation)
+            ),
         )
         monkeypatch.setattr(
             Phase0Worker,
             "_m3",
-            lambda self, job_id, workspace_id, pinned: calls.append(("m3", pinned)),
+            lambda self, job_id, workspace_id, pinned, claimed_generation=None: calls.append(
+                ("m3", pinned, claimed_generation)
+            ),
         )
         monkeypatch.setattr(
             Phase0Worker, "_fail", lambda self, job_id, exc: calls.append(("fail", exc))
@@ -86,7 +90,10 @@ def test_phase0_worker_runs_milestones_in_order_on_success(
 
         processed = worker.run_one()
         assert processed is True
-        assert calls == [("m1", 0), ("m2", "pinned"), ("m3", "pinned")]
+        # Every milestone receives the generation the claim stamped (review
+        # 2026-09-02 A10 F1): _m2/_m3 refuse a restored workspace by comparing it
+        # on the locked row, so run_one must hand it to them, not only to _m1.
+        assert calls == [("m1", 0), ("m2", "pinned", 0), ("m3", "pinned", 0)]
 
         s.expire_all()
         job = s.scalar(select(WorkspaceSetupJob).where(WorkspaceSetupJob.workspace_id == ws_id))

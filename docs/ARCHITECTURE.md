@@ -172,9 +172,9 @@ a rule that looks absolute usually is not.
 
 | primitive | line | first line of its contract |
 |---|---|---|
-| `live_at_generation` | fencing.py:72 | Primitive A. "Is this workspace LIVE and STILL at *generation*?", as a |
-| `acquire_commit_mutex_at_generation` | fencing.py:115 | Primitive B. Acquire the commit mutex, then refuse a workspace that is |
-| `acquire_shared_lease` | fencing.py:174 | Primitive C. Take the workspace's commit-mutex key in SHARED mode for the |
+| `live_at_generation` | fencing.py:80 | Primitive A. "Is this workspace LIVE and STILL at *generation*?", as a |
+| `acquire_commit_mutex_at_generation` | fencing.py:123 | Primitive B. Acquire the commit mutex, then refuse a workspace that is |
+| `acquire_shared_lease` | fencing.py:180 | Primitive C. Take the workspace's commit-mutex key in SHARED mode for the |
 
 ### Armed-gate allowlists (`tests/fencing/inventory.py`)
 

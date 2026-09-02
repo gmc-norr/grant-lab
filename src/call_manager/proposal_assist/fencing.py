@@ -33,8 +33,16 @@ shared and each waiting to upgrade is the one deadlock shape this protocol has.
 Where a transaction ALREADY holds the WORKSPACE row under FOR UPDATE, use none
 of them: assert the generation on that already-locked row. Only the workspace row
 qualifies — a job row carries no lifecycle state, so locking one proves nothing.
-Acquiring the mutex afterwards inverts the normative M -> J -> W order and opens
-a real Postgres 40P01 against the delete path (spec 5).
+Acquiring the mutex afterwards inverts the lock order and opens a real Postgres
+40P01 against the delete path (spec 5).
+
+LOCK ORDER, per job table: the mutex (M) first, always. Then the workspace row
+(W) BEFORE every job table — coherence, evaluator, review, uncited-claims and
+turn jobs — because the delete transaction updates the workspace row before it
+cancels those (measured, review 2026-09-02 A10 F2). The ONE exception is
+`workspace_setup_jobs`: J then W, because the rubric `activate` route locks the
+job row before it flushes its workspace update and the delete never locks setup
+job rows at all (phases/setup.py _m3 docstring).
 
 `WorkspaceGenerationStale` is DEFINED in ports/errors.py and re-exported here.
 It moved in F3b: a tool has to be able to CATCH it, and this module imports
@@ -133,8 +141,8 @@ def acquire_commit_mutex_at_generation(
     the one deadlock shape this protocol has.
 
     LOCK ORDER: this acquires the mutex (M). It must be called BEFORE any setup
-    job (J) or workspace (W) row lock, preserving the normative M -> J -> W
-    (phases/setup.py:500, web/api/rubric.py:341). Calling it after a job or
+    job (J) or workspace (W) row lock — M first, then W before every job table
+    except workspace_setup_jobs (see the module docstring). Calling it after a job or
     workspace row lock inverts the order against the delete path and opens a
     real Postgres 40P01. Where the caller ALREADY holds the workspace row under
     FOR UPDATE, do not call this at all — assert the generation on that
@@ -166,9 +174,7 @@ def acquire_commit_mutex_at_generation(
     if row is None or row[0] is not None:
         raise WorkspaceDeleted(workspace_id)
     if row[1] != generation:
-        raise WorkspaceGenerationStale(
-            workspace_id, expected=generation, actual=row[1]
-        )
+        raise WorkspaceGenerationStale(workspace_id, expected=generation, actual=row[1])
 
 
 def acquire_shared_lease(

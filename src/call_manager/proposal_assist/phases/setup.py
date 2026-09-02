@@ -85,6 +85,20 @@ class WorkspaceGoneDuringSetup(RuntimeError):
     'cancelled' status rather than a requeue; see _fail's docstring."""
 
 
+def _refuse_stale_claim(ws: Workspace, claimed_generation: int | None) -> None:
+    """Spec mechanism 3 (review 2026-09-02 A10 F1): the caller holds `ws` under
+    FOR UPDATE, so its `lifecycle_generation` is the truth for this transaction.
+    A claim stamped at another generation belongs to a workspace that was
+    deleted and restored since — writing its LLM-derived milestones now would
+    land them in the restored workspace and terminalize ANOTHER worker's claim.
+    None = legacy claim with no stamped generation; nothing to compare."""
+    if claimed_generation is not None and ws.lifecycle_generation != claimed_generation:
+        raise WorkspaceGoneDuringSetup(
+            f"workspace {ws.id} moved from generation {claimed_generation} to "
+            f"{ws.lifecycle_generation} (deleted and restored); this claim is stale"
+        )
+
+
 class SetupRowLockTimeout(RowLockTimeout):
     """A persist transaction's SET LOCAL lock_timeout fired while waiting on a
     lock — the Call row an ingestion batch upsert holds for its whole loop
@@ -346,8 +360,8 @@ class Phase0Worker:
 
         try:
             pinned = self._m1(job_id, workspace_id, claimed_generation)
-            self._m2(job_id, workspace_id, pinned)
-            self._m3(job_id, workspace_id, pinned)
+            self._m2(job_id, workspace_id, pinned, claimed_generation=claimed_generation)
+            self._m3(job_id, workspace_id, pinned, claimed_generation=claimed_generation)
         except Exception as exc:  # noqa: BLE001 — every outcome is recorded on the row
             self._fail(job_id, exc)
         return True
@@ -470,26 +484,55 @@ class Phase0Worker:
             _run_git(["add", "-A"], cwd=repo_dir)
             _run_git(["commit", "-q", "-m", "phase0: initialize empty artifacts"], cwd=repo_dir)
 
-    def _assert_live(self, job_id: uuid.UUID, workspace_id: uuid.UUID) -> None:
-        """Short, lock-free liveness read. Used BEFORE computing so a deleted
-        workspace costs no cloud spend; the locked persist re-checks for the
-        race that opens after this returns."""
+    def _assert_live(
+        self,
+        job_id: uuid.UUID,
+        workspace_id: uuid.UUID,
+        claimed_generation: int | None = None,
+    ) -> None:
+        """Short, lock-free pre-check. Used BEFORE computing so a workspace that
+        has moved on costs no cloud spend; the locked persist re-checks for the
+        race that opens after this returns.
+
+        Liveness alone is not enough (review 2026-09-02 A10 F1): after delete →
+        restore, `soft_deleted_at` is NULL again and the re-queued, re-claimed
+        row is 'running' again — for ANOTHER worker. The generation is what
+        tells this worker's claim from that one. None = a legacy row claimed
+        before the claim stamped a generation; only liveness can be checked.
+        """
         with self.session_factory() as s:
-            deleted = s.scalar(
-                select(Workspace.soft_deleted_at).where(Workspace.id == workspace_id)
-            )
+            row = s.execute(
+                select(Workspace.soft_deleted_at, Workspace.lifecycle_generation).where(
+                    Workspace.id == workspace_id
+                )
+            ).one_or_none()
             status = s.scalar(
                 select(WorkspaceSetupJob.status).where(WorkspaceSetupJob.id == job_id)
             )
-        if deleted is not None or status != "running":
+        deleted = None if row is None else row.soft_deleted_at
+        generation = None if row is None else row.lifecycle_generation
+        if row is None or deleted is not None or status != "running":
             raise WorkspaceGoneDuringSetup(
                 f"workspace {workspace_id} deleted or job {job_id} no longer running"
             )
+        if claimed_generation is not None and generation != claimed_generation:
+            raise WorkspaceGoneDuringSetup(
+                f"workspace {workspace_id} moved from generation {claimed_generation} to "
+                f"{generation} (deleted and restored); this claim is stale"
+            )
 
-    def _m2(self, job_id: uuid.UUID, workspace_id: uuid.UUID, pinned: str) -> None:
+    def _m2(
+        self,
+        job_id: uuid.UUID,
+        workspace_id: uuid.UUID,
+        pinned: str,
+        claimed_generation: int | None = None,
+    ) -> None:
         """Milestone 2: section extracts. The LLM call happens with NO
-        transaction open; only the write is under lock."""
-        self._assert_live(job_id, workspace_id)
+        transaction open; only the write is under lock. `claimed_generation` is
+        the generation the claim stamped (threaded from run_one, never re-read
+        at the write); the locked persist refuses any other."""
+        self._assert_live(job_id, workspace_id, claimed_generation)
 
         with self.session_factory() as s:
             ws = s.get(Workspace, workspace_id)
@@ -513,6 +556,7 @@ class Phase0Worker:
             ws = s.get(Workspace, workspace_id, with_for_update=True)
             if ws is None or ws.soft_deleted_at is not None:
                 raise WorkspaceGoneDuringSetup(f"workspace {workspace_id} deleted")
+            _refuse_stale_claim(ws, claimed_generation)
             # Workspace row THEN Call row — the normative order. Two
             # workspaces sharing a Call therefore queue rather than
             # deadlock, and neither inverts against the delete
@@ -550,9 +594,16 @@ class Phase0Worker:
             ws.section_extracts = snapshot
             s.commit()
 
-    def _m3(self, job_id: uuid.UUID, workspace_id: uuid.UUID, pinned: str) -> None:
+    def _m3(
+        self,
+        job_id: uuid.UUID,
+        workspace_id: uuid.UUID,
+        pinned: str,
+        claimed_generation: int | None = None,
+    ) -> None:
         """Milestone 3: rubric snapshot, the rubric_initialized audit event, and
-        the job's terminal transition — all in ONE transaction.
+        the job's terminal transition — all in ONE transaction. `claimed_generation`
+        as in _m2: the locked persist refuses a workspace at any other generation.
 
         The status write lives here, not in a later step, for two reasons: a
         crash between them would re-run M3 and append a second audit event
@@ -571,7 +622,7 @@ class Phase0Worker:
         Call row, held for a whole ingestion batch's upsert loop; CallRubric's
         unique index) can pin the workspace or job row against a DELETE.
         """
-        self._assert_live(job_id, workspace_id)
+        self._assert_live(job_id, workspace_id, claimed_generation)
 
         with self.session_factory() as s:
             ws = s.get(Workspace, workspace_id)
@@ -598,6 +649,7 @@ class Phase0Worker:
             ws = s.get(Workspace, workspace_id, with_for_update=True)
             if ws is None or ws.soft_deleted_at is not None:
                 raise WorkspaceGoneDuringSetup(f"workspace {workspace_id} deleted")
+            _refuse_stale_claim(ws, claimed_generation)
             call = s.get(Call, call_id, with_for_update=True)
             if call is None:
                 raise RuntimeError(f"call {call_id} not found")
