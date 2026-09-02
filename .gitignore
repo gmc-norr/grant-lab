@@ -21,6 +21,9 @@ venv/
 
 # Locally-rendered exports of design specs / plans
 docs/**/*.pdf
+# README.pdf is a 142 KB rendered copy of README.md — a build artifact, and it was
+# tracked while every other generated PDF was ignored (review 2026-09-02 §12).
+README.pdf
 
 # Runtime data (e.g. golden_set_last.json written by weekly eval job)
 data/
