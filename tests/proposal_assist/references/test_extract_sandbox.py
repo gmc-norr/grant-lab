@@ -58,3 +58,80 @@ def test_child_extraction_error_surfaces_as_extract_error():
         extract_text_bounded(
             mime="application/x-not-a-real-mime", data=b"garbage", timeout_seconds=30.0
         )
+
+
+# ---------------------------------------------------------------------------
+# Review 2026-09-02 §2.5(d) / Appendix A4 F6 — the sandbox bounds memory too
+# ---------------------------------------------------------------------------
+#
+# A 1.99 MB PDF whose one page is zlib(2 GiB of spaces) made the child allocate
+# 4.04 GB and "finish" inside the 30 s CPU budget. The worker now caps its own
+# address space (RLIMIT_AS) before extracting; a MemoryError is reported like any
+# other extraction failure. Measured 2026-09-02 on this box: a spawned child sits
+# at 48 MB of address space after importing the extractor and extracting a 1 MB
+# text file, and allocates 3 GiB without complaint when unlimited.
+
+
+class _ListQueue:
+    def __init__(self):
+        self.items: list = []
+
+    def put(self, item):
+        self.items.append(item)
+
+
+def test_worker_applies_the_memory_limit_before_extracting(monkeypatch):
+    import resource
+
+    from call_manager.proposal_assist.references import extract_sandbox as sb
+
+    calls: list = []
+    monkeypatch.setattr(sb.resource, "setrlimit", lambda res, lim: calls.append((res, lim)))
+    q = _ListQueue()
+    sb._worker("text/markdown", b"# T\n\nbody", q)
+    limit = sb._MAX_ADDRESS_SPACE_BYTES
+    assert calls == [(resource.RLIMIT_AS, (limit, limit))]
+    assert limit >= 1024**3, "must leave real extraction (pdfminer, openpyxl) room to run"
+    assert q.items and q.items[0][0] == "ok"
+
+
+def test_memory_error_inside_the_child_is_reported_as_an_extraction_failure(monkeypatch):
+    from call_manager.proposal_assist.references import extract_sandbox as sb
+
+    monkeypatch.setattr(sb.resource, "setrlimit", lambda res, lim: None)
+
+    def _boom(**kwargs):
+        raise MemoryError
+
+    monkeypatch.setattr(sb, "extract_text", _boom)
+    q = _ListQueue()
+    sb._worker("text/plain", b"x", q)
+    status, payload = q.items[0]
+    assert status == "err"
+    assert "MemoryError" in payload and "memory budget" in payload
+
+
+def _allocate_under_the_limit(q) -> None:
+    # Module-level so the spawn context can import it by qualified name.
+    from call_manager.proposal_assist.references import extract_sandbox as sb
+
+    sb._apply_memory_limit()
+    try:
+        bytearray(3 * 1024**3)
+        q.put("ok")
+    except MemoryError:
+        q.put("MemoryError")
+
+
+def test_the_limit_bites_in_a_real_spawned_child():
+    """The syscall, not a mock: under the worker's own limit a 3 GiB allocation
+    fails in a real spawned child of this interpreter."""
+    from call_manager.proposal_assist.references.extract_sandbox import _CTX
+
+    q = _CTX.Queue()
+    proc = _CTX.Process(target=_allocate_under_the_limit, args=(q,), daemon=True)
+    proc.start()
+    try:
+        assert q.get(timeout=60) == "MemoryError"
+    finally:
+        proc.join(10)
