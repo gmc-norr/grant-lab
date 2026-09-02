@@ -26,9 +26,23 @@ from call_manager.proposal_assist.ports.stamp import FenceStamp
 _HYDRATE_MUTEX_TIMEOUT_SECONDS = 5
 
 
+class Hydration(list):
+    """The update rows a room replays on cold start, plus the document epoch
+    those rows belong to — read in the SAME mutex-held session, so the two are
+    one consistent snapshot (spec 2026-09-02-collab-doc-epoch-design.md §3.2).
+
+    A list subclass so every existing caller (which iterates, indexes, or
+    compares the result to `[]`) is unchanged; only RoomManager reads
+    `.doc_epoch`, and a plain list from a test loader reads as epoch 0."""
+
+    def __init__(self, updates: list[bytes], *, doc_epoch: int) -> None:
+        super().__init__(updates)
+        self.doc_epoch = doc_epoch
+
+
 def load_or_hydrate(
     session, *, stamp: FenceStamp, workspace_id: uuid.UUID, artifact: str, workspaces_dir
-) -> list[bytes]:
+) -> Hydration:
     # SPEC §4.4 — the mutex comes BEFORE the read, not before the seed write.
     #
     # This used to guard only the cold seed path, below. That left the WARM path
@@ -61,18 +75,22 @@ def load_or_hydrate(
         generation=stamp.generation,
         timeout_seconds=_HYDRATE_MUTEX_TIMEOUT_SECONDS,
     )
+    # The epoch is read UNDER the mutex, next to the rows it labels: a switch
+    # that truncates the log also bumps the epoch in one transaction, and the
+    # mutex orders this read entirely before or entirely after it.
+    doc_epoch = state.get_doc_epoch(session, workspace_id=workspace_id, artifact=artifact)
     updates = store.load_updates(session, workspace_id=workspace_id, artifact=artifact)
     if updates:
-        return updates
+        return Hydration(updates, doc_epoch=doc_epoch)
     if not state.is_collab_enabled(session, workspace_id=workspace_id, artifact=artifact):
-        return []
+        return Hydration([], doc_epoch=doc_epoch)
     md = read_head_markdown(workspace_repo_dir(workspaces_dir, workspace_id), artifact)
     if md is None:
         # Collab enabled but the artifact file has never been committed. Leave the
         # room empty (Slice-1 behavior) rather than persisting a synthetic seed.
-        return []
+        return Hydration([], doc_epoch=doc_epoch)
     seed = pm_json_to_ydoc(markdown_to_pm_or_empty(md)).get_update()
     store.append_update(
         session, workspace_id=workspace_id, artifact=artifact, actor_id=None, update=seed
     )
-    return [seed]
+    return Hydration([seed], doc_epoch=doc_epoch)

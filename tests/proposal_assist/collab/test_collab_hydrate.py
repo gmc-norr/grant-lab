@@ -2,7 +2,7 @@
 import subprocess
 from pathlib import Path
 
-from pycrdt import Doc
+from pycrdt import Doc, Text
 
 from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
 from call_manager.proposal_assist.collab import state, store
@@ -144,3 +144,80 @@ def test_existing_updates_are_replayed_not_rehydrated(pg_session_factory, tmp_pa
             workspaces_dir=str(tmp_path),
         )
         assert updates == cap  # replayed the store, did NOT re-hydrate from git
+
+
+# --- The epoch rides with the rows (spec 2026-09-02-collab-doc-epoch-design.md §3.2) ---
+
+
+def test_warm_path_returns_a_hydration_carrying_the_rows_epoch(pg_session_factory, tmp_path):
+    from call_manager.proposal_assist.collab.hydrate import Hydration
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=make_user(s, email="hy-ep-warm@ki.se"))
+        state.enable_collab(s, workspace_id=ws.id, artifact="draft")
+        s.commit()
+        wid = ws.id
+    with pg_session_factory() as s:
+        # Two truncates happened before this room open: the rows that exist
+        # now belong to document 2.
+        state.reset_checkpoint(s, workspace_id=wid, artifact="draft")
+        state.reset_checkpoint(s, workspace_id=wid, artifact="draft")
+        d = Doc()
+        d["body"] = Text()
+        d["body"] += "warm"
+        store.append_update(
+            s, workspace_id=wid, artifact="draft", actor_id=None, update=d.get_update()
+        )
+        s.commit()
+    with pg_session_factory() as s:
+        updates = load_or_hydrate(
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            artifact="draft",
+            workspaces_dir=str(tmp_path),
+        )
+    assert isinstance(updates, Hydration)
+    assert isinstance(updates, list)  # still a list to every existing caller
+    assert len(updates) == 1
+    assert updates.doc_epoch == 2
+
+
+def test_cold_seed_path_carries_the_epoch_too(pg_session_factory, tmp_path):
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=make_user(s, email="hy-ep-cold@ki.se"))
+        s.commit()
+        wid = ws.id
+    _init_repo(Path(tmp_path) / str(wid) / "repo", "## Background\nseeded.\n")
+    with pg_session_factory() as s:
+        state.enable_collab(s, workspace_id=wid, artifact="draft")
+        state.reset_checkpoint(s, workspace_id=wid, artifact="draft")  # epoch 1, log empty
+        s.commit()
+    with pg_session_factory() as s:
+        updates = load_or_hydrate(
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            artifact="draft",
+            workspaces_dir=str(tmp_path),
+        )
+        s.commit()
+    assert len(updates) == 1  # the seed
+    assert updates.doc_epoch == 1
+
+
+def test_flag_off_and_never_reset_is_epoch_zero(pg_session_factory, tmp_path):
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=make_user(s, email="hy-ep-off@ki.se"))
+        s.commit()
+        wid = ws.id
+    with pg_session_factory() as s:
+        updates = load_or_hydrate(
+            s,
+            stamp=stamp_for(s, wid),
+            workspace_id=wid,
+            artifact="draft",
+            workspaces_dir=str(tmp_path),
+        )
+    assert updates == []
+    assert updates.doc_epoch == 0
