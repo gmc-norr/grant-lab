@@ -56,6 +56,31 @@ logger = logging.getLogger(__name__)
 # model-derived budget is part of the planned references/ranking RAG revamp.
 _REFERENCE_CHUNK_CHARS = 1000
 
+# Cap on chunks embedded per reference (review 2026-09-02 §2.5(a)). Every chunk
+# is one synchronous Ollama round-trip on the request thread inside an ingest
+# slot, then one 1024-float row held in memory until a single INSERT. A 50 MB
+# text/plain upload — an allowed MIME, under every byte cap — measured 58,255
+# chunks; the same size as markdown, 3.7 million. 500 chunks × 1000 chars is
+# ~500k characters, more than a 100-page PDF (which the extractor already caps),
+# so no legitimate reference is cut; what is cut is announced in a visible
+# `[truncated]` chunk exactly like the PDF page cap in extract.py.
+_MAX_REFERENCE_CHUNKS = 500
+
+
+def _cap_chunks(
+    chunks: list[tuple[str | None, str]], *, limit: int
+) -> list[tuple[str | None, str]]:
+    """The first `limit` chunks, plus one `[truncated]` marker chunk when any
+    were dropped. Unchanged (same list) at or under the limit."""
+    if len(chunks) <= limit:
+        return chunks
+    marker = (
+        "[truncated]",
+        f"[Reference truncated: only the first {limit} of {len(chunks)} text chunks "
+        "were indexed; the rest of the document is not included in this text.]",
+    )
+    return [*chunks[:limit], marker]
+
 
 @dataclass
 class IngestResult:
@@ -127,6 +152,15 @@ def run_postwrite_phases(
         chunks = chunk_sections(sections, max_chunk_chars=_REFERENCE_CHUNK_CHARS)
         if not chunks:
             raise ExtractError("no chunks produced from extracted text")
+        if len(chunks) > _MAX_REFERENCE_CHUNKS:
+            logger.warning(
+                "ingest: chunk cap hit — embedding %d of %d chunks (workspace=%s reference=%s)",
+                _MAX_REFERENCE_CHUNKS,
+                len(chunks),
+                workspace_id,
+                reference_id,
+            )
+            chunks = _cap_chunks(chunks, limit=_MAX_REFERENCE_CHUNKS)
 
         # Persist text.txt for v1.1 PageIndex + reembed CLI.
         full_text = "\n\n".join(t for (_, t) in sections)
@@ -165,8 +199,7 @@ def run_postwrite_phases(
             return i, section_path, stored_text, result.vector
 
         embedded = [
-            _embed_chunk(i, section_path, text)
-            for i, (section_path, text) in enumerate(chunks)
+            _embed_chunk(i, section_path, text) for i, (section_path, text) in enumerate(chunks)
         ]
         with session_factory() as s2:
             for i, section_path, stored_text, vec in embedded:
