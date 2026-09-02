@@ -523,3 +523,80 @@ describe("giving up on reconnection is told to the user", () => {
     vi.useRealTimers();
   });
 });
+
+describe("document epoch — a retained doc says which document it holds", () => {
+  // Spec 2026-09-02-collab-doc-epoch-design.md §4 / §6 tests 9-11. The server
+  // sends [varuint 4][varuint epoch] before its STEP1. A client that learned
+  // an epoch presents it on every reconnect so a doc from before a branch
+  // switch is refused (4409) before it can send its state.
+  const MESSAGE_DOC_EPOCH = 4;
+  const BARE = "ws://x/api/ws/workspaces/w/draft";
+  function epochFrame(epoch: number): Uint8Array {
+    const e = encoding.createEncoder();
+    encoding.writeVarUint(e, MESSAGE_DOC_EPOCH);
+    encoding.writeVarUint(e, epoch);
+    return encoding.toUint8Array(e);
+  }
+
+  it("connects bare first, learns the epoch, and presents it on the next reconnect", () => {
+    vi.useFakeTimers();
+    const { p, sockets } = makeProvider(true);
+    expect(p.docEpoch).toBeNull();
+    expect(sockets[0].url).toBe(BARE);
+    sockets[0].open();
+    sockets[0].deliver(epochFrame(7));
+    expect(p.docEpoch).toBe(7);
+    sockets[0].drop(1006);
+    vi.advanceTimersByTime(50);
+    expect(sockets).toHaveLength(2);
+    expect(sockets[1].url).toBe(`${BARE}?epoch=7`);
+    p.destroy();
+    vi.useRealTimers();
+  });
+
+  it("a frame 4 does not latch synced and is not echoed", () => {
+    const { p, sockets } = makeProvider(true);
+    const s = sockets[0]; s.open(); s.sent.length = 0;
+    s.deliver(epochFrame(2));
+    expect(p.synced).toBe(false);
+    expect(s.sent).toHaveLength(0);
+    p.destroy();
+  });
+
+  it("after 4409 this provider stays down and a NEW provider opens the bare URL", () => {
+    vi.useFakeTimers();
+    const onDocumentReplaced = vi.fn();
+    const { p, sockets } = makeProvider(true, { onDocumentReplaced });
+    sockets[0].open();
+    sockets[0].deliver(epochFrame(3));
+    sockets[0].drop(WS_DOCUMENT_REPLACED);
+    vi.advanceTimersByTime(60_000);
+    expect(sockets).toHaveLength(1);              // the old doc never reconnects
+    expect(onDocumentReplaced).toHaveBeenCalledOnce();
+    p.destroy();
+    const fresh = makeProvider(true);             // what useCollabDoc builds next
+    expect(fresh.p.docEpoch).toBeNull();
+    expect(fresh.sockets[0].url).toBe(BARE);
+    fresh.p.destroy();
+    vi.useRealTimers();
+  });
+
+  it("appends with & when the URL already carries a query string", () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const p = new CollabProvider({
+      url: "ws://x/y?token=t", doc: new Y.Doc(), canWrite: true,
+      reconnectBaseMs: 10, reconnectMaxMs: 20,
+      WebSocketImpl: class extends FakeSocket {
+        constructor(u: string) { super(u); sockets.push(this); }
+      } as unknown as typeof WebSocket,
+    });
+    sockets[0].open();
+    sockets[0].deliver(epochFrame(1));
+    sockets[0].drop(1006);
+    vi.advanceTimersByTime(50);
+    expect(sockets[1].url).toBe("ws://x/y?token=t&epoch=1");
+    p.destroy();
+    vi.useRealTimers();
+  });
+});
