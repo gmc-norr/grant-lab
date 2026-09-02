@@ -60,6 +60,7 @@ def test_owner_can_connect_and_persist_an_update(_app, pg_session_factory):
     client.cookies.set("session", _cookie(_app, oid))
     try:
         with client.websocket_connect(f"/api/ws/workspaces/{wid}/draft") as wsconn:
+            P.read_doc_epoch_message(wsconn.receive_bytes())  # DOC_EPOCH precedes STEP1
             first = wsconn.receive_bytes()          # server SYNC_STEP1
             assert P.is_sync_step1(first)
             wsconn.send_bytes(_update_frame("owner edit"))
@@ -111,6 +112,7 @@ def test_persist_failure_closes_socket_without_double_close_crash(
         with pytest.raises(WebSocketDisconnect) as exc, client.websocket_connect(
             f"/api/ws/workspaces/{wid}/draft"
         ) as wsconn:
+            P.read_doc_epoch_message(wsconn.receive_bytes())  # DOC_EPOCH precedes STEP1
             assert P.is_sync_step1(wsconn.receive_bytes())  # initial SYNC_STEP1
             wsconn.send_bytes(_update_frame("boom"))         # → persist raises → PersistError
             wsconn.receive_bytes()                            # server evicts + closes (1011)
@@ -160,6 +162,7 @@ def test_read_only_member_update_is_not_persisted(_app, pg_session_factory):
     client.cookies.set("session", _cookie(_app, mid))
     try:
         with client.websocket_connect(f"/api/ws/workspaces/{wid}/draft") as wsconn:
+            P.read_doc_epoch_message(wsconn.receive_bytes())  # DOC_EPOCH precedes STEP1
             assert P.is_sync_step1(wsconn.receive_bytes())  # can still read
             wsconn.send_bytes(_update_frame("should be dropped"))
     finally:
@@ -213,6 +216,7 @@ def test_member_connecting_to_locked_spec_is_read_only(_app, pg_session_factory)
     client.cookies.set("session", _cookie(_app, mid))
     try:
         with client.websocket_connect(f"/api/ws/workspaces/{wid}/spec") as wsconn:
+            P.read_doc_epoch_message(wsconn.receive_bytes())  # DOC_EPOCH precedes STEP1
             assert P.is_sync_step1(wsconn.receive_bytes())   # connect + read OK
             wsconn.send_bytes(_update_frame("should be dropped"))
     finally:
@@ -275,6 +279,7 @@ def test_oversized_frame_closes_the_connection(_app, pg_session_factory):
     client.cookies.set("session", _cookie(_app, oid))
     try:
         with client.websocket_connect(f"/api/ws/workspaces/{wid}/draft") as wsconn:
+            P.read_doc_epoch_message(wsconn.receive_bytes())  # DOC_EPOCH precedes STEP1
             wsconn.receive_bytes()  # STEP1
             wsconn.send_bytes(b"\x00" * 1_000_001)  # over _MAX_FRAME_BYTES
             with pytest.raises(WebSocketDisconnect):
@@ -364,5 +369,158 @@ def test_two_connections_converge_through_the_route(_app, pg_session_factory):
             mirror["body"] = Text()
             mirror.apply_update(P.extract_update(frame))
             assert "shared edit" in str(mirror.get("body", type=Text))
+    finally:
+        client.__exit__(None, None, None)
+
+
+# --- Document epoch (spec 2026-09-02-collab-doc-epoch-design.md §3.3, §6 tests 1-4) ---
+
+
+def _doc_update(text: str) -> bytes:
+    d = Doc()
+    d["body"] = Text()
+    d["body"] += text
+    return d.get_update()
+
+
+def _epoch_setup(_app, pg_session_factory, email: str):
+    """An enabled draft whose log holds one row of `old` content. Returns
+    (client, wid, oid) with the client's session cookie set."""
+    from fastapi.testclient import TestClient
+
+    from call_manager.proposal_assist.collab import store
+
+    _app.state.session_factory = pg_session_factory
+    with pg_session_factory() as s:
+        owner = make_user(s, email=email)
+        ws = make_workspace(s, owner=owner, current_phase="active")
+        collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
+        s.commit()
+        wid, oid = ws.id, owner.id
+        store.append_update(
+            s, workspace_id=wid, artifact="draft", actor_id=oid, update=_doc_update("old aims")
+        )
+        s.commit()
+    client = TestClient(_app)
+    client.__enter__()
+    client.cookies.set("session", _cookie(_app, oid))
+    return client, wid, oid
+
+
+def _body_text(pg_session_factory, wid) -> str:
+    from call_manager.proposal_assist.collab import store
+
+    d = Doc()
+    d["body"] = Text()
+    with pg_session_factory() as s:
+        for u in store.load_updates(s, workspace_id=wid, artifact="draft"):
+            d.apply_update(u)
+    return str(d["body"])
+
+
+def _truncate_and_replace(pg_session_factory, wid, oid, text: str) -> None:
+    """What a branch switch does to the log (branches.py step 6) followed by
+    new content on the new document — without the git choreography."""
+    from call_manager.proposal_assist.collab import store
+
+    with pg_session_factory() as s:
+        store.truncate_log(s, workspace_id=wid, artifact="draft")
+        collab_state.reset_checkpoint(s, workspace_id=wid, artifact="draft")
+        store.append_update(
+            s, workspace_id=wid, artifact="draft", actor_id=oid, update=_doc_update(text)
+        )
+        s.commit()
+
+
+def test_every_accepted_connect_learns_the_epoch_before_step1(_app, pg_session_factory):
+    # Spec test 3: no `?epoch=` → frame 4 (with the room's epoch) then STEP1.
+    client, wid, oid = _epoch_setup(_app, pg_session_factory, "route-epoch-learn@ki.se")
+    try:
+        with client.websocket_connect(f"/api/ws/workspaces/{wid}/draft") as wsconn:
+            first = wsconn.receive_bytes()
+            assert P.read_doc_epoch_message(first) == 0
+            assert P.is_sync_step1(wsconn.receive_bytes())
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_the_reviews_reproduction_is_refused_before_step1(_app, pg_session_factory, caplog):
+    # Spec test 1 — review 2026-09-02 §2.1 / probe_stale_doc_merge.py. A client
+    # learned epoch 0 with "old aims" in its doc, missed the switch, and comes
+    # back presenting 0 against a room on document 1. It must be closed 4409
+    # having received NOTHING (no STEP1 → it can never send its STEP2), and the
+    # new document must be exactly what it was.
+    import logging
+
+    import pytest
+    from starlette.websockets import WebSocketDisconnect
+
+    from call_manager.proposal_assist.collab.room import MANAGER
+
+    client, wid, oid = _epoch_setup(_app, pg_session_factory, "route-epoch-stale@ki.se")
+    try:
+        with client.websocket_connect(f"/api/ws/workspaces/{wid}/draft") as wsconn:
+            learned = P.read_doc_epoch_message(wsconn.receive_bytes())
+            assert P.is_sync_step1(wsconn.receive_bytes())
+        assert learned == 0
+        _truncate_and_replace(pg_session_factory, wid, oid, "new aims")
+        assert _body_text(pg_session_factory, wid) == "new aims"
+
+        with (
+            caplog.at_level(logging.INFO),
+            pytest.raises(WebSocketDisconnect) as exc,
+            client.websocket_connect(f"/api/ws/workspaces/{wid}/draft?epoch={learned}") as wsconn,
+        ):
+            wsconn.receive_bytes()  # the first thing to arrive is the close
+        assert exc.value.code == 4409
+        # The refusal sits INSIDE the try that owns `finally: release`, so the
+        # refused socket is deregistered and the room (its only client) is
+        # gone. Hoisting the check above the try would leave a phantom client.
+        assert MANAGER.get((wid, "draft")) is None
+        assert _body_text(pg_session_factory, wid) == "new aims"  # unchanged
+        events = [r.__dict__.get("event") for r in caplog.records]
+        assert "collab_stale_doc_refused" in events
+
+        # A fresh doc (no epoch) is accepted and learns the new epoch.
+        with client.websocket_connect(f"/api/ws/workspaces/{wid}/draft") as wsconn:
+            assert P.read_doc_epoch_message(wsconn.receive_bytes()) == 1
+            assert P.is_sync_step1(wsconn.receive_bytes())
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_a_socket_presenting_the_current_epoch_is_accepted_and_can_persist(
+    _app, pg_session_factory
+):
+    # Spec test 2.
+    client, wid, oid = _epoch_setup(_app, pg_session_factory, "route-epoch-current@ki.se")
+    try:
+        _truncate_and_replace(pg_session_factory, wid, oid, "new aims")
+        with client.websocket_connect(f"/api/ws/workspaces/{wid}/draft?epoch=1") as wsconn:
+            assert P.read_doc_epoch_message(wsconn.receive_bytes()) == 1
+            assert P.is_sync_step1(wsconn.receive_bytes())
+            wsconn.send_bytes(_update_frame(" plus edit"))
+    finally:
+        client.__exit__(None, None, None)
+    # Read back from the LOG, not the room: this socket's edit was persisted.
+    # (A row count would be environment-coupled: an evict checkpoint compacts
+    # rows once the workspace has a git repo.)
+    assert " plus edit" in _body_text(pg_session_factory, wid)
+
+
+def test_a_malformed_epoch_closes_1008_before_any_frame(_app, pg_session_factory):
+    # Spec test 4.
+    import pytest
+    from starlette.websockets import WebSocketDisconnect
+
+    client, wid, _oid = _epoch_setup(_app, pg_session_factory, "route-epoch-bad@ki.se")
+    try:
+        for bad in ("abc", "-1", "1.5", ""):
+            with (
+                pytest.raises(WebSocketDisconnect) as exc,
+                client.websocket_connect(f"/api/ws/workspaces/{wid}/draft?epoch={bad}") as wsconn,
+            ):
+                wsconn.receive_bytes()
+            assert exc.value.code == 1008, bad
     finally:
         client.__exit__(None, None, None)

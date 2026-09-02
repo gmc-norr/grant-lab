@@ -1,7 +1,7 @@
 # Collab document epoch — a retained Y.Doc must prove which document it holds
 
 **Date:** 2026-09-02
-**Status:** approved design, unimplemented
+**Status:** implemented on feat/collab-doc-epoch (unmerged)
 **Closes:** review of record `docs/superpowers/reviews/2026-09-02-thorough-project-review.md`
 §2.1 / Appendix A6 F1 (HIGH). The last open item of that review's §7 step 3.
 
@@ -156,6 +156,12 @@ Frontend (`collabProvider.test.ts`, `FakeSocket`):
 10. A frame 4 does not set `synced` and is not echoed.
 11. After 4409 the provider stays down (unchanged test) and a NEW provider opens the bare
     URL.
+
+**Mutation proof (run 2026-09-02 at authoring time):** eight mutants — route
+mismatch check disabled, frame 4 not sent, frame 4 sends 0, malformed epoch
+accepted, `reset_checkpoint` no bump, `reset_checkpoint` no row creation,
+`acquire` forgets the epoch, `operate` forgets the epoch — each made its named
+test fail. Script: `mutate_doc_epoch.sh` (scratch, not committed).
 
 ## 7. Out of scope
 

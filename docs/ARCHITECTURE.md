@@ -61,7 +61,7 @@ Read this before claiming two tables share, or do not share, a rule.
 | `claim_analysis_jobs` | `ClaimAnalysisJob` | 12 | 1 | 1 | 2 |
 | `claim_classifications` | `ClaimClassification` | 12 | 2 | 1 | 0 |
 | `coherence_jobs` | `CoherenceJob` | 14 | 2 | 1 | 2 |
-| `collab_artifact_state` | `CollabArtifactState` | 5 | 1 | 1 | 0 |
+| `collab_artifact_state` | `CollabArtifactState` | 6 | 1 | 1 | 0 |
 | `digest_runs` | `DigestRun` | 5 | 1 | 0 | 2 |
 | `evaluator_jobs` | `EvaluatorJob` | 17 | 2 | 1 | 2 |
 | `golden_set_triples` | `GoldenSetTriple` | 8 | 3 | 1 | 0 |

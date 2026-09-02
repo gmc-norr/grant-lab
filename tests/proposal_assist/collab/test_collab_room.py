@@ -447,3 +447,23 @@ async def test_a_frame_at_the_ws_cap_cannot_freeze_the_room(label, header, can_w
     assert log == []
     assert other.sent == []
     assert sender.sent == []
+
+
+@pytest.mark.anyio
+async def test_inbound_doc_epoch_frame_is_dropped_not_applied_persisted_or_broadcast():
+    # Frame 4 is server→client only. A client that echoes it (or forges one)
+    # changes nothing: Room.handle already ignores unknown types, and this pins
+    # that the new type stays on the ignored path — not persisted, not
+    # broadcast, not answered.
+    room = Room((uuid.uuid4(), "draft"))
+    sender, peer = FakeClient(), FakeClient()
+    st = ClientState(user_id=1, can_write=True)
+    room.clients[sender] = st
+    room.clients[peer] = ClientState(user_id=2, can_write=True)
+    log, persist = _persist_sink()
+    await room.handle(
+        sender=sender, state=st, message=P.create_doc_epoch_message(9), persist=persist
+    )
+    assert log == []
+    assert sender.sent == []
+    assert peer.sent == []

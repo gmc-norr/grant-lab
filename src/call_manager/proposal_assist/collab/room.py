@@ -130,6 +130,13 @@ class Room:
         self.ops = 0  # in-flight server ops (kernel accepts) — Codex H1
         self.poisoned = False
         self.evicted = False  # tombstone: in-flight ops recheck & abort (Slice 3b-1)
+        # The document epoch this room's doc belongs to (spec 2026-09-02
+        # doc-epoch §3.2). Set by RoomManager from the Hydration it replays;
+        # 0 until then. The WS route compares a reconnecting client's `?epoch=`
+        # against this before sending STEP1, and tells every client its value
+        # in a DOC_EPOCH frame. A room never outlives an epoch change: both
+        # truncate callers tear rooms down first.
+        self.doc_epoch = 0
         self._lock = asyncio.Lock()
         self._pending_on_evict = None  # deferred last-leave checkpoint (Slice 3a c)
         # Serialize permission reconciliation per-room (Slice 3a cluster a/b).
@@ -555,7 +562,11 @@ class RoomManager:
                     room.clients[client] = state
             if room is None:
                 room = Room(key)
-                for update in await load():  # runs OUTSIDE the manager lock
+                updates = await load()  # runs OUTSIDE the manager lock
+                # The epoch rides with the rows (hydrate.Hydration); a bare list
+                # from a test loader is epoch 0.
+                room.doc_epoch = getattr(updates, "doc_epoch", 0)
+                for update in updates:
                     room.doc.apply_update(update)
                 async with self._lock:
                     # Re-check AFTER the out-of-lock load(): retirement may have
@@ -605,7 +616,9 @@ class RoomManager:
                         room.ops += 1
                 if room is None:
                     room = Room(key)
-                    for update in await load():  # OUTSIDE the manager lock
+                    updates = await load()  # OUTSIDE the manager lock
+                    room.doc_epoch = getattr(updates, "doc_epoch", 0)
+                    for update in updates:
                         room.doc.apply_update(update)
                     async with self._lock:
                         # Re-check AFTER load(): retirement may have landed while

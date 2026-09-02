@@ -7,6 +7,7 @@ a SYNC write frame (to persist it with an actor tag and re-broadcast it).
 Wire format (pycrdt._sync):
   SYNC frame:      [YMessageType.SYNC (0)] [YSyncMessageType] [varuint len] [payload]
   AWARENESS frame: [YMessageType.AWARENESS (1)] [varuint len] [payload]
+  DOC_EPOCH frame: [MESSAGE_DOC_EPOCH (4)] [varuint epoch]        (server → client only)
 """
 
 from __future__ import annotations
@@ -29,6 +30,9 @@ __all__ = [
     "handle_sync_message",
     "create_update_message",
     "create_awareness_message",
+    "MESSAGE_DOC_EPOCH",
+    "create_doc_epoch_message",
+    "read_doc_epoch_message",
     "Awareness",
     "is_sync_step1",
     "is_sync_write",
@@ -83,6 +87,34 @@ def _read_var_uint(buf, pos: int) -> tuple[int, int]:
             return num, pos
         shift += 7
     raise ValueError("y varuint: overlong")
+
+
+# --- Document epoch frame (spec 2026-09-02-collab-doc-epoch-design.md §3.4) ---
+#
+# y-protocols uses 0 sync, 1 awareness, 2 auth, 3 query-awareness. 4 is free on
+# both sides. The server sends one of these right before its STEP1 so the
+# client can present the epoch back as `?epoch=N` on every reconnect; a Y.Doc
+# from a previous document (a branch switch truncated the log) is then refused
+# before it can send its state. Inbound, Room.handle ignores the type.
+MESSAGE_DOC_EPOCH = 4
+
+
+def create_doc_epoch_message(epoch: int) -> bytes:
+    """[varuint 4][varuint epoch], written with pycrdt's own varuint writer."""
+    if epoch < 0:
+        raise ValueError("doc epoch must be non-negative")
+    return write_var_uint(MESSAGE_DOC_EPOCH) + write_var_uint(epoch)
+
+
+def read_doc_epoch_message(message: bytes) -> int:
+    """The epoch carried by a DOC_EPOCH frame. Raises ValueError for any other
+    type, a truncated or overlong varuint, or trailing bytes."""
+    if len(message) < 1 or message[0] != MESSAGE_DOC_EPOCH:
+        raise ValueError("not a doc-epoch frame")
+    epoch, pos = _read_var_uint(message, 1)
+    if pos != len(message):
+        raise ValueError("doc-epoch frame: trailing bytes")
+    return epoch
 
 
 def safe_read_message(stream: bytes, start: int = 0) -> bytes:

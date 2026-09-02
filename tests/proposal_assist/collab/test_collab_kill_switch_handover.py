@@ -269,3 +269,24 @@ def test_handover_drains_and_truncates_spec_artifact(pg_session_factory, tmp_pat
     assert (repo / PROPOSAL_FILENAME).read_text() == draft_before
     with pg_session_factory() as s:
         assert _log_len(s, wid, artifact="draft") == 0
+
+
+def test_handover_moves_the_document_epoch(pg_session_factory, tmp_path):
+    """The handover truncates the log, and a truncated log is a new document
+    (spec 2026-09-02-collab-doc-epoch-design.md §3.1): the epoch of every
+    artifact it drained is one higher. An artifact it did NOT touch keeps its
+    epoch — the bump rides reset_checkpoint, not the pass."""
+    wid, oid, _repo = _setup(pg_session_factory, tmp_path, "ho-epoch@ki.se")
+    _seed_room_edit(pg_session_factory, wid, oid, "## Background\n\nedit.\n")
+    with pg_session_factory() as s:
+        assert state.get_doc_epoch(s, workspace_id=wid, artifact="draft") == 0
+
+    assert handover.run_kill_switch_handover(pg_session_factory, workspaces_dir=str(tmp_path)) == 1
+
+    with pg_session_factory() as s:
+        assert state.get_doc_epoch(s, workspace_id=wid, artifact="draft") == 1
+        assert state.get_doc_epoch(s, workspace_id=wid, artifact="spec") == 0  # not drained
+    # A second pass has nothing to drain and moves nothing.
+    assert handover.run_kill_switch_handover(pg_session_factory, workspaces_dir=str(tmp_path)) == 0
+    with pg_session_factory() as s:
+        assert state.get_doc_epoch(s, workspace_id=wid, artifact="draft") == 1

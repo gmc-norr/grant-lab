@@ -8,6 +8,12 @@ const MESSAGE_SYNC = 0;
 const MESSAGE_AWARENESS = 1;
 const WS_OPEN = 1;
 
+/** Server → client only: [varuint 4][varuint epoch]. Which DOCUMENT the room
+ *  holds (a branch switch or kill-switch handover starts a new one). We present
+ *  it back as `?epoch=N` on every reconnect so a doc from a previous document is
+ *  refused (4409) before it can send its state. y-protocols uses 0-3; 4 is free. */
+const MESSAGE_DOC_EPOCH = 4;
+
 /** y-protocols/sync subtypes. STEP1 = "here is my state vector, send me yours";
  *  STEP2 = the reply carrying state; UPDATE = an incremental change. Only the
  *  last two put content into the doc. */
@@ -67,6 +73,11 @@ export class CollabProvider {
   // that has not arrived — which reads as data loss. Consumers gate content on
   // this, never on status.
   private _synced = false;
+  // The document epoch this doc synced against, learned from the server's
+  // DOC_EPOCH frame. null until then — a fresh doc can merge nothing, so it
+  // connects bare and learns the current value. Never persisted: a page
+  // reload is a fresh doc by design.
+  private _docEpoch: number | null = null;
   private readonly listeners = new Set<StatusListener>();
   private readonly syncListeners = new Set<SyncListener>();
   private attempts = 0;
@@ -130,6 +141,12 @@ export class CollabProvider {
     return this._synced;
   }
 
+  /** The document epoch learned from the server, or null before the first
+   *  DOC_EPOCH frame. */
+  get docEpoch(): number | null {
+    return this._docEpoch;
+  }
+
   on(ev: "sync", cb: SyncListener): () => void;
   on(ev: "status", cb: StatusListener): () => void;
   on(ev: "status" | "sync", cb: StatusListener | SyncListener): () => void {
@@ -179,7 +196,11 @@ export class CollabProvider {
   private connect(): void {
     if (this.destroyed) return;
     this.setStatus(this.attempts === 0 ? "connecting" : "offline");
-    const ws = new this.WS(this.url);
+    const url =
+      this._docEpoch === null
+        ? this.url
+        : `${this.url}${this.url.includes("?") ? "&" : "?"}epoch=${this._docEpoch}`;
+    const ws = new this.WS(url);
     ws.binaryType = "arraybuffer";
     this.ws = ws;
 
@@ -211,6 +232,12 @@ export class CollabProvider {
         if (!(ev.data instanceof ArrayBuffer)) return;
         const dec = decoding.createDecoder(new Uint8Array(ev.data));
         const messageType = decoding.readVarUint(dec);
+        if (messageType === MESSAGE_DOC_EPOCH) {
+          // Neither sync nor awareness: applies nothing, latches nothing, is
+          // never echoed. Remembered for the next connect's URL.
+          this._docEpoch = decoding.readVarUint(dec);
+          return;
+        }
         if (messageType === MESSAGE_AWARENESS) {
           // Ungated read: viewers see peers' carets. origin `this` → no echo.
           awarenessProtocol.applyAwarenessUpdate(this.awareness, decoding.readVarUint8Array(dec), this);
