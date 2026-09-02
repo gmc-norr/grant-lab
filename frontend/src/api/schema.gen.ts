@@ -2878,6 +2878,13 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
+        /** HealthOut */
+        HealthOut: {
+            /** Scheduler Lock */
+            scheduler_lock: boolean;
+            /** Status */
+            status: string;
+        };
         /** HiddenCallOut */
         HiddenCallOut: {
             /** Deadline */
@@ -14840,9 +14847,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: string;
-                    };
+                    "application/json": components["schemas"]["HealthOut"];
                 };
             };
         };

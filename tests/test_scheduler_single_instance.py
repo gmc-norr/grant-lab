@@ -196,3 +196,67 @@ def test_executor_pool_is_sized_above_default(_settings_env):
     pool = sched._executors["default"]._pool
     assert pool._max_workers == SCHEDULER_EXECUTOR_MAX_WORKERS
     sched.shutdown(wait=False)
+
+
+# --- Review 2026-09-02 §2.6(b): the probe names WHY, and a held lock can be lost
+
+
+def test_probe_reports_acquired_held_elsewhere_and_unavailable():
+    from call_manager.scheduler import probe_scheduler_lock
+
+    lock, state = probe_scheduler_lock(_FakeEngine(acquired=True))
+    assert state == "acquired" and isinstance(lock, SchedulerLock)
+    lock.release()
+
+    lock, state = probe_scheduler_lock(_FakeEngine(acquired=False))
+    assert (lock, state) == (None, "held_elsewhere")
+
+    lock, state = probe_scheduler_lock(_FakeEngine(acquired=False, raise_on_connect=True))
+    assert (lock, state) == (None, "unavailable")
+
+
+def test_try_acquire_is_the_probe_without_the_reason():
+    """The old entry point keeps its contract for every caller and test."""
+    assert try_acquire_scheduler_lock(_FakeEngine(acquired=False)) is None
+    lock = try_acquire_scheduler_lock(_FakeEngine(acquired=True))
+    assert isinstance(lock, SchedulerLock)
+    lock.release()
+
+
+def test_is_held_goes_false_when_the_lock_backend_dies(pg_url, caplog):
+    """Killing the lock backend post-boot used to be silent: the instance kept
+    serving 200 with no log line while a second instance could take the lock
+    (review A9 S5). is_held() pings the held connection; a dead session means
+    the lock is gone, and that is logged exactly once."""
+    import logging
+
+    from sqlalchemy import create_engine, text
+
+    engine_a = create_engine(pg_url)
+    engine_b = create_engine(pg_url)
+    try:
+        lock = try_acquire_scheduler_lock(engine_a)
+        assert isinstance(lock, SchedulerLock)
+        assert lock.is_held() is True
+        pid = lock._connection.execute(text("SELECT pg_backend_pid()")).scalar()
+        with engine_b.connect() as conn_b:
+            conn_b.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+        with caplog.at_level(logging.WARNING):
+            assert lock.is_held() is False
+            assert lock.is_held() is False  # stays false, no second ping needed
+        lost = [r for r in caplog.records if r.__dict__.get("event") == "scheduler_lock_lost"]
+        assert len(lost) == 1, "the loss must be logged exactly once"
+        assert lock.acquired is False
+        # And the lock really is free for the next instance.
+        with engine_b.connect() as conn_b:
+            assert (
+                conn_b.execute(
+                    text("SELECT pg_try_advisory_lock(hashtext('call-manager-scheduler'))")
+                ).scalar()
+                is True
+            )
+            conn_b.execute(text("SELECT pg_advisory_unlock(hashtext('call-manager-scheduler'))"))
+        lock.release()  # tolerant on a dead connection
+    finally:
+        engine_a.dispose()
+        engine_b.dispose()

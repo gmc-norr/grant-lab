@@ -11,14 +11,24 @@ lock, which is what broke test_scheduler_single_instance.py in-suite.
 
 import threading
 
+import pytest
 from fastapi.testclient import TestClient
+
+from call_manager.main import create_app
+
+
+@pytest.fixture
+def _app(_settings_env, monkeypatch):
+    """Both tests below enter a SECOND lifespan that cannot take the advisory
+    lock. Since review 2026-09-02 §2.6(b) that is fatal by default; the standby
+    flag keeps the tolerated build-but-do-not-start path these tests pin."""
+    monkeypatch.setenv("SCHEDULER_STANDBY_OK", "true")
+    return create_app()
 
 
 def _live_scheduler_threads() -> list[str]:
     return [
-        t.name
-        for t in threading.enumerate()
-        if t.is_alive() and "apscheduler" in t.name.lower()
+        t.name for t in threading.enumerate() if t.is_alive() and "apscheduler" in t.name.lower()
     ]
 
 
@@ -38,7 +48,7 @@ def test_nested_lifespan_does_not_orphan_the_outer_scheduler(_app, pg_session_fa
     outer.__enter__()
     try:
         started = _app.state.scheduler
-        assert started.running                      # the outer really started one
+        assert started.running  # the outer really started one
 
         inner = TestClient(_app)
         inner.__enter__()
@@ -52,7 +62,7 @@ def test_nested_lifespan_does_not_orphan_the_outer_scheduler(_app, pg_session_fa
     finally:
         outer.__exit__(None, None, None)
 
-    assert not started.running                      # stopped by ITS own lifespan
+    assert not started.running  # stopped by ITS own lifespan
     assert len(_live_scheduler_threads()) == before  # no zombie left behind
 
 
@@ -72,10 +82,12 @@ def test_teardown_survives_the_lock_not_acquired_path(_app, pg_session_factory, 
     # call_manager.scheduler on every entry — patch it there, not on main.
     from call_manager import scheduler as scheduler_module
 
-    monkeypatch.setattr(scheduler_module, "try_acquire_scheduler_lock", lambda _e: None)
+    monkeypatch.setattr(
+        scheduler_module, "probe_scheduler_lock", lambda _e: (None, "held_elsewhere")
+    )
     _app.state.session_factory = pg_session_factory
 
     client = TestClient(_app)
     client.__enter__()
-    assert not _app.state.scheduler.running         # the not-started path is live
-    client.__exit__(None, None, None)               # must not raise
+    assert not _app.state.scheduler.running  # the not-started path is live
+    client.__exit__(None, None, None)  # must not raise

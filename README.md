@@ -28,9 +28,13 @@ hosted LLM assistant while retaining a versioned audit trail.
 - **Local models:** Ollama for Gemma ranking and BGE-M3 embeddings.
 - **Hosted model:** Anthropic, optionally enabled for proposal drafting and rank escalation.
 
-The scheduler runs inside the FastAPI process and is protected by a PostgreSQL advisory
-lock. Production must run one application process: do not use multiple Uvicorn workers or
-multiple replicas.
+The application is single-instance: the scheduler runs inside the FastAPI process, and the
+live-editing rooms, drafting subprocesses and login rate limiters are per-process state.
+A PostgreSQL advisory lock enforces this at startup — a second process (a second Uvicorn
+worker, a second replica) finds the lock held and **refuses to start**. Set
+`SCHEDULER_STANDBY_OK=true` only for a deliberate HTTP-only standby that runs no
+scheduler; `GET /healthz` reports `scheduler_lock` so a monitor can tell which process
+holds it.
 
 ## Local development
 

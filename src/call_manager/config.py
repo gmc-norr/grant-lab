@@ -79,9 +79,7 @@ class Settings(BaseSettings):
     # Once exceeded, the drain stops claiming and leaves the remainder PENDING
     # for the next tick. Default 240s ≈ one worst-case job, generous enough that
     # a healthy batch never trips it while still bounding the pathological case.
-    ranking_tick_budget_seconds: float = Field(
-        default=240.0, alias="RANKING_TICK_BUDGET_SECONDS"
-    )
+    ranking_tick_budget_seconds: float = Field(default=240.0, alias="RANKING_TICK_BUDGET_SECONDS")
     ollama_url: str = Field(default="http://localhost:11434", alias="OLLAMA_URL")
     gemma_model: str = Field(default="gemma4:e4b-it-q4_K_M", alias="GEMMA_MODEL")
     embedding_model: str = Field(default="bge-m3", alias="EMBEDDING_MODEL")
@@ -253,6 +251,18 @@ class Settings(BaseSettings):
         default=200,
         alias="COLLAB_CHECKPOINT_MIN_TAIL",
         description="Min uncheckpointed Yjs-log rows before a collab room is auto-checkpointed.",
+    )
+    scheduler_standby_ok: bool = Field(
+        default=False,
+        alias="SCHEDULER_STANDBY_OK",
+        description=(
+            "This app is single-instance: the in-process scheduler, the collab room "
+            "manager, the drafting registry and the login limiters are all "
+            "per-process state. When another process already holds the "
+            "single-instance advisory lock, startup is FATAL by default. Set true "
+            "to boot an HTTP-only standby instead: it serves requests, runs no "
+            "scheduler, and /healthz reports scheduler_lock=false."
+        ),
     )
     collab_kill_switch: bool = Field(
         default=False,

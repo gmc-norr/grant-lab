@@ -37,6 +37,7 @@ class _FakeJob:
 class _FakeScheduler:
     def __init__(self, jobs):
         self._jobs = dict(jobs)
+        self.running = True  # trigger_job_now refuses a stopped scheduler
 
     def get_job(self, job_id):
         return self._jobs.get(job_id)
