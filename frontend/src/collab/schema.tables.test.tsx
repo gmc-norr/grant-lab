@@ -44,8 +44,9 @@ describe("strict-GFM table nodes", () => {
   it("cells hold exactly one paragraph", () => {
     const e = mk();
     e.commands.insertTable({ rows: 2, cols: 2, withHeaderRow: true });
-    const cell = (json(e).content?.find((n) => n.type === "table")!)
-      .content![1].content![0];
+    const table = json(e).content?.find((n) => n.type === "table");
+    expect(table, "no table node in the document").toBeDefined();
+    const cell = table!.content![1].content![0];
     expect(cell.content).toHaveLength(1);
     expect(cell.content![0].type).toBe("paragraph");
   });

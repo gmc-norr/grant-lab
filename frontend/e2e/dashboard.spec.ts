@@ -3,11 +3,12 @@ import { expect, test, type Page } from "@playwright/test";
 
 // Dual-mode (dev Vite proxy / prod FastAPI build) smoke for the flipped `/` SPA.
 //
-// DEFERRED LIVE RUN: authored against the real serving contract, but not run in
-// this environment. Running it needs (1) `pnpm exec playwright install
-// --with-deps chromium` (sudo for the OS libs), (2) a seeded ACTIVE e2e user
-// matching the login() helper below PLUS at least one seeded call (the
-// call-detail navigation test skips on an empty feed), (3) a running Postgres, and (4) the dev
+// RUNNABLE (2026-09-03): scripts/collab_e2e_seed.py now seeds the password user
+// this spec logs in as, plus a Call, and scripts/collab_e2e_run.sh takes a spec
+// list — so `E2E_SPECS="e2e/collab.spec.ts e2e/dashboard.spec.ts"
+// scripts/collab_e2e_run.sh` drives the whole thing. It still needs (1) `pnpm
+// exec playwright install --with-deps chromium` (sudo for the OS libs), (2) a
+// running Docker for the seeder's testcontainers Postgres, and (3) the dev
 // (uvicorn SPA_MODE=dev + `pnpm dev`) or prod (`pnpm build` + uvicorn
 // SPA_MODE=prod) front-door up — with uvicorn's APP_BASE_URL set to the origin
 // the browser POSTs from (dev: http://localhost:5173; prod: http://localhost:8000),
@@ -60,16 +61,25 @@ test("logout through the React UI lands on /login", async ({ page }) => {
   await expect(page).toHaveURL(/\/login$/);
 });
 
-test("navigation to a call-detail page stays in the SPA", async ({
-  page,
-}) => {
+test("navigation to a call-detail page stays in the SPA", async ({ page }) => {
   await login(page);
   await page.goto("/");
-  // This test requires at least one seeded call (see the seed prerequisite in
-  // the header); skip explicitly on an empty feed rather than silently passing.
-  const link = page.locator('a[href^="/calls/"]').first();
-  const count = await page.locator('a[href^="/calls/"]').count();
-  test.skip(count === 0, "no seeded calls in the feed; seed a call to exercise this");
-  await link.click();
+
+  // The list rows do NOT link to /calls/<id> any more: since the reading-pane
+  // migration a row selects into `?selected=<id>` and the pane offers "Open
+  // full page ↗", which is the only /calls/<id> anchor in the app
+  // (CallReadingPane.tsx). This test used to look for `a[href^="/calls/"]` on
+  // the list and skip itself when it found none — so it skipped on EVERY run,
+  // seeded feed or not, and the skip read as "no calls" rather than "the
+  // selector is stale" (review 2026-09-02 A6 finding 6).
+  const row = page.getByRole("listitem").first();
+  await expect(row, "no calls in the feed — the seeder should have created one").toBeVisible({
+    timeout: 10_000,
+  });
+  await row.getByRole("link").first().click();
+
+  const openFull = page.getByRole("link", { name: /open full page/i });
+  await expect(openFull).toBeVisible({ timeout: 10_000 });
+  await openFull.click();
   await expect(page).toHaveURL(/\/calls\/\d+/);
 });

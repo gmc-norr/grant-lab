@@ -341,11 +341,28 @@ def test_reset_rejects_weak_400(monkeypatch, pg_url, pg_session_factory):
 
 def test_reset_password_has_no_status_gate(monkeypatch, pg_url, pg_session_factory):
     # reset-password works for a DISABLED user (no status gate) — pins the non-gate invariant.
+    #
+    # Review 2026-09-02 A6 F2: this asserted only `== 200`, which an
+    # implementation that KEEPS a status gate and answers a disabled user with a
+    # 200 no-op (early return before the hash write) also satisfies. The two
+    # side-effect assertions below are the ones the active-user sibling
+    # (test_reset_password_bumps_epoch) already makes; the whole point of this
+    # test is that a disabled user gets the same treatment, so it must check the
+    # same things.
     app = _setup(monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory)
     did = _user(pg_session_factory, email="rpd@ki.se", status="disabled")
+    with pg_session_factory() as s:
+        ep0 = s.get(User, did).session_epoch
     r = c.post(f"/api/admin/users/{did}/reset-password", json={"new_password": "fresh-strong-pw"})
     assert r.status_code == 200
+    with pg_session_factory() as s:
+        u = s.get(User, did)
+        assert verify_password(u.password_hash, "fresh-strong-pw"), (
+            "responded 200 but never wrote the new credential"
+        )
+        assert u.session_epoch == ep0 + 1, "the reset did not revoke existing sessions"
+        assert u.status == "disabled", "the reset must not quietly re-enable the account"
 
 
 def test_reset_404(monkeypatch, pg_url, pg_session_factory):

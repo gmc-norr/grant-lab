@@ -46,6 +46,7 @@ dev = [
     "pytest-httpx>=0.36.2",
     "pip-audit>=2.7",
     "pytest-xdist>=3.8.0",
+    "pytest-timeout>=2.3",
     "httpx2>=2.9.1",
 ]
 
@@ -190,6 +191,7 @@ no-build-package = [
     "pytest",
     "pytest-asyncio",
     "pytest-httpx",
+    "pytest-timeout",
     "pytest-xdist",
     "python-dateutil",
     "python-docx",
@@ -254,6 +256,15 @@ asyncio_mode = "auto"
 # silently. Scoped narrowly to ResourceWarning — we don't want a stray
 # DeprecationWarning from an unrelated library to fail the suite.
 filterwarnings = ["error::ResourceWarning"]
+# A hanging test is the worst CI signal there is. Review 2026-09-02 A6 F1 caught
+# `test_oversized_frame_closes_the_connection` doing exactly that: with the frame
+# cap disarmed the server never closed, `receive_bytes()` blocked forever, and the
+# run showed no failing test id — just a job that sat for 595 s and was killed by
+# the runner's global timeout. Every blocking-receive test in the collab suite has
+# the same shape. 120 s is ~40x the slowest single test here and comfortably above
+# a first-test-on-a-worker testcontainers Postgres start, so it fires only on a
+# genuine hang.
+timeout = 120
 
 
 [tool.ruff.lint.per-file-ignores]

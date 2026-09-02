@@ -3,19 +3,30 @@ import uuid
 
 
 def test_claude_adapter_constructor_accepts_tools_factory():
-    """The adapter accepts a tools_factory; if None, it works as before."""
+    """The adapter accepts a tools_factory; if None, it works as before.
+
+    Review 2026-09-02 A6 F5: this asserted `adapter is not None` on a freshly
+    constructed object — true of every constructor that does not raise, so the
+    test could only fail by exploding, and an adapter that accepted
+    `tools_factory=` and silently dropped it passed. Identity is the property
+    the name claims: the factory the adapter was handed is the factory it kept.
+    """
     from call_manager.proposal_assist.drafting.claude_adapter import (
         ClaudeAgentSDKAdapter,
     )
 
-    adapter = ClaudeAgentSDKAdapter(model="x", workspaces_dir="/tmp")
-    assert adapter is not None
-    adapter2 = ClaudeAgentSDKAdapter(
+    default = ClaudeAgentSDKAdapter(model="x", workspaces_dir="/tmp")
+    assert default._tools_factory is None, "no factory given, yet one was stored"
+
+    def factory(repo_dir, workspace_id):
+        return None
+
+    adapter = ClaudeAgentSDKAdapter(
         model="x",
         workspaces_dir="/tmp",
-        tools_factory=lambda repo_dir, workspace_id: None,  # type: ignore[arg-type]
+        tools_factory=factory,  # type: ignore[arg-type]
     )
-    assert adapter2 is not None
+    assert adapter._tools_factory is factory, "the tools_factory was accepted and discarded"
 
 
 def test_factory_wires_tools_into_adapter(monkeypatch, _settings_env):
@@ -36,7 +47,17 @@ def test_factory_wires_tools_into_adapter(monkeypatch, _settings_env):
         session_factory=None,  # type: ignore[arg-type]
     )
     adapter = controller._registry._adapter
-    assert getattr(adapter, "_tools_factory", None) is not None
+    tools_factory = getattr(adapter, "_tools_factory", None)
+    assert tools_factory is not None
+
+    # Presence is not wiring (review A6 F5): any truthy attribute satisfies the
+    # line above. The docstring's claim is that the closure BUILDS the
+    # per-workspace MCP server, so call it and look at what comes back.
+    import pathlib
+    import uuid as _uuid
+
+    server = tools_factory(pathlib.Path("/tmp/test_workspaces/repo"), _uuid.uuid4())
+    assert server is not None, "the wired tools_factory builds no MCP server"
 
 
 def test_adapter_launch_passes_mcp_servers_and_allowed_tools(monkeypatch):

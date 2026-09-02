@@ -10,6 +10,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "test": "vitest run",
+    "lint": "oxlint --deny-warnings src e2e",
     "gen:api": "bash ../scripts/gen_openapi_types.sh"
   },
   "dependencies": {
@@ -53,6 +54,7 @@
     "jsdom": "24.1.1",
     "markdown-it": "14.2.0",
     "openapi-typescript": "7.13.0",
+    "oxlint": "1.80.0",
     "prosemirror-markdown": "1.13.4",
     "prosemirror-model": "1.25.9",
     "prosemirror-schema-list": "1.5.1",

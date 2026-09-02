@@ -40,17 +40,28 @@ def _seed_ws_ref(pg_session_factory, *, chunk_text, chunk_index=0):
         s.add(ws)
         s.flush()
         ref = Reference(
-            workspace_id=ws.id, kind="paper", source_type="uploaded",
-            title="Smith 2021", filename="smith.pdf", storage_path="r/smith.pdf",
-            mime_type="application/pdf", metadata_status="approved",
+            workspace_id=ws.id,
+            kind="paper",
+            source_type="uploaded",
+            title="Smith 2021",
+            filename="smith.pdf",
+            storage_path="r/smith.pdf",
+            mime_type="application/pdf",
+            metadata_status="approved",
         )
         s.add(ref)
         s.flush()
-        s.add(ReferenceChunk(
-            reference_id=ref.id, workspace_id=ws.id, chunk_index=chunk_index,
-            section_path=None, text=chunk_text, embedding=[0.0] * 1024,
-            embedding_model="fake",
-        ))
+        s.add(
+            ReferenceChunk(
+                reference_id=ref.id,
+                workspace_id=ws.id,
+                chunk_index=chunk_index,
+                section_path=None,
+                text=chunk_text,
+                embedding=[0.0] * 1024,
+                embedding_model="fake",
+            )
+        )
         s.commit()
         return owner.id, ws.id, ref.id
 
@@ -105,9 +116,17 @@ def test_happy_path_inserts_marker_and_ledger(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
         ws = s.get(Workspace, ws_id)
         out = _call(
-            s, ws, reference_id=ref_id, anchor="The sky is blue.",
-            evidence_quote="azure", quote_start=0, quote_end=5,
-            base_commit_sha=bc, base_section_sha=bs, workspaces_dir=tmp_path, user_id=owner_id,
+            s,
+            ws,
+            reference_id=ref_id,
+            anchor="The sky is blue.",
+            evidence_quote="azure",
+            quote_start=0,
+            quote_end=5,
+            base_commit_sha=bc,
+            base_section_sha=bs,
+            workspaces_dir=tmp_path,
+            user_id=owner_id,
         )
         s.commit()
     assert set(out) == {"ev_id", "citekey", "commit_sha"}
@@ -133,9 +152,16 @@ def test_repeated_span_uses_the_selected_occurrence(pg_session_factory, tmp_path
     with pg_session_factory() as s:
         ws = s.get(Workspace, ws_id)
         out = _call(  # the SECOND "blue" is at code points 9..13
-            s, ws, reference_id=ref_id, anchor="The sky is blue.",
-            evidence_quote="blue", quote_start=9, quote_end=13,
-            base_commit_sha=bc, base_section_sha=bs, workspaces_dir=tmp_path,
+            s,
+            ws,
+            reference_id=ref_id,
+            anchor="The sky is blue.",
+            evidence_quote="blue",
+            quote_start=9,
+            quote_end=13,
+            base_commit_sha=bc,
+            base_section_sha=bs,
+            workspaces_dir=tmp_path,
         )
         s.commit()
     ledger = load_ledger((repo / CITATIONS_FILENAME).read_text())
@@ -154,9 +180,18 @@ def test_stale_section_raises(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
         ws = s.get(Workspace, ws_id)
         with pytest.raises(CiteStale):
-            _call(s, ws, reference_id=ref_id, anchor="The sky is blue.",
-                  evidence_quote="azure", quote_start=0, quote_end=5,
-                  base_commit_sha=bc, base_section_sha=bs, workspaces_dir=tmp_path)
+            _call(
+                s,
+                ws,
+                reference_id=ref_id,
+                anchor="The sky is blue.",
+                evidence_quote="azure",
+                quote_start=0,
+                quote_end=5,
+                base_commit_sha=bc,
+                base_section_sha=bs,
+                workspaces_dir=tmp_path,
+            )
 
 
 def test_other_section_changed_still_succeeds(pg_session_factory, tmp_path):
@@ -172,9 +207,18 @@ def test_other_section_changed_still_succeeds(pg_session_factory, tmp_path):
     subprocess.run(["git", "commit", "-aqm", "other"], cwd=repo, check=True, env=_git_env())
     with pg_session_factory() as s:
         ws = s.get(Workspace, ws_id)
-        out = _call(s, ws, reference_id=ref_id, anchor="The sky is blue.",
-                    evidence_quote="azure", quote_start=0, quote_end=5,
-                    base_commit_sha=bc, base_section_sha=bs, workspaces_dir=tmp_path)
+        out = _call(
+            s,
+            ws,
+            reference_id=ref_id,
+            anchor="The sky is blue.",
+            evidence_quote="azure",
+            quote_start=0,
+            quote_end=5,
+            base_commit_sha=bc,
+            base_section_sha=bs,
+            workspaces_dir=tmp_path,
+        )
         s.commit()
     assert "ev_id" in out
 
@@ -186,9 +230,18 @@ def test_anchor_ambiguous_raises_invalid(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
         ws = s.get(Workspace, ws_id)
         with pytest.raises(CiteInvalid):
-            _call(s, ws, reference_id=ref_id, anchor="foo.",
-                  evidence_quote="azure", quote_start=0, quote_end=5,
-                  base_commit_sha=bc, base_section_sha=bs, workspaces_dir=tmp_path)
+            _call(
+                s,
+                ws,
+                reference_id=ref_id,
+                anchor="foo.",
+                evidence_quote="azure",
+                quote_start=0,
+                quote_end=5,
+                base_commit_sha=bc,
+                base_section_sha=bs,
+                workspaces_dir=tmp_path,
+            )
 
 
 def test_quote_mismatch_raises_invalid(pg_session_factory, tmp_path):
@@ -198,9 +251,18 @@ def test_quote_mismatch_raises_invalid(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
         ws = s.get(Workspace, ws_id)
         with pytest.raises(CiteInvalid):
-            _call(s, ws, reference_id=ref_id, anchor="The sky is blue.",
-                  evidence_quote="NOTMATCHING", quote_start=0, quote_end=5,
-                  base_commit_sha=bc, base_section_sha=bs, workspaces_dir=tmp_path)
+            _call(
+                s,
+                ws,
+                reference_id=ref_id,
+                anchor="The sky is blue.",
+                evidence_quote="NOTMATCHING",
+                quote_start=0,
+                quote_end=5,
+                base_commit_sha=bc,
+                base_section_sha=bs,
+                workspaces_dir=tmp_path,
+            )
 
 
 def test_codepoint_offsets_with_non_bmp_char(pg_session_factory, tmp_path):
@@ -211,9 +273,18 @@ def test_codepoint_offsets_with_non_bmp_char(pg_session_factory, tmp_path):
     bc, bs = _base(repo, 1)
     with pg_session_factory() as s:
         ws = s.get(Workspace, ws_id)
-        out = _call(s, ws, reference_id=ref_id, anchor="The sky is blue.",
-                    evidence_quote="azure", quote_start=2, quote_end=7,
-                    base_commit_sha=bc, base_section_sha=bs, workspaces_dir=tmp_path)
+        out = _call(
+            s,
+            ws,
+            reference_id=ref_id,
+            anchor="The sky is blue.",
+            evidence_quote="azure",
+            quote_start=2,
+            quote_end=7,
+            base_commit_sha=bc,
+            base_section_sha=bs,
+            workspaces_dir=tmp_path,
+        )
         s.commit()
     ledger = load_ledger((repo / CITATIONS_FILENAME).read_text())
     row = next(r for r in ledger["evidence"] if r["id"] == out["ev_id"])
@@ -221,16 +292,93 @@ def test_codepoint_offsets_with_non_bmp_char(pg_session_factory, tmp_path):
     assert row["evidence_quote_offsets"] == [2, 7]
 
 
-def test_foreign_reference_raises_not_found(pg_session_factory, tmp_path):
+def test_unknown_reference_id_raises_not_found(pg_session_factory, tmp_path):
+    """Renamed from `test_foreign_reference_…`: a random uuid4 is a MISSING
+    reference, so this only ever proved the `ref is None` half of the guard.
+    The workspace-scope half is pinned by the test below (review 2026-09-02 A6
+    F7, which found the same gap in propose_citation's copy of this guard)."""
     owner_id, ws_id, _ = _seed_ws_ref(pg_session_factory, chunk_text="azure sky")
     repo = _init_repo(tmp_path, ws_id, DOC)
     bc, bs = _base(repo, 1)
     with pg_session_factory() as s:
         ws = s.get(Workspace, ws_id)
         with pytest.raises(CiteRefNotFound):
-            _call(s, ws, reference_id=uuid.uuid4(), anchor="The sky is blue.",
-                  evidence_quote="azure", quote_start=0, quote_end=5,
-                  base_commit_sha=bc, base_section_sha=bs, workspaces_dir=tmp_path)
+            _call(
+                s,
+                ws,
+                reference_id=uuid.uuid4(),
+                anchor="The sky is blue.",
+                evidence_quote="azure",
+                quote_start=0,
+                quote_end=5,
+                base_commit_sha=bc,
+                base_section_sha=bs,
+                workspaces_dir=tmp_path,
+            )
+
+
+def test_a_reference_owned_by_ANOTHER_workspace_raises_not_found(pg_session_factory, tmp_path):
+    """The scope half of the guard: the reference EXISTS and has a matching
+    chunk, so the only thing refusing it is `ref.workspace_id != workspace.id`.
+
+    Dropping that clause leaves the chunk lookup below as the last defence, and
+    it is scoped too — so the failure would look like a confusing "chunk not
+    found" until someone relaxes that scope as well, and then it would look
+    like a citation to a source the workspace never had.
+    """
+    _owner_id, ws_id, _ref_id = _seed_ws_ref(pg_session_factory, chunk_text="azure sky")
+    with pg_session_factory() as s:
+        # A second, complete workspace: distinct owner email (the seed helper's
+        # literal collides on uq_users_email), its own reference AND chunk.
+        other_owner = User(status="active", email="other-owner@ki.se")
+        s.add(other_owner)
+        s.flush()
+        other_ws = Workspace(title="Other", owner_id=other_owner.id, current_phase="active")
+        s.add(other_ws)
+        s.flush()
+        foreign_ref = Reference(
+            workspace_id=other_ws.id,
+            kind="paper",
+            source_type="uploaded",
+            title="Jones 2022",
+            filename="jones.pdf",
+            storage_path="r/jones.pdf",
+            mime_type="application/pdf",
+            metadata_status="approved",
+        )
+        s.add(foreign_ref)
+        s.flush()
+        s.add(
+            ReferenceChunk(
+                reference_id=foreign_ref.id,
+                workspace_id=other_ws.id,
+                chunk_index=0,
+                section_path=None,
+                text="azure sky",
+                embedding=[0.0] * 1024,
+                embedding_model="fake",
+            )
+        )
+        s.commit()
+        foreign_ref_id = foreign_ref.id
+
+    repo = _init_repo(tmp_path, ws_id, DOC)
+    bc, bs = _base(repo, 1)
+    with pg_session_factory() as s:
+        ws = s.get(Workspace, ws_id)
+        with pytest.raises(CiteRefNotFound):
+            _call(
+                s,
+                ws,
+                reference_id=foreign_ref_id,
+                anchor="The sky is blue.",
+                evidence_quote="azure",
+                quote_start=0,
+                quote_end=5,
+                base_commit_sha=bc,
+                base_section_sha=bs,
+                workspaces_dir=tmp_path,
+            )
 
 
 def test_anchor_outside_validated_section_raises_stale(pg_session_factory, tmp_path):
@@ -245,9 +393,18 @@ def test_anchor_outside_validated_section_raises_stale(pg_session_factory, tmp_p
     with pg_session_factory() as s:
         ws = s.get(Workspace, ws_id)
         with pytest.raises(CiteStale):
-            _call(s, ws, reference_id=ref_id, anchor="Elsewhere only.",  # lives in section 2
-                  evidence_quote="azure", quote_start=0, quote_end=5,
-                  base_commit_sha=bc, base_section_sha=bs, workspaces_dir=tmp_path)
+            _call(
+                s,
+                ws,
+                reference_id=ref_id,
+                anchor="Elsewhere only.",  # lives in section 2
+                evidence_quote="azure",
+                quote_start=0,
+                quote_end=5,
+                base_commit_sha=bc,
+                base_section_sha=bs,
+                workspaces_dir=tmp_path,
+            )
     assert "ev:" not in (repo / PROPOSAL_FILENAME).read_text()  # nothing committed
 
 
@@ -270,9 +427,18 @@ def test_anchor_only_inside_marker_in_section_raises_stale(pg_session_factory, t
     with pg_session_factory() as s:
         ws = s.get(Workspace, ws_id)
         with pytest.raises(CiteStale):
-            _call(s, ws, reference_id=ref_id, anchor="smith2021",
-                  evidence_quote="azure", quote_start=0, quote_end=5,
-                  base_commit_sha=bc, base_section_sha=bs, workspaces_dir=tmp_path)
+            _call(
+                s,
+                ws,
+                reference_id=ref_id,
+                anchor="smith2021",
+                evidence_quote="azure",
+                quote_start=0,
+                quote_end=5,
+                base_commit_sha=bc,
+                base_section_sha=bs,
+                workspaces_dir=tmp_path,
+            )
     after = (repo / PROPOSAL_FILENAME).read_text()
     assert after == doc  # nothing inserted, no new marker in section 2
 
@@ -288,9 +454,17 @@ def test_provenance_rows_added_but_not_committed(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
         ws = s.get(Workspace, ws_id)
         out = _call(
-            s, ws, reference_id=ref_id, anchor="The sky is blue.",
-            evidence_quote="azure", quote_start=0, quote_end=5,
-            base_commit_sha=bc, base_section_sha=bs, workspaces_dir=tmp_path, user_id=owner_id,
+            s,
+            ws,
+            reference_id=ref_id,
+            anchor="The sky is blue.",
+            evidence_quote="azure",
+            quote_start=0,
+            quote_end=5,
+            base_commit_sha=bc,
+            base_section_sha=bs,
+            workspaces_dir=tmp_path,
+            user_id=owner_id,
         )
         # The pending (uncommitted) rows live in session.new before we commit.
         pending_av = [o for o in s.new if isinstance(o, ArtifactVersion)]
@@ -322,9 +496,18 @@ def test_offsets_out_of_range_raises_invalid(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
         ws = s.get(Workspace, ws_id)
         with pytest.raises(CiteInvalid):
-            _call(s, ws, reference_id=ref_id, anchor="The sky is blue.",
-                  evidence_quote="azure", quote_start=0, quote_end=999,
-                  base_commit_sha=bc, base_section_sha=bs, workspaces_dir=tmp_path)
+            _call(
+                s,
+                ws,
+                reference_id=ref_id,
+                anchor="The sky is blue.",
+                evidence_quote="azure",
+                quote_start=0,
+                quote_end=999,
+                base_commit_sha=bc,
+                base_section_sha=bs,
+                workspaces_dir=tmp_path,
+            )
 
 
 def test_invalid_chunk_index_on_owned_ref_raises_invalid(pg_session_factory, tmp_path):
@@ -336,9 +519,19 @@ def test_invalid_chunk_index_on_owned_ref_raises_invalid(pg_session_factory, tmp
     with pg_session_factory() as s:
         ws = s.get(Workspace, ws_id)
         with pytest.raises(CiteInvalid):
-            _call(s, ws, reference_id=ref_id, anchor="The sky is blue.",
-                  evidence_quote="azure", quote_start=0, quote_end=5, chunk_index=7,
-                  base_commit_sha=bc, base_section_sha=bs, workspaces_dir=tmp_path)
+            _call(
+                s,
+                ws,
+                reference_id=ref_id,
+                anchor="The sky is blue.",
+                evidence_quote="azure",
+                quote_start=0,
+                quote_end=5,
+                chunk_index=7,
+                base_commit_sha=bc,
+                base_section_sha=bs,
+                workspaces_dir=tmp_path,
+            )
 
 
 def test_claim_context_falls_back_to_anchor(pg_session_factory, tmp_path, monkeypatch):
@@ -354,9 +547,17 @@ def test_claim_context_falls_back_to_anchor(pg_session_factory, tmp_path, monkey
     with pg_session_factory() as s:
         ws = s.get(Workspace, ws_id)
         out = _call(
-            s, ws, reference_id=ref_id, anchor="The sky is blue.",
-            evidence_quote="azure", quote_start=0, quote_end=5,
-            base_commit_sha=bc, base_section_sha=bs, workspaces_dir=tmp_path, user_id=owner_id,
+            s,
+            ws,
+            reference_id=ref_id,
+            anchor="The sky is blue.",
+            evidence_quote="azure",
+            quote_start=0,
+            quote_end=5,
+            base_commit_sha=bc,
+            base_section_sha=bs,
+            workspaces_dir=tmp_path,
+            user_id=owner_id,
         )
         s.commit()
     ledger = load_ledger((repo / CITATIONS_FILENAME).read_text())

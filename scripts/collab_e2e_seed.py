@@ -30,6 +30,7 @@ Then run the e2e suite:
     E2E_COLLAB_WS_ID=<from above> E2E_SESSION_COOKIE=<from above> \\
         pnpm exec playwright test e2e/collab.spec.ts
 """
+
 from __future__ import annotations
 
 import os
@@ -46,6 +47,12 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_REPO_ROOT / "src"))
+
+
+# The password login frontend/e2e/dashboard.spec.ts performs. Fixed, because the
+# spec's login() helper hard-codes both values.
+E2E_PASSWORD_EMAIL = "e2e@ki.se"
+E2E_PASSWORD = "correct-horse-1"
 
 
 def main() -> int:
@@ -98,7 +105,15 @@ def main() -> int:
         app.state.session_factory = Session
 
         # --- seed: two users, two collab artifacts ---
-        from call_manager.db.models import Reference, ReferenceChunk, WorkspaceViewer
+        from call_manager.auth.passwords import hash_password
+        from call_manager.db.models import (
+            Call,
+            Reference,
+            ReferenceChunk,
+            Source,
+            User,
+            WorkspaceViewer,
+        )
         from call_manager.proposal_assist.citations.gitio import _git_env
         from call_manager.proposal_assist.collab import state as collab_state
         from tests.proposal_assist.conftest import make_user, make_workspace
@@ -142,6 +157,40 @@ def main() -> int:
                     ),
                     embedding=[0.0] * 1024,
                     embedding_model="bge-m3",
+                )
+            )
+            # --- dashboard e2e prerequisites (review 2026-09-02 A6 finding 6) ---
+            # frontend/e2e/dashboard.spec.ts logs in through the REAL password
+            # form as e2e@ki.se / correct-horse-1, and this seeder created no
+            # password user at all — so that spec could not pass for anyone who
+            # had not hand-seeded one, and the whole file sat unrunnable (a HEAD
+            # commit even "fixed" its password selector). Fixed email on purpose:
+            # the spec's login() helper hard-codes it.
+            dash_user = User(
+                email=E2E_PASSWORD_EMAIL,
+                status="active",
+                password_hash=hash_password(E2E_PASSWORD),
+            )
+            s.add(dash_user)
+            # ... and at least one Call, or the call-detail navigation test
+            # skips itself on an empty feed (dashboard.spec.ts) — a green run
+            # that exercised nothing.
+            src = s.query(Source).filter_by(slug="vinnova").one_or_none()
+            if src is None:
+                src = Source(slug="vinnova", name="Vinnova", kind="api")
+                s.add(src)
+                s.flush()
+            s.add(
+                Call(
+                    source_id=src.id,
+                    external_id=f"E2E-{suffix}",
+                    title="Precision medicine programme",
+                    url=f"https://example.org/calls/E2E-{suffix}",
+                    summary="Funding for AI-based diagnostics.",
+                    full_text=(
+                        "Body about eligibility, scope, budget, expected "
+                        "outcomes, restrictions, mandatory."
+                    ),
                 )
             )
             s.commit()
@@ -198,6 +247,8 @@ def main() -> int:
         print(f"E2E_SESSION_COOKIE={owner_cookie}")  # back-compat with the pre-D0 tests
         print(f"E2E_OWNER_LABEL={owner_label}")
         print(f"E2E_MEMBER_LABEL={member_label}")
+        print(f"E2E_PASSWORD_EMAIL={E2E_PASSWORD_EMAIL}")
+        print(f"E2E_PASSWORD={E2E_PASSWORD}")
         print()
         print("Owner is a writer on draft + spec; member is a writer on the")
         print("active draft and READ-ONLY on the locked spec (?tab=spec).")
