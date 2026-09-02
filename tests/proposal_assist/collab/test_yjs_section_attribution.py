@@ -30,9 +30,10 @@ def test_attribution_no_spurious_raise_on_valid_docs(md):
     assert update
 
 
-def test_attribution_still_raises_on_hard_break_phantom():
-    # The 3a hard_break phantom (split_sections=3 vs block-map=2) still raises —
-    # now caught by attribution (and the count too).
+def test_hard_break_phantom_no_longer_diverges_and_replaces_the_right_section():
+    # The 3a hard_break phantom (split_sections=3 vs block-map=2) is gone: the
+    # serializer escapes "## FAKE" after a hard break (2026-09-02), so the
+    # partitions agree and section 1 is replaced, not refused.
     phantom = [
         {"type": "paragraph", "content": [{"type": "text", "text": "Intro."}]},
         {"type": "paragraph", "content": [
@@ -43,44 +44,32 @@ def test_attribution_still_raises_on_hard_break_phantom():
         {"type": "paragraph", "content": [{"type": "text", "text": "Body b."}]},
     ]
     doc = pm_json_to_ydoc({"type": "doc", "content": phantom})
-    with pytest.raises(SectionMapDivergenceError):
-        apply_pm_section_to_fragment(doc, section_index=1, blocks=_blocks_of("New.\n"))
+    apply_pm_section_to_fragment(doc, section_index=1, blocks=_blocks_of("New.\n"))
+    assert pm_to_markdown(ydoc_to_pm_json(doc)) == "Intro.\n\nx\\\n\\## FAKE\n\nNew.\n"
 
 
-def test_attribution_catches_compensating_divergence():
-    # Construct empirically: counts must MATCH (old guard would pass) while the
-    # partitions misalign. Verify the precondition explicitly; if it cannot be
-    # constructed against this serializer, the attribution is defense-in-depth and
-    # the count check already suffices for reachable inputs — record that as a
-    # finding in the commit message rather than asserting a vacuous pass.
-    # OBSERVED (Slice 3b-1): against this serializer the ELSE branch is the live
-    # one — hard_break renders as a backslash-continuation so split_sections reads
-    # the hidden "## X" as a real boundary (here starts=[0,1] vs n_line=3, counts
-    # DIFFER). The count check already refuses; positional attribution is
-    # defense-in-depth for future serializer changes that could net equal counts.
-    from call_manager.proposal_assist.collab.yjs_bridge import _block_starts_section
+def test_attribution_catches_compensating_divergence(monkeypatch):
+    # A matching COUNT is necessary but not sufficient: a compensating pair (one
+    # phantom block-boundary + one hidden real line-boundary) nets to the same
+    # count yet misaligns the partitions. Since 2026-09-02 the serializer emits
+    # no hidden line-boundaries, so the misalignment is injected: the line scan
+    # returns the same NUMBER of sections with the boundary shifted by one block.
+    from call_manager.proposal_assist.collab import yjs_bridge
+
     blocks = [
-        # section 0 preamble holds a hidden real boundary (hard_break + "## X"):
-        {"type": "paragraph", "content": [
-            {"type": "text", "text": "pre"}, {"type": "hard_break"},
-            {"type": "text", "text": "## X"},
-        ]},
-        # a real heading whose first line IS "## Y":
+        {"type": "paragraph", "content": [{"type": "text", "text": "pre"}]},
         {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Y"}]},
         {"type": "paragraph", "content": [{"type": "text", "text": "body y"}]},
     ]
     doc = pm_json_to_ydoc({"type": "doc", "content": blocks})
-    pm_json = ydoc_to_pm_json(doc)
-    blocks_json = pm_json.get("content") or []
-    starts = [0] + [i for i, b in enumerate(blocks_json) if _block_starts_section(b)]
-    n_line = len(split_sections(pm_to_markdown(pm_json)))
-    if len(starts) == n_line:
-        # Precondition met (counts match) → attribution MUST catch the misalignment.
-        with pytest.raises(SectionMapDivergenceError):
-            apply_pm_section_to_fragment(doc, section_index=1, blocks=_blocks_of("## Y\n\nz.\n"))
-    else:
-        # Counts differ here → the count check already catches it; the compensating
-        # shape needs a different construction. Assert the divergence IS caught
-        # (either way the guard must refuse), and note it for the reviewer.
-        with pytest.raises(SectionMapDivergenceError):
-            apply_pm_section_to_fragment(doc, section_index=1, blocks=_blocks_of("## Y\n\nz.\n"))
+    md_before = pm_to_markdown(ydoc_to_pm_json(doc))
+    # Keep the count equal (2 sections) but move the boundary: the line scan
+    # thinks section 1 starts one block LATER than the block map does.
+    real = yjs_bridge.split_sections
+    monkeypatch.setattr(
+        yjs_bridge, "split_sections", lambda md: real("pre\n\nY\n\n## body y\n")
+    )
+    assert len(real("pre\n\nY\n\n## body y\n")) == 2
+    with pytest.raises(SectionMapDivergenceError):
+        apply_pm_section_to_fragment(doc, section_index=1, blocks=_blocks_of("## Y\n\nz.\n"))
+    assert pm_to_markdown(ydoc_to_pm_json(doc)) == md_before

@@ -140,30 +140,39 @@ _PHANTOM = [
 ]
 
 
-def test_hard_break_phantom_boundary_raises():
-    # Verify the divergence is real: hard_break serializes as backslash-newline
-    # so "## FAKE" becomes a new line that split_sections counts as a boundary,
-    # but the block-map's _block_starts_section only checks each block's FIRST line.
+def test_hard_break_before_heading_text_is_no_longer_a_phantom_boundary():
+    # Until 2026-09-02 a hard_break serialized "## FAKE" onto its own line, which
+    # split_sections counted as a boundary while the block map did not; the
+    # divergence guard was the only thing standing between that and a wrong-
+    # section splice. The serializer now escapes a line-start construct after a
+    # hard break (`x\\\n\\## FAKE`), so the two partitions agree and the
+    # document round-trips as the same four blocks.
     doc = pm_json_to_ydoc(_pm_doc(_PHANTOM))
     pm_json = ydoc_to_pm_json(doc)
     md = pm_to_markdown(pm_json)
-    n_line = len(split_sections(md))
-    blocks_json = pm_json.get("content") or []
-
     from call_manager.proposal_assist.collab.yjs_bridge import _block_starts_section
-    starts = [0] + [i for i, b in enumerate(blocks_json) if _block_starts_section(b)]
-    # The divergence must be present in this construction; if not, the guard is
-    # not testable and we should report BLOCKED rather than a vacuous pass.
-    assert n_line != len(starts), (
-        f"Expected divergence: split_sections={n_line} vs block-map={len(starts)}; "
-        "hard_break may not serialize to a newline — stop and report BLOCKED"
-    )
 
-    # The guard raises BEFORE any mutation.
+    starts = [0] + [i for i, b in enumerate(pm_json["content"]) if _block_starts_section(b)]
+    assert len(split_sections(md)) == len(starts) == 2
+    assert [b["type"] for b in markdown_to_pm(md)["content"]] == [
+        "paragraph", "paragraph", "heading", "paragraph",
+    ]
+    apply_pm_section_to_fragment(doc, section_index=1, blocks=_blocks_of("New.\n"))
+    assert pm_to_markdown(ydoc_to_pm_json(doc)) == "Intro.\n\nx\\\n\\## FAKE\n\nNew.\n"
+
+
+def test_divergence_guard_raises_before_mutation(monkeypatch):
+    # No editor-producible shape diverges any more, so the guard is exercised
+    # with an injected disagreement: the line scan reports one section more
+    # than the block map. It must raise BEFORE touching the doc.
+    from call_manager.proposal_assist.collab import yjs_bridge
+
+    doc = pm_json_to_ydoc(_pm_doc(_PHANTOM))
     md_before = pm_to_markdown(ydoc_to_pm_json(doc))
+    real = yjs_bridge.split_sections
+    monkeypatch.setattr(yjs_bridge, "split_sections", lambda md: real(md + "\n## EXTRA\n"))
     with pytest.raises(SectionMapDivergenceError):
         apply_pm_section_to_fragment(doc, section_index=1, blocks=_blocks_of("New.\n"))
-    # Doc is unchanged after the raise (no partial mutation).
     assert pm_to_markdown(ydoc_to_pm_json(doc)) == md_before
 
 

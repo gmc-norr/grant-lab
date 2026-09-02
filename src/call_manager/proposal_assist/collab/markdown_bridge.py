@@ -47,6 +47,7 @@ drops are deliberate, not accidental; the drop sites below restate this.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from markdown_it import MarkdownIt
@@ -408,14 +409,58 @@ _ALT_DELIM = {
 # re-parseable, while NOT escaping "[" so bare ``[@key]`` markers stay literal.
 _INLINE_ESCAPE = {"*": "\\*", "_": "\\_", "`": "\\`", "~": "\\~", "\\": "\\\\"}
 
+# Plain text that LOOKS like markdown re-parses as markdown, and the text is
+# gone: ``[x](y)`` becomes a link whose text is ``x``, ``<https://x.se>`` an
+# autolink, and a line starting ``2024. Results`` an ordered list numbered
+# 2024 (second-opinion round on the 2026-09-02 review; all reproduced). The
+# checkpoint's dry-run reader cannot see any of these — they parse fine. So
+# the serializer escapes the ONE character that turns each construct on, and
+# nothing more, to keep already-correct documents byte-identical.
+_AUTOLINK_RE = re.compile(
+    r"<(?:[A-Za-z][A-Za-z0-9+.\-]{1,31}:[^\s<>]*|[\w.+\-]+@[\w\-]+(?:\.[\w\-]+)+)>"
+)
+# Constructs that are only recognised at the START of a line. ``*``, ``_``,
+# ``~`` and the backtick are already escaped by the per-character pass, so a
+# ``* `` bullet, a ``***`` rule, a ``___`` rule and a fence cannot occur here.
+_BLOCK_START_RE = re.compile(
+    r"""^(?:
+        \#{1,6}(?=[ \t]|$)                      # ATX heading
+      | >                                       # blockquote
+      | [-+](?=[ \t]|$)                         # bullet
+      | (?:-[ \t]*){3,}$                        # thematic break
+      | (?:=+|-+)[ \t]*$                        # setext underline
+      | \|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$   # table delimiter row
+    )""",
+    re.X,
+)
+_ORDERED_START_RE = re.compile(r"^(\d{1,9})([.)])(?=[ \t]|$)")
+_REFDEF_START_RE = re.compile(r"^(\[[^\]]*\]):(?=[ \t]|$)")
 
-def _escape_text(text: str) -> str:
-    """Escape inline-markdown-significant characters in plain text.
+
+def _escape_block_start(line: str) -> str:
+    if _BLOCK_START_RE.match(line):
+        return "\\" + line
+    m = _ORDERED_START_RE.match(line)
+    if m:
+        return f"{m.group(1)}\\{m.group(2)}{line[m.end():]}"
+    m = _REFDEF_START_RE.match(line)
+    if m:
+        return f"{m.group(1)}\\:{line[m.end():]}"
+    return line
+
+
+def _escape_text(text: str, *, at_line_start: bool = False) -> str:
+    """Escape markdown-significant characters in plain text.
 
     We deliberately do NOT escape ``[`` so a bare ``[@x9]`` citekey marker
     survives as literal, UNESCAPED text (the bare-marker scan must still match
     it). ``*``/``_``/`` ` ``/``~``/``\\`` are escaped so emphasis-like runs in
-    body text do not re-parse into marks on the next round-trip.
+    body text do not re-parse into marks on the next round-trip. ``](`` and an
+    autolink's ``<`` are escaped so literal link syntax stays text, and a
+    line-start construct (heading, bullet, ordered-list number, quote, rule,
+    setext underline, table delimiter row, reference definition) is escaped at
+    the start of every line inside the text and, when ``at_line_start``, at the
+    start of the text itself.
     """
     out: list[str] = []
     i = 0
@@ -444,7 +489,12 @@ def _escape_text(text: str) -> str:
             continue
         out.append(_INLINE_ESCAPE.get(ch, ch))
         i += 1
-    return "".join(out)
+    escaped = "".join(out).replace("](", "]\\(")
+    escaped = _AUTOLINK_RE.sub(lambda m: "\\" + m.group(0), escaped)
+    lines = escaped.split("\n")
+    return "\n".join(
+        _escape_block_start(line) if (k or at_line_start) else line for k, line in enumerate(lines)
+    )
 
 
 def _mark_key(mark: dict) -> tuple:
@@ -469,7 +519,9 @@ def _is_plain_text(node: dict) -> bool:
     return node["type"] == "text" and not any(m["type"] == "code" for m in node.get("marks", []))
 
 
-def _serialize_inline(nodes: list[dict], *, single_line: bool = False) -> str:
+def _serialize_inline(
+    nodes: list[dict], *, single_line: bool = False, line_start: bool = True
+) -> str:
     """Serialize an inline node list, opening/closing marks as the active set
     changes between adjacent nodes.
 
@@ -497,25 +549,40 @@ def _serialize_inline(nodes: list[dict], *, single_line: bool = False) -> str:
     too — a pre-pass over the node list could not see it. Nodes without a
     fixed-delimiter mark at either edge come out byte-identical.
 
-    ``single_line`` degrades ``hard_break`` to a single space — a ``\\``-newline
-    would split a table row or end a heading (spec §C; review 2026-09-02 §2.3)."""
+    ``single_line`` degrades ``hard_break`` (and a newline inside text) to a
+    single space — a line break would split a table row or end a heading (spec
+    §C; review 2026-09-02 §2.3). ``line_start=False`` says the text does not
+    begin a line of the document (a heading's ``## `` or a cell's ``| `` comes
+    first), so a leading ``1. `` or ``#`` is not a list or heading and must not
+    be escaped: ``## 1. Aims`` is the section's identity and stays byte-identical."""
     out: list[str] = []
     active: list[dict] = []  # open marks, outermost first
     opened_with: list[tuple[str, str]] = []  # (open, close) each active mark used
     pend = ""  # edge whitespace held back until we know what follows it
     last_close = ""  # the close delimiter written last; "" once anything follows
+    # line_start: nothing but whitespace written since the last newline (or, when
+    # the caller says so, since a prefix such as "## " that is not text).
 
     def emit(s: str) -> None:
-        nonlocal last_close
-        if s:
-            out.append(s)
-            last_close = ""
+        nonlocal last_close, line_start
+        if not s or (not out and not s.strip()):
+            # Block-leading whitespace has no markdown form (the reader drops
+            # it, and four spaces would make an indented code block), so the
+            # canonical form omits it.
+            return
+        out.append(s)
+        last_close = ""
+        if s.endswith("\n"):
+            line_start = True
+        elif s.strip():
+            line_start = False
 
     def close(pairs: list[tuple[dict, tuple[str, str]]]) -> None:
-        nonlocal last_close
+        nonlocal last_close, line_start
         for m, delim in pairs:
             out.append(_close_mark(m, delim))
             last_close = delim[1]
+            line_start = False
 
     def transition(closes, held: str) -> None:
         # Held whitespace lands OUTSIDE a fixed delimiter closing here, and
@@ -543,16 +610,15 @@ def _serialize_inline(nodes: list[dict], *, single_line: bool = False) -> str:
             del opened_with[cut:]
 
         lead = ""
-        atom = None
+        body = None
         if _is_plain_text(node):
-            text = node["text"]
+            text = node["text"].replace("\n", " ") if single_line else node["text"]
             body = text.strip()
             if not body:
                 pend = text  # whitespace-only: nothing to wrap, hold it back
                 continue
             lead = text[: len(text) - len(text.lstrip())]
             pend = text[len(text.rstrip()) :]
-            atom = _escape_text(body)
 
         active_keys = {_mark_key(m) for m in active}
         reopened = {_mark_key(m) for m, _ in closes}
@@ -581,9 +647,16 @@ def _serialize_inline(nodes: list[dict], *, single_line: bool = False) -> str:
             active.append(m)
             opened_with.append(delim)
         emit(lead)
-        emit(atom if atom is not None else _serialize_inline_atom(node, single_line=single_line))
+        if body is not None:
+            # Escaped at emission time: a line-start construct is only escaped
+            # when the text really starts a line — ``**1. Aim**`` is not a list.
+            emit(_escape_text(body, at_line_start=line_start))
+        else:
+            emit(_serialize_inline_atom(node, single_line=single_line))
 
-    transition(list(zip(reversed(active), reversed(opened_with), strict=True)), pend)
+    # Block-final whitespace has no markdown form either: the reader drops it,
+    # so writing it would make the projection non-canonical.
+    transition(list(zip(reversed(active), reversed(opened_with), strict=True)), "")
     return "".join(out)
 
 
@@ -652,11 +725,21 @@ def _wrap_inline_code(text: str) -> str:
     is entirely backticks/whitespace), a single space is padded on each side so
     the leading/trailing backtick is not eaten as part of the delimiter; one of
     those padding spaces is stripped again on parse, leaving the body intact and
-    keeping the round-trip idempotent.
+    keeping the round-trip idempotent. A body with a space at BOTH ends gets the
+    same one-space padding, because CommonMark strips one space from each end
+    of such a span.
     """
     fence = "`" * (_longest_backtick_run(text) + 1)
-    body = text
+    # CommonMark converts a line ending inside a code span to a space — and the
+    # block parser runs first, so a continuation line starting with "## " would
+    # END the span and start a heading. Write the space the reader would produce.
+    body = text.replace("\n", " ")
     if body.startswith("`") or body.endswith("`") or body.strip("`") == "":
+        body = f" {body} "
+    elif body.startswith(" ") and body.endswith(" ") and body.strip():
+        # CommonMark strips ONE space from each end of a code span whose body
+        # starts and ends with a space (and is not all spaces) — so `` ` a ` ``
+        # re-read as ``a``. Pad once more; the reader strips it back off.
         body = f" {body} "
     return f"{fence}{body}{fence}"
 
@@ -682,9 +765,11 @@ def _serialize_inline_atom(node: dict, *, single_line: bool = False) -> str:
         return " " if single_line else "\\\n"
     if ntype == "image":
         attrs = node.get("attrs", {})
-        alt = attrs.get("alt") or ""
+        alt = (attrs.get("alt") or "").replace("\n", " ")
         src = attrs.get("src", "")
         title = attrs.get("title")
+        if title:
+            title = title.replace("\n", " ")
         if title:
             return f'![{alt}]({src} "{title}")'
         return f"![{alt}]({src})"
@@ -695,10 +780,14 @@ def _serialize_block(node: dict) -> str:
     """Serialize one block node to markdown text (no trailing block separator)."""
     ntype = node["type"]
     if ntype == "paragraph":
-        return _serialize_inline(_without_trailing_hard_breaks(node.get("content", [])))
+        return _serialize_inline(_without_block_final_breaks(node.get("content", [])))
     if ntype == "heading":
         level = node.get("attrs", {}).get("level", 1)
-        body = _serialize_inline(node.get("content", []), single_line=True)
+        body = _serialize_inline(
+            _without_block_final_breaks(node.get("content", [])),
+            single_line=True,
+            line_start=False,
+        )
         return f"{'#' * level} {body}"
     if ntype == "code_block":
         body = _code_block_text(node)
@@ -724,13 +813,22 @@ def _code_block_text(node: dict) -> str:
     return "".join(c.get("text", "") for c in content)
 
 
-def _without_trailing_hard_breaks(nodes: list[dict]) -> list[dict]:
+def _without_block_final_breaks(nodes: list[dict]) -> list[dict]:
     """A ``hard_break`` that ends a block has no markdown form: ``\\`` before a
     block boundary is a LITERAL backslash on re-parse (review 2026-09-02 §2.3).
-    It carries no text, so dropping it loses nothing the reader can see."""
+    It carries no text, so dropping it loses nothing the reader can see. A
+    whitespace-only text node after it is block-final too — the reader drops
+    block-final whitespace — so it must not hide the break (second-opinion
+    finding: ``line\\\n   `` followed by a blank line kept the backslash)."""
     end = len(nodes)
-    while end and nodes[end - 1].get("type") == "hard_break":
-        end -= 1
+    while end:
+        node = nodes[end - 1]
+        if node.get("type") == "hard_break" or (
+            _is_plain_text(node) and not node.get("text", "").strip()
+        ):
+            end -= 1
+        else:
+            break
     return nodes[:end]
 
 
@@ -768,7 +866,11 @@ def _cell_text(cell: dict) -> str:
     """
     parts: list[str] = []
     for block in cell.get("content", []):
-        text = _serialize_inline(block.get("content", []), single_line=True)
+        text = _serialize_inline(
+            _without_block_final_breaks(block.get("content", [])),
+            single_line=True,
+            line_start=False,
+        )
         if text:
             parts.append(text)
     return " ".join(parts).replace("\n", " ").replace("|", "\\|")
