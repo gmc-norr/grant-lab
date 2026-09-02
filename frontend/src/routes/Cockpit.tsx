@@ -3,7 +3,7 @@ import { useParams } from "react-router-dom";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import type { ImperativePanelHandle } from "react-resizable-panels";
 
-import { Tabs } from "@mantine/core";
+import { Alert, Tabs } from "@mantine/core";
 
 import { useCockpitMeta } from "../api/workspace";
 import { BottomPanel } from "../cockpit/BottomPanel";
@@ -66,6 +66,16 @@ export function Cockpit() {
 
   // Branch AFTER all hooks. The shell sidebar/right-pane are mounted by AppShell
   // from the route handle (router.tsx) and handle setup themselves (Task 10).
+  // The error arm is not decoration: without it a 404 (workspace soft-deleted by
+  // admin retention, or the member removed from it) rendered "Loading…" forever
+  // — no alert, no explanation, and no way out but the rail. DraftPanel has the
+  // proper arm but is never reached from here.
+  if (meta.isError)
+    return (
+      <Alert role="alert" color="red" title="Workspace unavailable" className="cockpit-loading">
+        This workspace was not found, or it is no longer shared with you.
+      </Alert>
+    );
   if (meta.isLoading || !meta.data) return <p className="cockpit-loading">Loading…</p>;
   if (meta.data.current_phase === "setup") return <WorkspaceSetup id={id} />;
 

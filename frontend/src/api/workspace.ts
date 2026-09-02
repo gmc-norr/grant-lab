@@ -1,4 +1,4 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api, unwrap } from "./client";
 
@@ -8,6 +8,10 @@ export function useCockpitMeta(id: string) {
   return useQuery({
     queryKey: ["cockpit-meta", id],
     enabled: !!id,
+    // A workspace that was soft-deleted or unshared answers 404 and will keep
+    // answering 404: three retries only delay the error arm by several seconds
+    // of spinner. Same reasoning as useMembers' expected 403 above.
+    retry: false,
     queryFn: async () =>
       unwrap(
         await api.GET("/api/workspaces/{workspace_id}/cockpit-meta", {
@@ -47,10 +51,16 @@ export function useWorkspaces(status: string | null) {
   });
 }
 
-/** POST /api/workspaces — from-call create. Returns { id }. No invalidation:
- *  after create the caller navigates to the in-cockpit setup view; the list
- *  refetches on next mount. */
+/** POST /api/workspaces — from-call create. Returns { id }.
+ *
+ *  This used to say "no invalidation: the list refetches on next mount", which
+ *  is false inside the app's 20 s `staleTime` (App.tsx) with
+ *  `refetchOnWindowFocus: false`: remounting an observer over a fresh cache
+ *  entry serves the cache and fires no request. The user created a workspace,
+ *  went back to the list, and it was not there. Prefix key on purpose —
+ *  `useWorkspaces` keys by status filter, and every filter is now stale. */
 export function useCreateWorkspace() {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: async (vars: {
       call_id: number;
@@ -58,5 +68,6 @@ export function useCreateWorkspace() {
       deadline?: string | null;
       profile_id?: number | null;
     }) => unwrap(await api.POST("/api/workspaces", { body: vars })),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["workspaces"] }),
   });
 }

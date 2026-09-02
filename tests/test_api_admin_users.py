@@ -353,3 +353,37 @@ def test_reset_404(monkeypatch, pg_url, pg_session_factory):
     c, _ = _admin(app, pg_session_factory)
     r = c.post("/api/admin/users/999999/reset-password", json={"new_password": "fresh-strong-pw"})
     assert r.status_code == 404
+
+
+# --- Review 2026-09-02 A11 F1: admins can release a squatted address ---------
+
+
+def test_release_deletes_a_pending_row(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    c, _ = _admin(app, pg_session_factory)
+    uid = _user(pg_session_factory, email="squat@ki.se", status="pending")
+    r = c.post(f"/api/admin/users/{uid}/release")
+    assert r.status_code == 200 and r.json() == {"id": uid}
+    with pg_session_factory() as s:
+        assert s.get(User, uid) is None
+
+
+def test_release_refuses_anything_but_a_pending_row(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    c, _ = _admin(app, pg_session_factory)
+    active = _user(pg_session_factory, email="active@ki.se", status="active")
+    disabled = _user(pg_session_factory, email="off@ki.se", status="disabled")
+    assert c.post(f"/api/admin/users/{active}/release").status_code == 400
+    assert c.post(f"/api/admin/users/{disabled}/release").status_code == 400
+    assert c.post("/api/admin/users/999999/release").status_code == 404
+    with pg_session_factory() as s:
+        assert s.get(User, active) is not None and s.get(User, disabled) is not None
+
+
+def test_release_is_admin_only(monkeypatch, pg_url, pg_session_factory):
+    app = _setup(monkeypatch, pg_url)
+    victim = _user(pg_session_factory, email="v@ki.se", status="pending")
+    member = _user(pg_session_factory, email="m@ki.se", status="active")
+    c = TestClient(app)
+    c.cookies.set("session", app.state.session_signer.make(user_id=member))
+    assert c.post(f"/api/admin/users/{victim}/release").status_code == 403

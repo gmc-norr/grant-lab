@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -32,7 +32,7 @@ from call_manager.proposal_assist.turns.selection import (
 )
 from call_manager.proposal_assist.turns.submit import submit_user_turn
 from call_manager.proposal_assist.web._cloud_gate import gate_cloud_llm
-from call_manager.proposal_assist.web._perms import require_member, require_owner
+from call_manager.proposal_assist.web._perms import is_member, require_member, require_owner
 
 router = APIRouter()
 
@@ -202,8 +202,17 @@ def submit_turn(
         return SubmitTurnResponse(job_id=str(job.id), user_turn=TurnOut(**_turn_to_dict(user_turn)))
 
 
+_TURNS_PAGE_DEFAULT = 500
+_TURNS_PAGE_MAX = 1000
+
+
 class TurnsResponse(BaseModel):
     turns: list[TurnOut]
+    # Pagination (review 2026-09-02, carried: the list was unbounded). `turns` is
+    # the newest `limit` turns in position order; `has_more` says older ones
+    # exist and `next_before` is the cursor to pass as `before` to fetch them.
+    has_more: bool = False
+    next_before: int | None = None
     can_send: bool
     is_owner: bool
     disabled_reason: str | None
@@ -216,6 +225,8 @@ class TurnsResponse(BaseModel):
 def list_turns(
     workspace_id: uuid.UUID,
     request: Request,
+    limit: int = Query(_TURNS_PAGE_DEFAULT, ge=1, le=_TURNS_PAGE_MAX),
+    before: int | None = Query(None, ge=0, description="return turns with position < before"),
     user: User = Depends(get_current_user),  # noqa: B008
 ) -> TurnsResponse:
     """Chat read-model. The frontend gates the composer proactively from these
@@ -223,13 +234,15 @@ def list_turns(
     sf = request.app.state.session_factory
     with sf() as session:
         ws = require_member(workspace_id=workspace_id, user=user, session=session)
-        rows = list(
-            session.scalars(
-                select(ChatTurn)
-                .where(ChatTurn.workspace_id == workspace_id)
-                .order_by(ChatTurn.position)
-            )
-        )
+        # Newest `limit` turns (one extra row tells us whether older ones exist),
+        # returned in position order.
+        stmt = select(ChatTurn).where(ChatTurn.workspace_id == workspace_id)
+        if before is not None:
+            stmt = stmt.where(ChatTurn.position < before)
+        page = list(session.scalars(stmt.order_by(ChatTurn.position.desc()).limit(limit + 1)))
+        has_more = len(page) > limit
+        rows = list(reversed(page[:limit]))
+        next_before = rows[0].position if has_more and rows else None
         prior_ack = session.scalar(
             select(WorkspaceEvent.id)
             .where(
@@ -264,6 +277,8 @@ def list_turns(
             disabled_reason = None
         return TurnsResponse(
             turns=[TurnOut(**_turn_to_dict(t)) for t in rows],
+            has_more=has_more,
+            next_before=next_before,
             can_send=can_send,
             is_owner=is_owner,
             disabled_reason=disabled_reason,
@@ -311,6 +326,17 @@ def ack_disclosure(
 _TERMINAL = frozenset({"completed", "failed", "cancelled"})
 
 
+def _identity_still_valid(session, *, workspace_id, user_id, session_epoch) -> bool:
+    """The stream authorized once at connect; re-check on every poll (review
+    2026-09-02, carried: it outlived logout, admin disable and membership
+    removal). Same three facts get_current_user + require_member establish:
+    active account, unrevoked epoch, still a member."""
+    u = session.get(User, user_id)
+    if u is None or u.status != "active" or u.session_epoch != session_epoch:
+        return False
+    return is_member(workspace_id=workspace_id, user=u, session=session)
+
+
 async def _json_turn_stream(
     *,
     session_factory,
@@ -319,6 +345,8 @@ async def _json_turn_stream(
     since_position=None,
     poll_seconds=0.2,
     request=None,
+    user_id=None,
+    session_epoch=None,
 ):
     """JSON analogue of the Jinja _stream_turn_generator: emit one `turn` event
     (with an `id:` cursor = ChatTurn.position) per new row, then a terminal
@@ -337,6 +365,11 @@ async def _json_turn_stream(
         if request is not None and await request.is_disconnected():
             return
         with session_factory() as s:
+            if user_id is not None and not _identity_still_valid(
+                s, workspace_id=workspace_id, user_id=user_id, session_epoch=session_epoch
+            ):
+                yield 'event: done\ndata: {"status": "unauthorized"}\n\n'
+                return
             tj = s.get(TurnJob, turn_job_id)
             terminal = tj is None or tj.status in _TERMINAL
             rows = list(
@@ -354,6 +387,10 @@ async def _json_turn_stream(
                 status = tj.status if tj is not None else "missing"
                 yield f"event: done\ndata: {json.dumps({'status': status})}\n\n"
                 return
+            if not rows:
+                # SSE comment: keeps proxies from idling the connection out and
+                # gives the consumer a heartbeat between turns.
+                yield ": keepalive\n\n"
         await asyncio.sleep(poll_seconds)
 
 
@@ -361,9 +398,7 @@ class CancelTurnResponse(BaseModel):
     cancelled: bool
 
 
-@router.post(
-    "/workspaces/{workspace_id}/turns/{job_id}/cancel", response_model=CancelTurnResponse
-)
+@router.post("/workspaces/{workspace_id}/turns/{job_id}/cancel", response_model=CancelTurnResponse)
 def cancel_turn(
     workspace_id: uuid.UUID,
     job_id: uuid.UUID,
@@ -411,6 +446,8 @@ def stream_turn(
             turn_job_id=job_id,
             since_position=since,
             request=request,
+            user_id=user.id,
+            session_epoch=user.session_epoch,
         ),
         media_type="text/event-stream",
         headers=SSE_HEADERS,

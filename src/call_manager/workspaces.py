@@ -47,17 +47,24 @@ class RestoreOutcome(NamedTuple):
     transitioned: bool  # False when the workspace was already live
 
 
-# Lock order: mutex (M) → setup job (J) → workspace (W).
-# See phases/setup.py:500 and web/api/rubric.py:341 for the canonical order.
+# Lock order: mutex (M) first; then, for workspace_setup_jobs ONLY, the setup
+# job row (J) before the workspace row (W) — phases/setup.py _m3 and
+# web/api/rubric.py lock that way. Every OTHER job table is W then J: the
+# delete transaction below updates the workspace row before it touches
+# coherence/evaluator/review/uncited/turn jobs, and every writer of those
+# tables must match it or invert against the delete (a real 40P01 was measured
+# in the turn finalize, review 2026-09-02 A10 F2).
 _SETUP_RESTORE_MAP = {
     "queued": "queued",
     # NOT 'running'. See spec 5.2.1: the worker that owned it died with the
     # deletion, nothing recreates it, and requeue_stuck_setup_jobs will not
     # touch a 'running' row for STUCK_SETUP_AFTER (30 minutes). Restoring to
-    # 'running' reproduces the stuck state. The residual double-claim: accepted
-    # because the workspace WAS deleted, so any live worker has already failed
-    # its liveness check or will at its next milestone — and with Task 2's _fail
-    # fix that worker now re-queues rather than cancelling.
+    # 'running' reproduces the stuck state. The residual double-claim — the
+    # original worker is still alive, the re-queued row is re-claimed by a new
+    # one — is closed by the GENERATION, not by liveness: after this restore
+    # soft_deleted_at is NULL and the row is 'running' again, so a liveness
+    # check passes; _m2/_m3 refuse on lifecycle_generation != the claim's
+    # (phases/setup.py _refuse_stale_claim, review 2026-09-02 A10 F1).
     "running": "queued",
     # Preserved exactly: extraction is DONE and a human is the next actor.
     # Re-queueing re-runs extraction over completed work.
@@ -213,8 +220,10 @@ def soft_delete_workspace_db(
     # Terminalize any RUNNING turn in THIS transaction. The processor's
     # success-finalize is a conditional UPDATE ... WHERE status='running', so once
     # this commits both paths contend on the same row and the finalize becomes a
-    # no-op — closing the delete-vs-finalize race durably, with no in-process
-    # recheck. usage_unknown=True keeps the submit-time estimate: the turn HAS
+    # no-op. That only closes the race because the finalize takes the WORKSPACE
+    # row first, in the same order as this transaction (W then J): before review
+    # 2026-09-02 A10 F2 it took J then W, and the "contention" was a deadlock in
+    # which the finalize lost. usage_unknown=True keeps the submit-time estimate: the turn HAS
     # consumed input we cannot measure yet, and stamp_post_terminal_usage replaces
     # it if the stream reports real usage.
     running = session.execute(
@@ -313,18 +322,22 @@ def restore_workspace_db(
     # Step 4: Lock and repair the setup job BEFORE mutating the workspace row.
     # Lock order: mutex (M) → setup job (J) → workspace (W).
     # See phases/setup.py:500 and web/api/rubric.py:341.
-    jobs = session.execute(
-        select(WorkspaceSetupJob)
-        .where(WorkspaceSetupJob.workspace_id == workspace_id)
-        .with_for_update()
-    ).scalars().all()
+    jobs = (
+        session.execute(
+            select(WorkspaceSetupJob)
+            .where(WorkspaceSetupJob.workspace_id == workspace_id)
+            .with_for_update()
+        )
+        .scalars()
+        .all()
+    )
 
     restored_to: str | None = None
     for job in jobs:
         source = job.cancelled_from if job.status == "cancelled" else job.status
         if source not in _SETUP_RESTORE_MAP:
             continue  # terminal (done/failed), or cancelled by something that
-                      # was not a deletion (cancelled_from IS NULL) — not ours
+            # was not a deletion (cancelled_from IS NULL) — not ours
         job.status = _SETUP_RESTORE_MAP[source]
         restored_to = job.status  # only one row should match, per multiplicity audit
         job.cancelled_from = None

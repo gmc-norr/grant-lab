@@ -277,3 +277,63 @@ def test_connect_google_unauthenticated_redirects_to_login(monkeypatch, pg_url, 
     with TestClient(app) as c:
         r = c.post("/auth/google/start", data={"link": "1"}, follow_redirects=False)
         assert r.status_code == 303 and r.headers["location"] == "/login"
+
+
+# --- Review 2026-09-02 A11 F1: a squatted address ---------------------------
+
+
+def _callback(c, fake, *, sub, email):
+    state, nonce = _start(c)
+    fake.set_code("CX", _claims(sub=sub, email=email, nonce=nonce))
+    return c.get(
+        f"/auth/google/callback?code=CX&state={state}",
+        headers={"accept": "text/html"},
+        follow_redirects=False,
+    )
+
+
+def test_verified_google_identity_attaches_to_an_unverified_pending_row(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """An unauthenticated password registration parks a PENDING row with neither
+    a Google identity nor a password hash on any allowed-domain address, and the
+    real person's verified Google sign-in then landed on /auth/error forever
+    (after deny and after enable too). Google's email_verified is exactly the
+    proof the registration never had: attach the identity, keep it pending."""
+    app, fake = _setup(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        s.add(User(email="victim@ki.se", status="pending"))  # no oidc_sub, no password_hash
+        s.commit()
+    with TestClient(app) as c:
+        r = _callback(c, fake, sub="g-victim", email="victim@ki.se")
+        assert r.status_code == 303 and r.headers["location"] == "/auth/pending"
+    with pg_session_factory() as s:
+        rows = s.query(User).filter_by(email="victim@ki.se").all()
+        assert len(rows) == 1 and rows[0].oidc_sub == "g-victim" and rows[0].status == "pending"
+
+
+def test_an_active_row_without_google_is_still_a_collision(monkeypatch, pg_url, pg_session_factory):
+    """Never auto-link a real account: an ACTIVE password user keeps /auth/error."""
+    app, fake = _setup(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        s.add(User(email="real@ki.se", status="active", password_hash="x"))
+        s.commit()
+    with TestClient(app) as c:
+        assert (
+            _callback(c, fake, sub="g-x", email="real@ki.se").headers["location"] == "/auth/error"
+        )
+    with pg_session_factory() as s:
+        assert s.query(User).filter_by(email="real@ki.se").one().oidc_sub is None
+
+
+def test_a_pending_row_that_already_has_a_credential_is_still_a_collision(
+    monkeypatch, pg_url, pg_session_factory
+):
+    app, fake = _setup(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        s.add(User(email="half@ki.se", status="pending", password_hash="x"))
+        s.commit()
+    with TestClient(app) as c:
+        assert (
+            _callback(c, fake, sub="g-h", email="half@ki.se").headers["location"] == "/auth/error"
+        )

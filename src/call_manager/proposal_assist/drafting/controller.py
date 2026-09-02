@@ -9,6 +9,7 @@ This is the only object the web layer (B6) needs to construct."""
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import uuid
@@ -78,6 +79,48 @@ class WorkspaceController:
         registry.retire_workspace when it registers the "turns" hook."""
         return self._registry
 
+    def _prepare_launch(self, workspace_id: uuid.UUID) -> tuple[Session, str | None]:
+        """The synchronous half of launch: take the per-workspace advisory lock on
+        a long-held session from the DEDICATED drafting pool (Defect 1), sweep
+        orphaned turn jobs, read the resume session id, reconcile git drift and
+        the citekey cache. Returns the lock-holding session (kept open, uncommitted,
+        so the lock stays held) and the resume id. On LockNotAcquired the session
+        is closed here, so the caller owns nothing on that path."""
+        lock_session = self._lock_session_factory()
+        try:
+            if not acquire_workspace_lock(lock_session, workspace_id):
+                raise LockNotAcquired(workspace_id)
+        except BaseException:
+            with contextlib.suppress(Exception):
+                lock_session.close()
+            raise
+
+        # Run sweep in a separate committed session so the orphan-sweep UPDATE
+        # is visible to other sessions, while lock_session stays open
+        # (uncommitted) to hold the advisory lock on its connection. Also fetch
+        # the workspace's last_sdk_session_id for LaunchContext.resume_session_id.
+        with self._session_factory() as work_session:
+            sweep_orphaned_turn_jobs(work_session, workspace_id)
+            ws_row = work_session.scalar(select(Workspace).where(Workspace.id == workspace_id))
+            resume_session_id = ws_row.last_sdk_session_id if ws_row is not None else None
+            work_session.commit()
+        # B5: backfill orphan git commits (artifact_versions rows missing for
+        # committed proposal.md changes). Idempotent. Failure logged but doesn't
+        # block launch — the subprocess can still run; reconciliation will retry
+        # on the next workspace open.
+        try:
+            repo_dir = self._workspaces_dir / str(workspace_id) / "repo"
+            reconcile_workspace_git_drift(self._session_factory, workspace_id, repo_dir)
+            # Also repair the references.citekey cache from the canonical ledger
+            # (a prior best-effort cache write may have failed). Same contract:
+            # forward-only, idempotent, never blocks launch.
+            reconcile_workspace_citekeys(self._session_factory, workspace_id, repo_dir)
+        except Exception:
+            logger.exception(
+                "controller.launch: reconciliation failed for %s; continuing", workspace_id
+            )
+        return lock_session, resume_session_id
+
     async def launch(self, workspace_id: uuid.UUID) -> AgentHandle:
         """Launch (or return cached) handle, coalescing concurrent callers.
 
@@ -142,46 +185,16 @@ class WorkspaceController:
         handed_off = False
 
         try:
-            # Long-held lock session from the DEDICATED drafting pool (Defect 1).
-            lock_session = self._lock_session_factory()
-            if not acquire_workspace_lock(lock_session, workspace_id):
-                raise LockNotAcquired(workspace_id)
+            # Everything below up to adapter.launch is blocking DB + git work —
+            # a lock wait of up to 10 s, an orphan sweep, a git-drift walk and a
+            # citekey reconcile — and it ran ON the event loop before its first
+            # await (review 2026-09-02 §2.7), freezing every other request. It
+            # runs in a worker thread now; the lock session it opens is handed to
+            # the registry afterwards and is only ever used sequentially.
+            lock_session, resume_session_id = await asyncio.to_thread(
+                self._prepare_launch, workspace_id
+            )
             lock_acquired = True
-
-            # Run sweep in a separate committed session so the orphan-sweep
-            # UPDATE is visible to other sessions, while lock_session stays
-            # open (uncommitted) to hold the advisory lock on its connection.
-            # B4 will also fetch the workspace's last_sdk_session_id here to
-            # populate LaunchContext.resume_session_id for native resume.
-            with self._session_factory() as work_session:
-                sweep_orphaned_turn_jobs(work_session, workspace_id)
-                ws_row = work_session.scalar(select(Workspace).where(Workspace.id == workspace_id))
-                resume_session_id = ws_row.last_sdk_session_id if ws_row is not None else None
-                work_session.commit()
-            # B5: backfill orphan git commits (artifact_versions rows missing
-            # for committed proposal.md changes). Idempotent. Failure logged
-            # but doesn't block launch — the subprocess can still run;
-            # reconciliation will retry on the next workspace open.
-            try:
-                repo_dir = self._workspaces_dir / str(workspace_id) / "repo"
-                reconcile_workspace_git_drift(
-                    self._session_factory,
-                    workspace_id,
-                    repo_dir,
-                )
-                # Also repair the references.citekey cache from the canonical
-                # ledger (a prior best-effort cache write may have failed). Same
-                # contract: forward-only, idempotent, never blocks launch.
-                reconcile_workspace_citekeys(
-                    self._session_factory,
-                    workspace_id,
-                    repo_dir,
-                )
-            except Exception:
-                logger.exception(
-                    "controller.launch: reconciliation failed for %s; continuing",
-                    workspace_id,
-                )
 
             context = LaunchContext(
                 workspace_id=workspace_id,

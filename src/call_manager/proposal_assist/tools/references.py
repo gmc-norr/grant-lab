@@ -7,6 +7,7 @@ six tools added in Slice 2 are read-only — no mutation, no fetch.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import uuid
@@ -121,7 +122,9 @@ async def search_references_impl(
         )
         embedder = OllamaEmbedderAdapter(client)
 
-    query_vec = embedder.embed(query).vector
+    # Off the loop (review 2026-09-02 §2.7): one queued Ollama embed froze every
+    # request on the single event loop. asyncio (stdlib) passes the fence's import gate.
+    query_vec = (await asyncio.to_thread(embedder.embed, query)).vector
 
     with ctx.session_factory() as s:
         # HNSW cosine distance via pgvector; lower distance = more

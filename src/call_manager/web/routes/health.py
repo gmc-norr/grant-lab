@@ -1,13 +1,24 @@
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
 from sqlalchemy import text
 
 router = APIRouter()
 
 
+class HealthOut(BaseModel):
+    status: str
+    # True only in the ONE process that holds the single-instance advisory
+    # lock and whose lock connection is still alive. A standby
+    # (SCHEDULER_STANDBY_OK) reports False; so does an instance whose lock
+    # backend died under it (review 2026-09-02 §2.6(b)) — the status code stays
+    # 200 because HTTP still works, the field is what a monitor alerts on.
+    scheduler_lock: bool
+
+
 @router.get("/healthz")
-def healthz(request: Request) -> dict[str, str]:
+def healthz(request: Request) -> HealthOut:
     """Liveness + readiness in one endpoint.
 
     Single-instance deploy: there's no useful liveness-vs-readiness split.
@@ -24,4 +35,5 @@ def healthz(request: Request) -> dict[str, str]:
         # carry the DSN/host). Log it server-side, return a static message.
         logging.getLogger(__name__).warning("healthz db check failed: %s", exc)
         raise HTTPException(status_code=503, detail="db unavailable") from exc
-    return {"status": "ok"}
+    lock = getattr(request.app.state, "scheduler_lock", None)
+    return HealthOut(status="ok", scheduler_lock=lock is not None and lock.is_held())

@@ -243,6 +243,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/users/{user_id}/release": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Admin Release User
+         * @description Delete a PENDING row so its address is free again. A pending row is a
+         *     registration nobody has approved; deleting it releases a squatted address
+         *     (review 2026-09-02 A11 F1) where `deny` only parked it as disabled, which
+         *     still collides. Anything that was ever active keeps its row and its history.
+         */
+        post: operations["admin_release_user_api_admin_users__user_id__release_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/users/{user_id}/reset-password": {
         parameters: {
             query?: never;
@@ -2878,6 +2901,13 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
+        /** HealthOut */
+        HealthOut: {
+            /** Scheduler Lock */
+            scheduler_lock: boolean;
+            /** Status */
+            status: string;
+        };
         /** HiddenCallOut */
         HiddenCallOut: {
             /** Deadline */
@@ -3751,10 +3781,17 @@ export interface components {
             can_send: boolean;
             /** Disabled Reason */
             disabled_reason: string | null;
+            /**
+             * Has More
+             * @default false
+             */
+            has_more: boolean;
             /** Is Owner */
             is_owner: boolean;
             /** Needs Disclosure */
             needs_disclosure: boolean;
+            /** Next Before */
+            next_before?: number | null;
             /** Phase */
             phase: string;
             /** Running Job Id */
@@ -5512,6 +5549,118 @@ export interface operations {
         };
     };
     admin_enable_user_api_admin_users__user_id__enable_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminActionOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    admin_release_user_api_admin_users__user_id__release_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -14214,7 +14363,11 @@ export interface operations {
     };
     list_turns_api_workspaces__workspace_id__turns_get: {
         parameters: {
-            query?: never;
+            query?: {
+                limit?: number;
+                /** @description return turns with position < before */
+                before?: number | null;
+            };
             header?: never;
             path: {
                 workspace_id: string;
@@ -14840,9 +14993,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: string;
-                    };
+                    "application/json": components["schemas"]["HealthOut"];
                 };
             };
         };

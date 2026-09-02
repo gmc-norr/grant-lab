@@ -188,6 +188,27 @@ def admin_deny_user(
     return AdminActionOut(id=user_id)
 
 
+@router.post("/admin/users/{user_id}/release", response_model=AdminActionOut)
+def admin_release_user(
+    request: Request,
+    user_id: int,
+    admin: User = Depends(require_admin),  # noqa: B008
+):
+    """Delete a PENDING row so its address is free again. A pending row is a
+    registration nobody has approved; deleting it releases a squatted address
+    (review 2026-09-02 A11 F1) where `deny` only parked it as disabled, which
+    still collides. Anything that was ever active keeps its row and its history."""
+    with request.app.state.session_factory() as db:
+        u = db.get(User, user_id)
+        if u is None:
+            raise HTTPException(status_code=404, detail="user not found")
+        if u.status != "pending":
+            raise HTTPException(status_code=400, detail="only a pending user can be released")
+        db.delete(u)
+        db.commit()
+    return AdminActionOut(id=user_id)
+
+
 @router.post("/admin/users/{user_id}/disable", response_model=AdminActionOut)
 def admin_disable_user(
     request: Request,

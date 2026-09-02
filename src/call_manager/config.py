@@ -23,17 +23,62 @@ _DEV_SECRET_SENTINELS = frozenset(
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    database_url: str = Field(alias="DATABASE_URL")
-    session_secret: str = Field(alias="SESSION_SECRET", min_length=16)
+    database_url: str = Field(
+        alias="DATABASE_URL",
+        description=(
+            "SQLAlchemy URL of the Postgres 16 database (psycopg driver), e.g. "
+            "postgresql+psycopg://call_manager:PASSWORD@localhost:5432/call_manager. "
+            "Alembic reads the same value (alembic/env.py falls back to this file)."
+        ),
+    )
+    session_secret: str = Field(
+        alias="SESSION_SECRET",
+        min_length=16,
+        description=(
+            "Signing key for the session cookie. Generate one: "
+            'python -c "import secrets; print(secrets.token_urlsafe(48))". Left blank in '
+            "the example on purpose so a copied file cannot ship a known key; with an "
+            "https:// APP_BASE_URL the app refuses to start unless it is >= 32 chars and "
+            "not a known dev placeholder."
+        ),
+    )
     # NoDecode: pydantic-settings would otherwise try to JSON-decode the env
     # value for complex types. We want plain comma-separated strings, parsed
     # by the validator below.
-    allowed_email_domains: Annotated[list[str], NoDecode] = Field(alias="ALLOWED_EMAIL_DOMAINS")
-    initial_admin_emails: Annotated[list[str], NoDecode] = Field(
-        default_factory=list, alias="INITIAL_ADMIN_EMAIL"
+    allowed_email_domains: Annotated[list[str], NoDecode] = Field(
+        alias="ALLOWED_EMAIL_DOMAINS",
+        description="Comma-separated email domains allowed to sign in or request access.",
     )
-    initial_admin_password: str | None = Field(default=None, alias="INITIAL_ADMIN_PASSWORD")
-    app_base_url: str = Field(alias="APP_BASE_URL")
+    initial_admin_emails: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        alias="INITIAL_ADMIN_EMAIL",
+        description=(
+            "Comma-separated admin emails created at startup. Lockout recovery: when NO "
+            "active admin exists, these are re-activated and re-promoted at startup — "
+            "otherwise an existing user is left exactly as it is. To permanently demote "
+            "one, remove it from this list first."
+        ),
+    )
+    initial_admin_password: str | None = Field(
+        default=None,
+        alias="INITIAL_ADMIN_PASSWORD",
+        description=(
+            "Password for a configured admin that does NOT have one yet (first boot, or "
+            "an admin restored from total lockout). Must be >= 12 chars; empty = unset. "
+            "It never overwrites an existing password hash (admin_bootstrap.py): a "
+            "restart with this set does not reset a forgotten or compromised admin "
+            "password — use the in-app admin reset, which needs a second admin. Unset it "
+            "once logged in so the value stops living in a file."
+        ),
+    )
+    app_base_url: str = Field(
+        alias="APP_BASE_URL",
+        description=(
+            "The origin browsers use, scheme included, no path. It is what the CSRF and "
+            "WebSocket origin checks compare against, so in SPA_MODE=dev it is the Vite "
+            "origin (http://localhost:5173); https:// switches on the production checks."
+        ),
+    )
     google_oidc_enabled: bool = Field(default=False, alias="GOOGLE_OIDC_ENABLED")
     google_client_id: str | None = Field(default=None, alias="GOOGLE_CLIENT_ID")
     google_client_secret: str | None = Field(default=None, alias="GOOGLE_CLIENT_SECRET")
@@ -79,12 +124,17 @@ class Settings(BaseSettings):
     # Once exceeded, the drain stops claiming and leaves the remainder PENDING
     # for the next tick. Default 240s ≈ one worst-case job, generous enough that
     # a healthy batch never trips it while still bounding the pathological case.
-    ranking_tick_budget_seconds: float = Field(
-        default=240.0, alias="RANKING_TICK_BUDGET_SECONDS"
-    )
+    ranking_tick_budget_seconds: float = Field(default=240.0, alias="RANKING_TICK_BUDGET_SECONDS")
     ollama_url: str = Field(default="http://localhost:11434", alias="OLLAMA_URL")
     gemma_model: str = Field(default="gemma4:e4b-it-q4_K_M", alias="GEMMA_MODEL")
-    embedding_model: str = Field(default="bge-m3", alias="EMBEDDING_MODEL")
+    embedding_model: str = Field(
+        default="bge-m3",
+        alias="EMBEDDING_MODEL",
+        description=(
+            "Ollama embedding model (1024-dim). Must match what Ollama has pulled; the "
+            "similarity thresholds are calibrated for bge-m3."
+        ),
+    )
     # Expected embedding dimension. MUST match the model in EMBEDDING_MODEL and
     # the Vector(N) column width in db/models.py. bge-m3 and the dev fallback
     # mxbai-embed-large are both 1024; a swap to e.g. nomic-embed-text (768)
@@ -253,6 +303,18 @@ class Settings(BaseSettings):
         default=200,
         alias="COLLAB_CHECKPOINT_MIN_TAIL",
         description="Min uncheckpointed Yjs-log rows before a collab room is auto-checkpointed.",
+    )
+    scheduler_standby_ok: bool = Field(
+        default=False,
+        alias="SCHEDULER_STANDBY_OK",
+        description=(
+            "This app is single-instance: the in-process scheduler, the collab room "
+            "manager, the drafting registry and the login limiters are all "
+            "per-process state. When another process already holds the "
+            "single-instance advisory lock, startup is FATAL by default. Set true "
+            "to boot an HTTP-only standby instead: it serves requests, runs no "
+            "scheduler, and /healthz reports scheduler_lock=false."
+        ),
     )
     collab_kill_switch: bool = Field(
         default=False,
@@ -668,7 +730,11 @@ class Settings(BaseSettings):
     # Note: logout bumps session_epoch, which invalidates ALL outstanding
     # cookies for a user regardless of TTL — so the 30-day window is the
     # idle-session bound, not a hard upper limit on session lifetime.
-    session_max_age_seconds: int = Field(default=30 * 24 * 3600, alias="SESSION_MAX_AGE_SECONDS")
+    session_max_age_seconds: int = Field(
+        default=30 * 24 * 3600,
+        alias="SESSION_MAX_AGE_SECONDS",
+        description="Session cookie lifetime. 30 days by default; an organisational policy choice.",
+    )
     # App-level cap on request body size (bytes). Backstop behind a reverse
     # proxy's client_max_body_size. Must exceed the largest legitimate upload:
     # reference uploads are capped at 50 MiB (references web route), so the
@@ -676,8 +742,19 @@ class Settings(BaseSettings):
     max_request_body_bytes: int = Field(
         default=64 * 1024 * 1024, ge=0, alias="MAX_REQUEST_BODY_BYTES"
     )
-    digest_dry_run: bool = Field(default=False, alias="DIGEST_DRY_RUN")
-    admin_dashboard_url: str = Field(default="http://localhost:8000/", alias="ADMIN_DASHBOARD_URL")
+    digest_dry_run: bool = Field(
+        default=False,
+        alias="DIGEST_DRY_RUN",
+        description="Render the weekly digest without sending it. Set true in development.",
+    )
+    admin_dashboard_url: str = Field(
+        default="http://localhost:8000/",
+        alias="ADMIN_DASHBOARD_URL",
+        description=(
+            "Public URL of the dashboard; EVERY link in the weekly digest email is built "
+            "from it. The default points at localhost, so a production deployment must set it."
+        ),
+    )
     # SPA serving mode:
     #   'disabled' (default) — no browser UI is mounted; backend routes remain
     #                          available (used by tests and API-only processes).
@@ -685,7 +762,23 @@ class Settings(BaseSettings):
     #                          manifest-gated catch-all (see web/spa_serving.py).
     #   'dev'              — SPA is served by the Vite dev server; FastAPI mounts
     #                          nothing (the dev proxy forwards backend prefixes).
-    spa_mode: Literal["dev", "prod", "disabled"] = Field(default="disabled", alias="SPA_MODE")
+    spa_mode: Literal["dev", "prod", "disabled"] = Field(
+        default="disabled",
+        alias="SPA_MODE",
+        description=(
+            "How the React SPA is served. prod = FastAPI serves the built bundle (the only "
+            "production value; a built SPA must ship); dev = Vite dev server on :5173 "
+            "proxies the API; disabled = API only, no UI at all. There is no safe default."
+        ),
+    )
+    log_level: str = Field(
+        default="INFO",
+        alias="LOG_LEVEL",
+        description=(
+            "Root log level (DEBUG, INFO, WARNING, ERROR). APScheduler's own logger is "
+            "held at WARNING regardless — its per-job INFO lines were 32 MB/day."
+        ),
+    )
 
     @field_validator("admin_dashboard_url", mode="after")
     @classmethod
@@ -798,6 +891,14 @@ class Settings(BaseSettings):
                 "INITIAL_ADMIN_PASSWORD must be at least 12 characters (or empty/unset)."
             )
         return v  # unchanged — surrounding whitespace may be part of the password
+
+    @field_validator("log_level", mode="after")
+    @classmethod
+    def _log_level_is_a_level(cls, v: str) -> str:
+        name = str(v).strip().upper()
+        if name not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+            raise ValueError("LOG_LEVEL must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL")
+        return name
 
     @field_validator("allowed_email_domains", mode="after")
     @classmethod

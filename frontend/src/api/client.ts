@@ -29,6 +29,13 @@ export function redirectToLogin(): void {
   window.location.assign(`/login?next=${encodeURIComponent(next)}`);
 }
 
+/** Full-page nav to the holding page for a pending/disabled account. The server
+ *  supplies the target on the 403 envelope; the SSE probe (api/events.ts) has no
+ *  envelope to read, so it falls back to the same default the backend uses. */
+export function redirectToNoAccess(target?: string): void {
+  window.location.assign(target ?? "/auth/no-access");
+}
+
 // Collapse openapi-fetch's { data, error } envelope: return data, or throw the
 // Plan-1 error envelope ({ error: { code, message } }) as a typed ApiError.
 //
@@ -51,7 +58,7 @@ export function unwrap<T>(res: { data?: T; error?: unknown; response?: Response 
     // the 401 -> /login chokepoint); the cookie is already cleared server-side. Only
     // this code redirects — a plain 403 (forbidden) flows through as an ApiError.
     if (res.response?.status === 403 && e.error?.code === "account_inactive") {
-      window.location.assign(e.error.detail?.redirect ?? "/auth/no-access");
+      redirectToNoAccess(e.error.detail?.redirect);
       throw new ApiError("account_inactive", "account not active");
     }
     throw new ApiError(e.error?.code ?? "error", e.error?.message ?? "request failed");

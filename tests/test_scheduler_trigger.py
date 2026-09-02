@@ -12,8 +12,9 @@ class _FakeJob:
 
 
 class _FakeScheduler:
-    def __init__(self, jobs: dict) -> None:
+    def __init__(self, jobs: dict, *, running: bool = True) -> None:
         self._jobs = dict(jobs)
+        self.running = running
 
     def get_job(self, job_id: str):
         return self._jobs.get(job_id)
@@ -39,3 +40,14 @@ def test_trigger_job_now_nudges_job_and_returns_true():
     # Nudged to a UTC-aware "now"
     assert job.next_run_time.tzinfo is not None
     assert before <= job.next_run_time <= after
+
+
+def test_trigger_job_now_false_when_scheduler_is_not_running():
+    """Review 2026-09-02 §2.6(b) / prior #25: on a standby (scheduler built but
+    never started) the admin "run now" button returned triggered=true and ran
+    nothing — modify(next_run_time) on a stopped scheduler is a silent no-op.
+    A not-running scheduler is the same answer as no scheduler."""
+    job = _FakeJob()
+    sched = _FakeScheduler({"ingest:vinnova": job}, running=False)
+    assert trigger_job_now(sched, "ingest:vinnova") is False
+    assert job.next_run_time == "UNSET"  # not even nudged

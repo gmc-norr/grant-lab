@@ -90,205 +90,276 @@ _logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 3b-5d.D4: kill-switch handover BEFORE serving — drain every collab log to
-    # git and truncate it, so the git-first world is coherent from request #1.
-    if app.state.settings.collab_kill_switch:
-        import logging
+    # Single-instance enforcement comes FIRST — before the kill-switch handover,
+    # the admin bootstrap and the stranded-reference sweep below, each of which
+    # mutates shared state a second process would then fight over (review
+    # 2026-09-02 §2.6(b): a second replica reset the first one's in-flight
+    # ingests to 'failed'). The scheduler is in-process APScheduler, so two
+    # replicas would each fire every job; the collab room manager, drafting
+    # registry, pass registry, lifecycle tombstones and login limiters are
+    # per-process too. Holding the session-level advisory lock on a dedicated
+    # connection for the process lifetime means "I am the instance".
+    #
+    # Another process holding it is FATAL unless SCHEDULER_STANDBY_OK=true,
+    # which boots an HTTP-only standby with no scheduler. A backend that cannot
+    # answer the probe is an outage, not a second instance: tolerated with a
+    # warning (no scheduler) so /healthz can report the outage itself.
+    from call_manager.scheduler import SingleInstanceViolation, probe_scheduler_lock
 
-        from starlette.concurrency import run_in_threadpool
-
-        from call_manager.proposal_assist.collab.handover import run_kill_switch_handover
-
-        _n = await run_in_threadpool(
-            lambda: run_kill_switch_handover(
-                app.state.session_factory,
-                workspaces_dir=app.state.settings.workspaces_dir,
-            )
-        )
-        logging.getLogger(__name__).warning(
-            "collab kill-switch engaged — handover drained %d artifact(s)", _n
-        )
-
-    # Deferred import: keeps `admin_bootstrap` off the import graph until
-    # lifespan runs, so test-side `create_app()` calls that never enter
-    # lifespan don't pay the import cost or trigger its side-effects.
-    from call_manager.admin_bootstrap import bootstrap_admins
-
-    bootstrap_admins(
-        app.state.session_factory,
-        emails=app.state.settings.initial_admin_emails,
-        allowed_domains=app.state.settings.allowed_email_domains,
-        password=app.state.settings.initial_admin_password,
-    )
-
-    # Sweep stranded reference rows from a prior crash: anything in
-    # text_status='running' is a Phase 2 ingest that didn't complete
-    # (process was killed mid-Stage-1 by SIGTERM, deploy, OOM, etc.).
-    # The retry-via-UI flow lands in Slice 5; for now we just reset
-    # them to 'failed' so the admin panel reflects the truth and the
-    # user can re-upload. Per post-Slice-2 code review.
-    from sqlalchemy import update as _sql_update
-
-    from call_manager.db.models import Reference
-
-    with app.state.session_factory() as _bootstrap_s:
-        n_reset = _bootstrap_s.execute(
-            _sql_update(Reference)
-            .where(Reference.text_status == "running")
-            .values(
-                text_status="failed",
-                text_error="ingest interrupted (server restart before Stage 1 completed)",
-            )
-        ).rowcount
-        _bootstrap_s.commit()
-        if n_reset:
-            import logging as _logging
-
-            _logging.getLogger(__name__).warning(
-                "lifespan startup: reset %d stranded reference rows from "
-                "text_status='running' to 'failed' (likely killed by prior "
-                "restart). Users can re-upload affected refs.",
-                n_reset,
-            )
-
-    from call_manager.ingestion.alerts import ConsecutiveFailureTracker
-    from call_manager.scheduler import build_scheduler
-
-    settings = app.state.settings
-    alerter = ConsecutiveFailureTracker(
-        threshold=3,
-        sender=app.state.email_sender,
-        admin_email=settings.admin_alert_email,
-        session_factory=app.state.session_factory,
-    )
-    app.state.ingestion_alerter = alerter
-
-    from call_manager.email.factory import EmailConfigError, build_email_client
-
-    digest_email_client = None
-    if settings.resend_api_key or settings.smtp_host:
-        try:
-            digest_email_client = build_email_client(settings)
-            app.state.digest_email_client = digest_email_client
-        except EmailConfigError as e:
-            import logging
-
-            logging.getLogger(__name__).warning(
-                "digest.email_client_unavailable",
-                extra={"event": "digest_email_client_unavailable", "error": str(e)},
-            )
-
-    from call_manager.proposal_assist.drafting.factory import (
-        build_workspace_controller,
-    )
-
-    workspace_controller = build_workspace_controller(
-        settings=settings,
-        session_factory=app.state.session_factory,
-        reference_ingest_limiter=app.state.reference_ingest_limiter,
-    )
-    app.state.workspace_controller = workspace_controller
-
-    # Workspace retirement (Slice B-retire): one coordinator fans a delete out to
-    # every subsystem that holds live per-workspace state. Constructed HERE, in the
-    # lifespan, so a missing required hook raises MissingRetirementHook and the app
-    # fails to boot rather than silently skipping a teardown on every delete (the
-    # spec's startup invariant). Local imports follow this module's lifespan
-    # convention (see build_workspace_controller above).
-    from call_manager.proposal_assist.collab.room import MANAGER as _COLLAB_MANAGER
-    from call_manager.proposal_assist.jobs_retirement import build_jobs_retirement_hook
-    from call_manager.proposal_assist.lifecycle import LIFECYCLE
-    from call_manager.proposal_assist.passes import PASS_REGISTRY
-    from call_manager.proposal_assist.retirement import WorkspaceRetirement
-
-    app.state.workspace_lifecycle = LIFECYCLE
-    app.state.workspace_retirement = WorkspaceRetirement(
-        hooks={
-            "turns": workspace_controller.registry.retire_workspace,
-            "collab": _COLLAB_MANAGER.retire_workspace,
-            "jobs": build_jobs_retirement_hook(app.state.session_factory),
-            "passes": PASS_REGISTRY.retire_workspace,
-        },
-        lifecycle=LIFECYCLE,
-    )
-
-    # Claim-analysis embedder: the same construction reference ingest uses
-    # (web/references.py wraps the shared embed_client per request). Always
-    # constructible — embed_client is built unconditionally in create_app()
-    # and only fails at call time if Ollama is unreachable, which the drain
-    # tick surfaces as per-job failures (retry → dead-letter), not a crash.
-    from call_manager.proposal_assist.references.embed import OllamaEmbedderAdapter
-
-    analysis_embedder = OllamaEmbedderAdapter(app.state.embed_client)
-
-    import asyncio as _asyncio
-
-    # Single-instance enforcement (Defect 1): the scheduler is in-process
-    # APScheduler, so two replicas would each fire every job — duplicate
-    # ingests, duplicate digests, duplicate ranking work. Acquire a
-    # SESSION-level Postgres advisory lock on a dedicated long-lived
-    # connection held for the process lifetime. If we get it, start the
-    # scheduler; if another instance holds it, build the scheduler but do NOT
-    # start it (so trigger_job_now / introspection still work) and log loudly.
-    from call_manager.scheduler import try_acquire_scheduler_lock
-
-    scheduler_lock = try_acquire_scheduler_lock(app.state.engine)
-    app.state.scheduler_lock = scheduler_lock
+    # A second lifespan entered on the SAME app object (a test with two
+    # TestClients, or a nested one) is not a second process: the outer lifespan
+    # already holds the lock in this process. Reuse it — build an inert
+    # scheduler, start nothing, release nothing — and leave app.state pointing
+    # at the outer's live lock so /healthz keeps telling the truth. Decided
+    # BEFORE probing, because the probe would otherwise overwrite that state.
+    outer_lock = getattr(app.state, "scheduler_lock", None)
+    if outer_lock is not None and outer_lock.is_held():
+        scheduler_lock, lock_state = None, "reentrant"
+    else:
+        scheduler_lock, lock_state = probe_scheduler_lock(app.state.engine)
+        app.state.scheduler_lock = scheduler_lock
     start_scheduler = scheduler_lock is not None
     if not start_scheduler:
         import logging as _logging
 
+        if lock_state == "held_elsewhere" and not app.state.settings.scheduler_standby_ok:
+            _logging.getLogger(__name__).error(
+                "scheduler.lock_held_elsewhere_fatal",
+                extra={
+                    "event": "scheduler_lock_held_elsewhere_fatal",
+                    "detail": (
+                        "another process holds the single-instance advisory lock; "
+                        "this app must run as ONE process — refusing to start. Set "
+                        "SCHEDULER_STANDBY_OK=true for a deliberate HTTP-only standby"
+                    ),
+                },
+            )
+            raise SingleInstanceViolation(
+                "another instance holds the scheduler advisory lock; refusing to start "
+                "(set SCHEDULER_STANDBY_OK=true to boot as an HTTP-only standby)"
+            )
         _logging.getLogger(__name__).warning(
             "scheduler.lock_not_acquired",
             extra={
                 "event": "scheduler_lock_not_acquired",
+                "lock_state": lock_state,
                 "detail": (
-                    "another instance holds the scheduler advisory lock (or the "
-                    "backend does not support it); NOT starting the in-process "
-                    "scheduler in this replica to avoid double-running every job"
+                    "NOT starting the in-process scheduler in this process: "
+                    + {
+                        "held_elsewhere": "another instance holds the lock (standby mode)",
+                        "reentrant": "this app already holds the lock (nested lifespan)",
+                    }.get(lock_state, "the lock backend could not be probed (outage)")
                 ),
             },
         )
 
-    # Bound to a LOCAL as well as app.state: the teardown below must stop the
-    # scheduler THIS lifespan started, not whatever app.state happens to hold by
-    # then. A second lifespan entered on the same app object (a nested TestClient)
-    # overwrites both attributes — with a scheduler built start=False, since the
-    # nested advisory-lock acquire necessarily loses to the outer one — and the
-    # outer teardown then shut down that inert object and released a None lock,
-    # orphaning the running scheduler and its advisory lock for the rest of the
-    # process. Locals make each lifespan tear down exactly what it created.
-    scheduler = build_scheduler(
-        session_factory=app.state.session_factory,
-        settings=settings,
-        alerter=alerter,
-        ollama_url=settings.ollama_url,
-        gemma_model=settings.gemma_model,
-        ranking_tick_seconds=settings.ranking_tick_seconds,
-        ranking_queue_batch=settings.ranking_queue_batch,
-        embedding_pregate_threshold=settings.embedding_pregate_threshold,
-        embedding_hard_fail_threshold=settings.embedding_hard_fail_threshold,
-        anthropic_api_key=settings.anthropic_api_key,
-        remote_rank_model=settings.remote_rank_model,
-        ranking_escalation_min_score=settings.ranking_escalation_min_score,
-        ranking_remote_daily_cap=settings.ranking_remote_daily_cap,
-        embed_client=app.state.embed_client,
-        digest_email_client=digest_email_client,
-        digest_settings=settings,
-        limiters=[app.state.email_limiter, app.state.ip_limiter],
-        workspace_controller=workspace_controller,
-        # Never None here: build_citation_service raises in create_app() on
-        # misconfig, so a started app always has a real service.
-        citation_service=app.state.citation_service,
-        analysis_embedder=analysis_embedder,
-        app_loop=_asyncio.get_running_loop(),
-        start=start_scheduler,
-    )
-    app.state.scheduler = scheduler
-    app.state.app_loop = _asyncio.get_running_loop()
+    # Everything from here to the yield can raise (a missing retirement hook, a
+    # bootstrap failure). The lock is already ours, so give it back on the way
+    # out — a leaked lock would refuse the NEXT boot in this process as a second
+    # instance. The finally after the yield owns release on the normal path.
+    try:
+        # 3b-5d.D4: kill-switch handover BEFORE serving — drain every collab log to
+        # git and truncate it, so the git-first world is coherent from request #1.
+        if app.state.settings.collab_kill_switch:
+            import logging
+
+            from starlette.concurrency import run_in_threadpool
+
+            from call_manager.proposal_assist.collab.handover import run_kill_switch_handover
+
+            _n = await run_in_threadpool(
+                lambda: run_kill_switch_handover(
+                    app.state.session_factory,
+                    workspaces_dir=app.state.settings.workspaces_dir,
+                )
+            )
+            logging.getLogger(__name__).warning(
+                "collab kill-switch engaged — handover drained %d artifact(s)", _n
+            )
+
+        # Deferred import: keeps `admin_bootstrap` off the import graph until
+        # lifespan runs, so test-side `create_app()` calls that never enter
+        # lifespan don't pay the import cost or trigger its side-effects.
+        from call_manager.admin_bootstrap import bootstrap_admins
+
+        bootstrap_admins(
+            app.state.session_factory,
+            emails=app.state.settings.initial_admin_emails,
+            allowed_domains=app.state.settings.allowed_email_domains,
+            password=app.state.settings.initial_admin_password,
+        )
+
+        # Sweep stranded reference rows from a prior crash: anything in
+        # text_status='running' is a Phase 2 ingest that didn't complete
+        # (process was killed mid-Stage-1 by SIGTERM, deploy, OOM, etc.).
+        # The retry-via-UI flow lands in Slice 5; for now we just reset
+        # them to 'failed' so the admin panel reflects the truth and the
+        # user can re-upload. Per post-Slice-2 code review.
+        from sqlalchemy import update as _sql_update
+
+        from call_manager.db.models import Reference
+
+        with app.state.session_factory() as _bootstrap_s:
+            n_reset = _bootstrap_s.execute(
+                _sql_update(Reference)
+                .where(Reference.text_status == "running")
+                .values(
+                    text_status="failed",
+                    text_error="ingest interrupted (server restart before Stage 1 completed)",
+                )
+            ).rowcount
+            _bootstrap_s.commit()
+            if n_reset:
+                import logging as _logging
+
+                _logging.getLogger(__name__).warning(
+                    "lifespan startup: reset %d stranded reference rows from "
+                    "text_status='running' to 'failed' (likely killed by prior "
+                    "restart). Users can re-upload affected refs.",
+                    n_reset,
+                )
+
+        from call_manager.ingestion.alerts import ConsecutiveFailureTracker
+        from call_manager.scheduler import build_scheduler
+
+        settings = app.state.settings
+        alerter = ConsecutiveFailureTracker(
+            threshold=3,
+            sender=app.state.email_sender,
+            admin_email=settings.admin_alert_email,
+            session_factory=app.state.session_factory,
+        )
+        app.state.ingestion_alerter = alerter
+
+        from call_manager.email.factory import EmailConfigError, build_email_client
+
+        digest_email_client = None
+        if settings.resend_api_key or settings.smtp_host:
+            try:
+                digest_email_client = build_email_client(settings)
+                app.state.digest_email_client = digest_email_client
+            except EmailConfigError as e:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "digest.email_client_unavailable",
+                    extra={"event": "digest_email_client_unavailable", "error": str(e)},
+                )
+
+        from call_manager.proposal_assist.drafting.factory import (
+            build_workspace_controller,
+        )
+
+        workspace_controller = build_workspace_controller(
+            settings=settings,
+            session_factory=app.state.session_factory,
+            reference_ingest_limiter=app.state.reference_ingest_limiter,
+        )
+        app.state.workspace_controller = workspace_controller
+
+        # Workspace retirement (Slice B-retire): one coordinator fans a delete out to
+        # every subsystem that holds live per-workspace state. Constructed HERE, in the
+        # lifespan, so a missing required hook raises MissingRetirementHook and the app
+        # fails to boot rather than silently skipping a teardown on every delete (the
+        # spec's startup invariant). Local imports follow this module's lifespan
+        # convention (see build_workspace_controller above).
+        from call_manager.proposal_assist.collab.room import MANAGER as _COLLAB_MANAGER
+        from call_manager.proposal_assist.jobs_retirement import build_jobs_retirement_hook
+        from call_manager.proposal_assist.lifecycle import LIFECYCLE
+        from call_manager.proposal_assist.passes import PASS_REGISTRY
+        from call_manager.proposal_assist.retirement import WorkspaceRetirement
+
+        app.state.workspace_lifecycle = LIFECYCLE
+        app.state.workspace_retirement = WorkspaceRetirement(
+            hooks={
+                "turns": workspace_controller.registry.retire_workspace,
+                "collab": _COLLAB_MANAGER.retire_workspace,
+                "jobs": build_jobs_retirement_hook(app.state.session_factory),
+                "passes": PASS_REGISTRY.retire_workspace,
+            },
+            lifecycle=LIFECYCLE,
+        )
+
+        # Claim-analysis embedder: the same construction reference ingest uses
+        # (web/references.py wraps the shared embed_client per request). Always
+        # constructible — embed_client is built unconditionally in create_app()
+        # and only fails at call time if Ollama is unreachable, which the drain
+        # tick surfaces as per-job failures (retry → dead-letter), not a crash.
+        from call_manager.proposal_assist.references.embed import OllamaEmbedderAdapter
+
+        analysis_embedder = OllamaEmbedderAdapter(app.state.embed_client)
+
+        import asyncio as _asyncio
+
+        # Bound to a LOCAL as well as app.state: the teardown below must stop the
+        # scheduler THIS lifespan started, not whatever app.state happens to hold by
+        # then. A second lifespan entered on the same app object (a nested TestClient)
+        # overwrites both attributes — with a scheduler built start=False, since the
+        # nested advisory-lock acquire necessarily loses to the outer one — and the
+        # outer teardown then shut down that inert object and released a None lock,
+        # orphaning the running scheduler and its advisory lock for the rest of the
+        # process. Locals make each lifespan tear down exactly what it created.
+        scheduler = build_scheduler(
+            session_factory=app.state.session_factory,
+            settings=settings,
+            alerter=alerter,
+            ollama_url=settings.ollama_url,
+            gemma_model=settings.gemma_model,
+            ranking_tick_seconds=settings.ranking_tick_seconds,
+            ranking_queue_batch=settings.ranking_queue_batch,
+            embedding_pregate_threshold=settings.embedding_pregate_threshold,
+            embedding_hard_fail_threshold=settings.embedding_hard_fail_threshold,
+            anthropic_api_key=settings.anthropic_api_key,
+            remote_rank_model=settings.remote_rank_model,
+            ranking_escalation_min_score=settings.ranking_escalation_min_score,
+            ranking_remote_daily_cap=settings.ranking_remote_daily_cap,
+            embed_client=app.state.embed_client,
+            digest_email_client=digest_email_client,
+            digest_settings=settings,
+            limiters=[app.state.email_limiter, app.state.ip_limiter],
+            workspace_controller=workspace_controller,
+            # Never None here: build_citation_service raises in create_app() on
+            # misconfig, so a started app always has a real service.
+            citation_service=app.state.citation_service,
+            analysis_embedder=analysis_embedder,
+            app_loop=_asyncio.get_running_loop(),
+            start=start_scheduler,
+        )
+        app.state.scheduler = scheduler
+        app.state.app_loop = _asyncio.get_running_loop()
+    except BaseException:
+        if scheduler_lock is not None:
+            scheduler_lock.release()
+        raise
     try:
         yield
     finally:
+        # Drafting subprocesses FIRST (review 2026-09-02 §2.6f): the scheduler
+        # wait below is bounded by the longest tick (up to ~16 minutes), and a
+        # service manager that SIGKILLs before it returns used to skip this
+        # block entirely, leaking every SDK subprocess and its advisory-lock
+        # session. Terminating them before the wait also lets in-flight turns
+        # end promptly instead of running to their timeout.
+        # B6-residuals: terminate every live drafting subprocess before
+        # disposing the engine. Without this, each `lifespan` exit leaks
+        # SDK subprocesses + the per-workspace pg advisory-lock sessions
+        # the registry holds open for handle lifetime (see
+        # proposal_assist/drafting/registry.py — `_Entry.lock_session`).
+        # Run sequentially to avoid hammering the SDK during shutdown.
+        ctrl = getattr(app.state, "workspace_controller", None)
+        if ctrl is not None:
+            live_ids = list(ctrl._registry._entries.keys())
+            for wsid in live_ids:
+                try:
+                    await ctrl.terminate(wsid)
+                except Exception:
+                    import logging
+
+                    logging.getLogger(__name__).warning(
+                        "lifespan teardown: controller.terminate failed for %s",
+                        wsid,
+                        exc_info=True,
+                    )
         # wait=True so an in-flight rank-drain or ingest job completes
         # against the still-open pool — Plan 3 made the rank tick 60s, so
         # mid-flight at shutdown is plausible (was daily-only before).
@@ -311,26 +382,6 @@ async def lifespan(app: FastAPI):
         # engine.dispose() below — the lock holds its own connection.
         if scheduler_lock is not None:
             scheduler_lock.release()
-        # B6-residuals: terminate every live drafting subprocess before
-        # disposing the engine. Without this, each `lifespan` exit leaks
-        # SDK subprocesses + the per-workspace pg advisory-lock sessions
-        # the registry holds open for handle lifetime (see
-        # proposal_assist/drafting/registry.py — `_Entry.lock_session`).
-        # Run sequentially to avoid hammering the SDK during shutdown.
-        ctrl = getattr(app.state, "workspace_controller", None)
-        if ctrl is not None:
-            live_ids = list(ctrl._registry._entries.keys())
-            for wsid in live_ids:
-                try:
-                    await ctrl.terminate(wsid)
-                except Exception:
-                    import logging
-
-                    logging.getLogger(__name__).warning(
-                        "lifespan teardown: controller.terminate failed for %s",
-                        wsid,
-                        exc_info=True,
-                    )
         # Foundation v1 review-fixes added engine.dispose() here. Preserve it:
         # without disposal, repeated test-side create_app() calls leak DBAPI
         # connections to the GC, which psycopg surfaces as ResourceWarning
@@ -367,15 +418,14 @@ def _derive_ws_origin(app_base_url: str) -> str:
     if not _base.scheme or not _base.netloc:
         raise RuntimeError(f"APP_BASE_URL is not a valid URL: {app_base_url!r}")
     if not _HOST_PORT_RE.match(_base.netloc):
-        raise RuntimeError(
-            f"APP_BASE_URL host is not a valid host[:port]: {_base.netloc!r}"
-        )
+        raise RuntimeError(f"APP_BASE_URL host is not a valid host[:port]: {_base.netloc!r}")
     return f"{'wss' if _base.scheme == 'https' else 'ws'}://{_base.netloc}"
 
 
 def create_app() -> FastAPI:
-    configure_logging()
+    configure_logging()  # JSON from the first line, even if Settings() refuses to load
     settings = Settings()
+    configure_logging(settings.log_level)  # idempotent: re-levels, keeps the handler
 
     # 3b-5d.D4: arm the collab kill-switch BEFORE any request can consult the
     # flag. Module-level on purpose — see collab/state.py.
@@ -713,9 +763,7 @@ def create_app() -> FastAPI:
             },
         )
         if api_request(request):
-            return api_error(
-                429, code_for(429), BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"}
-            )
+            return api_error(429, code_for(429), BUSY_ERROR_MESSAGE, headers={"Retry-After": "2"})
         return JSONResponse(
             status_code=429,
             content={"detail": BUSY_ERROR_MESSAGE},

@@ -72,8 +72,8 @@ Read this before claiming two tables share, or do not share, a rule.
 | `proposed_changes` | `ProposedChange` | 19 | 4 | 4 | 2 |
 | `ranking_jobs` | `RankingJob` | 8 | 2 | 0 | 4 |
 | `ranking_remote_attempts` | `RankingRemoteAttempt` | 6 | 2 | 1 | 1 |
-| `reference_chunks` | `ReferenceChunk` | 8 | 2 | 0 | 0 |
-| `references` | `Reference` | 28 | 2 | 6 | 1 |
+| `reference_chunks` | `ReferenceChunk` | 8 | 2 | 0 | 2 |
+| `references` | `Reference` | 28 | 2 | 6 | 2 |
 | `review_run_items` | `ReviewRunItem` | 13 | 1 | 2 | 1 |
 | `review_runs` | `ReviewRun` | 14 | 2 | 1 | 2 |
 | `sources` | `Source` | 9 | 0 | 0 | 0 |
@@ -172,9 +172,9 @@ a rule that looks absolute usually is not.
 
 | primitive | line | first line of its contract |
 |---|---|---|
-| `live_at_generation` | fencing.py:72 | Primitive A. "Is this workspace LIVE and STILL at *generation*?", as a |
-| `acquire_commit_mutex_at_generation` | fencing.py:115 | Primitive B. Acquire the commit mutex, then refuse a workspace that is |
-| `acquire_shared_lease` | fencing.py:174 | Primitive C. Take the workspace's commit-mutex key in SHARED mode for the |
+| `live_at_generation` | fencing.py:80 | Primitive A. "Is this workspace LIVE and STILL at *generation*?", as a |
+| `acquire_commit_mutex_at_generation` | fencing.py:123 | Primitive B. Acquire the commit mutex, then refuse a workspace that is |
+| `acquire_shared_lease` | fencing.py:180 | Primitive C. Take the workspace's commit-mutex key in SHARED mode for the |
 
 ### Armed-gate allowlists (`tests/fencing/inventory.py`)
 
@@ -217,7 +217,7 @@ sibling paths is the shape of a real defect.
 | `reference_max_batch_bytes` | `Field(default=200 * 1024 * 1024, ge=1, description='Client-enforced max total bytes per drag-drop batch.')` |
 | `reference_max_batch_files` | `Field(default=25, ge=1, description='Client-enforced max PDFs per drag-drop batch.')` |
 | `review_dollar_cap_default` | `Field(default=Decimal('5.000'), alias='REVIEW_DOLLAR_CAP_DEFAULT', description='Global per-workspace daily $ cap on mock-panel runs; overridable per workspace via Workspace.review_dollar_cap_override.')` |
-| `session_max_age_seconds` | `Field(default=30 * 24 * 3600, alias='SESSION_MAX_AGE_SECONDS')` |
+| `session_max_age_seconds` | `Field(default=30 * 24 * 3600, alias='SESSION_MAX_AGE_SECONDS', description='Session cookie lifetime. 30 days by default; an organisational policy choice.')` |
 | `turn_max_seconds` | `Field(default=600, alias='TURN_MAX_SECONDS', description="Hard wall-clock bound on a single turn's processing inside the drain tick. A turn that exceeds this is cancelled in-loop and finalized as failed, releasing the workspace's running-row cleanly. MUST stay comfortably below the reaper TTL (reaper.DEFAULT_REAP_TTL_SECONDS) so a slow-but-live turn is bounded by this clean path, not reaped while still streaming.")` |
 | `uncited_claims_daily_token_cap` | `Field(default=200000, alias='UNCITED_CLAIMS_DAILY_TOKEN_CAP', description='Per-workspace daily ceiling on combined input+output tokens spent by uncited-claims passes (Europe/Stockholm day). A pass is blocked pre-run once reached.')` |
 

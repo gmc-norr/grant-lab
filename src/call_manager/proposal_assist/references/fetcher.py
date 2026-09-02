@@ -62,8 +62,19 @@ class SSRFError(FetchError):
 _ALLOWED_SCHEMES = frozenset({"https", "http"})
 _DEFAULT_MAX_BYTES = 50 * 1024 * 1024
 _DEFAULT_TIMEOUT_S = 60.0
+# Review 2026-09-02 §2.5(b)(c): bounds INSIDE one hop. `timeout_s` is a single
+# deadline for the whole fetch; httpx only knows a PER-READ timeout, so a body
+# that drips one byte every (timeout_s - ε) seconds never tripped it and held an
+# ingest slot for as long as it liked (measured: 12 bytes over 4.5 s under
+# timeout_s=1.0, no error). The read loop now re-checks the deadline between
+# pieces, and the per-read timeout is capped so one silent read cannot eat the
+# whole budget before that check runs.
+_READ_TIMEOUT_S = 10.0
+# An error status used to `response.read()` its whole body for a 200-char
+# snippet — 200 MB served under max_bytes=1 MiB was read in full. One small
+# piece is all the message needs.
+_ERROR_SNIPPET_BYTES = 4096
 _MAX_REDIRECTS = 5
-_CHUNK_BYTES = 64 * 1024
 
 
 def _is_private_ip(ip_str: str) -> bool:
@@ -256,7 +267,7 @@ def _fetch_url_bytes(
             with (
                 httpx.Client(
                     follow_redirects=False,
-                    timeout=remaining_s,
+                    timeout=min(remaining_s, _READ_TIMEOUT_S),
                     headers={"User-Agent": user_agent},
                     transport=transport,
                 ) as client,
@@ -274,10 +285,14 @@ def _fetch_url_bytes(
                     continue
 
                 if response.status_code >= 400:
-                    # read() the (error) body so we can echo a snippet.
-                    response.read()
+                    # Echo a SNIPPET of the error body — one bounded piece, never
+                    # response.read(): the streaming cap below covers only the
+                    # 2xx branch, and an attacker-controlled 5xx body is as big as
+                    # they like.
+                    snippet = next(response.iter_bytes(_ERROR_SNIPPET_BYTES), b"")
+                    text = snippet[:_ERROR_SNIPPET_BYTES].decode("utf-8", errors="replace")
                     raise FetchError(
-                        f"HTTP {response.status_code} for {current_url!r}: {response.text[:200]!r}"
+                        f"HTTP {response.status_code} for {current_url!r}: {text[:200]!r}"
                     )
 
                 # Accumulate chunks, aborting the moment the running
@@ -285,7 +300,16 @@ def _fetch_url_bytes(
                 # all redirect hops — a bomb can't reset the budget by
                 # redirecting to a fresh hop.
                 chunks: list[bytes] = []
-                for chunk in response.iter_bytes(chunk_size=_CHUNK_BYTES):
+                # No chunk_size: httpx would otherwise BUFFER pieces until it has
+                # that many bytes, and the deadline check below would run only
+                # after a whole 64 KiB of drip had arrived (verified against
+                # httpx 0.28's ByteChunker). Bare iter_bytes() yields each
+                # decoded piece as the transport delivers it.
+                for chunk in response.iter_bytes():
+                    # The deadline is a wall-clock budget for the WHOLE fetch;
+                    # checking it only between hops let a slow drip run forever.
+                    if time.monotonic() > deadline_time:
+                        raise FetchError(f"fetch budget exhausted for {url!r} (slow body)")
                     total += len(chunk)
                     if total > max_bytes:
                         raise FetchError(

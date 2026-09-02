@@ -1,10 +1,11 @@
 import { MantineProvider } from "@mantine/core";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import * as branchesMod from "../api/branches";
+import { ApiError } from "../api/client";
 import { BranchBar } from "./BranchBar";
 
 function mockBranches(current: string, branches: string[]) {
@@ -18,23 +19,35 @@ function mockBranches(current: string, branches: string[]) {
   } as never);
 }
 
-function mockMutations() {
-  const create = vi.fn();
-  const switchTo = vi.fn();
-  const del = vi.fn();
-  vi.spyOn(branchesMod, "useCreateBranch").mockReturnValue({
-    mutate: create,
+/** A stand-in for one `useMutation` result.
+ *
+ *  The previous version of this file mocked all three as bare `vi.fn()` with no
+ *  `isError`, no `error` and no `reset` — which is exactly why the review found
+ *  the swallowed switch/delete failures: the error path could not be reached
+ *  from this harness at all, so no test here could have caught it. Passing an
+ *  `error` makes the mutation behave like a failed one; the default succeeds and
+ *  invokes the caller's `onSuccess`, as TanStack does. */
+function mutationStub(error?: unknown) {
+  const mutate = vi.fn((_vars: unknown, opts?: { onSuccess?: () => void }) => {
+    if (!error) opts?.onSuccess?.();
+  });
+  return {
+    mutate,
+    reset: vi.fn(),
     isPending: false,
-  } as never);
-  vi.spyOn(branchesMod, "useSwitchBranch").mockReturnValue({
-    mutate: switchTo,
-    isPending: false,
-  } as never);
-  vi.spyOn(branchesMod, "useDeleteBranch").mockReturnValue({
-    mutate: del,
-    isPending: false,
-  } as never);
-  return { create, switchTo, del };
+    isError: error !== undefined,
+    error,
+  };
+}
+
+function mockMutations(errors?: { create?: unknown; switchTo?: unknown; del?: unknown }) {
+  const create = mutationStub(errors?.create);
+  const switchTo = mutationStub(errors?.switchTo);
+  const del = mutationStub(errors?.del);
+  vi.spyOn(branchesMod, "useCreateBranch").mockReturnValue(create as never);
+  vi.spyOn(branchesMod, "useSwitchBranch").mockReturnValue(switchTo as never);
+  vi.spyOn(branchesMod, "useDeleteBranch").mockReturnValue(del as never);
+  return { create: create.mutate, switchTo: switchTo.mutate, del: del.mutate };
 }
 
 /** `env="test"` is Mantine's own switch for this: without it the Menu dropdown
@@ -95,7 +108,7 @@ describe("BranchBar", () => {
     expect(switchTo).not.toHaveBeenCalled();
     expect(await screen.findByRole("dialog", { name: "Switch branch" })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Switch branch" }));
-    expect(switchTo).toHaveBeenCalledWith("main");
+    expect(switchTo).toHaveBeenCalledWith("main", expect.anything());
   });
 
   it("confirms before deleting, and only then mutates", async () => {
@@ -108,7 +121,7 @@ describe("BranchBar", () => {
     expect(del).not.toHaveBeenCalled();
     expect(await screen.findByRole("dialog", { name: "Delete branch" })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Delete branch" }));
-    expect(del).toHaveBeenCalledWith("main");
+    expect(del).toHaveBeenCalledWith("main", expect.anything());
   });
 
   it("creates from HEAD with the trimmed name when opened from the bar", async () => {
@@ -205,5 +218,67 @@ describe("BranchBar", () => {
     // moment the list recovers.
     expect(onBranchFromHandled).toHaveBeenCalled();
     expect(onSwitchHandled).toHaveBeenCalled();
+  });
+
+  it("keeps the switch modal open and says why when the server refuses", async () => {
+    // Review 2026-09-02 A7/F5. The confirm modal closed unconditionally on
+    // click, so a 409 (the server ABORTS a switch it cannot linearize against
+    // in-flight persists) or a 404 (branch already gone) left the bar showing
+    // the old branch with nothing said at all. The user reads that as "nothing
+    // happened" and clicks again — silently, every time.
+    mockBranches("test", ["main", "test"]);
+    const { switchTo } = mockMutations({
+      switchTo: new ApiError("conflict", "switch aborted: a persist is in flight"),
+    });
+    setup(<BranchBar id="w1" {...NOOP} />);
+    fireEvent.click(screen.getByRole("button", { name: "Branch: test" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "main" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Switch branch" }));
+
+    expect(switchTo).toHaveBeenCalledWith("main", expect.anything());
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("switch aborted: a persist is in flight");
+    // Still open: closing it is what threw the failure away.
+    expect(screen.getByRole("dialog", { name: "Switch branch" })).toBeInTheDocument();
+  });
+
+  it("keeps the delete modal open and says why when the delete fails", async () => {
+    mockBranches("test", ["main", "test"]);
+    const { del } = mockMutations({ del: new ApiError("not_found", "no such branch") });
+    setup(<BranchBar id="w1" {...NOOP} />);
+    fireEvent.click(screen.getByRole("button", { name: "Branch: test" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete main" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Delete branch" }));
+
+    expect(del).toHaveBeenCalledWith("main", expect.anything());
+    expect(await screen.findByRole("alert")).toHaveTextContent("no such branch");
+    expect(screen.getByRole("dialog", { name: "Delete branch" })).toBeInTheDocument();
+  });
+
+  it("says why a create failed instead of leaving a blank dialog", async () => {
+    mockBranches("test", ["main", "test"]);
+    mockMutations({ create: new ApiError("conflict", "branch name already taken") });
+    setup(<BranchBar id="w1" {...NOOP} />);
+    fireEvent.click(screen.getByRole("button", { name: "Branch: test" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Create new branch…" }));
+    await userEvent.type(await screen.findByLabelText("Branch name"), "spike");
+    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("branch name already taken");
+  });
+
+  it("a successful switch still closes its modal", async () => {
+    // The other half of the contract: "keep it open" must not become "never close".
+    mockBranches("test", ["main", "test"]);
+    mockMutations();
+    setup(<BranchBar id="w1" {...NOOP} />);
+    fireEvent.click(screen.getByRole("button", { name: "Branch: test" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "main" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Switch branch" }));
+
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Switch branch" })).toBeNull(),
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });

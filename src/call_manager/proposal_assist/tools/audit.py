@@ -23,13 +23,14 @@ registry's ``_safe_tool`` wrapper is the backstop.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
 from call_manager.db.models import Workspace
 from call_manager.proposal_assist.citations.audit import (
     validate_citations_deterministic,
-    validate_citations_semantic,
+    validate_citations_semantic_capped,
 )
 from call_manager.proposal_assist.citations.bibliography import (
     CITATION_STYLES,
@@ -44,6 +45,13 @@ if TYPE_CHECKING:
     from call_manager.proposal_assist.tools.registry import ToolContext
 
 logger = logging.getLogger(__name__)
+
+# Bound on judge calls per list_unsupported_claims tool call (review 2026-09-02
+# A11 F2): the owner-facing route got a 25-call cap, the agent tool did not, and
+# the agent can invoke it any number of times per turn. Matches that route's cap.
+_MAX_JUDGED_SENTENCES = 25
+# Same cap the owner-facing citation-audit route uses (web/api/citation_audit.py).
+_MAX_FRESH_VALIDATION_CALLS = 25
 
 # System prompt for the uncited-claim judge. The user content is the proposal's
 # OWN sentence (first-party) — it is NOT wrapped in <untrusted-reference>, so no
@@ -75,15 +83,21 @@ async def validate_citations_impl(ctx: ToolContext) -> dict[str, Any]:
 
     semantic_available = ctx.citation_service is not None
 
-    with ctx.session_factory() as session:
-        det = validate_citations_deterministic(
-            proposal_text=proposal_text,
-            ledger=ledger,
-            session=session,
-            workspace_id=ctx.workspace_id,
-        )
-        if semantic_available:
-            sem = validate_citations_semantic(
+    def _audit() -> tuple[list[dict], list[dict], int]:
+        # Blocking DB + one LLM HTTP round-trip per ledger row: off the loop, and
+        # through the SAME capped validator the owner-facing route uses (review
+        # 2026-09-02 A11 F2: the tool alone was uncapped, and the agent can call
+        # it any number of times per turn).
+        with ctx.session_factory() as session:
+            det = validate_citations_deterministic(
+                proposal_text=proposal_text,
+                ledger=ledger,
+                session=session,
+                workspace_id=ctx.workspace_id,
+            )
+            if not semantic_available:
+                return det, [], 0
+            sem, _fresh, deferred = validate_citations_semantic_capped(
                 proposal_text=proposal_text,
                 ledger=ledger,
                 session=session,
@@ -91,16 +105,20 @@ async def validate_citations_impl(ctx: ToolContext) -> dict[str, Any]:
                 workspace_id=ctx.workspace_id,
                 citation_service=ctx.citation_service,
                 deterministic_issues=det,
+                max_fresh_calls=_MAX_FRESH_VALIDATION_CALLS,
             )
-        else:
-            sem = []
+            return det, sem, deferred
 
+    det, sem, deferred = await asyncio.to_thread(_audit)
     checked = len([r for r in (ledger.get("evidence") or []) if r.get("id")])
 
     return {
         "issues": det + sem,
         "semantic_available": semantic_available,
         "checked": checked,
+        # Rows that would have needed a fresh LLM call beyond the per-call cap;
+        # the agent can call again to judge them.
+        "deferred": deferred,
     }
 
 
@@ -137,16 +155,25 @@ async def list_unsupported_claims_impl(ctx: ToolContext) -> dict[str, Any]:
     marker_starts = [m["start"] for m in find_markers(proposal_text)]
     sentences = list(iter_proposal_sentences(proposal_text))
 
-    candidates: list[dict[str, Any]] = []
+    # Uncited sentences first, then judge at most _MAX_JUDGED_SENTENCES of them.
+    # Span = [this offset, next sentence's offset) — last → end of text. A marker
+    # whose start falls in the span means this sentence is cited.
+    uncited: list[tuple[str, int]] = []
     for i, (sentence_text, offset) in enumerate(sentences):
-        # Span = [this offset, next sentence's offset) — last → end of text. A
-        # marker whose start falls in the span means this sentence is cited.
         next_offset = sentences[i + 1][1] if i + 1 < len(sentences) else len(proposal_text)
         if any(offset <= ms < next_offset for ms in marker_starts):
             continue  # already cited — skip
+        uncited.append((sentence_text, offset))
+    to_judge = uncited[:_MAX_JUDGED_SENTENCES]
+    remaining = len(uncited) - len(to_judge)
 
+    candidates: list[dict[str, Any]] = []
+    for sentence_text, offset in to_judge:
         try:
-            res = ctx.citation_service.complete_json(
+            # Each judge call is a blocking HTTP round-trip; off the loop (review
+            # 2026-09-02 A11 F2: 50 sentences froze the loop for the whole run).
+            res = await asyncio.to_thread(
+                ctx.citation_service.complete_json,
                 workspace_id=ctx.workspace_id,
                 op="list_unsupported",
                 system=_UNSUPPORTED_SYSTEM,
@@ -162,7 +189,12 @@ async def list_unsupported_claims_impl(ctx: ToolContext) -> dict[str, Any]:
 
         if res.cap_exceeded:
             # Cap reached → stop and report partial results as unavailable.
-            return {"candidates": candidates, "semantic_available": False}
+            return {
+                "candidates": candidates,
+                "semantic_available": False,
+                "truncated": True,
+                "remaining": remaining + (len(to_judge) - len(candidates)),
+            }
 
         data = res.data or {}
         if data.get("needs_citation") is True:
@@ -174,7 +206,12 @@ async def list_unsupported_claims_impl(ctx: ToolContext) -> dict[str, Any]:
                 }
             )
 
-    return {"candidates": candidates, "semantic_available": True}
+    return {
+        "candidates": candidates,
+        "semantic_available": True,
+        "truncated": remaining > 0,
+        "remaining": remaining,
+    }
 
 
 async def build_bibliography_impl(ctx: ToolContext, *, style: str | None = None) -> dict[str, Any]:

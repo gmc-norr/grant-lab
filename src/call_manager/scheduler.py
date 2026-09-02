@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import threading
 from datetime import UTC
 from datetime import datetime as _dt
 from pathlib import Path
@@ -63,6 +64,36 @@ class SchedulerLock:
     def __init__(self, connection) -> None:
         self._connection = connection
         self.acquired = True
+        self._ping_lock = threading.Lock()
+
+    def is_held(self) -> bool:
+        """Is the lock still ours? Pings the held connection: the lock is
+        session-level, so it lives exactly as long as that session. A dead
+        session (the backend was terminated, Postgres restarted) means the lock
+        is gone and another instance may already hold it — which used to be
+        silent (review 2026-09-02 A9 S5). Logged ONCE; after that the answer is
+        False without another ping. Serialized: /healthz is called concurrently
+        and a DBAPI connection is not."""
+        with self._ping_lock:
+            if not self.acquired or self._connection is None:
+                return False
+            try:
+                self._connection.execute(text("SELECT 1"))
+            except Exception:  # noqa: BLE001 — any failure means the session is gone
+                self.acquired = False
+                _logger.warning(
+                    "scheduler.lock_lost",
+                    extra={
+                        "event": "scheduler_lock_lost",
+                        "detail": (
+                            "the connection holding the single-instance advisory lock "
+                            "is dead; another instance can now take the lock while this "
+                            "one keeps running its scheduler — restart this instance"
+                        ),
+                    },
+                )
+                return False
+            return True
 
     def release(self) -> None:
         """Explicitly drop the session-level advisory lock, then close the connection.
@@ -99,8 +130,25 @@ class SchedulerLock:
             self.acquired = False
 
 
+class SingleInstanceViolation(RuntimeError):
+    """Raised at startup when another process holds the single-instance lock and
+    SCHEDULER_STANDBY_OK is not set. Uvicorn turns a lifespan exception into
+    "Application startup failed. Exiting." with a non-zero exit."""
+
+
 def try_acquire_scheduler_lock(engine: Engine) -> SchedulerLock | None:
-    """Try to acquire the process-wide single-instance scheduler lock.
+    """`probe_scheduler_lock` without the reason — the original entry point,
+    kept for every caller and test that only needs the lock or None."""
+    lock, _state = probe_scheduler_lock(engine)
+    return lock
+
+
+def probe_scheduler_lock(engine: Engine) -> tuple[SchedulerLock | None, str]:
+    """Try to acquire the process-wide single-instance scheduler lock, and say
+    why when it could not: `"acquired"`, `"held_elsewhere"` (another process
+    holds it — a second instance, which the lifespan treats as FATAL unless
+    SCHEDULER_STANDBY_OK), or `"unavailable"` (the backend could not answer the
+    probe — an outage, tolerated with a warning so /healthz can report it).
 
     Opens a dedicated long-lived connection and calls
     `pg_try_advisory_lock(hashtext('call-manager-scheduler'))`. The connection
@@ -122,7 +170,7 @@ def try_acquire_scheduler_lock(engine: Engine) -> SchedulerLock | None:
             "lock; proceeding without single-instance enforcement",
             exc_info=True,
         )
-        return None
+        return None, "unavailable"
     try:
         acquired = bool(
             conn.execute(
@@ -138,14 +186,14 @@ def try_acquire_scheduler_lock(engine: Engine) -> SchedulerLock | None:
         )
         with contextlib.suppress(Exception):
             conn.close()
-        return None
+        return None, "unavailable"
     if not acquired:
         # Another instance holds the lock — close the probe connection so we
         # don't leak it, and signal "do not start the scheduler".
         with contextlib.suppress(Exception):
             conn.close()
-        return None
-    return SchedulerLock(conn)
+        return None, "held_elsewhere"
+    return SchedulerLock(conn), "acquired"
 
 
 class _SafeBackgroundScheduler(BackgroundScheduler):
@@ -1142,6 +1190,11 @@ def trigger_job_now(scheduler: BackgroundScheduler | None, job_id: str) -> bool:
     coalesce=True, so a double-trigger collapses to one run.
     """
     if scheduler is None:
+        return False
+    if not scheduler.running:
+        # A standby's scheduler is built but never started; modify() on it is a
+        # silent no-op, and this used to report triggered=True for nothing
+        # (review 2026-09-02 §2.6(b), prior #25).
         return False
     job = scheduler.get_job(job_id)
     if job is None:

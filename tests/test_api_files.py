@@ -120,9 +120,7 @@ def test_api_files_delete_viewer_403(monkeypatch, pg_url, tmp_path, pg_session_f
     assert r.status_code == 403
 
 
-def test_api_serve_file_member_roundtrips_bytes(
-    monkeypatch, pg_url, tmp_path, pg_session_factory
-):
+def test_api_serve_file_member_roundtrips_bytes(monkeypatch, pg_url, tmp_path, pg_session_factory):
     app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
     ws_id, owner_id, member_id, _ = _setup(pg_session_factory)
     png = _png_bytes()
@@ -148,20 +146,14 @@ def test_api_serve_file_non_member_403(monkeypatch, pg_url, tmp_path, pg_session
     assert r.status_code == 403, r.text
 
 
-def test_api_serve_file_missing_attachment_404(
-    monkeypatch, pg_url, tmp_path, pg_session_factory
-):
+def test_api_serve_file_missing_attachment_404(monkeypatch, pg_url, tmp_path, pg_session_factory):
     app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
     ws_id, _, member_id, _ = _setup(pg_session_factory)
-    r = authed_client(app, user_id=member_id).get(
-        f"/api/workspaces/{ws_id}/files/{uuid.uuid4()}"
-    )
+    r = authed_client(app, user_id=member_id).get(f"/api/workspaces/{ws_id}/files/{uuid.uuid4()}")
     assert r.status_code == 404, r.text
 
 
-def test_api_serve_file_cross_workspace_404(
-    monkeypatch, pg_url, tmp_path, pg_session_factory
-):
+def test_api_serve_file_cross_workspace_404(monkeypatch, pg_url, tmp_path, pg_session_factory):
     """IDOR: a member of workspace A cannot read an attachment owned by workspace B."""
     app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
     ws_a, _, member_a, _ = _setup(pg_session_factory)
@@ -174,3 +166,20 @@ def test_api_serve_file_cross_workspace_404(
     # member of A requests B's attachment id under A's URL -> 404 (not 403, not 200).
     r = authed_client(app, user_id=member_a).get(f"/api/workspaces/{ws_a}/files/{aid_b}")
     assert r.status_code == 404, r.text
+
+
+def test_api_serve_file_with_a_cjk_name_is_not_a_500(
+    monkeypatch, pg_url, tmp_path, pg_session_factory
+):
+    """Review 2026-09-02 A1 item 8: `_sanitize_filename("研究.png")` keeps the
+    characters (isalnum is Unicode-aware) and the header encode raised."""
+    app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
+    ws_id, owner_id, member_id, _ = _setup(pg_session_factory)
+    aid = _upload(app, user_id=owner_id, ws_id=ws_id, name="研究.png", data=_png_bytes()).json()[
+        "attachment_id"
+    ]
+    r = authed_client(app, user_id=member_id).get(f"/api/workspaces/{ws_id}/files/{aid}")
+    assert r.status_code == 200, r.text
+    cd = r.headers["content-disposition"]
+    assert cd.startswith("inline; filename=")
+    assert "filename*=UTF-8''%E7%A0%94%E7%A9%B6.png" in cd
