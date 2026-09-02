@@ -1783,6 +1783,16 @@ class Reference(Base):
             unique=True,
             postgresql_where=text("citekey IS NOT NULL"),
         ),
+        # Created by 0031, absent from the ORM until the 2026-09-02 review
+        # (tests/test_schema_drift.py). The indexing backlog scan reads it.
+        Index(
+            "ix_references_indexing_backlog",
+            "workspace_id",
+            "created_at",
+            postgresql_where=text(
+                "text_status IN ('pending','running') OR outline_status IN ('pending','running')"
+            ),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -1850,6 +1860,16 @@ class ReferenceChunk(Base):
     __tablename__ = "reference_chunks"
     __table_args__ = (
         UniqueConstraint("reference_id", "chunk_index", name="uq_reference_chunks_ref_idx"),
+        # Both indexes existed only in migrations (0031 raw SQL, 0032) until the
+        # 2026-09-02 review: `alembic revision --autogenerate` would have DROPPED
+        # the vector index. tests/test_schema_drift.py now pins ORM == database.
+        Index("ix_reference_chunks_ws_model", "workspace_id", "embedding_model"),
+        Index(
+            "ix_reference_chunks_ws_embedding",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
