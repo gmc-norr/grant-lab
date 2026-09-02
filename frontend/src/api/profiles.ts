@@ -31,8 +31,20 @@ export function useProfile(id: number) {
 }
 
 export function useCreateProfile() {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: async (body: ProfileCreateBody) => unwrap(await api.POST("/api/profiles", { body })),
+    // Without this the list served the pre-create cache for 20 s: saving your
+    // FIRST profile and going back to /profiles still showed "No profiles yet"
+    // and a "Create your first profile" button. `["calls"]` too — the dashboard
+    // builds its Profile facet from that response (CallsFilters), so the new
+    // profile is missing from the filter as well.
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["profiles"] }),
+        qc.invalidateQueries({ queryKey: ["calls"] }),
+      ]);
+    },
   });
 }
 

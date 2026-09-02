@@ -55,14 +55,29 @@ function mockBranches(current: string, tips: Record<string, string>) {
   } as never);
 }
 
+/** Mirrors `BranchBar.test.tsx`'s stub: a mutation result that succeeds and runs
+ *  the caller's `onSuccess`, carrying the `reset`/`isError`/`error` fields the
+ *  bar reads. */
+function mutationStub() {
+  return {
+    mutate: vi.fn((_vars: unknown, opts?: { onSuccess?: () => void }) => opts?.onSuccess?.()),
+    reset: vi.fn(),
+    isPending: false,
+    isError: false,
+    error: undefined,
+  };
+}
+
 describe("VersionGraph", () => {
   // The pane now reads useBranches, and BranchBar reads the three mutation
   // hooks. Every test needs them stubbed or the hooks reach TanStack Query with
-  // no provider.
+  // no provider. BranchBar reads `reset`/`isError`/`error` off each of them and
+  // now passes `{ onSuccess }` to `mutate`, so the stub has to behave like a
+  // real (succeeding) mutation result, not a bare spy.
   beforeEach(() => {
     mockBranches("main", { main: "aaaaaaa" });
     for (const h of ["useCreateBranch", "useSwitchBranch", "useDeleteBranch"] as const) {
-      vi.spyOn(branchesMod, h).mockReturnValue({ mutate: vi.fn(), isPending: false } as never);
+      vi.spyOn(branchesMod, h).mockReturnValue(mutationStub() as never);
     }
   });
 
@@ -316,11 +331,9 @@ describe("VersionGraph", () => {
   it("clicking a branch pill confirms first, and only then switches", async () => {
     // Without this the entire pill-to-dialog wiring is untested, and a pill that
     // silently did nothing would ship green.
-    const switchTo = vi.fn();
-    vi.spyOn(branchesMod, "useSwitchBranch").mockReturnValue({
-      mutate: switchTo,
-      isPending: false,
-    } as never);
+    const stub = mutationStub();
+    const switchTo = stub.mutate;
+    vi.spyOn(branchesMod, "useSwitchBranch").mockReturnValue(stub as never);
     mockList({ versions: [ROW("aaaaaaa1", "newer"), ROW("bbbbbbb2", "older")] });
     mockBranches("test", { test: "aaaaaaa1", main: "bbbbbbb2" });
     wrap();
@@ -330,16 +343,13 @@ describe("VersionGraph", () => {
     expect(await screen.findByRole("dialog", { name: "Switch branch" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Switch branch" }));
-    expect(switchTo).toHaveBeenCalledWith("main");
+    expect(switchTo).toHaveBeenCalledWith("main", expect.anything());
   });
 
   it("a pill cancelled once still opens the dialog when clicked again", async () => {
     // The concrete failure the onSwitchHandled clearing exists to prevent:
     // `switchTo` is a string, so a stale value makes the second click a no-op.
-    vi.spyOn(branchesMod, "useSwitchBranch").mockReturnValue({
-      mutate: vi.fn(),
-      isPending: false,
-    } as never);
+    vi.spyOn(branchesMod, "useSwitchBranch").mockReturnValue(mutationStub() as never);
     mockList({ versions: [ROW("aaaaaaa1", "newer"), ROW("bbbbbbb2", "older")] });
     mockBranches("test", { test: "aaaaaaa1", main: "bbbbbbb2" });
     wrap();

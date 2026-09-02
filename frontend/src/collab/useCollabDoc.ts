@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import * as Y from "yjs";
 import { CollabProvider, type ProviderStatus } from "./collabProvider";
 
@@ -38,6 +39,7 @@ export function useCollabDoc(opts: {
   // Separate from status on purpose: see CollabProvider.synced.
   const [synced, setSynced] = useState(false);
   const [documentGeneration, setDocumentGeneration] = useState(0);
+  const qc = useQueryClient();
   const replacementAttempts = useRef(0);
   const replacementTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { workspaceId, artifact, canWrite } = opts;
@@ -60,6 +62,26 @@ export function useCollabDoc(opts: {
         // fresh pair connects and hydrates the newly selected branch.
         setState(null);
         setSynced(false);
+        // The Y.Doc is only half the cockpit. When ANOTHER member switches the
+        // branch, this socket is closed with 4409 and the editor body follows —
+        // but every TanStack read-model stays on the old branch, and nothing
+        // else can refresh it: these keys have no interval, refetchOnWindowFocus
+        // is off, staleTime is 20 s and the observers never unmount. The result
+        // was a cockpit that agreed with itself and was wrong: the status-bar
+        // pill and BranchBar named the OLD branch (offering "switch to" the one
+        // you were already on), the Versions pane listed the old history, and
+        // the selection toolbar ran live claims against the old sections.
+        // These are the same four keys the user's OWN switch invalidates
+        // (api/branches.ts); a remote switch must not be told less.
+        void Promise.all([
+          qc.invalidateQueries({ queryKey: ["branches", workspaceId] }),
+          qc.invalidateQueries({ queryKey: ["draft", workspaceId] }),
+          qc.invalidateQueries({ queryKey: ["spec", workspaceId] }),
+          qc.invalidateQueries({ queryKey: ["versions", workspaceId] }),
+        ]);
+        // NOT cockpit-meta: it carries title/deadline/phase/role/spec_locked/
+        // member_count only (web/api/workspaces.py CockpitMetaOut) — nothing a
+        // branch switch changes.
         if (replacementAttempts.current >= MAX_DOCUMENT_REPLACEMENTS) {
           setStatus("offline-permanent");
           return;

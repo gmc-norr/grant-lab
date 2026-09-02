@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 
+import { redirectToLogin, redirectToNoAccess } from "../../api/client";
 import { useReferences } from "../../api/citations";
 import { useEventStream } from "../../api/events";
 import { turnStreamUrl, useAckDisclosure, useCancelTurn, useTurns } from "../../api/turns";
@@ -56,7 +57,28 @@ export function CockpitChat() {
         void invalidateArtifact(qc, id, "draft");
       },
     },
-    { resetCursorOnUrlChange: true },
+    {
+      resetCursorOnUrlChange: true,
+      // events.ts classifies a dead stream by probing /api/me, then closes the
+      // EventSource so it cannot auto-reconnect. Passing neither callback threw
+      // that classification away: the 401/403 branch was dead code, this path
+      // never redirected, and the user sat under "Assistant is working…" over a
+      // socket that was never coming back — rescued only when the unrelated 15 s
+      // Problems poller happened to hit the 401 chokepoint in api/client.
+      //
+      // Clearing `jobId` is NOT what re-enables the composer: that also reads
+      // the cached `running_job_id`, and the turn really is still running
+      // server-side. It is here so a re-render during the navigation cannot
+      // reopen a stream we have just been told we may not read.
+      onExpired: () => {
+        setJobId(null);
+        redirectToLogin();
+      },
+      onNoAccess: () => {
+        setJobId(null);
+        redirectToNoAccess();
+      },
+    },
   );
 
   const merged = useMemo(() => {

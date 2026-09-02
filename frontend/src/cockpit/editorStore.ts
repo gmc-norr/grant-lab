@@ -5,6 +5,11 @@ export type SaveState =
   | "collab-connecting" | "collab-synced" | "collab-offline"
   // Retries exhausted — nothing will reconnect without a reload.
   | "collab-disconnected"
+  // The server CLOSED the socket on policy (1008/1009) and the provider does
+  // not retry it. Distinct from "collab-disconnected" (which is our own retries
+  // running out) and emphatically not "collab-readonly", which used to be its
+  // label and described a working view-only session that no longer exists.
+  | "collab-closed"
   | "collab-readonly";
 export type Cursor = { line: number; col: number };
 export type EditorSnapshot = { dirty: number[]; cursor: Cursor | null; save: SaveState };

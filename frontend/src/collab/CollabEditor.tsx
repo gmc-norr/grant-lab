@@ -44,8 +44,15 @@ export function CollabEditor(props: CollabEditorProps) {
   // and the cockpit's auth gate guarantees me resolves for anyone who reaches it.
   // The provider retries on its own; this only decides what the user is told.
   // Saying nothing is the worst outcome — a silent blank page reads as data loss.
-  const unreachable =
-    status === "offline" || status === "offline-permanent" || status === "closed-policy";
+  // Split, because these three states promise different things. "offline" IS
+  // retrying (the provider has attempts left). "offline-permanent" has exhausted
+  // them and re-enters connect() from nowhere, and "closed-policy" is a 1008/1009
+  // close the provider deliberately does not retry — so telling either of them
+  // "retrying." was a lie the user could sit in front of indefinitely, with the
+  // door out (reload) never mentioned.
+  const retrying = status === "offline";
+  const terminal = status === "offline-permanent" || status === "closed-policy";
+  const unreachable = retrying || terminal;
   // `synced` — NOT `status`. A connected socket that has not yet delivered the
   // document leaves the Y.Doc empty, and CollabEditorInner renders that empty
   // doc as a blank page: indistinguishable from a draft whose text is gone.
@@ -68,9 +75,11 @@ export function CollabEditor(props: CollabEditorProps) {
       <div data-collab-status={status} data-testid="collab-connecting">
         <Group gap="sm">
           <Text size="sm" c={unreachable ? undefined : "dimmed"}>
-            {unreachable
-              ? "Could not reach the live document — retrying."
-              : `Loading the ${props.artifact}…`}
+            {terminal
+              ? "Could not reach the live document — reload the page to try again."
+              : retrying
+                ? "Could not reach the live document — retrying."
+                : `Loading the ${props.artifact}…`}
           </Text>
           {props.actions}
         </Group>
@@ -115,6 +124,17 @@ function CollabEditorInner(
   useEffect(() => {
     if (editor) editor.commands.updateUser({ name: label, color });
   }, [editor, label, color]);
+
+  // `editable` is set once at useEditor() and the editor is keyed only on the
+  // doc, so a socket that dies AFTER the first sync left a fully typeable
+  // surface over a provider whose send() is a no-op: an owner who removed a
+  // member mid-session left them typing into a Y.Doc going nowhere, losing
+  // every keystroke on reload while the status bar said "Read-only". Terminal
+  // states must make the surface match what the socket can actually do.
+  const terminal = props.status === "offline-permanent" || props.status === "closed-policy";
+  useEffect(() => {
+    if (editor) editor.setEditable(props.canWrite && !terminal);
+  }, [editor, props.canWrite, terminal]);
 
   return (
     <div

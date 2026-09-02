@@ -103,6 +103,77 @@ describe("CollabEditor does not render an unsynced document as empty", () => {
   });
 });
 
+
+describe("the placeholder distinguishes retrying from terminal", () => {
+  // Review 2026-09-02 A7/F6. Every unreachable state said "retrying." — but
+  // "offline-permanent" has exhausted its 12 attempts and re-enters connect()
+  // from nowhere, and "closed-policy" is a 1008/1009 close the provider
+  // deliberately does not retry. A user could sit in front of that sentence
+  // indefinitely, never told the one thing that helps (reload). The existing
+  // assertions above match /could not|cannot|reach/, which is true of BOTH
+  // copies, so they could not see this: mutating "retrying." to anything else
+  // left them green.
+  it("promises a retry only while one is actually running", () => {
+    state.status = "offline";
+    state.synced = false;
+    render();
+    const text = screen.getByTestId("collab-connecting").textContent ?? "";
+    expect(text).toMatch(/retrying/i);
+    expect(text).not.toMatch(/reload/i);
+  });
+
+  it("tells an exhausted connection to reload, and does not claim a retry", () => {
+    state.status = "offline-permanent";
+    state.synced = false;
+    render();
+    const text = screen.getByTestId("collab-connecting").textContent ?? "";
+    expect(text).toMatch(/reload/i);
+    expect(text, "a state with no retries left must not promise one").not.toMatch(/retrying/i);
+  });
+
+  it("tells a policy close to reload, and does not claim a retry", () => {
+    state.status = "closed-policy";
+    state.synced = false;
+    render();
+    const text = screen.getByTestId("collab-connecting").textContent ?? "";
+    expect(text).toMatch(/reload/i);
+    expect(text).not.toMatch(/retrying/i);
+  });
+});
+
+
+describe("a dead socket makes the surface non-editable", () => {
+  // `editable` was set once at useEditor() and the editor is keyed only on the
+  // doc, so a socket that died AFTER the first sync left a fully typeable
+  // surface over a provider whose send() is a no-op. An owner removing a member
+  // mid-session left them typing into a Y.Doc going nowhere and losing every
+  // keystroke on reload — while the status bar said "Read-only".
+  it("stops accepting input once the connection is terminal", async () => {
+    state.status = "closed-policy";
+    state.synced = true;
+    render();
+    const el = (await screen.findByTestId("collab-editor")).querySelector("[contenteditable]");
+    expect(el?.getAttribute("contenteditable")).toBe("false");
+  });
+
+  it("stops accepting input once the retries are exhausted", async () => {
+    state.status = "offline-permanent";
+    state.synced = true;
+    render();
+    const el = (await screen.findByTestId("collab-editor")).querySelector("[contenteditable]");
+    expect(el?.getAttribute("contenteditable")).toBe("false");
+  });
+
+  it("a plain offline blip stays editable — the provider is still retrying", async () => {
+    // The other half: this must not become "any hiccup locks the document".
+    state.status = "offline";
+    state.synced = true;
+    render();
+    const el = (await screen.findByTestId("collab-editor")).querySelector("[contenteditable]");
+    expect(el?.getAttribute("contenteditable")).toBe("true");
+  });
+});
+
 it("names the artifact it is loading — a spec is not 'the draft'", () => {
   state.status = "connected";
   state.synced = false;

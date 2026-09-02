@@ -1,7 +1,8 @@
-import { Button, Group, Menu, Modal, Text, TextInput } from "@mantine/core";
+import { Alert, Button, Group, Menu, Modal, Text, TextInput } from "@mantine/core";
 import { useEffect, useState } from "react";
 
 import { useBranches, useCreateBranch, useDeleteBranch, useSwitchBranch } from "../api/branches";
+import { apiErrorMessage } from "../api/client";
 
 type Confirm = { kind: "switch" | "delete"; name: string } | null;
 
@@ -72,6 +73,7 @@ export function BranchBar({
   function closeNew() {
     setNewOpen(false);
     setNewName("");
+    createBranch.reset();
     onBranchFromHandled();
   }
 
@@ -82,7 +84,13 @@ export function BranchBar({
    *  every click — an accident, not a pattern to copy. */
   function closeSwitch() {
     setConfirm(null);
+    switchBranch.reset(); // or the note reappears the next time the modal opens
     onSwitchHandled();
+  }
+
+  function closeDelete() {
+    setConfirm(null);
+    deleteBranch.reset();
   }
 
   function handleCreate() {
@@ -140,6 +148,17 @@ export function BranchBar({
           Switching to <strong>{confirm?.name}</strong> will disconnect every open editor. Unsaved
           keystrokes will be lost.
         </Text>
+        {/* The server ABORTS a switch it cannot linearize against in-flight
+            persists, and a branch can be gone by the time you confirm. The modal
+            used to close unconditionally on click, so a 409/404 left the bar on
+            the old branch with nothing said: the user read it as "nothing
+            happened" and clicked again, silently, forever. Staying open with the
+            reason is the whole fix. */}
+        {switchBranch.isError && (
+          <Alert role="alert" color="red" mt="sm" variant="light">
+            {apiErrorMessage(switchBranch.error, "Could not switch branch.")}
+          </Alert>
+        )}
         <Group mt="md" justify="flex-end">
           <Button variant="default" onClick={closeSwitch}>
             Cancel
@@ -147,8 +166,7 @@ export function BranchBar({
           <Button
             disabled={switchBranch.isPending}
             onClick={() => {
-              if (confirm) switchBranch.mutate(confirm.name);
-              closeSwitch();
+              if (confirm) switchBranch.mutate(confirm.name, { onSuccess: closeSwitch });
             }}
           >
             Switch branch
@@ -156,21 +174,25 @@ export function BranchBar({
         </Group>
       </Modal>
 
-      <Modal opened={!isError && confirm?.kind === "delete"} onClose={() => setConfirm(null)} title="Delete branch">
+      <Modal opened={!isError && confirm?.kind === "delete"} onClose={closeDelete} title="Delete branch">
         <Text size="sm">
           Delete <strong>{confirm?.name}</strong>? This cannot be undone — the commits on this branch
           will be permanently lost.
         </Text>
+        {deleteBranch.isError && (
+          <Alert role="alert" color="red" mt="sm" variant="light">
+            {apiErrorMessage(deleteBranch.error, "Could not delete branch.")}
+          </Alert>
+        )}
         <Group mt="md" justify="flex-end">
-          <Button variant="default" onClick={() => setConfirm(null)}>
+          <Button variant="default" onClick={closeDelete}>
             Cancel
           </Button>
           <Button
             color="red"
             disabled={deleteBranch.isPending}
             onClick={() => {
-              if (confirm) deleteBranch.mutate(confirm.name);
-              setConfirm(null);
+              if (confirm) deleteBranch.mutate(confirm.name, { onSuccess: closeDelete });
             }}
           >
             Delete branch
@@ -190,6 +212,13 @@ export function BranchBar({
           value={newName}
           onChange={(e) => setNewName(e.currentTarget.value)}
         />
+        {/* create already kept its modal open on failure (onSuccess: closeNew)
+            but still said nothing about why. */}
+        {createBranch.isError && (
+          <Alert role="alert" color="red" mt="sm" variant="light">
+            {apiErrorMessage(createBranch.error, "Could not create branch.")}
+          </Alert>
+        )}
         <Group mt="md" justify="flex-end">
           <Button variant="default" onClick={closeNew}>
             Cancel
