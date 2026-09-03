@@ -1,6 +1,6 @@
 # Prior investigations — read this before measuring anything
 
-26 documents in `notes/` and `reviews/` record work already done: spikes with verdicts,
+31 documents in `notes/` and `reviews/` record work already done: spikes with verdicts,
 multi-agent reviews with verified defect tallies, and outside opinions. They are indexed
 here **by the question they answer**, because they are named by date and slice, which is
 useless when you are trying to find out whether someone has already looked at something.
@@ -53,6 +53,15 @@ The same ask, answered independently at 615 lines: structural alternatives to th
 generation fence for disable, restore and purge.
 
 ## Whole-project architecture reviews
+
+**[reviews/2026-09-02-current-tree-project-review.md](reviews/2026-09-02-current-tree-project-review.md)**
+*What is still true on `7bdc2bb3` after the morning's `fix/review-2026-09-02` merge?*
+Independent re-read plus cheap probes. Does not replace the morning review of record.
+**Fixed since `8f44a35e`:** `published_at` upsert, empty-blockquote brick, mark widening
+on the markdown↔PM path, tracked `.orig` files, pip PYSEC-2026-3721.
+**Still High:** stale Y.Doc merge (`doc_epoch` spec only), reference ingest exhaustion,
+CJK `Content-Disposition` 500, forgeable ranking fence, register squat, sync work on
+the asyncio loop, silent scheduler-lock loss, no git remote. Grade **B**.
 
 **[reviews/2026-09-02-thorough-project-review.md](reviews/2026-09-02-thorough-project-review.md)**
 *What does the whole project look like when every gate is mutated, every prior open
@@ -132,6 +141,30 @@ deliberate. Each names its branch, its tasks, and its flag status at the time.
 - **[notes/2026-07-02-collab-slice2c-notes.md](notes/2026-07-02-collab-slice2c-notes.md)** — mid-session permission sync
 - **[notes/2026-07-04-collab-slice3b3-notes.md](notes/2026-07-04-collab-slice3b3-notes.md)** — live handshake probe, **GO**
 - **[notes/2026-07-05-collab-e2e-derisk-findings.md](notes/2026-07-05-collab-e2e-derisk-findings.md)** — two-browser e2e, **GO**
+
+## Ranking and matching quality
+
+**[reviews/2026-09-03-matching-method-and-release-split-review.md](reviews/2026-09-03-matching-method-and-release-split-review.md)**
+*Does the call↔profile matching method make sense, would a different model be better,
+and should matching ship before proposal assist?* The pipeline is a sound five-stage
+cascade — but **the golden set is empty** (`golden_set_last.json` is `n_fixture: 0`),
+so nearly every tuning question is unanswerable, including the ones `config.py:153`
+already defers to it. Remote-model cost is capped at ~$99/month, so the cheap-API
+question is not worth a data-residency review; `claude-sonnet-5` is a free win over the
+configured `claude-sonnet-4-6`. Carries a SQL query that measures whether the remote
+escalation tier earns its keep **without** a golden set. Also records the two-release
+split decision (companion spec: `specs/2026-09-03-call-match-release-1-design.md`).
+
+**[notes/2026-09-03-matching-method-second-look.md](notes/2026-09-03-matching-method-second-look.md)**
+*Do the matching-method review's findings hold against the code and the live DB, and
+should the method change?* **Method stays** (user decision, principles only, no tuning).
+Citations hold; two claims wrong: the history file has 1052+ rows, not four — **the test
+suite appends to the live `data/golden_set_history.jsonl`** — and a 0.6B reranker is not
+"nearly free" (**1036 MiB free with Gemma loaded; Ollama 0.21 has no rerank endpoint**).
+F5 run live: 11 escalations, 5 flips ≥15, mostly downward. `claude-sonnet-5` verified safe
+for the ranking client. Principle verdict: rubric not Likert (only `topic_fit` is bare),
+the system must measure itself, no filter without an audit sample. Blind labelling helper
+left in `data/golden_labelling/` (gitignored).
 
 ## Implementation maps
 
