@@ -39,8 +39,21 @@ function spaIndexFallback(): PluginOption {
   };
 }
 
+// Which router the build compiles against. Resolved here, at config time, so
+// exactly ONE router file enters the module graph — the excluded one is never
+// read, let alone bundled. Doing this with a runtime ternary would not work:
+// both routers construct their router at module scope, a side effect Rollup
+// must preserve, so both graphs would ship. Pinned by scripts/check_match_bundle.mjs.
+const APP_EDITION = process.env.VITE_APP_EDITION === "match" ? "match" : "full";
+const ROUTER_FILE = APP_EDITION === "match" ? "src/router.simple.tsx" : "src/router.tsx";
+
 export default defineConfig({
   plugins: [react(), spaIndexFallback()],
+  resolve: {
+    alias: {
+      "virtual:app-router": resolve(__dirname, ROUTER_FILE),
+    },
+  },
   // Build to frontend/dist (INSIDE the frontend dir — writable by the non-root
   // container builder; the package tree at ../src is NOT copied into the build
   // image). The packaging step (Task 6) copies dist/ -> src/call_manager/web/spa/.

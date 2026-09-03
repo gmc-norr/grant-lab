@@ -124,3 +124,8 @@ export const simpleRouter = createBrowserRouter([
     ],
   },
 ]);
+
+// The `virtual:app-router` alias imports `router`; router.tsx already exports
+// that name. `simpleRouter` stays exported for the direct import in
+// router.simple.test.tsx, which must name the file it is pinning.
+export { simpleRouter as router };

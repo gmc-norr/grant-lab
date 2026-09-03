@@ -1,9 +1,9 @@
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider } from "react-router-dom";
+import { router } from "virtual:app-router";
 
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { router } from "./router";
 import { theme } from "./theme/theme";
 
 // Global stale time prevents thundering-herd refetches on tab focus for the
