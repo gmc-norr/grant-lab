@@ -61,8 +61,25 @@ Behind login:
 
 - `/` — ranked calls for the current profile, as a triage inbox
 - `/calls/:id` — call detail
-- `/profiles`, `/profiles/new`, `/profiles/:id`, `/profiles/:id/edit`
-- `/me` — account settings
+- `/profiles`, `/profiles/new`, `/profiles/:id`, `/profiles/:id/edit` —
+  including **LLM-assisted profile bootstrap**, which is easy to miss in a
+  "view + edit" scope line and is arguably the highest-leverage feature in the
+  release. `profiles/bootstrap.py`, `bootstrap_worker.py`, `bootstrap_prompt.py`
+  and `profiles/pubmed.py` build a profile from a seed plus the group's own
+  publications, with `bootstrap_status` already surfaced on the profiles API.
+
+  It matters more than its size suggests: **matching quality is bounded by
+  profile quality**, so this is the machinery that decides whether the product
+  is good. It runs on local Ollama (`bootstrap_worker.py:106`), so it ships in
+  release 1 with no `ANTHROPIC_API_KEY`.
+- `/me` — account settings, **including digest subscriptions**. `subscriptions`
+  (`user_id`, `profile_id`, `digest_enabled`), `PUT /me/subscriptions`
+  (`web/api/me.py:205`) and the `Settings.tsx` UI all exist already; the digest
+  is user-configurable today and release 1 keeps that.
+- `/admin` — the admin dashboard. Easy to overlook because it is an index route,
+  but it carries **source health**: per-source call counts
+  (`web/api/admin.py:167`). Without it nobody notices when a source stops
+  returning calls and the inbox just quietly gets emptier. In scope.
 - `/admin/users`, `/admin/users/pending`
 - `/admin/boards`, `/admin/boards/new`, `/admin/boards/:id` — admin only
 
@@ -81,9 +98,24 @@ Plus the existing weekly email digest, which needs no frontend.
 
 ## 4. New concepts
 
+Only §4.3 is genuinely new. §4.1 migrates a table that already carries rows and
+§4.2 renders columns that are already populated and already served — a reader
+who skips this note will plan far more work than the release needs.
+
 ### 4.1 Triage decisions
 
-New table `call_decisions`:
+**This extends an existing mechanism; it is not greenfield.** `user_call_dismissals`
+already exists and is wired end to end: `web/api/calls.py:193` writes a dismissal,
+`web/dashboard.py:326` filters the list on it, and `digest/assemble.py` respects
+it. Half of what this section asks for is already shipped and carrying real rows.
+
+What it lacks is the other half of the pair. Today a user can only push a call
+away; there is no way to keep one, so the list has a delete key and no inbox.
+And the existing key is `(user_id, call_id)` — a dismissal is global, so a
+researcher matching against two profiles who dismisses a call for one silently
+dismisses it for both. That is wrong once a user has more than one profile.
+
+Replace it with `call_decisions`:
 
 | column | type | notes |
 | --- | --- | --- |
@@ -96,19 +128,37 @@ New table `call_decisions`:
 | `decided_at` | timestamptz | |
 | `decided_by` | FK → users | for shared profiles |
 
-Partial unique index on `(user_id, profile_id, call_id)` so one user has at most
-one decision per call per profile.
+Unique index on `(user_id, profile_id, call_id)` — at most one decision per call
+per profile.
 
-**Undecided is the absence of a row.** This keeps the inbox query simple (a
-`NOT EXISTS`) and means a new call automatically arrives undecided without a
-backfill.
+**Migration, not a fresh table.** Every `user_call_dismissals` row becomes a
+`hidden` decision. Existing rows carry no profile, so they must fan out to the
+user's active profiles — that is the only lossless reading of "this user did not
+want this call". Fanning out is the conservative direction: it preserves the
+user's intent everywhere it currently applies, where picking one profile would
+silently un-hide calls people had already dealt with. Drop
+`user_call_dismissals` in the same migration; leaving both is how two sources of
+truth start.
 
-The dashboard defaults to `state IS NULL` — the inbox. Two more views: Saved,
-and Hidden (so a mistake is recoverable). The inbox can reach zero, and that is
-the point.
+**Undecided is the absence of a row.** The inbox query is a `NOT EXISTS`, and a
+newly ingested call arrives undecided with no backfill.
+
+The dashboard defaults to undecided — the inbox. Two more views: Saved, and
+Hidden (so a mistake is recoverable, which also keeps hiding from feeling
+risky — see the untested assumptions in §10).
 
 The digest respects decisions: a hidden call never appears in a later digest for
-that profile. This is what stops the digest becoming noise by week five.
+that profile. This is what stops the digest becoming noise by week five. The
+existing digest already does this for dismissals, so the migration must keep
+that behaviour working rather than reintroduce it.
+
+**What a saved call leads to: nothing, deliberately.** Release 1 has no
+proposal-assist, so Save means "I am interested in this" and the next step is
+the funder's own page. The two existing "Start drafting" entry points
+(`routes/CallRow.tsx:55` and `routes/CallDetailBody.tsx:48`) link to
+`/cockpit/new`, which §3 excludes — **they must be removed, not disabled**, or
+release 1 ships two buttons that 404. Release 2 adds drafting on top of a Saved
+list that already exists.
 
 ### 4.2 Match reasons
 
@@ -460,7 +510,12 @@ Deadline reminders are **not** in release 1.
 - The profiles API and pages (re-skinned into `SimpleShell`; contents unchanged)
 - The admin users pages
 - The Mantine theme tokens, the `openapi-fetch` client, generated types
-- The weekly email digest, plus a decisions-aware filter
+- The weekly email digest, plus a decisions-aware filter — it already filters on
+  `user_call_dismissals`, so the §4.1 migration must preserve that behaviour
+  rather than rebuild it
+- `subscriptions` + `PUT /me/subscriptions` + the `Settings.tsx` UI — digest
+  targeting already works and is untouched
+- The profile bootstrap worker, prompt and PubMed lookup — local-only, unchanged
 
 ## 9. Testing
 
@@ -476,6 +531,13 @@ Three gates that make the design's claims true rather than asserted:
 3. **Public endpoint gates.** Unpublished board → 404. No auth required for a
    published one. Response body contains no score float and no rationale text.
    An unapproved call never appears. A call past its deadline never appears.
+
+4. **No release-1 screen links into the excluded half.** Assert that no component
+   reachable from `router.simple.tsx` emits an href under `/cockpit`. The bundle
+   gate (1) proves the cockpit *code* is absent; it says nothing about a link
+   pointing at a route the server will 404. Two such links exist today
+   (`CallRow.tsx:55`, `CallDetailBody.tsx:48`), so this gate starts red and
+   removing them is what turns it green.
 
 Plus, per the repo convention, mutation-test each gate: break the thing the gate
 claims to protect and confirm the gate goes red.
@@ -524,7 +586,8 @@ The design rests on a bet that has not been checked with a real user:
 
 1. `SimpleShell` + `router.simple.tsx` + the build flag + the bundle gate
 2. Re-skin the existing calls / profiles / account / admin-users pages into it
-3. `call_decisions` + the triage inbox + digest integration
+3. `call_decisions` — migrate `user_call_dismissals` and drop it (§4.1), remove
+   the two `/cockpit/new` links, then the triage inbox and digest integration
 4. Match reasons replacing the score badge
 5. `boards` + `board_items` + the bulk admin approval queue (§4.3 — the gate is
    only real if approving 24 candidates is fast)
