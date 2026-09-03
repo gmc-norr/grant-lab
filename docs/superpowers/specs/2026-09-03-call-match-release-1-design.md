@@ -150,8 +150,10 @@ New table `boards`:
 | `title` | text | shown in the board header |
 | `profile_id` | FK → profiles, ON DELETE RESTRICT | usually an `institution`-level profile |
 | `is_published` | bool, default false | nothing is public until this flips |
-| `max_items` | int, default 8 | |
-| `rotate_seconds` | int, default 12 | spotlight dwell time |
+| `min_score` | int, default 60 | the score threshold; everything at or above it is a candidate |
+| `items_per_page` | int, default 8 | grid is 2 x 4 |
+| `max_pages` | int, default 3 | hard cap — see the exposure note below |
+| `page_seconds` | int, default 30 | dwell time per page |
 | `created_by` | FK → users | |
 | `created_at` / `updated_at` | timestamptz | |
 
@@ -167,11 +169,23 @@ New table `board_items` — the **approved queue**:
 
 Primary key `(board_id, call_id)`.
 
-**The board never publishes an unapproved call.** The ranker *proposes* a
-candidate list in the admin UI; an admin ticks what goes up. Rationale: a
-corridor screen is the institution's voice, and a single bad rank on a hospital
-wall is a public incident, not a bug report. The cost is one table and one
-checkbox column.
+**The board never publishes an unapproved call.** `min_score` *proposes* the
+candidate set; an admin ticks what goes up. Rationale: a corridor screen is the
+institution's voice, and a single bad rank on a hospital wall is a public
+incident, not a bug report.
+
+This is worth stating plainly because the two rules look like they conflict:
+"everything above the threshold is included" is automatic, and "an admin
+approves each call" is not. **The threshold selects; the human confirms.** The
+threshold is a filter on what an admin is asked about, never a publish
+decision.
+
+The cost of keeping the gate is that approval is now a recurring chore rather
+than a one-off — 24 candidates instead of 8. So the admin queue must be built
+for bulk: a checklist ordered by score, an "approve everything at or above N"
+action, and a visible count of what is waiting. An approval UI that costs a
+minute per call will be abandoned, and an abandoned gate is worse than no gate
+because the board silently stops updating.
 
 Only admins may create, edit, approve items for, or publish a board.
 
@@ -206,6 +220,77 @@ it still looks like the same product.
 `PreAuthLayout` is reused unchanged for login/register — it is already
 auth-free and shell-free.
 
+### The triage screen
+
+Mockups: https://claude.ai/code/artifact/cba2b38b-a1e7-4179-bca6-a734195e50fc
+
+Release 1 serves three people at three moments, and they do not want the same
+thing: the corridor passer-by (three seconds, signage), the researcher on Monday
+morning (five minutes, a reading app), and the coordinator (as long as it takes,
+a dense admin tool). Treating all three as one app with panes is the mistake the
+cockpit SPA makes; each gets its own visual register here.
+
+The researcher's screen is the product. It is a **single ~680 px column** — an
+expanding feed, not a mail-client split and not a one-card-at-a-time stack. The
+focused call is expanded with its evidence; the rest are collapsed to title,
+funder and days left. A decided card leaves the list.
+
+Three properties follow from the job rather than from taste:
+
+- **The list must end.** A feed that never empties trains people to stop opening
+  it. Reaching zero is the reward, and the inbox-zero state is a designed screen,
+  not an afterthought.
+- **The evidence is visible, not behind a click.** If people decide from the
+  title alone, the ranking added nothing a keyword search would not have given
+  them. The quoted sentence *is* the decision input, so it gets prime space.
+- **One primary action, one keypress.** "Powerful" here means fast, not dense:
+  `j`/`k` to move, `s` to save, `h` to hide — inbox empty in under a minute.
+  More filters would make the tool complicated, not powerful.
+
+On a 1440 px screen the column is **not** stretched; reading degrades past ~75
+characters. The extra width holds a 240 px left rail for orientation only:
+Inbox / Saved / Hidden with counts, and the profile being matched against.
+
+### Responsive strategy
+
+Mostly plain responsive CSS — the single column *is* the phone layout, which is
+half of why it was chosen. Three deliberate exceptions where the DOM genuinely
+differs:
+
+1. **The wall board** — not a breakpoint at all. Its own route, own layout,
+   shares only the API.
+2. **The decide gesture** — `s`/`h`/`j`/`k` on desktop; swipe right to save,
+   left to hide on a phone. Same cards, same data, different interaction. The
+   rail becomes a bottom tab bar, where thumbs are.
+3. **Admin** — a seven-column table is bad on a phone at any breakpoint. Admin
+   screens are **desktop-only** and say so politely on small screens. Nobody
+   approves a wall display from a bus.
+
+Everything else is media queries, with container queries where a component
+should react to its own box rather than the viewport. `useMediaQuery` is
+reserved for exceptions 2 and 3.
+
+### Visual language
+
+The existing app is **dark-only** (`frontend/src/theme/theme.css`, a VS Code
+palette, `color-scheme: dark`). Release 1 keeps every token — teal `#0f766e` /
+`#14b8a6`, the deadline red and amber, the exact system font stack, 4 px radii —
+but puts the *application* screens on an off-white ground. It is a reading app,
+read in a bright office, by people who are not developers; dark-on-dark is
+precisely the register release 1 exists to leave behind. **The wall board stays
+dark**, where dark is right.
+
+Colour is reserved for one thing: **deadline urgency**. The bands already exist
+(`frontend/src/routes/Deadline.tsx`: ≤14 days urgent, ≤30 days watch). Everything
+else is greyscale plus the teal accent for actions. Type carries hierarchy, not
+boxes and borders.
+
+One typographic decision does real work: **quoted evidence is set in a serif**
+(Georgia), the only serif in the product, used for nothing else. It makes the
+quote read as *the funder said this* rather than *the model thinks this*. That
+distinction carries the credibility of the whole feature, so it is a design
+requirement, not decoration.
+
 ## 6. The corridor board
 
 ### Constraints (hard)
@@ -215,25 +300,48 @@ From the signage literature, treated as requirements:
 - Readable text height = viewing distance (m) × 0.84 cm, then × 1.5 for comfort.
 - Contrast ratio ≥ 7:1 for all text.
 - Sans-serif, at most two fonts, no italics.
-- A QR code must be ≥ 1/10 of its scanning distance, and ≥ 200 px on screen.
+- A QR code must be ≥ 1/10 of its **scanning** distance, and ≥ 150 px on screen
+  (the published screen floor; 240 px is the general digital recommendation, which
+  is aimed at print and small embeds). Note that scanning distance is not viewing
+  distance: people read the board from ~2-4 m but step to ~0.7-1 m to scan.
 
-### Two zones, two distances
+### A grid of eight, paging
 
-A corridor screen has two audiences and the design serves both:
+Every call carries its own QR code. That decision sets the whole layout, because
+**a QR changes who the board is for**: a spotlight board serves someone walking
+past at 4 m, but a board where everything is scannable serves someone who
+*stopped*. Someone close enough to scan does not need 80 px type.
 
-- **Spotlight zone** — for someone walking past at ~4 m. Text ≥ 80 px on a
-  55" 1080p screen (4 × 0.84 × 1.5 = 5 cm). Shows one call: title (max 3 lines),
-  its match reasons, funder, days-to-deadline, and its QR code.
-- **List zone** — for someone who stops at ~2 m. Text ≥ 40 px
-  (2 × 0.84 × 1.5 = 2.5 cm). Shows the remaining ranked calls: rank, short
-  title, days left.
+So the body is a 2 x 4 grid of eight cards on a 1920 x 1080 screen. Per card:
 
-The spotlight advances down the list every `rotate_seconds`. At any instant the
-whole ranked list is visible; over one cycle each call gets full-size treatment.
+- QR **150 px** (≈ 9.4 cm on a 55" screen) — comfortably above the 1/10 rule for
+  an arm's-length scan.
+- Title **34 px** — readable standing ~1.7 m back.
+- Funder, days-to-deadline, budget.
+
+One element stays big enough to read at 4 m, and it is the header: the board
+title plus **the nearest deadline across all pages**, in the urgent colour.
+That is the hook that makes someone stop. Without it the board is invisible to
+anyone not already standing at it.
+
+Pages cycle every `page_seconds` (default 30). The page count is **dynamic** —
+every call at or above `min_score` that an admin has approved is included,
+eight per page.
+
+**Paging does not add coverage for free; it dilutes exposure.** At three pages
+any one call is on screen a third of the time. At six, a passer-by has a
+one-in-six chance of seeing a given call and a full cycle runs three minutes,
+which is longer than anyone stands in a corridor. `max_pages` (default 3) exists
+for this reason: past it, raise `min_score` rather than adding pages. Without
+the cap the threshold quietly becomes a lottery.
+
+A footer shows `Sida N av M` and a progress bar, so someone who stopped knows
+more is coming and roughly how long to wait.
 
 Sizing is expressed in `vh`, not pixels, so the same page works on a portrait
 screen — most corridor displays are hung portrait, and the deployment screen is
-not known yet.
+not known yet. A portrait board is one column of four rather than two of four;
+`items_per_page` covers it.
 
 ### What is on the board
 
@@ -330,13 +438,41 @@ claims to protect and confirm the gate goes red.
 - Is the digest's current per-profile targeting sufficient, or does release 1
   need the discipline-specific variants that peer universities run?
 
+### Not yet designed
+
+Three screens are in scope but unmocked, and they are the ones most likely to
+come out wrong:
+
+- **First run.** What a user sees before they have a profile. The profile drives
+  all matching, so this path is load-bearing and entirely undrawn.
+- **Search.** The triage screen shows an affordance for it; nothing behind it is
+  designed. This is also the only place a researcher could ask *"why isn't call X
+  here?"* — which is exactly the blind spot §F2 of the matching review describes,
+  currently with no UI surface at all.
+- **The board approval queue.** The only genuinely novel admin screen: the
+  ranker proposes, an admin ticks, in bulk. No precedent anywhere in the app.
+
+### Two untested assumptions
+
+The design rests on a bet that has not been checked with a real user:
+
+1. **That the quoted sentence is what makes a researcher decide.** If they skim
+   titles and ignore the quote, the ranking adds nothing over a keyword list and
+   the layout is wrong. Twenty minutes with one researcher and the mockups
+   settles it.
+2. **That people will actually hide things.** If hiding feels risky — "what if I
+   miss something?" — nothing gets hidden, the inbox never empties, and the
+   design collapses into a feed. Watch for it; the fix (make Hidden visibly and
+   obviously recoverable) is cheap, but only if the problem is noticed.
+
 ## 11. Sequencing
 
 1. `SimpleShell` + `router.simple.tsx` + the build flag + the bundle gate
 2. Re-skin the existing calls / profiles / account / admin-users pages into it
 3. `call_decisions` + the triage inbox + digest integration
 4. Match reasons replacing the score badge
-5. `boards` + `board_items` + admin board management
-6. The public board endpoint + the `/b/:slug` display page
+5. `boards` + `board_items` + the bulk admin approval queue (§4.3 — the gate is
+   only real if approving 24 candidates is fast)
+6. The public board endpoint + the paging `/b/:slug` display page
 7. Share a call with a colleague
 8. Change detection and notification (alone, last)
