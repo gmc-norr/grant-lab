@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import react from "@vitejs/plugin-react";
-import { type Connect, type PluginOption } from "vite";
+import { loadEnv, type Connect, type PluginOption } from "vite";
 // vitest/config's defineConfig is a superset of vite's that also accepts `test`.
 import { defineConfig } from "vitest/config";
 
@@ -43,11 +43,25 @@ function spaIndexFallback(): PluginOption {
 // exactly ONE router file enters the module graph — the excluded one is never
 // read, let alone bundled. Doing this with a runtime ternary would not work:
 // both routers construct their router at module scope, a side effect Rollup
-// must preserve, so both graphs would ship. Pinned by scripts/check_match_bundle.mjs.
-const APP_EDITION = process.env.VITE_APP_EDITION === "match" ? "match" : "full";
-const ROUTER_FILE = APP_EDITION === "match" ? "src/router.simple.tsx" : "src/router.tsx";
+// must preserve, so both graphs would ship. Pinned by scripts/check_match_bundle.mjs
+// and by src/virtual-router.test.ts.
+//
+// It reads loadEnv(), NOT process.env, and that is load-bearing. Vite evaluates
+// this config module BEFORE it reads any .env file (resolveConfig calls
+// loadConfigFromFile ~70 lines ahead of loadEnv), and loadEnv writes only
+// NODE_ENV/BROWSER/BROWSER_ARGS back into process.env — every VITE_* key from a
+// .env file goes solely into the object that becomes import.meta.env. So
+// `process.env.VITE_APP_EDITION` is undefined for a .env-configured build, while
+// src/edition.ts (reading import.meta.env) sees "match": a match-branded shell
+// rendered on the FULL router, with the whole cockpit graph bundled, silently.
+// loadEnv returns the merged view — .env overridden by a real shell export —
+// which is exactly what Vite feeds import.meta.env, so both readers agree.
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, __dirname, "VITE_");
+  const APP_EDITION = env.VITE_APP_EDITION === "match" ? "match" : "full";
+  const ROUTER_FILE = APP_EDITION === "match" ? "src/router.simple.tsx" : "src/router.tsx";
 
-export default defineConfig({
+  return {
   plugins: [react(), spaIndexFallback()],
   resolve: {
     alias: {
@@ -103,4 +117,5 @@ export default defineConfig({
       },
     },
   },
+};
 });

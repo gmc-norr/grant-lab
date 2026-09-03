@@ -1,5 +1,9 @@
-// Which product edition this BUILD is. Set at build time via VITE_APP_EDITION
-// and read exactly once, here. The backend has a matching APP_EDITION setting
+// Which product edition this BUILD is. Set at build time via VITE_APP_EDITION.
+// This is the RUNTIME reader; vite.config.ts reads the same variable at CONFIG
+// time to pick which router file enters the module graph. Two readers by
+// design — kept in agreement by the config using loadEnv() rather than
+// process.env (process.env misses .env-file values entirely), and pinned by
+// src/virtual-router.test.ts. The backend has a matching APP_EDITION setting
 // (src/call_manager/config.py) and the two must agree in a deployment — a match
 // frontend against a full backend merely hides features, but a full frontend
 // against a match backend renders links to endpoints that do not exist.
