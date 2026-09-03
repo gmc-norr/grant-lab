@@ -65,7 +65,12 @@
   --app-link: #0f766e;
   --app-statusbar: #0f766e;
   --app-heading: #155e75;
-  --app-good: #15803d;
+  /* green-800, not green-700. The score pill (MatchBadge.module.css) paints this
+     on --app-hover, where #15803d measured 4.22:1 — below AA, and a regression
+     from the dark palette's 7.25:1. Darkened the FOREGROUND per the brief's
+     rule, not the ground: 5.99:1 on --app-hover, 6.78:1 on --app-editor. Both
+     are pinned below. */
+  --app-good: #166534;
   --app-warn: #a16207; /* the ≤30-day deadline band */
   --app-bad: #b91c1c; /* the ≤14-day deadline band */
 
@@ -76,10 +81,28 @@
      --mantine-color-anchor = #14b8a6 at 2.37:1 on the off-white ground (the
      very value the comment above calls "unreadable"), and every meta line
      rendered --mantine-color-dimmed = #868e96 at 2.87:1.
-     These are pointed at the tokens rather than at literals ON PURPOSE, so the
-     floors contrast.test.ts already enforces on --app-link and --app-muted
-     govern the rendered pixel too. Do not inline a hex here — that would put the
-     link colour back outside the test's reach. */
+     --dimmed and --error are pointed at the tokens rather than at literals ON
+     PURPOSE, so the floors contrast.test.ts enforces on --app-muted and
+     --app-bad govern the rendered pixel too. Do not inline a hex there.
+
+     --anchor is DIFFERENT and the line below is INERT — measured, after this
+     block was first written with the opposite claim in this comment. Mantine
+     re-declares --mantine-color-anchor at runtime: MantineCssVariables renders
+     a <style data-mantine-styles> inside the React tree (no `precedence` prop,
+     so React 19 does not hoist it) under
+     :root[data-mantine-color-scheme="light"] — specificity 0-2-0, the SAME as
+     :root:root, but later in document order because it lives in <body> while
+     this file is a <head> link. It survives Mantine's dedup only because
+     primaryColor is teal rather than the default blue; --dimmed and --error are
+     stripped by that dedup, which is exactly why those two lines DO work.
+
+     So the rendered link colour comes from theme.ts (teal[8] + primaryShade
+     .light: 8), not from --app-link. There is no visible defect because
+     teal[8], --app-accent and --app-link are all #0f766e — and
+     contrast.test.ts now asserts that they stay equal, so editing one without
+     the others goes red instead of silently moving the test away from the
+     pixel. The line is kept as the declaration of intent for the day Mantine's
+     dedup or our primaryColor changes. */
   --mantine-color-anchor: var(--app-link);
   --mantine-color-dimmed: var(--app-muted);
   /* Mantine's red.6 (#fa5252) is the required-field asterisk; it measured
