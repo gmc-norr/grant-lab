@@ -21,5 +21,8 @@ export default defineConfig({
   // band. The harness/CI starts the servers; these specs only drive the browser.
   use: {
     baseURL: MODE === "prod" ? "http://localhost:8000" : "http://localhost:5173",
+    // CI uploads frontend/test-results/ on failure (ci.yml `e2e` job); a trace is
+    // the only way to see WHY a two-browser collab step failed on a headless runner.
+    trace: process.env.CI ? "retain-on-failure" : "off",
   },
 });

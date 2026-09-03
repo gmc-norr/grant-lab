@@ -126,3 +126,65 @@ jobs:
         run: |
           uv build --wheel
           unzip -l dist/*.whl | grep -q "call_manager/web/spa/index.html"
+
+  # Playwright e2e — the two specs the seed harness can drive end to end
+  # (review 2026-09-02 §7 item 11; wired 2026-09-03). Both front doors are gated:
+  # `dev` is the Vite proxy the harness defaults to, `prod` builds the SPA and
+  # serves it from uvicorn under the strict CSP — the 3b-5d.D4 flip gate. Its own
+  # job so a browser-level failure is reported on its own and the unit gates
+  # keep running. It was deliberately left unwired until the selection-toolbar
+  # overlap (collab.spec.ts "owner cites after both users edit", gap 30 > 24)
+  # was fixed — wiring it earlier would have turned CI red on a known bug.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        spa_mode: [dev, prod]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
+        with:
+          version: "0.11.x"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync deps (frozen)
+        run: uv sync --all-extras --frozen
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: frontend/.nvmrc
+
+      - name: Enable corepack (pnpm pinned via package.json packageManager)
+        run: corepack enable
+
+      - name: Frontend deps (frozen, scripts off)
+        run: cd frontend && pnpm install --frozen-lockfile
+
+      - name: Playwright Chromium (+ OS libs)
+        run: cd frontend && pnpm exec playwright install --with-deps chromium
+
+      # The harness boots a testcontainers Postgres (Docker is on the runner),
+      # migrates, seeds two users + a workspace + a password user + a call, starts
+      # uvicorn (and Vite in dev mode), runs the specs, and tears it all down.
+      - name: Playwright e2e (collab two-browser + dashboard) — SPA_MODE=${{ matrix.spa_mode }}
+        env:
+          E2E_SPA_MODE: ${{ matrix.spa_mode }}
+          E2E_SPECS: e2e/collab.spec.ts e2e/dashboard.spec.ts
+        run: bash scripts/collab_e2e_run.sh
+
+      - name: Upload Playwright traces on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: playwright-${{ matrix.spa_mode }}
+          path: |
+            frontend/test-results/
+            .e2e-vite.log
+          if-no-files-found: ignore
