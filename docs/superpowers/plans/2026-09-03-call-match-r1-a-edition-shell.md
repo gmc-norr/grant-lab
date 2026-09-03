@@ -25,8 +25,14 @@ implicitly include this section.
 - **Expected suite result is `3361 passed, 1 skipped`.** The **`1 skipped`** is
   the signal, not the total — it is a real-SDK test gated on `ANTHROPIC_API_KEY`.
   `0 skipped` means a live API call just ran.
-- **Frontend tests:** `pnpm -C frontend test run`. **Lint:** `pnpm -C frontend lint`
-  (oxlint — there is no eslint config).
+- **Frontend tests:** `pnpm -C frontend test` (the whole suite) or
+  `pnpm -C frontend test src/path/file.test.tsx` (one file). **Do NOT write
+  `pnpm test run`** — `test` is already `vitest run`, so the extra `run` becomes
+  a filename filter matching nothing: measured output is
+  `No test files found, exiting with code 1`, which reads like a broken change.
+  **Lint:** `pnpm -C frontend lint` (oxlint — there is no eslint config).
+- **Frontend baseline is `128 test files, 907 tests, all passing`** (measured
+  2026-09-03). Each task states its own delta from that.
 - **Never run `ruff format` on a directory.** Format by filename only. Count
   `git status` lines before and after; the delta must be 0 for untouched files.
 - **`docs/ARCHITECTURE.md` is generated.** Regenerate in the same commit that
@@ -83,13 +89,16 @@ the calls dashboard, profiles, account settings and admin-users.
 | `frontend/src/edition.ts` | Reads `VITE_APP_EDITION`, one place (create) |
 | `frontend/src/App.tsx` | Import the router through the alias (modify) |
 | `frontend/src/virtual-router.d.ts` | Type the `virtual:app-router` alias (create) |
-| `frontend/vite.config.ts` | Resolve the alias per edition at config time (modify) |
+| `frontend/vite.config.ts` | Alias per edition + emit the module manifest (modify) |
 | `frontend/src/routes/CallRow.tsx:52-56` | Remove the "Start drafting" link (modify) |
 | `frontend/src/routes/CallDetailBody.tsx:46-50` | Remove the "Start drafting workspace" button (modify) |
 | `frontend/src/noCockpitLinks.test.tsx` | Gate 4: no links into the excluded half (create) |
 | `scripts/check_match_bundle.mjs` | Gate 1: content-based bundle check (create) |
 | `frontend/src/theme/theme.match.css` | The release-1 off-white palette (create) |
 | `frontend/src/theme/contrast.test.ts` | Pins the palette's contrast ratios (create) |
+| `scripts/package_spa.sh` | Copy a gate-clean build into `web/spa/` (create) |
+| `frontend/src/routes/AdminNav.tsx` | Gate the full-only admin links (modify) |
+| `frontend/src/routes/AdminDashboard.tsx:164` | Gate the golden-set link (modify) |
 
 ---
 
@@ -156,7 +165,20 @@ def _base_env(monkeypatch):
 
 
 def _paths(app) -> set[str]:
+    """HTTP route paths only. WebSocket routes have no `.methods` — see _ws_paths."""
     return {r.path for r in app.routes if hasattr(r, "methods")}
+
+
+def _ws_paths(app) -> set[str]:
+    """WebSocket route paths.
+
+    Starlette's APIWebSocketRoute carries no `.methods`, so a filter written as
+    `hasattr(r, "methods")` silently drops it. Measured on this app: exactly one
+    such route exists, /api/ws/workspaces/{workspace_id}/{artifact}, and it is
+    the collab websocket the match edition must not mount. Without this helper
+    the edition gate would pass with the websocket wide open.
+    """
+    return {r.path for r in app.routes if not hasattr(r, "methods") and hasattr(r, "path")}
 
 
 def test_match_edition_registers_no_proposal_assist_route(monkeypatch, _base_env):
@@ -164,6 +186,23 @@ def test_match_edition_registers_no_proposal_assist_route(monkeypatch, _base_env
     paths = _paths(create_app())
     leaked = sorted(p for p in paths if p.startswith(EXCLUDED_PREFIXES))
     assert leaked == [], f"match edition leaked proposal-assist routes: {leaked}"
+
+
+def test_match_edition_mounts_no_collab_websocket(monkeypatch, _base_env):
+    """The collab WS is mounted in main.py, not in the api router, and it is
+    invisible to a `.methods` filter — so it needs its own assertion."""
+    monkeypatch.setenv("APP_EDITION", "match")
+    ws = _ws_paths(create_app())
+    leaked = sorted(p for p in ws if "/ws/" in p or "collab" in p)
+    assert leaked == [], f"match edition leaked a websocket route: {leaked}"
+
+
+def test_full_edition_still_mounts_the_collab_websocket(monkeypatch, _base_env):
+    """Guards the guard: if the WS moves or is renamed, the match assertion above
+    becomes vacuously true and nobody would notice."""
+    monkeypatch.setenv("APP_EDITION", "full")
+    ws = _ws_paths(create_app())
+    assert any("/ws/" in p for p in ws), f"no websocket route found at all: {sorted(ws)}"
 
 
 def test_match_edition_still_serves_the_release_1_surface(monkeypatch, _base_env):
@@ -188,8 +227,9 @@ def test_full_edition_is_unchanged(monkeypatch, _base_env):
 uv run pytest tests/architecture/test_edition_surface.py -v
 ```
 
-Expected: `test_match_edition_registers_no_proposal_assist_route` FAILS with a
-long `leaked` list (the routers mount unconditionally today). The other two PASS.
+Expected: `test_match_edition_registers_no_proposal_assist_route` and
+`test_match_edition_mounts_no_collab_websocket` both FAIL (the routers mount
+unconditionally today). The other three PASS.
 
 - [ ] **Step 3: Add the setting**
 
@@ -349,7 +389,65 @@ from call_manager.web.api import build_api_router
 uv run pytest tests/architecture/test_edition_surface.py -v
 ```
 
-Expected: 3 passed.
+Expected: 5 passed.
+
+- [ ] **Step 6b: Refuse a match deployment with drafting still on**
+
+Spec §5: a release-1 deployment "runs with `DRAFTING_ENABLED=false`".
+`drafting_enabled` defaults to **`True`** (`config.py:166`), and nothing so far
+couples the two — a match deploy that forgets the variable runs with the drafting
+subsystem armed behind absent routes. Make it impossible rather than documented.
+
+Add a model validator to `Settings` in `src/call_manager/config.py`, beside the
+other cross-field validators:
+
+```python
+    @model_validator(mode="after")
+    def _match_edition_disables_drafting(self) -> Settings:
+        # Spec §5: release 1 ships with the drafting subsystem off. The routes are
+        # already absent (main.py), but the scheduler ticks are gated on THIS flag,
+        # so leaving it True would keep drain/phase0 work running for a subsystem
+        # the deployment does not serve. Refuse the combination rather than
+        # silently correcting it: a deploy that sets DRAFTING_ENABLED=true means
+        # to enable drafting, and it should hear that it cannot.
+        if self.app_edition == "match" and self.drafting_enabled:
+            raise ValueError(
+                "APP_EDITION=match requires DRAFTING_ENABLED=false — release 1 does "
+                "not serve the proposal-assist subsystem."
+            )
+        return self
+```
+
+If `model_validator` is not already imported in `config.py`, add it to the
+`pydantic` import line. If the file has no other `mode="after"` validator, check
+how existing cross-field checks are written and match that style.
+
+Append to `tests/architecture/test_edition_surface.py`:
+
+```python
+def test_match_edition_refuses_drafting_enabled(monkeypatch, _base_env):
+    monkeypatch.setenv("APP_EDITION", "match")
+    monkeypatch.setenv("DRAFTING_ENABLED", "true")
+    with pytest.raises(Exception, match="DRAFTING_ENABLED"):
+        create_app()
+
+
+def test_match_edition_accepts_drafting_disabled(monkeypatch, _base_env):
+    monkeypatch.setenv("APP_EDITION", "match")
+    monkeypatch.setenv("DRAFTING_ENABLED", "false")
+    create_app()  # must not raise
+```
+
+Every `APP_EDITION=match` invocation elsewhere in this plan — the tests above,
+`create_app()` in Task 2, and the smoke command — must now also set
+`DRAFTING_ENABLED=false`. Update `_base_env` in this file to include it, and
+the fixture in `test_auth_allowlist.py` when Task 2 lands.
+
+```bash
+uv run pytest tests/architecture/test_edition_surface.py -v
+```
+
+Expected: 7 passed. Plan A's final count becomes **3371**.
 
 - [ ] **Step 7: Regenerate the pinned artefacts**
 
@@ -364,29 +462,47 @@ uv run python scripts/gen_architecture.py
 uv run pytest -n 16 --dist loadfile
 ```
 
-Expected: `3364 passed, 1 skipped` (3361 + the 3 new). If the count differs by
-anything other than +3, stop and read the failures — a conditional router is
+Expected: `3368 passed, 1 skipped` (3361 + this task's 7). If the count differs
+by anything other than +7, stop and read the failures — a conditional router is
 exactly the change that breaks an unrelated test's assumption about route count.
+Task 2 adds 3 more, so **Plan A finishes at 3371**.
 
 - [ ] **Step 9: Mutation-test the gate**
 
-Temporarily change `if edition != "match":` to `if True:` in
-`web/api/__init__.py`, then:
+**Two conditions were added, so mutate both** — the api-router one and the
+`main.py` one. A single mutation would leave the other untested, and the
+websocket lives behind the `main.py` condition alone.
+
+Mutation A — `web/api/__init__.py`: change `if edition != "match":` to `if True:`.
 
 ```bash
 uv run pytest tests/architecture/test_edition_surface.py -v
 ```
 
-Expected: `test_match_edition_registers_no_proposal_assist_route` FAILS naming the
-leaked paths. Restore the line, then clear stale bytecode — a same-size restore
-inside one second can leave pytest running the mutant:
+Expected: `test_match_edition_registers_no_proposal_assist_route` FAILS naming
+the leaked `/api/*` paths. Restore it.
+
+Mutation B — `main.py`: change `if settings.app_edition != "match":` to `if True:`.
 
 ```bash
 find src -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null; true
 uv run pytest tests/architecture/test_edition_surface.py -v
 ```
 
-Expected: 3 passed.
+Expected: **`test_match_edition_mounts_no_collab_websocket` FAILS** naming
+`/api/ws/workspaces/{workspace_id}/{artifact}`. If it passes, `_ws_paths` is not
+seeing the route and the websocket half of this gate is hollow — fix it before
+continuing.
+
+Restore, clear bytecode again (a same-size restore inside one second can leave
+pytest running the mutant), and re-run:
+
+```bash
+find src -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null; true
+uv run pytest tests/architecture/test_edition_surface.py -v
+```
+
+Expected: 5 passed.
 
 - [ ] **Step 10: Commit**
 
@@ -424,8 +540,8 @@ visible diff.
 
 **Two facts this gate must encode, both measured on 2026-09-03, not guessed:**
 
-1. `require_admin` (`auth/dependencies.py:49`) calls `get_current_user` **in its
-   function body**, not as a FastAPI sub-dependency — so FastAPI's dependant tree
+1. `require_admin` (`auth/dependencies.py:50`, the call at `:53`) invokes
+   `get_current_user` **in its function body**, not as a FastAPI sub-dependency — so FastAPI's dependant tree
    never sees `get_current_user` on an admin route. A gate that looked only for
    `get_current_user` would flag all 21 `/api/admin/*` routes. The auth set is
    `{get_current_user, require_admin}`.
@@ -672,8 +788,12 @@ describe("SimpleShell", () => {
   it("renders none of the cockpit shell furniture", () => {
     renderAt("/");
     // The AppShell landmarks that release 1 deliberately drops.
+    // Assert on what each component ACTUALLY exposes. `queryByRole("status")`
+    // would be vacuous: StatusBar renders `<footer aria-label="Status bar">`
+    // (StatusBar.tsx:125), whose implicit role is contentinfo — never `status` —
+    // so that query returns null whether or not StatusBar is mounted.
     expect(screen.queryByLabelText("Primary")).not.toBeInTheDocument(); // ActivityBar
-    expect(screen.queryByRole("status")).not.toBeInTheDocument(); // StatusBar
+    expect(screen.queryByLabelText("Status bar")).not.toBeInTheDocument(); // StatusBar
     expect(screen.queryByLabelText(/resize/i)).not.toBeInTheDocument(); // panel handles
   });
 });
@@ -688,7 +808,7 @@ import { render, screen, within } from "@testing-library/react";
 - [ ] **Step 2: Run the test to verify it fails**
 
 ```bash
-pnpm -C frontend test run src/shell/SimpleShell.test.tsx
+pnpm -C frontend test src/shell/SimpleShell.test.tsx
 ```
 
 Expected: FAIL — `Failed to resolve import "./SimpleShell"`.
@@ -847,7 +967,7 @@ Pick one and make the test match the component; do not leave them disagreeing.
 - [ ] **Step 4: Run the test to verify it passes**
 
 ```bash
-pnpm -C frontend test run src/shell/SimpleShell.test.tsx
+pnpm -C frontend test src/shell/SimpleShell.test.tsx
 ```
 
 Expected: 4 passed.
@@ -982,7 +1102,7 @@ it("every release-1 route is owned by the shared SPA manifest", () => {
 - [ ] **Step 2: Run the test to verify it fails**
 
 ```bash
-pnpm -C frontend test run src/router.simple.test.tsx
+pnpm -C frontend test src/router.simple.test.tsx
 ```
 
 Expected: FAIL — `Failed to resolve import "./router.simple"`.
@@ -1120,10 +1240,12 @@ export const simpleRouter = createBrowserRouter([
 ]);
 ```
 
-`AdminLayout` may render links to `/admin/drafting`, `/admin/golden-set` and
-`/admin/deleted-workspaces` — routes this router does not mount. Task 7's gate
-catches that; if it fires here, gate the links in `AdminLayout` on the edition
-helper from Task 5 rather than deleting them (the full edition still needs them).
+`AdminLayout` renders `AdminNav`, which **does** link to `/admin/drafting`,
+`/admin/golden-set` and `/admin/deleted-workspaces` (`AdminNav.tsx:7,8,11`) —
+routes this router does not mount. `AdminDashboard.tsx:164` links to
+`/admin/golden-set` too. Task 7 Step 4b gates all four on `isMatchEdition`;
+they are not deleted, because the full edition still needs them. Expect the
+admin screens to show dead links until that step lands.
 
 `Dashboard` currently declares `handle: { Sidebar: CallsFilters, RightPane:
 CallReadingPane }` in `router.tsx`. `SimpleShell` reads no handles, so the
@@ -1133,7 +1255,7 @@ out of the import graph. Filtering returns as part of Plan B's triage screen.
 - [ ] **Step 4: Run the test to verify it passes**
 
 ```bash
-pnpm -C frontend test run src/router.simple.test.tsx
+pnpm -C frontend test src/router.simple.test.tsx
 ```
 
 Expected: 3 passed. If test 1 fails on a set mismatch, read the diff: either the
@@ -1149,7 +1271,7 @@ Add a cockpit route to `router.simple.tsx`, inside the `SimpleShell` children:
 ```
 
 ```bash
-pnpm -C frontend test run src/router.simple.test.tsx
+pnpm -C frontend test src/router.simple.test.tsx
 ```
 
 Expected: **both** test 1 (set mismatch) and test 2 (`leaked` non-empty) FAIL.
@@ -1219,7 +1341,7 @@ it("falls back to full for anything unrecognised", () => {
 - [ ] **Step 2: Run the test to verify it fails**
 
 ```bash
-pnpm -C frontend test run src/edition.test.ts
+pnpm -C frontend test src/edition.test.ts
 ```
 
 Expected: FAIL — `Failed to resolve import "./edition"`.
@@ -1254,7 +1376,7 @@ export const isMatchEdition = APP_EDITION === "match";
 - [ ] **Step 4: Run the test to verify it passes**
 
 ```bash
-pnpm -C frontend test run src/edition.test.ts
+pnpm -C frontend test src/edition.test.ts
 ```
 
 Expected: 3 passed.
@@ -1317,14 +1439,21 @@ declare module "virtual:app-router" {
 }
 ```
 
-Then in `frontend/src/App.tsx`, replace the router import:
+Then in `frontend/src/App.tsx`, replace the router import and add the edition
+import — **Task 8 needs `APP_EDITION` in this file, so add it now**:
 
 ```tsx
+import { APP_EDITION } from "./edition";
 import { router } from "virtual:app-router";
 ```
 
 and delete `import { router } from "./router";`. The `<RouterProvider router={router} />`
-line does not change.
+line does not change in this task; Task 8 uses `APP_EDITION` on the
+`MantineProvider` line.
+
+Lint will flag `APP_EDITION` as unused until Task 8 lands. If that blocks the
+commit, add the import in Task 8 instead — but then Task 8 Step 6 must say so
+rather than claiming it is "already imported".
 
 Vitest reads the same config, so unit tests resolve the alias too — and with
 `VITE_APP_EDITION` unset they get the full router, which is what
@@ -1354,7 +1483,7 @@ Expected: both exit 0.
 - [ ] **Step 8: Run the whole frontend suite**
 
 ```bash
-pnpm -C frontend test run
+pnpm -C frontend test
 pnpm -C frontend lint
 ```
 
@@ -1384,177 +1513,249 @@ guessing is worse than the failure mode of ignoring."
 
 ---
 
-### Task 6: Gate 1 — the bundle contains no excluded code
+### Task 6: Gate 1 — the bundle contains no excluded module
 
-Spec §9 gate 1, corrected. Assert on **emitted content**, not on chunk
-filenames: Vite is free to fold an excluded module into a differently-named
-chunk, so a gate that greps for `cockpit-*.js` would pass with the code shipped.
+Spec §9 gate 1. Assert on the **module graph Rollup actually built**, by file
+path — not on chunk filenames, and not on string sentinels.
+
+**Both weaker designs were tried against this repo on 2026-09-03 and both
+failed.** Chunk filenames fail because Vite may fold an excluded module into a
+differently-named chunk. String sentinels fail worse, and the measurement is
+worth stating because it is counter-intuitive:
+
+> A five-sentinel list was drawn from the `Cockpit-*.js` chunk of a full build
+> (`proposal-spec.md`, `coherence-keeper`, `uncited-claims`, `y-protocols`,
+> `Start drafting workspace`). Three of the five appeared in **zero** files of
+> that build — dead on arrival. Then a single `CockpitSidebar` import was planted
+> in the simple router. The bundle grew from **451 kB to 632 kB** — 181 kB of
+> cockpit code shipped — and **all** the sentinels still reported clean, because
+> `CockpitSidebar` does not import the editor or the collab stack the sentinels
+> came from.
+
+A sentinel list only detects leaks from the chunk it was drawn from. The module
+graph has no such blind spot: it names every file that entered the build.
 
 **Files:**
+- Modify: `frontend/vite.config.ts` (add the `moduleManifest()` plugin)
 - Create: `scripts/check_match_bundle.mjs`
-- Modify: `frontend/package.json` (add the script entry)
+- Modify: `frontend/package.json` (two script entries)
 
 **Interfaces:**
-- Consumes: a completed `VITE_APP_EDITION=match` build in `frontend/dist/`.
-- Produces: `pnpm -C frontend check:bundle` — exit 0 clean, exit 1 with the
-  offending sentinel and file.
+- Consumes: the `virtual:app-router` alias from Task 5.
+- Produces: `dist/module-manifest.json` — a sorted array of every module id in
+  the build — and `pnpm -C frontend check:bundle`, exit 0 clean / exit 1 with
+  the offending paths.
 
-- [ ] **Step 1: Write the checker**
+- [ ] **Step 1: Emit the module graph at build time**
+
+In `frontend/vite.config.ts`, add this plugin immediately above
+`function spaIndexFallback(): PluginOption {`:
+
+```ts
+// Write the exact set of source modules Rollup put into the bundle, so a gate
+// can assert on FILE PATHS instead of guessing from chunk names or grepping for
+// strings. `generateBundle` runs after chunking, and every chunk's `modules` map
+// is keyed by resolved module id — which is what makes this impossible to fool:
+// renaming a chunk does not change it, and a module with no distinctive string
+// still appears.
+function moduleManifest(): PluginOption {
+  return {
+    name: "module-manifest",
+    generateBundle(_opts, bundle) {
+      const mods = new Set<string>();
+      for (const out of Object.values(bundle)) {
+        if (out.type !== "chunk") continue;
+        for (const id of Object.keys(out.modules)) mods.add(id);
+      }
+      this.emitFile({
+        type: "asset",
+        fileName: "module-manifest.json",
+        source: JSON.stringify([...mods].sort(), null, 2),
+      });
+    },
+  };
+}
+```
+
+and register it:
+
+```ts
+  plugins: [react(), spaIndexFallback(), moduleManifest()],
+```
+
+- [ ] **Step 2: Write the gate**
 
 Create `scripts/check_match_bundle.mjs`:
 
 ```js
 #!/usr/bin/env node
 /**
- * Gate 1: prove the match build contains no proposal-assist code.
+ * Gate 1: prove the match build contains no proposal-assist module.
  *
- * Assert on EMITTED CONTENT, not on chunk filenames. Vite may fold an excluded
- * module into a differently-named chunk at any time — `manualChunks` heuristics,
- * a dependency change, a version bump — so a gate that looked for `cockpit-*.js`
- * would go green while the code shipped. Distinctive string literals from the
- * excluded modules survive minification and are what we search for.
+ * Reads dist/module-manifest.json — the module graph Rollup actually built,
+ * emitted by the moduleManifest() plugin in vite.config.ts — and asserts that no
+ * module under an excluded directory is in it.
+ *
+ * Measured on this repo, 2026-09-03:
+ *   full build           703 modules,  73 excluded  (the gate has teeth)
+ *   match build          251 modules,   0 excluded  (clean)
+ *   match + 1 leak       446 modules,  19 excluded  (caught)
+ *
+ * Two weaker designs were tried and rejected. Chunk-filename matching: Vite may
+ * fold an excluded module into a differently-named chunk. String sentinels: a
+ * planted CockpitSidebar import shipped 181 kB of cockpit code while every
+ * sentinel reported clean, because a sentinel only detects leaks from the chunk
+ * it was drawn from. Module ids have no such blind spot.
  *
  * Usage:
- *   VITE_APP_EDITION=match pnpm -C frontend build
- *   node scripts/check_match_bundle.mjs frontend/dist
+ *   pnpm -C frontend build:match && pnpm -C frontend check:bundle
  */
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
-// Each sentinel is a string literal that appears in an excluded module and
-// nowhere in the release-1 surface. Verified present in a `full` build and
-// absent from a `match` build by the self-check below — if a sentinel ever stops
-// appearing in the full build it has been renamed, and the gate has silently
-// stopped testing anything.
-const SENTINELS = [
-  "proposal-spec.md", // cockpit spec panel
-  "coherence-keeper", // cockpit analysis
-  "uncited-claims", // cockpit problems panel
-  "Start drafting workspace", // the CallDetail button release 1 removes
-  "y-protocols", // the collab CRDT stack
+// Directories the match edition must not reach. Substrings of a resolved module
+// id, matched against POSIX-style paths.
+const EXCLUDED = [
+  "/src/cockpit/",
+  "/src/collab/",
+  "/src/routes/Cockpit",
+  "/src/routes/Workspace",
+  "/src/routes/AdminDrafting",
+  "/src/routes/AdminGoldenSet",
+  "/src/routes/AdminDeletedWorkspace",
 ];
 
 const dist = resolve(process.argv[2] ?? "frontend/dist");
+const manifest = resolve(dist, "module-manifest.json");
 
-function walk(dir) {
-  const out = [];
-  for (const name of readdirSync(dir)) {
-    const p = join(dir, name);
-    if (statSync(p).isDirectory()) out.push(...walk(p));
-    else if (/\.(js|mjs|css)$/.test(name)) out.push(p);
-  }
-  return out;
-}
-
-const files = walk(dist);
-if (files.length === 0) {
-  console.error(`ERROR: no JS/CSS emitted under ${dist} — did the build run?`);
-  process.exit(1);
-}
-
-const hits = [];
-for (const f of files) {
-  const text = readFileSync(f, "utf8");
-  for (const s of SENTINELS) {
-    if (text.includes(s)) hits.push({ file: f.slice(dist.length + 1), sentinel: s });
-  }
-}
-
-if (hits.length > 0) {
-  console.error("ERROR: the match bundle contains excluded proposal-assist code:");
-  for (const h of hits) console.error(`  ${h.file}  contains  ${JSON.stringify(h.sentinel)}`);
+let modules;
+try {
+  modules = JSON.parse(readFileSync(manifest, "utf8"));
+} catch {
   console.error(
-    "\nThe fix is an import, not a chunk name: something reachable from " +
-      "router.simple.tsx imports a cockpit/collab module.",
+    `ERROR: no module manifest at ${manifest}.\n` +
+      "The moduleManifest() plugin in vite.config.ts did not run — did the build " +
+      "complete, and is the plugin registered?",
   );
   process.exit(1);
 }
 
-console.log(`match bundle clean: ${files.length} files, none of ${SENTINELS.length} sentinels`);
+if (!Array.isArray(modules) || modules.length === 0) {
+  console.error(`ERROR: ${manifest} is empty. A build that bundles nothing proves nothing.`);
+  process.exit(1);
+}
+
+const leaked = modules
+  .map((m) => m.split("\\").join("/"))
+  .filter((m) => EXCLUDED.some((x) => m.includes(x)))
+  .sort();
+
+if (leaked.length > 0) {
+  console.error(`ERROR: the match bundle contains ${leaked.length} excluded module(s):`);
+  for (const m of leaked.slice(0, 25)) console.error(`  ${m.split("/frontend/").pop()}`);
+  if (leaked.length > 25) console.error(`  ... and ${leaked.length - 25} more`);
+  console.error(
+    "\nThe fix is an import, not a chunk name: something reachable from " +
+      "router.simple.tsx imports one of these. Read the import chain and cut it.",
+  );
+  process.exit(1);
+}
+
+console.log(`match bundle clean: ${modules.length} modules, 0 under ${EXCLUDED.length} excluded paths`);
 ```
 
-- [ ] **Step 2: Verify the sentinels are real — run against a FULL build first**
+- [ ] **Step 3: Wire it into package.json**
 
-A sentinel that appears in neither build tests nothing. Prove each one is
-present in `full` before trusting its absence in `match`:
+In `frontend/package.json` `"scripts"`, add:
+
+```json
+    "build:match": "VITE_APP_EDITION=match tsc && VITE_APP_EDITION=match vite build",
+    "check:bundle": "node ../scripts/check_match_bundle.mjs dist"
+```
+
+`build` is `tsc && vite build`; `build:match` must set the variable for **both**
+halves, because `tsc` type-checks `App.tsx`'s alias import and `vite build`
+resolves it.
+
+- [ ] **Step 4: Prove the gate has teeth — run it against the FULL build first**
+
+A gate that would pass on a build containing the excluded code tests nothing.
 
 ```bash
 pnpm -C frontend build
 node scripts/check_match_bundle.mjs frontend/dist
 ```
 
-Expected: **exit 1**, listing hits for as many sentinels as possible. Any
-sentinel with **no** hit in the full build is dead — replace it. Find a live
-replacement with:
+Expected: **exit 1**, reporting roughly **73 excluded modules** out of ~703.
+If it exits 0 here, the `EXCLUDED` prefixes do not match this repo's paths —
+print a few ids from `frontend/dist/module-manifest.json` and fix the list before
+going further.
+
+- [ ] **Step 5: Run it against the match build**
 
 ```bash
-grep -rlo "some-candidate-string" frontend/src/cockpit frontend/src/collab | head
+pnpm -C frontend build:match
+pnpm -C frontend check:bundle
 ```
 
-Do not proceed until every sentinel in the list fires against the full build.
+Expected: exit 0, `match bundle clean: ~251 modules, 0 under 7 excluded paths`.
 
-- [ ] **Step 3: Run against the match build**
+If it exits 1, read the named modules. In order of likelihood: `VITE_APP_EDITION`
+was not set for the build (a bare `vite build` gets the full router); a shared
+barrel under `components/` re-exports a cockpit component; or `AdminLayout`
+imports a workspace screen.
 
-```bash
-VITE_APP_EDITION=match pnpm -C frontend build
-node scripts/check_match_bundle.mjs frontend/dist
-```
+- [ ] **Step 6: Mutation-test the gate**
 
-Expected: exit 0, `match bundle clean: N files, none of 5 sentinels`.
-
-If it exits 1, something in the release-1 graph still reaches the cockpit. Read
-the named file and cut the import. In order of likelihood: the `virtual:app-router`
-alias did not take effect (check `process.env.VITE_APP_EDITION` is actually set
-for the build — `pnpm build:match` sets it, a bare `vite build` does not); a
-shared barrel file under `components/` re-exports a cockpit component; or
-`AdminLayout` imports a workspace screen.
-
-- [ ] **Step 4: Wire it into package.json**
-
-In `frontend/package.json` `"scripts"`, add:
-
-```json
-    "build:match": "VITE_APP_EDITION=match vite build",
-    "check:bundle": "node ../scripts/check_match_bundle.mjs dist"
-```
-
-- [ ] **Step 5: Mutation-test the gate**
-
-Add a static cockpit import to `frontend/src/router.simple.tsx`:
+Plant a single cockpit import in `frontend/src/router.simple.tsx`:
 
 ```tsx
 import { CockpitSidebar } from "./cockpit/CockpitSidebar";
 ```
 
-and reference it so it is not shaken out — add `{ path: "profiles/x", element:
-<CockpitSidebar /> }` to the `SimpleShell` children temporarily. Then:
+and reference it so it is not shaken out — add
+`{ path: "profiles/leak", element: <CockpitSidebar /> },` to the `SimpleShell`
+children temporarily.
 
 ```bash
 pnpm -C frontend build:match && pnpm -C frontend check:bundle
 ```
 
-Expected: **exit 1**, naming a file and a sentinel.
+Expected: **exit 1**, naming ~19 modules starting with `src/cockpit/CockpitSidebar.tsx`.
+This exact mutation is what defeated the string-sentinel design, so it is the one
+that matters.
 
 Revert both edits and re-run; expected exit 0.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Keep the manifest out of the served bundle**
+
+`module-manifest.json` is a build artefact, not an asset. It lands in `dist/` and
+would be copied into `src/call_manager/web/spa/` by the packaging step. That is
+harmless (it lists file paths, no secrets) but pointless. Delete it during
+packaging — Task 9 does this — rather than complicating the plugin.
+
+- [ ] **Step 8: Commit**
 
 ```bash
-git add scripts/check_match_bundle.mjs frontend/package.json
-git commit -m "test(edition): prove the match bundle carries no cockpit code
+git add scripts/check_match_bundle.mjs frontend/vite.config.ts frontend/package.json
+git commit -m "test(edition): prove the match bundle carries no cockpit module
 
-Greps emitted JS/CSS for string literals from the excluded modules rather than
-inspecting chunk filenames. Vite may fold an excluded module into a
-differently-named chunk at any time, so a filename check would go green while the
-code shipped.
+Asserts on the module graph Rollup actually built — emitted as
+dist/module-manifest.json by a generateBundle plugin — rather than on chunk
+filenames or string sentinels. Measured: full 703 modules/73 excluded, match
+251/0, match+1 planted import 446/19.
 
-Each sentinel is verified to FIRE against a full build before its absence from a
-match build is trusted — a sentinel that appears in neither tests nothing."
+Both weaker designs were tried on this repo and failed. Filenames: Vite may fold
+an excluded module into a differently-named chunk. Sentinels, worse: three of a
+five-string list drawn from the Cockpit chunk appeared in ZERO files of the full
+build, and a planted CockpitSidebar import then shipped 181 kB of cockpit code
+(451 kB -> 632 kB) while every sentinel still reported clean — a sentinel only
+detects leaks from the chunk it came from."
 ```
 
 ---
 
-### Task 7: Remove the drafting links and gate 4
+### Task 7: Remove the dead links into the excluded half, and gate 4
 
 Spec §9 gate 4 and §4.1. Two "Start drafting" links point at `/cockpit/new`,
 which release 1 excludes. The bundle gate proves the cockpit *code* is absent; it
@@ -1580,17 +1781,35 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 
-// Gate 4: no component reachable from the release-1 router may emit an href
-// under /cockpit. The bundle gate proves the cockpit CODE is absent; it says
-// nothing about a link pointing at a route the server will 404.
+// Gate 4: no component reachable from the release-1 router may emit an href into
+// the excluded half. The bundle gate proves the excluded CODE is absent; it says
+// nothing about a link pointing at a route that is no longer mounted.
+//
+// EVERY excluded prefix, not only /cockpit. The first draft of this gate matched
+// /cockpit alone and would have shipped a green run alongside four dead admin
+// links: AdminNav.tsx:7,8,11 links to /admin/drafting, /admin/golden-set and
+// /admin/deleted-workspaces, and AdminDashboard.tsx:164 links to /admin/golden-set.
+// AdminNav is reached through AdminLayout, which the simple router mounts.
 //
 // This is a source scan rather than a render walk because rendering every
 // release-1 screen with every data shape is not tractable, and a link inside a
-// conditional branch would be missed by a render test. The tradeoff is that a
-// dynamically-built href would slip through — acceptable, because none exist and
-// gate 1 would catch the import that made one possible.
+// conditional branch would be missed by a render test. The tradeoff is real: a
+// dynamically-built href (`"/" + "cockpit/new"`) slips through, and gate 1 would
+// NOT catch it — such a component imports no excluded module. That gap is
+// accepted because no such construction exists in this codebase today; if one
+// appears, this gate is the wrong shape and an AST check should replace it.
 
 const SRC = join(import.meta.dirname ?? __dirname, ".");
+
+// Kept identical to router.simple.test.tsx's EXCLUDED_PREFIXES. If you add one
+// there, add it here — a route the simple router stops mounting is a route
+// nothing may link to.
+const EXCLUDED_PREFIXES = [
+  "/cockpit",
+  "/admin/drafting",
+  "/admin/golden-set",
+  "/admin/deleted-workspaces",
+];
 
 // Files that legitimately mention /cockpit because they are the FULL edition.
 const EXEMPT = [
@@ -1616,14 +1835,18 @@ function walk(dir: string): string[] {
   return out;
 }
 
-it("no release-1 source emits a /cockpit href", () => {
+it("no release-1 source emits an href into the excluded half", () => {
   const offenders: string[] = [];
   for (const file of walk(SRC)) {
     const rel = file.slice(SRC.length + 1);
     if (EXEMPT.some((e) => rel.includes(e))) continue;
     const text = readFileSync(file, "utf8");
     text.split("\n").forEach((line, i) => {
-      if (/["'`]\/cockpit/.test(line)) offenders.push(`${rel}:${i + 1}  ${line.trim()}`);
+      for (const pre of EXCLUDED_PREFIXES) {
+        if (line.includes(`"${pre}`) || line.includes(`'${pre}`) || line.includes(`\`${pre}`)) {
+          offenders.push(`${rel}:${i + 1}  ${line.trim()}`);
+        }
+      }
     });
   }
   expect(offenders).toEqual([]);
@@ -1633,11 +1856,12 @@ it("no release-1 source emits a /cockpit href", () => {
 - [ ] **Step 2: Run the test to verify it fails**
 
 ```bash
-pnpm -C frontend test run src/noCockpitLinks.test.tsx
+pnpm -C frontend test src/noCockpitLinks.test.tsx
 ```
 
-Expected: FAIL, listing `routes/CallRow.tsx` and `routes/CallDetailBody.tsx`.
-This gate starts red by design — removing the links is what turns it green.
+Expected: FAIL, listing at least `routes/CallRow.tsx`, `routes/CallDetailBody.tsx`,
+`routes/AdminNav.tsx` (three lines) and `routes/AdminDashboard.tsx`. This gate
+starts red by design — removing or gating those links is what turns it green.
 
 - [ ] **Step 3: Remove the link from `CallRow.tsx`**
 
@@ -1674,10 +1898,49 @@ now unused.
 forbids showing the raw score, but removing it is Plan B's task 4 — it belongs
 with the chip row that replaces it, not with a link removal.
 
+- [ ] **Step 4b: Gate the excluded admin links on the edition**
+
+`AdminNav.tsx:7,8,11` and `AdminDashboard.tsx:164` link to admin routes the
+simple router does not mount. Unlike the drafting links these must **not** be
+deleted — the full edition still needs them. Gate them instead.
+
+In `frontend/src/routes/AdminNav.tsx`, filter the items:
+
+```tsx
+import { isMatchEdition } from "../edition";
+
+// Release 1 mounts only /admin, /admin/users and /admin/users/pending
+// (router.simple.tsx). Linking to the others would render buttons that resolve
+// to the in-app soft 404. Pinned by noCockpitLinks.test.tsx.
+const MATCH_EXCLUDED = ["/admin/drafting", "/admin/golden-set", "/admin/deleted-workspaces"];
+```
+
+and wherever the list is rendered, filter with
+`.filter((it) => !isMatchEdition || !MATCH_EXCLUDED.includes(it.to))`.
+
+In `frontend/src/routes/AdminDashboard.tsx:164`, wrap the "Manage golden set"
+anchor in `{!isMatchEdition && ( ... )}`.
+
+The source-scan gate cannot tell a gated link from an ungated one — both are
+string literals in the file. So add the two files to the test's `EXEMPT` list
+**and** pin the gating with a render test instead:
+
+```tsx
+// in frontend/src/routes/AdminNav.test.tsx (create if absent)
+it("omits the full-edition destinations in the match build", () => {
+  // isMatchEdition is a build-time constant; vi.mock it to exercise both.
+  expect(MATCH_EXCLUDED.every((p) => !renderedHrefs().includes(p))).toBe(true);
+});
+```
+
+Write that test against whatever `AdminNav` actually renders — read the file
+first. If gating turns out to need more than a filter, prefer moving the three
+items into a constant the simple router's own nav does not import.
+
 - [ ] **Step 5: Run the test to verify it passes**
 
 ```bash
-pnpm -C frontend test run src/noCockpitLinks.test.tsx
+pnpm -C frontend test src/noCockpitLinks.test.tsx
 ```
 
 Expected: 1 passed.
@@ -1685,7 +1948,7 @@ Expected: 1 passed.
 - [ ] **Step 6: Run the full frontend suite**
 
 ```bash
-pnpm -C frontend test run
+pnpm -C frontend test
 pnpm -C frontend lint
 ```
 
@@ -1705,24 +1968,17 @@ pnpm -C frontend exec playwright test e2e/dashboard.spec.ts
 Add `<Link to="/cockpit/new">x</Link>` to `frontend/src/routes/ProfilesList.tsx`.
 
 ```bash
-pnpm -C frontend test run src/noCockpitLinks.test.tsx
+pnpm -C frontend test src/noCockpitLinks.test.tsx
 ```
 
 Expected: FAIL naming `routes/ProfilesList.tsx` with its line number. Revert and
 re-run; expected 1 passed.
 
-- [ ] **Step 8: Rebuild and re-check the bundle**
+- [ ] **Step 8: Re-run the bundle gate**
 
-Removing "Start drafting workspace" removes one of Task 6's sentinels from the
-**full** build too. Confirm the sentinel list still has teeth:
-
-```bash
-pnpm -C frontend build && node scripts/check_match_bundle.mjs frontend/dist
-```
-
-Expected: exit 1 on the remaining four sentinels. If it now exits 0, the
-sentinel list has gone dead — go back to Task 6 Step 2 and replace the dead
-entries before committing.
+Removing components can only shrink the module graph, so this should still be
+green — but run it, because Step 4b **added** an import (`../edition`) to two
+admin files that are in the match graph.
 
 ```bash
 pnpm -C frontend build:match && pnpm -C frontend check:bundle
@@ -1848,7 +2104,7 @@ describe("the match edition palette", () => {
 - [ ] **Step 2: Run the test to verify it fails**
 
 ```bash
-pnpm -C frontend test run src/theme/contrast.test.ts
+pnpm -C frontend test src/theme/contrast.test.ts
 ```
 
 Expected: FAIL — `ENOENT ... theme.match.css`.
@@ -1922,7 +2178,7 @@ foreground is the adjustable half.
 - [ ] **Step 4: Run the test to verify it passes**
 
 ```bash
-pnpm -C frontend test run src/theme/contrast.test.ts
+pnpm -C frontend test src/theme/contrast.test.ts
 ```
 
 Expected: 9 passed.
@@ -1948,7 +2204,9 @@ page. In `frontend/src/App.tsx`:
         <MantineProvider theme={theme} defaultColorScheme={APP_EDITION === "match" ? "light" : "dark"}>
 ```
 
-`APP_EDITION` is already imported from Task 5.
+`APP_EDITION` was imported into `App.tsx` in Task 5, Step 5. If it is not there,
+add `import { APP_EDITION } from "./edition";` — the plan's Task 5 draft once
+omitted it and the build failed on an unbound name.
 
 - [ ] **Step 7: Look at it**
 
@@ -1968,16 +2226,21 @@ dark card. Fix what you see — the contrast test covers tokens, not components.
 
 ```bash
 pnpm -C frontend build
-grep -rl "faf9f7" frontend/dist && echo "LEAK" || echo "clean: light palette absent from the full build"
+if grep -rql "faf9f7" frontend/dist; then echo "LEAK: theme.match.css is in the FULL build"; exit 1; fi
+echo "clean: light palette absent from the full build"
 ```
 
-Expected: `clean: ...`. If the hex appears, `theme.match.css` reached the full
-graph — something outside `router.simple.tsx` imports `SimpleShell`.
+Expected: `clean: ...`, exit 0. Note the `if`: a bare
+`grep ... && echo LEAK || echo clean` exits **0 on both branches**, so a leak
+would print its warning into a green run and nobody would stop.
+
+If the hex appears, `theme.match.css` reached the full graph — something outside
+`router.simple.tsx` imports `SimpleShell`.
 
 - [ ] **Step 9: Full frontend suite**
 
 ```bash
-pnpm -C frontend test run
+pnpm -C frontend test
 pnpm -C frontend lint
 ```
 
@@ -2001,6 +2264,152 @@ and the full build cannot accidentally go light. Contrast ratios are pinned by
 theme/contrast.test.ts rather than eyeballed."
 ```
 
+---
+
+### Task 9: Package the match build into the directory FastAPI serves
+
+Without this task the smoke test proves nothing. `SPA_MODE=prod` serves from
+`SPA_DIR = src/call_manager/web/spa` (`web/spa_serving.py:12`), **not** from
+`frontend/dist`. A smoke run after `build:match` would therefore serve whatever
+already sits in `web/spa/` — most likely a stale *full* build, complete with the
+cockpit. Every gate in this plan would be green and the deployed app would be
+the thing the plan exists to prevent.
+
+**This is not hypothetical.** Checked on 2026-09-03, `src/call_manager/web/spa/`
+already contains a full build — `assets/Cockpit-B0I71zuY.js`, `AdminDrafting-*.js`
+and the rest. A smoke run of the original plan would have served that, cockpit
+and all, while every gate reported green. The directory is gitignored
+(`.gitignore:49`), so replacing it is safe.
+
+**Files:**
+- Create: `scripts/package_spa.sh`
+- Modify: `frontend/package.json` (one script entry)
+
+**Interfaces:**
+- Consumes: a checked build in `frontend/dist` (Tasks 5, 6).
+- Produces: `src/call_manager/web/spa/` containing exactly that build.
+
+- [ ] **Step 1: Write the packaging script**
+
+Create `scripts/package_spa.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Copy a built SPA into the directory FastAPI serves under SPA_MODE=prod.
+#
+# SPA_DIR is src/call_manager/web/spa (web/spa_serving.py:12). `vite build`
+# writes to frontend/dist and NOTHING copies it across — so a smoke test run
+# straight after a build serves the PREVIOUS bundle. That is how a match
+# deployment ships a full-edition cockpit with every gate green.
+#
+# Refuses to package a build that has not passed the bundle gate, so the copy
+# cannot become the step where the guarantee is lost.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DIST="$ROOT/frontend/dist"
+SPA="$ROOT/src/call_manager/web/spa"
+
+[ -f "$DIST/index.html" ] || { echo "FATAL: no build at $DIST — run a build first" >&2; exit 1; }
+
+# Match builds must be gate-clean before they are allowed near the served tree.
+if [ "${VITE_APP_EDITION:-full}" = "match" ]; then
+  node "$ROOT/scripts/check_match_bundle.mjs" "$DIST" || {
+    echo "FATAL: refusing to package a match build that fails the bundle gate" >&2
+    exit 1
+  }
+fi
+
+rm -rf "$SPA"
+mkdir -p "$SPA"
+cp -R "$DIST"/. "$SPA"/
+# A build artefact, not an asset — it lists source paths and serves no purpose
+# to a browser (Task 6, Step 7).
+rm -f "$SPA/module-manifest.json"
+
+echo "packaged $(du -sh "$SPA" | cut -f1) into src/call_manager/web/spa (edition=${VITE_APP_EDITION:-full})"
+```
+
+```bash
+chmod +x scripts/package_spa.sh
+```
+
+- [ ] **Step 2: Add the script entry**
+
+In `frontend/package.json` `"scripts"`:
+
+```json
+    "package:match": "VITE_APP_EDITION=match ../scripts/package_spa.sh"
+```
+
+- [ ] **Step 3: Check what is in the served directory right now**
+
+Before overwriting it, look — the repo may be carrying a build someone depends on.
+
+```bash
+ls src/call_manager/web/spa/ 2>/dev/null | head
+git check-ignore -v src/call_manager/web/spa/ && echo "(gitignored — safe to replace)"
+```
+
+If it is tracked in git rather than ignored, stop and ask: replacing a committed
+bundle is a different decision from refreshing an ignored one.
+
+- [ ] **Step 4: Package a match build and verify**
+
+```bash
+pnpm -C frontend build:match
+pnpm -C frontend check:bundle
+pnpm -C frontend package:match
+node scripts/check_match_bundle.mjs frontend/dist   # dist still clean
+ls src/call_manager/web/spa/assets/ | head
+```
+
+Expected: `packaged ... (edition=match)`, and the served directory contains the
+same `index-*.js` the match build emitted — one chunk, no `Cockpit-*.js`.
+
+- [ ] **Step 5: Prove the refusal works**
+
+Package a **full** build while claiming it is a match build. The script must
+refuse rather than copy.
+
+```bash
+pnpm -C frontend build            # full
+VITE_APP_EDITION=match scripts/package_spa.sh
+```
+
+Expected: exit 1, `FATAL: refusing to package a match build that fails the
+bundle gate`, and `src/call_manager/web/spa/` **unchanged**. Confirm that last
+part — a script that deletes before it validates would have destroyed the served
+tree on the way to failing:
+
+```bash
+ls src/call_manager/web/spa/assets/ | head
+```
+
+If the directory is now empty, move the `rm -rf` below the gate check.
+
+- [ ] **Step 6: Restore a good match build**
+
+```bash
+pnpm -C frontend build:match && pnpm -C frontend package:match
+```
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add scripts/package_spa.sh frontend/package.json
+git commit -m "build: package the built SPA into the directory FastAPI serves
+
+SPA_MODE=prod serves src/call_manager/web/spa (spa_serving.py:12), not
+frontend/dist, and nothing copied between them. A smoke test run straight after
+build:match therefore served the PREVIOUS bundle — which is how a match
+deployment ships a full-edition cockpit with every gate green.
+
+The script refuses to package a match build that fails the bundle gate, and
+validates before it deletes, so the copy cannot become the step where the
+guarantee is lost."
+```
+
 ## Definition of done for Plan A
 
 Run all of it, in this order, from a clean tree:
@@ -2010,28 +2419,44 @@ uv run pytest -n 16 --dist loadfile
 uv run python scripts/gen_routes.py --check
 uv run python scripts/gen_architecture.py && git diff --exit-code docs/ARCHITECTURE.md
 uv run python scripts/gen_env_example.py && git diff --exit-code .env.example
-pnpm -C frontend test run
+pnpm -C frontend test
 pnpm -C frontend lint
 pnpm -C frontend build
-grep -rl "faf9f7" frontend/dist && echo "LEAK: the light palette is in the FULL build" || true
+if grep -rql "faf9f7" frontend/dist; then echo "LEAK: light palette in the FULL build"; exit 1; fi
 pnpm -C frontend build:match && pnpm -C frontend check:bundle
 ```
 
-Expected: `3364 passed, 1 skipped` from pytest (the **`1 skipped`** is the
-signal — `0 skipped` means a live Anthropic call ran), every generator check
+Expected: `3371 passed, 1 skipped` from pytest — 3361 baseline + 7 from Task 1
+(three route-surface, two websocket, two drafting-coupling) + 3 from Task 2
+(`test_no_unlisted_route_is_public` is parametrized over two editions, plus the
+dead-entry test). The **`1 skipped`** is the signal;
+`0 skipped` means a live Anthropic call ran. Every generator check
 clean, all frontend tests green, both builds succeed, the bundle check exits 0.
 
-Then a manual smoke, because no gate here proves the app is usable:
+Then a manual smoke, because no gate here proves the app is usable. **Package
+first** — `SPA_MODE=prod` serves `src/call_manager/web/spa`, not `frontend/dist`:
 
 ```bash
-VITE_APP_EDITION=match pnpm -C frontend build
-# serve it against a match backend
-APP_EDITION=match SPA_MODE=prod uv run uvicorn call_manager.main:create_app --factory
+pnpm -C frontend build:match
+pnpm -C frontend check:bundle
+pnpm -C frontend package:match
+APP_EDITION=match DRAFTING_ENABLED=false SPA_MODE=prod \
+  uv run uvicorn call_manager.main:create_app --factory
 ```
 
 Open it and confirm: the calls list renders, a call detail opens, profiles list
-and edit work, `/me` saves, an admin sees `/admin` and `/admin/users`, and
-`/cockpit` gives a real 404 rather than a blank screen.
+and edit work, `/me` saves, an admin sees `/admin` and `/admin/users` **and no
+link to Drafting, Golden set or Deleted workspaces**.
+
+`/cockpit` will return **HTTP 200 with the SPA's in-app "Not found" page**, not a
+real 404. That is expected, and it is a deliberate limitation of Plan A:
+`frontend/routes.json` is shared by both editions and lists `/cockpit`, so
+`is_spa_route("/cockpit")` is `True` and the server hands back `index.html`;
+the simple router's `*` route then renders the soft 404. Making it a real 404
+needs an edition-aware manifest in `scripts/gen_routes.py`, which is more
+plumbing than the symptom justifies — after Task 7 nothing in release 1 links
+there, so only a hand-typed URL reaches it. Revisit if a real 404 is ever
+required.
 
 ## What Plan A deliberately does not do
 
