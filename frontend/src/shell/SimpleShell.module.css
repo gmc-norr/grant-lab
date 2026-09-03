@@ -24,6 +24,11 @@
   font-size: 0.95rem;
   color: var(--app-text);
   text-decoration: none;
+  /* Same 44px thumb target as .link — the brand is a tappable Link in the same
+     bar, and the responsive strategy keeps one DOM across breakpoints. */
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
 }
 
 .nav {

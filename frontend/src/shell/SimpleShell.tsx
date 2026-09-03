@@ -13,6 +13,12 @@ const DESTINATIONS = [
   // "as const" a heterogeneous array widens to a union, and reading d.adminOnly
   // is then a type error on the members that omit it (TS2339). vitest does not
   // typecheck, so only "pnpm build" catches that.
+  // `end` is INERT for to="/" in this react-router version, measured: NavLink
+  // computes isActive as `to === pathname || (!end && pathname.startsWith(to)
+  // && pathname.charAt(to.length) === "/")`, and for to="/" that last char is
+  // the first letter of the segment, never "/". Flipping this to false changes
+  // nothing and reddens no test. Kept because it states the intent and would
+  // become load-bearing the moment this entry stops being the root.
   { to: "/", label: "Calls", end: true, adminOnly: false },
   { to: "/profiles", label: "Profiles", end: false, adminOnly: false },
   { to: "/admin", label: "Admin", end: false, adminOnly: true },
@@ -24,6 +30,7 @@ export function SimpleShell() {
   // schema but no component reads it; do not introduce a second source.
   const { data: session } = useSession();
   const isAdmin = Boolean(session?.capabilities.admin);
+  const email = session?.user.email;
 
   return (
     <div className={styles.shell}>
@@ -47,8 +54,15 @@ export function SimpleShell() {
         </nav>
         <Menu position="bottom-end" withinPortal>
           <Menu.Target>
-            <UnstyledButton className={styles.link} aria-label="Account menu">
-              {session?.user.email ?? "Account"}
+            {/* The accessible name must CONTAIN the visible text (WCAG 2.5.3,
+                label-in-name) or a voice-control user cannot say what they see.
+                A bare aria-label="Account menu" would replace the email
+                outright. */}
+            <UnstyledButton
+              className={styles.link}
+              aria-label={email ? `Account menu for ${email}` : "Account menu"}
+            >
+              {email ?? "Account"}
             </UnstyledButton>
           </Menu.Target>
           <Menu.Dropdown>

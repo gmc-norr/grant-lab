@@ -11,6 +11,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // only CLOSES OVER `sessionData`; it dereferences it when `useSession()` runs
 // during a render, long after the const initialises, so the hoisted `vi.mock`
 // never trips the TDZ.
+// FakeSession is a local PARTIAL: it is not checked against the generated
+// /api/me type, and the mock returns no isLoading/isError. Shape drift is
+// caught by tsc over SimpleShell.tsx (tsconfig include: ["src"], build is
+// `tsc && vite build`), not by this mock — do not read it as shape coverage.
 type FakeSession = { user: { email: string }; capabilities: { admin: boolean } };
 const sessionData: { value: FakeSession | undefined } = { value: undefined };
 vi.mock("../api/session", () => ({ useSession: () => ({ data: sessionData.value }) }));
@@ -92,5 +96,19 @@ describe("SimpleShell", () => {
     expect(screen.queryByLabelText("Primary")).not.toBeInTheDocument(); // ActivityBar
     expect(screen.queryByLabelText("Status bar")).not.toBeInTheDocument(); // StatusBar
     expect(screen.queryByLabelText(/resize/i)).not.toBeInTheDocument(); // panel handles
+  });
+
+  it("names the account menu with the email it displays", () => {
+    // WCAG 2.5.3 label-in-name: the accessible name must CONTAIN the visible
+    // text, or a voice-control user cannot say what they see. A bare
+    // aria-label="Account menu" would replace the email outright.
+    renderAt("/");
+    const account = screen.getByRole("button", { name: /account menu for p@umu\.se/i });
+    expect(account).toHaveTextContent("p@umu.se");
+  });
+
+  it("keeps the brand as a link home", () => {
+    renderAt("/profiles");
+    expect(screen.getByRole("link", { name: "Call Match" })).toHaveAttribute("href", "/");
   });
 });
