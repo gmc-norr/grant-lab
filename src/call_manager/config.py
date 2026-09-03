@@ -173,6 +173,20 @@ class Settings(BaseSettings):
             "Toggle requires app restart; UI-driven toggling is deferred."
         ),
     )
+    app_edition: Literal["match", "full"] = Field(
+        default="full",
+        alias="APP_EDITION",
+        description=(
+            "Which product edition this process serves. 'match' is Call Match "
+            "release 1: funding-call matching only. It does NOT mount the "
+            "proposal-assist routers (workspaces, turns, annotations, rubric, "
+            "references, citation_audit, export, files) or the collab websocket, "
+            "so those endpoints do not exist rather than returning 403. 'full' is "
+            "the complete application. This is a deploy-time decision, not a "
+            "runtime toggle; the frontend has a matching build flag "
+            "(VITE_APP_EDITION) and the two must agree."
+        ),
+    )
     extractor_version: str = Field(
         default="sections-v1",
         alias="EXTRACTOR_VERSION",
@@ -848,6 +862,21 @@ class Settings(BaseSettings):
                 f"EMBEDDING_PREGATE_THRESHOLD ({self.embedding_pregate_threshold}); "
                 "an inverted gate silently FAILs pairs whose cosine is in "
                 "[pregate, hard_fail) that should PASS."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _match_edition_disables_drafting(self):
+        # Spec §5: release 1 ships with the drafting subsystem off. The routes are
+        # already absent (main.py), but the scheduler ticks are gated on THIS flag,
+        # so leaving it True would keep drain/phase0 work running for a subsystem
+        # the deployment does not serve. Refuse the combination rather than
+        # silently correcting it: a deploy that sets DRAFTING_ENABLED=true means
+        # to enable drafting, and it should hear that it cannot.
+        if self.app_edition == "match" and self.drafting_enabled:
+            raise ValueError(
+                "APP_EDITION=match requires DRAFTING_ENABLED=false — release 1 does "
+                "not serve the proposal-assist subsystem."
             )
         return self
 

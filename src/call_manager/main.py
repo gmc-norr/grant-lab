@@ -66,7 +66,7 @@ from call_manager.proposal_assist.web.uncited_claims import (
 from call_manager.proposal_assist.web.versions import (
     router as versions_router,
 )
-from call_manager.web.api import router as api_router
+from call_manager.web.api import build_api_router
 from call_manager.web.api.errors import api_error, api_request, code_for
 from call_manager.web.middleware import (
     MaxBodySizeMiddleware,
@@ -886,18 +886,22 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(oauth_google.router)
-    app.include_router(proposals_router)
-    app.include_router(coherence_router)
-    app.include_router(evaluator_router)
-    app.include_router(review_router)
-    app.include_router(versions_router)
-    app.include_router(branches_router)
-    app.include_router(problems_router)
-    app.include_router(uncited_claims_router)
-    app.include_router(activity_router)
-    app.include_router(collab_ws.router)
-    app.include_router(collab_checkpoint.router)
-    app.include_router(api_router)
+    # Proposal assist + collab. Skipped entirely in the match edition (Call Match
+    # release 1) so the endpoints do not exist rather than answering 403 —
+    # pinned by tests/architecture/test_edition_surface.py.
+    if settings.app_edition != "match":
+        app.include_router(proposals_router)
+        app.include_router(coherence_router)
+        app.include_router(evaluator_router)
+        app.include_router(review_router)
+        app.include_router(versions_router)
+        app.include_router(branches_router)
+        app.include_router(problems_router)
+        app.include_router(uncited_claims_router)
+        app.include_router(activity_router)
+        app.include_router(collab_ws.router)
+        app.include_router(collab_checkpoint.router)
+    app.include_router(build_api_router(edition=settings.app_edition))
 
     # Dev-only SSE validation endpoint (/events/ping). Mounted ONLY in dev so it
     # never exists in prod/disabled (a test asserts 404 there). Registered before
