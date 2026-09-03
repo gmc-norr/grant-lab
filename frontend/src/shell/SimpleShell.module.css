@@ -1,0 +1,62 @@
+/* Release-1 chrome: a top bar and a content column. No activity bar, no status
+   bar, no resizable panes. Same theme tokens as AppShell so the two editions
+   read as the same product. */
+.shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: var(--app-editor);
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  padding: 0 1rem;
+  min-height: 48px;
+  background: var(--app-titlebar);
+  border-bottom: 1px solid var(--app-border);
+}
+
+.brand {
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--app-text);
+  text-decoration: none;
+}
+
+.nav {
+  display: flex;
+  gap: 0.25rem;
+  margin-right: auto;
+}
+
+.link {
+  padding: 0.4rem 0.7rem;
+  border-radius: 4px;
+  color: var(--app-muted-chrome);
+  text-decoration: none;
+  font-size: 0.9rem;
+  /* 44px min touch target on a phone; the spec's responsive strategy keeps the
+     same DOM across breakpoints for everything but the board and the swipe
+     gesture, so the nav must be thumb-usable as-is. */
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.link:hover {
+  background: var(--app-hover);
+  color: var(--app-text);
+}
+
+.link[aria-current="page"] {
+  color: var(--app-text);
+  box-shadow: inset 0 -2px 0 var(--app-accent-bright);
+}
+
+.content {
+  flex: 1 1 auto;
+  min-width: 0;
+}
