@@ -9,6 +9,15 @@ NOTE the allowlist is phrased as an allowlist, not as "/api/public/* is the only
 unauthenticated prefix". That phrasing is false: authentication cannot precede
 login, so /api/auth/login, /api/auth/register and /healthz are unauthenticated
 today and must stay so. Adding an entry here is the reviewed act.
+
+This is an AUTHENTICATION gate, not an authorization one: require_admin and
+get_current_user both satisfy it, so swapping require_admin for
+get_current_user on an /api/admin route stays green here. Route-level
+authorization is each endpoint's own business.
+
+The walk can only judge a route that carries both `.methods` and
+`.dependant`. Everything else is pinned in UNJUDGEABLE_ROUTES below and
+asserted there, so a route cannot become invisible to this gate silently.
 """
 
 from __future__ import annotations
@@ -76,13 +85,21 @@ def _env(monkeypatch):
         monkeypatch.setenv(k, v)
 
 
+# SPA_MODE changes the route table: `dev` adds /events/ping and the four FastAPI
+# docs routes (main.py:488-499, :906-912). The enforcing direction must run in
+# every mode that mounts something, or a route added inside the dev block is
+# governed by no test at all. `prod` is deliberately absent: mount_spa raises
+# unless src/call_manager/web/spa/index.html exists (spa_serving.py:37), so a
+# prod-mode case would couple this gate to a frontend build artefact.
+@pytest.mark.parametrize("spa_mode", ["disabled", "dev"])
 @pytest.mark.parametrize("edition", ["full", "match"])
-def test_no_unlisted_route_is_public(monkeypatch, _env, edition):
+def test_no_unlisted_route_is_public(monkeypatch, _env, edition, spa_mode):
     monkeypatch.setenv("APP_EDITION", edition)
+    monkeypatch.setenv("SPA_MODE", spa_mode)
     unlisted = sorted(_auth_free_routes(create_app()) - PUBLIC_ROUTES)
     assert unlisted == [], (
-        f"{edition} edition: these routes have no auth dependency and are not on "
-        f"the reviewed allowlist: {unlisted}"
+        f"{edition} edition, SPA_MODE={spa_mode}: these routes have no auth "
+        f"dependency and are not on the reviewed allowlist: {unlisted}"
     )
 
 
@@ -96,3 +113,57 @@ def test_the_allowlist_has_no_dead_entries(monkeypatch, _env):
     monkeypatch.setenv("SPA_MODE", "dev")
     dead = sorted(PUBLIC_ROUTES - _auth_free_routes(create_app()))
     assert dead == [], f"allowlist entries that no longer match a public route: {dead}"
+
+
+# Routes `_auth_free_routes` structurally CANNOT judge, and why each is safe.
+# The walk needs both `.methods` and `.dependant`; anything missing either is
+# skipped in silence. Measured 2026-09-03 across both editions x
+# {disabled, dev}: exactly these six, and no others.
+#
+# Without this pin the module docstring's claim — "every route outside the
+# allowlist carries an auth dependency" — is broader than what the gate checks,
+# and the next person to add an allowlist entry would trust a guarantee that
+# does not exist.
+UNJUDGEABLE_ROUTES = frozenset(
+    {
+        # APIWebSocketRoute: has a dependant, but no `.methods`. It authenticates
+        # in its BODY via resolve_ws_user (proposal_assist/web/collab_ws.py:98) —
+        # the same shape as require_admin — so a dependency walk could not see it
+        # even with the methods filter relaxed. Full edition only.
+        "/api/ws/workspaces/{workspace_id}/{artifact}",
+        # StaticFiles mount: no dependant. Serves favicon.svg only (main.py:885),
+        # deliberately public.
+        "/static",
+        # FastAPI's own docs, registered through Starlette's add_route, so they
+        # have `.methods` but no `.dependant`. Mounted only when SPA_MODE=dev
+        # (main.py:488-499); that gating is pinned separately by
+        # tests/test_docs_gated_in_prod.py.
+        "/docs",
+        "/docs/oauth2-redirect",
+        "/openapi.json",
+        "/redoc",
+    }
+)
+
+
+def _unjudgeable_routes(app) -> set[str]:
+    """Paths the auth walk skips because they lack `.methods` or `.dependant`."""
+    return {
+        getattr(r, "path", repr(r))
+        for r in app.routes
+        if getattr(r, "methods", None) is None or getattr(r, "dependant", None) is None
+    }
+
+
+@pytest.mark.parametrize("spa_mode", ["disabled", "dev"])
+@pytest.mark.parametrize("edition", ["full", "match"])
+def test_the_walk_judges_every_route_it_does_not_pin(monkeypatch, _env, edition, spa_mode):
+    """No route may become invisible to the gate without a reviewed line here."""
+    monkeypatch.setenv("APP_EDITION", edition)
+    monkeypatch.setenv("SPA_MODE", spa_mode)
+    invisible = sorted(_unjudgeable_routes(create_app()) - UNJUDGEABLE_ROUTES)
+    assert invisible == [], (
+        f"{edition} edition, SPA_MODE={spa_mode}: these routes are skipped by "
+        f"_auth_free_routes and are not pinned as reviewed exclusions, so the "
+        f"gate cannot see whether they are public: {invisible}"
+    )
