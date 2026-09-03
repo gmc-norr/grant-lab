@@ -81,7 +81,11 @@ Behind login:
   (`web/api/admin.py:167`). Without it nobody notices when a source stops
   returning calls and the inbox just quietly gets emptier. In scope.
 - `/admin/users`, `/admin/users/pending`
-- `/admin/boards`, `/admin/boards/new`, `/admin/boards/:id` — admin only
+- `/boards`, `/boards/new`, `/boards/:id` — wall-display management. **Not under
+  `/admin`**: since any user who can edit a profile may build a board (§4.3), an
+  `/admin` path would be a lie about who the page is for, and the route guard
+  would have to contradict the URL. Only the Publish control inside the page is
+  admin-gated.
 
 Plus the existing weekly email digest, which needs no frontend.
 
@@ -204,7 +208,9 @@ New table `boards`:
 | `items_per_page` | int, default 8 | grid is 2 x 4 |
 | `max_pages` | int, default 3 | hard cap — see the exposure note below |
 | `page_seconds` | int, default 30 | dwell time per page |
-| `created_by` | FK → users | |
+| `created_by` | FK → users | the author |
+| `published_by` | FK → users, nullable | admin who made it public; NULL while unpublished |
+| `published_at` | timestamptz, nullable | |
 | `created_at` / `updated_at` | timestamptz | |
 
 New table `board_items` — the **approved queue**:
@@ -237,7 +243,32 @@ action, and a visible count of what is waiting. An approval UI that costs a
 minute per call will be abandoned, and an abandoned gate is worse than no gate
 because the board silently stops updating.
 
-Only admins may create, edit, approve items for, or publish a board.
+### Who may do what
+
+The risky act is not creating a board — it is making one **world-readable**. So
+the two are separated:
+
+| Action | Who |
+| --- | --- |
+| Create a board, edit its settings, approve/reorder items | any user who **can edit the board's profile** |
+| Flip `is_published` (and un-publish) | **admin only** |
+| Delete a board | its creator, or an admin |
+
+"Can edit the profile" is not a new concept: `web/api/profiles.py:151` already
+defines it as `p.created_by == user.id or user.is_admin`. Boards reuse that rule
+exactly, so no second permission model appears.
+
+This maps the permission to where the risk actually sits. A researcher builds the
+board for their group's own screen — harmless, because an unpublished board is
+private and its slug resolves to a 404. An admin then glances at it and
+publishes. A hospital already understands that shape: it is the same as any
+comms sign-off.
+
+`created_by` on `boards` is the author; `approved_by` on `board_items` records
+who confirmed each call. Publication is recorded separately (`published_by`,
+`published_at`) because "I picked these calls" and "I put them on a public wall"
+are different claims and a later question about the wall will be about the
+second one.
 
 ## 5. Making "out of release 1" true
 
@@ -538,6 +569,15 @@ Three gates that make the design's claims true rather than asserted:
    pointing at a route the server will 404. Two such links exist today
    (`CallRow.tsx:55`, `CallDetailBody.tsx:48`), so this gate starts red and
    removing them is what turns it green.
+
+5. **`/api/public/*` is the only unauthenticated prefix in the app.** Walk every
+   route on the app and assert that each one outside that prefix carries an auth
+   dependency. This matters because auth here is enforced **per route**
+   (`Depends(get_current_user)`), not by middleware — there is no deny-by-default
+   path check, so an endpoint becomes public by *omitting a line*. That is silent
+   in both directions: the board needs the omission, and any other route that
+   loses it ships wide open with nothing to notice. This gate is the only thing
+   that would catch the second case.
 
 Plus, per the repo convention, mutation-test each gate: break the thing the gate
 claims to protect and confirm the gate goes red.
