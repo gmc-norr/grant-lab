@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter
 
 import call_manager.web.api.annotations as annotations_router
@@ -65,7 +67,7 @@ _FULL_ONLY = (
 )
 
 
-def build_api_router(*, edition: str = "full") -> APIRouter:
+def build_api_router(*, edition: Literal["match", "full"] = "full") -> APIRouter:
     """Compose the /api router for one edition. `edition` is Settings.app_edition."""
     r = APIRouter(
         prefix="/api",

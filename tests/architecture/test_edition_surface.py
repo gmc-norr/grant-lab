@@ -11,11 +11,27 @@ import pytest
 
 from call_manager.main import create_app
 
-# Every path prefix the proposal-assist half owns. A match build must register
-# NONE of these. Derived from main.py's router list and api/__init__.py.
+# Path prefixes the proposal-assist half owns. A match build must register NONE
+# of these.
+#
+# Measured 2026-09-03: /api/workspaces alone catches all 64 routes the match
+# edition drops — every proposal-assist router in main.py carries
+# prefix="/api/workspaces", and api/__init__.py's _FULL_ONLY routers do too.
+# The other eight entries match nothing today. They are kept as forward
+# declarations, NOT as evidence of eight independent guards.
+#
+# A prefix blocklist can only catch an ANTICIPATED leak, so
+# test_match_edition_drops_only_excluded_routes below pins the stronger,
+# self-maintaining property: match's surface is a strict subset of full's,
+# and every path full has that match lacks is under one of these prefixes.
+# A future proposal-assist router at an unanticipated prefix fails THAT test.
 EXCLUDED_PREFIXES = (
     "/workspaces",
     "/api/workspaces",
+    # The collab websocket. NOT under /api/workspaces — this entry is the
+    # second live one, and test_match_edition_drops_only_excluded_routes is
+    # what found it missing.
+    "/api/ws/",
     "/api/turns",
     "/api/annotations",
     "/api/rubric",
@@ -111,3 +127,30 @@ def test_match_edition_accepts_drafting_disabled(monkeypatch, _base_env):
     monkeypatch.setenv("APP_EDITION", "match")
     monkeypatch.setenv("DRAFTING_ENABLED", "false")
     create_app()  # must not raise
+
+
+def test_match_edition_drops_only_excluded_routes(monkeypatch, _base_env):
+    """The self-maintaining half of the gate.
+
+    EXCLUDED_PREFIXES can only catch a leak somebody anticipated. This one needs
+    no list kept current: it builds both editions and asserts (a) match's surface
+    is a strict subset of full's — the match build may not INVENT a route — and
+    (b) every path full has that match lacks is under a declared excluded prefix.
+    A future proposal-assist router mounted at an unanticipated prefix, which the
+    blocklist would wave through, fails here.
+    """
+    monkeypatch.setenv("APP_EDITION", "full")
+    full = _paths(create_app()) | _ws_paths(create_app())
+    monkeypatch.setenv("APP_EDITION", "match")
+    match = _paths(create_app()) | _ws_paths(create_app())
+
+    invented = sorted(match - full)
+    assert invented == [], f"match edition registered routes full does not have: {invented}"
+
+    dropped = full - match
+    assert dropped, "match dropped NOTHING — the edition split is not doing anything"
+    undeclared = sorted(p for p in dropped if not p.startswith(EXCLUDED_PREFIXES))
+    assert undeclared == [], (
+        "match dropped routes that no EXCLUDED_PREFIXES entry declares. Either the "
+        f"drop is wrong or the prefix list is stale: {undeclared}"
+    )

@@ -184,7 +184,8 @@ class Settings(BaseSettings):
             "so those endpoints do not exist rather than returning 403. 'full' is "
             "the complete application. This is a deploy-time decision, not a "
             "runtime toggle; the frontend has a matching build flag "
-            "(VITE_APP_EDITION) and the two must agree."
+            "(VITE_APP_EDITION) and the two must agree. A 'match' process "
+            "REQUIRES DRAFTING_ENABLED=false and refuses to start otherwise."
         ),
     )
     extractor_version: str = Field(
