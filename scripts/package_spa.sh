@@ -6,29 +6,62 @@
 # straight after a build serves the PREVIOUS bundle. That is how a match
 # deployment ships a full-edition cockpit with every gate green.
 #
-# Refuses to package a build that has not passed the bundle gate, so the copy
-# cannot become the step where the guarantee is lost.
+# THE EDITION IS READ FROM THE BUNDLE, NOT FROM THE INVOCATION. The first
+# version of this script keyed the gate off ${VITE_APP_EDITION:-full}, which had
+# two reachable silent failures: `./scripts/package_spa.sh` after a full build —
+# one keystroke from the documented `pnpm package:match` — skipped the gate
+# entirely and packaged a cockpit into the served tree at exit 0; and a
+# legitimately .env-configured match build (vite.config.ts reads loadEnv, not
+# process.env) has no shell variable set, so it too skipped the gate and printed
+# `edition=full` over a match bundle. dist/module-manifest.json is the repo's
+# trusted edition oracle and it was sitting right here unread.
+#
+# NOTE there is a SECOND copy step: .github/workflows/ci.yml:118 does its own
+# `rm -rf src/call_manager/web/spa` + `docker cp` for the wheel, does not call
+# this script, and runs no bundle gate — and frontend/Dockerfile builds the FULL
+# edition. This script governs the local path only. Keep them in mind together.
+#
+# Pinned by tests/architecture/test_package_spa.py.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$ROOT/frontend/dist"
 SPA="$ROOT/src/call_manager/web/spa"
 
+# ROOT is derived from BASH_SOURCE, so a symlinked scripts/ dir resolves it to
+# the wrong tree. Cheap positive identity check before anything destructive.
+[ -f "$ROOT/scripts/check_match_bundle.mjs" ] ||
+  { echo "FATAL: $ROOT is not the repo root (no scripts/check_match_bundle.mjs)" >&2; exit 1; }
 [ -f "$DIST/index.html" ] || { echo "FATAL: no build at $DIST — run a build first" >&2; exit 1; }
 
-# Match builds must be gate-clean before they are allowed near the served tree.
-if [ "${VITE_APP_EDITION:-full}" = "match" ]; then
-  node "$ROOT/scripts/check_match_bundle.mjs" "$DIST" || {
-    echo "FATAL: refusing to package a match build that fails the bundle gate" >&2
-    exit 1
-  }
+# Ask the ARTEFACT which edition it is. Clean under the excluded-path list means
+# a match bundle; anything else is a full one.
+if node "$ROOT/scripts/check_match_bundle.mjs" "$DIST" >/dev/null 2>&1; then
+  EDITION=match
+else
+  EDITION=full
 fi
 
+# A caller that ASKED for match and got a full bundle is the failure this script
+# exists to stop. Print the gate's real output so the offending modules are named.
+if [ "${VITE_APP_EDITION:-}" = "match" ] && [ "$EDITION" != "match" ]; then
+  node "$ROOT/scripts/check_match_bundle.mjs" "$DIST" >&2 || true
+  echo "FATAL: refusing to package a match build that fails the bundle gate" >&2
+  exit 1
+fi
+
+# Everything above this line is validation. Nothing destructive may move above
+# it: a script that deletes before it validates destroys the served tree on the
+# way to failing. tests/architecture/test_package_spa.py mutates exactly that.
 rm -rf "$SPA"
 mkdir -p "$SPA"
 cp -R "$DIST"/. "$SPA"/
-# A build artefact, not an asset — it lists source paths and serves no purpose
-# to a browser (Task 6, Step 7).
+# A build artefact, not an asset (Task 6, Step 7). Only /assets is mounted
+# static (web/spa_serving.py), so it was never browser-reachable anyway — but
+# removing it leaves the served tree auditable by chunk-name grep alone, the
+# technique check_match_bundle.mjs's header documents as defeated. edition.txt
+# below is the replacement: small, and it records what the manifest proved.
 rm -f "$SPA/module-manifest.json"
+printf 'edition=%s\npackaged=%s\n' "$EDITION" "$(date -Is)" > "$SPA/edition.txt"
 
-echo "packaged $(du -sh "$SPA" | cut -f1) into src/call_manager/web/spa (edition=${VITE_APP_EDITION:-full})"
+echo "packaged $(du -sb "$SPA" | cut -f1) bytes into src/call_manager/web/spa (edition=$EDITION, from the bundle)"
