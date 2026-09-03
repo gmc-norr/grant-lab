@@ -2,7 +2,7 @@
 import { Button, Group, Menu, Paper, Popover, Text, TextInput } from "@mantine/core";
 import type { Editor } from "@tiptap/core";
 import { BubbleMenu, type BubbleMenuProps } from "@tiptap/react/menus";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { ApiError } from "../api/client";
 import { useAckDisclosure, useSubmitTurn } from "../api/turns";
@@ -37,6 +37,7 @@ const BUBBLE_OPTIONS = {
 const shouldShowSelectionToolbar: NonNullable<BubbleMenuProps["shouldShow"]> = ({ state }) =>
   deriveClaimAnchor(state) !== null;
 
+const PLUGIN_KEY = "draft-selection-actions";
 const appendToBody = () => document.body;
 
 export type TiptapSelectionToolbarProps = {
@@ -67,6 +68,35 @@ export function TiptapSelectionToolbar(props: TiptapSelectionToolbarProps) {
     const update = () => setClaim(deriveClaimAnchor(editor.state));
     editor.on("selectionUpdate", update);
     return () => { editor.off("selectionUpdate", update); };
+  }, [editor]);
+
+  // Re-position whenever the bubble-menu wrapper changes size. The tiptap plugin
+  // positions the wrapper inside ProseMirror's updateState — before this component's
+  // selectionUpdate listener runs, so before React commits the Paper into it. It
+  // therefore measures an EMPTY wrapper (0 px) and, with placement "top", writes a top
+  // that puts the later-mounted 52 px Paper exactly one own-height too low: ON the
+  // selected text. Nothing re-measures on its own (only selection/doc changes, window
+  // resize, scroll). Every single-shot selection — dblclick, one-step drag, a synthetic
+  // range — stays wrong; multi-step ones (drag with moves, shift+arrow) self-correct on
+  // the next selection transaction. Measured in-browser 2026-09-03. The plugin's one
+  // reposition hook is a transaction carrying setMeta(pluginKey, "updatePosition").
+  // Position writes do not change the wrapper's size, so this cannot loop. Invariant:
+  // any IN-FLOW child that grows the wrapper (the needsAck alert, turnError) lifts the
+  // whole toolbar so its bottom stays 8 px above the selection; the Edit popover is out
+  // of flow (absolute) and does not move it — measured.
+  const anchorRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = anchorRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      if (editor.isDestroyed) return;
+      // The plugin's hide() removes the wrapper from the DOM, which reports as 0×0:
+      // nothing to position, so do not spend a transaction on it.
+      if (!entries.some((entry) => entry.contentRect.height > 0)) return;
+      editor.view.dispatch(editor.state.tr.setMeta(PLUGIN_KEY, "updatePosition"));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
   }, [editor]);
 
   // Locate the section in the sections array
@@ -149,8 +179,9 @@ export function TiptapSelectionToolbar(props: TiptapSelectionToolbarProps) {
   return (
     <>
       <BubbleMenu
+        ref={anchorRef}
         editor={editor}
-        pluginKey="draft-selection-actions"
+        pluginKey={PLUGIN_KEY}
         updateDelay={0}
         appendTo={appendToBody}
         shouldShow={shouldShowSelectionToolbar}

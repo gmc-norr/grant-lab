@@ -3,8 +3,8 @@ import { MantineProvider } from "@mantine/core";
 import type { Editor } from "@tiptap/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen } from "@testing-library/react";
-import type { ReactNode } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ReactNode, Ref } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "../api/client";
 import { theme } from "../theme/theme";
@@ -33,11 +33,14 @@ type BubbleMenuTestProps = {
   children?: ReactNode;
   options?: Record<string, unknown>;
   shouldShow?: (props: { state: unknown }) => boolean;
+  ref?: Ref<HTMLDivElement>;
 };
+// The real BubbleMenu forwards its ref to the wrapper div the tiptap plugin positions;
+// the mock does the same so the toolbar's ResizeObserver has an element to observe.
 vi.mock("@tiptap/react/menus", () => ({
   BubbleMenu: (props: BubbleMenuTestProps) => {
     bubbleMenuMock(props);
-    return <div data-testid="bubble-menu">{props.children}</div>;
+    return <div ref={props.ref} data-testid="bubble-menu">{props.children}</div>;
   },
 }));
 vi.mock("../api/turns", () => ({
@@ -90,6 +93,7 @@ function renderToolbar(overrides: {
   connected?: boolean;
   settled?: boolean;
   sections?: { sha: string; text: string }[];
+  editor?: Editor;
 } = {}) {
   const {
     canEdit = true,
@@ -97,13 +101,14 @@ function renderToolbar(overrides: {
     connected = true,
     settled = true,
     sections = SECTIONS,
+    editor = fakeEditor(),
   } = overrides;
   const qc = new QueryClient();
-  render(
+  return render(
     <MantineProvider theme={theme} defaultColorScheme="dark">
       <QueryClientProvider client={qc}>
         <TiptapSelectionToolbar
-          editor={fakeEditor()}
+          editor={editor}
           provider={fakeProvider(connected, settled)}
           workspaceId="ws-1"
           head={HEAD}
@@ -332,5 +337,99 @@ describe("TiptapSelectionToolbar Ask errors", () => {
     fireEvent.click(await screen.findByRole("button", { name: /i understand/i }));
     expect(submitMock).toHaveBeenCalledTimes(2);
     expect(submitMock.mock.calls[1][0].selection_context.anchor).toBe("Test claim.");
+  });
+});
+
+describe("TiptapSelectionToolbar repositioning", () => {
+  // The tiptap bubble-menu plugin measures its wrapper the instant the selection changes —
+  // BEFORE React commits the Paper into it. Measured in-browser 2026-09-03: the wrapper is
+  // appended EMPTY (0 px), the Paper mounts ~50 ms later, and the plugin's position write
+  // then lands one own-height too low — ON the selected text — for every single-shot
+  // selection (dblclick, one-step drag, synthetic range). Nothing re-measures on its own.
+  // The plugin's one reposition hook is a transaction carrying
+  // setMeta(pluginKey, "updatePosition"); this pins the wiring wrapper → resize → that
+  // transaction. The geometry itself is pinned by e2e/collab.spec.ts (gap <= 24 px).
+  type RoCallback = (entries: unknown[], observer: unknown) => void;
+  type Captured = { cb: RoCallback; observe: ReturnType<typeof vi.fn>; disconnect: ReturnType<typeof vi.fn> };
+  let captured: Captured[];
+  let realResizeObserver: typeof ResizeObserver;
+
+  beforeEach(() => {
+    captured = [];
+    realResizeObserver = globalThis.ResizeObserver;
+    // Mantine may construct observers of its own, so each instance is captured and the
+    // test picks the one that observed the bubble-menu wrapper.
+    globalThis.ResizeObserver = class {
+      observe = vi.fn();
+      unobserve = vi.fn();
+      disconnect = vi.fn();
+      constructor(cb: RoCallback) {
+        captured.push({ cb, observe: this.observe, disconnect: this.disconnect });
+      }
+    } as unknown as typeof ResizeObserver;
+  });
+  afterEach(() => {
+    globalThis.ResizeObserver = realResizeObserver;
+  });
+
+  /** fakeEditor() plus the view/state surface the reposition dispatch needs. */
+  function editorWithView() {
+    const editor = fakeEditor();
+    const tr = { setMeta: vi.fn() };
+    tr.setMeta.mockReturnValue(tr);
+    const dispatch = vi.fn();
+    Object.assign(editor, {
+      isDestroyed: false,
+      state: { selection: {}, tr },
+      view: { dispatch },
+    });
+    return { editor, tr, dispatch };
+  }
+
+  const grown = [{ contentRect: { height: 52 } }]; // what the wrapper reports once the Paper is in it
+  const hidden = [{ contentRect: { height: 0 } }]; // what it reports after the plugin's hide() detaches it
+
+  function wrapperObserver(): Captured {
+    const wrapper = screen.getByTestId("bubble-menu");
+    const ro = captured.find((c) => c.observe.mock.calls.some((call) => call[0] === wrapper));
+    expect(ro, "no ResizeObserver observed the bubble-menu wrapper").toBeDefined();
+    return ro!;
+  }
+
+  it("observes the bubble-menu wrapper and asks the plugin to re-position when it resizes", () => {
+    const { editor, tr, dispatch } = editorWithView();
+    const { unmount } = renderToolbar({ editor });
+    const ro = wrapperObserver();
+    expect(dispatch).not.toHaveBeenCalled();
+
+    act(() => ro.cb(grown, {}));
+
+    expect(tr.setMeta).toHaveBeenCalledWith("draft-selection-actions", "updatePosition");
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(dispatch).toHaveBeenCalledWith(tr);
+
+    unmount();
+    expect(ro.disconnect).toHaveBeenCalled();
+  });
+
+  it("does not dispatch into a destroyed editor", () => {
+    const { editor, dispatch } = editorWithView();
+    renderToolbar({ editor });
+    const ro = wrapperObserver();
+    (editor as unknown as { isDestroyed: boolean }).isDestroyed = true;
+
+    act(() => ro.cb(grown, {}));
+
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("ignores the zero-height notification a hidden (detached) wrapper produces", () => {
+    const { editor, dispatch } = editorWithView();
+    renderToolbar({ editor });
+    const ro = wrapperObserver();
+
+    act(() => ro.cb(hidden, {}));
+
+    expect(dispatch).not.toHaveBeenCalled();
   });
 });

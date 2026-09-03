@@ -55,6 +55,55 @@ async function saveVersion(page: Page) {
   ]);
 }
 
+/** The selection toolbar must float clear of the selected text — above it (placement
+ * "top", offset 8) or, flipped, below it — never ON it. Two things are pinned: the toolbar
+ * and the selection do not overlap vertically, and the near edge is within 24 px.
+ *
+ * Polled, not sampled once: the tiptap bubble-menu plugin positions its wrapper BEFORE
+ * React commits the Paper into it, so the first write measures an EMPTY wrapper and lands
+ * the toolbar one own-height too low (on the selection); a ResizeObserver in
+ * TiptapSelectionToolbar then asks the plugin to re-position. Polling tolerates that
+ * one-frame correction while still failing on the persistent bug (gap 30 > 24, overlap).
+ * Measured 2026-09-03: every single-shot selection — a real dblclick, a one-step drag,
+ * the synthetic range below — was wrong; multi-step drags and shift+arrow self-corrected.
+ * Both single-shot paths a user or this harness takes are pinned: dblclick in (c), the
+ * synthetic range in (e). */
+async function expectToolbarClearOfSelection(page: Page) {
+  const selectionToolbar = page.getByRole("toolbar", { name: "Selection actions" });
+  await expect(selectionToolbar).toBeVisible();
+  const viewport = page.viewportSize();
+  expect(viewport).not.toBeNull();
+  await expect
+    .poll(
+      async () => {
+        const toolbarBox = await selectionToolbar.boundingBox();
+        if (!toolbarBox) return "toolbar has no box";
+        const selectionBox = await page.evaluate(() => {
+          const selection = window.getSelection();
+          if (!selection || selection.rangeCount === 0) throw new Error("selection disappeared");
+          const rect = selection.getRangeAt(0).getBoundingClientRect();
+          return { top: rect.top, bottom: rect.bottom };
+        });
+        const toolbarTop = toolbarBox.y;
+        const toolbarBottom = toolbarBox.y + toolbarBox.height;
+        const overlaps = toolbarBottom > selectionBox.top && toolbarTop < selectionBox.bottom;
+        const verticalGap = Math.min(
+          Math.abs(toolbarBottom - selectionBox.top),
+          Math.abs(toolbarTop - selectionBox.bottom),
+        );
+        const inViewport = toolbarTop >= 0 && toolbarBottom <= viewport!.height;
+        if (overlaps || verticalGap > 24 || !inViewport) {
+          return `toolbar ${toolbarTop.toFixed(1)}-${toolbarBottom.toFixed(1)} vs selection `
+            + `${selectionBox.top.toFixed(1)}-${selectionBox.bottom.toFixed(1)}: `
+            + `overlaps=${overlaps} gap=${verticalGap.toFixed(1)} inViewport=${inViewport}`;
+        }
+        return "clear";
+      },
+      { timeout: 5_000, message: "selection toolbar must sit clear of the selected text" },
+    )
+    .toBe("clear");
+}
+
 test.describe("collab two-browser (distinct users)", () => {
   test.skip(
     !WS || !COOKIE_OWNER || !COOKIE_MEMBER,
@@ -174,6 +223,8 @@ test.describe("collab two-browser (distinct users)", () => {
     await edA.getByText("diagnostic", { exact: false }).first().dblclick();
     const citeBtn = A.page.getByRole("button", { name: "Cite" });
     await expect(citeBtn).toBeEnabled({ timeout: 8_000 });
+    // A real dblclick is a single-shot selection — the path the toolbar-overlap bug hit.
+    await expectToolbarClearOfSelection(A.page);
     await citeBtn.click();
 
     const composer = A.page.getByRole("complementary", { name: /add a citation/i });
@@ -297,25 +348,7 @@ test.describe("collab two-browser (distinct users)", () => {
     });
     const citeBtn = A.page.getByRole("button", { name: "Cite" });
     await expect(citeBtn).toBeEnabled({ timeout: 8_000 });
-    const selectionToolbar = A.page.getByRole("toolbar", { name: "Selection actions" });
-    await expect(selectionToolbar).toBeVisible();
-    const toolbarBox = await selectionToolbar.boundingBox();
-    const selectionBox = await A.page.evaluate(() => {
-      const selection = window.getSelection();
-      if (!selection || selection.rangeCount === 0) throw new Error("selection disappeared");
-      const rect = selection.getRangeAt(0).getBoundingClientRect();
-      return { top: rect.top, bottom: rect.bottom };
-    });
-    const viewport = A.page.viewportSize();
-    expect(toolbarBox).not.toBeNull();
-    expect(viewport).not.toBeNull();
-    expect(toolbarBox!.y).toBeGreaterThanOrEqual(0);
-    expect(toolbarBox!.y + toolbarBox!.height).toBeLessThanOrEqual(viewport!.height);
-    const verticalGap = Math.min(
-      Math.abs(toolbarBox!.y + toolbarBox!.height - selectionBox.top),
-      Math.abs(toolbarBox!.y - selectionBox.bottom),
-    );
-    expect(verticalGap).toBeLessThanOrEqual(24);
+    await expectToolbarClearOfSelection(A.page);
     await citeBtn.click();
 
     const composer = A.page.getByRole("complementary", { name: /add a citation/i });
