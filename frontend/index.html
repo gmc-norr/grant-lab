@@ -4,6 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <!--
+      SHARED BY BOTH EDITIONS. There is one index.html and one build entry point;
+      the edition split happens at the router alias (vite.config.ts), long after
+      this <title> is fixed. So the Call Match tab reads "Grant Lab" even though
+      SimpleShell's brand says "Call Match". Left as-is deliberately: renaming the
+      product surface is a naming decision for the humans shipping release 1, not
+      a defect to patch. If it should differ per edition, this is the place —
+      vite's transformIndexHtml or an env-driven %VITE_APP_TITLE% placeholder.
+    -->
     <title>Grant Lab</title>
   </head>
   <body>

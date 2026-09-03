@@ -102,6 +102,23 @@ export default defineConfig(({ mode }) => {
   // file (kept in src/ so tsc picks up its `expect` type augmentation). `vite
   // build` ignores this `test` key.
   test: {
+    // Pin the THIRD reader of VITE_APP_EDITION. Without this, `import.meta.env`
+    // under vitest carries whatever the developer's shell happens to export, so
+    // src/virtual-router.test.ts — the only test that resolves the build-time
+    // alias — asserted the FULL direction and nothing else, in CI and locally.
+    // The match direction is the one this branch exists to protect; CI runs it
+    // as a second, explicitly-VITE_APP_EDITION=match invocation
+    // (.github/workflows/ci.yml, right after the bundle gate).
+    //
+    // The value is APP_EDITION, not a literal "full", and that is measured, not
+    // stylistic: vitest's `test.env` OVERRIDES an inherited process.env value in
+    // import.meta.env (verified 2026-09-04 — a literal "full" here made
+    // `VITE_APP_EDITION=match pnpm run test src/virtual-router.test.ts` fail,
+    // because the alias resolved to router.simple.tsx while edition.ts still
+    // read "full"). Using the same config-time constant the alias uses keeps the
+    // two readers in agreement in BOTH directions, and still resolves to "full"
+    // when nothing is set — which is the determinism this pin is for.
+    env: { VITE_APP_EDITION: APP_EDITION },
     environment: "jsdom",
     globals: true,
     setupFiles: ["./src/test-setup.ts"],

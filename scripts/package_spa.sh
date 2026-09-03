@@ -16,10 +16,25 @@
 # `edition=full` over a match bundle. dist/module-manifest.json is the repo's
 # trusted edition oracle and it was sitting right here unread.
 #
-# NOTE there is a SECOND copy step: .github/workflows/ci.yml:118 does its own
-# `rm -rf src/call_manager/web/spa` + `docker cp` for the wheel, does not call
-# this script, and runs no bundle gate — and frontend/Dockerfile builds the FULL
-# edition. This script governs the local path only. Keep them in mind together.
+# NOTE there are TWO OTHER writers of the served directory, and neither calls
+# this script or runs any bundle gate:
+#   1. .github/workflows/ci.yml:132-137 — `rm -rf src/call_manager/web/spa` +
+#      `docker cp` for the wheel, and frontend/Dockerfile builds the FULL
+#      edition. (The earlier ":118" here was stale; 118 is the OSV-Scanner step.)
+#   2. scripts/collab_e2e_run.sh:110-113 — under E2E_SPA_MODE=prod it runs
+#      `pnpm build` (FULL: no VITE_APP_EDITION) and then
+#      `rsync -a --delete frontend/dist/ src/call_manager/web/spa/`. So ANY local
+#      SPA_MODE=prod e2e run leaves a full build in the served tree even if
+#      `pnpm package:match` ran first — and it writes no edition.txt, so the
+#      marker from the previous packaging is deleted with the rest of the tree.
+# This script governs the local packaging path only. Keep all three in mind
+# together — and note that web/spa_serving.py:mount_spa's edition check does NOT
+# rescue either of them: it refuses to start only on a marker that is PRESENT and
+# DISAGREEING, and neither writer leaves one (writer 1 never creates it; writer
+# 2's `rsync --delete` removes the one this script left, since edition.txt is not
+# in frontend/dist). Absent means unknown, which is what keeps the CI/Docker
+# deployment bootable. So after either of them, re-run `pnpm package:match`
+# before serving a match deployment; nothing will tell you if you do not.
 #
 # Pinned by tests/architecture/test_package_spa.py.
 set -euo pipefail

@@ -95,6 +95,17 @@ jobs:
       - name: Match-edition bundle gate (no cockpit module)
         run: cd frontend && pnpm run build:match && pnpm run check:bundle
 
+      # A SECOND vitest invocation, and it needs to be second. The build-time
+      # alias (virtual:app-router -> router.tsx | router.simple.tsx) has exactly
+      # one test, src/virtual-router.test.ts, and a vitest run can only ever
+      # exercise ONE direction of it: the alias is resolved once, at vite config
+      # time, from VITE_APP_EDITION. The run above has it unset, so it asserts
+      # the full direction — and the match direction, the one this branch exists
+      # to protect, was asserted nowhere. There is no way to cover both in one
+      # process, hence the extra ~10 s.
+      - name: Match-edition router alias (the direction the main run cannot cover)
+        run: cd frontend && VITE_APP_EDITION=match pnpm run test src/virtual-router.test.ts
+
       # OpenAPI -> TS drift: regenerate the committed client types from the live
       # route definitions (DB-free; no server needed) and fail if they changed.
       # Keeps frontend/src/api/schema.gen.ts in lockstep with the FastAPI schema.
