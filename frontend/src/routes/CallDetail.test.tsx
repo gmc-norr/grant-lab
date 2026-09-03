@@ -62,14 +62,19 @@ it("renders the ranking hero, analyst notes, and criterion why-string", async ()
   expect(screen.getByText("Cosine similarity 0.420 (pass threshold 0.30).")).toBeInTheDocument();
 });
 
-it("Start drafting links to /cockpit/new with the call + best profile prefilled", async () => {
+it("the full call page renders NO Start-drafting control", async () => {
+  // INVERTED from "Start drafting links to /cockpit/new with the call + best
+  // profile prefilled". An absence assertion on an async page is worthless until
+  // the page has actually rendered, so wait for the heading FIRST — otherwise
+  // this passes on a page that never loaded at all.
   vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: RANKED, error: undefined } as never);
   renderDetail();
-  const href =
-    (await screen.findByRole("link", { name: /start drafting/i })).getAttribute("href") ?? "";
-  expect(href).toContain("/cockpit/new?");
-  expect(href).toContain("call_id=5");
-  expect(href).toContain("profile_id=7"); // best_profile_id from RANKED
+  expect(await screen.findByRole("heading", { name: "Genomics Grant" })).toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: /start drafting/i })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /start drafting/i })).not.toBeInTheDocument();
+  for (const a of screen.queryAllByRole("link")) {
+    expect(a.getAttribute("href") ?? "").not.toContain("/cockpit");
+  }
 });
 
 it("renders the low band for a zero aggregate score", async () => {

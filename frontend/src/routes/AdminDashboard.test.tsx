@@ -6,7 +6,24 @@ import * as clientMod from "../api/client";
 import { renderWithProviders } from "../test-utils";
 import { AdminDashboard } from "./AdminDashboard";
 
+// The "Manage golden set" link is gated on the edition: /admin/golden-set is not
+// mounted by router.simple.tsx. noCockpitLinks.test.tsx EXEMPTs AdminDashboard
+// .tsx (a source scan cannot tell a gated literal from an ungated one), so the
+// two tests at the bottom of this file are the only thing pinning that gating.
+// See AdminNav.test.tsx for why the mock uses a getter.
+const edition = vi.hoisted(() => ({ isMatch: false }));
+vi.mock("../edition", () => ({
+  get isMatchEdition() {
+    return edition.isMatch;
+  },
+  get APP_EDITION() {
+    return edition.isMatch ? "match" : "full";
+  },
+  resolveEdition: (raw: string | undefined) => (raw === "match" ? "match" : "full"),
+}));
+
 afterEach(() => {
+  edition.isMatch = false;
   vi.restoreAllMocks();
 });
 
@@ -92,4 +109,30 @@ it("reenable posts the user id", async () => {
   await waitFor(() =>
     expect(post).toHaveBeenCalledWith("/api/admin/digest/reenable", { body: { user_id: 9 } }),
   );
+});
+
+it("the FULL edition links out to the golden-set admin page", async () => {
+  // The control: without it, gating that hid the link in BOTH editions would
+  // still pass the match test below.
+  edition.isMatch = false;
+  mockDash();
+  renderWithProviders(<AdminDashboard />);
+  expect(await screen.findByRole("link", { name: /manage golden set/i })).toHaveAttribute(
+    "href",
+    "/admin/golden-set",
+  );
+});
+
+it("the MATCH edition renders no link to the unmounted golden-set page", async () => {
+  edition.isMatch = true;
+  mockDash();
+  renderWithProviders(<AdminDashboard />);
+  // Wait for the page to actually render first — an absence assertion against a
+  // still-loading page passes for the wrong reason.
+  expect(await screen.findByText("Vinnova")).toBeInTheDocument();
+  expect(screen.getByText(/Ranking quality/)).toBeInTheDocument(); // the card is still there
+  expect(screen.queryByRole("link", { name: /manage golden set/i })).not.toBeInTheDocument();
+  for (const a of screen.queryAllByRole("link")) {
+    expect(a.getAttribute("href") ?? "").not.toContain("/admin/golden-set");
+  }
 });

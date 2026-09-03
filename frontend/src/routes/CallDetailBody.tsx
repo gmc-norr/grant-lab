@@ -1,6 +1,5 @@
 // frontend/src/routes/CallDetailBody.tsx
-import { Anchor, Badge, Box, Button, Card, Code, Group, Stack, Text, Title } from "@mantine/core";
-import { Link } from "react-router-dom";
+import { Anchor, Badge, Box, Card, Code, Group, Stack, Text, Title } from "@mantine/core";
 
 import type { CallDetail } from "../api/calls";
 import { DeadlineLocal } from "./Deadline";
@@ -24,10 +23,12 @@ const GRID_AUTOFILL = (min: string) => ({
 // the useCallDetail payload — no hooks, no routing state, no mutations. Returns a
 // Fragment so the parent's <Stack> controls vertical rhythm. Hide/unhide and the
 // page chrome live in CallDetail (v1: hide is full-page only).
-export function CallDetailBody({ call, ranking, criteria, best_profile_id }: CallDetail) {
-  const startParams = new URLSearchParams({ call_id: String(call.id), call_title: call.title });
-  if (best_profile_id != null) startParams.set("profile_id", String(best_profile_id));
-
+//
+// There is NO "Start drafting workspace" button: it linked to /cockpit/new, which
+// release 1 does not mount. Pinned by noCockpitLinks.test.tsx, CallDetailBody
+// .test.tsx and CallDetail.test.tsx. best_profile_id is still on the wire payload
+// (CallDetail) — it fed only that link, so it is no longer destructured here.
+export function CallDetailBody({ call, ranking, criteria }: CallDetail) {
   const band = ranking
     ? ranking.aggregate_score >= 70 ? "strong" : ranking.aggregate_score > 0 ? "mid" : "low"
     : "low";
@@ -43,11 +44,6 @@ export function CallDetailBody({ call, ranking, criteria, best_profile_id }: Cal
           {call.programme && <> · {call.programme}</>}
           {call.external_id && <> · <Code>{call.external_id}</Code></>}
         </Text>
-        <Box mt="sm">
-          <Button component={Link} to={`/cockpit/new?${startParams.toString()}`} size="sm">
-            Start drafting workspace
-          </Button>
-        </Box>
       </Box>
 
       {ranking && (

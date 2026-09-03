@@ -91,15 +91,24 @@ it("paginating preserves the show_closed toggle in the URL", async () => {
   });
 });
 
-it("threads the dashboard's effective profile into the Start-drafting links", async () => {
+it("threads the dashboard's effective profile into the row links, and emits none into /cockpit", async () => {
+  // INVERTED from "threads the dashboard's effective profile into the
+  // Start-drafting links". Profile threading is still real behaviour — CallRow
+  // still takes profileId and still pins it into the reading-pane selection URL —
+  // so the original property is kept, retargeted at the link that survives.
+  // Asserting only the absence would have silently dropped that coverage.
   vi.spyOn(clientMod.api, "GET").mockResolvedValue(
     itemsBody([row(1, "Call one", null)], {
       effective: { profile_id: 5, source: null, sort: "newest", show_closed: false },
     }) as never,
   );
   renderAt("/");
-  const start = await screen.findByRole("link", { name: "Start drafting" });
-  expect(start.getAttribute("href")).toContain("profile_id=5");
+  const title = await screen.findByRole("link", { name: "Call one" });
+  expect(title.getAttribute("href")).toContain("profile=5");
+  expect(screen.queryByRole("link", { name: /start drafting/i })).not.toBeInTheDocument();
+  for (const a of screen.getAllByRole("link")) {
+    expect(a.getAttribute("href") ?? "").not.toContain("/cockpit");
+  }
 });
 
 it("a 401 (session expired) redirects to /login instead of dead-ending on an error", async () => {

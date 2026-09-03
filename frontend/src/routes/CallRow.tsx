@@ -9,18 +9,18 @@ import { selectionSearch } from "./callSelection";
 
 // One call in the list: the title selects the call into the right reading pane
 // (URL ?selected=id, preserving filters), a muted meta line (source · deadline),
-// the banded match pill, and a "Start drafting" action. The whole row is
-// click-to-select for mouse users; the title + Start-drafting anchors remain the
-// keyboard/interactive targets, so the row onClick ignores clicks that land on an
-// <a>/<button> (no nested-interactive a11y trap, no double navigation). profileId
-// is the dashboard's resolved effective profile, pinned so the pane ranks the same.
+// and the banded match pill. The whole row is click-to-select for mouse users;
+// the title anchor remains the keyboard/interactive target, so the row onClick
+// ignores clicks that land on an <a>/<button> (no nested-interactive a11y trap,
+// no double navigation). profileId is the dashboard's resolved effective
+// profile, pinned so the pane ranks the same.
+//
+// There is NO "Start drafting" action: it linked to /cockpit/new, which release 1
+// does not mount. Pinned by noCockpitLinks.test.tsx and by CallRow.test.tsx.
 export function CallRow({ call, profileId }: { call: CallItem; profileId?: number | null }) {
   const [sp] = useSearchParams();
   const navigate = useNavigate();
   const selected = sp.get("selected") === String(call.id);
-  const params = new URLSearchParams({ call_id: String(call.id), call_title: call.title });
-  if (profileId != null) params.set("profile_id", String(profileId));
-  const startHref = `/cockpit/new?${params.toString()}`;
   const onRowClick = (e: React.MouseEvent) => {
     if ((e.target as HTMLElement).closest("a,button")) return; // links/buttons handle themselves
     navigate({ search: selectionSearch(sp, call.id, profileId) });
@@ -51,9 +51,6 @@ export function CallRow({ call, profileId }: { call: CallItem; profileId?: numbe
       </Box>
       <Stack gap="0.3rem" align="flex-end" flex="0 0 auto">
         <MatchBadge score={call.aggregate_score} />
-        <Anchor component={Link} fz="0.8rem" fw={500} to={startHref} style={{ whiteSpace: "nowrap" }}>
-          Start drafting
-        </Anchor>
       </Stack>
     </Group>
   );

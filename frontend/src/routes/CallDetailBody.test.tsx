@@ -40,12 +40,17 @@ it("renders the title heading, ranking score band, and analyst notes", () => {
   expect(screen.getByText("Budget & funding")).toBeInTheDocument();
 });
 
-it("Start drafting links to /cockpit/new with the call + best profile prefilled", () => {
+it("renders NO Start-drafting control — /cockpit/new is not mounted in release 1", () => {
+  // INVERTED from "Start drafting links to /cockpit/new with the call + best
+  // profile prefilled". It was a <Button component={Link}>, so it has both a link
+  // and a button role in different react-router versions; both are checked, and
+  // so is every rendered href.
   renderBody(DATA);
-  const href = screen.getByRole("link", { name: /start drafting/i }).getAttribute("href") ?? "";
-  expect(href).toContain("/cockpit/new?");
-  expect(href).toContain("call_id=5");
-  expect(href).toContain("profile_id=7");
+  expect(screen.queryByRole("link", { name: /start drafting/i })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /start drafting/i })).not.toBeInTheDocument();
+  for (const a of screen.queryAllByRole("link")) {
+    expect(a.getAttribute("href") ?? "").not.toContain("/cockpit");
+  }
 });
 
 it("renders the low band for a zero aggregate score", () => {
