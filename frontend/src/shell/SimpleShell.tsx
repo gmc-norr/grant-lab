@@ -2,6 +2,10 @@ import { Menu, UnstyledButton } from "@mantine/core";
 import { Link, NavLink, Outlet } from "react-router-dom";
 
 import { useSession } from "../api/session";
+// The match edition's light ground. Imported HERE, not in main.tsx, so it enters
+// the module graph only through router.simple.tsx — the full build never sees it.
+// Must come before the CSS module so the module's own rules win the cascade.
+import "../theme/theme.match.css";
 import styles from "./SimpleShell.module.css";
 
 // Release-1 shell. AppShell's IDE furniture (activity bar, status bar,

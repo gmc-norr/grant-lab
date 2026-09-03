@@ -4,6 +4,7 @@ import { RouterProvider } from "react-router-dom";
 import { router } from "virtual:app-router";
 
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { APP_EDITION } from "./edition";
 import { theme } from "./theme/theme";
 
 // Global stale time prevents thundering-herd refetches on tab focus for the
@@ -22,7 +23,10 @@ const qc = new QueryClient({
 export function App() {
   return (
     <ErrorBoundary>
-      <MantineProvider theme={theme} defaultColorScheme="dark">
+      {/* The --app-* tokens are ours, but Mantine's own components (Menu,
+          Button, Badge) read defaultColorScheme, and theme.match.css cannot
+          reach them. Leaving it "dark" puts a dark dropdown on a light page. */}
+      <MantineProvider theme={theme} defaultColorScheme={APP_EDITION === "match" ? "light" : "dark"}>
         <QueryClientProvider client={qc}>
           <RouterProvider router={router} />
         </QueryClientProvider>
