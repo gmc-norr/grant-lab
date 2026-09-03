@@ -1,26 +1,9 @@
 import type { RouteObject } from "react-router-dom";
 import { expect, it } from "vitest";
 
+import { leafPaths } from "./routeLeafPaths";
 import { simpleRouter } from "./router.simple";
 import { SPA_ROUTES } from "./routes.gen";
-
-// Same leaf walk as router.test.tsx: a pathless layout contributes nothing
-// itself, its children inherit the parent base, an index route resolves to the
-// parent base.
-function leafPaths(routes: RouteObject[], base = ""): string[] {
-  const out: string[] = [];
-  for (const r of routes) {
-    const here =
-      r.path == null
-        ? base
-        : r.path.startsWith("/")
-          ? r.path
-          : `${base.replace(/\/$/, "")}/${r.path}`;
-    if (r.children?.length) out.push(...leafPaths(r.children, here));
-    else out.push(r.index ? base || "/" : here);
-  }
-  return out;
-}
 
 // The release-1 route set, written out. This is an ALLOWLIST, not a subset
 // check: routes.gen.ts already contains "/cockpit", so a subset assertion would
@@ -54,10 +37,16 @@ const EXCLUDED_PREFIXES = [
 ];
 
 it("the simple router mounts exactly the release-1 route set", () => {
-  const concrete = leafPaths(simpleRouter.routes as RouteObject[]).filter(
-    (p) => !p.includes("*"),
-  );
-  expect(new Set(concrete)).toEqual(new Set(RELEASE_1_ROUTES));
+  // Exclude ONLY the in-app soft-404 leaf, by exact value. A `!p.includes("*")`
+  // filter here would drop every splat leaf, and a splat is the natural way to
+  // mount a subtree: measured, `{ path: "cockpit/*" }` and `{ path:
+  // "workspaces/*" }` both passed this test under that filter, the second
+  // passing test 2 as well. Excluding a whole class of path from an "exact"
+  // allowlist is how a subset check gets reintroduced by accident.
+  const concrete = leafPaths(simpleRouter.routes as RouteObject[]).filter((p) => p !== "/*");
+  // Sorted arrays, not Sets: a Set collapses duplicates, so a route mounted
+  // twice would compare equal to one mounted once.
+  expect([...concrete].sort()).toEqual([...RELEASE_1_ROUTES].sort());
 });
 
 it("the simple router mounts no excluded path", () => {
@@ -68,11 +57,18 @@ it("the simple router mounts no excluded path", () => {
   expect(leaked).toEqual([]);
 });
 
-it("every release-1 route is owned by the shared SPA manifest", () => {
+it("every route the simple router mounts is owned by the shared SPA manifest", () => {
   // The server decides which paths get index.html from routes.gen.ts. A
   // release-1 route the manifest does not own would 404 on a hard refresh.
+  //
+  // This walks the ROUTER, not RELEASE_1_ROUTES: reading the constant would
+  // assert a relation between two constants and be load-bearing only through
+  // test 1. Mirrors spa_routes.py:39-44 — prefix ownership with "/" owning
+  // only itself.
   const owned = (p: string) =>
     SPA_ROUTES.some((r) => (r === "/" ? p === "/" : p === r || p.startsWith(r + "/")));
-  const unowned = RELEASE_1_ROUTES.filter((p) => !owned(p));
+  const unowned = leafPaths(simpleRouter.routes as RouteObject[])
+    .filter((p) => p !== "/*")
+    .filter((p) => !owned(p));
   expect(unowned).toEqual([]);
 });
