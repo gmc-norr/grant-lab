@@ -136,13 +136,30 @@ Unique index on `(user_id, profile_id, call_id)` — at most one decision per ca
 per profile.
 
 **Migration, not a fresh table.** Every `user_call_dismissals` row becomes a
-`hidden` decision. Existing rows carry no profile, so they must fan out to the
-user's active profiles — that is the only lossless reading of "this user did not
-want this call". Fanning out is the conservative direction: it preserves the
-user's intent everywhere it currently applies, where picking one profile would
-silently un-hide calls people had already dealt with. Drop
-`user_call_dismissals` in the same migration; leaving both is how two sources of
-truth start.
+`hidden` decision. Existing rows carry no profile, so they fan out.
+
+**This is a deliberate semantic change, and it is not lossless.** An earlier
+revision of this spec called fanning out "the only lossless reading"; it is not.
+Today's dismissal is global — `web/dashboard.py:325-332` filters on
+`(user_id, call_id)` and nothing else — so it also suppresses the call on any
+profile the user creates *later*. No per-profile backfill can reproduce that: a
+profile added next month starts clean and the old hide reappears. That is the
+intended trade, because per-profile decisions are the entire point of the new
+table, but it must be written down rather than discovered by the first user it
+surprises.
+
+**The backfill set, named exactly:** every profile the user is subscribed to
+(`subscriptions.profile_id` for that `user_id`) plus their
+`users.default_profile_id`, restricted to `profiles.is_active = true`. Not
+"every active profile in the database" — `Profile.is_active`
+(`src/call_manager/db/models.py:294`) is a global flag, not a per-user one, so
+that reading would write a hide onto other groups' profiles. Fanning out to the
+user's own set is the conservative direction: it preserves their intent
+everywhere it currently applies, where picking a single profile would silently
+un-hide calls people had already dealt with.
+
+Drop `user_call_dismissals` in the same migration; leaving both is how two
+sources of truth start.
 
 **Undecided is the absence of a row.** The inbox query is a `NOT EXISTS`, and a
 newly ingested call arrives undecided with no backfill.
@@ -150,6 +167,13 @@ newly ingested call arrives undecided with no backfill.
 The dashboard defaults to undecided — the inbox. Two more views: Saved, and
 Hidden (so a mistake is recoverable, which also keeps hiding from feeling
 risky — see the untested assumptions in §10).
+
+**Hidden is a re-skin, not a new feature.** `POST /calls/{id}/hide`,
+`DELETE /calls/{id}/hide` (un-hide) and `GET /calls/hidden`
+(`web/api/calls.py:181-231`) all exist and work today. Release 1 re-points them
+at `call_decisions` and gives them a visible home in the UI; the recoverability
+the §10 assumption depends on is already implemented server-side. **Saved** is
+the genuinely new half of the pair.
 
 The digest respects decisions: a hidden call never appears in a later digest for
 that profile. This is what stops the digest becoming noise by week five. The
@@ -192,6 +216,17 @@ because it carries the quote. The design is therefore:
 
 The band (high / medium / low) is retained for sorting and for the digest, but
 the raw aggregate is not shown in the UI.
+
+**Most of this is already built — on the detail page.**
+`frontend/src/routes/CallDetailBody.tsx:145-171` already renders one card per
+criterion carrying its label, its rating, its `rationale` and its
+`quoted_evidence` as a blockquote, fed by `CallDetailCriterionOut`
+(`web/api/calls.py:147-155`). So §4.2 is new work **only for the list/feed
+view**, where `routes/CallRow.tsx:6,53` still renders `MatchBadge`.
+
+The detail page does need one *removal*, not an addition: `CallDetailBody.tsx:57-67`
+renders `{ranking.aggregate_score}` under the heading "Aggregate score" — exactly
+the raw number the paragraph above forbids.
 
 ### 4.3 Boards
 
@@ -280,10 +315,19 @@ Two routers:
 `frontend/src/main.tsx` picks one at build time from a Vite env flag
 (`VITE_APP_EDITION` = `match` | `full`, default `full`).
 
-This works because the cockpit and admin-drafting routes are *already*
-`lazy(() => import(...))` in `router.tsx`. Leaving those imports out of
-`router.simple.tsx` means Vite never emits the chunks — the code is genuinely
-absent from the bundle, not merely unreachable.
+**The current router is only partly lazy, so exclusion must not lean on
+laziness.** An earlier revision claimed "the cockpit and admin-drafting routes
+are already `lazy(() => import(...))`". Only some are. `Cockpit` and the admin
+screens are lazy (`frontend/src/router.tsx:31-43`), but `CockpitChat` and
+`CockpitSidebar` are **static** imports at `router.tsx:5-6`, and
+`WorkspaceList`, `WorkspaceCreate` and `WorkspacesFilters` are static as well.
+
+What actually makes the exclusion real is simpler and stronger than laziness:
+`router.simple.tsx` must not import cockpit, workspace, editor or collab modules
+**at all**, lazily or otherwise, and must share no module with `router.tsx` that
+does. Then tree-shaking has no path to reach that code and Vite never emits it.
+Whether the *full* router lazy-loads a route is irrelevant to what the *simple*
+build contains.
 
 Backend: release 1 does not mount the `workspaces` / `turns` / `annotations` /
 `rubric` / `references` / `citation_audit` / `export` / `files` routers, and
@@ -351,8 +395,18 @@ field, with where each comes from:
 | Keywords | `Call.keywords` | often empty |
 | "N things to check" | count of `CallRanking.applicant_notes` | **escalated calls only** |
 
-Two of these are already on `CallOut` and cost no backend work: `summary` and
-`keywords` are served today and the current dashboard renders neither.
+**`summary` and `keywords` must be added to the list schema — this is not
+free.** An earlier revision of this spec claimed the two were "already on
+`CallOut` and cost no backend work". They are not on it. `CallOut`
+(`web/api/calls.py:33-50`), the model `GET /api/calls` returns, carries only
+`id`, `title`, `deadline`, `deadline_local_date`, `published_at`, `source_name`,
+`source_slug` and `aggregate_score`. `summary`, `keywords`, `programme` and the
+budget fields live on `CallDetailCallOut` (`calls.py:109-125`) — the **detail**
+model, which is why the detail page renders them today and the list cannot.
+
+The expanded card therefore needs real backend work: add the fields to `CallOut`
+and to the row construction in `get_calls` (`calls.py:404-416`). It is a small
+change, but it is a change, and §11 carries it as one.
 
 **The card must read correctly with the optional fields missing**, because for
 most calls they will be. `CallRanking.summary` and `applicant_notes` are written
@@ -445,8 +499,11 @@ past at 4 m, but a board where everything is scannable serves someone who
 
 So the body is a 2 x 4 grid of eight cards on a 1920 x 1080 screen. Per card:
 
-- QR **150 px** (≈ 9.4 cm on a 55" screen) — comfortably above the 1/10 rule for
-  an arm's-length scan.
+- QR **170 px** (≈ 10.6 cm on a 55" screen). The 1/10 rule at the 1 m maximum
+  scanning distance stated above needs **10 cm**, and the 150 px screen floor is
+  only 9.4 cm — it satisfies the pixel floor and *fails* the distance rule. Where
+  the two disagree the distance rule governs, because it is the one that decides
+  whether a phone actually locks on.
 - Title **34 px** — readable standing ~1.7 m back.
 - Funder, days-to-deadline, budget.
 
@@ -456,8 +513,16 @@ That is the hook that makes someone stop. Without it the board is invisible to
 anyone not already standing at it.
 
 Pages cycle every `page_seconds` (default 30). The page count is **dynamic** —
-every call at or above `min_score` that an admin has approved is included,
-eight per page.
+approved calls are laid out eight per page, up to `max_pages`.
+
+**Capacity is `items_per_page` × `max_pages`, 24 by default, and approval is
+capped at it.** Two rules in an earlier revision could not both hold: "every
+approved call is included" and "`max_pages` default 3". Approve a 25th call and
+one of them breaks. The cap therefore belongs at the **approval** step, where a
+human is present — the admin queue refuses the 25th approval and names what to
+drop, or the admin raises `min_score` or `max_pages` deliberately. What must not
+happen is the display silently truncating a list an admin approved: they would
+have no way to see the loss.
 
 **Paging does not add coverage for free; it dilutes exposure.** At three pages
 any one call is on screen a third of the time. At six, a passer-by has a
@@ -469,10 +534,24 @@ the cap the threshold quietly becomes a lottery.
 A footer shows `Sida N av M` and a progress bar, so someone who stopped knows
 more is coming and roughly how long to wait.
 
-Sizing is expressed in `vh`, not pixels, so the same page works on a portrait
-screen — most corridor displays are hung portrait, and the deployment screen is
-not known yet. A portrait board is one column of four rather than two of four;
-`items_per_page` covers it.
+Sizing is expressed in `vh`, not pixels, because most corridor displays are hung
+portrait and the deployment screen is not known yet.
+
+**But `vh` alone does not make one layout fit both orientations, and the default
+of 8 does not fit a portrait column.** Eight cards in a single column need eight
+170 px QRs — 1360 px of QR before a single title — which overflows a 1080 x 1920
+portrait screen once titles and meta are added. So orientation changes the
+*setting*, not just the CSS:
+
+| Orientation | Grid | `items_per_page` |
+| --- | --- | --- |
+| Landscape 1920 x 1080 | 2 x 4 | 8 (default) |
+| Portrait 1080 x 1920 | 1 x 4 | **4** |
+
+The board renderer picks the default from the viewport aspect ratio and the
+legibility floors (170 px QR, 34 px title) rather than trusting a single number
+to work everywhere; `items_per_page` remains an override for a screen that
+measures differently.
 
 ### What is on the board
 
@@ -509,11 +588,30 @@ something to a passer-by; "0.83" does not.
 
 `GET /api/public/boards/{slug}` — no authentication, rate-limited, cached.
 
-Returns only: board title, `generated_at`, and for each approved item the call
-title, source name, deadline, match reasons, and `Call.url`. It reuses
-`build_dashboard_view()` (`src/call_manager/web/dashboard.py`), which already
-takes a bare `profile_id` and requires no user, to order the admin's candidate
-list.
+Returns exactly the card fields and nothing else: board title, `generated_at`,
+and per approved item the call title, source name, `deadline_local_date`,
+`budget_min` / `budget_max` / `currency`, and `Call.url`.
+
+**No match reasons.** An earlier revision listed them in this payload, which
+contradicted the rule two paragraphs above that the board never shows criterion
+data. Budget, which the card requires, was missing from that same list. Both are
+corrected here.
+
+**This needs its own query — `build_dashboard_view()` cannot be reused.** An
+earlier revision claimed it "already takes a bare `profile_id` and requires no
+user". That is false. Its signature is
+`build_dashboard_view(session, *, user_id: int, ...)`
+(`src/call_manager/web/dashboard.py:230-242`): `user_id` is a **required**
+keyword argument, and lines 325-332 use it to subtract that user's dismissals
+from every result. A public request has no user to supply, and borrowing an
+admin's id would silently apply one person's hides to a corridor wall.
+
+So release 1 adds a small **userless** query: `board_items` joined to `calls`,
+ordered by `board_items.position`, filtered to `Call.deadline` in the future. It
+touches no decision table at all — which is the correct semantics anyway, since
+a board is the institution's published list, not any individual's inbox. The
+same query without the `board_items` join and with a `min_score` filter over
+`call_rankings` feeds the admin approval queue.
 
 The public page is a route under `PreAuthLayout` at `/b/:slug` — that layout is
 already auth-free, so no new auth architecture is introduced.
@@ -537,31 +635,56 @@ Deadline reminders are **not** in release 1.
 ## 8. Reused unchanged
 
 - Auth: `PreAuthLayout`, `Login`, `Register`, session handling
-- `build_dashboard_view()` — the ranking query
+- `build_dashboard_view()` — the ranking query, for the **logged-in** views
+  only. The corridor board gets its own userless query instead (§6), because
+  this one requires a `user_id` and subtracts that user's decisions
 - The profiles API and pages (re-skinned into `SimpleShell`; contents unchanged)
 - The admin users pages
 - The Mantine theme tokens, the `openapi-fetch` client, generated types
 - The weekly email digest, plus a decisions-aware filter — it already filters on
   `user_call_dismissals`, so the §4.1 migration must preserve that behaviour
   rather than rebuild it
-- `subscriptions` + `PUT /me/subscriptions` + the `Settings.tsx` UI — digest
-  targeting already works and is untouched
+- `subscriptions` + `PUT /me/subscriptions` + the `Settings.tsx` UI — **choosing
+  which profiles you get a digest for** already works and is untouched. Note the
+  limit, which release 1 inherits rather than closes: `PUT /me/subscriptions`
+  (`web/api/me.py:205-254`) takes only `profile_ids` and diffs set membership —
+  it inserts and deletes rows and never reads or writes
+  `Subscription.digest_enabled`. So subscribe/unsubscribe is shipped; **pausing
+  the digest for one profile without unsubscribing from it is not exposed**,
+  even though the column exists (`models.py:325-327`)
 - The profile bootstrap worker, prompt and PubMed lookup — local-only, unchanged
 
 ## 9. Testing
 
-Three gates that make the design's claims true rather than asserted:
+Five gates that make the design's claims true rather than asserted:
 
 1. **Bundle gate.** Assert the `VITE_APP_EDITION=match` build output contains no
-   cockpit/editor/collab chunk. Without this, "excluded" is a claim.
+   cockpit/editor/collab code. Without this, "excluded" is a claim. Assert on
+   **emitted content**, not on chunk filenames: Vite is free to fold an excluded
+   module into a differently-named chunk, and a gate that greps for
+   `cockpit-*.js` would then pass with the code shipped. Grep the emitted
+   JavaScript for stable sentinels from the excluded modules instead.
 2. **Route manifest drift guard covers both routers.** `router.test.tsx`
    currently pins one router against `routes.json` `spa_routes`. With two
-   routers and one manifest, the simple router can silently drift. The guard
-   must assert the release-1 route set explicitly, and that it is a subset of
-   the manifest.
+   routers and one manifest, the simple router can silently drift.
+
+   **A subset assertion is not enough, and on its own is hollow.**
+   `frontend/routes.json` line 2 already lists `/cockpit` inside `spa_routes`,
+   so a `router.simple.tsx` that still mounted every cockpit path would remain a
+   perfectly valid subset. Subset catches an *unknown* path; it cannot catch an
+   *excluded* one. The guard must therefore pin `router.simple.tsx` to an
+   **exact allowlist** and assert the excluded prefixes are absent by name:
+   `/cockpit*`, `/admin/drafting`, `/admin/golden-set`,
+   `/admin/deleted-workspaces`.
 3. **Public endpoint gates.** Unpublished board → 404. No auth required for a
-   published one. Response body contains no score float and no rationale text.
-   An unapproved call never appears. A call past its deadline never appears.
+   published one. An unapproved call never appears. A call past its deadline
+   never appears. And the response body carries **no score field of any type and
+   no score value** — phrasing this as "no score float" would not hold, because
+   `CallRanking.aggregate_score` is a `SmallInteger`
+   (`src/call_manager/db/models.py:357`) and an exposed integer score would sail
+   through such a gate. Assert on the key set instead: no `aggregate_score`, no
+   `embed_similarity` (the actual float, `models.py:368`), no `rationale`, no
+   `quoted_evidence`, at any nesting depth.
 
 4. **No release-1 screen links into the excluded half.** Assert that no component
    reachable from `router.simple.tsx` emits an href under `/cockpit`. The bundle
@@ -570,9 +693,20 @@ Three gates that make the design's claims true rather than asserted:
    (`CallRow.tsx:55`, `CallDetailBody.tsx:48`), so this gate starts red and
    removing them is what turns it green.
 
-5. **`/api/public/*` is the only unauthenticated prefix in the app.** Walk every
-   route on the app and assert that each one outside that prefix carries an auth
-   dependency. This matters because auth here is enforced **per route**
+5. **Every route outside a pinned public allowlist carries an auth dependency.**
+   Walk every route on the app and assert it.
+
+   **Phrase it as an allowlist, not as "`/api/public/*` is the only
+   unauthenticated prefix" — that version is false and the gate would start
+   permanently red.** Authentication cannot precede login: `POST /auth/login`
+   and `POST /auth/register` (`web/api/auth.py:74,135`) and `GET /healthz`
+   (`web/routes/health.py:20`) are unauthenticated today and must stay so. So
+   the gate pins a short, explicit list — `/api/public/*`, the session and OIDC
+   endpoints, `/healthz` — and asserts every *other* route carries
+   `Depends(get_current_user)`. The allowlist itself is the reviewed artefact:
+   adding a line to it is a visible diff, which is the whole point.
+
+   This matters because auth here is enforced **per route**
    (`Depends(get_current_user)`), not by middleware — there is no deny-by-default
    path check, so an endpoint becomes public by *omitting a line*. That is silent
    in both directions: the board needs the omission, and any other route that
@@ -590,8 +724,10 @@ claims to protect and confirm the gate goes red.
 - How many of the six criteria are actually populated in the live data today?
   The table exists; whether every ranker path fills all six is unverified.
   Measure before designing the chip row's empty state.
-- Portrait or landscape corridor screen? The design works for both, but the
-  first real screen should be measured, not assumed.
+- Portrait or landscape corridor screen? §6 now specifies both — 2 x 4 with
+  `items_per_page=8` landscape, 1 x 4 with `items_per_page=4` portrait — but the
+  first real screen should still be measured, not assumed. The open part is
+  which one gets deployed, not whether the layout exists.
 - Is the digest's current per-profile targeting sufficient, or does release 1
   need the discipline-specific variants that peer universities run?
 
@@ -602,10 +738,15 @@ come out wrong:
 
 - **First run.** What a user sees before they have a profile. The profile drives
   all matching, so this path is load-bearing and entirely undrawn.
-- **Search.** The triage screen shows an affordance for it; nothing behind it is
-  designed. This is also the only place a researcher could ask *"why isn't call X
-  here?"* — which is exactly the blind spot §F2 of the matching review describes,
-  currently with no UI surface at all.
+- **Search — the UI only. The backend already exists.** An earlier revision said
+  "nothing behind it is designed"; in fact `build_dashboard_view()` already
+  accepts `q` and implements escaped multi-field matching
+  (`web/dashboard.py:211-227,240,335-336`), and `GET /api/calls` already accepts
+  and forwards it (`web/api/calls.py:382,401-402`). The remaining work is the
+  affordance and its result states, not a query. This is also the only place a
+  researcher could ask *"why isn't call X here?"* — the blind spot §F2 of the
+  matching review describes, which today has no UI surface even though the query
+  behind it is shipped.
 - **The board approval queue.** The only genuinely novel admin screen: the
   ranker proposes, an admin ticks, in bulk. No precedent anywhere in the app.
 
@@ -628,7 +769,10 @@ The design rests on a bet that has not been checked with a real user:
 2. Re-skin the existing calls / profiles / account / admin-users pages into it
 3. `call_decisions` — migrate `user_call_dismissals` and drop it (§4.1), remove
    the two `/cockpit/new` links, then the triage inbox and digest integration
-4. Match reasons replacing the score badge
+4. Match reasons on the **list** view, replacing `MatchBadge`, plus the
+   `summary`/`keywords` additions to `CallOut` the expanded card needs (§5). The
+   detail page already renders chips, rationale and quoted evidence (§4.2) — the
+   only work there is deleting its raw "Aggregate score" block
 5. `boards` + `board_items` + the bulk admin approval queue (§4.3 — the gate is
    only real if approving 24 candidates is fast)
 6. The public board endpoint + the paging `/b/:slug` display page
