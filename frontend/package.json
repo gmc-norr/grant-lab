@@ -11,6 +11,7 @@
     "build": "tsc && vite build",
     "build:match": "VITE_APP_EDITION=match tsc && VITE_APP_EDITION=match vite build",
     "check:bundle": "node ../scripts/check_match_bundle.mjs dist",
+    "package:match": "VITE_APP_EDITION=match ../scripts/package_spa.sh",
     "test": "vitest run",
     "lint": "oxlint --deny-warnings src e2e",
     "gen:api": "bash ../scripts/gen_openapi_types.sh"
