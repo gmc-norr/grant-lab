@@ -10,6 +10,30 @@ import { isSpaRoute, isViteAsset, shouldServeViaVite } from "./src/dev-proxy";
 
 const BACKEND = "http://localhost:8000";
 
+// Write the exact set of source modules Rollup put into the bundle, so a gate
+// can assert on FILE PATHS instead of guessing from chunk names or grepping for
+// strings. `generateBundle` runs after chunking, and every chunk's `modules` map
+// is keyed by resolved module id — which is what makes this impossible to fool:
+// renaming a chunk does not change it, and a module with no distinctive string
+// still appears.
+function moduleManifest(): PluginOption {
+  return {
+    name: "module-manifest",
+    generateBundle(_opts, bundle) {
+      const mods = new Set<string>();
+      for (const out of Object.values(bundle)) {
+        if (out.type !== "chunk") continue;
+        for (const id of Object.keys(out.modules)) mods.add(id);
+      }
+      this.emitFile({
+        type: "asset",
+        fileName: "module-manifest.json",
+        source: JSON.stringify([...mods].sort(), null, 2),
+      });
+    },
+  };
+}
+
 // Serve index.html for SPA-owned document routes; let everything else fall
 // through to the default-to-backend proxy below (-> uvicorn -> FastAPI real 404
 // for unknowns). Route ownership comes from the generated manifest.
@@ -62,7 +86,7 @@ export default defineConfig(({ mode }) => {
   const ROUTER_FILE = APP_EDITION === "match" ? "src/router.simple.tsx" : "src/router.tsx";
 
   return {
-  plugins: [react(), spaIndexFallback()],
+  plugins: [react(), spaIndexFallback(), moduleManifest()],
   resolve: {
     alias: {
       "virtual:app-router": resolve(__dirname, ROUTER_FILE),
