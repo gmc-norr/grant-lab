@@ -17,17 +17,17 @@ def _connect_src_directive(csp: str) -> str:
 def _set_http_env(monkeypatch, database_url):
     monkeypatch.setenv("DATABASE_URL", database_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
 
 
 def _set_https_env(monkeypatch, database_url):
     monkeypatch.setenv("DATABASE_URL", database_url)
     monkeypatch.setenv("SESSION_SECRET", "prod-grade-secret-with-enough-entropy-xyz123")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
-    monkeypatch.setenv("APP_BASE_URL", "https://app.ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
+    monkeypatch.setenv("APP_BASE_URL", "https://app.umu.se")
     # https deploy requires a real EMAIL_FROM (example.com placeholder is rejected).
-    monkeypatch.setenv("EMAIL_FROM", "noreply@ki.se")
+    monkeypatch.setenv("EMAIL_FROM", "noreply@umu.se")
     # https deploy requires a real email transport (else create_app refuses).
     monkeypatch.setenv("RESEND_API_KEY", "re_secret")
 
@@ -151,7 +151,7 @@ def test_build_csp_no_origin_stays_strict():
 # unvalidated APP_BASE_URL netloc. `urlsplit().netloc` only stops at `/`,
 # `?` or `#` — not `;` or whitespace — and config.py's APP_BASE_URL
 # validator is a bare scheme-prefix check, so a value like
-# "https://app.ki.se; script-src * 'unsafe-inline'" used to sail through to
+# "https://app.umu.se; script-src * 'unsafe-inline'" used to sail through to
 # the derived ws_origin and get interpolated verbatim into the CSP header.
 # _derive_ws_origin (extracted from create_app for exactly this) must now
 # reject any netloc that isn't a plain host[:port].
@@ -162,7 +162,7 @@ def test_ws_origin_injection_rejected_at_startup():
     from call_manager.main import _derive_ws_origin
 
     with pytest.raises(RuntimeError):
-        _derive_ws_origin("https://app.ki.se; script-src * 'unsafe-inline'")
+        _derive_ws_origin("https://app.umu.se; script-src * 'unsafe-inline'")
 
 
 def test_ws_origin_whitespace_netloc_rejected_at_startup():
@@ -182,7 +182,7 @@ def test_normal_body_passes_under_cap(pg_session_factory, pg_url, monkeypatch):
     with TestClient(app) as client:
         r = client.post(
             "/api/auth/login",
-            json={"email": "bodycap-probe@ki.se", "password": "x" * 16},
+            json={"email": "bodycap-probe@umu.se", "password": "x" * 16},
         )
     # Login failure is a 400 (enumeration-safe); the point is it was NOT rejected by the size cap.
     assert r.status_code == 400

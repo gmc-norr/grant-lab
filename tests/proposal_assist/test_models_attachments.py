@@ -11,7 +11,7 @@ from tests.proposal_assist.conftest import make_user, make_workspace
 def test_attachment_insert_figure(pg_session_factory):
     with pg_session_factory() as s:
         ws = make_workspace(s)
-        uploader = make_user(s, email="uploader@ki.se")
+        uploader = make_user(s, email="uploader@umu.se")
         s.add(
             Attachment(
                 workspace_id=ws.id,
@@ -33,7 +33,7 @@ def test_attachment_insert_figure(pg_session_factory):
 def test_attachment_kind_check(pg_session_factory):
     with pg_session_factory() as s:
         ws = make_workspace(s)
-        uploader = make_user(s, email="x@ki.se")
+        uploader = make_user(s, email="x@umu.se")
         s.add(
             Attachment(
                 workspace_id=ws.id,
@@ -65,7 +65,7 @@ def _add_attachment(s, ws_id, user_id, *, filename="fig.png"):
 def test_attachment_job_insert_queued(pg_session_factory):
     with pg_session_factory() as s:
         ws = make_workspace(s)
-        uploader = make_user(s, email="u@ki.se")
+        uploader = make_user(s, email="u@umu.se")
         attachment = _add_attachment(s, ws.id, uploader.id)
         s.add(
             AttachmentJob(
@@ -87,7 +87,7 @@ def test_attachment_job_unique_active_per_attachment_kind(pg_session_factory):
     ('queued','running') prevents double-enqueueing the same describe job."""
     with pg_session_factory() as s:
         ws = make_workspace(s)
-        uploader = make_user(s, email="u2@ki.se")
+        uploader = make_user(s, email="u2@umu.se")
         attachment = _add_attachment(s, ws.id, uploader.id)
         s.add(
             AttachmentJob(
@@ -115,7 +115,7 @@ def test_attachment_job_completed_allows_re_enqueue(pg_session_factory):
     same (attachment_id, kind) — the partial index is bounded by status."""
     with pg_session_factory() as s:
         ws = make_workspace(s)
-        uploader = make_user(s, email="u3@ki.se")
+        uploader = make_user(s, email="u3@umu.se")
         attachment = _add_attachment(s, ws.id, uploader.id)
         s.add(
             AttachmentJob(
@@ -144,7 +144,7 @@ def test_attachment_job_updated_at_bumped_on_modification(pg_session_factory):
     transition, which is easy to forget and would mislead the index."""
     with pg_session_factory() as s:
         ws = make_workspace(s)
-        uploader = make_user(s, email="updated-at@ki.se")
+        uploader = make_user(s, email="updated-at@umu.se")
         attachment = _add_attachment(s, ws.id, uploader.id)
         job = AttachmentJob(
             workspace_id=ws.id,

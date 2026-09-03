@@ -26,7 +26,7 @@ def test_retired_acquire_closes_with_1008(_app, pg_session_factory):
 
     _app.state.session_factory = pg_session_factory
     with pg_session_factory() as s:
-        owner = make_user(s, email="ws-retire@ki.se")
+        owner = make_user(s, email="ws-retire@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
@@ -63,7 +63,7 @@ def test_hydration_mutex_timeout_closes_with_1013(_app, pg_session_factory, monk
 
     _app.state.session_factory = pg_session_factory
     with pg_session_factory() as s:
-        owner = make_user(s, email="ws-mutex@ki.se")
+        owner = make_user(s, email="ws-mutex@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
@@ -107,7 +107,7 @@ def test_a_bounded_hydration_lock_timeout_closes_with_1013_not_1011(
 
     _app.state.session_factory = pg_session_factory
     with pg_session_factory() as s:
-        owner = make_user(s, email="ws-tailbound@ki.se")
+        owner = make_user(s, email="ws-tailbound@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
@@ -155,7 +155,7 @@ def test_a_non_lock_operational_error_keeps_its_existing_propagation(
 
     _app.state.session_factory = pg_session_factory
     with pg_session_factory() as s:
-        owner = make_user(s, email="ws-tailbound-real@ki.se")
+        owner = make_user(s, email="ws-tailbound-real@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()

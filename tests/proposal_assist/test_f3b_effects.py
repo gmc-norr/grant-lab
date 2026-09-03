@@ -506,7 +506,7 @@ def test_propose_artifact_edit_copies_the_provenance_verbatim(pg_session_factory
         s.add(turn)
         s.flush()
         turn_id = turn.id
-        author_id = make_user(s, email="provenance-author@ki.se").id
+        author_id = make_user(s, email="provenance-author@umu.se").id
         s.commit()
 
     prov = Provenance(

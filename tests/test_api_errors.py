@@ -6,7 +6,7 @@ def _app(monkeypatch, pg_url):
     for k, v in {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://testserver",
     }.items():
         monkeypatch.setenv(k, v)
@@ -15,7 +15,7 @@ def _app(monkeypatch, pg_url):
 
 def _login(app, pg_session_factory, test_client_factory):
     with pg_session_factory() as s:
-        u = User(status="active", email="u@ki.se")
+        u = User(status="active", email="u@umu.se")
         s.add(u)
         s.flush()
         p = Profile(
@@ -209,7 +209,7 @@ def test_api_inactive_account_is_envelope(
 ):
     app = _app(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        u = User(status="pending", email="pending@ki.se")
+        u = User(status="pending", email="pending@umu.se")
         s.add(u)
         s.commit()
         uid = u.id

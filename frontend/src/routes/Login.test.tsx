@@ -11,7 +11,7 @@ afterEach(() => { vi.restoreAllMocks(); });
 
 function mockConfig(enabled: boolean) {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue({
-    data: { google_oidc_enabled: enabled, allowed_domains: ["ki.se"] }, error: undefined,
+    data: { google_oidc_enabled: enabled, allowed_domains: ["umu.se"] }, error: undefined,
   } as never);
 }
 
@@ -40,13 +40,13 @@ it("on success invalidates ['me'] and navigates to the server redirect", async (
     data: { redirect: "/calls/5" }, error: undefined, response: new Response(),
   } as never);
   renderWithProviders(<Login />, { route: "/login?next=/calls/5" });
-  await userEvent.type(screen.getByLabelText(/email/i), "a@ki.se");
+  await userEvent.type(screen.getByLabelText(/email/i), "a@umu.se");
   await userEvent.type(screen.getByLabelText(/password/i, { selector: "input" }), "correct-horse-1");
   await userEvent.click(screen.getByRole("button", { name: /^sign in$/i }));
   // threads ?next into the POST
   await waitFor(() =>
     expect(clientMod.api.POST).toHaveBeenCalledWith("/api/auth/login", {
-      body: { email: "a@ki.se", password: "correct-horse-1", next: "/calls/5" },
+      body: { email: "a@umu.se", password: "correct-horse-1", next: "/calls/5" },
     }),
   );
 });
@@ -58,7 +58,7 @@ it("shows ONE generic message for every failure mode (anti-enumeration)", async 
     response: new Response(null, { status: 400 }),
   } as never);
   renderWithProviders(<Login />, { route: "/login" });
-  await userEvent.type(screen.getByLabelText(/email/i), "ghost@ki.se");
+  await userEvent.type(screen.getByLabelText(/email/i), "ghost@umu.se");
   await userEvent.type(screen.getByLabelText(/password/i, { selector: "input" }), "whatever-long");
   await userEvent.click(screen.getByRole("button", { name: /^sign in$/i }));
   const alert = await screen.findByRole("alert");

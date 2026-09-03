@@ -19,7 +19,7 @@ def test_canonical_from_nonempty_log(pg_session_factory):
     md = "## A\n\nBody a.\n"
     # A real workspace row first — yjs_updates.workspace_id is an FK to workspaces.
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="canon-log@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="canon-log@umu.se"))
         s.commit()
         wid = ws.id
     _seed_log(pg_session_factory, wid, "draft", md)

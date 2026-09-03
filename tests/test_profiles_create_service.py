@@ -63,7 +63,7 @@ def test_merge_does_not_overwrite_nonempty_description():
 
 def test_create_atomic_success(pg_session_factory):
     with pg_session_factory() as s:
-        u = User(email="c@ki.se")
+        u = User(email="c@umu.se")
         s.add(u)
         s.flush()
         p = create_profile_with_bootstrap(
@@ -86,7 +86,7 @@ def test_create_atomic_success(pg_session_factory):
 
 def test_create_rolls_back_on_failure(pg_session_factory):
     with pg_session_factory() as s:
-        u = User(email="c2@ki.se")
+        u = User(email="c2@umu.se")
         s.add(u)
         s.flush()
         with pytest.raises(Exception):  # noqa: B017
@@ -123,7 +123,7 @@ def test_merge_drops_overlong_areas_item():
 
 def test_existing_default_is_preserved(pg_session_factory):
     with pg_session_factory() as s:
-        u = User(email="c3@ki.se")
+        u = User(email="c3@umu.se")
         s.add(u)
         s.flush()
         first = create_profile_with_bootstrap(

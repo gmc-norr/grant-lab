@@ -51,7 +51,7 @@ sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 # The password login frontend/e2e/dashboard.spec.ts performs. Fixed, because the
 # spec's login() helper hard-codes both values.
-E2E_PASSWORD_EMAIL = "e2e@ki.se"
+E2E_PASSWORD_EMAIL = "e2e@umu.se"
 E2E_PASSWORD = "correct-horse-1"
 
 
@@ -59,7 +59,7 @@ def main() -> int:
     os.environ.setdefault("EMBEDDING_MODEL", "bge-m3")
     # Minimal env that create_app/Settings validates.
     os.environ.setdefault("SESSION_SECRET", "e2e-seed-secret-at-least-16-chars!")
-    os.environ.setdefault("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    os.environ.setdefault("ALLOWED_EMAIL_DOMAINS", "umu.se")
     # SPA_MODE: "dev" (default) uses the Vite server + dev CSP's broad ws: token.
     # "prod" (E2E_SPA_MODE=prod) serves the BUILT bundle from FastAPI under the
     # strict CSP with ONLY the same-origin ws token derived from APP_BASE_URL —
@@ -121,8 +121,8 @@ def main() -> int:
 
         suffix = uuid.uuid4().hex[:8]
         with Session() as s:
-            owner = make_user(s, email=f"e2e-owner-{suffix}@ki.se")
-            member = make_user(s, email=f"e2e-member-{suffix}@ki.se")
+            owner = make_user(s, email=f"e2e-owner-{suffix}@umu.se")
+            member = make_user(s, email=f"e2e-member-{suffix}@umu.se")
             ws = make_workspace(s, owner=owner, current_phase="active")
             # Membership row: a WorkspaceViewer is a *writer* on the active draft
             # and *read-only* on the locked spec (resolve_access, ws_auth.py:118-126).
@@ -161,7 +161,7 @@ def main() -> int:
             )
             # --- dashboard e2e prerequisites (review 2026-09-02 A6 finding 6) ---
             # frontend/e2e/dashboard.spec.ts logs in through the REAL password
-            # form as e2e@ki.se / correct-horse-1, and this seeder created no
+            # form as e2e@umu.se / correct-horse-1, and this seeder created no
             # password user at all — so that spec could not pass for anyone who
             # had not hand-seeded one, and the whole file sat unrunnable (a HEAD
             # commit even "fixed" its password selector). Fixed email on purpose:

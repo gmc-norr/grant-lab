@@ -74,7 +74,7 @@ def test_draft_checkpoint_enqueues_coverage_for_new_sections(pg_session_factory,
     """A draft checkpoint that advances git enqueues one queued job per
     non-empty section of the serialized doc, pinned to the checkpoint's
     commit_sha (spec §6 case 1)."""
-    wid, oid = _setup_ws(pg_session_factory, tmp_path, email="d3-draft@ki.se")
+    wid, oid = _setup_ws(pg_session_factory, tmp_path, email="d3-draft@umu.se")
     doc = _seed_room_edit(
         pg_session_factory,
         wid,
@@ -107,7 +107,7 @@ def test_spec_checkpoint_enqueues_nothing(pg_session_factory, tmp_path):
     (mirrors save_section: spec §3 has no claim analysis) — spec §6 case 2.
     Non-vacuous: the spec content's sections are uncovered, so without the
     artifact gate the hook WOULD insert."""
-    wid, oid = _setup_ws(pg_session_factory, tmp_path, email="d3-spec@ki.se", artifact="spec")
+    wid, oid = _setup_ws(pg_session_factory, tmp_path, email="d3-spec@umu.se", artifact="spec")
     _seed_room_edit(
         pg_session_factory, wid, oid, "## Approach\n\nspec content.\n", artifact="spec"
     )
@@ -128,7 +128,7 @@ def test_spec_checkpoint_enqueues_nothing(pg_session_factory, tmp_path):
 def test_seed_only_checkpoint_enqueues_nothing(pg_session_factory, tmp_path):
     """The unauthored-seed early-return (checkpoint.py:91-106) never reaches the
     hook — no git commit, no jobs (spec §6 case 3)."""
-    wid, _ = _setup_ws(pg_session_factory, tmp_path, email="d3-seed@ki.se")
+    wid, _ = _setup_ws(pg_session_factory, tmp_path, email="d3-seed@umu.se")
     _seed_room_edit(pg_session_factory, wid, None, "## Background\n\noriginal.\n")
     with pg_session_factory() as s:
         res = checkpoint_artifact(
@@ -150,7 +150,7 @@ def test_unchanged_content_checkpoint_enqueues_nothing(pg_session_factory, tmp_p
     rows from the first checkpoint are DELETED, so if the hook ran on the
     second checkpoint the shas would be uncovered and rows WOULD appear.
     Also covers the max_id<=watermark no-op (spec §6 case 3, first variant)."""
-    wid, oid = _setup_ws(pg_session_factory, tmp_path, email="d3-nochange@ki.se")
+    wid, oid = _setup_ws(pg_session_factory, tmp_path, email="d3-nochange@umu.se")
     doc = _seed_room_edit(pg_session_factory, wid, oid, "## Background\n\nedited once.\n")
     with pg_session_factory() as s:
         checkpoint_artifact(
@@ -206,7 +206,7 @@ def test_scan_path_checkpoint_enqueues_coverage(pg_session_factory, tmp_path):
     """record_version=False (the periodic tail-scan, 3b-5c) still enqueues —
     the gate is `changed`, NOT record_version (spec §6 case 5). Quiet for
     provenance, loud for coverage."""
-    wid, oid = _setup_ws(pg_session_factory, tmp_path, email="d3-scan@ki.se")
+    wid, oid = _setup_ws(pg_session_factory, tmp_path, email="d3-scan@umu.se")
     doc = _seed_room_edit(pg_session_factory, wid, oid, "## Background\n\nscan edit.\n")
     expected_shas = _live_shas(serialize_doc_to_markdown(doc))
 

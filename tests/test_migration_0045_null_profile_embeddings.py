@@ -24,8 +24,8 @@ def test_0045_nulls_profile_vectors_only(pg_url):
                 text("INSERT INTO sources (name, slug) VALUES ('S','s45') ON CONFLICT DO NOTHING")
             )
             sid = conn.execute(text("SELECT id FROM sources WHERE slug='s45'")).scalar_one()
-            conn.execute(text("INSERT INTO users (email) VALUES ('m45@ki.se')"))
-            uid = conn.execute(text("SELECT id FROM users WHERE email='m45@ki.se'")).scalar_one()
+            conn.execute(text("INSERT INTO users (email) VALUES ('m45@umu.se')"))
+            uid = conn.execute(text("SELECT id FROM users WHERE email='m45@umu.se'")).scalar_one()
             conn.execute(
                 text(
                     "INSERT INTO profiles (name, kind, description, structured, created_by, "

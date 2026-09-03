@@ -25,7 +25,7 @@ def _mk_ws(pg_session_factory, email):
 
 
 def test_compact_snapshot_reuses_min_id_and_preserves_doc(pg_session_factory):
-    wid = _mk_ws(pg_session_factory, "compact-min@ki.se")
+    wid = _mk_ws(pg_session_factory, "compact-min@umu.se")
     _append(pg_session_factory, wid, "## A\n\nBody a.\n")
     _append(pg_session_factory, wid, "## A\n\nBody a.\n\n## B\n\nBody b.\n")
     with pg_session_factory() as s:
@@ -52,7 +52,7 @@ def test_compact_snapshot_merged_replays_before_a_lower_tail(pg_session_factory)
     # than a naive new merged row; the id-reuse design keeps the merged row at
     # min_id so it ALWAYS replays first. Simulate a tail that committed during the
     # checkpoint window (id > max_id) and assert convergence.
-    wid = _mk_ws(pg_session_factory, "compact-order@ki.se")
+    wid = _mk_ws(pg_session_factory, "compact-order@umu.se")
     _append(pg_session_factory, wid, "## A\n\nBody a.\n")                     # id 1
     _append(pg_session_factory, wid, "## A\n\nBody a.\n\n## B\n\nBody b.\n")  # id 2 (snapshot max)
     with pg_session_factory() as s:
@@ -77,7 +77,7 @@ def test_compact_snapshot_merged_replays_before_a_lower_tail(pg_session_factory)
 
 
 def test_compact_snapshot_does_not_clobber_unlisted_rows(pg_session_factory):
-    wid = _mk_ws(pg_session_factory, "compact-noclobber@ki.se")
+    wid = _mk_ws(pg_session_factory, "compact-noclobber@umu.se")
     _append(pg_session_factory, wid, "## A\n\nBody a.\n")
     _append(pg_session_factory, wid, "## A\n\nBody a2.\n")
     _append(pg_session_factory, wid, "## A\n\nBody a3.\n")
@@ -103,7 +103,7 @@ def _enable(pg_session_factory, wid):
 
 
 def test_checkpoint_compacts_log_to_single_row(pg_session_factory, tmp_path):
-    wid = _mk_ws(pg_session_factory, "cp-compact@ki.se")
+    wid = _mk_ws(pg_session_factory, "cp-compact@umu.se")
     repo = Path(tmp_path) / str(wid) / "repo"
     _init_repo(repo, "## A\n\nseed.\n")
     _enable(pg_session_factory, wid)
@@ -133,7 +133,7 @@ def test_checkpoint_compacts_log_to_single_row(pg_session_factory, tmp_path):
 
 
 def test_checkpoint_single_row_no_compaction_noop(pg_session_factory, tmp_path):
-    wid = _mk_ws(pg_session_factory, "cp-single@ki.se")
+    wid = _mk_ws(pg_session_factory, "cp-single@umu.se")
     repo = Path(tmp_path) / str(wid) / "repo"
     _init_repo(repo, "## A\n\nseed.\n")
     _enable(pg_session_factory, wid)
@@ -153,7 +153,7 @@ def test_checkpoint_single_row_no_compaction_noop(pg_session_factory, tmp_path):
 
 
 def test_compact_snapshot_preserves_merged_actor_id(pg_session_factory):
-    wid = _mk_ws(pg_session_factory, "compact-actor@ki.se")
+    wid = _mk_ws(pg_session_factory, "compact-actor@umu.se")
     _append(pg_session_factory, wid, "## A\n\nseed.\n")                  # unauthored seed
     _append(pg_session_factory, wid, "## A\n\nauthored.\n", actor_id=1)  # authored tail
     with pg_session_factory() as s:
@@ -173,7 +173,7 @@ def test_compact_snapshot_preserves_merged_actor_id(pg_session_factory):
 
 
 def test_checkpoint_compaction_preserves_last_author(pg_session_factory, tmp_path):
-    wid = _mk_ws(pg_session_factory, "cp-actor@ki.se")
+    wid = _mk_ws(pg_session_factory, "cp-actor@umu.se")
     repo = Path(tmp_path) / str(wid) / "repo"
     _init_repo(repo, "## A\n\nseed.\n")
     _enable(pg_session_factory, wid)

@@ -66,7 +66,7 @@ def test_cancel_running_turn_is_too_late(client_authed_owner, current_user, pg_s
 
 def test_non_owner_cancel_403(client_authed_owner, current_user, pg_session_factory):
     with pg_session_factory() as s:
-        stranger = make_user(s, email="stranger2@ki.se")
+        stranger = make_user(s, email="stranger2@umu.se")
         ws = make_workspace(s, owner=stranger)
         jid = _seed_queued_turn(s, ws, stranger.id)
         s.commit()

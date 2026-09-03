@@ -27,7 +27,7 @@ def _settings_env(monkeypatch):
     """
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://x:y@localhost/z")
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     monkeypatch.setenv("DRAFTING_ADAPTER", "fake")
 

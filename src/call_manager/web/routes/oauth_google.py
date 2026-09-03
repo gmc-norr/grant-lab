@@ -135,7 +135,7 @@ def google_callback(
     link_uid = txn.get("link_uid")
     if link_uid is not None:
         # Enforce domain allowlist on the Google identity being linked. Without
-        # this check an active ki.se user could link a personal@gmail.com account,
+        # this check an active umu.se user could link a personal@gmail.com account,
         # which would let them bypass the domain gate on future sign-ins.
         google_email = email.strip().lower()
         if not domain_allowed(google_email, settings.allowed_email_domains):

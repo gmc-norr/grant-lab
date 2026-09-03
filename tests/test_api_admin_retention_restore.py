@@ -32,7 +32,7 @@ from tests.proposal_assist.conftest import make_user, make_workspace
 def _seed_workspace(sf):
     """Create a plain workspace (not deleted). Returns workspace_id."""
     with sf() as s:
-        owner = make_user(s, email=f"owner-{uuid.uuid4().hex[:8]}@ki.se")
+        owner = make_user(s, email=f"owner-{uuid.uuid4().hex[:8]}@umu.se")
         ws = make_workspace(s, owner=owner, title="Test WS")
         s.commit()
         return ws.id
@@ -64,7 +64,7 @@ def _path(ws_id):
 def test_admin_restores_deleted_workspace(monkeypatch, pg_url, pg_session_factory, tmp_path):
     """Admin POSTing restore on a deleted workspace → 204, row is live, audit row written."""
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    c, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    c, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed_workspace(pg_session_factory)
     with pg_session_factory() as s:
         soft_delete(s, ws_id)
@@ -91,7 +91,7 @@ def test_admin_restores_deleted_workspace(monkeypatch, pg_url, pg_session_factor
 
 def test_missing_workspace_returns_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    c, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    c, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     missing_id = uuid.uuid4()
     r = c.post(_path(missing_id))
     assert r.status_code == 404, r.text
@@ -103,7 +103,7 @@ def test_non_admin_returns_403(monkeypatch, pg_url, pg_session_factory, tmp_path
     ws_id = _seed_workspace(pg_session_factory)
     with pg_session_factory() as s:
         soft_delete(s, ws_id)
-    c, _ = client_for(app, pg_session_factory, email="user@ki.se", is_admin=False)
+    c, _ = client_for(app, pg_session_factory, email="user@umu.se", is_admin=False)
     r = c.post(_path(ws_id))
     assert r.status_code == 403, r.text
 
@@ -113,7 +113,7 @@ def test_live_workspace_returns_204_without_audit(
 ):
     """A live workspace returns 204 immediately with no audit row written."""
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    c, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    c, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed_workspace(pg_session_factory)
 
     # Workspace is LIVE (not deleted)
@@ -137,7 +137,7 @@ def test_second_restore_is_204_with_exactly_one_audit_row(
     """A second call after successful restore finds the workspace live → 204,
     total audit rows stays at 1."""
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    c, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    c, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed_workspace(pg_session_factory)
     with pg_session_factory() as s:
         soft_delete(s, ws_id)
@@ -166,7 +166,7 @@ def test_commit_mutex_timeout_is_429(monkeypatch, pg_url, pg_session_factory, tm
     )
 
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    c, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    c, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed_workspace(pg_session_factory)
     with pg_session_factory() as s:
         soft_delete(s, ws_id)
@@ -198,7 +198,7 @@ def test_route_forwards_the_generation_it_received_not_a_re_read(
     generation it would send 99; if it forwards the outcome it sends the real one.
     """
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    c, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    c, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed_workspace(pg_session_factory)
     with pg_session_factory() as s:
         soft_delete(s, ws_id)
@@ -249,7 +249,7 @@ def test_fault_injection_503_then_retry_with_real_bridge(
     from call_manager.proposal_assist.lifecycle import signal_workspace_restored as _real_signal
 
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    c, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    c, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed_workspace(pg_session_factory)
     with pg_session_factory() as s:
         soft_delete(s, ws_id)
@@ -298,7 +298,7 @@ def test_restore_works_without_retention_inspection_enabled(
     # Confirm the flag is off
     assert not app.state.settings.retention_inspection_enabled
 
-    c, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    c, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed_workspace(pg_session_factory)
     with pg_session_factory() as s:
         soft_delete(s, ws_id)

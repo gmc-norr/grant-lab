@@ -10,12 +10,12 @@ from tests.proposal_assist.conftest import make_user, make_workspace
 def test_workspace_event_insert_with_payload(pg_session_factory):
     with pg_session_factory() as s:
         ws = make_workspace(s)
-        actor = make_user(s, email="actor@ki.se")
+        actor = make_user(s, email="actor@umu.se")
         s.add(
             WorkspaceEvent(
                 workspace_id=ws.id,
                 kind="created",
-                payload={"title": ws.title, "owner_email": "actor@ki.se"},
+                payload={"title": ws.title, "owner_email": "actor@umu.se"},
                 actor_id=actor.id,
             )
         )

@@ -97,7 +97,7 @@ def test_insert_non_owner_403(
 ):
     _app.state.settings.workspaces_dir = str(tmp_path)
     with pg_session_factory() as s:
-        stranger = make_user(s, email="stranger-ins@ki.se")
+        stranger = make_user(s, email="stranger-ins@umu.se")
         ws, ann_id, _ = _seed_supported(s, tmp_path, stranger)
         s.commit()
         ws_id = ws.id

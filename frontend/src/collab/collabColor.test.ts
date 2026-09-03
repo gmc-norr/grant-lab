@@ -14,13 +14,13 @@ describe("colorForUserId", () => {
 
 describe("displayName", () => {
   it("prefers name, falls back to email local-part", () => {
-    expect(displayName({ name: "Dr. Who", email: "who@ki.se" })).toBe("Dr. Who");
-    expect(displayName({ name: null, email: "who@ki.se" })).toBe("who");
+    expect(displayName({ name: "Dr. Who", email: "who@umu.se" })).toBe("Dr. Who");
+    expect(displayName({ name: null, email: "who@umu.se" })).toBe("who");
   });
   it("has a safe fallback when the user is unresolved", () => {
     expect(displayName(undefined)).toBe("Anonymous");
   });
   it("clamps very long labels", () => {
-    expect(displayName({ name: "x".repeat(100), email: "x@ki.se" }).length).toBeLessThanOrEqual(32);
+    expect(displayName({ name: "x".repeat(100), email: "x@umu.se" }).length).toBeLessThanOrEqual(32);
   });
 });

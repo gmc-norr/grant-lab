@@ -67,7 +67,7 @@ def test_workspace_viewer_composite_pk(pg_session_factory):
     same pair twice raises IntegrityError."""
     with pg_session_factory() as s:
         ws = make_workspace(s)
-        viewer = make_user(s, email="viewer@ki.se")
+        viewer = make_user(s, email="viewer@umu.se")
         s.add(WorkspaceViewer(workspace_id=ws.id, user_id=viewer.id))
         s.commit()
         s.add(WorkspaceViewer(workspace_id=ws.id, user_id=viewer.id))
@@ -81,7 +81,7 @@ def test_workspace_viewer_cascade_on_workspace_delete(pg_session_factory):
 
     with pg_session_factory() as s:
         ws = make_workspace(s)
-        viewer = make_user(s, email="viewer2@ki.se")
+        viewer = make_user(s, email="viewer2@umu.se")
         ws_id = ws.id
         viewer_id = viewer.id
         s.add(WorkspaceViewer(workspace_id=ws_id, user_id=viewer_id))

@@ -8,14 +8,14 @@ from call_manager.main import create_app
 def _setup(monkeypatch, pg_url):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     return create_app()
 
 
 def _login(app, pg_session_factory, *, name=None, is_admin=False):
     with pg_session_factory() as s:
-        u = User(status="active", email="u@ki.se", name=name, is_admin=is_admin)
+        u = User(status="active", email="u@umu.se", name=name, is_admin=is_admin)
         s.add(u)
         s.commit()
         s.refresh(u)
@@ -57,7 +57,7 @@ def test_settings_read_model(monkeypatch, pg_url, pg_session_factory):
     assert r.status_code == 200
     body = r.json()
     assert body["name"] == "Pär"
-    assert body["email"] == "u@ki.se"
+    assert body["email"] == "u@umu.se"
     assert body["is_admin"] is True
     assert body["has_password"] is False  # OAuth/passwordless test user
     # active profiles only, ordered by name, with subscribed flags

@@ -6,7 +6,7 @@ from call_manager.db.models import Profile, ProfileBootstrapJob, ProfileKind, Us
 
 
 def _mk_profile(session):
-    u = User(email="creator@ki.se")
+    u = User(email="creator@umu.se")
     session.add(u)
     session.flush()
     p = Profile(

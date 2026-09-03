@@ -26,7 +26,7 @@ def main() -> int:
     os.environ.setdefault("EMBEDDING_MODEL", "bge-m3")
     # Required env that create_app/Settings validates:
     os.environ.setdefault("SESSION_SECRET", "probe-secret-at-least-16-chars!")
-    os.environ.setdefault("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    os.environ.setdefault("ALLOWED_EMAIL_DOMAINS", "umu.se")
     os.environ["SPA_MODE"] = "disabled"
     os.environ["APP_BASE_URL"] = "http://127.0.0.1:8199"
 
@@ -62,7 +62,7 @@ def main() -> int:
         from tests.test_editing_save import _init_repo
 
         with Session() as s:
-            owner = make_user(s, email=f"probe-{uuid.uuid4().hex[:8]}@ki.se")
+            owner = make_user(s, email=f"probe-{uuid.uuid4().hex[:8]}@umu.se")
             ws = make_workspace(s, owner=owner, current_phase="active")
             collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
             s.commit()

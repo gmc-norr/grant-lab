@@ -109,7 +109,7 @@ def test_last_leave_checkpoints_and_evicts(_app, pg_session_factory, tmp_path):
     _app.state.session_factory = pg_session_factory
     _app.state.settings.workspaces_dir = str(tmp_path)
     with pg_session_factory() as s:
-        owner = make_user(s, email="trig-last-leave@ki.se")
+        owner = make_user(s, email="trig-last-leave@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
@@ -175,7 +175,7 @@ def test_explicit_endpoint_owner_commits(_app, pg_session_factory, tmp_path):
     _app.state.session_factory = pg_session_factory
     _app.state.settings.workspaces_dir = str(tmp_path)
     with pg_session_factory() as s:
-        owner = make_user(s, email="trig-explicit-owner@ki.se")
+        owner = make_user(s, email="trig-explicit-owner@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
@@ -211,7 +211,7 @@ def test_explicit_endpoint_repo_missing_is_clean_noop(_app, pg_session_factory, 
     _app.state.session_factory = pg_session_factory
     _app.state.settings.workspaces_dir = str(tmp_path)
     with pg_session_factory() as s:
-        owner = make_user(s, email="trig-norepo@ki.se")
+        owner = make_user(s, email="trig-norepo@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
@@ -233,8 +233,8 @@ def test_explicit_endpoint_read_only_member_is_forbidden(_app, pg_session_factor
     _app.state.session_factory = pg_session_factory
     _app.state.settings.workspaces_dir = str(tmp_path)
     with pg_session_factory() as s:
-        owner = make_user(s, email="trig-ro-owner@ki.se")
-        member = make_user(s, email="trig-ro-member@ki.se")
+        owner = make_user(s, email="trig-ro-owner@umu.se")
+        member = make_user(s, email="trig-ro-member@umu.se")
         # setup phase -> members are read-only for the draft
         ws = make_workspace(s, owner=owner, current_phase="setup")
         s.add(WorkspaceViewer(workspace_id=ws.id, user_id=member.id))
@@ -257,7 +257,7 @@ def test_explicit_endpoint_collab_disabled_is_conflict(_app, pg_session_factory,
     _app.state.session_factory = pg_session_factory
     _app.state.settings.workspaces_dir = str(tmp_path)
     with pg_session_factory() as s:
-        owner = make_user(s, email="trig-disabled-owner@ki.se")
+        owner = make_user(s, email="trig-disabled-owner@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         # NOT enabling collab for the draft
         s.commit()
@@ -277,8 +277,8 @@ def test_explicit_endpoint_non_member_is_not_found(_app, pg_session_factory, tmp
     _app.state.session_factory = pg_session_factory
     _app.state.settings.workspaces_dir = str(tmp_path)
     with pg_session_factory() as s:
-        owner = make_user(s, email="trig-nm-owner@ki.se")
-        stranger = make_user(s, email="trig-nm-stranger@ki.se")
+        owner = make_user(s, email="trig-nm-owner@umu.se")
+        stranger = make_user(s, email="trig-nm-stranger@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
@@ -301,7 +301,7 @@ def test_flag_off_connection_rejected_and_fully_dormant(_app, pg_session_factory
     _app.state.session_factory = pg_session_factory
     _app.state.settings.workspaces_dir = str(tmp_path)
     with pg_session_factory() as s:
-        owner = make_user(s, email="trig-flagoff@ki.se")
+        owner = make_user(s, email="trig-flagoff@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         # deliberately NOT calling enable_collab
         s.commit()
@@ -345,7 +345,7 @@ def test_explicit_endpoint_404s_for_a_deleted_workspace(_app, pg_session_factory
     _app.state.session_factory = pg_session_factory
     _app.state.settings.workspaces_dir = str(tmp_path)
     with pg_session_factory() as s:
-        owner = make_user(s, email="trig-deleted-owner@ki.se")
+        owner = make_user(s, email="trig-deleted-owner@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()

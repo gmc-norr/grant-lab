@@ -9,12 +9,12 @@ from call_manager.main import create_app
 def _setup(monkeypatch, pg_url):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     return create_app()
 
 
-def _admin(app, sf, test_client_factory, *, email="root@ki.se"):
+def _admin(app, sf, test_client_factory, *, email="root@umu.se"):
     with sf() as s:
         u = User(status="active", email=email, is_admin=True)
         s.add(u)
@@ -74,7 +74,7 @@ def test_rerank_enqueues_for_active_profiles(
 def test_rerank_requires_admin(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     app = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        u = User(status="active", email="na@ki.se", is_admin=False)
+        u = User(status="active", email="na@umu.se", is_admin=False)
         s.add(u)
         s.commit()
         s.refresh(u)
@@ -114,7 +114,7 @@ def test_reenable_clears_and_returns_id(
     app = _setup(monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory, test_client_factory)
     with pg_session_factory() as s:
-        u = User(status="active", email="bounced@ki.se", digest_disabled_at=datetime.now(UTC))
+        u = User(status="active", email="bounced@umu.se", digest_disabled_at=datetime.now(UTC))
         s.add(u)
         s.commit()
         s.refresh(u)
@@ -131,7 +131,7 @@ def test_reenable_already_enabled_noop(
     app = _setup(monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory, test_client_factory)
     with pg_session_factory() as s:
-        u = User(status="active", email="fine@ki.se", digest_disabled_at=None)
+        u = User(status="active", email="fine@umu.se", digest_disabled_at=None)
         s.add(u)
         s.commit()
         s.refresh(u)

@@ -17,7 +17,7 @@ def _signer() -> SessionSigner:
 
 def test_user_from_cookie_valid(pg_session_factory):
     with pg_session_factory() as s:
-        u = make_user(s, email="wsauth-ok@ki.se")
+        u = make_user(s, email="wsauth-ok@umu.se")
         s.commit()
         uid = u.id
     signer = _signer()
@@ -36,7 +36,7 @@ def test_user_from_cookie_missing_or_bad_raises(pg_session_factory):
 
 def test_user_from_cookie_rejects_inactive_and_stale_epoch(pg_session_factory):
     with pg_session_factory() as s:
-        u = User(status="disabled", email="wsauth-disabled@ki.se")
+        u = User(status="disabled", email="wsauth-disabled@umu.se")
         s.add(u)
         s.commit()
         uid = u.id
@@ -48,7 +48,7 @@ def test_user_from_cookie_rejects_inactive_and_stale_epoch(pg_session_factory):
 
     # active but epoch bumped after the cookie was minted
     with pg_session_factory() as s:
-        u = make_user(s, email="wsauth-epoch@ki.se")
+        u = make_user(s, email="wsauth-epoch@umu.se")
         s.commit()
         uid = u.id
     cookie = signer.make(user_id=uid, session_epoch=0)
@@ -66,9 +66,9 @@ def _add_viewer(session, ws, user):
 
 def test_access_matrix(pg_session_factory):
     with pg_session_factory() as s:
-        owner = make_user(s, email="acc-owner@ki.se")
-        member = make_user(s, email="acc-member@ki.se")
-        stranger = make_user(s, email="acc-stranger@ki.se")
+        owner = make_user(s, email="acc-owner@umu.se")
+        member = make_user(s, email="acc-member@umu.se")
+        stranger = make_user(s, email="acc-stranger@umu.se")
         ws_active = make_workspace(s, owner=owner, current_phase="active")
         _add_viewer(s, ws_active, member)
         s.commit()
@@ -90,8 +90,8 @@ def test_access_matrix(pg_session_factory):
 
 def test_access_setup_phase_is_owner_only(pg_session_factory):
     with pg_session_factory() as s:
-        owner = make_user(s, email="setup-owner@ki.se")
-        member = make_user(s, email="setup-member@ki.se")
+        owner = make_user(s, email="setup-owner@umu.se")
+        member = make_user(s, email="setup-member@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="setup")
         _add_viewer(s, ws, member)
         s.commit()
@@ -106,8 +106,8 @@ def test_access_locked_spec_is_owner_only(pg_session_factory):
     from datetime import UTC, datetime
 
     with pg_session_factory() as s:
-        owner = make_user(s, email="lock-owner@ki.se")
-        member = make_user(s, email="lock-member@ki.se")
+        owner = make_user(s, email="lock-owner@umu.se")
+        member = make_user(s, email="lock-member@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         _add_viewer(s, ws, member)
         ws.spec_locked_at = datetime.now(UTC)

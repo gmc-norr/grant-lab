@@ -218,7 +218,7 @@ def test_kernel_happy_path_via_http(_app, pg_session_factory, tmp_path):
 
     md0 = "## Background\noriginal.\n"
     with pg_session_factory() as s:
-        owner = make_user(s, email="ka-route-happy@ki.se")
+        owner = make_user(s, email="ka-route-happy@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
@@ -279,7 +279,7 @@ def test_live_client_converges(_app, pg_session_factory, tmp_path):
 
     md0 = "## Background\noriginal.\n"
     with pg_session_factory() as s:
-        owner = make_user(s, email="ka-route-converge@ki.se")
+        owner = make_user(s, email="ka-route-converge@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
@@ -350,7 +350,7 @@ def test_stale_vs_live(_app, pg_session_factory, tmp_path):
 
     md0 = "## Background\noriginal.\n"
     with pg_session_factory() as s:
-        owner = make_user(s, email="ka-route-stale@ki.se")
+        owner = make_user(s, email="ka-route-stale@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
@@ -430,7 +430,7 @@ def test_collab_citation_accept_via_http(_app, pg_session_factory, tmp_path):
     _app.state.settings.workspaces_dir = str(tmp_path)
 
     with pg_session_factory() as s:
-        owner = make_user(s, email="ka-route-cite-accept@ki.se")
+        owner = make_user(s, email="ka-route-cite-accept@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
@@ -489,7 +489,7 @@ def test_flag_off_citation_parity(_app, pg_session_factory, tmp_path):
     _app.state.settings.workspaces_dir = str(tmp_path)
 
     with pg_session_factory() as s:
-        owner = make_user(s, email="ka-route-cite-flagoff@ki.se")
+        owner = make_user(s, email="ka-route-cite-flagoff@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         # Deliberately NOT calling enable_collab
         s.commit()
@@ -542,7 +542,7 @@ def test_unsupported_kind_returns_422(_app, pg_session_factory, tmp_path):
 
     md0 = "## Background\noriginal.\n"
     with pg_session_factory() as s:
-        owner = make_user(s, email="ka-route-unsupported@ki.se")
+        owner = make_user(s, email="ka-route-unsupported@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
@@ -606,7 +606,7 @@ def test_flag_off_parity_git_first(_app, pg_session_factory, tmp_path):
 
     md0 = "## Background\noriginal.\n"
     with pg_session_factory() as s:
-        owner = make_user(s, email="ka-route-flagoff@ki.se")
+        owner = make_user(s, email="ka-route-flagoff@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         # Deliberately NOT calling enable_collab
         s.commit()
@@ -663,7 +663,7 @@ def test_accept_race_second_accept_is_rejected(_app, pg_session_factory, tmp_pat
 
     md0 = "## Background\noriginal.\n"
     with pg_session_factory() as s:
-        owner = make_user(s, email="ka-route-race@ki.se")
+        owner = make_user(s, email="ka-route-race@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
@@ -720,7 +720,7 @@ def test_kernel_commit_mutex_timeout_maps_to_429(_app, pg_session_factory, tmp_p
 
     md0 = "## Background\noriginal.\n"
     with pg_session_factory() as s:
-        owner = make_user(s, email="ka-route-429@ki.se")
+        owner = make_user(s, email="ka-route-429@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
@@ -772,7 +772,7 @@ def test_kernel_evicts_room_on_post_mutation_failure(
 
     md0 = "## Background\noriginal.\n"
     with pg_session_factory() as s:
-        owner = make_user(s, email="ka-route-evict@ki.se")
+        owner = make_user(s, email="ka-route-evict@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()

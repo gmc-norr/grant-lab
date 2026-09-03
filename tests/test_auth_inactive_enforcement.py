@@ -9,14 +9,14 @@ from call_manager.main import create_app
 def _app(monkeypatch, pg_url):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     return create_app()
 
 
 def _user(sf, status):
     with sf() as s:
-        u = User(email=f"{status}@ki.se", status=status)
+        u = User(email=f"{status}@umu.se", status=status)
         s.add(u)
         s.commit()
         s.refresh(u)
@@ -67,7 +67,7 @@ def test_get_current_user_raises_account_inactive(pg_url, pg_session_factory):
     sf = make_session_factory(engine)
     try:
         with sf() as s:
-            u = User(email="p@ki.se", status="pending")
+            u = User(email="p@umu.se", status="pending")
             s.add(u)
             s.commit()
             s.refresh(u)

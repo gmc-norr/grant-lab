@@ -13,7 +13,7 @@ from call_manager.db.models import (
 )
 
 
-def _user_and_call(s, email="u@ki.se"):
+def _user_and_call(s, email="u@umu.se"):
     u = User(email=email)
     s.add(u)
     s.flush()
@@ -104,7 +104,7 @@ def test_digest_run_user_week_uniqueness(pg_session_factory):
 
 def test_user_bounce_columns_default_zero_and_null(pg_session_factory):
     with pg_session_factory() as s:
-        u = User(email="bounce@ki.se")
+        u = User(email="bounce@umu.se")
         s.add(u)
         s.commit()
         s.refresh(u)

@@ -13,9 +13,9 @@ def test_smtp_success_returns_ok(monkeypatch):
     monkeypatch.setattr("call_manager.email.client.smtplib.SMTP", fake_smtp_class)
 
     client = SMTPClient(
-        host="smtp.example.com", port=587, user="u", password="p", from_addr="bot@ki.se"
+        host="smtp.example.com", port=587, user="u", password="p", from_addr="bot@umu.se"
     )
-    r = client.send(to="u@ki.se", subject="hi", html="<p>hi</p>", text="hi")
+    r = client.send(to="u@umu.se", subject="hi", html="<p>hi</p>", text="hi")
     assert r.ok
     assert r.bounce_reason is None
     fake_conn.starttls.assert_called_once()
@@ -31,14 +31,14 @@ def test_smtp_recipient_refused_is_bounce(monkeypatch):
     import smtplib
 
     fake_conn.sendmail.side_effect = smtplib.SMTPRecipientsRefused(
-        {"u@ki.se": (550, b"5.1.1 user unknown")}
+        {"u@umu.se": (550, b"5.1.1 user unknown")}
     )
     monkeypatch.setattr("call_manager.email.client.smtplib.SMTP", fake_smtp_class)
 
     client = SMTPClient(
-        host="smtp.example.com", port=587, user="u", password="p", from_addr="bot@ki.se"
+        host="smtp.example.com", port=587, user="u", password="p", from_addr="bot@umu.se"
     )
-    r = client.send(to="u@ki.se", subject="hi", html="<p>hi</p>", text="hi")
+    r = client.send(to="u@umu.se", subject="hi", html="<p>hi</p>", text="hi")
     assert not r.ok
     assert r.bounce_reason and "550" in r.bounce_reason
 
@@ -50,10 +50,10 @@ def test_smtp_connection_error_raises_transport(monkeypatch):
     monkeypatch.setattr("call_manager.email.client.smtplib.SMTP", fake_smtp_class)
 
     client = SMTPClient(
-        host="smtp.example.com", port=587, user="u", password="p", from_addr="bot@ki.se"
+        host="smtp.example.com", port=587, user="u", password="p", from_addr="bot@umu.se"
     )
     with pytest.raises(EmailTransportError):
-        client.send(to="u@ki.se", subject="hi", html="<p>hi</p>", text="hi")
+        client.send(to="u@umu.se", subject="hi", html="<p>hi</p>", text="hi")
 
 
 def test_smtp_no_login_when_no_user(monkeypatch):
@@ -64,9 +64,9 @@ def test_smtp_no_login_when_no_user(monkeypatch):
     monkeypatch.setattr("call_manager.email.client.smtplib.SMTP", fake_smtp_class)
 
     client = SMTPClient(
-        host="smtp.example.com", port=587, user=None, password=None, from_addr="bot@ki.se"
+        host="smtp.example.com", port=587, user=None, password=None, from_addr="bot@umu.se"
     )
-    r = client.send(to="u@ki.se", subject="hi", html="<p></p>", text="")
+    r = client.send(to="u@umu.se", subject="hi", html="<p></p>", text="")
     assert r.ok
     fake_conn.login.assert_not_called()
 
@@ -91,9 +91,9 @@ def test_magic_link_smtp_starttls_uses_verifying_context(monkeypatch):
         port=587,
         user="u",
         password="p",
-        from_address="bot@ki.se",
+        from_address="bot@umu.se",
     )
-    sender.send(to="u@ki.se", subject="hi", text_body="link")
+    sender.send(to="u@umu.se", subject="hi", text_body="link")
 
     fake_conn.starttls.assert_called_once()
     _, kwargs = fake_conn.starttls.call_args

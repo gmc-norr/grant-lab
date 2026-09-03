@@ -13,7 +13,7 @@ import { renderWithProviders } from "../test-utils";
 // names its own cause. Deliberately NOT mocking CollabEditor itself: a mock
 // that cannot enter the connecting state cannot fail this test.
 const doc = vi.hoisted(() => ({ ready: false }));
-const session = vi.hoisted(() => ({ user: { id: 1, name: "T", email: "t@ki.se" } as unknown }));
+const session = vi.hoisted(() => ({ user: { id: 1, name: "T", email: "t@umu.se" } as unknown }));
 
 vi.mock("./useCollabDoc", () => ({
   useCollabDoc: () =>
@@ -30,7 +30,7 @@ const ACTIONS = <button type="button">Export ▾</button>;
 describe("CollabEditor — the actions slot survives the connecting state", () => {
   it("still renders actions while the doc and provider are unresolved", () => {
     doc.ready = false;
-    session.user = { id: 1, name: "T", email: "t@ki.se" };
+    session.user = { id: 1, name: "T", email: "t@umu.se" };
     renderWithProviders(
       <CollabEditor workspaceId="w" artifact="draft" canWrite actions={ACTIONS} />,
     );
@@ -50,7 +50,7 @@ describe("CollabEditor — the actions slot survives the connecting state", () =
 
   it("renders no stray action when the panel passes none", () => {
     doc.ready = false;
-    session.user = { id: 1, name: "T", email: "t@ki.se" };
+    session.user = { id: 1, name: "T", email: "t@umu.se" };
     renderWithProviders(<CollabEditor workspaceId="w" artifact="draft" canWrite />);
     expect(screen.getByTestId("collab-connecting")).toHaveTextContent("Loading the draft…");
     expect(screen.queryByRole("button")).not.toBeInTheDocument();

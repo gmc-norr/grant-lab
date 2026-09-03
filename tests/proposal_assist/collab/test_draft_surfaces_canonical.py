@@ -86,7 +86,7 @@ def _categories(pg_session_factory, wid, tmp_path):
 
 
 def test_the_panel_judges_the_live_document_not_stale_git(pg_session_factory, tmp_path):
-    wid = _setup(pg_session_factory, tmp_path, "problems-canon@ki.se")
+    wid = _setup(pg_session_factory, tmp_path, "problems-canon@umu.se")
     cats = _categories(pg_session_factory, wid, tmp_path)
 
     assert "broken_citation" not in cats, (
@@ -103,7 +103,7 @@ def test_flag_off_the_panel_still_judges_raw_git(pg_session_factory, tmp_path):
     """Control. With collab disabled git IS the document, so the verdicts invert.
     A fix that ignored the flag would change every non-collab workspace, and a test
     that cannot tell the two apart proves nothing."""
-    wid = _setup(pg_session_factory, tmp_path, "problems-canon-off@ki.se", collab=False)
+    wid = _setup(pg_session_factory, tmp_path, "problems-canon-off@umu.se", collab=False)
     cats = _categories(pg_session_factory, wid, tmp_path)
     assert "broken_citation" in cats
     assert "over_length" not in cats
@@ -122,7 +122,7 @@ def _audit_types(monkeypatch, pg_url, tmp_path, pg_session_factory, *, collab):
     for k, v in {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://testserver",
     }.items():
         monkeypatch.setenv(k, v)
@@ -131,7 +131,7 @@ def _audit_types(monkeypatch, pg_url, tmp_path, pg_session_factory, *, collab):
     app.state.settings.workspaces_dir = str(tmp_path)
 
     with pg_session_factory() as s:
-        owner = make_user(s, email=f"audit-canon-{'on' if collab else 'off'}@ki.se")
+        owner = make_user(s, email=f"audit-canon-{'on' if collab else 'off'}@umu.se")
         ws = make_workspace(s, owner=owner)
         s.commit()
         wid, oid = ws.id, owner.id
@@ -197,7 +197,7 @@ def test_a_pass_that_evaluated_the_live_draft_is_not_reported_stale(pg_session_f
     reported stale) and comparing against git (the live sha never equals the disk sha,
     so a correct pass would be reported stale forever — an unattended re-run loop).
     """
-    wid = _setup(pg_session_factory, tmp_path, "stale-flags@ki.se")
+    wid = _setup(pg_session_factory, tmp_path, "stale-flags@umu.se")
     repo = workspace_repo_dir(tmp_path, wid)
     with pg_session_factory() as s:
         ws = s.get(Workspace, wid)
@@ -237,7 +237,7 @@ def test_a_pass_that_evaluated_the_live_draft_is_not_reported_stale(pg_session_f
 
 def test_a_pass_that_evaluated_the_stale_disk_draft_is_reported_stale(pg_session_factory, tmp_path):
     """The other direction, so the flags are not simply hardwired off."""
-    wid = _setup(pg_session_factory, tmp_path, "stale-flags-disk@ki.se")
+    wid = _setup(pg_session_factory, tmp_path, "stale-flags-disk@umu.se")
     disk_sha = hashlib.sha256(STALE_DISK.encode()).hexdigest()
     with pg_session_factory() as s:
         rubric_ts = s.get(Workspace, wid).rubric_updated_at

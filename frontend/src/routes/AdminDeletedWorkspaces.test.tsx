@@ -28,7 +28,7 @@ function row(i: number) {
   return {
     id: `1111111${i}-1111-1111-1111-111111111111`,
     title: `Retired grant draft ${i}`,
-    owner_email: `owner${i}@ki.se`,
+    owner_email: `owner${i}@umu.se`,
     soft_deleted_at: "2026-08-01T10:00:00Z",
   };
 }
@@ -41,7 +41,7 @@ function mockList(items: unknown[], total = items.length, { canInspect = true } 
     if (path === "/api/me") {
       return {
         data: {
-          user: { id: 1, email: "a@ki.se", status: "active", default_profile_id: null },
+          user: { id: 1, email: "a@umu.se", status: "active", default_profile_id: null },
           capabilities: { admin: true, retention_inspection: canInspect },
         },
         error: undefined,
@@ -67,7 +67,7 @@ it("lists deleted workspaces with owner and deletion time", async () => {
   mockList([row(0)]);
   renderWithProviders(<AdminDeletedWorkspaces />);
   expect(await screen.findByText("Retired grant draft 0")).toBeInTheDocument();
-  expect(screen.getByText("owner0@ki.se")).toBeInTheDocument();
+  expect(screen.getByText("owner0@umu.se")).toBeInTheDocument();
 });
 
 it("says so plainly when nothing has been deleted", async () => {
@@ -116,7 +116,7 @@ function mockDetail(overrides: Record<string, unknown> = {}) {
     data: {
       id: WS_ID,
       title: "Retired grant draft",
-      owner_email: "owner@ki.se",
+      owner_email: "owner@umu.se",
       soft_deleted_at: "2026-08-01T10:00:00Z",
       repository_available: true,
       history_available: true,

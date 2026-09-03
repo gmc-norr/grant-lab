@@ -22,7 +22,7 @@ async def test_build_scheduler_registers_idle_sweep_tick(monkeypatch, pg_url):
 
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     monkeypatch.setenv("DRAFTING_ADAPTER", "fake")
     settings = Settings()
@@ -108,7 +108,7 @@ async def test_idle_sweep_runs_on_app_loop_not_fresh_loop(monkeypatch, pg_url):
 
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     monkeypatch.setenv("DRAFTING_ADAPTER", "fake")
     settings = Settings()
@@ -188,7 +188,7 @@ def test_idle_sweep_tick_also_reconciles(monkeypatch, pg_url):
 
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     monkeypatch.setenv("DRAFTING_ADAPTER", "fake")
     settings = Settings()

@@ -60,7 +60,7 @@ _PROFILE = {
         "AI/ML for digital pathology, radiology, and federated learning across "
         "Nordic medical centers. Focus: cancer diagnostics from whole-slide "
         "images and multi-site model training that preserves data sovereignty. "
-        "Active collaborations with KI, Umeå University, and regional pathology "
+        "Active collaborations with Umeå University, Region Västerbotten, and regional pathology "
         "labs. Funded grants include translational AI for tumor classification."
     ),
     "structured": {

@@ -50,7 +50,7 @@ def _payload():
     )
     return DigestPayload(
         user_id=42,
-        user_email="u@ki.se",
+        user_email="u@umu.se",
         sections=[section],
         total_calls=3,
     )
@@ -104,7 +104,7 @@ def test_html_renders_deadline_in_stockholm_timezone():
     section = DigestProfileSection(profile_id=1, profile_name="P", entries=[entry])
     payload = DigestPayload(
         user_id=1,
-        user_email="u@ki.se",
+        user_email="u@umu.se",
         sections=[section],
         total_calls=1,
     )
@@ -132,7 +132,7 @@ def test_html_link_goes_to_in_app_not_external_source():
     section = DigestProfileSection(profile_id=1, profile_name="P", entries=[entry])
     payload = DigestPayload(
         user_id=1,
-        user_email="u@ki.se",
+        user_email="u@umu.se",
         sections=[section],
         total_calls=1,
     )
@@ -162,7 +162,7 @@ def test_text_link_goes_to_in_app():
     section = DigestProfileSection(profile_id=1, profile_name="P", entries=[entry])
     payload = DigestPayload(
         user_id=1,
-        user_email="u@ki.se",
+        user_email="u@umu.se",
         sections=[section],
         total_calls=1,
     )
@@ -188,7 +188,7 @@ def test_days_until_is_deterministic_with_explicit_now():
         also_in_profiles=[],
     )
     section = DigestProfileSection(profile_id=1, profile_name="P", entries=[entry])
-    payload = DigestPayload(user_id=1, user_email="u@ki.se", sections=[section], total_calls=1)
+    payload = DigestPayload(user_id=1, user_email="u@umu.se", sections=[section], total_calls=1)
 
     html = render_html(payload, dashboard_url="http://app/", now=now)
     text = render_text(payload, dashboard_url="http://app/", now=now)
@@ -239,7 +239,7 @@ def test_html_escapes_xss_in_title():
     )
     payload = DigestPayload(
         user_id=1,
-        user_email="u@ki.se",
+        user_email="u@umu.se",
         sections=[section],
         total_calls=1,
     )

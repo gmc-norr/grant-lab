@@ -39,7 +39,7 @@ def _seed_three_refs(pg_session_factory, tmp_path):
     storage = ReferenceStorage(root=tmp_path)
     embedder = FakeEmbedder()
     with pg_session_factory() as s:
-        user = make_user(s, email=f"owner-{uuid.uuid4()}@ki.se")
+        user = make_user(s, email=f"owner-{uuid.uuid4()}@umu.se")
         s.commit()
         ws = make_workspace(s, owner=user)
         s.commit()
@@ -197,7 +197,7 @@ async def test_read_reference_section_returns_concatenated_chunks(pg_session_fac
     storage = ReferenceStorage(root=tmp_path)
     embedder = FakeEmbedder()
     with pg_session_factory() as s:
-        user = make_user(s, email=f"owner-{uuid.uuid4()}@ki.se")
+        user = make_user(s, email=f"owner-{uuid.uuid4()}@umu.se")
         s.commit()
         ws = make_workspace(s, owner=user)
         s.commit()
@@ -268,7 +268,7 @@ async def test_navigate_reference_returns_hierarchical_outline(pg_session_factor
     storage = ReferenceStorage(root=tmp_path)
     embedder = FakeEmbedder()
     with pg_session_factory() as s:
-        user = make_user(s, email=f"owner-{uuid.uuid4()}@ki.se")
+        user = make_user(s, email=f"owner-{uuid.uuid4()}@umu.se")
         s.commit()
         ws = make_workspace(s, owner=user)
         s.commit()
@@ -337,7 +337,7 @@ async def test_navigate_reference_data_kind_returns_skipped(pg_session_factory, 
     embedder = FakeEmbedder()
     csv = b"name,age\nalice,30\nbob,25\n"
     with pg_session_factory() as s:
-        user = make_user(s, email=f"owner-{uuid.uuid4()}@ki.se")
+        user = make_user(s, email=f"owner-{uuid.uuid4()}@umu.se")
         s.commit()
         ws = make_workspace(s, owner=user)
         s.commit()
@@ -380,7 +380,7 @@ async def test_summarize_data_csv_returns_schema_and_sample(pg_session_factory, 
     embedder = FakeEmbedder()
     csv = b"patient_id,age,diagnosis\n1,42,ALL\n2,67,AML\n3,55,ALL\n"
     with pg_session_factory() as s:
-        user = make_user(s, email=f"owner-{uuid.uuid4()}@ki.se")
+        user = make_user(s, email=f"owner-{uuid.uuid4()}@umu.se")
         s.commit()
         ws = make_workspace(s, owner=user)
         s.commit()
@@ -556,7 +556,7 @@ async def test_search_references_includes_chunk_index_and_citekey(pg_session_fac
     storage = ReferenceStorage(root=tmp_path)
     embedder = FakeEmbedder()
     with pg_session_factory() as s:
-        user = make_user(s, email=f"owner-{uuid.uuid4()}@ki.se")
+        user = make_user(s, email=f"owner-{uuid.uuid4()}@umu.se")
         s.commit()
         ws = make_workspace(s, owner=user)
         s.commit()
@@ -642,7 +642,7 @@ async def test_read_reference_section_includes_chunk_indexes(pg_session_factory,
     storage = ReferenceStorage(root=tmp_path)
     embedder = FakeEmbedder()
     with pg_session_factory() as s:
-        user = make_user(s, email=f"owner-{uuid.uuid4()}@ki.se")
+        user = make_user(s, email=f"owner-{uuid.uuid4()}@umu.se")
         s.commit()
         ws = make_workspace(s, owner=user)
         s.commit()
@@ -762,7 +762,7 @@ async def test_read_reference_section_tombstoned_includes_flag(pg_session_factor
     storage = ReferenceStorage(root=tmp_path)
     embedder = FakeEmbedder()
     with pg_session_factory() as s:
-        user = make_user(s, email=f"owner-{uuid.uuid4()}@ki.se")
+        user = make_user(s, email=f"owner-{uuid.uuid4()}@umu.se")
         s.commit()
         ws = make_workspace(s, owner=user)
         s.commit()
@@ -809,7 +809,7 @@ async def test_read_reference_section_non_tombstoned_omits_flag(pg_session_facto
     storage = ReferenceStorage(root=tmp_path)
     embedder = FakeEmbedder()
     with pg_session_factory() as s:
-        user = make_user(s, email=f"owner-{uuid.uuid4()}@ki.se")
+        user = make_user(s, email=f"owner-{uuid.uuid4()}@umu.se")
         s.commit()
         ws = make_workspace(s, owner=user)
         s.commit()
@@ -856,7 +856,7 @@ async def test_read_reference_data_kind_steers_to_summarize(pg_session_factory, 
     embedder = FakeEmbedder()
     csv = b"a,b\n1,2\n"
     with pg_session_factory() as s:
-        user = make_user(s, email=f"r-{uuid.uuid4()}@ki.se")
+        user = make_user(s, email=f"r-{uuid.uuid4()}@umu.se")
         s.commit()
         ws = make_workspace(s, owner=user)
         s.commit()

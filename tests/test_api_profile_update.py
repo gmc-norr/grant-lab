@@ -9,7 +9,7 @@ from call_manager.main import create_app
 def _setup(monkeypatch, pg_url):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     # Keep the re-embed/backfill driver offline (it would hit Ollama).
     monkeypatch.setattr(post_edit, "refresh_and_backfill_in_background", lambda **kw: None)
@@ -23,7 +23,7 @@ def _client_for(app, uid):
     return client
 
 
-def _other_user(pg_session_factory, *, is_admin=False, email="o@ki.se"):
+def _other_user(pg_session_factory, *, is_admin=False, email="o@umu.se"):
     with pg_session_factory() as s:
         u = User(status="active", email=email, is_admin=is_admin)
         s.add(u)
@@ -39,7 +39,7 @@ _EDIT = {
     "level": "group", "career_stage": "", "applicant_types": "", "role": "",
     "years_since_phd": "", "org_type": "university_hospital", "capabilities": "biobank",
     "patient_populations": "", "scale": "", "funding_instruments": "project_grant",
-    "funder_exclusions": "", "country": "SE", "host_institution": "KI",
+    "funder_exclusions": "", "country": "SE", "host_institution": "UmU",
 }
 
 
@@ -52,7 +52,7 @@ def test_update_areas_only_change_triggers_reembed(  # noqa: E501
     # on the driver (instead of no-op'ing it) to assert refresh_embedding=True.
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     captured: dict = {}
 
@@ -122,7 +122,7 @@ def test_update_403_before_409_when_drafting(monkeypatch, pg_url, pg_session_fac
     with pg_session_factory() as s:
         s.add(ProfileBootstrapJob(profile_id=pid, status="running", seed={"x": 1}))
         s.commit()
-    other = _other_user(pg_session_factory, email="other2@ki.se")
+    other = _other_user(pg_session_factory, email="other2@umu.se")
     client = _client_for(app, other)
     with client:
         r = client.put(f"/api/profiles/{pid}", json=_EDIT)
@@ -132,7 +132,7 @@ def test_update_403_before_409_when_drafting(monkeypatch, pg_url, pg_session_fac
 def test_update_bad_currency_400_before_404(monkeypatch, pg_url, pg_session_factory):
     # input-shape validation (currency 400) fires BEFORE the in-session 404 — parity.
     app = _setup(monkeypatch, pg_url)
-    owner = _other_user(pg_session_factory, email="owner@ki.se")
+    owner = _other_user(pg_session_factory, email="owner@umu.se")
     client = _client_for(app, owner)
     with client:
         r = client.put("/api/profiles/999999", json={**_EDIT, "budget_currency": "ZZZ"})
@@ -141,7 +141,7 @@ def test_update_bad_currency_400_before_404(monkeypatch, pg_url, pg_session_fact
 
 def test_update_404_missing(monkeypatch, pg_url, pg_session_factory):
     app = _setup(monkeypatch, pg_url)
-    owner = _other_user(pg_session_factory, email="owner@ki.se")
+    owner = _other_user(pg_session_factory, email="owner@umu.se")
     client = _client_for(app, owner)
     with client:
         r = client.put("/api/profiles/999999", json=_EDIT)

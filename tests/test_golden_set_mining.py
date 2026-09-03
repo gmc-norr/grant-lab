@@ -37,7 +37,7 @@ def _mk_call(s, src, ext):
 
 def test_add_list_delete_roundtrip(pg_session_factory):
     with pg_session_factory() as s:
-        u = User(email="a@ki.se")
+        u = User(email="a@umu.se")
         s.add(u)
         s.flush()
         p = Profile(
@@ -68,7 +68,7 @@ def test_add_list_delete_roundtrip(pg_session_factory):
 
 def test_candidates_dismissed_high_score(pg_session_factory):
     with pg_session_factory() as s:
-        u = User(email="sub@ki.se")
+        u = User(email="sub@umu.se")
         s.add(u)
         s.flush()
         p = Profile(
@@ -104,7 +104,7 @@ def test_candidates_dismissed_high_score(pg_session_factory):
 
 def test_candidates_cosine_disagreement_high_cos_low_score(pg_session_factory):
     with pg_session_factory() as s:
-        u = User(email="c@ki.se")
+        u = User(email="c@umu.se")
         s.add(u)
         s.flush()
         p = Profile(
@@ -139,7 +139,7 @@ def test_candidates_cosine_disagreement_high_cos_low_score(pg_session_factory):
 
 def test_candidates_exclude_existing_triples(pg_session_factory):
     with pg_session_factory() as s:
-        u = User(email="x@ki.se")
+        u = User(email="x@umu.se")
         s.add(u)
         s.flush()
         p = Profile(

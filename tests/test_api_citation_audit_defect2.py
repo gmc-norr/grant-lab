@@ -55,7 +55,7 @@ def _app(monkeypatch, pg_url, tmp_path):
     for k, v in {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://testserver",
     }.items():
         monkeypatch.setenv(k, v)
@@ -64,7 +64,7 @@ def _app(monkeypatch, pg_url, tmp_path):
     return app
 
 
-def _seed(pg_session_factory, *, email="defect2-owner@ki.se"):
+def _seed(pg_session_factory, *, email="defect2-owner@umu.se"):
     with pg_session_factory() as s:
         owner = User(status="active", email=email)
         s.add(owner)
@@ -173,7 +173,7 @@ def test_deep_check_cap_limits_fresh_llm_calls(
     # Override the cap on the already-created Settings object (post-create).
     app.state.settings.citation_deep_check_max_per_request = CAP
 
-    owner_id, ws_id = _seed(pg_session_factory, email="d2s1@ki.se")
+    owner_id, ws_id = _seed(pg_session_factory, email="d2s1@umu.se")
     app.state.session_factory = pg_session_factory
 
     # Seed more references than the cap.
@@ -221,7 +221,7 @@ def test_deep_check_deferred_zero_when_within_limit(
     # Use a large cap so 2 rows are well within it.
     app.state.settings.citation_deep_check_max_per_request = 25
 
-    owner_id, ws_id = _seed(pg_session_factory, email="d2s2@ki.se")
+    owner_id, ws_id = _seed(pg_session_factory, email="d2s2@umu.se")
     app.state.session_factory = pg_session_factory
 
     refs = _seed_many_references(pg_session_factory, ws_id, count=2)

@@ -33,7 +33,7 @@ def _init_repo(root, ws_id, doc):
 
 def _seed_ws_ref(pg_session_factory, *, chunk_text, chunk_index=0):
     with pg_session_factory() as s:
-        owner = User(status="active", email="owner@ki.se")
+        owner = User(status="active", email="owner@umu.se")
         s.add(owner)
         s.flush()
         ws = Workspace(title="W", owner_id=owner.id, current_phase="active")
@@ -330,7 +330,7 @@ def test_a_reference_owned_by_ANOTHER_workspace_raises_not_found(pg_session_fact
     with pg_session_factory() as s:
         # A second, complete workspace: distinct owner email (the seed helper's
         # literal collides on uq_users_email), its own reference AND chunk.
-        other_owner = User(status="active", email="other-owner@ki.se")
+        other_owner = User(status="active", email="other-owner@umu.se")
         s.add(other_owner)
         s.flush()
         other_ws = Workspace(title="Other", owner_id=other_owner.id, current_phase="active")

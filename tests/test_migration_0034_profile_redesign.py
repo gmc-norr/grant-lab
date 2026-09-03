@@ -23,8 +23,8 @@ def test_0034_maps_kinds_and_adds_columns(pg_url):
     try:
         # Seed legacy rows under the 0033 schema (profile_kind enum: org/group/user).
         with eng.begin() as c:
-            c.execute(text("INSERT INTO users (email) VALUES ('m@ki.se')"))
-            uid = c.execute(text("SELECT id FROM users WHERE email='m@ki.se'")).scalar_one()
+            c.execute(text("INSERT INTO users (email) VALUES ('m@umu.se')"))
+            uid = c.execute(text("SELECT id FROM users WHERE email='m@umu.se'")).scalar_one()
             for nm, k in [("Org A", "org"), ("Grp B", "group"), ("Dr C", "user")]:
                 c.execute(
                     text(
@@ -57,7 +57,7 @@ def test_0034_maps_kinds_and_adds_columns(pg_url):
         # Hermetic cleanup: drop the rows we seeded and guarantee head schema.
         with eng.begin() as c:
             c.execute(text("DELETE FROM profiles WHERE name IN ('Org A','Grp B','Dr C')"))
-            c.execute(text("DELETE FROM users WHERE email='m@ki.se'"))
+            c.execute(text("DELETE FROM users WHERE email='m@umu.se'"))
         eng.dispose()
         command.upgrade(cfg, "head")  # restore for subsequent tests
 
@@ -82,8 +82,8 @@ def test_0034_downgrade_survives_unexpected_kind(pg_url):
         # simulates a row written by a future migration that 0034's CASE
         # doesn't know how to map back.
         with eng.begin() as c:
-            c.execute(text("INSERT INTO users (email) VALUES ('weird@ki.se')"))
-            uid = c.execute(text("SELECT id FROM users WHERE email='weird@ki.se'")).scalar_one()
+            c.execute(text("INSERT INTO users (email) VALUES ('weird@umu.se')"))
+            uid = c.execute(text("SELECT id FROM users WHERE email='weird@umu.se'")).scalar_one()
             c.execute(text("ALTER TABLE profiles DROP CONSTRAINT IF EXISTS ck_profiles_kind"))
             c.execute(text("ALTER TABLE profiles DROP CONSTRAINT IF EXISTS ck_profiles_level"))
             c.execute(
@@ -105,6 +105,6 @@ def test_0034_downgrade_survives_unexpected_kind(pg_url):
     finally:
         with eng.begin() as c:
             c.execute(text("DELETE FROM profiles WHERE name='Weird'"))
-            c.execute(text("DELETE FROM users WHERE email='weird@ki.se'"))
+            c.execute(text("DELETE FROM users WHERE email='weird@umu.se'"))
         eng.dispose()
         command.upgrade(cfg, "head")  # restore head for subsequent tests

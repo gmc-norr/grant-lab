@@ -547,8 +547,8 @@ async def test_reconcile_pops_deleted_entries_even_when_in_flight(pg_session_fac
         registry=registry, session_factory=pg_session_factory, workspaces_dir=tmp_path
     )
     with pg_session_factory() as s:
-        live = make_workspace(s, owner=make_user(s, email="live-owner@ki.se"))
-        dead = make_workspace(s, owner=make_user(s, email="dead-owner@ki.se"))
+        live = make_workspace(s, owner=make_user(s, email="live-owner@umu.se"))
+        dead = make_workspace(s, owner=make_user(s, email="dead-owner@umu.se"))
         s.commit()
         live_id, dead_id = live.id, dead.id
 
@@ -586,8 +586,8 @@ async def test_reconcile_passes_soft_delete_predicate_to_the_adapter(pg_session_
         registry=registry, session_factory=pg_session_factory, workspaces_dir=tmp_path
     )
     with pg_session_factory() as s:
-        live = make_workspace(s, owner=make_user(s, email="p-live@ki.se"))
-        dead = make_workspace(s, owner=make_user(s, email="p-dead@ki.se"))
+        live = make_workspace(s, owner=make_user(s, email="p-live@umu.se"))
+        dead = make_workspace(s, owner=make_user(s, email="p-dead@umu.se"))
         s.commit()
         live_id, dead_id = live.id, dead.id
     with pg_session_factory() as s:

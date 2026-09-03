@@ -18,7 +18,7 @@ from call_manager.ranking.eval import run_golden_set_eval
 def _seed_pair(s, *, external_id, score, expected):
     u = s.execute(select(User)).scalars().first()
     if u is None:
-        u = User(email="g@ki.se")
+        u = User(email="g@umu.se")
         s.add(u)
         s.flush()
     p = Profile(

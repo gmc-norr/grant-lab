@@ -16,7 +16,7 @@ def _app(monkeypatch, pg_url, **extra):
     for k, v in {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://testserver",
         **extra,
     }.items():
@@ -33,7 +33,7 @@ def test_login_oversized_password_422(pg_url, monkeypatch, pg_session_factory):
     with TestClient(app) as c:
         r = c.post(
             "/api/auth/login",
-            json={"email": "a@ki.se", "password": "x" * 1025},
+            json={"email": "a@umu.se", "password": "x" * 1025},
         )
     assert r.status_code == 422
 
@@ -44,7 +44,7 @@ def test_login_max_password_accepted_at_validation(pg_url, monkeypatch, pg_sessi
     with TestClient(app) as c:
         r = c.post(
             "/api/auth/login",
-            json={"email": "a@ki.se", "password": "x" * 1024},
+            json={"email": "a@umu.se", "password": "x" * 1024},
         )
     # 400 from login failure (not 422 from schema) = validation passed
     assert r.status_code == 400
@@ -57,7 +57,7 @@ def test_change_password_oversized_new_password_422(pg_url, monkeypatch):
 
     app = _app(monkeypatch, pg_url)
     with app.state.session_factory() as s:
-        u = User(email="pw@ki.se", status="active", password_hash=hash_password("correct-horse-1"))
+        u = User(email="pw@umu.se", status="active", password_hash=hash_password("correct-horse-1"))
         s.add(u)
         s.commit()
         s.refresh(u)
@@ -78,7 +78,9 @@ def test_change_password_oversized_current_password_422(pg_url, monkeypatch):
 
     app = _app(monkeypatch, pg_url)
     with app.state.session_factory() as s:
-        u = User(email="pw2@ki.se", status="active", password_hash=hash_password("correct-horse-1"))
+        u = User(
+            email="pw2@umu.se", status="active", password_hash=hash_password("correct-horse-1")
+        )
         s.add(u)
         s.commit()
         s.refresh(u)
@@ -133,7 +135,7 @@ def test_login_rehashes_on_param_upgrade(pg_url, monkeypatch, pg_session_factory
     app = _app(monkeypatch, pg_url)
     original_hash = hash_password("correct-horse-1")
     with pg_session_factory() as s:
-        u = User(email="rh@ki.se", status="active", password_hash=original_hash)
+        u = User(email="rh@umu.se", status="active", password_hash=original_hash)
         s.add(u)
         s.commit()
         s.refresh(u)
@@ -149,7 +151,7 @@ def test_login_rehashes_on_param_upgrade(pg_url, monkeypatch, pg_session_factory
         return ok, True  # force needs_rehash=True
 
     with patch.object(apiauth, "verify_password", _fake_vp), TestClient(app) as c:
-        r = c.post("/api/auth/login", json={"email": "rh@ki.se", "password": "correct-horse-1"})
+        r = c.post("/api/auth/login", json={"email": "rh@umu.se", "password": "correct-horse-1"})
     assert r.status_code == 200
 
     with pg_session_factory() as s:
@@ -202,7 +204,7 @@ def test_connect_google_off_domain_rejected(pg_url, monkeypatch, pg_session_fact
     for k, v in {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://testserver",
         "GOOGLE_OIDC_ENABLED": "true",
         "GOOGLE_CLIENT_ID": "test-cid",
@@ -214,7 +216,7 @@ def test_connect_google_off_domain_rejected(pg_url, monkeypatch, pg_session_fact
     app.state.google_oidc_client = fake
 
     with pg_session_factory() as s:
-        u = User(email="link2@ki.se", status="active")
+        u = User(email="link2@umu.se", status="active")
         s.add(u)
         s.commit()
         s.refresh(u)
@@ -259,7 +261,7 @@ def test_413_body_cap_has_nosniff_header(pg_url, monkeypatch, pg_session_factory
     """Oversized body → 413; response must carry X-Content-Type-Options: nosniff."""
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     monkeypatch.setenv("MAX_REQUEST_BODY_BYTES", "1000")
     app = create_app()
@@ -363,8 +365,8 @@ def test_transport_configured_rejects_example_com_email_from(monkeypatch):
     bounce from an IANA-controlled domain."""
     monkeypatch.setenv("DATABASE_URL", "postgresql://x")
     monkeypatch.setenv("SESSION_SECRET", "prod-grade-secret-with-enough-entropy-xyz123")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
-    monkeypatch.setenv("APP_BASE_URL", "https://app.ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
+    monkeypatch.setenv("APP_BASE_URL", "https://app.umu.se")
     monkeypatch.setenv("RESEND_API_KEY", "re_live_key")
     # EMAIL_FROM left at default (no-reply@example.com) → must raise
     from call_manager.config import Settings
@@ -378,8 +380,8 @@ def test_prod_without_transport_allows_default_email_from(monkeypatch):
     NoOpEmailSender — so the placeholder EMAIL_FROM must NOT block startup."""
     monkeypatch.setenv("DATABASE_URL", "postgresql://x")
     monkeypatch.setenv("SESSION_SECRET", "prod-grade-secret-with-enough-entropy-xyz123")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
-    monkeypatch.setenv("APP_BASE_URL", "https://app.ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
+    monkeypatch.setenv("APP_BASE_URL", "https://app.umu.se")
     monkeypatch.delenv("RESEND_API_KEY", raising=False)
     monkeypatch.delenv("SMTP_HOST", raising=False)
     from call_manager.config import Settings
@@ -392,20 +394,20 @@ def test_https_real_email_from_ok(monkeypatch):
     """In prod (https), a real EMAIL_FROM is accepted."""
     monkeypatch.setenv("DATABASE_URL", "postgresql://x")
     monkeypatch.setenv("SESSION_SECRET", "prod-grade-secret-with-enough-entropy-xyz123")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
-    monkeypatch.setenv("APP_BASE_URL", "https://app.ki.se")
-    monkeypatch.setenv("EMAIL_FROM", "noreply@ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
+    monkeypatch.setenv("APP_BASE_URL", "https://app.umu.se")
+    monkeypatch.setenv("EMAIL_FROM", "noreply@umu.se")
     from call_manager.config import Settings
 
     s = Settings()
-    assert s.email_from == "noreply@ki.se"
+    assert s.email_from == "noreply@umu.se"
 
 
 def test_http_default_email_from_ok(monkeypatch):
     """In dev (http), the default example.com EMAIL_FROM is allowed."""
     monkeypatch.setenv("DATABASE_URL", "postgresql://x")
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
     from call_manager.config import Settings
 
@@ -421,7 +423,7 @@ def test_create_app_rejects_mismatched_embedding_dim(monkeypatch):
     at create_app() with a clear message — not late at the first INSERT."""
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@localhost:5432/db")
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
     monkeypatch.setenv("EMBEDDING_DIM", "768")
     from call_manager.main import create_app
@@ -434,7 +436,7 @@ def test_create_app_accepts_default_embedding_dim(monkeypatch):
     """The default EMBEDDING_DIM (1024) matches the column width → no assertion."""
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@localhost:5432/db")
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
     monkeypatch.delenv("EMBEDDING_DIM", raising=False)
     from call_manager.main import create_app

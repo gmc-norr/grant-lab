@@ -40,7 +40,7 @@ describe("ActivityPanel", () => {
           {
             id: "e1",
             category: "review",
-            actor: "alice@ki.se",
+            actor: "alice@umu.se",
             summary: "started a panel review",
             count: 1,
             created_at: twoHoursAgo,
@@ -60,7 +60,7 @@ describe("ActivityPanel", () => {
     };
     const onNavigate = vi.fn();
     wrap(<ActivityPanel id="ws1" onNavigate={onNavigate} />);
-    expect(screen.getByText("alice@ki.se")).toBeInTheDocument();
+    expect(screen.getByText("alice@umu.se")).toBeInTheDocument();
     expect(screen.getByText("started a panel review")).toBeInTheDocument();
     expect(screen.getByText("System")).toBeInTheDocument(); // null actor
     expect(screen.getAllByText(/2h ago/).length).toBeGreaterThan(0);
@@ -81,12 +81,12 @@ describe("ActivityPanel", () => {
     h.activity = {
       data: {
         items: [
-          { id: "e1", category: "member", actor: "owner@ki.se", summary: "added collaborator a@ki.se", count: 1, created_at: new Date().toISOString(), target: null },
+          { id: "e1", category: "member", actor: "owner@umu.se", summary: "added collaborator a@umu.se", count: 1, created_at: new Date().toISOString(), target: null },
         ],
       },
     };
     wrap(<ActivityPanel id="ws1" onNavigate={vi.fn()} />);
-    expect(screen.getByText(/added collaborator a@ki\.se/i)).toBeInTheDocument();
+    expect(screen.getByText(/added collaborator a@umu\.se/i)).toBeInTheDocument();
     expect(document.querySelector('[data-category="member"]')).not.toBeNull();
   });
 });

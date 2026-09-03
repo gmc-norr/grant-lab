@@ -41,7 +41,7 @@ def _mk(pg_session_factory, tmp_path, email, md, *, soft_deleted=False):
 
 
 def test_checkpoint_active_tails_quietly_checkpoints_candidate(pg_session_factory, tmp_path):
-    wid = _mk(pg_session_factory, tmp_path, "cat-a@ki.se", "## Background\n\nedited by A.\n")
+    wid = _mk(pg_session_factory, tmp_path, "cat-a@umu.se", "## Background\n\nedited by A.\n")
 
     n = cp.checkpoint_active_tails(pg_session_factory, workspaces_dir=str(tmp_path), min_tail=1)
 
@@ -73,7 +73,7 @@ def test_checkpoint_active_tails_rechecks_soft_delete(pg_session_factory, tmp_pa
     # A candidate that is soft-deleted between scan and checkpoint must be skipped by
     # the per-candidate recheck (mirrors make_checkpoint_on_evict). Force the finder to
     # return a soft-deleted workspace to exercise the recheck directly.
-    wid = _mk(pg_session_factory, tmp_path, "cat-sd@ki.se", "## X\n\nedited.\n", soft_deleted=True)
+    wid = _mk(pg_session_factory, tmp_path, "cat-sd@umu.se", "## X\n\nedited.\n", soft_deleted=True)
     monkeypatch.setattr(
         store, "find_checkpoint_candidates", lambda s, *, min_tail: [(wid, "draft")]
     )
@@ -90,8 +90,8 @@ def test_checkpoint_active_tails_rechecks_soft_delete(pg_session_factory, tmp_pa
 def test_checkpoint_active_tails_isolates_a_failing_artifact(
     pg_session_factory, tmp_path, monkeypatch
 ):
-    wid_bad = _mk(pg_session_factory, tmp_path, "cat-bad@ki.se", "## X\n\nbad.\n")
-    wid_ok = _mk(pg_session_factory, tmp_path, "cat-ok@ki.se", "## Y\n\nok.\n")
+    wid_bad = _mk(pg_session_factory, tmp_path, "cat-bad@umu.se", "## X\n\nbad.\n")
+    wid_ok = _mk(pg_session_factory, tmp_path, "cat-ok@umu.se", "## Y\n\nok.\n")
     real = cp.checkpoint_artifact
 
     def _flaky(session, *, workspace_id, **kw):
@@ -155,7 +155,7 @@ def test_a_bounded_checkpoint_failure_leaves_the_tail_for_the_next_scan(
     Asserted as "still a candidate, watermark unmoved" rather than "it logged" — a
     job that logs and drops the work would satisfy the weaker claim just as well.
     """
-    wid = _mk(pg_session_factory, tmp_path, "c3-absorb@ki.se", "## Background\n\nedited.\n")
+    wid = _mk(pg_session_factory, tmp_path, "c3-absorb@umu.se", "## Background\n\nedited.\n")
 
     with pg_session_factory() as s:
         assert (wid, "draft") in store.find_checkpoint_candidates(s, min_tail=1)
@@ -200,7 +200,7 @@ async def test_a_bounded_eviction_checkpoint_logs_skipped_not_error(
     Contends the collab_artifact_state row advance_checkpoint updates — NOT the
     workspace row, whose only reader here is a plain SELECT that takes no lock.
     """
-    wid = _mk(pg_session_factory, tmp_path, "c3-evict@ki.se", "## Background\n\nedited.\n")
+    wid = _mk(pg_session_factory, tmp_path, "c3-evict@umu.se", "## Background\n\nedited.\n")
     on_evict = make_checkpoint_on_evict(pg_session_factory, str(tmp_path), wid, "draft")
 
     release, t = _hold_state_row(pg_session_factory, wid)
@@ -239,7 +239,7 @@ def test_a_bounded_scan_checkpoint_logs_a_warning_without_a_traceback(
     advance_checkpoint writes; the workspace row would prove nothing, since
     acquire_commit_mutex_live's liveness re-read is a plain SELECT.
     """
-    wid = _mk(pg_session_factory, tmp_path, "c3-scanlog@ki.se", "## Background\n\nedited.\n")
+    wid = _mk(pg_session_factory, tmp_path, "c3-scanlog@umu.se", "## Background\n\nedited.\n")
 
     release, t = _hold_state_row(pg_session_factory, wid)
     try:
@@ -271,7 +271,7 @@ def test_a_real_scan_failure_keeps_its_traceback(pg_session_factory, tmp_path, m
     to is_lock_timeout ONLY. A genuine failure on this best-effort background
     path is diagnosable from nothing but this log line, so it must keep exc_info.
     """
-    wid = _mk(pg_session_factory, tmp_path, "c3-scanreal@ki.se", "## Background\n\nedited.\n")
+    wid = _mk(pg_session_factory, tmp_path, "c3-scanreal@umu.se", "## Background\n\nedited.\n")
 
     def _boom(*a, **kw):
         raise RuntimeError("boom")
@@ -305,7 +305,7 @@ def test_a_bounded_handover_checkpoint_logs_skipped_not_error(
     engaged. Contention is benign here: the log is NOT truncated, so the next
     tick retries.
     """
-    wid = _mk(pg_session_factory, tmp_path, "c3-handover@ki.se", "## Background\n\nedited.\n")
+    wid = _mk(pg_session_factory, tmp_path, "c3-handover@umu.se", "## Background\n\nedited.\n")
 
     release, t = _hold_state_row(pg_session_factory, wid)
     try:

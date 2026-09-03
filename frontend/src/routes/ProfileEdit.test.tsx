@@ -19,7 +19,7 @@ const BASE = {
   patient_populations: [], scale: null as string | null, career_stage: null as string | null,
   role: null as string | null, years_since_phd: null as number | null,
   applicant_types: [], funding_instruments: ["project_grant"], funder_exclusions: [], country: "SE",
-  host_institution: "KI", can_edit: true, bootstrap_status: null as string | null,
+  host_institution: "UmU", can_edit: true, bootstrap_status: null as string | null,
   bootstrap_pubmed_status: null as string | null, publications_fetched: null as number | null,
 };
 

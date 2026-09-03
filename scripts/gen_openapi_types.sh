@@ -34,7 +34,7 @@ trap 'rm -f "$tmp"' EXIT
 # supported version and must move together with CI's pin.
 DATABASE_URL="${DATABASE_URL:-postgresql+psycopg://u:p@localhost:5432/db}" \
   SESSION_SECRET="${SESSION_SECRET:-test-secret-at-least-16-chars}" \
-  ALLOWED_EMAIL_DOMAINS="${ALLOWED_EMAIL_DOMAINS:-ki.se}" \
+  ALLOWED_EMAIL_DOMAINS="${ALLOWED_EMAIL_DOMAINS:-umu.se}" \
   APP_BASE_URL="${APP_BASE_URL:-http://localhost:8000}" \
   EMBEDDING_MODEL=bge-m3 \
   SPA_MODE=disabled \

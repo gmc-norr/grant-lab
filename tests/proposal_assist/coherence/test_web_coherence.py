@@ -80,7 +80,7 @@ def test_latest_returns_null_then_job(
 def test_non_member_403(client_authed_owner, _app, current_user, pg_session_factory, tmp_path):
     _app.state.settings.workspaces_dir = str(tmp_path)
     with pg_session_factory() as s:
-        stranger = make_user(s, email="stranger2@ki.se")
+        stranger = make_user(s, email="stranger2@umu.se")
         ws = make_workspace(s, owner=stranger, ack_disclosure=True)
         s.commit()
         ws_id = str(ws.id)

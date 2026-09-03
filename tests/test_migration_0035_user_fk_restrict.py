@@ -98,8 +98,8 @@ def test_0035_restrict_blocks_user_delete(pg_url):
     eng = create_engine(pg_url)
     try:
         with eng.begin() as c:
-            c.execute(text("INSERT INTO users (email) VALUES ('owner@ki.se')"))
-            uid = c.execute(text("SELECT id FROM users WHERE email='owner@ki.se'")).scalar_one()
+            c.execute(text("INSERT INTO users (email) VALUES ('owner@umu.se')"))
+            uid = c.execute(text("SELECT id FROM users WHERE email='owner@umu.se'")).scalar_one()
             c.execute(
                 text(
                     "INSERT INTO workspaces (id, title, owner_id, status, current_phase) "
@@ -111,7 +111,7 @@ def test_0035_restrict_blocks_user_delete(pg_url):
         raised = False
         try:
             with eng.begin() as c:
-                c.execute(text("DELETE FROM users WHERE email='owner@ki.se'"))
+                c.execute(text("DELETE FROM users WHERE email='owner@umu.se'"))
         except IntegrityError:
             raised = True
         assert raised, "RESTRICT must forbid deleting a user who owns a workspace"
@@ -121,8 +121,8 @@ def test_0035_restrict_blocks_user_delete(pg_url):
             c.execute(
                 text(
                     "DELETE FROM workspaces WHERE owner_id IN "
-                    "(SELECT id FROM users WHERE email='owner@ki.se')"
+                    "(SELECT id FROM users WHERE email='owner@umu.se')"
                 )
             )
-            c.execute(text("DELETE FROM users WHERE email='owner@ki.se'"))
+            c.execute(text("DELETE FROM users WHERE email='owner@umu.se'"))
         eng.dispose()

@@ -78,7 +78,7 @@ def _settings_env(monkeypatch, pg_url):
     """
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
 
 
@@ -103,7 +103,7 @@ def current_user(_app, pg_session_factory):
     is replaced with the test one so get_current_user() resolves against the
     same DB the test writes to."""
     with pg_session_factory() as s:
-        u = User(status="active", email="owner-fixture@ki.se")
+        u = User(status="active", email="owner-fixture@umu.se")
         s.add(u)
         s.commit()
         uid = u.id
@@ -153,7 +153,7 @@ def client_authed_outsider(_app, current_user, pg_session_factory):
     """
     _app.state.session_factory = pg_session_factory
     with pg_session_factory() as s:
-        outsider = User(status="active", email="outsider-fixture@ki.se")
+        outsider = User(status="active", email="outsider-fixture@umu.se")
         s.add(outsider)
         s.commit()
         oid = outsider.id
@@ -197,8 +197,8 @@ def make_call(
     return call
 
 
-def make_user(session, *, email: str = "owner@ki.se") -> "User":  # noqa: F821
-    """Build a User row. The default email is the fixed literal "owner@ki.se",
+def make_user(session, *, email: str = "owner@umu.se") -> "User":  # noqa: F821
+    """Build a User row. The default email is the fixed literal "owner@umu.se",
     NOT unique per call: a second call in the same test/session with no
     explicit `email` collides on `uq_users_email`. Callers that need more than
     one user must pass a distinct `email` themselves."""
@@ -215,7 +215,7 @@ def make_profile(session, *, name: str = "Test PI Profile") -> "Profile":  # noq
     `kind: ProfileKind` and `created_by` FK — no `slug`."""
     from call_manager.db.models import Profile, ProfileKind
 
-    u = make_user(session, email=f"profile-owner-{name.lower().replace(' ', '-')}@ki.se")
+    u = make_user(session, email=f"profile-owner-{name.lower().replace(' ', '-')}@umu.se")
     p = Profile(
         name=name,
         kind=ProfileKind.ORGANIZATIONAL_UNIT,

@@ -30,7 +30,7 @@ def _live_room(session, wid, workspaces_dir):
 def test_apply_citation_to_room_inserts_marker_and_cocommits_ledger(pg_session_factory, tmp_path):
     md0 = "preamble\n\n## Methods\nThe claim here.\n"
     with pg_session_factory() as s:
-        o = make_user(s, email="acr@ki.se")
+        o = make_user(s, email="acr@umu.se")
         ws = make_workspace(s, owner=o, current_phase="active")
         s.commit()
         wid, oid = ws.id, o.id
@@ -61,7 +61,7 @@ def test_apply_citation_to_room_inserts_marker_and_cocommits_ledger(pg_session_f
 def test_apply_citation_stale_section_sha_raises(pg_session_factory, tmp_path):
     md0 = "preamble\n\n## Methods\nThe claim here.\n"
     with pg_session_factory() as s:
-        o = make_user(s, email="acr2@ki.se")
+        o = make_user(s, email="acr2@umu.se")
         ws = make_workspace(s, owner=o, current_phase="active")
         s.commit()
         wid, oid = ws.id, o.id
@@ -85,7 +85,7 @@ def test_apply_citation_stale_section_sha_raises(pg_session_factory, tmp_path):
 def test_apply_citation_anchor_absent_from_section_raises(pg_session_factory, tmp_path):
     md0 = "preamble\n\n## Methods\nThe claim here.\n"
     with pg_session_factory() as s:
-        o = make_user(s, email="acr3@ki.se")
+        o = make_user(s, email="acr3@umu.se")
         ws = make_workspace(s, owner=o, current_phase="active")
         s.commit()
         wid, oid = ws.id, o.id
@@ -114,7 +114,7 @@ def test_apply_citation_anchor_unique_in_other_section_rejected(pg_session_facto
     # a broken `== 0` guard lets this through and the test fails (no CiteStale raised).
     md0 = "preamble\n\n## Methods\nAlpha body here.\n\n## Results\nUNIQUE PHRASE lives here.\n"
     with pg_session_factory() as s:
-        o = make_user(s, email="acr4@ki.se")
+        o = make_user(s, email="acr4@umu.se")
         ws = make_workspace(s, owner=o, current_phase="active")
         s.commit()
         wid, oid = ws.id, o.id

@@ -29,7 +29,7 @@ def test_unauthenticated_ws_is_rejected(_app, pg_session_factory):
 
     _app.state.session_factory = pg_session_factory
     with pg_session_factory() as s:
-        owner = make_user(s, email="route-noauth@ki.se")
+        owner = make_user(s, email="route-noauth@umu.se")
         ws = make_workspace(s, owner=owner)
         s.commit()
         wid = ws.id
@@ -50,7 +50,7 @@ def test_owner_can_connect_and_persist_an_update(_app, pg_session_factory):
 
     _app.state.session_factory = pg_session_factory
     with pg_session_factory() as s:
-        owner = make_user(s, email="route-owner@ki.se")
+        owner = make_user(s, email="route-owner@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
@@ -94,7 +94,7 @@ def test_persist_failure_closes_socket_without_double_close_crash(
 
     _app.state.session_factory = pg_session_factory
     with pg_session_factory() as s:
-        owner = make_user(s, email="route-persistfail@ki.se")
+        owner = make_user(s, email="route-persistfail@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
@@ -128,8 +128,8 @@ def test_non_member_connection_is_rejected(_app, pg_session_factory):
 
     _app.state.session_factory = pg_session_factory
     with pg_session_factory() as s:
-        owner = make_user(s, email="route-owner2@ki.se")
-        stranger = make_user(s, email="route-stranger@ki.se")
+        owner = make_user(s, email="route-owner2@umu.se")
+        stranger = make_user(s, email="route-stranger@umu.se")
         ws = make_workspace(s, owner=owner)
         s.commit()
         wid, sid = ws.id, stranger.id
@@ -150,8 +150,8 @@ def test_read_only_member_update_is_not_persisted(_app, pg_session_factory):
 
     _app.state.session_factory = pg_session_factory
     with pg_session_factory() as s:
-        owner = make_user(s, email="ro-owner@ki.se")
-        member = make_user(s, email="ro-member@ki.se")
+        owner = make_user(s, email="ro-owner@umu.se")
+        member = make_user(s, email="ro-member@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="setup")
         s.add(WorkspaceViewer(workspace_id=ws.id, user_id=member.id))
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
@@ -179,7 +179,7 @@ def test_invalid_artifact_is_rejected(_app, pg_session_factory):
 
     _app.state.session_factory = pg_session_factory
     with pg_session_factory() as s:
-        owner = make_user(s, email="bad-art@ki.se")
+        owner = make_user(s, email="bad-art@umu.se")
         ws = make_workspace(s, owner=owner)
         s.commit()
         wid, oid = ws.id, owner.id
@@ -203,8 +203,8 @@ def test_member_connecting_to_locked_spec_is_read_only(_app, pg_session_factory)
 
     _app.state.session_factory = pg_session_factory
     with pg_session_factory() as s:
-        owner = make_user(s, email="ls-owner@ki.se")
-        member = make_user(s, email="ls-member@ki.se")
+        owner = make_user(s, email="ls-owner@umu.se")
+        member = make_user(s, email="ls-member@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         ws.spec_locked_at = datetime.now(UTC)          # locked → members read-only on spec
         s.add(WorkspaceViewer(workspace_id=ws.id, user_id=member.id))
@@ -243,7 +243,7 @@ def test_foreign_origin_is_rejected(_app, pg_session_factory):
 
     _app.state.session_factory = pg_session_factory
     with pg_session_factory() as s:
-        owner = make_user(s, email="origin-owner@ki.se")
+        owner = make_user(s, email="origin-owner@umu.se")
         ws = make_workspace(s, owner=owner)
         s.commit()
         wid, oid = ws.id, owner.id
@@ -269,7 +269,7 @@ def test_oversized_frame_closes_the_connection(_app, pg_session_factory):
 
     _app.state.session_factory = pg_session_factory
     with pg_session_factory() as s:
-        owner = make_user(s, email="big-owner@ki.se")
+        owner = make_user(s, email="big-owner@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
@@ -306,7 +306,7 @@ def test_connect_straddle_revalidates_and_closes_stale_epoch(
 
     _app.state.session_factory = pg_session_factory
     with pg_session_factory() as s:
-        owner = make_user(s, email="straddle-owner@ki.se")
+        owner = make_user(s, email="straddle-owner@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
@@ -350,7 +350,7 @@ def test_two_connections_converge_through_the_route(_app, pg_session_factory):
 
     _app.state.session_factory = pg_session_factory
     with pg_session_factory() as s:
-        owner = make_user(s, email="conv-owner@ki.se")
+        owner = make_user(s, email="conv-owner@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
@@ -434,7 +434,7 @@ def _truncate_and_replace(pg_session_factory, wid, oid, text: str) -> None:
 
 def test_every_accepted_connect_learns_the_epoch_before_step1(_app, pg_session_factory):
     # Spec test 3: no `?epoch=` → frame 4 (with the room's epoch) then STEP1.
-    client, wid, oid = _epoch_setup(_app, pg_session_factory, "route-epoch-learn@ki.se")
+    client, wid, oid = _epoch_setup(_app, pg_session_factory, "route-epoch-learn@umu.se")
     try:
         with client.websocket_connect(f"/api/ws/workspaces/{wid}/draft") as wsconn:
             first = wsconn.receive_bytes()
@@ -457,7 +457,7 @@ def test_the_reviews_reproduction_is_refused_before_step1(_app, pg_session_facto
 
     from call_manager.proposal_assist.collab.room import MANAGER
 
-    client, wid, oid = _epoch_setup(_app, pg_session_factory, "route-epoch-stale@ki.se")
+    client, wid, oid = _epoch_setup(_app, pg_session_factory, "route-epoch-stale@umu.se")
     try:
         with client.websocket_connect(f"/api/ws/workspaces/{wid}/draft") as wsconn:
             learned = P.read_doc_epoch_message(wsconn.receive_bytes())
@@ -493,7 +493,7 @@ def test_a_socket_presenting_the_current_epoch_is_accepted_and_can_persist(
     _app, pg_session_factory
 ):
     # Spec test 2.
-    client, wid, oid = _epoch_setup(_app, pg_session_factory, "route-epoch-current@ki.se")
+    client, wid, oid = _epoch_setup(_app, pg_session_factory, "route-epoch-current@umu.se")
     try:
         _truncate_and_replace(pg_session_factory, wid, oid, "new aims")
         with client.websocket_connect(f"/api/ws/workspaces/{wid}/draft?epoch=1") as wsconn:
@@ -513,7 +513,7 @@ def test_a_malformed_epoch_closes_1008_before_any_frame(_app, pg_session_factory
     import pytest
     from starlette.websockets import WebSocketDisconnect
 
-    client, wid, _oid = _epoch_setup(_app, pg_session_factory, "route-epoch-bad@ki.se")
+    client, wid, _oid = _epoch_setup(_app, pg_session_factory, "route-epoch-bad@umu.se")
     try:
         for bad in ("abc", "-1", "1.5", ""):
             with (

@@ -18,7 +18,7 @@ class _Embed:
 
 def _enqueue(sf, *, name="Grp"):
     with sf() as s:
-        u = User(email=f"{name.lower()}@ki.se")
+        u = User(email=f"{name.lower()}@umu.se")
         s.add(u)
         s.flush()
         p = Profile(
@@ -153,7 +153,7 @@ def test_scheduler_registers_bootstrap_tick(monkeypatch):
     for k, v in {
         "DATABASE_URL": "postgresql+psycopg://x:y@localhost/z",
         "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://testserver",
         "DRAFTING_ADAPTER": "fake",
     }.items():

@@ -19,7 +19,7 @@ const DETAIL = {
   must_include: ["pediatric"], hard_exclusions: [],
   org_type: "university_hospital", capabilities: ["biobank"], patient_populations: [],
   scale: null, career_stage: null, role: null, years_since_phd: null, applicant_types: [],
-  funding_instruments: ["project_grant"], funder_exclusions: [], country: "SE", host_institution: "KI",
+  funding_instruments: ["project_grant"], funder_exclusions: [], country: "SE", host_institution: "UmU",
   can_edit: true, bootstrap_status: null, bootstrap_pubmed_status: null, publications_fetched: null,
 };
 

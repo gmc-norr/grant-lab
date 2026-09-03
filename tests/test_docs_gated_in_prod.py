@@ -20,7 +20,7 @@ def _make_app(monkeypatch, *, spa_mode: str):
     # A dummy URL is fine because create_app() builds the engine lazily.
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@localhost:5432/db")
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     monkeypatch.setenv("SPA_MODE", spa_mode)
     return create_app()

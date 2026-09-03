@@ -6,7 +6,7 @@ def _env(monkeypatch, pg_url, base_url, secret):
     for k, v in {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": secret,
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": base_url,
     }.items():
         monkeypatch.setenv(k, v)

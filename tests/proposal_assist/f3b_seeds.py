@@ -25,11 +25,11 @@ from tests.proposal_assist.conftest import make_user, make_workspace
 
 def seed_workspace(session, *, generation: int = 0) -> uuid.UUID:
     # make_workspace(session) with no owner falls back to make_user's HARDCODED
-    # default email ("owner@ki.se", not unique per call), so two seed_workspace
+    # default email ("owner@umu.se", not unique per call), so two seed_workspace
     # calls in one test/session would collide on uq_users_email. A fresh,
     # uniquely-emailed owner per call is what the mine/theirs test pattern
     # actually needs.
-    owner = make_user(session, email=f"f3b-seed-{uuid.uuid4()}@ki.se")
+    owner = make_user(session, email=f"f3b-seed-{uuid.uuid4()}@umu.se")
     ws = make_workspace(session, owner=owner)
     session.flush()
     session.execute(

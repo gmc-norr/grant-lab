@@ -14,7 +14,7 @@ from call_manager.ranking.remote_attempts import count_today, record_attempt
 
 
 def _seed(s):
-    u = User(email="r@ki.se")
+    u = User(email="r@umu.se")
     s.add(u)
     s.flush()
     p = Profile(

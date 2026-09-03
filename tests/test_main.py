@@ -14,15 +14,15 @@ def _set_min_env(monkeypatch, database_url):
     # These tests use an https APP_BASE_URL, which now requires a strong
     # (>=32 char, non-placeholder) SESSION_SECRET — see config validator.
     monkeypatch.setenv("SESSION_SECRET", "prod-grade-secret-with-enough-entropy-xyz123")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     # https requires a real EMAIL_FROM (example.com placeholder is rejected in prod).
-    monkeypatch.setenv("EMAIL_FROM", "noreply@ki.se")
+    monkeypatch.setenv("EMAIL_FROM", "noreply@umu.se")
 
 
 def test_resend_api_key_selects_resend_email_sender(monkeypatch, pg_url):
     """RESEND_API_KEY set → ResendEmailSender regardless of http/https."""
     _set_min_env(monkeypatch, pg_url)
-    monkeypatch.setenv("APP_BASE_URL", "https://app.ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "https://app.umu.se")
     monkeypatch.setenv("RESEND_API_KEY", "re_secret")
     app = create_app()
     assert isinstance(app.state.email_sender, ResendEmailSender)
@@ -32,9 +32,9 @@ def test_resend_api_key_selects_resend_email_sender(monkeypatch, pg_url):
 def test_smtp_host_without_resend_selects_smtp_email_sender(monkeypatch, pg_url):
     """SMTP_HOST set (no RESEND key) → SMTPEmailSender — accepted production transport."""
     _set_min_env(monkeypatch, pg_url)
-    monkeypatch.setenv("APP_BASE_URL", "https://app.ki.se")
-    monkeypatch.setenv("SMTP_HOST", "smtp.ki.se")
-    monkeypatch.setenv("SMTP_USER", "user@ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "https://app.umu.se")
+    monkeypatch.setenv("SMTP_HOST", "smtp.umu.se")
+    monkeypatch.setenv("SMTP_USER", "user@umu.se")
     monkeypatch.setenv("SMTP_PASSWORD", "secret")
     app = create_app()
     assert isinstance(app.state.email_sender, SMTPEmailSender)
@@ -55,7 +55,7 @@ def test_no_email_creds_https_selects_noop_email_sender(monkeypatch, pg_url):
     best-effort only (magic-link login was removed), so prod no longer refuses to
     start; it drops alerts silently instead of console-logging their bodies."""
     _set_min_env(monkeypatch, pg_url)
-    monkeypatch.setenv("APP_BASE_URL", "https://app.ki.se")
+    monkeypatch.setenv("APP_BASE_URL", "https://app.umu.se")
     app = create_app()
     assert isinstance(app.state.email_sender, NoOpEmailSender)
     app.state.engine.dispose()

@@ -57,7 +57,7 @@ def test_e2e_create_profile_then_rank_then_browse(monkeypatch, pg_url, pg_sessio
     the ranking queue, then browse the ranked feed."""
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
 
     # Seed a Call (published recently) so backfill finds it
@@ -79,7 +79,7 @@ def test_e2e_create_profile_then_rank_then_browse(monkeypatch, pg_url, pg_sessio
     app = create_app()
     # Login as a user
     with pg_session_factory() as s:
-        u = User(status="active", email="e2e@ki.se")
+        u = User(status="active", email="e2e@umu.se")
         s.add(u)
         s.commit()
         s.refresh(u)

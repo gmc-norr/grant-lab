@@ -33,7 +33,7 @@ from call_manager.config import Settings  # noqa: E402
 DAY_ONE: dict[str, str | None] = {
     "DATABASE_URL": "postgresql+psycopg://call_manager:CHANGE_ME@localhost:5432/call_manager",
     "SESSION_SECRET": "",
-    "ALLOWED_EMAIL_DOMAINS": "karolinska.se,regionstockholm.se,ki.se",
+    "ALLOWED_EMAIL_DOMAINS": "regionvasterbotten.se,umu.se",
     "INITIAL_ADMIN_EMAIL": "",
     "APP_BASE_URL": "https://calls.example.org",
     "ADMIN_DASHBOARD_URL": "https://calls.example.org/",

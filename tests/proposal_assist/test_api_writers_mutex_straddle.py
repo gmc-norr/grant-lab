@@ -290,7 +290,7 @@ def test_add_member_straddled_by_a_delete_returns_404_and_writes_nothing(
 ):
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
-        target = make_user(s, email="c2-add-straddle@ki.se")
+        target = make_user(s, email="c2-add-straddle@umu.se")
         s.commit()
         ws_id, target_id = ws.id, target.id
 
@@ -298,7 +298,7 @@ def test_add_member_straddled_by_a_delete_returns_404_and_writes_nothing(
         pg_session_factory,
         ws_id,
         lambda: client_authed_owner.post(
-            f"/api/workspaces/{ws_id}/members", json={"email": "c2-add-straddle@ki.se"}
+            f"/api/workspaces/{ws_id}/members", json={"email": "c2-add-straddle@umu.se"}
         ),
     )
 
@@ -319,7 +319,7 @@ def test_add_member_returns_429_when_the_commit_mutex_is_wedged(
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
-        target = make_user(s, email="c2-add-wedged@ki.se")
+        target = make_user(s, email="c2-add-wedged@umu.se")
         s.commit()
         ws_id, target_id = ws.id, target.id
 
@@ -327,7 +327,7 @@ def test_add_member_returns_429_when_the_commit_mutex_is_wedged(
         pg_session_factory,
         ws_id,
         lambda: client_authed_owner.post(
-            f"/api/workspaces/{ws_id}/members", json={"email": "c2-add-wedged@ki.se"}
+            f"/api/workspaces/{ws_id}/members", json={"email": "c2-add-wedged@umu.se"}
         ),
     )
 
@@ -351,7 +351,7 @@ def test_remove_member_straddled_by_a_delete_returns_404_and_writes_nothing(
 ):
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
-        target = make_user(s, email="c2-rm-straddle@ki.se")
+        target = make_user(s, email="c2-rm-straddle@umu.se")
         s.flush()
         s.add(WorkspaceViewer(workspace_id=ws.id, user_id=target.id))
         s.commit()
@@ -380,7 +380,7 @@ def test_remove_member_returns_429_when_the_commit_mutex_is_wedged(
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
-        target = make_user(s, email="c2-rm-wedged@ki.se")
+        target = make_user(s, email="c2-rm-wedged@umu.se")
         s.flush()
         s.add(WorkspaceViewer(workspace_id=ws.id, user_id=target.id))
         s.commit()
@@ -1069,7 +1069,7 @@ def test_add_member_gives_up_on_a_held_workspace_row_instead_of_pinning_the_mute
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
-        target = make_user(s, email="c2-add-rowheld@ki.se")
+        target = make_user(s, email="c2-add-rowheld@umu.se")
         s.commit()
         ws_id, target_id = ws.id, target.id
 
@@ -1077,7 +1077,7 @@ def test_add_member_gives_up_on_a_held_workspace_row_instead_of_pinning_the_mute
         pg_session_factory,
         ws_id,
         lambda: client_authed_owner.post(
-            f"/api/workspaces/{ws_id}/members", json={"email": "c2-add-rowheld@ki.se"}
+            f"/api/workspaces/{ws_id}/members", json={"email": "c2-add-rowheld@umu.se"}
         ),
         route="add_member",
     )
@@ -1102,7 +1102,7 @@ def test_remove_member_gives_up_on_a_held_workspace_row_instead_of_pinning_the_m
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
-        target = make_user(s, email="c2-rm-rowheld@ki.se")
+        target = make_user(s, email="c2-rm-rowheld@umu.se")
         s.flush()
         s.add(WorkspaceViewer(workspace_id=ws.id, user_id=target.id))
         s.commit()

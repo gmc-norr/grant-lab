@@ -18,9 +18,9 @@ it("useSettings fetches the settings", async () => {
 it("useAddMember POSTs the email", async () => {
   const spy = vi
     .spyOn(clientMod.api, "POST")
-    .mockResolvedValue({ data: { user_id: 2, email: "a@ki.se", role: "member" }, error: undefined } as never);
+    .mockResolvedValue({ data: { user_id: 2, email: "a@umu.se", role: "member" }, error: undefined } as never);
   const { result } = renderHook(() => useAddMember("ws-1"), { wrapper: wrap() });
-  result.current.mutate("a@ki.se");
+  result.current.mutate("a@umu.se");
   await waitFor(() => expect(result.current.isSuccess).toBe(true));
   expect(spy).toHaveBeenCalled();
 });

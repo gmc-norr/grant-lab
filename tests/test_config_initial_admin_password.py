@@ -6,7 +6,7 @@ from call_manager.config import Settings
 def _base(monkeypatch, **extra):
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://x/y")
     monkeypatch.setenv("SESSION_SECRET", "x" * 32)
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     for k, v in extra.items():
         monkeypatch.setenv(k, v)

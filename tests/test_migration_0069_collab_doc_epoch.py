@@ -8,7 +8,7 @@ from call_manager.db.models import CollabArtifactState, User, Workspace
 
 
 def _ws(session):
-    u = User(status="active", email="epoch-mig@ki.se")
+    u = User(status="active", email="epoch-mig@umu.se")
     session.add(u)
     session.flush()
     ws = Workspace(title="W", owner_id=u.id, current_phase="active")

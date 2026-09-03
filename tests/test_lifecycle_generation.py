@@ -80,8 +80,8 @@ def test_soft_delete_allocates_a_generation_and_returns_it(pg_session_factory):
 
 def test_the_generation_is_per_workspace(pg_session_factory):
     with pg_session_factory() as s:
-        owner_a = make_user(s, email="gen-a@ki.se")
-        owner_b = make_user(s, email="gen-b@ki.se")
+        owner_a = make_user(s, email="gen-a@umu.se")
+        owner_b = make_user(s, email="gen-b@umu.se")
         a = make_workspace(s, owner=owner_a)
         b = make_workspace(s, owner=owner_b)
         s.commit()

@@ -222,11 +222,11 @@ def test_the_same_name_in_two_workspaces_is_fine(pg_session_factory):
     second one silently at backfill time."""
     with pg_session_factory() as s:
         # Distinct owner emails: `make_user`'s default is the fixed literal
-        # "owner@ki.se", so two `make_workspace` calls in one session with no
+        # "owner@umu.se", so two `make_workspace` calls in one session with no
         # explicit owner collide on `uq_users_email`
         # (`tests/proposal_assist/conftest.py:200-204` documents this).
-        a = make_workspace(s, title="a", owner=make_user(s, email="a@ki.se")).id
-        b = make_workspace(s, title="b", owner=make_user(s, email="b@ki.se")).id
+        a = make_workspace(s, title="a", owner=make_user(s, email="a@umu.se")).id
+        b = make_workspace(s, title="b", owner=make_user(s, email="b@umu.se")).id
         s.commit()
 
     with pg_session_factory() as s:
@@ -917,8 +917,8 @@ def test_reconciling_survives_the_root_branchs_ref_being_deleted(pg_session_fact
     else — asserting only on the broken workspace would miss the collateral.
     """
     with pg_session_factory() as s:
-        broken = make_workspace(s, title="broken", owner=make_user(s, email="br@ki.se")).id
-        other = make_workspace(s, title="other", owner=make_user(s, email="ot@ki.se")).id
+        broken = make_workspace(s, title="broken", owner=make_user(s, email="br@umu.se")).id
+        other = make_workspace(s, title="other", owner=make_user(s, email="ot@umu.se")).id
         s.commit()
     for wid in (broken, other):
         _repo(tmp_path, wid, "main", extra=("new_ideas",))
@@ -949,7 +949,7 @@ def test_a_rootless_workspace_whose_root_ref_vanished_is_left_honestly_rootless(
     surviving branch would silently promote something nobody chose, and §7.3 gives
     that power to promote alone."""
     with pg_session_factory() as s:
-        wid = make_workspace(s, title="w", owner=make_user(s, email="rootless@ki.se")).id
+        wid = make_workspace(s, title="w", owner=make_user(s, email="rootless@umu.se")).id
         s.commit()
     _repo(tmp_path, wid, "main", extra=("new_ideas",))
 
@@ -977,7 +977,7 @@ def test_a_surviving_root_pointer_is_not_cleared_by_an_unrelated_orphan(
     would silently unroot every healthy workspace that happened to have a stale
     row lying around."""
     with pg_session_factory() as s:
-        wid = make_workspace(s, title="w", owner=make_user(s, email="survive@ki.se")).id
+        wid = make_workspace(s, title="w", owner=make_user(s, email="survive@umu.se")).id
         s.commit()
     _repo(tmp_path, wid, "main")
 
@@ -1002,10 +1002,10 @@ def test_one_broken_repo_does_not_halt_the_rest(pg_session_factory, tmp_path):
     founded, and the unique key makes the retry fail differently."""
     with pg_session_factory() as s:
         # Distinct owners: `make_user`'s default email is the fixed literal
-        # "owner@ki.se" and two calls in one session collide on `uq_users_email`
+        # "owner@umu.se" and two calls in one session collide on `uq_users_email`
         # (`tests/proposal_assist/conftest.py:200-204`).
-        good = make_workspace(s, title="good", owner=make_user(s, email="good@ki.se")).id
-        bad = make_workspace(s, title="bad", owner=make_user(s, email="bad@ki.se")).id
+        good = make_workspace(s, title="good", owner=make_user(s, email="good@umu.se")).id
+        bad = make_workspace(s, title="bad", owner=make_user(s, email="bad@umu.se")).id
         s.commit()
     _repo(tmp_path, good, "main")
     broken = workspace_repo_dir(tmp_path, bad)
@@ -2301,9 +2301,9 @@ def test_a_workspace_with_a_repo_always_has_a_root_pointer(pg_session_factory, t
     one after backfill means every path for that workspace resolves nowhere."""
     with pg_session_factory() as s:
         # Distinct owners: `make_user`'s default email is the fixed literal
-        # "owner@ki.se" and two calls in one session collide on `uq_users_email`.
-        a = make_workspace(s, title="a", owner=make_user(s, email="inv-a@ki.se")).id
-        b = make_workspace(s, title="b", owner=make_user(s, email="inv-b@ki.se")).id
+        # "owner@umu.se" and two calls in one session collide on `uq_users_email`.
+        a = make_workspace(s, title="a", owner=make_user(s, email="inv-a@umu.se")).id
+        b = make_workspace(s, title="b", owner=make_user(s, email="inv-b@umu.se")).id
         s.commit()
     init_workspace_repo(workspace_repo_dir(tmp_path, a), "# A\n")
     init_workspace_repo(workspace_repo_dir(tmp_path, b), "# B\n")
@@ -2331,9 +2331,9 @@ def test_the_root_pointer_never_names_another_workspaces_branch(pg_session_facto
     """
     with pg_session_factory() as s:
         # Distinct owners: `make_user`'s default email is the fixed literal
-        # "owner@ki.se" and two calls in one session collide on `uq_users_email`.
-        a = make_workspace(s, title="a", owner=make_user(s, email="inv-a@ki.se")).id
-        b = make_workspace(s, title="b", owner=make_user(s, email="inv-b@ki.se")).id
+        # "owner@umu.se" and two calls in one session collide on `uq_users_email`.
+        a = make_workspace(s, title="a", owner=make_user(s, email="inv-a@umu.se")).id
+        b = make_workspace(s, title="b", owner=make_user(s, email="inv-b@umu.se")).id
         s.commit()
     init_workspace_repo(workspace_repo_dir(tmp_path, a), "# A\n")
     init_workspace_repo(workspace_repo_dir(tmp_path, b), "# B\n")

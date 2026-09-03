@@ -6,9 +6,9 @@ from call_manager.auth.domain import domain_allowed, extract_domain, normalize_d
 @pytest.mark.parametrize(
     "email,expected",
     [
-        ("alice@ki.se", "ki.se"),
-        ("Bob@KI.SE", "ki.se"),
-        ("carol+tag@karolinska.se", "karolinska.se"),
+        ("alice@umu.se", "umu.se"),
+        ("Bob@UMU.SE", "umu.se"),
+        ("carol+tag@regionvasterbotten.se", "regionvasterbotten.se"),
     ],
 )
 def test_extract_domain(email, expected):
@@ -19,8 +19,8 @@ def test_extract_domain(email, expected):
     "bad",
     [
         "not-an-email",  # no @
-        "x@y@ki.se",  # multiple @
-        "@ki.se",  # empty local part
+        "x@y@umu.se",  # multiple @
+        "@umu.se",  # empty local part
         "alice@",  # empty domain
         "",  # empty
     ],
@@ -33,12 +33,12 @@ def test_extract_domain_rejects_malformed(bad):
 @pytest.mark.parametrize(
     "email,allowed,ok",
     [
-        ("alice@ki.se", ["ki.se"], True),
-        ("alice@KI.SE", ["ki.se"], True),
-        ("alice@ki.se", ["karolinska.se"], False),
+        ("alice@umu.se", ["umu.se"], True),
+        ("alice@UMU.SE", ["umu.se"], True),
+        ("alice@umu.se", ["regionvasterbotten.se"], False),
         # subdomain does NOT match parent — explicit listing required
-        ("alice@intern.ki.se", ["ki.se"], False),
-        ("alice@intern.ki.se", ["intern.ki.se", "ki.se"], True),
+        ("alice@intern.umu.se", ["umu.se"], False),
+        ("alice@intern.umu.se", ["intern.umu.se", "umu.se"], True),
     ],
 )
 def test_domain_allowed(email, allowed, ok):
@@ -47,9 +47,9 @@ def test_domain_allowed(email, allowed, ok):
 
 def test_extract_domain_strips_trailing_root_dot():
     # A trailing root dot is a valid FQDN form; it must normalize to the same
-    # domain so `alice@ki.se.` is treated as ki.se, not a distinct domain.
-    assert extract_domain("alice@ki.se.") == "ki.se"
-    assert domain_allowed("alice@ki.se.", ["ki.se"]) is True
+    # domain so `alice@umu.se.` is treated as umu.se, not a distinct domain.
+    assert extract_domain("alice@umu.se.") == "umu.se"
+    assert domain_allowed("alice@umu.se.", ["umu.se"]) is True
 
 
 def test_normalize_domain_idna_canonicalizes_unicode():
@@ -58,7 +58,7 @@ def test_normalize_domain_idna_canonicalizes_unicode():
     # "kі.se" uses a Cyrillic 'і' (U+0456) in place of ASCII 'i'.
     homoglyph = "kі.se"
     assert normalize_domain(homoglyph).startswith("xn--")
-    assert domain_allowed(f"attacker@{homoglyph}", ["ki.se"]) is False
+    assert domain_allowed(f"attacker@{homoglyph}", ["umu.se"]) is False
 
 
 def test_normalize_domain_rejects_empty():

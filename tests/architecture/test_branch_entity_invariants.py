@@ -74,11 +74,11 @@ def test_reconciliation_leaves_an_attached_head_with_a_root_pointer(pg_session_f
     """
     with pg_session_factory() as s:
         # Distinct owners: make_workspace defaults to make_user(session) with no
-        # email, and that default is the fixed literal "owner@ki.se" — a second
+        # email, and that default is the fixed literal "owner@umu.se" — a second
         # call in the same session with no explicit email collides on
         # uq_users_email.
-        a = make_workspace(s, title="a", owner=make_user(s, email="a@ki.se")).id
-        b = make_workspace(s, title="b", owner=make_user(s, email="b@ki.se")).id
+        a = make_workspace(s, title="a", owner=make_user(s, email="a@umu.se")).id
+        b = make_workspace(s, title="b", owner=make_user(s, email="b@umu.se")).id
         s.commit()
     init_workspace_repo(workspace_repo_dir(tmp_path, a), "# A\n")
     init_workspace_repo(workspace_repo_dir(tmp_path, b), "# B\n")
@@ -108,8 +108,8 @@ def test_the_root_pointer_never_names_another_workspaces_branch(pg_session_facto
         # Distinct owners: see the note in the test above — make_workspace's
         # default owner collides on uq_users_email across two calls in one
         # session.
-        a = make_workspace(s, title="a", owner=make_user(s, email="a@ki.se")).id
-        b = make_workspace(s, title="b", owner=make_user(s, email="b@ki.se")).id
+        a = make_workspace(s, title="a", owner=make_user(s, email="a@umu.se")).id
+        b = make_workspace(s, title="b", owner=make_user(s, email="b@umu.se")).id
         s.commit()
     init_workspace_repo(workspace_repo_dir(tmp_path, a), "# A\n")
     init_workspace_repo(workspace_repo_dir(tmp_path, b), "# B\n")

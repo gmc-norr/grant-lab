@@ -35,8 +35,8 @@ def test_0044_adds_columns_ledger_and_backfills_analysis_model(pg_url):
                 {"s": sid},
             )
             cid = conn.execute(text("SELECT id FROM calls WHERE external_id='e'")).scalar_one()
-            conn.execute(text("INSERT INTO users (email) VALUES ('m44@ki.se')"))
-            uid = conn.execute(text("SELECT id FROM users WHERE email='m44@ki.se'")).scalar_one()
+            conn.execute(text("INSERT INTO users (email) VALUES ('m44@umu.se')"))
+            uid = conn.execute(text("SELECT id FROM users WHERE email='m44@umu.se'")).scalar_one()
             conn.execute(
                 text(
                     "INSERT INTO profiles (name, kind, description, structured, created_by) "

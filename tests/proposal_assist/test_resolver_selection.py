@@ -22,7 +22,7 @@ from call_manager.proposal_assist.attachments.resolver import (
 
 def _seed_workspace(session) -> uuid.UUID:
     """Insert a minimal User + Workspace; return the workspace UUID."""
-    u = User(email=f"sel-test-{uuid.uuid4().hex[:8]}@ki.se")
+    u = User(email=f"sel-test-{uuid.uuid4().hex[:8]}@umu.se")
     session.add(u)
     session.flush()
     ws = Workspace(title="selection-test ws", owner_id=u.id)

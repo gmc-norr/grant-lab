@@ -5,7 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from call_manager.db.models import Profile, Subscription, User
 
 
-def _user_and_profile(s, email="u@ki.se", profile_name="G"):
+def _user_and_profile(s, email="u@umu.se", profile_name="G"):
     from call_manager.db.models import ProfileKind
 
     u = User(email=email)

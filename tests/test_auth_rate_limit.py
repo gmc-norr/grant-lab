@@ -4,21 +4,21 @@ from call_manager.auth.rate_limit import SlidingWindowLimiter
 def test_allows_under_limit():
     rl = SlidingWindowLimiter(max_requests=3, window_seconds=60)
     for _ in range(3):
-        assert rl.allow("alice@ki.se") is True
+        assert rl.allow("alice@umu.se") is True
 
 
 def test_blocks_over_limit():
     rl = SlidingWindowLimiter(max_requests=3, window_seconds=60)
     for _ in range(3):
-        rl.allow("alice@ki.se")
-    assert rl.allow("alice@ki.se") is False
+        rl.allow("alice@umu.se")
+    assert rl.allow("alice@umu.se") is False
 
 
 def test_separate_keys_are_independent():
     rl = SlidingWindowLimiter(max_requests=1, window_seconds=60)
-    assert rl.allow("a@ki.se") is True
-    assert rl.allow("b@ki.se") is True
-    assert rl.allow("a@ki.se") is False
+    assert rl.allow("a@umu.se") is True
+    assert rl.allow("b@umu.se") is True
+    assert rl.allow("a@umu.se") is False
 
 
 def test_window_expires(monkeypatch):

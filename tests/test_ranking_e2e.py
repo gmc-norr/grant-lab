@@ -83,7 +83,7 @@ def test_e2e_pipeline(pg_session_factory):
     """Enqueue a v2 job → drain → verify CallRanking + 4 criteria rows
     (timeline pass + topic_fit + eligibility + exclusions) + score 100."""
     with pg_session_factory() as s:
-        u = User(email="e2e@ki.se")
+        u = User(email="e2e@umu.se")
         s.add(u)
         s.flush()
         p = Profile(
@@ -230,7 +230,7 @@ def _setup_profile(pg_session_factory, *, profile_embedding):
     from call_manager.db.models import Profile, ProfileKind, User
 
     with pg_session_factory() as s:
-        u = User(email="e2e-pregate@ki.se")
+        u = User(email="e2e-pregate@umu.se")
         s.add(u)
         s.flush()
         p = Profile(

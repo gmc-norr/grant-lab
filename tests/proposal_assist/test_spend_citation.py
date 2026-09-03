@@ -15,7 +15,7 @@ from call_manager.proposal_assist.spend import record_spend, sum_spend_today
 
 
 def _ws(session):
-    u = User(status="active", email="cite@ki.se")
+    u = User(status="active", email="cite@umu.se")
     session.add(u)
     session.flush()
     ws = Workspace(title="W", owner_id=u.id, current_phase="active")

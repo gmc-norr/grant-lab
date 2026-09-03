@@ -178,7 +178,7 @@ def test_a_QUEUED_job_refuses_when_the_global_cap_is_reached(
     with pg_session_factory() as s:
         # A distinct owner: run_pass creates its own workspace with the default
         # owner email, and users.email is unique.
-        ws = make_workspace(s, owner=make_user(s, email=f"capseed-{family}@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email=f"capseed-{family}@umu.se"))
         s.flush()
         record_spend(
             s,

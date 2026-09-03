@@ -7,7 +7,7 @@ def _app(monkeypatch, pg_url, mode):
     for k, v in {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://testserver",
         "SPA_MODE": mode,
     }.items():

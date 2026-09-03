@@ -13,7 +13,7 @@ const DRAFT = {
   drafting_enabled: true,
   global_cap: { allowed: false, used_in: 1500, used_out: 0, cap_in: 1000, cap_out: 500, reason: "input_cap_exceeded" },
   per_workspace: [
-    { id: "11111111-1111-1111-1111-111111111111", title: "Big", owner_email: "o@ki.se", used_in: 1500, used_out: 0 },
+    { id: "11111111-1111-1111-1111-111111111111", title: "Big", owner_email: "o@umu.se", used_in: 1500, used_out: 0 },
   ],
   recent_events: [
     { created_at: "2026-06-01T00:00:00Z", workspace_id: "11111111-1111-1111-1111-111111111111", kind: "cloud_turn_failed", payload: { error: "boom_xyz" } },

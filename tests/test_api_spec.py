@@ -313,7 +313,7 @@ def test_get_spec_exposes_lock_fields(monkeypatch, pg_url, pg_session_factory, t
     assert after["locked"] is True
     assert after["can_edit"] is False  # locked -> read-only even for the owner
     assert after["can_manage_lock"] is True  # owner can still unlock
-    assert after["locked_by"] == "owner@ki.se"
+    assert after["locked_by"] == "owner@umu.se"
 
 
 def test_get_spec_member_cannot_manage_lock(monkeypatch, pg_url, pg_session_factory, tmp_path):

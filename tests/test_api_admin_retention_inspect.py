@@ -62,7 +62,7 @@ def _seed(sf, tmp_path, *, content="# Draft\n", n_commits=1, email=None):
     Returns the workspace id.
     """
     with sf() as s:
-        owner = make_user(s, email=email or f"o-{uuid.uuid4().hex[:8]}@ki.se")
+        owner = make_user(s, email=email or f"o-{uuid.uuid4().hex[:8]}@umu.se")
         ws = make_workspace(s, owner=owner, title="Seeded")
         s.commit()
         ws_id = ws.id
@@ -81,7 +81,7 @@ def test_reads_a_deleted_workspace(monkeypatch, pg_url, pg_session_factory, tmp_
     re-reads liveness and raises WorkspaceDeleted for exactly the workspaces
     this endpoint serves. Either mistake turns this 200 into a 500."""
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, content="# Draft\n\nBody text.\n")
     with pg_session_factory() as s:
         soft_delete(s, ws_id)
@@ -106,7 +106,7 @@ def test_a_contended_mutex_is_429_with_retry_after(
     from call_manager.web.api import admin_retention
 
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path)
     with pg_session_factory() as s:
         soft_delete(s, ws_id)
@@ -130,7 +130,7 @@ def test_serves_the_committed_draft_not_the_working_tree(
     whichever bytes happened to be on disk — content that was never part of the
     proposal's history and that the commit list does not explain."""
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, content="# Committed\n")
     repo = workspace_repo_dir(Path(tmp_path), ws_id)
     (repo / "proposal.md").write_text("# UNCOMMITTED SCRATCH\n")
@@ -144,7 +144,7 @@ def test_serves_the_committed_draft_not_the_working_tree(
 
 def test_live_workspace_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, content="# Live\n")
     r = admin.get(f"/api/admin/workspaces/deleted/{ws_id}")
     assert r.status_code == 404
@@ -173,7 +173,7 @@ def test_live_workspace_404s_without_waiting_on_the_mutex(
     from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
 
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, content="# Live\n")
 
     # `with`, not a bare call: if acquire_commit_mutex raised, a plain
@@ -213,7 +213,7 @@ def test_a_restore_in_the_mutex_window_is_seen_by_the_fresh_reread(
     from call_manager.web.api import admin_retention
 
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, content="# Secret draft\n")
     with pg_session_factory() as s:
         soft_delete(s, ws_id)
@@ -252,7 +252,7 @@ def test_the_restore_probe_itself_does_not_break_the_route(
     from call_manager.web.api import admin_retention
 
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, content="# Secret draft\n")
     with pg_session_factory() as s:
         soft_delete(s, ws_id)
@@ -283,7 +283,7 @@ def test_an_unreadable_history_is_not_reported_as_an_empty_one(
     from call_manager.web.api import admin_retention
 
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, admin_id = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin, admin_id = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, content="# Draft\n\nBody text.\n", n_commits=3)
     with pg_session_factory() as s:
         soft_delete(s, ws_id)
@@ -308,7 +308,7 @@ def test_an_unreadable_history_is_not_reported_as_an_empty_one(
 def test_a_readable_history_says_so(monkeypatch, pg_url, pg_session_factory, tmp_path):
     """Negative control: history_available must not be hardcoded False."""
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, n_commits=2)
     with pg_session_factory() as s:
         soft_delete(s, ws_id)
@@ -330,7 +330,7 @@ def test_the_audited_response_forbids_http_caching(
     keeps shared caches out.
     """
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path)
     with pg_session_factory() as s:
         soft_delete(s, ws_id)
@@ -344,7 +344,7 @@ def test_the_audited_response_forbids_http_caching(
 
 def test_non_admin_is_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    member, _ = client_for(app, pg_session_factory, email="member@ki.se", is_admin=False)
+    member, _ = client_for(app, pg_session_factory, email="member@umu.se", is_admin=False)
     ws_id = _seed(pg_session_factory, tmp_path)
     with pg_session_factory() as s:
         soft_delete(s, ws_id)
@@ -357,9 +357,9 @@ def test_missing_repository_is_a_state_not_an_error(
 ):
     """A workspace deleted before setup created a repo. Legitimate, not a bug."""
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, admin_id = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin, admin_id = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     with pg_session_factory() as s:
-        owner = make_user(s, email="norepo@ki.se")
+        owner = make_user(s, email="norepo@umu.se")
         ws = make_workspace(s, owner=owner, title="never set up")
         s.commit()
         ws_id = ws.id
@@ -392,8 +392,8 @@ def test_inspection_writes_exactly_one_audit_event_naming_the_admin(
     was served, commit count, truncation flag. `actor_id is not None` would pass
     with the wrong admin, a duplicate event, or an empty payload."""
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, admin_id = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
-    other, other_id = client_for(app, pg_session_factory, email="other@ki.se", is_admin=True)
+    admin, admin_id = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
+    other, other_id = client_for(app, pg_session_factory, email="other@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, n_commits=2)
     with pg_session_factory() as s:
         soft_delete(s, ws_id)
@@ -423,7 +423,7 @@ def test_a_second_read_appends_a_second_event(monkeypatch, pg_url, pg_session_fa
     """The trace is per-read, not per-workspace. An implementation that
     de-duplicated would hide repeat access to someone's draft."""
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path)
     with pg_session_factory() as s:
         soft_delete(s, ws_id)
@@ -449,7 +449,7 @@ def test_no_content_is_served_when_the_audit_write_fails(
     from call_manager.web.api import admin_retention
 
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, content="# Secret draft\n")
     with pg_session_factory() as s:
         soft_delete(s, ws_id)
@@ -478,7 +478,7 @@ def test_the_audit_write_precedes_response_construction(
     from call_manager.web.api import admin_retention
 
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, content="# Draft\n")
     with pg_session_factory() as s:
         soft_delete(s, ws_id)
@@ -508,7 +508,7 @@ def test_inspection_starts_no_collab_room(monkeypatch, pg_url, pg_session_factor
     Inspection that spun up a room would resurrect machinery deletion tore
     down, and Slice E's purge would then have a reader nothing knows about."""
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path)
     with pg_session_factory() as s:
         soft_delete(s, ws_id)
@@ -529,7 +529,7 @@ def test_truncated_history_is_reported_to_the_caller(
     """A capped list presented as a complete one is a lie the admin cannot
     detect. The flag is the only thing that distinguishes them."""
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, n_commits=205)
     with pg_session_factory() as s:
         soft_delete(s, ws_id)
@@ -541,7 +541,7 @@ def test_truncated_history_is_reported_to_the_caller(
 
 def test_untruncated_history_says_so(monkeypatch, pg_url, pg_session_factory, tmp_path):
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, n_commits=3)
     with pg_session_factory() as s:
         soft_delete(s, ws_id)
@@ -556,7 +556,7 @@ def test_inspection_creates_no_commit(monkeypatch, pg_url, pg_session_factory, t
     from call_manager.proposal_assist.citations.gitio import current_head
 
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path)
     with pg_session_factory() as s:
         soft_delete(s, ws_id)
@@ -584,9 +584,9 @@ def test_missing_draft_does_not_erase_a_real_history(
     commit here ever creates that file.
     """
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     with pg_session_factory() as s:
-        owner = make_user(s, email=f"o-{uuid.uuid4().hex[:8]}@ki.se")
+        owner = make_user(s, email=f"o-{uuid.uuid4().hex[:8]}@umu.se")
         ws = make_workspace(s, owner=owner, title="No draft at HEAD")
         s.commit()
         ws_id = ws.id
@@ -624,7 +624,7 @@ def test_an_empty_draft_is_not_reported_as_served(
     merely "the read succeeded". An empty proposal.md at HEAD is technically
     readable but is not a draft."""
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     ws_id = _seed(pg_session_factory, tmp_path, content="")
     with pg_session_factory() as s:
         soft_delete(s, ws_id)
@@ -670,7 +670,7 @@ def test_inspection_is_refused_when_the_capability_is_disabled(
     ws_id = _seed(sf, tmp_path)
     with sf() as s:
         soft_delete(s, ws_id)
-    c, _ = client_for(app, sf, email="admin@ki.se", is_admin=True)
+    c, _ = client_for(app, sf, email="admin@umu.se", is_admin=True)
 
     r = c.get(f"/api/admin/workspaces/deleted/{ws_id}")
 
@@ -689,7 +689,7 @@ def test_a_refused_inspection_serves_no_content(monkeypatch, pg_url, pg_session_
     ws_id = _seed(sf, tmp_path, content="# Secret draft\n\nUnpublished.\n")
     with sf() as s:
         soft_delete(s, ws_id)
-    c, _ = client_for(app, sf, email="admin@ki.se", is_admin=True)
+    c, _ = client_for(app, sf, email="admin@umu.se", is_admin=True)
 
     body = c.get(f"/api/admin/workspaces/deleted/{ws_id}").text
 
@@ -709,7 +709,7 @@ def test_a_refused_inspection_writes_no_audit_row(
     ws_id = _seed(sf, tmp_path)
     with sf() as s:
         soft_delete(s, ws_id)
-    c, _ = client_for(app, sf, email="admin@ki.se", is_admin=True)
+    c, _ = client_for(app, sf, email="admin@umu.se", is_admin=True)
 
     c.get(f"/api/admin/workspaces/deleted/{ws_id}")
 
@@ -734,7 +734,7 @@ def test_the_list_stays_available_when_inspection_is_disabled(
     ws_id = _seed(sf, tmp_path)
     with sf() as s:
         soft_delete(s, ws_id)
-    c, _ = client_for(app, sf, email="admin@ki.se", is_admin=True)
+    c, _ = client_for(app, sf, email="admin@umu.se", is_admin=True)
 
     r = c.get("/api/admin/workspaces/deleted")
 
@@ -748,12 +748,12 @@ def test_the_capability_is_reported_to_the_client_both_ways(
     """/api/me drives whether the UI offers the door at all. A door that 403s is
     worse than no door, so this must track the setting rather than assume it."""
     off = _disabled_app(monkeypatch, pg_url, tmp_path)
-    c_off, _ = client_for(off, off.state.session_factory, email="a@ki.se", is_admin=True)
+    c_off, _ = client_for(off, off.state.session_factory, email="a@umu.se", is_admin=True)
     assert c_off.get("/api/me").json()["capabilities"]["retention_inspection"] is False
 
     monkeypatch.setenv("RETENTION_INSPECTION_ENABLED", "true")
     on = setup_app(monkeypatch, pg_url, tmp_path)
-    c_on, _ = client_for(on, on.state.session_factory, email="b@ki.se", is_admin=True)
+    c_on, _ = client_for(on, on.state.session_factory, email="b@umu.se", is_admin=True)
     assert c_on.get("/api/me").json()["capabilities"]["retention_inspection"] is True
 
 
@@ -764,5 +764,5 @@ def test_a_non_admin_never_gets_the_capability_even_when_enabled(
     must not hand it to someone who fails the role check."""
     monkeypatch.setenv("RETENTION_INSPECTION_ENABLED", "true")
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    c, _ = client_for(app, app.state.session_factory, email="user@ki.se", is_admin=False)
+    c, _ = client_for(app, app.state.session_factory, email="user@umu.se", is_admin=False)
     assert c.get("/api/me").json()["capabilities"]["retention_inspection"] is False

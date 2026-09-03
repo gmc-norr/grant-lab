@@ -17,12 +17,12 @@ from call_manager.main import create_app
 def _setup(monkeypatch, pg_url):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     return create_app()
 
 
-def _admin(app, sf, test_client_factory, *, email="root@ki.se"):
+def _admin(app, sf, test_client_factory, *, email="root@umu.se"):
     with sf() as s:
         u = User(status="active", email=email, is_admin=True)
         s.add(u)
@@ -61,7 +61,7 @@ def _seed_call_profile(sf, uid):
 def test_golden_set_requires_admin(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     app = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        u = User(status="active", email="alice@ki.se", is_admin=False)
+        u = User(status="active", email="alice@umu.se", is_admin=False)
         s.add(u)
         s.commit()
         s.refresh(u)

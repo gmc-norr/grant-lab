@@ -13,7 +13,7 @@ from tests.proposal_assist.conftest import make_user, make_workspace
 def test_exact_offsets_disambiguate_repeated_quote(pg_session_factory):
     # "sky" occurs twice → offset-less path is ambiguous; exact offsets pick one.
     with pg_session_factory() as s:
-        o = make_user(s, email="cci@ki.se")
+        o = make_user(s, email="cci@umu.se")
         ws = make_workspace(s, owner=o)
         s.commit()
         wid = ws.id
@@ -42,7 +42,7 @@ def test_exact_offsets_disambiguate_repeated_quote(pg_session_factory):
 ])
 def test_exact_offsets_bounds_rejected(pg_session_factory, qs, qe, frag):
     with pg_session_factory() as s:
-        o = make_user(s, email="cci2@ki.se")
+        o = make_user(s, email="cci2@umu.se")
         ws = make_workspace(s, owner=o)
         s.commit()
         wid = ws.id
@@ -57,7 +57,7 @@ def test_exact_offsets_bounds_rejected(pg_session_factory, qs, qe, frag):
 
 def test_error_returns_carry_codes(pg_session_factory):
     with pg_session_factory() as s:
-        o = make_user(s, email="cci3@ki.se")
+        o = make_user(s, email="cci3@umu.se")
         ws = make_workspace(s, owner=o)
         s.commit()
         wid = ws.id

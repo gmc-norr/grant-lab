@@ -75,7 +75,7 @@ def test_phase0_and_compaction_skip_when_disabled(monkeypatch):
 
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://x:y@127.0.0.1/z")
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     monkeypatch.setenv("DRAFTING_ENABLED", "false")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")

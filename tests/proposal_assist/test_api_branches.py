@@ -157,7 +157,7 @@ def test_a_stranger_cannot_mutate_branches(
 ):
     # Not the owner and not a member: refused by either guard.
     with pg_session_factory() as s:
-        stranger = make_user(s, email="stranger-branch@ki.se")
+        stranger = make_user(s, email="stranger-branch@umu.se")
         wid = _seed(s, _app, stranger)
         s.commit()
     call = getattr(client_authed_owner, verb)
@@ -176,7 +176,7 @@ def test_a_MEMBER_can_list_but_cannot_mutate(
     from call_manager.db.models import WorkspaceViewer
 
     with pg_session_factory() as s:
-        other_owner = make_user(s, email="branch-owner@ki.se")
+        other_owner = make_user(s, email="branch-owner@umu.se")
         wid = _seed(s, _app, other_owner)
         s.add(WorkspaceViewer(workspace_id=wid, user_id=current_user.id))
         s.commit()

@@ -5,31 +5,31 @@ from call_manager.db.models import User
 
 
 def test_creates_users_with_admin_flag(pg_session_factory):
-    bootstrap_admins(pg_session_factory, emails=["root@ki.se"], allowed_domains=["ki.se"])
+    bootstrap_admins(pg_session_factory, emails=["root@umu.se"], allowed_domains=["umu.se"])
     with pg_session_factory() as s:
-        u = s.query(User).filter_by(email="root@ki.se").one()
+        u = s.query(User).filter_by(email="root@umu.se").one()
     assert u.is_admin is True
 
 
 def test_promotes_existing_user(pg_session_factory):
     with pg_session_factory() as s:
-        s.add(User(email="alice@ki.se", is_admin=False))
+        s.add(User(email="alice@umu.se", is_admin=False))
         s.commit()
-    bootstrap_admins(pg_session_factory, emails=["alice@ki.se"], allowed_domains=["ki.se"])
+    bootstrap_admins(pg_session_factory, emails=["alice@umu.se"], allowed_domains=["umu.se"])
     with pg_session_factory() as s:
-        u = s.query(User).filter_by(email="alice@ki.se").one()
+        u = s.query(User).filter_by(email="alice@umu.se").one()
     assert u.is_admin is True
 
 
 def test_is_idempotent(pg_session_factory):
-    bootstrap_admins(pg_session_factory, emails=["root@ki.se"], allowed_domains=["ki.se"])
-    bootstrap_admins(pg_session_factory, emails=["root@ki.se"], allowed_domains=["ki.se"])
+    bootstrap_admins(pg_session_factory, emails=["root@umu.se"], allowed_domains=["umu.se"])
+    bootstrap_admins(pg_session_factory, emails=["root@umu.se"], allowed_domains=["umu.se"])
     with pg_session_factory() as s:
-        assert s.query(User).filter_by(email="root@ki.se").count() == 1
+        assert s.query(User).filter_by(email="root@umu.se").count() == 1
 
 
 def test_no_admins_in_env_is_noop(pg_session_factory):
-    bootstrap_admins(pg_session_factory, emails=[], allowed_domains=["ki.se"])
+    bootstrap_admins(pg_session_factory, emails=[], allowed_domains=["umu.se"])
     with pg_session_factory() as s:
         assert s.query(User).count() == 0
 
@@ -42,7 +42,7 @@ def test_skips_email_outside_allowlist(pg_session_factory, caplog):
         bootstrap_admins(
             pg_session_factory,
             emails=["intruder@example.com"],
-            allowed_domains=["ki.se"],
+            allowed_domains=["umu.se"],
         )
     with pg_session_factory() as s:
         assert s.query(User).filter_by(email="intruder@example.com").count() == 0
@@ -59,7 +59,7 @@ def test_skips_malformed_email(pg_session_factory, caplog):
         bootstrap_admins(
             pg_session_factory,
             emails=["not-an-email"],
-            allowed_domains=["ki.se"],
+            allowed_domains=["umu.se"],
         )
     with pg_session_factory() as s:
         assert s.query(User).count() == 0
@@ -69,9 +69,9 @@ def test_mixed_valid_and_invalid_emails(pg_session_factory):
     """Valid entries still bootstrap even when invalid ones are skipped."""
     bootstrap_admins(
         pg_session_factory,
-        emails=["root@ki.se", "intruder@example.com", "bad"],
-        allowed_domains=["ki.se"],
+        emails=["root@umu.se", "intruder@example.com", "bad"],
+        allowed_domains=["umu.se"],
     )
     with pg_session_factory() as s:
         emails = {u.email for u in s.query(User).all()}
-    assert emails == {"root@ki.se"}
+    assert emails == {"root@umu.se"}

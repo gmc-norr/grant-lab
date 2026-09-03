@@ -25,7 +25,7 @@ def _base_env(monkeypatch, pg_url):
     for k, v in {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://testserver",
         "DRAFTING_ADAPTER": "fake",
     }.items():

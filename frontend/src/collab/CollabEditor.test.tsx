@@ -40,7 +40,7 @@ vi.mock("./useSaveVersion", () => ({
 }));
 
 vi.mock("../api/session", () => ({
-  useSession: () => ({ data: { user: { id: 1, name: "Tester", email: "t@ki.se" } } }),
+  useSession: () => ({ data: { user: { id: 1, name: "Tester", email: "t@umu.se" } } }),
 }));
 
 import { CollabEditor } from "./CollabEditor";

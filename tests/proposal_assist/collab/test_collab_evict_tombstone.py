@@ -81,7 +81,7 @@ async def test_kernel_accept_aborts_on_tombstoned_room(pg_session_factory, tmp_p
     from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
     with pg_session_factory() as s:
-        o = make_user(s, email="k-tombstone@ki.se")
+        o = make_user(s, email="k-tombstone@umu.se")
         ws = make_workspace(s, owner=o, current_phase="active")
         s.commit()
         wid, oid = ws.id, o.id

@@ -345,7 +345,7 @@ Full detail in the appendices.
   regardless of the row's status; `web/routes/oauth_google.py:161-163` answers
   `/auth/error`, the same page as a bad token). The admin API has approve/deny/disable/
   enable/role/reset-password and nothing that deletes a user or releases an address;
-  `deny` maps to `disabled`, which still collides. Probe: register `victim@ki.se` with no
+  `deny` maps to `disabled`, which still collides. Probe: register `victim@umu.se` with no
   cookie → 200; the victim's verified Google sign-in → `/auth/error` while pending, after
   deny, and after enable. 30 addresses per IP per 15 min. Fix shape: on collision with a
   pending row that has neither `oidc_sub` nor `password_hash`, attach the verified Google
@@ -567,7 +567,7 @@ survived verification (5 confirmed, 2 plausible), 2 refuted.
 
 1. **Line 22 — the selector fix is correct but the spec still cannot pass**: nothing runs
    it (CI runs vitest only; `scripts/collab_e2e_run.sh` hard-codes `collab.spec.ts`) and
-   no seed creates an active `e2e@ki.se` with password `correct-horse-1`, so the failure
+   no seed creates an active `e2e@umu.se` with password `correct-horse-1`, so the failure
    moved from a strict-mode error at `fill()` to a login-denial timeout at `waitForURL`.
    The gitignored `frontend/test-results/.last-run.json` from five minutes before the
    commit records exactly this: status failed, alert "Invalid email or password."
@@ -734,7 +734,7 @@ Main tree read-only; only the allowed `gen_openapi_types.sh` regenerate-then-rev
 | 3 | Post-save optimistic write reverts server newline canonicalization | **OPEN** | READ | `editor/ArtifactSectionEditor.tsx:224-232` writes `text: content` (client bytes) next to `sha: result.section_sha` (server sha of canonical bytes). Server appends `\n` to a non-final section lacking one (`proposal_assist/editing/save.py:290-291`); `SaveResultOut` carries no text (`web/api/workspaces.py:169-175`). Ordering makes it a strict regression: `useSaveSection.onSuccess` (`api/editor.ts:48`) invalidates, TanStack 5.101.0 awaits `onSuccess` and `invalidateQueries` awaits the active refetch, so the canonical bytes have already landed when `mutateAsync` resolves — then `setQueryData` overwrites them. The existing test (`ArtifactSectionEditor.test.tsx:137-186`) uses `"target branch\n"` (already canonical) so cannot see it. Prior citation `:173` is now `:224`. |
 | 4 | §4.9 give-up shown as "reconnecting…", §4.10 Save-a-version not invalidating Versions | **FIXED 2d2cd3aa** (both) | RAN | 4.9: `collabProvider.ts:294` sets `offline-permanent`; `collabStatus.ts:9` -> `collab-disconnected`; `shell/StatusBar.tsx:22` label "Disconnected — reload to reconnect". Tests: `collabProvider.test.ts:490` `"the status becomes terminal once retries are exhausted"`, `:174` `"gives up after maxReconnectAttempts consecutive failures (no infinite loop)"` (28 passed). 4.10: `api/invalidateArtifact.ts:36-40` invalidates `[artifact,id]`, `["versions",id]`, `["branches",id]`; `collab/useSaveVersion.ts:18` uses it. Tests `api/invalidateArtifact.test.ts:9` `"refreshes the artifact, version list, and branch tips"`, `:23` `"uses the versions PREFIX so both artifacts' lists refresh"`, `:60` `"every artifact invalidation goes through the helper"` (source-scan gate) — 3 passed. |
 | 5 | No frontend lint gate | **OPEN** | RAN | `ls frontend/eslint* frontend/.eslintrc*` -> none; `grep eslint\|oxlint\|biome frontend/package.json` -> none; scripts are `dev/build/test/gen:api` only (`package.json:9-14`). CI runs vitest (`ci.yml:74`) and type-checks only via the Docker build (`frontend/Dockerfile:27` `pnpm run build` = `tsc && vite build`, `tsconfig:8-10` strict + noUnusedLocals/Parameters). 5 dead `eslint-disable` directives in `frontend/src` (3 for `react-hooks/exhaustive-deps`: `collab/useCollabDoc.ts:118`, `editor/CodeMirrorEditor.tsx`, `cockpit/CitationsPanel.tsx`) — a rule that has never run here. **Cheapest gate:** one devDep `oxlint` (zero config, bundles react-hooks + typescript rules), `"lint": "oxlint --deny-warnings src"` + one CI step after vitest. Constraint: `frontend/pnpm-workspace.yaml` `minimumReleaseAge: 10080` — pin a version >= 7 days old. Eslint flat config + typescript-eslint + eslint-plugin-react-hooks is the 3-4 dep alternative. |
-| 6 | Playwright e2e wiring; cockpit.spec.ts | **OPEN** (confirmed; cockpit is inert) | RAN | Only `collab.spec.ts` is wired (`scripts/collab_e2e_run.sh:172`); `ci.yml` has no playwright step; no `e2e` script in `package.json`. `pnpm exec playwright test e2e/cockpit.spec.ts e2e/dashboard.spec.ts --list` -> 6 tests: cockpit 2 (both `test.skip` stubs, `cockpit.spec.ts:8,13`, header says "enabled in SP2a-4" — SP2a-4 merged and never enabled them; file dated Jun 22), dashboard 4. `dashboard.spec.ts:21-23` logs in as `e2e@ki.se`/`correct-horse-1`; `scripts/collab_e2e_seed.py` creates no password user (grep `password` -> none; it emits cookies only). HEAD 8f44a35e edited dashboard.spec.ts's password selector — a change to a test nothing can run. cockpit.spec.ts cannot fail (always skipped) and cannot pass meaningfully; dashboard.spec.ts cannot pass. |
+| 6 | Playwright e2e wiring; cockpit.spec.ts | **OPEN** (confirmed; cockpit is inert) | RAN | Only `collab.spec.ts` is wired (`scripts/collab_e2e_run.sh:172`); `ci.yml` has no playwright step; no `e2e` script in `package.json`. `pnpm exec playwright test e2e/cockpit.spec.ts e2e/dashboard.spec.ts --list` -> 6 tests: cockpit 2 (both `test.skip` stubs, `cockpit.spec.ts:8,13`, header says "enabled in SP2a-4" — SP2a-4 merged and never enabled them; file dated Jun 22), dashboard 4. `dashboard.spec.ts:21-23` logs in as `e2e@umu.se`/`correct-horse-1`; `scripts/collab_e2e_seed.py` creates no password user (grep `password` -> none; it emits cookies only). HEAD 8f44a35e edited dashboard.spec.ts's password selector — a change to a test nothing can run. cockpit.spec.ts cannot fail (always skipped) and cannot pass meaningfully; dashboard.spec.ts cannot pass. |
 | 7 | Data-layer drift (3 indexes incl. HNSW; no gate) | **OPEN — MEASURED** | RAN | `scratchpad/drift_probe.py`: `PostgresContainer("pgvector/pgvector:pg16", driver="psycopg")`, `command.upgrade(cfg,"head")` -> `alembic_version: 0068`, 125 live indexes in `public`; `compare_metadata(MigrationContext, Base.metadata)` -> **DIFF OPS: 3**, all `remove_index`, no other op kind: (1) `reference_chunks.ix_reference_chunks_ws_embedding` cols=[embedding] `using='hnsw'` ops `{'embedding':'vector_cosine_ops'}` — created by raw SQL `alembic/versions/0031_references.py:111`; (2) `reference_chunks.ix_reference_chunks_ws_model` cols=[workspace_id, embedding_model] — `0032_reference_chunks_workspace_index.py:26`; (3) `references.ix_references_indexing_backlog` cols=[workspace_id, created_at] `where="((text_status = ANY (ARRAY['pending','running'])) OR (outline_status = ANY (ARRAY['pending','running'])))"` — `0031_references.py:80`. Zero add/modify ops: columns, FKs, constraints, every other index are in parity. ORM side: `db/models.py:1754-1791` `Reference.__table_args__` = 6 CheckConstraints + `uq_references_workspace_citekey`; `:1851-1853` `ReferenceChunk.__table_args__` = `uq_reference_chunks_ref_idx` only. Gate: `grep -rln "compare_metadata\|autogenerate" tests/` -> **nothing** (only comments at `db/models.py:149,158,262`, `db/__init__.py:5`). |
 | 8 | Alembic: heads, pass-only downgrades, boot migrations, /healthz revision | **PARTIAL** (single head OK; rest OPEN) | RAN | 68 migration files (not 69; `alembic/versions/` holds only `0001..0068` + `__pycache__`); `uv run alembic heads` -> `0068 (head)`. AST scan: 3 pass-only downgrades — `0010_profile_embed_text_v2.py`, `0037_backfill_reference_original_sha256.py`, `0045_null_profile_embeddings.py` (all data backfills; 0010's docstring calls the no-op deliberate). No migration at boot: no `alembic`/`command.upgrade` in `main.py`; README:109 and :201 make it manual. `/healthz` (`web/routes/health.py:19-27`) is `SELECT 1` only; `grep alembic_version\|ScriptDirectory\|MigrationContext src/` -> none. |
 | 9 | Scheduler lock ops surface | **OPEN** (+ one new twist) | RAN | No heartbeat/readiness (`grep heartbeat scheduler.py main.py` -> none; the only "heartbeat" is the per-job touch in `analysis/pipeline.py:205`). Without the lock at boot: one WARNING `scheduler.lock_not_acquired` (`main.py:239-251`), scheduler built `start=False`, `/healthz` stays 200. **New:** `POST /admin/digest/send` and `/admin/ingest/{slug}` (`web/api/admin.py:388-393, :421`) call `trigger_job_now`, which on a never-started scheduler returns True and the job never runs — probe `scratchpad/trigger_probe.py`: `running: False / trigger_job_now -> True / job actually ran: False` (`scheduler.py:1144-1150` checks only job existence; pre-start jobs sit in `_pending_jobs`). Lock lost after boot (PG restart): `SchedulerLock` (`scheduler.py:54-98`) has only `__init__`/`release`, nothing re-checks; the scheduler keeps running with no signal (harmless in a one-process deploy). |
@@ -865,8 +865,8 @@ or `disabled` account is added as a member (row + `member_added` event carrying 
 shown in `list_members`). This defeats the anti-enumeration `auth.py` builds for
 register/login, for any authenticated user.
 **RAN** (probe 3, owner client):
-`stranger@ki.se` (exists) → `201 {"user_id":3,"email":"stranger@ki.se","role":"member"}`;
-`pending@ki.se` (status=pending) → `201`; `nobody@ki.se` → `400 "could not add collaborator"`.
+`stranger@umu.se` (exists) → `201 {"user_id":3,"email":"stranger@umu.se","role":"member"}`;
+`pending@umu.se` (status=pending) → `201`; `nobody@umu.se` → `400 "could not add collaborator"`.
 Fix shape: uniform 202 "invitation recorded" regardless of existence, or restrict to `status == "active"` and still answer uniformly. Low: internal tool with a domain allowlist.
 
 ###### F5 — Low — `src/call_manager/web/api/me.py:221` — unbounded `profile_ids` list → 500 at 65,536 elements
@@ -900,7 +900,7 @@ returns it on a member-gated read. The locker is always the owner (`require_owne
 lock), and `list_members` (:1283-1294) is owner-gated precisely so member/owner emails
 stay with the owner; the 2026-08-29 review recorded the same policy breach for the
 activity feed — this is a second surface.
-**RAN** (probe 7): owner locks; member `GET /spec` → `200 … "locked_by":"owner@ki.se"`; the
+**RAN** (probe 7): owner locks; member `GET /spec` → `200 … "locked_by":"owner@umu.se"`; the
 same member `GET /members` → 403.
 Fix shape: return `locked_by_me: bool`/a display name, or gate the email on `is_owner`.
 
@@ -1742,7 +1742,7 @@ each has two distinct enforcement points.
 | 10 | `require_admin` | `src/call_manager/auth/dependencies.py:54` — `54s/if not user.is_admin:/if False:/` | `tests/test_auth_dependencies.py` | **RED** (1 failed, 3 passed) | `test_require_admin_rejects_non_admin` (named file) |
 | 11 | `verify_password` mismatch → True | `src/call_manager/auth/passwords.py:45` — `45s/return False, False/return True, False/` (line 45 only; line 47 untouched) | `tests/test_auth_passwords.py`, `tests/test_api_auth.py` | **RED** twice: unit (1 failed) and, re-run against the route file alone, HTTP (1 failed, 6 passed) | `test_hash_and_verify_roundtrip`; `test_login_failures_identical_400_no_cookie` (both named) |
 | 12a | OIDC `email_verified` | `src/call_manager/auth/oidc.py:140` — `140s/if claims.get("email_verified") is not True:/if False:/` | `tests/test_auth_oidc.py` | **RED** (1 failed, 7 passed) | `test_rejects_bad_claims[over4]` = `{"email_verified": False}` (named file) |
-| 12b | Email-domain allowlist | `src/call_manager/auth/domain.py:52` — `52s/return domain in normalized/return True/` | `tests/test_auth_domain.py`, `tests/test_web_oauth_google.py` | **RED** twice: unit (1 failed, 10 passed) and route-only re-run (1 failed, 2 passed; landed on `/auth/pending` instead of `/auth/error`) | `test_domain_allowed[alice@ki.se-allowed2-False]`; `test_callback_disallowed_domain_rejected` (both named) |
+| 12b | Email-domain allowlist | `src/call_manager/auth/domain.py:52` — `52s/return domain in normalized/return True/` | `tests/test_auth_domain.py`, `tests/test_web_oauth_google.py` | **RED** twice: unit (1 failed, 10 passed) and route-only re-run (1 failed, 2 passed; landed on `/auth/pending` instead of `/auth/error`) | `test_domain_allowed[alice@umu.se-allowed2-False]`; `test_callback_disallowed_domain_rejected` (both named) |
 
 **Score: 16/16 mutations detected — 15 by a red test, 1 (9a) by a hang. 0 hollow gates
 among the 12 invariants.** Every detection came from a file I named in (b); no mutation
@@ -2366,7 +2366,7 @@ logged them as such and they were re-run at the correct lines — no result belo
 
 ###### F1 — Medium — `src/call_manager/web/api/auth.py:134-180` + `auth/accounts.py:38-39` + `web/routes/oauth_google.py:161-163` — an unauthenticated `POST /api/auth/register` squats any allowed-domain address and blocks that person's Google sign-in with no admin recovery surface
 `register` needs no session and no proof of address: it inserts a `pending` row for any
-`@ki.se` address (:162). `resolve_google_account` then refuses the *real* owner's verified
+`@umu.se` address (:162). `resolve_google_account` then refuses the *real* owner's verified
 Google sign-in on `email_collision` (accounts.py:38-39 — "never auto-link"), regardless of the
 row's status, and the callback answers `/auth/error` (oauth_google.py:161-163), the same page as
 a bad token. The admin surface has approve/deny/disable/enable/role/reset-password and nothing
@@ -2374,14 +2374,14 @@ that deletes a user or releases an email (RAN, route dump below); `deny` maps to
 which still collides. The only way back is: admin approves the squatted row with an
 `initial_password`, hands it to the person out of band, and that person later runs
 Connect-Google (`oauth_google.py:136-150`).
-Scenario: anyone on the hospital network posts `{"email":"<colleague>@ki.se"}` (30 per IP per
+Scenario: anyone on the hospital network posts `{"email":"<colleague>@umu.se"}` (30 per IP per
 15 min, `main.py:803` → ~2,880 addresses/day/IP) — every targeted colleague's Google sign-in,
 the primary production login path (third-pass:715), fails with a generic error until an admin
 does the password dance. The register endpoint's anti-enumeration design makes the squat
 invisible to the victim.
 **RAN** (probe A, FakeOIDC harness from `tests/test_web_oauth_google.py`):
 ```
-POST /api/auth/register {"email":"victim@ki.se"} (no cookie) -> 200 {"ok":true}; row status=pending oidc_sub=None
+POST /api/auth/register {"email":"victim@umu.se"} (no cookie) -> 200 {"ok":true}; row status=pending oidc_sub=None
 victim Google sign-in (email_verified, sub=g-victim) while pending -> (303, '/auth/error')
 after admin POST /api/admin/users/{id}/deny                     -> (303, '/auth/error')
 after admin POST /api/admin/users/{id}/enable                   -> (303, '/auth/error')

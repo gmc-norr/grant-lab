@@ -68,9 +68,9 @@ owned outside engineering, with this shape:
 5. Sweep every already-deleted workspace, and account for backup expiry.
 6. Retain only the explicitly approved minimal audit record.
 
-It needs KI archive/privacy ownership, not an engineering default: GDPR
+It needs UmU archive/privacy ownership, not an engineering default: GDPR
 storage limitation requires a defined purpose and retention period rather than
-indefinite storage, while KI may be legally required to retain qualifying
+indefinite storage, while UmU may be legally required to retain qualifying
 research data and its accompanying documentation under its records schedule.
 Those two pull in opposite directions and the resolution is theirs to make.
 

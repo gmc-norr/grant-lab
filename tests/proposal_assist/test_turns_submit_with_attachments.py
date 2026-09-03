@@ -141,8 +141,8 @@ def test_submit_with_cross_workspace_attachment_raises(
     """
     settings = Settings()
     with pg_session_factory() as s:
-        owner_a = make_user(s, email="ws-a@ki.se")
-        owner_b = make_user(s, email="ws-b@ki.se")
+        owner_a = make_user(s, email="ws-a@umu.se")
+        owner_b = make_user(s, email="ws-b@umu.se")
         ws_a = make_workspace(s, owner=owner_a)
         ws_b = make_workspace(s, owner=owner_b)
         att_b = _seed_attachment(s, workspace=ws_b, uploaded_by=owner_b, tokens_estimate=10)

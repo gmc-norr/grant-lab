@@ -12,7 +12,7 @@ from tests.proposal_assist.conftest import make_user, make_workspace
 def test_phase_approval_insert(pg_session_factory):
     with pg_session_factory() as s:
         ws = make_workspace(s)
-        approver = make_user(s, email="approver@ki.se")
+        approver = make_user(s, email="approver@umu.se")
         s.add(
             PhaseApproval(
                 workspace_id=ws.id,
@@ -33,7 +33,7 @@ def test_phase_approval_insert(pg_session_factory):
 def test_phase_approval_phase_check_constraint(pg_session_factory):
     with pg_session_factory() as s:
         ws = make_workspace(s)
-        approver = make_user(s, email="approver2@ki.se")
+        approver = make_user(s, email="approver2@umu.se")
         s.add(
             PhaseApproval(
                 workspace_id=ws.id,
@@ -53,7 +53,7 @@ def test_phase_approval_cascade_on_workspace_delete(pg_session_factory):
 
     with pg_session_factory() as s:
         ws = make_workspace(s)
-        approver = make_user(s, email="approver3@ki.se")
+        approver = make_user(s, email="approver3@umu.se")
         s.add(
             PhaseApproval(
                 workspace_id=ws.id,

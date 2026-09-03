@@ -70,8 +70,8 @@ def test_one_members_ack_does_not_consent_for_another(pg_session_factory):
     from tests.proposal_assist.conftest import make_user, make_workspace
 
     with pg_session_factory() as s:
-        owner = make_user(s, email="ack-owner@ki.se")
-        other = make_user(s, email="ack-other@ki.se")
+        owner = make_user(s, email="ack-owner@umu.se")
+        other = make_user(s, email="ack-other@umu.se")
         ws = make_workspace(s, owner=owner, ack_disclosure=True, current_phase="active")
         s.flush()
         s.add(WorkspaceViewer(workspace_id=ws.id, user_id=other.id))

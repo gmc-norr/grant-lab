@@ -39,7 +39,7 @@ class _FakeAdapter:
 def test_end_to_end_ingest_and_browse(monkeypatch, pg_url, pg_session_factory):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     app = create_app()
 
@@ -60,7 +60,7 @@ def test_end_to_end_ingest_and_browse(monkeypatch, pg_url, pg_session_factory):
 
     # 2. Browse as a logged-in user
     with pg_session_factory() as s:
-        u = User(status="active", email="alice@ki.se")
+        u = User(status="active", email="alice@umu.se")
         s.add(u)
         s.commit()
         s.refresh(u)

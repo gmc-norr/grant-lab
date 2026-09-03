@@ -16,9 +16,9 @@ def _setup(
     from call_manager.db.models import WorkspaceSetupJob
 
     with pg_session_factory() as s:
-        owner = make_user(s, email="owner@ki.se")
-        member = make_user(s, email="member@ki.se")
-        stranger = make_user(s, email="stranger@ki.se")
+        owner = make_user(s, email="owner@umu.se")
+        member = make_user(s, email="member@umu.se")
+        stranger = make_user(s, email="stranger@umu.se")
         ws = make_workspace(s, owner=owner)
         ws.current_phase = phase
         ws.rubric_criteria = (

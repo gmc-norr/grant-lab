@@ -189,14 +189,14 @@ async def test_concurrent_submits_cannot_overshoot_cap(monkeypatch, pg_url, pg_s
 
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     monkeypatch.setenv("DAILY_TOKEN_CAP_INPUT", "100")
     monkeypatch.setenv("DAILY_TOKEN_CAP_OUTPUT", "1000000")
     settings = Settings()
 
     with pg_session_factory() as s:
-        owner = make_user(s, email="concurrent-test-owner@ki.se")
+        owner = make_user(s, email="concurrent-test-owner@umu.se")
         s.commit()
         ws = make_workspace(s, owner=owner)
         s.commit()

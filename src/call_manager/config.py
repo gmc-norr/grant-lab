@@ -825,7 +825,7 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"EMAIL_FROM is set to the placeholder '{self.email_from}' but a "
                 "send transport (RESEND_API_KEY or SMTP_HOST) is configured. Set a "
-                "real sender address (e.g. noreply@ki.se) to avoid bounces."
+                "real sender address (e.g. noreply@umu.se) to avoid bounces."
             )
         return self
 

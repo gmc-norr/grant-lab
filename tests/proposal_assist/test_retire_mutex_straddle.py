@@ -111,7 +111,7 @@ def test_blocked_save_section_refuses_and_leaves_git_untouched(pg_session_factor
 
     md0 = "## Background\noriginal.\n"
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="straddle-save@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="straddle-save@umu.se"))
         s.commit()
         ws_id = ws.id
     repo = Path(tmp_path) / str(ws_id) / "repo"
@@ -154,7 +154,7 @@ def test_blocked_kernel_accept_refuses_and_leaves_the_proposal_pending(
     swapped in place rather than hoisted above the early-exit mutation."""
     md0 = "## Background\noriginal.\n"
     with pg_session_factory() as s:
-        owner = make_user(s, email="straddle-kernel@ki.se")
+        owner = make_user(s, email="straddle-kernel@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         s.commit()
         ws_id, oid = ws.id, owner.id
@@ -233,7 +233,7 @@ def test_blocked_enable_on_touch_returns_false_and_writes_no_state_row(
 
     md0 = "## Background\noriginal.\n"  # a live workspace here WOULD be enabled
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="straddle-flip@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="straddle-flip@umu.se"))
         s.commit()
         ws_id = ws.id
     repo = Path(tmp_path) / str(ws_id) / "repo"
@@ -269,7 +269,7 @@ def test_the_blocking_probe_actually_observes_a_lock_wait(pg_session_factory):
     """Guards the guard: if _wait_until_blocked returned immediately, every test
     above would be synchronizing on nothing and could pass by luck."""
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="probe@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="probe@umu.se"))
         s.commit()
         ws_id = ws.id
 

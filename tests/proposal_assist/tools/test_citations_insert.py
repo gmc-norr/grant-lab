@@ -360,7 +360,7 @@ async def test_reference_in_another_workspace_not_found(
     from tests.proposal_assist.conftest import make_user
 
     with pg_session_factory() as s:
-        other_owner = make_user(s, email=f"other-{uuid.uuid4()}@ki.se")
+        other_owner = make_user(s, email=f"other-{uuid.uuid4()}@umu.se")
         s.commit()
         other_ws = make_workspace(s, owner=other_owner)
         s.commit()

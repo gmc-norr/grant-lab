@@ -158,9 +158,9 @@ def test_migration_0064_round_trips(pg_url, pg_session_factory):
         try:
             # Seed AT 0063 — before the column exists.
             with eng.begin() as c:
-                c.execute(text("INSERT INTO users (email) VALUES ('mig64@ki.se')"))
+                c.execute(text("INSERT INTO users (email) VALUES ('mig64@umu.se')"))
                 uid = c.execute(
-                    text("SELECT id FROM users WHERE email='mig64@ki.se'")
+                    text("SELECT id FROM users WHERE email='mig64@umu.se'")
                 ).scalar_one()
                 c.execute(
                     text(

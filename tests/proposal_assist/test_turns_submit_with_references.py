@@ -18,7 +18,7 @@ from call_manager.proposal_assist.turns.submit import submit_user_turn
 
 
 def _seed_workspace(s, *, owner_email=None):
-    owner = User(email=owner_email or f"u-{uuid.uuid4()}@ki.se")
+    owner = User(email=owner_email or f"u-{uuid.uuid4()}@umu.se")
     s.add(owner)
     s.flush()
     ws = Workspace(owner_id=owner.id, title="T")

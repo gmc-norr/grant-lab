@@ -67,7 +67,7 @@ def _make_ctx(pg_session_factory, tmp_path, workspace_id, *, active_turn_job_id=
 def _seed_running_turn(pg_session_factory):
     """Create a workspace + a running TurnJob (fetch_count starts at 0)."""
     with pg_session_factory() as s:
-        owner = User(email=f"o-{uuid.uuid4()}@ki.se")
+        owner = User(email=f"o-{uuid.uuid4()}@umu.se")
         s.add(owner)
         s.flush()
         ws = Workspace(owner_id=owner.id, title="T")
@@ -94,7 +94,7 @@ async def test_fetch_reference_no_running_turn_returns_error(pg_session_factory,
     for this workspace (e.g., the tool was invoked from a stale
     handle); we return a clear error."""
     with pg_session_factory() as s:
-        owner = User(email=f"o-{uuid.uuid4()}@ki.se")
+        owner = User(email=f"o-{uuid.uuid4()}@umu.se")
         s.add(owner)
         s.flush()
         ws = Workspace(owner_id=owner.id, title="T")

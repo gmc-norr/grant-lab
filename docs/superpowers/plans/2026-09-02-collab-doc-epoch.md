@@ -106,7 +106,7 @@ from call_manager.db.models import CollabArtifactState, User, Workspace
 
 
 def _ws(session):
-    u = User(status="active", email="epoch-mig@ki.se")
+    u = User(status="active", email="epoch-mig@umu.se")
     session.add(u)
     session.flush()
     ws = Workspace(title="W", owner_id=u.id, current_phase="active")
@@ -258,7 +258,7 @@ Append to `tests/proposal_assist/collab/test_collab_state.py`:
 
 def test_doc_epoch_is_zero_without_a_row(pg_session_factory):
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="st-e0@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="st-e0@umu.se"))
         s.commit()
         wid = ws.id
     with pg_session_factory() as s:
@@ -269,7 +269,7 @@ def test_reset_checkpoint_bumps_the_epoch_and_clears_the_watermark(pg_session_fa
     # A truncated log is a new document (spec §3.1): every reset moves the
     # epoch by exactly one, and the watermark goes back to "never opened".
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="st-e1@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="st-e1@umu.se"))
         state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         state.advance_checkpoint(
             s, workspace_id=ws.id, artifact="draft", up_to_update_id=7, commit_sha="abc"
@@ -295,7 +295,7 @@ def test_reset_checkpoint_creates_a_missing_row_so_the_epoch_still_moves(pg_sess
     # epoch 0 behind — otherwise a client from before the switch presents 0,
     # the room says 0, and the stale document is accepted.
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="st-e2@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="st-e2@umu.se"))
         s.commit()
         wid = ws.id
     with pg_session_factory() as s:
@@ -435,7 +435,7 @@ def test_handover_moves_the_document_epoch(pg_session_factory, tmp_path):
     (spec 2026-09-02-collab-doc-epoch-design.md §3.1): the epoch of every
     artifact it drained is one higher. An artifact it did NOT touch keeps its
     epoch — the bump rides reset_checkpoint, not the pass."""
-    wid, oid, _repo = _setup(pg_session_factory, tmp_path, "ho-epoch@ki.se")
+    wid, oid, _repo = _setup(pg_session_factory, tmp_path, "ho-epoch@umu.se")
     _seed_room_edit(pg_session_factory, wid, oid, "## Background\n\nedit.\n")
     with pg_session_factory() as s:
         assert state.get_doc_epoch(s, workspace_id=wid, artifact="draft") == 0
@@ -646,7 +646,7 @@ def test_warm_path_returns_a_hydration_carrying_the_rows_epoch(pg_session_factor
     from call_manager.proposal_assist.collab.hydrate import Hydration
 
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="hy-ep-warm@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="hy-ep-warm@umu.se"))
         state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
         wid = ws.id
@@ -675,7 +675,7 @@ def test_warm_path_returns_a_hydration_carrying_the_rows_epoch(pg_session_factor
 
 def test_cold_seed_path_carries_the_epoch_too(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="hy-ep-cold@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="hy-ep-cold@umu.se"))
         s.commit()
         wid = ws.id
     _init_repo(Path(tmp_path) / str(wid) / "repo", "## Background\nseeded.\n")
@@ -695,7 +695,7 @@ def test_cold_seed_path_carries_the_epoch_too(pg_session_factory, tmp_path):
 
 def test_flag_off_and_never_reset_is_epoch_zero(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="hy-ep-off@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="hy-ep-off@umu.se"))
         s.commit()
         wid = ws.id
     with pg_session_factory() as s:
@@ -995,7 +995,7 @@ def _truncate_and_replace(pg_session_factory, wid, oid, text: str) -> None:
 
 def test_every_accepted_connect_learns_the_epoch_before_step1(_app, pg_session_factory):
     # Spec test 3: no `?epoch=` → frame 4 (with the room's epoch) then STEP1.
-    client, wid, oid = _epoch_setup(_app, pg_session_factory, "route-epoch-learn@ki.se")
+    client, wid, oid = _epoch_setup(_app, pg_session_factory, "route-epoch-learn@umu.se")
     try:
         with client.websocket_connect(f"/api/ws/workspaces/{wid}/draft") as wsconn:
             first = wsconn.receive_bytes()
@@ -1016,7 +1016,7 @@ def test_the_reviews_reproduction_is_refused_before_step1(_app, pg_session_facto
     import pytest
     from starlette.websockets import WebSocketDisconnect
 
-    client, wid, oid = _epoch_setup(_app, pg_session_factory, "route-epoch-stale@ki.se")
+    client, wid, oid = _epoch_setup(_app, pg_session_factory, "route-epoch-stale@umu.se")
     try:
         with client.websocket_connect(f"/api/ws/workspaces/{wid}/draft") as wsconn:
             learned = P.read_doc_epoch_message(wsconn.receive_bytes())
@@ -1047,7 +1047,7 @@ def test_a_socket_presenting_the_current_epoch_is_accepted_and_can_persist(
     _app, pg_session_factory
 ):
     # Spec test 2.
-    client, wid, oid = _epoch_setup(_app, pg_session_factory, "route-epoch-current@ki.se")
+    client, wid, oid = _epoch_setup(_app, pg_session_factory, "route-epoch-current@umu.se")
     try:
         _truncate_and_replace(pg_session_factory, wid, oid, "new aims")
         with client.websocket_connect(f"/api/ws/workspaces/{wid}/draft?epoch=1") as wsconn:
@@ -1066,7 +1066,7 @@ def test_a_malformed_epoch_closes_1008_before_any_frame(_app, pg_session_factory
     import pytest
     from starlette.websockets import WebSocketDisconnect
 
-    client, wid, _oid = _epoch_setup(_app, pg_session_factory, "route-epoch-bad@ki.se")
+    client, wid, _oid = _epoch_setup(_app, pg_session_factory, "route-epoch-bad@umu.se")
     try:
         for bad in ("abc", "-1", "1.5", ""):
             with pytest.raises(WebSocketDisconnect) as exc, client.websocket_connect(

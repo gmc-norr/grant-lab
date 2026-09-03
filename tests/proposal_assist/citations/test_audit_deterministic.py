@@ -343,7 +343,7 @@ def test_reference_missing_nonexistent(pg_session_factory, _settings_env):
 def test_reference_in_other_workspace_missing(pg_session_factory, _settings_env):
     wsid = _make_workspace(pg_session_factory)
     with pg_session_factory() as s:
-        other_owner = make_user(s, email=f"other-{uuid.uuid4()}@ki.se")
+        other_owner = make_user(s, email=f"other-{uuid.uuid4()}@umu.se")
         s.commit()
         other_ws = make_workspace(s, owner=other_owner)
         s.commit()

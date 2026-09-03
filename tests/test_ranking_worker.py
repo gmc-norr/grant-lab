@@ -26,7 +26,7 @@ drain_queue = partial(_drain_queue, embedding_threshold=0.30)
 
 
 def _seed(s):
-    u = User(email="u@ki.se")
+    u = User(email="u@umu.se")
     s.add(u)
     s.flush()
     p = Profile(
@@ -160,7 +160,7 @@ def test_worker_short_circuit_writes_up_to_failing_gate_row(pg_session_factory):
     short-circuit precedence (budget, trl, both PASS here) plus timeline=fail.
     No LLM row, no embedding row (timeline short-circuits before it)."""
     with pg_session_factory() as s:
-        u = User(email="sc@ki.se")
+        u = User(email="sc@umu.se")
         s.add(u)
         s.flush()
         p = Profile(
@@ -230,7 +230,7 @@ def test_worker_must_include_with_failing_timeline_persists_llm_score(
     from datetime import timedelta
 
     with pg_session_factory() as s:
-        u = User(email="mi@ki.se")
+        u = User(email="mi@umu.se")
         s.add(u)
         s.flush()
         # Profile has must_include=["pathology"].
@@ -477,7 +477,7 @@ def test_worker_must_include_override_appears_in_summary(pg_session_factory):
     from datetime import timedelta
 
     with pg_session_factory() as s:
-        u = User(email="ovr@ki.se")
+        u = User(email="ovr@umu.se")
         s.add(u)
         s.flush()
         p = Profile(
@@ -833,7 +833,7 @@ def test_worker_tick_budget_stops_claiming_and_leaves_remainder_pending(
 
     # Seed THREE pending jobs.
     with pg_session_factory() as s:
-        u = User(email="budget@ki.se")
+        u = User(email="budget@umu.se")
         s.add(u)
         s.flush()
         p = Profile(

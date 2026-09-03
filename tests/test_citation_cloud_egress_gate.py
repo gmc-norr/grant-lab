@@ -23,7 +23,7 @@ def _settings(**over):
     base = {
         "DATABASE_URL": "postgresql+psycopg://u:p@localhost/db",
         "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://testserver",
         "CITATION_LLM_PROVIDER": "anthropic",
         "ANTHROPIC_API_KEY": "sk-ant-not-a-real-key",
@@ -107,7 +107,7 @@ def _cloud_app(monkeypatch, pg_url, tmp_path, *, drafting="true"):
     for k, v in {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://testserver",
         "CITATION_LLM_PROVIDER": "anthropic",
         "ANTHROPIC_API_KEY": "sk-ant-not-a-real-key",
@@ -137,7 +137,7 @@ def _record_egress(monkeypatch):
 
 def _seed_deep_check(pg_session_factory, tmp_path, *, acknowledged: bool):
     with pg_session_factory() as s:
-        owner = User(status="active", email="owner@ki.se")
+        owner = User(status="active", email="owner@umu.se")
         s.add(owner)
         s.flush()
         ws = Workspace(title="W", owner_id=owner.id, current_phase="active")
@@ -285,8 +285,8 @@ def _upload_as_member(monkeypatch, pg_url, tmp_path, pg_session_factory, *, ackn
     app.state.embed_client = FakeEmbedClient()
 
     with pg_session_factory() as s:
-        owner = make_user(s, email="owner@ki.se")
-        member = make_user(s, email="member@ki.se")
+        owner = make_user(s, email="owner@umu.se")
+        member = make_user(s, email="member@umu.se")
         ws = make_workspace(s, owner=owner)
         s.commit()
         add_member(s, workspace_id=ws.id, user=member)
@@ -350,8 +350,8 @@ def test_a_members_upload_does_not_ride_on_the_OWNERS_ack(
     app.state.embed_client = FakeEmbedClient()
 
     with pg_session_factory() as s:
-        owner = make_user(s, email="owner@ki.se")
-        member = make_user(s, email="member@ki.se")
+        owner = make_user(s, email="owner@umu.se")
+        member = make_user(s, email="member@umu.se")
         ws = make_workspace(s, owner=owner)
         s.commit()
         add_member(s, workspace_id=ws.id, user=member)

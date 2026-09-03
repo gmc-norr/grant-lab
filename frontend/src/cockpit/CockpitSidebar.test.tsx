@@ -196,7 +196,7 @@ it("owner sees the Versions commits", async () => {
         error: undefined,
       });
     if (path.endsWith("/members"))
-      return Promise.resolve({ data: [{ email: "owner@ki.se", role: "owner" }, { email: "m@ki.se", role: "member" }], error: undefined });
+      return Promise.resolve({ data: [{ email: "owner@umu.se", role: "owner" }, { email: "m@umu.se", role: "member" }], error: undefined });
     if (path.endsWith("/cockpit-meta"))
       return Promise.resolve({ data: { workspace_title: "W", workspace_deadline: null, current_phase: "active", role: "owner", spec_locked: false, member_count: 2 }, error: undefined });
     if (path.endsWith("/references")) return Promise.resolve({ data: [], error: undefined });
@@ -219,7 +219,7 @@ it("owner sees the named Members list", async () => {
         error: undefined,
       });
     if (path.endsWith("/members"))
-      return Promise.resolve({ data: [{ email: "owner@ki.se", role: "owner" }, { email: "m@ki.se", role: "member" }], error: undefined });
+      return Promise.resolve({ data: [{ email: "owner@umu.se", role: "owner" }, { email: "m@umu.se", role: "member" }], error: undefined });
     if (path.endsWith("/cockpit-meta"))
       return Promise.resolve({ data: { workspace_title: "W", workspace_deadline: null, current_phase: "active", role: "owner", spec_locked: false, member_count: 2 }, error: undefined });
     if (path.endsWith("/references")) return Promise.resolve({ data: [], error: undefined });
@@ -227,7 +227,7 @@ it("owner sees the named Members list", async () => {
     return Promise.resolve(draft as never);
   }) as never);
   renderSidebar("/cockpit/ws-1?view=members");
-  expect(await screen.findByText("owner@ki.se")).toBeInTheDocument();
+  expect(await screen.findByText("owner@umu.se")).toBeInTheDocument();
 });
 
 it("a non-owner member sees the member count only (no emails)", async () => {
@@ -247,7 +247,7 @@ it("a non-owner member sees the member count only (no emails)", async () => {
   }) as never);
   renderSidebar("/cockpit/ws-1?view=members");
   expect(await screen.findByText(/3 members/)).toBeInTheDocument();
-  expect(screen.queryByText("owner@ki.se")).toBeNull();
+  expect(screen.queryByText("owner@umu.se")).toBeNull();
 });
 
 it("owner can remove a viewer (confirm-gated) from the Members group", async () => {
@@ -255,8 +255,8 @@ it("owner can remove a viewer (confirm-gated) from the Members group", async () 
     if (path.endsWith("/members"))
       return Promise.resolve({
         data: [
-          { user_id: 1, email: "owner@ki.se", role: "owner" },
-          { user_id: 2, email: "viewer@ki.se", role: "member" },
+          { user_id: 1, email: "owner@umu.se", role: "owner" },
+          { user_id: 2, email: "viewer@umu.se", role: "member" },
         ],
         error: undefined,
       });
@@ -276,10 +276,10 @@ it("owner can remove a viewer (confirm-gated) from the Members group", async () 
   }) as never);
   vi.spyOn(window, "confirm").mockReturnValue(true);
   renderSidebar("/cockpit/ws-1?view=members");
-  fireEvent.click(await screen.findByRole("button", { name: /remove viewer@ki\.se/i }));
+  fireEvent.click(await screen.findByRole("button", { name: /remove viewer@umu\.se/i }));
   expect(m.removeMutate).toHaveBeenCalledWith(2);
   // owner row has NO remove control:
-  expect(screen.queryByRole("button", { name: /remove owner@ki\.se/i })).toBeNull();
+  expect(screen.queryByRole("button", { name: /remove owner@umu\.se/i })).toBeNull();
 });
 
 it("owner can open Edit rubric and save (active phase)", async () => {
@@ -287,7 +287,7 @@ it("owner can open Edit rubric and save (active phase)", async () => {
     if (path.endsWith("/cockpit-meta"))
       return Promise.resolve({ data: { workspace_title: "W", workspace_deadline: null, current_phase: "active", role: "owner", spec_locked: false, member_count: 1 }, error: undefined });
     if (path.endsWith("/members"))
-      return Promise.resolve({ data: [{ user_id: 1, email: "owner@ki.se", role: "owner" }], error: undefined });
+      return Promise.resolve({ data: [{ user_id: 1, email: "owner@umu.se", role: "owner" }], error: undefined });
     if (path.includes("/history"))
       return Promise.resolve({
         data: { versions: [], truncated: false, history_available: true },

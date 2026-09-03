@@ -61,7 +61,7 @@ def run_compaction(pg_session_factory, monkeypatch, _settings_env):
         settings = Settings()
         with pg_session_factory() as s:
             if workspace_id is None:
-                ws = make_workspace(s, owner=make_user(s, email="compact@ki.se"))
+                ws = make_workspace(s, owner=make_user(s, email="compact@umu.se"))
                 workspace_id = ws.id
             else:
                 ws = s.get(Workspace, workspace_id)
@@ -95,7 +95,7 @@ def run_compaction_tick(pg_session_factory, monkeypatch, _settings_env):
 
         settings = Settings()
         with pg_session_factory() as s:
-            ws = make_workspace(s, owner=make_user(s, email="tick@ki.se"))
+            ws = make_workspace(s, owner=make_user(s, email="tick@umu.se"))
             for i in range(3):
                 make_chat_turn(
                     s, ws, role="user", content={"type": "text", "text": f"tick {i}"}
@@ -132,7 +132,7 @@ def at_cap(pg_session_factory, monkeypatch, _settings_env):
 
     def _seed():
         with pg_session_factory() as s:
-            ws = make_workspace(s, owner=make_user(s, email="capped@ki.se"))
+            ws = make_workspace(s, owner=make_user(s, email="capped@umu.se"))
             # One over-cap turn (2000 > 1000) — the org is already over budget
             # for today before compaction is even attempted. Seeded in BOTH
             # ledgers so the cap trips whether it reads ChatTurn (now) or

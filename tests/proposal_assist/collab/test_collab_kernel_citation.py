@@ -236,7 +236,7 @@ def test_git_first_citation_accept_commits_both_files(pg_session_factory, tmp_pa
     """
     with pg_session_factory() as s:
         ws, repo = _setup(s, tmp_path)
-        approver = make_user(s, email="approver-collab@ki.se")
+        approver = make_user(s, email="approver-collab@umu.se")
         s.flush()
         ref = _seed_reference(s, ws.id, chunk_text=CHUNK_TEXT, citekey="smith2021")
         s.flush()
@@ -378,7 +378,7 @@ def _kernel_setup(pg_session_factory, tmp_path, *, ref_citekey=None, ref_csl=Non
     Returns (wid, oid, repo, room_doc, base_sha).
     """
     with pg_session_factory() as s:
-        o = make_user(s, email=f"k-cite-{uuidlib.uuid4().hex[:8]}@ki.se")
+        o = make_user(s, email=f"k-cite-{uuidlib.uuid4().hex[:8]}@umu.se")
         ws = make_workspace(s, owner=o, current_phase="active")
         s.commit()
         wid, oid = ws.id, o.id

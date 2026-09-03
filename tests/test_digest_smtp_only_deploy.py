@@ -37,13 +37,13 @@ class _Settings:
         self.smtp_port = kw.get("smtp_port", 587)
         self.smtp_user = kw.get("smtp_user")
         self.smtp_password = kw.get("smtp_password")
-        self.email_from = kw.get("email_from", "x@ki.se")
+        self.email_from = kw.get("email_from", "x@umu.se")
 
 
 def test_smtp_host_alone_builds_a_digest_client():
     # THE regression. Before: EmailConfigError -> digest_email_client=None ->
     # the digest job is never registered.
-    client = build_email_client(_Settings(smtp_host="smtp.ki.se"))
+    client = build_email_client(_Settings(smtp_host="smtp.umu.se"))
     assert type(client).__name__ == "SMTPClient"
 
 
@@ -59,14 +59,14 @@ def test_resend_key_alone_still_builds_a_resend_client():
         # order (resend wins when both are present), or the two selectors
         # disagree again in a subtler way.
         ({"resend_api_key": "re_x"}, "resend"),
-        ({"smtp_host": "smtp.ki.se"}, "smtp"),
-        ({"resend_api_key": "re_x", "smtp_host": "smtp.ki.se"}, "resend"),
+        ({"smtp_host": "smtp.umu.se"}, "smtp"),
+        ({"resend_api_key": "re_x", "smtp_host": "smtp.umu.se"}, "resend"),
         ({}, None),
         # An explicit setting always wins over inference, including when it
         # contradicts the credentials present — that is an operator's decision
         # and it should fail loudly, not be silently overridden.
         ({"email_transport": "smtp", "resend_api_key": "re_x"}, "smtp"),
-        ({"email_transport": "resend", "smtp_host": "smtp.ki.se"}, "resend"),
+        ({"email_transport": "resend", "smtp_host": "smtp.umu.se"}, "resend"),
     ],
 )
 def test_the_transport_decision_is_single_sourced(kw, expected):
@@ -76,7 +76,7 @@ def test_the_transport_decision_is_single_sourced(kw, expected):
 def test_an_explicit_transport_without_its_credential_still_raises():
     # Inference must not paper over a misconfiguration the operator stated.
     with pytest.raises(EmailConfigError, match="RESEND_API_KEY"):
-        build_email_client(_Settings(email_transport="resend", smtp_host="smtp.ki.se"))
+        build_email_client(_Settings(email_transport="resend", smtp_host="smtp.umu.se"))
     with pytest.raises(EmailConfigError, match="SMTP_HOST"):
         build_email_client(_Settings(email_transport="smtp", resend_api_key="re_x"))
 
@@ -111,12 +111,12 @@ def test_an_smtp_only_app_actually_builds_the_digest_client(
     for k, v in {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://testserver",
         "WORKSPACES_DIR": str(tmp_path),
         # The whole deploy shape under test: SMTP host, nothing else.
-        "SMTP_HOST": "smtp.ki.se",
-        "EMAIL_FROM": "noreply@ki.se",  # a real address; the placeholder is rejected
+        "SMTP_HOST": "smtp.umu.se",
+        "EMAIL_FROM": "noreply@umu.se",  # a real address; the placeholder is rejected
     }.items():
         monkeypatch.setenv(k, v)
     monkeypatch.delenv("RESEND_API_KEY", raising=False)
@@ -144,17 +144,17 @@ def test_an_smtp_only_app_actually_builds_the_digest_client(
         # Resend for alerts and SMTP for the digest — the same disagreement in
         # the opposite direction.
         (
-            {"EMAIL_TRANSPORT": "smtp", "RESEND_API_KEY": "re_x", "SMTP_HOST": "smtp.ki.se"},
+            {"EMAIL_TRANSPORT": "smtp", "RESEND_API_KEY": "re_x", "SMTP_HOST": "smtp.umu.se"},
             "SMTPEmailSender",
             "SMTPClient",
         ),
         (
-            {"EMAIL_TRANSPORT": "resend", "RESEND_API_KEY": "re_x", "SMTP_HOST": "smtp.ki.se"},
+            {"EMAIL_TRANSPORT": "resend", "RESEND_API_KEY": "re_x", "SMTP_HOST": "smtp.umu.se"},
             "ResendEmailSender",
             "ResendClient",
         ),
         # Inferred, no explicit setting.
-        ({"SMTP_HOST": "smtp.ki.se"}, "SMTPEmailSender", "SMTPClient"),
+        ({"SMTP_HOST": "smtp.umu.se"}, "SMTPEmailSender", "SMTPClient"),
         ({"RESEND_API_KEY": "re_x"}, "ResendEmailSender", "ResendClient"),
     ],
 )
@@ -165,9 +165,9 @@ def test_both_selectors_always_agree(env, expect_sender, expect_client, monkeypa
     base = {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://testserver",
-        "EMAIL_FROM": "noreply@ki.se",
+        "EMAIL_FROM": "noreply@umu.se",
     }
     for k in ("RESEND_API_KEY", "SMTP_HOST", "EMAIL_TRANSPORT"):
         monkeypatch.delenv(k, raising=False)

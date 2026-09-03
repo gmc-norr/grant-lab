@@ -36,7 +36,7 @@ def _base_sha(session, wid, workspaces_dir, section_index=1):
 async def test_direct_cite_applies_and_returns(pg_session_factory, tmp_path):
     md0 = "preamble\n\n## Methods\nThe claim here.\n"
     with pg_session_factory() as s:
-        o = make_user(s, email="dck@ki.se")
+        o = make_user(s, email="dck@umu.se")
         ws = make_workspace(s, owner=o, current_phase="active")
         s.commit()
         wid, oid = ws.id, o.id
@@ -70,7 +70,7 @@ async def test_direct_cite_anchor_gone_is_clean_stale_no_evict(
     # still be a CLEAN pre-mutation error → no eviction, no lingering room.
     md0 = "preamble\n\n## Methods\nThe claim here.\n"
     with pg_session_factory() as s:
-        o = make_user(s, email="dck2@ki.se")
+        o = make_user(s, email="dck2@umu.se")
         ws = make_workspace(s, owner=o, current_phase="active")
         s.commit()
         wid, oid = ws.id, o.id
@@ -104,7 +104,7 @@ async def test_direct_cite_anchor_gone_is_clean_stale_no_evict(
 async def test_direct_cite_post_mutation_failure_evicts(pg_session_factory, tmp_path, monkeypatch):
     md0 = "preamble\n\n## Methods\nThe claim here.\n"
     with pg_session_factory() as s:
-        o = make_user(s, email="dck3@ki.se")
+        o = make_user(s, email="dck3@umu.se")
         ws = make_workspace(s, owner=o, current_phase="active")
         s.commit()
         wid, oid = ws.id, o.id
@@ -151,7 +151,7 @@ async def test_direct_cite_section_structure_error_does_not_evict(
 
     md0 = "preamble\n\n## Methods\nThe claim here.\n"
     with pg_session_factory() as s:
-        o = make_user(s, email="dck5@ki.se")
+        o = make_user(s, email="dck5@umu.se")
         ws = make_workspace(s, owner=o, current_phase="active")
         s.commit()
         wid, oid = ws.id, o.id
@@ -194,7 +194,7 @@ async def test_direct_cite_stale_sha_allowed_when_anchor_present(pg_session_fact
     # passes enforce_section_sha=False and relies on anchor-relocation.
     md0 = "preamble\n\n## Methods\nThe claim here.\n"
     with pg_session_factory() as s:
-        o = make_user(s, email="dck6@ki.se")
+        o = make_user(s, email="dck6@umu.se")
         ws = make_workspace(s, owner=o, current_phase="active")
         s.commit()
         wid, oid = ws.id, o.id

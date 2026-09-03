@@ -35,7 +35,7 @@ def _recv_until_write(wsconn, tries: int = 10) -> bytes:
 def test_state_survives_room_eviction_and_reconnect(_app, pg_session_factory):
     _app.state.session_factory = pg_session_factory
     with pg_session_factory() as s:
-        owner = make_user(s, email="recover-owner@ki.se")
+        owner = make_user(s, email="recover-owner@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
@@ -99,7 +99,7 @@ def test_xmlfragment_doc_survives_recovery_via_the_bridge(_app, pg_session_facto
 
     _app.state.session_factory = pg_session_factory
     with pg_session_factory() as s:
-        owner = make_user(s, email="xml-recover@ki.se")
+        owner = make_user(s, email="xml-recover@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         collab_state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()

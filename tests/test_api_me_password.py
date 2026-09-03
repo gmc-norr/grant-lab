@@ -9,7 +9,7 @@ from call_manager.main import create_app
 def _setup(monkeypatch, pg_url):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     return create_app()
 
@@ -18,7 +18,7 @@ def _login(app, pg_session_factory, *, password_hash=None, oidc=False):
     with pg_session_factory() as s:
         u = User(
             status="active",
-            email="u@ki.se",
+            email="u@umu.se",
             password_hash=password_hash,
             session_epoch=0,
             oidc_iss=("https://accounts.google.com" if oidc else None),

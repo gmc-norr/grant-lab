@@ -53,7 +53,7 @@ async def _acquire_client(pg_session_factory, tmp_path, wid, oid):
 async def test_pre_mutation_failure_does_not_evict(pg_session_factory, tmp_path):
     # PRE-mutation IndexError (section_index out of range, in _CLEAN_ACCEPT_ERRORS)
     # → no evict; the registered client keeps its live doc.
-    wid, oid, repo = _seed_repo(pg_session_factory, tmp_path, "evict-pre@ki.se")
+    wid, oid, repo = _seed_repo(pg_session_factory, tmp_path, "evict-pre@umu.se")
     key = (wid, "draft")
     client = await _acquire_client(pg_session_factory, tmp_path, wid, oid)
     try:
@@ -81,7 +81,7 @@ async def test_post_mutation_failure_evicts(pg_session_factory, tmp_path, monkey
     # → evict. Discriminating: WITH a client registered, the room would survive on
     # exit if the evict arm were removed (client present), so this pins the evict.
     import call_manager.proposal_assist.collab.kernel as kmod
-    wid, oid, repo = _seed_repo(pg_session_factory, tmp_path, "evict-post@ki.se")
+    wid, oid, repo = _seed_repo(pg_session_factory, tmp_path, "evict-post@umu.se")
     key = (wid, "draft")
     client = await _acquire_client(pg_session_factory, tmp_path, wid, oid)
     # base from the live (registered) room so the accept passes staleness + mutates.

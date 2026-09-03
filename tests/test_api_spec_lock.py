@@ -54,7 +54,7 @@ def test_lock_owner_writes_one_event_and_pins_head(
     r = c.post(f"/api/workspaces/{ws_id}/spec/lock")
     assert r.status_code == 200
     body = r.json()
-    assert body["locked"] is True and body["locked_by"] == "owner@ki.se"
+    assert body["locked"] is True and body["locked_by"] == "owner@umu.se"
     evs = _events(pg_session_factory, ws_id)
     assert len(evs) == 1
     assert evs[0].action == "lock" and evs[0].artifact_commit_sha == head

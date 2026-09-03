@@ -60,7 +60,7 @@ def _seed_reference(pg_session_factory, workspace_id, storage, tmp_path):
 
 def _make_ws(pg_session_factory):
     with pg_session_factory() as s:
-        user = make_user(s, email=f"owner-{uuid.uuid4()}@ki.se")
+        user = make_user(s, email=f"owner-{uuid.uuid4()}@umu.se")
         s.commit()
         ws = make_workspace(s, owner=user)
         s.commit()

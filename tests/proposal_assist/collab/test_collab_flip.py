@@ -23,7 +23,7 @@ def _ws(s, email):
 
 def test_enables_once_sticky_and_commits(pg_session_factory):
     with pg_session_factory() as s:
-        wid = _ws(s, "flip1@ki.se").id
+        wid = _ws(s, "flip1@umu.se").id
         s.commit()
     with pg_session_factory() as s:
         result = maybe_auto_enable(s, stamp=stamp_for(s, wid), workspace_id=wid, artifact="draft")
@@ -38,7 +38,7 @@ def test_enables_once_sticky_and_commits(pg_session_factory):
 def test_kill_switch_suppresses(pg_session_factory):
     state.set_kill_switch(True)
     with pg_session_factory() as s:
-        wid = _ws(s, "flip3@ki.se").id
+        wid = _ws(s, "flip3@umu.se").id
         s.commit()
         result = maybe_auto_enable(s, stamp=stamp_for(s, wid), workspace_id=wid, artifact="draft")
         assert result is False
@@ -49,7 +49,7 @@ def test_kill_switch_suppresses(pg_session_factory):
 
 def test_per_artifact_independence(pg_session_factory):
     with pg_session_factory() as s:
-        wid = _ws(s, "flip4@ki.se").id
+        wid = _ws(s, "flip4@umu.se").id
         s.commit()
     with pg_session_factory() as s:
         assert (
@@ -63,7 +63,7 @@ def test_concurrent_first_read_race_reports_enabled(pg_session_factory, monkeypa
     """The loser of the insert race gets IntegrityError on commit -> rollback ->
     report True (the other request enabled it)."""
     with pg_session_factory() as s:
-        wid = _ws(s, "flip5@ki.se").id
+        wid = _ws(s, "flip5@umu.se").id
         s.commit()
     with pg_session_factory() as s:
         real_commit = s.commit
@@ -86,7 +86,7 @@ def test_mutex_held_by_writer_defers_flip(pg_session_factory, monkeypatch):
     and leaves the caller's session usable. The next read retries."""
     monkeypatch.setattr(flip, "_FLIP_MUTEX_TIMEOUT_SECONDS", 1)  # keep the test fast
     with pg_session_factory() as s:
-        wid = _ws(s, "flip6@ki.se").id
+        wid = _ws(s, "flip6@umu.se").id
         s.commit()
     holder = pg_session_factory()
     try:
@@ -109,7 +109,7 @@ def test_table_doc_enables_now(pg_session_factory):
     """The D4 hold-back is gone: a pipe-table artifact enables like any other
     (the bridge round-trips GFM tables losslessly — tables slice §G)."""
     with pg_session_factory() as s:
-        wid = _ws(s, "flip7@ki.se").id
+        wid = _ws(s, "flip7@umu.se").id
         s.commit()
     with pg_session_factory() as s:
         assert (

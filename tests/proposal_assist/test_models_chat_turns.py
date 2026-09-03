@@ -107,8 +107,8 @@ def test_chat_turn_position_is_global_not_per_workspace(pg_session_factory):
     with pg_session_factory() as s:
         from tests.proposal_assist.conftest import make_user
 
-        ws_a = make_workspace(s, title="A", owner=make_user(s, email="owner-a@ki.se"))
-        ws_b = make_workspace(s, title="B", owner=make_user(s, email="owner-b@ki.se"))
+        ws_a = make_workspace(s, title="A", owner=make_user(s, email="owner-a@umu.se"))
+        ws_b = make_workspace(s, title="B", owner=make_user(s, email="owner-b@umu.se"))
         t_a = ChatTurn(
             workspace_id=ws_a.id,
             role="user",

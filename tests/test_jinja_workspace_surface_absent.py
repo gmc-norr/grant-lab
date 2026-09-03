@@ -16,7 +16,7 @@ def test_no_bare_workspaces_route_registered(monkeypatch, pg_url):
     # pg_url is defined in tests/conftest.py and available to this root test.
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     app = create_app()
     bare = [

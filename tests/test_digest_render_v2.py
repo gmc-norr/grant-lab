@@ -26,7 +26,7 @@ def test_digest_html_shows_v2_one_line_summary_in_rationale_slot():
     section = DigestProfileSection(profile_id=1, profile_name="P", entries=[entry])
     payload = DigestPayload(
         user_id=1,
-        user_email="u@ki.se",
+        user_email="u@umu.se",
         sections=[section],
         total_calls=1,
     )
@@ -50,7 +50,7 @@ def test_digest_text_shows_v2_one_line_summary():
     section = DigestProfileSection(profile_id=1, profile_name="P", entries=[entry])
     payload = DigestPayload(
         user_id=1,
-        user_email="u@ki.se",
+        user_email="u@umu.se",
         sections=[section],
         total_calls=1,
     )

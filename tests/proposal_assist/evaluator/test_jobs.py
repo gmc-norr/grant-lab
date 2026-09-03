@@ -24,7 +24,7 @@ def test_claim_skips_running_and_picks_a_queued_in_another_workspace(pg_session_
         ws = make_workspace(s)
         s.flush()
         s.add(EvaluatorJob(workspace_id=ws.id, status="running"))
-        ws2 = make_workspace(s, owner=make_user(s, email="ws2-owner@ki.se"))
+        ws2 = make_workspace(s, owner=make_user(s, email="ws2-owner@umu.se"))
         s.flush()
         s.add(EvaluatorJob(workspace_id=ws2.id, status="queued"))
         s.commit()

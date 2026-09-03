@@ -56,7 +56,7 @@ The weekly digest is the primary re-engagement channel, and it breaks at the fir
   `/login`. **Fix:** dedicated page with an inline "request a new link" form.
 - **Silent failure modes:** wrong-domain / typo'd email shows the same "check your email" success
   page (enumeration-resistant by design, but punishes legit users); rate-limit lockout after 5/15min
-  shows success with no "check spam / wait a minute" guidance; the `you@ki.se` placeholder is
+  shows success with no "check spam / wait a minute" guidance; the `you@umu.se` placeholder is
   hardcoded, not driven by `ALLOWED_EMAIL_DOMAINS`.
 - **Shared-workstation ergonomics:** 30-day session default + "Sign out" is secretly
   sign-out-**everywhere** (bumps `session_epoch`). On shared ward computers the next person is the

@@ -28,7 +28,7 @@ from tests.proposal_assist.conftest import make_user, make_workspace
 
 def _seed(pg_session_factory) -> tuple[uuid.UUID, int]:
     with pg_session_factory() as s:
-        owner = make_user(s, email=f"fenceb-{uuid.uuid4().hex[:8]}@ki.se")
+        owner = make_user(s, email=f"fenceb-{uuid.uuid4().hex[:8]}@umu.se")
         ws = make_workspace(s, owner=owner)
         s.commit()
         return ws.id, ws.lifecycle_generation

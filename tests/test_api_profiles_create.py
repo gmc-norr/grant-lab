@@ -9,14 +9,14 @@ from call_manager.main import create_app
 def _setup(monkeypatch, pg_url):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     return create_app()
 
 
 def _login(app, pg_session_factory):
     with pg_session_factory() as s:
-        u = User(status="active", email="creator@ki.se")
+        u = User(status="active", email="creator@umu.se")
         s.add(u)
         s.commit()
         s.refresh(u)
@@ -33,7 +33,7 @@ _BODY = {
     "areas": "oncology", "career_stage": "", "applicant_types": "", "role": "",
     "years_since_phd": "", "org_type": "university_hospital", "capabilities": "biobank",
     "patient_populations": "", "scale": "", "funding_instruments": "", "funder_exclusions": "",
-    "country": "SE", "host_institution": "KI",
+    "country": "SE", "host_institution": "UmU",
 }
 
 

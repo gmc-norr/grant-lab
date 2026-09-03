@@ -55,7 +55,7 @@ def _app(monkeypatch, pg_url, tmp_path):
     for k, v in {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://testserver",
     }.items():
         monkeypatch.setenv(k, v)
@@ -78,9 +78,9 @@ def _seed(app, pg_session_factory, tmp_path, content):
     convention in tests/test_api_calls.py / tests/test_api_errors.py.
     """
     with pg_session_factory() as s:
-        owner = User(status="active", email="owner@ki.se")
-        member = User(status="active", email="member@ki.se")
-        stranger = User(status="active", email="stranger@ki.se")
+        owner = User(status="active", email="owner@umu.se")
+        member = User(status="active", email="member@umu.se")
+        stranger = User(status="active", email="stranger@umu.se")
         s.add_all([owner, member, stranger])
         s.flush()
         ws = Workspace(title="W", owner_id=owner.id, current_phase="active")
@@ -253,7 +253,7 @@ def test_draft_no_proposal_file_is_404(monkeypatch, pg_url, pg_session_factory, 
     `.exists()` check would otherwise stay green."""
     app = _app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
-        owner = User(status="active", email="owner@ki.se")
+        owner = User(status="active", email="owner@umu.se")
         s.add(owner)
         s.flush()
         ws = Workspace(title="W", owner_id=owner.id, current_phase="active")
@@ -276,7 +276,7 @@ def test_draft_folds_whole_proposal_citation_map(monkeypatch, pg_url, pg_session
     ev_id = "ev-abc123def456"  # production length: 12 hex (new_ev_id = ev-<uuid.hex[:12]>)
     proposal = f"preamble\n\n## Methods\nSee [@smith2021]<!-- ev:{ev_id} --> here.\n"
     with pg_session_factory() as s:
-        owner = User(status="active", email="owner@ki.se")
+        owner = User(status="active", email="owner@umu.se")
         s.add(owner)
         s.flush()
         ws = Workspace(title="W", owner_id=owner.id, current_phase="active")
@@ -336,7 +336,7 @@ def test_draft_does_not_leak_cross_workspace_reference_title(
     ev_id = "ev-abc123def456"  # production length: 12 hex (new_ev_id = ev-<uuid.hex[:12]>)
     proposal = f"preamble\n\n## Methods\nSee [@smith2021]<!-- ev:{ev_id} --> here.\n"
     with pg_session_factory() as s:
-        owner = User(status="active", email="owner@ki.se")
+        owner = User(status="active", email="owner@umu.se")
         s.add(owner)
         s.flush()
         # Workspace A: the one being read (has the proposal + marker).
@@ -593,7 +593,7 @@ def test_save_section_no_proposal_file_is_404(monkeypatch, pg_url, pg_session_fa
     test_draft_no_proposal_file_is_404."""
     app = _app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
-        owner = User(status="active", email="owner@ki.se")
+        owner = User(status="active", email="owner@umu.se")
         s.add(owner)
         s.flush()
         ws = Workspace(title="W", owner_id=owner.id, current_phase="active")
@@ -624,8 +624,8 @@ def test_save_section_non_owner_no_proposal_is_403_not_404(
     state is never disclosed to non-owners."""
     app = _app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
-        owner = User(status="active", email="owner@ki.se")
-        member = User(status="active", email="member@ki.se")
+        owner = User(status="active", email="owner@umu.se")
+        member = User(status="active", email="member@umu.se")
         s.add_all([owner, member])
         s.flush()
         ws = Workspace(title="W", owner_id=owner.id, current_phase="active")
@@ -853,7 +853,7 @@ def test_citation_source_cross_workspace_reference_is_404(
     with pg_session_factory() as s:
         from call_manager.db.models import User, Workspace
 
-        other_owner = User(status="active", email="other@ki.se")
+        other_owner = User(status="active", email="other@umu.se")
         s.add(other_owner)
         s.flush()
         ws_b = Workspace(title="B", owner_id=other_owner.id, current_phase="active")
@@ -1366,7 +1366,7 @@ def test_reference_chunks_cross_workspace_reference_is_404(
         app, pg_session_factory, tmp_path, "preamble\n\n## Methods\noriginal.\n"
     )
     with pg_session_factory() as s:
-        other = User(status="active", email="other@ki.se")
+        other = User(status="active", email="other@umu.se")
         s.add(other)
         s.flush()
         ws_b = Workspace(title="B", owner_id=other.id, current_phase="active")
@@ -1505,8 +1505,8 @@ def test_members_owner_sees_named_list(monkeypatch, pg_url, pg_session_factory, 
     r = _client(app, owner_id).get(f"/api/workspaces/{ws_id}/members")
     assert r.status_code == 200
     b = r.json()
-    assert b[0]["email"] == "owner@ki.se" and b[0]["role"] == "owner"  # owner first
-    assert any(m["email"] == "member@ki.se" and m["role"] == "member" for m in b)
+    assert b[0]["email"] == "owner@umu.se" and b[0]["role"] == "owner"  # owner first
+    assert any(m["email"] == "member@umu.se" and m["role"] == "member" for m in b)
     assert len(b) == 2
 
 
@@ -1540,8 +1540,8 @@ def _mk_source_call(s, *, slug, title):
 def test_list_workspaces_owned_and_viewer_only(monkeypatch, pg_url, pg_session_factory, tmp_path):
     app = _app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
-        owner = User(status="active", email="owner@ki.se")
-        other = User(status="active", email="other@ki.se")
+        owner = User(status="active", email="owner@umu.se")
+        other = User(status="active", email="other@umu.se")
         s.add_all([owner, other])
         s.flush()
         call = _mk_source_call(s, slug="test-funder", title="Linked Call")
@@ -1577,7 +1577,7 @@ def test_list_workspaces_status_filter_and_validation(
 ):
     app = _app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
-        owner = User(status="active", email="owner@ki.se")
+        owner = User(status="active", email="owner@umu.se")
         s.add(owner)
         s.flush()
         s.add_all(
@@ -1599,7 +1599,7 @@ def test_list_workspaces_status_filter_and_validation(
 def test_create_workspace_from_call(monkeypatch, pg_url, pg_session_factory, tmp_path):
     app = _app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
-        owner = User(status="active", email="owner@ki.se")
+        owner = User(status="active", email="owner@umu.se")
         s.add(owner)
         s.flush()
         call = _mk_source_call(s, slug="test-funder-c1", title="Linked Call")
@@ -1623,7 +1623,7 @@ def test_create_workspace_from_call(monkeypatch, pg_url, pg_session_factory, tmp
 def test_create_workspace_validation(monkeypatch, pg_url, pg_session_factory, tmp_path):
     app = _app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
-        owner = User(status="active", email="owner@ki.se")
+        owner = User(status="active", email="owner@umu.se")
         s.add(owner)
         s.flush()
         call = _mk_source_call(s, slug="test-funder-c2", title="C")
@@ -1656,7 +1656,7 @@ def test_create_workspace_stores_profile_and_deadline(
 ):
     app = _app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
-        owner = User(status="active", email="owner@ki.se")
+        owner = User(status="active", email="owner@umu.se")
         s.add(owner)
         s.flush()
         call = _mk_source_call(s, slug="test-funder-c3", title="C")
@@ -1724,7 +1724,7 @@ def test_members_list_includes_user_id(monkeypatch, pg_url, pg_session_factory, 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "x\n")
     with pg_session_factory() as s:
-        viewer = User(status="active", email="viewer-d1@ki.se")
+        viewer = User(status="active", email="viewer-d1@umu.se")
         s.add(viewer)
         s.flush()
         s.add(WorkspaceViewer(workspace_id=ws_id, user_id=viewer.id))
@@ -1734,5 +1734,5 @@ def test_members_list_includes_user_id(monkeypatch, pg_url, pg_session_factory, 
     assert r.status_code == 200, r.text
     rows = r.json()
     by_email = {m["email"]: m for m in rows}
-    assert by_email["viewer-d1@ki.se"]["user_id"] == viewer_id
+    assert by_email["viewer-d1@umu.se"]["user_id"] == viewer_id
     assert all("user_id" in m for m in rows)

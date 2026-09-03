@@ -37,7 +37,7 @@ def _make_png_bytes(width: int = 4, height: int = 4) -> bytes:
 def _seed_user_and_workspace(session) -> tuple[User, Workspace]:
     """Insert a User + Workspace and return both ORM objects (flushed but not
     committed so callers can add more objects before committing)."""
-    u = User(email=f"resolver-test-{uuid.uuid4().hex[:8]}@ki.se")
+    u = User(email=f"resolver-test-{uuid.uuid4().hex[:8]}@umu.se")
     session.add(u)
     session.flush()
     ws = Workspace(title="test ws", owner_id=u.id)

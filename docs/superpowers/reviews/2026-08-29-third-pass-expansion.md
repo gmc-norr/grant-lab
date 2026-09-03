@@ -468,7 +468,7 @@ scenario, and a coverage verdict in the run record.
 | Finding | Location |
 |---|---|
 | SSE turn stream authorizes once at connect; keeps streaming after logout, admin-disable, or member removal (every one of those bumps `session_epoch`) | `web/api/turns.py:394,406` |
-| `add_member` matches collaborator email case-sensitively; `Anna.Svensson@ki.se` silently fails while login/register normalize | `web/api/settings.py:160` |
+| `add_member` matches collaborator email case-sensitively; `Anna.Svensson@umu.se` silently fails while login/register normalize | `web/api/settings.py:160` |
 | Activity feed discloses collaborator email addresses to non-owner members, defeating the owner-only PII policy — its named test asserts the wrong thing | `proposal_assist/web/activity.py:82` |
 | Login rate-limit slot consumed on **successful** logins: 5 sign-ins in 15 min locks the account out | `web/api/auth.py:90` |
 | `POST /api/auth/logout` accepts an epoch-stale cookie, so a revoked cookie remains a working force-logout button | `web/api/auth.py:205` |

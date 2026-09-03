@@ -83,7 +83,7 @@ def _seed_deleted_with_setup_job(
     the DB half of the delete (bumps the lifecycle generation, cancels turns).
     Returns (ws_id, owner_id, job_id)."""
     with pg_session_factory() as s:
-        owner = make_user(s, email=owner_email or f"owner-{uuid.uuid4().hex[:8]}@ki.se")
+        owner = make_user(s, email=owner_email or f"owner-{uuid.uuid4().hex[:8]}@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="setup")
         s.flush()
         ws_id = ws.id
@@ -390,7 +390,7 @@ def test_the_owner_can_open_the_workspace_again_after_restore(
 
     # Owner + their workspace.
     with pg_session_factory() as s:
-        owner = make_user(s, email="cockpit-owner@ki.se")
+        owner = make_user(s, email="cockpit-owner@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="setup")
         s.flush()
         s.add(WorkspaceSetupJob(workspace_id=ws.id, status="running"))
@@ -399,9 +399,9 @@ def test_the_owner_can_open_the_workspace_again_after_restore(
         owner_id = owner.id
 
     # The owner's authenticated client (a distinct helper account is the admin).
-    owner_client = client_for(app, pg_session_factory, email="junk@ki.se", is_admin=False)[0]
+    owner_client = client_for(app, pg_session_factory, email="junk@umu.se", is_admin=False)[0]
     owner_client.cookies.set("session", app.state.session_signer.make(user_id=owner_id))
-    admin_client, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin_client, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
 
     cockpit = f"/api/workspaces/{ws_id}/cockpit-meta"
 

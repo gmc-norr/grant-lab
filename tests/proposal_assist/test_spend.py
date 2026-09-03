@@ -15,7 +15,7 @@ from call_manager.db.models import LlmSpend, User, Workspace
 from call_manager.proposal_assist.spend import record_spend, sum_spend_today
 
 
-def _ws(session, email="spend@ki.se"):
+def _ws(session, email="spend@umu.se"):
     u = User(status="active", email=email)
     session.add(u)
     session.flush()
@@ -93,8 +93,8 @@ def test_sum_today_ignores_yesterday(pg_session_factory):
 
 def test_sum_today_can_scope_to_one_workspace(pg_session_factory):
     with pg_session_factory() as s:
-        a = _ws(s, "a@ki.se")
-        b = _ws(s, "b@ki.se")
+        a = _ws(s, "a@umu.se")
+        b = _ws(s, "b@umu.se")
         record_spend(s, workspace_id=a, kind="chat_turn", status="ok", tokens_in=3, tokens_out=0)
         record_spend(s, workspace_id=b, kind="chat_turn", status="ok", tokens_in=9, tokens_out=0)
         s.commit()

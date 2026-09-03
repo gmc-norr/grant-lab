@@ -4,7 +4,7 @@ from tests.proposal_assist.conftest import make_user, make_workspace
 
 def test_append_update_commit_false_defers_to_caller(pg_session_factory):
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="stg-o@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="stg-o@umu.se"))
         s.commit()
         wid = ws.id
     # stage but roll back -> nothing persisted

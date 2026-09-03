@@ -18,8 +18,8 @@ def test_resend_success_returns_message_id():
         assert "/emails" in str(req.url)
         return httpx.Response(200, json={"id": "msg_abc"})
 
-    client = ResendClient(api_key="key", from_addr="bot@ki.se", transport=_mock(handler))
-    r = client.send(to="u@ki.se", subject="hi", html="<p>hi</p>", text="hi")
+    client = ResendClient(api_key="key", from_addr="bot@umu.se", transport=_mock(handler))
+    r = client.send(to="u@umu.se", subject="hi", html="<p>hi</p>", text="hi")
     assert isinstance(r, SendResult)
     assert r.ok
     assert r.message_id == "msg_abc"
@@ -33,7 +33,7 @@ def test_resend_invalid_email_is_synchronous_bounce():
             json={"name": "validation_error", "message": "Invalid email address"},
         )
 
-    client = ResendClient(api_key="key", from_addr="bot@ki.se", transport=_mock(handler))
+    client = ResendClient(api_key="key", from_addr="bot@umu.se", transport=_mock(handler))
     r = client.send(to="bad", subject="hi", html="<p>hi</p>", text="hi")
     assert not r.ok
     assert r.bounce_reason and "invalid" in r.bounce_reason.lower()
@@ -43,9 +43,9 @@ def test_resend_5xx_raises_transport_error():
     def handler(req):
         return httpx.Response(503)
 
-    client = ResendClient(api_key="key", from_addr="bot@ki.se", transport=_mock(handler))
+    client = ResendClient(api_key="key", from_addr="bot@umu.se", transport=_mock(handler))
     with pytest.raises(EmailTransportError):
-        client.send(to="u@ki.se", subject="hi", html="<p>hi</p>", text="hi")
+        client.send(to="u@umu.se", subject="hi", html="<p>hi</p>", text="hi")
 
 
 def test_resend_rate_limit_is_transport_error_not_bounce():
@@ -58,18 +58,18 @@ def test_resend_rate_limit_is_transport_error_not_bounce():
             json={"name": "rate_limit_exceeded", "message": "too many"},
         )
 
-    client = ResendClient(api_key="key", from_addr="bot@ki.se", transport=_mock(handler))
+    client = ResendClient(api_key="key", from_addr="bot@umu.se", transport=_mock(handler))
     with pytest.raises(EmailTransportError):
-        client.send(to="u@ki.se", subject="hi", html="<p>hi</p>", text="hi")
+        client.send(to="u@umu.se", subject="hi", html="<p>hi</p>", text="hi")
 
 
 def test_resend_network_error_raises_transport_error():
     def handler(req):
         raise httpx.ConnectError("boom")
 
-    client = ResendClient(api_key="key", from_addr="bot@ki.se", transport=_mock(handler))
+    client = ResendClient(api_key="key", from_addr="bot@umu.se", transport=_mock(handler))
     with pytest.raises(EmailTransportError):
-        client.send(to="u@ki.se", subject="hi", html="<p>hi</p>", text="hi")
+        client.send(to="u@umu.se", subject="hi", html="<p>hi</p>", text="hi")
 
 
 def test_resend_missing_field_is_transport_error_not_bounce():
@@ -83,9 +83,9 @@ def test_resend_missing_field_is_transport_error_not_bounce():
             json={"name": "missing_field", "message": "from is required"},
         )
 
-    client = ResendClient(api_key="k", from_addr="bot@ki.se", transport=_mock(handler))
+    client = ResendClient(api_key="k", from_addr="bot@umu.se", transport=_mock(handler))
     with pytest.raises(EmailTransportError):
-        client.send(to="u@ki.se", subject="s", html="<p></p>", text="")
+        client.send(to="u@umu.se", subject="s", html="<p></p>", text="")
 
 
 def test_resend_sender_side_validation_error_is_transport_not_bounce():
@@ -104,7 +104,7 @@ def test_resend_sender_side_validation_error_is_transport_not_bounce():
 
     client = ResendClient(api_key="k", from_addr="bot@unverified.example", transport=_mock(handler))
     with pytest.raises(EmailTransportError):
-        client.send(to="u@ki.se", subject="s", html="<p></p>", text="")
+        client.send(to="u@umu.se", subject="s", html="<p></p>", text="")
 
 
 def test_resend_recipient_validation_error_is_bounce():
@@ -117,7 +117,7 @@ def test_resend_recipient_validation_error_is_bounce():
             json={"name": "validation_error", "message": "Invalid `to` email address"},
         )
 
-    client = ResendClient(api_key="k", from_addr="bot@ki.se", transport=_mock(handler))
+    client = ResendClient(api_key="k", from_addr="bot@umu.se", transport=_mock(handler))
     r = client.send(to="bad", subject="s", html="<p></p>", text="")
     assert not r.ok
     assert r.bounce_reason
@@ -130,8 +130,8 @@ def test_resend_authorization_header_set():
         captured["auth"] = req.headers.get("authorization")
         return httpx.Response(200, json={"id": "x"})
 
-    client = ResendClient(api_key="my-key", from_addr="bot@ki.se", transport=_mock(handler))
-    client.send(to="u@ki.se", subject="s", html="<p></p>", text="")
+    client = ResendClient(api_key="my-key", from_addr="bot@umu.se", transport=_mock(handler))
+    client.send(to="u@umu.se", subject="s", html="<p></p>", text="")
     assert captured["auth"] == "Bearer my-key"
 
 
@@ -157,7 +157,7 @@ def test_resend_from_in_recipient_context_is_bounce_not_sender_fault():
             },
         )
 
-    client = ResendClient(api_key="k", from_addr="bot@ki.se", transport=_mock(handler))
+    client = ResendClient(api_key="k", from_addr="bot@umu.se", transport=_mock(handler))
     # Should be classified as a recipient bounce, not a sender-side transport error.
     r = client.send(to="bad@bad", subject="s", html="<p></p>", text="")
     assert not r.ok, "Expected a bounce (ok=False) for a recipient validation_error"
@@ -173,10 +173,10 @@ def test_resend_from_domain_hint_is_sender_fault():
             422,
             json={
                 "name": "validation_error",
-                "message": "The from domain ki.se is not verified in your Resend account.",
+                "message": "The from domain umu.se is not verified in your Resend account.",
             },
         )
 
-    client = ResendClient(api_key="k", from_addr="bot@ki.se", transport=_mock(handler))
+    client = ResendClient(api_key="k", from_addr="bot@umu.se", transport=_mock(handler))
     with pytest.raises(EmailTransportError):
-        client.send(to="u@ki.se", subject="s", html="<p></p>", text="")
+        client.send(to="u@umu.se", subject="s", html="<p></p>", text="")

@@ -27,14 +27,14 @@ _STOCKHOLM = ZoneInfo("Europe/Stockholm")
 def _setup(monkeypatch, pg_url):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     return create_app()
 
 
 def _login(app, pg_session_factory):
     with pg_session_factory() as s:
-        u = User(status="active", email="u@ki.se")
+        u = User(status="active", email="u@umu.se")
         s.add(u)
         s.commit()
         s.refresh(u)

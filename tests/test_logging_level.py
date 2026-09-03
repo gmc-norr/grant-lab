@@ -44,7 +44,7 @@ def test_level_names_are_accepted_and_bad_ones_refused(_restore_levels):
 def _settings(monkeypatch, **overrides):
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@localhost:5432/db")
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     for k, v in overrides.items():
         monkeypatch.setenv(k, v)

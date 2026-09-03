@@ -87,7 +87,7 @@ def _enqueued(pg_session_factory, wid):
 def test_the_reconcile_tick_enqueues_the_live_sections_not_the_stale_disk_ones(
     pg_session_factory, tmp_path
 ):
-    wid = _workspace_with_room_ahead_of_disk(pg_session_factory, tmp_path, "recon-canon@ki.se")
+    wid = _workspace_with_room_ahead_of_disk(pg_session_factory, tmp_path, "recon-canon@umu.se")
     live, stale = _live_shas(pg_session_factory, wid, tmp_path), _shas(STALE_DISK)
     # Guard the fixture itself: if the two bases ever coincided the assertion below
     # would pass without proving anything.
@@ -106,7 +106,7 @@ def test_the_drain_tick_analyses_the_live_section_instead_of_superseding_it(
 ):
     """The other half. A job carrying a LIVE section sha is unrunnable while the drain
     resolves that sha against stale HEAD — it is superseded on arrival, unanalysed."""
-    wid = _workspace_with_room_ahead_of_disk(pg_session_factory, tmp_path, "drain-canon@ki.se")
+    wid = _workspace_with_room_ahead_of_disk(pg_session_factory, tmp_path, "drain-canon@umu.se")
     repo = workspace_repo_dir(tmp_path, wid)
     with pg_session_factory() as s:
         text = canonical_artifact_markdown(s, workspace_id=wid, artifact="draft", repo_dir=repo)
@@ -146,7 +146,7 @@ def test_flag_off_both_ticks_still_read_raw_disk(pg_session_factory, tmp_path):
     ignored the flag would change behaviour for every non-collab workspace, and a test
     that cannot tell the two apart proves nothing."""
     wid = _workspace_with_room_ahead_of_disk(
-        pg_session_factory, tmp_path, "ticks-off@ki.se", collab=False
+        pg_session_factory, tmp_path, "ticks-off@umu.se", collab=False
     )
     reconcile_analysis_coverage(session_factory=pg_session_factory, workspaces_dir=tmp_path)
     assert _enqueued(pg_session_factory, wid) == _shas(STALE_DISK)

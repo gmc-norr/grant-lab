@@ -42,7 +42,7 @@ def _seed_for_activate(pg_session_factory, app):
     from tests.proposal_assist.conftest import make_user, make_workspace
 
     with pg_session_factory() as s:
-        owner = make_user(s, email=f"rubric-owner-{uuid.uuid4().hex[:6]}@ki.se")
+        owner = make_user(s, email=f"rubric-owner-{uuid.uuid4().hex[:6]}@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="setup")
         ws.rubric_criteria = [
             {"name": "Impact", "description": "d", "weight": 0.6, "scale_max": 5},
@@ -223,7 +223,7 @@ def test_activate_no_signal_on_wrong_phase(monkeypatch, pg_url, pg_session_facto
     app = _app(monkeypatch, pg_url, tmp_path)
     with pg_session_factory() as s:
         from tests.proposal_assist.conftest import make_user, make_workspace
-        owner = make_user(s, email=f"rubric2-owner-{uuid.uuid4().hex[:6]}@ki.se")
+        owner = make_user(s, email=f"rubric2-owner-{uuid.uuid4().hex[:6]}@umu.se")
         ws = make_workspace(s, owner=owner, current_phase="active")
         ws.rubric_criteria = [
             {"name": "Impact", "description": "d", "weight": 0.6, "scale_max": 5},
@@ -289,7 +289,7 @@ def test_add_member_route_does_not_signal(
     # We need a user NOT already in the workspace — use a fresh user.
     with pg_session_factory() as s:
         from call_manager.db.models import User
-        new_user = User(status="active", email="newmember@ki.se")
+        new_user = User(status="active", email="newmember@umu.se")
         s.add(new_user)
         s.commit()
         new_email = new_user.email

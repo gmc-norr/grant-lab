@@ -42,7 +42,7 @@ def setup_app(monkeypatch, pg_url, tmp_path):
     for k, v in {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://testserver",
     }.items():
         monkeypatch.setenv(k, v)

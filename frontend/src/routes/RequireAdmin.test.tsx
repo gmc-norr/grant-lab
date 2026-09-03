@@ -11,7 +11,7 @@ afterEach(() => {
 
 function mockMe(admin: boolean) {
   return vi.spyOn(clientMod.api, "GET").mockResolvedValue({
-    data: { user: { id: 1, email: "a@ki.se", status: "active", default_profile_id: null }, capabilities: { admin } },
+    data: { user: { id: 1, email: "a@umu.se", status: "active", default_profile_id: null }, capabilities: { admin } },
     error: undefined,
   } as never);
 }

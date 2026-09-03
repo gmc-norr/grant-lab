@@ -27,7 +27,7 @@ def _settings_env(monkeypatch, pg_url):
     """Populate the env vars Settings() requires (mirrors proposal_assist/conftest.py)."""
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
 
 

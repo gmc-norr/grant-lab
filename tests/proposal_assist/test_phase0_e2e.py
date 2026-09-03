@@ -90,7 +90,7 @@ def test_phase0_happy_path_workspace_to_spec(
 ):
     # === Step A: Set up the workspace + queued setup job in the DB ===
     with pg_session_factory() as s:
-        owner = make_user(s, email="e2e-owner@ki.se")
+        owner = make_user(s, email="e2e-owner@umu.se")
         call = make_call(s)
         profile = make_profile(s, name="e2e-profile")
         s.commit()
@@ -161,7 +161,7 @@ def test_phase0_happy_path_workspace_to_spec(
     # === Step D: Owner activates the workspace via the JSON API endpoint ===
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     app = create_app()
     client = TestClient(app, raise_server_exceptions=True)

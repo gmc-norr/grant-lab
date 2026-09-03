@@ -555,8 +555,8 @@ def test_post_terminal_usage_refuses_non_terminal_or_foreign_job(pg_session_fact
     from call_manager.proposal_assist.turns.outcomes import stamp_post_terminal_usage
 
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="a-owner@ki.se"))
-        other = make_workspace(s, owner=make_user(s, email="b-owner@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="a-owner@umu.se"))
+        other = make_workspace(s, owner=make_user(s, email="b-owner@umu.se"))
         user_turn = make_chat_turn(s, ws, role="user", content={"type": "text", "text": "q"})
         job = TurnJob(
             workspace_id=ws.id,

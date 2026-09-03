@@ -28,7 +28,7 @@ def _init_repo(repo: Path, content: str) -> None:
 def test_hydrates_from_git_when_store_empty_and_enabled(pg_session_factory, tmp_path):
     md = "preamble\n\n## Background\nhello **world**.\n"
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="hy-o@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="hy-o@umu.se"))
         s.commit()
         wid = ws.id
     _init_repo(Path(tmp_path) / str(wid) / "repo", md)
@@ -53,7 +53,7 @@ def test_hydrates_from_git_when_store_empty_and_enabled(pg_session_factory, tmp_
 
 def test_no_hydrate_when_flag_off(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="hy-off@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="hy-off@umu.se"))
         s.commit()
         wid = ws.id
     _init_repo(Path(tmp_path) / str(wid) / "repo", "## X\nbody\n")
@@ -73,7 +73,7 @@ def test_hydrates_empty_paragraph_when_head_is_blank(pg_session_factory, tmp_pat
     # node needs `block+`), so hydration must seed the canonical empty-paragraph
     # doc rather than crash on markdown_to_pm(""). (Finding D.)
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="hy-blank@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="hy-blank@umu.se"))
         s.commit()
         wid = ws.id
     _init_repo(Path(tmp_path) / str(wid) / "repo", "   \n")
@@ -101,7 +101,7 @@ def test_no_hydrate_when_enabled_but_artifact_file_missing(pg_session_factory, t
     # Collab enabled but the artifact was never committed (no git HEAD to seed
     # from): stay Slice-1 empty rather than persist a synthetic seed. (Finding D.)
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="hy-missing@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="hy-missing@umu.se"))
         s.commit()
         wid = ws.id
     # deliberately do NOT init a repo / write proposal.md
@@ -121,7 +121,7 @@ def test_no_hydrate_when_enabled_but_artifact_file_missing(pg_session_factory, t
 
 def test_existing_updates_are_replayed_not_rehydrated(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="hy-ex@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="hy-ex@umu.se"))
         s.commit()
         wid = ws.id
     _init_repo(Path(tmp_path) / str(wid) / "repo", "## X\nGIT.\n")
@@ -153,7 +153,7 @@ def test_warm_path_returns_a_hydration_carrying_the_rows_epoch(pg_session_factor
     from call_manager.proposal_assist.collab.hydrate import Hydration
 
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="hy-ep-warm@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="hy-ep-warm@umu.se"))
         state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
         wid = ws.id
@@ -185,7 +185,7 @@ def test_warm_path_returns_a_hydration_carrying_the_rows_epoch(pg_session_factor
 
 def test_cold_seed_path_carries_the_epoch_too(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="hy-ep-cold@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="hy-ep-cold@umu.se"))
         s.commit()
         wid = ws.id
     _init_repo(Path(tmp_path) / str(wid) / "repo", "## Background\nseeded.\n")
@@ -208,7 +208,7 @@ def test_cold_seed_path_carries_the_epoch_too(pg_session_factory, tmp_path):
 
 def test_flag_off_and_never_reset_is_epoch_zero(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="hy-ep-off@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="hy-ep-off@umu.se"))
         s.commit()
         wid = ws.id
     with pg_session_factory() as s:

@@ -19,8 +19,8 @@ def test_max_email_len_is_320():
 
 
 def test_email_fingerprint_is_stable_12_hex():
-    fp = email_fingerprint("a@ki.se")
-    assert len(fp) == 12 and fp == email_fingerprint("a@ki.se")
+    fp = email_fingerprint("a@umu.se")
+    assert len(fp) == 12 and fp == email_fingerprint("a@umu.se")
 
 
 def test_direct_client_host():

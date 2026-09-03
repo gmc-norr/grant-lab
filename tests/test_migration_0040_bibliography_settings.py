@@ -87,7 +87,7 @@ def test_0040_round_trip(migrated_engine, pg_url):
 # ---------------------------------------------------------------------------
 
 
-def _make_user(session, email: str = "bib-owner@ki.se"):
+def _make_user(session, email: str = "bib-owner@umu.se"):
     from call_manager.db.models import User
 
     u = User(email=email)

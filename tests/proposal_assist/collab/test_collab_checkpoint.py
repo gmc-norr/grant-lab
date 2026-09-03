@@ -46,7 +46,7 @@ def _seed_room_with_edit(pg_session_factory, wid, actor_id, md) -> Doc:
 
 def test_checkpoint_commits_serialized_doc_with_provenance(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
-        o = make_user(s, email="cp-o@ki.se")
+        o = make_user(s, email="cp-o@umu.se")
         ws = make_workspace(s, owner=o)
         s.commit()
         wid, oid = ws.id, o.id
@@ -101,7 +101,7 @@ def test_checkpoint_commits_serialized_doc_with_provenance(pg_session_factory, t
 
 def test_second_checkpoint_with_no_new_updates_is_noop(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
-        o = make_user(s, email="cp-noop@ki.se")
+        o = make_user(s, email="cp-noop@umu.se")
         ws = make_workspace(s, owner=o)
         s.commit()
         wid, oid = ws.id, o.id
@@ -145,7 +145,7 @@ def test_seed_only_open_close_does_not_checkpoint(pg_session_factory, tmp_path):
     # dropping non-schema markup) — but it should advance the watermark past the
     # seed so it isn't re-evaluated forever.
     with pg_session_factory() as s:
-        o = make_user(s, email="cp-seedonly@ki.se")
+        o = make_user(s, email="cp-seedonly@umu.se")
         ws = make_workspace(s, owner=o)
         s.commit()
         wid = ws.id
@@ -185,7 +185,7 @@ def test_checkpoint_repo_missing_is_clean_noop(pg_session_factory, tmp_path):
     # (collab enabled before the repo is created). checkpoint_artifact must resolve
     # to a clean no-op (commit_sha="") instead of raising GitCommitError -> 500.
     with pg_session_factory() as s:
-        o = make_user(s, email="cp-norepo@ki.se")
+        o = make_user(s, email="cp-norepo@umu.se")
         ws = make_workspace(s, owner=o)
         s.commit()
         wid, oid = ws.id, o.id
@@ -228,7 +228,7 @@ def _files_in_head(repo: Path) -> list[str]:
 
 def test_checkpoint_record_version_false_is_quiet_and_compacts(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
-        o = make_user(s, email="cp-quiet@ki.se")
+        o = make_user(s, email="cp-quiet@umu.se")
         ws = make_workspace(s, owner=o)
         s.commit()
         wid, oid = ws.id, o.id
@@ -277,7 +277,7 @@ def test_checkpoint_co_commits_extra_files(pg_session_factory, tmp_path):
     # Task 2: checkpoint with extra_files={} co-commits multiple files atomically.
     # Seed a room with an authored edit, then checkpoint with citations.json.
     with pg_session_factory() as s:
-        o = make_user(s, email="cp-extra@ki.se")
+        o = make_user(s, email="cp-extra@umu.se")
         ws = make_workspace(s, owner=o)
         s.commit()
         wid, oid = ws.id, o.id
@@ -367,7 +367,7 @@ def test_checkpoint_of_an_empty_blockquote_commits_readable_markdown(
     # Tiptap: typing "> " and moving on leaves blockquote[paragraph()]. This
     # used to checkpoint as a bare ">" that markdown_to_pm refused, so the next
     # GET of the draft 500ed and the git-first save answered 409.
-    wid, oid = _collab_workspace(pg_session_factory, tmp_path, email="cp-bq@ki.se")
+    wid, oid = _collab_workspace(pg_session_factory, tmp_path, email="cp-bq@umu.se")
     t = lambda s: {"type": "text", "text": s}  # noqa: E731
     doc = pm_json_to_ydoc(
         {
@@ -407,7 +407,7 @@ def test_checkpoint_refuses_a_projection_the_reader_cannot_parse(
     # the §2.3 fixes), so the reader's refusal is simulated; what is real is
     # everything the guard must guarantee: no commit, no version row, watermark
     # unmoved, and the SAME log checkpoints normally once the reader accepts it.
-    wid, oid = _collab_workspace(pg_session_factory, tmp_path, email="cp-refuse@ki.se")
+    wid, oid = _collab_workspace(pg_session_factory, tmp_path, email="cp-refuse@umu.se")
     repo = Path(tmp_path) / str(wid) / "repo"
     _seed_room_with_edit(pg_session_factory, wid, oid, "## Background\n\nedited.\n")
     head_before = _git_head(repo)

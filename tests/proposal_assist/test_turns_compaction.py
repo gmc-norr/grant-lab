@@ -275,10 +275,10 @@ def test_run_compaction_tick_processes_only_workspaces_over_threshold(
     settings = Settings()
     client = _stub_summarizer_client("Summary.")
     with pg_session_factory() as s:
-        ws_over = make_workspace(s, owner=make_user(s, email="over@ki.se"))
+        ws_over = make_workspace(s, owner=make_user(s, email="over@umu.se"))
         for i in range(3):
             make_chat_turn(s, ws_over, role="user", content={"type": "text", "text": f"x{i}"})
-        ws_under = make_workspace(s, owner=make_user(s, email="under@ki.se"))
+        ws_under = make_workspace(s, owner=make_user(s, email="under@umu.se"))
         make_chat_turn(s, ws_under, role="user", content={"type": "text", "text": "x"})
         s.commit()
         over_id = ws_over.id

@@ -59,7 +59,7 @@ def _seed(pg_session_factory, tmp_path, doc_md, email):
 
 
 def test_accept_preserves_concurrent_edit_in_other_section(pg_session_factory, tmp_path):
-    wid, oid, repo, room_doc = _seed(pg_session_factory, tmp_path, _DOC, "k-c2@ki.se")
+    wid, oid, repo, room_doc = _seed(pg_session_factory, tmp_path, _DOC, "k-c2@umu.se")
     # Client generates a char-level edit in section B (last block) vs the pre-accept
     # state; the update arrives AFTER the accept.
     fork_update = _fork_edit_last_paragraph(room_doc, " CONCURRENT")
@@ -83,7 +83,7 @@ def test_accept_preserves_concurrent_edit_in_other_section(pg_session_factory, t
 def test_clear_preamble_via_empty_new_text_does_not_crash(pg_session_factory, tmp_path):
     # Empty new_text is a legal preamble clear (kernel.py:106); the section-scoped
     # apply must map it to blocks=[] (raw markdown_to_pm raises on '') and succeed.
-    wid, oid, repo, room_doc = _seed(pg_session_factory, tmp_path, _DOC, "k-clear@ki.se")
+    wid, oid, repo, room_doc = _seed(pg_session_factory, tmp_path, _DOC, "k-clear@umu.se")
     live_md = pm_to_markdown(ydoc_to_pm_json(room_doc))
     base_sha = split_sections(live_md)[0].sha   # section 0 = the "Preamble." preamble
     with pg_session_factory() as s:
@@ -101,7 +101,7 @@ def test_clear_preamble_via_empty_new_text_does_not_crash(pg_session_factory, tm
 
 def test_normal_single_section_accept_unchanged(pg_session_factory, tmp_path):
     # Non-concurrent regression: a plain accept still yields the expected content.
-    wid, oid, repo, room_doc = _seed(pg_session_factory, tmp_path, _DOC, "k-plain@ki.se")
+    wid, oid, repo, room_doc = _seed(pg_session_factory, tmp_path, _DOC, "k-plain@umu.se")
     live_md = pm_to_markdown(ydoc_to_pm_json(room_doc))
     base_sha = split_sections(live_md)[1].sha
     with pg_session_factory() as s:
@@ -122,7 +122,7 @@ def test_blank_clear_of_already_empty_preamble_is_noop_accept(pg_session_factory
     # (dodging the new_text == live.text short-circuit), blocks=[] on the already-
     # empty preamble range [0,0) yields b"" — which must be accepted as a no-op,
     # NOT persisted (a b"" row would poison the next hydration).
-    wid, oid, repo, room_doc = _seed(pg_session_factory, tmp_path, _NO_PREAMBLE, "k-noop@ki.se")
+    wid, oid, repo, room_doc = _seed(pg_session_factory, tmp_path, _NO_PREAMBLE, "k-noop@umu.se")
     before = pm_to_markdown(ydoc_to_pm_json(room_doc))
     base_sha = split_sections(before)[0].sha    # section 0 = the EMPTY preamble
     with pg_session_factory() as s:
@@ -146,7 +146,7 @@ def test_section_write_beside_a_table_preserves_it(pg_session_factory, tmp_path)
     # A section-scoped edit to "## Intro" must leave the sibling "## Budget"
     # table's Yjs identity (and content) completely alone.
     wid, oid, repo, room_doc = _seed(
-        pg_session_factory, tmp_path, _TABLE_SECTIONED, "k-tbl-beside@ki.se"
+        pg_session_factory, tmp_path, _TABLE_SECTIONED, "k-tbl-beside@umu.se"
     )
     live_md = pm_to_markdown(ydoc_to_pm_json(room_doc))
     base_sha = split_sections(live_md)[1].sha   # section 1 = "## Intro"
@@ -170,7 +170,7 @@ def test_section_write_INTO_a_table_section_roundtrips(pg_session_factory, tmp_p
     # table block-range must line up with split_sections' line-scan boundaries
     # exactly like any other block, so this must NOT raise SectionMapDivergenceError.
     wid, oid, repo, room_doc = _seed(
-        pg_session_factory, tmp_path, _TABLE_SECTIONED, "k-tbl-into@ki.se"
+        pg_session_factory, tmp_path, _TABLE_SECTIONED, "k-tbl-into@umu.se"
     )
     live_md = pm_to_markdown(ydoc_to_pm_json(room_doc))
     base_sha = split_sections(live_md)[2].sha   # section 2 = "## Budget"

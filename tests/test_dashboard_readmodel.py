@@ -20,7 +20,7 @@ from call_manager.web.dashboard import build_dashboard_view, resolve_profile_sel
 
 def _seed(pg_session_factory):
     with pg_session_factory() as s:
-        u = User(status="active", email="u@ki.se")
+        u = User(status="active", email="u@umu.se")
         s.add(u)
         s.commit()
         return u.id
@@ -28,7 +28,7 @@ def _seed(pg_session_factory):
 
 def _seed_user_and_profile(pg_session_factory, *, profile_active=True):
     with pg_session_factory() as s:
-        u = User(status="active", email="u@ki.se")
+        u = User(status="active", email="u@umu.se")
         s.add(u)
         s.flush()
         p = Profile(
@@ -184,7 +184,7 @@ def _seed_call_with_heavy_columns(pg_session_factory, *, ranked):
     """
     suffix = "r" if ranked else "u"
     with pg_session_factory() as s:
-        u = User(status="active", email=f"heavy-{suffix}@ki.se")
+        u = User(status="active", email=f"heavy-{suffix}@umu.se")
         src = Source(slug=f"heavy-src-{suffix}", name="Heavy")
         s.add_all([u, src])
         s.flush()

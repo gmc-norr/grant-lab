@@ -16,7 +16,7 @@ from call_manager.ranking import eval as eval_mod
 
 
 def _seed(s, *, external_id, score, expected, pv):
-    u = User(email=f"{external_id}@ki.se")
+    u = User(email=f"{external_id}@umu.se")
     s.add(u)
     s.flush()
     p = Profile(

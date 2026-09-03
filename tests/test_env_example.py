@@ -64,7 +64,7 @@ def test_a_verbatim_copy_is_a_serving_production_configuration(_clean_env):
     s = Settings(
         _env_file=str(EXAMPLE),
         SESSION_SECRET="an-example-only-secret-that-is-long-enough-xxxxxxxx",
-        INITIAL_ADMIN_EMAIL="admin@ki.se",
+        INITIAL_ADMIN_EMAIL="admin@umu.se",
     )
     assert s.spa_mode == "prod", "the example must serve a UI"
     assert "localhost" not in s.admin_dashboard_url, "every digest link is built from this"

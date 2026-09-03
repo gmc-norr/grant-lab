@@ -456,8 +456,8 @@ def test_generate_citekey_collision_two_existing(pg_session_factory):
 def test_generate_citekey_same_key_different_workspace_no_collision(pg_session_factory):
     """smith2021 in ws_a must not block ws_b from getting smith2021."""
     with pg_session_factory() as s:
-        ws_a = make_workspace(s, owner=make_user(s, email="a@ki.se"))
-        ws_b = make_workspace(s, owner=make_user(s, email="b@ki.se"))
+        ws_a = make_workspace(s, owner=make_user(s, email="a@umu.se"))
+        ws_b = make_workspace(s, owner=make_user(s, email="b@umu.se"))
         s.commit()
         a_id, b_id = ws_a.id, ws_b.id
 

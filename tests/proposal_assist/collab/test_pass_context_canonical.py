@@ -86,7 +86,7 @@ def _assemble(name, pg_session_factory, wid, tmp_path):
 def test_every_pass_reads_the_live_room_not_stale_disk(pg_session_factory, tmp_path):
     """The whole point, asserted as an exact set so a partial fix cannot pass."""
     wid = _workspace_with_room_ahead_of_disk(
-        pg_session_factory, tmp_path, "pass-canon@ki.se"
+        pg_session_factory, tmp_path, "pass-canon@umu.se"
     )
     stale = {}
     for name in _ASSEMBLERS:
@@ -103,7 +103,7 @@ def test_flag_off_still_reads_raw_disk(pg_session_factory, tmp_path):
     otherwise the fix would silently change behaviour for every non-collab
     workspace, and a test that cannot distinguish the two proves nothing."""
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="pass-canon-off@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="pass-canon-off@umu.se"))
         s.commit()
         wid = ws.id
     repo = workspace_repo_dir(tmp_path, wid)

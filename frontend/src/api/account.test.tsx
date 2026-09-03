@@ -16,7 +16,7 @@ afterEach(() => {
 });
 
 const SETTINGS = {
-  name: "Pär", email: "p@ki.se", is_admin: false,
+  name: "Pär", email: "p@umu.se", is_admin: false,
   google_oidc_enabled: false, google_linked: false, has_password: true, profiles: [],
 };
 

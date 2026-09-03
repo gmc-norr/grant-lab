@@ -31,7 +31,7 @@ def test_excluded_and_unknown_kinds_produce_no_rows():
         _ev("cloud_turn_sent", actor_id=1),
         _ev("some_future_kind", actor_id=1),
     ]
-    assert build_activity_feed(events, {1: "a@ki.se"}) == []
+    assert build_activity_feed(events, {1: "a@umu.se"}) == []
 
 
 def test_collapse_same_actor_same_heading_edits():
@@ -52,13 +52,13 @@ def test_collapse_same_actor_same_heading_edits():
             secs_ago=20,
         ),
     ]
-    rows = build_activity_feed(events, {1: "a@ki.se"})
+    rows = build_activity_feed(events, {1: "a@umu.se"})
     assert len(rows) == 1
     r = rows[0].as_dict()
     assert r["category"] == "edit"
     assert r["summary"] == "edited Methods ×3"
     assert r["count"] == 3
-    assert r["actor"] == "a@ki.se"
+    assert r["actor"] == "a@umu.se"
     assert r["target"] == {"top_tab": "draft", "bottom_tab": None}
 
 
@@ -68,7 +68,7 @@ def test_collapse_mixed_headings_makes_n_edits():
         _ev("user_edit", actor_id=1, payload={"heading": "Aims", "artifact": "spec"}),
         _ev("user_edit", actor_id=1, payload={"heading": "Budget", "artifact": "draft"}),
     ]
-    rows = build_activity_feed(events, {1: "a@ki.se"})
+    rows = build_activity_feed(events, {1: "a@umu.se"})
     assert len(rows) == 1
     assert rows[0].summary == "made 3 edits"
     # mixed artifacts default to draft
@@ -77,7 +77,7 @@ def test_collapse_mixed_headings_makes_n_edits():
 
 def test_spec_init_edit_without_heading():
     events = [_ev("user_edit", actor_id=1, payload={"artifact": "spec"})]
-    rows = build_activity_feed(events, {1: "a@ki.se"})
+    rows = build_activity_feed(events, {1: "a@umu.se"})
     assert rows[0].summary == "edited the spec"
     assert rows[0].count == 1
     assert rows[0].target.top_tab == "spec"
@@ -88,7 +88,7 @@ def test_blank_heading_run_uses_artifact_fallback():
         _ev("user_edit", actor_id=1, payload={"heading": "Methods", "artifact": "draft"}),
         _ev("user_edit", actor_id=1, payload={"artifact": "draft"}),  # blank heading
     ]
-    rows = build_activity_feed(events, {1: "a@ki.se"})
+    rows = build_activity_feed(events, {1: "a@umu.se"})
     assert rows[0].summary == "edited the draft ×2"
     assert rows[0].target.top_tab == "draft"
 
@@ -106,7 +106,7 @@ def test_run_broken_by_interleaving_preserves_chronology():
             secs_ago=20,
         ),
     ]
-    rows = build_activity_feed(events, {1: "a@ki.se"})
+    rows = build_activity_feed(events, {1: "a@umu.se"})
     assert [r.category for r in rows] == ["edit", "turn", "edit"]
     assert all(r.count == 1 for r in rows)
 
@@ -116,8 +116,8 @@ def test_actor_boundary_splits_run():
         _ev("user_edit", actor_id=1, payload={"heading": "Methods", "artifact": "draft"}),
         _ev("user_edit", actor_id=2, payload={"heading": "Methods", "artifact": "draft"}),
     ]
-    rows = build_activity_feed(events, {1: "a@ki.se", 2: "b@ki.se"})
-    assert [r.actor for r in rows] == ["a@ki.se", "b@ki.se"]
+    rows = build_activity_feed(events, {1: "a@umu.se", 2: "b@umu.se"})
+    assert [r.actor for r in rows] == ["a@umu.se", "b@umu.se"]
     assert len(rows) == 2
 
 
@@ -158,7 +158,7 @@ def test_render_and_target_table():
         "rubric_edited": ("edited the funder criteria", {"top_tab": "spec", "bottom_tab": None}),
     }
     for kind, (summary, target) in cases.items():
-        rows = build_activity_feed([_ev(kind, actor_id=1)], {1: "a@ki.se"})
+        rows = build_activity_feed([_ev(kind, actor_id=1)], {1: "a@umu.se"})
         assert len(rows) == 1, kind
         d = rows[0].as_dict()
         assert d["summary"] == summary, kind
@@ -170,7 +170,7 @@ def test_actor_resolution_variants():
     # rubric_edited has no actor_id; user is in payload.edited_by_user_id
     rubric = _ev("rubric_edited", payload={"edited_by_user_id": 7})
     assert actor_user_id(rubric) == 7
-    assert build_activity_feed([rubric], {7: "ed@ki.se"})[0].actor == "ed@ki.se"
+    assert build_activity_feed([rubric], {7: "ed@umu.se"})[0].actor == "ed@umu.se"
     # rubric_initialized carries no user id anywhere -> System (None)
     init = _ev("rubric_initialized")
     assert actor_user_id(init) is None
@@ -193,7 +193,7 @@ def test_collapsed_row_id_and_time_come_from_most_recent():
         ),
         _ev("user_edit", actor_id=1, payload={"heading": "M", "artifact": "draft"}, secs_ago=30),
     ]
-    row = build_activity_feed(events, {1: "a@ki.se"})[0]
+    row = build_activity_feed(events, {1: "a@umu.se"})[0]
     assert row.id == str(newest)
     assert row.created_at == (_BASE).isoformat()
 
@@ -202,21 +202,21 @@ def test_member_added_renders_under_member_category_with_email():
     from call_manager.proposal_assist.activity.feed import build_activity_feed
 
     ev = _ev(
-        "member_added", actor_id=1, payload={"target_user_id": 2, "target_email": "alice@ki.se"}
+        "member_added", actor_id=1, payload={"target_user_id": 2, "target_email": "alice@umu.se"}
     )
-    rows = build_activity_feed([ev], {1: "owner@ki.se"})
+    rows = build_activity_feed([ev], {1: "owner@umu.se"})
     assert len(rows) == 1
     assert rows[0].category == "member"
-    assert "alice@ki.se" in rows[0].summary
-    assert rows[0].actor == "owner@ki.se"
+    assert "alice@umu.se" in rows[0].summary
+    assert rows[0].actor == "owner@umu.se"
 
 
 def test_workspace_activated_renders_under_rubric_category():
     from call_manager.proposal_assist.activity.feed import build_activity_feed
 
     ev = _ev("workspace_activated", actor_id=1, payload={})
-    rows = build_activity_feed([ev], {1: "owner@ki.se"})
+    rows = build_activity_feed([ev], {1: "owner@umu.se"})
     assert len(rows) == 1
     assert rows[0].category == "rubric"
     assert "activated the workspace" in rows[0].summary
-    assert rows[0].actor == "owner@ki.se"
+    assert rows[0].actor == "owner@umu.se"

@@ -38,9 +38,9 @@ def test_migration_0062_round_trips(pg_url):
     try:
         # Seed a workspace row to verify existing rows survive round-trip.
         with eng.begin() as c:
-            c.execute(text("INSERT INTO users (email) VALUES ('mig62@ki.se')"))
+            c.execute(text("INSERT INTO users (email) VALUES ('mig62@umu.se')"))
             uid = c.execute(
-                text("SELECT id FROM users WHERE email='mig62@ki.se'")
+                text("SELECT id FROM users WHERE email='mig62@umu.se'")
             ).scalar_one()
             c.execute(
                 text(
@@ -72,7 +72,7 @@ def test_migration_0062_round_trips(pg_url):
             gen = c.execute(
                 text(
                     "SELECT lifecycle_generation FROM workspaces "
-                    "WHERE owner_id IN (SELECT id FROM users WHERE email='mig62@ki.se')"
+                    "WHERE owner_id IN (SELECT id FROM users WHERE email='mig62@umu.se')"
                 )
             ).scalar_one()
         assert gen == 0, f"existing row after re-upgrade must have generation=0, got {gen}"
@@ -81,9 +81,9 @@ def test_migration_0062_round_trips(pg_url):
             c.execute(
                 text(
                     "DELETE FROM workspaces WHERE owner_id IN "
-                    "(SELECT id FROM users WHERE email='mig62@ki.se')"
+                    "(SELECT id FROM users WHERE email='mig62@umu.se')"
                 )
             )
-            c.execute(text("DELETE FROM users WHERE email='mig62@ki.se'"))
+            c.execute(text("DELETE FROM users WHERE email='mig62@umu.se'"))
         command.upgrade(cfg, "head")
         eng.dispose()

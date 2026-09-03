@@ -60,10 +60,10 @@ def _run_round_trip(engine, alembic_cfg):
         # post-0008 schema (no scheme / setwise_offset / ranking_scheme).
         conn.execute(
             text(
-                "INSERT INTO users (email, is_admin, created_at) VALUES ('rt@ki.se', false, now())"
+                "INSERT INTO users (email, is_admin, created_at) VALUES ('rt@umu.se', false, now())"
             )
         )
-        uid = conn.execute(text("SELECT id FROM users WHERE email = 'rt@ki.se'")).scalar_one()
+        uid = conn.execute(text("SELECT id FROM users WHERE email = 'rt@umu.se'")).scalar_one()
         conn.execute(
             text(
                 "INSERT INTO profiles (name, kind, description, structured, "

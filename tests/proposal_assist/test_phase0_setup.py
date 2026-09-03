@@ -481,8 +481,8 @@ def test_claim_next_returns_oldest_by_queued_at(pg_session_factory):
     from call_manager.db.models import User
 
     with pg_session_factory() as s:
-        owner_a = User(email="fifo-owner-a@ki.se")
-        owner_b = User(email="fifo-owner-b@ki.se")
+        owner_a = User(email="fifo-owner-a@umu.se")
+        owner_b = User(email="fifo-owner-b@umu.se")
         s.add_all([owner_a, owner_b])
         s.flush()
         ws_a = make_workspace(s, owner=owner_a)
@@ -647,8 +647,8 @@ def test_phase0_step_5_second_workspace_same_call_skips_llm(
 
         call = make_call(s)
         s.commit()
-        owner1 = make_user(s, email="rubric-owner-1@ki.se")
-        owner2 = make_user(s, email="rubric-owner-2@ki.se")
+        owner1 = make_user(s, email="rubric-owner-1@umu.se")
+        owner2 = make_user(s, email="rubric-owner-2@umu.se")
         ws1 = make_workspace(s, owner=owner1, call_id=call.id, current_phase="setup")
         ws2 = make_workspace(s, owner=owner2, call_id=call.id, current_phase="setup")
         job1 = WorkspaceSetupJob(workspace_id=ws1.id, status="running")

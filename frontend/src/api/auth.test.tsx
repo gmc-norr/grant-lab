@@ -12,7 +12,7 @@ afterEach(() => {
 
 it("useAuthConfig GETs /api/auth/config", async () => {
   const get = vi.spyOn(clientMod.api, "GET").mockResolvedValue({
-    data: { google_oidc_enabled: true, allowed_domains: ["ki.se"] }, error: undefined,
+    data: { google_oidc_enabled: true, allowed_domains: ["umu.se"] }, error: undefined,
   } as never);
   const { result } = renderHook(() => useAuthConfig(), { wrapper: wrapper(new QueryClient()) });
   await waitFor(() => expect(result.current.isSuccess).toBe(true));
@@ -24,10 +24,10 @@ it("useLogin POSTs credentials + returns the redirect", async () => {
     data: { redirect: "/" }, error: undefined, response: new Response(),
   } as never);
   const { result } = renderHook(() => useLogin(), { wrapper: wrapper(new QueryClient()) });
-  const out = await result.current.mutateAsync({ email: "a@ki.se", password: "pw-long-enough" });
+  const out = await result.current.mutateAsync({ email: "a@umu.se", password: "pw-long-enough" });
   expect(out).toEqual({ redirect: "/" });
   expect(post).toHaveBeenCalledWith("/api/auth/login", {
-    body: { email: "a@ki.se", password: "pw-long-enough", next: null },
+    body: { email: "a@umu.se", password: "pw-long-enough", next: null },
   });
 });
 
@@ -41,7 +41,7 @@ it("useLogin throws ApiError on a 400 (unwrap does NOT redirect — 400 != 401)"
   } as never);
   const { result } = renderHook(() => useLogin(), { wrapper: wrapper(new QueryClient()) });
   await expect(
-    result.current.mutateAsync({ email: "a@ki.se", password: "bad" }),
+    result.current.mutateAsync({ email: "a@umu.se", password: "bad" }),
   ).rejects.toThrow(/Invalid email or password/);
   expect(redirect).not.toHaveBeenCalled(); // 400 != 401, no redirect loop
 });
@@ -51,8 +51,8 @@ it("useRegister POSTs email+name", async () => {
     data: { ok: true }, error: undefined,
   } as never);
   const { result } = renderHook(() => useRegister(), { wrapper: wrapper(new QueryClient()) });
-  await result.current.mutateAsync({ email: "n@ki.se", name: "N" });
-  expect(post).toHaveBeenCalledWith("/api/auth/register", { body: { email: "n@ki.se", name: "N" } });
+  await result.current.mutateAsync({ email: "n@umu.se", name: "N" });
+  expect(post).toHaveBeenCalledWith("/api/auth/register", { body: { email: "n@umu.se", name: "N" } });
 });
 
 it("useLogout POSTs logout", async () => {

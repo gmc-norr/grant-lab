@@ -27,7 +27,7 @@ from tests.proposal_assist.conftest import make_call, make_user, make_workspace
 def _env(monkeypatch, pg_url):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
 
 
@@ -39,7 +39,7 @@ def _app(_env):
 @pytest.fixture
 def owner(_app, pg_session_factory):
     with pg_session_factory() as s:
-        u = make_user(s, email="retry-owner@ki.se")
+        u = make_user(s, email="retry-owner@umu.se")
         s.commit()
         uid = u.id
     _app.state.session_factory = pg_session_factory
@@ -50,7 +50,7 @@ def owner(_app, pg_session_factory):
 @pytest.fixture
 def non_owner(_app, pg_session_factory):
     with pg_session_factory() as s:
-        u = make_user(s, email="retry-non-owner@ki.se")
+        u = make_user(s, email="retry-non-owner@umu.se")
         s.commit()
         uid = u.id
     _app.state.session_factory = pg_session_factory

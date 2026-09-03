@@ -6,7 +6,7 @@ from call_manager.db.models import Profile, ProfileKind, ProfileLevel, User
 
 
 def _user(s):
-    u = User(email="owner@ki.se")
+    u = User(email="owner@umu.se")
     s.add(u)
     s.flush()
     return u.id

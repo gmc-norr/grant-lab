@@ -19,12 +19,12 @@ from call_manager.main import create_app
 def _setup(monkeypatch, pg_url):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     return create_app()
 
 
-def _login(app, pg_session_factory, email="u@ki.se"):
+def _login(app, pg_session_factory, email="u@umu.se"):
     with pg_session_factory() as s:
         u = User(status="active", email=email)
         s.add(u)
@@ -134,7 +134,7 @@ def test_detail_active_not_owned_profile_still_shows_ranking(
     cid = _seed_call(pg_session_factory)
     app = _setup(monkeypatch, pg_url)
     client, uid = _login(app, pg_session_factory)
-    other_uid = _login(app, pg_session_factory, email="other@ki.se")[1]
+    other_uid = _login(app, pg_session_factory, email="other@umu.se")[1]
     pid = _seed_profile(pg_session_factory, owner_id=other_uid, name="Other")
     _seed_ranking(pg_session_factory, cid=cid, pid=pid)
     assert other_uid != uid

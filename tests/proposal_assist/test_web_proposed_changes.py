@@ -148,7 +148,7 @@ def test_accept_endpoint_rejects_non_member(
     # not a member, so the member gate must reject with 403.
     _app.state.settings.workspaces_dir = str(tmp_path)
     with pg_session_factory() as s:
-        stranger = make_user(s, email="stranger@ki.se")
+        stranger = make_user(s, email="stranger@umu.se")
         ws = make_workspace(s, owner=stranger)
         s.flush()
         pc = _seed_pending(s, ws, tmp_path)
@@ -259,7 +259,7 @@ def test_accept_endpoint_allows_viewer(
     # WorkspaceViewer collaborator) can accept. current_user is the viewer here.
     _app.state.settings.workspaces_dir = str(tmp_path)
     with pg_session_factory() as s:
-        owner = make_user(s, email="ws-owner@ki.se")
+        owner = make_user(s, email="ws-owner@umu.se")
         ws = make_workspace(s, owner=owner)
         s.flush()
         s.add(WorkspaceViewer(workspace_id=ws.id, user_id=current_user.id))
@@ -277,7 +277,7 @@ def test_reject_endpoint_rejects_non_member(
 ):
     _app.state.settings.workspaces_dir = str(tmp_path)
     with pg_session_factory() as s:
-        stranger = make_user(s, email="stranger-r@ki.se")
+        stranger = make_user(s, email="stranger-r@umu.se")
         ws = make_workspace(s, owner=stranger)
         s.flush()
         pc = _seed_pending(s, ws, tmp_path)
@@ -293,7 +293,7 @@ def test_list_endpoint_rejects_non_member(
 ):
     _app.state.settings.workspaces_dir = str(tmp_path)
     with pg_session_factory() as s:
-        stranger = make_user(s, email="stranger-l@ki.se")
+        stranger = make_user(s, email="stranger-l@umu.se")
         ws = make_workspace(s, owner=stranger)
         s.flush()
         _seed_pending(s, ws, tmp_path)

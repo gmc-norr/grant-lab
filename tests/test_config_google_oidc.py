@@ -7,10 +7,10 @@ from call_manager.config import Settings
 def _base(monkeypatch, **extra):
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://x/y")
     monkeypatch.setenv("SESSION_SECRET", "x" * 32)
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
-    monkeypatch.setenv("APP_BASE_URL", "https://app.ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
+    monkeypatch.setenv("APP_BASE_URL", "https://app.umu.se")
     # Real EMAIL_FROM required in prod (https); example.com default is rejected.
-    monkeypatch.setenv("EMAIL_FROM", "noreply@ki.se")
+    monkeypatch.setenv("EMAIL_FROM", "noreply@umu.se")
     for k, v in extra.items():
         monkeypatch.setenv(k, v)
     return Settings()
@@ -19,7 +19,7 @@ def _base(monkeypatch, **extra):
 def test_oidc_disabled_by_default(monkeypatch):
     s = _base(monkeypatch)
     assert s.google_oidc_enabled is False
-    assert s.google_redirect_uri == "https://app.ki.se/auth/google/callback"
+    assert s.google_redirect_uri == "https://app.umu.se/auth/google/callback"
 
 
 def test_enabled_requires_client_credentials(monkeypatch):

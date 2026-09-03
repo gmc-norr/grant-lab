@@ -88,7 +88,7 @@ def _log_len(s, wid, *, artifact="draft"):
 def test_enter_direction_small_tail_drained_and_truncated(pg_session_factory, tmp_path):
     """A 1-row tail (far below the 200 scan floor) is checkpointed to git and
     the log is truncated — a subsequent git-first save can never be clobbered."""
-    wid, oid, repo = _setup(pg_session_factory, tmp_path, "ho1@ki.se")
+    wid, oid, repo = _setup(pg_session_factory, tmp_path, "ho1@umu.se")
     doc = _seed_room_edit(pg_session_factory, wid, oid, "## Background\n\nlive tail edit.\n")
 
     n = handover.run_kill_switch_handover(pg_session_factory, workspaces_dir=str(tmp_path))
@@ -111,7 +111,7 @@ def test_fully_checkpointed_log_is_still_truncated(pg_session_factory, tmp_path)
     kill-window git edits."""
     from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
 
-    wid, oid, repo = _setup(pg_session_factory, tmp_path, "ho2@ki.se")
+    wid, oid, repo = _setup(pg_session_factory, tmp_path, "ho2@umu.se")
     _seed_room_edit(pg_session_factory, wid, oid, "## Background\n\ncheckpointed edit.\n")
     with pg_session_factory() as s:
         checkpoint_artifact(
@@ -150,8 +150,8 @@ def test_fully_checkpointed_log_is_still_truncated(pg_session_factory, tmp_path)
 def test_failure_is_isolated_and_retryable(pg_session_factory, tmp_path, monkeypatch):
     """A truncate failure on one artifact rolls back atomically (checkpoint+truncate
     are one txn — the log survives, retry succeeds) and does not block others."""
-    wid_a, oid_a, _ = _setup(pg_session_factory, tmp_path, "ho3a@ki.se")
-    wid_b, oid_b, _ = _setup(pg_session_factory, tmp_path, "ho3b@ki.se")
+    wid_a, oid_a, _ = _setup(pg_session_factory, tmp_path, "ho3a@umu.se")
+    wid_b, oid_b, _ = _setup(pg_session_factory, tmp_path, "ho3b@umu.se")
     _seed_room_edit(pg_session_factory, wid_a, oid_a, "## Background\n\nA edit.\n")
     _seed_room_edit(pg_session_factory, wid_b, oid_b, "## Background\n\nB edit.\n")
 
@@ -176,7 +176,7 @@ def test_repoless_log_is_never_truncated(pg_session_factory, tmp_path):
     """No git repo = nowhere to hand the content over to — the log must survive
     (data preservation beats the pass completing)."""
     with pg_session_factory() as s:
-        o = make_user(s, email="ho4@ki.se")
+        o = make_user(s, email="ho4@umu.se")
         ws = make_workspace(s, owner=o)
         state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
@@ -199,7 +199,7 @@ def test_repoless_failure_logs_error_with_traceback(pg_session_factory, tmp_path
     whole job is data integrity. `logging` stores a suppressed `exc_info` as
     `False`, not `None`, so assert on truthiness rather than `is not None`."""
     with pg_session_factory() as s:
-        o = make_user(s, email="ho-err@ki.se")
+        o = make_user(s, email="ho-err@umu.se")
         ws = make_workspace(s, owner=o)
         state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
@@ -228,7 +228,7 @@ def test_handover_drains_table_to_bordered_gfm(pg_session_factory, tmp_path):
     the room's table content is checkpointed to git as bordered GFM (spec §5),
     and the committed markdown re-parses back into a table node — the drain ->
     CM6 -> re-hydrate loop is lossless for tables."""
-    wid, oid, repo = _setup(pg_session_factory, tmp_path, "ho-tbl@ki.se")
+    wid, oid, repo = _setup(pg_session_factory, tmp_path, "ho-tbl@umu.se")
     table_md = (
         "## Intro\n\nprose.\n\n"
         "## Budget\n\n| Item | Cost |\n| --- | --- |\n| Staff | 100 |\n"
@@ -253,7 +253,7 @@ def test_handover_drains_and_truncates_spec_artifact(pg_session_factory, tmp_pat
     draft path, while the co-located draft artifact in the SAME workspace/repo
     is left completely untouched (cross-artifact isolation — the checkpoint
     write must never clobber the sibling artifact's file or log)."""
-    wid, oid, repo = _setup_spec(pg_session_factory, tmp_path, "ho5@ki.se")
+    wid, oid, repo = _setup_spec(pg_session_factory, tmp_path, "ho5@umu.se")
     doc = _seed_room_edit(
         pg_session_factory, wid, oid, "## Approach\n\nlive spec edit.\n", artifact="spec"
     )
@@ -276,7 +276,7 @@ def test_handover_moves_the_document_epoch(pg_session_factory, tmp_path):
     (spec 2026-09-02-collab-doc-epoch-design.md §3.1): the epoch of every
     artifact it drained is one higher. An artifact it did NOT touch keeps its
     epoch — the bump rides reset_checkpoint, not the pass."""
-    wid, oid, _repo = _setup(pg_session_factory, tmp_path, "ho-epoch@ki.se")
+    wid, oid, _repo = _setup(pg_session_factory, tmp_path, "ho-epoch@umu.se")
     _seed_room_edit(pg_session_factory, wid, oid, "## Background\n\nedit.\n")
     with pg_session_factory() as s:
         assert state.get_doc_epoch(s, workspace_id=wid, artifact="draft") == 0

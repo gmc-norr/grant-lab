@@ -27,7 +27,7 @@ def _build_app(monkeypatch, pg_url, tmp_path, pg_session_factory):
     for k, v in {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://testserver",
         "WORKSPACES_DIR": str(tmp_path),
     }.items():
@@ -39,7 +39,7 @@ def _build_app(monkeypatch, pg_url, tmp_path, pg_session_factory):
     return app
 
 
-def _setup(pg_session_factory, tmp_path, *, email="defect1-owner@ki.se"):
+def _setup(pg_session_factory, tmp_path, *, email="defect1-owner@umu.se"):
     """Return (storage, ws_id, owner_id)."""
     storage = ReferenceStorage(root=tmp_path)
     with pg_session_factory() as s:
@@ -74,7 +74,7 @@ def test_metadata_approve_row_gone_after_rollback_is_404(
     import sqlalchemy.orm
 
     app = _build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
-    storage, ws_id, owner_id = _setup(pg_session_factory, tmp_path, email="d1s1@ki.se")
+    storage, ws_id, owner_id = _setup(pg_session_factory, tmp_path, email="d1s1@umu.se")
     rid = _seed_ref(pg_session_factory, storage, ws_id)
 
     class _FakeOrig:
@@ -138,7 +138,7 @@ def test_metadata_approve_citekey_collision_regenerates_key(
     import sqlalchemy.orm
 
     app = _build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
-    storage, ws_id, owner_id = _setup(pg_session_factory, tmp_path, email="d1s2@ki.se")
+    storage, ws_id, owner_id = _setup(pg_session_factory, tmp_path, email="d1s2@umu.se")
     rid = _seed_ref(pg_session_factory, storage, ws_id)
 
     # Pre-seed a reference with "roe2021" to force generate_citekey to produce "roe2021a".
@@ -209,7 +209,7 @@ def test_metadata_approve_unrelated_integrity_error_raises(
     import sqlalchemy.orm
 
     app = _build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
-    storage, ws_id, owner_id = _setup(pg_session_factory, tmp_path, email="d1s3@ki.se")
+    storage, ws_id, owner_id = _setup(pg_session_factory, tmp_path, email="d1s3@umu.se")
     rid = _seed_ref(pg_session_factory, storage, ws_id)
 
     class _FakeFKOrig:
@@ -259,7 +259,7 @@ def test_metadata_approve_double_collision_returns_409_not_500(
     import sqlalchemy.orm
 
     app = _build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
-    storage, ws_id, owner_id = _setup(pg_session_factory, tmp_path, email="d1s4@ki.se")
+    storage, ws_id, owner_id = _setup(pg_session_factory, tmp_path, email="d1s4@umu.se")
     rid = _seed_ref(pg_session_factory, storage, ws_id)
 
     class _FakeOrig:

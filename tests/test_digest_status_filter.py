@@ -24,9 +24,9 @@ def _profile_owned_by(s, owner_id) -> int:
 
 def test_candidate_query_excludes_non_active(pg_session_factory):
     with pg_session_factory() as s:
-        active = User(email="active@ki.se", status="active")
-        disabled = User(email="disabled@ki.se", status="disabled")
-        pending = User(email="pending@ki.se", status="pending")
+        active = User(email="active@umu.se", status="active")
+        disabled = User(email="disabled@umu.se", status="disabled")
+        pending = User(email="pending@umu.se", status="pending")
         s.add_all([active, disabled, pending])
         s.flush()
         for u in (active, disabled, pending):
@@ -34,13 +34,13 @@ def test_candidate_query_excludes_non_active(pg_session_factory):
         s.commit()
         ids = set(candidate_user_ids(s))
         emails = {s.get(User, i).email for i in ids}
-    assert "active@ki.se" in emails
-    assert "disabled@ki.se" not in emails and "pending@ki.se" not in emails
+    assert "active@umu.se" in emails
+    assert "disabled@umu.se" not in emails and "pending@umu.se" not in emails
 
 
 def test_assemble_returns_none_for_non_active(pg_session_factory):
     with pg_session_factory() as s:
-        u = User(email="d@ki.se", status="disabled")
+        u = User(email="d@umu.se", status="disabled")
         s.add(u)
         s.flush()
         s.add(Subscription(user_id=u.id, profile_id=_profile_owned_by(s, u.id)))

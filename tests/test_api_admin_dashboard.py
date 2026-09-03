@@ -18,13 +18,13 @@ from call_manager.main import create_app
 def _setup(monkeypatch, pg_url, *, model="bge-m3"):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     monkeypatch.setenv("EMBEDDING_MODEL", model)
     return create_app()
 
 
-def _admin(app, sf, test_client_factory, *, email="root@ki.se"):
+def _admin(app, sf, test_client_factory, *, email="root@umu.se"):
     with sf() as s:
         u = User(status="active", email=email, is_admin=True)
         s.add(u)
@@ -36,7 +36,7 @@ def _admin(app, sf, test_client_factory, *, email="root@ki.se"):
     return c, uid
 
 
-def _nonadmin(app, sf, test_client_factory, *, email="alice@ki.se"):
+def _nonadmin(app, sf, test_client_factory, *, email="alice@umu.se"):
     with sf() as s:
         u = User(status="active", email=email, is_admin=False)
         s.add(u)
@@ -129,10 +129,10 @@ def test_dashboard_digest_panel(monkeypatch, pg_url, pg_session_factory, test_cl
     with pg_session_factory() as s:
         s.add(DigestRun(user_id=uid, sent_at=now, included_call_ids=[1, 2]))
         s.add(
-            User(status="active", email="older@ki.se", digest_disabled_at=now - timedelta(days=3))
+            User(status="active", email="older@umu.se", digest_disabled_at=now - timedelta(days=3))
         )
         s.add(
-            User(status="active", email="newer@ki.se", digest_disabled_at=now - timedelta(hours=1))
+            User(status="active", email="newer@umu.se", digest_disabled_at=now - timedelta(hours=1))
         )
         s.commit()
     d = c.get("/api/admin/dashboard").json()["digest"]
@@ -140,7 +140,7 @@ def test_dashboard_digest_panel(monkeypatch, pg_url, pg_session_factory, test_cl
     assert d["last_sent_at"] is not None
     assert d["disabled_users"] == 2
     emails = [r["email"] for r in d["disabled_user_rows"]]
-    assert emails == ["newer@ki.se", "older@ki.se"]  # most-recent-first
+    assert emails == ["newer@umu.se", "older@umu.se"]  # most-recent-first
     assert set(d["disabled_user_rows"][0]) == {"id", "email", "disabled_at"}
 
 
@@ -183,7 +183,7 @@ def test_dashboard_embedding_coverage(monkeypatch, pg_url, pg_session_factory, t
                 published_at=datetime.now(UTC),
             )
         )
-        owner = User(status="active", email="owner@ki.se")
+        owner = User(status="active", email="owner@umu.se")
         s.add(owner)
         s.flush()
         s.add(
@@ -221,7 +221,7 @@ def test_dashboard_coverage_excludes_blank_profiles_counts_areas_only(
     app = _setup(monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory, test_client_factory)
     with pg_session_factory() as s:
-        owner = User(status="active", email="owner2@ki.se")
+        owner = User(status="active", email="owner2@umu.se")
         s.add(owner)
         s.flush()
         # blank description, no areas -> excluded from total entirely

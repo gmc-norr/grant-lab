@@ -199,7 +199,7 @@ def test_post_citation_git_path_severed_when_flag_flips_after_guard(
     from call_manager.proposal_assist.citations.human_cite import insert_citation_for_user
 
     with pg_session_factory() as s:
-        ws, repo = _seed(s, tmp_path, make_user(s, email="sever-cite@ki.se"), enable=("draft",))
+        ws, repo = _seed(s, tmp_path, make_user(s, email="sever-cite@umu.se"), enable=("draft",))
         s.commit()
         head_before = current_head(repo)
         with pytest.raises(CollabSeveranceConflict):
@@ -238,7 +238,7 @@ def test_citation_accept_replay_severed_when_flag_flips_after_guard(
     from call_manager.proposal_assist.proposals.proposing import propose_citation_insert
 
     with pg_session_factory() as s:
-        owner = make_user(s, email="sever-accept@ki.se")
+        owner = make_user(s, email="sever-accept@umu.se")
         ws, repo = _seed(s, tmp_path, owner, enable=("draft",))
         sec = split_sections(DOC)[1]
         pc = propose_citation_insert(
@@ -257,7 +257,7 @@ def test_citation_accept_replay_severed_when_flag_flips_after_guard(
         pc_id, wid = pc.id, ws.id
         head_before = current_head(repo)
     with pg_session_factory() as s:
-        approver = make_user(s, email="sever-approver@ki.se")
+        approver = make_user(s, email="sever-approver@umu.se")
         s.flush()
         # The workspace is live at generation 0; the stamp the route would thread
         # from require_member. The severance recheck runs UNDER the mutex, so the

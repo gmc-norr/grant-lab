@@ -8,7 +8,7 @@ import { Settings } from "./Settings";
 afterEach(() => { vi.restoreAllMocks(); });
 
 const SETTINGS = {
-  name: "Pär", email: "p@ki.se", is_admin: false,
+  name: "Pär", email: "p@umu.se", is_admin: false,
   google_oidc_enabled: true, google_linked: false, has_password: true,
   profiles: [
     { id: 1, name: "Group A", subscribed: true },
@@ -24,7 +24,7 @@ it("renders the sections from the settings read-model", async () => {
   mockGet();
   renderWithProviders(<Settings />);
   expect(await screen.findByDisplayValue("Pär")).toBeInTheDocument();
-  expect(screen.getByText("p@ki.se")).toBeInTheDocument();
+  expect(screen.getByText("p@umu.se")).toBeInTheDocument();
   expect(screen.getByRole("heading", { name: /change password/i })).toBeInTheDocument();
   expect(screen.getByRole("heading", { name: /google sign-in/i })).toBeInTheDocument();
   expect(screen.getByRole("checkbox", { name: /Group A/ })).toBeChecked();

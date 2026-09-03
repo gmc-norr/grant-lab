@@ -20,7 +20,7 @@ function renderAt(path: string) {
   );
 }
 
-const ME = { data: { user: { id: 1, email: "p@ki.se", status: "active", default_profile_id: null }, capabilities: { admin: false } }, error: undefined };
+const ME = { data: { user: { id: 1, email: "p@umu.se", status: "active", default_profile_id: null }, capabilities: { admin: false } }, error: undefined };
 const META = (title: string) => ({ data: { workspace_title: title, workspace_deadline: null, current_phase: "active", role: "owner", spec_locked: false, member_count: 1 }, error: undefined });
 
 it("shows the workspace title on the cockpit", async () => {
@@ -62,7 +62,7 @@ it("shows the signed-in email chip and a working sign-out", async () => {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue(ME as never);
   const post = vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { ok: true }, error: undefined } as never);
   renderAt("/");
-  expect(await screen.findByText("p@ki.se")).toBeInTheDocument();
+  expect(await screen.findByText("p@umu.se")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: /sign out/i }));
   await waitFor(() => expect(post).toHaveBeenCalledWith("/api/auth/logout", {}));
   await waitFor(() => expect(assign).toHaveBeenCalledWith("/login"));

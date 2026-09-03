@@ -62,13 +62,13 @@ def test_the_same_name_in_two_workspaces_is_fine(pg_session_factory):
     second one silently at backfill time."""
     with pg_session_factory() as s:
         # Distinct owners: make_user's default email is the fixed literal
-        # "owner@ki.se" (tests/proposal_assist/conftest.py:200-204), so two
+        # "owner@umu.se" (tests/proposal_assist/conftest.py:200-204), so two
         # make_workspace() calls with no owner= in the same session collide
         # on uq_users_email. That collision is incidental to this test's
         # subject (Branch.name uniqueness), so give each workspace its own
         # owner rather than let an unrelated fixture collision mask it.
-        a = make_workspace(s, title="a", owner=make_user(s, email="branch-test-a@ki.se")).id
-        b = make_workspace(s, title="b", owner=make_user(s, email="branch-test-b@ki.se")).id
+        a = make_workspace(s, title="a", owner=make_user(s, email="branch-test-a@umu.se")).id
+        b = make_workspace(s, title="b", owner=make_user(s, email="branch-test-b@umu.se")).id
         s.commit()
 
     with pg_session_factory() as s:
@@ -462,12 +462,12 @@ def test_one_broken_repo_does_not_halt_the_rest(pg_session_factory, tmp_path):
     founded, and the unique key makes the retry fail differently."""
     with pg_session_factory() as s:
         # Distinct owners: make_user's default email is the fixed literal
-        # "owner@ki.se" (tests/proposal_assist/conftest.py:200-204), so two
+        # "owner@umu.se" (tests/proposal_assist/conftest.py:200-204), so two
         # make_workspace() calls with no owner= in the same session collide
         # on uq_users_email, same as test_the_same_name_in_two_workspaces_is_fine
         # above.
-        good_owner = make_user(s, email="broken-repo-good@ki.se")
-        bad_owner = make_user(s, email="broken-repo-bad@ki.se")
+        good_owner = make_user(s, email="broken-repo-good@umu.se")
+        bad_owner = make_user(s, email="broken-repo-bad@umu.se")
         good = make_workspace(s, title="good", owner=good_owner).id
         bad = make_workspace(s, title="bad", owner=bad_owner).id
         s.commit()
@@ -500,8 +500,8 @@ def test_reconciling_survives_the_root_branchs_ref_being_deleted(pg_session_fact
     else — asserting only on the broken workspace would miss the collateral.
     """
     with pg_session_factory() as s:
-        broken = make_workspace(s, title="broken", owner=make_user(s, email="br@ki.se")).id
-        other = make_workspace(s, title="other", owner=make_user(s, email="ot@ki.se")).id
+        broken = make_workspace(s, title="broken", owner=make_user(s, email="br@umu.se")).id
+        other = make_workspace(s, title="other", owner=make_user(s, email="ot@umu.se")).id
         s.commit()
     for wid in (broken, other):
         _repo(tmp_path, wid, "main", extra=("new_ideas",))
@@ -541,7 +541,7 @@ def test_a_rootless_workspace_whose_root_ref_vanished_is_left_honestly_rootless(
     surviving branch would silently promote something nobody chose, and §7.3 gives
     that power to promote alone."""
     with pg_session_factory() as s:
-        wid = make_workspace(s, title="w", owner=make_user(s, email="rootless@ki.se")).id
+        wid = make_workspace(s, title="w", owner=make_user(s, email="rootless@umu.se")).id
         s.commit()
     _repo(tmp_path, wid, "main", extra=("new_ideas",))
 
@@ -569,7 +569,7 @@ def test_a_surviving_root_pointer_is_not_cleared_by_an_unrelated_orphan(
     would silently unroot every healthy workspace that happened to have a stale
     row lying around."""
     with pg_session_factory() as s:
-        wid = make_workspace(s, title="w", owner=make_user(s, email="survive@ki.se")).id
+        wid = make_workspace(s, title="w", owner=make_user(s, email="survive@umu.se")).id
         s.commit()
     _repo(tmp_path, wid, "main")
 
@@ -740,7 +740,7 @@ def test_reconciling_after_a_switch_does_not_move_the_root(pg_session_factory, t
     actually matters is that the root stays undeletable.
     """
     with pg_session_factory() as s:
-        wid = make_workspace(s, title="w", owner=make_user(s, email="noswitch@ki.se")).id
+        wid = make_workspace(s, title="w", owner=make_user(s, email="noswitch@umu.se")).id
         s.commit()
     repo = _repo(tmp_path, wid, "main", extra=("new_ideas",))
 
@@ -791,8 +791,8 @@ def test_a_workspace_with_no_repo_is_counted_absent_not_silently_zero(pg_session
     prints the same clean zero an empty instance prints. Counting them is what
     makes those two distinguishable in the migration's output."""
     with pg_session_factory() as s:
-        a = make_workspace(s, title="a", owner=make_user(s, email="abs-a@ki.se")).id
-        make_workspace(s, title="b", owner=make_user(s, email="abs-b@ki.se"))
+        a = make_workspace(s, title="a", owner=make_user(s, email="abs-a@umu.se")).id
+        make_workspace(s, title="b", owner=make_user(s, email="abs-b@umu.se"))
         s.commit()
     _repo(tmp_path, a, "main")  # one real repo, one workspace with none
 
@@ -983,8 +983,8 @@ def test_an_unreadable_directory_skips_one_workspace_not_the_batch(pg_session_fa
     import os
 
     with pg_session_factory() as s:
-        bad = make_workspace(s, title="bad", owner=make_user(s, email="bad@ki.se")).id
-        good = make_workspace(s, title="good", owner=make_user(s, email="good@ki.se")).id
+        bad = make_workspace(s, title="bad", owner=make_user(s, email="bad@umu.se")).id
+        good = make_workspace(s, title="good", owner=make_user(s, email="good@umu.se")).id
         s.commit()
     _repo(tmp_path, good, "main")
 
@@ -1083,7 +1083,7 @@ def test_every_arm_of_the_skip_handler_is_reachable(pg_session_factory, tmp_path
     while an arm is missing.
     """
     with pg_session_factory() as s:
-        wid = make_workspace(s, title="w", owner=make_user(s, email="arm@ki.se")).id
+        wid = make_workspace(s, title="w", owner=make_user(s, email="arm@umu.se")).id
         s.commit()
     _repo(tmp_path, wid, "main")
 
@@ -1117,8 +1117,8 @@ def test_the_workspace_id_narrowing_touches_only_that_workspace(pg_session_facto
     no rows, no pointer — and the counts must describe one workspace, not two.
     """
     with pg_session_factory() as s:
-        mine = make_workspace(s, title="mine", owner=make_user(s, email="narrow-a@ki.se")).id
-        other = make_workspace(s, title="other", owner=make_user(s, email="narrow-b@ki.se")).id
+        mine = make_workspace(s, title="mine", owner=make_user(s, email="narrow-a@umu.se")).id
+        other = make_workspace(s, title="other", owner=make_user(s, email="narrow-b@umu.se")).id
         s.commit()
     _repo(tmp_path, mine, "main")
     _repo(tmp_path, other, "main", extra=("new_ideas",))

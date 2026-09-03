@@ -59,7 +59,7 @@ class _FakeOllama:
 
 
 def _seed_ranked_pair(s, ext):
-    u = User(email=f"{ext}@ki.se")
+    u = User(email=f"{ext}@umu.se")
     s.add(u)
     s.flush()
     p = Profile(

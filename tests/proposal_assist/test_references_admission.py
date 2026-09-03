@@ -42,7 +42,7 @@ async def test_fetch_reference_returns_busy_when_limiter_exhausted(pg_session_fa
 
     # Seed workspace + running TurnJob.
     with pg_session_factory() as s:
-        owner = User(email=f"o-{_uuid.uuid4()}@ki.se")
+        owner = User(email=f"o-{_uuid.uuid4()}@umu.se")
         s.add(owner)
         s.flush()
         ws = Workspace(owner_id=owner.id, title="T")

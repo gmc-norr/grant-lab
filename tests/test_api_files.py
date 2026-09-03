@@ -21,9 +21,9 @@ def _png_bytes(width: int = 4, height: int = 4) -> bytes:
 def _setup(pg_session_factory):
     """Return (ws_id, owner_id, member_id, stranger_id). member is a viewer."""
     with pg_session_factory() as s:
-        owner = make_user(s, email="owner@ki.se")
-        member = make_user(s, email="member@ki.se")
-        stranger = make_user(s, email="stranger@ki.se")
+        owner = make_user(s, email="owner@umu.se")
+        member = make_user(s, email="member@umu.se")
+        stranger = make_user(s, email="stranger@umu.se")
         ws = make_workspace(s, owner=owner)
         s.commit()
         add_member(s, workspace_id=ws.id, user=member)
@@ -158,7 +158,7 @@ def test_api_serve_file_cross_workspace_404(monkeypatch, pg_url, tmp_path, pg_se
     app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
     ws_a, _, member_a, _ = _setup(pg_session_factory)
     with pg_session_factory() as s:
-        owner_b = make_user(s, email="ownerb@ki.se")
+        owner_b = make_user(s, email="ownerb@umu.se")
         ws_b = make_workspace(s, owner=owner_b)
         s.commit()
         ws_b_id, owner_b_id = ws_b.id, owner_b.id

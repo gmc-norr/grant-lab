@@ -28,7 +28,7 @@ def _pending_coherence(s, ws_id, job_id, section=0):
 def test_enqueue_create_or_return_active(pg_session_factory):
     with pg_session_factory() as s:
         ws = make_workspace(s)
-        u = make_user(s, email="req@ki.se")
+        u = make_user(s, email="req@umu.se")
         s.flush()
         first = jobs.enqueue_coherence_run(s, workspace_id=ws.id, requested_by=u.id)
         s.flush()
@@ -45,7 +45,7 @@ def test_claim_skips_workspace_with_running(pg_session_factory):
         # Different workspace has a queued job that SHOULD be claimable.
         # Distinct owner: make_user's default email is fixed (not unique-per-call),
         # so a second make_workspace(s) with the default owner UNIQUE-collides.
-        ws2 = make_workspace(s, owner=make_user(s, email="ws2-owner@ki.se"))
+        ws2 = make_workspace(s, owner=make_user(s, email="ws2-owner@umu.se"))
         s.flush()
         q = CoherenceJob(workspace_id=ws2.id, status="queued")
         s.add(q)

@@ -202,8 +202,8 @@ def test_reference_citekey_unique_per_workspace(pg_session_factory):
         )
 
     with pg_session_factory() as s:
-        ws_a = make_workspace(s, owner=make_user(s, email="a@ki.se"))
-        ws_b = make_workspace(s, owner=make_user(s, email="b@ki.se"))
+        ws_a = make_workspace(s, owner=make_user(s, email="a@umu.se"))
+        ws_b = make_workspace(s, owner=make_user(s, email="b@umu.se"))
         s.commit()
         a, b = ws_a.id, ws_b.id
 

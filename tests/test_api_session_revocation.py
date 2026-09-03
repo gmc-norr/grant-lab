@@ -3,6 +3,7 @@ signal_user_revocation, and with which close code. The teardown primitive itself
 is unit-tested in tests/proposal_assist/collab/test_collab_revoke_user.py; here we
 patch signal_user_revocation in each route module's namespace and assert the wiring
 (target user_id + close code), so these tests stay fast and DB-only."""
+
 from fastapi.testclient import TestClient
 
 from call_manager.auth.passwords import hash_password
@@ -14,7 +15,7 @@ def _app(monkeypatch, pg_url):
     for k, v in {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://testserver",
     }.items():
         monkeypatch.setenv(k, v)
@@ -61,12 +62,12 @@ def _capture(monkeypatch, module_path):
 
 def test_logout_signals_revocation_1008(monkeypatch, pg_url, pg_session_factory):
     app = _app(monkeypatch, pg_url)
-    uid = _user(app.state.session_factory, email="lo@ki.se", password="correct-horse-1")
+    uid = _user(app.state.session_factory, email="lo@umu.se", password="correct-horse-1")
     calls = _capture(monkeypatch, "call_manager.web.api.auth")
     with _client(app, uid) as c:
         r = c.post("/api/auth/logout")
     assert r.status_code == 200
-    assert calls == [(uid, 1008)]   # terminal close
+    assert calls == [(uid, 1008)]  # terminal close
 
 
 def test_logout_without_cookie_does_not_signal(monkeypatch, pg_url, pg_session_factory):
@@ -75,12 +76,12 @@ def test_logout_without_cookie_does_not_signal(monkeypatch, pg_url, pg_session_f
     with TestClient(app) as c:
         r = c.post("/api/auth/logout")
     assert r.status_code == 200
-    assert calls == []              # no user resolved -> nothing to revoke
+    assert calls == []  # no user resolved -> nothing to revoke
 
 
 def test_change_password_signals_revocation_1012(monkeypatch, pg_url, pg_session_factory):
     app = _app(monkeypatch, pg_url)
-    uid = _user(app.state.session_factory, email="cp@ki.se", password="oldpassword12")
+    uid = _user(app.state.session_factory, email="cp@umu.se", password="oldpassword12")
     calls = _capture(monkeypatch, "call_manager.web.api.me")
     with _client(app, uid) as c:
         r = c.post(
@@ -88,13 +89,13 @@ def test_change_password_signals_revocation_1012(monkeypatch, pg_url, pg_session
             json={"current_password": "oldpassword12", "new_password": "newlongpassword"},
         )
     assert r.status_code == 200
-    assert calls == [(uid, 1012)]   # reconnectable: the acting browser re-mints + reconnects
+    assert calls == [(uid, 1012)]  # reconnectable: the acting browser re-mints + reconnects
 
 
 def test_admin_disable_signals_1008(monkeypatch, pg_url, pg_session_factory):
     app = _app(monkeypatch, pg_url)
-    aid = _user(app.state.session_factory, email="adm@ki.se", is_admin=True)
-    tid = _user(app.state.session_factory, email="tgt@ki.se")
+    aid = _user(app.state.session_factory, email="adm@umu.se", is_admin=True)
+    tid = _user(app.state.session_factory, email="tgt@umu.se")
     calls = _capture(monkeypatch, "call_manager.web.api.admin_users")
     with _client(app, aid) as c:
         r = c.post(f"/api/admin/users/{tid}/disable")
@@ -104,8 +105,8 @@ def test_admin_disable_signals_1008(monkeypatch, pg_url, pg_session_factory):
 
 def test_admin_reset_password_signals_1008(monkeypatch, pg_url, pg_session_factory):
     app = _app(monkeypatch, pg_url)
-    aid = _user(app.state.session_factory, email="adm2@ki.se", is_admin=True)
-    tid = _user(app.state.session_factory, email="tgt2@ki.se")
+    aid = _user(app.state.session_factory, email="adm2@umu.se", is_admin=True)
+    tid = _user(app.state.session_factory, email="tgt2@umu.se")
     calls = _capture(monkeypatch, "call_manager.web.api.admin_users")
     with _client(app, aid) as c:
         r = c.post(
@@ -118,8 +119,8 @@ def test_admin_reset_password_signals_1008(monkeypatch, pg_url, pg_session_facto
 
 def test_admin_approve_with_password_signals_1008(monkeypatch, pg_url, pg_session_factory):
     app = _app(monkeypatch, pg_url)
-    aid = _user(app.state.session_factory, email="adm3@ki.se", is_admin=True)
-    tid = _user(app.state.session_factory, email="pend@ki.se", status="pending")
+    aid = _user(app.state.session_factory, email="adm3@umu.se", is_admin=True)
+    tid = _user(app.state.session_factory, email="pend@umu.se", status="pending")
     calls = _capture(monkeypatch, "call_manager.web.api.admin_users")
     with _client(app, aid) as c:
         r = c.post(
@@ -127,29 +128,31 @@ def test_admin_approve_with_password_signals_1008(monkeypatch, pg_url, pg_sessio
             json={"role": "member", "initial_password": "newlongpassword"},
         )
     assert r.status_code == 200
-    assert calls == [(tid, 1008)]   # a credential was issued -> revoke prior sessions
+    assert calls == [(tid, 1008)]  # a credential was issued -> revoke prior sessions
 
 
 def test_admin_approve_oidc_without_password_does_not_signal(
     monkeypatch, pg_url, pg_session_factory
 ):
     app = _app(monkeypatch, pg_url)
-    aid = _user(app.state.session_factory, email="adm4@ki.se", is_admin=True)
-    tid = _user(app.state.session_factory, email="goog@ki.se", status="pending", oidc_sub="sub-xyz")
+    aid = _user(app.state.session_factory, email="adm4@umu.se", is_admin=True)
+    tid = _user(
+        app.state.session_factory, email="goog@umu.se", status="pending", oidc_sub="sub-xyz"
+    )
     calls = _capture(monkeypatch, "call_manager.web.api.admin_users")
     with _client(app, aid) as c:
         r = c.post(f"/api/admin/users/{tid}/approve", json={"role": "member"})
     assert r.status_code == 200
-    assert calls == []              # no epoch bump (no credential issued) -> no revoke
+    assert calls == []  # no epoch bump (no credential issued) -> no revoke
 
 
 def test_admin_enable_and_change_role_do_not_signal(monkeypatch, pg_url, pg_session_factory):
     app = _app(monkeypatch, pg_url)
-    aid = _user(app.state.session_factory, email="adm5@ki.se", is_admin=True)
-    disabled = _user(app.state.session_factory, email="dis@ki.se", status="disabled")
-    active = _user(app.state.session_factory, email="act@ki.se")
+    aid = _user(app.state.session_factory, email="adm5@umu.se", is_admin=True)
+    disabled = _user(app.state.session_factory, email="dis@umu.se", status="disabled")
+    active = _user(app.state.session_factory, email="act@umu.se")
     calls = _capture(monkeypatch, "call_manager.web.api.admin_users")
     with _client(app, aid) as c:
         assert c.post(f"/api/admin/users/{disabled}/enable").status_code == 200
         assert c.post(f"/api/admin/users/{active}/role", json={"role": "admin"}).status_code == 200
-    assert calls == []              # neither bumps session_epoch -> neither revokes
+    assert calls == []  # neither bumps session_epoch -> neither revokes

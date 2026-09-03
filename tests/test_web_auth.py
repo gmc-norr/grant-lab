@@ -13,7 +13,7 @@ _PW = "irrelevant-but-long"
 def _mk_app(monkeypatch, pg_url):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     app = create_app()
     sender = InMemoryEmailSender()
@@ -31,7 +31,7 @@ def test_login_rejects_oversized_email_without_consuming_limiter(
     (memory-amplification DoS) and must not reach the DB.
     """
     app, _ = _mk_app(monkeypatch, pg_url)
-    huge = "a" * 400 + "@ki.se"
+    huge = "a" * 400 + "@umu.se"
 
     with TestClient(app) as client:
         r = client.post("/api/auth/login", json={"email": huge, "password": _PW})
@@ -52,12 +52,12 @@ def test_trusted_proxy_reads_x_forwarded_for(monkeypatch, pg_url, pg_session_fac
     with TestClient(app) as client:
         client.post(
             "/api/auth/login",
-            json={"email": "a@ki.se", "password": _PW},
+            json={"email": "a@umu.se", "password": _PW},
             headers={"X-Forwarded-For": "1.1.1.1"},
         )
         client.post(
             "/api/auth/login",
-            json={"email": "b@ki.se", "password": _PW},
+            json={"email": "b@umu.se", "password": _PW},
             headers={"X-Forwarded-For": "2.2.2.2"},
         )
 
@@ -81,7 +81,7 @@ def test_trusted_proxy_picks_rightmost_xff_to_resist_spoofing(
     with TestClient(app) as client:
         client.post(
             "/api/auth/login",
-            json={"email": "a@ki.se", "password": _PW},
+            json={"email": "a@umu.se", "password": _PW},
             # Attacker spoofs "1.1.1.1" at the head; proxy appended the real
             # peer "9.9.9.9" at the tail. The bucket key must be 9.9.9.9.
             headers={"X-Forwarded-For": "1.1.1.1, 9.9.9.9"},
@@ -100,7 +100,7 @@ def test_untrusted_proxy_ignores_x_forwarded_for(monkeypatch, pg_url, pg_session
     with TestClient(app) as client:
         client.post(
             "/api/auth/login",
-            json={"email": "a@ki.se", "password": _PW},
+            json={"email": "a@umu.se", "password": _PW},
             headers={"X-Forwarded-For": "9.9.9.9"},
         )
 
@@ -123,7 +123,7 @@ def test_api_admin_forbidden_for_non_admin(monkeypatch, pg_url, pg_session_facto
     from call_manager.db.models import User
 
     with pg_session_factory() as s:
-        u = User(status="active", email="plain@ki.se", is_admin=False)
+        u = User(status="active", email="plain@umu.se", is_admin=False)
         s.add(u)
         s.commit()
         s.refresh(u)

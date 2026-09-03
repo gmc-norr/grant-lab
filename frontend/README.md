@@ -23,7 +23,7 @@ An unknown/typo path therefore still reaches **FastAPI's real 404** in dev.
 # else create_app() won't start):
 SPA_MODE=dev APP_BASE_URL=http://localhost:5173 \
   DATABASE_URL=postgresql+psycopg://... SESSION_SECRET=dev-secret-at-least-16-chars \
-  ALLOWED_EMAIL_DOMAINS=ki.se \
+  ALLOWED_EMAIL_DOMAINS=umu.se \
   uv run uvicorn call_manager.main:create_app --factory --reload --port 8000
 
 # Terminal 2 — frontend:

@@ -76,7 +76,7 @@ def _seed_reference(s, workspace_id, *, chunk_text, citekey=None):
 def test_accept_prose_applies_and_records_approver(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
         ws, repo = _setup(s, tmp_path)
-        approver = make_user(s, email="approver@ki.se")
+        approver = make_user(s, email="approver@umu.se")
         s.flush()
         base_commit, base_section = capture_base(repo, 1)
         pc = propose_prose_edit(
@@ -110,7 +110,7 @@ def test_accept_prose_applies_and_records_approver(pg_session_factory, tmp_path)
 def test_accept_non_pending_is_rejected(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
         ws, repo = _setup(s, tmp_path)
-        approver = make_user(s, email="approver@ki.se")
+        approver = make_user(s, email="approver@umu.se")
         s.flush()
         base_commit, base_section = capture_base(repo, 1)
         pc = propose_prose_edit(
@@ -140,7 +140,7 @@ def test_accept_does_not_clobber_human_edit_race(pg_session_factory, tmp_path):
     # the proposal is accepted. Accept must go stale, not overwrite (finding #1).
     with pg_session_factory() as s:
         ws, repo = _setup(s, tmp_path)
-        approver = make_user(s, email="approver@ki.se")
+        approver = make_user(s, email="approver@umu.se")
         s.flush()
 
         base_commit, base_section = capture_base(repo, 1)  # T0: proposer's read
@@ -197,9 +197,9 @@ def test_accept_rejects_mismatched_workspace(pg_session_factory, tmp_path):
     # by calling it under B's path (finding #2).
     with pg_session_factory() as s:
         ws, repo = _setup(s, tmp_path)
-        other_owner = make_user(s, email="other-owner@ki.se")
+        other_owner = make_user(s, email="other-owner@umu.se")
         other = make_workspace(s, owner=other_owner)
-        approver = make_user(s, email="approver@ki.se")
+        approver = make_user(s, email="approver@umu.se")
         s.flush()
         base_commit, base_section = capture_base(repo, 1)
         pc = propose_prose_edit(
@@ -230,7 +230,7 @@ def test_accept_noop_proposal_is_accepted_at_current_head(pg_session_factory, tm
     # return contract for the changed=False path).
     with pg_session_factory() as s:
         ws, repo = _setup(s, tmp_path)
-        approver = make_user(s, email="approver@ki.se")
+        approver = make_user(s, email="approver@umu.se")
         s.flush()
         base_commit, base_section = capture_base(repo, 1)
         live_text = split_sections((repo / PROPOSAL_FILENAME).read_text())[1].text
@@ -268,7 +268,7 @@ def test_accept_rejects_non_prose_spec_kind(pg_session_factory, tmp_path):
     # never a silent 500 or a misdirected save_section replay.
     with pg_session_factory() as s:
         ws, repo = _setup(s, tmp_path)
-        approver = make_user(s, email="approver@ki.se")
+        approver = make_user(s, email="approver@umu.se")
         s.flush()
         rid = _seed_reference(s, ws.id, chunk_text=CHUNK_TEXT, citekey="smith2021")
         base_commit, base_section = capture_base(repo, 1)
@@ -304,7 +304,7 @@ CHUNK_TEXT = "Adjuvant therapy reduces recurrence by 30% in the treated cohort."
 def test_accept_citation_inserts_marker_and_ledger_row(pg_session_factory, tmp_path):
     with pg_session_factory() as s:
         ws, repo = _setup(s, tmp_path)
-        approver = make_user(s, email="approver@ki.se")
+        approver = make_user(s, email="approver@umu.se")
         s.flush()
         rid = _seed_reference(s, ws.id, chunk_text=CHUNK_TEXT, citekey="smith2021")
         base_commit, base_section = capture_base(repo, 1)
@@ -356,7 +356,7 @@ def test_accept_citation_verify_fail_goes_stale(pg_session_factory, tmp_path):
     # StaleSectionError->stale), stamped with the resolver, NO marker written.
     with pg_session_factory() as s:
         ws, repo = _setup(s, tmp_path)
-        approver = make_user(s, email="approver@ki.se")
+        approver = make_user(s, email="approver@umu.se")
         s.flush()
         rid = _seed_reference(s, ws.id, chunk_text=CHUNK_TEXT, citekey="smith2021")
         base_commit, base_section = capture_base(repo, 1)
@@ -402,7 +402,7 @@ def test_accept_citation_atomic_when_citekey_cache_branch_runs(pg_session_factor
     # branch; the citekey="smith2021" tests above skip it and would mask the bug.)
     with pg_session_factory() as s:
         ws, repo = _setup(s, tmp_path)
-        approver = make_user(s, email="approver@ki.se")
+        approver = make_user(s, email="approver@umu.se")
         s.flush()
         rid = _seed_reference(s, ws.id, chunk_text=CHUNK_TEXT, citekey=None)
         base_commit, base_section = capture_base(repo, 1)
@@ -529,7 +529,7 @@ def test_reject_sets_status_and_approver(pg_session_factory, tmp_path):
 
     with pg_session_factory() as s:
         ws, repo = _setup(s, tmp_path)
-        approver = make_user(s, email="approver@ki.se")
+        approver = make_user(s, email="approver@umu.se")
         s.flush()
         base_commit, base_section = capture_base(repo, 1)
         pc = propose_prose_edit(
@@ -571,7 +571,7 @@ def test_citation_accept_citekey_cache_integrity_error_is_savepointed(pg_session
 
     with pg_session_factory() as s:
         ws, repo = _setup(s, tmp_path)
-        approver = make_user(s, email="approver@ki.se")
+        approver = make_user(s, email="approver@umu.se")
         s.flush()
 
         # Seed reference B to own citekey="taken123" in this workspace.
@@ -640,7 +640,7 @@ def test_citation_accept_git_commit_error_is_retryable_not_stale(pg_session_fact
 
     with pg_session_factory() as s:
         ws, repo = _setup(s, tmp_path)
-        approver = make_user(s, email="approver@ki.se")
+        approver = make_user(s, email="approver@umu.se")
         s.flush()
         rid = _seed_reference(s, ws.id, chunk_text=CHUNK_TEXT, citekey="smith2021")
         base_commit, base_section = capture_base(repo, 1)

@@ -84,7 +84,7 @@ const LOCKED = {
     can_edit: false,
     locked: true,
     locked_at: "2026-06-20T10:00:00Z",
-    locked_by: "owner@ki.se",
+    locked_by: "owner@umu.se",
     can_manage_lock: true,
     sections: [
       { index: 0, heading: "", text: "", sha: "p" },
@@ -97,7 +97,7 @@ const LOCKED = {
 it("a locked spec shows the lock banner and an Unlock control for the owner", async () => {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue(LOCKED as never);
   renderPanel();
-  await screen.findByText(/Spec locked by owner@ki.se/i);
+  await screen.findByText(/Spec locked by owner@umu.se/i);
   expect(screen.getByRole("button", { name: /unlock spec/i })).toBeInTheDocument();
 });
 

@@ -7,7 +7,7 @@ from tests.proposal_assist.conftest import make_user, make_workspace
 
 def test_yjs_update_row_roundtrips_and_orders_by_id(pg_session_factory):
     with pg_session_factory() as s:
-        owner = make_user(s, email="yjs-owner@ki.se")
+        owner = make_user(s, email="yjs-owner@umu.se")
         ws = make_workspace(s, owner=owner)
         s.add(
             YjsUpdate(workspace_id=ws.id, artifact="draft", actor_id=owner.id, update_bytes=b"\x01")
@@ -36,7 +36,7 @@ def test_yjs_update_row_roundtrips_and_orders_by_id(pg_session_factory):
 
 def test_append_and_load_updates_are_room_scoped_and_ordered(pg_session_factory):
     with pg_session_factory() as s:
-        owner = make_user(s, email="store-owner@ki.se")
+        owner = make_user(s, email="store-owner@umu.se")
         ws = make_workspace(s, owner=owner)
         wid = ws.id
         uid = owner.id
@@ -55,7 +55,7 @@ def test_append_and_load_updates_are_room_scoped_and_ordered(pg_session_factory)
 
 def test_load_updates_empty_room_returns_empty_list(pg_session_factory):
     with pg_session_factory() as s:
-        owner = make_user(s, email="empty-room@ki.se")
+        owner = make_user(s, email="empty-room@umu.se")
         ws = make_workspace(s, owner=owner)
         s.commit()
         assert store.load_updates(s, workspace_id=ws.id, artifact="draft") == []
@@ -63,7 +63,7 @@ def test_load_updates_empty_room_returns_empty_list(pg_session_factory):
 
 def test_has_authored_updates_false_empty_false_seed_true_authored(pg_session_factory):
     with pg_session_factory() as s:
-        owner = make_user(s, email="authored-owner@ki.se")
+        owner = make_user(s, email="authored-owner@umu.se")
         ws = make_workspace(s, owner=owner)
         s.commit()
         wid, uid = ws.id, owner.id
@@ -90,7 +90,7 @@ def test_has_authored_updates_false_empty_false_seed_true_authored(pg_session_fa
 
 def test_find_checkpoint_candidates_counts_rows_excludes_softdeleted(pg_session_factory):
     with pg_session_factory() as s:
-        o = make_user(s, email="fcc-o@ki.se")
+        o = make_user(s, email="fcc-o@umu.se")
         ws1 = make_workspace(s, owner=o)   # lightly edited (1 uncheckpointed row)
         ws2 = make_workspace(s, owner=o)   # over threshold (3 uncheckpointed rows)
         ws3 = make_workspace(s, owner=o)   # over threshold BUT soft-deleted

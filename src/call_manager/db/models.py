@@ -38,7 +38,7 @@ class User(Base):
     __table_args__ = (
         # Defense in depth: the application always lowercases before insert,
         # but Postgres `UNIQUE(email)` is case-sensitive, so a rogue SQL
-        # admin task could create both `Alice@ki.se` and `alice@ki.se` and
+        # admin task could create both `Alice@umu.se` and `alice@umu.se` and
         # split a single person across two accounts. The CHECK forces
         # lowercase at the DB level — combined with UNIQUE(email), this
         # guarantees one row per address regardless of case.

@@ -88,8 +88,8 @@ def test_get_verdict_miss_returns_none(pg_session_factory):
 
 def test_workspace_isolation(pg_session_factory):
     with pg_session_factory() as s:
-        ws_a = make_workspace(s, owner=make_user(s, email="a@ki.se"))
-        ws_b = make_workspace(s, owner=make_user(s, email="b@ki.se"))
+        ws_a = make_workspace(s, owner=make_user(s, email="a@umu.se"))
+        ws_b = make_workspace(s, owner=make_user(s, email="b@umu.se"))
         s.commit()
         a_id, b_id = ws_a.id, ws_b.id
 

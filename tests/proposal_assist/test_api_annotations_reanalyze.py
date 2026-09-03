@@ -68,7 +68,7 @@ def test_reanalyze_non_owner_403(
 ):
     _app.state.settings.workspaces_dir = str(tmp_path)
     with pg_session_factory() as s:
-        stranger = make_user(s, email="stranger-re@ki.se")
+        stranger = make_user(s, email="stranger-re@umu.se")
         ws = make_workspace(s, owner=stranger)
         _init_repo(tmp_path, ws.id, DOC)
         s.commit()

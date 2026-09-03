@@ -81,7 +81,7 @@ def test_dismiss_already_resolved_409(client_authed_owner, current_user, pg_sess
 
 def test_dismiss_non_owner_403(client_authed_owner, current_user, pg_session_factory):
     with pg_session_factory() as s:
-        stranger = make_user(s, email="stranger-dis@ki.se")
+        stranger = make_user(s, email="stranger-dis@umu.se")
         ws, ann_id = _seed_open(s, stranger)
         s.commit()
         ws_id = ws.id

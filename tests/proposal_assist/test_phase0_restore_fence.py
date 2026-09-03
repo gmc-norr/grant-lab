@@ -53,7 +53,7 @@ def _stale_claim_after_restore(pg_session_factory, current_user, tmp_path, clien
     (running, claimed_at_generation=2). Returns what A needs to resume."""
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
-        admin = make_user(s, email="restore-admin@ki.se")
+        admin = make_user(s, email="restore-admin@umu.se")
         s.add(WorkspaceSetupJob(workspace_id=ws.id, status="queued"))
         s.commit()
         ws_id, admin_id = ws.id, admin.id

@@ -45,7 +45,7 @@ def test_whoami_returns_401_without_cookie(pg_url):
 def test_whoami_works_with_valid_cookie(pg_url, pg_session_factory):
     with _mk_app(pg_url) as (app, signer, _):
         with pg_session_factory() as s:
-            u = User(email="alice@ki.se", status="active")
+            u = User(email="alice@umu.se", status="active")
             s.add(u)
             s.commit()
             s.refresh(u)
@@ -55,7 +55,7 @@ def test_whoami_works_with_valid_cookie(pg_url, pg_session_factory):
             client.cookies.set("session", signer.make(user_id=uid))
             r = client.get("/whoami")
     assert r.status_code == 200
-    assert r.json()["email"] == "alice@ki.se"
+    assert r.json()["email"] == "alice@umu.se"
 
 
 def test_stale_epoch_cookie_rejected(pg_url, pg_session_factory):
@@ -63,7 +63,7 @@ def test_stale_epoch_cookie_rejected(pg_url, pg_session_factory):
     advances past N (logout / admin revocation)."""
     with _mk_app(pg_url) as (app, signer, _):
         with pg_session_factory() as s:
-            u = User(email="alice@ki.se", status="active")
+            u = User(email="alice@umu.se", status="active")
             s.add(u)
             s.commit()
             s.refresh(u)
@@ -86,7 +86,7 @@ def test_stale_epoch_cookie_rejected(pg_url, pg_session_factory):
 def test_require_admin_rejects_non_admin(pg_url, pg_session_factory):
     with _mk_app(pg_url) as (app, signer, _):
         with pg_session_factory() as s:
-            u = User(email="alice@ki.se", is_admin=False, status="active")
+            u = User(email="alice@umu.se", is_admin=False, status="active")
             s.add(u)
             s.commit()
             s.refresh(u)
@@ -101,7 +101,7 @@ def test_require_admin_rejects_non_admin(pg_url, pg_session_factory):
 def test_require_admin_allows_admin(pg_url, pg_session_factory):
     with _mk_app(pg_url) as (app, signer, _):
         with pg_session_factory() as s:
-            u = User(email="root@ki.se", is_admin=True, status="active")
+            u = User(email="root@umu.se", is_admin=True, status="active")
             s.add(u)
             s.commit()
             s.refresh(u)

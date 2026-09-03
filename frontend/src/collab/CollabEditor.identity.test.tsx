@@ -45,7 +45,7 @@ describe("CollabEditor identity (Slice 3b-5b #1: no Anonymous flash)", () => {
     // ever set — nothing "Anonymous" is broadcast.
     expect((stashed!.awareness.getLocalState() as any)?.user).toBeUndefined();
 
-    sessionData.value = { user: { id: 7, name: "Late Name", email: "late@ki.se" } };
+    sessionData.value = { user: { id: 7, name: "Late Name", email: "late@umu.se" } };
     rerender(<CollabEditor workspaceId="w" artifact="draft" canWrite />);
     await waitFor(() => {
       expect((stashed!.awareness.getLocalState() as any)?.user?.name).toBe("Late Name");

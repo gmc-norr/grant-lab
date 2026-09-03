@@ -40,7 +40,7 @@ def test_failure_streak_persisted_to_db(pg_session_factory):
     tracker = ConsecutiveFailureTracker(
         threshold=3,
         sender=sender,
-        admin_email="root@ki.se",
+        admin_email="root@umu.se",
         session_factory=pg_session_factory,
     )
 
@@ -60,7 +60,7 @@ def test_streak_survives_simulated_restart(pg_session_factory):
     tracker_before = ConsecutiveFailureTracker(
         threshold=3,
         sender=sender_before,
-        admin_email="root@ki.se",
+        admin_email="root@umu.se",
         session_factory=pg_session_factory,
     )
     # Record 2 failures — persist count=2, no alert yet.
@@ -75,7 +75,7 @@ def test_streak_survives_simulated_restart(pg_session_factory):
     tracker_after = ConsecutiveFailureTracker(
         threshold=3,
         sender=sender_after,
-        admin_email="root@ki.se",
+        admin_email="root@umu.se",
         session_factory=pg_session_factory,
     )
     # Fresh tracker must read from DB → count becomes 3 → alert fires.
@@ -95,7 +95,7 @@ def test_success_resets_consecutive_failures_in_db(pg_session_factory):
     tracker = ConsecutiveFailureTracker(
         threshold=3,
         sender=sender,
-        admin_email="root@ki.se",
+        admin_email="root@umu.se",
         session_factory=pg_session_factory,
     )
 
@@ -114,7 +114,7 @@ def test_alert_not_resent_on_continued_failure_after_restart(pg_session_factory)
     tracker1 = ConsecutiveFailureTracker(
         threshold=3,
         sender=sender1,
-        admin_email="root@ki.se",
+        admin_email="root@umu.se",
         session_factory=pg_session_factory,
     )
     for _ in range(3):
@@ -126,7 +126,7 @@ def test_alert_not_resent_on_continued_failure_after_restart(pg_session_factory)
     tracker2 = ConsecutiveFailureTracker(
         threshold=3,
         sender=sender2,
-        admin_email="root@ki.se",
+        admin_email="root@umu.se",
         session_factory=pg_session_factory,
     )
     tracker2.record_failure("vinnova", error="still broken")
@@ -139,7 +139,7 @@ def test_per_source_independence_persisted(pg_session_factory):
     tracker = ConsecutiveFailureTracker(
         threshold=3,
         sender=sender,
-        admin_email="root@ki.se",
+        admin_email="root@umu.se",
         session_factory=pg_session_factory,
     )
 
@@ -174,7 +174,7 @@ def test_in_memory_only_still_works():
     tracker = ConsecutiveFailureTracker(
         threshold=3,
         sender=sender,
-        admin_email="root@ki.se",
+        admin_email="root@umu.se",
         # No session_factory — pure in-memory
     )
     for _ in range(3):
@@ -204,7 +204,7 @@ def test_stale_source_triggers_alert(pg_session_factory):
     check_stale_sources(
         session_factory=pg_session_factory,
         sender=sender,
-        admin_email="root@ki.se",
+        admin_email="root@umu.se",
         stale_days=3,
     )
 
@@ -219,7 +219,7 @@ def test_stale_source_never_fetched_triggers_alert(pg_session_factory):
     check_stale_sources(
         session_factory=pg_session_factory,
         sender=sender,
-        admin_email="root@ki.se",
+        admin_email="root@umu.se",
         stale_days=3,
     )
 
@@ -241,7 +241,7 @@ def test_recently_fetched_source_no_alert(pg_session_factory):
     check_stale_sources(
         session_factory=pg_session_factory,
         sender=sender,
-        admin_email="root@ki.se",
+        admin_email="root@umu.se",
         stale_days=3,
     )
 
@@ -292,7 +292,7 @@ def test_stale_check_zero_failures_independent_of_streak(pg_session_factory):
     check_stale_sources(
         session_factory=pg_session_factory,
         sender=sender,
-        admin_email="root@ki.se",
+        admin_email="root@umu.se",
         stale_days=3,
     )
 
@@ -324,7 +324,7 @@ def test_stale_backstop_suppressed_within_cooldown(pg_session_factory):
     check_stale_sources(
         session_factory=pg_session_factory,
         sender=sender,
-        admin_email="root@ki.se",
+        admin_email="root@umu.se",
         stale_days=3,
     )
     assert len(sender.sent) == 1, "first stale check should alert"
@@ -337,7 +337,7 @@ def test_stale_backstop_suppressed_within_cooldown(pg_session_factory):
     check_stale_sources(
         session_factory=pg_session_factory,
         sender=sender,
-        admin_email="root@ki.se",
+        admin_email="root@umu.se",
         stale_days=3,
     )
     assert len(sender.sent) == 1, "stale backstop must not re-send within cooldown"
@@ -366,7 +366,7 @@ def test_stale_backstop_re_alerts_after_cooldown(pg_session_factory):
     check_stale_sources(
         session_factory=pg_session_factory,
         sender=sender,
-        admin_email="root@ki.se",
+        admin_email="root@umu.se",
         stale_days=3,
     )
     assert len(sender.sent) == 1, "cooldown elapsed ⇒ re-alert"

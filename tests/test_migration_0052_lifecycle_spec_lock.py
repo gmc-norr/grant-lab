@@ -36,8 +36,8 @@ def test_new_check_rejects_old_phase(pg_url):
     eng = create_engine(pg_url)
     try:
         with eng.begin() as c:
-            c.execute(text("INSERT INTO users (email) VALUES ('lck@ki.se')"))
-            uid = c.execute(text("SELECT id FROM users WHERE email='lck@ki.se'")).scalar_one()
+            c.execute(text("INSERT INTO users (email) VALUES ('lck@umu.se')"))
+            uid = c.execute(text("SELECT id FROM users WHERE email='lck@umu.se'")).scalar_one()
             c.execute(
                 text(
                     "INSERT INTO workspaces (id, title, owner_id, status, current_phase) "
@@ -51,7 +51,7 @@ def test_new_check_rejects_old_phase(pg_url):
                 c.execute(
                     text(
                         "UPDATE workspaces SET current_phase='draft' "
-                        "WHERE owner_id IN (SELECT id FROM users WHERE email='lck@ki.se')"
+                        "WHERE owner_id IN (SELECT id FROM users WHERE email='lck@umu.se')"
                     )
                 )
         except IntegrityError:
@@ -62,10 +62,10 @@ def test_new_check_rejects_old_phase(pg_url):
             c.execute(
                 text(
                     "DELETE FROM workspaces WHERE owner_id IN "
-                    "(SELECT id FROM users WHERE email='lck@ki.se')"
+                    "(SELECT id FROM users WHERE email='lck@umu.se')"
                 )
             )
-            c.execute(text("DELETE FROM users WHERE email='lck@ki.se'"))
+            c.execute(text("DELETE FROM users WHERE email='lck@umu.se'"))
         eng.dispose()
 
 
@@ -75,8 +75,8 @@ def test_data_migration_maps_old_phases_to_active(pg_url):
     try:
         command.downgrade(cfg, "0051")  # before this migration
         with eng.begin() as c:
-            c.execute(text("INSERT INTO users (email) VALUES ('mig@ki.se')"))
-            uid = c.execute(text("SELECT id FROM users WHERE email='mig@ki.se'")).scalar_one()
+            c.execute(text("INSERT INTO users (email) VALUES ('mig@umu.se')"))
+            uid = c.execute(text("SELECT id FROM users WHERE email='mig@umu.se'")).scalar_one()
             for phase in ("setup", "spec", "plan", "draft", "review"):
                 c.execute(
                     text(
@@ -90,7 +90,7 @@ def test_data_migration_maps_old_phases_to_active(pg_url):
             rows = c.execute(
                 text(
                     "SELECT title, current_phase, spec_locked_at FROM workspaces "
-                    "WHERE owner_id IN (SELECT id FROM users WHERE email='mig@ki.se')"
+                    "WHERE owner_id IN (SELECT id FROM users WHERE email='mig@umu.se')"
                 )
             ).all()
         by_title = {r.title: r for r in rows}
@@ -103,9 +103,9 @@ def test_data_migration_maps_old_phases_to_active(pg_url):
             c.execute(
                 text(
                     "DELETE FROM workspaces WHERE owner_id IN "
-                    "(SELECT id FROM users WHERE email='mig@ki.se')"
+                    "(SELECT id FROM users WHERE email='mig@umu.se')"
                 )
             )
-            c.execute(text("DELETE FROM users WHERE email='mig@ki.se'"))
+            c.execute(text("DELETE FROM users WHERE email='mig@umu.se'"))
         command.upgrade(cfg, "head")  # restore head for later tests
         eng.dispose()

@@ -59,7 +59,7 @@ def test_activity_resolves_rubric_edited_via_payload(
 ):
     ws_id = _ws(_app, current_user, pg_session_factory, tmp_path)
     with pg_session_factory() as s:
-        editor = User(status="active", email="editor@ki.se")
+        editor = User(status="active", email="editor@umu.se")
         s.add(editor)
         s.flush()
         s.add(
@@ -73,7 +73,7 @@ def test_activity_resolves_rubric_edited_via_payload(
         s.commit()
     body = client_authed_owner.get(f"/api/workspaces/{ws_id}/activity").json()
     assert body["items"][0]["summary"] == "edited the funder criteria"
-    assert body["items"][0]["actor"] == "editor@ki.se"
+    assert body["items"][0]["actor"] == "editor@umu.se"
 
 
 def test_activity_tiebreak_is_deterministic(
@@ -112,7 +112,7 @@ def test_activity_non_member_403(
     # so this is distinct from the 404 path).
     _app.state.settings.workspaces_dir = str(tmp_path)
     with pg_session_factory() as s:
-        stranger = make_user(s, email="stranger@ki.se")
+        stranger = make_user(s, email="stranger@umu.se")
         other = make_workspace(s, owner=stranger, current_phase="active")
         s.commit()
         other_id = other.id
@@ -166,7 +166,7 @@ def test_activity_member_category_owner_only_pii(
     from call_manager.db.models import WorkspaceEvent, WorkspaceViewer
 
     _app.state.settings.workspaces_dir = str(tmp_path)
-    member_email = "viewer@ki.se"
+    member_email = "viewer@umu.se"
     with pg_session_factory() as s:
         viewer = make_user(s, email=member_email)
         ws = make_workspace(s, owner=current_user, current_phase="active")

@@ -228,7 +228,7 @@ def test_the_db_half_stamps_terminalizes_and_refuses_a_redelete(pg_session_facto
 
     # The DB half, run explicitly — no route calls it in isolation.
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="split-a@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="split-a@umu.se"))
         ut = make_chat_turn(s, ws, role="user", content={"type": "text", "text": "q"},
                             tokens_in=1234)
         job = TurnJob(workspace_id=ws.id, status="running",

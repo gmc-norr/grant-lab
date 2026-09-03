@@ -101,7 +101,7 @@ def now():
 
 def test_run_digest_sends_and_logs(pg_session_factory, now):
     with pg_session_factory() as s:
-        uid = _seed_user_with_payload(s, email="alice@ki.se")
+        uid = _seed_user_with_payload(s, email="alice@umu.se")
         s.commit()
     email = _FakeEmail()
     summary = run_digest(
@@ -113,7 +113,7 @@ def test_run_digest_sends_and_logs(pg_session_factory, now):
     assert summary.emails_sent == 1
     assert summary.bounces == 0
     assert len(email.calls) == 1
-    assert email.calls[0]["to"] == "alice@ki.se"
+    assert email.calls[0]["to"] == "alice@umu.se"
     with pg_session_factory() as s:
         runs = s.execute(select(DigestRun).where(DigestRun.user_id == uid)).scalars().all()
     assert len(runs) == 1
@@ -121,7 +121,7 @@ def test_run_digest_sends_and_logs(pg_session_factory, now):
 
 def test_run_digest_skips_users_with_no_payload(pg_session_factory, now):
     with pg_session_factory() as s:
-        u = User(email="empty@ki.se")
+        u = User(email="empty@umu.se")
         s.add(u)
         s.commit()
     email = _FakeEmail()
@@ -137,7 +137,7 @@ def test_run_digest_skips_users_with_no_payload(pg_session_factory, now):
 
 def test_run_digest_idempotent_within_week(pg_session_factory, now):
     with pg_session_factory() as s:
-        uid = _seed_user_with_payload(s, email="dup@ki.se")
+        uid = _seed_user_with_payload(s, email="dup@umu.se")
         s.commit()
     email = _FakeEmail()
     run_digest(
@@ -161,7 +161,7 @@ def test_run_digest_idempotent_within_week(pg_session_factory, now):
 
 def test_run_digest_bounce_increments_counter(pg_session_factory, now):
     with pg_session_factory() as s:
-        uid = _seed_user_with_payload(s, email="bouncey@ki.se")
+        uid = _seed_user_with_payload(s, email="bouncey@umu.se")
         s.commit()
     email = _FakeEmail(results=[SendResult(ok=False, bounce_reason="invalid_email")])
     summary = run_digest(
@@ -183,7 +183,7 @@ def test_run_digest_bounce_increments_counter(pg_session_factory, now):
 
 def test_run_digest_third_bounce_disables_user(pg_session_factory, now):
     with pg_session_factory() as s:
-        uid = _seed_user_with_payload(s, email="thrice@ki.se")
+        uid = _seed_user_with_payload(s, email="thrice@umu.se")
         u = s.get(User, uid)
         u.digest_bounce_count = 2
         s.commit()
@@ -204,7 +204,7 @@ def test_run_digest_third_bounce_disables_user(pg_session_factory, now):
 
 def test_run_digest_success_resets_bounce_counter(pg_session_factory, now):
     with pg_session_factory() as s:
-        uid = _seed_user_with_payload(s, email="recover@ki.se")
+        uid = _seed_user_with_payload(s, email="recover@umu.se")
         u = s.get(User, uid)
         u.digest_bounce_count = 2
         s.commit()
@@ -222,7 +222,7 @@ def test_run_digest_success_resets_bounce_counter(pg_session_factory, now):
 
 def test_run_digest_transport_error_does_not_count_as_bounce(pg_session_factory, now):
     with pg_session_factory() as s:
-        uid = _seed_user_with_payload(s, email="transient@ki.se")
+        uid = _seed_user_with_payload(s, email="transient@umu.se")
         s.commit()
     email = _FakeEmail(error_at={0: EmailTransportError("boom")})
     summary = run_digest(
@@ -244,7 +244,7 @@ def test_run_digest_transport_error_does_not_count_as_bounce(pg_session_factory,
 
 def test_run_digest_dry_run_does_not_send_or_write(pg_session_factory, now):
     with pg_session_factory() as s:
-        uid = _seed_user_with_payload(s, email="dry@ki.se")
+        uid = _seed_user_with_payload(s, email="dry@umu.se")
         s.commit()
     email = _FakeEmail()
     summary = run_digest(
@@ -265,8 +265,8 @@ def test_run_digest_continues_when_one_user_assembly_fails(pg_session_factory, n
     digests. Spec docstring: 'Per-recipient try/except so one bounce doesn't
     stop the batch.'"""
     with pg_session_factory() as s:
-        uid_bad = _seed_user_with_payload(s, email="bad@ki.se")
-        _seed_user_with_payload(s, email="good@ki.se")
+        uid_bad = _seed_user_with_payload(s, email="bad@umu.se")
+        _seed_user_with_payload(s, email="good@umu.se")
         s.commit()
 
     real_assemble = __import__(
@@ -292,13 +292,13 @@ def test_run_digest_continues_when_one_user_assembly_fails(pg_session_factory, n
     assert summary.emails_sent == 1
     assert summary.users_processed == 2
     sent_to = [c["to"] for c in email.calls]
-    assert "good@ki.se" in sent_to
-    assert "bad@ki.se" not in sent_to
+    assert "good@umu.se" in sent_to
+    assert "bad@umu.se" not in sent_to
 
 
 def test_run_digest_skips_disabled_users(pg_session_factory, now):
     with pg_session_factory() as s:
-        uid = _seed_user_with_payload(s, email="disabled@ki.se")
+        uid = _seed_user_with_payload(s, email="disabled@umu.se")
         u = s.get(User, uid)
         u.digest_disabled_at = datetime(2026, 1, 1, tzinfo=UTC)
         s.commit()

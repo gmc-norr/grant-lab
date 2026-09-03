@@ -30,8 +30,8 @@ def _seed_ws_owner_member(pg_session_factory):
     No git repo on disk — Task-2 tests never checkpoint for real.
     """
     with pg_session_factory() as s:
-        owner = User(status="active", email=f"perm-owner-{uuid.uuid4().hex[:8]}@ki.se")
-        member = User(status="active", email=f"perm-member-{uuid.uuid4().hex[:8]}@ki.se")
+        owner = User(status="active", email=f"perm-owner-{uuid.uuid4().hex[:8]}@umu.se")
+        member = User(status="active", email=f"perm-member-{uuid.uuid4().hex[:8]}@umu.se")
         s.add(owner)
         s.add(member)
         s.flush()

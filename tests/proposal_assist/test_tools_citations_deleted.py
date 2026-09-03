@@ -103,7 +103,7 @@ def restored_ctx(pg_session_factory, _settings_env, tmp_path):
     0 → 2) AFTER the agent's turn formed its belief at generation 0."""
     with pg_session_factory() as s:
         ws = make_workspace(s)
-        admin = make_user(s, email="restore-admin@ki.se")
+        admin = make_user(s, email="restore-admin@umu.se")
         s.commit()
         wsid, admin_id = ws.id, admin.id
     repo_dir = tmp_path / "repo"

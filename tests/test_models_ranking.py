@@ -15,7 +15,7 @@ from call_manager.db.models import (
 
 
 def _profile(s, name="Group A", kind=ProfileKind.ORGANIZATIONAL_UNIT):
-    u = User(email="creator@ki.se")
+    u = User(email="creator@umu.se")
     s.add(u)
     s.flush()
     p = Profile(name=name, kind=kind, description="", structured={}, created_by=u.id)

@@ -8,7 +8,7 @@ from call_manager.main import create_app
 def _setup(monkeypatch, pg_url):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     return create_app()
 
@@ -20,7 +20,7 @@ def _client_for(app, pg_session_factory, uid):
     return client
 
 
-def _new_user(pg_session_factory, *, is_admin=False, email="u@ki.se"):
+def _new_user(pg_session_factory, *, is_admin=False, email="u@umu.se"):
     with pg_session_factory() as s:
         u = User(status="active", email=email, is_admin=is_admin)
         s.add(u)
@@ -41,7 +41,7 @@ def test_detail_flattens_namespaced_structured(
         "org": {"org_type": "university_hospital", "capabilities": ["biobank"],
                 "patient_populations": ["children"], "scale": "~400 researchers"},
         "funding": {"instruments": ["project_grant"], "funder_exclusions": ["x"]},
-        "geo": {"country": "SE", "host_institution": "KI"},
+        "geo": {"country": "SE", "host_institution": "UmU"},
         "eligibility": {"applicant_types": ["solo_pi"], "role": "PI", "years_since_phd": 5},
     }
     pid, owner_id = profile_factory(name="Lab", structured=structured)
@@ -67,7 +67,7 @@ def test_detail_can_edit_false_nulls_bootstrap(
     with pg_session_factory() as s:
         s.add(ProfileBootstrapJob(profile_id=pid, status="running", seed={"x": 1}))
         s.commit()
-    other = _new_user(pg_session_factory, email="other@ki.se")
+    other = _new_user(pg_session_factory, email="other@umu.se")
     client = _client_for(app, pg_session_factory, other)
     with client:
         r = client.get(f"/api/profiles/{pid}")
@@ -94,7 +94,7 @@ def test_detail_owner_sees_bootstrap_status(
 def test_detail_admin_can_edit(monkeypatch, pg_url, pg_session_factory, profile_factory):
     app = _setup(monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Lab")
-    admin = _new_user(pg_session_factory, is_admin=True, email="admin@ki.se")
+    admin = _new_user(pg_session_factory, is_admin=True, email="admin@umu.se")
     client = _client_for(app, pg_session_factory, admin)
     with client:
         r = client.get(f"/api/profiles/{pid}")

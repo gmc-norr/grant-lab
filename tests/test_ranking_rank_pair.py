@@ -805,7 +805,7 @@ def test_settings_embedding_pregate_threshold_reads_env_var(monkeypatch):
     the environment. (Replaces the old lru_cache-flush test.)"""
     monkeypatch.setenv("DATABASE_URL", "postgresql://x")
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
     monkeypatch.setenv("EMBEDDING_PREGATE_THRESHOLD", "0.42")
 

@@ -40,7 +40,7 @@ class _FailingAdapter:
 
 
 def _alerter(sender):
-    return ConsecutiveFailureTracker(threshold=3, sender=sender, admin_email="root@ki.se")
+    return ConsecutiveFailureTracker(threshold=3, sender=sender, admin_email="root@umu.se")
 
 
 def test_successful_run_persists_and_advances_timestamp(pg_session_factory):

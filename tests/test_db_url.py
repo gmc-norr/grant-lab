@@ -22,7 +22,7 @@ def _write_dotenv(tmp_path, url: str) -> None:
     (tmp_path / ".env").write_text(
         f"DATABASE_URL={url}\n"
         "SESSION_SECRET=test-secret-at-least-16-chars\n"
-        "ALLOWED_EMAIL_DOMAINS=ki.se\n"
+        "ALLOWED_EMAIL_DOMAINS=umu.se\n"
         "APP_BASE_URL=http://testserver\n"
     )
 

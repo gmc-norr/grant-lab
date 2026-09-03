@@ -419,7 +419,7 @@ async def test_propose_citation_refuses_a_reference_from_ANOTHER_workspace(
     with pg_session_factory() as s:
         # A distinct owner: make_user's default email is a fixed literal, so a
         # second default-owner workspace collides on uq_users_email.
-        other = make_workspace(s, owner=make_user(s, email="other-owner@ki.se"))
+        other = make_workspace(s, owner=make_user(s, email="other-owner@umu.se"))
         s.commit()
         other_id = other.id
     foreign_rid = _seed_reference(pg_session_factory, other_id, chunks=[(0, "Results", CHUNK_TEXT)])

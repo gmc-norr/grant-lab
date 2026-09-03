@@ -10,7 +10,7 @@ def _settings(**over):
     for k, v in {
         "DATABASE_URL": "postgresql://x",
         "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://localhost:8000",
     }.items():
         os.environ.setdefault(k, v)
@@ -131,8 +131,8 @@ def test_global_cap_blocks_without_calling(pg_session_factory):
 
     # Two distinct workspaces.
     with pg_session_factory() as s:
-        ws_a = make_workspace(s, owner=make_user(s, email="a@ki.se"))
-        ws_b = make_workspace(s, owner=make_user(s, email="b@ki.se"))
+        ws_a = make_workspace(s, owner=make_user(s, email="a@umu.se"))
+        ws_b = make_workspace(s, owner=make_user(s, email="b@umu.se"))
         s.commit()
         a, b = ws_a.id, ws_b.id
 

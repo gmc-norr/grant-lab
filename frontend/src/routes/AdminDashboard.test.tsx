@@ -21,7 +21,7 @@ const DASH = {
     last_sent_at: null,
     runs_this_week: 0,
     disabled_users: 1,
-    disabled_user_rows: [{ id: 9, email: "bounced@ki.se", disabled_at: "2026-06-01T00:00:00Z" }],
+    disabled_user_rows: [{ id: 9, email: "bounced@umu.se", disabled_at: "2026-06-01T00:00:00Z" }],
   },
   embedding_coverage: {
     call_embedded: 1, call_total: 3, call_stale: 2,
@@ -39,7 +39,7 @@ it("renders source health, queue counts and coverage", async () => {
   mockDash();
   renderWithProviders(<AdminDashboard />);
   expect(await screen.findByText("Vinnova")).toBeInTheDocument();
-  expect(screen.getByText("bounced@ki.se")).toBeInTheDocument();
+  expect(screen.getByText("bounced@umu.se")).toBeInTheDocument();
   expect(screen.getByText(/1\/3 embedded/)).toBeInTheDocument();
   expect(screen.getByText(/up to ~6/)).toBeInTheDocument();
 });

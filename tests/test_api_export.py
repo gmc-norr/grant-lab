@@ -40,7 +40,7 @@ def _app(monkeypatch, pg_url, tmp_path):
     for k, v in {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://testserver",
     }.items():
         monkeypatch.setenv(k, v)
@@ -53,9 +53,9 @@ def _app(monkeypatch, pg_url, tmp_path):
 def _seed(pg_session_factory):
     """owner + viewer + stranger + active workspace. Returns ids + ws_id."""
     with pg_session_factory() as s:
-        owner = User(status="active", email="owner@ki.se")
-        viewer = User(status="active", email="viewer@ki.se")
-        stranger = User(status="active", email="stranger@ki.se")
+        owner = User(status="active", email="owner@umu.se")
+        viewer = User(status="active", email="viewer@umu.se")
+        stranger = User(status="active", email="stranger@umu.se")
         s.add_all([owner, viewer, stranger])
         s.flush()
         ws = Workspace(title="My Proposal", owner_id=owner.id, current_phase="active")

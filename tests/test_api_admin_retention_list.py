@@ -15,9 +15,9 @@ from tests.proposal_assist.conftest import make_user, make_workspace
 
 def test_lists_only_deleted_workspaces(monkeypatch, pg_url, pg_session_factory, tmp_path):
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     with pg_session_factory() as s:
-        owner = make_user(s, email="o@ki.se")
+        owner = make_user(s, email="o@umu.se")
         live = make_workspace(s, owner=owner, title="still here")
         dead = make_workspace(s, owner=owner, title="gone")
         s.commit()
@@ -66,9 +66,9 @@ def test_newest_deletion_first(monkeypatch, pg_url, pg_session_factory, tmp_path
     Distinct timestamps, set explicitly rather than by wall-clock, so the
     assertion cannot pass by accident on a fast machine."""
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     with pg_session_factory() as s:
-        owner = make_user(s, email="ord@ki.se")
+        owner = make_user(s, email="ord@umu.se")
         made = [make_workspace(s, owner=owner, title=f"w{i}") for i in range(3)]
         s.commit()
         ids = [w.id for w in made]
@@ -93,10 +93,10 @@ def test_equal_deletion_times_still_page_without_repeating_a_row(
     Two workspaces deleted in the same instant is the case that exposes it, so
     the query carries an id tiebreak."""
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     same = datetime(2026, 8, 5, 9, 0, tzinfo=UTC)
     with pg_session_factory() as s:
-        owner = make_user(s, email="tie@ki.se")
+        owner = make_user(s, email="tie@umu.se")
         made = [make_workspace(s, owner=owner, title=f"t{i}") for i in range(4)]
         s.commit()
         for w in made:
@@ -113,23 +113,23 @@ def test_equal_deletion_times_still_page_without_repeating_a_row(
 
 def test_non_admin_is_403(monkeypatch, pg_url, pg_session_factory, tmp_path):
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    member, _ = client_for(app, pg_session_factory, email="member@ki.se", is_admin=False)
+    member, _ = client_for(app, pg_session_factory, email="member@umu.se", is_admin=False)
     r = member.get("/api/admin/workspaces/deleted")
     assert r.status_code == 403
 
 
 def test_pagination_caps_the_limit(monkeypatch, pg_url, pg_session_factory, tmp_path):
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     r = admin.get("/api/admin/workspaces/deleted?limit=5000")
     assert r.status_code == 422, "an uncapped limit lets one request read the whole table"
 
 
 def test_returns_total_count_and_honours_offset(monkeypatch, pg_url, pg_session_factory, tmp_path):
     app = setup_app(monkeypatch, pg_url, tmp_path)
-    admin, _ = client_for(app, pg_session_factory, email="admin@ki.se", is_admin=True)
+    admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
     with pg_session_factory() as s:
-        owner = make_user(s, email="o2@ki.se")
+        owner = make_user(s, email="o2@umu.se")
         made = [make_workspace(s, owner=owner, title=f"w{i}") for i in range(3)]
         s.commit()
         ids = [w.id for w in made]

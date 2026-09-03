@@ -398,8 +398,8 @@ EMBEDDING_COLUMN_DIM = 1024
 
 # Strict host[:port] shape for a CSP token derived from user-supplied config.
 # `urlsplit().netloc` only terminates at `/`, `?` or `#` — NOT `;` or
-# whitespace — so a value like "https://app.ki.se; script-src * 'unsafe-inline'"
-# parses to a netloc of "app.ki.se; script-src * 'unsafe-inline'" and, absent
+# whitespace — so a value like "https://app.umu.se; script-src * 'unsafe-inline'"
+# parses to a netloc of "app.umu.se; script-src * 'unsafe-inline'" and, absent
 # this check, would be interpolated verbatim into the CSP header, injecting
 # arbitrary directives. config.py's APP_BASE_URL validator only checks the
 # scheme prefix, so this is the last line of defense before the value reaches

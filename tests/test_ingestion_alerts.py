@@ -18,7 +18,7 @@ class _FailingSender:
 
 def test_threshold_not_yet_reached():
     sender = InMemoryEmailSender()
-    t = ConsecutiveFailureTracker(threshold=3, sender=sender, admin_email="a@ki.se")
+    t = ConsecutiveFailureTracker(threshold=3, sender=sender, admin_email="a@umu.se")
     t.record_failure("eu_portal", error="oops")
     t.record_failure("eu_portal", error="oops")
     assert sender.sent == []
@@ -26,7 +26,7 @@ def test_threshold_not_yet_reached():
 
 def test_threshold_reached_emits_one_email():
     sender = InMemoryEmailSender()
-    t = ConsecutiveFailureTracker(threshold=3, sender=sender, admin_email="a@ki.se")
+    t = ConsecutiveFailureTracker(threshold=3, sender=sender, admin_email="a@umu.se")
     for _ in range(3):
         t.record_failure("eu_portal", error="boom")
     assert len(sender.sent) == 1
@@ -36,7 +36,7 @@ def test_threshold_reached_emits_one_email():
 
 def test_continued_failure_does_not_re_alert():
     sender = InMemoryEmailSender()
-    t = ConsecutiveFailureTracker(threshold=3, sender=sender, admin_email="a@ki.se")
+    t = ConsecutiveFailureTracker(threshold=3, sender=sender, admin_email="a@umu.se")
     for _ in range(5):
         t.record_failure("eu_portal", error="boom")
     assert len(sender.sent) == 1
@@ -44,7 +44,7 @@ def test_continued_failure_does_not_re_alert():
 
 def test_success_resets_counter_and_re_arms_alerts():
     sender = InMemoryEmailSender()
-    t = ConsecutiveFailureTracker(threshold=3, sender=sender, admin_email="a@ki.se")
+    t = ConsecutiveFailureTracker(threshold=3, sender=sender, admin_email="a@umu.se")
     for _ in range(3):
         t.record_failure("eu_portal", error="boom")
     t.record_success("eu_portal")
@@ -55,7 +55,7 @@ def test_success_resets_counter_and_re_arms_alerts():
 
 def test_per_source_independence():
     sender = InMemoryEmailSender()
-    t = ConsecutiveFailureTracker(threshold=3, sender=sender, admin_email="a@ki.se")
+    t = ConsecutiveFailureTracker(threshold=3, sender=sender, admin_email="a@umu.se")
     t.record_failure("eu_portal")
     t.record_failure("eu_portal")
     t.record_failure("vinnova")
@@ -85,7 +85,7 @@ def test_send_failure_does_not_suppress_future_alerts():
     alerted stays False → 4th failure retries the send.
     """
     failing = _FailingSender()
-    t = ConsecutiveFailureTracker(threshold=3, sender=failing, admin_email="a@ki.se")
+    t = ConsecutiveFailureTracker(threshold=3, sender=failing, admin_email="a@umu.se")
     for _ in range(3):
         t.record_failure("eu_portal", error="boom")
     assert len(failing.attempts) == 1  # threshold-crossing fired

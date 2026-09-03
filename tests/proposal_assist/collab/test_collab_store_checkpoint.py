@@ -4,8 +4,8 @@ from tests.proposal_assist.conftest import make_user, make_workspace
 
 def test_load_rows_returns_ordered_id_actor_bytes(pg_session_factory):
     with pg_session_factory() as s:
-        o = make_user(s, email="lr-o@ki.se")
-        u2 = make_user(s, email="lr-2@ki.se")
+        o = make_user(s, email="lr-o@umu.se")
+        u2 = make_user(s, email="lr-2@umu.se")
         ws = make_workspace(s, owner=o)
         s.commit()
         wid, oid, u2id = ws.id, o.id, u2.id

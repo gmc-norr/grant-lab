@@ -109,9 +109,9 @@ def test_dedup_keeps_the_provenance_row_not_the_reconciled_one(pg_url, pg_sessio
             older = datetime.now(UTC) - timedelta(days=2)
             newer = datetime.now(UTC)
             with eng.begin() as c:
-                c.execute(text("INSERT INTO users (email) VALUES ('mig65@ki.se')"))
+                c.execute(text("INSERT INTO users (email) VALUES ('mig65@umu.se')"))
                 uid = c.execute(
-                    text("SELECT id FROM users WHERE email='mig65@ki.se'")
+                    text("SELECT id FROM users WHERE email='mig65@umu.se'")
                 ).scalar_one()
                 c.execute(
                     text(

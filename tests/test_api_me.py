@@ -6,7 +6,7 @@ def _app(monkeypatch, pg_url):
     for k, v in {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://testserver",
     }.items():
         monkeypatch.setenv(k, v)
@@ -15,7 +15,7 @@ def _app(monkeypatch, pg_url):
 
 def _login(app, pg_session_factory, test_client_factory):
     with pg_session_factory() as s:
-        u = User(status="active", email="u@ki.se")
+        u = User(status="active", email="u@umu.se")
         s.add(u)
         s.commit()
         uid = u.id
@@ -40,7 +40,7 @@ def test_me_returns_user(monkeypatch, pg_url, pg_session_factory, test_client_fa
     assert r.status_code == 200
     body = r.json()
     assert body["user"]["id"] == uid
-    assert body["user"]["email"] == "u@ki.se"
+    assert body["user"]["email"] == "u@umu.se"
     assert body["user"]["status"] == "active"
     # Exact match on purpose: capabilities is a free-form dict, so an equality
     # check is what catches a new key being exposed to every client by accident.
@@ -52,7 +52,7 @@ def test_me_returns_user(monkeypatch, pg_url, pg_session_factory, test_client_fa
 def test_me_admin_capability(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     app = _app(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        u = User(status="active", email="admin@ki.se", is_admin=True)
+        u = User(status="active", email="admin@umu.se", is_admin=True)
         s.add(u)
         s.commit()
         uid = u.id
@@ -69,7 +69,7 @@ def test_me_admin_capability(monkeypatch, pg_url, pg_session_factory, test_clien
 def test_me_exposes_user_name(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     app = _app(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        u = User(status="active", email="named@ki.se", name="Dr. Named")
+        u = User(status="active", email="named@umu.se", name="Dr. Named")
         s.add(u)
         s.commit()
         uid = u.id
@@ -83,7 +83,7 @@ def test_me_exposes_user_name(monkeypatch, pg_url, pg_session_factory, test_clie
 def test_me_name_is_null_when_unset(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     app = _app(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        u = User(status="active", email="anon@ki.se")
+        u = User(status="active", email="anon@umu.se")
         s.add(u)
         s.commit()
         uid = u.id

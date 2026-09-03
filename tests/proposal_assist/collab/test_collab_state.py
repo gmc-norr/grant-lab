@@ -4,7 +4,7 @@ from tests.proposal_assist.conftest import make_user, make_workspace
 
 def test_flag_defaults_off_and_enable_is_idempotent(pg_session_factory):
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="st-o@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="st-o@umu.se"))
         s.commit()
         wid = ws.id
     with pg_session_factory() as s:
@@ -20,7 +20,7 @@ def test_flag_defaults_off_and_enable_is_idempotent(pg_session_factory):
 
 def test_watermark_roundtrips(pg_session_factory):
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="st-w@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="st-w@umu.se"))
         s.commit()
         wid = ws.id
     with pg_session_factory() as s:
@@ -36,7 +36,7 @@ def test_watermark_roundtrips(pg_session_factory):
 
 def test_doc_epoch_is_zero_without_a_row(pg_session_factory):
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="st-e0@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="st-e0@umu.se"))
         s.commit()
         wid = ws.id
     with pg_session_factory() as s:
@@ -47,7 +47,7 @@ def test_reset_checkpoint_bumps_the_epoch_and_clears_the_watermark(pg_session_fa
     # A truncated log is a new document (spec §3.1): every reset moves the
     # epoch by exactly one, and the watermark goes back to "never opened".
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="st-e1@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="st-e1@umu.se"))
         state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         state.advance_checkpoint(
             s, workspace_id=ws.id, artifact="draft", up_to_update_id=7, commit_sha="abc"
@@ -73,7 +73,7 @@ def test_reset_checkpoint_creates_a_missing_row_so_the_epoch_still_moves(pg_sess
     # epoch 0 behind — otherwise a client from before the switch presents 0,
     # the room says 0, and the stale document is accepted.
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="st-e2@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="st-e2@umu.se"))
         s.commit()
         wid = ws.id
     with pg_session_factory() as s:

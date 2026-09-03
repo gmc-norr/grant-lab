@@ -23,11 +23,11 @@ function mockPost() {
 
 it("renders active and disabled rows with the right actions", async () => {
   mockUsers([
-    { id: 1, email: "act@ki.se", name: null, status: "active", is_admin: false },
-    { id: 2, email: "dis@ki.se", name: null, status: "disabled", is_admin: false },
+    { id: 1, email: "act@umu.se", name: null, status: "active", is_admin: false },
+    { id: 2, email: "dis@umu.se", name: null, status: "disabled", is_admin: false },
   ]);
   renderWithProviders(<AdminUsers />);
-  expect(await screen.findByText("act@ki.se")).toBeInTheDocument();
+  expect(await screen.findByText("act@umu.se")).toBeInTheDocument();
   // active row -> Disable + Make admin + reset-password; disabled row -> Enable
   expect(screen.getByRole("button", { name: /disable/i })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: /make admin/i })).toBeInTheDocument();
@@ -36,7 +36,7 @@ it("renders active and disabled rows with the right actions", async () => {
 });
 
 it("clicking Make admin posts role=admin", async () => {
-  mockUsers([{ id: 1, email: "act@ki.se", name: null, status: "active", is_admin: false }]);
+  mockUsers([{ id: 1, email: "act@umu.se", name: null, status: "active", is_admin: false }]);
   const post = mockPost();
   renderWithProviders(<AdminUsers />);
   await userEvent.click(await screen.findByRole("button", { name: /make admin/i }));
@@ -49,7 +49,7 @@ it("clicking Make admin posts role=admin", async () => {
 });
 
 it("clicking Disable posts disable", async () => {
-  mockUsers([{ id: 3, email: "act@ki.se", name: null, status: "active", is_admin: false }]);
+  mockUsers([{ id: 3, email: "act@umu.se", name: null, status: "active", is_admin: false }]);
   const post = mockPost();
   renderWithProviders(<AdminUsers />);
   await userEvent.click(await screen.findByRole("button", { name: /disable/i }));
@@ -59,7 +59,7 @@ it("clicking Disable posts disable", async () => {
 });
 
 it("clicking Enable on a disabled row posts enable", async () => {
-  mockUsers([{ id: 4, email: "dis@ki.se", name: null, status: "disabled", is_admin: false }]);
+  mockUsers([{ id: 4, email: "dis@umu.se", name: null, status: "disabled", is_admin: false }]);
   const post = mockPost();
   renderWithProviders(<AdminUsers />);
   await userEvent.click(await screen.findByRole("button", { name: /enable/i }));
@@ -69,7 +69,7 @@ it("clicking Enable on a disabled row posts enable", async () => {
 });
 
 it("submitting the reset-password form posts the new password", async () => {
-  mockUsers([{ id: 5, email: "act@ki.se", name: null, status: "active", is_admin: false }]);
+  mockUsers([{ id: 5, email: "act@umu.se", name: null, status: "active", is_admin: false }]);
   const post = mockPost();
   renderWithProviders(<AdminUsers />);
   await userEvent.type(await screen.findByPlaceholderText(/new password/i), "fresh-strong-pw");

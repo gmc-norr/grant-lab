@@ -80,7 +80,7 @@ def test_run_golden_set_eval_against_seeded_rankings(pg_session_factory, tmp_pat
     """Build a golden set as a JSON file, seed CallRanking rows, run eval,
     verify the report shape."""
     with pg_session_factory() as s:
-        u = User(email="ge@ki.se")
+        u = User(email="ge@umu.se")
         s.add(u)
         s.flush()
         p = Profile(
@@ -147,7 +147,7 @@ def test_run_golden_set_eval_n_compared_reflects_actual_rows(pg_session_factory,
     /admin would show tau computed on a much smaller subset than the
     displayed Pairs count."""
     with pg_session_factory() as s:
-        u = User(email="m2@ki.se")
+        u = User(email="m2@umu.se")
         s.add(u)
         s.flush()
         p = Profile(
@@ -237,7 +237,7 @@ def test_run_golden_set_eval_dedups_repeated_triples(pg_session_factory, tmp_pat
     """If the fixture lists the same (call_id, profile_id) twice, dedup so
     tau isn't biased by double-weighting. First occurrence wins."""
     with pg_session_factory() as s:
-        u = User(email="dup@ki.se")
+        u = User(email="dup@umu.se")
         s.add(u)
         s.flush()
         p = Profile(

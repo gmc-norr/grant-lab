@@ -12,7 +12,7 @@ from call_manager.main import create_app
 def build_app(monkeypatch, pg_url, tmp_path, pg_session_factory):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     monkeypatch.setenv("WORKSPACES_DIR", str(tmp_path))
     app = create_app()

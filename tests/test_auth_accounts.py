@@ -15,21 +15,21 @@ def test_new_identity_creates_pending(pg_session_factory):
 
 def test_returning_identity_matches(pg_session_factory):
     with pg_session_factory() as s:
-        s.add(User(email="x@ki.se", status="active", oidc_iss=ISS, oidc_sub="s2"))
+        s.add(User(email="x@umu.se", status="active", oidc_iss=ISS, oidc_sub="s2"))
         s.commit()
     with pg_session_factory() as s:
-        res = resolve_google_account(s, iss=ISS, sub="s2", email="x@ki.se", name=None)
+        res = resolve_google_account(s, iss=ISS, sub="s2", email="x@umu.se", name=None)
         assert res.outcome == "matched" and res.user.status == "active"
 
 
 def test_email_collision_blocked(pg_session_factory):
     with pg_session_factory() as s:
-        s.add(User(email="admin@ki.se", status="active"))  # no identity
+        s.add(User(email="admin@umu.se", status="active"))  # no identity
         s.commit()
     with pg_session_factory() as s:
-        res = resolve_google_account(s, iss=ISS, sub="s3", email="admin@ki.se", name=None)
+        res = resolve_google_account(s, iss=ISS, sub="s3", email="admin@umu.se", name=None)
         assert res.outcome == "email_collision" and res.user is None
-        assert s.query(User).filter_by(email="admin@ki.se").one().oidc_sub is None
+        assert s.query(User).filter_by(email="admin@umu.se").one().oidc_sub is None
 
 
 def test_concurrent_insert_reresolves(pg_session_factory, monkeypatch):
@@ -37,7 +37,7 @@ def test_concurrent_insert_reresolves(pg_session_factory, monkeypatch):
     # existence check returns None. The flush hits the unique index -> we roll
     # back and re-resolve to the winner.
     with pg_session_factory() as s0:
-        s0.add(User(email="pre@ki.se", status="active", oidc_iss=ISS, oidc_sub="race"))
+        s0.add(User(email="pre@umu.se", status="active", oidc_iss=ISS, oidc_sub="race"))
         s0.commit()
 
     real = acc._by_identity
@@ -51,9 +51,9 @@ def test_concurrent_insert_reresolves(pg_session_factory, monkeypatch):
 
     monkeypatch.setattr(acc, "_by_identity", flaky)
     with pg_session_factory() as s:
-        res = resolve_google_account(s, iss=ISS, sub="race", email="newcomer@ki.se", name=None)
+        res = resolve_google_account(s, iss=ISS, sub="race", email="newcomer@umu.se", name=None)
         assert res.outcome == "matched"
-        assert res.user.email == "pre@ki.se"
+        assert res.user.email == "pre@umu.se"
 
 
 def test_resolve_does_not_stamp_last_login_at(pg_session_factory):
@@ -61,10 +61,10 @@ def test_resolve_does_not_stamp_last_login_at(pg_session_factory):
     # a matched disabled/pending account must not have it advanced on a refused
     # sign-in attempt.
     with pg_session_factory() as s:
-        s.add(User(email="dis@ki.se", status="disabled", oidc_iss=ISS, oidc_sub="s6"))
+        s.add(User(email="dis@umu.se", status="disabled", oidc_iss=ISS, oidc_sub="s6"))
         s.commit()
     with pg_session_factory() as s:
-        res = resolve_google_account(s, iss=ISS, sub="s6", email="dis@ki.se", name=None)
+        res = resolve_google_account(s, iss=ISS, sub="s6", email="dis@umu.se", name=None)
         assert res.outcome == "matched" and res.user.status == "disabled"
         assert res.user.last_login_at is None
 
@@ -81,7 +81,7 @@ def test_long_google_name_is_truncated(pg_session_factory):
 
 def test_link_attaches_identity(pg_session_factory):
     with pg_session_factory() as s:
-        u = User(email="me@ki.se", status="active")
+        u = User(email="me@umu.se", status="active")
         s.add(u)
         s.commit()
         uid = u.id
@@ -93,8 +93,8 @@ def test_link_attaches_identity(pg_session_factory):
 
 def test_link_rejects_used_identity(pg_session_factory):
     with pg_session_factory() as s:
-        s.add(User(email="other@ki.se", status="active", oidc_iss=ISS, oidc_sub="s5"))
-        u = User(email="mine@ki.se", status="active")
+        s.add(User(email="other@umu.se", status="active", oidc_iss=ISS, oidc_sub="s5"))
+        u = User(email="mine@umu.se", status="active")
         s.add(u)
         s.commit()
         uid = u.id

@@ -10,12 +10,12 @@ afterEach(() => { vi.restoreAllMocks(); });
 
 it("submits email+name and shows the 'request received' state", async () => {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue({
-    data: { google_oidc_enabled: false, allowed_domains: ["ki.se"] }, error: undefined,
+    data: { google_oidc_enabled: false, allowed_domains: ["umu.se"] }, error: undefined,
   } as never);
   const post = vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { ok: true }, error: undefined } as never);
   renderWithProviders(<Register />, { route: "/register" });
-  await userEvent.type(screen.getByLabelText(/email/i), "new@ki.se");
+  await userEvent.type(screen.getByLabelText(/email/i), "new@umu.se");
   await userEvent.click(screen.getByRole("button", { name: /request access/i }));
   await waitFor(() => expect(screen.getByText(/request received/i)).toBeInTheDocument());
-  expect(post).toHaveBeenCalledWith("/api/auth/register", { body: { email: "new@ki.se", name: null } });
+  expect(post).toHaveBeenCalledWith("/api/auth/register", { body: { email: "new@umu.se", name: null } });
 });

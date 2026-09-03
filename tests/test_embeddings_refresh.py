@@ -38,7 +38,7 @@ def _seed_call(s, *, source_slug: str = "vinnova", title: str = "T") -> int:
 
 
 def _seed_profile(s, *, name: str = "P") -> int:
-    u = User(email=f"{name.lower()}@ki.se")
+    u = User(email=f"{name.lower()}@umu.se")
     s.add(u)
     s.flush()
     p = Profile(

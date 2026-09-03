@@ -91,7 +91,7 @@ def _mk_pc(
 def test_kernel_accept_applies_edit_and_checkpoints(pg_session_factory, tmp_path):
     md0 = "## Background\noriginal.\n"
     with pg_session_factory() as s:
-        o = make_user(s, email="k-accept@ki.se")
+        o = make_user(s, email="k-accept@umu.se")
         ws = make_workspace(s, owner=o, current_phase="active")
         s.commit()
         wid, oid = ws.id, o.id
@@ -157,7 +157,7 @@ def test_kernel_accept_detects_staleness_against_LIVE_room_not_git(pg_session_fa
     # HEAD == base_commit_sha, yet the accept must detect the live section changed.
     md0 = "## Background\noriginal.\n"
     with pg_session_factory() as s:
-        o = make_user(s, email="k-stale@ki.se")
+        o = make_user(s, email="k-stale@umu.se")
         ws = make_workspace(s, owner=o, current_phase="active")
         s.commit()
         wid, oid = ws.id, o.id
@@ -217,7 +217,7 @@ def test_kernel_accept_detects_staleness_against_LIVE_room_not_git(pg_session_fa
 def test_kernel_accept_noop_proposal_accepts_without_new_commit(pg_session_factory, tmp_path):
     md0 = "## Background\nsame.\n"
     with pg_session_factory() as s:
-        o = make_user(s, email="k-noop@ki.se")
+        o = make_user(s, email="k-noop@umu.se")
         ws = make_workspace(s, owner=o, current_phase="active")
         s.commit()
         wid, oid = ws.id, o.id
@@ -278,7 +278,7 @@ def test_kernel_accept_raises_proposed_change_not_found_for_missing_pc(
     the proposed_changes row does not exist — and it does so BEFORE any doc mutation."""
     md0 = "## Background\noriginal.\n"
     with pg_session_factory() as s:
-        o = make_user(s, email="k-notfound@ki.se")
+        o = make_user(s, email="k-notfound@umu.se")
         ws = make_workspace(s, owner=o, current_phase="active")
         s.commit()
         wid, oid = ws.id, o.id
@@ -329,7 +329,7 @@ def test_kernel_rejects_accept_into_locked_spec(pg_session_factory, tmp_path):
     room_doc = pm_json_to_ydoc(markdown_to_pm(spec_md))
     base_sha = split_sections(pm_to_markdown(ydoc_to_pm_json(room_doc)))[1].sha
     with pg_session_factory() as s:
-        o = make_user(s, email="k-speclock@ki.se")
+        o = make_user(s, email="k-speclock@umu.se")
         ws = make_workspace(s, owner=o, current_phase="active")
         s.commit()
         wid, oid = ws.id, o.id
@@ -361,7 +361,7 @@ def test_kernel_accepts_unlocked_spec_and_checkpoints(pg_session_factory, tmp_pa
     artifact and confirms the spec file is updated in git."""
     spec_md = "## Aims\noriginal aims.\n"
     with pg_session_factory() as s:
-        o = make_user(s, email="k-specok@ki.se")
+        o = make_user(s, email="k-specok@umu.se")
         ws = make_workspace(s, owner=o, current_phase="active")
         s.commit()
         wid, oid = ws.id, o.id

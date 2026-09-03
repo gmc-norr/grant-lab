@@ -7,7 +7,7 @@ from call_manager.db.models import Profile, ProfileKind, User
 def test_can_insert_and_read_user(pg_session_factory):
     SessionLocal = pg_session_factory
     with SessionLocal() as s:
-        u = User(email="alice@ki.se", name="Alice", is_admin=False)
+        u = User(email="alice@umu.se", name="Alice", is_admin=False)
         s.add(u)
         s.commit()
         s.refresh(u)
@@ -18,10 +18,10 @@ def test_can_insert_and_read_user(pg_session_factory):
 def test_user_email_is_unique(pg_session_factory):
     SessionLocal = pg_session_factory
     with SessionLocal() as s:
-        s.add(User(email="bob@ki.se"))
+        s.add(User(email="bob@umu.se"))
         s.commit()
     with SessionLocal() as s, pytest.raises(IntegrityError):
-        s.add(User(email="bob@ki.se"))
+        s.add(User(email="bob@umu.se"))
         s.commit()
 
 
@@ -30,7 +30,7 @@ def test_user_email_check_rejects_mixed_case(pg_session_factory):
     case-insensitive in practice. Inserting a non-lowercased email must fail."""
     SessionLocal = pg_session_factory
     with SessionLocal() as s, pytest.raises(IntegrityError):
-        s.add(User(email="Alice@ki.se"))
+        s.add(User(email="Alice@umu.se"))
         s.commit()
 
 
@@ -42,7 +42,7 @@ def test_active_profile_name_is_unique_at_db_level(pg_session_factory):
     from sqlalchemy import select
 
     with SessionLocal() as s:
-        u = User(email="owner@ki.se")
+        u = User(email="owner@umu.se")
         s.add(u)
         s.flush()
         s.add(
@@ -57,7 +57,7 @@ def test_active_profile_name_is_unique_at_db_level(pg_session_factory):
         s.commit()
 
     with SessionLocal() as s, pytest.raises(IntegrityError):
-        u = s.execute(select(User).where(User.email == "owner@ki.se")).scalar_one()
+        u = s.execute(select(User).where(User.email == "owner@umu.se")).scalar_one()
         s.add(
             Profile(
                 name="dup",
@@ -77,7 +77,7 @@ def test_inactive_profile_reuses_name(pg_session_factory):
 
     SessionLocal = pg_session_factory
     with SessionLocal() as s:
-        u = User(email="owner2@ki.se")
+        u = User(email="owner2@umu.se")
         s.add(u)
         s.flush()
         old = Profile(
@@ -92,7 +92,7 @@ def test_inactive_profile_reuses_name(pg_session_factory):
         s.commit()
 
     with SessionLocal() as s:
-        u = s.execute(select(User).where(User.email == "owner2@ki.se")).scalar_one()
+        u = s.execute(select(User).where(User.email == "owner2@umu.se")).scalar_one()
         s.add(
             Profile(
                 name="shared",

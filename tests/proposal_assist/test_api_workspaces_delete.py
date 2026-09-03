@@ -157,7 +157,7 @@ def test_owner_delete_204_cascades_and_keeps_bytes(
 
 def test_non_owner_delete_403(client_authed_owner, current_user, pg_session_factory):
     with pg_session_factory() as s:
-        stranger = make_user(s, email="stranger@ki.se")
+        stranger = make_user(s, email="stranger@umu.se")
         ws = make_workspace(s, owner=stranger)  # current_user has no relationship to it
         s.commit()
         ws_id = ws.id
@@ -170,7 +170,7 @@ def test_non_owner_delete_403(client_authed_owner, current_user, pg_session_fact
 def test_viewer_delete_403(client_authed_owner, current_user, pg_session_factory):
     # A workspace member (viewer) is still not the owner → 403 (spec §4.1: viewer AND stranger).
     with pg_session_factory() as s:
-        stranger = make_user(s, email="viewer-owner@ki.se")
+        stranger = make_user(s, email="viewer-owner@umu.se")
         ws = make_workspace(s, owner=stranger)
         s.add(WorkspaceViewer(workspace_id=ws.id, user_id=current_user.id))
         s.commit()

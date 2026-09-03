@@ -18,11 +18,11 @@ function mockPending(users: unknown[]) {
 
 it("shows an initial-password input for local accounts, not for Google", async () => {
   mockPending([
-    { id: 1, email: "local@ki.se", name: null, created_at: "2026-06-01T00:00:00Z", google_linked: false },
-    { id: 2, email: "goog@ki.se", name: "G", created_at: "2026-06-01T00:00:00Z", google_linked: true },
+    { id: 1, email: "local@umu.se", name: null, created_at: "2026-06-01T00:00:00Z", google_linked: false },
+    { id: 2, email: "goog@umu.se", name: "G", created_at: "2026-06-01T00:00:00Z", google_linked: true },
   ]);
   renderWithProviders(<AdminPendingUsers />);
-  expect(await screen.findByText("local@ki.se")).toBeInTheDocument();
+  expect(await screen.findByText("local@umu.se")).toBeInTheDocument();
   // one password input total (only the local account has one)
   expect(screen.getAllByPlaceholderText(/initial password/i)).toHaveLength(1);
   expect(screen.getByText(/google/i)).toBeInTheDocument();
@@ -30,7 +30,7 @@ it("shows an initial-password input for local accounts, not for Google", async (
 
 it("approve-as-admin posts role=admin with the typed password", async () => {
   mockPending([
-    { id: 1, email: "local@ki.se", name: null, created_at: "2026-06-01T00:00:00Z", google_linked: false },
+    { id: 1, email: "local@umu.se", name: null, created_at: "2026-06-01T00:00:00Z", google_linked: false },
   ]);
   const post = vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { id: 1 }, error: undefined } as never);
   renderWithProviders(<AdminPendingUsers />);

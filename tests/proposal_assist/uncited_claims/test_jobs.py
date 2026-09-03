@@ -25,7 +25,7 @@ def test_claim_picks_queued_skips_running(pg_session_factory):
         ws = make_workspace(s)
         s.flush()
         s.add(UncitedClaimsJob(workspace_id=ws.id, status="running"))
-        ws2 = make_workspace(s, owner=make_user(s, email="ws2-owner@ki.se"))
+        ws2 = make_workspace(s, owner=make_user(s, email="ws2-owner@umu.se"))
         s.flush()
         s.add(UncitedClaimsJob(workspace_id=ws2.id, status="queued"))
         s.commit()

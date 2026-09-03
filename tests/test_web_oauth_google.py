@@ -56,7 +56,7 @@ def _setup(monkeypatch, pg_url):
     for k, v in {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://testserver",
         "GOOGLE_OIDC_ENABLED": "true",
         "GOOGLE_CLIENT_ID": AUD,
@@ -103,9 +103,9 @@ def test_callback_new_user_pending(monkeypatch, pg_url, pg_session_factory):
     app, fake = _setup(monkeypatch, pg_url)
     with TestClient(app) as c:
         state, nonce = _start(c)
-        # Allowed-domain (ki.se) email so the sign-in is admitted and creates a
+        # Allowed-domain (umu.se) email so the sign-in is admitted and creates a
         # pending account (the disallowed-domain path is covered separately).
-        fake.set_code("C", _claims(email="new@ki.se", nonce=nonce))
+        fake.set_code("C", _claims(email="new@umu.se", nonce=nonce))
         r = c.get(
             f"/auth/google/callback?code=C&state={state}",
             headers={"accept": "text/html"},
@@ -115,14 +115,14 @@ def test_callback_new_user_pending(monkeypatch, pg_url, pg_session_factory):
         assert r.headers.get("referrer-policy") == "no-referrer"
         assert "oauth_txn=" in "".join(r.headers.get_list("set-cookie"))  # cleared
     with pg_session_factory() as s:
-        assert s.query(User).filter_by(email="new@ki.se").one().status == "pending"
+        assert s.query(User).filter_by(email="new@umu.se").one().status == "pending"
 
 
 def test_callback_disallowed_domain_rejected(monkeypatch, pg_url, pg_session_factory):
     """A Google sign-in from a domain outside ALLOWED_EMAIL_DOMAINS must NOT
     create a pending account — it lands on /auth/error, parity with password
     registration + admin bootstrap. Regression for the OIDC allow-list gap."""
-    app, fake = _setup(monkeypatch, pg_url)  # ALLOWED_EMAIL_DOMAINS=ki.se
+    app, fake = _setup(monkeypatch, pg_url)  # ALLOWED_EMAIL_DOMAINS=umu.se
     with TestClient(app) as c:
         state, nonce = _start(c)
         fake.set_code("C", _claims(email="outsider@gmail.com", nonce=nonce))
@@ -139,11 +139,11 @@ def test_callback_disallowed_domain_rejected(monkeypatch, pg_url, pg_session_fac
 def test_callback_active_user_gets_session(monkeypatch, pg_url, pg_session_factory):
     app, fake = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        s.add(User(email="ok@ki.se", status="active", oidc_iss=ISS, oidc_sub="g-2"))
+        s.add(User(email="ok@umu.se", status="active", oidc_iss=ISS, oidc_sub="g-2"))
         s.commit()
     with TestClient(app) as c:
         state, nonce = _start(c)
-        fake.set_code("C2", _claims(sub="g-2", email="ok@ki.se", nonce=nonce))
+        fake.set_code("C2", _claims(sub="g-2", email="ok@umu.se", nonce=nonce))
         r = c.get(
             f"/auth/google/callback?code=C2&state={state}",
             headers={"accept": "text/html"},
@@ -156,11 +156,11 @@ def test_callback_active_user_gets_session(monkeypatch, pg_url, pg_session_facto
 def test_callback_disabled_user_no_access(monkeypatch, pg_url, pg_session_factory):
     app, fake = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        s.add(User(email="no@ki.se", status="disabled", oidc_iss=ISS, oidc_sub="g-9"))
+        s.add(User(email="no@umu.se", status="disabled", oidc_iss=ISS, oidc_sub="g-9"))
         s.commit()
     with TestClient(app) as c:
         state, nonce = _start(c)
-        fake.set_code("C9", _claims(sub="g-9", email="no@ki.se", nonce=nonce))
+        fake.set_code("C9", _claims(sub="g-9", email="no@umu.se", nonce=nonce))
         r = c.get(
             f"/auth/google/callback?code=C9&state={state}",
             headers={"accept": "text/html"},
@@ -172,11 +172,11 @@ def test_callback_disabled_user_no_access(monkeypatch, pg_url, pg_session_factor
 def test_callback_email_collision_error(monkeypatch, pg_url, pg_session_factory):
     app, fake = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        s.add(User(email="dupe@ki.se", status="active"))
+        s.add(User(email="dupe@umu.se", status="active"))
         s.commit()
     with TestClient(app) as c:
         state, nonce = _start(c)
-        fake.set_code("C3", _claims(sub="g-3", email="dupe@ki.se", nonce=nonce))
+        fake.set_code("C3", _claims(sub="g-3", email="dupe@umu.se", nonce=nonce))
         r = c.get(
             f"/auth/google/callback?code=C3&state={state}",
             headers={"accept": "text/html"},
@@ -237,7 +237,7 @@ def test_routes_404_when_disabled(monkeypatch, pg_url, pg_session_factory):
     for k, v in {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://testserver",
     }.items():
         monkeypatch.setenv(k, v)
@@ -249,7 +249,7 @@ def test_routes_404_when_disabled(monkeypatch, pg_url, pg_session_factory):
 def test_connect_google_links_active_user(monkeypatch, pg_url, pg_session_factory):
     app, fake = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        u = User(email="link@ki.se", status="active")
+        u = User(email="link@umu.se", status="active")
         s.add(u)
         s.commit()
         s.refresh(u)
@@ -258,10 +258,10 @@ def test_connect_google_links_active_user(monkeypatch, pg_url, pg_session_factor
         c.cookies.set("session", app.state.session_signer.make(user_id=uid))
         start = c.post("/auth/google/start", data={"link": "1"}, follow_redirects=False)
         q = parse_qs(urlparse(start.headers["location"]).query)
-        # Google identity must also be within ALLOWED_EMAIL_DOMAINS (ki.se) after
+        # Google identity must also be within ALLOWED_EMAIL_DOMAINS (umu.se) after
         # Fix 3: link-mode now enforces the domain allowlist so a user can't bypass
         # the domain gate by linking a personal Gmail to their institutional account.
-        fake.set_code("LC", _claims(sub="g-link", email="link-google@ki.se", nonce=q["nonce"][0]))
+        fake.set_code("LC", _claims(sub="g-link", email="link-google@umu.se", nonce=q["nonce"][0]))
         r = c.get(
             f"/auth/google/callback?code=LC&state={q['state'][0]}",
             headers={"accept": "text/html"},
@@ -302,13 +302,13 @@ def test_verified_google_identity_attaches_to_an_unverified_pending_row(
     proof the registration never had: attach the identity, keep it pending."""
     app, fake = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        s.add(User(email="victim@ki.se", status="pending"))  # no oidc_sub, no password_hash
+        s.add(User(email="victim@umu.se", status="pending"))  # no oidc_sub, no password_hash
         s.commit()
     with TestClient(app) as c:
-        r = _callback(c, fake, sub="g-victim", email="victim@ki.se")
+        r = _callback(c, fake, sub="g-victim", email="victim@umu.se")
         assert r.status_code == 303 and r.headers["location"] == "/auth/pending"
     with pg_session_factory() as s:
-        rows = s.query(User).filter_by(email="victim@ki.se").all()
+        rows = s.query(User).filter_by(email="victim@umu.se").all()
         assert len(rows) == 1 and rows[0].oidc_sub == "g-victim" and rows[0].status == "pending"
 
 
@@ -316,14 +316,14 @@ def test_an_active_row_without_google_is_still_a_collision(monkeypatch, pg_url, 
     """Never auto-link a real account: an ACTIVE password user keeps /auth/error."""
     app, fake = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        s.add(User(email="real@ki.se", status="active", password_hash="x"))
+        s.add(User(email="real@umu.se", status="active", password_hash="x"))
         s.commit()
     with TestClient(app) as c:
         assert (
-            _callback(c, fake, sub="g-x", email="real@ki.se").headers["location"] == "/auth/error"
+            _callback(c, fake, sub="g-x", email="real@umu.se").headers["location"] == "/auth/error"
         )
     with pg_session_factory() as s:
-        assert s.query(User).filter_by(email="real@ki.se").one().oidc_sub is None
+        assert s.query(User).filter_by(email="real@umu.se").one().oidc_sub is None
 
 
 def test_a_pending_row_that_already_has_a_credential_is_still_a_collision(
@@ -331,9 +331,9 @@ def test_a_pending_row_that_already_has_a_credential_is_still_a_collision(
 ):
     app, fake = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        s.add(User(email="half@ki.se", status="pending", password_hash="x"))
+        s.add(User(email="half@umu.se", status="pending", password_hash="x"))
         s.commit()
     with TestClient(app) as c:
         assert (
-            _callback(c, fake, sub="g-h", email="half@ki.se").headers["location"] == "/auth/error"
+            _callback(c, fake, sub="g-h", email="half@umu.se").headers["location"] == "/auth/error"
         )

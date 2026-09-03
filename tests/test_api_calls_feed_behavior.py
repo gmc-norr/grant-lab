@@ -35,7 +35,7 @@ def _app(monkeypatch, pg_url):
     for k, v in {
         "DATABASE_URL": pg_url,
         "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://testserver",
     }.items():
         monkeypatch.setenv(k, v)
@@ -47,7 +47,7 @@ def _login(app, pg_session_factory, *, profile=False, profile_active=True, set_d
     (pid is None when profile=False). Profiles need not be OWNED by the user —
     the read-model resolves ``?profile`` by is_active alone."""
     with pg_session_factory() as s:
-        u = User(status="active", email="u@ki.se")
+        u = User(status="active", email="u@umu.se")
         s.add(u)
         s.flush()
         pid = None

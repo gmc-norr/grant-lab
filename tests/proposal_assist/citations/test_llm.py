@@ -53,7 +53,7 @@ def test_build_citation_llm_anthropic_requires_key():
     for k, v in {
         "DATABASE_URL": "postgresql://x",
         "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://localhost:8000",
     }.items():
         os.environ.setdefault(k, v)
@@ -72,7 +72,7 @@ def test_build_citation_llm_rejects_unknown_provider():
     for k, v in {
         "DATABASE_URL": "postgresql://x",
         "SESSION_SECRET": "test-secret-at-least-16-chars",
-        "ALLOWED_EMAIL_DOMAINS": "ki.se",
+        "ALLOWED_EMAIL_DOMAINS": "umu.se",
         "APP_BASE_URL": "http://localhost:8000",
     }.items():
         os.environ.setdefault(k, v)

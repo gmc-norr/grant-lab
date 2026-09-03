@@ -3,7 +3,7 @@ def normalize_domain(domain: str) -> str:
 
     Lower-case, strip a trailing root dot, and IDNA-encode to punycode. The
     IDNA step is the security-relevant part: a Unicode homoglyph domain (e.g.
-    `ki.se` written with a Cyrillic lookalike) encodes to its `xn--` punycode
+    `umu.se` written with a Cyrillic lookalike) encodes to its `xn--` punycode
     form, so it can only ever match an allowlist entry that is *also* that
     punycode form — never an ASCII look-alike. Applied identically to the
     configured allowlist (`config._split_csv`) and to the address being
@@ -25,7 +25,7 @@ def extract_domain(email: str) -> str:
     """Return the normalized (lower-cased, IDNA-canonical) domain of an email.
 
     Strict: exactly one `@`, both local and domain parts non-empty. Rejects
-    multi-`@` addresses (`x@y@ki.se`) so we never write malformed addresses
+    multi-`@` addresses (`x@y@umu.se`) so we never write malformed addresses
     to the users table or hand them to the email API. The domain is run
     through `normalize_domain`, so an IDN homoglyph can't impersonate an
     ASCII allowlist entry.

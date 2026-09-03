@@ -44,7 +44,7 @@ JONES_CSL = {
 }
 
 
-def _make_workspace(pg_session_factory, *, owner_email="owner@ki.se"):
+def _make_workspace(pg_session_factory, *, owner_email="owner@umu.se"):
     with pg_session_factory() as s:
         owner = make_user(s, email=owner_email)
         ws = make_workspace(s, owner=owner)
@@ -348,7 +348,7 @@ def test_unresolved_citekey_blocked(pg_session_factory, tmp_path):
 
 def test_reference_in_other_workspace_blocked(pg_session_factory, tmp_path):
     wsid = _make_workspace(pg_session_factory)
-    other_wsid = _make_workspace(pg_session_factory, owner_email="other@ki.se")
+    other_wsid = _make_workspace(pg_session_factory, owner_email="other@umu.se")
     rid = _seed_reference(pg_session_factory, other_wsid, citekey="smith2021", csl_json=SMITH_CSL)
     proposal = _proposal(build_marker("smith2021", "ev-aaaaaaaaaaaa"))
 

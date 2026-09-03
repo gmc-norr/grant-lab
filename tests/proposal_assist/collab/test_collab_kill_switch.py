@@ -23,7 +23,7 @@ def test_settings_parse_env_alias(monkeypatch, _settings_env):
 
 def test_kill_switch_masks_enabled_flag(pg_session_factory):
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="ks@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="ks@umu.se"))
         state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
         wid = ws.id
@@ -41,7 +41,7 @@ def test_enable_collab_still_writes_under_kill_switch_mask(pg_session_factory):
     only the is_collab_enabled VIEW is masked."""
     state.set_kill_switch(True)
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="ks2@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="ks2@umu.se"))
         state.enable_collab(s, workspace_id=ws.id, artifact="draft")
         s.commit()
         wid = ws.id

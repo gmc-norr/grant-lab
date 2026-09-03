@@ -6,7 +6,7 @@ from call_manager.proposal_assist.spend import record_spend
 def _setup(monkeypatch, pg_url, *, drafting_enabled=True):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     monkeypatch.setenv("DRAFTING_ENABLED", "true" if drafting_enabled else "false")
     monkeypatch.setenv("GLOBAL_DAILY_TOKEN_CAP_INPUT", "1000")
@@ -14,7 +14,7 @@ def _setup(monkeypatch, pg_url, *, drafting_enabled=True):
     return create_app()
 
 
-def _admin(app, sf, test_client_factory, *, email="root@ki.se"):
+def _admin(app, sf, test_client_factory, *, email="root@umu.se"):
     with sf() as s:
         u = User(status="active", email=email, is_admin=True)
         s.add(u)
@@ -29,7 +29,7 @@ def _admin(app, sf, test_client_factory, *, email="root@ki.se"):
 def test_drafting_requires_admin(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     app = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        u = User(status="active", email="alice@ki.se", is_admin=False)
+        u = User(status="active", email="alice@umu.se", is_admin=False)
         s.add(u)
         s.commit()
         s.refresh(u)
@@ -58,7 +58,7 @@ def test_drafting_kill_switch_off(monkeypatch, pg_url, pg_session_factory, test_
 def test_drafting_per_workspace_usage(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     app = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        owner = User(status="active", email="owner@ki.se")
+        owner = User(status="active", email="owner@umu.se")
         s.add(owner)
         s.flush()
         ws = Workspace(owner_id=owner.id, title="VisibleInPanel")
@@ -77,7 +77,7 @@ def test_drafting_per_workspace_usage(monkeypatch, pg_url, pg_session_factory, t
     c = _admin(app, pg_session_factory, test_client_factory)
     rows = c.get("/api/admin/drafting").json()["per_workspace"]
     row = next(r for r in rows if r["title"] == "VisibleInPanel")
-    assert row["owner_email"] == "owner@ki.se"
+    assert row["owner_email"] == "owner@umu.se"
     assert row["used_in"] == 42 and row["used_out"] == 7
     assert isinstance(row["id"], str)  # UUID serialized as string for /cockpit/:id links
 
@@ -87,7 +87,7 @@ def test_drafting_per_workspace_desc_by_used_in(
 ):
     app = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        owner = User(status="active", email="o@ki.se")
+        owner = User(status="active", email="o@umu.se")
         s.add(owner)
         s.flush()
         small = Workspace(owner_id=owner.id, title="Small")
@@ -121,7 +121,7 @@ def test_drafting_recent_failed_events(
 ):
     app = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        owner = User(status="active", email="o@ki.se")
+        owner = User(status="active", email="o@umu.se")
         s.add(owner)
         s.flush()
         ws = Workspace(owner_id=owner.id, title="WithFails")
@@ -147,7 +147,7 @@ def test_drafting_recent_failed_events(
 def test_drafting_cap_exceeded_reason(monkeypatch, pg_url, pg_session_factory, test_client_factory):
     app = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
-        owner = User(status="active", email="o@ki.se")
+        owner = User(status="active", email="o@umu.se")
         s.add(owner)
         s.flush()
         ws = Workspace(owner_id=owner.id, title="OverCapWs")

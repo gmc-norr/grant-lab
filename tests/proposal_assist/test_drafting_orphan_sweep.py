@@ -66,9 +66,9 @@ def test_sweep_is_workspace_scoped(pg_session_factory):
 
     with pg_session_factory() as s:
         # Two workspaces — each with their own owner to avoid UNIQUE
-        # email collisions on the default 'owner@ki.se'.
-        owner_a = User(email="orphan-sweep-a@ki.se")
-        owner_b = User(email="orphan-sweep-b@ki.se")
+        # email collisions on the default 'owner@umu.se'.
+        owner_a = User(email="orphan-sweep-a@umu.se")
+        owner_b = User(email="orphan-sweep-b@umu.se")
         s.add_all([owner_a, owner_b])
         s.flush()
         ws_a = make_workspace(s, owner=owner_a, title="A")

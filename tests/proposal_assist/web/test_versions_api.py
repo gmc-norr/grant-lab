@@ -311,7 +311,7 @@ def test_non_member_gets_403_not_a_document(
     `client_authed_owner`, but own the workspace by a stranger instead."""
     _app.state.settings.workspaces_dir = str(tmp_path)
     with pg_session_factory() as s:
-        stranger = make_user(s, email="stranger-v@ki.se")
+        stranger = make_user(s, email="stranger-v@umu.se")
         ws = make_workspace(s, owner=stranger)
         s.commit()
         ws_id = str(ws.id)

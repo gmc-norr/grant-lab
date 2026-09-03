@@ -30,7 +30,7 @@ def _seed(s, *, n_calls: int = 3, n_profiles: int = 2) -> None:
             )
         )
     for i in range(n_profiles):
-        u = User(email=f"cli-{i}@ki.se")
+        u = User(email=f"cli-{i}@umu.se")
         s.add(u)
         s.flush()
         s.add(
@@ -116,7 +116,7 @@ def test_cli_backfill_terminates_when_only_blank_description_profiles_remain(
     they're skipped at SQL level (Codex regression). Should exit 0
     (no failures, just nothing to do for those rows)."""
     with pg_session_factory() as s:
-        u = User(email="blank-cli@ki.se")
+        u = User(email="blank-cli@umu.se")
         s.add(u)
         s.flush()
         # Add a profile with blank description

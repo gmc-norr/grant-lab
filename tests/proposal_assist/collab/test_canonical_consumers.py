@@ -57,7 +57,7 @@ async def test_read_collab_on_returns_log_canonical(pg_session_factory, _setting
     # normalized form. Collab-on read must return the normalized (log) content so
     # its section shas match the kernel's live.sha at accept.
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="canon-read@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="canon-read@umu.se"))
         s.commit()
         wid = ws.id
     (tmp_path / filename_for(Artifact.DRAFT)).write_text("## A\nBody a.\n")
@@ -102,7 +102,7 @@ async def test_read_then_accept_end_to_end_not_false_stale(
     # not rejected as stale — the exact false-stale bug this slice fixes. Uses a
     # tight raw HEAD so the un-fixed read (raw base) would be flagged stale.
     with pg_session_factory() as s:
-        o = make_user(s, email="canon-e2e@ki.se")
+        o = make_user(s, email="canon-e2e@umu.se")
         ws = make_workspace(s, owner=o, current_phase="active")
         s.commit()
         wid, oid = ws.id, o.id
@@ -140,7 +140,7 @@ def _seed_ws_with_proposal(pg_session_factory, tmp_path, *, collab, base_from):
     raw = "Preamble.\n\n## A\nBody a.\n"           # tight: no blank line after '##'
     norm = pm_to_markdown(markdown_to_pm(raw))
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email=f"stale-{uuid.uuid4().hex[:8]}@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email=f"stale-{uuid.uuid4().hex[:8]}@umu.se"))
         s.commit()
         wid = ws.id
     repo_dir = workspace_repo_dir(str(tmp_path), wid)
@@ -200,7 +200,7 @@ async def test_citation_anchor_probe_reads_log_canonical_collab_on(
 ):
     """Collab-on: anchor in durable log but NOT on disk → probe reads log → no error."""
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="cite-collab@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="cite-collab@umu.se"))
         s.commit()
         wid = ws.id
 
@@ -246,7 +246,7 @@ async def test_citation_anchor_probe_reads_raw_disk_flag_off(
 ):
     """Flag-off: anchor absent from disk → probe reads raw disk → anchor not found (parity)."""
     with pg_session_factory() as s:
-        ws = make_workspace(s, owner=make_user(s, email="cite-flagoff@ki.se"))
+        ws = make_workspace(s, owner=make_user(s, email="cite-flagoff@umu.se"))
         s.commit()
         wid = ws.id
 

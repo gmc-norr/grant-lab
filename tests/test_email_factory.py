@@ -19,7 +19,7 @@ class _FakeSettings:
     smtp_port: int = 587
     smtp_user: str | None = None
     smtp_password: str | None = None
-    email_from: str = "bot@ki.se"
+    email_from: str = "bot@umu.se"
 
 
 def test_factory_returns_resend_when_configured():

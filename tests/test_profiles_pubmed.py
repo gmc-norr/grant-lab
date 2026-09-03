@@ -79,7 +79,7 @@ def test_fetch_publications_by_name_affiliation_fallback():
         ]
     )
     client = PubMedClient(transport=transport, sleep_between_members=0)
-    pubs = client.fetch_publications([Member(name="Smith J", affiliation="Karolinska Institutet")])
+    pubs = client.fetch_publications([Member(name="Smith J", affiliation="Umeå universitet")])
     assert len(pubs) == 2
     # Search URL must use the [au] and [ad] fields
     assert "[au]" in calls[0].lower() or "%5bau%5d" in calls[0].lower()
@@ -117,7 +117,7 @@ def test_query_for_sanitizes_entrez_injection():
 
     member = Member(
         name='Smith J"[au] OR 1[uid] OR "',
-        affiliation="Karolinska [ad] AND hacked",
+        affiliation="Umeå [ad] AND hacked",
     )
     q = _query_for(member)
     # The only field tags present are the two we intentionally emit.
@@ -207,12 +207,12 @@ def test_api_key_and_tool_email_included_in_request():
         sleep_between_members=0,
         api_key="SECRET-KEY",
         tool="call-manager",
-        email="ops@ki.se",
+        email="ops@umu.se",
     )
     client.fetch_publications([Member(orcid="0000-0001-2345-6789")])
     assert any("api_key=SECRET-KEY" in u for u in seen)
     assert any("tool=call-manager" in u for u in seen)
-    assert any("email=ops%40ki.se" in u or "email=ops@ki.se" in u for u in seen)
+    assert any("email=ops%40umu.se" in u or "email=ops@umu.se" in u for u in seen)
 
 
 def test_member_rejects_malformed_orcid():

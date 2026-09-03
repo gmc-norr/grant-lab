@@ -29,7 +29,7 @@ from call_manager.scheduler import SingleInstanceViolation, probe_scheduler_lock
 def _set_min_env(monkeypatch, database_url):
     monkeypatch.setenv("DATABASE_URL", database_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
-    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "ki.se")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
 
 
