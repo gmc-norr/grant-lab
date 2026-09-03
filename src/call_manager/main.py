@@ -917,5 +917,5 @@ def create_app() -> FastAPI:
     # Every real router above is registered first, so concrete routes always
     # win; an unmatched /api/* still raises HTTPException(404) and flows
     # through the Plan-1 JSON envelope handler.
-    mount_spa(app, spa_mode=settings.spa_mode)
+    mount_spa(app, spa_mode=settings.spa_mode, edition=settings.app_edition)
     return app

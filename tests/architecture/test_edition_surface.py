@@ -39,6 +39,19 @@ EXCLUDED_PREFIXES = (
     "/api/citation-audit",
     "/api/export",
     "/api/files",
+    # The three admin routers behind proposal-assist-only pages, moved out of
+    # api/__init__.py's _ALWAYS. LIVE entries, not forward declarations: measured
+    # 2026-09-04, these three prefixes cover exactly the six PATHS (seven
+    # operations) the move drops — /api/admin/drafting,
+    # /api/admin/golden-set (GET + POST), /api/admin/golden-set/{triple_id},
+    # /api/admin/workspaces/deleted, /api/admin/workspaces/deleted/{workspace_id}
+    # and .../{workspace_id}/restore. They are NOT under /api/workspaces (the
+    # `/admin` segment comes first), which is why the existing entries missed
+    # them and why test_match_edition_drops_only_excluded_routes went red on the
+    # move until they were declared here.
+    "/api/admin/drafting",
+    "/api/admin/golden-set",
+    "/api/admin/workspaces/deleted",
 )
 
 

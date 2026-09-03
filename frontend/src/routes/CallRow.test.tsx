@@ -2,11 +2,36 @@
 import { MantineProvider } from "@mantine/core";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
-import { expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 
 import type { CallItem } from "../api/dashboard";
 import { theme } from "../theme/theme";
 import { CallRow } from "./CallRow";
+
+// CallRow's destination is edition-dependent, and isMatchEdition is a BUILD-TIME
+// constant (edition.ts reads import.meta.env at module scope), so a test that
+// read the real value would pass or fail by environment. Mocked with the mutable
+// holder + GETTER pattern from AdminNav.test.tsx:25-34 — the getter is
+// load-bearing: CallRow reads isMatchEdition during render and vitest's SSR
+// transform rewrites that read to a namespace property access, so flipping
+// `edition.isMatch` between tests is observed. A plain value would be frozen at
+// import time and the match cases below would silently run the FULL branch and
+// still pass their "does not contain selected=" style assertions only by luck —
+// so both directions are asserted positively.
+const edition = vi.hoisted(() => ({ isMatch: false }));
+vi.mock("../edition", () => ({
+  get isMatchEdition() {
+    return edition.isMatch;
+  },
+  get APP_EDITION() {
+    return edition.isMatch ? "match" : "full";
+  },
+  resolveEdition: (raw: string | undefined) => (raw === "match" ? "match" : "full"),
+}));
+
+afterEach(() => {
+  edition.isMatch = false;
+});
 
 function call(over: Partial<CallItem> = {}): CallItem {
   return {
@@ -138,4 +163,62 @@ it("emits no /cockpit link when there is no resolved profile either", () => {
   for (const a of screen.getAllByRole("link")) {
     expect(a.getAttribute("href") ?? "").not.toContain("/cockpit");
   }
+});
+
+// --- Match edition -----------------------------------------------------------
+// Release-1 CRITICAL: router.simple.tsx mounts no reading pane, so ?selected=N
+// renders nothing and /calls/:id — which it DOES mount — was reachable from no
+// link at all. These pin the match branch; the full-edition tests above are the
+// control that catches a fix applied unconditionally.
+
+it("the MATCH edition links the title to the call's own page, not a selection URL", () => {
+  edition.isMatch = true;
+  renderRow(<CallRow call={call()} />);
+  const href = screen.getByRole("link", { name: "Grant X" }).getAttribute("href") ?? "";
+  expect(href).toBe("/calls/3");
+  expect(href).not.toContain("selected=");
+});
+
+it("the MATCH edition pins the resolved profile onto the detail URL", () => {
+  // CallDetail.tsx:13-20 reads ?profile= and ranks against it, exactly as
+  // CallReadingPane.tsx:50's "Open full page" link relies on.
+  edition.isMatch = true;
+  renderRow(<CallRow call={call()} profileId={7} />, "/?source=eu&page=2");
+  const href = screen.getByRole("link", { name: "Grant X" }).getAttribute("href") ?? "";
+  expect(href).toBe("/calls/3?profile=7");
+});
+
+it("the MATCH edition navigates to the call page when the row body is clicked", () => {
+  edition.isMatch = true;
+  function Probe() {
+    const loc = useLocation();
+    return <span data-testid="loc">{loc.pathname + loc.search}</span>;
+  }
+  renderRow(
+    <Routes>
+      <Route path="/" element={<><CallRow call={call()} profileId={7} /><Probe /></>} />
+      <Route path="/calls/:id" element={<Probe />} />
+    </Routes>,
+  );
+  fireEvent.click(screen.getByRole("listitem"));
+  expect(screen.getByTestId("loc").textContent).toBe("/calls/3?profile=7");
+});
+
+it("the FULL edition still selects into the reading pane on a row click", () => {
+  // The control. Without it a fix that dropped the edition gate — sending the
+  // full edition to /calls/:id too — would leave every match test above green.
+  edition.isMatch = false;
+  function Probe() {
+    const loc = useLocation();
+    return <span data-testid="loc">{loc.pathname + loc.search}</span>;
+  }
+  renderRow(
+    <Routes>
+      <Route path="/" element={<><CallRow call={call()} profileId={7} /><Probe /></>} />
+    </Routes>,
+  );
+  fireEvent.click(screen.getByRole("listitem"));
+  const loc = screen.getByTestId("loc").textContent ?? "";
+  expect(loc).toContain("selected=3");
+  expect(loc.split("?")[0]).toBe("/");
 });

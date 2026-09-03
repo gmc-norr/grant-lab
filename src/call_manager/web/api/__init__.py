@@ -41,8 +41,6 @@ _ALWAYS = (
     me.router,
     admin.router,
     admin_users.router,
-    admin_golden_set.router,
-    admin_retention.router,
     calls.router,
     profiles.router,
 )
@@ -64,6 +62,19 @@ _FULL_ONLY = (
     # — it is the proposal-assist workspace settings router, not app settings.
     # Leaving it in _ALWAYS leaked three /api/workspaces paths into a match build.
     settings.router,
+    # The three ADMIN routers behind proposal-assist-only pages. They were in
+    # _ALWAYS, which left six require_admin-gated proposal-assist endpoints live
+    # in a deployment that does not serve proposal assist — including the
+    # MUTATING /api/admin/workspaces/deleted/{id}/restore. Not an authorization
+    # hole (every one is admin-gated), but the branch's claim is that the surface
+    # is ABSENT. The pages they back — AdminDrafting.tsx, AdminGoldenSet.tsx,
+    # AdminDeletedWorkspaces.tsx, AdminDeletedWorkspaceDetail.tsx — are the only
+    # frontend consumers and router.simple.tsx mounts none of them. The
+    # AdminDashboard golden-set panel reads `golden_set_report` off
+    # /api/admin/dashboard, a different endpoint that stays in _ALWAYS.
+    admin.drafting_router,
+    admin_golden_set.router,
+    admin_retention.router,
 )
 
 
@@ -81,6 +92,12 @@ def build_api_router(*, edition: Literal["match", "full"] = "full") -> APIRouter
     return r
 
 
-# Module-level full-edition router. Kept so existing `from ... import router`
-# call sites (and the OpenAPI codegen) keep working unchanged.
+# Module-level full-edition router. RETAINED SPECULATIVELY — it has NO consumer.
+# The comment here used to claim it kept "existing `from ... import router` call
+# sites (and the OpenAPI codegen) working"; measured 2026-09-04, no such call site
+# exists in src/, tests/ or scripts/. main.py:69 imports build_api_router and
+# calls it with the live edition, and scripts/gen_openapi_types.sh goes through
+# create_app(). The cost is not zero: this line builds the entire FULL router at
+# package-import time, including in a match process that will never serve it.
+# Kept because the plan prescribes it and removing it is the human's call.
 router = build_api_router(edition="full")
