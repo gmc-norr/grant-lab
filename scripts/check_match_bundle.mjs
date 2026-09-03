@@ -49,6 +49,22 @@ const EXCLUDED = [
   "/src/routes/AdminDrafting",
   "/src/routes/AdminGoldenSet",
   "/src/routes/AdminDeletedWorkspace",
+  // The full edition's VS Code shell. NOT "/src/shell/" — the match edition
+  // legitimately ships SimpleShell.tsx, SimpleShell.module.css and BrandMark.tsx
+  // out of that directory, so the exclusion is per file.
+  //
+  // These are here because gate 4 (noCockpitLinks.test.tsx) EXEMPTS them
+  // whole-file: nav-items.ts carries a live `to: "/cockpit"` that is a false
+  // negative there by construction, and ActivityBar/TitleBar only read
+  // `pathname === "/cockpit..."`. Without these entries, a SimpleShell that
+  // one day imported ActivityBar would render that /cockpit link in a match
+  // build with BOTH gates green.
+  "/src/shell/ActivityBar",
+  "/src/shell/AppShell",
+  "/src/shell/Sidebar",
+  "/src/shell/StatusBar",
+  "/src/shell/TitleBar",
+  "/src/shell/nav-items",
 ];
 
 // DELIBERATELY NOT EXCLUDED: frontend/src/api/. It holds proposal-assist clients

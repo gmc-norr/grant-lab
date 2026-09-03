@@ -89,3 +89,32 @@ it("the MATCH edition omits every destination the simple router does not mount",
     expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
   }
 });
+
+// The coherence gate. Three hand-maintained copies of the release-1 admin route
+// set exist — router.simple.tsx's mounted routes, AdminNav's MATCH_EXCLUDED, and
+// noCockpitLinks.test.tsx's EXCLUDED_PREFIXES — and nothing asserted they agree.
+// The concrete failure that leaves open: if router.simple.tsx later stops
+// mounting /admin/users/pending, AdminNav keeps linking to it in the match
+// edition, the link resolves to the in-app soft 404, and every gate stays green
+// because each one is individually consistent.
+//
+// This walks the actual match router rather than any copy of the list.
+it("every admin link the match edition renders is a route the match router mounts", async () => {
+  edition.isMatch = true;
+  const { simpleRouter } = await import("../router.simple");
+  const { leafPaths } = await import("../routeLeafPaths");
+  const mounted = new Set(leafPaths(simpleRouter.routes as never));
+
+  render(
+    <MemoryRouter initialEntries={["/admin"]}>
+      <AdminNav />
+    </MemoryRouter>,
+  );
+  const hrefs = screen
+    .getAllByRole("link")
+    .map((a) => a.getAttribute("href"))
+    .filter((h): h is string => h !== null);
+
+  expect(hrefs.length).toBeGreaterThan(0); // a nav rendering nothing must not pass
+  expect(hrefs.filter((h) => !mounted.has(h))).toEqual([]);
+});
