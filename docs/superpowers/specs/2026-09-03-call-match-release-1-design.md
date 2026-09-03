@@ -251,6 +251,56 @@ On a 1440 px screen the column is **not** stretched; reading degrades past ~75
 characters. The extra width holds a 240 px left rail for orientation only:
 Inbox / Saved / Hidden with counts, and the profile being matched against.
 
+### What a call card shows
+
+The card answers four questions in the order a researcher asks them: *what is
+this*, *what does it fund*, *why is it in front of me*, *can I apply*. Field by
+field, with where each comes from:
+
+| Shown | Source | Always present? |
+| --- | --- | --- |
+| Title | `Call.title` | yes |
+| Funder | `Call.source_name` | yes |
+| Programme | `Call.programme` | no — omit the separator when absent |
+| Deadline + days left | `Call.deadline_local_date` | usually |
+| Budget (a **range** when min ≠ max) | `Call.budget_min/max/currency` | often absent |
+| **What the call funds** | `Call.summary` | depends on the source adapter |
+| The matched sentence | `call_ranking_criteria.quoted_evidence` | when ranked |
+| Criterion chips | `call_ranking_criteria.rating` | when ranked |
+| Keywords | `Call.keywords` | often empty |
+| "N things to check" | count of `CallRanking.applicant_notes` | **escalated calls only** |
+
+Two of these are already on `CallOut` and cost no backend work: `summary` and
+`keywords` are served today and the current dashboard renders neither.
+
+**The card must read correctly with the optional fields missing**, because for
+most calls they will be. `CallRanking.summary` and `applicant_notes` are written
+only by the remote path (`enable_analysis=True`); the local Gemma path leaves
+both NULL, and the remote path is capped at `RANKING_REMOTE_DAILY_CAP` (100/day).
+So the richest cards are a minority — though a usefully biased minority, since
+escalation is triggered by a high local score, which is exactly what sits at the
+top of the inbox.
+
+Where `Call.summary` is absent, say so and link out rather than collapsing the
+section: an empty space reads as a bug, a sentence reads as a fact about the
+source.
+
+### Applicant notes on the detail page
+
+`CallRanking.applicant_notes` is a list of `{category, text}` over a closed
+vocabulary of nine categories, each with a display heading already defined in
+`web/filters.py:note_category_heading` — Deadline, Eligibility, Budget &
+funding, Team & consortium, IP & licensing, Data & open access, Evaluation
+criteria, Process & timing, Other. The detail API already serves them as
+`CallDetailNoteOut{category, heading, text}`.
+
+These are the most useful thing on the page and the most dangerous, because they
+are the **only block not sourced from the call text**. The criteria quote the
+call; the summary is the funder's; the notes are the model's inference. So they
+are grouped under their own heading, visibly attributed to the model, and
+carry an instruction to verify against the call text. Never interleave them with
+quoted evidence.
+
 ### Responsive strategy
 
 Mostly plain responsive CSS — the single column *is* the phone layout, which is
@@ -345,14 +395,19 @@ not known yet. A portrait board is one column of four rather than two of four;
 
 ### What is on the board
 
-Per call: title, funder/source, days-to-deadline, a one-line snippet of the
-call's **own summary**, and a QR code.
+Per call: title, funder/source, days-to-deadline, budget, and a QR code.
 
-Note the deliberate difference from the logged-in view: the board shows the
-funder's own words, never the criterion chips or `quoted_evidence`-plus-
-`rationale` expansion. Criterion ratings are judgements *about this
-institution's fit*; a summary snippet is public information the funder already
-published. Both answer "why is this here?", but only one is safe on a wall.
+**No summary line.** An earlier revision of this spec called for a one-line
+snippet of `Call.summary`; eight cards on a 1080 px board leave no room for it
+without shrinking the QR or the title below their legibility floors. The QR *is*
+the "tell me more" — a passer-by who wants the detail scans it and reads the
+funder's own page on a device built for reading.
+
+Note the deliberate difference from the logged-in view: the board never shows
+the criterion chips, `quoted_evidence`, `rationale`, or `applicant_notes`.
+Everything in that group is a judgement *about this institution's fit*, and none
+of it belongs in a corridor. Title, funder, deadline and budget are facts the
+funder already published.
 
 The QR points at `Call.url` — the **funder's own page**, never at this app. A QR
 that dead-ends on a login screen is worse than no QR.
