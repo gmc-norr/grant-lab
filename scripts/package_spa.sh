@@ -18,7 +18,7 @@
 #
 # NOTE there are TWO OTHER writers of the served directory, and neither calls
 # this script or runs any bundle gate:
-#   1. .github/workflows/ci.yml:132-137 — `rm -rf src/call_manager/web/spa` +
+#   1. .github/workflows/ci.yml:146-147 — `rm -rf src/call_manager/web/spa` +
 #      `docker cp` for the wheel, and frontend/Dockerfile builds the FULL
 #      edition. (The earlier ":118" here was stale; 118 is the OSV-Scanner step.)
 #   2. scripts/collab_e2e_run.sh:110-113 — under E2E_SPA_MODE=prod it runs

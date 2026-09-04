@@ -102,22 +102,25 @@ export default defineConfig(({ mode }) => {
   // file (kept in src/ so tsc picks up its `expect` type augmentation). `vite
   // build` ignores this `test` key.
   test: {
-    // Pin the THIRD reader of VITE_APP_EDITION. Without this, `import.meta.env`
-    // under vitest carries whatever the developer's shell happens to export, so
-    // src/virtual-router.test.ts — the only test that resolves the build-time
-    // alias — asserted the FULL direction and nothing else, in CI and locally.
-    // The match direction is the one this branch exists to protect; CI runs it
-    // as a second, explicitly-VITE_APP_EDITION=match invocation
-    // (.github/workflows/ci.yml, right after the bundle gate).
+    // Derives the test-time VITE_APP_EDITION from the SAME config-time constant
+    // the router alias uses, so the two readers cannot disagree under vitest.
     //
-    // The value is APP_EDITION, not a literal "full", and that is measured, not
-    // stylistic: vitest's `test.env` OVERRIDES an inherited process.env value in
-    // import.meta.env (verified 2026-09-04 — a literal "full" here made
-    // `VITE_APP_EDITION=match pnpm run test src/virtual-router.test.ts` fail,
-    // because the alias resolved to router.simple.tsx while edition.ts still
-    // read "full"). Using the same config-time constant the alias uses keeps the
-    // two readers in agreement in BOTH directions, and still resolves to "full"
-    // when nothing is set — which is the determinism this pin is for.
+    // Be clear about what this line does NOT do. It is INERT — measured four ways
+    // 2026-09-04: with it, without it, exported or not, the outcome is identical,
+    // because vitest already feeds `import.meta.env` from the same loadEnv() view
+    // the alias resolves from, and loadEnv merges process.env. It documents the
+    // coupling; it does not create it.
+    //
+    // What it must NOT become is a literal "full". vitest's `test.env` OVERRIDES
+    // an inherited process.env value in import.meta.env, so a literal breaks
+    // `VITE_APP_EDITION=match pnpm run test src/virtual-router.test.ts` — the
+    // alias resolves to router.simple.tsx while edition.ts still reads "full".
+    //
+    // The thing that actually closes the uncovered direction is the CI step:
+    // src/virtual-router.test.ts is the only test that resolves the build-time
+    // alias, and without a second explicitly-match invocation it asserts the FULL
+    // direction and nothing else. See .github/workflows/ci.yml, right after the
+    // bundle gate.
     env: { VITE_APP_EDITION: APP_EDITION },
     environment: "jsdom",
     globals: true,

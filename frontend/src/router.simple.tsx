@@ -102,8 +102,11 @@ export const simpleRouter = createBrowserRouter([
       // alone, so a typed unknown URL hits FastAPI's real 404, never this.
       {
         path: "*",
+        // component="main", matching router.tsx:155. SimpleShell used to supply
+        // the landmark; it no longer does (every other release-1 route renders
+        // its own), so without this the soft-404 page would have none at all.
         element: (
-          <Center component="div" role="alert" p="xl">
+          <Center component="main" role="alert" p="xl">
             <Title order={1}>Not found</Title>
           </Center>
         ),

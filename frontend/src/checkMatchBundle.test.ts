@@ -59,9 +59,14 @@ const REQUIRED = [
   "/src/routes/AdminDeletedWorkspace",
   // The six per-file /src/shell/ entries. Per-file and not "/src/shell/" because
   // the match edition legitimately ships SimpleShell + BrandMark out of that
-  // directory. These carry gate 4's whole-file EXEMPTions (noCockpitLinks.test
-  // .tsx:59-63), so without them a SimpleShell that imported ActivityBar would
-  // render a /cockpit link with BOTH gates green.
+  // directory.
+  //
+  // THREE of them — ActivityBar, TitleBar and nav-items — carry gate 4's
+  // whole-file EXEMPTions (noCockpitLinks.test.tsx:60-62), so without those a
+  // SimpleShell that imported ActivityBar would render nav-items' live
+  // `to: "/cockpit"` with BOTH gates green. The other three (AppShell, Sidebar,
+  // StatusBar) are here for the ordinary reason that they are full-edition
+  // furniture — gate 4 does not exempt them.
   "/src/shell/ActivityBar",
   "/src/shell/AppShell",
   "/src/shell/Sidebar",
@@ -83,8 +88,12 @@ it("SimpleShell is NOT excluded — the match shell must still be buildable", ()
   // above by prefix accident while making the match build impossible, and a
   // reviewer would read the red bundle gate as a leak rather than as an
   // over-broad list.
+  // `includes`, not `startsWith` — the same matcher check_match_bundle.mjs:100
+  // uses. With startsWith an entry of "SimpleShell" would break every match
+  // build while this control stayed green: a control weaker than the mechanism
+  // it mirrors is not a control.
   const entries = excludedEntries();
-  for (const shipped of ["/src/shell/SimpleShell", "/src/shell/BrandMark"]) {
-    expect(entries.some((e) => shipped.startsWith(e))).toBe(false);
+  for (const shipped of ["/src/shell/SimpleShell.tsx", "/src/shell/BrandMark.tsx"]) {
+    expect(entries.some((e) => shipped.includes(e))).toBe(false);
   }
 });

@@ -24,6 +24,12 @@ vi.mock("../api/session", () => ({ useSession: () => ({ data: sessionData.value 
 // logout mutation), which is the thing that was missing. Hoisted for the same
 // reason as sessionData above.
 const logout = vi.hoisted(() => ({ mutate: vi.fn(), isPending: false }));
+// jsdom refuses a plain assignment to window.location.assign, so redefine it.
+const assign = vi.fn();
+Object.defineProperty(window, "location", {
+  configurable: true,
+  value: { ...window.location, assign },
+});
 vi.mock("../api/auth", () => ({ useLogout: () => logout }));
 
 import { SimpleShell } from "./SimpleShell";
@@ -64,6 +70,7 @@ describe("SimpleShell", () => {
   beforeEach(() => {
     sessionData.value = MEMBER;
     logout.mutate.mockClear();
+    assign.mockClear();
     logout.isPending = false;
   });
 
@@ -147,6 +154,20 @@ describe("SimpleShell", () => {
     expect(logout.mutate).not.toHaveBeenCalled();
     fireEvent.click(item);
     expect(logout.mutate).toHaveBeenCalledTimes(1);
+
+    // And it must NAVIGATE on success. Asserting only that mutate was called
+    // leaves the onSuccess handler free to be dropped — and that handler is what
+    // discards every cached query along with the document. A sign-out that
+    // clears the cookie and leaves the previous user's calls, profiles and admin
+    // data on screen is the failure this shell exists to avoid on a shared
+    // workstation. Driving the real second argument is what makes it a gate.
+    const [, opts] = logout.mutate.mock.calls[0] as [
+      undefined,
+      { onSuccess?: () => void } | undefined,
+    ];
+    expect(opts?.onSuccess).toBeTypeOf("function");
+    opts!.onSuccess!();
+    expect(assign).toHaveBeenCalledWith("/login");
   });
 
   it("disables Sign out while the logout request is in flight", async () => {

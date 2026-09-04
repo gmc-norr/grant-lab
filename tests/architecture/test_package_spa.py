@@ -115,3 +115,38 @@ def test_it_refuses_a_tree_that_is_not_the_repo_root(tmp_path):
     out = _run(root, VITE_APP_EDITION="match")
     assert out.returncode == 1
     assert "is not the repo root" in out.stderr
+
+
+# --- The bundle gate's MECHANISM, not just its data -------------------------
+#
+# frontend/src/checkMatchBundle.test.ts pins the EXCLUDED array's membership.
+# Nothing pinned the code that USES it: neutering the `EXCLUDED.some(...)`
+# predicate, or the non-zero exit, left that test, `pnpm check:bundle` and CI all
+# green while the gate waved a cockpit module through. That is the same shape as
+# the five hollow gates this branch already found, so it gets a positive control:
+# a manifest that MUST be rejected, asserted to be rejected.
+
+
+def _gate(root, dist):
+    return subprocess.run(
+        ["node", str(root / "scripts" / "check_match_bundle.mjs"), str(dist)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_the_bundle_gate_rejects_a_manifest_containing_an_excluded_module(tmp_path):
+    root = _tree(tmp_path, modules=DIRTY)
+    out = _gate(root, root / "frontend" / "dist")
+    assert out.returncode == 1, out.stdout + out.stderr
+    assert "CockpitSidebar" in out.stderr, "the refusal must name the offending module"
+
+
+def test_the_bundle_gate_accepts_a_clean_manifest(tmp_path):
+    """The other half. Without this a gate that rejected EVERYTHING would pass
+    the test above while making every match build unshippable."""
+    root = _tree(tmp_path, modules=CLEAN)
+    out = _gate(root, root / "frontend" / "dist")
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "clean" in out.stdout
