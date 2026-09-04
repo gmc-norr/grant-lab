@@ -36,7 +36,7 @@ Every task's requirements implicitly include this section.
 
   | Suite | Command | Baseline |
   | --- | --- | --- |
-  | Backend | `uv run pytest -n 16 --dist loadfile` | `4915 passed, 1 skipped` |
+  | Backend | `uv run pytest -n 16 --dist loadfile` | `5029 passed, 1 skipped` |
   | Architecture subset | `uv run pytest tests/architecture -q` | `73 passed` |
   | Frontend | `pnpm -C frontend test` | `135 files, 954 tests` |
 
@@ -71,7 +71,11 @@ Every task's requirements implicitly include this section.
   it exits **0** with empty output on an unchanged file, so it can never fail.
 - **The `full` edition must keep working** at every commit: `pnpm -C frontend build`
   succeeds and `tests/architecture/full_edition_routes.txt` grows by **exactly 2
-  lines, 105 -> 107**, and by nothing else. Release 1 is an addition, not a
+  lines, 107 -> 109**, and by nothing else. (**Re-measured 2026-09-04 after the
+  profile-visibility merge `ed1153a3`**, which added
+  `/api/profiles/{profile_id}/viewers` and `/api/profiles/{profile_id}/visibility`
+  and moved the base 105 -> 107. The review history below argues about 105 vs 107
+  vs 109; all of it was against the OLD base and is left as written.) Release 1 is an addition, not a
   replacement. **Measured**, because three sources disagreed: I first wrote
   "still 105" and two outside reviewers both said 109. The file holds unique
   **paths**, not operations — `POST` and `DELETE /api/calls/{call_id}/hide` are
@@ -279,12 +283,12 @@ Settled points: `.superpowers/review/planB-settled.md`.
 | File | Responsibility |
 | --- | --- |
 | `src/call_manager/db/models.py` | Add `CallDecision`, delete `UserCallDismissal` (modify) |
-| `alembic/versions/0070_call_decisions.py` | Create, backfill, drop (create) |
+| `alembic/versions/0071_call_decisions.py` | Create, backfill, drop (create) |
 | `src/call_manager/web/api/calls.py` | Re-point hide; add save; grow `CallOut` (modify) |
 | `src/call_manager/web/dashboard.py` | Filter per (user, profile) on `state` (modify) |
 | `src/call_manager/digest/assemble.py` | Per-profile exclusion sets (modify) |
 | `src/call_manager/ranking/golden_set.py` | Read `profile_id`; filter `state='hidden'` (modify) |
-| `tests/migrations/test_0070_call_decisions.py` | The backfill-set gate (create) |
+| `tests/test_migration_0071_call_decisions.py` | The backfill-set gate (create) |
 | `tests/web/test_call_decisions_api.py` | Save/hide/inbox endpoints (create) |
 | `tests/web/test_calls_list_query_count.py` | The no-N+1 gate (create) |
 | `tests/architecture/test_criterion_vocabulary.py` | Pins the 7 criteria / 5 ratings (create) |
@@ -321,8 +325,15 @@ how two sources of truth start.
 
 **Files:**
 - Modify: `src/call_manager/db/models.py` (add `CallDecision` after `Subscription`; delete `UserCallDismissal` at `:442`)
-- Create: `alembic/versions/0070_call_decisions.py` — `down_revision = "0069"` (head measured: `0069_collab_doc_epoch.py`, 69 migrations)
-- Create: `tests/migrations/test_0070_call_decisions.py`
+- Create: `alembic/versions/0071_call_decisions.py` — `down_revision = "0070"`
+  (head **re-measured 2026-09-04** after the profile-visibility merge:
+  `0070_profile_visibility.py`, **70** migrations. This plan was written against
+  `0069` and would have created a SECOND `0070` claiming the same parent — a
+  branched history alembic refuses to walk.)
+- Create: `tests/test_migration_0071_call_decisions.py` (**not**
+  `tests/migrations/…` — that directory does not exist; every migration test on
+  master is `tests/test_migration_NNNN_*.py`, and a path under a missing
+  directory makes pytest exit **4, "no tests ran"**, which reads like a pass)
 - Regenerate: `docs/ARCHITECTURE.md`
 
 **Interfaces:**
@@ -339,7 +350,7 @@ alembic's enum-alteration pain when Plan C or D adds a third state.
 class CallDecision(Base):
     """A user's triage decision about one call, for one profile.
 
-    Supersedes the table migration 0070 drops. (Its NAME is deliberately not
+    Supersedes the table migration 0071 drops. (Its NAME is deliberately not
     written here: Task 2's "no consumer remains" gate greps src/ for it, and a
     docstring mention makes that gate fail on correct code. The old name lives in
     the migration, where the grep never looks.) The old key was (user_id, call_id):
@@ -485,12 +496,26 @@ There *is* one, and the spec names it as canonical:
   already defines it as `p.created_by == user.id or user.is_admin`. Boards reuse that
   rule exactly, so no second permission model appears."*
 
-What is genuinely org-wide is **reading**: `list_profiles` (`profiles.py:118-121`)
-returns every active profile — name, kind, level, `description` — to any logged-in
-user, with no filter, and `resolve_profile_selection` accepts any active id. Given
-the app is a single-organization internal tool behind domain-restricted,
-admin-approved accounts, and that a profile is a *group's research profile* rather
-than personal data, that reads as deliberate, not as a hole.
+**SUPERSEDED 2026-09-04 by the profile-visibility merge `ed1153a3`.** What this
+paragraph said was true when this plan was written and is now false, so it is
+replaced rather than quietly edited:
+
+> ~~What is genuinely org-wide is **reading**: `list_profiles` returns every
+> active profile to any logged-in user, with no filter, and
+> `resolve_profile_selection` accepts any active id ... that reads as deliberate,
+> not as a hole.~~
+
+Reading is **no longer org-wide**. A profile now has an owner and a `visibility`
+of `'org'` or `'private'`, and `web/profile_access.py::readable_profile_ids` is
+the single rule deciding who may read it. `list_profiles` filters by it and
+`resolve_profile_selection` applies it on **both** arms. The observation that
+prompted the change was raised from this very plan's review and became its own
+slice; the "single-organization internal tool" reasoning above is exactly what
+that slice decided was not good enough for a group's unpublished directions.
+
+Day one is unchanged in practice — every existing profile defaults to `'org'` —
+so nothing in this plan's behaviour shifts on merge. What shifts is the RULE the
+gate below must name.
 
 **So gate 5 changes.** An earlier draft asked Task 8 to reject "a `profile_id` the
 user cannot use", which tests a rule that does not exist and **should not**: a
@@ -500,8 +525,18 @@ nobody else's view of anything. Edit rights would be the *wrong* rule — a subs
 who did not create a shared profile must still be able to triage for it, which is
 exactly what §4.1's `decided_by` ("for shared profiles") is for.
 
-The rule Task 8 must actually enforce is **"exists and is active"** — the same
-predicate `resolve_profile_selection` already applies to reads. See Task 8 gate 5.
+The rule Task 8 must actually enforce is **"exists, is active, and is readable
+by this user"** — still, exactly, *the same predicate `resolve_profile_selection`
+already applies to reads*. That framing was right and survives the merge
+unchanged; only its CONTENT grew a third arm. Concretely: `can_read_profile(session,
+user, profile_id)` from `web/profile_access.py`. See Task 8 gate 5.
+
+The paragraph above still holds on the part that matters: **edit rights remain the
+wrong rule.** A colleague a profile is *shared with* — a viewer, not the owner —
+must still be able to triage for it, which is what §4.1's `decided_by` is for. The
+read rule is deliberately wider than the edit rule (`profiles.py::_profile_for_edit`
+returns 404 to a non-reader and 403 to a reader who is not the owner), and it is
+the READ side this gate wants.
 
 **Report the orphan loss, do not hide it.** Before the drop, count and log the dismissals
 that fanned out to nothing (see the open question above):
@@ -513,7 +548,7 @@ orphans = conn.execute(sa.text("""
                       WHERE c.user_id = d.user_id AND c.call_id = d.call_id)
 """)).scalar_one()
 if orphans:
-    print(f"0070: {orphans} dismissal(s) had no active subscribed or default "
+    print(f"0071: {orphans} dismissal(s) had no active subscribed or default "
           f"profile and were NOT migrated")
 ```
 
@@ -525,7 +560,7 @@ dimension — say so in the docstring rather than pretending it round-trips.
 
 - [ ] **Step 3: The backfill gate — this is the task's real test**
 
-`tests/migrations/test_0070_call_decisions.py`. Name what trivially passes first:
+`tests/test_migration_0071_call_decisions.py`. Name what trivially passes first:
 **a fixture with one user and one profile passes every wrong version of this
 query.** So the fixture must make each wrong reading produce a *different* count.
 
@@ -559,7 +594,7 @@ Also assert `user_call_dismissals` is **gone** (`inspector.has_table` is False) 
 
 Run each inside one shell invocation, restoring with `cp` from a saved copy:
 
-| # | Mutation in `0070`'s SQL | Must redden because |
+| # | Mutation in `0071`'s SQL | Must redden because |
 | --- | --- | --- |
 | B1 | drop `AND p.is_active = true` | P2 appears → 4 rows |
 | B2 | drop `OR p.id = u.default_profile_id` | P3 missing → 2 rows (P5 survives via its subscription) |
@@ -574,7 +609,7 @@ not the expectation.
 
 ```bash
 cd /home/parlar_ai/dev/call-monitor
-uv run pytest tests/migrations/test_0070_call_decisions.py -q
+uv run pytest tests/test_migration_0071_call_decisions.py -q
 uv run alembic check
 uv run python scripts/gen_architecture.py
 test -n "$(git diff --name-only -- docs/ARCHITECTURE.md)" \
@@ -592,7 +627,7 @@ model and the migration agree. `docs/ARCHITECTURE.md` **must** change here (a ne
 table with a unique index and a CHECK); an unchanged file means the generator did
 not run.
 
-**Test delta from `4915 passed, 1 skipped`:** `+N` where N is the count this file
+**Test delta from `5029 passed, 1 skipped`:** `+N` where N is the count this file
 actually collects — measure it, do not predict it. Some existing
 `user_call_dismissals` tests will move or be deleted in Task 2; count then.
 
@@ -771,7 +806,7 @@ idempotency now that the row has two states.
    - `grep` exits **1** on no match, so it must be written `! grep -rq … src/` or
      the check inverts.
    - **The obvious pattern fails on correct code.** The new `CallDecision`
-     docstring says *"Replaces user_call_dismissals (migration 0070)"*, which lives
+     docstring says *"Replaces user_call_dismissals (migration 0071)"*, which lives
      in `src/`. Verified by building the case and running it: the gate reported
      `GATE FAILS on a CORRECT Task 1`. Match the **identifier**, not the prose:
 
@@ -1511,10 +1546,11 @@ pnpm -C frontend e2e:match
 Expectations:
 
 - **`1 skipped` — exactly one.** `0 skipped` means a live Anthropic call ran.
-- **The pass total will be higher than `4915`.** State the number you measured and
+- **The pass total will be higher than `5029`** (measured on master at
+  `ed1153a3`, 2026-09-04; it was `4915` when this plan was first written). State the number you measured and
   the per-task deltas that produce it. Do **not** copy a predicted total into this
   section — the Plan A brief's stale `3361` is why this line exists.
-- `tests/architecture/full_edition_routes.txt` goes **105 -> 107**, and the diff is
+- `tests/architecture/full_edition_routes.txt` goes **107 -> 109**, and the diff is
   exactly these two added lines:
 
   ```
