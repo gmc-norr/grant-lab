@@ -2,11 +2,31 @@
 import { MantineProvider } from "@mantine/core";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 
 import type { CallDetail } from "../api/calls";
 import { theme } from "../theme/theme";
 import { CallDetailBody } from "./CallDetailBody";
+
+// The Start-drafting button is edition-gated and isMatchEdition is a BUILD-TIME
+// constant, so a test that read the real value would pass or fail by environment.
+// Mutable holder + GETTER, the pattern from AdminNav.test.tsx:25-34: the getter is
+// load-bearing, because a plain value would be frozen at import time and the match
+// case below would silently run the FULL branch.
+const edition = vi.hoisted(() => ({ isMatch: false }));
+vi.mock("../edition", () => ({
+  get isMatchEdition() {
+    return edition.isMatch;
+  },
+  get APP_EDITION() {
+    return edition.isMatch ? "match" : "full";
+  },
+  resolveEdition: (raw: string | undefined) => (raw === "match" ? "match" : "full"),
+}));
+
+afterEach(() => {
+  edition.isMatch = false;
+});
 
 const DATA = {
   call: {
@@ -40,11 +60,30 @@ it("renders the title heading, ranking score band, and analyst notes", () => {
   expect(screen.getByText("Budget & funding")).toBeInTheDocument();
 });
 
-it("renders NO Start-drafting control — /cockpit/new is not mounted in release 1", () => {
-  // INVERTED from "Start drafting links to /cockpit/new with the call + best
-  // profile prefilled". It was a <Button component={Link}>, so it has both a link
-  // and a button role in different react-router versions; both are checked, and
-  // so is every rendered href.
+it("the FULL edition links Start drafting to /cockpit/new with the call + best profile", () => {
+  // The control for the match test below. Without it a fix that dropped the
+  // button unconditionally — i.e. broke the full product, which is run-record
+  // ESCALATE E1 — would leave the match test green.
+  renderBody(DATA);
+  const link = screen.getByRole("link", { name: /start drafting/i });
+  const href = link.getAttribute("href") ?? "";
+  expect(href).toContain("/cockpit/new?");
+  expect(href).toContain("call_id=5");
+  expect(href).toContain("profile_id=7");
+});
+
+it("the FULL edition omits profile_id when there is no best profile", () => {
+  renderBody({ ...DATA, best_profile_id: null } as CallDetail);
+  const href = screen.getByRole("link", { name: /start drafting/i }).getAttribute("href") ?? "";
+  expect(href).toContain("call_id=5");
+  expect(href).not.toContain("profile_id");
+});
+
+it("the MATCH edition renders NO Start-drafting control — /cockpit/new is not mounted", () => {
+  // It is a <Button component={Link}>, so it can carry a link or a button role
+  // depending on the react-router version; both are checked, and so is every
+  // rendered href — a renamed link would pass a name-only assertion.
+  edition.isMatch = true;
   renderBody(DATA);
   expect(screen.queryByRole("link", { name: /start drafting/i })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /start drafting/i })).not.toBeInTheDocument();

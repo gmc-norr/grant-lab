@@ -16,8 +16,19 @@ import { selectionSearch } from "./callSelection";
 // no double navigation). profileId is the dashboard's resolved effective
 // profile, pinned so the pane ranks the same.
 //
-// There is NO "Start drafting" action: it linked to /cockpit/new, which release 1
-// does not mount. Pinned by noCockpitLinks.test.tsx and by CallRow.test.tsx.
+// "Start drafting" is GATED on the edition, not deleted. Spec §4.1 said to remove
+// it, and removing it made /cockpit/new unreachable in the FULL edition too:
+// WorkspaceCreate.tsx:21-30 is from-call-only, so a full build could no longer
+// create a drafting workspace through the UI at all, while WorkspaceList.tsx:75,81
+// went on telling users to "pick a call to start drafting". That is run-record
+// ESCALATE E1, resolved by the human on 2026-09-04. The spec's stated reason for
+// deletion — "or release 1 ships two buttons that 404" — is satisfied by gating:
+// release 1 does not mount /cockpit/new and does not render this link.
+//
+// Same mechanism as AdminNav.tsx. noCockpitLinks.test.tsx EXEMPTs this file
+// because a source scan cannot tell a gated string literal from an ungated one,
+// so BOTH branches are pinned by CallRow.test.tsx instead — those tests are the
+// only thing holding this gating.
 //
 // DESTINATION IS EDITION-DEPENDENT, and that is a reachability fix, not a style
 // choice. ?selected=N only does something when a reading pane is mounted to read
@@ -35,6 +46,9 @@ export function CallRow({ call, profileId }: { call: CallItem; profileId?: numbe
   const navigate = useNavigate();
   const selected = sp.get("selected") === String(call.id);
   const detailTo = `/calls/${call.id}${profileId != null ? `?profile=${profileId}` : ""}`;
+  const startParams = new URLSearchParams({ call_id: String(call.id), call_title: call.title });
+  if (profileId != null) startParams.set("profile_id", String(profileId));
+  const startHref = `/cockpit/new?${startParams.toString()}`;
   const rowTarget = isMatchEdition
     ? detailTo
     : { search: selectionSearch(sp, call.id, profileId) };
@@ -68,6 +82,11 @@ export function CallRow({ call, profileId }: { call: CallItem; profileId?: numbe
       </Box>
       <Stack gap="0.3rem" align="flex-end" flex="0 0 auto">
         <MatchBadge score={call.aggregate_score} />
+        {!isMatchEdition && (
+          <Anchor component={Link} fz="0.8rem" fw={500} to={startHref} style={{ whiteSpace: "nowrap" }}>
+            Start drafting
+          </Anchor>
+        )}
       </Stack>
     </Group>
   );

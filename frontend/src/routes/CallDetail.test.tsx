@@ -8,7 +8,21 @@ import * as clientMod from "../api/client";
 import { theme } from "../theme/theme";
 import { CallDetail } from "./CallDetail";
 
-afterEach(() => { vi.restoreAllMocks(); });
+// /calls/:id is mounted by BOTH routers, so this page renders in both editions and
+// the Start-drafting button below it is edition-gated. Mutable holder + GETTER,
+// the pattern from AdminNav.test.tsx:25-34.
+const edition = vi.hoisted(() => ({ isMatch: false }));
+vi.mock("../edition", () => ({
+  get isMatchEdition() {
+    return edition.isMatch;
+  },
+  get APP_EDITION() {
+    return edition.isMatch ? "match" : "full";
+  },
+  resolveEdition: (raw: string | undefined) => (raw === "match" ? "match" : "full"),
+}));
+
+afterEach(() => { vi.restoreAllMocks(); edition.isMatch = false; });
 
 function LocationProbe() {
   return <span data-testid="loc">{useLocation().pathname}</span>;
@@ -62,11 +76,21 @@ it("renders the ranking hero, analyst notes, and criterion why-string", async ()
   expect(screen.getByText("Cosine similarity 0.420 (pass threshold 0.30).")).toBeInTheDocument();
 });
 
-it("the full call page renders NO Start-drafting control", async () => {
-  // INVERTED from "Start drafting links to /cockpit/new with the call + best
-  // profile prefilled". An absence assertion on an async page is worthless until
-  // the page has actually rendered, so wait for the heading FIRST — otherwise
-  // this passes on a page that never loaded at all.
+it("the FULL call page links Start drafting to /cockpit/new with the call + best profile", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: RANKED, error: undefined } as never);
+  renderDetail();
+  expect(await screen.findByRole("heading", { name: "Genomics Grant" })).toBeInTheDocument();
+  const href = screen.getByRole("link", { name: /start drafting/i }).getAttribute("href") ?? "";
+  expect(href).toContain("/cockpit/new?");
+  expect(href).toContain("call_id=5");
+  expect(href).toContain("profile_id=7");
+});
+
+it("the MATCH call page renders NO Start-drafting control", async () => {
+  // An absence assertion on an async page is worthless until the page has
+  // actually rendered, so wait for the heading FIRST — otherwise this passes on a
+  // page that never loaded at all.
+  edition.isMatch = true;
   vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: RANKED, error: undefined } as never);
   renderDetail();
   expect(await screen.findByRole("heading", { name: "Genomics Grant" })).toBeInTheDocument();

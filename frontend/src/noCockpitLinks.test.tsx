@@ -77,6 +77,14 @@ const EXEMPT = [
   // only thing holding the gating for these files — keep them that way.
   "routes/AdminNav.tsx",
   "routes/AdminDashboard.tsx",
+  //
+  // The two drafting entry points, restored under the same KIND-B gating after
+  // run-record ESCALATE E1: deleting them left the FULL edition with no reachable
+  // path to WorkspaceCreate. Pinned by CallRow.test.tsx, CallDetailBody.test.tsx
+  // and CallDetail.test.tsx over BOTH branches — those tests are the only thing
+  // holding the gating for these files.
+  "routes/CallRow.tsx",
+  "routes/CallDetailBody.tsx",
 ];
 
 function walk(dir: string): string[] {

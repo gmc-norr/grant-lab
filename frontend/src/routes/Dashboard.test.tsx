@@ -2,11 +2,29 @@ import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
-import { expect, it, vi } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 
 import * as clientMod from "../api/client";
 import { theme } from "../theme/theme";
 import { Dashboard } from "./Dashboard";
+
+// CallRow's Start-drafting link is edition-gated and isMatchEdition is a
+// BUILD-TIME constant, so a test that read the real value would pass or fail by
+// environment. Mutable holder + GETTER, the pattern from AdminNav.test.tsx:25-34.
+const edition = vi.hoisted(() => ({ isMatch: false }));
+vi.mock("../edition", () => ({
+  get isMatchEdition() {
+    return edition.isMatch;
+  },
+  get APP_EDITION() {
+    return edition.isMatch ? "match" : "full";
+  },
+  resolveEdition: (raw: string | undefined) => (raw === "match" ? "match" : "full"),
+}));
+
+afterEach(() => {
+  edition.isMatch = false;
+});
 
 // Surfaces the live URL search so a test can assert WHEN (not just whether) it changes.
 function LocationProbe() {
@@ -91,12 +109,28 @@ it("paginating preserves the show_closed toggle in the URL", async () => {
   });
 });
 
-it("threads the dashboard's effective profile into the row links, and emits none into /cockpit", async () => {
-  // INVERTED from "threads the dashboard's effective profile into the
-  // Start-drafting links". Profile threading is still real behaviour — CallRow
-  // still takes profileId and still pins it into the reading-pane selection URL —
-  // so the original property is kept, retargeted at the link that survives.
-  // Asserting only the absence would have silently dropped that coverage.
+it("threads the dashboard's effective profile into BOTH row links in the full edition", async () => {
+  // Profile threading is real behaviour on two links at once: the title anchor
+  // pins ?profile= for the reading pane, and Start drafting pins profile_id= for
+  // WorkspaceCreate. Asserting one would drop coverage of the other.
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue(
+    itemsBody([row(1, "Call one", null)], {
+      effective: { profile_id: 5, source: null, sort: "newest", show_closed: false },
+    }) as never,
+  );
+  renderAt("/");
+  const title = await screen.findByRole("link", { name: "Call one" });
+  expect(title.getAttribute("href")).toContain("profile=5");
+  const start = screen.getByRole("link", { name: /start drafting/i });
+  expect(start.getAttribute("href") ?? "").toContain("/cockpit/new?");
+  expect(start.getAttribute("href") ?? "").toContain("profile_id=5");
+});
+
+it("the MATCH dashboard threads the profile and emits no /cockpit link at all", async () => {
+  // The dashboard is the release-1 landing page, so this is the whole-page check
+  // that gate 4's source scan can no longer make for CallRow.tsx: no rendered
+  // href may point into the excluded half.
+  edition.isMatch = true;
   vi.spyOn(clientMod.api, "GET").mockResolvedValue(
     itemsBody([row(1, "Call one", null)], {
       effective: { profile_id: 5, source: null, sort: "newest", show_closed: false },

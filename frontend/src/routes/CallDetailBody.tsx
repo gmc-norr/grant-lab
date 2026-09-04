@@ -1,7 +1,9 @@
 // frontend/src/routes/CallDetailBody.tsx
-import { Anchor, Badge, Box, Card, Code, Group, Stack, Text, Title } from "@mantine/core";
+import { Anchor, Badge, Box, Button, Card, Code, Group, Stack, Text, Title } from "@mantine/core";
+import { Link } from "react-router-dom";
 
 import type { CallDetail } from "../api/calls";
+import { isMatchEdition } from "../edition";
 import { DeadlineLocal } from "./Deadline";
 
 function budgetText(c: { budget_min: number | null; budget_max: number | null; currency: string | null }): string {
@@ -24,11 +26,16 @@ const GRID_AUTOFILL = (min: string) => ({
 // Fragment so the parent's <Stack> controls vertical rhythm. Hide/unhide and the
 // page chrome live in CallDetail (v1: hide is full-page only).
 //
-// There is NO "Start drafting workspace" button: it linked to /cockpit/new, which
-// release 1 does not mount. Pinned by noCockpitLinks.test.tsx, CallDetailBody
-// .test.tsx and CallDetail.test.tsx. best_profile_id is still on the wire payload
-// (CallDetail) — it fed only that link, so it is no longer destructured here.
-export function CallDetailBody({ call, ranking, criteria }: CallDetail) {
+// The "Start drafting workspace" button is GATED on the edition, not deleted —
+// see the long note in CallRow.tsx for why (run-record ESCALATE E1). Release 1
+// does not mount /cockpit/new, so the match edition must not render it; the full
+// edition is the only remaining way to reach WorkspaceCreate. noCockpitLinks
+// .test.tsx EXEMPTs this file, so both branches are pinned by CallDetailBody
+// .test.tsx and CallDetail.test.tsx instead.
+export function CallDetailBody({ call, ranking, criteria, best_profile_id }: CallDetail) {
+  const startParams = new URLSearchParams({ call_id: String(call.id), call_title: call.title });
+  if (best_profile_id != null) startParams.set("profile_id", String(best_profile_id));
+
   const band = ranking
     ? ranking.aggregate_score >= 70 ? "strong" : ranking.aggregate_score > 0 ? "mid" : "low"
     : "low";
@@ -44,6 +51,13 @@ export function CallDetailBody({ call, ranking, criteria }: CallDetail) {
           {call.programme && <> · {call.programme}</>}
           {call.external_id && <> · <Code>{call.external_id}</Code></>}
         </Text>
+        {!isMatchEdition && (
+          <Box mt="sm">
+            <Button component={Link} to={`/cockpit/new?${startParams.toString()}`} size="sm">
+              Start drafting workspace
+            </Button>
+          </Box>
+        )}
       </Box>
 
       {ranking && (
