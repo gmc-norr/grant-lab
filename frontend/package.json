@@ -14,7 +14,8 @@
     "package:match": "VITE_APP_EDITION=match ../scripts/package_spa.sh",
     "test": "vitest run",
     "lint": "oxlint --deny-warnings src e2e",
-    "gen:api": "bash ../scripts/gen_openapi_types.sh"
+    "gen:api": "bash ../scripts/gen_openapi_types.sh",
+    "e2e:match": "E2E_MODE=match playwright test e2e/match.spec.ts"
   },
   "dependencies": {
     "@codemirror/commands": "6.10.3",
