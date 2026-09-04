@@ -129,6 +129,13 @@ rule.
 **[notes/2026-06-16-cockpit-workspace-design-notes.md](notes/2026-06-16-cockpit-workspace-design-notes.md)**
 Working notes refining the above for sub-project 2. Has a resume point at the bottom.
 
+**[notes/2026-09-04-profile-visibility-scope.md](notes/2026-09-04-profile-visibility-scope.md)**
+*Who should be able to read a research profile, and what does "profiles are personal"
+actually require?* Measured ten read surfaces, three of which do not look like profile
+endpoints. Two facts settle the design: the weekly digest **is** the profile's output,
+so hiding fields while leaving subscription open is decorative; and `workspace_viewers`
+plus `workspaces.py:1473-1479` already provide the sharing pattern to copy.
+
 ## Collab build record — one note per slice, what shipped and what was deferred
 
 Consult these when a collab behaviour looks wrong and you need to know whether it was
