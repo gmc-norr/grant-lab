@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 
 import * as clientMod from "../api/client";
+import type { ProfileVisibility } from "../api/profiles";
 import { theme } from "../theme/theme";
 import { ProfileVisibilityCard } from "./ProfileVisibilityCard";
 
@@ -25,14 +26,21 @@ function renderCard({
   visibility = "private",
   viewers = [] as (typeof ADA)[],
   addResult,
+  viewersNeverAnswer = false,
 }: {
-  visibility?: string;
+  visibility?: ProfileVisibility;
   viewers?: (typeof ADA)[];
   addResult?: unknown;
+  /** Hold GET /viewers open forever, so the query stays `pending` and the card's
+   *  loading arm is the one under test. */
+  viewersNeverAnswer?: boolean;
 } = {}) {
   const get = vi
     .spyOn(clientMod.api, "GET")
-    .mockResolvedValue({ data: { viewers }, error: undefined } as never);
+    .mockImplementation((() =>
+      viewersNeverAnswer
+        ? new Promise(() => {})
+        : Promise.resolve({ data: { viewers }, error: undefined })) as never);
   const put = vi.spyOn(clientMod.api, "PUT").mockImplementation((async (path: string) =>
     path === VISIBILITY_PATH
       ? { data: { visibility: "org" }, error: undefined }
@@ -60,6 +68,17 @@ it("shows the current visibility and, when private, who it is shared with", asyn
   // Names, not ids: a list of `[7]` is unusable.
   expect(screen.getByText("Ada Lovelace")).toBeInTheDocument();
   expect(get).toHaveBeenCalledWith(VIEWERS_PATH, PARAMS);
+});
+
+// --- F1: the default path must not state a falsehood ---------------------
+
+it("says it is LOADING, not 'shared with nobody', while GET /viewers is in flight", async () => {
+  renderCard({ visibility: "private", viewers: [ADA], viewersNeverAnswer: true });
+  // Every fresh mount of a private profile passes through this state. Before the
+  // loading arm existed the card asserted, on the DEFAULT path, that the profile
+  // was shared with no one — which for this owner is simply false.
+  expect(await screen.findByText(/loading who can see this/i)).toBeInTheDocument();
+  expect(screen.queryByText("Not shared with anyone yet.")).toBeNull();
 });
 
 it("asks for no viewer list while the profile is org-visible", async () => {
@@ -138,18 +157,28 @@ it("add gate: adding a viewer POSTs the email and renders the server's list", as
   expect(await screen.findByText("ada@umu.se")).toBeInTheDocument();
 });
 
-it("a rejected address gets one generic message, never a user-existence answer", async () => {
+it("a rejected address gets one generic message, and leaves the list standing", async () => {
   const user = userEvent.setup();
+  // Seeded with a viewer ON PURPOSE: rendered with an EMPTY list this test could
+  // not tell a harmless refusal from one that wiped the people already shared
+  // with — the assertion would hold either way.
   renderCard({
-    viewers: [],
+    viewers: [ADA],
     addResult: {
       data: undefined,
       error: { error: { code: "bad_request", message: "could not add viewer" } },
     },
   });
+  await screen.findByText("ada@umu.se");
   await user.type(screen.getByLabelText(/share with/i), "nobody@umu.se");
   await user.click(screen.getByRole("button", { name: "Add" }));
   expect(await screen.findByText(/couldn't add that address/i)).toBeInTheDocument();
+  // Never a user-existence oracle…
   expect(screen.queryByText(/no such user/i)).toBeNull();
   expect(screen.queryByText(/does not exist/i)).toBeNull();
+  // …and a failed add is not a removal: measured at the moment the refusal is on
+  // screen, so the error path has demonstrably already run.
+  expect(screen.getByText("ada@umu.se")).toBeInTheDocument();
+  expect(screen.getByText("Ada Lovelace")).toBeInTheDocument();
+  expect(screen.queryByText("Not shared with anyone yet.")).toBeNull();
 });

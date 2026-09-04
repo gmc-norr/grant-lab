@@ -112,9 +112,12 @@ class ProfileDetailOut(BaseModel):
     host_institution: str | None
     # state
     can_edit: bool
-    # 'org' | 'private'. The owner's UI has to render its own current state; the
-    # only alternative would be guessing, or a second endpoint that does not exist.
-    visibility: str
+    # The owner's UI has to render its own current state; the only alternative
+    # would be guessing, or a second endpoint that does not exist. A Literal, not
+    # a bare `str`, so the generated TS type is the union and a frontend that
+    # compares against a third spelling fails to compile instead of silently
+    # rendering the wrong branch.
+    visibility: Literal["private", "org"]
     bootstrap_status: str | None
     bootstrap_pubmed_status: str | None
     publications_fetched: int | None
@@ -632,7 +635,9 @@ class ProfileVisibilityIn(BaseModel):
 
 
 class ProfileVisibilityOut(BaseModel):
-    visibility: str
+    # Same union as the In model: the answer to a write is the same vocabulary as
+    # the write, and the card derives its rendered state from this field.
+    visibility: Literal["private", "org"]
 
 
 @router.put("/profiles/{profile_id}/visibility", response_model=ProfileVisibilityOut)

@@ -25,19 +25,28 @@ function range(min: number | null, max: number | null) {
 
 export function ProfileDetail() {
   const { id } = useParams();
-  const { data, isLoading, isError } = useProfile(Number(id));
+  const { data, isLoading, isError, error } = useProfile(Number(id));
   if (isLoading) return <Text p="md">Loading…</Text>;
-  if (isError || !data)
+  if (isError || !data) {
+    // Only a 404 means "not shared with you". A 500, a proxy timeout or a dropped
+    // connection is the SERVER's problem, and telling the owner of a profile that
+    // their own profile isn't shared with them is a lie that sends them looking
+    // for a permission bug. Same idiom as CallDetail.tsx.
+    const notFound = (error as { code?: string } | null)?.code === "not_found";
     return (
       <Box component="main" maw="48rem" mx="auto" px="xs" pt="md" pb="xl">
-        {/* The API cannot tell these apart on purpose: an unreadable profile and
-            a missing one return the SAME 404, so a stranger cannot probe which
-            ids exist. The copy therefore has to cover both — the realistic
-            reader is a colleague following a link that stopped working, not an
-            attacker. */}
-        <Text role="alert">This profile isn't shared with you, or it doesn't exist.</Text>
+        {/* The API cannot tell the two 404 cases apart on purpose: an unreadable
+            profile and a missing one return the SAME status, so a stranger cannot
+            probe which ids exist. That copy therefore has to cover both — the
+            realistic reader is a colleague following a link that stopped working,
+            not an attacker. */}
+        <Text role="alert">
+          {notFound
+            ? "This profile isn't shared with you, or it doesn't exist."
+            : "Couldn't load this profile."}
+        </Text>
         <Text size="sm" c="dimmed" mt="xs">
-          Ask whoever owns it to share it with you, or{" "}
+          {notFound ? "Ask whoever owns it to share it with you, or " : "Try again in a moment, or "}
           <Anchor component={Link} to="/profiles">
             go back to your profiles
           </Anchor>
@@ -45,6 +54,7 @@ export function ProfileDetail() {
         </Text>
       </Box>
     );
+  }
   return <DetailView p={data} />;
 }
 

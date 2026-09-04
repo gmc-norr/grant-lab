@@ -24,12 +24,12 @@ export function ProfileVisibilityCard({
   visibility,
 }: {
   profileId: number;
-  visibility: string;
+  visibility: ProfileVisibility;
 }) {
   const setVisibility = useSetProfileVisibility(profileId);
   // The prop is the server's last word; the mutation's in-flight variable and
   // its answer are newer. No local state to fall out of sync with a refetch.
-  const current: string = setVisibility.isPending
+  const current: ProfileVisibility = setVisibility.isPending
     ? (setVisibility.variables ?? visibility)
     : (setVisibility.data?.visibility ?? visibility);
   const isPrivate = current === "private";
@@ -71,6 +71,14 @@ export function ProfileVisibilityCard({
             <Text size="sm" c="red" role="alert">
               Couldn't load who this is shared with.
             </Text>
+          ) : viewers.isPending ? (
+            // Without this arm the DEFAULT path of a fresh mount states something
+            // false: `rows` is [] until GET /viewers answers, so the card told
+            // every owner of a private profile that it was shared with nobody.
+            // `isPending` (not `isLoading`) is exact here because this block only
+            // renders while the query is enabled — pending means "no answer yet",
+            // never "switched off".
+            <Text size="sm">Loading who can see this…</Text>
           ) : rows.length === 0 ? (
             <Text size="sm">Not shared with anyone yet.</Text>
           ) : (

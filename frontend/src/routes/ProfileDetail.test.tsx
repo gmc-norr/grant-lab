@@ -48,9 +48,10 @@ it("renders the description, rubric, and namespaced fields", async () => {
   expect(screen.getByRole("link", { name: /edit/i })).toHaveAttribute("href", "/profiles/5/edit");
 });
 
-it("shows not-found on a 404", async () => {
+/** Render the route with GET /api/profiles/{id} refusing under `code`. */
+function renderDetailError(code: string) {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue({
-    data: undefined, error: { error: { code: "not_found", message: "profile not found" } },
+    data: undefined, error: { error: { code, message: "nope" } },
   } as never);
   const qc = new QueryClient();
   render(
@@ -62,11 +63,27 @@ it("shows not-found on a 404", async () => {
       </QueryClientProvider>
     </MantineProvider>,
   );
+}
+
+it("shows not-found on a 404", async () => {
+  renderDetailError("not_found");
   // The API answers the SAME 404 for "does not exist" and "not shared with you",
   // so the copy must cover both honestly rather than accuse the reader of a typo.
   expect(
     await screen.findByText("This profile isn't shared with you, or it doesn't exist."),
   ).toBeInTheDocument();
+});
+
+it("a non-404 failure says the load failed, NOT that the profile isn't shared", async () => {
+  renderDetailError("internal");
+  // Only `not_found` carries the sharing meaning. A 500 or a dropped connection
+  // reaching the OWNER of the profile would otherwise report their own profile as
+  // one they are not allowed to see — and send them hunting a permissions bug
+  // that does not exist.
+  expect(await screen.findByText("Couldn't load this profile.")).toBeInTheDocument();
+  expect(
+    screen.queryByText("This profile isn't shared with you, or it doesn't exist."),
+  ).toBeNull();
 });
 
 it("gate 15: no sharing card when can_edit is false, and the page still renders", async () => {

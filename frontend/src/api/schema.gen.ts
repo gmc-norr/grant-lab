@@ -3283,8 +3283,11 @@ export interface components {
             trl_max: number | null;
             /** Trl Min */
             trl_min: number | null;
-            /** Visibility */
-            visibility: string;
+            /**
+             * Visibility
+             * @enum {string}
+             */
+            visibility: "private" | "org";
             /** Years Since Phd */
             years_since_phd: number | null;
         };
@@ -3459,8 +3462,11 @@ export interface components {
         };
         /** ProfileVisibilityOut */
         ProfileVisibilityOut: {
-            /** Visibility */
-            visibility: string;
+            /**
+             * Visibility
+             * @enum {string}
+             */
+            visibility: "private" | "org";
         };
         /** ProfilesListOut */
         ProfilesListOut: {
