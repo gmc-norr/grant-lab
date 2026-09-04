@@ -164,17 +164,43 @@ is now **54–58**. `CallRow.tsx`'s `MatchBadge` render is at **:84**, not `:53`
 
 ---
 
-## Open question for the human — answer before Task 1
+## Decided by the human, 2026-09-04
 
-**A dismissal belonging to a user with no active subscribed profile and no
-`default_profile_id` fans out to zero rows: the hide is silently dropped.** The
-spec names the backfill set exactly but does not say what happens when it is
-empty. Options: (a) drop it and log the count, (b) keep a profile-less decision
-row with `profile_id NULL` (which breaks "a decision is per profile" and the
-unique index). This plan assumes **(a)**, and the migration **must print the
-dropped count** rather than dropping silently. If (b) is wanted, Task 1 changes.
+**1. No profile is an onboarding screen, not a firehose.** Measured first: without a
+profile the list does **not** empty — `dashboard.py:296` falls back to "the unranked
+sort (newest/deadline)" and returns **every open call in the database**, 50 a page,
+newest-published first, with no score, no chips and no reason. Three existing tests
+already pin that behaviour (`tests/test_api_calls_feed_behavior.py -k unranked`,
+3 passed). There is **no** per-user or per-profile row filter — only hidden, closed,
+`?source=` and `?q=`. And `hide_call` takes no profile argument today, which is how a
+profile-less user can hide a call at all.
 
----
+That screen is defensible in the **full** edition as a browsable archive. It is not
+defensible as release 1, whose entire promise is *the calls that match you*; §5 says
+a feed that never ends is what trains people to stop opening it. **Task 8 makes the
+match edition show an onboarding screen instead.** The full edition keeps the unranked
+fallback unchanged.
+
+**2. A dismissal that fans out to zero rows is dropped, and the count is printed.**
+The alternative — a `profile_id NULL` row — breaks the unique index and the
+"a decision is per profile" rule. Two things make this cheap: after Task 8 no *new*
+orphan can be created in the match edition, and the hides in question were made
+against an unranked list that release 1 replaces. **Before running the migration on
+real data, run this and put the number in the commit message:**
+
+```sql
+SELECT count(*) FROM user_call_dismissals d
+JOIN users u ON u.id = d.user_id
+WHERE NOT EXISTS (SELECT 1 FROM subscriptions s
+                  JOIN profiles p ON p.id = s.profile_id AND p.is_active
+                  WHERE s.user_id = d.user_id)
+  AND (u.default_profile_id IS NULL
+       OR NOT EXISTS (SELECT 1 FROM profiles p
+                      WHERE p.id = u.default_profile_id AND p.is_active));
+```
+
+It needs the DB URL from `.env`, which this run must never read — so it is the
+human's query to run, not the agent's.
 
 ## File structure
 
@@ -200,6 +226,7 @@ dropped count** rather than dropping silently. If (b) is wanted, Task 1 changes.
 | `frontend/src/routes/TriageFeed.tsx` | The match index: rail + feed + keys (create) |
 | `frontend/src/routes/TriageFeed.module.css` | 240 px rail, ~680 px column (create) |
 | `frontend/src/routes/TriageCard.tsx` | The expanded / collapsed card (create) |
+| `frontend/src/routes/TriageEmptyProfile.tsx` | No profile yet: the onboarding screen (create) |
 | `frontend/src/components/CriterionChips.tsx` | The chip row + expansion (create) |
 | `frontend/src/components/CriterionChips.module.css` | Rating colours, Georgia quote (create) |
 | `frontend/src/api/decisions.ts` | Save / hide / undo mutations + counts (create) |
@@ -914,7 +941,98 @@ the kind of change that can drop a module the full router still imports.
 
 ---
 
-### Task 8: Browser coverage and CI
+### Task 8: No profile is an onboarding screen, not a firehose
+
+Decided by the human, 2026-09-04 (see *Decided by the human* above). Release 1's
+first screen for a user with no profile must be an invitation to make one, not 50
+unranked calls.
+
+**Files:**
+- Create: `frontend/src/routes/TriageEmptyProfile.tsx`, `.test.tsx`
+- Modify: `frontend/src/routes/TriageFeed.tsx` (the branch)
+- Modify: `src/call_manager/web/api/calls.py` (`hide`/`save` require a profile)
+- Modify: `tests/web/test_call_decisions_api.py`
+
+**Interfaces:**
+- Consumes: `DashboardOut.effective.profile_id` (already on the wire — Task 7 reads it).
+- Produces: the guarantee Task 1's migration leans on, that no new orphan decision
+  can be created.
+
+**This is a match-edition change only.** `dashboard.py`'s unranked fallback stays
+exactly as it is: the full edition's archive view is not release 1's problem, and
+touching it would break Global Constraint 3 for no gain. The split is the same one
+Task 7 uses — `TriageFeed` is mounted only by `router.simple.tsx`, so the branch
+lives there and `Dashboard.tsx` never sees it.
+
+- [ ] **Step 1: The frontend branch**
+
+`TriageFeed` reads `effective.profile_id` from the list response. When it is `null`,
+render `TriageEmptyProfile` **instead of** the feed — not above it, not with an empty
+list below it. The screen says what a profile is for in one sentence and links to
+`/profiles/new`; if the user has profiles but none selected, it lists them instead
+of sending them to create a duplicate.
+
+Distinguish this from **inbox zero** (Task 7). They are different screens with
+different copy: inbox zero is *"you're done"*, this is *"you haven't started"*.
+Shipping one for the other is the likely bug, so the tests assert on the two copies
+being different strings.
+
+- [ ] **Step 2: Make the backend refuse too**
+
+A screen is not a guarantee — the endpoint is. `POST/DELETE /calls/{id}/hide` and
+`/save` gain a **required** `profile_id`, and return **422** without one. That is what
+actually closes the orphan path, and it is what lets Task 1's migration say "no new
+orphan can be created" rather than "the UI does not offer it".
+
+**This is a breaking change to an existing endpoint** — `POST /calls/{id}/hide`
+currently takes no profile. Nothing in-tree calls it without one after Task 3's
+frontend work, but say so in the commit message; it is the second place (with Task 2)
+where Plan B alters behaviour the full edition already had.
+
+- [ ] **Step 3: Gates**
+
+1. `profile_id = null` in the list response renders `TriageEmptyProfile`, and the
+   feed's own list element is **absent**. *What trivially passes:* asserting the
+   onboarding copy is present — a component rendering both would pass that. Assert
+   the feed is gone in the same test.
+2. Inbox-zero copy and no-profile copy are **different**, asserted as two distinct
+   strings against the two states. This is the gate that catches shipping one screen
+   for both.
+3. A user with profiles but none selected sees the picker, not `/profiles/new` alone.
+4. `POST /api/calls/1/hide` with no `profile_id` → **422**.
+5. `POST /api/calls/1/hide` with a `profile_id` the user cannot use (inactive, or
+   another group's) → 4xx, not a written row. *This is the one that matters:* a
+   required parameter that is never validated is a required parameter in name only.
+
+- [ ] **Step 4: Mutation-test**
+
+| # | Mutation | Reddens |
+| --- | --- | --- |
+| B28 | render the feed **and** the onboarding screen | gate 1 |
+| B29 | reuse the inbox-zero component for the no-profile branch | gate 2 |
+| B30 | `profile_id: int \| None = Query(default=None)` on `hide` | gate 4 |
+| B31 | drop the ownership check on `profile_id` | gate 5 |
+
+B31 is the one to write the test for **first**. Gate 4 passes the moment the
+parameter is declared required; gate 5 is the only one that proves it means anything.
+
+- [ ] **Step 5: Verify**
+
+```bash
+pnpm -C frontend test src/routes/TriageEmptyProfile.test.tsx src/routes/TriageFeed.test.tsx
+uv run pytest tests/web/test_call_decisions_api.py -q
+uv run pytest tests/test_api_calls_feed_behavior.py -q -k unranked   # 3 passed, UNCHANGED
+pnpm -C frontend build && pnpm -C frontend build:match && pnpm -C frontend check:bundle
+pnpm -C frontend gen:api && git diff --stat frontend/src/api/schema.gen.ts
+```
+
+The unranked-feed tests must stay **green and untouched** — they are the full
+edition's behaviour, and this task must not move them. If they go red, the branch
+leaked out of the match edition.
+
+---
+
+### Task 9: Browser coverage and CI
 
 Plan A wired `frontend/e2e/match.spec.ts` (10 scenarios, `gotoRendered()` walking
 all 15 mounted routes) and `tests/architecture/test_match_gates_are_wired.py`
@@ -928,15 +1046,16 @@ Both must grow with this plan, or CI keeps proving Plan A's product.
 - [ ] **Step 1: New scenarios** against `page.route` API mocks: the feed renders;
   `s` moves a card to Saved; `h` moves it to Hidden; un-hide returns it to the
   inbox; inbox-zero appears when the last card is decided; a chip expands to show
-  its quoted evidence.
+  its quoted evidence; **and a session with `profile_id: null` lands on the
+  onboarding screen, not on a list of calls** (Task 8).
 - [ ] **Step 2: Update the pins.** The scenario-title list is pinned by exact
   string, and the `expect(` floor is a measured number. **Measure both after
   writing the scenarios** — the Plan A run wrote `>= 30` commented "measured at 40"
   when the real count was 22, and the test failed on its first run. Write the
   number the command prints.
-- [ ] **Step 3: Mutation-test.** B28: delete one new scenario — the title pin goes
-  red. B29: strip the assertions from one scenario body but keep its title — the
-  `expect(` floor goes red. B29 is the one that matters; a title pin alone passes
+- [ ] **Step 3: Mutation-test.** B32: delete one new scenario — the title pin goes
+  red. B33: strip the assertions from one scenario body but keep its title — the
+  `expect(` floor goes red. B33 is the one that matters; a title pin alone passes
   over an empty test.
 - [ ] **Step 4: Verify.**
 
@@ -956,6 +1075,7 @@ cd /home/parlar_ai/dev/call-monitor
 ruff check src tests alembic scripts
 uv run alembic check
 uv run pytest -n 16 --dist loadfile
+uv run pytest tests/test_api_calls_feed_behavior.py -q -k unranked   # 3 passed, UNTOUCHED
 uv run python scripts/gen_routes.py --check
 uv run python scripts/gen_architecture.py && git diff --exit-code docs/ARCHITECTURE.md
 uv run python scripts/gen_env_example.py && git diff --exit-code .env.example
@@ -1013,5 +1133,9 @@ Named so a reviewer does not read them as omissions:
   keep it. §4.2 replaces the number *in release 1*; the full edition is not release 1.
 - **`/cockpit` still returns HTTP 200 with the SPA's soft 404** in a match build —
   Plan A's recorded limitation, unchanged here.
+- **The full edition's no-profile archive view is untouched.** Without a profile
+  `dashboard.py` still returns every open call, newest first, 50 a page. Task 8
+  replaces that screen in the **match** edition only. Changing it for `full` would
+  break Global Constraint 3 and is not release 1's problem.
 - **The old global-hide semantics are not preserved for the full edition.** This is
   the deliberate, spec-sanctioned loss described in Task 2, not an oversight.
