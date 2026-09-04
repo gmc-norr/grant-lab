@@ -20,7 +20,8 @@ const DETAIL = {
   org_type: "university_hospital", capabilities: ["biobank"], patient_populations: [],
   scale: null, career_stage: null, role: null, years_since_phd: null, applicant_types: [],
   funding_instruments: ["project_grant"], funder_exclusions: [], country: "SE", host_institution: "UmU",
-  can_edit: true, bootstrap_status: null, bootstrap_pubmed_status: null, publications_fetched: null,
+  can_edit: true, visibility: "private",
+  bootstrap_status: null, bootstrap_pubmed_status: null, publications_fetched: null,
 };
 
 function renderDetail(payload = DETAIL) {
@@ -61,5 +62,24 @@ it("shows not-found on a 404", async () => {
       </QueryClientProvider>
     </MantineProvider>,
   );
-  expect(await screen.findByText(/not found/i)).toBeInTheDocument();
+  // The API answers the SAME 404 for "does not exist" and "not shared with you",
+  // so the copy must cover both honestly rather than accuse the reader of a typo.
+  expect(
+    await screen.findByText("This profile isn't shared with you, or it doesn't exist."),
+  ).toBeInTheDocument();
+});
+
+it("gate 15: no sharing card when can_edit is false, and the page still renders", async () => {
+  renderDetail({ ...DETAIL, can_edit: false });
+  // The rest of the page DOES render — so this is not passing on a blank page.
+  expect(await screen.findByRole("heading", { name: /Digital Pathology Lab/ })).toBeInTheDocument();
+  expect(screen.getByText("Imaging research.")).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: /who can see this/i })).toBeNull();
+  expect(screen.queryByRole("radio", { name: /only me and admins/i })).toBeNull();
+});
+
+it("mounts the sharing card for an owner", async () => {
+  renderDetail();
+  expect(await screen.findByRole("heading", { name: /who can see this/i })).toBeInTheDocument();
+  expect(screen.getByRole("radio", { name: "Only me and admins" })).toBeChecked();
 });

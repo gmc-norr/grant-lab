@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 
 import type { ProfileDetail as Detail } from "../api/profiles";
 import { useProfile } from "../api/profiles";
+import { ProfileVisibilityCard } from "./ProfileVisibilityCard";
 
 function Chips({ items }: { items: string[] }) {
   if (items.length === 0) return <>—</>;
@@ -29,7 +30,19 @@ export function ProfileDetail() {
   if (isError || !data)
     return (
       <Box component="main" maw="48rem" mx="auto" px="xs" pt="md" pb="xl">
-        <Text role="alert">Profile not found.</Text>
+        {/* The API cannot tell these apart on purpose: an unreadable profile and
+            a missing one return the SAME 404, so a stranger cannot probe which
+            ids exist. The copy therefore has to cover both — the realistic
+            reader is a colleague following a link that stopped working, not an
+            attacker. */}
+        <Text role="alert">This profile isn't shared with you, or it doesn't exist.</Text>
+        <Text size="sm" c="dimmed" mt="xs">
+          Ask whoever owns it to share it with you, or{" "}
+          <Anchor component={Link} to="/profiles">
+            go back to your profiles
+          </Anchor>
+          .
+        </Text>
       </Box>
     );
   return <DetailView p={data} />;
@@ -62,6 +75,8 @@ function DetailView({ p }: { p: Detail }) {
           </Button>
         </Group>
       </Group>
+
+      {p.can_edit && <ProfileVisibilityCard profileId={p.id} visibility={p.visibility} />}
 
       <Card withBorder radius="md" p="md" bg="var(--app-sidebar)" mb="md">
         <Title order={2} size="h5" mb="sm">

@@ -114,6 +114,10 @@ const PROFILE = {
   country: "SE",
   host_institution: "UmU",
   can_edit: true,
+  // The detail payload always carries it now, and the owner's sharing card
+  // reads it — a fixture without it would walk /profiles/1 through a branch the
+  // API cannot actually produce.
+  visibility: "private",
   bootstrap_status: null,
   bootstrap_pubmed_status: null,
   publications_fetched: null,
