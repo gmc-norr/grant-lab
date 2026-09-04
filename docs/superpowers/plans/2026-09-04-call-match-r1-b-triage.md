@@ -249,11 +249,25 @@ Verified by running, not by reading:
 | The saved list returned `HiddenListOut` — five fields, cannot render the card | Dissolved by `?view=saved`; the endpoint is not added |
 | Swipe and the phone rail had no owner in any plan | Assigned to Plan D as a recorded deviation |
 
-**Refuted / narrowed:** the reviewers' `109` (measured 107); a claim that the
-backfill should widen to every active profile (the spec decided otherwise, on
-purpose — but the measurement behind it was right and is now written down, together
-with the fact that **every active profile is selectable by every user today**, which
-is a live gap outside this plan's scope).
+**Refuted / narrowed:** the reviewers' `109` (measured **107**); a claim that the
+backfill should widen to every active profile (the spec decided otherwise on purpose,
+though the measurement behind it was right and is now written down).
+
+**And one finding I generated myself, then had to withdraw.** Chasing the reviewer's
+"selectable set" point I reported that *"there is no profile ownership model in the
+app at all"* and flagged Task 8 as a possible stop-and-escalate. Measured afterwards,
+that was wrong on both halves:
+
+- `profiles.py:342-343` raises **403** unless `created_by == user.id or is_admin`.
+  Spec §4.3 cites `profiles.py:151` as the canonical rule and builds boards on it.
+- The rule Task 8 needs is not that one anyway. A decision is keyed
+  `(user_id, profile_id, call_id)` and read only by its author, so requiring *edit*
+  rights would break shared-profile triage — which is what `decided_by` exists for.
+
+Gate 5 now asserts **exists-and-active**, the escalation is withdrawn, and the
+correction is written in place beside the claim rather than deleted. What *is* real
+and stays recorded: **profile reads are org-wide by design** — `list_profiles`
+returns every active profile's name and full `description` to every logged-in user.
 
 Raw findings: `.superpowers/review/findings-planB/planB-<model>.md`.
 Settled points: `.superpowers/review/planB-settled.md`.
@@ -457,11 +471,37 @@ The spec chose this knowingly (*"Not 'every active profile in the database' — 
 reading would write a hide onto other groups' profiles"*), and this plan keeps that
 choice. It is written down here so the first person it surprises finds it.
 
-**It also surfaces something outside Plan B's scope: there is no profile ownership
-model at all.** `?profile=99` works for anyone. Task 8's gate 5 (a `profile_id` the
-user cannot use must be rejected) is the first thing in the codebase that will need
-one, and it may not be able to express it. **If gate 5 cannot be written, that is a
-finding to escalate, not a gate to weaken.**
+**On profile ownership — a correction to an earlier draft of this plan.** That draft
+said "there is no profile ownership model at all". That is **wrong**, and it is worth
+correcting in place rather than quietly deleting, because the wrong version was
+already reported once as an escalation.
+
+There *is* one, and the spec names it as canonical:
+
+- `profiles.py:342-343` — `update_profile` raises **403** unless
+  `p.created_by == user.id or user.is_admin`. **Writes are protected.**
+- `profiles.py:151` — `get_profile` returns `can_edit` computed the same way.
+- Spec §4.3: *"'Can edit the profile' is not a new concept: `web/api/profiles.py:151`
+  already defines it as `p.created_by == user.id or user.is_admin`. Boards reuse that
+  rule exactly, so no second permission model appears."*
+
+What is genuinely org-wide is **reading**: `list_profiles` (`profiles.py:118-121`)
+returns every active profile — name, kind, level, `description` — to any logged-in
+user, with no filter, and `resolve_profile_selection` accepts any active id. Given
+the app is a single-organization internal tool behind domain-restricted,
+admin-approved accounts, and that a profile is a *group's research profile* rather
+than personal data, that reads as deliberate, not as a hole.
+
+**So gate 5 changes.** An earlier draft asked Task 8 to reject "a `profile_id` the
+user cannot use", which tests a rule that does not exist and **should not**: a
+decision row is keyed `(user_id, profile_id, call_id)` and every read and write is
+scoped `user_id == user.id`, so deciding against a profile you can see affects
+nobody else's view of anything. Edit rights would be the *wrong* rule — a subscriber
+who did not create a shared profile must still be able to triage for it, which is
+exactly what §4.1's `decided_by` ("for shared profiles") is for.
+
+The rule Task 8 must actually enforce is **"exists and is active"** — the same
+predicate `resolve_profile_selection` already applies to reads. See Task 8 gate 5.
 
 **Report the orphan loss, do not hide it.** Before the drop, count and log the dismissals
 that fanned out to nothing (see the open question above):
@@ -1351,9 +1391,19 @@ where Plan B alters behaviour the full edition already had.
    for both.
 3. A user with profiles but none selected sees the picker, not `/profiles/new` alone.
 4. `POST /api/calls/1/hide` with no `profile_id` → **422**.
-5. `POST /api/calls/1/hide` with a `profile_id` the user cannot use (inactive, or
-   another group's) → 4xx, not a written row. *This is the one that matters:* a
-   required parameter that is never validated is a required parameter in name only.
+5. `POST /api/calls/1/hide` with a `profile_id` that **does not exist or is
+   inactive** → 4xx, and **no row written**. *This is the one that matters:* a
+   required parameter that is never validated is required in name only, and a
+   `hidden` row pointing at a dead profile is invisible in every view.
+
+   **Not "another group's profile".** An earlier draft asked for that, on a mistaken
+   belief that no ownership model existed. It does (`profiles.py:342`, spec §4.3),
+   but it governs **editing** a profile, which is the wrong rule here: a decision is
+   keyed `(user_id, profile_id, call_id)` and read only by its own author, so
+   deciding against a profile you can legitimately see affects no one. Requiring
+   edit rights would break shared-profile triage — the thing `decided_by` exists
+   for. Reject dead ids; do not invent an authorization rule this codebase does not
+   have.
 
 - [ ] **Step 4: Mutation-test**
 
@@ -1362,10 +1412,15 @@ where Plan B alters behaviour the full edition already had.
 | B28 | render the feed **and** the onboarding screen | gate 1 |
 | B29 | reuse the inbox-zero component for the no-profile branch | gate 2 |
 | B30 | `profile_id: int \| None = Query(default=None)` on `hide` | gate 4 |
-| B31 | drop the ownership check on `profile_id` | gate 5 |
+| B31 | drop the exists-and-active check on `profile_id` | gate 5 — the fixture must use a **deleted** id *and* an **inactive** one; an id of `999999` alone passes a check that only tests `is_active` |
 
 B31 is the one to write the test for **first**. Gate 4 passes the moment the
 parameter is declared required; gate 5 is the only one that proves it means anything.
+
+**Gate 5 is writable, so there is no escalation here.** An earlier draft flagged this
+task as a possible stop-and-escalate on the grounds that the codebase had no
+authorization model to express the rule. Measured, that was wrong twice over: the
+model exists, and it is not the rule this gate needs.
 
 - [ ] **Step 5: Verify**
 
