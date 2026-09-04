@@ -137,6 +137,16 @@ const PROFILES = {
   ],
 };
 
+// GET /api/profiles/{id}/viewers. The owner's sharing card asks for this on every
+// mount of a PRIVATE profile, and the catch-all's `{}` would answer it with a list
+// of nobody — which is the one thing the card must never say when it does not know.
+const VIEWERS = {
+  viewers: [{ user_id: 7, name: "Ada Lovelace", email: "ada@umu.se" }],
+};
+// The person the ADD scenario shares with. Not in VIEWERS, so "Grace Hopper" on the
+// page can only have come from the response to the write.
+const GRACE = { user_id: 8, name: "Grace Hopper", email: "grace@umu.se" };
+
 const ADMIN_USERS = {
   users: [{ id: 1, email: "p@umu.se", name: null, status: "active", is_admin: true }],
   page: 1,
@@ -205,6 +215,7 @@ async function mockApi(page: Page, seen: string[] = []): Promise<string[]> {
     if (url.pathname === "/api/me/settings") return json(SETTINGS);
     if (url.pathname === "/api/profiles") return json(PROFILES);
     if (/^\/api\/profiles\/\d+$/.test(url.pathname)) return json(PROFILE);
+    if (/^\/api\/profiles\/\d+\/viewers$/.test(url.pathname)) return json(VIEWERS);
     if (url.pathname === "/api/auth/logout") return json({});
     // AuthConfigOut: Login/Register read allowed_domains[0], so `{}` crashes the
     // page into the error boundary — which the walk below catches rather than
@@ -389,4 +400,121 @@ test("the account menu offers Settings as well as Sign out", async ({ page }) =>
   await page.getByRole("menuitem", { name: "Settings" }).click();
   await expect(page).toHaveURL(/\/me$/);
   await expect(page.locator("main")).toHaveCount(1);
+});
+
+// --- who can see a profile (release 1's sharing rule, in a browser) --------
+//
+// The backend half — that GET /api/profiles OMITS what the caller cannot read,
+// and that the four sharing endpoints refuse a stranger — is pinned by
+// tests/test_profile_access.py. These four scenarios are the OTHER half, and only
+// a browser can answer them: that the owner's card is mounted at all, that the
+// Mantine control sends the position it was moved to, that the add form uses the
+// ADD endpoint rather than the REPLACE one, and that the list page renders
+// exactly the profiles it was handed.
+
+test("the owner's sharing card names who a private profile is shared with", async ({ page }) => {
+  // ProfileDetail mounts the card only when the payload says can_edit, and the
+  // card is the ONLY way an owner can discover a profile is private — nothing
+  // else on the page says so. A card that does not mount is a profile nobody can
+  // unshare.
+  await mockApi(page);
+  await gotoRendered(page, "/profiles/1");
+  await expect(page.getByRole("heading", { name: "Who can see this" })).toBeVisible();
+  await expect(page.getByRole("radio", { name: "Only me and admins" })).toBeChecked();
+  // Name AND email, from GET /viewers: a list of user ids is unusable, and two
+  // colleagues can share a first name.
+  await expect(page.getByText("Ada Lovelace")).toBeVisible();
+  await expect(page.getByText("ada@umu.se")).toBeVisible();
+});
+
+test("moving the sharing control sends the position it was moved TO, both ways", async ({
+  page,
+}) => {
+  // BOTH directions on purpose. A card that hard-coded one value would satisfy a
+  // one-way assertion while making the other position unreachable — and the
+  // unreachable one here is "private", i.e. the whole feature.
+  await mockApi(page);
+  const bodies: unknown[] = [];
+  await page.route("**/api/profiles/1/visibility", async (route) => {
+    const body: unknown = route.request().postDataJSON();
+    bodies.push(body);
+    // Echo it: the card prefers the server's answer over the prop, so echoing is
+    // what a real PUT does and keeps the second click meaningful.
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(body),
+    });
+  });
+  await gotoRendered(page, "/profiles/1");
+  const control = page.getByRole("radiogroup", { name: "Who can see this profile" });
+  // Mantine renders the radio INPUT visually hidden and puts the text in a
+  // sibling <label for>; clicking the role="radio" element can miss, so click the
+  // label text. This repo has hit that before.
+  await control.getByText("Everyone here", { exact: true }).click();
+  await expect(page.getByRole("radio", { name: "Everyone here" })).toBeChecked();
+  // The control disables itself while the write is in flight, and a click on a
+  // disabled label does nothing — so wait for the first write to settle rather
+  // than racing the second click against it.
+  await expect(page.getByRole("radio", { name: "Only me and admins" })).toBeEnabled();
+  await control.getByText("Only me and admins", { exact: true }).click();
+  await expect(page.getByRole("radio", { name: "Only me and admins" })).toBeChecked();
+  expect(bodies).toEqual([{ visibility: "org" }, { visibility: "private" }]);
+});
+
+test("adding a viewer by email POSTs that address and lists the person back", async ({ page }) => {
+  await mockApi(page);
+  const writes: { method: string; body: unknown }[] = [];
+  await page.route("**/api/profiles/1/viewers", async (route) => {
+    const method = route.request().method();
+    const json = (body: unknown) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+    if (method === "GET") return json(VIEWERS);
+    writes.push({ method, body: route.request().postDataJSON() });
+    return json({ viewers: [...VIEWERS.viewers, GRACE] });
+  });
+  await gotoRendered(page, "/profiles/1");
+  await page.getByLabel("Share with (email)").fill(GRACE.email);
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  // The name comes from the RESPONSE, not from an optimistic guess: GRACE is not
+  // in the mocked GET.
+  await expect(page.getByText("Grace Hopper")).toBeVisible();
+  // The METHOD is half the assertion. PUT /viewers is the REPLACE endpoint, so an
+  // add sent there would reconcile the list DOWN to whatever it carried — the
+  // rendered page would look identical here and the sharing would be wrong.
+  expect(writes).toEqual([{ method: "POST", body: { email: GRACE.email } }]);
+});
+
+test("a non-viewer's profile list has no trace of the private profile", async ({ page }) => {
+  await mockApi(page);
+  // Registered AFTER mockApi so it wins: page.route handlers are matched in
+  // REVERSE registration order, so the last one registered is tried first.
+  await page.route("**/api/profiles", async (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        profiles: [
+          {
+            id: 2,
+            name: "Neuro Imaging Group",
+            kind: "organizational_unit",
+            level: "group",
+            areas_count: 1,
+            budget_currency: "SEK",
+            description: "MRI research.",
+          },
+        ],
+      }),
+    }),
+  );
+  await gotoRendered(page, "/profiles");
+  // HONEST SCOPE: the API is mocked here, so this asserts that the SPA renders
+  // exactly the list it was GIVEN and invents no rows of its own — NOT that the
+  // server filtered anything. The server half, that GET /api/profiles omits
+  // profiles the caller cannot read, is tests/test_profile_access.py gate 1.
+  // The readable profile is asserted present so an empty page cannot pass the
+  // absence check vacuously.
+  await expect(page.getByRole("link", { name: "Neuro Imaging Group" })).toBeVisible();
+  await expect(page.getByText("Digital Pathology Lab")).toHaveCount(0);
 });
