@@ -51,12 +51,18 @@ The v1 design spec (`docs/superpowers/specs/2026-04-14-call-monitor-design.md`) 
     Postgres containers. Scale down on a smaller machine; `-n 4` is the measured floor
     (still ~3m). Never use `-n auto`: `psutil` is not installed here, so xdist falls
     through to `sched_getaffinity` and resolves it to **72** workers.
-  - Expected result is **`3361 passed, 1 skipped`** (2026-08-16). The **`1 skipped`** is
-    the signal, not the total: that skip is a real-SDK test gated on `ANTHROPIC_API_KEY`
-    (`tests/proposal_assist/test_drafting_claude_adapter.py`). With the key exported you
-    get `0 skipped` and one more pass, and it makes a live API call. The pass total moves
-    every slice — don't read a different total as a broken suite, read `0 skipped` as
-    "a live API call just ran".
+  - **The `1 skipped` is the expectation. The pass total is not.** That skip is a
+    real-SDK test gated on `ANTHROPIC_API_KEY`
+    (`tests/proposal_assist/test_drafting_claude_adapter.py`); with the key exported you
+    get `0 skipped` and one more pass, and it makes a live API call. So read `0 skipped`
+    as "a live API call just ran", and read a different total as "a slice merged".
+  - Recent measurements, for order of magnitude only: **4857** at `f0aaed0c`
+    (2026-09-03), **3361** on 2026-08-16. This line said `3361` for two and a half
+    weeks after it stopped being true, and a plan copied it into its own "Global
+    Constraints" as a hard expectation — so the 2026-09-04 Call Match run opened
+    against a base **1496 tests higher** than its brief claimed. **Measure the base
+    yourself before you assert a total, carry your plan's DELTAS against what you
+    measured, and never adjust an expected number to make the arithmetic close.**
 - FastAPI backend. PostgreSQL 16 + SQLAlchemy 2.x + Alembic, with `pgvector` for embeddings.
 - APScheduler, in-process — **single-instance hard constraint** (the scheduler must not run on more than one process).
 - **Frontend is a React 19 + Vite SPA** (react-router, TanStack Query, `openapi-fetch` against types generated from the FastAPI OpenAPI schema; `pnpm`). It owns the calls dashboard, proposal-assist workspace, admin, auth, profile, and settings pages. Jinja remains only for email-digest rendering; there is no server-rendered web UI.
