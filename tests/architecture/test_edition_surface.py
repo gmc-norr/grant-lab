@@ -130,6 +130,11 @@ def test_match_edition_still_serves_the_release_1_surface(monkeypatch, _base_env
 #     > tests/architecture/full_edition_routes.txt
 #
 # Verified byte-identical to a temp checkout of f0aaed0c on 2026-09-04.
+#
+# 2026-09-04, profile-visibility Task 3: 105 -> 107. The two added paths are
+# /api/profiles/{profile_id}/viewers and /api/profiles/{profile_id}/visibility
+# (the sharing endpoints). The count below moves with the file, in the same
+# commit, so a route added without intent is still red.
 _BASELINE = Path(__file__).with_name("full_edition_routes.txt")
 
 
@@ -158,7 +163,7 @@ def test_full_edition_route_set_matches_the_committed_baseline(monkeypatch, _bas
 def test_the_baseline_is_not_empty():
     """A baseline of zero routes would make the comparison above vacuous on an
     app that also served nothing."""
-    assert len(_BASELINE.read_text().split()) == 105
+    assert len(_BASELINE.read_text().split()) == 107
 
 
 def test_full_edition_is_unchanged(monkeypatch, _base_env):

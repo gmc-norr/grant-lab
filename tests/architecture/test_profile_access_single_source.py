@@ -89,9 +89,6 @@ DELEGATION_PINS: dict[str, str] = {
 # cannot go green without deleting its own line here. A self-removing scaffold.
 # THIS DICT MUST BE EMPTY (and deleted) when Task 5 lands.
 _NOT_YET_WIRED: dict[str, str] = {
-    "web/api/profiles.py::list_profiles": "Task 3",
-    "web/api/profiles.py::get_profile": "Task 3",
-    "web/api/profiles.py::update_profile": "Task 3",
     "web/dashboard.py::resolve_profile_selection": "Task 4",
     "web/dashboard.py::set_default_profile": "Task 4",
     "web/dashboard.py::build_dashboard_view": "Task 4",
