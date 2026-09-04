@@ -140,12 +140,22 @@ jobs:
       - name: Build SPA in the ephemeral secretless container
         run: docker build -f frontend/Dockerfile -t call-manager-spa-build .
 
-      - name: Extract the SPA bundle into the package tree
+      # Extract to frontend/dist and then let scripts/package_spa.sh write the
+      # served tree. It used to `docker cp` straight into src/call_manager/web/spa,
+      # which bypassed the bundle gate AND left no edition.txt — so the wheel's SPA
+      # was un-gated and unlabelled, and web/spa_serving.py's boot-time mismatch
+      # check could never fire on it (absent marker = unknown = allowed). Routing
+      # through the script makes the wheel's SPA carry the same proof as a local
+      # `pnpm package:match`: the gate reads dist/module-manifest.json, the marker
+      # records what it proved. package_spa.sh is now the ONLY writer of that
+      # directory, which tests/architecture/test_package_spa.py pins.
+      - name: Extract the SPA bundle and package it through the gate
         run: |
           c=$(docker create call-manager-spa-build)
-          rm -rf src/call_manager/web/spa && mkdir -p src/call_manager/web/spa
-          docker cp "$c:/build/dist/." src/call_manager/web/spa/
+          rm -rf frontend/dist && mkdir -p frontend/dist
+          docker cp "$c:/build/dist/." frontend/dist/
           docker rm "$c"
+          bash scripts/package_spa.sh
 
       - name: Build the wheel and assert it contains the SPA
         run: |

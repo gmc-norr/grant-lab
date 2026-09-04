@@ -13,6 +13,7 @@ two scripts in, fake a dist, and run it. No build, no node_modules, ~1 s.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -150,3 +151,102 @@ def test_the_bundle_gate_accepts_a_clean_manifest(tmp_path):
     out = _gate(root, root / "frontend" / "dist")
     assert out.returncode == 0, out.stdout + out.stderr
     assert "clean" in out.stdout
+
+
+# --- the served tree has exactly one writer ----------------------------------
+# package_spa.sh is the gate: it asks dist/module-manifest.json which edition the
+# bundle actually is and stamps src/call_manager/web/spa/edition.txt with the
+# answer. That only governs the deployed artefact if nothing ELSE writes that
+# directory. Two things did — ci.yml's `docker cp` for the wheel and
+# collab_e2e_run.sh's `rsync --delete` — and both were invisible, because
+# web/spa_serving.py treats an ABSENT marker as unknown-and-allowed. So the wheel
+# shipped a full SPA past every gate, and a local prod e2e run erased the marker a
+# `pnpm package:match` had left. Both now call the script. This keeps it true.
+
+_SERVED = "src/call_manager/web/spa"
+# `docker cp` matches on `cp`. Deliberately NOT `>`: YAML block scalars are `run: >`.
+_WRITE = re.compile(r"\b(rm|rsync|cp|mkdir|mv|tee|install|unzip|tar)\b")
+
+
+def _scanned_files() -> list[Path]:
+    files = [
+        *sorted((REPO / "scripts").glob("*.sh")),
+        *sorted((REPO / ".github" / "workflows").glob("*.yml")),
+        REPO / "frontend" / "Dockerfile",
+    ]
+    return [f for f in files if f.is_file()]
+
+
+def _writer_lines(text: str, name: str) -> list[str]:
+    hits = []
+    for i, line in enumerate(text.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if _SERVED in stripped and _WRITE.search(stripped):
+            hits.append(f"{name}:{i}  {stripped}")
+    return hits
+
+
+def test_the_scan_set_is_not_empty():
+    """A scan over nothing passes over anything. Pin the three files that matter."""
+    names = {f.name for f in _scanned_files()}
+    assert {"package_spa.sh", "collab_e2e_run.sh", "ci.yml", "Dockerfile"} <= names, names
+
+
+def test_the_writer_detector_actually_detects():
+    """The positive control. Without it the test below is 'absence already true':
+    a detector matching nothing would pass on any repo, including the broken one.
+    These are the two lines that were really there before this was fixed."""
+    flagged = _writer_lines(
+        'rsync -a --delete frontend/dist/ src/call_manager/web/spa/\n'
+        'rm -rf src/call_manager/web/spa && mkdir -p src/call_manager/web/spa\n'
+        'docker cp "$c:/build/dist/." src/call_manager/web/spa/\n',
+        "fixture",
+    )
+    assert len(flagged) == 3, flagged
+
+
+def test_the_detector_does_not_flag_reads_or_comments():
+    """collab_e2e_run.sh legitimately READS the path (a git check-ignore safety
+    net) and several files discuss it in comments. Flagging those would push
+    someone to delete the safety net to get green."""
+    assert (
+        _writer_lines(
+            '  if ! git check-ignore -q "src/call_manager/web/spa/"; then\n'
+            "# NOTE: rm -rf src/call_manager/web/spa used to live here\n"
+            '  SPA="$ROOT/src/call_manager/web/spa"\n',
+            "fixture",
+        )
+        == []
+    )
+
+
+def test_no_other_writer_of_the_served_tree():
+    offenders: list[str] = []
+    for f in _scanned_files():
+        if f.name == "package_spa.sh":
+            continue
+        offenders += _writer_lines(f.read_text(), str(f.relative_to(REPO)))
+    assert offenders == [], (
+        "these write src/call_manager/web/spa without going through "
+        "scripts/package_spa.sh, so the bundle gate and edition.txt do not "
+        "govern what they leave behind:\n" + "\n".join(offenders)
+    )
+
+
+def test_the_wheel_build_packages_through_the_script():
+    """The other half. 'Nothing else writes it' is also satisfied by a CI that
+    stopped writing it at all — which would ship a wheel with no SPA."""
+    ci = (REPO / ".github" / "workflows" / "ci.yml").read_text()
+    assert "bash scripts/package_spa.sh" in ci
+
+
+def test_the_container_build_does_not_hard_code_the_edition():
+    """frontend/Dockerfile built the FULL edition unconditionally, so no
+    `--build-arg` could ever produce a match wheel."""
+    dockerfile = (REPO / "frontend" / "Dockerfile").read_text()
+    assert "ARG VITE_APP_EDITION=full" in dockerfile
+    build_lines = [ln for ln in dockerfile.splitlines() if "pnpm run build" in ln]
+    assert len(build_lines) == 1, build_lines
+    assert "$VITE_APP_EDITION" in build_lines[0], build_lines[0]

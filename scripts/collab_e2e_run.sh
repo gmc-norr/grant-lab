@@ -109,8 +109,14 @@ if [ "$E2E_SPA_MODE" = "prod" ]; then
   fi
   echo "[run] E2E_SPA_MODE=prod — building the SPA (pnpm build)…"
   ( cd frontend && pnpm build )
-  echo "[run] syncing frontend/dist/ -> src/call_manager/web/spa/…"
-  rsync -a --delete frontend/dist/ src/call_manager/web/spa/
+  # Was `rsync -a --delete frontend/dist/ src/call_manager/web/spa/`. That wrote
+  # the served tree with no bundle gate and no edition.txt — and --delete removed
+  # the marker a previous `pnpm package:match` had left, so an e2e run silently
+  # downgraded a match deployment to full with nothing to detect it afterwards.
+  # package_spa.sh does the same copy, asks dist/module-manifest.json which
+  # edition it actually is, and records the answer.
+  echo "[run] packaging frontend/dist/ -> src/call_manager/web/spa/ (gate + edition marker)…"
+  bash "$ROOT/scripts/package_spa.sh"
 fi
 
 echo "[run] starting seed (testcontainers PG + uvicorn:8000, SPA_MODE=$E2E_SPA_MODE)…"
