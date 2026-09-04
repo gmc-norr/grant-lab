@@ -34,6 +34,7 @@ from call_manager.db.models import (
     User,
     UserCallDismissal,
 )
+from call_manager.web.profile_access import can_read_profile, readable_profile_ids
 
 # Score threshold for counting "high match" calls in the dashboard summary.
 # Calls with aggregate_score >= this value are highlighted as top matches.
@@ -66,13 +67,19 @@ def resolve_profile_selection(
 
     Mirrors the legacy three-way sticky-default resolution from `calls_index`:
 
-    - absent (``None``): honour the user's stored default if still active, else
-      unranked. Never writes.
+    - absent (``None``): honour the user's stored default if still active AND
+      still readable, else unranked. Never writes.
     - explicit empty (``""``): unranked. When ``persist`` is True, also CLEAR
       the stored default.
-    - an id was given: validate (must exist AND be active) BEFORE persisting.
-      Invalid/inactive → unranked, stored default untouched. When ``persist`` is
-      True and the id is valid, store it as the new default.
+    - an id was given: validate (must exist, be active AND be readable by this
+      user) BEFORE persisting. Invalid/inactive/unreadable → unranked, stored
+      default untouched. When ``persist`` is True and the id is valid, store it
+      as the new default.
+
+    BOTH id-bearing arms compose ``profile_access.can_read_profile``, and they
+    give unreadable ids the SAME answer as unknown ones — see the comments at
+    each. The user is loaded here because the live callers hold only a
+    ``user_id``; a user id that no longer resolves gets the unranked view.
 
     ``persist=False`` is the read-only `/api/calls` path (the only live caller):
     identical resolution, never writes. The ``persist=True`` write branch is
@@ -86,9 +93,20 @@ def resolve_profile_selection(
     `_parse_optional_profile_id` behavior (a genuinely malformed URL).
     """
     if raw_profile is None:
-        # Bare / or return visit — honour stored default if still active.
+        # Bare / or return visit — honour stored default if still active AND
+        # still readable. THIS ARM IS THE ONE A FIX MISSES: no `?profile=` is
+        # sent at all, so a check placed only on the explicit arm below never
+        # runs, and a default stored while a profile was shared keeps ranking
+        # the feed forever after the share is revoked.
         stored = session.scalar(select(User.default_profile_id).where(User.id == user_id))
         if stored is None:
+            return None
+        viewer = session.get(User, user_id)
+        if viewer is None or not can_read_profile(session, viewer, stored):
+            # Degrade to unranked, exactly as a deactivated default does. The
+            # users.default_profile_id row is deliberately LEFT ALONE:
+            # revocation is a FILTER, not a delete, so re-sharing restores the
+            # colleague's preference without them setting it again.
             return None
         return session.scalar(
             select(Profile.id).where(Profile.id == stored, Profile.is_active.is_(True))
@@ -127,6 +145,15 @@ def resolve_profile_selection(
     valid = session.scalar(
         select(Profile.id).where(Profile.id == requested, Profile.is_active.is_(True))
     )
+    if valid is not None:
+        # And unreadable degrades to unranked, with the SAME answer an unknown
+        # or inactive id gets. It must NOT 404: a status that distinguishes
+        # "exists but is not yours" from "does not exist" makes ?profile=N an
+        # oracle for every id a user can type, and profile NAMES are the thing
+        # worth not confirming.
+        viewer = session.get(User, user_id)
+        if viewer is None or not can_read_profile(session, viewer, valid):
+            return None
     if valid is not None and persist:
         u = session.get(User, user_id)
         if u is not None and u.default_profile_id != valid:
@@ -138,7 +165,12 @@ def set_default_profile(session: Session, *, user_id: int, profile_id: int | Non
     """Explicit preference write for ``POST /api/me/default-profile``.
 
     ``None`` clears the stored default. A non-None id must reference an existing
-    active profile or this 404s. The caller commits.
+    active profile THIS USER MAY READ or this 404s. The caller commits.
+
+    Without the read check this endpoint is the bypass: store an unreadable
+    profile as the default, then load a bare ``/api/calls`` with no ``?profile=``
+    at all. ONE status — the same 404 — for missing, inactive and unreadable, so
+    storing is not an existence oracle either.
     """
     u = session.get(User, user_id)
     if u is None:
@@ -149,7 +181,7 @@ def set_default_profile(session: Session, *, user_id: int, profile_id: int | Non
     valid = session.scalar(
         select(Profile.id).where(Profile.id == profile_id, Profile.is_active.is_(True))
     )
-    if valid is None:
+    if valid is None or not can_read_profile(session, u, valid):
         from fastapi import HTTPException
 
         raise HTTPException(status_code=404, detail="profile not found or inactive")
@@ -413,11 +445,25 @@ def build_dashboard_view(
         )
 
     sources = session.execute(select(Source).order_by(Source.name)).scalars().all()
-    profiles = (
-        session.execute(select(Profile).where(Profile.is_active.is_(True)).order_by(Profile.name))
-        .scalars()
-        .all()
-    )
+    # The facet list is the profile picker, so its payload is profile NAMES —
+    # offered to everyone before this filter existed. A name is the leak worth
+    # closing: a dropdown of every private profile is a directory of who is
+    # working on what. Same composition the profiles list endpoint uses; the
+    # user is loaded because the live caller holds only a `user_id`, and one
+    # that no longer resolves is offered nothing.
+    viewer = session.get(User, user_id)
+    profiles: list[Profile] = []
+    if viewer is not None:
+        profiles = list(
+            session.execute(
+                select(Profile)
+                .where(
+                    Profile.is_active.is_(True),
+                    Profile.id.in_(readable_profile_ids(viewer)),
+                )
+                .order_by(Profile.name)
+            ).scalars()
+        )
 
     pending, failed = _ranking_counts(session, profile_id) if profile_id is not None else (0, 0)
 

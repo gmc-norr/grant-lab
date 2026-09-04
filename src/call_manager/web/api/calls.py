@@ -26,6 +26,7 @@ from call_manager.web.filters import (
     model_label,
     note_category_heading,
 )
+from call_manager.web.profile_access import can_read_profile
 
 router = APIRouter()
 
@@ -270,10 +271,21 @@ def get_call_detail(
         ranking = None
         criteria: list[CallRankingCriterion] = []
         profile_obj: Profile | None = None
-        # Parity: resolve ?profile by is_active ALONE — NOT ownership (web/routes/calls.py:69-71).
+        # This route resolves `?profile=` ITSELF — it never goes through
+        # `dashboard.resolve_profile_selection` — so it composes the read rule
+        # here. It used to resolve by is_active ALONE, which made it the
+        # eleventh surface and the one an audit of "the profile endpoints"
+        # walks straight past.
+        #
+        # Unreadable produces `profile_obj = None`, the SAME state an inactive
+        # or unknown id produces, and NOT a 404: a status that separates
+        # "exists but is not yours" from "does not exist" turns ?profile=N into
+        # an oracle. `ranking` and `criteria` are populated only inside this
+        # branch, so `profile_obj is None` is exactly the condition under which
+        # no score, no criterion and no `_criterion_detail` string is rendered.
         if profile_id is not None:
             p = session.get(Profile, profile_id)
-            if p is not None and p.is_active:
+            if p is not None and p.is_active and can_read_profile(session, user, p.id):
                 profile_obj = p
                 ranking = session.execute(
                     select(CallRanking).where(
@@ -292,6 +304,19 @@ def get_call_detail(
                     )
 
         # best-fit profile: highest-scoring profile OWNED by the current user.
+        #
+        # OWNERSHIP, not the read rule, and that is DELIBERATE — this line is
+        # not a surface someone forgot to widen. Ownership is already narrower
+        # than readability, so it leaks nothing. Widening it to
+        # `readable_profile_ids` is defensible product-wise (a colleague a
+        # profile is shared with would otherwise see it offered but never
+        # chosen), but it is NOT a day-one no-op: every profile in the live
+        # database is 'org', so a widened query would pick from every profile
+        # in the organisation and change every user's call page the day it
+        # merges. That is a product decision for a human, not part of the
+        # privacy fix. Pinned by
+        # tests/test_profile_access.py::test_best_profile_id_stays_owner_scoped_by_decision
+        # — delete that gate in the commit that makes the decision.
         best_profile_id = session.scalar(
             select(CallRanking.profile_id)
             .join(Profile, Profile.id == CallRanking.profile_id)

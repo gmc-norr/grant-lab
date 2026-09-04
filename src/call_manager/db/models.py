@@ -277,6 +277,10 @@ class Profile(Base):
             "level IS NULL OR level IN ('lab','group','department','clinic','institution','other')",
             name="ck_profiles_level",
         ),
+        CheckConstraint(
+            "visibility IN ('private','org')",
+            name="ck_profiles_visibility",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -311,6 +315,47 @@ class Profile(Base):
         nullable=True,
     )
     embedding_model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 'org'  -- every active user may read it. The DEFAULT, so migration 0070 is
+    #           a no-op for existing rows and nobody's Monday changes.
+    # 'private' -- owner, admins and explicit profile_viewers rows only.
+    # String + CHECK rather than a native enum: matches ck_profiles_kind two
+    # constraints up and ck_ranking_remote_attempts_outcome, and avoids ALTER
+    # TYPE if a third value ever appears.
+    visibility: Mapped[str] = mapped_column(
+        String(10), nullable=False, server_default=text("'org'")
+    )
+
+
+class ProfileViewer(Base):
+    """A user the profile's owner has explicitly let read it.
+
+    Deliberately identical in shape to workspace_viewers (migration 0015): same
+    composite PK, same CASCADEs, same added_at. The read predicate in
+    web/profile_access.py copies workspaces.py's for the same reason -- spec 4.3
+    requires that no second permission model appears, and boards are built on
+    the profile rule.
+
+    Absence of a row is not "no access": visibility='org' and is_admin both grant
+    reading without one, and the OWNER never has a row. See readable_profile_ids().
+    """
+
+    __tablename__ = "profile_viewers"
+
+    profile_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("profiles.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
 
 
 class Subscription(Base):

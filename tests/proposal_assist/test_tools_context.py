@@ -8,7 +8,7 @@ from call_manager.proposal_assist.tools.context import (
     get_profile_impl,
 )
 from call_manager.proposal_assist.tools.registry import ToolContext
-from tests.proposal_assist.conftest import make_workspace
+from tests.proposal_assist.conftest import make_user, make_workspace
 
 
 def _build_ctx(pg_session_factory, wsid):
@@ -87,3 +87,54 @@ async def test_get_profile_returns_snapshot_when_populated(
     result = await get_profile_impl(ctx, ports=build_ports(pg_session_factory))
     assert result["linked"] is True
     assert "Group X" in result["description"]
+
+
+@pytest.mark.asyncio
+async def test_the_profile_snapshot_is_workspace_scoped_not_profile_scoped(
+    pg_session_factory,
+    _settings_env,
+):
+    """A workspace MEMBER reads the linked profile's description even when that
+    profile is private and the member is not one of its viewers. INTENDED, and
+    pinned here so nobody "fixes" it as a leak (PD-13, decided 2026-09-04).
+
+    The reasoning: adding somebody to a workspace is meant to share what the
+    workspace was built on, the way sharing a document shares what it quotes.
+    The owner had to be able to read the profile to link it (create_workspace_api
+    applies can_read_profile, PD-9) and then chose to add the member.
+
+    Note what this tool does NOT have: a user. `ToolContext` carries a
+    workspace_id and no actor at all, so the profile read rule is not merely
+    unapplied here — it is inapplicable. Anyone tempted to add it should change
+    the SHARING decision above, not this function, or `?profile=` deep links and
+    the digest will start disagreeing with the workspace about the same profile.
+
+    The rule that still holds: only members reach this tool. A stranger to the
+    workspace gets nothing, because turns are gated on require_member.
+    """
+    from call_manager.db.models import Profile, ProfileKind
+
+    with pg_session_factory() as s:
+        owner = make_user(s, email="profile-owner@umu.se")
+        private = Profile(
+            name="Unpublished direction",
+            kind=ProfileKind.ORGANIZATIONAL_UNIT.value,
+            description="A research direction its owner has NOT shared.",
+            visibility="private",
+            is_active=True,
+            created_by=owner.id,
+        )
+        s.add(private)
+        s.flush()
+        ws = make_workspace(s)
+        ws.profile_id = private.id
+        # Phase 0 copies the description in; the copy is what the agent reads.
+        ws.profile_desc_snapshot = private.description
+        s.commit()
+        wsid = ws.id
+
+    ctx = _build_ctx(pg_session_factory, wsid)
+    result = await get_profile_impl(ctx, ports=build_ports(pg_session_factory))
+
+    assert result["linked"] is True
+    assert result["description"] == "A research direction its owner has NOT shared."
