@@ -29,7 +29,7 @@ from dataclasses import dataclass
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 import call_manager.profiles.post_edit as post_edit
 from call_manager.auth.session_cookie import SessionSigner
@@ -320,6 +320,7 @@ def test_gate6_update_does_not_leak_existence_to_a_stranger(
     assert unreadable.status_code == 404, (
         f"PUT on an unreadable profile must 404, not 403: {unreadable.status_code}"
     )
+    assert missing.status_code == 404, missing.text
     assert unreadable.json() == missing.json(), (
         f"PUT's 'unreadable' and 'does not exist' answers differ: "
         f"{unreadable.json()} vs {missing.json()}"
@@ -363,8 +364,7 @@ def test_sharing_ops_403_for_a_viewer_who_is_not_the_owner(
     with client_for(app, world.b) as client:
         r = client.request(method.upper(), url, json=body)
     assert r.status_code == 403, (
-        f"{method.upper()} {suffix} let a non-owner viewer through with "
-        f"{r.status_code}: {r.text}"
+        f"{method.upper()} {suffix} let a non-owner viewer through with {r.status_code}: {r.text}"
     )
     assert r.json()["error"]["code"] == "forbidden"
 
@@ -388,23 +388,36 @@ def test_sharing_ops_404_for_a_stranger_with_no_existence_oracle(
         f"{method.upper()} {suffix} answered {unreadable.status_code} for a profile "
         f"the caller cannot read; anything but 404 confirms it exists: {unreadable.text}"
     )
+    assert missing.status_code == 404, missing.text
     assert unreadable.json() == missing.json(), (
         f"{method.upper()} {suffix}: unreadable and nonexistent must be "
         f"indistinguishable; got {unreadable.json()} vs {missing.json()}"
     )
 
 
-def test_owner_lists_viewers_with_names_and_emails(
-    monkeypatch, pg_url, pg_session_factory, world
+@pytest.mark.parametrize(("method", "suffix", "body"), _SHARING_OPS)
+def test_sharing_ops_admin_may_manage_a_profile_they_do_not_own(
+    monkeypatch, pg_url, pg_session_factory, world, method, suffix, body
 ):
+    """The edit rule is created_by OR admin (profiles.py, spec 4.3). Gate 4 and
+    the PUT-profile test exercise the admin arm elsewhere; without this, dropping
+    `and not user.is_admin` from the sharing ops' ladder reddens nothing."""
+    app = setup_app(monkeypatch, pg_url)
+    with client_for(app, world.d) as client:
+        r = client.request(method.upper(), f"/api/profiles/{world.p_secret}{suffix}", json=body)
+    assert r.status_code == 200, (
+        f"{method.upper()} {suffix}: an admin must be able to manage sharing on a "
+        f"profile they do not own; got {r.status_code}: {r.text}"
+    )
+
+
+def test_owner_lists_viewers_with_names_and_emails(monkeypatch, pg_url, pg_session_factory, world):
     app = setup_app(monkeypatch, pg_url)
     with client_for(app, world.a) as client:
         r = client.get(f"/api/profiles/{world.p_priv}/viewers")
     assert r.status_code == 200, r.text
     assert r.json() == {
-        "viewers": [
-            {"user_id": world.b, "name": "Bo Colleague", "email": "b-colleague@umu.se"}
-        ]
+        "viewers": [{"user_id": world.b, "name": "Bo Colleague", "email": "b-colleague@umu.se"}]
     }, "a list of bare ids is unusable in a UI — the response carries name and email"
 
 
@@ -435,9 +448,7 @@ def test_owner_replaces_viewers_and_the_response_is_the_servers_truth(
     with pg_session_factory() as s:
         rows = {
             tuple(x)
-            for x in s.execute(
-                text("SELECT profile_id, user_id FROM profile_viewers")
-            ).all()
+            for x in s.execute(text("SELECT profile_id, user_id FROM profile_viewers")).all()
         }
     assert rows == {(world.p_priv, world.c)}, rows
 
@@ -459,9 +470,7 @@ def test_removing_the_last_viewer_does_not_flip_visibility(
     assert r.status_code == 200, r.text
     assert r.json()["viewers"] == []
     with pg_session_factory() as s:
-        vis = s.scalar(
-            text("SELECT visibility FROM profiles WHERE id = :p"), {"p": world.p_priv}
-        )
+        vis = s.scalar(text("SELECT visibility FROM profiles WHERE id = :p"), {"p": world.p_priv})
     assert vis == "private", f"emptying the viewer list must not touch visibility; got {vis!r}"
     with client_for(app, world.c) as client:
         assert client.get(f"/api/profiles/{world.p_priv}").status_code == 404
@@ -510,9 +519,7 @@ def test_add_viewer_is_idempotent_and_the_owner_is_a_no_op(
         )
 
 
-@pytest.mark.parametrize(
-    "email", ["nobody@umu.se", "pending@umu.se", "", "not-an-email"]
-)
+@pytest.mark.parametrize("email", ["nobody@umu.se", "pending@umu.se", "", "not-an-email"])
 def test_add_viewer_gives_no_user_existence_oracle(
     monkeypatch, pg_url, pg_session_factory, world, email
 ):
@@ -563,6 +570,38 @@ def test_owner_flips_visibility_both_ways(monkeypatch, pg_url, pg_session_factor
         assert client.get(f"/api/profiles/{world.p_org}").json()["visibility"] == "org"
     with client_for(app, world.c) as stranger:
         assert stranger.get(f"/api/profiles/{world.p_org}").status_code == 200
+
+
+def test_viewer_rows_survive_a_visibility_round_trip(
+    monkeypatch, pg_url, pg_session_factory, world
+):
+    """P_priv has B's viewer row. Flipping to 'org' and back must not delete it:
+    visibility and the viewer list are independent, so an owner can widen and
+    re-narrow without re-inviting everyone. The other flip test uses P_org,
+    which has no rows, so a flip that deleted viewers reddened nothing there."""
+    app = setup_app(monkeypatch, pg_url)
+    with client_for(app, world.a) as client:
+        assert (
+            client.put(
+                f"/api/profiles/{world.p_priv}/visibility", json={"visibility": "org"}
+            ).status_code
+            == 200
+        )
+        assert (
+            client.put(
+                f"/api/profiles/{world.p_priv}/visibility", json={"visibility": "private"}
+            ).status_code
+            == 200
+        )
+    with pg_session_factory() as s:
+        rows = (
+            s.execute(select(ProfileViewer.user_id).where(ProfileViewer.profile_id == world.p_priv))
+            .scalars()
+            .all()
+        )
+    assert rows == [world.b], f"the viewer row must survive the round trip; got {rows}"
+    with client_for(app, world.b) as viewer:
+        assert viewer.get(f"/api/profiles/{world.p_priv}").status_code == 200
 
 
 def test_visibility_rejects_a_value_outside_the_vocabulary(
