@@ -211,22 +211,47 @@ def _enclosing_functions(module: ast.Module) -> dict[ast.AST, str]:
     return owner
 
 
-def _profile_visibility_refs(node: ast.AST) -> bool:
-    """`Profile.visibility` -- and `models.Profile.visibility`, same thing."""
+_ORM_SYMBOLS = ("Profile", "ProfileViewer")
+
+
+def _bound_names(module: ast.Module) -> dict[str, str]:
+    """Local name -> ORM symbol, for the two symbols the negative half bans.
+
+    `from ...models import ProfileViewer as PV` binds `PV`; without this map a
+    one-line alias would walk the whole gate. `import ...models as m` needs no
+    entry -- `m.ProfileViewer` is caught by the attribute rule below.
+    """
+    bound = {name: name for name in _ORM_SYMBOLS}
+    for node in ast.walk(module):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name in _ORM_SYMBOLS:
+                    bound[alias.asname or alias.name] = alias.name
+    return bound
+
+
+def _profile_visibility_refs(node: ast.AST, bound: dict[str, str]) -> bool:
+    """`Profile.visibility` -- and `models.Profile.visibility`, and
+    `P.visibility` after `import Profile as P`: the same thing."""
     if not isinstance(node, ast.Attribute) or node.attr != "visibility":
         return False
     base = node.value
     if isinstance(base, ast.Name):
-        return base.id == "Profile"
+        return bound.get(base.id) == "Profile"
     if isinstance(base, ast.Attribute):
         return base.attr == "Profile"
     return False
 
 
-def _profile_viewer_ref(node: ast.AST) -> bool:
-    """A use of the ORM class. An `import` binds an ast.alias, not an ast.Name,
-    so importing the model is not itself a violation -- using it is."""
-    return isinstance(node, ast.Name) and node.id == "ProfileViewer"
+def _profile_viewer_ref(node: ast.AST, bound: dict[str, str]) -> bool:
+    """A use of the ORM class: a bare or aliased name, or `models.ProfileViewer`.
+    An `import` binds an ast.alias, not an ast.Name, so importing the model is
+    not itself a violation -- using it is. Detected at the same strength as
+    `Profile.visibility` above (review 2026-09-04 I2: the first version matched
+    only a bare ast.Name)."""
+    if isinstance(node, ast.Name):
+        return bound.get(node.id) == "ProfileViewer"
+    return isinstance(node, ast.Attribute) and node.attr == "ProfileViewer"
 
 
 # --------------------------------------------------------------------------
@@ -325,10 +350,11 @@ def test_no_module_builds_a_second_read_predicate() -> None:
             continue
         module = ast.parse(path.read_text(), filename=str(path))
         owner = _enclosing_functions(module)
+        bound = _bound_names(module)
         for node in ast.walk(module):
-            if _profile_visibility_refs(node):
+            if _profile_visibility_refs(node, bound):
                 what = "Profile.visibility"
-            elif _profile_viewer_ref(node):
+            elif _profile_viewer_ref(node, bound):
                 what = "ProfileViewer"
             else:
                 continue
@@ -347,6 +373,20 @@ def test_no_module_builds_a_second_read_predicate() -> None:
         f"{sorted(EXEMPT_PROFILE_FUNCTIONS)} -- which manage the rows and do "
         f"not decide access."
     )
+
+
+def test_pin_set_has_not_shrunk() -> None:
+    """Exact names, exact set -- and an exact COUNT, so deleting a pin is red.
+
+    The plan's own history is the reason: its first draft pinned seven surfaces
+    and outside review found three more; the controller found an eleventh. A
+    tuple that can quietly lose an entry is the same failure in reverse. 10 and
+    1 are the counts MEASURED when this gate was written (2026-09-04); a task
+    that legitimately adds or removes a surface changes these numbers in the
+    same diff, where a reviewer sees it.
+    """
+    assert len(PREDICATE_PINS) == 10, sorted(PREDICATE_PINS)
+    assert len(DELEGATION_PINS) == 1, sorted(DELEGATION_PINS)
 
 
 def test_not_yet_wired_names_are_real_pins() -> None:
