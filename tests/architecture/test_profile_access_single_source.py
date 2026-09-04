@@ -85,6 +85,13 @@ PREDICATE_PINS: tuple[str, ...] = (
     # Phase-0 copies the profile's description into the workspace snapshot the
     # drafting agent reads back.
     "web/api/workspaces.py::create_workspace_api",
+    # The sharing guard. Outside review 2026-09-04 (Sol #9) found it unpinned:
+    # deleting its `can_read_profile` line left every architecture gate green
+    # while turning the four sharing routes into a 403-vs-404 existence oracle.
+    # MEASURED: the four behavioural cases in
+    # tests/test_profile_access.py::test_sharing_ops_404_for_a_stranger_with_no_existence_oracle
+    # did go red, so the hole was in THIS file, not in the coverage.
+    "web/api/profiles.py::_profile_for_edit",
 )
 
 # Pinned on DELEGATION rather than on the predicate. `set_default` is a
@@ -95,7 +102,40 @@ PREDICATE_PINS: tuple[str, ...] = (
 # body, so what is pinned is that it still delegates.
 DELEGATION_PINS: dict[str, str] = {
     "web/api/me.py::set_default": "set_default_profile",
+    # The four sharing operations. Each is exempt from the NEGATIVE half (they
+    # manage viewer rows), which previously left them pinned by nothing at all:
+    # an exemption is not coverage. They must keep going through the guard.
+    "web/api/profiles.py::list_profile_viewers": "_profile_for_edit",
+    "web/api/profiles.py::replace_profile_viewers": "_profile_for_edit",
+    "web/api/profiles.py::add_profile_viewer": "_profile_for_edit",
+    "web/api/profiles.py::set_profile_visibility": "_profile_for_edit",
 }
+
+# The pin sets, written out a SECOND time as literals. Deliberate duplication:
+# the point is that changing PREDICATE_PINS alone cannot pass. A legitimate new
+# surface changes both, in one diff, where a reviewer sees the pair.
+EXPECTED_PREDICATE_PINS = frozenset({
+    "web/api/profiles.py::list_profiles",
+    "web/api/profiles.py::get_profile",
+    "web/api/profiles.py::update_profile",
+    "web/api/profiles.py::_profile_for_edit",
+    "web/dashboard.py::resolve_profile_selection",
+    "web/dashboard.py::set_default_profile",
+    "web/dashboard.py::build_dashboard_view",
+    "web/api/me.py::get_settings",
+    "web/api/me.py::update_subscriptions",
+    "web/api/calls.py::get_call_detail",
+    "digest/assemble.py::assemble_for_user",
+    "web/api/workspaces.py::create_workspace_api",
+})
+EXPECTED_DELEGATION_PINS = frozenset({
+    "web/api/me.py::set_default",
+    "web/api/profiles.py::list_profile_viewers",
+    "web/api/profiles.py::replace_profile_viewers",
+    "web/api/profiles.py::add_profile_viewer",
+    "web/api/profiles.py::set_profile_visibility",
+})
+
 
 # --------------------------------------------------------------------------
 # The negative half's exempt set. Each entry states why.
@@ -185,6 +225,69 @@ def _body_calls(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
     return out
 
 
+# Callee names whose ARGUMENT position turns the predicate from a value into a
+# filter: `Profile.id.in_(readable_profile_ids(user))`. MEASURED 2026-09-04 --
+# across the twelve pinned surfaces the predicate appears in exactly two shapes,
+# an `if` test (8 sites) and an `in_()` argument (4 sites), plus one site
+# (me.py::update_subscriptions) that binds the result to a name and passes THAT
+# to `in_()`.
+FILTER_CALLEES = frozenset({"in_", "where", "filter", "any_"})
+
+
+def _parents(fn: ast.AST) -> dict[ast.AST, ast.AST]:
+    out: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(fn):
+        for child in ast.iter_child_nodes(node):
+            out[child] = node
+    return out
+
+
+def _guarding_nodes(fn: ast.AST) -> set[ast.AST]:
+    """Every node sitting inside a branch TEST or inside a filter-call argument.
+
+    These are the two positions in which a value actually decides something. A
+    node anywhere else is a value the function computed and may ignore.
+    """
+    out: set[ast.AST] = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.If | ast.IfExp | ast.While):
+            out.update(ast.walk(node.test))
+        if isinstance(node, ast.Call) and _callee_name(node) in FILTER_CALLEES:
+            for arg in (*node.args, *(kw.value for kw in node.keywords)):
+                out.update(ast.walk(arg))
+    return out
+
+
+def _predicate_is_load_bearing(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """The predicate is CALLED *and its result decides something*.
+
+    Asserting only that the name is called is the hollow shape outside review
+    found (grok #2, Sol #7/#8) and that I then reproduced: with
+    `_unused = readable_profile_ids(user)` left in `assemble.py` and the
+    `.where(...)` deleted, all 29 tests in this file passed. That is the access
+    rule reverted with the call left behind.
+    """
+    guarding = _guarding_nodes(fn)
+    parent = _parents(fn)
+    calls = [
+        node
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Call) and _callee_name(node) in PREDICATE_NAMES
+    ]
+    if any(call in guarding for call in calls):
+        return True
+    # ...or bound to a name that is itself used in a guarding position.
+    bound: set[str] = set()
+    for call in calls:
+        stmt = parent.get(call)
+        if isinstance(stmt, ast.Assign):
+            bound.update(tgt.id for tgt in stmt.targets if isinstance(tgt, ast.Name))
+    return any(
+        isinstance(node, ast.Name) and node.id in bound and node in guarding
+        for node in ast.walk(fn)
+    )
+
+
 def _enclosing_functions(module: ast.Module) -> dict[ast.AST, str]:
     """Map every node to the name of the OUTERMOST function containing it.
 
@@ -226,6 +329,35 @@ def _bound_names(module: ast.Module) -> dict[str, str]:
     return bound
 
 
+def _is_visibility_load(node: ast.AST | None) -> bool:
+    """`x.visibility`, or `getattr(x, "visibility")` -- the same read.
+
+    `getattr` is here because it is the one-character way around an
+    attribute-shaped rule, not because anyone has written it.
+    """
+    if isinstance(node, ast.Attribute) and node.attr == "visibility":
+        return True
+    return (
+        isinstance(node, ast.Call)
+        and _callee_name(node) == "getattr"
+        and len(node.args) >= 2
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value == "visibility"
+    )
+
+
+def _reads_visibility(node: ast.AST | None) -> bool:
+    """Does this expression read `.visibility` ANYWHERE inside it?
+
+    Wider than `_is_visibility_load` on purpose: the assigned value may be
+    `p.visibility if p else "org"` or `p.visibility or "org"`. MEASURED --
+    a first version of this rule matched only a bare Attribute, and that exact
+    ternary mutant survived it (39 passed) while the plain
+    `v = p.visibility` mutant was caught.
+    """
+    return node is not None and any(_is_visibility_load(n) for n in ast.walk(node))
+
+
 def _visibility_compare_operands(module: ast.Module) -> set[ast.AST]:
     """Every `<anything>.visibility` used as an operand of a comparison.
 
@@ -246,12 +378,28 @@ def _visibility_compare_operands(module: ast.Module) -> set[ast.AST]:
     profiles.py -- so no second model carries a `visibility` attribute for this
     to collide with. Narrow it the day one does.
     """
+    # One hop of indirection, because `v = p.visibility` then `v == "org"` is
+    # the same second predicate with a line break in it, and the operand-only
+    # rule could not see it (outside review 2026-09-04: grok #5, Sol #10).
+    aliases: set[str] = set()
+    for node in ast.walk(module):
+        if isinstance(node, ast.Assign) and _reads_visibility(node.value):
+            aliases.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif (
+            isinstance(node, ast.AnnAssign | ast.AugAssign)
+            and _reads_visibility(node.value)
+            and isinstance(node.target, ast.Name)
+        ):
+            aliases.add(node.target.id)
+
     out: set[ast.AST] = set()
     for node in ast.walk(module):
         if not isinstance(node, ast.Compare):
             continue
         for operand in (node.left, *node.comparators):
-            if isinstance(operand, ast.Attribute) and operand.attr == "visibility":
+            if _is_visibility_load(operand) or (
+                isinstance(operand, ast.Name) and operand.id in aliases
+            ):
                 out.add(operand)
     return out
 
@@ -310,6 +458,13 @@ def test_pinned_surface_calls_the_single_source(qualname: str) -> None:
         f"{qualname} does not CALL {' or '.join(PREDICATE_NAMES)}. Every surface "
         f"that resolves a profile for a user must go through "
         f"src/call_manager/{DEFINITION}; an import alone is not enough."
+    )
+    assert _predicate_is_load_bearing(fn), (
+        f"{qualname} CALLS {' or '.join(PREDICATE_NAMES)} but does not USE the "
+        f"result to decide anything: it reaches no `if` test and no query "
+        f"filter. A call whose value is discarded is the access rule reverted "
+        f"with the call left behind, which an earlier version of this gate "
+        f"could not tell from the real thing."
     )
 
 
@@ -405,7 +560,15 @@ def test_no_module_builds_a_second_read_predicate() -> None:
 
 
 def test_pin_set_has_not_shrunk() -> None:
-    """Exact names, exact set -- and an exact COUNT, so deleting a pin is red.
+    """Exact names, exact set -- literally, not just the right number of them.
+
+    This docstring said "exact names, exact set" for a day while the body
+    asserted `len(PREDICATE_PINS) == 11` and nothing else (outside review
+    2026-09-04, Sol #12). Swapping one pinned surface for a different function
+    that happens to call the predicate passed. A gate whose docstring claims
+    more than its assertion is worse than no gate: it is the reason the next
+    reader does not write the real one.
+
 
     The plan's own history is the reason: its first draft pinned seven surfaces
     and outside review found three more; the controller found an eleventh, and
@@ -416,8 +579,16 @@ def test_pin_set_has_not_shrunk() -> None:
     task that legitimately adds or removes a surface changes these numbers in
     the same diff, where a reviewer sees it.
     """
-    assert len(PREDICATE_PINS) == 11, sorted(PREDICATE_PINS)
-    assert len(DELEGATION_PINS) == 1, sorted(DELEGATION_PINS)
+    assert set(PREDICATE_PINS) == EXPECTED_PREDICATE_PINS, {
+        "unexpectedly added": sorted(set(PREDICATE_PINS) - EXPECTED_PREDICATE_PINS),
+        "unexpectedly removed": sorted(EXPECTED_PREDICATE_PINS - set(PREDICATE_PINS)),
+    }
+    assert set(DELEGATION_PINS) == EXPECTED_DELEGATION_PINS, {
+        "unexpectedly added": sorted(set(DELEGATION_PINS) - EXPECTED_DELEGATION_PINS),
+        "unexpectedly removed": sorted(EXPECTED_DELEGATION_PINS - set(DELEGATION_PINS)),
+    }
+    # Length too, so a pin duplicated in the tuple cannot hide a deleted one.
+    assert len(PREDICATE_PINS) == len(EXPECTED_PREDICATE_PINS), sorted(PREDICATE_PINS)
 
 
 def test_exempt_set_is_documented_and_minimal() -> None:
