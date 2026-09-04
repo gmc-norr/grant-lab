@@ -81,6 +81,31 @@ jobs:
       - name: Frontend unit tests (vitest)
         run: cd frontend && pnpm run test
 
+      # Gate 1 of the Call Match edition split: the match bundle must contain no
+      # proposal-assist module. Gates 2, 4 and 5 are vitest/pytest and already
+      # run above; gate 1 is a build script, so without this step it fired only
+      # when a human remembered — which is not a gate.
+      #
+      # It asserts on dist/module-manifest.json, the module graph Rollup actually
+      # built, by file path. Chunk-filename matching and string sentinels were
+      # both tried against this repo and both failed; scripts/check_match_bundle.mjs
+      # records the measurements. The two commands are chained with && on purpose:
+      # a build that fails at tsc writes no manifest, and a separately-invoked
+      # check would then read the previous clean one and exit 0.
+      - name: Match-edition bundle gate (no cockpit module)
+        run: cd frontend && pnpm run build:match && pnpm run check:bundle
+
+      # A SECOND vitest invocation, and it needs to be second. The build-time
+      # alias (virtual:app-router -> router.tsx | router.simple.tsx) has exactly
+      # one test, src/virtual-router.test.ts, and a vitest run can only ever
+      # exercise ONE direction of it: the alias is resolved once, at vite config
+      # time, from VITE_APP_EDITION. The run above has it unset, so it asserts
+      # the full direction — and the match direction, the one this branch exists
+      # to protect, was asserted nowhere. There is no way to cover both in one
+      # process, hence the extra ~10 s.
+      - name: Match-edition router alias (the direction the main run cannot cover)
+        run: cd frontend && VITE_APP_EDITION=match pnpm run test src/virtual-router.test.ts
+
       # OpenAPI -> TS drift: regenerate the committed client types from the live
       # route definitions (DB-free; no server needed) and fail if they changed.
       # Keeps frontend/src/api/schema.gen.ts in lockstep with the FastAPI schema.
@@ -115,12 +140,22 @@ jobs:
       - name: Build SPA in the ephemeral secretless container
         run: docker build -f frontend/Dockerfile -t call-manager-spa-build .
 
-      - name: Extract the SPA bundle into the package tree
+      # Extract to frontend/dist and then let scripts/package_spa.sh write the
+      # served tree. It used to `docker cp` straight into src/call_manager/web/spa,
+      # which bypassed the bundle gate AND left no edition.txt — so the wheel's SPA
+      # was un-gated and unlabelled, and web/spa_serving.py's boot-time mismatch
+      # check could never fire on it (absent marker = unknown = allowed). Routing
+      # through the script makes the wheel's SPA carry the same proof as a local
+      # `pnpm package:match`: the gate reads dist/module-manifest.json, the marker
+      # records what it proved. package_spa.sh is now the ONLY writer of that
+      # directory, which tests/architecture/test_package_spa.py pins.
+      - name: Extract the SPA bundle and package it through the gate
         run: |
           c=$(docker create call-manager-spa-build)
-          rm -rf src/call_manager/web/spa && mkdir -p src/call_manager/web/spa
-          docker cp "$c:/build/dist/." src/call_manager/web/spa/
+          rm -rf frontend/dist && mkdir -p frontend/dist
+          docker cp "$c:/build/dist/." frontend/dist/
           docker rm "$c"
+          bash scripts/package_spa.sh
 
       - name: Build the wheel and assert it contains the SPA
         run: |
@@ -187,4 +222,50 @@ jobs:
           path: |
             frontend/test-results/
             .e2e-vite.log
+          if-no-files-found: ignore
+
+  # The MATCH edition's only browser coverage. Its own job, and deliberately not
+  # a third value in the `e2e` matrix above: that matrix drives
+  # scripts/collab_e2e_run.sh, which needs uv, a testcontainers Postgres and a
+  # seeded workspace. This needs none of them — playwright.config.ts's match mode
+  # builds the bundle, runs gate 1 over it, serves frontend/dist statically and
+  # mocks /api in-page. ~2 min, no Docker, no Python.
+  #
+  # Why it exists: every other gate on this branch is a unit test or a static
+  # scan, and release 1 still shipped with no way to sign out and a call list
+  # whose rows navigated nowhere. Both were obvious in a browser in seconds.
+  # Pointing this spec at a FULL build fails all 8 of its tests, so a green run
+  # is evidence about the match artefact specifically.
+  match-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: frontend/.nvmrc
+
+      - name: Enable corepack (pnpm pinned via package.json packageManager)
+        run: corepack enable
+
+      - name: Frontend deps (frozen, scripts off)
+        run: cd frontend && pnpm install --frozen-lockfile
+
+      - name: Playwright Chromium (+ OS libs)
+        run: cd frontend && pnpm exec playwright install --with-deps chromium
+
+      # `pnpm run e2e:match` is E2E_MODE=match; the webServer block chains
+      # build:match && check:bundle && serve, so a build that fails at tsc cannot
+      # leave the previous dist/ standing for the browser to pass over.
+      - name: Match-edition browser smoke
+        run: cd frontend && pnpm run e2e:match
+
+      - name: Upload Playwright traces on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: playwright-match
+          path: frontend/test-results/
           if-no-files-found: ignore

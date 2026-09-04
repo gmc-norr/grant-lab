@@ -2,13 +2,37 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import react from "@vitejs/plugin-react";
-import { type Connect, type PluginOption } from "vite";
+import { loadEnv, type Connect, type PluginOption } from "vite";
 // vitest/config's defineConfig is a superset of vite's that also accepts `test`.
 import { defineConfig } from "vitest/config";
 
 import { isSpaRoute, isViteAsset, shouldServeViaVite } from "./src/dev-proxy";
 
 const BACKEND = "http://localhost:8000";
+
+// Write the exact set of source modules Rollup put into the bundle, so a gate
+// can assert on FILE PATHS instead of guessing from chunk names or grepping for
+// strings. `generateBundle` runs after chunking, and every chunk's `modules` map
+// is keyed by resolved module id — which is what makes this impossible to fool:
+// renaming a chunk does not change it, and a module with no distinctive string
+// still appears.
+function moduleManifest(): PluginOption {
+  return {
+    name: "module-manifest",
+    generateBundle(_opts, bundle) {
+      const mods = new Set<string>();
+      for (const out of Object.values(bundle)) {
+        if (out.type !== "chunk") continue;
+        for (const id of Object.keys(out.modules)) mods.add(id);
+      }
+      this.emitFile({
+        type: "asset",
+        fileName: "module-manifest.json",
+        source: JSON.stringify([...mods].sort(), null, 2),
+      });
+    },
+  };
+}
 
 // Serve index.html for SPA-owned document routes; let everything else fall
 // through to the default-to-backend proxy below (-> uvicorn -> FastAPI real 404
@@ -39,8 +63,35 @@ function spaIndexFallback(): PluginOption {
   };
 }
 
-export default defineConfig({
-  plugins: [react(), spaIndexFallback()],
+// Which router the build compiles against. Resolved here, at config time, so
+// exactly ONE router file enters the module graph — the excluded one is never
+// read, let alone bundled. Doing this with a runtime ternary would not work:
+// both routers construct their router at module scope, a side effect Rollup
+// must preserve, so both graphs would ship. Pinned by scripts/check_match_bundle.mjs
+// and by src/virtual-router.test.ts.
+//
+// It reads loadEnv(), NOT process.env, and that is load-bearing. Vite evaluates
+// this config module BEFORE it reads any .env file (resolveConfig calls
+// loadConfigFromFile ~70 lines ahead of loadEnv), and loadEnv writes only
+// NODE_ENV/BROWSER/BROWSER_ARGS back into process.env — every VITE_* key from a
+// .env file goes solely into the object that becomes import.meta.env. So
+// `process.env.VITE_APP_EDITION` is undefined for a .env-configured build, while
+// src/edition.ts (reading import.meta.env) sees "match": a match-branded shell
+// rendered on the FULL router, with the whole cockpit graph bundled, silently.
+// loadEnv returns the merged view — .env overridden by a real shell export —
+// which is exactly what Vite feeds import.meta.env, so both readers agree.
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, __dirname, "VITE_");
+  const APP_EDITION = env.VITE_APP_EDITION === "match" ? "match" : "full";
+  const ROUTER_FILE = APP_EDITION === "match" ? "src/router.simple.tsx" : "src/router.tsx";
+
+  return {
+  plugins: [react(), spaIndexFallback(), moduleManifest()],
+  resolve: {
+    alias: {
+      "virtual:app-router": resolve(__dirname, ROUTER_FILE),
+    },
+  },
   // Build to frontend/dist (INSIDE the frontend dir — writable by the non-root
   // container builder; the package tree at ../src is NOT copied into the build
   // image). The packaging step (Task 6) copies dist/ -> src/call_manager/web/spa/.
@@ -51,6 +102,26 @@ export default defineConfig({
   // file (kept in src/ so tsc picks up its `expect` type augmentation). `vite
   // build` ignores this `test` key.
   test: {
+    // Derives the test-time VITE_APP_EDITION from the SAME config-time constant
+    // the router alias uses, so the two readers cannot disagree under vitest.
+    //
+    // Be clear about what this line does NOT do. It is INERT — measured four ways
+    // 2026-09-04: with it, without it, exported or not, the outcome is identical,
+    // because vitest already feeds `import.meta.env` from the same loadEnv() view
+    // the alias resolves from, and loadEnv merges process.env. It documents the
+    // coupling; it does not create it.
+    //
+    // What it must NOT become is a literal "full". vitest's `test.env` OVERRIDES
+    // an inherited process.env value in import.meta.env, so a literal breaks
+    // `VITE_APP_EDITION=match pnpm run test src/virtual-router.test.ts` — the
+    // alias resolves to router.simple.tsx while edition.ts still reads "full".
+    //
+    // The thing that actually closes the uncovered direction is the CI step:
+    // src/virtual-router.test.ts is the only test that resolves the build-time
+    // alias, and without a second explicitly-match invocation it asserts the FULL
+    // direction and nothing else. See .github/workflows/ci.yml, right after the
+    // bundle gate.
+    env: { VITE_APP_EDITION: APP_EDITION },
     environment: "jsdom",
     globals: true,
     setupFiles: ["./src/test-setup.ts"],
@@ -90,4 +161,5 @@ export default defineConfig({
       },
     },
   },
+};
 });

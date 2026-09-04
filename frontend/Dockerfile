@@ -24,4 +24,17 @@ RUN pnpm install --frozen-lockfile
 # .dockerignore keeps frontend/node_modules + frontend/dist out so this COPY
 # cannot clobber the freshly-installed deps or drag host cruft into the image.
 COPY --chown=builder:builder frontend/ ./
-RUN pnpm run build   # outDir = /build/dist (vite.config.ts -> resolve(__dirname, "dist"))
+
+# The edition is a BUILD ARG, not a hard-coded `full`. It defaults to full, which
+# is what ships today, so this is behaviour-preserving; a match image is
+# `docker build --build-arg VITE_APP_EDITION=match -f frontend/Dockerfile .`.
+# vite.config.ts resolves the router alias through loadEnv(), which merges
+# process.env, so a RUN-scoped export is enough.
+#
+# The BUNDLE GATE deliberately does not run in here: scripts/check_match_bundle.mjs
+# lives at the repo root and the build context copies only frontend/, so it is not
+# present. It runs OUTSIDE, in scripts/package_spa.sh, over the extracted
+# dist/module-manifest.json — the stronger place for it, because that reads the
+# artefact instead of trusting this ARG.
+ARG VITE_APP_EDITION=full
+RUN VITE_APP_EDITION="$VITE_APP_EDITION" pnpm run build   # outDir = /build/dist (vite.config.ts -> resolve(__dirname, "dist"))

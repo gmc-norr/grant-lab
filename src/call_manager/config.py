@@ -173,6 +173,21 @@ class Settings(BaseSettings):
             "Toggle requires app restart; UI-driven toggling is deferred."
         ),
     )
+    app_edition: Literal["match", "full"] = Field(
+        default="full",
+        alias="APP_EDITION",
+        description=(
+            "Which product edition this process serves. 'match' is Call Match "
+            "release 1: funding-call matching only. It does NOT mount the "
+            "proposal-assist routers (workspaces, turns, annotations, rubric, "
+            "references, citation_audit, export, files) or the collab websocket, "
+            "so those endpoints do not exist rather than returning 403. 'full' is "
+            "the complete application. This is a deploy-time decision, not a "
+            "runtime toggle; the frontend has a matching build flag "
+            "(VITE_APP_EDITION) and the two must agree. A 'match' process "
+            "REQUIRES DRAFTING_ENABLED=false and refuses to start otherwise."
+        ),
+    )
     extractor_version: str = Field(
         default="sections-v1",
         alias="EXTRACTOR_VERSION",
@@ -848,6 +863,39 @@ class Settings(BaseSettings):
                 f"EMBEDDING_PREGATE_THRESHOLD ({self.embedding_pregate_threshold}); "
                 "an inverted gate silently FAILs pairs whose cosine is in "
                 "[pregate, hard_fail) that should PASS."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _match_edition_disables_drafting(self):
+        # Spec §5: release 1 ships with the drafting subsystem off. The routes are
+        # already absent (main.py's `if settings.app_edition != "match"` block and
+        # web/api/__init__.py's _FULL_ONLY), and this flag short-circuits SEVEN
+        # scheduler ticks — proposal_assist_phase0_tick (scheduler.py:623),
+        # turn_drain, coherence_drain, evaluator_drain, review_drain,
+        # uncited_claims_drain, compaction_tick — and keeps the two claim-analysis
+        # jobs from being registered at all (scheduler.py:1155, 1162).
+        #
+        # IT IS NOT A MASTER SWITCH FOR THE SCHEDULER, and the earlier claim here
+        # that "the scheduler ticks are gated on THIS flag" was wrong. Measured
+        # 2026-09-04: eight proposal-assist jobs are registered unconditionally
+        # and consult no drafting flag — jobs_retirement_reconcile_tick
+        # (scheduler.py:652-654) and passes_reconcile_tick (scheduler.py:680-681)
+        # document that as DELIBERATE (rows their hooks skipped must still
+        # converge on a deployment with drafting off), while drafting_idle_sweep
+        # and the five reapers (coherence, evaluator, review, uncited_claims,
+        # turn) simply carry no guard; collab:checkpoint_tails is a ninth,
+        # gated only on COLLAB_CHECKPOINT_SCAN_SECONDS > 0 (default 60). So a
+        # match process DOES run those ticks — against permanently empty tables.
+        # Cheap, but real, and not something this validator buys.
+        #
+        # Refuse the combination rather than
+        # silently correcting it: a deploy that sets DRAFTING_ENABLED=true means
+        # to enable drafting, and it should hear that it cannot.
+        if self.app_edition == "match" and self.drafting_enabled:
+            raise ValueError(
+                "APP_EDITION=match requires DRAFTING_ENABLED=false — release 1 does "
+                "not serve the proposal-assist subsystem."
             )
         return self
 

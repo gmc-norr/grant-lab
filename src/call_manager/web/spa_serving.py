@@ -26,15 +26,67 @@ class _ImmutableStaticFiles(StaticFiles):
         return response
 
 
-def mount_spa(app: FastAPI, *, spa_mode: str) -> None:
+def packaged_edition() -> str | None:
+    """The edition recorded in the served bundle, or None when unknown.
+
+    scripts/package_spa.sh writes SPA_DIR/edition.txt (`edition=match|full`,
+    derived from dist/module-manifest.json — the bundle itself, not the caller's
+    env). ABSENT MEANS UNKNOWN, NOT FULL: the CI/Docker path
+    (.github/workflows/ci.yml:146-147) does its own `docker cp` and writes no
+    edition.txt at all, so treating a missing file as a mismatch would refuse
+    every existing deployment. A present-but-unparsable file is unknown too.
+    """
+    try:
+        # ValueError alongside OSError: read_text() raises UnicodeDecodeError on a
+        # non-UTF-8 file, and that is a ValueError — it escaped an `except OSError`
+        # and failed boot, contradicting the "unparsable is unknown" promise above.
+        #
+        # NOT errors="replace": that decodes the garbage instead of raising, so the
+        # value parses to something like "m\ufffdatch", which is not absent — it is
+        # a KNOWN edition that disagrees, and the app refuses anyway. The test for
+        # this caught that exact mistake.
+        text = (SPA_DIR / "edition.txt").read_text()
+    except (OSError, ValueError):
+        return None
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key.strip() == "edition":
+            # Only the two editions package_spa.sh writes count as known. Anything
+            # else is a marker we cannot interpret, which is the same class as an
+            # absent one — refusing on it would fail boot over a corrupt byte.
+            return value.strip() if value.strip() in ("match", "full") else None
+    return None
+
+
+def mount_spa(app: FastAPI, *, spa_mode: str, edition: str) -> None:
     """Serve the built SPA when spa_mode == 'prod'. 'dev' is served by Vite;
     'disabled' mounts nothing. Must be called AFTER all API/HTML routers are
-    included so real routes win and only unmatched paths reach the fallback."""
+    included so real routes win and only unmatched paths reach the fallback.
+
+    `edition` is Settings.app_edition, passed in rather than read from a global
+    so this stays a pure function of its arguments (the tests build both
+    directions without touching module state)."""
     if spa_mode != "prod":
         return
     index = SPA_DIR / "index.html"
     if not index.exists():
         raise RuntimeError(f"SPA build missing at {index} (SPA_MODE=prod)")
+
+    # An APP_EDITION that disagrees with the bundle on disk is silent in every
+    # other way: APP_EDITION=match served with a FULL bundle renders the full
+    # router — cockpit links, the dark theme — against a backend where every
+    # proposal-assist request 404s, and no gate anywhere notices. The bundle is
+    # the only artefact that records which router was compiled in, so refuse to
+    # start. Unknown (no edition.txt) proceeds — see packaged_edition().
+    packaged = packaged_edition()
+    if packaged is not None and packaged != edition:
+        raise RuntimeError(
+            f"SPA edition mismatch (SPA_MODE=prod): the packaged bundle at {SPA_DIR} "
+            f"is edition={packaged!r} but APP_EDITION={edition!r}. Rebuild and "
+            "package the matching edition (pnpm -C frontend build:match && "
+            "pnpm -C frontend package:match for match; build + scripts/package_spa.sh "
+            "for full), or change APP_EDITION to agree with the bundle."
+        )
     assets = SPA_DIR / "assets"
     if assets.exists():
         app.mount("/assets", _ImmutableStaticFiles(directory=assets), name="spa-assets")

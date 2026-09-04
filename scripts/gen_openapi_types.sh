@@ -32,12 +32,18 @@ trap 'rm -f "$tmp"' EXIT
 # that CI (uv python install 3.12) could never reproduce — the drift check then
 # fails for everyone with no source change. This is the project's MINIMUM
 # supported version and must move together with CI's pin.
+# `APP_EDITION=full` pins the SURFACE. create_app() composes the /api router
+# conditionally on it (web/api/__init__.py build_api_router), so a developer
+# whose .env sets APP_EDITION=match would silently generate a schema missing
+# every proposal-assist route — a truncation the drift gate then reports as
+# everyone else's failure. Codegen always describes the full surface.
 DATABASE_URL="${DATABASE_URL:-postgresql+psycopg://u:p@localhost:5432/db}" \
   SESSION_SECRET="${SESSION_SECRET:-test-secret-at-least-16-chars}" \
   ALLOWED_EMAIL_DOMAINS="${ALLOWED_EMAIL_DOMAINS:-umu.se}" \
   APP_BASE_URL="${APP_BASE_URL:-http://localhost:8000}" \
   EMBEDDING_MODEL=bge-m3 \
   SPA_MODE=disabled \
+  APP_EDITION=full \
   uv run --python 3.12 python -c "import json,sys; from call_manager.main import create_app; json.dump(create_app().openapi(), sys.stdout, sort_keys=True)" >"$tmp"
 
 mkdir -p "$ROOT/frontend/src/api"

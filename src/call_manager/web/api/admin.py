@@ -26,6 +26,14 @@ from call_manager.scheduler import trigger_job_now
 
 router = APIRouter()
 
+# Release-1 admin routes live on `router` (always mounted). /admin/drafting is
+# the ONE proposal-assist route in this module — measured, not assumed: the other
+# five are /admin/dashboard, /admin/rerank, /admin/digest/send,
+# /admin/digest/reenable and /admin/sources/{slug}/fetch, all ranking/digest.
+# It gets its own router so api/__init__.py can put it in _FULL_ONLY without
+# splitting the file. Pinned by tests/architecture/test_edition_surface.py.
+drafting_router = APIRouter()
+
 
 def _digest_panel_context(session) -> dict:
     now = datetime.now(UTC)
@@ -308,7 +316,7 @@ class AdminDraftingOut(BaseModel):
     recent_events: list[RecentEventOut]
 
 
-@router.get("/admin/drafting", response_model=AdminDraftingOut)
+@drafting_router.get("/admin/drafting", response_model=AdminDraftingOut)
 def admin_drafting(
     request: Request,
     admin: User = Depends(require_admin),  # noqa: B008

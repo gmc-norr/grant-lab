@@ -1,0 +1,112 @@
+/* frontend/src/theme/theme.match.css
+ *
+ * Call Match release 1 puts the APPLICATION screens on an off-white ground
+ * (spec §5 "Visual language"). It is a reading app, read in a bright office, by
+ * people who are not developers — dark-on-dark is the register release 1 exists
+ * to leave behind. The wall board stays dark, where dark is right, so the board
+ * route (Plan C) must NOT import this file.
+ *
+ * Identity is preserved: the teal accent, the deadline bands, the font stack and
+ * the 4px radii are the same decisions, re-tuned for contrast on light. Only the
+ * surface, text and border tokens are redefined; every other --app-* token
+ * inherits from theme.css.
+ *
+ * Loaded by SimpleShell.tsx, which only router.simple.tsx reaches — so the full
+ * build never ships this file and cannot accidentally go light.
+ *
+ * Contrast is pinned by theme/contrast.test.ts. Do not edit a colour here
+ * without running it.
+ *
+ * The selector is `:root:root`, not `:root`, and that is load-bearing. theme.css
+ * defines the same tokens at `:root` (specificity 0-1-0) and, at equal
+ * specificity, the LAST declaration wins. main.tsx imports ./App (line 7) before
+ * ./theme/theme.css (line 8), so Rollup emits the whole App subgraph's CSS —
+ * this file included — ahead of theme.css: measured in a real match build, the
+ * light --app-editor landed at byte 254861 of the emitted index.css and the dark
+ * one at 256230, so the DARK palette won and the light ground never appeared at
+ * all. Repeating the pseudo-class (0-2-0) makes this file win on specificity
+ * instead of on order, which no import shuffle in main.tsx can quietly undo.
+ * Reordering main.tsx would have fixed it too, but would have moved the FULL
+ * edition's CSS for a gain only the match build needs.
+ *
+ * Note for editors of these comments: write no `--app-name: #hex` sequence in
+ * prose here. contrast.test.ts scrapes this file with a regex that cannot tell a
+ * comment from a declaration, so a hex quoted above would enter the token map.
+ */
+
+:root:root {
+  color-scheme: light;
+
+  /* Surfaces. Off-white, not pure white: less glare under office lighting, and
+     it lets a genuinely white card lift off the page. */
+  --app-editor: #faf9f7;
+  --app-sidebar: #f2f0ec;
+  --app-titlebar: #ffffff;
+  --app-tabbar: #f2f0ec;
+  --app-activitybar: #f2f0ec;
+
+  /* Text. 15.0:1 on the editor ground — comfortably past AA, which matters
+     because this is a screen people read paragraphs on, not a chrome surface.
+     Measured, along with every ratio below, by theme/contrast.test.ts. */
+  --app-text: #1f2328;
+  --app-muted: #5a6169;
+  --app-muted-chrome: #5a6169; /* the title bar is white here, so same value */
+  --app-dim: #767f88; /* tertiary only (timestamps), never body text */
+
+  --app-border: #e2ded7;
+  --app-border-strong: #cfc9c0;
+  --app-hover: #eeebe5;
+  --app-selected: #d9f0ec;
+
+  /* Identity + semantics, darkened to clear AA on a light ground. The dark
+     palette's #14b8a6 measures 2.4:1 here and would have been unreadable. */
+  --app-accent: #0f766e;
+  --app-accent-bright: #0d9488;
+  --app-link: #0f766e;
+  --app-statusbar: #0f766e;
+  --app-heading: #155e75;
+  /* green-800, not green-700. The score pill (MatchBadge.module.css) paints this
+     on --app-hover, where #15803d measured 4.22:1 — below AA, and a regression
+     from the dark palette's 7.25:1. Darkened the FOREGROUND per the brief's
+     rule, not the ground: 5.99:1 on --app-hover, 6.78:1 on --app-editor. Both
+     are pinned below. */
+  --app-good: #166534;
+  --app-warn: #a16207; /* the ≤30-day deadline band */
+  --app-bad: #b91c1c; /* the ≤14-day deadline band */
+
+  /* Bridge to Mantine's own variables. The --app-* tokens above are OURS: a
+     Mantine <Anchor> or <Text c="dimmed"> never reads them, so pinning our
+     tokens alone pins nothing a user actually sees. Measured in a real match
+     build before this block existed: every call title on the dashboard rendered
+     --mantine-color-anchor = #14b8a6 at 2.37:1 on the off-white ground (the
+     very value the comment above calls "unreadable"), and every meta line
+     rendered --mantine-color-dimmed = #868e96 at 2.87:1.
+     --dimmed and --error are pointed at the tokens rather than at literals ON
+     PURPOSE, so the floors contrast.test.ts enforces on --app-muted and
+     --app-bad govern the rendered pixel too. Do not inline a hex there.
+
+     --anchor is DIFFERENT and the line below is INERT — measured, after this
+     block was first written with the opposite claim in this comment. Mantine
+     re-declares --mantine-color-anchor at runtime: MantineCssVariables renders
+     a <style data-mantine-styles> inside the React tree (no `precedence` prop,
+     so React 19 does not hoist it) under
+     :root[data-mantine-color-scheme="light"] — specificity 0-2-0, the SAME as
+     :root:root, but later in document order because it lives in <body> while
+     this file is a <head> link. It survives Mantine's dedup only because
+     primaryColor is teal rather than the default blue; --dimmed and --error are
+     stripped by that dedup, which is exactly why those two lines DO work.
+
+     So the rendered link colour comes from theme.ts (teal[8] + primaryShade
+     .light: 8), not from --app-link. There is no visible defect because
+     teal[8], --app-accent and --app-link are all #0f766e — and
+     contrast.test.ts now asserts that they stay equal, so editing one without
+     the others goes red instead of silently moving the test away from the
+     pixel. The line is kept as the declaration of intent for the day Mantine's
+     dedup or our primaryColor changes. */
+  --mantine-color-anchor: var(--app-link);
+  --mantine-color-dimmed: var(--app-muted);
+  /* Mantine's red.6 (#fa5252) is the required-field asterisk; it measured
+     2.89:1 on the settings card. --app-bad is the same semantic in our palette
+     and is pinned at 4.5:1 by the contrast test. */
+  --mantine-color-error: var(--app-bad);
+}
