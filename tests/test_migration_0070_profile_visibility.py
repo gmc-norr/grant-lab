@@ -224,6 +224,15 @@ def test_backfill_carries_subscribers_forward_but_not_the_owner(pg_url, pg_sessi
             f"explicit viewers: B and C, not the owner A ({ids['a']}) and not the "
             f"unrelated D ({ids['d']}); got {sorted(rows)}"
         )
+        # ON DELETE CASCADE is declared by the migration and compare_metadata
+        # does not check ondelete — so observe it rather than trust it.
+        with eng.begin() as c:
+            c.execute(text("DELETE FROM profiles WHERE id = :p"), {"p": pid})
+            left = c.scalar(
+                text("SELECT count(*) FROM profile_viewers WHERE profile_id = :p"),
+                {"p": pid},
+            )
+        assert left == 0, "profile_viewers rows must CASCADE away with their profile"
     finally:
         eng.dispose()
 
@@ -277,3 +286,15 @@ def test_visibility_check_rejects_an_unknown_value(pg_session_factory, profile_f
             {"p": pid},
         )
         s.commit()
+    # The other half: the CHECK must ADMIT 'private'. Nothing else in this task
+    # writes 'private', and compare_metadata does not compare CHECK bodies, so a
+    # constraint narrowed to ('org') alone would otherwise ship green.
+    with pg_session_factory() as s:
+        s.execute(
+            text("UPDATE profiles SET visibility = 'private' WHERE id = :p"),
+            {"p": pid},
+        )
+        s.commit()
+        assert (
+            s.scalar(text("SELECT visibility FROM profiles WHERE id = :p"), {"p": pid}) == "private"
+        )
