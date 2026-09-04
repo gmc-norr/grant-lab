@@ -1,168 +1,195 @@
-# Profile visibility — scope
+# Profiles are personal — scope
 
-**Status:** scoped, not decided. Nothing here is implemented. The central question
-is a policy call for the human; the engineering follows from the answer.
+**Decided 2026-09-04 by the human:** *"all profiles should be personal even if used
+for an organization."* Shape chosen: **private by default, the owner shares
+explicitly** — with named colleagues or org-wide.
 
-**Why this exists.** While verifying an unrelated finding in Call Match Plan B I
-claimed the app had no profile ownership model. That was wrong — `profiles.py:342`
-enforces `created_by == user.id or user.is_admin` on writes, and spec §4.3 names
-that rule as canonical. But measuring it turned up something the correction did not
-dispose of: **profile *reads* are org-wide, and some profiles describe people.**
+**Status:** scoped and designed, **not implemented**. One sequencing question for the
+human at the end.
+
+**Why this exists.** Verifying an unrelated Call Match finding turned up that profile
+*reads* are org-wide. Writes were already correct (`profiles.py:342-343`); this is a
+read-visibility change, and the decision above turns it into a small ownership model.
 
 ---
 
-## 1. Measured exposure
+## 1. What is exposed today — measured on `master` `9365f123`
 
-Every row below was read from the source on `master` `9365f123`, not inferred.
+| Surface | Returns | Filter today |
+| --- | --- | --- |
+| `GET /api/profiles` (`profiles.py:116-138`) | every profile: id, name, kind, level, areas_count, budget_currency, **full `description`** | `is_active` |
+| `GET /api/profiles/{id}` (`:140-205`) | the above plus all of `_flatten_structured` | `is_active` |
+| `GET /api/calls?profile=N` (`dashboard.py:127-131`) | that profile's match scores across every call | `is_active` |
+| `GET /api/calls/{id}?profile=N` → `_criterion_detail` (`call_detail_view.py:27`) | renders `profile.structured` — budget and TRL ranges — into the call detail page | `is_active` |
+| `PUT /me/subscriptions` (`me.py:205-255`) | subscribe to **any** profile | `is_active` |
+| `GET /api/calls` facets (`calls.py:90-92`) | profile **id + name** only | — |
 
-| Surface | What it returns | To whom | Filter |
-| --- | --- | --- | --- |
-| `GET /api/profiles` (`profiles.py:116-138`) | id, name, kind, level, areas_count, budget_currency, **full `description`** — for **every** profile | any logged-in user | `is_active` only |
-| `GET /api/profiles/{id}` (`:140-205`) | the above plus all of `_flatten_structured` (below) | any logged-in user | `is_active` only |
-| `GET /api/calls?profile=N` (`dashboard.py:127-131`) | that profile's match scores across every call | any logged-in user | `is_active` only |
-| `GET /api/calls/{id}?profile=N` → `_criterion_detail` (`call_detail_view.py:27`) | renders `profile.structured` — budget range, TRL range — **into the call detail page** | any logged-in user | `is_active` only |
-| `PUT /me/subscriptions` (`me.py:205-255`) | subscribe to any profile | any logged-in user | `is_active` only |
-| `GET /api/calls` facets (`calls.py:90-92`) | profile **id + name** only | any logged-in user | — |
+`_flatten_structured` (`profiles.py:48-77`) returns `areas`, budget/TRL ranges,
+`must_include`, `hard_exclusions`, `org_type`, `capabilities`,
+`patient_populations`, `scale`, `career_stage`, `role`, `years_since_phd`,
+`applicant_types`, `funding_instruments`, `funder_exclusions`, `country`,
+`host_institution`. `ProfileKind` (`db/models.py:227-229`) is
+`organizational_unit | individual`, so on an individual profile several of those
+describe a named colleague.
 
-`_flatten_structured` (`profiles.py:48-77`) returns:
+---
 
+## 2. The two facts that shape the design
+
+**2.1 — The digest is the profile's output, so field-hiding alone is not a control.**
+`digest/assemble.py:82-96` builds a user's weekly email from their **subscribed**
+profiles. A subscriber receives, every Monday, the ranked list of calls matching that
+profile — which reveals its content whether or not they can read the `description`
+field. `Settings.tsx:207` currently offers **every** active profile as a checkbox
+("Check the profiles whose Monday-morning digest you want emailed to you"), and
+`me.py:214-226` validates only `is_active`. **Subscription must be gated by the same
+predicate as reading**, or the change is decorative.
+
+**2.2 — There is already a sharing pattern; do not invent a second one.**
+`workspace_viewers` (`WorkspaceViewer`: `workspace_id`, `user_id`, `added_at`) with
+the predicate at `workspaces.py:1473-1479`:
+
+```python
+viewer_ids = select(WorkspaceViewer.workspace_id).where(WorkspaceViewer.user_id == user.id)
+... or_(Workspace.owner_id == user.id, Workspace.id.in_(viewer_ids))
 ```
-areas, budget_min/max, trl_min/max, must_include, hard_exclusions,
-org_type, capabilities, patient_populations, scale,
-career_stage, role, years_since_phd, applicant_types,
-funding_instruments, funder_exclusions, country, host_institution
+
+Profiles mirror it exactly. This matters beyond tidiness: spec §4.3 makes a point of
+*"no second permission model appears"*, and boards (Plan C) are built on the profile
+rule, so a divergent shape here propagates.
+
+---
+
+## 3. Design
+
+### 3.1 Schema
+
+- **`profile_viewers`** — `(profile_id, user_id)` composite PK, `added_at`, both FKs
+  `ON DELETE CASCADE`. A byte-for-byte analogue of `workspace_viewers`.
+- **`profiles.visibility`** — `String(10)` + `CheckConstraint("visibility IN
+  ('private','org')")`, following `ck_ranking_remote_attempts_outcome` rather than a
+  native enum (no `ALTER TYPE` when a third value appears).
+
+`org` is retained deliberately: the human's instruction was "personal … **even if
+used for an organization**", i.e. a department profile is one person's, shared
+onward — not that org-wide sharing must become impossible. Making it a deliberate
+act is the change; making it unavailable is not.
+
+### 3.2 The read predicate — one function, used everywhere
+
+```python
+def readable_profiles(user) -> Select:
+    """Profile ids `user` may read. The ONLY definition -- every surface calls this.
+    Mirrors workspaces.py:1473-1479 (owner OR explicit viewer), plus the org escape
+    hatch and the admin override that profiles.py:151/342 already use for editing."""
 ```
 
-Writes are correctly gated (`profiles.py:342-343`, 403 unless creator or admin).
-**This is a read-visibility question only.**
+`created_by == user.id` **OR** `user.is_admin` **OR** `visibility == 'org'` **OR**
+`EXISTS profile_viewers(profile_id, user.id)`.
+
+Editing stays exactly as it is (`created_by` or admin) — narrower than reading, and
+out of scope.
+
+### 3.3 Migration `0070_profile_visibility` (or `0071` if Plan B lands first)
+
+1. Create `profile_viewers`; add `visibility` defaulting to **`'org'`**.
+   **Nothing changes on day one.** Every profile keeps today's behaviour; owners
+   narrow the ones they want.
+2. **Backfill a viewer row for every existing subscriber**
+   (`INSERT … SELECT user_id, profile_id FROM subscriptions`), excluding the owner.
+   Without this, the first owner who flips to `private` silently cancels colleagues'
+   Monday digests with no notification and no audit trail. Preserving current access
+   is the conservative direction; the owner can then remove people deliberately.
+   Same reasoning as Call Match Plan B's dismissal fan-out.
+
+### 3.4 Enforcement — all six surfaces
+
+| File | Change |
+| --- | --- |
+| `web/api/profiles.py` | `list_profiles` and `get_profile` filter on `readable_profiles` |
+| `web/dashboard.py:127-131` | `resolve_profile_selection` adds the readable check |
+| `web/dashboard.py:416` | the facet list filters too |
+| `web/call_detail_view.py:27` | `_criterion_detail` is only reached for a readable profile |
+| `web/api/me.py:214-226` | `update_subscriptions` rejects unreadable ids (**§2.1**) |
+| `digest/assemble.py:82-96` | skip profiles the recipient can no longer read, so revoking access stops the email |
+
+### 3.5 New endpoints
+
+`GET/PUT /api/profiles/{id}/viewers` and `PUT /api/profiles/{id}/visibility`, both
+gated on the **edit** rule (`created_by` or admin). Frontend: a "Who can see this"
+card on the profile detail page.
 
 ---
 
-## 2. Three measured facts that constrain any fix
+## 4. Gates, written before the code
 
-**2.1 — Some profiles are people.** `ProfileKind` (`db/models.py:227-229`) is
-`organizational_unit | individual`. On an `individual` profile, `career_stage`,
-`role`, `years_since_phd` and `host_institution` describe a named colleague. Whether
-that is a problem depends on how many such profiles exist and what people put in
-them — **not measurable from here** (see §6), and the first thing to check.
+1. **All six surfaces, one test.** A user who may not read profile P gets: no P in
+   `/api/profiles`; 404 on `/api/profiles/P`; no P in the facet list; P rejected by
+   `?profile=P`; no P budget range from `_criterion_detail`; 4xx from
+   `PUT /me/subscriptions` naming P; and no P section in their assembled digest.
+   *What trivially passes:* testing `/api/profiles` alone. Seven assertions.
+2. **Default is `org`, asserted on a profile created through the real endpoint** —
+   not a hand-built row. This is what proves nothing breaks on day one.
+3. **The migration preserves access.** Fixture: profile owned by A, `subscriptions`
+   rows for B and C. After migration, `profile_viewers` holds B and C and **not** A
+   (the owner needs no row). Flip to `private`; B still gets the digest; D does not.
+4. **Editing is unchanged.** A viewer who is not the creator still gets **403** from
+   `PUT /api/profiles/{id}`. Reading is wider than editing; this gate stops the two
+   collapsing into one.
 
-**2.2 — "Subscribers can read it" is self-granting, so it is not a control.**
-`PUT /me/subscriptions` validates only `Profile.is_active`. Any user can subscribe
-to any active profile and would thereby grant themselves the visibility. A
-subscriber-based rule only becomes meaningful if subscription itself is gated, which
-is a second change with its own UX cost (someone must approve requests).
+**Mutations that must redden:**
 
-**2.3 — There are two leak surfaces, not one.** Narrowing `/api/profiles` alone
-leaves `?profile=N` on the calls API returning another profile's scores, and
-`_criterion_detail` rendering its budget and TRL ranges into a call detail page. Any
-fix has to cover both, and the calls-API half is the one that is easy to forget
-because it does not look like a profile endpoint.
-
----
-
-## 3. The decision — the human's, not the agent's
-
-Read §2.1 first: if every profile is an org unit, this is close to a non-issue and
-**Option A** is right.
-
-### Option A — leave it, write down that it is deliberate
-
-Org-wide read is intentional: a single-hospital internal tool, accounts restricted
-to an allowed email domain and admin-approved, profiles describing research
-directions people are trying to get funded. Discoverability is a feature — it is how
-you find who else works on something.
-
-- **Work:** a paragraph in `docs/ARCHITECTURE.md` and one architecture test pinning
-  that `list_profiles` has no owner filter **on purpose**, so a future reader does
-  not "fix" it. ~half a day.
-- **Cost:** none, unless §2.1 turns up personal detail people did not expect to be
-  public.
-
-### Option B — split the payload: names public, detail scoped
-
-Everyone keeps seeing every profile's **name, kind, level** (so discovery, the
-dashboard picker and the facets still work). **`description` and `structured`** go
-to creator + admin + subscribers.
-
-- Needs 2.2 solved, or it is decorative. Simplest honest version: **gate the detail
-  on creator + admin only**, and treat "I want to see this group's profile" as a
-  conversation, not a button.
-- **Work:** a `ProfileListItemOut` without `description`; a `can_read_detail`
-  predicate beside the existing `can_edit`; `get_profile` returns a thin body to
-  non-readers; `?profile=N` on both calls endpoints rejects a profile the caller
-  cannot read; `_criterion_detail` gets a redacted branch. Plus the frontend's
-  profile list and detail pages, which today assume the full payload.
-- **Size:** ~2-3 days with gates. Touches 6 backend files and 3 frontend routes.
-- **Cost:** breaks the "browse another group's matches" behaviour, which may be
-  load-bearing for collaboration. Ask before assuming it is not.
-
-### Option C — a per-profile visibility flag
-
-`profiles.visibility ∈ ('org','restricted')`, defaulting to `org` so nothing changes
-until someone opts in. The creator flips it.
-
-- **Work:** Option B's mechanism, plus a migration, plus the flag in the profile
-  editor, plus a decision about what an `individual` profile defaults to.
-- **Size:** ~4-5 days. Also the only option that scales if the answer differs per
-  group, which in a hospital it usually does.
-- **Cost:** a new concept in the product, and a default that will be wrong for
-  somebody.
-
-**Recommendation:** answer §2.1 first, then **A** if profiles are all org units,
-**C** if individual profiles carry real personal detail. B is the awkward middle —
-it pays most of C's implementation cost without C's ability to say "this one is
-fine, that one is not."
+| # | Mutation | Reddens |
+| --- | --- | --- |
+| V1 | remove the check from `_criterion_detail` **only** | gate 1. If the suite stays green, gate 1 tests one surface and claims six |
+| V2 | remove it from `update_subscriptions` only | gate 1's subscription assertion |
+| V3 | `assemble.py` ignores readability | gate 3's "B still gets the digest / D does not" |
+| V4 | migration skips the subscriber backfill | gate 3 |
+| V5 | default `visibility` to `'private'` | gate 2 — the day-one break, caught by the gate that exists to catch it |
+| V6 | `readable_profiles` returns viewer-only, dropping the `created_by` arm | an owner reading their own private profile |
 
 ---
 
-## 4. Whichever option: the gates that must exist
+## 5. Not in scope
 
-Written now so they are not invented later to fit the code.
-
-1. **Both surfaces, not one.** A test that a caller who may not read profile P gets
-   neither P's `description` from `/api/profiles` **nor** P's scores from
-   `/api/calls?profile=P` **nor** P's budget range from
-   `/api/calls/{id}?profile=P`. *What trivially passes:* testing only
-   `/api/profiles`. Three assertions, one test.
-2. **The list still works.** Names and the dashboard picker must keep functioning
-   for profiles the caller cannot read in detail, or discovery dies silently.
-3. **Mutation:** delete the check from `_criterion_detail` alone. If the suite stays
-   green, gate 1 is testing one surface and calling it three.
-4. For Option C: **the default is `org`**, asserted against a profile created
-   through the real endpoint — not against a hand-built row.
+- **Write authorization.** Already correct, already spec-canonical (§4.3). Untouched.
+- **`users` data.** A different surface.
+- **Boards (Plan C).** They build on the *edit* rule, which does not move.
+- **Retroactive privacy.** This changes who can read from now on. It does not
+  un-send digests already delivered, and it cannot.
 
 ---
 
-## 5. Explicitly not in scope
+## 6. Interaction with Call Match Plan B — read before sequencing
 
-- **Write authorization.** Already correct (`profiles.py:342-343`), already the
-  spec's canonical rule (§4.3). Do not touch it.
-- **Call Match Plan B.** Its Task 8 gate asserts a `profile_id` **exists and is
-  active** — deliberately not an ownership rule, because a decision row is private
-  to its author and requiring edit rights would break shared-profile triage. If
-  Option B or C lands, Plan B's gate becomes a special case of it and should be
-  revisited *then*, not pre-emptively.
-- **Anything about `users`.** Account data is a separate surface.
+Plan B's Task 8 gate 5 currently asserts a `profile_id` **exists and is active**.
+Under this change the rule becomes **exists, is active, and is readable by the
+caller** — because `resolve_profile_selection` is exactly where §3.4 adds the check.
+
+- **If this lands first:** Plan B's gate is written once, correctly, and Task 8 needs
+  a one-line amendment before it is built.
+- **If Plan B lands first:** Plan B ships a gate that is right for today and needs
+  widening afterwards, and every `?profile=` surface Plan B adds (`?view=`, the
+  counts endpoint, `/calls/{id}/save`) becomes another place to retrofit the check.
+
+**Recommendation: this first.** It is the smaller change, it is a privacy change
+rather than a feature, and Plan B adds three new surfaces that would otherwise each
+need retrofitting. Estimated **4-5 days** with the gates above; Plan B is unblocked
+the moment it merges.
 
 ---
 
-## 6. What I could not measure, and why
+## 7. What could not be measured here
 
-Everything below needs the live database, whose URL is in `.env` — a file this work
-must not read.
+Needs the live database, whose URL is in `.env` — which this work must not read.
 
-- **How many `individual` profiles exist, and what is in them.** This is the whole
-  decision. One query:
+```sql
+SELECT kind, count(*) FROM profiles WHERE is_active GROUP BY kind;
+SELECT p.id, p.name, count(s.user_id) AS subscribers
+  FROM profiles p LEFT JOIN subscriptions s ON s.profile_id = p.id
+ WHERE p.is_active GROUP BY p.id, p.name ORDER BY subscribers DESC;
+```
 
-  ```sql
-  SELECT kind, count(*) FROM profiles WHERE is_active GROUP BY kind;
-  SELECT count(*) FROM profiles
-   WHERE is_active AND kind = 'individual'
-     AND (structured->'eligibility'->>'years_since_phd' IS NOT NULL
-          OR structured->'eligibility'->>'career_stage' IS NOT NULL);
-  ```
-
-- **Whether descriptions contain anything people would not say in a corridor.**
-  Not answerable by query; worth asking two or three profile owners.
-- **How often `?profile=` is used against a profile the caller has not subscribed
-  to.** No access log analysis was done.
+The second one sizes §3.3 step 2 and tells you how many people would be affected the
+first time an owner flips a well-subscribed profile to `private`. Worth knowing
+before, not after.
