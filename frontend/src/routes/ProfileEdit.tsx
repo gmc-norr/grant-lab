@@ -16,14 +16,25 @@ function joinLines(xs: string[]) { return xs.join("\n"); }
 export function ProfileEdit() {
   const { id } = useParams();
   const pid = Number(id);
-  const { data, isLoading, isError } = useProfile(pid);
+  const { data, isLoading, isError, error } = useProfile(pid);
   if (isLoading) return <Text p="md">Loading…</Text>;
-  if (isError || !data)
+  if (isError || !data) {
+    // /profiles/{id}/edit calls the SAME useProfile as the detail page and
+    // inherits the same two failures. A 404 is honestly ambiguous — unreadable or
+    // absent, the API refuses to say which — but anything else is the server
+    // failing, and must not be reported as a sharing decision. Same idiom as
+    // CallDetail.tsx / ProfileDetail.tsx.
+    const notFound = (error as { code?: string } | null)?.code === "not_found";
     return (
       <Box component="main" maw="44rem" mx="auto" px="xs" pt="md" pb="xl">
-        <Text role="alert">Profile not found.</Text>
+        <Text role="alert">
+          {notFound
+            ? "This profile isn't shared with you, or it doesn't exist."
+            : "Couldn't load this profile."}
+        </Text>
       </Box>
     );
+  }
   return <EditForm key={data.bootstrap_status ?? "ready"} p={data} pid={pid} />;
 }
 

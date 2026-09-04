@@ -21,7 +21,6 @@ from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import (
     ArtifactVersion,
     Call,
-    Profile,
     Reference,
     ReferenceChunk,
     SpecLockEvent,
@@ -80,6 +79,7 @@ from call_manager.proposal_assist.proposals.kernel_accept import RoomEvicted
 from call_manager.proposal_assist.references.storage import ReferenceStorage
 from call_manager.proposal_assist.retirement import signal_workspace_retirement
 from call_manager.proposal_assist.web._perms import require_member, require_owner
+from call_manager.web.profile_access import can_read_profile
 from call_manager.workspaces import (
     create_workspace,
     soft_delete_workspace_db,
@@ -1549,7 +1549,17 @@ def create_workspace_api(
     with sf() as session:
         if session.get(Call, body.call_id) is None:
             raise HTTPException(status_code=400, detail=f"No such call: {body.call_id}")
-        if body.profile_id is not None and session.get(Profile, body.profile_id) is None:
+        # READABILITY, not existence. This check used to be
+        # `session.get(Profile, ...) is None`, which answered 400 for a profile
+        # that does not exist and 201 for one the caller may not read -- an
+        # existence oracle on every profile id, on a route whose name says
+        # nothing about profiles (PD-9). It is not only an oracle: Phase-0 copies
+        # the profile's `description` into `ws.profile_desc_snapshot`, which the
+        # drafting agent's read-only get_profile tool hands back on a plain ask.
+        # can_read_profile() is False for a nonexistent id too, so the unreadable
+        # and the missing id keep the IDENTICAL detail string -- one answer, no
+        # oracle. Same reasoning as profiles.py's 404-not-403.
+        if body.profile_id is not None and not can_read_profile(session, user, body.profile_id):
             raise HTTPException(status_code=400, detail=f"No such profile: {body.profile_id}")
         ws = create_workspace(
             session=session,

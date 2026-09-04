@@ -44,8 +44,10 @@ def _app(monkeypatch, pg_url):
 
 def _login(app, pg_session_factory, *, profile=False, profile_active=True, set_default=False):
     """Active user + optional active/inactive profile. Returns (client, uid, pid)
-    (pid is None when profile=False). Profiles need not be OWNED by the user —
-    the read-model resolves ``?profile`` by is_active alone."""
+    (pid is None when profile=False). The profile is created BY this user and
+    takes the server default visibility 'org', so it is readable on both counts:
+    the read-model resolves ``?profile`` by is_active AND readability
+    (``web/profile_access.py``), never by is_active alone."""
     with pg_session_factory() as s:
         u = User(status="active", email="u@umu.se")
         s.add(u)

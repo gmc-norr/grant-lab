@@ -41,7 +41,7 @@ Read this before claiming two tables share, or do not share, a rule.
 
 ## Tables
 
-44 mapped tables.
+45 mapped tables.
 
 | table | class | cols | FKs | CHECKs | indexes |
 |---|---|---|---|---|---|
@@ -68,7 +68,8 @@ Read this before claiming two tables share, or do not share, a rule.
 | `llm_spend` | `LlmSpend` | 10 | 1 | 3 | 2 |
 | `phase_approvals` | `PhaseApproval` | 6 | 2 | 1 | 1 |
 | `profile_bootstrap_jobs` | `ProfileBootstrapJob` | 11 | 1 | 1 | 0 |
-| `profiles` | `Profile` | 14 | 2 | 3 | 2 |
+| `profile_viewers` | `ProfileViewer` | 3 | 2 | 0 | 0 |
+| `profiles` | `Profile` | 15 | 2 | 4 | 2 |
 | `proposed_changes` | `ProposedChange` | 19 | 4 | 4 | 2 |
 | `ranking_jobs` | `RankingJob` | 8 | 2 | 0 | 4 |
 | `ranking_remote_attempts` | `RankingRemoteAttempt` | 6 | 2 | 1 | 1 |
@@ -143,6 +144,7 @@ Every CHECK constraining a `status`-like column. Divergence here is a real defec
 | `llm_spend` | `workspace_id` → `workspaces.id` (CASCADE) |
 | `phase_approvals` | `workspace_id` → `workspaces.id` (CASCADE)<br>`approving_user_id` → `users.id` (RESTRICT) |
 | `profile_bootstrap_jobs` | `profile_id` → `profiles.id` (CASCADE) |
+| `profile_viewers` | `profile_id` → `profiles.id` (CASCADE)<br>`user_id` → `users.id` (CASCADE) |
 | `profiles` | `parent_profile_id` → `profiles.id` (SET NULL)<br>`created_by` → `users.id` (RESTRICT) |
 | `proposed_changes` | `workspace_id` → `workspaces.id` (CASCADE)<br>`triggering_turn_id` → `chat_turns.id` (SET NULL)<br>`created_by` → `users.id` (SET NULL)<br>`resolved_by` → `users.id` (SET NULL) |
 | `ranking_jobs` | `call_id` → `calls.id` (CASCADE)<br>`profile_id` → `profiles.id` (CASCADE) |

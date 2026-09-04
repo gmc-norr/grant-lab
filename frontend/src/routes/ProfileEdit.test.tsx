@@ -40,6 +40,44 @@ function renderEdit(payload = BASE) {
   );
 }
 
+/** Same mount as renderEdit, but with GET /api/profiles/{id} refusing under `code`. */
+function renderEditError(code: string) {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({
+    data: undefined, error: { error: { code, message: "nope" } },
+  } as never);
+  const qc = new QueryClient();
+  return render(
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={["/profiles/5/edit"]}>
+          <Routes>
+            <Route path="/profiles/:id/edit" element={<ProfileEdit />} />
+            <Route path="/profiles/:id" element={<Probe />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>
+    </MantineProvider>,
+  );
+}
+
+it("a 404 on the edit route says the profile isn't shared, not 'not found'", async () => {
+  renderEditError("not_found");
+  // /profiles/{id}/edit inherits the detail route's ambiguous 404: a colleague
+  // following an old EDIT link is the realistic reader, and "Profile not found."
+  // accused them of a typo.
+  expect(
+    await screen.findByText("This profile isn't shared with you, or it doesn't exist."),
+  ).toBeInTheDocument();
+});
+
+it("a non-404 failure on the edit route says the load failed, not that it isn't shared", async () => {
+  renderEditError("internal");
+  expect(await screen.findByText("Couldn't load this profile.")).toBeInTheDocument();
+  expect(
+    screen.queryByText("This profile isn't shared with you, or it doesn't exist."),
+  ).toBeNull();
+});
+
 it("pre-fills from the read-model and saves, navigating to detail", async () => {
   const put = vi.spyOn(clientMod.api, "PUT").mockResolvedValue({ data: { id: 5 }, error: undefined } as never);
   renderEdit();

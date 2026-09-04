@@ -140,6 +140,10 @@ REQUIRED_SCENARIOS = [
     "the light ground is actually PAINTED, not merely declared",
     "no critical a11y violations on the release-1 landing page",
     "the account menu offers Settings as well as Sign out",
+    "the owner's sharing card names who a private profile is shared with",
+    "moving the sharing control sends the position it was moved TO, both ways",
+    "adding a viewer by email POSTs that address and lists the person back",
+    "a non-viewer's profile list has no trace of the private profile",
 ]
 
 
@@ -161,16 +165,26 @@ def test_the_match_spec_declares_every_required_scenario():
 
 
 def test_the_match_spec_actually_asserts_things():
-    """`pnpm run e2e:match` over ten empty test bodies exits 0. This is the
-    density floor that stops that.
+    """`pnpm run e2e:match` over fourteen empty test bodies exits 0. This is the
+    count that stops that.
 
-    22 `expect(` calls in live code, MEASURED 2026-09-04 — the first draft of this
-    line said 40 from memory and failed on its first run, which is the exact habit
-    the branch's own defect log is about. The floor is 18: below the real number so
-    ordinary edits do not trip it, far above what a gutted spec would have."""
+    **34 `expect(` calls in live code, MEASURED 2026-09-04** by running this test's
+    own regex over the comment-stripped spec, and written down as what the command
+    printed — not remembered. (An earlier draft of this line said 40 from memory
+    and failed on its first run.)
+
+    EQUALITY, not a floor. The previous version asserted `>= 18` against a real 22,
+    and four spare assertions are four assertions anyone can delete without a gate
+    noticing — which is the whole failure mode this file exists to catch, one level
+    up. The cost of equality is that a legitimate edit changes this number; that is
+    the point. Change it IN THE SAME DIFF as the spec, and only after re-running the
+    measurement."""
     src = "\n".join(_spec_source_lines())
     expects = len(re.findall(r"\bexpect\(", src))
-    assert expects >= 18, f"only {expects} expect() calls in the browser smoke"
+    assert expects == 34, (
+        f"the browser smoke has {expects} expect() calls, this gate pins 34 — "
+        "if the change was deliberate, re-measure and update the number here"
+    )
     # The two release-1 CRITICALs the spec exists to catch, in live code.
     assert "/api/auth/logout" in src  # sign-out really ends the session
     assert "/cockpit" in src  # no link into the excluded half
