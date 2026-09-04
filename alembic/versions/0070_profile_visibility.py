@@ -74,6 +74,12 @@ def upgrade() -> None:
     # created_by, and a row would make "remove this viewer" able to lock an
     # owner out of their own profile.
     #
+    # A disclosure in the OPPOSITE direction, which this backfill creates and no
+    # part of the plan analysed (PD-10): every current non-owner subscriber
+    # becomes VISIBLE to the profile's owner and to admins, by name and email,
+    # through GET /api/profiles/{id}/viewers — before this migration nobody could
+    # see who had subscribed to a profile.
+    #
     # ON CONFLICT DO NOTHING: subscriptions is keyed (user_id, profile_id) and
     # profile_viewers on (profile_id, user_id), so the SELECT itself cannot
     # duplicate a pair -- the clause exists only for a RE-RUN. Measured, not

@@ -251,6 +251,13 @@ def update_subscriptions(
         # their digest_enabled preference is preserved. The client can never echo
         # either kind of id back (the picker shows neither), so scoping the diff
         # this way is the only safe one.
+        #
+        # The consequence, chosen deliberately (plan Task 5 Step 2): a subscription
+        # to a profile the user can no longer read is INVISIBLE to the picker, the
+        # user cannot remove it themselves, and it RESUMES the day the owner
+        # re-shares the profile — that is the price of preserving digest_enabled
+        # across a revocation, and nothing is delivered while the revocation
+        # stands (the digest applies the same read rule).
         existing_active_ids = set(
             session.execute(
                 select(Subscription.profile_id)

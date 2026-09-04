@@ -1,16 +1,20 @@
 """The ONE definition of who may READ a profile.
 
 Every surface that shows, lists, ranks or digests a profile composes the
-subquery below. Nothing anywhere else may compare `Profile.visibility` or build
-a select over `ProfileViewer` to decide access -- that rule is enforced by
+subquery below. Nothing anywhere else may compare a profile's `visibility` --
+the class attribute `Profile.visibility` or a loaded row's `p.visibility` alike
+-- or build a select over `ProfileViewer` to decide access -- that rule is enforced by
 tests/architecture/test_profile_access_single_source.py, which also pins the
 list of functions that must call in here.
 
-The gate exists because the failure mode is silent and partial: ten of the
-eleven surfaces get the rule right, the eleventh keeps its own is_active-only
+The gate exists because the failure mode is silent and partial: eleven of the
+twelve surfaces get the rule right, the twelfth keeps its own existence-only
 lookup, and a private profile leaks through exactly one route. The first draft
-of this plan listed seven surfaces; outside review found three more, and the
-controller found an eleventh (calls.py's ?profile= resolution).
+of this plan listed seven surfaces; outside review found three more, the
+controller found an eleventh (calls.py's ?profile= resolution), and the final
+whole-branch review found a twelfth in a route that never mentions profiles in
+its name -- web/api/workspaces.py's create_workspace_api, which validated its
+optional profile_id by EXISTENCE (PD-9).
 
 Shape copied deliberately from web/api/workspaces.py:1471-1480 -- same composite
 viewer table, same or_() over owner/viewer. Spec 4.3 requires that no second

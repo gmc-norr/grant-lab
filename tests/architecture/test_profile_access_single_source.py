@@ -4,12 +4,15 @@ The whole "profiles are personal" plan reduces to one property: every surface
 calls the predicate, and nothing reimplements it. That property is not local to
 any one file, so no unit test can hold it -- which is why it lives here.
 
-The failure mode is silent and partial. Ten of the eleven surfaces get the rule
-right, the eleventh keeps its own is_active-only lookup, and a private profile
-leaks through exactly one route. It is not hypothetical: the first draft of this
-plan pinned SEVEN surfaces, an outside review found three more, and the
+The failure mode is silent and partial. Eleven of the twelve surfaces get the
+rule right, the twelfth keeps its own existence-only lookup, and a private
+profile leaks through exactly one route. It is not hypothetical: the first draft
+of this plan pinned SEVEN surfaces, an outside review found three more, the
 controller found an eleventh (`calls.py::get_call_detail` resolves `?profile=`
-with its own lookup, at calls.py:273-277).
+with its own lookup, at calls.py:273-277), and the final whole-branch review
+found a TWELFTH outside this plan's vocabulary entirely --
+`web/api/workspaces.py::create_workspace_api`, which validated `profile_id` by
+existence alone (PD-9).
 
 TWO HALVES, and each covers a hole the other cannot see:
 
@@ -21,9 +24,14 @@ TWO HALVES, and each covers a hole the other cannot see:
   tolerates one being dropped the day a seventh is added.
 
   NEGATIVE -- outside a named exempt set, no module may reference
-  `Profile.visibility` or `ProfileViewer`. That is what stops a surface from
-  being "wired" with its own second copy of the arms, which would satisfy the
-  positive half and still drift.
+  `Profile.visibility` or `ProfileViewer`, and no module may COMPARE any
+  `.visibility` attribute. That is what stops a surface from being "wired" with
+  its own second copy of the arms, which would satisfy the positive half and
+  still drift. The comparison half is the one the plan's spec got wrong (PD-11):
+  it banned `Profile.visibility`, the CLASS attribute, but a second predicate is
+  realistically written on the loaded row -- `if p.visibility != "org"` in a
+  route that already has the object in hand -- which the class-attribute rule
+  never sees.
 
 An EARLIER draft of the negative half banned `ProfileViewer` and
 `Profile.visibility` everywhere, which a reviewer showed can never pass:
@@ -71,6 +79,12 @@ PREDICATE_PINS: tuple[str, ...] = (
     # is_active ALONE, not through the dashboard resolver.
     "web/api/calls.py::get_call_detail",
     "digest/assemble.py::assemble_for_user",
+    # The twelfth, found by the final whole-branch review (PD-9). Not a
+    # "profile" surface by name at all: POST /api/workspaces validated its
+    # optional profile_id by EXISTENCE, so 400-vs-201 was an oracle, and
+    # Phase-0 copies the profile's description into the workspace snapshot the
+    # drafting agent reads back.
+    "web/api/workspaces.py::create_workspace_api",
 )
 
 # Pinned on DELEGATION rather than on the predicate. `set_default` is a
@@ -212,6 +226,36 @@ def _bound_names(module: ast.Module) -> dict[str, str]:
     return bound
 
 
+def _visibility_compare_operands(module: ast.Module) -> set[ast.AST]:
+    """Every `<anything>.visibility` used as an operand of a comparison.
+
+    The class-attribute rule below sees `select(...).where(Profile.visibility ==
+    "org")`. It does NOT see `if p.visibility != "org"`, and that is the shape a
+    second predicate actually takes: on the INSTANCE, inside a route that has
+    already loaded it. PD-11 / final review I1.
+
+    COMPARISON only, deliberately. The two legitimate uses both stay green
+    because neither compares: `{"visibility": p.visibility}` in get_profile is a
+    dict value, and `p.visibility = body.visibility` in set_profile_visibility is
+    an assignment. A rule over every `.visibility` reference would be red on both
+    and would be exempted into meaninglessness by the end of the week.
+
+    Not narrowed by the OTHER operand: `.visibility` occurs five times under
+    src/call_manager (measured 2026-09-04) -- the predicate's own
+    `Profile.visibility == "org"` plus its docstring, and three lines in
+    profiles.py -- so no second model carries a `visibility` attribute for this
+    to collide with. Narrow it the day one does.
+    """
+    out: set[ast.AST] = set()
+    for node in ast.walk(module):
+        if not isinstance(node, ast.Compare):
+            continue
+        for operand in (node.left, *node.comparators):
+            if isinstance(operand, ast.Attribute) and operand.attr == "visibility":
+                out.add(operand)
+    return out
+
+
 def _profile_visibility_refs(node: ast.AST, bound: dict[str, str]) -> bool:
     """`Profile.visibility` -- and `models.Profile.visibility`, and
     `P.visibility` after `import Profile as P`: the same thing."""
@@ -311,6 +355,12 @@ def test_readable_profile_ids_is_defined_exactly_once() -> None:
 def test_no_module_builds_a_second_read_predicate() -> None:
     """Outside the exempt set, nothing touches the access MECHANISM.
 
+    Three shapes are banned: a `Profile.visibility` reference, a `ProfileViewer`
+    reference, and ANY `.visibility` attribute compared against anything. The
+    third was added after the final review (PD-11) -- the first two are written
+    in terms of the ORM CLASS, and the realistic second predicate is written on
+    a loaded ROW, which the class rule cannot see however it is aliased.
+
     Stricter than "inside a function body" on purpose: a module-level constant
     holding `select(ProfileViewer.profile_id).where(...)` is a second predicate
     just as much as an inline one, and it is the shape a well-meaning refactor
@@ -324,9 +374,12 @@ def test_no_module_builds_a_second_read_predicate() -> None:
         module = ast.parse(path.read_text(), filename=str(path))
         owner = _enclosing_functions(module)
         bound = _bound_names(module)
+        compared_visibility = _visibility_compare_operands(module)
         for node in ast.walk(module):
             if _profile_visibility_refs(node, bound):
                 what = "Profile.visibility"
+            elif node in compared_visibility:
+                what = "a `.visibility` comparison"
             elif _profile_viewer_ref(node, bound):
                 what = "ProfileViewer"
             else:
@@ -338,7 +391,10 @@ def test_no_module_builds_a_second_read_predicate() -> None:
             violations.append(f"{where} line {node.lineno}: {what}")
     assert not violations, (
         "The profile read rule has exactly one definition, "
-        f"src/call_manager/{DEFINITION}. These references build a second one:\n  "
+        f"src/call_manager/{DEFINITION}. These references build a second one "
+        "(a `.visibility` COMPARISON is one whatever it is compared to and "
+        "whatever object it is read from -- reading the column to display it or "
+        "writing it is not):\n  "
         + "\n  ".join(violations)
         + f"\nCall readable_profile_ids()/can_read_profile() instead. The only "
         f"exemptions are {sorted(EXEMPT_MODULES)} and, in "
@@ -352,13 +408,15 @@ def test_pin_set_has_not_shrunk() -> None:
     """Exact names, exact set -- and an exact COUNT, so deleting a pin is red.
 
     The plan's own history is the reason: its first draft pinned seven surfaces
-    and outside review found three more; the controller found an eleventh. A
-    tuple that can quietly lose an entry is the same failure in reverse. 10 and
-    1 are the counts MEASURED when this gate was written (2026-09-04); a task
-    that legitimately adds or removes a surface changes these numbers in the
-    same diff, where a reviewer sees it.
+    and outside review found three more; the controller found an eleventh, and
+    the final whole-branch review a twelfth (`create_workspace_api`, PD-9). A
+    tuple that can quietly lose an entry is the same failure in reverse. 11 and
+    1 are the counts MEASURED after that twelfth pin landed (2026-09-04); the
+    11 was 10 until `web/api/workspaces.py::create_workspace_api` was added. A
+    task that legitimately adds or removes a surface changes these numbers in
+    the same diff, where a reviewer sees it.
     """
-    assert len(PREDICATE_PINS) == 10, sorted(PREDICATE_PINS)
+    assert len(PREDICATE_PINS) == 11, sorted(PREDICATE_PINS)
     assert len(DELEGATION_PINS) == 1, sorted(DELEGATION_PINS)
 
 
@@ -366,12 +424,26 @@ def test_exempt_set_is_documented_and_minimal() -> None:
     """Each exemption carries a reason, and none of them is stale.
 
     An exemption whose target no longer exists is how an exempt list rots into
-    a wildcard. The profiles.py functions are Task 3's, so they are allowed to
-    be absent today -- the module is not.
+    a wildcard. Every one of the four functions exists now (Task 3 created
+    them), so each name must RESOLVE -- a reason-only check would leave a
+    renamed or deleted function's exemption sitting in the list, silently
+    covering whatever function later took its name.
     """
     for rel, reason in EXEMPT_MODULES.items():
         assert (SRC / rel).is_file(), f"exempt module no longer exists: {rel}"
         assert reason.strip(), rel
     assert (SRC / EXEMPT_FUNCTION_MODULE).is_file()
+    defined = {
+        node.name
+        for node in _parse(EXEMPT_FUNCTION_MODULE).body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
     for name, reason in EXEMPT_PROFILE_FUNCTIONS.items():
         assert reason.strip(), name
+        assert name in defined, (
+            f"exempt function no longer exists: {EXEMPT_FUNCTION_MODULE}::{name}. "
+            f"An exemption for a function nobody can find is a wildcard waiting "
+            f"for a future function to be given that name; delete it, or fix the "
+            f"name if the function was renamed. Top-level functions there: "
+            f"{sorted(defined)}"
+        )
