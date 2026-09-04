@@ -22,6 +22,8 @@ asserted there, so a route cannot become invisible to this gate silently.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from call_manager.auth.dependencies import get_current_user, require_admin
@@ -130,6 +132,14 @@ UNJUDGEABLE_ROUTES = frozenset(
         # in its BODY via resolve_ws_user (proposal_assist/web/collab_ws.py:98) —
         # the same shape as require_admin — so a dependency walk could not see it
         # even with the methods filter relaxed. Full edition only.
+        #
+        # An outside reviewer read this exemption as "so nothing tests that the
+        # websocket authenticates". It does not follow, and it is not true: the
+        # guarantee is held end-to-end by
+        # tests/proposal_assist/collab/test_collab_ws_route.py::test_unauthenticated_ws_is_rejected,
+        # which connects without a cookie and asserts WebSocketDisconnect. That
+        # link is pinned below so exempting the route here can never be the last
+        # word on it.
         "/api/ws/workspaces/{workspace_id}/{artifact}",
         # StaticFiles mount: no dependant. Serves favicon.svg only (main.py:885),
         # deliberately public.
@@ -167,3 +177,20 @@ def test_the_walk_judges_every_route_it_does_not_pin(monkeypatch, _env, edition,
         f"_auth_free_routes and are not pinned as reviewed exclusions, so the "
         f"gate cannot see whether they are public: {invisible}"
     )
+
+
+def test_the_exempted_websocket_is_covered_somewhere_else():
+    """An exemption is only honest while the thing it exempts is tested elsewhere.
+
+    `/api/ws/...` is in UNJUDGEABLE_ROUTES because a dependency walk structurally
+    cannot see body-level authentication. That is a limit of THIS gate, not a gap
+    in the guarantee — but nothing connected the two, so deleting the end-to-end
+    test would leave the exemption reading as coverage.
+    """
+    ws_test = Path(__file__).resolve().parents[1] / "proposal_assist/collab/test_collab_ws_route.py"
+    assert ws_test.is_file(), ws_test
+    src = ws_test.read_text()
+    assert "def test_unauthenticated_ws_is_rejected(" in src
+    body = src[src.index("def test_unauthenticated_ws_is_rejected(") :]
+    body = body[: body.find("\ndef ")]
+    assert "websocket_connect" in body and "WebSocketDisconnect" in body, body[:400]

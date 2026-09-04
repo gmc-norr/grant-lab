@@ -7,6 +7,8 @@ with a crafted request. This test is the only thing that makes that claim true.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from call_manager.main import create_app
@@ -119,6 +121,46 @@ def test_match_edition_still_serves_the_release_1_surface(monkeypatch, _base_env
         assert required in paths, f"match edition dropped {required}"
 
 
+# The full edition's complete route set, as it stood at the branch base f0aaed0c
+# and as it must still stand. Regenerate ONLY when a route change is intended:
+#
+#   APP_EDITION=full DRAFTING_ENABLED=true SPA_MODE=disabled ... python -c \
+#     "from call_manager.main import create_app; \
+#      print('\n'.join(sorted({r.path for r in create_app().routes})))" \
+#     > tests/architecture/full_edition_routes.txt
+#
+# Verified byte-identical to a temp checkout of f0aaed0c on 2026-09-04.
+_BASELINE = Path(__file__).with_name("full_edition_routes.txt")
+
+
+def test_full_edition_route_set_matches_the_committed_baseline(monkeypatch, _base_env):
+    """The whole set, not two samples.
+
+    This test used to assert that two hardcoded paths were present, under the name
+    "full edition is unchanged" — a full app that had dropped the other 103 routes
+    passed it. Two outside reviewers named that independently. The 105-vs-105
+    byte-identical comparison against the base commit was real, but it was a
+    one-off script run by hand, so nothing in CI held it.
+    """
+    monkeypatch.setenv("APP_EDITION", "full")
+    monkeypatch.setenv("DRAFTING_ENABLED", "true")
+    live = sorted({r.path for r in create_app().routes})
+    expected = _BASELINE.read_text().split()
+    added = sorted(set(live) - set(expected))
+    removed = sorted(set(expected) - set(live))
+    assert (added, removed) == ([], []), (
+        f"the FULL edition's route surface moved: +{added} -{removed}\n"
+        "Release 1 is an addition, not a replacement. If the change is intended, "
+        f"regenerate {_BASELINE.name} in the same commit."
+    )
+
+
+def test_the_baseline_is_not_empty():
+    """A baseline of zero routes would make the comparison above vacuous on an
+    app that also served nothing."""
+    assert len(_BASELINE.read_text().split()) == 105
+
+
 def test_full_edition_is_unchanged(monkeypatch, _base_env):
     """Default and explicit `full` both keep every route."""
     monkeypatch.setenv("APP_EDITION", "full")
@@ -167,3 +209,74 @@ def test_match_edition_drops_only_excluded_routes(monkeypatch, _base_env):
         "match dropped routes that no EXCLUDED_PREFIXES entry declares. Either the "
         f"drop is wrong or the prefix list is stale: {undeclared}"
     )
+
+
+# --- what release 1 SERVES, not only what it drops -----------------------------
+# Every test above constrains the DIFFERENCE between the editions: match must not
+# have the excluded prefixes, and match's drops must all be excluded. None of them
+# asks whether a route the match edition KEEPS belongs in release 1 — so a new
+# proposal-assist router added to _ALWAYS ships in both editions and every gate
+# stays green. Measured 2026-09-04: an authenticated `/api/proposals/{id}/draft`
+# router placed in _ALWAYS reached the match app and all 63 architecture tests
+# passed. That is defect #27's shape recurring (six admin proposal-assist
+# endpoints were in _ALWAYS at the time), and #27 was found by reading, not by a
+# gate.
+#
+# So _ALWAYS is pinned by NAME. Adding a router to it is now a deliberate edit in
+# two places, which is the point: the second place is where somebody asks whether
+# release 1 should serve it.
+_ALWAYS_ROUTERS = [
+    "auth.router",
+    "me.router",
+    "admin.router",
+    "admin_users.router",
+    "calls.router",
+    "profiles.router",
+]
+
+
+def _tuple_elements(name: str) -> list[str]:
+    """Source text of each element of a module-level tuple in web/api/__init__.py."""
+    import ast
+
+    src = (Path(__file__).resolve().parents[2] / "src/call_manager/web/api/__init__.py").read_text()
+    tree = ast.parse(src)
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == name for t in node.targets
+        ):
+            assert isinstance(node.value, ast.Tuple), f"{name} is not a tuple literal"
+            return [ast.unparse(e) for e in node.value.elts]
+    raise AssertionError(f"no module-level {name} in web/api/__init__.py")
+
+
+def test_the_always_mounted_routers_are_exactly_the_reviewed_set():
+    assert _tuple_elements("_ALWAYS") == _ALWAYS_ROUTERS, (
+        "the routers mounted in BOTH editions changed. Every entry here is served "
+        "to release-1 users, so adding one is a product decision: does the match "
+        "edition need it? If yes, add it to _ALWAYS_ROUTERS with that reasoning."
+    )
+
+
+def test_the_full_only_routers_are_exactly_the_reviewed_set():
+    """The other direction. Without this, moving a router OUT of _FULL_ONLY into
+    _ALWAYS would only trip the test above — and moving one out of _FULL_ONLY
+    entirely (dropping it from both editions) would trip nothing at all."""
+    assert _tuple_elements("_FULL_ONLY") == [
+        "annotations_router.router",
+        "workspaces.router",
+        "turns.router",
+        "references.router",
+        "files.router",
+        "rubric.router",
+        "export.router",
+        "citation_audit.router",
+        "settings.router",
+        # A sub-router carved out of admin.py by this branch: six proposal-assist
+        # admin endpoints were in _ALWAYS and therefore served in match (defect
+        # #27). All require_admin-gated, so not an authorization hole — but the
+        # branch's headline claim is that the surface is ABSENT.
+        "admin.drafting_router",
+        "admin_golden_set.router",
+        "admin_retention.router",
+    ]

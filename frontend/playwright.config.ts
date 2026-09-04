@@ -25,13 +25,28 @@ export default defineConfig({
   // previous dist/ standing for the gate — and for the browser — to pass over.
   // `pnpm test` (vitest) never sees these specs; testDir is e2e/ and
   // vite.config.ts scopes vitest to src/.
+  // Match mode runs ONE spec. Without this, `E2E_MODE=match playwright test` with
+  // no path argument collects e2e/collab.spec.ts and e2e/dashboard.spec.ts too and
+  // drives them at the static mock server, which has no Postgres, no uvicorn and no
+  // seeded user. `pnpm run e2e:match` names the spec, so the documented entry point
+  // was never wrong — but a gate that is only correct when invoked exactly one way
+  // is one bare command away from a confusing red run, or from silently adopting the
+  // next spec someone drops in e2e/.
+  testMatch: MODE === "match" ? /match\.spec\.ts$/ : undefined,
   webServer:
     MODE === "match"
       ? {
           command:
             "pnpm run build:match && pnpm run check:bundle && node ../scripts/serve_spa_static.mjs dist 4173",
           url: "http://127.0.0.1:4173/index.html",
-          reuseExistingServer: !process.env.CI,
+          // NOT `!process.env.CI`. Reusing a server on :4173 skips the command
+          // above entirely — so a local run would validate whatever bundle is
+          // already being served, which may predate every change under test. This
+          // repo has already shipped one stale-artefact defect of exactly that
+          // shape (a build that failed at tsc wrote no manifest, and a separately
+          // invoked check read the previous clean one and exited 0). The artefact
+          // IS the thing under test here, so it is always rebuilt.
+          reuseExistingServer: false,
           timeout: 180_000,
         }
       : undefined,

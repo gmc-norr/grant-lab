@@ -53,13 +53,27 @@ SPA="$ROOT/src/call_manager/web/spa"
   { echo "FATAL: $ROOT is not the repo root (no scripts/check_match_bundle.mjs)" >&2; exit 1; }
 [ -f "$DIST/index.html" ] || { echo "FATAL: no build at $DIST — run a build first" >&2; exit 1; }
 
-# Ask the ARTEFACT which edition it is. Clean under the excluded-path list means
-# a match bundle; anything else is a full one.
-if node "$ROOT/scripts/check_match_bundle.mjs" "$DIST" >/dev/null 2>&1; then
-  EDITION=match
-else
-  EDITION=full
-fi
+# Ask the ARTEFACT which edition it is, and READ THE EXIT CODE, not just its sign.
+# check_match_bundle.mjs returns 0 clean / 1 leaked / 2 could-not-judge, and the
+# difference matters: this script used to map every non-zero to `full`, so a MATCH
+# build whose manifest failed to write was labelled `edition=full`, packaged at
+# exit 0, and stamped into the served tree's edition.txt. The artefact then lied
+# about itself, which is the one thing edition.txt exists to prevent. "The gate
+# could not run" is not evidence of anything and must stop the packaging.
+set +e
+node "$ROOT/scripts/check_match_bundle.mjs" "$DIST" >/dev/null 2>&1
+GATE_RC=$?
+set -e
+case "$GATE_RC" in
+  0) EDITION=match ;;
+  1) EDITION=full ;;
+  *)
+    node "$ROOT/scripts/check_match_bundle.mjs" "$DIST" >&2 || true
+    echo "FATAL: the bundle gate could not judge $DIST (exit $GATE_RC) — refusing to" \
+         "package an artefact whose edition is unknown. Rebuild, then retry." >&2
+    exit 1
+    ;;
+esac
 
 # A caller that ASKED for match and got a full bundle is the failure this script
 # exists to stop. Print the gate's real output so the offending modules are named.

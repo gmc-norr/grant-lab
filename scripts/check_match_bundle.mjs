@@ -6,7 +6,14 @@
  * emitted by the moduleManifest() plugin in vite.config.ts — and asserts that no
  * module under an excluded directory is in it.
  *
- * Measured on this repo, 2026-09-03, against the eight-prefix list below:
+ * Measured on this repo, 2026-09-03, against the EIGHT-prefix list this file
+ * shipped with that day. The list below now has 14 entries — the three Admin
+ * prefixes and the six per-file /src/shell/ ones were added afterwards, each for
+ * a defect recorded in the run log — so these three numbers describe a strictly
+ * WEAKER gate than the one running today. They are kept because they are what was
+ * actually measured; the current list's own number is printed on every run
+ * ("0 under 14 excluded paths"). Do not read 81/0/19 as current.
+ *
  *   full build           703 modules,  81 excluded  (the gate has teeth)
  *   match build          384 modules,   0 excluded  (clean)
  *   match + 1 leak       474 modules,  19 excluded  (caught)
@@ -29,6 +36,21 @@
  */
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+
+// EXIT CODES, and the difference is load-bearing.
+//   0  the bundle was read and is clean
+//   1  the bundle was read and CONTAINS an excluded module — a real leak
+//   2  the bundle could NOT be judged (no manifest, malformed, empty)
+//
+// 1 and 2 used to be the same code, and scripts/package_spa.sh maps "non-zero"
+// to EDITION=full. So a match build whose manifest failed to write was labelled
+// `edition=full`, packaged at exit 0, and stamped into the served tree's
+// edition.txt — the artefact lying about itself, which is the one thing that
+// file exists to prevent. A gate that cannot run must not be indistinguishable
+// from a gate that ran and disagreed.
+const EXIT_CLEAN = 0;
+const EXIT_LEAKED = 1;
+const EXIT_CANNOT_JUDGE = 2;
 
 // Directories the match edition must not reach. Substrings of a resolved module
 // id, matched against POSIX-style paths.
@@ -87,12 +109,12 @@ try {
       "The moduleManifest() plugin in vite.config.ts did not run — did the build " +
       "complete, and is the plugin registered?",
   );
-  process.exit(1);
+  process.exit(EXIT_CANNOT_JUDGE);
 }
 
 if (!Array.isArray(modules) || modules.length === 0) {
   console.error(`ERROR: ${manifest} is empty. A build that bundles nothing proves nothing.`);
-  process.exit(1);
+  process.exit(EXIT_CANNOT_JUDGE);
 }
 
 const leaked = modules
@@ -108,7 +130,62 @@ if (leaked.length > 0) {
     "\nThe fix is an import, not a chunk name: something reachable from " +
       "router.simple.tsx imports one of these. Read the import chain and cut it.",
   );
-  process.exit(1);
+  process.exit(EXIT_LEAKED);
 }
 
-console.log(`match bundle clean: ${modules.length} modules, 0 under ${EXCLUDED.length} excluded paths`);
+// THE COMPLEMENT. Everything above is a BLOCKLIST of 14 known-bad prefixes, and a
+// blocklist only ever knows what it was told: this branch's worst bundle defect was
+// a MISSING entry (/src/editor/, 513 kB of CodeMirror shipping "clean"), and a whole
+// new directory — src/assist/, say — would leak the same way with every prefix green.
+//
+// So the other half asks the inverse question: is every app directory in this bundle
+// one release 1 is supposed to contain? A new top-level area under frontend/src/ then
+// fails until somebody declares it here, which is a decision rather than an oversight.
+//
+// Its honest limit, stated so nobody reads more into a green run: this is
+// DIRECTORY-level. A new file inside an allowed directory — routes/AssistPanel.tsx —
+// is not caught by this half, and is exactly what the EXCLUDED blocklist above is for.
+// The two halves cover different mistakes and neither subsumes the other.
+const ALLOWED_APP_DIRS = ["api/", "components/", "routes/", "shell/", "theme/"];
+const ALLOWED_APP_ROOT_FILES = ["App.tsx", "main.tsx", "router.simple.tsx"];
+
+const appModules = modules
+  .map((m) => m.split("\\").join("/"))
+  .filter((m) => m.includes("/frontend/src/"))
+  .map((m) => m.split("/frontend/src/").pop());
+
+const undeclared = appModules
+  .filter(
+    (m) =>
+      !ALLOWED_APP_DIRS.some((d) => m.startsWith(d)) && !ALLOWED_APP_ROOT_FILES.includes(m),
+  )
+  .sort();
+
+if (undeclared.length > 0) {
+  console.error(
+    `ERROR: the match bundle contains ${undeclared.length} app module(s) from an ` +
+      "area release 1 has not declared:",
+  );
+  for (const m of undeclared.slice(0, 25)) console.error(`  src/${m}`);
+  if (undeclared.length > 25) console.error(`  ... and ${undeclared.length - 25} more`);
+  console.error(
+    "\nEither release 1 genuinely needs this area — add it to ALLOWED_APP_DIRS and " +
+      "say why — or something reachable from router.simple.tsx imports code it should not.",
+  );
+  process.exit(EXIT_LEAKED);
+}
+
+// A bundle with no app modules at all satisfies "no undeclared area" vacuously, and
+// would also satisfy the blocklist. Both halves are then green over nothing.
+if (appModules.length === 0) {
+  console.error(
+    `ERROR: ${manifest} lists ${modules.length} modules but NONE under frontend/src/. ` +
+      "Two empty sets are disjoint; this proves nothing about the app.",
+  );
+  process.exit(EXIT_CANNOT_JUDGE);
+}
+
+console.log(
+  `match bundle clean: ${modules.length} modules, 0 under ${EXCLUDED.length} excluded paths, ` +
+    `${appModules.length} app modules all under ${ALLOWED_APP_DIRS.length} declared areas`,
+);

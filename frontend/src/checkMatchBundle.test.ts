@@ -10,8 +10,10 @@ import { expect, it } from "vitest";
 // bundle gate — could be emptied and EVERY gate on this branch would stay green
 // while `check:bundle` printed "match bundle clean: N modules, 0 under 0
 // excluded paths". That is not hypothetical: BOTH of this branch's worst bundle
-// defects were missing entries in this exact array (the /src/editor/ subgraph
-// and the five /src/shell/ files that gate 4 exempts whole-file).
+// defects were missing entries in this exact array: the /src/editor/ subgraph,
+// and the /src/shell/ files — SIX entries, THREE of which gate 4 exempts
+// whole-file (the precise breakdown is beside those entries below; an earlier
+// draft of this line said "five", which matched neither number).
 //
 // The script is PARSED, not imported: importing it executes the gate — it reads
 // dist/module-manifest.json and calls process.exit — which would make this test
@@ -81,6 +83,59 @@ it("the bundle gate's EXCLUDED list still contains every path release 1 must not
   // but say so explicitly — "empty" and "shrunk" are different bugs.
   expect(entries.length).toBeGreaterThanOrEqual(REQUIRED.length);
   expect(REQUIRED.filter((r) => !entries.includes(r))).toEqual([]);
+});
+
+// The gate's SECOND half, added after three outside reviewers pointed out that
+// EXCLUDED is a closed blocklist: it only ever knows what it was told, and this
+// branch's worst bundle defect was a MISSING entry. ALLOWED_APP_DIRS is the
+// inverse — every app directory in the bundle must be one release 1 declared —
+// so a whole new area (src/assist/) fails until somebody decides about it. It
+// lives in the same unlinted, untypechecked .mjs, so it needs the same pin: with
+// it emptied, every app module becomes "undeclared" and the gate would go red for
+// everyone, which is loud; but with a directory ADDED, a new area ships silently.
+function arrayEntries(name: string): string[] {
+  const src = readFileSync(SCRIPT, "utf8");
+  const start = src.indexOf(`const ${name} = [`);
+  expect(start, `check_match_bundle.mjs no longer declares \`const ${name} = [\``).toBeGreaterThan(
+    -1,
+  );
+  const end = src.indexOf("];", start);
+  return src
+    .slice(start, end)
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => !l.startsWith("//") && !l.startsWith("*"))
+    .flatMap((l) => [...l.matchAll(/"([^"]+)"/g)].map((m) => m[1]));
+}
+
+it("the bundle gate's ALLOWED_APP_DIRS is exactly the areas release 1 declares", () => {
+  // Exact equality, not a subset: a subset check passes on a list that GREW, and
+  // growing it is precisely how a new proposal-assist area would ship clean.
+  expect(arrayEntries("ALLOWED_APP_DIRS").sort()).toEqual([
+    "api/",
+    "components/",
+    "routes/",
+    "shell/",
+    "theme/",
+  ]);
+  expect(arrayEntries("ALLOWED_APP_ROOT_FILES").sort()).toEqual([
+    "App.tsx",
+    "main.tsx",
+    "router.simple.tsx",
+  ]);
+});
+
+it("the bundle gate distinguishes 'could not judge' from 'clean' and from 'leaked'", () => {
+  // package_spa.sh maps the exit code to an edition and STAMPS it into the served
+  // tree's edition.txt. While 1 meant both "leaked" and "no manifest", a match
+  // build whose manifest failed to write was labelled `edition=full` and packaged
+  // at exit 0 — the artefact lying about itself.
+  const src = readFileSync(SCRIPT, "utf8");
+  expect(src).toContain("const EXIT_CANNOT_JUDGE = 2");
+  expect(src).toContain("process.exit(EXIT_CANNOT_JUDGE)");
+  expect(src).toContain("process.exit(EXIT_LEAKED)");
+  // ...and no bare numeric exit survives to blur them again.
+  expect(/process\.exit\(\d/.test(src)).toBe(false);
 });
 
 it("SimpleShell is NOT excluded — the match shell must still be buildable", () => {

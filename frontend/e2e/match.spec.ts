@@ -72,6 +72,87 @@ const CALL_DETAIL = {
   best_profile_id: null,
 };
 
+// Every release-1 page's read-model. These exist so the WALK below can visit all
+// fifteen mounted routes: a page whose fetch returns the wrong shape crashes into
+// react-router's default error screen, and a crashed page has no links and no
+// landmark — so an href check over it would pass vacuously. The walk asserts the
+// page rendered before it asserts anything about the page.
+const SETTINGS = {
+  name: "P",
+  email: "p@umu.se",
+  is_admin: true,
+  google_oidc_enabled: false,
+  google_linked: false,
+  has_password: true,
+  profiles: [{ id: 1, name: "Group A", subscribed: true }],
+};
+
+const PROFILE = {
+  id: 1,
+  name: "Digital Pathology Lab",
+  kind: "organizational_unit",
+  level: "group",
+  description: "Imaging research.",
+  budget_currency: "SEK",
+  areas: ["oncology"],
+  budget_min: 100,
+  budget_max: 200,
+  trl_min: 3,
+  trl_max: 7,
+  must_include: [],
+  hard_exclusions: [],
+  org_type: "university_hospital",
+  capabilities: [],
+  patient_populations: [],
+  scale: null,
+  career_stage: null,
+  role: null,
+  years_since_phd: null,
+  applicant_types: [],
+  funding_instruments: ["project_grant"],
+  funder_exclusions: [],
+  country: "SE",
+  host_institution: "UmU",
+  can_edit: true,
+  bootstrap_status: null,
+  bootstrap_pubmed_status: null,
+  publications_fetched: null,
+};
+
+const PROFILES = {
+  profiles: [
+    {
+      id: 1,
+      name: "Digital Pathology Lab",
+      kind: "organizational_unit",
+      level: "group",
+      areas_count: 1,
+      budget_currency: "SEK",
+      description: "Imaging research.",
+    },
+  ],
+};
+
+const ADMIN_USERS = {
+  users: [{ id: 1, email: "p@umu.se", name: null, status: "active", is_admin: true }],
+  page: 1,
+  per_page: 50,
+  total: 1,
+};
+
+const ADMIN_PENDING = {
+  users: [
+    {
+      id: 2,
+      email: "new@umu.se",
+      name: null,
+      created_at: "2026-06-01T00:00:00Z",
+      google_linked: false,
+    },
+  ],
+  page: 1,
+};
+
 // The admin landing page's read-model. A real payload, not `{}`: the catch-all
 // below answers 200 {} and AdminDashboard then crashes on `sources.map`, which
 // takes react-router's DEFAULT error boundary — neither router declares an
@@ -115,11 +196,62 @@ async function mockApi(page: Page, seen: string[] = []): Promise<string[]> {
     if (url.pathname === "/api/calls") return json(CALLS);
     if (/^\/api\/calls\/\d+$/.test(url.pathname)) return json(CALL_DETAIL);
     if (url.pathname === "/api/admin/dashboard") return json(ADMIN_DASH);
+    if (url.pathname === "/api/admin/users") return json(ADMIN_USERS);
+    if (url.pathname === "/api/admin/users/pending") return json(ADMIN_PENDING);
+    if (url.pathname === "/api/me/settings") return json(SETTINGS);
+    if (url.pathname === "/api/profiles") return json(PROFILES);
+    if (/^\/api\/profiles\/\d+$/.test(url.pathname)) return json(PROFILE);
     if (url.pathname === "/api/auth/logout") return json({});
-    if (url.pathname === "/api/auth/config") return json({ oidc_enabled: false });
+    // AuthConfigOut: Login/Register read allowed_domains[0], so `{}` crashes the
+    // page into the error boundary — which the walk below catches rather than
+    // passing over, because a crashed page has no links and no landmark.
+    if (url.pathname === "/api/auth/config")
+      return json({ allowed_domains: ["umu.se"], google_oidc_enabled: false });
     return json({});
   });
   return seen;
+}
+
+// Every concrete path router.simple.tsx mounts. Kept in step with
+// src/router.simple.test.tsx's RELEASE_1_ROUTES, with the :id params filled in.
+// The earlier version of the walk below visited three of these, while its own
+// test title said "anywhere in release 1" — three outside reviewers named that
+// independently, and they were right: a dead link on /profiles or /me was
+// invisible to it.
+const IN_SHELL_ROUTES = [
+  "/",
+  "/calls/1",
+  "/me",
+  "/profiles",
+  "/profiles/new",
+  "/profiles/1",
+  "/profiles/1/edit",
+  "/admin",
+  "/admin/users",
+  "/admin/users/pending",
+];
+// PreAuthLayout's pages. They render inside their own <main> (PreAuthLayout.tsx)
+// and make no authenticated call, so they need no session.
+const PRE_AUTH_ROUTES = ["/login", "/register", "/auth/pending", "/auth/no-access", "/auth/error"];
+const ALL_ROUTES = [...IN_SHELL_ROUTES, ...PRE_AUTH_ROUTES];
+
+/**
+ * Navigate, and PROVE the page rendered before the caller asserts anything.
+ *
+ * This is the load-bearing part of the walk. A route that throws during render
+ * takes react-router's default error boundary (neither router declares an
+ * errorElement), which replaces the whole subtree — so the page has no links and
+ * no landmark, and every "no bad href here" assertion passes over it. Exactly one
+ * <main> is both the landmark assertion and the proof of life: an error screen
+ * has none, and a nested-landmark regression has two.
+ */
+async function gotoRendered(page: Page, path: string): Promise<void> {
+  await page.goto(path);
+  await expect(
+    page.getByText("Unexpected Application Error", { exact: false }),
+    `${path} crashed into react-router's error boundary`,
+  ).toHaveCount(0);
+  await expect(page.locator("main"), `main landmarks on ${path}`).toHaveCount(1);
 }
 
 async function hrefsOn(page: Page): Promise<string[]> {
@@ -165,21 +297,35 @@ test("signing out reaches the logout endpoint and leaves for /login", async ({ p
   expect(seen).toContain("POST /api/auth/logout");
 });
 
-test("no rendered link anywhere in release 1 points into the excluded half", async ({ page }) => {
+test("no rendered link anywhere in release 1 points into the excluded half", async ({
+  page,
+}) => {
   // The browser-level counterpart to src/noCockpitLinks.test.tsx, which is a
-  // SOURCE scan and now EXEMPTs CallRow.tsx and CallDetailBody.tsx (their
-  // /cockpit link is edition-gated, and a scan cannot tell a gated literal from
-  // an ungated one). This asks the rendered DOM instead.
+  // SOURCE scan and EXEMPTs four KIND-B files whose /cockpit or /admin/* literal
+  // is edition-gated at its render site (a scan cannot tell a gated literal from
+  // an ungated one). This asks the rendered DOM instead, on EVERY mounted route —
+  // the previous version visited three, which left the exempted files' other
+  // screens uncovered.
   await mockApi(page);
   const offenders: string[] = [];
-  for (const path of ["/", "/calls/1", "/admin"]) {
-    await page.goto(path);
-    await expect(page.getByRole("link", { name: "Call Match" })).toBeVisible();
+  for (const path of ALL_ROUTES) {
+    await gotoRendered(page, path);
     for (const href of await hrefsOn(page)) {
       if (EXCLUDED_PREFIXES.some((p) => href.startsWith(p))) offenders.push(`${path} -> ${href}`);
     }
   }
   expect(offenders).toEqual([]);
+});
+
+test("every mounted release-1 route renders exactly one main landmark", async ({ page }) => {
+  // SimpleShell shipped a <main> wrapper around <Outlet/> while all twelve
+  // release-1 pages render their own, and the unit test that should have caught it
+  // asserted getByRole("main") against a harness child of <p>calls page</p> — so it
+  // passed only because the fake child had no landmark. The assertion lives inside
+  // gotoRendered, so this test is the coverage claim: all fifteen routes, not two.
+  await mockApi(page);
+  for (const path of ALL_ROUTES) await gotoRendered(page, path);
+  expect(ALL_ROUTES.length).toBe(15); // the count is the claim; keep it in step with the router
 });
 
 test("the admin subnav offers only the three sections release 1 mounts", async ({ page }) => {
@@ -216,20 +362,27 @@ test("the light ground is actually PAINTED, not merely declared", async ({ page 
   expect(bg).toBe("rgb(250, 249, 247)");
 });
 
-test("exactly one main landmark per page, and no critical a11y violations", async ({ page }) => {
-  // The landmark count is pinned explicitly rather than left to axe: SimpleShell
-  // shipped a <main> wrapper around <Outlet/> while all twelve release-1 pages
-  // render their own, and the unit test that should have caught it asserted
-  // getByRole("main") against a harness child of <p>calls page</p> — so it
-  // passed only because the fake child had no landmark.
+test("no critical a11y violations on the release-1 landing page", async ({ page }) => {
+  // Landmarks moved to their own walk above. This is axe, and it is scoped
+  // honestly: `impact === "critical"` only, matching e2e/dashboard.spec.ts. It is
+  // a floor, not WCAG coverage — the contrast ratios are pinned by
+  // src/theme/contrast.test.ts and the painted ground by the test below.
   await mockApi(page);
-  for (const path of ["/", "/calls/1"]) {
-    await page.goto(path);
-    await expect(page.getByRole("link", { name: "Call Match" })).toBeVisible();
-    expect(await page.locator("main").count(), `main landmarks on ${path}`).toBe(1);
-  }
-  await page.goto("/");
+  await gotoRendered(page, "/");
   await expect(page.getByRole("listitem").first()).toBeVisible({ timeout: 10_000 });
   const results = await new AxeBuilder({ page }).analyze();
   expect(results.violations.filter((v) => v.impact === "critical")).toEqual([]);
+});
+
+test("the account menu offers Settings as well as Sign out", async ({ page }) => {
+  // /me is mounted by router.simple.tsx and the account menu is its ONLY entry
+  // point in release 1 — SimpleShell's nav has Calls / Profiles / Admin and
+  // nothing else. Nothing asserted this item existed, so deleting it left every
+  // test green while stranding a mounted route.
+  await mockApi(page);
+  await gotoRendered(page, "/");
+  await page.getByRole("button", { name: /account menu for p@umu\.se/i }).click();
+  await page.getByRole("menuitem", { name: "Settings" }).click();
+  await expect(page).toHaveURL(/\/me$/);
+  await expect(page.locator("main")).toHaveCount(1);
 });
