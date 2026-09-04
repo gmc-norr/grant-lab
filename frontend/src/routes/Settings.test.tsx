@@ -102,3 +102,22 @@ it("reconciles subscriptions checked-set from the server response after save", a
   );
   expect(screen.getByRole("checkbox", { name: /Group B/ })).toBeChecked();
 });
+
+// Gate 14 — the UI half of gate 11b. The picker is a pure PROJECTION of
+// GET /me/settings: it renders every profile the endpoint returns and finds
+// profiles nowhere else, so an unreadable profile the server withheld cannot
+// reappear here. This gate mocks the API, so it is honest about what it does
+// NOT cover: mutation V20c (get_settings returns every active profile again)
+// leaves it GREEN — the leak is in the JSON, and tests/test_profile_access_digest.py
+// ::test_gate11b_the_settings_payload_offers_only_readable_profiles is what catches it.
+it("offers only the profiles the settings payload returned", async () => {
+  mockGet({
+    ...SETTINGS,
+    profiles: [{ id: 1, name: "P Org Wide", subscribed: false }],
+  });
+  renderWithProviders(<Settings />);
+  expect(await screen.findByRole("checkbox", { name: /P Org Wide/ })).not.toBeChecked();
+  expect(screen.queryByRole("checkbox", { name: /P Private Secret/ })).toBeNull();
+  expect(screen.queryByText(/P Private Secret/)).toBeNull();
+  expect(screen.getAllByRole("checkbox")).toHaveLength(1);
+});

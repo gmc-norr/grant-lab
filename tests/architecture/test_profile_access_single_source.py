@@ -83,17 +83,6 @@ DELEGATION_PINS: dict[str, str] = {
     "web/api/me.py::set_default": "set_default_profile",
 }
 
-# Wired by later tasks; see the module docstring of the plan. Marked
-# xfail(strict=True), NOT skipped and NOT exempted: the moment Task 3/4/5 wires
-# a function the case XPASSes, strict turns that into a FAILURE, and the task
-# cannot go green without deleting its own line here. A self-removing scaffold.
-# THIS DICT MUST BE EMPTY (and deleted) when Task 5 lands.
-_NOT_YET_WIRED: dict[str, str] = {
-    "web/api/me.py::get_settings": "Task 5",
-    "web/api/me.py::update_subscriptions": "Task 5",
-    "digest/assemble.py::assemble_for_user": "Task 5",
-}
-
 # --------------------------------------------------------------------------
 # The negative half's exempt set. Each entry states why.
 # --------------------------------------------------------------------------
@@ -252,17 +241,6 @@ def _profile_viewer_ref(node: ast.AST, bound: dict[str, str]) -> bool:
 # --------------------------------------------------------------------------
 
 
-def _pin_params() -> list[pytest.param]:
-    params = []
-    for qualname in PREDICATE_PINS:
-        marks = []
-        task = _NOT_YET_WIRED.get(qualname)
-        if task is not None:
-            marks.append(pytest.mark.xfail(strict=True, reason=f"wired in {task}"))
-        params.append(pytest.param(qualname, id=qualname, marks=marks))
-    return params
-
-
 @pytest.mark.parametrize(
     "qualname",
     [pytest.param(q, id=q) for q in (*PREDICATE_PINS, *DELEGATION_PINS)],
@@ -270,15 +248,17 @@ def _pin_params() -> list[pytest.param]:
 def test_pinned_function_still_exists(qualname: str) -> None:
     """Every pin resolves to a real top-level function.
 
-    Separate from the call assertion ON PURPOSE. The call assertions carry
-    xfail markers while Tasks 3-5 are outstanding, and a missing function
-    inside an xfail'd case reads as an expected failure -- a rename would hide
-    behind the scaffold. This test is never xfail'd, so a rename is loud today.
+    Separate from the call assertion ON PURPOSE. The two failures say different
+    things: "this surface stopped checking" and "this surface is gone". A rename
+    that took the predicate call with it would otherwise report only the first,
+    and the fix -- add the call back -- would be the wrong one.
     """
     _resolve(qualname)
 
 
-@pytest.mark.parametrize("qualname", _pin_params())
+@pytest.mark.parametrize(
+    "qualname", [pytest.param(q, id=q) for q in PREDICATE_PINS]
+)
 def test_pinned_surface_calls_the_single_source(qualname: str) -> None:
     fn = _resolve(qualname)
     called = _body_calls(fn)
@@ -380,19 +360,6 @@ def test_pin_set_has_not_shrunk() -> None:
     """
     assert len(PREDICATE_PINS) == 10, sorted(PREDICATE_PINS)
     assert len(DELEGATION_PINS) == 1, sorted(DELEGATION_PINS)
-
-
-def test_not_yet_wired_names_are_real_pins() -> None:
-    """The scaffold can only cover pins that exist.
-
-    A typo'd key applies no marker, so the case is simply red today -- loud, and
-    fail-safe. The opposite, a leftover key for a pin that has been renamed
-    away, is silent: it would sit here forever looking like an exemption for
-    something. So the dict is checked against the pin list, and it must be empty
-    (and deleted, with this test) once Task 5 lands.
-    """
-    unknown = sorted(set(_NOT_YET_WIRED) - set(PREDICATE_PINS))
-    assert not unknown, f"_NOT_YET_WIRED names something that is not a pin: {unknown}"
 
 
 def test_exempt_set_is_documented_and_minimal() -> None:

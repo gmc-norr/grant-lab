@@ -683,6 +683,10 @@ def seed_ranked_calls(pg_session_factory, world: World) -> RankedWorld:
     are what make `_criterion_detail` render a non-None string, which is what
     gate 9 is about. Task 5 reuses this helper for the digest rather than
     building a second world.
+
+    SIDE EFFECT worth knowing before you reuse it: it also STAMPS each profile's
+    rubric bands — a distinct budget_min/budget_max/trl_min/trl_max per profile,
+    plus budget_currency — so the markers below are unique per profile.
     """
     spec = {
         # profile id: (score, budget_min, budget_max, trl_min, trl_max)

@@ -12,6 +12,7 @@ from call_manager.proposal_assist.collab.permissions import (
     signal_user_revocation,
 )
 from call_manager.web.dashboard import set_default_profile
+from call_manager.web.profile_access import readable_profile_ids
 
 router = APIRouter()
 
@@ -92,9 +93,19 @@ class AccountSettingsOut(BaseModel):
 def get_settings(request: Request, user: User = Depends(get_current_user)):  # noqa: B008
     sf = request.app.state.session_factory
     with sf() as session:
+        # The picker's read-model is a SEPARATE query from GET /api/profiles —
+        # Settings.tsx calls this endpoint, not that one — so it needs the read
+        # rule in its own right. Without it every active profile's id AND NAME
+        # goes to every user, and subscribing to one would mail them its ranked
+        # calls every Monday.
         profiles = list(
             session.execute(
-                select(Profile).where(Profile.is_active.is_(True)).order_by(Profile.name)
+                select(Profile)
+                .where(
+                    Profile.is_active.is_(True),
+                    Profile.id.in_(readable_profile_ids(user)),
+                )
+                .order_by(Profile.name)
             ).scalars()
         )
         subscribed_ids = set(
@@ -214,21 +225,32 @@ def update_subscriptions(
         db_user = session.get(User, user.id)
         if db_user is None:
             raise HTTPException(status_code=401, detail="user not found")
+        # ONE predicate, bound once and applied to BOTH sides of the diff below.
+        # Unreadable is treated exactly like inactive: invisible to the diff in
+        # both directions. Filtering only `valid_ids` would be worse than not
+        # filtering at all — an unreadable-but-ACTIVE profile would still enter
+        # `existing_active_ids`, land in `to_remove`, and one innocent settings
+        # save after a revocation would DELETE the subscription and its
+        # digest_enabled preference, which re-sharing could then never restore.
+        readable = readable_profile_ids(user)
         valid_ids = (
             set(
                 session.execute(
                     select(Profile.id).where(
-                        Profile.id.in_(desired), Profile.is_active.is_(True)
+                        Profile.id.in_(desired),
+                        Profile.is_active.is_(True),
+                        Profile.id.in_(readable),
                     )
                 ).scalars()
             )
             if desired
             else set()
         )
-        # DIFF scoped to ACTIVE-profile subscriptions only — subs to temporarily-
-        # inactive profiles are left untouched so their digest_enabled preference is
-        # preserved. The client can never echo an inactive profile id back (the UI
-        # only shows active profiles), so scoping to active-only is the only safe diff.
+        # DIFF scoped to ACTIVE, READABLE-profile subscriptions only — subs to
+        # temporarily-inactive or no-longer-shared profiles are left untouched so
+        # their digest_enabled preference is preserved. The client can never echo
+        # either kind of id back (the picker shows neither), so scoping the diff
+        # this way is the only safe one.
         existing_active_ids = set(
             session.execute(
                 select(Subscription.profile_id)
@@ -236,6 +258,7 @@ def update_subscriptions(
                 .where(
                     Subscription.user_id == user.id,
                     Profile.is_active.is_(True),
+                    Profile.id.in_(readable),
                 )
             ).scalars()
         )

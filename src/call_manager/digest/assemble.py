@@ -20,6 +20,7 @@ from call_manager.ranking.must_include import (
     normalize_must_terms,
     pg_word_boundary_pattern,
 )
+from call_manager.web.profile_access import readable_profile_ids
 
 DIGEST_TOP_THRESHOLD = 60
 
@@ -79,7 +80,12 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
     if user is None or user.status != "active" or user.digest_disabled_at is not None:
         return None
 
-    # 1. Subscribed active profiles, digest_enabled
+    # 1. Subscribed active profiles, digest_enabled, and STILL READABLE.
+    # The weekly email is the surface field-hiding cannot close: it carries a
+    # profile's ranked calls, which reveal its content whether or not the API
+    # shows its description. So the read rule is applied HERE, as a FILTER —
+    # revocation must not touch `subscriptions`, or the user's digest_enabled
+    # preference is destroyed and a re-share cannot bring the section back.
     profiles = (
         session.execute(
             select(Profile)
@@ -88,6 +94,7 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
                 Subscription.user_id == user_id,
                 Subscription.digest_enabled.is_(True),
                 Profile.is_active.is_(True),
+                Profile.id.in_(readable_profile_ids(user)),
             )
             .order_by(Profile.id)  # tie-break ordering for dedup
         )
