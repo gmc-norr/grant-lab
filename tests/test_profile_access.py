@@ -26,6 +26,7 @@ stayed wider than editing instead of the two collapsing into one rule.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -33,7 +34,15 @@ from sqlalchemy import select, text
 
 import call_manager.profiles.post_edit as post_edit
 from call_manager.auth.session_cookie import SessionSigner
-from call_manager.db.models import Profile, ProfileViewer, User
+from call_manager.db.models import (
+    Call,
+    CallRanking,
+    CallRankingCriterion,
+    Profile,
+    ProfileViewer,
+    Source,
+    User,
+)
 from call_manager.main import create_app
 
 # An id no profile can have. Used for the "does a profile exist here?" oracle
@@ -629,3 +638,447 @@ def test_detail_carries_visibility_so_the_owner_ui_can_render_its_own_state(
         priv = client.get(f"/api/profiles/{world.p_priv}").json()
     assert org["visibility"] == "org"
     assert priv["visibility"] == "private"
+
+
+# ==========================================================================
+# Task 4 — the calls API and the dashboard.
+#
+# These surfaces do not look like profile endpoints, which is exactly why a
+# fix misses them: `GET /api/calls` resolves `?profile=` AND the stored
+# default in web/dashboard.py, `GET /api/calls/{id}` resolves `?profile=` a
+# second time with a lookup of its own, and the facet list hands out profile
+# NAMES to everyone.
+#
+# THE FIXTURE MUST BE LIVE. "No P_secret score appears" is already true of an
+# empty database, and a gate that passes against an empty database is not a
+# gate. So every absence below is paired with a presence on the SAME row: the
+# owner sees the score and the rendered criterion detail that the stranger
+# does not.
+# ==========================================================================
+
+
+@dataclass(frozen=True)
+class RankedWorld:
+    """One call, ranked against all three profiles of `World`.
+
+    `score`, `budget_marker` and `trl_marker` are keyed by profile id. The
+    markers are strings that appear in `_criterion_detail`'s rendering for
+    exactly ONE profile, so "C did not see P_secret's numbers" is asserted
+    against text that provably exists in the database and that the owner
+    provably does receive.
+    """
+
+    call_id: int
+    score: dict[int, int]
+    budget_marker: dict[int, str]
+    trl_marker: dict[int, str]
+
+
+def seed_ranked_calls(pg_session_factory, world: World) -> RankedWorld:
+    """Make the world RANKED: one call with a CallRanking + criteria rows for
+    each of P_org, P_priv and P_secret.
+
+    Shape copied from tests/test_digest_assemble.py::_seed_call (same Call +
+    CallRanking pair); the criteria rows and the structured budget/TRL fields
+    are what make `_criterion_detail` render a non-None string, which is what
+    gate 9 is about. Task 5 reuses this helper for the digest rather than
+    building a second world.
+    """
+    spec = {
+        # profile id: (score, budget_min, budget_max, trl_min, trl_max)
+        world.p_org: (41, 111_111, 222_222, 2, 5),
+        world.p_priv: (62, 555_555, 666_666, 4, 8),
+        world.p_secret: (93, 777_777, 888_888, 6, 9),
+    }
+    with pg_session_factory() as s:
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        call = Call(
+            source_id=src.id,
+            external_id="ranked-against-all-three",
+            url="https://example.invalid/ranked-against-all-three",
+            title="Precision oncology platform call",
+            summary="A call ranked against all three profiles.",
+            keywords=["oncology"],
+            deadline=datetime.now(UTC) + timedelta(days=90),
+            published_at=datetime.now(UTC) - timedelta(days=1),
+            budget_min=1_000_000,
+            budget_max=2_000_000,
+            currency="SEK",
+            raw={"trl_min": 3, "trl_max": 7},
+        )
+        s.add(call)
+        s.flush()
+        for pid, (score, b_min, b_max, t_min, t_max) in spec.items():
+            p = s.get(Profile, pid)
+            p.structured = {
+                **(p.structured or {}),
+                "budget_min": b_min,
+                "budget_max": b_max,
+                "trl_min": t_min,
+                "trl_max": t_max,
+            }
+            p.budget_currency = "SEK"
+            s.add(
+                CallRanking(
+                    call_id=call.id,
+                    profile_id=pid,
+                    aggregate_score=score,
+                    rationale=f"ranked against {p.name}",
+                    model="gemma4:e4b-q8",
+                    prompt_version="v2.0",
+                    ranked_at=datetime.now(UTC),
+                )
+            )
+            for criterion in ("budget", "trl"):
+                s.add(
+                    CallRankingCriterion(
+                        call_id=call.id,
+                        profile_id=pid,
+                        criterion=criterion,
+                        rating="pass",
+                    )
+                )
+        call_id = call.id
+        s.commit()
+
+    ranked = RankedWorld(
+        call_id=call_id,
+        score={pid: v[0] for pid, v in spec.items()},
+        budget_marker={pid: f"{v[1]:,}" for pid, v in spec.items()},
+        trl_marker={pid: f"{v[3]}–{v[4]}" for pid, v in spec.items()},
+    )
+    # The markers are only useful if they are unique — a shared marker would
+    # make "P_secret's numbers are absent" accidentally false for a reason
+    # that has nothing to do with the read rule.
+    assert len(set(ranked.budget_marker.values())) == 3, ranked.budget_marker
+    assert len(set(ranked.trl_marker.values())) == 3, ranked.trl_marker
+    return ranked
+
+
+@pytest.fixture
+def ranked(pg_session_factory, world) -> RankedWorld:
+    return seed_ranked_calls(pg_session_factory, world)
+
+
+def _scores(body: dict) -> list[int | None]:
+    return [item["aggregate_score"] for item in body["items"]]
+
+
+def _facet_ids(client) -> list[int]:
+    r = client.get("/api/calls")
+    assert r.status_code == 200, r.text
+    return [p["id"] for p in r.json()["facets"]["profiles"]]
+
+
+# ==========================================================================
+# Gate 7 — the EXPLICIT arm. An unreadable ?profile degrades; it never 404s.
+# ==========================================================================
+def test_gate7_explicit_unreadable_profile_degrades_with_no_oracle(
+    monkeypatch, pg_url, pg_session_factory, world, ranked
+):
+    app = setup_app(monkeypatch, pg_url)
+    # Precondition: the fixture is LIVE — this exact request, made by the
+    # owner, returns P_secret's score. Without this the assertions below are
+    # equally true of an empty database.
+    with client_for(app, world.a) as owner:
+        seen = owner.get(f"/api/calls?profile={world.p_secret}").json()
+    assert seen["effective"]["profile_id"] == world.p_secret, seen["effective"]
+    assert _scores(seen) == [ranked.score[world.p_secret]], seen["items"]
+
+    with client_for(app, world.c) as stranger:
+        unreadable = stranger.get(f"/api/calls?profile={world.p_secret}")
+        missing = stranger.get(f"/api/calls?profile={NO_SUCH_PROFILE_ID}")
+    assert unreadable.status_code == 200, (
+        f"an unreadable ?profile must DEGRADE to the unranked list. A 404 (or "
+        f"any status that differs from the one a nonexistent id gets) turns "
+        f"?profile=N into an oracle for every id a user can type; got "
+        f"{unreadable.status_code}: {unreadable.text}"
+    )
+    body = unreadable.json()
+    assert body["effective"]["profile_id"] is None, (
+        f"assert the RESOLVED value, not merely the absence of scores: "
+        f"{body['effective']}"
+    )
+    assert _scores(body) == [None], (
+        f"P_secret's score reached a stranger through ?profile=: {body['items']}"
+    )
+    assert unreadable.json() == missing.json(), (
+        f"the 'unreadable' and 'does not exist' answers differ, which is the "
+        f"oracle itself: {unreadable.json()} vs {missing.json()}"
+    )
+
+
+# ==========================================================================
+# Gate 7b — THE BYPASS. The stored default is a second arm, and no ?profile=
+# is ever sent, so a patch to the explicit arm alone never runs.
+# ==========================================================================
+def test_gate7b_storing_an_unreadable_profile_as_the_default_is_refused(
+    monkeypatch, pg_url, pg_session_factory, world, ranked
+):
+    app = setup_app(monkeypatch, pg_url)
+    with client_for(app, world.c) as stranger:
+        refused = stranger.post("/api/me/default-profile", json={"profile_id": world.p_secret})
+        missing = stranger.post(
+            "/api/me/default-profile", json={"profile_id": NO_SUCH_PROFILE_ID}
+        )
+    assert refused.status_code == 404, (
+        f"POST /api/me/default-profile stored an unreadable profile: "
+        f"{refused.status_code}: {refused.text}"
+    )
+    assert refused.json() == missing.json(), (
+        f"one status AND one body for missing, inactive and unreadable, or "
+        f"storing is itself the oracle: {refused.json()} vs {missing.json()}"
+    )
+    with pg_session_factory() as s:
+        assert s.get(User, world.c).default_profile_id is None
+    # "404 for everyone" would pass both assertions above.
+    with client_for(app, world.a) as owner:
+        allowed = owner.post("/api/me/default-profile", json={"profile_id": world.p_secret})
+    assert allowed.status_code == 200, f"the OWNER must still be able to store it: {allowed.text}"
+    with pg_session_factory() as s:
+        assert s.get(User, world.a).default_profile_id == world.p_secret
+
+
+def test_gate7b_a_stored_unreadable_default_degrades_on_a_bare_visit(
+    monkeypatch, pg_url, pg_session_factory, world, ranked
+):
+    """The hole the whole task exists for. The row is written directly because
+    the endpoint now refuses it — but it arrives legitimately too: stored while
+    the profile was shared, then revoked. No `?profile=` is ever sent, so an
+    explicit-arm-only patch is never reached.
+    """
+    with pg_session_factory() as s:
+        s.get(User, world.c).default_profile_id = world.p_secret
+        s.get(User, world.a).default_profile_id = world.p_secret
+        s.commit()
+
+    app = setup_app(monkeypatch, pg_url)
+    # Live fixture: the same stored default, for its owner, ranks the feed.
+    with client_for(app, world.a) as owner:
+        owned = owner.get("/api/calls").json()
+    assert owned["effective"]["profile_id"] == world.p_secret, owned["effective"]
+    assert _scores(owned) == [ranked.score[world.p_secret]], owned["items"]
+
+    with client_for(app, world.c) as stranger:
+        bare = stranger.get("/api/calls")
+    assert bare.status_code == 200, bare.text
+    body = bare.json()
+    assert body["effective"]["profile_id"] is None, (
+        f"a stored default the user may not read must degrade to unranked on a "
+        f"BARE visit, exactly as a deactivated one does; got {body['effective']}"
+    )
+    assert _scores(body) == [None], (
+        f"P_secret's score reached a stranger with no ?profile= in the URL at "
+        f"all — the stored-default arm: {body['items']}"
+    )
+    with pg_session_factory() as s:
+        assert s.get(User, world.c).default_profile_id == world.p_secret, (
+            "the resolver FILTERS the stored default; it must not delete the row"
+        )
+
+
+# ==========================================================================
+# Gate 8 — the facet list. It hands out profile NAMES.
+# ==========================================================================
+def test_gate8_facets_offer_only_the_profiles_the_caller_may_read(
+    monkeypatch, pg_url, pg_session_factory, world, ranked
+):
+    app = setup_app(monkeypatch, pg_url)
+    with client_for(app, world.c) as stranger:
+        r = stranger.get("/api/calls")
+    assert r.status_code == 200, r.text
+    facets = r.json()["facets"]["profiles"]
+    ids = [p["id"] for p in facets]
+    names = [p["name"] for p in facets]
+    assert world.p_org in ids, (
+        f"every profile in the live database is 'org' — the facet list must "
+        f"still offer them, or this filter is a wall; got {ids}"
+    )
+    assert world.p_secret not in ids, f"the facet list leaked P_secret: {ids}"
+    assert world.p_priv not in ids, f"the facet list leaked P_priv to a non-viewer: {ids}"
+    assert "P Private Secret" not in names, (
+        f"the NAME is the payload here — someone can read the whole research "
+        f"programme off a dropdown; got {names}"
+    )
+
+
+def test_gate8_facets_are_a_filter_not_a_wall(
+    monkeypatch, pg_url, pg_session_factory, world, ranked
+):
+    """Owner, viewer and admin each keep the profiles they are entitled to."""
+    app = setup_app(monkeypatch, pg_url)
+    expected = {
+        world.a: {world.p_org, world.p_priv, world.p_secret},  # owner of all three
+        world.b: {world.p_org, world.p_priv},  # viewer of P_priv only
+        world.d: {world.p_org, world.p_priv, world.p_secret},  # admin
+    }
+    for uid, want in expected.items():
+        with client_for(app, uid) as client:
+            got = set(_facet_ids(client))
+        assert got == want, f"user {uid}: facet list {sorted(got)} != {sorted(want)}"
+
+
+# ==========================================================================
+# Gate 9 — the call-detail surface, which resolves ?profile= ITSELF.
+# ==========================================================================
+def test_gate9_call_detail_hides_an_unreadable_profiles_ranking_and_criteria(
+    monkeypatch, pg_url, pg_session_factory, world, ranked
+):
+    app = setup_app(monkeypatch, pg_url)
+    url = f"/api/calls/{ranked.call_id}?profile={world.p_secret}"
+    with client_for(app, world.a) as owner:
+        seen = owner.get(url)
+    assert seen.status_code == 200, seen.text
+    body = seen.json()
+    # Live fixture: there IS a ranking, and there IS a rendered detail string.
+    assert body["ranking"]["aggregate_score"] == ranked.score[world.p_secret], body["ranking"]
+    details = {c["criterion"]: c["detail"] for c in body["criteria"]}
+    assert ranked.budget_marker[world.p_secret] in (details.get("budget") or ""), details
+    assert ranked.trl_marker[world.p_secret] in (details.get("trl") or ""), details
+
+    with client_for(app, world.c) as stranger:
+        hidden = stranger.get(url)
+        missing = stranger.get(f"/api/calls/{ranked.call_id}?profile={NO_SUCH_PROFILE_ID}")
+    assert hidden.status_code == 200, (
+        f"the call itself is readable — only the profile's view of it is not. "
+        f"A 404 here would be an oracle: {hidden.status_code}: {hidden.text}"
+    )
+    hidden_body = hidden.json()
+    assert hidden_body["ranking"] is None, hidden_body["ranking"]
+    assert hidden_body["criteria"] == [], hidden_body["criteria"]
+    assert ranked.budget_marker[world.p_secret] not in hidden.text, hidden.text
+    assert ranked.trl_marker[world.p_secret] not in hidden.text, hidden.text
+    # The invariant, stated at the boundary: profile_obj is None whenever the
+    # profile is not readable — indistinguishable from an id that does not
+    # exist, which is exactly what `profile_obj = None` produces.
+    assert hidden.json() == missing.json(), (
+        f"unreadable and nonexistent must be the same answer: "
+        f"{hidden.json()} vs {missing.json()}"
+    )
+
+
+# ==========================================================================
+# Gate 10 — the viewer. A shared profile must be USABLE, not merely visible.
+# ==========================================================================
+def test_gate10_the_viewer_can_use_the_shared_profile_on_every_surface(
+    monkeypatch, pg_url, pg_session_factory, world, ranked
+):
+    app = setup_app(monkeypatch, pg_url)
+    with client_for(app, world.b) as viewer:
+        feed = viewer.get(f"/api/calls?profile={world.p_priv}").json()
+        facets = _facet_ids(viewer)
+        stored = viewer.post("/api/me/default-profile", json={"profile_id": world.p_priv})
+        bare = viewer.get("/api/calls").json()
+        detail = viewer.get(f"/api/calls/{ranked.call_id}?profile={world.p_priv}").json()
+        other = viewer.get(f"/api/calls?profile={world.p_secret}").json()
+
+    assert feed["effective"]["profile_id"] == world.p_priv, feed["effective"]
+    assert _scores(feed) == [ranked.score[world.p_priv]], (
+        f"B has a profile_viewers row on P_priv and must SEE its score — a "
+        f"shared profile that ranks nothing is not shared; got {feed['items']}"
+    )
+    assert world.p_priv in facets, facets
+    assert stored.status_code == 200, stored.text
+    assert bare["effective"]["profile_id"] == world.p_priv, bare["effective"]
+    assert _scores(bare) == [ranked.score[world.p_priv]], bare["items"]
+    assert detail["ranking"]["aggregate_score"] == ranked.score[world.p_priv], detail["ranking"]
+    details = {c["criterion"]: c["detail"] for c in detail["criteria"]}
+    assert ranked.budget_marker[world.p_priv] in (details.get("budget") or ""), details
+    assert other["effective"]["profile_id"] is None, (
+        "B's viewer row is for P_priv ONLY — it must not resolve P_secret"
+    )
+
+
+# ==========================================================================
+# Gate 10b — revocation is a FILTER, not a delete.
+# ==========================================================================
+def test_gate10b_revoking_a_share_degrades_the_stored_default_without_erasing_it(
+    monkeypatch, pg_url, pg_session_factory, world, ranked
+):
+    app = setup_app(monkeypatch, pg_url)
+    with client_for(app, world.b) as viewer:
+        assert (
+            viewer.post(
+                "/api/me/default-profile", json={"profile_id": world.p_priv}
+            ).status_code
+            == 200
+        )
+        before = viewer.get("/api/calls").json()
+    assert before["effective"]["profile_id"] == world.p_priv, (
+        f"precondition: while shared, B's bare visit is RANKED by P_priv; "
+        f"got {before['effective']}"
+    )
+    assert _scores(before) == [ranked.score[world.p_priv]], before["items"]
+
+    with client_for(app, world.a) as owner:
+        revoke = owner.put(f"/api/profiles/{world.p_priv}/viewers", json={"user_ids": []})
+    assert revoke.status_code == 200, revoke.text
+
+    with client_for(app, world.b) as viewer:
+        after = viewer.get("/api/calls").json()
+    assert after["effective"]["profile_id"] is None, (
+        f"the share is gone, so the next bare visit must degrade to unranked; "
+        f"got {after['effective']}"
+    )
+    assert _scores(after) == [None], after["items"]
+    with pg_session_factory() as s:
+        assert s.get(User, world.b).default_profile_id == world.p_priv, (
+            "revocation FILTERS the preference; it must not delete the row, or "
+            "re-sharing silently loses the colleague's setting"
+        )
+
+    with client_for(app, world.a) as owner:
+        reshare = owner.post(
+            f"/api/profiles/{world.p_priv}/viewers", json={"email": "b-colleague@umu.se"}
+        )
+    assert reshare.status_code == 200, reshare.text
+    with client_for(app, world.b) as viewer:
+        restored = viewer.get("/api/calls").json()
+    assert restored["effective"]["profile_id"] == world.p_priv, (
+        f"re-sharing must restore the stored preference with no second POST "
+        f"from B — that is what 'filter, not delete' buys; got "
+        f"{restored['effective']}"
+    )
+    assert _scores(restored) == [ranked.score[world.p_priv]], restored["items"]
+
+
+# ==========================================================================
+# best_profile_id — a DECISION, pinned so that widening it is a visible act.
+# ==========================================================================
+def test_best_profile_id_stays_owner_scoped_by_decision(
+    monkeypatch, pg_url, pg_session_factory, world, ranked
+):
+    """`best_profile_id` is `Profile.created_by == user.id`, and stays that way.
+
+    Widening it to the READ rule is defensible product-wise (a shared profile
+    that is never chosen reads as a bug) but it is NOT a day-one no-op: every
+    profile in the live database is 'org', so a widened query would pick from
+    every profile in the organisation and change every user's call page the day
+    this merges. That is a product decision for a human, not part of a privacy
+    fix — so it is pinned here rather than left as an unrecorded choice.
+
+    Delete this test in the commit that widens it.
+    """
+    app = setup_app(monkeypatch, pg_url)
+    with client_for(app, world.a) as owner:
+        owned = owner.get(f"/api/calls/{ranked.call_id}").json()
+    with client_for(app, world.b) as viewer:
+        shared = viewer.get(f"/api/calls/{ranked.call_id}").json()
+    with client_for(app, world.d) as admin:
+        everything = admin.get(f"/api/calls/{ranked.call_id}").json()
+
+    assert owned["best_profile_id"] == world.p_secret, (
+        f"the fixture is live and best-fit HAS an answer to give: A owns all "
+        f"three ranked profiles and P_secret scores highest; got "
+        f"{owned['best_profile_id']}"
+    )
+    assert shared["best_profile_id"] is None, (
+        f"B can READ P_org (org-wide) and P_priv (shared) and BOTH are ranked "
+        f"on this call, so a best-fit widened to the read rule would answer "
+        f"{world.p_priv} here. It answers None because the scope is ownership, "
+        f"deliberately; got {shared['best_profile_id']}"
+    )
+    assert everything["best_profile_id"] is None, (
+        f"an admin reads every profile, so a widened best-fit would answer "
+        f"{world.p_secret} here; got {everything['best_profile_id']}"
+    )
