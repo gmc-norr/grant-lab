@@ -47,7 +47,7 @@ it("useCallDetail omits the profile query when none is given", async () => {
   );
 });
 
-it("useHideCall POSTs the hide path WITH profile_id and invalidates ['calls']", async () => {
+it("useHideCall POSTs the hide path WITH profile_id and invalidates ['calls'] AND ['decision-counts']", async () => {
   const post = vi
     .spyOn(clientMod.api, "POST")
     .mockResolvedValue({ data: { hidden: true }, error: undefined } as never);
@@ -61,4 +61,7 @@ it("useHideCall POSTs the hide path WITH profile_id and invalidates ['calls']", 
     params: { path: { call_id: 5 }, query: { profile_id: 7 } },
   });
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ["calls"] });
+  // Hook-level on purpose: a per-call onSuccess is dropped by TanStack v5 if the
+  // caller unmounts before the response (final review, F1). The rail reads this key.
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ["decision-counts"] });
 });

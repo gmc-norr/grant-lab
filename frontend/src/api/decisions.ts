@@ -40,8 +40,9 @@ export function decisionCountsKey(profileId: number | null, filters: CountsFilte
 // the counts sit one triage behind for the rest of the session (App.tsx's
 // staleTime is 20 s).
 //
-// Every decision hook calls this in its OWN `onSuccess` — the four in this file
-// and `useHideCall`/`useUnhideCall` in api/calls.ts, which import it. It is
+// Every decision hook calls this in its OWN `onSuccess` — `useSaveCall` and
+// `useUnsaveCall` below, and `useHideCall`/`useUnhideCall` in api/calls.ts, which
+// import it. It is
 // deliberately not passed per-call at a mutate() site: TanStack v5 runs
 // mutate-level callbacks only while the observer still has listeners
 // (query-core mutationObserver.js: `if (this.#mutateOptions &&

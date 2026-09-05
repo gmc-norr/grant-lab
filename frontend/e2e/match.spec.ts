@@ -907,8 +907,8 @@ test("pressing u in Hidden returns the call to the inbox, and the rail count mov
 
   await page.keyboard.press("u");
 
-  // D19. THE RAIL IS CORRECT IMMEDIATELY. `useUnhideCall` invalidates only
-  // ["calls"], so the caller passes invalidateDecisions as its onSuccess; without
+  // D19. THE RAIL IS CORRECT IMMEDIATELY. `useUnhideCall` invalidates BOTH
+  // ["calls"] and ["decision-counts"] at hook level (invalidateDecisions); without
   // that the rail reads "Hidden 1 / Inbox 0" over a feed showing the opposite for
   // the whole of App.tsx's 20 s staleTime. The dry run of this task MEASURED that
   // stale rail and wrote it down as a live bug; it is fixed, so this asserts the
