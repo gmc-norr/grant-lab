@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import datetime
 from typing import Literal
 
@@ -35,6 +36,53 @@ from call_manager.web.profile_access import can_read_profile
 router = APIRouter()
 
 
+# Criteria whose rating is a machine-readable REASON CODE for the aggregate
+# score rather than a graded judgement. Single-sourced here because both the
+# list card and the detail page render the distinction.
+_REASON_CODE_CRITERIA = ("budget", "timeline", "trl", "embedding")
+
+
+def _criterion_common_fields(c: CallRankingCriterion) -> dict:
+    """The criterion fields the list and the detail page MUST agree on.
+
+    Copying the label lookup and the two derivations into the list response
+    would let the card call "Budget" something the detail page does not, with
+    nothing failing. `detail` is deliberately absent: it needs the Profile and
+    CallRanking objects, which the list does not load (and loading them per row
+    is the N+1 this task exists to avoid).
+
+    Both callers' queries carry `.order_by(CallRankingCriterion.criterion)` --
+    keep them in that same order (D5). Without it Postgres is free to hand back
+    each surface's chips in a different sequence, and this shared function
+    would not catch it.
+    """
+    return {
+        "criterion": c.criterion,
+        "label": criterion_label(c.criterion),
+        "rating": c.rating,
+        "is_topic_fit": c.criterion == "topic_fit",
+        "rationale": c.rationale,
+        "is_reason_code": c.criterion in _REASON_CODE_CRITERIA,
+        "quoted_evidence": c.quoted_evidence,
+    }
+
+
+class CallListCriterionOut(BaseModel):
+    """`CallDetailCriterionOut` minus `detail` -- see `_criterion_common_fields`.
+
+    `rationale` and `quoted_evidence` are on the LIST schema, not only the
+    detail page, because the card's chip expansion renders both (D10).
+    """
+
+    criterion: str
+    label: str
+    rating: str
+    is_topic_fit: bool
+    rationale: str | None
+    is_reason_code: bool
+    quoted_evidence: str | None
+
+
 class CallOut(BaseModel):
     id: int
     title: str
@@ -53,6 +101,29 @@ class CallOut(BaseModel):
     source_slug: str | None
     # None = no ranking row for this call/profile (the score itself is NOT NULL).
     aggregate_score: int | None
+    # --- the match card's body (spec §5) ---------------------------------
+    # Plain columns, all of them already loaded by the dashboard query:
+    # `build_dashboard_view` defers ONLY `embedding`, `full_text` and `raw`
+    # (with raiseload=True), so none of these costs an extra SELECT and none of
+    # them trips the raiseload contract. `summary` is the one that can be long;
+    # if the payload becomes a problem the lever is a `?fields=` projection --
+    # do NOT re-defer `summary`, which reintroduces one SELECT per row (D10).
+    programme: str | None
+    budget_min: int | None
+    budget_max: int | None
+    currency: str | None
+    url: str
+    summary: str | None
+    keywords: list[str]
+    # Per-profile. Empty when no profile is selected or the call is unranked --
+    # which is why the full edition's no-profile archive pays nothing for this.
+    criteria: list[CallListCriterionOut]
+    # "N things to check". `applicant_notes` is nullable and the local Gemma
+    # path always leaves it NULL, so this is 0 far more often than not.
+    applicant_note_count: int
+    # Its OWN column, not `applicant_note_count > 0`: an escalation can succeed
+    # and still carry zero notes when the analysis failed or was capped.
+    escalated: bool
 
 
 class SummaryOut(BaseModel):
@@ -538,10 +609,15 @@ def get_call_detail(
                 if ranking is not None:
                     criteria = list(
                         session.execute(
-                            select(CallRankingCriterion).where(
+                            select(CallRankingCriterion)
+                            .where(
                                 CallRankingCriterion.call_id == call_id,
                                 CallRankingCriterion.profile_id == profile_id,
                             )
+                            # D5: the same ORDER BY the list's batched query
+                            # carries, so both surfaces agree on the sequence
+                            # and not merely on the set.
+                            .order_by(CallRankingCriterion.criterion)
                         ).scalars()
                     )
 
@@ -614,18 +690,12 @@ def get_call_detail(
 
         criteria_out = [
             CallDetailCriterionOut(
-                criterion=c.criterion,
-                label=criterion_label(c.criterion),
-                rating=c.rating,
-                is_topic_fit=(c.criterion == "topic_fit"),
+                **_criterion_common_fields(c),
                 detail=(
                     _criterion_detail(c.criterion, call=call, profile=profile_obj, ranking=ranking)
                     if (profile_obj is not None and ranking is not None)
                     else None
                 ),
-                rationale=c.rationale,
-                is_reason_code=(c.criterion in ("budget", "timeline", "trl", "embedding")),
-                quoted_evidence=c.quoted_evidence,
             )
             for c in criteria
         ]
@@ -661,7 +731,10 @@ def get_calls(
         profile_id = resolve_profile_selection(
             session, user_id=user.id, raw_profile=profile, persist=False
         )
-        view = build_dashboard_view(
+        # Named `dashboard`, not `view`: the `view` parameter is still needed
+        # below (the criteria block reads `dashboard.effective`) and rebinding
+        # it to the result would shadow the request's own triage view.
+        dashboard = build_dashboard_view(
             session,
             user_id=user.id,
             source=source,
@@ -674,6 +747,39 @@ def get_calls(
             min_score=min_score,
             view=view,
         )
+        # Scope the chips to the profile the ranking join ACTUALLY used.
+        # `build_dashboard_view` degrades an unknown/inactive id to None
+        # internally and reports the result in `effective`; reading the local
+        # `profile_id` instead would let one payload answer with a score from
+        # no profile and chips from a suppressed one. `effective` is typed
+        # dict[str, object], hence the isinstance narrowing rather than a cast.
+        _eff = dashboard.effective["profile_id"]
+        criteria_profile_id = _eff if isinstance(_eff, int) else None
+
+        # ONE query for the whole page, not one per row. Reading
+        # `call.rankings[i].criteria` inside the comprehension below would be a
+        # lazy load per row -- invisible in a 1-row fixture and 50 round trips
+        # on a full page. It runs INSIDE this `with sf() as session` block
+        # because `dashboard.calls` holds instances attached to this session.
+        # tests/web/test_calls_list_query_count.py is the gate.
+        call_ids = [call.id for call, _ in dashboard.calls]
+        criteria_by_call: dict[int, list[CallRankingCriterion]] = defaultdict(list)
+        if criteria_profile_id is not None and call_ids:
+            for crit in session.execute(
+                select(CallRankingCriterion)
+                .where(
+                    CallRankingCriterion.profile_id == criteria_profile_id,
+                    # The PAGE, not the profile. Without this the query reads
+                    # the profile's entire criteria table on every request and
+                    # discards everything off-page -- one statement, identical
+                    # response, unbounded read.
+                    CallRankingCriterion.call_id.in_(call_ids),
+                )
+                # D5: deterministic, and the same ORDER BY the detail query got.
+                .order_by(CallRankingCriterion.criterion)
+            ).scalars():
+                criteria_by_call[crit.call_id].append(crit)
+
         items = [
             CallOut(
                 id=call.id,
@@ -684,18 +790,36 @@ def get_calls(
                 source_name=(call.source.name if call.source else None),
                 source_slug=(call.source.slug if call.source else None),
                 aggregate_score=(ranking.aggregate_score if ranking else None),
+                programme=call.programme,
+                budget_min=call.budget_min,
+                budget_max=call.budget_max,
+                currency=call.currency,
+                url=call.url,
+                summary=call.summary,
+                keywords=list(call.keywords or []),
+                criteria=[
+                    CallListCriterionOut(**_criterion_common_fields(crit))
+                    for crit in criteria_by_call[call.id]
+                ],
+                # `ranking` is Optional and None is the DEFAULT list state, not
+                # an edge case: the no-profile view has no rankings at all, and
+                # even a ranked view LEFT JOINs, so a newly ingested call has
+                # none. `len(ranking.applicant_notes or [])` without the guard
+                # is an AttributeError on the commonest row there is.
+                applicant_note_count=(0 if ranking is None else len(ranking.applicant_notes or [])),
+                escalated=bool(ranking is not None and ranking.escalated),
             )
-            for call, ranking in view.calls
+            for call, ranking in dashboard.calls
         ]
         facets = FacetsOut(
-            sources=[SourceFacet(slug=s.slug, name=s.name) for s in view.sources],
-            profiles=[ProfileFacet(id=p.id, name=p.name) for p in view.profiles],
+            sources=[SourceFacet(slug=s.slug, name=s.name) for s in dashboard.sources],
+            profiles=[ProfileFacet(id=p.id, name=p.name) for p in dashboard.profiles],
         )
     return DashboardOut(
         items=items,
-        summary=view.summary,
-        pagination=view.pagination,
-        ranking=view.ranking,
-        effective=view.effective,
+        summary=dashboard.summary,
+        pagination=dashboard.pagination,
+        ranking=dashboard.ranking,
+        effective=dashboard.effective,
         facets=facets,
     )

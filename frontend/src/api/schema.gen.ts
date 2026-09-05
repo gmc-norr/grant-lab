@@ -2645,24 +2645,67 @@ export interface components {
             /** Hidden */
             hidden: boolean;
         };
+        /**
+         * CallListCriterionOut
+         * @description `CallDetailCriterionOut` minus `detail` -- see `_criterion_common_fields`.
+         *
+         *     `rationale` and `quoted_evidence` are on the LIST schema, not only the
+         *     detail page, because the card's chip expansion renders both (D10).
+         */
+        CallListCriterionOut: {
+            /** Criterion */
+            criterion: string;
+            /** Is Reason Code */
+            is_reason_code: boolean;
+            /** Is Topic Fit */
+            is_topic_fit: boolean;
+            /** Label */
+            label: string;
+            /** Quoted Evidence */
+            quoted_evidence: string | null;
+            /** Rating */
+            rating: string;
+            /** Rationale */
+            rationale: string | null;
+        };
         /** CallOut */
         CallOut: {
             /** Aggregate Score */
             aggregate_score: number | null;
+            /** Applicant Note Count */
+            applicant_note_count: number;
+            /** Budget Max */
+            budget_max: number | null;
+            /** Budget Min */
+            budget_min: number | null;
+            /** Criteria */
+            criteria: components["schemas"]["CallListCriterionOut"][];
+            /** Currency */
+            currency: string | null;
             /** Deadline */
             deadline: string | null;
             /** Deadline Local Date */
             deadline_local_date: string | null;
+            /** Escalated */
+            escalated: boolean;
             /** Id */
             id: number;
+            /** Keywords */
+            keywords: string[];
+            /** Programme */
+            programme: string | null;
             /** Published At */
             published_at: string | null;
             /** Source Name */
             source_name: string | null;
             /** Source Slug */
             source_slug: string | null;
+            /** Summary */
+            summary: string | null;
             /** Title */
             title: string;
+            /** Url */
+            url: string;
         };
         /** CancelTurnResponse */
         CancelTurnResponse: {
