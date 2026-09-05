@@ -40,16 +40,43 @@ const CALLS = {
       source_name: "Vinnova",
       source_slug: "vinnova",
       deadline: null,
+      deadline_local_date: null,
       published_at: null,
       aggregate_score: 82,
+      // THE CARD'S OWN FIELDS. This fixture was written for CallRow, which read
+      // none of them; TriageCard calls `call.criteria.find(...)` and
+      // `call.keywords.map(...)` unconditionally, so an item without them takes
+      // the whole route into react-router's error boundary. MEASURED on this
+      // branch the moment the feed was mounted: 8 failed / 6 passed, every
+      // failure reported as "/ crashed" rather than as anything about the feed.
+      programme: null,
+      budget_min: null,
+      budget_max: null,
+      currency: null,
+      url: "https://example.org/calls/1",
+      summary: null,
+      keywords: [],
+      criteria: [],
+      applicant_note_count: 0,
+      escalated: false,
     },
   ],
   summary: { open_count: 1, high_score: 1, soon_deadline: 0 },
   pagination: { page: 1, limit: 50, has_prev: false, has_next: false, total: 1 },
   ranking: { pending: 0, failed: 0 },
-  effective: { profile_id: null, source: null, sort: "newest", show_closed: false },
-  facets: { sources: [], profiles: [] },
+  // A RESOLVED PROFILE. `profile_id: null` was the shipped shape here while the
+  // index was the archive list, where it meant "no profile filter". The triage
+  // feed reads it as "there is nothing to record a decision on": the rail's
+  // counts are not even requested, and every decision control stands down. A
+  // fixture in that state exercises none of the screen this task added.
+  effective: { profile_id: 1, source: null, sort: "newest", show_closed: false },
+  facets: { sources: [], profiles: [{ id: 1, name: "Group A" }] },
 };
+
+// The rail's counts. The catch-all's `{}` would render three blank counts rather
+// than crash, so this is realism, not a fix — but a blank rail is not what the
+// a11y and landing specs below are meant to be looking at.
+const DECISION_COUNTS = { inbox: 1, saved: 0, hidden: 0 };
 
 const CALL_DETAIL = {
   call: {
@@ -200,14 +227,23 @@ const ADMIN_DASH = {
 // unmatched call would get index.html, and `unwrap` turns a non-JSON or 401
 // response into a full-page nav to /login — a spec that silently ended up on the
 // login page would then "pass" its absence assertions.
+// The decision surface, whose QUERY STRING is half of what the request means:
+// `profile_id` is what makes a decision per-profile, and a client that dropped
+// it would look identical in a path-only log while 422-ing against the server.
+const DECISION_PATH = /^\/api\/calls\/(?:\d+\/(?:save|hide)|decisions\/counts)$/;
+
 async function mockApi(page: Page, seen: string[] = []): Promise<string[]> {
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
-    seen.push(`${route.request().method()} ${url.pathname}`);
+    const query = DECISION_PATH.test(url.pathname) ? url.search : "";
+    seen.push(`${route.request().method()} ${url.pathname}${query}`);
     const json = (body: unknown) =>
       route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
     if (url.pathname === "/api/me") return json(ME);
     if (url.pathname === "/api/calls") return json(CALLS);
+    if (url.pathname === "/api/calls/decisions/counts") return json(DECISION_COUNTS);
+    if (/^\/api\/calls\/\d+\/save$/.test(url.pathname)) return json({ state: "saved" });
+    if (/^\/api\/calls\/\d+\/hide$/.test(url.pathname)) return json({ hidden: true });
     if (/^\/api\/calls\/\d+$/.test(url.pathname)) return json(CALL_DETAIL);
     if (url.pathname === "/api/admin/dashboard") return json(ADMIN_DASH);
     if (url.pathname === "/api/admin/users") return json(ADMIN_USERS);

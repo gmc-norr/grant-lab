@@ -6,7 +6,6 @@ import { AccountNoAccess } from "./routes/AccountNoAccess";
 import { AccountPending } from "./routes/AccountPending";
 import { AuthError } from "./routes/AuthError";
 import { CallDetail } from "./routes/CallDetail";
-import { Dashboard } from "./routes/Dashboard";
 import { Login } from "./routes/Login";
 import { PreAuthLayout } from "./routes/PreAuthLayout";
 import { ProfileDetail } from "./routes/ProfileDetail";
@@ -15,6 +14,7 @@ import { ProfileNew } from "./routes/ProfileNew";
 import { ProfilesList } from "./routes/ProfilesList";
 import { Register } from "./routes/Register";
 import { Settings } from "./routes/Settings";
+import { TriageFeed } from "./routes/TriageFeed";
 import { SimpleShell } from "./shell/SimpleShell";
 
 // Call Match release 1. This file's import list IS the exclusion mechanism:
@@ -57,7 +57,12 @@ export const simpleRouter = createBrowserRouter([
   {
     element: <SimpleShell />,
     children: [
-      { index: true, element: <Dashboard /> },
+      // THE EDITION SPLIT, and it is this line rather than a branch inside a
+      // shared component. Dashboard/CallRow/MatchBadge/DashboardHeader/
+      // Pagination are the FULL edition's list; dropping the import here is what
+      // removes them from the match bundle (check_match_bundle.mjs measures it).
+      // None of them may be deleted — router.tsx still mounts them.
+      { index: true, element: <TriageFeed /> },
       { path: "calls/:id", element: <CallDetail /> },
       { path: "me", element: <Settings /> },
       { path: "profiles", element: <ProfilesList /> },

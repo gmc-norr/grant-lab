@@ -1,0 +1,271 @@
+/* Spec §5's researcher screen: ONE ~680 px column, plus a 240 px rail that holds
+   orientation and nothing else. The extra width on a 1440 px display goes to the
+   rail, never to the column — reading degrades past ~75 characters, so a
+   stretched column would be a regression dressed as responsiveness.
+
+   The single column IS the phone layout, which is half of why it was chosen; the
+   only breakpoint here moves the rail above the column. */
+.layout {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 2rem;
+  align-items: start;
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 4rem;
+}
+
+@media (max-width: 40rem) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1rem;
+  }
+}
+
+.rail {
+  position: sticky;
+  top: 1rem;
+}
+
+.railList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.railLink {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  /* 44px thumb target, matching SimpleShell's nav — the rail becomes a bottom
+     tab bar on a phone (spec §5, responsive exception 2). */
+  min-height: 44px;
+  padding: 0 0.6rem;
+  border-radius: 4px;
+  color: var(--app-muted);
+  text-decoration: none;
+  font-size: 0.9rem;
+}
+
+.railLink:hover {
+  background: var(--app-hover);
+  color: var(--app-text);
+}
+
+.railLink[aria-current="page"] {
+  background: var(--app-selected);
+  color: var(--app-text);
+  font-weight: 600;
+}
+
+.railCount {
+  font-variant-numeric: tabular-nums;
+  color: var(--app-dim);
+}
+
+.railProfile {
+  margin: 1.25rem 0 0.25rem;
+  padding: 0 0.6rem;
+  color: var(--app-dim);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+/* The profile picker (D11). It sits UNDER the "matching against" line because
+   it answers the question that line raises — "and what else could it be?" */
+.picker {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.pickerLink {
+  display: flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 0.6rem;
+  border-radius: 4px;
+  color: var(--app-muted);
+  text-decoration: none;
+  font-size: 0.85rem;
+}
+
+.pickerLink:hover {
+  background: var(--app-hover);
+  color: var(--app-text);
+}
+
+.pickerLink[aria-current="true"] {
+  color: var(--app-text);
+  font-weight: 600;
+}
+
+.column {
+  max-width: 680px;
+}
+
+.feed {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.status {
+  margin: 0 0 1rem;
+  color: var(--app-muted);
+}
+
+.nextPage {
+  margin: 1.25rem 0 0;
+  font-size: 0.9rem;
+}
+
+.nextPage a {
+  color: var(--app-link);
+}
+
+/* --- the card --- */
+
+.card {
+  padding: 1rem 0;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.card:focus {
+  outline: none;
+}
+
+/* The focused card is the expanded one, and it says so with a rule in the
+   margin rather than a box — type carries hierarchy here, not borders. */
+.cardExpanded {
+  box-shadow: inset 3px 0 0 var(--app-accent-bright);
+  padding-left: 0.9rem;
+  margin-left: -0.9rem;
+}
+
+.cardTitle {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.cardTitle a {
+  color: var(--app-text);
+  text-decoration: none;
+}
+
+.cardTitle a:hover {
+  text-decoration: underline;
+}
+
+.cardMeta,
+.cardFacts {
+  margin: 0.25rem 0 0;
+  color: var(--app-muted);
+  font-size: 0.85rem;
+}
+
+.cardBody {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-top: 0.7rem;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.cardBody p {
+  margin: 0;
+}
+
+.noSummary {
+  color: var(--app-muted);
+}
+
+/* Spec §5: quoted evidence is the ONE serif in the product, so the funder's
+   sentence reads as *they said this* rather than *the model thinks this*. Same
+   decision as CriterionChips.module.css's .quote — the two must not drift. */
+.quote {
+  margin: 0;
+  padding-left: 0.7rem;
+  border-left: 2px solid var(--app-border-strong);
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 0.95rem;
+}
+
+.keywords {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.keyword {
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  background: var(--app-hover);
+  color: var(--app-muted);
+  font-size: 0.75rem;
+}
+
+.cardActions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+/* Quiet by design: un-decide is the correction, not the primary action, and the
+   teal accent is reserved for what the screen is actually FOR. */
+.undecide {
+  min-height: 32px;
+  padding: 0 0.7rem;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--app-muted);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.undecide:hover {
+  background: var(--app-hover);
+  color: var(--app-text);
+}
+
+/* --- inbox zero --- */
+
+.empty {
+  padding: 3rem 0;
+  text-align: center;
+}
+
+.emptyHeadline {
+  margin: 0;
+  font-size: 1.4rem;
+  font-weight: 600;
+  color: var(--app-text);
+}
+
+.emptyBody {
+  margin: 0.5rem auto 0;
+  max-width: 28rem;
+  color: var(--app-muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.emptyBody kbd {
+  padding: 0.05rem 0.3rem;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 3px;
+  background: var(--app-hover);
+  font-family: inherit;
+  font-size: 0.85em;
+}

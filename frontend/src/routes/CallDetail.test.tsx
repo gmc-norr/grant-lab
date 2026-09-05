@@ -28,20 +28,25 @@ function LocationProbe() {
   return <span data-testid="loc">{useLocation().pathname}</span>;
 }
 
-function renderDetail(url = "/calls/5?profile=7") {
-  const qc = new QueryClient();
-  return render(
-    <MantineProvider theme={theme} defaultColorScheme="dark">
-      <QueryClientProvider client={qc}>
-        <MemoryRouter initialEntries={[url]}>
-          <Routes>
-            <Route path="/calls/:id" element={<><CallDetail /><LocationProbe /></>} />
-            <Route path="/" element={<LocationProbe />} />
-          </Routes>
-        </MemoryRouter>
-      </QueryClientProvider>
-    </MantineProvider>,
-  );
+// Optional `qc`: the decision-counts gate below spies on invalidateQueries,
+// which means the test must hold the SAME QueryClient instance the component
+// uses rather than one buried inside this helper.
+function renderDetail(url = "/calls/5?profile=7", qc = new QueryClient()) {
+  return {
+    qc,
+    ...render(
+      <MantineProvider theme={theme} defaultColorScheme="dark">
+        <QueryClientProvider client={qc}>
+          <MemoryRouter initialEntries={[url]}>
+            <Routes>
+              <Route path="/calls/:id" element={<><CallDetail /><LocationProbe /></>} />
+              <Route path="/" element={<LocationProbe />} />
+            </Routes>
+          </MemoryRouter>
+        </QueryClientProvider>
+      </MantineProvider>,
+    ),
+  };
 }
 
 const RANKED = {
@@ -213,4 +218,66 @@ it("renders deadline_local_date instead of slicing the UTC string", async () => 
   // The local date (2026-09-16) must appear, not the UTC slice (2026-09-15).
   expect(screen.getByText("2026-09-16")).toBeInTheDocument();
   expect(screen.queryByText("2026-09-15")).not.toBeInTheDocument();
+});
+
+// -------------------------------------------------------------------------
+// Gate 15 — the triage rail sits on another screen, and this page's decisions
+// move it. `useHideCall`/`useUnhideCall` (api/calls.ts) invalidate only
+// ["calls"]: they predate the rail and CallDetail has no rail of its own. With
+// App.tsx's staleTime of 20 s, a decision made here leaves the feed's
+// ["decision-counts"] query reading its pre-decision numbers for up to twenty
+// seconds — measured, and the reason both mutations pass invalidateDecisions as
+// a per-call onSuccess. See TriageFeed.decide for the same pattern.
+// -------------------------------------------------------------------------
+it("Undo also invalidates the rail's decision-counts, not only the calls list", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: RANKED, error: undefined } as never);
+  vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { hidden: true }, error: undefined } as never);
+  vi.spyOn(clientMod.api, "DELETE").mockResolvedValue({ data: { hidden: false }, error: undefined } as never);
+  const qc = new QueryClient();
+  const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+  renderDetail("/calls/5?profile=7", qc);
+  fireEvent.click(await screen.findByRole("button", { name: /hide this call/i }));
+  fireEvent.click(screen.getByRole("button", { name: /yes, hide it/i }));
+  const undoBtn = await screen.findByRole("button", { name: /undo/i });
+  // Discard whatever the HIDE step already invalidated, so what follows is a
+  // statement about UNDO alone rather than about the pair of them.
+  invalidateSpy.mockClear();
+  fireEvent.click(undoBtn);
+  await waitFor(() => expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["decision-counts"] }));
+  // The calls list is still invalidated too — this is additive, not instead-of.
+  expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["calls"] });
+});
+
+it("Hide invalidates the rail's decision-counts as well", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: RANKED, error: undefined } as never);
+  vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { hidden: true }, error: undefined } as never);
+  vi.spyOn(clientMod.api, "DELETE").mockResolvedValue({ data: { hidden: false }, error: undefined } as never);
+  const qc = new QueryClient();
+  const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+  renderDetail("/calls/5?profile=7", qc);
+  fireEvent.click(await screen.findByRole("button", { name: /hide this call/i }));
+  invalidateSpy.mockClear();
+  fireEvent.click(screen.getByRole("button", { name: /yes, hide it/i }));
+  await waitFor(() => expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["decision-counts"] }));
+  expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["calls"] });
+});
+
+it("the back link returns to the feed the reader arrived from, view and all (D11)", async () => {
+  // B31c killer. `to="/"` drops the triage view and the profile: a reader who
+  // opened a call from Hidden lands back in the Inbox of no profile in
+  // particular, which is not where they were.
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: RANKED, error: undefined } as never);
+  renderDetail("/calls/5?profile=7&view=hidden");
+  await screen.findByRole("heading", { name: "Genomics Grant" });
+  expect(screen.getByRole("link", { name: /all calls/i })).toHaveAttribute(
+    "href",
+    "/?profile=7&view=hidden",
+  );
+});
+
+it("the back link is a bare / when the reader arrived with no search at all", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: RANKED, error: undefined } as never);
+  renderDetail("/calls/5");
+  await screen.findByRole("heading", { name: "Genomics Grant" });
+  expect(screen.getByRole("link", { name: /all calls/i })).toHaveAttribute("href", "/");
 });
