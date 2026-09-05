@@ -32,6 +32,23 @@ const GRID_AUTOFILL = (min: string) => ({
 // edition is the only remaining way to reach WorkspaceCreate. noCockpitLinks
 // .test.tsx EXEMPTs this file, so both branches are pinned by CallDetailBody
 // .test.tsx and CallDetail.test.tsx instead.
+//
+// The RAW AGGREGATE is likewise GATED, not deleted. Spec §4.2: "The band (high /
+// medium / low) is retained for sorting and for the digest, but the raw aggregate
+// is not shown in the UI" — and the same rule applies, so deleting it would strip
+// the score from the full edition. THREE children of the ranking card print that
+// raw number, not the one the spec names: the figure, its "Aggregate score"
+// heading, and the escalation note — `escalated_from_score` is an aggregate score
+// too, the LOCAL one from before the remote re-rank (ranking/rank_pair.py assigns
+// it `local_agg.score`; ranking/golden_set.py subtracts it from `aggregate_score`
+// as the same unit). All three are gated.
+//
+// What deliberately STAYS in the match edition: the reason badge, the model
+// attribution and the rationale, which name a reason instead of a number, and the
+// cosine line — gating that would be theatre, because the same value reaches the
+// match edition through the criterion breakdown below, which §4.2 keeps
+// (web/call_detail_view.py writes "Cosine similarity 0.420 (pass threshold 0.30)."
+// into a criterion `detail`).
 export function CallDetailBody({ call, ranking, criteria, best_profile_id }: CallDetail) {
   const startParams = new URLSearchParams({ call_id: String(call.id), call_title: call.title });
   if (best_profile_id != null) startParams.set("profile_id", String(best_profile_id));
@@ -41,6 +58,23 @@ export function CallDetailBody({ call, ranking, criteria, best_profile_id }: Cal
     : "low";
   const figureColor =
     band === "strong" ? "var(--app-good)" : band === "mid" ? "var(--app-warn)" : "var(--app-dim)";
+
+  // GATE 4 — no empty bordered card. Once the three raw-aggregate guards above
+  // have fired, a match-edition ranking card can hold nothing a researcher can
+  // act on: `aggregate_reason_label` is null (it is null in every fixture in this
+  // repo), `rationale` is "" (the wire type is `str`, not `str | None`), and
+  // `embed_similarity` is null whenever a vector is missing. All that is left is
+  // the model-attribution badge, which is chrome rather than a match reason — a
+  // bordered, tinted card whose entire content is "Analyzed by X". So the section
+  // renders in `match` only when at least one of those three carries something.
+  // In `full` the figure and its heading are always inside the card, so the card
+  // is never empty and this expression is not consulted.
+  const rankingCardHasContent =
+    !isMatchEdition ||
+    (ranking != null &&
+      (Boolean(ranking.aggregate_reason_label) ||
+        Boolean(ranking.rationale) ||
+        ranking.embed_similarity != null));
 
   return (
     <>
@@ -60,15 +94,17 @@ export function CallDetailBody({ call, ranking, criteria, best_profile_id }: Cal
         )}
       </Box>
 
-      {ranking && (
+      {ranking && rankingCardHasContent && (
         <Box component="section" aria-label="Ranking">
           <Card component="article" withBorder radius="md" p="md" bg="var(--app-sidebar)">
             <Group align="flex-start" gap="md" wrap="nowrap">
-              <Text data-band={band} fz="2.5rem" fw={700} ta="center" c={figureColor} miw="3rem" lh={1}>
-                {ranking.aggregate_score}
-              </Text>
+              {!isMatchEdition && (
+                <Text data-band={band} fz="2.5rem" fw={700} ta="center" c={figureColor} miw="3rem" lh={1}>
+                  {ranking.aggregate_score}
+                </Text>
+              )}
               <Stack gap="0.4rem">
-                <Text fw={700}>Aggregate score</Text>
+                {!isMatchEdition && <Text fw={700}>Aggregate score</Text>}
                 {ranking.aggregate_reason_label && (
                   <Badge variant="default" tt="none" radius="xl">{ranking.aggregate_reason_label}</Badge>
                 )}
@@ -81,7 +117,7 @@ export function CallDetailBody({ call, ranking, criteria, best_profile_id }: Cal
                 {ranking.embed_similarity != null && (
                   <Text c="dimmed" fz="0.8rem">Cosine similarity: {ranking.embed_similarity.toFixed(3)}</Text>
                 )}
-                {ranking.escalated && ranking.escalated_from_score != null && (
+                {!isMatchEdition && ranking.escalated && ranking.escalated_from_score != null && (
                   <Text c="dimmed" fz="0.8rem">
                     Escalated from {ranking.escalated_from_score} (analysis by {ranking.analysis_model_label}).
                   </Text>
