@@ -1,6 +1,6 @@
 # Prior investigations — read this before measuring anything
 
-31 documents in `notes/` and `reviews/` record work already done: spikes with verdicts,
+33 documents in `notes/` and `reviews/` record work already done: spikes with verdicts,
 multi-agent reviews with verified defect tallies, and outside opinions. They are indexed
 here **by the question they answer**, because they are named by date and slice, which is
 useless when you are trying to find out whether someone has already looked at something.
@@ -53,6 +53,16 @@ The same ask, answered independently at 615 lines: structural alternatives to th
 generation fence for disable, restore and purge.
 
 ## Whole-project architecture reviews
+
+**[reviews/2026-09-05-architecture-review.md](reviews/2026-09-05-architecture-review.md)**
+*What is the architecture at `ed1153a3`, after review §7 closed and the Call Match
+edition split landed — and does the split hold at the process boundary?* Measured, not
+inherited: package import graph via `ast` (four package-level cycles, named by line),
+a match-edition boot that still loads `claude_agent_sdk`, `pycrdt` and 142 of 237
+`call_manager` modules, the DRY-drift species re-counted against the 2026-08-20 SOLID
+review (unchanged: 4 pass runners, 4 evict ceremonies, `ToolContext` 29 fields), the
+suite writing 2 rows per run into the live golden-set history, and still **0 git
+remotes**. Grade **B+**. Carries a release-1 structural watch list and the order of work.
 
 **[reviews/2026-09-02-current-tree-project-review.md](reviews/2026-09-02-current-tree-project-review.md)**
 *What is still true on `7bdc2bb3` after the morning's `fix/review-2026-09-02` merge?*
