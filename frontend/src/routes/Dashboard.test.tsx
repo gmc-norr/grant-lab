@@ -126,10 +126,15 @@ it("threads the dashboard's effective profile into BOTH row links in the full ed
   expect(start.getAttribute("href") ?? "").toContain("profile_id=5");
 });
 
-it("the MATCH dashboard threads the profile and emits no /cockpit link at all", async () => {
-  // The dashboard is the release-1 landing page, so this is the whole-page check
-  // that gate 4's source scan can no longer make for CallRow.tsx: no rendered
-  // href may point into the excluded half.
+it("under the match edition flag Dashboard threads the profile and emits no /cockpit link", async () => {
+  // NOT a statement about the release-1 landing page any more. Task 7 mounted
+  // TriageFeed at "/" in router.simple.tsx, so `Dashboard` is the FULL edition's
+  // list and is not in the match bundle at all — check_match_bundle.mjs is what
+  // pins that. What survives here is narrower and still worth holding: with
+  // `isMatch` true this component drops the Start-drafting link and emits no
+  // href into the excluded half, so the flag it still reads keeps working. The
+  // whole-page check for the page that IS the landing page lives in
+  // e2e/match.spec.ts, against the bundle that ships.
   edition.isMatch = true;
   vi.spyOn(clientMod.api, "GET").mockResolvedValue(
     itemsBody([row(1, "Call one", null)], {

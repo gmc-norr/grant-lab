@@ -828,9 +828,14 @@ describe("Task 8 — no profile is an onboarding screen, not a firehose", () => 
   });
 
   it("fires no decision when there is no profile to record it on", async () => {
-    // The key listener is unmounted with the feed, so this is a statement about
-    // the ONBOARDING screen: `s` over it must not reach the API. It awaits past
-    // TanStack's microtask deferral — see expectNoDecision.
+    // NOT because the listener is gone — it is still bound. The keydown effect
+    // runs on every render of TriageFeed, including the one that returns the
+    // onboarding screen, so `s` and `h` over that screen still reach onKey with
+    // three items in scope. What stands the decision down is the FIRST LINE of
+    // decide() and undecide(): `if (profileId === null) return`. That is the
+    // guard this test protects, and deleting it fires a POST with no profile —
+    // a guaranteed 422. It awaits past TanStack's microtask deferral — see
+    // expectNoDecision.
     const { post, del } = stub({ items: THREE, profileId: null, profiles: [] });
     renderFeed();
     await screen.findByRole("heading", { name: "No research profile yet." });
