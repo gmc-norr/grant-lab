@@ -18,7 +18,7 @@ import pathlib
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-MODELS = REPO / "src/grant_lab/db/models.py"
+MODELS_PKG = REPO / "src/grant_lab/db/models"
 CONFIG = REPO / "src/grant_lab/config.py"
 FENCING = REPO / "src/grant_lab/proposal_assist/fencing.py"
 INVENTORY = REPO / "tests/fencing/inventory.py"
@@ -53,10 +53,36 @@ class Table:
         self.fks: list[tuple[str, str, str]] = []
 
 
+def _model_modules() -> list[pathlib.Path]:
+    """The model modules, in the order `models/__init__.py` imports them.
+
+    Ordered by that file rather than alphabetically so the generated document
+    keeps following the package's own subsystem grouping, and so a module added
+    to the package is picked up here without editing this script. Every .py in
+    the package must be reachable this way -- an unimported module would be
+    silently missing from ARCHITECTURE.md, which is the failure this assert
+    exists to prevent.
+    """
+    init = (MODELS_PKG / "__init__.py").read_text()
+    order: list[pathlib.Path] = []
+    for node in ast.parse(init).body:
+        if isinstance(node, ast.ImportFrom) and node.module:
+            _, _, tail = node.module.rpartition(".")
+            path = MODELS_PKG / f"{tail}.py"
+            if path.is_file() and path not in order:
+                order.append(path)
+    found = {p for p in MODELS_PKG.glob("*.py") if p.name != "__init__.py"}
+    missing = sorted(p.name for p in found - set(order))
+    assert not missing, f"model modules not imported by models/__init__.py: {missing}"
+    return order
+
+
 def parse_models() -> list[Table]:
-    tree = ast.parse(MODELS.read_text())
     out: list[Table] = []
-    for cls in [n for n in tree.body if isinstance(n, ast.ClassDef)]:
+    classes: list[ast.ClassDef] = []
+    for path in _model_modules():
+        classes += [n for n in ast.parse(path.read_text()).body if isinstance(n, ast.ClassDef)]
+    for cls in classes:
         tname = None
         for stmt in cls.body:
             if (

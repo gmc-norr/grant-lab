@@ -136,7 +136,12 @@ F3A_COLUMN_FILES = frozenset({
     # Endgame Group F (2026-08-24 Task 6) — claim_next_setup_job now stamps
     # claimed_at_generation in its locking statement and run_one threads it into _m1.
     "proposal_assist/phases/setup.py",
-    "db/models.py",
+    # The column DECLARATIONS. One entry until 2026-09-05, when models.py was
+    # split into a package; these are the three modules whose tables carry
+    # claimed_at_generation, not three new call sites.
+    "db/models/jobs.py",
+    "db/models/references.py",
+    "db/models/workspaces.py",
 })
 
 #: A SEPARATE, EXACT set for importing the F1 fencing primitives. Empty through

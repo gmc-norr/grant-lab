@@ -192,7 +192,7 @@ EXPECTED_DELEGATION_PINS = frozenset(
 # Whole modules. (alembic/versions/0070_profile_visibility.py backfills the
 # viewer table, but it lives outside src/ and so is never scanned.)
 EXEMPT_MODULES: dict[str, str] = {
-    "db/models.py": "declares Profile.visibility and the ProfileViewer table",
+    "db/models/profiles.py": "declares Profile.visibility and the ProfileViewer table",
     DEFINITION: "IS the single definition of the read rule",
 }
 

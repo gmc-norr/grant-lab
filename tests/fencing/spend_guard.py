@@ -495,7 +495,7 @@ def llm_spend_writers() -> list[str]:
     REFERENCES the name, however it was imported (bare, aliased, or qualified as
     `models.LlmSpend`). That over-reports by design: a module that merely reads
     the table is also reported, and the test's expected list is the audit. Two
-    modules are allowed: `db/models.py` declares the class, and
+    modules are allowed: `db/models/spend.py` declares the class, and
     `proposal_assist/spend.py` is the writer.
     """
     out: list[str] = []

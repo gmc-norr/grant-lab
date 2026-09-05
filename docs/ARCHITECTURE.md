@@ -31,13 +31,13 @@ Read this before claiming two tables share, or do not share, a rule.
 
 - `status IN ('queued','running')` — 4 table(s): coherence_jobs, evaluator_jobs, review_runs, uncited_claims_jobs
 - `oidc_sub IS NOT NULL` — 1 table(s): users
-- `is_active = true` — 1 table(s): profiles
-- `status IN ('pending', 'running')` — 1 table(s): ranking_jobs
-- `kind = 'rubric_initialized'` — 1 table(s): workspace_events
 - `status = 'running'` — 1 table(s): turn_jobs
 - `status IN ('queued', 'running')` — 1 table(s): attachment_jobs
-- `citekey IS NOT NULL` — 1 table(s): references
 - `status = 'queued'` — 1 table(s): claim_analysis_jobs
+- `is_active = true` — 1 table(s): profiles
+- `status IN ('pending', 'running')` — 1 table(s): ranking_jobs
+- `citekey IS NOT NULL` — 1 table(s): references
+- `kind = 'rubric_initialized'` — 1 table(s): workspace_events
 
 ## Tables
 

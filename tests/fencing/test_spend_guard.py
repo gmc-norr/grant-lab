@@ -629,11 +629,14 @@ def test_the_ledger_has_exactly_one_writer():
     # LlmSpend row and called record_spend.
     # Reference-level, not constructor-level: a second writer using
     # `session.execute(insert(LlmSpend)...)` or `bulk_insert_mappings` builds no
-    # LlmSpend object, so a constructor check could never have seen it. models.py
-    # is the declaration; spend.py is the writer. Anything else appearing here is
-    # a second module touching the ledger class and needs a reason.
+    # LlmSpend object, so a constructor check could never have seen it.
+    # db/models/spend.py is the declaration (it was db/models.py until the
+    # 2026-09-05 package split); proposal_assist/spend.py is the writer. Two
+    # files named spend.py, doing opposite jobs -- read the directory, not the
+    # basename. Anything else appearing here is a second module touching the
+    # ledger class and needs a reason.
     assert llm_spend_writers() == [
-        "grant_lab/db/models.py",
+        "grant_lab/db/models/spend.py",
         "grant_lab/proposal_assist/spend.py",
     ]
 
