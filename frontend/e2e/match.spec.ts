@@ -78,6 +78,16 @@ const CALLS = {
 // a11y and landing specs below are meant to be looking at.
 const DECISION_COUNTS = { inbox: 1, saved: 0, hidden: 0 };
 
+// The OTHER index screen: no profile resolved. Release 1's answer is an
+// invitation, NOT the fifty-call archive. It keeps CALLS' item deliberately —
+// the server really does answer with calls in this state — so the scenario below
+// can assert the browser renders none of them.
+const CALLS_NO_PROFILE = {
+  ...CALLS,
+  effective: { profile_id: null, source: null, sort: "newest", show_closed: false },
+  facets: { sources: [], profiles: [] },
+};
+
 const CALL_DETAIL = {
   call: {
     id: 1,
@@ -423,6 +433,34 @@ test("no critical a11y violations on the release-1 landing page", async ({ page 
   await expect(page.getByRole("listitem").first()).toBeVisible({ timeout: 10_000 });
   const results = await new AxeBuilder({ page }).analyze();
   expect(results.violations.filter((v) => v.impact === "critical")).toEqual([]);
+});
+
+test("with no profile the landing page is an invitation, not the archive", async ({ page }) => {
+  // The server still answers with calls in this state — dashboard.py's unranked
+  // fallback is deliberately untouched, and the full edition keeps it — so the
+  // fixture keeps CALLS' one item on purpose: the point is that the browser
+  // renders NONE of them. This is the only place the branch is checked against
+  // the REAL match bundle rather than a jsdom render of the component.
+  await mockApi(page);
+  await page.route(
+    (url) => url.pathname === "/api/calls",
+    (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(CALLS_NO_PROFILE),
+      }),
+  );
+  await gotoRendered(page, "/");
+  await expect(page.getByRole("heading", { name: "No research profile yet." })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Create a research profile" })).toHaveAttribute(
+    "href",
+    "/profiles/new",
+  );
+  // THE FEED IS GONE, and these are the assertions with teeth: a screen that
+  // rendered the onboarding copy ABOVE the list would pass the two above.
+  await expect(page.getByRole("link", { name: "Genomics Grant" })).toHaveCount(0);
+  await expect(page.getByRole("navigation", { name: "Triage views" })).toHaveCount(0);
 });
 
 test("the account menu offers Settings as well as Sign out", async ({ page }) => {

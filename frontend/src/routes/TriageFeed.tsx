@@ -13,6 +13,7 @@ import {
   type TriageView,
 } from "../api/decisions";
 import { TriageCard } from "./TriageCard";
+import { TriageEmptyProfile } from "./TriageEmptyProfile";
 import styles from "./TriageFeed.module.css";
 
 // The match edition's index screen (spec §5). A single ~680 px expanding column
@@ -233,6 +234,22 @@ export function TriageFeed() {
         Couldn&apos;t load calls.
       </p>
     );
+  }
+
+  // NO PROFILE IS A DIFFERENT SCREEN, and it REPLACES the feed rather than
+  // sitting above it. The server still answers with the unranked fallback here
+  // (dashboard.py is untouched by design, so the FULL edition keeps its
+  // browsable archive), so returning the layout with an empty column would
+  // render every open call in the database ranked against nothing — the
+  // firehose release 1 exists to remove.
+  //
+  // The rail goes with it: its counts are not even fetched without a profile
+  // (useDecisionCounts is `enabled: profileId != null`, and profile_id is
+  // REQUIRED on that route), and Saved/Hidden hold nothing to show until a
+  // profile is picked. Reaching them again is one link away, on the screen
+  // below.
+  if (profileId === null) {
+    return <TriageEmptyProfile profiles={data.facets.profiles} />;
   }
 
   const profileName = data.facets.profiles.find((p) => p.id === profileId)?.name ?? null;

@@ -139,6 +139,7 @@ REQUIRED_SCENARIOS = [
     "an excluded route renders the in-app soft 404, not a cockpit",
     "the light ground is actually PAINTED, not merely declared",
     "no critical a11y violations on the release-1 landing page",
+    "with no profile the landing page is an invitation, not the archive",
     "the account menu offers Settings as well as Sign out",
     "the owner's sharing card names who a private profile is shared with",
     "moving the sharing control sends the position it was moved TO, both ways",
@@ -165,13 +166,14 @@ def test_the_match_spec_declares_every_required_scenario():
 
 
 def test_the_match_spec_actually_asserts_things():
-    """`pnpm run e2e:match` over fourteen empty test bodies exits 0. This is the
+    """`pnpm run e2e:match` over fifteen empty test bodies exits 0. This is the
     count that stops that.
 
-    **34 `expect(` calls in live code, MEASURED 2026-09-04** by running this test's
+    **38 `expect(` calls in live code, MEASURED 2026-09-05** by running this test's
     own regex over the comment-stripped spec, and written down as what the command
     printed — not remembered. (An earlier draft of this line said 40 from memory
-    and failed on its first run.)
+    and failed on its first run.) It was 34 until Task 8 added the no-profile
+    scenario and its four assertions.
 
     EQUALITY, not a floor. The previous version asserted `>= 18` against a real 22,
     and four spare assertions are four assertions anyone can delete without a gate
@@ -181,8 +183,8 @@ def test_the_match_spec_actually_asserts_things():
     measurement."""
     src = "\n".join(_spec_source_lines())
     expects = len(re.findall(r"\bexpect\(", src))
-    assert expects == 34, (
-        f"the browser smoke has {expects} expect() calls, this gate pins 34 — "
+    assert expects == 38, (
+        f"the browser smoke has {expects} expect() calls, this gate pins 38 — "
         "if the change was deliberate, re-measure and update the number here"
     )
     # The two release-1 CRITICALs the spec exists to catch, in live code.

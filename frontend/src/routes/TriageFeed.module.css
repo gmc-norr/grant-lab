@@ -269,3 +269,42 @@
   font-family: inherit;
   font-size: 0.85em;
 }
+
+/* --- no profile: the onboarding screen (NOT inbox zero) --- */
+
+/* One centred column with NO rail: there are no counts to orient by yet, and a
+   rail of em-dashes beside an invitation is furniture, not orientation. */
+.onboarding {
+  max-width: 34rem;
+  margin: 0 auto;
+  padding: 4rem 1rem;
+}
+
+.onboardingHeadline {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--app-text);
+}
+
+.onboardingBody {
+  margin: 0.75rem 0 0;
+  color: var(--app-muted);
+  font-size: 0.95rem;
+  line-height: 1.55;
+}
+
+/* The rail's .pickerLink is deliberately quiet — it sits under a label in 240 px
+   of chrome. Here the same list IS the screen's primary action, so it gets the
+   body colour and a 44 px thumb target instead of the rail's 36 px. The list
+   reset itself (.picker) is shared. */
+.onboardingPickerLink {
+  min-height: 44px;
+  color: var(--app-text);
+  font-size: 0.95rem;
+}
+
+.createLink {
+  color: var(--app-link);
+}

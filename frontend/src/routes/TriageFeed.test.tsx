@@ -760,3 +760,82 @@ describe("reviewer Minor 3 — the cursor also resets when the PAGE changes, not
     );
   });
 });
+
+describe("Task 8 — no profile is an onboarding screen, not a firehose", () => {
+  // THE FIXTURE GIVES THREE ITEMS WITH profile_id null ON PURPOSE: that is what
+  // the server really sends in this state (dashboard.py's unranked fallback is
+  // deliberately untouched, and the full edition keeps it). An `items: []`
+  // fixture would let a component that renders the onboarding screen ABOVE the
+  // feed pass every absence assertion for free.
+  it("gate 1 — renders the onboarding screen INSTEAD of the feed", async () => {
+    const { get } = stub({ items: THREE, profileId: null, profiles: [] });
+    const { container } = renderFeed();
+    expect(
+      await screen.findByRole("heading", { name: "No research profile yet." }),
+    ).toBeInTheDocument();
+    // THE FEED IS GONE — not empty, GONE. Asserting the onboarding copy alone
+    // passes a component that renders both, so three separate structures: the
+    // cards, the rail that frames them, and the inbox-zero panel.
+    expect(container.querySelectorAll("[data-call-id]")).toHaveLength(0);
+    expect(container.querySelector("[data-count]")).toBeNull();
+    expect(container.querySelector("[data-empty]")).toBeNull();
+    // The rail is gone with the feed, so the three view tabs are unreachable
+    // until a profile is picked (recorded decision).
+    expect(screen.queryByRole("navigation", { name: "Triage views" })).toBeNull();
+    // And the counts query is never fired — profile_id is a REQUIRED int there,
+    // so a request in this state is a 422 the user would never see.
+    expect(gets(get, "/api/calls/decisions/counts")).toHaveLength(0);
+  });
+
+  // Gate 2, in BOTH directions and in one test: inbox zero says *you are done*,
+  // this says *you have not started*, and shipping one for the other is exactly
+  // the failure this catches. Cross-absence, not a string comparison — `A !== B`
+  // passes for a component that renders neither.
+  it("gate 2 — says something DIFFERENT from inbox zero, in both directions", async () => {
+    stub({ items: THREE, profileId: null, profiles: [] });
+    const noProfile = renderFeed();
+    await screen.findByRole("heading", { name: "No research profile yet." });
+    expect(noProfile.container.textContent).not.toContain("Inbox zero.");
+    expect(noProfile.container.textContent).not.toContain("You have triaged every call");
+    noProfile.unmount();
+
+    stub({ items: [], counts: { inbox: 0, saved: 4, hidden: 12 } });
+    const inboxZero = renderFeed();
+    expect(await screen.findByText("Inbox zero.")).toBeInTheDocument();
+    expect(inboxZero.container.textContent).not.toContain("No research profile yet.");
+    expect(inboxZero.container.textContent).not.toContain("Pick a research profile.");
+    expect(inboxZero.container.querySelector('[data-screen="no-profile"]')).toBeNull();
+  });
+
+  // Gate 3. A user who already has profiles is offered them; sending them to
+  // /profiles/new ALONE asks for a duplicate of what they already own.
+  it("gate 3 — offers the readable profiles when the user has some but none is selected", async () => {
+    stub({
+      items: THREE,
+      profileId: null,
+      profiles: [
+        { id: 7, name: "Molecular oncology" },
+        { id: 9, name: "Clinical genomics" },
+      ],
+    });
+    const { container } = renderFeed();
+    await screen.findByRole("heading", { name: "Pick a research profile." });
+    const picks = [...container.querySelectorAll("[data-profile-pick]")];
+    expect(picks.map((el) => el.getAttribute("href"))).toEqual(["/?profile=7", "/?profile=9"]);
+    expect(screen.queryByRole("heading", { name: "No research profile yet." })).toBeNull();
+    // The other branch of gate 3 lives in TriageEmptyProfile.test.tsx: with no
+    // profiles there is /profiles/new and NO picker.
+  });
+
+  it("fires no decision when there is no profile to record it on", async () => {
+    // The key listener is unmounted with the feed, so this is a statement about
+    // the ONBOARDING screen: `s` over it must not reach the API. It awaits past
+    // TanStack's microtask deferral — see expectNoDecision.
+    const { post, del } = stub({ items: THREE, profileId: null, profiles: [] });
+    renderFeed();
+    await screen.findByRole("heading", { name: "No research profile yet." });
+    fireEvent.keyDown(document.body, { key: "s" });
+    fireEvent.keyDown(document.body, { key: "h" });
+    await expectNoDecision(post, del);
+  });
+});
