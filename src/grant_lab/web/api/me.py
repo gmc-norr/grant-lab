@@ -7,10 +7,6 @@ from sqlalchemy import delete, select
 from grant_lab.auth.dependencies import get_current_user
 from grant_lab.auth.passwords import WeakPassword, hash_password, verify_password
 from grant_lab.db.models import Profile, Subscription, User
-from grant_lab.proposal_assist.collab.permissions import (
-    WS_RECONNECTABLE_CLOSE,
-    signal_user_revocation,
-)
 from grant_lab.web.dashboard import set_default_profile
 from grant_lab.web.profile_access import readable_profile_ids
 
@@ -192,6 +188,13 @@ def change_password(
     # Tear down the user's OTHER live collab sockets. 1012 (reconnectable), NOT
     # 1008: the acting browser re-mints its cookie just below and should reconnect
     # cleanly under the new epoch (logout/disable stay terminal 1008).
+    # Imported here, not at module scope: this module is in the MATCH edition's
+    # surface and collab.permissions pulls the whole collab stack (pycrdt) with it.
+    # Pinned by tests/architecture/test_match_edition_process_cut.py.
+    from grant_lab.proposal_assist.collab.permissions import (
+        WS_RECONNECTABLE_CLOSE,
+        signal_user_revocation,
+    )
     signal_user_revocation(request, user.id, close_code=WS_RECONNECTABLE_CLOSE)
     # Re-mint THIS browser's session under the new epoch (same cookie attrs as the Jinja route).
     response.set_cookie(

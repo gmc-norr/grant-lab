@@ -6,7 +6,7 @@ import threading
 from datetime import UTC
 from datetime import datetime as _dt
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -24,11 +24,12 @@ from grant_lab.embeddings.client import OllamaEmbedClient
 from grant_lab.embeddings.refresh import refresh_missing_embeddings_tick
 from grant_lab.ingestion.alerts import ConsecutiveFailureTracker, check_stale_sources
 from grant_lab.ingestion.orchestrator import run_ingestion
-from grant_lab.proposal_assist.analysis.pipeline import drain_analysis_queue
-from grant_lab.proposal_assist.analysis.reconcile import reconcile_analysis_coverage
-from grant_lab.proposal_assist.drafting.controller import WorkspaceController
-from grant_lab.proposal_assist.phases.setup import run_phase0_tick
 from grant_lab.ranking.anthropic_client import AnthropicClient
+
+if TYPE_CHECKING:
+    # Annotation only — `from __future__ import annotations` makes it a string,
+    # so this never executes at runtime and a match process never imports it.
+    from grant_lab.proposal_assist.drafting.controller import WorkspaceController
 from grant_lab.ranking.ollama_client import OllamaClient
 from grant_lab.ranking.queue import reconcile_missing_rankings
 from grant_lab.ranking.worker import drain_queue
@@ -633,6 +634,11 @@ def build_scheduler(
                 model=settings.proposal_assist_llm_model,
             )
 
+        # Deferred: importing the proposal-assist stack at module scope made a match
+        # process load pycrdt and prosemirror at boot for jobs it never runs.
+        # Pinned by tests/architecture/test_match_edition_process_cut.py.
+        from grant_lab.proposal_assist.phases.setup import run_phase0_tick
+
         run_phase0_tick(
             session_factory=session_factory,
             client_factory=make_client,
@@ -1123,6 +1129,11 @@ def build_scheduler(
     # so they run directly in APScheduler's threadpool — no app_loop dispatch.
     def _analysis_drain_tick() -> None:
         try:
+            # Deferred: importing the proposal-assist stack at module scope made a match
+            # process load pycrdt and prosemirror at boot for jobs it never runs.
+            # Pinned by tests/architecture/test_match_edition_process_cut.py.
+            from grant_lab.proposal_assist.analysis.pipeline import drain_analysis_queue
+
             out = drain_analysis_queue(
                 session_factory=session_factory,
                 citation_service=citation_service,
@@ -1136,6 +1147,11 @@ def build_scheduler(
 
     def _analysis_reconcile_tick() -> None:
         try:
+            # Deferred: importing the proposal-assist stack at module scope made a match
+            # process load pycrdt and prosemirror at boot for jobs it never runs.
+            # Pinned by tests/architecture/test_match_edition_process_cut.py.
+            from grant_lab.proposal_assist.analysis.reconcile import reconcile_analysis_coverage
+
             n = reconcile_analysis_coverage(
                 session_factory=session_factory,
                 workspaces_dir=Path(settings.workspaces_dir),

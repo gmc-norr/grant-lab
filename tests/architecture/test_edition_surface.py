@@ -261,7 +261,19 @@ def _tuple_elements(name: str) -> list[str]:
         ):
             assert isinstance(node.value, ast.Tuple), f"{name} is not a tuple literal"
             return [ast.unparse(e) for e in node.value.elts]
-    raise AssertionError(f"no module-level {name} in web/api/__init__.py")
+
+    # _FULL_ONLY is no longer a module-level tuple: the 2026-09-05 process cut moved
+    # it into _full_only_routers() so a match process does not import the full
+    # edition's routers at all (tests/architecture/test_match_edition_process_cut.py).
+    # The reviewed-set guarantee is unchanged — read the tuple it RETURNS.
+    if name == "_FULL_ONLY":
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name == "_full_only_routers":
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.Return) and isinstance(sub.value, ast.Tuple):
+                        return [ast.unparse(e) for e in sub.value.elts]
+                raise AssertionError("_full_only_routers() does not return a tuple literal")
+    raise AssertionError(f"no module-level {name} and no _full_only_routers() returning it")
 
 
 def test_the_always_mounted_routers_are_exactly_the_reviewed_set():

@@ -1,8 +1,16 @@
 """Route-wiring for session-revocation: which invalidation routes call
 signal_user_revocation, and with which close code. The teardown primitive itself
 is unit-tested in tests/proposal_assist/collab/test_collab_revoke_user.py; here we
-patch signal_user_revocation in each route module's namespace and assert the wiring
-(target user_id + close code), so these tests stay fast and DB-only."""
+patch signal_user_revocation at its SOURCE and assert the wiring (target user_id +
+close code), so these tests stay fast and DB-only.
+
+Patched at the source, not in each route module's namespace: the 2026-09-05 match
+process cut made these route modules import it inside the function that calls it,
+so the name no longer exists at module scope for monkeypatch to find. Patching
+`collab.permissions.signal_user_revocation` still proves the wiring — each test
+drives ONE route and asserts what that route signalled — and it lets this use
+`raising=True`, so a renamed target now fails loudly at patch time instead of
+silently recording no calls."""
 
 from fastapi.testclient import TestClient
 
@@ -47,15 +55,12 @@ def _client(app, uid):
     return c
 
 
-def _capture(monkeypatch, module_path):
-    """Patch signal_user_revocation in a route module's namespace and record its
-    (user_id, close_code) calls. raising=False keeps the pre-implementation red a
-    clean assertion failure rather than an AttributeError at patch time."""
+def _capture(monkeypatch):
+    """Patch signal_user_revocation at its source and record (user_id, close_code)."""
     calls: list[tuple[int, int]] = []
     monkeypatch.setattr(
-        f"{module_path}.signal_user_revocation",
+        "grant_lab.proposal_assist.collab.permissions.signal_user_revocation",
         lambda request, user_id, *, close_code=1008: calls.append((user_id, close_code)),
-        raising=False,
     )
     return calls
 
@@ -63,7 +68,7 @@ def _capture(monkeypatch, module_path):
 def test_logout_signals_revocation_1008(monkeypatch, pg_url, pg_session_factory):
     app = _app(monkeypatch, pg_url)
     uid = _user(app.state.session_factory, email="lo@umu.se", password="correct-horse-1")
-    calls = _capture(monkeypatch, "grant_lab.web.api.auth")
+    calls = _capture(monkeypatch)
     with _client(app, uid) as c:
         r = c.post("/api/auth/logout")
     assert r.status_code == 200
@@ -72,7 +77,7 @@ def test_logout_signals_revocation_1008(monkeypatch, pg_url, pg_session_factory)
 
 def test_logout_without_cookie_does_not_signal(monkeypatch, pg_url, pg_session_factory):
     app = _app(monkeypatch, pg_url)
-    calls = _capture(monkeypatch, "grant_lab.web.api.auth")
+    calls = _capture(monkeypatch)
     with TestClient(app) as c:
         r = c.post("/api/auth/logout")
     assert r.status_code == 200
@@ -82,7 +87,7 @@ def test_logout_without_cookie_does_not_signal(monkeypatch, pg_url, pg_session_f
 def test_change_password_signals_revocation_1012(monkeypatch, pg_url, pg_session_factory):
     app = _app(monkeypatch, pg_url)
     uid = _user(app.state.session_factory, email="cp@umu.se", password="oldpassword12")
-    calls = _capture(monkeypatch, "grant_lab.web.api.me")
+    calls = _capture(monkeypatch)
     with _client(app, uid) as c:
         r = c.post(
             "/api/me/password",
@@ -96,7 +101,7 @@ def test_admin_disable_signals_1008(monkeypatch, pg_url, pg_session_factory):
     app = _app(monkeypatch, pg_url)
     aid = _user(app.state.session_factory, email="adm@umu.se", is_admin=True)
     tid = _user(app.state.session_factory, email="tgt@umu.se")
-    calls = _capture(monkeypatch, "grant_lab.web.api.admin_users")
+    calls = _capture(monkeypatch)
     with _client(app, aid) as c:
         r = c.post(f"/api/admin/users/{tid}/disable")
     assert r.status_code == 200
@@ -107,7 +112,7 @@ def test_admin_reset_password_signals_1008(monkeypatch, pg_url, pg_session_facto
     app = _app(monkeypatch, pg_url)
     aid = _user(app.state.session_factory, email="adm2@umu.se", is_admin=True)
     tid = _user(app.state.session_factory, email="tgt2@umu.se")
-    calls = _capture(monkeypatch, "grant_lab.web.api.admin_users")
+    calls = _capture(monkeypatch)
     with _client(app, aid) as c:
         r = c.post(
             f"/api/admin/users/{tid}/reset-password",
@@ -121,7 +126,7 @@ def test_admin_approve_with_password_signals_1008(monkeypatch, pg_url, pg_sessio
     app = _app(monkeypatch, pg_url)
     aid = _user(app.state.session_factory, email="adm3@umu.se", is_admin=True)
     tid = _user(app.state.session_factory, email="pend@umu.se", status="pending")
-    calls = _capture(monkeypatch, "grant_lab.web.api.admin_users")
+    calls = _capture(monkeypatch)
     with _client(app, aid) as c:
         r = c.post(
             f"/api/admin/users/{tid}/approve",
@@ -139,7 +144,7 @@ def test_admin_approve_oidc_without_password_does_not_signal(
     tid = _user(
         app.state.session_factory, email="goog@umu.se", status="pending", oidc_sub="sub-xyz"
     )
-    calls = _capture(monkeypatch, "grant_lab.web.api.admin_users")
+    calls = _capture(monkeypatch)
     with _client(app, aid) as c:
         r = c.post(f"/api/admin/users/{tid}/approve", json={"role": "member"})
     assert r.status_code == 200
@@ -151,7 +156,7 @@ def test_admin_enable_and_change_role_do_not_signal(monkeypatch, pg_url, pg_sess
     aid = _user(app.state.session_factory, email="adm5@umu.se", is_admin=True)
     disabled = _user(app.state.session_factory, email="dis@umu.se", status="disabled")
     active = _user(app.state.session_factory, email="act@umu.se")
-    calls = _capture(monkeypatch, "grant_lab.web.api.admin_users")
+    calls = _capture(monkeypatch)
     with _client(app, aid) as c:
         assert c.post(f"/api/admin/users/{disabled}/enable").status_code == 200
         assert c.post(f"/api/admin/users/{active}/role", json={"role": "admin"}).status_code == 200

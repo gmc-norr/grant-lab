@@ -4,24 +4,20 @@ from typing import Literal
 
 from fastapi import APIRouter
 
-import grant_lab.web.api.annotations as annotations_router
+# ONLY the six both-edition routers are imported eagerly. The full-only ones are
+# imported inside _full_only_routers() because this is a PACKAGE __init__: any
+# `import grant_lab.web.api.<anything>` runs it, so an eager import here pulled the
+# whole proposal-assist stack — pycrdt, prosemirror, claude_agent_sdk — into a match
+# process that never serves those routes. Pinned by
+# tests/architecture/test_match_edition_process_cut.py, which boots each edition in
+# a FRESH interpreter and reads sys.modules.
 from grant_lab.web.api import (
     admin,
-    admin_golden_set,
-    admin_retention,
     admin_users,
     auth,
     calls,
-    citation_audit,
-    export,
-    files,
     me,
     profiles,
-    references,
-    rubric,
-    settings,
-    turns,
-    workspaces,
 )
 from grant_lab.web.api.errors import STATUS_CODES, ApiError
 
@@ -45,37 +41,58 @@ _ALWAYS = (
     profiles.router,
 )
 
+
 # Mounted ONLY in the full edition. In a match build these routes are never
 # registered, so a request for one gets FastAPI's real 404 — there is no handler
 # to reach. Pinned by tests/architecture/test_edition_surface.py.
-_FULL_ONLY = (
-    annotations_router.router,
-    workspaces.router,
-    turns.router,
-    references.router,
-    files.router,
-    rubric.router,
-    export.router,
-    citation_audit.router,
-    # Despite the module name, every route in web/api/settings.py is
-    # workspace-scoped (/workspaces/{id}/settings and /workspaces/{id}/members*)
-    # — it is the proposal-assist workspace settings router, not app settings.
-    # Leaving it in _ALWAYS leaked three /api/workspaces paths into a match build.
-    settings.router,
-    # The three ADMIN routers behind proposal-assist-only pages. They were in
-    # _ALWAYS, which left six require_admin-gated proposal-assist endpoints live
-    # in a deployment that does not serve proposal assist — including the
-    # MUTATING /api/admin/workspaces/deleted/{id}/restore. Not an authorization
-    # hole (every one is admin-gated), but the branch's claim is that the surface
-    # is ABSENT. The pages they back — AdminDrafting.tsx, AdminGoldenSet.tsx,
-    # AdminDeletedWorkspaces.tsx, AdminDeletedWorkspaceDetail.tsx — are the only
-    # frontend consumers and router.simple.tsx mounts none of them. The
-    # AdminDashboard golden-set panel reads `golden_set_report` off
-    # /api/admin/dashboard, a different endpoint that stays in _ALWAYS.
-    admin.drafting_router,
-    admin_golden_set.router,
-    admin_retention.router,
-)
+def _full_only_routers() -> tuple:
+    """Import and return the full-edition routers. Called only when edition != match.
+
+    Deferred deliberately: importing these at module scope is what made
+    APP_EDITION=match a route cut rather than a process cut.
+    """
+    import grant_lab.web.api.annotations as annotations_router
+    from grant_lab.web.api import (
+        admin_golden_set,
+        admin_retention,
+        citation_audit,
+        export,
+        files,
+        references,
+        rubric,
+        settings,
+        turns,
+        workspaces,
+    )
+
+    return (
+        annotations_router.router,
+        workspaces.router,
+        turns.router,
+        references.router,
+        files.router,
+        rubric.router,
+        export.router,
+        citation_audit.router,
+        # Despite the module name, every route in web/api/settings.py is
+        # workspace-scoped (/workspaces/{id}/settings and /workspaces/{id}/members*)
+        # — it is the proposal-assist workspace settings router, not app settings.
+        # Leaving it in _ALWAYS leaked three /api/workspaces paths into a match build.
+        settings.router,
+        # The three ADMIN routers behind proposal-assist-only pages. They were in
+        # _ALWAYS, which left six require_admin-gated proposal-assist endpoints live
+        # in a deployment that does not serve proposal assist — including the
+        # MUTATING /api/admin/workspaces/deleted/{id}/restore. Not an authorization
+        # hole (every one is admin-gated), but the branch's claim is that the surface
+        # is ABSENT. The pages they back — AdminDrafting.tsx, AdminGoldenSet.tsx,
+        # AdminDeletedWorkspaces.tsx, AdminDeletedWorkspaceDetail.tsx — are the only
+        # frontend consumers and router.simple.tsx mounts none of them. The
+        # AdminDashboard golden-set panel reads `golden_set_report` off
+        # /api/admin/dashboard, a different endpoint that stays in _ALWAYS.
+        admin.drafting_router,
+        admin_golden_set.router,
+        admin_retention.router,
+    )
 
 
 def build_api_router(*, edition: Literal["match", "full"] = "full") -> APIRouter:
@@ -87,17 +104,6 @@ def build_api_router(*, edition: Literal["match", "full"] = "full") -> APIRouter
     for sub in _ALWAYS:
         r.include_router(sub)
     if edition != "match":
-        for sub in _FULL_ONLY:
+        for sub in _full_only_routers():
             r.include_router(sub)
     return r
-
-
-# Module-level full-edition router. RETAINED SPECULATIVELY — it has NO consumer.
-# The comment here used to claim it kept "existing `from ... import router` call
-# sites (and the OpenAPI codegen) working"; measured 2026-09-04, no such call site
-# exists in src/, tests/ or scripts/. main.py:69 imports build_api_router and
-# calls it with the live edition, and scripts/gen_openapi_types.sh goes through
-# create_app(). The cost is not zero: this line builds the entire FULL router at
-# package-import time, including in a match process that will never serve it.
-# Kept because the plan prescribes it and removing it is the human's call.
-router = build_api_router(edition="full")

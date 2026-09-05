@@ -9,7 +9,6 @@ from sqlalchemy import func, select
 from grant_lab.auth.dependencies import require_admin
 from grant_lab.auth.passwords import WeakPassword, hash_password
 from grant_lab.db.models import User
-from grant_lab.proposal_assist.collab.permissions import signal_user_revocation
 
 router = APIRouter()
 
@@ -167,6 +166,10 @@ def admin_approve_user(
         # A credential was issued (epoch bumped above) — revoke any prior live
         # collab sockets for this account (terminal 1008). Only on the
         # password-issuing path; an OIDC approval without a password bumps nothing.
+        # Imported here, not at module scope: this module is in the MATCH edition's
+        # surface and collab.permissions pulls the whole collab stack (pycrdt) with it.
+        # Pinned by tests/architecture/test_match_edition_process_cut.py.
+        from grant_lab.proposal_assist.collab.permissions import signal_user_revocation
         signal_user_revocation(request, user_id)
     return AdminActionOut(id=user_id)
 
@@ -227,6 +230,10 @@ def admin_disable_user(
         u.session_epoch = (u.session_epoch or 0) + 1
         db.commit()
     # Disabled + epoch bumped — tear down the user's live collab sockets (1008).
+    # Imported here, not at module scope: this module is in the MATCH edition's
+    # surface and collab.permissions pulls the whole collab stack (pycrdt) with it.
+    # Pinned by tests/architecture/test_match_edition_process_cut.py.
+    from grant_lab.proposal_assist.collab.permissions import signal_user_revocation
     signal_user_revocation(request, user_id)
     return AdminActionOut(id=user_id)
 
@@ -290,5 +297,9 @@ def admin_reset_password(
         u.session_epoch = (u.session_epoch or 0) + 1  # revoke the target's sessions
         db.commit()
     # Password reset + epoch bumped — tear down the target's live collab sockets (1008).
+    # Imported here, not at module scope: this module is in the MATCH edition's
+    # surface and collab.permissions pulls the whole collab stack (pycrdt) with it.
+    # Pinned by tests/architecture/test_match_edition_process_cut.py.
+    from grant_lab.proposal_assist.collab.permissions import signal_user_revocation
     signal_user_revocation(request, user_id)
     return AdminActionOut(id=user_id)

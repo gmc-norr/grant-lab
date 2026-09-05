@@ -85,8 +85,12 @@ def test_phase0_and_compaction_skip_when_disabled(monkeypatch):
     # Record whether the work functions get called.
     phase0_calls: list = []
     compaction_calls: list = []
+    # Patched at its SOURCE, matching the compaction patch below. The 2026-09-05
+    # match process cut moved scheduler.py's proposal-assist imports inside the
+    # functions that call them, so `grant_lab.scheduler.run_phase0_tick` no longer
+    # exists at module scope.
     monkeypatch.setattr(
-        "grant_lab.scheduler.run_phase0_tick",
+        "grant_lab.proposal_assist.phases.setup.run_phase0_tick",
         lambda **kw: phase0_calls.append(kw),
     )
     monkeypatch.setattr(

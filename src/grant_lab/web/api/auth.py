@@ -13,7 +13,6 @@ from grant_lab.auth.passwords import hash_password, verify_password
 from grant_lab.auth.redirects import safe_next
 from grant_lab.auth.session_cookie import InvalidSession
 from grant_lab.db.models import User
-from grant_lab.proposal_assist.collab.permissions import signal_user_revocation
 from grant_lab.web.client_ip import MAX_EMAIL_LEN, client_ip, email_fingerprint
 
 _logger = logging.getLogger(__name__)
@@ -209,6 +208,10 @@ def logout(
                 # The epoch bump invalidates the cookie for future requests, but an
                 # open collab socket rides cached write permission — tear it down
                 # (terminal 1008). Bounded barrier; never raises into the route.
+                # Imported here, not at module scope: this module is in the MATCH edition's
+                # surface and collab.permissions pulls the whole collab stack (pycrdt) with it.
+                # Pinned by tests/architecture/test_match_edition_process_cut.py.
+                from grant_lab.proposal_assist.collab.permissions import signal_user_revocation
                 signal_user_revocation(request, data.user_id)
     response.delete_cookie(
         "session", path="/", httponly=True, secure=settings.cookie_secure, samesite="lax"

@@ -40,32 +40,6 @@ from grant_lab.proposal_assist.drafting.locking import (
 from grant_lab.proposal_assist.editing.save import BranchMismatchError
 from grant_lab.proposal_assist.ports.errors import WorkspaceGenerationStale
 from grant_lab.proposal_assist.references.admission import IngestLimiter
-from grant_lab.proposal_assist.web import collab_checkpoint, collab_ws
-from grant_lab.proposal_assist.web.activity import (
-    router as activity_router,
-)
-from grant_lab.proposal_assist.web.branches import router as branches_router
-from grant_lab.proposal_assist.web.coherence import (
-    router as coherence_router,
-)
-from grant_lab.proposal_assist.web.evaluator import (
-    router as evaluator_router,
-)
-from grant_lab.proposal_assist.web.problems import (
-    router as problems_router,
-)
-from grant_lab.proposal_assist.web.proposals import (
-    router as proposals_router,
-)
-from grant_lab.proposal_assist.web.review import (
-    router as review_router,
-)
-from grant_lab.proposal_assist.web.uncited_claims import (
-    router as uncited_claims_router,
-)
-from grant_lab.proposal_assist.web.versions import (
-    router as versions_router,
-)
 from grant_lab.web.api import build_api_router
 from grant_lab.web.api.errors import api_error, api_request, code_for
 from grant_lab.web.middleware import (
@@ -890,6 +864,24 @@ def create_app() -> FastAPI:
     # release 1) so the endpoints do not exist rather than answering 403 —
     # pinned by tests/architecture/test_edition_surface.py.
     if settings.app_edition != "match":
+        # Imported HERE, not at module scope. These modules reach the whole
+        # proposal-assist stack (pycrdt, prosemirror, claude_agent_sdk); importing
+        # them at the top of main.py made APP_EDITION=match a route cut that still
+        # LOADED everything it refused to serve. Pinned by
+        # tests/architecture/test_match_edition_process_cut.py.
+        from grant_lab.proposal_assist.web import collab_checkpoint, collab_ws
+        from grant_lab.proposal_assist.web.activity import router as activity_router
+        from grant_lab.proposal_assist.web.branches import router as branches_router
+        from grant_lab.proposal_assist.web.coherence import router as coherence_router
+        from grant_lab.proposal_assist.web.evaluator import router as evaluator_router
+        from grant_lab.proposal_assist.web.problems import router as problems_router
+        from grant_lab.proposal_assist.web.proposals import router as proposals_router
+        from grant_lab.proposal_assist.web.review import router as review_router
+        from grant_lab.proposal_assist.web.uncited_claims import (
+            router as uncited_claims_router,
+        )
+        from grant_lab.proposal_assist.web.versions import router as versions_router
+
         app.include_router(proposals_router)
         app.include_router(coherence_router)
         app.include_router(evaluator_router)
