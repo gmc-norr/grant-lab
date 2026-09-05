@@ -33,6 +33,26 @@ def _require_explicit_event_loops():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_golden_set_files(tmp_path, monkeypatch):
+    """Keep the suite out of the human's live `data/` directory.
+
+    `ranking/eval.py` computes `_REPORT_PATH` and `_HISTORY_PATH` at import,
+    both under `CALL_MANAGER_DATA_DIR` (default `data/`), so they are absolute
+    paths into the working tree by the time any test runs. Redirecting them per
+    module did not hold: `test_ranking_eval.py` patched `_REPORT_PATH` and not
+    `_HISTORY_PATH`, and `test_golden_set_eval_db_mode.py` did the same, so a
+    run appended **six** rows to the real `data/golden_set_history.jsonl`
+    (measured 2026-09-05, 1120 -> 1126 lines). Doing it here means a new test
+    cannot forget. `tests/test_golden_set_isolation.py` fails if either
+    constant ever resolves back inside the repo's data dir.
+    """
+    from grant_lab.ranking import eval as eval_mod
+
+    monkeypatch.setattr(eval_mod, "_REPORT_PATH", tmp_path / "golden_set_last.json")
+    monkeypatch.setattr(eval_mod, "_HISTORY_PATH", tmp_path / "golden_set_history.jsonl")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_settings_from_dotenv(monkeypatch):
     """Disable .env loading for every test.
 
