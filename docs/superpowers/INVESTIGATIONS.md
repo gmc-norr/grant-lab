@@ -1,6 +1,6 @@
 # Prior investigations — read this before measuring anything
 
-34 documents in `notes/` and `reviews/` record work already done: spikes with verdicts,
+35 documents in `notes/` and `reviews/` record work already done: spikes with verdicts,
 multi-agent reviews with verified defect tallies, and outside opinions. They are indexed
 here **by the question they answer**, because they are named by date and slice, which is
 useless when you are trying to find out whether someone has already looked at something.
@@ -103,6 +103,19 @@ revocation drift. Confirms the prior critical CRDT decoder issue is fixed.
 
 **[reviews/2026-08-29-third-pass-expansion.md](reviews/2026-08-29-third-pass-expansion.md)**
 **The review of record.** Supersedes the second pass's severity ranking. Start here.
+
+**[reviews/2026-09-05-runtime-ownership-and-state-consistency-review.md](reviews/2026-09-05-runtime-ownership-and-state-consistency-review.md)**
+*Is the problem module organization, or runtime ownership?* **Runtime ownership.** An
+outside review at `4e6212e2`, carrying a **verification and disposition section written
+after each finding was run** — three confirmed, one confirmed but narrower than written,
+one deliberately not verified. Read that section before acting on any finding above it.
+Its two live ones: **`/healthz` returns 200 after the single-instance advisory lock is
+lost**, so an orchestrator keeps routing to a process that no longer owns the invariant;
+and **the embedding repair cannot tell "present" from "current"** — it selects NULL
+vectors and model mismatches only, so a profile edited while Ollama is down keeps its
+superseded vector forever and its rankings silently describe old text. It also caught
+that the match-edition gate measured `create_app()` rather than a running lifespan
+(**0 modules there, 45 once it booted**) — fixed in `1fdfe050`.
 
 **[reviews/2026-08-29-second-pass-architecture-review.md](reviews/2026-08-29-second-pass-architecture-review.md)**
 Superseded by the third pass. Contains a confirmed production race.
