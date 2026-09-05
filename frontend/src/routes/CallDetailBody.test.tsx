@@ -231,3 +231,53 @@ it("the FULL edition still renders the Ranking card for that same bare ranking",
   expect(screen.getByText("Aggregate score")).toBeInTheDocument();
   expect(screen.getByText("Analyzed by Sonnet 4.6")).toBeInTheDocument();
 });
+
+// GATE 4 IS AN OR OF THREE, NOT ANY ONE OF THEM. BARE above proves the
+// all-three-empty case; the two REASONED/ESCALATED fixtures above give the
+// disjunction TWO truthy terms at once (both inherit `rationale: "Strong
+// fit."` and `embed_similarity: 0.42` from DATA), so a mutant that drops any
+// single term from `rankingCardHasContent` — `|| Boolean(ranking.rationale)`,
+// say — still finds a second truthy term in every existing match-edition
+// fixture and stays green. Each fixture below starts from BARE (all three
+// empty) and restores exactly ONE term, so each one is a separate, minimal
+// witness for its own disjunct: only the mutant that drops THAT term can
+// leave THAT fixture's card ungated.
+const REASON_LABEL_ONLY = {
+  ...BARE,
+  ranking: { ...BARE.ranking, aggregate_reason_label: "Budget" },
+} as unknown as CallDetail;
+
+const RATIONALE_ONLY = {
+  ...BARE,
+  ranking: { ...BARE.ranking, rationale: "Strong fit." },
+} as unknown as CallDetail;
+
+const EMBED_SIMILARITY_ONLY = {
+  ...BARE,
+  ranking: { ...BARE.ranking, embed_similarity: 0.42 },
+} as unknown as CallDetail;
+
+it("the MATCH edition renders the Ranking card when only the reason label carries content", () => {
+  edition.isMatch = true;
+  renderBody(REASON_LABEL_ONLY);
+  expect(screen.getByRole("region", { name: "Ranking" })).toBeInTheDocument();
+  expect(reasonBadge()).toBeInTheDocument();
+});
+
+it("the MATCH edition renders the Ranking card when only the rationale carries content", () => {
+  edition.isMatch = true;
+  renderBody(RATIONALE_ONLY);
+  expect(screen.getByRole("region", { name: "Ranking" })).toBeInTheDocument();
+  expect(
+    within(screen.getByRole("region", { name: "Ranking" })).getByText("Strong fit."),
+  ).toBeInTheDocument();
+});
+
+it("the MATCH edition renders the Ranking card when only the cosine similarity carries content", () => {
+  edition.isMatch = true;
+  renderBody(EMBED_SIMILARITY_ONLY);
+  expect(screen.getByRole("region", { name: "Ranking" })).toBeInTheDocument();
+  expect(
+    within(screen.getByRole("region", { name: "Ranking" })).getByText("Cosine similarity: 0.420"),
+  ).toBeInTheDocument();
+});
