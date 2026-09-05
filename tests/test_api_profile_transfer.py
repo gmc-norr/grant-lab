@@ -1,8 +1,11 @@
 """`PUT /api/profiles/{profile_id}/owner` -- profile ownership transfer.
 
-Thirteen cases. `created_by` is load-bearing in seven places (profile_access.py:69,
-profiles.py:142/196/400/544/612, calls.py:641), so this endpoint is one transaction,
-not a field update, and each case below pins one decision from D10/D9/Open-6/Open-7/D17.
+Fifteen cases (the original thirteen, plus a self-transfer case and an
+already-subscribed-recipient case from fix round 1). `created_by` is
+load-bearing in seven places (profile_access.py:69,
+profiles.py:151/261/468/612/678, calls.py:641), so this endpoint is one
+transaction, not a field update, and each case below pins one decision from
+D10/D9/Open-6/Open-7/D17.
 
 FIXTURES -- this repo has NO `db_session`, `client` or `client_unauth`. The session
 fixture is `pg_session_factory` (tests/conftest.py:151), a FACTORY used as
@@ -15,7 +18,7 @@ tests/test_api_profile_detail.py:8-20.
 the status code: a missing route also answers 404
 (`{"error":{"code":"not_found","message":"Not Found"}}`), so a status-only assertion
 is green before a line of the endpoint exists. The real refusal comes from
-`_profile_for_edit` (profiles.py:139/141), which raises `detail="profile not found"`,
+`_profile_for_edit` (profiles.py:148/150), which raises `detail="profile not found"`,
 rendered into the envelope's `message` by main.py:548.
 """
 
@@ -154,7 +157,10 @@ def test_a_reader_who_cannot_edit_gets_403(monkeypatch, pg_url, pg_session_facto
 
 def test_an_inactive_recipient_is_refused_generically(monkeypatch, pg_url, pg_session_factory):
     """Open-8: an inactive account is not a valid transfer target, and the
-    caller is not told WHY -- see the byte-equal comparison below."""
+    caller is not told WHY. The exact generic body is asserted here too, not
+    only in the byte-equal sibling test below -- on its own, a status-only
+    assertion here would still pass against a message that named the reason.
+    """
     app = _setup(monkeypatch, pg_url)
     with pg_session_factory() as s:
         owner = _user(s, "owner5@umu.se")
@@ -167,6 +173,7 @@ def test_an_inactive_recipient_is_refused_generically(monkeypatch, pg_url, pg_se
     with client:
         r = client.put(f"/api/profiles/{pid}/owner", json={"email": "disabled5@umu.se"})
     assert r.status_code == 400, r.text
+    assert r.json() == {"error": {"code": "bad_request", "message": "could not transfer profile"}}
 
 
 def test_an_unknown_email_gets_the_SAME_generic_400(monkeypatch, pg_url, pg_session_factory):
@@ -310,6 +317,7 @@ def test_a_now_unreadable_default_profile_id_is_cleared(monkeypatch, pg_url, pg_
     with client:
         r = client.put(f"/api/profiles/{pid}/owner", json={"email": "newowner11@umu.se"})
     assert r.status_code == 200, r.text
+    assert r.json()["outgoing_lost_read"] is True
 
     with pg_session_factory() as s:
         assert s.get(User, owner_id).default_profile_id is None
@@ -337,6 +345,7 @@ def test_a_still_readable_default_profile_id_is_LEFT(monkeypatch, pg_url, pg_ses
             json={"email": "newowner12@umu.se", "keep_read_access": True},
         )
     assert r.status_code == 200, r.text
+    assert r.json()["outgoing_lost_read"] is False
 
     with pg_session_factory() as s:
         assert s.get(User, owner_id).default_profile_id == pid
@@ -370,3 +379,61 @@ def test_the_detail_payload_says_whether_the_owner_would_lose_read(
         r2 = admin_client.get(f"/api/profiles/{pid2}")
     assert r2.status_code == 200, r2.text
     assert r2.json()["outgoing_lost_read"] is False
+
+
+def test_a_self_transfer_with_keep_read_access_creates_no_viewer_row(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """Fix round 1, Important 1. The owner "transfers" to their own address
+    with keep_read_access=True: `outgoing.id == target.id` here, so the
+    self-transfer guard at profiles.py:823 (`outgoing.id != target.id`) must
+    stop the ProfileViewer write. Without it, the owner -- who is STILL the
+    owner after step 2 -- would get a row of their own, breaking the
+    invariant "the owner never has a row" (db/models/profiles.py:135-136).
+    """
+    app = _setup(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        owner = _user(s, "owner14@umu.se")
+        p = _profile(s, owner, visibility="private")
+        s.commit()
+        pid, owner_id = p.id, owner.id
+
+    client = _client_for(app, owner_id)
+    with client:
+        r = client.put(
+            f"/api/profiles/{pid}/owner",
+            json={"email": "owner14@umu.se", "keep_read_access": True},
+        )
+    assert r.status_code == 200, r.text
+
+    with pg_session_factory() as s:
+        assert s.get(Profile, pid).created_by == owner_id
+        row = s.query(ProfileViewer).filter_by(profile_id=pid, user_id=owner_id).one_or_none()
+        assert row is None
+
+
+def test_transfer_when_recipient_already_has_a_subscription(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """Fix round 1, Minor 6. profiles.py:813's `already_subscribed is None`
+    guard: without it, inserting a second Subscription row for the same
+    (user_id, profile_id) composite primary key is an IntegrityError/500.
+    """
+    app = _setup(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        owner = _user(s, "owner15@umu.se")
+        new_owner = _user(s, "newowner15@umu.se")
+        p = _profile(s, owner)
+        s.flush()
+        s.add(Subscription(user_id=new_owner.id, profile_id=p.id, digest_enabled=False))
+        s.commit()
+        pid, owner_id, new_owner_id = p.id, owner.id, new_owner.id
+
+    client = _client_for(app, owner_id)
+    with client:
+        r = client.put(f"/api/profiles/{pid}/owner", json={"email": "newowner15@umu.se"})
+    assert r.status_code == 200, r.text
+
+    with pg_session_factory() as s:
+        rows = s.query(Subscription).filter_by(profile_id=pid, user_id=new_owner_id).all()
+        assert len(rows) == 1

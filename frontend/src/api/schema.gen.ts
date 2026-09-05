@@ -864,21 +864,24 @@ export interface paths {
         get?: never;
         /**
          * Transfer Profile Owner
-         * @description Move a profile to another user. Owner-or-admin, per profiles.py:400.
+         * @description Move a profile to another user. Owner-or-admin, via `_profile_for_edit`'s
+         *     own check (profiles.py:151); `:468` is `update_profile`'s use of the same
+         *     gate.
          *
          *     The admin arm is not a convenience: the case that motivated this is an owner
          *     who can no longer log in, so only an admin can act.
          *
          *     Ownership is load-bearing in SEVEN places (profile_access.py:69,
-         *     profiles.py:142/196/400/544/612, calls.py:641), which is why this is one
+         *     profiles.py:151/261/468/612/678, calls.py:641), which is why this is one
          *     transaction and not four endpoints.
          *
          *     Recipient eligibility is `status == 'active'` and nothing narrower: an
          *     unshared private profile has no viewer rows at all, so a
          *     viewers-only rule would make transfer impossible for exactly the case it
          *     exists for. The refusal is ONE generic 400 for unknown, inactive and
-         *     ineligible alike -- mirroring add_profile_viewer (:599-601), so this is not a
-         *     directory of who has an account.
+         *     ineligible alike -- mirroring add_profile_viewer's own generic-400 rationale
+         *     (:667-669), not replace_profile_viewers' silent-drop shape (:600-601), so
+         *     this is not a directory of who has an account.
          */
         put: operations["transfer_profile_owner_api_profiles__profile_id__owner_put"];
         post?: never;
@@ -3565,7 +3568,15 @@ export interface components {
              */
             keep_read_access: boolean;
         };
-        /** ProfileTransferOut */
+        /**
+         * ProfileTransferOut
+         * @description `outgoing_lost_read` here is the REALIZED outcome of this transfer,
+         *     computed after any `keep_read_access` row already exists -- unlike the
+         *     same-named field on `GET /api/profiles/{id}` (`ProfileDetailOut`), which is
+         *     the HYPOTHETICAL "would leaving cost the owner read" computed BEFORE the
+         *     act, so a transfer with `keep_read_access=True` can return `False` here for
+         *     a profile where the pre-transfer `GET` returned `True`.
+         */
         ProfileTransferOut: {
             /** Outgoing Lost Read */
             outgoing_lost_read: boolean;

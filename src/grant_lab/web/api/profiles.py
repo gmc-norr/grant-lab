@@ -730,6 +730,14 @@ class ProfileTransferIn(BaseModel):
 
 
 class ProfileTransferOut(BaseModel):
+    """`outgoing_lost_read` here is the REALIZED outcome of this transfer,
+    computed after any `keep_read_access` row already exists -- unlike the
+    same-named field on `GET /api/profiles/{id}` (`ProfileDetailOut`), which is
+    the HYPOTHETICAL "would leaving cost the owner read" computed BEFORE the
+    act, so a transfer with `keep_read_access=True` can return `False` here for
+    a profile where the pre-transfer `GET` returned `True`.
+    """
+
     owner: ProfileViewerOut
     outgoing_lost_read: bool
 
@@ -741,7 +749,9 @@ def transfer_profile_owner(
     body: ProfileTransferIn,
     user: User = Depends(get_current_user),  # noqa: B008
 ):
-    """Move a profile to another user. Owner-or-admin, per profiles.py:400.
+    """Move a profile to another user. Owner-or-admin, via `_profile_for_edit`'s
+    own check (profiles.py:151); `:468` is `update_profile`'s use of the same
+    gate.
 
     The admin arm is not a convenience: the case that motivated this is an owner
     who can no longer log in, so only an admin can act.
@@ -754,8 +764,9 @@ def transfer_profile_owner(
     unshared private profile has no viewer rows at all, so a
     viewers-only rule would make transfer impossible for exactly the case it
     exists for. The refusal is ONE generic 400 for unknown, inactive and
-    ineligible alike -- mirroring add_profile_viewer (:599-601), so this is not a
-    directory of who has an account.
+    ineligible alike -- mirroring add_profile_viewer's own generic-400 rationale
+    (:667-669), not replace_profile_viewers' silent-drop shape (:600-601), so
+    this is not a directory of who has an account.
     """
     sf = request.app.state.session_factory
     with sf() as session:
@@ -765,6 +776,10 @@ def transfer_profile_owner(
         if target is None or target.status != "active":
             raise HTTPException(status_code=400, detail="could not transfer profile")
 
+        # Never None: Profile.created_by is nullable=False with
+        # ondelete="RESTRICT" (db/models/profiles.py:96-97, set at table
+        # creation in migration 0003, never retrofitted onto existing rows),
+        # so a referenced user row cannot be deleted out from under it.
         outgoing = session.get(User, p.created_by)
 
         # 1. D10's stale-row hazard: the incoming owner may already hold a
@@ -805,7 +820,7 @@ def transfer_profile_owner(
         # own address) would otherwise add a ProfileViewer row for someone who
         # is STILL the owner after step 2, breaking the invariant this whole
         # step exists to restore in step 1.
-        if body.keep_read_access and outgoing is not None and outgoing.id != target.id:
+        if body.keep_read_access and outgoing.id != target.id:
             already_viewer = session.scalar(
                 select(ProfileViewer.user_id).where(
                     ProfileViewer.profile_id == p.id,
@@ -817,11 +832,9 @@ def transfer_profile_owner(
 
         # Open-7: a default_profile_id the outgoing owner can no longer read
         # must not keep pointing the dashboard at a profile they cannot open.
-        outgoing_lost_read = False
-        if outgoing is not None:
-            outgoing_lost_read = not can_read_profile(session, outgoing, p.id)
-            if outgoing_lost_read and outgoing.default_profile_id == p.id:
-                outgoing.default_profile_id = None
+        outgoing_lost_read = not can_read_profile(session, outgoing, p.id)
+        if outgoing_lost_read and outgoing.default_profile_id == p.id:
+            outgoing.default_profile_id = None
 
         session.commit()
         owner_out = ProfileViewerOut(user_id=target.id, name=target.name, email=target.email)
