@@ -219,6 +219,29 @@ def test_the_waiting_count_counts_UNAPPROVED_candidates_only(pg_session_factory,
     assert total == 1
 
 
+def test_a_ranking_on_a_DIFFERENT_profile_does_not_admit_a_call_that_fails_the_boards_own_score(
+    pg_session_factory, profile_factory
+):
+    # The board's own profile scores this call BELOW min_score; a different
+    # profile scores the SAME call ABOVE it. If the ranking join is not scoped
+    # to `board.profile_id`, the join fans out (one row per ranking) and
+    # `min_score` gets judged against whichever row survives -- here the OTHER
+    # profile's passing score would wrongly admit the call.
+    pid, owner_id = profile_factory(name="Board's own profile")
+    other_pid, _other_owner = profile_factory(name="Other profile")
+    board_id = _make_board(
+        pg_session_factory, profile_id=pid, created_by=owner_id, slug="j" * 16, min_score=60
+    )
+    call_id = _make_call(pg_session_factory, external_id="scored-elsewhere")
+    _rank(pg_session_factory, call_id=call_id, profile_id=pid, score=40)
+    _rank(pg_session_factory, call_id=call_id, profile_id=other_pid, score=90)
+
+    rows, total = _run_queue(pg_session_factory, board_id)
+
+    assert rows == []
+    assert total == 0
+
+
 def test_a_call_the_owner_SAVED_is_still_in_the_queue(pg_session_factory, profile_factory):
     pid, owner_id = profile_factory(name="Saved stays")
     board_id = _make_board(pg_session_factory, profile_id=pid, created_by=owner_id, slug="i" * 16)

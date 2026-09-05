@@ -10,8 +10,8 @@ OWNER's, which is the 2026-09-05 decisions note D2 and a deliberate override of
 
 Key off `profiles.created_by`, NOT `boards.created_by`. §4.3 gives board creation
 to any profile EDITOR, and "can edit" is `created_by == user.id or user.is_admin`
-(profiles.py:196), so an admin can build a board on a profile they do not own.
-Keying off the board's creator would then apply a passing admin's inbox
+(web/api/profiles.py:261), so an admin can build a board on a profile they do not
+own. Keying off the board's creator would then apply a passing admin's inbox
 housekeeping to somebody else's corridor wall.
 
 This CALLS dashboard._decision_predicate. It does not copy it. A second copy is
@@ -40,7 +40,13 @@ class QueueRow:
 def board_queue(
     session: Session, *, board: Board, limit: int, offset: int
 ) -> tuple[list[QueueRow], int]:
-    """Candidates for `board`, best score first, plus the total waiting count."""
+    """Candidates for `board`, best score first, plus the WAITING count.
+
+    The int is not a pagination total: already-approved candidates are
+    returned in the rows (flagged, not dropped -- D3) but excluded from this
+    count, so it is smaller than the returned population and must not be used
+    to paginate them.
+    """
     owner_id = session.scalar(select(Profile.created_by).where(Profile.id == board.profile_id))
     filters = [
         _decision_predicate("archive", user_id=owner_id, profile_id=board.profile_id),
@@ -49,13 +55,15 @@ def board_queue(
         Call.deadline > func.now(),
     ]
     approved_ids = select(BoardItem.call_id).where(BoardItem.board_id == board.id).scalar_subquery()
+    # Scope the ranking join to the BOARD'S OWN profile. A call ranked on
+    # several profiles has a CallRanking row per profile; without this clause
+    # the join fans out one row per profile (inflating `waiting`) and judges
+    # `min_score` against a score another group produced, not this board's.
+    ranking_join = (CallRanking.call_id == Call.id) & (CallRanking.profile_id == board.profile_id)
 
     rows = session.execute(
         select(Call, CallRanking.aggregate_score, Call.id.in_(approved_ids))
-        .join(
-            CallRanking,
-            (CallRanking.call_id == Call.id) & (CallRanking.profile_id == board.profile_id),
-        )
+        .join(CallRanking, ranking_join)
         .where(*filters)
         .order_by(CallRanking.aggregate_score.desc(), Call.id.desc())
         .limit(limit)
@@ -69,17 +77,11 @@ def board_queue(
     # Already-approved candidates stay in `queue_rows` (flagged, not dropped --
     # D3: approval and the queue are different states) but drop out of the
     # WAITING count, which is what a "N calls need review" badge means.
-    waiting = (
-        session.scalar(
-            select(func.count())
-            .select_from(Call)
-            .join(
-                CallRanking,
-                (CallRanking.call_id == Call.id) & (CallRanking.profile_id == board.profile_id),
-            )
-            .where(*filters, Call.id.notin_(approved_ids))
-        )
-        or 0
+    waiting = session.scalar(
+        select(func.count())
+        .select_from(Call)
+        .join(CallRanking, ranking_join)
+        .where(*filters, Call.id.notin_(approved_ids))
     )
 
     return queue_rows, waiting
