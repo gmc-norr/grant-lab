@@ -411,9 +411,9 @@ def test_hydration_really_can_raise_a_lock_timeout_after_the_mutex(
     """
     from pathlib import Path
 
+    from grant_lab.errors import is_lock_timeout
     from grant_lab.proposal_assist.collab import state as collab_state
     from grant_lab.proposal_assist.collab.hydrate import load_or_hydrate
-    from grant_lab.proposal_assist.drafting.locking import is_lock_timeout
     from tests.proposal_assist.conftest import init_workspace_repo
 
     with pg_session_factory() as s:

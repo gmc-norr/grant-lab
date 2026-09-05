@@ -31,7 +31,6 @@ from sqlalchemy.orm import sessionmaker
 
 from grant_lab.db.models import ArtifactVersion, Reference, Workspace, WorkspaceEvent
 from grant_lab.proposal_assist.citations.ledger import load_ledger
-from grant_lab.proposal_assist.fencing import acquire_shared_lease, live_at_generation
 from grant_lab.proposal_assist.ports.artifacts import CITATIONS_FILENAME
 
 logger = logging.getLogger(__name__)
@@ -49,6 +48,12 @@ def reconcile_workspace_git_drift(
     so backfilled rows' created_at matches when the commit actually
     landed — not when reconciliation ran. Spec line 258 mandates this.
     """
+    # Imported inside the function: fencing imports drafting, whose package __init__
+    # imports controller, which imports THIS module. That cycle is real and was
+    # masked until 2026-09-05 only because main.py eagerly imported the whole chain
+    # into every process. Binding the names at call time breaks it.
+    from grant_lab.proposal_assist.fencing import acquire_shared_lease, live_at_generation
+
     if not (repo_dir / ".git").is_dir():
         return 0
     try:
@@ -197,6 +202,12 @@ def reconcile_workspace_citekeys(
     expected failure modes — logs and continues. Returns the number of
     references.citekey values repaired.
     """
+    # Imported inside the function: fencing imports drafting, whose package __init__
+    # imports controller, which imports THIS module. That cycle is real and was
+    # masked until 2026-09-05 only because main.py eagerly imported the whole chain
+    # into every process. Binding the names at call time breaks it.
+    from grant_lab.proposal_assist.fencing import acquire_shared_lease, live_at_generation
+
     citations_path = repo_dir / CITATIONS_FILENAME
     if not citations_path.exists():
         return 0

@@ -16,11 +16,11 @@ import uuid
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
+from grant_lab.errors import is_lock_timeout
 from grant_lab.proposal_assist.collab import state
 from grant_lab.proposal_assist.drafting.locking import (
     CommitMutexTimeout,
     WorkspaceDeleted,
-    is_lock_timeout,
 )
 from grant_lab.proposal_assist.fencing import (
     WorkspaceGenerationStale,

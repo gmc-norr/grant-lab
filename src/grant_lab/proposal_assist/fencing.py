@@ -59,14 +59,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from grant_lab.db.models import Workspace
-from grant_lab.proposal_assist.drafting.locking import (
-    MUTEX_TAIL_LOCK_TIMEOUT_SECONDS,
-    CommitMutexTimeout,
-    WorkspaceDeleted,
-    acquire_commit_mutex,
-    commit_mutex_key,
-    is_lock_timeout,
-)
+from grant_lab.errors import is_lock_timeout
 from grant_lab.proposal_assist.ports.errors import WorkspaceGenerationStale
 
 __all__ = [
@@ -165,6 +158,16 @@ def acquire_commit_mutex_at_generation(
     both conditions hold at once, and callers map them to different outcomes
     (404 versus a quiet abandon-with-accounting).
     """
+    # Imported inside the function. `drafting.locking` is a submodule of the
+    # `drafting` PACKAGE, whose __init__ imports controller and factory, which
+    # import port_impl, which imports THIS module — a real cycle, masked until
+    # 2026-09-05 only because main.py eagerly imported the whole chain into every
+    # process. Binding these at call time breaks it.
+    from grant_lab.proposal_assist.drafting.locking import (
+        WorkspaceDeleted,
+        acquire_commit_mutex,
+    )
+
     acquire_commit_mutex(session, workspace_id, timeout_seconds=timeout_seconds)
     row = session.execute(
         select(Workspace.soft_deleted_at, Workspace.lifecycle_generation).where(
@@ -214,6 +217,17 @@ def acquire_shared_lease(
     MUTEX_TAIL_LOCK_TIMEOUT_SECONDS cap in force for the rest of the transaction
     (Slice C3) rather than restoring DEFAULT, which is 0 = disabled.
     """
+    # Imported inside the function. `drafting.locking` is a submodule of the
+    # `drafting` PACKAGE, whose __init__ imports controller and factory, which
+    # import port_impl, which imports THIS module — a real cycle, masked until
+    # 2026-09-05 only because main.py eagerly imported the whole chain into every
+    # process. Binding these at call time breaks it.
+    from grant_lab.proposal_assist.drafting.locking import (
+        MUTEX_TAIL_LOCK_TIMEOUT_SECONDS,
+        CommitMutexTimeout,
+        commit_mutex_key,
+    )
+
     timeout_ms = int(timeout_seconds) * 1000
     if timeout_ms <= 0:
         raise ValueError(f"timeout_seconds must be a positive int, got {timeout_seconds!r}")

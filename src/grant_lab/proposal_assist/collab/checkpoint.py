@@ -13,6 +13,7 @@ from pycrdt import Doc
 from sqlalchemy.orm import Session
 
 from grant_lab.db.models import ArtifactVersion, Workspace, WorkspaceEvent
+from grant_lab.errors import is_lock_timeout
 from grant_lab.proposal_assist.analysis.queue import enqueue_uncovered_sections
 from grant_lab.proposal_assist.artifacts import Artifact, filename_for
 from grant_lab.proposal_assist.citations.gitio import (
@@ -27,7 +28,6 @@ from grant_lab.proposal_assist.collab.markdown_bridge import pm_to_markdown
 from grant_lab.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
 from grant_lab.proposal_assist.drafting.locking import (
     WorkspaceDeleted,
-    is_lock_timeout,
 )
 from grant_lab.proposal_assist.fencing import (
     WorkspaceGenerationStale,

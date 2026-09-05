@@ -17,6 +17,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.websockets import WebSocketDisconnect
 
 from grant_lab.db.models import Workspace
+from grant_lab.errors import is_lock_timeout
 from grant_lab.proposal_assist.collab import protocol as P
 from grant_lab.proposal_assist.collab import state as collab_state
 from grant_lab.proposal_assist.collab import store
@@ -41,7 +42,6 @@ from grant_lab.proposal_assist.drafting.contract import WorkspaceRetired
 from grant_lab.proposal_assist.drafting.locking import (
     CommitMutexTimeout,
     WorkspaceDeleted,
-    is_lock_timeout,
 )
 from grant_lab.proposal_assist.fencing import WorkspaceGenerationStale
 from grant_lab.proposal_assist.ports.stamp import FenceStamp, stamp_for_workspace

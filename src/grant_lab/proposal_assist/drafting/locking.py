@@ -33,6 +33,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
+from grant_lab.errors import is_lock_timeout
 from grant_lab.proposal_assist.ports.errors import (
     BUSY_ERROR_MESSAGE as BUSY_ERROR_MESSAGE,
 )
@@ -173,23 +174,6 @@ class WorkspaceDeleted(RuntimeError):
     def __init__(self, workspace_id: uuid.UUID) -> None:
         super().__init__(f"workspace {workspace_id} was deleted")
         self.workspace_id = workspace_id
-
-
-def is_lock_timeout(exc: BaseException) -> bool:
-    """True iff *exc* is a Postgres lock_not_available (SQLSTATE 55P03) — a
-    `SET LOCAL lock_timeout` that fired.
-
-    Since Slice C3 the mutex-held tail keeps a 2s cap in force, so 55P03 is the
-    routine "someone else holds a row I need" signal rather than a server fault.
-    Every site that must tell contention from a real database failure calls this,
-    so the SQLSTATE check exists exactly once.
-
-    psycopg exposes the code as `sqlstate`; older drivers use `pgcode`. Anything
-    that is not a DBAPI error at all (no `.orig`) is not a lock timeout.
-    """
-    orig = getattr(exc, "orig", None)
-    sqlstate = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
-    return sqlstate == "55P03"
 
 
 def acquire_commit_mutex(

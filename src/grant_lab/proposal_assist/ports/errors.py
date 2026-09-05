@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import uuid
 
+from grant_lab.errors import BUSY_ERROR_MESSAGE
+
 
 class WorkspaceGenerationStale(RuntimeError):
     """The workspace has moved past the generation the caller carried.
@@ -78,9 +80,12 @@ class CommitMutexTimeout(RuntimeError):
     """
 
 
-#: Served with 429 + Retry-After: 2, and returned verbatim by the tools. Here so the
-#: message the agent sees and the message the browser sees cannot drift apart.
-BUSY_ERROR_MESSAGE = "workspace is busy — try again in a moment"
+#: Served with 429 + Retry-After: 2, and returned verbatim by the tools. Its one
+#: DEFINITION moved to grant_lab/db/errors.py on 2026-09-05 (the generic
+#: OperationalError handler both editions register needs it); re-exported here so
+#: the message the agent sees and the message the browser sees cannot drift apart,
+#: and so every existing import site is unchanged.
+BUSY_ERROR_MESSAGE = BUSY_ERROR_MESSAGE
 
 #: The workspace was deleted while the actor was mid-turn.
 DELETED_ERROR_MESSAGE = "workspace no longer exists"

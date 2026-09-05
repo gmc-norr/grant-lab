@@ -27,19 +27,8 @@ from grant_lab.auth.session_cookie import SessionSigner
 from grant_lab.config import Settings
 from grant_lab.db.session import make_engine, make_session_factory
 from grant_lab.embeddings.client import OllamaEmbedClient
+from grant_lab.errors import BUSY_ERROR_MESSAGE, is_lock_timeout
 from grant_lab.logging import configure_logging
-from grant_lab.proposal_assist.citations import build_citation_service
-from grant_lab.proposal_assist.collab import state as collab_state
-from grant_lab.proposal_assist.drafting.contract import WorkspaceRetired
-from grant_lab.proposal_assist.drafting.locking import (
-    BUSY_ERROR_MESSAGE,
-    DELETED_ERROR_MESSAGE,
-    WorkspaceDeleted,
-    is_lock_timeout,
-)
-from grant_lab.proposal_assist.editing.save import BranchMismatchError
-from grant_lab.proposal_assist.ports.errors import WorkspaceGenerationStale
-from grant_lab.proposal_assist.references.admission import IngestLimiter
 from grant_lab.web.api import build_api_router
 from grant_lab.web.api.errors import api_error, api_request, code_for
 from grant_lab.web.middleware import (
@@ -403,7 +392,11 @@ def create_app() -> FastAPI:
 
     # 3b-5d.D4: arm the collab kill-switch BEFORE any request can consult the
     # flag. Module-level on purpose — see collab/state.py.
-    collab_state.set_kill_switch(settings.collab_kill_switch)
+    if settings.app_edition != "match":
+        # Collab is not served in a match build, so there is no room to arm.
+        from grant_lab.proposal_assist.collab import state as collab_state
+
+        collab_state.set_kill_switch(settings.collab_kill_switch)
 
     if settings.embedding_dim != EMBEDDING_COLUMN_DIM:
         raise RuntimeError(
@@ -562,122 +555,138 @@ def create_app() -> FastAPI:
             headers=getattr(exc, "headers", None) or {},
         )
 
-    @app.exception_handler(WorkspaceDeleted)
-    async def _workspace_deleted(request: Request, exc: WorkspaceDeleted):
-        # A writer that won the per-workspace commit mutex only to find the
-        # workspace deleted. It mutated nothing. 404 matches what every reader
-        # already sees — the workspace is gone — and keeps the SPA on its existing
-        # not-found path. Registered explicitly so it resolves ahead of the
-        # catch-all Exception handler below.
-        if api_request(request):
-            return api_error(404, "workspace_deleted", DELETED_ERROR_MESSAGE)
-        return JSONResponse(status_code=404, content={"detail": DELETED_ERROR_MESSAGE})
-
-    @app.exception_handler(BranchMismatchError)
-    async def _branch_mismatch(request: Request, exc: BranchMismatchError):
-        # A save whose edit form was rendered on a different branch. Raised by
-        # save_section BEFORE any git or row work, so nothing was mutated — the
-        # route's `with sf() as session` closes and rolls back on the way out,
-        # which is why this propagates instead of being caught per-route (same
-        # shape as WorkspaceDeleted above).
-        #
-        # Its OWN code, not the generic status-derived "conflict": the client has
-        # to tell this apart from a stale section, whose answer is "reload and
-        # re-apply". There is no reload that helps here — the document the user
-        # was editing is on another branch — so the UI names both branches and
-        # keeps the text on screen instead of offering to discard it.
-        message = (
-            f"this edit belongs to branch '{exc.base_branch}'; the workspace is "
-            f"now on '{exc.current_branch}' — it was not saved"
+    # The four WORKSPACE exception handlers, registered only in the full edition.
+    # Each of these exceptions is raised exclusively by proposal-assist routes, and
+    # a match build does not mount them — so in match these handlers could never
+    # fire, while importing the classes to register them pulled the whole
+    # proposal-assist package into the process. The generic OperationalError,
+    # RequestValidationError and Exception handlers below stay in BOTH editions.
+    # Pinned by tests/architecture/test_match_edition_process_cut.py.
+    if settings.app_edition != "match":
+        from grant_lab.proposal_assist.drafting.contract import WorkspaceRetired
+        from grant_lab.proposal_assist.drafting.locking import (
+            DELETED_ERROR_MESSAGE,
+            WorkspaceDeleted,
         )
-        if api_request(request):
-            return api_error(409, "branch_mismatch", message)
-        return JSONResponse(status_code=409, content={"detail": message})
+        from grant_lab.proposal_assist.editing.save import BranchMismatchError
+        from grant_lab.proposal_assist.ports.errors import WorkspaceGenerationStale
 
-    @app.exception_handler(WorkspaceRetired)
-    async def _workspace_retired(request: Request, exc: WorkspaceRetired):
-        # Same fact as WorkspaceDeleted, observed one layer earlier: the in-process
-        # retirement tombstone. B-retire made RoomManager.acquire/operate raise this,
-        # and operate raises from __aenter__ — i.e. BEFORE the `try` each kernel
-        # writer opens inside its `async with`, so the writers' own clean-error
-        # handling never sees it and it lands in the calling route's except chain,
-        # which lists only cite/git/mutex errors. The collab writer routes (kernel
-        # accept, direct cite, spec init, annotation insert) would otherwise 500 on
-        # a delete race that used to yield a clean 404 from the mutex's
-        # WorkspaceDeleted.
-        #
-        # Deliberately reuses the "workspace_deleted" code and message rather than
-        # minting a "workspace_retired" one: to a client these are one event (the
-        # workspace is gone), and reusing them makes the raced response BYTE-
-        # IDENTICAL to the pre-B-retire behaviour. WorkspaceRetired is NOT a
-        # subclass of WorkspaceDeleted (both are bare RuntimeErrors), so Starlette
-        # cannot reach the handler above — this registration is required, not
-        # redundant.
-        if api_request(request):
-            return api_error(404, "workspace_deleted", DELETED_ERROR_MESSAGE)
-        return JSONResponse(status_code=404, content={"detail": DELETED_ERROR_MESSAGE})
+        @app.exception_handler(WorkspaceDeleted)
+        async def _workspace_deleted(request: Request, exc: WorkspaceDeleted):
+            # A writer that won the per-workspace commit mutex only to find the
+            # workspace deleted. It mutated nothing. 404 matches what every reader
+            # already sees — the workspace is gone — and keeps the SPA on its existing
+            # not-found path. Registered explicitly so it resolves ahead of the
+            # catch-all Exception handler below.
+            if api_request(request):
+                return api_error(404, "workspace_deleted", DELETED_ERROR_MESSAGE)
+            return JSONResponse(status_code=404, content={"detail": DELETED_ERROR_MESSAGE})
 
-    @app.exception_handler(WorkspaceGenerationStale)
-    async def _workspace_generation_stale(request: Request, exc: WorkspaceGenerationStale):
-        # The same fact again, observed by the epoch fence: a writer that won the
-        # commit mutex carrying a generation the workspace has since moved past.
-        # The only way a LIVE workspace changes generation is a lifecycle
-        # transition (delete, and then restore) — so the workspace this client
-        # addressed is gone, and the row now under that id belongs to a later
-        # epoch. `acquire_commit_mutex_at_generation` raises this BEFORE any
-        # effect (fencing.py), so nothing was mutated.
-        #
-        # 404 + "workspace_deleted" + DELETED_ERROR_MESSAGE, reused rather than
-        # minted, for the same reason the WorkspaceRetired handler above reuses
-        # them: to a client this is the same event — the workspace you addressed
-        # is gone — and it should not be told two different things about it.
-        #
-        # What the collab-ON fork of these routes does, measured rather than
-        # assumed (this comment previously claimed blanket parity, which is false
-        # for the second case):
-        #
-        #   * Plain delete race — soft-deleted mid-request and still deleted.
-        #     Flag-off: Primitive B's own re-read raises WorkspaceDeleted
-        #     (fencing.py:166-167) -> 404 via the handler above. Collab-ON:
-        #     RoomManager.operate's is_retired guards raise WorkspaceRetired
-        #     (collab/room.py:548, 563, 577) -> 404, and the collab checkpoint's
-        #     acquire_commit_mutex_at_generation re-reads soft_deleted_at (and
-        #     compares the generation) underneath that (fencing.py). Parity holds
-        #     here, and reusing this body is what keeps it holding.
-        #
-        #   * Delete-and-RESTORE race — the only race that can reach THIS handler,
-        #     because a still-deleted row is caught by WorkspaceDeleted first.
-        #     Parity does NOT hold here, and claiming it did was this comment's
-        #     earlier error: flag-off is now STRICTER than collab-ON. A restore
-        #     clears the retired flag (lifecycle.py:157 applies retired=False), so
-        #     is_retired() is False again and collab-ON proceeds into the new
-        #     epoch; soft_deleted_at is back to NULL, so the durable backstop waves
-        #     it through too. Only the generation on the caller's stamp catches it,
-        #     and only on the converted (flag-off) path — which is the fence doing
-        #     its job, not a regression.
-        #
-        # So this 404 is not chosen to MATCH collab-ON on the case that reaches it;
-        # it is chosen because the client-visible fact is identical to the plain
-        # delete it already knows, and because minting a second code would make the
-        # answer to "your workspace is gone" depend on a feature flag. Closing the
-        # collab-ON gap is the epoch fence's own remaining work, not this handler's.
-        #
-        # Registered explicitly because WorkspaceGenerationStale is a bare
-        # RuntimeError, sibling to WorkspaceDeleted rather than a subclass, so
-        # Starlette's MRO walk cannot reach the handler above; without this it
-        # falls to the catch-all Exception handler and the epoch race — the exact
-        # event the fence exists to catch — surfaces as a sanitized 500.
-        # ports/errors.py states this exception "never reaches a user as a 5xx";
-        # this registration is what makes that true.
-        #
-        # UnfencedInvocation (ports/errors.py) sits in the same position and is
-        # deliberately NOT handled here: it means the actor carried no generation
-        # at all, which on a live row (lifecycle_generation is NOT NULL with
-        # server_default 0) is an internal inconsistency, not a lifecycle event a
-        # client caused. A 500 is the correct answer to it.
-        if api_request(request):
-            return api_error(404, "workspace_deleted", DELETED_ERROR_MESSAGE)
-        return JSONResponse(status_code=404, content={"detail": DELETED_ERROR_MESSAGE})
+        @app.exception_handler(BranchMismatchError)
+        async def _branch_mismatch(request: Request, exc: BranchMismatchError):
+            # A save whose edit form was rendered on a different branch. Raised by
+            # save_section BEFORE any git or row work, so nothing was mutated — the
+            # route's `with sf() as session` closes and rolls back on the way out,
+            # which is why this propagates instead of being caught per-route (same
+            # shape as WorkspaceDeleted above).
+            #
+            # Its OWN code, not the generic status-derived "conflict": the client has
+            # to tell this apart from a stale section, whose answer is "reload and
+            # re-apply". There is no reload that helps here — the document the user
+            # was editing is on another branch — so the UI names both branches and
+            # keeps the text on screen instead of offering to discard it.
+            message = (
+                f"this edit belongs to branch '{exc.base_branch}'; the workspace is "
+                f"now on '{exc.current_branch}' — it was not saved"
+            )
+            if api_request(request):
+                return api_error(409, "branch_mismatch", message)
+            return JSONResponse(status_code=409, content={"detail": message})
+
+        @app.exception_handler(WorkspaceRetired)
+        async def _workspace_retired(request: Request, exc: WorkspaceRetired):
+            # Same fact as WorkspaceDeleted, observed one layer earlier: the in-process
+            # retirement tombstone. B-retire made RoomManager.acquire/operate raise this,
+            # and operate raises from __aenter__ — i.e. BEFORE the `try` each kernel
+            # writer opens inside its `async with`, so the writers' own clean-error
+            # handling never sees it and it lands in the calling route's except chain,
+            # which lists only cite/git/mutex errors. The collab writer routes (kernel
+            # accept, direct cite, spec init, annotation insert) would otherwise 500 on
+            # a delete race that used to yield a clean 404 from the mutex's
+            # WorkspaceDeleted.
+            #
+            # Deliberately reuses the "workspace_deleted" code and message rather than
+            # minting a "workspace_retired" one: to a client these are one event (the
+            # workspace is gone), and reusing them makes the raced response BYTE-
+            # IDENTICAL to the pre-B-retire behaviour. WorkspaceRetired is NOT a
+            # subclass of WorkspaceDeleted (both are bare RuntimeErrors), so Starlette
+            # cannot reach the handler above — this registration is required, not
+            # redundant.
+            if api_request(request):
+                return api_error(404, "workspace_deleted", DELETED_ERROR_MESSAGE)
+            return JSONResponse(status_code=404, content={"detail": DELETED_ERROR_MESSAGE})
+
+        @app.exception_handler(WorkspaceGenerationStale)
+        async def _workspace_generation_stale(request: Request, exc: WorkspaceGenerationStale):
+            # The same fact again, observed by the epoch fence: a writer that won the
+            # commit mutex carrying a generation the workspace has since moved past.
+            # The only way a LIVE workspace changes generation is a lifecycle
+            # transition (delete, and then restore) — so the workspace this client
+            # addressed is gone, and the row now under that id belongs to a later
+            # epoch. `acquire_commit_mutex_at_generation` raises this BEFORE any
+            # effect (fencing.py), so nothing was mutated.
+            #
+            # 404 + "workspace_deleted" + DELETED_ERROR_MESSAGE, reused rather than
+            # minted, for the same reason the WorkspaceRetired handler above reuses
+            # them: to a client this is the same event — the workspace you addressed
+            # is gone — and it should not be told two different things about it.
+            #
+            # What the collab-ON fork of these routes does, measured rather than
+            # assumed (this comment previously claimed blanket parity, which is false
+            # for the second case):
+            #
+            #   * Plain delete race — soft-deleted mid-request and still deleted.
+            #     Flag-off: Primitive B's own re-read raises WorkspaceDeleted
+            #     (fencing.py:166-167) -> 404 via the handler above. Collab-ON:
+            #     RoomManager.operate's is_retired guards raise WorkspaceRetired
+            #     (collab/room.py:548, 563, 577) -> 404, and the collab checkpoint's
+            #     acquire_commit_mutex_at_generation re-reads soft_deleted_at (and
+            #     compares the generation) underneath that (fencing.py). Parity holds
+            #     here, and reusing this body is what keeps it holding.
+            #
+            #   * Delete-and-RESTORE race — the only race that can reach THIS handler,
+            #     because a still-deleted row is caught by WorkspaceDeleted first.
+            #     Parity does NOT hold here, and claiming it did was this comment's
+            #     earlier error: flag-off is now STRICTER than collab-ON. A restore
+            #     clears the retired flag (lifecycle.py:157 applies retired=False), so
+            #     is_retired() is False again and collab-ON proceeds into the new
+            #     epoch; soft_deleted_at is back to NULL, so the durable backstop waves
+            #     it through too. Only the generation on the caller's stamp catches it,
+            #     and only on the converted (flag-off) path — which is the fence doing
+            #     its job, not a regression.
+            #
+            # So this 404 is not chosen to MATCH collab-ON on the case that reaches it;
+            # it is chosen because the client-visible fact is identical to the plain
+            # delete it already knows, and because minting a second code would make the
+            # answer to "your workspace is gone" depend on a feature flag. Closing the
+            # collab-ON gap is the epoch fence's own remaining work, not this handler's.
+            #
+            # Registered explicitly because WorkspaceGenerationStale is a bare
+            # RuntimeError, sibling to WorkspaceDeleted rather than a subclass, so
+            # Starlette's MRO walk cannot reach the handler above; without this it
+            # falls to the catch-all Exception handler and the epoch race — the exact
+            # event the fence exists to catch — surfaces as a sanitized 500.
+            # ports/errors.py states this exception "never reaches a user as a 5xx";
+            # this registration is what makes that true.
+            #
+            # UnfencedInvocation (ports/errors.py) sits in the same position and is
+            # deliberately NOT handled here: it means the actor carried no generation
+            # at all, which on a live row (lifecycle_generation is NOT NULL with
+            # server_default 0) is an internal inconsistency, not a lifecycle event a
+            # client caused. A 500 is the correct answer to it.
+            if api_request(request):
+                return api_error(404, "workspace_deleted", DELETED_ERROR_MESSAGE)
+            return JSONResponse(status_code=404, content={"detail": DELETED_ERROR_MESSAGE})
 
     @app.exception_handler(OperationalError)
     async def _lock_timeout(request: Request, exc: OperationalError):
@@ -815,9 +824,20 @@ def create_app() -> FastAPI:
     # StructuredLLM but does NOT open any connection at this point — the LLM
     # client is lazy/per-call, so this is safe at startup. Routes pass this
     # through to ingest_bytes so extraction runs in production.
-    app.state.citation_service = build_citation_service(
-        settings=settings, session_factory=session_factory
-    )
+    # Built only in the full edition. Its consumers are the citation_audit and
+    # references routers (both _FULL_ONLY) and the analysis ticks, which the
+    # scheduler already gates on settings.drafting_enabled — and APP_EDITION=match
+    # REQUIRES DRAFTING_ENABLED=false (config.py::_match_edition_disables_drafting).
+    # Call ingestion never touches it: `ingest_bytes` is reference ingestion, in
+    # proposal_assist/references/. None is an existing, handled contract.
+    if settings.app_edition == "match":
+        app.state.citation_service = None
+    else:
+        from grant_lab.proposal_assist.citations import build_citation_service
+
+        app.state.citation_service = build_citation_service(
+            settings=settings, session_factory=session_factory
+        )
     app.state.email_sender = email_sender
     app.state.email_limiter = SlidingWindowLimiter(
         max_requests=5, window_seconds=15 * 60, name="email"
@@ -848,9 +868,15 @@ def create_app() -> FastAPI:
         model=settings.embedding_model,
         expected_dim=settings.embedding_dim,
     )
-    app.state.reference_ingest_limiter = IngestLimiter(
-        capacity=settings.reference_ingest_concurrency
-    )
+    if settings.app_edition == "match":
+        # Read only by the references router (_FULL_ONLY) and the drafting factory.
+        app.state.reference_ingest_limiter = None
+    else:
+        from grant_lab.proposal_assist.references.admission import IngestLimiter
+
+        app.state.reference_ingest_limiter = IngestLimiter(
+            capacity=settings.reference_ingest_concurrency
+        )
 
     # Vendored static assets (only favicon.svg after the legacy UI deletion). Serving
     # locally avoids an unreviewed third-party CDN dependency on every page load,

@@ -16,6 +16,7 @@ import uuid
 from starlette.concurrency import run_in_threadpool
 
 from grant_lab.db.models import User, Workspace
+from grant_lab.errors import is_lock_timeout
 from grant_lab.proposal_assist.citations.gitio import GitCommitError
 from grant_lab.proposal_assist.collab.checkpoint import checkpoint_artifact
 from grant_lab.proposal_assist.collab.room import MANAGER
@@ -23,7 +24,6 @@ from grant_lab.proposal_assist.collab.ws_auth import resolve_access
 from grant_lab.proposal_assist.drafting.locking import (
     CommitMutexTimeout,
     WorkspaceDeleted,
-    is_lock_timeout,
 )
 from grant_lab.proposal_assist.fencing import WorkspaceGenerationStale
 from grant_lab.proposal_assist.ports.stamp import stamp_for_workspace

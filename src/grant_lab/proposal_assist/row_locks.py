@@ -63,7 +63,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from grant_lab.proposal_assist.drafting.locking import is_lock_timeout
+from grant_lab.errors import is_lock_timeout
 
 # The four proposal-assist pass prefixes (coherence, evaluator, uncited-claims,
 # review) take the workspace row FOR UPDATE and hold it across context assembly —

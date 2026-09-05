@@ -15,13 +15,15 @@ case boots a subprocess with a hermetic environment (`.env` disabled exactly as
 The full-edition case is not decoration: without it, deleting the imports
 outright would also make the match case pass. The pair pins a DIFFERENCE.
 
-Result of the 2026-09-05 cut: 142 -> 52 proposal-assist modules, 239 -> 135
-`grant_lab` modules, and pycrdt/prosemirror/claude_agent_sdk all absent. The
-remaining 52 are NOT reachable by deferring an import; they need two decisions:
-`drafting.locking` exports `is_lock_timeout` and the error messages used by the
-GENERIC OperationalError handler that both editions need, and it is undecided
-whether a match deployment needs `citation_service` at all (call ingestion uses
-it for metadata extraction). Both are package moves, not import moves.
+Result of the 2026-09-05 cut: **0** proposal-assist modules in a match boot,
+`grant_lab` modules 239 -> 83, and pycrdt/prosemirror/claude_agent_sdk absent.
+
+Getting the last 52 to zero took two moves that deferring could not: the shared
+`is_lock_timeout` and `BUSY_ERROR_MESSAGE` — used by the GENERIC OperationalError
+handler both editions register — moved to `grant_lab/db/errors.py`, and
+`citation_service` is now built only in the full edition (its only consumers are
+_FULL_ONLY routers and analysis ticks the scheduler already gates on
+`drafting_enabled`, which match forbids).
 """
 
 from __future__ import annotations
@@ -79,34 +81,23 @@ def _boot(edition: str) -> dict:
     )
 
 
-# Measured on the match boot after the 2026-09-05 cut, and a RATCHET, not a target:
-# any new module-level import of proposal_assist from the always-loaded path pushes
-# it up and reddens this. Lowering it is welcome — see the module docstring for the
-# two things standing between 52 and 0.
-MATCH_PROPOSAL_ASSIST_CEILING = 52
-
-
 def test_a_match_boot_loads_none_of_the_heavy_proposal_assist_dependencies():
-    """The three libraries only the full edition needs must not be imported at all.
-
-    This is the assertion that matters: `pycrdt` (collaborative editing),
-    `prosemirror` (the document model) and `claude_agent_sdk` (drafting) are the
-    weight, and a match deployment neither serves nor sells any of them.
-    """
+    """The three libraries only the full edition needs must not be imported at all."""
     got = _boot("match")
     for dep in ("pycrdt", "prosemirror", "claude_agent_sdk"):
         assert got[dep] is False, (
-            f"a match boot imported {dep}, which only the full edition needs. "
-            f"probe: {got}"
+            f"a match boot imported {dep}, which only the full edition needs. probe: {got}"
         )
 
 
-def test_a_match_boot_does_not_grow_its_proposal_assist_footprint():
+def test_a_match_boot_imports_no_proposal_assist_module_at_all():
+    """Zero, not a budget. Any module-level import of proposal_assist from the
+    always-loaded path reddens this, and the fix is to defer it to the caller or
+    move the shared thing out of the package (grant_lab/db/errors.py is where
+    is_lock_timeout and BUSY_ERROR_MESSAGE went for exactly this reason)."""
     got = _boot("match")
-    assert got["proposal_assist"] <= MATCH_PROPOSAL_ASSIST_CEILING, (
-        f"a match boot imported {got['proposal_assist']} proposal_assist modules, "
-        f"above the {MATCH_PROPOSAL_ASSIST_CEILING} ratchet — something was added to "
-        "the always-loaded import path. Defer it, or lower the ceiling if you cut one."
+    assert got["proposal_assist"] == 0, (
+        f"a match boot imported {got['proposal_assist']} proposal_assist modules. probe: {got}"
     )
 
 

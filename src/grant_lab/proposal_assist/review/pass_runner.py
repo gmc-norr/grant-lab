@@ -25,9 +25,16 @@ from grant_lab.proposal_assist.citations.gitio import (
     write_and_commit_files,
 )
 from grant_lab.proposal_assist.drafting.contract import LaunchContext, TurnDoneEvent
-from grant_lab.proposal_assist.fencing import (
+
+# CommitMutexTimeout and WorkspaceDeleted come from drafting/locking.py, their
+# actual home. They used to be reachable through fencing only as a side effect of
+# a module-level import there, which the 2026-09-05 import-cycle fix deferred;
+# fencing's own __all__ never listed them.
+from grant_lab.proposal_assist.drafting.locking import (
     CommitMutexTimeout,
     WorkspaceDeleted,
+)
+from grant_lab.proposal_assist.fencing import (
     WorkspaceGenerationStale,
     acquire_commit_mutex_at_generation,
 )
