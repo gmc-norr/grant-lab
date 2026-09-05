@@ -23,9 +23,11 @@
 /api/auth/logout
 /api/auth/register
 /api/calls
+/api/calls/decisions/counts
 /api/calls/hidden
 /api/calls/{call_id}
 /api/calls/{call_id}/hide
+/api/calls/{call_id}/save
 /api/me
 /api/me/default-profile
 /api/me/name

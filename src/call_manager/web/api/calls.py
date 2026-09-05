@@ -19,7 +19,11 @@ from call_manager.db.models import (
     User,
 )
 from call_manager.web.call_detail_view import _criterion_detail, _parse_optional_profile_id
-from call_manager.web.dashboard import build_dashboard_view, resolve_profile_selection
+from call_manager.web.dashboard import (
+    build_dashboard_view,
+    count_decision_views,
+    resolve_profile_selection,
+)
 from call_manager.web.filters import (
     criterion_label,
     deadline_local_date,
@@ -179,6 +183,27 @@ class HiddenListOut(BaseModel):
     items: list[HiddenCallOut]
 
 
+class CallDecisionOut(BaseModel):
+    """The state the call is in AFTER the request. `null` is undecided.
+
+    Undecided is the ABSENCE of a row, so the undo path returns `null` rather
+    than inventing a fourth state name the table cannot store.
+
+    NOT the same shape as `CallHideOut{hidden: bool}`, and deliberately so
+    (D14): hide is a re-skin of an endpoint that predates the state column and
+    keeps its wire contract; save is new and says which of the three states the
+    call now sits in. The frontend has two hooks either way.
+    """
+
+    state: Literal["saved", "hidden"] | None
+
+
+class CallDecisionCountsOut(BaseModel):
+    inbox: int
+    saved: int
+    hidden: int
+
+
 def _readable_active_profile_or_404(session, user: User, profile_id: int) -> None:
     """A decision needs a real, live, READABLE profile to attach to.
 
@@ -284,6 +309,98 @@ def unhide_call(
     return CallHideOut(hidden=False)
 
 
+@router.post("/calls/{call_id}/save", response_model=CallDecisionOut)
+def save_call(
+    request: Request,
+    call_id: int,
+    profile_id: int = Query(...),
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    """Save one call FOR ONE PROFILE -- the genuinely new half of the pair.
+
+    `profile_id` is REQUIRED (422 without it) and goes through the read rule,
+    exactly as `hide_call` does: same table, same NOT NULL FK, same 404-not-403
+    contract, so an id the caller may not read is indistinguishable from one
+    that does not exist.
+
+    DO UPDATE, not DO NOTHING. The first save of an undecided call INSERTS, and
+    on a missing row DO UPDATE and DO NOTHING are indistinguishable -- the
+    behaviour this chooses is only observable on the flip: saving a HIDDEN call
+    must move it to saved, where DO NOTHING would answer 200 and leave it
+    hidden. All THREE columns move: `decided_at` because this IS a new decision
+    and Saved/Hidden are ordered by it (D12), `decided_by` because it records
+    who pressed the key (D4).
+
+    The conflict target is the full (user_id, profile_id, call_id) key, so this
+    upsert can only ever touch the caller's own row -- a colleague holding their
+    own decision on the same call and profile is untouched.
+    """
+    sf = request.app.state.session_factory
+    with sf() as session:
+        if session.get(Call, call_id) is None:
+            raise HTTPException(status_code=404, detail="call not found")
+        _readable_active_profile_or_404(session, user, profile_id)
+        session.execute(
+            pg_insert(CallDecision)
+            .values(
+                user_id=user.id,
+                profile_id=profile_id,
+                call_id=call_id,
+                state="saved",
+                decided_by=user.id,
+            )
+            .on_conflict_do_update(
+                index_elements=["user_id", "profile_id", "call_id"],
+                set_={"state": "saved", "decided_at": func.now(), "decided_by": user.id},
+            )
+        )
+        session.commit()
+    return CallDecisionOut(state="saved")
+
+
+@router.delete("/calls/{call_id}/save", response_model=CallDecisionOut)
+def unsave_call(
+    request: Request,
+    call_id: int,
+    profile_id: int = Query(...),
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    """Un-save: back to undecided, which is the ABSENCE of a row.
+
+    Scoped by user, by profile AND by state, for the same three reasons as
+    `unhide_call`. `CallDecision.user_id == user.id` is this endpoint's ONLY
+    authorization control -- the unique key is (user_id, profile_id, call_id),
+    so a colleague can hold their own saved row on the very same call and
+    profile and dropping that clause would delete it. Without the profile
+    predicate the delete reaches across every other profile; without the state
+    predicate an undo keypress on a HIDDEN card would throw the hide away too.
+
+    `profile_id` is REQUIRED (422 without it, same as save) but, unlike save, is
+    NOT run through `_readable_active_profile_or_404` (T2-10). Every row this
+    delete can touch is already scoped to `user_id == user.id`, so there is
+    nothing left to leak by skipping the check -- and skipping it is
+    load-bearing: deactivate the profile, or have its sharing revoked, and the
+    call the user saved on it must still be un-saveable, not stranded behind a
+    404 forever.
+
+    Idempotent: 200 even when there was no saved row to delete.
+    """
+    sf = request.app.state.session_factory
+    with sf() as session:
+        if session.get(Call, call_id) is None:
+            raise HTTPException(status_code=404, detail="call not found")
+        session.execute(
+            delete(CallDecision).where(
+                CallDecision.user_id == user.id,
+                CallDecision.profile_id == profile_id,
+                CallDecision.call_id == call_id,
+                CallDecision.state == "saved",
+            )
+        )
+        session.commit()
+    return CallDecisionOut(state=None)
+
+
 @router.get("/calls/hidden", response_model=HiddenListOut)
 def list_hidden_calls(
     request: Request,
@@ -329,6 +446,52 @@ def list_hidden_calls(
             for call, _decided_at in rows
         ]
     return HiddenListOut(items=items)
+
+
+@router.get("/calls/decisions/counts", response_model=CallDecisionCountsOut)
+def get_decision_counts(
+    request: Request,
+    profile_id: int = Query(...),
+    source: str | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=200),
+    show_closed: bool = Query(default=False),
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    """Where inbox-zero comes from: how many calls sit in each triage view.
+
+    Declared above `/calls/{call_id}`, but NOT because it has to be. MEASURED in
+    Phase 2: Starlette compiles `/api/calls/{call_id}` to
+    `^/api/calls/(?P<call_id>[^/]+)$`, and `[^/]+` cannot cross a slash, so this
+    THREE-segment path never competes with it and is safe wherever it is
+    declared. The order hazard is real for a TWO-segment path -- that same regex
+    DOES match `/api/calls/counts` -- which is why `/calls/hidden` above must
+    stay where it is, and why this path is three segments rather than two.
+
+    `source`, `q` and `show_closed` are accepted with the LIST's names, defaults
+    and semantics, so the rail and the feed agree under a filter and not only in
+    the unfiltered case. `min_score` is deliberately NOT accepted (D18): a score
+    floor needs the ranking join and `score_floor_active`'s three-way rule, and
+    a second copy of that here is how the rail and the feed drift. It is also
+    not applied, so a `min_score`-filtered list can show FEWER calls than these
+    counts report for the same view; no release-1 surface can observe that (the
+    match edition ships no `min_score` control).
+
+    `profile_id` is REQUIRED and goes through the read rule, exactly as the two
+    write routes do -- these counts are a per-profile fact about a user's own
+    decisions, and an unreadable id must not be a probe.
+    """
+    sf = request.app.state.session_factory
+    with sf() as session:
+        _readable_active_profile_or_404(session, user, profile_id)
+        counts = count_decision_views(
+            session,
+            user_id=user.id,
+            profile_id=profile_id,
+            source=source,
+            q=q,
+            show_closed=show_closed,
+        )
+    return CallDecisionCountsOut(**counts)
 
 
 @router.get("/calls/{call_id}", response_model=CallDetailOut)
@@ -437,9 +600,7 @@ def get_call_detail(
             ranking_out = CallDetailRankingOut(
                 aggregate_score=ranking.aggregate_score,
                 aggregate_reason_label=(
-                    criterion_label(ranking.aggregate_reason)
-                    if ranking.aggregate_reason
-                    else None
+                    criterion_label(ranking.aggregate_reason) if ranking.aggregate_reason else None
                 ),
                 model_label=model_label(ranking.model),
                 rationale=ranking.rationale,

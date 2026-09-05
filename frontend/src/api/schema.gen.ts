@@ -521,6 +521,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/calls/decisions/counts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Decision Counts
+         * @description Where inbox-zero comes from: how many calls sit in each triage view.
+         *
+         *     Declared above `/calls/{call_id}`, but NOT because it has to be. MEASURED in
+         *     Phase 2: Starlette compiles `/api/calls/{call_id}` to
+         *     `^/api/calls/(?P<call_id>[^/]+)$`, and `[^/]+` cannot cross a slash, so this
+         *     THREE-segment path never competes with it and is safe wherever it is
+         *     declared. The order hazard is real for a TWO-segment path -- that same regex
+         *     DOES match `/api/calls/counts` -- which is why `/calls/hidden` above must
+         *     stay where it is, and why this path is three segments rather than two.
+         *
+         *     `source`, `q` and `show_closed` are accepted with the LIST's names, defaults
+         *     and semantics, so the rail and the feed agree under a filter and not only in
+         *     the unfiltered case. `min_score` is deliberately NOT accepted (D18): a score
+         *     floor needs the ranking join and `score_floor_active`'s three-way rule, and
+         *     a second copy of that here is how the rail and the feed drift. It is also
+         *     not applied, so a `min_score`-filtered list can show FEWER calls than these
+         *     counts report for the same view; no release-1 surface can observe that (the
+         *     match edition ships no `min_score` control).
+         *
+         *     `profile_id` is REQUIRED and goes through the read rule, exactly as the two
+         *     write routes do -- these counts are a per-profile fact about a user's own
+         *     decisions, and an unreadable id must not be a probe.
+         */
+        get: operations["get_decision_counts_api_calls_decisions_counts_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/calls/hidden": {
         parameters: {
             query?: never;
@@ -611,6 +652,65 @@ export interface paths {
          *     Idempotent: 200 even when there was no hidden row to delete.
          */
         delete: operations["unhide_call_api_calls__call_id__hide_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/calls/{call_id}/save": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Save Call
+         * @description Save one call FOR ONE PROFILE -- the genuinely new half of the pair.
+         *
+         *     `profile_id` is REQUIRED (422 without it) and goes through the read rule,
+         *     exactly as `hide_call` does: same table, same NOT NULL FK, same 404-not-403
+         *     contract, so an id the caller may not read is indistinguishable from one
+         *     that does not exist.
+         *
+         *     DO UPDATE, not DO NOTHING. The first save of an undecided call INSERTS, and
+         *     on a missing row DO UPDATE and DO NOTHING are indistinguishable -- the
+         *     behaviour this chooses is only observable on the flip: saving a HIDDEN call
+         *     must move it to saved, where DO NOTHING would answer 200 and leave it
+         *     hidden. All THREE columns move: `decided_at` because this IS a new decision
+         *     and Saved/Hidden are ordered by it (D12), `decided_by` because it records
+         *     who pressed the key (D4).
+         *
+         *     The conflict target is the full (user_id, profile_id, call_id) key, so this
+         *     upsert can only ever touch the caller's own row -- a colleague holding their
+         *     own decision on the same call and profile is untouched.
+         */
+        post: operations["save_call_api_calls__call_id__save_post"];
+        /**
+         * Unsave Call
+         * @description Un-save: back to undecided, which is the ABSENCE of a row.
+         *
+         *     Scoped by user, by profile AND by state, for the same three reasons as
+         *     `unhide_call`. `CallDecision.user_id == user.id` is this endpoint's ONLY
+         *     authorization control -- the unique key is (user_id, profile_id, call_id),
+         *     so a colleague can hold their own saved row on the very same call and
+         *     profile and dropping that clause would delete it. Without the profile
+         *     predicate the delete reaches across every other profile; without the state
+         *     predicate an undo keypress on a HIDDEN card would throw the hide away too.
+         *
+         *     `profile_id` is REQUIRED (422 without it, same as save) but, unlike save, is
+         *     NOT run through `_readable_active_profile_or_404` (T2-10). Every row this
+         *     delete can touch is already scoped to `user_id == user.id`, so there is
+         *     nothing left to leak by skipping the check -- and skipping it is
+         *     load-bearing: deactivate the profile, or have its sharing revoked, and the
+         *     call the user saved on it must still be un-saveable, not stranded behind a
+         *     404 forever.
+         *
+         *     Idempotent: 200 even when there was no saved row to delete.
+         */
+        delete: operations["unsave_call_api_calls__call_id__save_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -2423,6 +2523,31 @@ export interface components {
             tips: {
                 [key: string]: string;
             };
+        };
+        /** CallDecisionCountsOut */
+        CallDecisionCountsOut: {
+            /** Hidden */
+            hidden: number;
+            /** Inbox */
+            inbox: number;
+            /** Saved */
+            saved: number;
+        };
+        /**
+         * CallDecisionOut
+         * @description The state the call is in AFTER the request. `null` is undecided.
+         *
+         *     Undecided is the ABSENCE of a row, so the undo path returns `null` rather
+         *     than inventing a fourth state name the table cannot store.
+         *
+         *     NOT the same shape as `CallHideOut{hidden: bool}`, and deliberately so
+         *     (D14): hide is a re-skin of an endpoint that predates the state column and
+         *     keeps its wire contract; save is new and says which of the three states the
+         *     call now sits in. The frontend has two hooks either way.
+         */
+        CallDecisionOut: {
+            /** State */
+            state: ("saved" | "hidden") | null;
         };
         /** CallDetailCallOut */
         CallDetailCallOut: {
@@ -7049,6 +7174,121 @@ export interface operations {
             };
         };
     };
+    get_decision_counts_api_calls_decisions_counts_get: {
+        parameters: {
+            query: {
+                profile_id: number;
+                source?: string | null;
+                q?: string | null;
+                show_closed?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CallDecisionCountsOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
     list_hidden_calls_api_calls_hidden_get: {
         parameters: {
             query: {
@@ -7409,6 +7649,234 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CallHideOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    save_call_api_calls__call_id__save_post: {
+        parameters: {
+            query: {
+                profile_id: number;
+            };
+            header?: never;
+            path: {
+                call_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CallDecisionOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    unsave_call_api_calls__call_id__save_delete: {
+        parameters: {
+            query: {
+                profile_id: number;
+            };
+            header?: never;
+            path: {
+                call_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CallDecisionOut"];
                 };
             };
             /** @description Bad Request */

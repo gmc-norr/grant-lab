@@ -302,6 +302,78 @@ def _search_predicate(q: str):
     return and_(*term_clauses)
 
 
+def _base_call_filters(
+    view: View, *, user_id: int, profile_id: int | None, source_id: int | None, q: str | None
+):
+    """The ONE definition of the call-matching filters, shared by the list, its
+    badges and the rail counts.
+
+    One definition, so the rail cannot say "3" over a feed showing 2. The `view`
+    predicate is the only per-view part; `source` and free text restrict the same
+    corpus in every view. `build_dashboard_view` and `count_decision_views` are
+    the only callers and MUST NOT grow separate copies of this -- a second copy
+    is how the rail and the feed drift apart under a filter nobody re-tested.
+
+    `open_expr` is deliberately NOT here. It is applied by the caller, because it
+    is applied CONDITIONALLY and per view: `show_closed` governs inbox/archive
+    and never saved/hidden (D1). Folding it in would force both callers to undo
+    it for two of the four views.
+    """
+    filters = [_decision_predicate(view, user_id=user_id, profile_id=profile_id)]
+    if source_id is not None:
+        filters.append(Call.source_id == source_id)
+    if q and q.strip():
+        filters.append(_search_predicate(q.strip()))
+    return filters
+
+
+def count_decision_views(
+    session: Session,
+    *,
+    user_id: int,
+    profile_id: int,
+    source: str | None = None,
+    q: str | None = None,
+    show_closed: bool = False,
+) -> dict[str, int]:
+    """How many calls sit in each triage view, for ONE profile. Inbox-zero.
+
+    THREE calls to `_base_call_filters`, one per view -- not one shared "the list
+    predicate" call. No single predicate is both: the inbox excludes every
+    decision, saved and hidden select one state each.
+
+    Takes the list's filters, with the LIST'S NAMES, defaults and semantics --
+    `source`, `q`, `show_closed` -- so the rail and the feed agree under a filter
+    and not only in the unfiltered case. `open_expr` is applied exactly as the
+    list applies it: to `inbox` unless `show_closed`, and NEVER to `saved` or
+    `hidden`, which list DECISIONS and keep a call that has closed (D1).
+
+    `min_score` is deliberately NOT accepted (D18). A score floor needs the
+    ranking join and `score_floor_active`'s three-way rule, and duplicating that
+    here is exactly how the rail and the feed drift; no release-1 surface can
+    observe the difference (the match edition ships no `min_score` control). A
+    `min_score`-filtered list can therefore show FEWER calls than these counts
+    report for the same view.
+
+    `profile_id` is REQUIRED, unlike the list's optional `?profile`. There is no
+    honest "counts for the unranked archive": the archive is one view, not three,
+    and saved/hidden with no profile are empty by D8.
+    """
+    open_expr = or_(Call.deadline.is_(None), Call.deadline > datetime.now(UTC))
+    # Unknown/stale slug degrades to "all sources", exactly as the list does.
+    source_id = session.scalar(select(Source.id).where(Source.slug == source)) if source else None
+
+    def count(view: View) -> int:
+        filters = _base_call_filters(
+            view, user_id=user_id, profile_id=profile_id, source_id=source_id, q=q
+        )
+        if not show_closed and view not in ("saved", "hidden"):
+            filters.append(open_expr)
+        return session.scalar(select(func.count()).select_from(Call).where(*filters)) or 0
+
+    return {"inbox": count("inbox"), "saved": count("saved"), "hidden": count("hidden")}
+
+
 def build_dashboard_view(
     session: Session,
     *,
@@ -419,11 +491,9 @@ def build_dashboard_view(
     # is the EFFECTIVE one: an unknown/inactive/unreadable id was degraded to
     # None above, so the decision scope and the ranking join always agree about
     # which profile this is.
-    base_filters = [_decision_predicate(view, user_id=user_id, profile_id=profile_id)]
-    if source_id is not None:
-        base_filters.append(Call.source_id == source_id)
-    if q and q.strip():
-        base_filters.append(_search_predicate(q.strip()))
+    base_filters = _base_call_filters(
+        view, user_id=user_id, profile_id=profile_id, source_id=source_id, q=q
+    )
     # The list (and its pagination total) hide closed calls by default -- but
     # NOT in the Saved and Hidden views (D1). Those list DECISIONS: a researcher
     # who saved a call because they intend to apply must not watch it vanish
