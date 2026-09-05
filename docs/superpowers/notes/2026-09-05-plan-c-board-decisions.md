@@ -1,6 +1,6 @@
 # Plan C (corridor boards) — the decisions the spec does not make
 
-**Date:** 2026-09-05 (rev 3) · **Status:** decided with the human; implementation plan not yet written
+**Date:** 2026-09-05 (rev 4) · **Status:** decided with the human; implementation plan not yet written
 **Spec:** [`specs/2026-09-03-call-match-release-1-design.md`](../specs/2026-09-03-call-match-release-1-design.md) §4.3, §6
 
 ## What this document is
@@ -10,9 +10,18 @@ and the public `/b/:slug` screen. The spec fixes the tables, the permissions, th
 the QR rules and what is deliberately not public.
 
 This note records the decisions the spec does **not** make, plus **two deliberate
-overrides of the spec** (D2 and D7). Rev 1 was reviewed by two outside models; rev 2
-corrected the four errors they both found; rev 3 adds D7 and D8, and records three
-questions that turned out to be **already answered by the code** rather than open.
+overrides of the spec** (D2 and D7) and **one capability the app does not have yet**
+(D10, profile transfer). Rev 1 was reviewed by two outside models; rev 2 corrected the
+four errors they both found; rev 3 added D7 and D8 and recorded three questions that
+turned out to be **already answered by the code** rather than open; rev 4 closes the two
+remaining open questions as D9 and D10, and **corrects rev 3's own statement of the
+second one** — the schema makes the failure it described impossible, and the real
+failure is quieter.
+
+**D10 widens Plan C's footprint beyond boards.** Transferring a profile touches the
+permission model seven other surfaces read from, so Plan C must either carry it as its
+own slice with its own gates or hand it to a separate plan. That is a sequencing call
+for the plan author; it is not a reason to soften the decision.
 
 ## Revision history — and what rev 1 got wrong
 
@@ -237,14 +246,119 @@ only automatic removal is the existing deadline filter.
 deadline passes. With D8 that is false as written: it also changes when the funder's data
 changes. Plan C should carry D8's sentence, not D3's.
 
-## Still open — for the human, before Plan C's Task 1
+### D9. The PROFILE OWNER is told the queue needs attention.
 
-1. **Nobody is told the queue needs attention.** D5's gap is visible only on the corridor
-   screen, to passers-by who cannot act on it. Decide what notifies a profile editor:
-   live cards falling below `items_per_page`, a deadline dropping an item, or a
-   waiting-count threshold. Not schema-blocking; it is a surface.
-2. **Ownership succession.** D2 keys off `profiles.created_by`. Decide what happens to a
-   board when that person leaves — reassign the profile, or the queue loses its reference.
+Decided 2026-09-05, closing rev 3's first open question. D5 established that an
+underfull board is visible only to passers-by, who cannot act on it. The person told is
+the same person D2 already keys the queue off: `profiles.created_by`.
+
+**The channel already exists and is already populated for exactly this person.**
+`profiles/create.py:79` inserts `Subscription(user_id=owner_id, profile_id=p.id,
+digest_enabled=True)` inside the same atomic create as the profile row. So
+`subscriptions` is already a per-(user, profile) row for every profile owner, keyed the
+same way the board is. Plan C adds no new addressing table and no new recipient concept.
+
+**Not the board's creator.** Consistent with D2: §4.3 lets any profile editor create a
+board, so `boards.created_by` may be an admin who built it for somebody else. Notifying
+them would tell the wrong person a queue they do not own is short.
+
+**Two things Plan C must decide, not assumed here.**
+
+1. **Whether it reuses `digest_enabled` or needs its own flag.** That column governs the
+   weekly digest (`digest/send.py:38` filters `digest_disabled_at IS NULL` and
+   `status == 'active'`). Reusing it means switching off the weekly email also switches
+   off the corridor-board alert, which is a different thing with a different urgency.
+   A second boolean on the same row is the cheaper honest option, but it is Plan C's call.
+2. **The trigger.** Rev 3 listed three candidates — live cards falling below
+   `items_per_page`, a deadline dropping an item, a waiting-count threshold. Still open,
+   still not schema-blocking, because all three read the same two tables.
+
+**The gap D9 does not close.** `digest/send.py:38` sends only to `User.status ==
+'active'`. A **disabled** owner is silently not notified, and nothing anywhere reports
+that the notification had no recipient. That is not a bug in D9 — it is the same hole
+D10 exists to fill, and Plan C should make the silence visible rather than assume the
+mail went out.
+
+**D9 does not say** that every profile *editor* is notified, nor that a `ProfileViewer`
+is, nor that the alert appears anywhere other than the owner's inbox.
+
+### D10. A profile can be TRANSFERRED to another user. New capability.
+
+Decided 2026-09-05, closing rev 3's second open question, which asked what happens to a
+board when the owner leaves.
+
+**Rev 3 stated the failure mode wrongly, and the schema says so.** Rev 3 said the queue
+"loses its reference". It cannot: `Profile.created_by` is
+`ForeignKey("users.id", ondelete="RESTRICT")` and `nullable=False`
+(`db/models.py:299-301`). Postgres **refuses** to delete a user who owns a profile. And
+the only route that deletes a user at all, `admin_release_user`
+(`web/api/admin_users.py:195`), raises 400 unless `u.status == "pending"` — a user who
+has never been approved and therefore cannot have created anything. Leaving is
+`admin_disable_user` (`admin_users.py:216`), which sets `status = "disabled"` and bumps
+`session_epoch`.
+
+So the real state of a departed owner is: **row present, FK intact, queue still resolves,
+owner cannot log in, and — per D9 — is not emailed.** The board keeps publishing and the
+queue keeps growing with nobody able to reach it. That is worse than a dangling
+reference, because nothing is broken enough to notice.
+
+**Measured: nothing in this codebase reassigns ownership today.** `created_by` is
+written at creation and never updated — `grep -rn "created_by *=" src/grant_lab/web/api/`
+returns three hits, none of them a profile and none of them a reassignment: a
+golden-set row's author (`admin_golden_set.py:94`), an `ArtifactVersion` built with the
+literal string `"user"` (`workspaces.py:622`), and a response DTO copying a value it
+just read (`workspaces.py:1337`). Transfer is genuinely new work,
+not a widening of an existing endpoint.
+
+**What transfer must move.** `created_by` is not a label; it is load-bearing in seven
+places (measured, `grep -rn "Profile.created_by\|p.created_by" src/grant_lab/`):
+
+| site | what it decides |
+| --- | --- |
+| `web/profile_access.py:68` | the **owner arm** of `readable_profile_ids` |
+| `web/api/profiles.py:142` | one route's edit gate |
+| `web/api/profiles.py:196` | the `can_edit` flag the SPA renders from |
+| `web/api/profiles.py:400` | the update gate |
+| `web/api/profiles.py:544` | viewer-list writes drop the owner's own id |
+| `web/api/profiles.py:612` | adding the owner as a viewer is a deliberate no-op |
+| `web/api/calls.py:641` | a call route scoped to profiles the user owns |
+
+**The consequence that must not be silent: transfer moves READ access.** For a
+`visibility='private'` profile, `created_by` is the only arm granting the old owner
+anything — they are never in `profile_viewers` (`profiles.py:612` makes adding them a
+no-op, and `profile_access.py` documents "the OWNER never has a row"). So the moment the
+profile transfers, **the previous owner loses the ability to read it**, and the transfer
+UI must say so before it happens rather than after.
+
+**Who may transfer.** Owner-or-admin, the rule already at `profiles.py:400`. The admin
+arm is not a convenience here — it is the entire point, because the case that motivated
+D10 is an owner who can no longer log in.
+
+**Three follow-on rows Plan C must decide about, all measured as existing:**
+
+- The old owner's `Subscription(user_id, profile_id)` row from `profiles/create.py:79`.
+  Left alone, they keep getting the digest for a profile they may no longer read.
+- The new owner may have **no** subscription row. Transfer should create one, mirroring
+  the create path, or D9 notifies nobody.
+- `users.default_profile_id` (`db/models.py:98`) may point at the transferred profile for
+  the old owner.
+
+**D10 does not say** that disabling a user auto-transfers their profiles (it does not —
+transfer is a deliberate act), nor that ownership may be transferred to an inactive user,
+nor that the old owner retains read access. If they should, that is an explicit
+`ProfileViewer` row written by the transfer, and Plan C must say so.
+
+## Still open — none blocking Plan C's Task 1
+
+Rev 3's two open questions are closed above as D9 and D10. What remains is scoped
+*inside* those decisions, and none of it changes a table:
+
+1. **D9's trigger** — which of the three signals fires the alert.
+2. **D9's flag** — reuse `digest_enabled` or add a second boolean.
+3. **D7's flip** — what happens when an author changes orientation on a board already
+   over the new capacity.
+4. **D4's boundary** — whether a board whose profile is *already* private may be
+   published at all. D4 governs an already-published board only.
 
 ## What Plan C must still measure for itself
 
