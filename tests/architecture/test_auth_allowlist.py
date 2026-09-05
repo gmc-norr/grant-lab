@@ -45,6 +45,10 @@ PUBLIC_ROUTES = frozenset(
         ("POST", "/auth/google/start"),  # OIDC redirect
         ("GET", "/auth/google/callback"),  # OIDC return leg
         ("GET", "/events/ping"),  # dev-only SSE probe (SPA_MODE=dev)
+        # The corridor board. Deliberately unauthenticated: it is a screen on a
+        # wall, and §6's payload carries no score, no rationale and no profile
+        # identity. Rate-limited at 60/15min per IP and cached ~5 minutes.
+        ("GET", "/api/public/boards/{slug}"),
     }
 )
 

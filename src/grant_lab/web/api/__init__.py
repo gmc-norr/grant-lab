@@ -19,6 +19,7 @@ from grant_lab.web.api import (
     calls,
     me,
     profiles,
+    public_boards,
 )
 from grant_lab.web.api.errors import STATUS_CODES, ApiError
 
@@ -45,6 +46,7 @@ _ALWAYS = (
     # anything under grant_lab.proposal_assist -- this file is a package
     # __init__, so an import here runs in every process.
     boards.router,
+    public_boards.router,
 )
 
 

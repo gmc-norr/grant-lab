@@ -843,6 +843,16 @@ def create_app() -> FastAPI:
         max_requests=5, window_seconds=15 * 60, name="email"
     )
     app.state.ip_limiter = SlidingWindowLimiter(max_requests=30, window_seconds=15 * 60, name="ip")
+    # The public corridor-board route has no session to key a limiter off, so
+    # it buckets by IP like `ip_limiter` above but keeps its OWN counter:
+    # sharing `ip_limiter` would let a burst of board views lock a hospital's
+    # shared egress IP out of login. 60/15min is 20x headroom over one
+    # legitimate screen's expected rate (Plan C D6: a 15-minute window over a
+    # ~5-minute client cache is ~3 requests) while still bounding a scraper
+    # that has no other rate-limit surface to hit.
+    app.state.board_limiter = SlidingWindowLimiter(
+        max_requests=60, window_seconds=15 * 60, name="board"
+    )
     app.state.session_signer = SessionSigner(
         secret=settings.session_secret,
         max_age_seconds=settings.session_max_age_seconds,

@@ -45,6 +45,7 @@
 /api/profiles/{profile_id}/owner
 /api/profiles/{profile_id}/viewers
 /api/profiles/{profile_id}/visibility
+/api/public/boards/{slug}
 /api/workspaces
 /api/workspaces/{workspace_id}
 /api/workspaces/{workspace_id}/activate

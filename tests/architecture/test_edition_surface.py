@@ -154,6 +154,11 @@ def test_match_edition_still_serves_the_release_1_surface(monkeypatch, _base_env
 # added paths: /api/boards/{board_id}/queue (GET), /api/boards/{board_id}/items
 # (GET, POST, PUT), /api/boards/{board_id}/items/{call_id} (DELETE) and
 # /api/boards/{board_id}/publish (PUT) -- six operations, four unique paths.
+#
+# Plan C Task 7 (QR encoding and the userless public endpoint): 116 -> 117.
+# One added path: /api/public/boards/{slug} (GET) -- the one unauthenticated
+# route, deliberately in its own module (web/api/public_boards.py) and its own
+# gate exemption (test_boards_permission_single_source.py).
 _BASELINE = Path(__file__).with_name("full_edition_routes.txt")
 
 
@@ -182,7 +187,7 @@ def test_full_edition_route_set_matches_the_committed_baseline(monkeypatch, _bas
 def test_the_baseline_is_not_empty():
     """A baseline of zero routes would make the comparison above vacuous on an
     app that also served nothing."""
-    assert len(_BASELINE.read_text().split()) == 116
+    assert len(_BASELINE.read_text().split()) == 117
 
 
 def test_full_edition_is_unchanged(monkeypatch, _base_env):
@@ -259,6 +264,9 @@ _ALWAYS_ROUTERS = [
     # Boards are a MATCH-edition feature: the corridor screen is release 1's
     # public face.
     "boards.router",
+    # The public corridor-board JSON (Task 7): unauthenticated by design, so it
+    # ships in match too -- it IS release 1's public face.
+    "public_boards.router",
 ]
 
 
