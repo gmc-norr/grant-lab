@@ -35,7 +35,15 @@ button.chip {
 
 .pass .value { color: var(--app-good); }
 .fail .value { color: var(--app-dim); }
-.unsure .value { color: var(--app-warn); }
+
+/* unsure is NOT the deadline band: spec §5 reserves the amber warn colour for
+   the ≤30-day deadline-urgency signal, and §4.2's "coloured by rating" governs
+   pass/fail — a gate that could not judge gets a neutral border and muted
+   text, no fill, so amber stays exclusively the deadline signal. */
+.unsure {
+  border: 1px solid var(--app-border-strong);
+}
+.unsure .value { color: var(--app-muted); }
 
 .detail {
   padding-left: 0.45rem;

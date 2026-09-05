@@ -235,3 +235,17 @@ it("sets the quote in Georgia, and uses Georgia for nothing else here", () => {
   expect(quoteRule).toMatch(/Georgia/);
   expect(css.match(/Georgia/g)).toHaveLength(1);
 });
+
+it("never wears the deadline band's colour on an unsure chip", () => {
+  // theme.match.css annotates --app-warn as "the ≤30-day deadline band" (spec
+  // §5); §4.2's "coloured by rating" governs pass/fail only. A `.unsure` rule
+  // that reaches for --app-warn would make a gate-could-not-judge chip look
+  // like a looming deadline, so the token must not appear anywhere in this
+  // stylesheet at all.
+  const css = readFileSync("src/components/CriterionChips.module.css", "utf8");
+  expect(css).not.toMatch(/--app-warn/);
+  // Positive control: pass/fail must still be coloured, so this test cannot
+  // pass merely because the file was emptied out.
+  expect(css).toMatch(/\.pass \.value\s*\{[^}]*--app-good/);
+  expect(css).toMatch(/\.fail \.value\s*\{[^}]*--app-dim/);
+});
