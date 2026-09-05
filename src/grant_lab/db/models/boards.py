@@ -50,7 +50,13 @@ class Board(Base):
         # >= 16 chars, per §4.3. Enforced in the DB so a hand-written INSERT
         # cannot create a guessable public URL.
         CheckConstraint("char_length(slug) >= 16", name="ck_boards_slug_length"),
-        CheckConstraint("items_per_page > 0", name="ck_boards_items_per_page"),
+        # 1-64: originally "items_per_page > 0" (migration 0072); migration
+        # 0074 dropped and recreated it as a range in the same commit that
+        # added the ceiling on BoardSettingsIn.items_per_page (web/api/
+        # boards.py) -- 64 is roughly eight times spec §6's largest real grid
+        # (landscape, 8), a guard-rail against nonsense rather than a product
+        # limit, and far below what int4 can hold.
+        CheckConstraint("items_per_page BETWEEN 1 AND 64", name="ck_boards_items_per_page"),
         CheckConstraint("max_pages > 0", name="ck_boards_max_pages"),
         # Matches CallRanking.aggregate_score's own 0-100 scale
         # (ranking/aggregate.py: "gates + LLM rubric -> 0-100 score") --
@@ -59,10 +65,12 @@ class Board(Base):
         # BoardSettingsIn.min_score (web/api/boards.py) -- this is the floor,
         # not a restatement of it.
         CheckConstraint("min_score BETWEEN 0 AND 100", name="ck_boards_min_score_range"),
-        # Migration 0074, alongside ck_boards_min_score_range. Task 10's
-        # rotation timer divides by this; 0 or negative had no DB backstop
-        # before this constraint and returned 200 from PUT.
-        CheckConstraint("page_seconds > 0", name="ck_boards_page_seconds"),
+        # 1-3600 (one hour). Migration 0074, alongside ck_boards_min_score_
+        # range. Task 10's rotation timer divides by this; 0 or negative had
+        # no DB backstop before this constraint and returned 200 from PUT. The
+        # ceiling is a guard-rail, not a product limit: an hour per corridor
+        # page is already absurd.
+        CheckConstraint("page_seconds BETWEEN 1 AND 3600", name="ck_boards_page_seconds"),
         Index("ix_boards_profile_id", "profile_id"),
     )
 
@@ -101,8 +109,15 @@ class Board(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    # onupdate: SQLAlchemy applies this client-side in the UPDATE statement
+    # itself (no DDL, no trigger) -- matches the other six updated_at columns
+    # in this repo (profiles.py, workspaces.py, ranking.py x2, jobs.py x2).
+    # Without it, update_board (web/api/boards.py) never advanced this column
+    # and BoardOut.updated_at stayed permanently equal to created_at even
+    # after a settings change -- Task 5 is this column's only writer and only
+    # reader, so it is Task 5's to fix.
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
 

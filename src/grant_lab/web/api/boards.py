@@ -228,10 +228,19 @@ class BoardSettingsIn(BaseModel):
 
     title: str | None = Field(default=None, min_length=1, description=_TITLE_DESCRIPTION)
     orientation: Literal["landscape", "portrait"] | None = None
-    # >= 1: the DB floor is ck_boards_items_per_page ("items_per_page > 0"). 0
-    # passed pydantic before this fix and reached that CHECK as an uncaught
-    # IntegrityError -> 500 on ordinary authenticated input.
-    items_per_page: int | None = Field(default=None, ge=1)
+    # >= 1, <= 64: the DB floor+ceiling is ck_boards_items_per_page
+    # ("items_per_page BETWEEN 1 AND 64", migration 0074). 0 passed pydantic
+    # before round 1's fix and reached the (then floor-only) CHECK as an
+    # uncaught IntegrityError -> 500. The ceiling is round 2's fix: without
+    # it, a value that clears int4's range (e.g. 3_000_000_000) sailed past
+    # pydantic and the Python capacity guard and died on the UPDATE as an
+    # uncaught out-of-range error -> 500, and a value like 500 sailed all the
+    # way through as a silent 200 that corrupted the corridor layout. 64 is a
+    # guard-rail against nonsense, not a product limit: spec §6's real grids
+    # are 8 (landscape 2x4) and 4 (portrait 1x4), and this field exists only
+    # as an override for a screen that measures differently, so 64 is roughly
+    # eight times the largest real layout.
+    items_per_page: int | None = Field(default=None, ge=1, le=64)
     # 0-100: matched against CallRanking.aggregate_score (boards/queue.py),
     # which ranking/aggregate.py documents as "gates + LLM rubric -> 0-100
     # score" and which calls.py's own `min_score` query param already bounds
@@ -239,10 +248,14 @@ class BoardSettingsIn(BaseModel):
     # Unlike items_per_page and page_seconds, this had NO CHECK constraint at
     # all -- an out-of-range value returned 200 and persisted silently.
     min_score: int | None = Field(default=None, ge=0, le=100)
-    # >= 1: matched by the new ck_boards_page_seconds CHECK (migration 0074).
-    # Had no CHECK before this fix either -- 0 or a negative value returned 200
-    # and would drive Task 10's rotation timer into a busy-loop or no-op.
-    page_seconds: int | None = Field(default=None, ge=1)
+    # >= 1, <= 3600 (one hour): matched by ck_boards_page_seconds (migration
+    # 0074). Had no CHECK at all before round 1's fix -- 0 or a negative value
+    # returned 200 and would drive Task 10's rotation timer into a busy-loop
+    # or no-op. The ceiling is round 2's fix, for the same reason as
+    # items_per_page's: one hour per page is already absurd for a rotating
+    # corridor display, so anything longer is a typo, not a setting -- a
+    # guard-rail against nonsense, not a product limit.
+    page_seconds: int | None = Field(default=None, ge=1, le=3600)
 
 
 @router.put("/boards/{board_id}", response_model=BoardOut)
@@ -285,11 +298,17 @@ def update_board(
         old_cap = board.items_per_page * board.max_pages
         new_cap = new_items_per_page * board.max_pages
         if new_cap < old_cap and new_cap < approved_count:
-            # Only name the orientation when THIS request actually changed it --
-            # a pure items_per_page shrink on an unchanged orientation is not
-            # that orientation's fault, and "landscape holds 18" reads as if 18
-            # were landscape's own default (it's 24).
-            if body.orientation is not None:
+            # Only name the orientation when it is what DETERMINED
+            # new_items_per_page -- i.e. the same condition that branch above
+            # uses to derive it from ORIENTATION_ITEMS_PER_PAGE. Branching on
+            # "an orientation was present in the body" instead (round 1's
+            # bug) misattributes a request that flips orientation AND
+            # overrides items_per_page in the same body: a
+            # portrait/4/12-approved board sent
+            # {"orientation":"landscape","items_per_page":3} got "landscape
+            # holds 9", though landscape's own default holds 24 -- the shrink
+            # came from the items_per_page override, not the flip.
+            if orientation_changed and body.items_per_page is None:
                 cap_description = f"{new_orientation} holds {new_cap}"
             else:
                 cap_description = f"the new settings hold {new_cap}"

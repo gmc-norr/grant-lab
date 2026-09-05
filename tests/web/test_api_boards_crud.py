@@ -679,7 +679,9 @@ def test_the_409_does_not_blame_orientation_when_items_per_page_alone_shrinks_it
     assert "landscape" not in detail.lower()
     assert "20" in detail
     assert "18" in detail
-    assert "2" in detail  # 20 - 18 = 2 to remove
+    assert "remove 2 first" in detail  # 20 - 18 = 2 to remove; "2" alone
+    # can't fail once "20" already passed -- this is what the round-2 review
+    # flagged as a vacuous assertion.
     row = _get_board_row(pg_session_factory, board_id)
     assert row.items_per_page == 8  # refused, unchanged
 
@@ -707,3 +709,177 @@ def test_a_bare_title_rename_is_allowed_on_a_board_already_over_capacity(
     assert row.title == "Renamed corridor"
     assert row.orientation == "portrait"
     assert row.items_per_page == 4
+
+
+# --- review round 2 ----------------------------------------------------------
+# Findings against commits c1e5b961 + 2656d356.
+
+
+def test_settings_items_per_page_above_64_is_422_and_does_not_persist(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """IMPORTANT: items_per_page had a floor (round 1) but no ceiling. A
+    value like 500 sailed through as a silent 200 that corrupted the corridor
+    grid -- the same "200 that plants a live corridor-display defect" shape
+    round 1 used to justify bounding page_seconds at all."""
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Items-per-page ceiling profile")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid).json()["id"]
+
+    r = owner.put(f"/api/boards/{board_id}", json={"items_per_page": 65})
+
+    assert r.status_code == 422, r.text
+    row = _get_board_row(pg_session_factory, board_id)
+    assert row.items_per_page == 8  # unchanged -- the model's own default
+
+
+def test_settings_items_per_page_absurdly_large_is_422_not_500(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """IMPORTANT: the exact round-2 reproduction. A value that clears int4's
+    range entirely must be rejected by pydantic before it ever reaches an
+    UPDATE, not sail through the Python capacity guard and die as an
+    uncaught out-of-range DB error -- byte-identical in symptom to the
+    items_per_page: 0 500 that round 1 was asked to close."""
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Items-per-page overflow profile")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid).json()["id"]
+
+    r = owner.put(f"/api/boards/{board_id}", json={"items_per_page": 3_000_000_000})
+
+    assert r.status_code == 422, r.text
+    row = _get_board_row(pg_session_factory, board_id)
+    assert row.items_per_page == 8
+
+
+def test_settings_items_per_page_boundary_64_is_accepted(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Items-per-page ceiling-ok profile")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid).json()["id"]
+
+    r = owner.put(f"/api/boards/{board_id}", json={"items_per_page": 64})
+
+    assert r.status_code == 200, r.text
+    assert r.json()["items_per_page"] == 64
+    row = _get_board_row(pg_session_factory, board_id)
+    assert row.items_per_page == 64
+
+
+def test_settings_page_seconds_above_3600_is_422_and_does_not_persist(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """IMPORTANT: page_seconds had a floor (round 1) but no ceiling. A value
+    like 100000 sailed through as a silent 200 that would drive Task 10's
+    rotation timer into an effectively-frozen page."""
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Page seconds ceiling profile")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid).json()["id"]
+
+    r = owner.put(f"/api/boards/{board_id}", json={"page_seconds": 3601})
+
+    assert r.status_code == 422, r.text
+    row = _get_board_row(pg_session_factory, board_id)
+    assert row.page_seconds == 30  # unchanged -- the model's own default
+
+
+def test_settings_page_seconds_boundary_3600_is_accepted(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Page seconds ceiling-ok profile")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid).json()["id"]
+
+    r = owner.put(f"/api/boards/{board_id}", json={"page_seconds": 3600})
+
+    assert r.status_code == 200, r.text
+    assert r.json()["page_seconds"] == 3600
+    row = _get_board_row(pg_session_factory, board_id)
+    assert row.page_seconds == 3600
+
+
+def test_a_settings_change_advances_updated_at_past_created_at(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """IMPORTANT: `Board.updated_at` had no `onupdate=func.now()`, so it
+    permanently equalled `created_at` even after a settings change --
+    update_board is this column's only writer and get_board/list_boards are
+    its only readers, so this is Task 5's bug to fix."""
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Updated-at profile")
+    owner = _client_for(app, owner_id)
+    created = _create_board(owner, profile_id=pid).json()
+    board_id = created["id"]
+    assert created["updated_at"] == created["created_at"]
+
+    r = owner.put(f"/api/boards/{board_id}", json={"title": "Renamed"})
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert datetime.fromisoformat(body["updated_at"]) > datetime.fromisoformat(body["created_at"])
+    row = _get_board_row(pg_session_factory, board_id)
+    assert row.updated_at > row.created_at
+
+
+def test_the_409_does_not_blame_orientation_when_an_items_per_page_override_accompanies_the_flip(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """MINOR (round 2): a request that flips orientation AND overrides
+    items_per_page in the same body must not blame the flip for the
+    resulting cap. The prior code branched on "an orientation was present in
+    the body" rather than on what actually determined items_per_page; a
+    portrait/4/12-approved board sent
+    {"orientation": "landscape", "items_per_page": 3} got "landscape holds
+    9", though landscape's own default holds 24."""
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Flip-plus-override profile")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid, orientation="portrait").json()["id"]
+    # portrait cap = 4*3 = 12; approve up to it.
+    _approve_n(pg_session_factory, board_id=board_id, approved_by=owner_id, n=12)
+
+    r = owner.put(
+        f"/api/boards/{board_id}",
+        json={"orientation": "landscape", "items_per_page": 3},
+    )
+
+    # new cap = 3*3 = 9 < 12 approved -- refused.
+    assert r.status_code == 409, r.text
+    detail = r.json()["error"]["message"]
+    assert "landscape" not in detail.lower()
+    assert "the new settings hold 9" in detail
+    assert "remove 3 first" in detail  # 12 - 9 = 3
+    row = _get_board_row(pg_session_factory, board_id)
+    assert row.orientation == "portrait"  # refused, unchanged
+    assert row.items_per_page == 4
+
+
+def test_deleting_a_board_with_approved_items_removes_them_too(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """MINOR (round 2): `delete_board` issues a bare `session.delete(board)`,
+    safe only because BoardItem.board_id is `ondelete="CASCADE"` with no ORM
+    `relationship()` intervening. Both existing delete tests use empty
+    boards, so a later change of that ondelete to RESTRICT would ship a 500
+    with the suite green."""
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Delete-with-items profile")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid).json()["id"]
+    _approve_n(pg_session_factory, board_id=board_id, approved_by=owner_id, n=3)
+
+    r = owner.delete(f"/api/boards/{board_id}")
+
+    assert r.status_code == 204, r.text
+    assert _get_board_row(pg_session_factory, board_id) is None
+    with pg_session_factory() as s:
+        remaining = (
+            s.execute(select(BoardItem).where(BoardItem.board_id == board_id)).scalars().all()
+        )
+    assert remaining == []
