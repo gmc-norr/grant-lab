@@ -218,12 +218,25 @@ def test_an_unpublished_board_is_404(monkeypatch, pg_url, pg_session_factory, pr
     _make_board(
         pg_session_factory, profile_id=pid, created_by=owner_id, slug="b" * 16, is_published=False
     )
+    # Positive control, in the SAME test: a SIBLING board that IS published,
+    # so a mutant that 404s every slug (or an unregistered route) cannot pass
+    # this test by accident.
+    control_slug = "b" + "1" * 15
+    _make_board(
+        pg_session_factory,
+        profile_id=pid,
+        created_by=owner_id,
+        slug=control_slug,
+        is_published=True,
+    )
 
     with TestClient(app) as c:
         r = c.get(f"/api/public/boards/{'b' * 16}")
+        control = c.get(f"/api/public/boards/{control_slug}")
 
     assert r.status_code == 404, r.text
     assert r.json() == {"error": {"code": "not_found", "message": "board not found"}}
+    assert control.status_code == 200, control.text
 
 
 def test_a_nonexistent_slug_is_the_SAME_404(
@@ -234,13 +247,24 @@ def test_a_nonexistent_slug_is_the_SAME_404(
     _make_board(
         pg_session_factory, profile_id=pid, created_by=owner_id, slug="c" * 16, is_published=False
     )
+    # Positive control, in the SAME test.
+    control_slug = "c" + "2" * 15
+    _make_board(
+        pg_session_factory,
+        profile_id=pid,
+        created_by=owner_id,
+        slug=control_slug,
+        is_published=True,
+    )
 
     with TestClient(app) as c:
         unpublished = c.get(f"/api/public/boards/{'c' * 16}")
         nonexistent = c.get(f"/api/public/boards/{'z' * 16}")
+        control = c.get(f"/api/public/boards/{control_slug}")
 
     assert unpublished.status_code == 404
     assert nonexistent.status_code == 404
+    assert control.status_code == 200, control.text
     # BYTE-EQUAL bodies: two differently-worded 404s would let a client tell
     # "not published" apart from "doesn't exist" and make the slug field
     # BoardOut already exposes (GET /api/boards) into a public oracle.
