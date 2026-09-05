@@ -172,7 +172,7 @@ def test_full_edition_route_set_matches_the_committed_baseline(monkeypatch, _bas
 def test_the_baseline_is_not_empty():
     """A baseline of zero routes would make the comparison above vacuous on an
     app that also served nothing."""
-    assert len(_BASELINE.read_text().split()) == 109
+    assert len(_BASELINE.read_text().split()) == 110
 
 
 def test_full_edition_is_unchanged(monkeypatch, _base_env):

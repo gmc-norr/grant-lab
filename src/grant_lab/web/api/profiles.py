@@ -15,6 +15,7 @@ from grant_lab.db.models import (
     ProfileKind,
     ProfileLevel,
     ProfileViewer,
+    Subscription,
     User,
 )
 from grant_lab.embeddings.similarity import build_profile_text
@@ -113,6 +114,13 @@ class ProfileDetailOut(BaseModel):
     host_institution: str | None
     # state
     can_edit: bool
+    # Whether TRANSFERRING this profile away from its current owner would cost
+    # them their own read access, per transfer_read_effect (Task 1). D17: the
+    # transfer UI must be able to say this BEFORE the act, so it lives here,
+    # not only on the PUT /owner response. False for every reader who is not
+    # the owner -- transfer_read_effect returns False in that case, since the
+    # transfer takes nothing from someone who is not being transferred FROM.
+    outgoing_lost_read: bool
     # The owner's UI has to render its own current state; the only alternative
     # would be guessing, or a second endpoint that does not exist. A Literal, not
     # a bare `str`, so the generated TS type is the union and a frontend that
@@ -251,6 +259,7 @@ def get_profile(
         if not can_read_profile(session, user, p.id):
             raise HTTPException(status_code=404, detail="profile not found")
         can_edit = p.created_by == user.id or user.is_admin
+        outgoing_lost_read = transfer_read_effect(session, profile=p, outgoing=user)
         job = session.execute(
             select(ProfileBootstrapJob).where(ProfileBootstrapJob.profile_id == profile_id)
         ).scalar_one_or_none()
@@ -277,7 +286,9 @@ def get_profile(
                 "bootstrap_pubmed_status": None,
                 "publications_fetched": None,
             }
-    return ProfileDetailOut(**core, **flat, can_edit=can_edit, **boot)
+    return ProfileDetailOut(
+        **core, **flat, can_edit=can_edit, outgoing_lost_read=outgoing_lost_read, **boot
+    )
 
 
 class ProfileCreateIn(BaseModel):
@@ -711,3 +722,108 @@ def set_profile_visibility(
         p.visibility = body.visibility
         session.commit()
     return ProfileVisibilityOut(visibility=body.visibility)
+
+
+class ProfileTransferIn(BaseModel):
+    email: str
+    keep_read_access: bool = False
+
+
+class ProfileTransferOut(BaseModel):
+    owner: ProfileViewerOut
+    outgoing_lost_read: bool
+
+
+@router.put("/profiles/{profile_id}/owner", response_model=ProfileTransferOut)
+def transfer_profile_owner(
+    request: Request,
+    profile_id: int,
+    body: ProfileTransferIn,
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    """Move a profile to another user. Owner-or-admin, per profiles.py:400.
+
+    The admin arm is not a convenience: the case that motivated this is an owner
+    who can no longer log in, so only an admin can act.
+
+    Ownership is load-bearing in SEVEN places (profile_access.py:69,
+    profiles.py:151/261/468/612/678, calls.py:641), which is why this is one
+    transaction and not four endpoints.
+
+    Recipient eligibility is `status == 'active'` and nothing narrower: an
+    unshared private profile has no viewer rows at all, so a
+    viewers-only rule would make transfer impossible for exactly the case it
+    exists for. The refusal is ONE generic 400 for unknown, inactive and
+    ineligible alike -- mirroring add_profile_viewer (:599-601), so this is not a
+    directory of who has an account.
+    """
+    sf = request.app.state.session_factory
+    with sf() as session:
+        p = _profile_for_edit(session, profile_id=profile_id, user=user)
+        email = (body.email or "").strip().lower()
+        target = session.scalar(select(User).where(User.email == email)) if email else None
+        if target is None or target.status != "active":
+            raise HTTPException(status_code=400, detail="could not transfer profile")
+
+        outgoing = session.get(User, p.created_by)
+
+        # 1. D10's stale-row hazard: the incoming owner may already hold a
+        # legitimate viewer row (add_profile_viewer only refuses one for
+        # whoever is owner AT THAT MOMENT). Delete it so the ProfileViewer
+        # invariant "the owner never has a row" (db/models/profiles.py:135-136)
+        # stays true after the transfer.
+        session.execute(
+            delete(ProfileViewer).where(
+                ProfileViewer.profile_id == p.id,
+                ProfileViewer.user_id == target.id,
+            )
+        )
+
+        # 2. Move ownership.
+        p.created_by = target.id
+
+        # 3. Give the new owner a subscription, mirroring
+        # profiles/create.py:79 -- otherwise D9 notifies nobody. NEVER touch
+        # the outgoing owner's row: digest/assemble.py:86-88 is explicit that
+        # deleting it destroys their digest_enabled preference beyond a
+        # re-share's ability to restore it, and assemble.py:97 already filters
+        # the digest through readable_profile_ids, so their section simply
+        # stops appearing.
+        already_subscribed = session.scalar(
+            select(Subscription.user_id).where(
+                Subscription.user_id == target.id,
+                Subscription.profile_id == p.id,
+            )
+        )
+        if already_subscribed is None:
+            session.add(Subscription(user_id=target.id, profile_id=p.id, digest_enabled=True))
+
+        # 4. Open-6: keep the outgoing owner's read access if asked. Computed
+        # AFTER step 2, so can_read_profile below asks the REAL post-transfer
+        # predicate rather than a hypothetical. Guarded on outgoing.id !=
+        # target.id: a self-transfer (recipient email == the current owner's
+        # own address) would otherwise add a ProfileViewer row for someone who
+        # is STILL the owner after step 2, breaking the invariant this whole
+        # step exists to restore in step 1.
+        if body.keep_read_access and outgoing is not None and outgoing.id != target.id:
+            already_viewer = session.scalar(
+                select(ProfileViewer.user_id).where(
+                    ProfileViewer.profile_id == p.id,
+                    ProfileViewer.user_id == outgoing.id,
+                )
+            )
+            if already_viewer is None:
+                session.add(ProfileViewer(profile_id=p.id, user_id=outgoing.id))
+
+        # Open-7: a default_profile_id the outgoing owner can no longer read
+        # must not keep pointing the dashboard at a profile they cannot open.
+        outgoing_lost_read = False
+        if outgoing is not None:
+            outgoing_lost_read = not can_read_profile(session, outgoing, p.id)
+            if outgoing_lost_read and outgoing.default_profile_id == p.id:
+                outgoing.default_profile_id = None
+
+        session.commit()
+        owner_out = ProfileViewerOut(user_id=target.id, name=target.name, email=target.email)
+
+    return ProfileTransferOut(owner=owner_out, outgoing_lost_read=outgoing_lost_read)

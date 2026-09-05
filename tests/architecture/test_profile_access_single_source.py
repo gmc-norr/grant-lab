@@ -149,6 +149,11 @@ DELEGATION_PINS: dict[str, str] = {
     # test_unsave_after_the_profile_is_deactivated_still_removes_the_row.
     "web/api/calls.py::save_call": "_readable_active_profile_or_404",
     "web/api/calls.py::get_decision_counts": "_readable_active_profile_or_404",
+    # Task 3: transfer moves ProfileViewer rows (delete + maybe create), which
+    # is why it is exempt from the negative half below rather than pinned on
+    # the predicate -- but it must still gate on _profile_for_edit, the same
+    # shape as the other four sharing operations above.
+    "web/api/profiles.py::transfer_profile_owner": "_profile_for_edit",
 }
 
 # The pin sets, written out a SECOND time as literals. Deliberate duplication:
@@ -181,6 +186,7 @@ EXPECTED_DELEGATION_PINS = frozenset(
         "web/api/calls.py::hide_call",
         "web/api/calls.py::save_call",
         "web/api/calls.py::get_decision_counts",
+        "web/api/profiles.py::transfer_profile_owner",
     }
 )
 
@@ -211,6 +217,10 @@ EXEMPT_PROFILE_FUNCTIONS: dict[str, str] = {
     "_readable_ignoring_ownership": (
         "reads ONE viewer row to answer a hypothetical, after can_read_profile has "
         "already answered the org/admin arms; decides nothing about the live request"
+    ),
+    "transfer_profile_owner": (
+        "moves ownership and the viewer rows that follow it; gates on "
+        "_profile_for_edit and asks can_read_profile for the read consequence"
     ),
 }
 EXEMPT_FUNCTION_MODULE = "web/api/profiles.py"
@@ -630,21 +640,26 @@ def test_pin_set_has_not_shrunk() -> None:
     the final whole-branch review a twelfth (`create_workspace_api`, PD-9). A
     tuple that can quietly lose an entry is the same failure in reverse.
 
-    THE COUNTS ARE 13 PREDICATE PINS AND 8 DELEGATION PINS, MEASURED on
-    2026-09-05 after the save/counts endpoints landed. The thirteenth predicate
-    pin is `web/api/calls.py::_readable_active_profile_or_404` (the decision
-    write rule) and the sixth delegation pin is `hide_call` delegating to it;
-    the seventh and eighth are `save_call` and `get_decision_counts`, the other
-    two decision surfaces that resolve a caller-supplied profile_id. The
-    predicate count did NOT move for those two -- they delegate to the same
-    helper, which is the shape DELEGATION_PINS exists for. Before the
-    `call_decisions` commit the real sets held 12 and 5 -- while this docstring
-    still said "11 and 1", which it had said since the twelfth pin
-    (`create_workspace_api`, PD-9) landed on 2026-09-04. A count in prose rots;
-    that is why the assertions below are on
-    the SETS and on the length, and why this paragraph is the only place a
-    number is written. A task that legitimately adds or removes a surface
-    changes both literal sets in the same diff, where a reviewer sees it.
+    THE COUNTS ARE 13 PREDICATE PINS AND 9 DELEGATION PINS, MEASURED on
+    2026-09-05 after Plan C Task 3 (profile ownership transfer) landed. The
+    thirteenth predicate pin is `web/api/calls.py::_readable_active_profile_or_404`
+    (the decision write rule) and the sixth delegation pin is `hide_call`
+    delegating to it; the seventh and eighth are `save_call` and
+    `get_decision_counts`, the other two decision surfaces that resolve a
+    caller-supplied profile_id. The ninth is `transfer_profile_owner`,
+    delegating to `_profile_for_edit` like the other four sharing operations --
+    it is a DELEGATION pin, not a predicate pin, because it moves
+    ProfileViewer rows and so is exempt from the negative half rather than
+    pinned on the predicate. The predicate count did NOT move for any of the
+    last three -- they delegate to an already-pinned helper, which is the
+    shape DELEGATION_PINS exists for. Before the `call_decisions` commit the
+    real sets held 12 and 5 -- while this docstring still said "11 and 1",
+    which it had said since the twelfth pin (`create_workspace_api`, PD-9)
+    landed on 2026-09-04. A count in prose rots; that is why the assertions
+    below are on the SETS and on the length, and why this paragraph is the
+    only place a number is written. A task that legitimately adds or removes
+    a surface changes both literal sets in the same diff, where a reviewer
+    sees it.
     """
     assert set(PREDICATE_PINS) == EXPECTED_PREDICATE_PINS, {
         "unexpectedly added": sorted(set(PREDICATE_PINS) - EXPECTED_PREDICATE_PINS),

@@ -854,6 +854,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/profiles/{profile_id}/owner": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Transfer Profile Owner
+         * @description Move a profile to another user. Owner-or-admin, per profiles.py:400.
+         *
+         *     The admin arm is not a convenience: the case that motivated this is an owner
+         *     who can no longer log in, so only an admin can act.
+         *
+         *     Ownership is load-bearing in SEVEN places (profile_access.py:69,
+         *     profiles.py:142/196/400/544/612, calls.py:641), which is why this is one
+         *     transaction and not four endpoints.
+         *
+         *     Recipient eligibility is `status == 'active'` and nothing narrower: an
+         *     unshared private profile has no viewer rows at all, so a
+         *     viewers-only rule would make transfer impossible for exactly the case it
+         *     exists for. The refusal is ONE generic 400 for unknown, inactive and
+         *     ineligible alike -- mirroring add_profile_viewer (:599-601), so this is not a
+         *     directory of who has an account.
+         */
+        put: operations["transfer_profile_owner_api_profiles__profile_id__owner_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/profiles/{profile_id}/viewers": {
         parameters: {
             query?: never;
@@ -3475,6 +3509,8 @@ export interface components {
             name: string;
             /** Org Type */
             org_type: string | null;
+            /** Outgoing Lost Read */
+            outgoing_lost_read: boolean;
             /** Patient Populations */
             patient_populations: string[];
             /** Publications Fetched */
@@ -3518,6 +3554,22 @@ export interface components {
             level: string | null;
             /** Name */
             name: string;
+        };
+        /** ProfileTransferIn */
+        ProfileTransferIn: {
+            /** Email */
+            email: string;
+            /**
+             * Keep Read Access
+             * @default false
+             */
+            keep_read_access: boolean;
+        };
+        /** ProfileTransferOut */
+        ProfileTransferOut: {
+            /** Outgoing Lost Read */
+            outgoing_lost_read: boolean;
+            owner: components["schemas"]["ProfileViewerOut"];
         };
         /** ProfileUpdateIn */
         ProfileUpdateIn: {
@@ -9048,6 +9100,122 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProfileUpdateOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    transfer_profile_owner_api_profiles__profile_id__owner_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                profile_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProfileTransferIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProfileTransferOut"];
                 };
             };
             /** @description Bad Request */

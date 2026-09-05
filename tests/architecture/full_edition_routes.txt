@@ -36,6 +36,7 @@
 /api/me/subscriptions
 /api/profiles
 /api/profiles/{profile_id}
+/api/profiles/{profile_id}/owner
 /api/profiles/{profile_id}/viewers
 /api/profiles/{profile_id}/visibility
 /api/workspaces
