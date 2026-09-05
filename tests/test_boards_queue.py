@@ -110,10 +110,10 @@ def test_a_call_the_owner_hid_is_absent_from_the_queue(pg_session_factory, profi
     _rank(pg_session_factory, call_id=call_id, profile_id=pid, score=80)
     _decide(pg_session_factory, user_id=owner_id, profile_id=pid, call_id=call_id, state="hidden")
 
-    rows, total = _run_queue(pg_session_factory, board_id)
+    rows, waiting = _run_queue(pg_session_factory, board_id)
 
     assert rows == []
-    assert total == 0
+    assert waiting == 0
 
 
 def test_a_call_a_COLLEAGUE_hid_is_still_in_the_queue(pg_session_factory, profile_factory):
@@ -126,10 +126,10 @@ def test_a_call_a_COLLEAGUE_hid_is_still_in_the_queue(pg_session_factory, profil
         pg_session_factory, user_id=colleague_id, profile_id=pid, call_id=call_id, state="hidden"
     )
 
-    rows, total = _run_queue(pg_session_factory, board_id)
+    rows, waiting = _run_queue(pg_session_factory, board_id)
 
     assert [r.call.id for r in rows] == [call_id]
-    assert total == 1
+    assert waiting == 1
 
 
 def test_a_call_the_BOARD_CREATOR_hid_is_still_in_the_queue(pg_session_factory, profile_factory):
@@ -141,10 +141,10 @@ def test_a_call_the_BOARD_CREATOR_hid_is_still_in_the_queue(pg_session_factory, 
     _rank(pg_session_factory, call_id=call_id, profile_id=pid, score=80)
     _decide(pg_session_factory, user_id=admin_id, profile_id=pid, call_id=call_id, state="hidden")
 
-    rows, total = _run_queue(pg_session_factory, board_id)
+    rows, waiting = _run_queue(pg_session_factory, board_id)
 
     assert [r.call.id for r in rows] == [call_id]
-    assert total == 1
+    assert waiting == 1
 
 
 def test_a_hide_on_a_DIFFERENT_profile_does_not_suppress(pg_session_factory, profile_factory):
@@ -157,10 +157,10 @@ def test_a_hide_on_a_DIFFERENT_profile_does_not_suppress(pg_session_factory, pro
         pg_session_factory, user_id=owner_id, profile_id=other_pid, call_id=call_id, state="hidden"
     )
 
-    rows, total = _run_queue(pg_session_factory, board_id)
+    rows, waiting = _run_queue(pg_session_factory, board_id)
 
     assert [r.call.id for r in rows] == [call_id]
-    assert total == 1
+    assert waiting == 1
 
 
 def test_below_min_score_is_absent(pg_session_factory, profile_factory):
@@ -171,10 +171,10 @@ def test_below_min_score_is_absent(pg_session_factory, profile_factory):
     call_id = _make_call(pg_session_factory, external_id="low-score")
     _rank(pg_session_factory, call_id=call_id, profile_id=pid, score=59)
 
-    rows, total = _run_queue(pg_session_factory, board_id)
+    rows, waiting = _run_queue(pg_session_factory, board_id)
 
     assert rows == []
-    assert total == 0
+    assert waiting == 0
 
 
 def test_a_past_deadline_is_absent(pg_session_factory, profile_factory):
@@ -183,10 +183,10 @@ def test_a_past_deadline_is_absent(pg_session_factory, profile_factory):
     call_id = _make_call(pg_session_factory, external_id="expired", deadline=PAST)
     _rank(pg_session_factory, call_id=call_id, profile_id=pid, score=80)
 
-    rows, total = _run_queue(pg_session_factory, board_id)
+    rows, waiting = _run_queue(pg_session_factory, board_id)
 
     assert rows == []
-    assert total == 0
+    assert waiting == 0
 
 
 def test_an_already_approved_call_is_flagged_not_dropped(pg_session_factory, profile_factory):
@@ -196,12 +196,12 @@ def test_an_already_approved_call_is_flagged_not_dropped(pg_session_factory, pro
     _rank(pg_session_factory, call_id=call_id, profile_id=pid, score=80)
     _approve(pg_session_factory, board_id=board_id, call_id=call_id, approved_by=owner_id)
 
-    rows, total = _run_queue(pg_session_factory, board_id)
+    rows, waiting = _run_queue(pg_session_factory, board_id)
 
     assert [r.call.id for r in rows] == [call_id]
     assert rows[0].already_approved is True
     # It is already up -- it is not part of the WAITING count.
-    assert total == 0
+    assert waiting == 0
 
 
 def test_the_waiting_count_counts_UNAPPROVED_candidates_only(pg_session_factory, profile_factory):
@@ -213,10 +213,16 @@ def test_the_waiting_count_counts_UNAPPROVED_candidates_only(pg_session_factory,
     _rank(pg_session_factory, call_id=waiting_id, profile_id=pid, score=70)
     _approve(pg_session_factory, board_id=board_id, call_id=approved_id, approved_by=owner_id)
 
-    rows, total = _run_queue(pg_session_factory, board_id)
+    rows, waiting = _run_queue(pg_session_factory, board_id)
 
-    assert {r.call.id for r in rows} == {approved_id, waiting_id}
-    assert total == 1
+    # A LIST, not a set: these two are ranked 90 and 70, so this is also the
+    # only thing in the file that can see `order_by(aggregate_score.desc())`.
+    # As a set it discarded the ordering evidence it already had.
+    assert [r.call.id for r in rows] == [approved_id, waiting_id]
+    assert waiting == 1
+    # Minor 2: nothing else asserts the score REACHES the row -- the min_score
+    # tests only prove it participates in the filter.
+    assert [r.score for r in rows] == [90, 70]
 
 
 def test_a_ranking_on_a_DIFFERENT_profile_does_not_admit_a_call_that_fails_the_boards_own_score(
@@ -236,10 +242,10 @@ def test_a_ranking_on_a_DIFFERENT_profile_does_not_admit_a_call_that_fails_the_b
     _rank(pg_session_factory, call_id=call_id, profile_id=pid, score=40)
     _rank(pg_session_factory, call_id=call_id, profile_id=other_pid, score=90)
 
-    rows, total = _run_queue(pg_session_factory, board_id)
+    rows, waiting = _run_queue(pg_session_factory, board_id)
 
     assert rows == []
-    assert total == 0
+    assert waiting == 0
 
 
 def test_a_call_the_owner_SAVED_is_still_in_the_queue(pg_session_factory, profile_factory):
@@ -249,7 +255,36 @@ def test_a_call_the_owner_SAVED_is_still_in_the_queue(pg_session_factory, profil
     _rank(pg_session_factory, call_id=call_id, profile_id=pid, score=80)
     _decide(pg_session_factory, user_id=owner_id, profile_id=pid, call_id=call_id, state="saved")
 
-    rows, total = _run_queue(pg_session_factory, board_id)
+    rows, waiting = _run_queue(pg_session_factory, board_id)
 
     assert [r.call.id for r in rows] == [call_id]
-    assert total == 1
+    assert waiting == 1
+
+
+def test_limit_and_offset_page_the_rows_without_moving_the_waiting_count(
+    pg_session_factory, profile_factory
+):
+    """Minor 3: nothing else calls `_run_queue` with non-default paging.
+
+    Both `.limit(limit)` and `.offset(offset)` could be deleted outright and
+    every other test in this file stays green -- each of them fits inside the
+    default `limit=10`. The waiting count is asserted alongside on purpose:
+    it is deliberately NOT paged, so a `limit` accidentally spliced into the
+    count query would show up here as 2 instead of 3.
+    """
+    pid, owner_id = profile_factory(name="Paged queue")
+    board_id = _make_board(pg_session_factory, profile_id=pid, created_by=owner_id, slug="k" * 16)
+    ids = {}
+    for name, score in (("top", 95), ("mid", 85), ("low", 75)):
+        ids[name] = _make_call(pg_session_factory, external_id=f"paged-{name}")
+        _rank(pg_session_factory, call_id=ids[name], profile_id=pid, score=score)
+
+    page1, waiting1 = _run_queue(pg_session_factory, board_id, limit=2, offset=0)
+    page2, waiting2 = _run_queue(pg_session_factory, board_id, limit=2, offset=2)
+
+    assert [r.call.id for r in page1] == [ids["top"], ids["mid"]]
+    assert [r.call.id for r in page2] == [ids["low"]]
+    # Unpaged on both pages -- the count answers "how many need review", not
+    # "how many are on this page".
+    assert waiting1 == 3
+    assert waiting2 == 3
