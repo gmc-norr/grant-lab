@@ -196,9 +196,13 @@ EXEMPT_MODULES: dict[str, str] = {
     DEFINITION: "IS the single definition of the read rule",
 }
 
-# Functions inside web/api/profiles.py that Task 3 creates for viewer CRUD.
-# They MANAGE the rows; they do not DECIDE access. Exempt by name, so a
-# renamed or repurposed function loses the exemption and the gate notices.
+# Functions inside web/api/profiles.py exempted from the negative half below.
+# Two different shapes, neither of which DECIDES access: most of these are
+# Task 3's viewer CRUD, which MANAGE the rows; `_readable_ignoring_ownership`
+# (Task 1) is not CRUD at all -- it asks the single-source predicate a
+# hypothetical about a synthetic user, and decides nothing about a live
+# request. Exempt by name, so a renamed or repurposed function loses the
+# exemption and the gate notices.
 EXEMPT_PROFILE_FUNCTIONS: dict[str, str] = {
     "list_profile_viewers": "reads the viewer rows to show them, does not gate on them",
     "replace_profile_viewers": "writes the viewer rows",
@@ -603,9 +607,10 @@ def test_no_module_builds_a_second_read_predicate() -> None:
         + "\n  ".join(violations)
         + f"\nCall readable_profile_ids()/can_read_profile() instead. The only "
         f"exemptions are {sorted(EXEMPT_MODULES)} and, in "
-        f"{EXEMPT_FUNCTION_MODULE}, the viewer-CRUD functions "
-        f"{sorted(EXEMPT_PROFILE_FUNCTIONS)} -- which manage the rows and do "
-        f"not decide access."
+        f"{EXEMPT_FUNCTION_MODULE}, the named functions "
+        f"{sorted(EXEMPT_PROFILE_FUNCTIONS)} -- viewer-row CRUD, plus a "
+        f"hypothetical-read helper that asks the single source about a "
+        f"synthetic user -- none of which decide access for a live request."
     )
 
 
@@ -657,10 +662,13 @@ def test_exempt_set_is_documented_and_minimal() -> None:
     """Each exemption carries a reason, and none of them is stale.
 
     An exemption whose target no longer exists is how an exempt list rots into
-    a wildcard. Every one of the four functions exists now (Task 3 created
-    them), so each name must RESOLVE -- a reason-only check would leave a
-    renamed or deleted function's exemption sitting in the list, silently
-    covering whatever function later took its name.
+    a wildcard. Every function named in EXEMPT_PROFILE_FUNCTIONS must exist
+    and RESOLVE -- a reason-only check would leave a renamed or deleted
+    function's exemption sitting in the list, silently covering whatever
+    function later took its name. Not every entry is Task 3's viewer CRUD and
+    not every entry manages rows -- see the dict's own comment above for the
+    two shapes -- so this test does not assert a count; a count in prose rots
+    (see test_pin_set_has_not_shrunk's docstring for why).
     """
     for rel, reason in EXEMPT_MODULES.items():
         assert (SRC / rel).is_file(), f"exempt module no longer exists: {rel}"

@@ -164,7 +164,25 @@ def transfer_read_effect(session, *, profile: Profile, outgoing: User) -> bool:
 
 
 def _readable_ignoring_ownership(session, user: User, profile_id: int) -> bool:
-    """`can_read_profile` with the owner arm neutralised.
+    """`can_read_profile` with the owner arm neutralised -- and, as a side
+    effect of HOW that is done, the profile_viewers arm too.
+
+    `readable_profile_ids` has an admin arm, an owner arm, a `visibility ==
+    'org'` arm and a profile_viewers arm (profile_access.py:61-73). Probing
+    `can_read_profile` with a synthetic `id=-1` user correctly drops the owner
+    arm -- `created_by == -1` can never match a real row -- but the SAME probe
+    also drops the profile_viewers arm, because that arm is keyed on the same
+    `user.id` (`ProfileViewer.user_id == -1` can never match either). The
+    probe cannot neutralise one without the other; both happen to be indexed
+    by identity.
+
+    That is why the viewer row is re-asked for below, for the REAL user id:
+    it puts back the one arm the probe took out along with ownership. This is
+    a lookup of one row, not a second copy of the read rule -- it asks the
+    exact question `readable_profile_ids` itself asks for this user
+    (`ProfileViewer` matching this `profile_id` and this `user.id`), with no
+    `or_`, no visibility comparison and no admin branch of its own, so there
+    is nothing here for a rule to drift out of sync with.
 
     Implemented by asking the real predicate about a user whose id cannot match
     `created_by` -- rather than by rewriting the arms here, which
