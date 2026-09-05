@@ -19,6 +19,11 @@ string that SQLAlchemy resolves through the shared metadata registry.
 """
 
 from grant_lab.db.base import Base
+from grant_lab.db.models.boards import (
+    ORIENTATION_ITEMS_PER_PAGE,
+    Board,
+    BoardItem,
+)
 from grant_lab.db.models.calls import (
     Call,
     CallRubric,
@@ -91,6 +96,8 @@ __all__ = [
     "Attachment",
     "AttachmentJob",
     "Base",
+    "Board",
+    "BoardItem",
     "Branch",
     "Call",
     "CallDecision",
@@ -110,6 +117,7 @@ __all__ = [
     "EvaluatorJob",
     "GoldenSetTriple",
     "LlmSpend",
+    "ORIENTATION_ITEMS_PER_PAGE",
     "PhaseApproval",
     "Profile",
     "ProfileBootstrapJob",
