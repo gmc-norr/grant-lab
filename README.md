@@ -1,6 +1,6 @@
-# Call Manager
+# Grant Lab
 
-Call Manager is an internal hospital application for finding and developing
+Grant Lab is an internal hospital application for finding and developing
 research-funding opportunities. It collects calls from sources such as Vinnova and the EU
 Funding & Tenders Portal, ranks each call against organization and research-group profiles,
 and presents the results in a web dashboard and weekly email digest.
@@ -188,8 +188,8 @@ pnpm run build
 Build the SPA before starting FastAPI in production mode:
 
 ```bash
-docker build -f frontend/Dockerfile -t call-manager-spa-build .
-container=$(docker create call-manager-spa-build)
+docker build -f frontend/Dockerfile -t grant-lab-spa-build .
+container=$(docker create grant-lab-spa-build)
 rm -rf src/call_manager/web/spa
 mkdir -p src/call_manager/web/spa
 docker cp "$container:/build/dist/." src/call_manager/web/spa/

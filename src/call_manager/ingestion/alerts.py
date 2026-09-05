@@ -175,7 +175,7 @@ class ConsecutiveFailureTracker:
         # one transient mail outage masks the real ongoing ingestion outage
         # the alert was supposed to surface.
         try:
-            subject = f"[call-manager] {source_slug} failing: {self._threshold}+ consecutive errors"
+            subject = f"[Grant Lab] {source_slug} failing: {self._threshold}+ consecutive errors"
             self._sender.send(
                 to=self._admin_email,
                 subject=subject,
@@ -280,7 +280,7 @@ def check_stale_sources(
                 sender.send(
                     to=admin_email,
                     subject=(
-                        f"[call-manager] {len(stale)} source(s) "
+                        f"[Grant Lab] {len(stale)} source(s) "
                         f"not fetched in {stale_days}+ days"
                     ),
                     text_body=(

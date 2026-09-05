@@ -1,4 +1,4 @@
-# Call Manager — Frontend (React SPA)
+# Grant Lab — Frontend (React SPA)
 
 Vite + React + TypeScript SPA. It owns all browser page routes, including the
 calls dashboard, proposal-assist workspace, admin, auth, profiles, and settings.

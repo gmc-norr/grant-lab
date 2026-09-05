@@ -1,5 +1,5 @@
 [project]
-name = "call-manager"
+name = "grant-lab"
 version = "0.1.0"
 description = "Internal hospital funding-call manager"
 requires-python = ">=3.12"

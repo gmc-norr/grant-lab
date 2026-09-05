@@ -1,4 +1,4 @@
-# call-manager
+# grant-lab
 
 Internal hospital tool that aggregates funding calls (grants, EU calls, Vinnova programmes, etc.) from multiple sources, ranks them with a local LLM against organization- and group-level research profiles, and surfaces the most relevant calls via a web dashboard and weekly email digest. It also provides a proposal-assist workspace for drafting applications against the ranked calls.
 

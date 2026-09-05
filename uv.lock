@@ -189,105 +189,6 @@ filecache = [
 ]
 
 [[package]]
-name = "call-manager"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "alembic" },
-    { name = "anthropic" },
-    { name = "apscheduler" },
-    { name = "argon2-cffi" },
-    { name = "bleach" },
-    { name = "claude-agent-sdk" },
-    { name = "cryptography" },
-    { name = "defusedxml" },
-    { name = "fastapi" },
-    { name = "httpx" },
-    { name = "itsdangerous" },
-    { name = "jinja2" },
-    { name = "joserfc" },
-    { name = "markdown" },
-    { name = "openpyxl" },
-    { name = "pdfminer-six" },
-    { name = "pgvector" },
-    { name = "pillow" },
-    { name = "prosemirror" },
-    { name = "psycopg", extra = ["binary"] },
-    { name = "pycrdt" },
-    { name = "pydantic" },
-    { name = "pydantic-settings" },
-    { name = "pymupdf" },
-    { name = "python-docx" },
-    { name = "python-multipart" },
-    { name = "sqlalchemy" },
-    { name = "striprtf" },
-    { name = "trafilatura" },
-    { name = "uvicorn", extra = ["standard"] },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "httpx2" },
-    { name = "pip-audit" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-httpx" },
-    { name = "pytest-timeout" },
-    { name = "pytest-xdist" },
-    { name = "reportlab" },
-    { name = "ruff" },
-    { name = "testcontainers" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "alembic", specifier = ">=1.13" },
-    { name = "anthropic", specifier = ">=0.102.0" },
-    { name = "apscheduler", specifier = ">=3.10" },
-    { name = "argon2-cffi", specifier = ">=23.1" },
-    { name = "bleach", specifier = ">=6.3.0" },
-    { name = "claude-agent-sdk" },
-    { name = "cryptography", specifier = ">=43.0" },
-    { name = "defusedxml", specifier = ">=0.7.1" },
-    { name = "fastapi", specifier = ">=0.115" },
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "itsdangerous", specifier = ">=2.2" },
-    { name = "jinja2", specifier = ">=3.1" },
-    { name = "joserfc", specifier = ">=1.7.4" },
-    { name = "markdown", specifier = ">=3.10.2" },
-    { name = "openpyxl", specifier = ">=3.1.0" },
-    { name = "pdfminer-six", specifier = ">=20231228" },
-    { name = "pgvector", specifier = ">=0.3.0" },
-    { name = "pillow", specifier = ">=12.2.0" },
-    { name = "prosemirror", specifier = ">=0.6.1" },
-    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
-    { name = "pycrdt", specifier = ">=0.14.0" },
-    { name = "pydantic", specifier = ">=2.8" },
-    { name = "pydantic-settings", specifier = ">=2.4" },
-    { name = "pymupdf", specifier = ">=1.25.0" },
-    { name = "python-docx", specifier = ">=1.1.0" },
-    { name = "python-multipart", specifier = ">=0.0.9" },
-    { name = "sqlalchemy", specifier = ">=2.0" },
-    { name = "striprtf", specifier = ">=0.0.26" },
-    { name = "trafilatura", specifier = ">=2.0.0" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "httpx2", specifier = ">=2.9.1" },
-    { name = "pip-audit", specifier = ">=2.7" },
-    { name = "pytest", specifier = ">=8.3" },
-    { name = "pytest-asyncio", specifier = ">=0.24" },
-    { name = "pytest-httpx", specifier = ">=0.36.2" },
-    { name = "pytest-timeout", specifier = ">=2.3" },
-    { name = "pytest-xdist", specifier = ">=3.8.0" },
-    { name = "reportlab", specifier = ">=4.0" },
-    { name = "ruff", specifier = ">=0.6" },
-    { name = "testcontainers", extras = ["postgres"], specifier = ">=4.8" },
-]
-
-[[package]]
 name = "certifi"
 version = "2026.2.25"
 source = { registry = "https://pypi.org/simple" }
@@ -651,6 +552,105 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/e6/dc/be6cbe99670cd6e4ad387123647cb08e0c32975e223f82551e914c5568a6/filelock-3.29.4.tar.gz", hash = "sha256:10cdb3656fc44541cdf30652a93fb10ec6b05325620eb316bd26893e4201538a", size = 63028, upload-time = "2026-06-13T16:12:00.744Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/13/37/a065dc3bd6e49423a6532c642ca7378d3f467b1ef44c2800c937af7f9739/filelock-3.29.4-py3-none-any.whl", hash = "sha256:dac1648087d5115554850d113e7dd8c83ab2d38e3435dde2d4f163847e57b767", size = 42757, upload-time = "2026-06-13T16:11:59.582Z" },
+]
+
+[[package]]
+name = "grant-lab"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "alembic" },
+    { name = "anthropic" },
+    { name = "apscheduler" },
+    { name = "argon2-cffi" },
+    { name = "bleach" },
+    { name = "claude-agent-sdk" },
+    { name = "cryptography" },
+    { name = "defusedxml" },
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "itsdangerous" },
+    { name = "jinja2" },
+    { name = "joserfc" },
+    { name = "markdown" },
+    { name = "openpyxl" },
+    { name = "pdfminer-six" },
+    { name = "pgvector" },
+    { name = "pillow" },
+    { name = "prosemirror" },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "pycrdt" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "pymupdf" },
+    { name = "python-docx" },
+    { name = "python-multipart" },
+    { name = "sqlalchemy" },
+    { name = "striprtf" },
+    { name = "trafilatura" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "httpx2" },
+    { name = "pip-audit" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-httpx" },
+    { name = "pytest-timeout" },
+    { name = "pytest-xdist" },
+    { name = "reportlab" },
+    { name = "ruff" },
+    { name = "testcontainers" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "alembic", specifier = ">=1.13" },
+    { name = "anthropic", specifier = ">=0.102.0" },
+    { name = "apscheduler", specifier = ">=3.10" },
+    { name = "argon2-cffi", specifier = ">=23.1" },
+    { name = "bleach", specifier = ">=6.3.0" },
+    { name = "claude-agent-sdk" },
+    { name = "cryptography", specifier = ">=43.0" },
+    { name = "defusedxml", specifier = ">=0.7.1" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "itsdangerous", specifier = ">=2.2" },
+    { name = "jinja2", specifier = ">=3.1" },
+    { name = "joserfc", specifier = ">=1.7.4" },
+    { name = "markdown", specifier = ">=3.10.2" },
+    { name = "openpyxl", specifier = ">=3.1.0" },
+    { name = "pdfminer-six", specifier = ">=20231228" },
+    { name = "pgvector", specifier = ">=0.3.0" },
+    { name = "pillow", specifier = ">=12.2.0" },
+    { name = "prosemirror", specifier = ">=0.6.1" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
+    { name = "pycrdt", specifier = ">=0.14.0" },
+    { name = "pydantic", specifier = ">=2.8" },
+    { name = "pydantic-settings", specifier = ">=2.4" },
+    { name = "pymupdf", specifier = ">=1.25.0" },
+    { name = "python-docx", specifier = ">=1.1.0" },
+    { name = "python-multipart", specifier = ">=0.0.9" },
+    { name = "sqlalchemy", specifier = ">=2.0" },
+    { name = "striprtf", specifier = ">=0.0.26" },
+    { name = "trafilatura", specifier = ">=2.0.0" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "httpx2", specifier = ">=2.9.1" },
+    { name = "pip-audit", specifier = ">=2.7" },
+    { name = "pytest", specifier = ">=8.3" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "pytest-httpx", specifier = ">=0.36.2" },
+    { name = "pytest-timeout", specifier = ">=2.3" },
+    { name = "pytest-xdist", specifier = ">=3.8.0" },
+    { name = "reportlab", specifier = ">=4.0" },
+    { name = "ruff", specifier = ">=0.6" },
+    { name = "testcontainers", extras = ["postgres"], specifier = ">=4.8" },
 ]
 
 [[package]]

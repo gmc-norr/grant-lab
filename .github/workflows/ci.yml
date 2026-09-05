@@ -138,7 +138,7 @@ jobs:
       # needs SOCKET_SECURITY_API_KEY; pnpm audit + OSV over the lockfile +
       # Dependabot (npm) provide the tokenless JS supply-chain baseline.
       - name: Build SPA in the ephemeral secretless container
-        run: docker build -f frontend/Dockerfile -t call-manager-spa-build .
+        run: docker build -f frontend/Dockerfile -t grant-lab-spa-build .
 
       # Extract to frontend/dist and then let scripts/package_spa.sh write the
       # served tree. It used to `docker cp` straight into src/call_manager/web/spa,
@@ -151,7 +151,7 @@ jobs:
       # directory, which tests/architecture/test_package_spa.py pins.
       - name: Extract the SPA bundle and package it through the gate
         run: |
-          c=$(docker create call-manager-spa-build)
+          c=$(docker create grant-lab-spa-build)
           rm -rf frontend/dist && mkdir -p frontend/dist
           docker cp "$c:/build/dist/." frontend/dist/
           docker rm "$c"

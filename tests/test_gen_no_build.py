@@ -43,7 +43,7 @@ version = "2.0"
 wheels = [{ url = "https://example/alpha_pkg-2.0-py3-none-any.whl" }]
 
 [[package]]
-name = "call-manager"
+name = "grant-lab"
 version = "0.1.0"
 source = { editable = "." }
 """
@@ -122,7 +122,7 @@ def test_editable_and_virtual_packages_are_skipped():
     lock = {
         "package": [
             {"name": "real-dep", "wheels": [{"url": "x.whl"}]},
-            {"name": "call-manager", "source": {"editable": "."}, "wheels": []},
+            {"name": "grant-lab", "source": {"editable": "."}, "wheels": []},
             {"name": "workspace-root", "source": {"virtual": "."}},
         ]
     }
@@ -132,7 +132,7 @@ def test_editable_and_virtual_packages_are_skipped():
     assert with_wheels == ["real-dep"]
     assert source_only == []
     # First-party packages never leak into either third-party list.
-    assert "call-manager" not in with_wheels
+    assert "grant-lab" not in with_wheels
     assert "workspace-root" not in with_wheels
 
 
