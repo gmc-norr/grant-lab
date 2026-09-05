@@ -415,13 +415,29 @@ def test_hiding_a_saved_call_flips_the_row_and_rewrites_three_columns(
     )
 
 
+# Gate 8b - re-hiding the SAME call on the SAME profile. "Still one row, still
+# hidden" is true under DO NOTHING as well, so asserting only that is a byte-for-
+# byte restatement of tests/test_api_calls_hide.py::test_hide_is_idempotent and
+# cannot see the upsert at all. What DO UPDATE actually buys here is that a
+# re-hide is a NEW decision: `decided_at` moves forward, which is what pushes the
+# call back to the top of Hidden (D12 orders that list by decided_at DESC).
 def test_hide_is_idempotent_within_one_profile(monkeypatch, pg_url, pg_session_factory):
     uid, (p1, _p2), (cid,) = _seed(pg_session_factory)
     app = _app(monkeypatch, pg_url)
     with _client(app, uid) as client:
-        client.post(f"/api/calls/{cid}/hide", params={"profile_id": p1})
         assert client.post(f"/api/calls/{cid}/hide", params={"profile_id": p1}).status_code == 200
+        first = _rows(pg_session_factory, user_id=uid, call_id=cid)
+        assert client.post(f"/api/calls/{cid}/hide", params={"profile_id": p1}).status_code == 200
+        second = _rows(pg_session_factory, user_id=uid, call_id=cid)
     assert _states(pg_session_factory, user_id=uid, call_id=cid) == {p1: "hidden"}
+    assert len(first) == 1 and len(second) == 1, (
+        f"one row per (user, profile, call) throughout: {first} -> {second}"
+    )
+    assert second[0][2] > first[0][2], (
+        "a re-hide is a NEW decision, so `decided_at` must move forward and the call "
+        "returns to the top of Hidden (D12). DO NOTHING leaves it frozen at the first "
+        f"hide. Got {first[0][2]} -> {second[0][2]}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -618,39 +634,54 @@ def test_saved_and_hidden_keep_closed_calls_but_the_inbox_does_not(
 
 
 # ---------------------------------------------------------------------------
-# Gate 13 (D12) - Saved is a log of what you just did: most-recent-decision
-# first, NOT the inbox's score/newest order. The fixture makes the two orders
-# DISAGREE - the later-published call (which the unranked sort puts first) is
-# saved with the EARLIER decided_at - or the gate is the "absence already true"
-# shape.
+# Gate 13 (D12) - Saved is a log of what you just did: ordered by decided_at
+# DESC and by NOTHING ELSE. THREE calls, because a two-row fixture whose
+# expected order happens to equal ascending id cannot tell "ordered by
+# decided_at" from "not ordered at all" - the heap returns insertion order for
+# a table that small, so DELETING the order_by stays green.
+#
+# The expectation below disagrees with every ordering the code could fall back
+# to at once: id ASC (= insertion/heap order), id DESC, published_at DESC, and
+# the ranked branch's `closed_expr.asc()` prefix. That last one is why the
+# fixture carries a CLOSED call (deadline 2020) saved MOST recently: it must
+# come FIRST, so re-adding "open before closed" ahead of decided_at - the shape
+# every other view uses - reddens this gate instead of passing unnoticed.
 # ---------------------------------------------------------------------------
 def test_saved_is_ordered_most_recent_decision_first(monkeypatch, pg_url, pg_session_factory):
-    uid, (p1, _p2), (c_older_pub, c_newer_pub) = _seed(pg_session_factory, n_calls=2)
+    past = datetime(2020, 1, 1, tzinfo=UTC)
+    uid, (p1, _p2), (c_pub_first, c_closed, c_pub_last) = _seed(
+        pg_session_factory, n_calls=3, deadlines=[None, past, None]
+    )
+    # `_seed` gives ascending ids AND ascending published_at, so:
+    #   id ASC / heap    -> [c_pub_first, c_closed, c_pub_last]
+    #   id DESC          -> [c_pub_last, c_closed, c_pub_first]
+    #   published_at DESC-> [c_pub_last, c_closed, c_pub_first]
+    #   closed-last      -> [c_pub_last, c_pub_first, c_closed]
+    #   decided_at DESC  -> [c_closed, c_pub_last, c_pub_first]   <- the only one
+    # The rows are INSERTED in ascending call-id order so that the decision
+    # table's own heap order is the id-ASC one too, not the expectation.
     with pg_session_factory() as s:
-        # c_newer_pub was published LATER (published_at 2026-04-02 vs 04-01) but
-        # decided EARLIER. Score order would put it first; decision order must not.
-        s.execute(
-            text(
-                "INSERT INTO call_decisions "
-                "  (user_id, profile_id, call_id, state, decided_at, decided_by) "
-                "VALUES (:u, :p, :c, 'saved', '2026-05-01 00:00:00+00', :u)"
-            ),
-            {"u": uid, "p": p1, "c": c_newer_pub},
-        )
-        s.execute(
-            text(
-                "INSERT INTO call_decisions "
-                "  (user_id, profile_id, call_id, state, decided_at, decided_by) "
-                "VALUES (:u, :p, :c, 'saved', '2026-06-01 00:00:00+00', :u)"
-            ),
-            {"u": uid, "p": p1, "c": c_older_pub},
-        )
+        for call_id, when in (
+            (c_pub_first, "2026-04-01 00:00:00+00"),
+            (c_closed, "2026-06-01 00:00:00+00"),
+            (c_pub_last, "2026-05-01 00:00:00+00"),
+        ):
+            s.execute(
+                text(
+                    "INSERT INTO call_decisions "
+                    "  (user_id, profile_id, call_id, state, decided_at, decided_by) "
+                    "VALUES (:u, :p, :c, 'saved', :t, :u)"
+                ),
+                {"u": uid, "p": p1, "c": call_id, "t": when},
+            )
         s.commit()
     app = _app(monkeypatch, pg_url)
     with _client(app, uid) as client:
         body = client.get("/api/calls", params={"profile": p1, "view": "saved"}).json()
-    assert [i["id"] for i in body["items"]] == [c_older_pub, c_newer_pub], (
+    assert [i["id"] for i in body["items"]] == [c_closed, c_pub_last, c_pub_first], (
         "Saved is ordered decided_at DESC (D12). The call saved on 2026-06-01 comes "
-        "first even though the other one was published later and would sort first in "
-        f"the inbox's order. Got {_titles(body)}"
+        "first even though it is CLOSED and was published before one of the others - "
+        "so neither the inbox's closed-LAST/published-desc order nor the table's "
+        f"insertion order can pass this. Got {_titles(body)}, expected "
+        f"{[c_closed, c_pub_last, c_pub_first]}"
     )

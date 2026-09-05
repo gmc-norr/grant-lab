@@ -30,9 +30,12 @@ export function useCallDetail(id: number, profile?: number | null) {
 // profile in scope must not offer the action at all.
 export type DecisionArgs = { id: number; profileId: number };
 
-// Idempotent hide. Invalidates the dashboard list cache; the CALLER navigates
-// back to "/" (keeps this hook free of Router context, so it unit-tests with
-// only a QueryClientProvider).
+// Hide is repeatable, but NOT a no-op the second time: the server upserts with
+// DO UPDATE, so re-hiding an already-hidden call re-stamps `decided_at` and the
+// call moves back to the TOP of the Hidden list (which is ordered by most recent
+// decision). Invalidates the dashboard list cache; the CALLER navigates back to
+// "/" (keeps this hook free of Router context, so it unit-tests with only a
+// QueryClientProvider).
 export function useHideCall() {
   const qc = useQueryClient();
   return useMutation({
