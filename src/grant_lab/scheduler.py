@@ -259,7 +259,10 @@ def build_scheduler(
     digest_email_client: EmailClient | None = None,
     digest_settings=None,  # duck-typed: needs .digest_dry_run, .admin_dashboard_url
     limiters: list[SlidingWindowLimiter] | None = None,
-    workspace_controller: WorkspaceController,
+    # None in a MATCH boot: main.py's lifespan builds the proposal-assist half only
+    # when settings.drafting_enabled, and match forbids drafting. Every tick below
+    # that touches it guards on the same flag.
+    workspace_controller: WorkspaceController | None = None,
     citation_service=None,  # CitationLLMService | None — gates the analysis ticks
     analysis_embedder=None,  # references.embed.Embedder | None — gates the analysis ticks
     app_loop=None,  # asyncio.AbstractEventLoop | None
@@ -758,7 +761,16 @@ def build_scheduler(
 
         When app_loop is None (scheduler-tick unit test), the registry was
         freshly constructed in the test's own loop scope — asyncio.run() is
-        safe there and this branch is only exercised in tests."""
+        safe there and this branch is only exercised in tests.
+
+        Guarded on drafting_enabled like its seven sibling ticks. It was the only
+        one that was not, so a MATCH deployment registered this job and fired it
+        on every interval against the drafting registry it does not serve. It is
+        also the only tick that dereferences workspace_controller without the
+        flag check, so the guard is what makes the parameter safely optional."""
+        if not settings.drafting_enabled:
+            return
+
         import asyncio
 
         async def _sweep_and_reconcile():
@@ -786,15 +798,21 @@ def build_scheduler(
         except Exception:
             _logger.exception("drafting.idle_sweep failed")
 
-    sched.add_job(
-        _drafting_idle_sweep,
-        trigger=IntervalTrigger(
-            seconds=settings.workspace_idle_sweep_seconds,
-        ),
-        id="drafting_idle_sweep",
-        max_instances=1,
-        coalesce=True,
-    )
+    # Registered only when drafting is on, so a MATCH scheduler does not carry a
+    # job that can never do anything. Gating the REGISTRATION as well as the body
+    # is what makes this observable from outside the process: the architecture
+    # gate asserts the job id is absent in match and present in full, which an
+    # early-returning body would not show.
+    if settings.drafting_enabled:
+        sched.add_job(
+            _drafting_idle_sweep,
+            trigger=IntervalTrigger(
+                seconds=settings.workspace_idle_sweep_seconds,
+            ),
+            id="drafting_idle_sweep",
+            max_instances=1,
+            coalesce=True,
+        )
 
     # B4: turn-drain tick. Uses the same app_loop dispatch pattern as
     # drafting_idle_sweep so the registry's loop-bound state isn't
