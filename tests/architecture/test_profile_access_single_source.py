@@ -204,6 +204,10 @@ EXEMPT_PROFILE_FUNCTIONS: dict[str, str] = {
     "replace_profile_viewers": "writes the viewer rows",
     "add_profile_viewer": "writes one viewer row",
     "set_profile_visibility": "writes the visibility column",
+    "_readable_ignoring_ownership": (
+        "reads ONE viewer row to answer a hypothetical, after can_read_profile has "
+        "already answered the org/admin arms; decides nothing about the live request"
+    ),
 }
 EXEMPT_FUNCTION_MODULE = "web/api/profiles.py"
 

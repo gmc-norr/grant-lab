@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
@@ -142,6 +143,44 @@ def _profile_for_edit(session, *, profile_id: int, user: User) -> Profile:
     if p.created_by != user.id and not user.is_admin:
         raise HTTPException(status_code=403, detail="not authorized")
     return p
+
+
+def transfer_read_effect(session, *, profile: Profile, outgoing: User) -> bool:
+    """True when `outgoing` will LOSE read access if `profile` leaves them.
+
+    Computed, never asserted. `readable_profile_ids` short-circuits on
+    `if user.is_admin` (profile_access.py:61) and returns every profile, so an
+    admin previous owner loses nothing; `visibility='org'` and an explicit
+    ProfileViewer row each keep access too. The decisions note records that an
+    earlier revision stated the revocation unconditionally and was wrong, so the
+    transfer UI must render THIS, not a fixed sentence.
+
+    Asks the single-source predicate as if the transfer had already happened, by
+    excluding only the owner arm -- which is the one arm the transfer removes.
+    """
+    if profile.created_by != outgoing.id:
+        return False  # not the owner; the transfer takes nothing from them
+    return not _readable_ignoring_ownership(session, outgoing, profile.id)
+
+
+def _readable_ignoring_ownership(session, user: User, profile_id: int) -> bool:
+    """`can_read_profile` with the owner arm neutralised.
+
+    Implemented by asking the real predicate about a user whose id cannot match
+    `created_by` -- rather than by rewriting the arms here, which
+    tests/architecture/test_profile_access_single_source.py forbids and which is
+    how a second read rule gets born.
+    """
+    probe = SimpleNamespace(id=-1, is_admin=user.is_admin)
+    if can_read_profile(session, probe, profile_id):
+        return True
+    viewer = session.scalar(
+        select(ProfileViewer.user_id).where(
+            ProfileViewer.profile_id == profile_id,
+            ProfileViewer.user_id == user.id,
+        )
+    )
+    return viewer is not None
 
 
 @router.get("/profiles", response_model=ProfilesListOut)
@@ -604,9 +643,7 @@ def add_profile_viewer(
     with sf() as session:
         p = _profile_for_edit(session, profile_id=profile_id, user=user)
         email = (body.email or "").strip().lower()
-        target = (
-            session.scalar(select(User).where(User.email == email)) if email else None
-        )
+        target = session.scalar(select(User).where(User.email == email)) if email else None
         if target is None or target.status != "active":
             raise HTTPException(status_code=400, detail="could not add viewer")
         if target.id != p.created_by:  # the owner never has a row — no-op, 200
