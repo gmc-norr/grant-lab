@@ -34,12 +34,13 @@ def readable_profile_ids(user) -> Select:
 
     Four arms, in the order they are cheap to evaluate:
       created_by == user.id   -- the owner. NEVER has a profile_viewers row.
-      user.is_admin           -- same override profiles.py:342 uses for editing.
+      user.is_admin           -- the same override _profile_for_edit uses for
+                                 editing (profiles.py:142).
       visibility == 'org'     -- the default, so this is most profiles today.
       profile_viewers         -- explicitly shared.
 
     READING IS WIDER THAN EDITING, always. Editing stays created_by-or-admin
-    (profiles.py:342-343, spec 4.3). Do not collapse the two: a colleague a
+    (_profile_for_edit, profiles.py:142, spec 4.3). Do not collapse the two: a colleague a
     profile is shared with must be able to read it and must not be able to
     change it.
 
