@@ -299,9 +299,7 @@ def test_capacity_uses_the_STORED_items_per_page_not_a_default(
     board_id = _create_board(owner, profile_id=pid, orientation="portrait").json()["id"]
     default_items_per_page = ORIENTATION_ITEMS_PER_PAGE["portrait"]
     overridden_items_per_page = default_items_per_page + 1  # a non-default override
-    put_r = owner.put(
-        f"/api/boards/{board_id}", json={"items_per_page": overridden_items_per_page}
-    )
+    put_r = owner.put(f"/api/boards/{board_id}", json={"items_per_page": overridden_items_per_page})
     assert put_r.status_code == 200, put_r.text
     board = _get_board_row(pg_session_factory, board_id)
     default_cap = default_items_per_page * board.max_pages
@@ -463,10 +461,16 @@ def test_a_reader_who_cannot_edit_the_profile_gets_403_on_approve(
     pid, owner_id = profile_factory(name="Reader cannot approve profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
+    # A REAL call id, not []: with an empty list `_items(...) == []` below
+    # holds whether or not the refusal worked, so the state assertion would be
+    # decorative. This way the mutant is caught writing a row onto a board it
+    # has no rights to.
+    call_id = _make_call(pg_session_factory, external_id="reader-approve-target")
+    _rank(pg_session_factory, call_id=call_id, profile_id=pid, score=90)
     reader_id = _new_user(pg_session_factory, "reader-approve@umu.se")
     reader = _client_for(app, reader_id)
 
-    r = reader.post(f"/api/boards/{board_id}/items", json={"call_ids": []})
+    r = reader.post(f"/api/boards/{board_id}/items", json={"call_ids": [call_id]})
 
     assert r.status_code == 403, r.text
     assert b"not authorized" in r.content
@@ -474,8 +478,9 @@ def test_a_reader_who_cannot_edit_the_profile_gets_403_on_approve(
 
     # Positive control: the owner's identical request succeeds, so the 403
     # above is the edit-permission check and not a broken route.
-    r2 = owner.post(f"/api/boards/{board_id}/items", json={"call_ids": []})
+    r2 = owner.post(f"/api/boards/{board_id}/items", json={"call_ids": [call_id]})
     assert r2.status_code == 200, r2.text
+    assert [i.call_id for i in _items(pg_session_factory, board_id)] == [call_id]
 
 
 def test_a_stranger_gets_404_not_403_on_approve(
@@ -489,18 +494,25 @@ def test_a_stranger_gets_404_not_403_on_approve(
     _set_visibility(pg_session_factory, pid, "private")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid).json()["id"]
+    # A REAL call id, not []: with an empty list `_items(...) == []` below
+    # holds whether or not the refusal worked, so the state assertion would be
+    # decorative. This way the mutant is caught writing a row onto a board it
+    # has no rights to.
+    call_id = _make_call(pg_session_factory, external_id="stranger-approve-target")
+    _rank(pg_session_factory, call_id=call_id, profile_id=pid, score=90)
     stranger_id = _new_user(pg_session_factory, "stranger-approve@umu.se")
     stranger = _client_for(app, stranger_id)
 
-    r = stranger.post(f"/api/boards/{board_id}/items", json={"call_ids": []})
+    r = stranger.post(f"/api/boards/{board_id}/items", json={"call_ids": [call_id]})
 
     assert r.status_code == 404, r.text
     assert b"profile not found" in r.content
     assert _items(pg_session_factory, board_id) == []
 
     # Positive control: the owner's identical request succeeds.
-    r2 = owner.post(f"/api/boards/{board_id}/items", json={"call_ids": []})
+    r2 = owner.post(f"/api/boards/{board_id}/items", json={"call_ids": [call_id]})
     assert r2.status_code == 200, r2.text
+    assert [i.call_id for i in _items(pg_session_factory, board_id)] == [call_id]
 
 
 def test_a_reader_who_cannot_edit_the_profile_gets_403_on_unapprove(
