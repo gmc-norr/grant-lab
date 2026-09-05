@@ -36,15 +36,16 @@ per spec §6's ban on silently truncating a list an admin approved.
 from __future__ import annotations
 
 import secrets
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from pydantic import BaseModel, Field, model_validator
+from sqlalchemy import func, select, update
 
 from grant_lab.auth.dependencies import get_current_user
-from grant_lab.db.models import ORIENTATION_ITEMS_PER_PAGE, Board, BoardItem, Profile, User
+from grant_lab.boards.queue import board_queue
+from grant_lab.db.models import ORIENTATION_ITEMS_PER_PAGE, Board, BoardItem, Call, Profile, User
 from grant_lab.web.api.profiles import _profile_for_edit
 from grant_lab.web.profile_access import readable_profile_ids
 
@@ -71,7 +72,13 @@ _SLUG_BYTES = 16
 class BoardOut(BaseModel):
     id: int
     slug: str
-    title: str
+    # Open-5, repeated here (Task 6): the input models (BoardCreateIn,
+    # BoardSettingsIn) already carried this description, but BoardOut is what
+    # GET, list, create, update AND the publish route all return -- Task 10's
+    # publish confirmation dialog reads the CURRENT title back off this model,
+    # not off an input schema, so the caution has to reach the OUTPUT side too
+    # or the one dialog that most needs it never sees it.
+    title: str = Field(..., description=_TITLE_DESCRIPTION)
     profile_id: int
     orientation: Literal["landscape", "portrait"]
     items_per_page: int
@@ -358,3 +365,369 @@ def delete_board(
         session.delete(board)
         session.commit()
     return Response(status_code=204)
+
+
+# --- Task 6: approve, un-approve, reorder, publish --------------------------
+#
+# Permissions still come from the ONE place: every route below starts with
+# `_board_for_edit`, same as Task 5. Publish additionally narrows to admin
+# AFTER that call -- never instead of it -- the same shape delete_board (above)
+# uses for its own creator-or-admin narrowing, so a non-admin's request
+# against a board they cannot even READ still 404s/403s on the SAME rule
+# before the admin-only refusal is ever reached.
+
+
+class QueueCallOut(BaseModel):
+    call_id: int
+    title: str
+    url: str
+    deadline: datetime | None
+    source_name: str | None
+    score: int
+    already_approved: bool
+
+
+class BoardQueueOut(BaseModel):
+    items: list[QueueCallOut]
+    # NOT a pagination total -- board_queue's own contract (Task 4): already-
+    # approved candidates are counted OUT of this, so it answers "how many
+    # still need a decision", not "how many rows exist".
+    waiting_count: int
+
+
+class BoardItemOut(BaseModel):
+    call_id: int
+    title: str
+    url: str
+    deadline: datetime | None
+    source_name: str | None
+    position: int
+    approved_by: int
+    approved_at: datetime
+
+
+class BoardItemsOut(BaseModel):
+    items: list[BoardItemOut]
+
+
+def _item_out(call: Call, item: BoardItem) -> BoardItemOut:
+    return BoardItemOut(
+        call_id=call.id,
+        title=call.title,
+        url=call.url,
+        deadline=call.deadline,
+        source_name=(call.source.name if call.source else None),
+        position=item.position,
+        approved_by=item.approved_by,
+        approved_at=item.approved_at,
+    )
+
+
+def _list_items(session, board_id: int) -> list[BoardItemOut]:
+    rows = session.execute(
+        select(Call, BoardItem)
+        .join(BoardItem, BoardItem.call_id == Call.id)
+        .where(BoardItem.board_id == board_id)
+        .order_by(BoardItem.position.asc())
+    ).all()
+    return [_item_out(call, item) for call, item in rows]
+
+
+@router.get("/boards/{board_id}/queue", response_model=BoardQueueOut)
+def get_board_queue(
+    request: Request,
+    board_id: int,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    """The admin approval checklist -- any profile editor (§4.3), not
+    admin-only. A thin serialization over `board_queue` (boards/queue.py,
+    Task 4), which is where D2's "the profile OWNER's hides, not the
+    caller's" decision actually lives -- this route does not re-derive it."""
+    sf = request.app.state.session_factory
+    with sf() as session:
+        board = _board_for_edit(session, board_id=board_id, user=user)
+        rows, waiting = board_queue(session, board=board, limit=limit, offset=offset)
+        items = [
+            QueueCallOut(
+                call_id=row.call.id,
+                title=row.call.title,
+                url=row.call.url,
+                deadline=row.call.deadline,
+                source_name=(row.call.source.name if row.call.source else None),
+                score=row.score,
+                already_approved=row.already_approved,
+            )
+            for row in rows
+        ]
+    return BoardQueueOut(items=items, waiting_count=waiting)
+
+
+@router.get("/boards/{board_id}/items", response_model=BoardItemsOut)
+def get_board_items(
+    request: Request,
+    board_id: int,
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    """Approved items, in `position` order. Applies NO decision filtering --
+    D3: an owner's later hide of an already-approved call must not make it
+    vanish here; un-approving (DELETE below) is the only way a card comes
+    down once it is up."""
+    sf = request.app.state.session_factory
+    with sf() as session:
+        _board_for_edit(session, board_id=board_id, user=user)
+        items = _list_items(session, board_id)
+    return BoardItemsOut(items=items)
+
+
+class ApproveIn(BaseModel):
+    """Bulk approve: EITHER an explicit checklist selection OR a score floor,
+    never both and never neither -- §4.3's two bulk affordances ("a checklist"
+    and "approve everything at or above N") are different requests, not two
+    optional filters on the same one."""
+
+    call_ids: list[int] | None = None
+    min_score: int | None = Field(default=None, ge=0, le=100)
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> ApproveIn:
+        if (self.call_ids is None) == (self.min_score is None):
+            raise ValueError("send exactly one of call_ids or min_score")
+        return self
+
+
+def _candidates_at_or_above(
+    session, board: Board, min_score: int, *, page_size: int = 200
+) -> list[int]:
+    """Every WAITING call_id in `board`'s queue scoring >= min_score.
+
+    Paged through `board_queue` rather than one big `limit=` (which would
+    silently truncate the very thing §6 forbids truncating) -- but not
+    forced to walk the whole queue either: rows come back
+    `ORDER BY aggregate_score DESC`, so the scan can stop at the first row
+    below the floor.
+    """
+    call_ids: list[int] = []
+    offset = 0
+    while True:
+        rows, _waiting = board_queue(session, board=board, limit=page_size, offset=offset)
+        if not rows:
+            return call_ids
+        for row in rows:
+            if row.score < min_score:
+                return call_ids
+            if not row.already_approved:
+                call_ids.append(row.call.id)
+        if len(rows) < page_size:
+            return call_ids
+        offset += page_size
+
+
+@router.post("/boards/{board_id}/items", response_model=BoardItemsOut)
+def approve_items(
+    request: Request,
+    board_id: int,
+    body: ApproveIn,
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    """Bulk approve -- §4.3's checklist and "approve everything at or above N"
+    in one route; a per-call POST costs a minute per call and an abandoned
+    gate is worse than no gate.
+
+    CAPACITY. Enforced here too, not only on the settings PUT's flip guard
+    (Task 5): the cap is the STORED `items_per_page * max_pages` (D7), and a
+    bulk request that would exceed it approves NONE. A partial approve is
+    exactly the silent truncation spec §6 forbids, just performed by the
+    server instead of the display.
+
+    CONCURRENCY (Task 5 review note carried forward). Task 5's own capacity
+    guard reads the approved count, then writes, with no lock -- an approve
+    landing between its read and its commit can leave a board over cap. This
+    route closes that gap from the approval side: it re-reads `board` under
+    `SELECT ... FOR UPDATE` before counting, so a second concurrent approve on
+    the SAME board blocks here until the first commits, then counts what the
+    first actually landed. Postgres also blocks Task 5's own settings-PUT
+    UPDATE on this row for the same reason (any UPDATE needs the row lock),
+    so the two paths end up mutually serialized on one primitive without
+    Task 5's code changing. Different boards do not contend -- the lock is
+    per-row.
+    """
+    sf = request.app.state.session_factory
+    with sf() as session:
+        board = _board_for_edit(session, board_id=board_id, user=user)
+        session.refresh(board, with_for_update=True)
+
+        if body.call_ids is not None:
+            requested = list(dict.fromkeys(body.call_ids))  # de-dup, keep order
+            if requested:
+                found_ids = set(
+                    session.execute(select(Call.id).where(Call.id.in_(requested))).scalars()
+                )
+                unknown = [cid for cid in requested if cid not in found_ids]
+                if unknown:
+                    raise HTTPException(status_code=422, detail=f"unknown call_id(s): {unknown}")
+        else:
+            requested = _candidates_at_or_above(session, board, body.min_score)
+
+        already_approved_ids = set(
+            session.execute(
+                select(BoardItem.call_id).where(BoardItem.board_id == board.id)
+            ).scalars()
+        )
+        new_ids = [cid for cid in requested if cid not in already_approved_ids]
+
+        approved_count = len(already_approved_ids)
+        cap = board.items_per_page * board.max_pages
+        if approved_count + len(new_ids) > cap:
+            overflow = approved_count + len(new_ids) - cap
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"approving {len(new_ids)} more would put "
+                    f"{approved_count + len(new_ids)} on a board that holds {cap} — "
+                    f"drop {overflow} from this selection, or remove {overflow} "
+                    "already-approved first"
+                ),
+            )
+
+        if new_ids:
+            existing_max = session.scalar(
+                select(func.max(BoardItem.position)).where(BoardItem.board_id == board.id)
+            )
+            next_position = 0 if existing_max is None else existing_max + 1
+            for offset, cid in enumerate(new_ids):
+                session.add(
+                    BoardItem(
+                        board_id=board.id,
+                        call_id=cid,
+                        position=next_position + offset,
+                        approved_by=user.id,
+                    )
+                )
+            session.commit()
+
+        items = _list_items(session, board.id)
+    return BoardItemsOut(items=items)
+
+
+class ReorderIn(BaseModel):
+    call_ids: list[int]
+
+
+@router.put("/boards/{board_id}/items", response_model=BoardItemsOut)
+def reorder_items(
+    request: Request,
+    board_id: int,
+    body: ReorderIn,
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    """Rewrite every approved item's `position` from `call_ids`' order.
+    All-or-nothing: an unknown call_id, a missing one, or a duplicate refuses
+    the WHOLE request (validated before any UPDATE is issued) rather than
+    applying a partial reorder."""
+    sf = request.app.state.session_factory
+    with sf() as session:
+        board = _board_for_edit(session, board_id=board_id, user=user)
+
+        if len(set(body.call_ids)) != len(body.call_ids):
+            raise HTTPException(status_code=422, detail="duplicate call_id in reorder")
+
+        existing_ids = set(
+            session.execute(
+                select(BoardItem.call_id).where(BoardItem.board_id == board.id)
+            ).scalars()
+        )
+        provided_ids = set(body.call_ids)
+        unknown = sorted(provided_ids - existing_ids)
+        if unknown:
+            raise HTTPException(
+                status_code=422,
+                detail=f"unknown call_id(s), not approved on this board: {unknown}",
+            )
+        missing = sorted(existing_ids - provided_ids)
+        if missing:
+            raise HTTPException(
+                status_code=422,
+                detail=f"reorder must include every approved call_id; missing: {missing}",
+            )
+
+        for position, call_id in enumerate(body.call_ids):
+            session.execute(
+                update(BoardItem)
+                .where(BoardItem.board_id == board.id, BoardItem.call_id == call_id)
+                .values(position=position)
+            )
+        session.commit()
+
+        items = _list_items(session, board.id)
+    return BoardItemsOut(items=items)
+
+
+@router.delete("/boards/{board_id}/items/{call_id}", status_code=204)
+def unapprove_item(
+    request: Request,
+    board_id: int,
+    call_id: int,
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    """Un-approve: any profile editor, NOT admin-only (§4.3). D3: the owner
+    can take a card down deliberately, on the board -- independent of the
+    per-user CallDecision hide/save state, which this never touches and which
+    never reaches here."""
+    sf = request.app.state.session_factory
+    with sf() as session:
+        board = _board_for_edit(session, board_id=board_id, user=user)
+        item = session.get(BoardItem, (board.id, call_id))
+        if item is None:
+            raise HTTPException(status_code=404, detail="item not found on this board")
+        session.delete(item)
+        session.commit()
+    return Response(status_code=204)
+
+
+class PublishIn(BaseModel):
+    is_published: bool
+
+
+@router.put("/boards/{board_id}/publish", response_model=BoardOut)
+def publish_board(
+    request: Request,
+    board_id: int,
+    body: PublishIn,
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    """Admin-only, deliberately its OWN route rather than a field on
+    BoardSettingsIn -- §4.3: "I picked these calls" and "I put them on a
+    public wall" are different claims, and a field on the editor-accessible
+    settings route would make the second reachable by whoever can make the
+    first.
+
+    The admin check sits AFTER `_board_for_edit`, never instead of it -- the
+    same shape delete_board uses for its own (looser) creator-or-admin
+    narrowing -- so a non-admin's request against a board they cannot even
+    edit still gets THAT refusal, on the one permission rule this module has,
+    before the admin-only refusal is reached.
+
+    Un-publishing is admin-only too (§4.3: "(and un-publish)") and
+    deliberately does NOT clear `published_by`/`published_at`: they record
+    who last made the board public and when, a question that survives the
+    board coming back down.
+    """
+    sf = request.app.state.session_factory
+    with sf() as session:
+        board = _board_for_edit(session, board_id=board_id, user=user)
+        if not user.is_admin:
+            raise HTTPException(
+                status_code=403,
+                detail="only an admin may publish or unpublish a board",
+            )
+        board.is_published = body.is_published
+        if body.is_published:
+            board.published_by = user.id
+            board.published_at = datetime.now(UTC)
+        approved_count = _approved_counts(session, [board.id]).get(board.id, 0)
+        session.commit()
+        session.refresh(board)
+        out = _to_out(board, approved_count)
+    return out

@@ -149,6 +149,11 @@ def test_match_edition_still_serves_the_release_1_surface(monkeypatch, _base_env
 # /api/boards (GET list, POST create) and /api/boards/{board_id} (GET, PUT,
 # DELETE) -- five operations, two unique paths, matching this file's
 # unique-PATHS-not-operations convention above.
+#
+# Plan C Task 6 (approve, un-approve, reorder, publish): 112 -> 116. Four
+# added paths: /api/boards/{board_id}/queue (GET), /api/boards/{board_id}/items
+# (GET, POST, PUT), /api/boards/{board_id}/items/{call_id} (DELETE) and
+# /api/boards/{board_id}/publish (PUT) -- six operations, four unique paths.
 _BASELINE = Path(__file__).with_name("full_edition_routes.txt")
 
 
@@ -177,7 +182,7 @@ def test_full_edition_route_set_matches_the_committed_baseline(monkeypatch, _bas
 def test_the_baseline_is_not_empty():
     """A baseline of zero routes would make the comparison above vacuous on an
     app that also served nothing."""
-    assert len(_BASELINE.read_text().split()) == 112
+    assert len(_BASELINE.read_text().split()) == 116
 
 
 def test_full_edition_is_unchanged(monkeypatch, _base_env):

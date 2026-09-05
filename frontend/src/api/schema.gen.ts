@@ -581,6 +581,141 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/boards/{board_id}/items": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Board Items
+         * @description Approved items, in `position` order. Applies NO decision filtering --
+         *     D3: an owner's later hide of an already-approved call must not make it
+         *     vanish here; un-approving (DELETE below) is the only way a card comes
+         *     down once it is up.
+         */
+        get: operations["get_board_items_api_boards__board_id__items_get"];
+        /**
+         * Reorder Items
+         * @description Rewrite every approved item's `position` from `call_ids`' order.
+         *     All-or-nothing: an unknown call_id, a missing one, or a duplicate refuses
+         *     the WHOLE request (validated before any UPDATE is issued) rather than
+         *     applying a partial reorder.
+         */
+        put: operations["reorder_items_api_boards__board_id__items_put"];
+        /**
+         * Approve Items
+         * @description Bulk approve -- §4.3's checklist and "approve everything at or above N"
+         *     in one route; a per-call POST costs a minute per call and an abandoned
+         *     gate is worse than no gate.
+         *
+         *     CAPACITY. Enforced here too, not only on the settings PUT's flip guard
+         *     (Task 5): the cap is the STORED `items_per_page * max_pages` (D7), and a
+         *     bulk request that would exceed it approves NONE. A partial approve is
+         *     exactly the silent truncation spec §6 forbids, just performed by the
+         *     server instead of the display.
+         *
+         *     CONCURRENCY (Task 5 review note carried forward). Task 5's own capacity
+         *     guard reads the approved count, then writes, with no lock -- an approve
+         *     landing between its read and its commit can leave a board over cap. This
+         *     route closes that gap from the approval side: it re-reads `board` under
+         *     `SELECT ... FOR UPDATE` before counting, so a second concurrent approve on
+         *     the SAME board blocks here until the first commits, then counts what the
+         *     first actually landed. Postgres also blocks Task 5's own settings-PUT
+         *     UPDATE on this row for the same reason (any UPDATE needs the row lock),
+         *     so the two paths end up mutually serialized on one primitive without
+         *     Task 5's code changing. Different boards do not contend -- the lock is
+         *     per-row.
+         */
+        post: operations["approve_items_api_boards__board_id__items_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/boards/{board_id}/items/{call_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Unapprove Item
+         * @description Un-approve: any profile editor, NOT admin-only (§4.3). D3: the owner
+         *     can take a card down deliberately, on the board -- independent of the
+         *     per-user CallDecision hide/save state, which this never touches and which
+         *     never reaches here.
+         */
+        delete: operations["unapprove_item_api_boards__board_id__items__call_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/boards/{board_id}/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Publish Board
+         * @description Admin-only, deliberately its OWN route rather than a field on
+         *     BoardSettingsIn -- §4.3: "I picked these calls" and "I put them on a
+         *     public wall" are different claims, and a field on the editor-accessible
+         *     settings route would make the second reachable by whoever can make the
+         *     first.
+         *
+         *     The admin check sits AFTER `_board_for_edit`, never instead of it -- the
+         *     same shape delete_board uses for its own (looser) creator-or-admin
+         *     narrowing -- so a non-admin's request against a board they cannot even
+         *     edit still gets THAT refusal, on the one permission rule this module has,
+         *     before the admin-only refusal is reached.
+         *
+         *     Un-publishing is admin-only too (§4.3: "(and un-publish)") and
+         *     deliberately does NOT clear `published_by`/`published_at`: they record
+         *     who last made the board public and when, a question that survives the
+         *     board coming back down.
+         */
+        put: operations["publish_board_api_boards__board_id__publish_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/boards/{board_id}/queue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Board Queue
+         * @description The admin approval checklist -- any profile editor (§4.3), not
+         *     admin-only. A thin serialization over `board_queue` (boards/queue.py,
+         *     Task 4), which is where D2's "the profile OWNER's hides, not the
+         *     caller's" decision actually lives -- this route does not re-derive it.
+         */
+        get: operations["get_board_queue_api_boards__board_id__queue_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/calls": {
         parameters: {
             query?: never;
@@ -2571,6 +2706,19 @@ export interface components {
             /** Message */
             message: string;
         };
+        /**
+         * ApproveIn
+         * @description Bulk approve: EITHER an explicit checklist selection OR a score floor,
+         *     never both and never neither -- §4.3's two bulk affordances ("a checklist"
+         *     and "approve everything at or above N") are different requests, not two
+         *     optional filters on the same one.
+         */
+        ApproveIn: {
+            /** Call Ids */
+            call_ids?: number[] | null;
+            /** Min Score */
+            min_score?: number | null;
+        };
         /** AuditIssueOut */
         AuditIssueOut: {
             /** Citekey */
@@ -2608,6 +2756,33 @@ export interface components {
              */
             title: string;
         };
+        /** BoardItemOut */
+        BoardItemOut: {
+            /**
+             * Approved At
+             * Format: date-time
+             */
+            approved_at: string;
+            /** Approved By */
+            approved_by: number;
+            /** Call Id */
+            call_id: number;
+            /** Deadline */
+            deadline: string | null;
+            /** Position */
+            position: number;
+            /** Source Name */
+            source_name: string | null;
+            /** Title */
+            title: string;
+            /** Url */
+            url: string;
+        };
+        /** BoardItemsOut */
+        BoardItemsOut: {
+            /** Items */
+            items: components["schemas"]["BoardItemOut"][];
+        };
         /** BoardOut */
         BoardOut: {
             /** Approved Count */
@@ -2644,13 +2819,23 @@ export interface components {
             published_by: number | null;
             /** Slug */
             slug: string;
-            /** Title */
+            /**
+             * Title
+             * @description The board is publicly visible once published, and the title is the one piece of free text on it, so it should not name anything the profile's owner would not put on a corridor wall.
+             */
             title: string;
             /**
              * Updated At
              * Format: date-time
              */
             updated_at: string;
+        };
+        /** BoardQueueOut */
+        BoardQueueOut: {
+            /** Items */
+            items: components["schemas"]["QueueCallOut"][];
+            /** Waiting Count */
+            waiting_count: number;
         };
         /**
          * BoardSettingsIn
@@ -3903,6 +4088,28 @@ export interface components {
             /** Profiles */
             profiles: components["schemas"]["ProfileListItemOut"][];
         };
+        /** PublishIn */
+        PublishIn: {
+            /** Is Published */
+            is_published: boolean;
+        };
+        /** QueueCallOut */
+        QueueCallOut: {
+            /** Already Approved */
+            already_approved: boolean;
+            /** Call Id */
+            call_id: number;
+            /** Deadline */
+            deadline: string | null;
+            /** Score */
+            score: number;
+            /** Source Name */
+            source_name: string | null;
+            /** Title */
+            title: string;
+            /** Url */
+            url: string;
+        };
         /** QueueCountsOut */
         QueueCountsOut: {
             /** Done */
@@ -3991,6 +4198,11 @@ export interface components {
         RegisterOut: {
             /** Ok */
             ok: boolean;
+        };
+        /** ReorderIn */
+        ReorderIn: {
+            /** Call Ids */
+            call_ids: number[];
         };
         /** RerankOut */
         RerankOut: {
@@ -7792,6 +8004,692 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    get_board_items_api_boards__board_id__items_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                board_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BoardItemsOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    reorder_items_api_boards__board_id__items_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                board_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReorderIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BoardItemsOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    approve_items_api_boards__board_id__items_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                board_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ApproveIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BoardItemsOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    unapprove_item_api_boards__board_id__items__call_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                board_id: number;
+                call_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    publish_board_api_boards__board_id__publish_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                board_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PublishIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BoardOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    get_board_queue_api_boards__board_id__queue_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                board_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BoardQueueOut"];
+                };
             };
             /** @description Bad Request */
             400: {

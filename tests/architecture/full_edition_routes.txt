@@ -24,6 +24,10 @@
 /api/auth/register
 /api/boards
 /api/boards/{board_id}
+/api/boards/{board_id}/items
+/api/boards/{board_id}/items/{call_id}
+/api/boards/{board_id}/publish
+/api/boards/{board_id}/queue
 /api/calls
 /api/calls/decisions/counts
 /api/calls/hidden
