@@ -1,6 +1,6 @@
 # Plan C (corridor boards) — the decisions the spec does not make
 
-**Date:** 2026-09-05 (rev 5) · **Status:** decided with the human; implementation plan not yet written
+**Date:** 2026-09-05 (rev 6) · **Status:** decided with the human; implementation plan not yet written
 **Spec:** [`specs/2026-09-03-call-match-release-1-design.md`](../specs/2026-09-03-call-match-release-1-design.md) §4.3, §6
 
 ## What this document is
@@ -15,8 +15,9 @@ overrides of the spec** (D2 and D7) and **one capability the app does not have y
 four errors they both found; rev 3 added D7 and D8 and recorded three questions that
 turned out to be **already answered by the code** rather than open; rev 4 closed the two
 remaining open questions as D9 and D10, and corrected rev 3's own statement of the
-second one; rev 5 is the outside review of D9 and D10, which found **six** errors in
-rev 4 — including one where rev 4 was wrong in the **opposite** direction from the code.
+second one; revs 5-6 are the outside review of D9 and D10, which found **nine** errors in
+rev 4 — including one where rev 4 was wrong in the **opposite** direction from the code,
+and one where the note printed a command that does not produce the number beside it.
 
 **D10 widens Plan C's footprint beyond boards.** Transferring a profile touches the
 permission model seven other surfaces read from, so Plan C must either carry it as its
@@ -38,8 +39,8 @@ live. The code claims in rev 1 were all checked; the spec it was building on was
 
 ### What rev 4 got wrong — D9 and D10, found by outside review
 
-Three models reviewed rev 4; two returned findings, and they **independently agreed on
-three of these**. Every row was then verified locally against `master` before this edit —
+Three models reviewed rev 4 and all three returned findings; they **independently agreed
+on three of these**. Every row was verified locally against `master` before this edit —
 the models could not run anything, and two of their findings were themselves wrong.
 
 | rev 4 said | measured |
@@ -50,15 +51,28 @@ the models could not run anything, and two of their findings were themselves wro
 | `digest_enabled` is filtered by `digest/send.py:38` | It is filtered at `digest/assemble.py:95`. `send.py:38` filters the **user**, not the subscription. Corroborated by both models. |
 | the old owner's stale `Subscription` row means they "keep getting the digest for a profile they may no longer read" | **Backwards.** `assemble.py:97` already filters the digest through `readable_profile_ids`, and `assemble.py:86-89` says deleting that row is forbidden because it destroys the `digest_enabled` preference. Rev 4 proposed the bug that comment exists to prevent. |
 | D9's three triggers "all read the same two tables" | They do not. Two read `boards`/`board_items`/`calls`; the waiting-count trigger also touches `call_rankings` and `call_decisions`. |
+| `grep -rn "created_by *=" src/grant_lab/web/api/` "returns three hits" | That command returns **5**: ` *=` also matches `created_by ==`. The three-hit count came from a run that filtered `==` out, and rev 4 printed the command without the filter — so anyone re-running it got a different number. The conclusion was right and the evidence was not reproducible. |
+| "Still open" was "scoped *inside* those decisions" and complete | Two of its items were carried over from D7 and D4, and it omitted **every** open item D10 itself raises. Now one list, marked by where each was raised. |
+| "the OWNER never has a row" attributed to `profile_access.py` | The phrase is in the `ProfileViewer` docstring (`db/models/profiles.py:136`). `profile_access.py` states the same fact in different words. Fact right, attribution wrong. |
 
-Two further findings were **new**, not corrections — the stale `profile_viewers` row on
-transfer (now in D10) and the bounce-disabled owner (now in D9).
+Three further findings were **new**, not corrections — the stale `profile_viewers` row on
+transfer (now in D10), the bounce-disabled owner (now in D9), and a defect in the **code**
+rather than the note: `profile_access.py`'s docstring cited `profiles.py:342` for the
+edit rule, which is now a Pydantic form field. Fixed in `c84bb4f5`, which names the
+function so the next move survives. One model found it directly; it was also reached by
+chasing a different finding, from the other end.
 
 **Two findings were refuted by running the check the reviewers could not.** "Other
 user-deletion paths may exist" — a repo-wide grep finds exactly one, `admin_users.py:210`,
 so D10's claim stands. "Some `Profile` creation path may skip the subscription" — both
 insertion paths subscribe the owner; the real, narrower point (no constraint enforces it)
 is now recorded in D10.
+
+**One finding was about the review package, not the note.** Four of D10's citations point
+at files the package did not include (`web/api/calls.py`, `admin_golden_set.py`,
+`workspaces.py`), so no reviewer could check them. They were verified locally instead. The
+lesson is for the next package, not for this document: include the file behind every
+`file.py:NN` the document cites, or expect that citation to come back unchecked.
 
 ## Three questions that were not open — the code already answers them
 
@@ -278,9 +292,13 @@ the same person D2 already keys the queue off: `profiles.created_by`.
 
 **The channel already exists and is already populated for exactly this person.**
 `profiles/create.py:79` inserts `Subscription(user_id=owner_id, profile_id=p.id,
-digest_enabled=True)` inside the same atomic create as the profile row. So
-`subscriptions` is already a per-(user, profile) row for every profile owner, keyed the
-same way the board is. Plan C adds no new addressing table and no new recipient concept.
+digest_enabled=True)` inside the same atomic create as the profile row. Both paths that
+insert a `Profile` do subscribe the owner — see D10's measurement — so `subscriptions`
+is a per-(user, profile) row for every profile owner **today**, keyed the same way the
+board is. Plan C adds no new addressing table and no new recipient concept.
+
+It is a convention, not a constraint (D10 again): nothing enforces it, so if D9's alert
+depends on the row existing, Plan C should assert it rather than trust it.
 
 **Not the board's creator.** Consistent with D2: §4.3 lets any profile editor create a
 board, so `boards.created_by` may be an admin who built it for somebody else. Notifying
@@ -330,7 +348,7 @@ board when the owner leaves.
 **Rev 3 stated the failure mode wrongly, and the schema says so.** Rev 3 said the queue
 "loses its reference". It cannot: `Profile.created_by` is
 `ForeignKey("users.id", ondelete="RESTRICT")` and `nullable=False`
-(`db/models.py:299-301`). Postgres **refuses** to delete a user who owns a profile. And
+(`db/models/profiles.py:96-98`). Postgres **refuses** to delete a user who owns a profile. And
 the only route that deletes a user at all, `admin_release_user`
 (`web/api/admin_users.py:195`), raises 400 unless `u.status == "pending"` — a user who
 has never been approved and therefore cannot have created anything. Leaving is
@@ -354,8 +372,12 @@ precondition of disabling a user. Rev 4 assumed D10 made this moot; it does not,
 the bounce-disabled owner in D9 has not left.
 
 **Measured: nothing in this codebase reassigns ownership today.** `created_by` is
-written at creation and never updated — `grep -rn "created_by *=" src/grant_lab/web/api/`
-returns three hits, none of them a profile and none of them a reassignment: a
+written at creation and never updated. The command is
+`grep -rn "created_by *=" src/grant_lab/web/api/*.py | grep -v "=="`, and **the filter is
+not optional**: the pattern also matches `created_by ==`, so unfiltered it returns **5**,
+two of them the edit gate itself. Rev 4 printed the unfiltered command beside the
+filtered count, so a reader who ran it got a different number than the note claimed.
+Filtered, it returns three hits, none of them a profile and none of them a reassignment: a
 golden-set row's author (`admin_golden_set.py:94`), an `ArtifactVersion` built with the
 literal string `"user"` (`workspaces.py:622`), and a response DTO copying a value it
 just read (`workspaces.py:1337`). Transfer is genuinely new work,
@@ -392,7 +414,8 @@ one legitimately — and if the profile is then transferred **to that person**, 
 `profile_viewers` row survives, because nothing deletes it. D10's premise ("the owner
 never has a row") is now false for that profile, and a *later* transfer away leaves them
 with read access nobody granted deliberately. **Transfer must delete the incoming owner's
-viewer row in the same transaction**, or the invariant `profile_access.py` documents stops
+viewer row in the same transaction**, or the invariant stated in the `ProfileViewer`
+docstring (`db/models/profiles.py:136`, "the OWNER never has a row") stops
 being true.
 
 **Who may transfer.** Owner-or-admin, the rule already at `profiles.py:400`. The admin
@@ -412,7 +435,7 @@ D10 is an owner who can no longer log in.
 - **The new owner may have NO subscription row** — transfer must create one, mirroring
   `profiles/create.py:79`, or D9 notifies nobody. This is the follow-on that actually
   needs a write.
-- **`users.default_profile_id`** (`db/models.py:98`) may still point at the transferred
+- **`users.default_profile_id`** (`db/models/identity.py:87`) may still point at the transferred
   profile for the old owner.
 
 **The invariant is a convention, not a constraint.** Both paths that insert a `Profile`
@@ -429,10 +452,12 @@ nor that the old owner retains read access. If they should, that is an explicit
 
 ## Still open
 
-Rev 3's two open questions are closed above as D9 and D10. What remains is scoped
-*inside* those decisions. **Rev 4 said none of it changes a table; that was wrong**, and
-one item below is a schema decision that must be taken before Plan C's schema task, not
-after it.
+Rev 3's two open questions are closed above as D9 and D10. Rev 4 said what remained was
+"scoped inside those decisions" and that "none of it changes a table". **Both halves were
+wrong**: two items below are carried over from D7 and D4, not from D9 or D10; and one is
+a schema decision that must be taken before Plan C's schema task, not after it.
+
+This is the complete list — every open point in this document, wherever it was raised.
 
 **Must be decided BEFORE the schema task:**
 
@@ -450,6 +475,19 @@ after it.
    over the new capacity.
 5. **D4's boundary** — whether a board whose profile is *already* private may be
    published at all. D4 governs an already-published board only.
+
+**Raised by D10, and omitted from rev 4's list entirely:**
+
+6. **Does the outgoing owner keep read access?** If yes, transfer must write them a
+   `ProfileViewer` row; if no, the UI must warn a non-admin owner before the act. D10
+   settles the mechanism, not the policy.
+7. **`users.default_profile_id`** may still point at the transferred profile for the old
+   owner. Decide whether transfer clears it.
+8. **Who may receive a profile?** D10 says ownership must not move to an inactive user,
+   but does not say whether a `ProfileViewer`, any active user, or only a named colleague
+   is eligible.
+
+Items 6-8 are writes inside the transfer transaction, not new tables.
 
 ## What Plan C must still measure for itself
 
