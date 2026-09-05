@@ -9,12 +9,12 @@ from sqlalchemy.orm import Session
 
 from call_manager.db.models import (
     Call,
+    CallDecision,
     CallRanking,
     DigestRun,
     Profile,
     Subscription,
     User,
-    UserCallDismissal,
 )
 from call_manager.ranking.must_include import (
     normalize_must_terms,
@@ -105,13 +105,22 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
         return None
 
     # 2. Exclusion sets
-    dismissed_ids = set(
-        session.execute(
-            select(UserCallDismissal.call_id).where(UserCallDismissal.user_id == user_id)
+    #
+    # ONE SET PER PROFILE, not one per user: a decision is per profile now, so a
+    # call hidden under P1 must still be able to reach the reader under P2.
+    #
+    # state == 'hidden' ONLY. Excluding every decision would drop SAVED calls out
+    # of the digest -- the one place the user has explicitly said they want the
+    # call. The spec's wording is exact: "a hidden call never appears in a later
+    # digest for that profile."
+    dismissed_ids: dict[int, set[int]] = defaultdict(set)
+    for pid, cid in session.execute(
+        select(CallDecision.profile_id, CallDecision.call_id).where(
+            CallDecision.user_id == user_id,
+            CallDecision.state == "hidden",
         )
-        .scalars()
-        .all()
-    )
+    ).all():
+        dismissed_ids[pid].add(cid)
     # Bound prior_ids to the last 78 weeks (~18 months). This MUST comfortably
     # exceed the longest realistic call deadline: EU portal calls routinely
     # carry 9-12 month deadlines, and a call still inside its deadline window
@@ -158,11 +167,8 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
             .all()
         )
 
-    excluded = dismissed_ids | prior_ids
-    # Materialize the excluded id set once so it isn't re-iterated per profile
-    # query (a Python set re-iterates in arbitrary order for each in_ call).
-    excluded_list = list(excluded)
-    excl_clause = Call.id.notin_(excluded_list) if excluded_list else True
+    # prior_ids is user-wide (a digest is one email); only the hidden half is
+    # per profile, so the union is built inside the loop below.
 
     # 3. For each profile, build candidate entries (pre-dedup)
     # Track: dict[call_id, list[(profile, bucket, ranking_or_none)]]
@@ -171,6 +177,12 @@ def assemble_for_user(session: Session, *, user_id: int, now: datetime) -> Diges
     top_total_by_profile: dict[int, int] = {}
 
     for profile in profiles:
+        # Materialize THIS profile's excluded id set once, so it isn't
+        # re-iterated by each of the three candidate queries below (a Python set
+        # re-iterates in arbitrary order for each in_ call).
+        excluded_list = list(dismissed_ids.get(profile.id, frozenset()) | prior_ids)
+        excl_clause = Call.id.notin_(excluded_list) if excluded_list else True
+
         # Shared normalization (min length) with the ranking path so the SAME
         # terms are considered on both sides (B11 Defect 1).
         must_terms = normalize_must_terms(profile.structured.get("must_include"))

@@ -6,10 +6,12 @@ from sqlalchemy.exc import IntegrityError
 
 from call_manager.db.models import (
     Call,
+    CallDecision,
     DigestRun,
+    Profile,
+    ProfileKind,
     Source,
     User,
-    UserCallDismissal,
 )
 
 
@@ -30,24 +32,49 @@ def _user_and_call(s, email="u@umu.se"):
     return u.id, c.id
 
 
-def test_dismissal_create_and_pk(pg_session_factory):
-    with pg_session_factory() as s:
-        uid, cid = _user_and_call(s)
-        s.add(UserCallDismissal(user_id=uid, call_id=cid))
-        s.commit()
-    with pg_session_factory() as s:
-        d = s.execute(select(UserCallDismissal)).scalar_one()
-    assert d.user_id == uid and d.call_id == cid
-    assert d.dismissed_at is not None
+def _profile(s, uid, name="P"):
+    p = Profile(
+        name=name,
+        kind=ProfileKind.ORGANIZATIONAL_UNIT,
+        description="d",
+        structured={},
+        created_by=uid,
+    )
+    s.add(p)
+    s.flush()
+    return p.id
 
 
-def test_dismissal_pk_prevents_duplicate(pg_session_factory):
+# The ORM half of the decision contract. The migration test pins the DDL; this
+# pins that the MAPPED class carries the same key, which is what application
+# code actually writes through.
+def test_decision_create_and_defaults(pg_session_factory):
     with pg_session_factory() as s:
         uid, cid = _user_and_call(s)
-        s.add(UserCallDismissal(user_id=uid, call_id=cid))
+        pid = _profile(s, uid)
+        s.add(CallDecision(user_id=uid, profile_id=pid, call_id=cid, state="hidden"))
         s.commit()
+    with pg_session_factory() as s:
+        d = s.execute(select(CallDecision)).scalar_one()
+    assert (d.user_id, d.profile_id, d.call_id) == (uid, pid, cid)
+    assert d.state == "hidden"
+    assert d.decided_at is not None
+    assert d.note is None and d.decided_by is None
+
+
+def test_decision_unique_key_includes_the_profile(pg_session_factory):
+    """(user, profile, call) is unique - but the SAME call on a DIFFERENT profile
+    is a different decision. A (user, call) key would reject the second insert."""
+    with pg_session_factory() as s:
+        uid, cid = _user_and_call(s)
+        p1 = _profile(s, uid, "P1")
+        p2 = _profile(s, uid, "P2")
+        s.add(CallDecision(user_id=uid, profile_id=p1, call_id=cid, state="hidden"))
+        s.add(CallDecision(user_id=uid, profile_id=p2, call_id=cid, state="saved"))
+        s.commit()
+        assert len(s.execute(select(CallDecision)).scalars().all()) == 2
     with pg_session_factory() as s, pytest.raises(IntegrityError):
-        s.add(UserCallDismissal(user_id=uid, call_id=cid))
+        s.add(CallDecision(user_id=uid, profile_id=p1, call_id=cid, state="saved"))
         s.commit()
 
 

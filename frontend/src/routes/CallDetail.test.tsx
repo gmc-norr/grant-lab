@@ -1,6 +1,6 @@
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 
@@ -147,7 +147,7 @@ it("Hide posts after confirm and shows undo affordance", async () => {
   fireEvent.click(await screen.findByRole("button", { name: /hide this call/i }));
   fireEvent.click(screen.getByRole("button", { name: /yes, hide it/i }));
   await waitFor(() => expect(post).toHaveBeenCalledWith("/api/calls/{call_id}/hide", {
-    params: { path: { call_id: 5 } },
+    params: { path: { call_id: 5 }, query: { profile_id: 7 } },
   }));
   // After hide: undo + back-to-calls buttons appear; no auto-navigate.
   expect(await screen.findByRole("button", { name: /undo/i })).toBeInTheDocument();
@@ -166,10 +166,36 @@ it("Undo calls DELETE unhide and reverts to hide button", async () => {
   const undoBtn = await screen.findByRole("button", { name: /undo/i });
   fireEvent.click(undoBtn);
   await waitFor(() => expect(del).toHaveBeenCalledWith("/api/calls/{call_id}/hide", {
-    params: { path: { call_id: 5 } },
+    params: { path: { call_id: 5 }, query: { profile_id: 7 } },
   }));
   // After undo: back to initial hide button.
   expect(await screen.findByRole("button", { name: /hide this call/i })).toBeInTheDocument();
+});
+
+// -------------------------------------------------------------------------
+// Gate 14 (D3) - a decision belongs to a profile. `call_decisions.profile_id`
+// is NOT NULL, so with no ?profile= in scope there is nowhere to record a hide:
+// the control is DISABLED and no POST is made. The full edition's no-profile
+// archive losing the ability to hide is one of the two behaviours this task
+// deliberately changes.
+// -------------------------------------------------------------------------
+it("with no ?profile= the hide button is disabled, hints why, and posts nothing", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: RANKED, error: undefined } as never);
+  const post = vi
+    .spyOn(clientMod.api, "POST")
+    .mockResolvedValue({ data: { hidden: true }, error: undefined } as never);
+  renderDetail("/calls/5");
+  await screen.findByRole("heading", { name: "Genomics Grant" });
+  const btn = screen.getByRole("button", { name: /hide this call/i });
+  expect(btn).toBeDisabled();
+  expect(screen.getByText("Pick a profile to hide calls.")).toBeInTheDocument();
+  fireEvent.click(btn);
+  // TanStack defers mutate() to a microtask, so a synchronous
+  // not.toHaveBeenCalled() would pass even on a page that DID fire the request.
+  // Flush the queue first, then assert.
+  await act(async () => { await Promise.resolve(); });
+  expect(post).not.toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: /yes, hide it/i })).not.toBeInTheDocument();
 });
 
 it("renders deadline_local_date instead of slicing the UTC string", async () => {

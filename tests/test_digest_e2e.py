@@ -6,6 +6,7 @@ from sqlalchemy import select
 
 from call_manager.db.models import (
     Call,
+    CallDecision,
     CallRanking,
     DigestRun,
     Profile,
@@ -13,7 +14,6 @@ from call_manager.db.models import (
     Source,
     Subscription,
     User,
-    UserCallDismissal,
 )
 from call_manager.digest.send import run_digest
 from call_manager.email.client import SendResult
@@ -121,8 +121,9 @@ def test_e2e_two_users_one_dismissed_one_must_include(pg_session_factory, now):
                 ranked_at=now,
             )
         )
-        # Bob dismisses c2
-        s.add(UserCallDismissal(user_id=ub.id, call_id=c2.id))
+        # Bob hides c2 ON P2 - the profile it is ranked for. A decision is per
+        # profile now, so hiding it anywhere else would not suppress it here.
+        s.add(CallDecision(user_id=ub.id, profile_id=p2.id, call_id=c2.id, state="hidden"))
         s.commit()
         ua_id = ua.id
         c1_id = c1.id

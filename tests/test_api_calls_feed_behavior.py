@@ -21,12 +21,12 @@ from sqlalchemy import select
 
 from call_manager.db.models import (
     Call,
+    CallDecision,
     CallRanking,
     Profile,
     ProfileKind,
     Source,
     User,
-    UserCallDismissal,
 )
 from call_manager.main import create_app
 
@@ -832,9 +832,13 @@ def test_search_narrows_summary_badges(monkeypatch, pg_url, pg_session_factory):
 
 
 def test_dismissed_calls_omitted(monkeypatch, pg_url, pg_session_factory):
-    """A call the user hid (POST /api/calls/{id}/hide → UserCallDismissal) is
+    """A call the user hid (POST /api/calls/{id}/hide → CallDecision 'hidden') is
     omitted from that user's /api/calls feed. The hide POST itself
-    (idempotency/404/auth) stays covered in test_api_calls_hide.py."""
+    (idempotency/404/auth) stays covered in test_api_calls_hide.py.
+
+    Hidden ON a profile and read back WITHOUT one: this is the full edition's
+    unranked archive, whose rule is "hidden on ANY profile" - today's global
+    behaviour, verbatim."""
     app = _app(monkeypatch, pg_url)
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
@@ -856,23 +860,21 @@ def test_dismissed_calls_omitted(monkeypatch, pg_url, pg_session_factory):
         s.flush()
         hidden_id = hidden.id
         s.commit()
-    c, uid, _ = _login(app, pg_session_factory)
+    c, uid, pid = _login(app, pg_session_factory, profile=True)
     with c:
-        c.post(f"/api/calls/{hidden_id}/hide")
+        c.post(f"/api/calls/{hidden_id}/hide", params={"profile_id": pid})
         body = c.get("/api/calls").json()
     titles = _titles(body)
     assert "VisibleCall" in titles
     assert "HiddenCall" not in titles
-    # The dismissal row was actually written for this user.
+    # The decision row was actually written for this user, on that profile.
     with pg_session_factory() as s:
-        assert (
-            s.execute(
-                select(UserCallDismissal).where(
-                    UserCallDismissal.user_id == uid, UserCallDismissal.call_id == hidden_id
-                )
-            ).scalar_one_or_none()
-            is not None
-        )
+        row = s.execute(
+            select(CallDecision).where(
+                CallDecision.user_id == uid, CallDecision.call_id == hidden_id
+            )
+        ).scalar_one()
+    assert (row.profile_id, row.state) == (pid, "hidden")
 
 
 # --- score floor (min_score) ------------------------------------------------

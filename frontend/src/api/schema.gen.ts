@@ -530,7 +530,19 @@ export interface paths {
         };
         /**
          * List Hidden Calls
-         * @description Return the calls the current user has hidden, ordered newest-dismissed first.
+         * @description The calls the current user has hidden ON ONE PROFILE, newest-hidden first.
+         *
+         *     `profile_id` is REQUIRED (422 without it — D9). A decision belongs to a
+         *     profile, so there is no honest cross-profile answer here; the alternative
+         *     ("no profile = any profile, DISTINCT by call") costs a dedup subquery for a
+         *     surface neither edition calls, and it is the one shape that WIDENS rather
+         *     than narrows. No dedup, no union: one profile, one row per call under the
+         *     unique key.
+         *
+         *     NO readability check on the given profile_id, same reasoning as
+         *     `unhide_call` above: every row is already scoped to `user.id`, so there is
+         *     nothing to leak; adding one would only stop a user from seeing (and then
+         *     un-hiding) their own rows after a profile was deactivated or un-shared.
          */
         get: operations["list_hidden_calls_api_calls_hidden_get"];
         put?: never;
@@ -567,12 +579,36 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Hide Call */
+        /**
+         * Hide Call
+         * @description Hide one call FOR ONE PROFILE.
+         *
+         *     `profile_id` is REQUIRED (422 without it). A decision row cannot exist
+         *     without a profile, so there is no honest global hide left to offer — the
+         *     full edition's unranked archive can no longer hide, and that is one of the
+         *     two behaviours this task deliberately changes (D3).
+         */
         post: operations["hide_call_api_calls__call_id__hide_post"];
         /**
          * Unhide Call
-         * @description Remove a dismissal so the call reappears in the feed. Idempotent — 200
-         *     even when the call was not hidden (no dismissal row to delete).
+         * @description Un-hide one call FOR ONE PROFILE so it reappears in that profile's feed.
+         *
+         *     Scoped by user, by profile AND by state. `CallDecision.user_id == user.id`
+         *     is this endpoint's ONLY authorization control — the unique key is
+         *     (user_id, profile_id, call_id), so a colleague can hold their own hidden row
+         *     on the very same call and profile, and dropping that clause would delete it.
+         *     Deleting on (user_id, call_id) would reach across every other profile, and
+         *     deleting without the state filter would throw away a SAVED decision on this
+         *     profile — neither is an un-hide.
+         *
+         *     `profile_id` is REQUIRED (422 without it, same as hide) but, unlike hide, is
+         *     NOT run through `_readable_active_profile_or_404`. Every row this delete can
+         *     touch is already scoped to `user_id == user.id`, so there is nothing left to
+         *     leak by skipping the check — and skipping it is load-bearing: deactivate the
+         *     profile, or have its sharing revoked, and the call the user hid on it must
+         *     still be un-hideable, not stranded behind a 404 forever.
+         *
+         *     Idempotent: 200 even when there was no hidden row to delete.
          */
         delete: operations["unhide_call_api_calls__call_id__hide_delete"];
         options?: never;
@@ -6904,6 +6940,7 @@ export interface operations {
                 show_closed?: boolean;
                 q?: string | null;
                 min_score?: number | null;
+                view?: "archive" | "inbox" | "saved" | "hidden";
             };
             header?: never;
             path?: never;
@@ -7014,7 +7051,9 @@ export interface operations {
     };
     list_hidden_calls_api_calls_hidden_get: {
         parameters: {
-            query?: never;
+            query: {
+                profile_id: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -7238,7 +7277,9 @@ export interface operations {
     };
     hide_call_api_calls__call_id__hide_post: {
         parameters: {
-            query?: never;
+            query: {
+                profile_id: number;
+            };
             header?: never;
             path: {
                 call_id: number;
@@ -7350,7 +7391,9 @@ export interface operations {
     };
     unhide_call_api_calls__call_id__hide_delete: {
         parameters: {
-            query?: never;
+            query: {
+                profile_id: number;
+            };
             header?: never;
             path: {
                 call_id: number;

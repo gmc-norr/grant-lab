@@ -50,7 +50,7 @@ def _run_round_trip(engine, alembic_cfg):
         conn.execute(text("DELETE FROM ranking_jobs"))
         conn.execute(text("DELETE FROM call_rankings"))
         conn.execute(text("DELETE FROM digest_runs"))
-        conn.execute(text("DELETE FROM user_call_dismissals"))
+        conn.execute(text("DELETE FROM call_decisions"))
         conn.execute(text("DELETE FROM subscriptions"))
         conn.execute(text("DELETE FROM profiles"))
         conn.execute(text("DELETE FROM users"))

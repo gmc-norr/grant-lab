@@ -5,18 +5,18 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import joinedload
 
 from call_manager.auth.dependencies import get_current_user
 from call_manager.db.models import (
     Call,
+    CallDecision,
     CallRanking,
     CallRankingCriterion,
     Profile,
     User,
-    UserCallDismissal,
 )
 from call_manager.web.call_detail_view import _criterion_detail, _parse_optional_profile_id
 from call_manager.web.dashboard import build_dashboard_view, resolve_profile_selection
@@ -179,21 +179,64 @@ class HiddenListOut(BaseModel):
     items: list[HiddenCallOut]
 
 
+def _readable_active_profile_or_404(session, user: User, profile_id: int) -> None:
+    """A decision needs a real, live, READABLE profile to attach to.
+
+    `call_decisions.profile_id` is NOT NULL and FKs to `profiles`, so this is not
+    defence in depth — it is the difference between a 404 and an IntegrityError.
+
+    404 (not 403) for an unreadable id, matching `can_read_profile`'s contract:
+    a profile the caller may not read must not be distinguishable from one that
+    does not exist, or `?profile_id=N` becomes an existence oracle for every id
+    a user can type.
+
+    Deliberately NOT called by `unhide_call` or `list_hidden_calls` — see their
+    docstrings; validating there would strand a user's own rows behind a 404.
+    """
+    live = session.scalar(
+        select(Profile.id).where(Profile.id == profile_id, Profile.is_active.is_(True))
+    )
+    if live is None or not can_read_profile(session, user, profile_id):
+        raise HTTPException(status_code=404, detail="profile not found")
+
+
 @router.post("/calls/{call_id}/hide", response_model=CallHideOut)
 def hide_call(
     request: Request,
     call_id: int,
+    profile_id: int = Query(...),
     user: User = Depends(get_current_user),  # noqa: B008
 ):
+    """Hide one call FOR ONE PROFILE.
+
+    `profile_id` is REQUIRED (422 without it). A decision row cannot exist
+    without a profile, so there is no honest global hide left to offer — the
+    full edition's unranked archive can no longer hide, and that is one of the
+    two behaviours this task deliberately changes (D3).
+    """
     sf = request.app.state.session_factory
     with sf() as session:
         if session.get(Call, call_id) is None:
             raise HTTPException(status_code=404, detail="call not found")
-        # ON CONFLICT DO NOTHING — idempotent if the user hides twice.
+        _readable_active_profile_or_404(session, user, profile_id)
+        # DO UPDATE, not DO NOTHING. The row now carries a STATE: hiding a call
+        # the user had saved must flip it, and DO NOTHING would silently leave
+        # it saved while returning 200. All THREE columns move — `decided_at`
+        # because this IS a new decision and the Saved/Hidden lists order by it
+        # (D12), `decided_by` because it records who pressed the key.
         session.execute(
-            pg_insert(UserCallDismissal)
-            .values(user_id=user.id, call_id=call_id)
-            .on_conflict_do_nothing(index_elements=["user_id", "call_id"])
+            pg_insert(CallDecision)
+            .values(
+                user_id=user.id,
+                profile_id=profile_id,
+                call_id=call_id,
+                state="hidden",
+                decided_by=user.id,
+            )
+            .on_conflict_do_update(
+                index_elements=["user_id", "profile_id", "call_id"],
+                set_={"state": "hidden", "decided_at": func.now(), "decided_by": user.id},
+            )
         )
         session.commit()
     return CallHideOut(hidden=True)
@@ -203,18 +246,38 @@ def hide_call(
 def unhide_call(
     request: Request,
     call_id: int,
+    profile_id: int = Query(...),
     user: User = Depends(get_current_user),  # noqa: B008
 ):
-    """Remove a dismissal so the call reappears in the feed. Idempotent — 200
-    even when the call was not hidden (no dismissal row to delete)."""
+    """Un-hide one call FOR ONE PROFILE so it reappears in that profile's feed.
+
+    Scoped by user, by profile AND by state. `CallDecision.user_id == user.id`
+    is this endpoint's ONLY authorization control — the unique key is
+    (user_id, profile_id, call_id), so a colleague can hold their own hidden row
+    on the very same call and profile, and dropping that clause would delete it.
+    Deleting on (user_id, call_id) would reach across every other profile, and
+    deleting without the state filter would throw away a SAVED decision on this
+    profile — neither is an un-hide.
+
+    `profile_id` is REQUIRED (422 without it, same as hide) but, unlike hide, is
+    NOT run through `_readable_active_profile_or_404`. Every row this delete can
+    touch is already scoped to `user_id == user.id`, so there is nothing left to
+    leak by skipping the check — and skipping it is load-bearing: deactivate the
+    profile, or have its sharing revoked, and the call the user hid on it must
+    still be un-hideable, not stranded behind a 404 forever.
+
+    Idempotent: 200 even when there was no hidden row to delete.
+    """
     sf = request.app.state.session_factory
     with sf() as session:
         if session.get(Call, call_id) is None:
             raise HTTPException(status_code=404, detail="call not found")
         session.execute(
-            delete(UserCallDismissal).where(
-                UserCallDismissal.user_id == user.id,
-                UserCallDismissal.call_id == call_id,
+            delete(CallDecision).where(
+                CallDecision.user_id == user.id,
+                CallDecision.profile_id == profile_id,
+                CallDecision.call_id == call_id,
+                CallDecision.state == "hidden",
             )
         )
         session.commit()
@@ -224,20 +287,36 @@ def unhide_call(
 @router.get("/calls/hidden", response_model=HiddenListOut)
 def list_hidden_calls(
     request: Request,
+    profile_id: int = Query(...),
     user: User = Depends(get_current_user),  # noqa: B008
 ):
-    """Return the calls the current user has hidden, ordered newest-dismissed first."""
+    """The calls the current user has hidden ON ONE PROFILE, newest-hidden first.
+
+    `profile_id` is REQUIRED (422 without it — D9). A decision belongs to a
+    profile, so there is no honest cross-profile answer here; the alternative
+    ("no profile = any profile, DISTINCT by call") costs a dedup subquery for a
+    surface neither edition calls, and it is the one shape that WIDENS rather
+    than narrows. No dedup, no union: one profile, one row per call under the
+    unique key.
+
+    NO readability check on the given profile_id, same reasoning as
+    `unhide_call` above: every row is already scoped to `user.id`, so there is
+    nothing to leak; adding one would only stop a user from seeing (and then
+    un-hiding) their own rows after a profile was deactivated or un-shared.
+    """
     sf = request.app.state.session_factory
     with sf() as session:
         rows = session.execute(
-            select(Call, UserCallDismissal.dismissed_at)
+            select(Call, CallDecision.decided_at)
             .join(
-                UserCallDismissal,
-                (UserCallDismissal.call_id == Call.id)
-                & (UserCallDismissal.user_id == user.id),
+                CallDecision,
+                (CallDecision.call_id == Call.id)
+                & (CallDecision.user_id == user.id)
+                & (CallDecision.profile_id == profile_id)
+                & (CallDecision.state == "hidden"),
             )
             .options(joinedload(Call.source))
-            .order_by(UserCallDismissal.dismissed_at.desc())
+            .order_by(CallDecision.decided_at.desc(), Call.id.desc())
         ).all()
         items = [
             HiddenCallOut(
@@ -247,7 +326,7 @@ def list_hidden_calls(
                 deadline_local_date=deadline_local_date(call.deadline),
                 source_name=(call.source.name if call.source else None),
             )
-            for call, _dismissed_at in rows
+            for call, _decided_at in rows
         ]
     return HiddenListOut(items=items)
 
@@ -406,6 +485,13 @@ def get_calls(
     show_closed: bool = Query(default=False),
     q: str | None = Query(default=None, max_length=200),
     min_score: int | None = Query(default=None, ge=0, le=100),
+    # The four triage views over ONE query. `archive` is the default, so an
+    # omitted parameter is byte-for-byte today's behaviour and the full edition
+    # (which sends no `view`) cannot notice this exists. The Literal is written
+    # out INLINE rather than reusing dashboard.View: ruff B008 exempts a
+    # `Query()` default under an inline Literal but flags it under a
+    # module-level alias — the same reason `sort` above duplicates its own.
+    view: Literal["archive", "inbox", "saved", "hidden"] = Query(default="archive"),
     user: User = Depends(get_current_user),  # noqa: B008
 ):
     sf = request.app.state.session_factory
@@ -425,6 +511,7 @@ def get_calls(
             show_closed=show_closed,
             q=q,
             min_score=min_score,
+            view=view,
         )
         items = [
             CallOut(

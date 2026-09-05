@@ -16,7 +16,9 @@ export function CallDetail() {
   const hide = useHideCall();
   const unhide = useUnhideCall();
   const [confirmHide, setConfirmHide] = useState(false);
-  const [hiddenId, setHiddenId] = useState<number | null>(null);
+  // Remember the profile the hide was made ON, so Undo deletes the same row
+  // even if the URL changes underneath us.
+  const [hidden, setHidden] = useState<{ id: number; profileId: number } | null>(null);
   const { data, isLoading, isError, error } = useCallDetail(callId, profile);
 
   if (isLoading) return <Text p="md">Loading…</Text>;
@@ -34,11 +36,11 @@ export function CallDetail() {
       <CallDetailBody {...data} />
 
       <Group component="section" aria-label="Hide this call" align="center" gap="sm">
-        {hiddenId !== null ? (
+        {hidden !== null ? (
           <>
             <Text span c="dimmed">Call hidden.</Text>
             <Button variant="subtle" size="xs" disabled={unhide.isPending}
-                    onClick={async () => { await unhide.mutateAsync(hiddenId); setHiddenId(null); }}>
+                    onClick={async () => { await unhide.mutateAsync(hidden); setHidden(null); }}>
               Undo
             </Button>
             <Button variant="subtle" size="xs" onClick={() => navigate("/")}>
@@ -48,8 +50,13 @@ export function CallDetail() {
         ) : confirmHide ? (
           <>
             <Text span c="dimmed">Hide this call from your feed?</Text>
-            <Button variant="default" size="xs" disabled={hide.isPending}
-                    onClick={async () => { await hide.mutateAsync(call.id); setConfirmHide(false); setHiddenId(call.id); }}>
+            <Button variant="default" size="xs" disabled={hide.isPending || profile === null}
+                    onClick={async () => {
+                      if (profile === null) return;
+                      await hide.mutateAsync({ id: call.id, profileId: profile });
+                      setConfirmHide(false);
+                      setHidden({ id: call.id, profileId: profile });
+                    }}>
               Yes, hide it
             </Button>
             <Button variant="subtle" size="xs" onClick={() => setConfirmHide(false)}>
@@ -58,10 +65,19 @@ export function CallDetail() {
           </>
         ) : (
           <>
-            <Button variant="default" size="xs" onClick={() => setConfirmHide(true)}>
+            {/* A decision belongs to a profile: call_decisions.profile_id is NOT
+                NULL, so with no ?profile= in scope there is nowhere to record the
+                hide. The button is disabled rather than firing a 422 the user
+                cannot act on. */}
+            <Button variant="default" size="xs" disabled={profile === null}
+                    onClick={() => setConfirmHide(true)}>
               Hide this call
             </Button>
-            <Text c="dimmed" fz="0.8rem">Removes it from your feed. Other users are unaffected.</Text>
+            <Text c="dimmed" fz="0.8rem">
+              {profile === null
+                ? "Pick a profile to hide calls."
+                : "Removes it from this profile's feed. Other users are unaffected."}
+            </Text>
           </>
         )}
       </Group>
