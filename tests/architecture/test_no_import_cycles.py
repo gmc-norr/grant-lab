@@ -51,23 +51,65 @@ def _module_name(path: Path, root: Path) -> str:
     return ".".join(parts)
 
 
-def _top_level_imports(body: list[ast.stmt]):
-    """Names imported when the module body EXECUTES."""
+def _package_of(module: str, is_package: bool) -> str:
+    """The package a relative import inside `module` resolves against.
+
+    A package (`a/b/__init__.py`) resolves `.` against ITSELF; a plain module
+    (`a/b/c.py`) resolves it against its parent. Same rule as
+    `importlib._bootstrap._resolve_name`.
+    """
+    return module if is_package else module.rpartition(".")[0]
+
+
+def _resolve_relative(module: str | None, level: int, package: str) -> str | None:
+    """`from ..x import y` inside `package` -> the absolute module name.
+
+    Returns None when the import climbs above the root, which cannot be part of
+    a cycle inside this tree.
+    """
+    bits = package.rsplit(".", level - 1)
+    if len(bits) < level:
+        return None
+    base = bits[0]
+    if not base:
+        return None
+    return f"{base}.{module}" if module else base
+
+
+def _top_level_imports(body: list[ast.stmt], package: str):
+    """Names imported when the module body EXECUTES.
+
+    RELATIVE IMPORTS COUNT. They were skipped (`st.level == 0`) until the
+    2026-09-05 outside review demonstrated the hole: the same two-module cycle
+    written with `from .second import x` instead of the absolute spelling failed
+    at runtime with a partially-initialized-module ImportError and this scanner
+    reported `cycles=[]`. Four relative imports exist in
+    `proposal_assist/collab/`, so the blind spot covered real code.
+    """
     for st in body:
         if isinstance(st, ast.Import):
             for alias in st.names:
                 yield alias.name
-        elif isinstance(st, ast.ImportFrom) and st.module and st.level == 0:
-            yield st.module
+        elif isinstance(st, ast.ImportFrom):
+            if st.level == 0:
+                if not st.module:
+                    continue
+                target = st.module
+            else:
+                resolved = _resolve_relative(st.module, st.level, package)
+                if resolved is None:
+                    continue
+                target = resolved
+            yield target
             for alias in st.names:
-                yield f"{st.module}.{alias.name}"
+                yield f"{target}.{alias.name}"
         elif isinstance(st, ast.If):
             if "TYPE_CHECKING" in ast.unparse(st.test):
                 continue  # never executed at runtime
-            yield from _top_level_imports(st.body)
-            yield from _top_level_imports(st.orelse)
+            yield from _top_level_imports(st.body, package)
+            yield from _top_level_imports(st.orelse, package)
         elif isinstance(st, ast.Try):
-            yield from _top_level_imports(st.body)
+            yield from _top_level_imports(st.body, package)
 
 
 def _cycles(root: Path = SRC) -> list[list[str]]:
@@ -79,7 +121,8 @@ def _cycles(root: Path = SRC) -> list[list[str]]:
 
     for f in files:
         me = _module_name(f, root)
-        for target in _top_level_imports(ast.parse(f.read_text()).body):
+        package = _package_of(me, f.name == "__init__.py")
+        for target in _top_level_imports(ast.parse(f.read_text()).body, package):
             if not target.startswith(root.name):
                 continue
             # `from pkg.mod import thing` — walk up to the deepest real module
@@ -168,3 +211,78 @@ def test_the_analysis_actually_saw_the_codebase():
     """A cycle check over zero files passes vacuously. Pin that it read the tree."""
     files = list(SRC.rglob("*.py"))
     assert len(files) > 200, f"only {len(files)} modules scanned — is SRC wrong? {SRC}"
+
+
+# ---------------------------------------------------------------------------
+# The gate on the gate.
+#
+# `_top_level_imports` skipped every relative import until the 2026-09-05
+# outside review built the same cycle twice — once absolute, once relative —
+# and showed the scanner reporting the first and missing the second while BOTH
+# failed at runtime. These cases pin the fix, and the runtime control is what
+# makes them evidence rather than a restatement of the implementation.
+# ---------------------------------------------------------------------------
+
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+import textwrap  # noqa: E402
+
+import pytest  # noqa: E402
+
+
+def _write_cycle(root: Path, *, relative: bool) -> None:
+    root.mkdir(parents=True)
+    (root / "__init__.py").write_text("")
+    second = ".second" if relative else "cycleprobe.second"
+    first = ".first" if relative else "cycleprobe.first"
+    (root / "first.py").write_text(f"from {second} import B\n\nA = 1\n")
+    (root / "second.py").write_text(f"from {first} import A\n\nB = 2\n")
+
+
+@pytest.mark.parametrize("relative", [False, True], ids=["absolute", "relative"])
+def test_the_scanner_finds_a_two_module_cycle_in_either_spelling(tmp_path, relative):
+    """Both spellings are the SAME cycle. The relative one was invisible.
+
+    What trivially passes this: a scanner that reports a cycle for the absolute
+    case only — which is exactly what shipped, and why the `relative` id is the
+    one that matters here.
+    """
+    root = tmp_path / "cycleprobe"
+    _write_cycle(root, relative=relative)
+    found = _cycles(root)
+    assert [sorted(c) for c in found] == [["cycleprobe.first", "cycleprobe.second"]], (
+        f"relative={relative}: scanner reported {found}"
+    )
+
+
+@pytest.mark.parametrize("relative", [False, True], ids=["absolute", "relative"])
+def test_both_spellings_really_do_fail_at_runtime(tmp_path, relative):
+    """The control. Without it the case above only proves the scanner agrees
+    with itself; this proves the thing it is scanning for is a real ImportError."""
+    root = tmp_path / "cycleprobe"
+    _write_cycle(root, relative=relative)
+    proc = subprocess.run(
+        [sys.executable, "-c", "import cycleprobe.first"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode != 0, f"relative={relative}: expected an ImportError, got exit 0"
+    assert "partially initialized module" in proc.stderr, proc.stderr[-500:]
+
+
+def test_a_relative_import_that_climbs_above_the_root_is_ignored_not_crashed(tmp_path):
+    """`from ... import x` at depth 1 escapes the tree. It cannot be part of a
+    cycle inside it, and it must not raise while building the graph."""
+    root = tmp_path / "cycleprobe"
+    root.mkdir(parents=True)
+    (root / "__init__.py").write_text("")
+    (root / "lonely.py").write_text(
+        textwrap.dedent("""
+            from ... import something
+
+            X = 1
+        """)
+    )
+    assert _cycles(root) == []

@@ -28,8 +28,10 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parents[2]
@@ -37,19 +39,46 @@ CI = REPO / ".github" / "workflows" / "ci.yml"
 SPEC = REPO / "frontend" / "e2e" / "match.spec.ts"
 
 
+def _enforces(node: dict) -> bool:
+    """Whether a job or step both RUNS unconditionally and BLOCKS on failure.
+
+    A GitHub `if:` is an expression, and proving one is truthy is not something
+    this file can do. So any `if:` at all disqualifies a node from carrying a
+    gate — conservative, and the trace-upload step's legitimate `if: failure()`
+    shows why the rule cannot simply be "no conditions anywhere in the file":
+    it is scoped to the nodes whose commands we depend on.
+
+    `continue-on-error` disqualifies unless it is literally false. A truthy
+    string like "true" must not slip through a bare truthiness test.
+    """
+    if "if" in node:
+        return False
+    return not ("continue-on-error" in node and node["continue-on-error"] is not False)
+
+
 def _run_lines() -> list[str]:
-    """Every non-comment line of every step's `run:` body, across every job.
+    """Every non-comment line of every ENFORCING step's `run:` body.
 
     Parsing rather than grepping is the whole point. `yaml.safe_load` drops
     YAML-level comments outright, so a commented-out step simply is not here; and
     stripping `#` lines inside a `run: |` block removes the other hiding place.
+
+    THE THIRD HOLE, found by an outside review on 2026-09-05: parsing closed the
+    comment loophole but still read command TEXT, so `if: false` on the match-e2e
+    job, `if: false` on its smoke step, and `continue-on-error: true` on the job
+    each passed every check in this file. Measured — twelve checks, zero
+    rejections, against a removed-command control that was correctly rejected.
+    Filtering HERE rather than adding parallel assertions means every existing
+    check inherits the fix: a command that cannot fail the build is not present.
     """
     workflow = yaml.safe_load(CI.read_text())
     out: list[str] = []
     for job in workflow["jobs"].values():
+        if not _enforces(job):
+            continue
         for step in job.get("steps", []):
             body = step.get("run")
-            if not body:
+            if not body or not _enforces(step):
                 continue
             for line in str(body).splitlines():
                 stripped = line.strip()
@@ -373,3 +402,72 @@ def test_the_await_scan_does_not_demand_await_of_a_synchronous_matcher():
     assert unawaited_async_matchers("expect.poll(() => n).toBe(1);") == [
         "line 1: expect.poll(…).toBe"
     ]
+
+
+# ---------------------------------------------------------------------------
+# The third hole's controls.
+#
+# Every check above reads command text. Until 2026-09-05 that text stayed
+# readable when the job or step carrying it could not fail the build, and an
+# outside review measured the result: `if: false` on the match-e2e job, `if:
+# false` on its smoke step, and `continue-on-error: true` on the job each passed
+# all twelve checks, while a removed COMMAND was correctly rejected.
+#
+# These run the real workflow through the real parser with one field added.
+# ---------------------------------------------------------------------------
+
+_SMOKE = "pnpm run e2e:match"
+
+
+def _workflow_with(mutation: str | None) -> dict:
+    """The real ci.yml, optionally with one enforcement field flipped."""
+    workflow = yaml.safe_load(CI.read_text())
+    job_name, job, step = None, None, None
+    for name, candidate in workflow["jobs"].items():
+        for candidate_step in candidate.get("steps", []):
+            if candidate_step.get("run") and _SMOKE in str(candidate_step["run"]):
+                job_name, job, step = name, candidate, candidate_step
+    assert step is not None, f"no step runs {_SMOKE!r} — this harness is testing nothing"
+    assert job_name == "match-e2e", job_name
+    if mutation == "disabled-job":
+        job["if"] = False
+    elif mutation == "disabled-step":
+        step["if"] = False
+    elif mutation == "nonblocking-job":
+        job["continue-on-error"] = True
+    elif mutation == "nonblocking-step":
+        step["continue-on-error"] = True
+    elif mutation == "remove-command":
+        step["run"] = "echo nothing"
+    return workflow
+
+
+def _run_lines_for(tmp_path, monkeypatch, mutation: str | None) -> list[str]:
+    path = tmp_path / "ci.yml"
+    path.write_text(yaml.safe_dump(_workflow_with(mutation)))
+    monkeypatch.setattr(sys.modules[__name__], "CI", path)
+    return _run_lines()
+
+
+def test_the_mutation_harness_preserves_the_command_when_it_changes_nothing(
+    tmp_path, monkeypatch
+):
+    """The positive control. Without it, a harness that mangled the YAML would
+    make every rejection below pass for the wrong reason."""
+    assert any(_SMOKE in line for line in _run_lines_for(tmp_path, monkeypatch, None))
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["remove-command", "disabled-job", "disabled-step", "nonblocking-job", "nonblocking-step"],
+)
+def test_a_smoke_test_that_cannot_fail_the_build_does_not_count_as_wired(
+    tmp_path, monkeypatch, mutation
+):
+    """`remove-command` was already rejected before the fix; the other four were
+    not. All five must be now — a gate that cannot fail the build is not a gate.
+    """
+    lines = _run_lines_for(tmp_path, monkeypatch, mutation)
+    assert not any(_SMOKE in line for line in lines), (
+        f"{mutation}: the workflow still counts as running {_SMOKE!r}"
+    )
