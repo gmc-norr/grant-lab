@@ -1189,3 +1189,52 @@ def test_counts_requires_a_readable_active_profile(monkeypatch, pg_url, pg_sessi
         assert (
             client.get("/api/calls/decisions/counts", params={"profile_id": p1}).status_code == 404
         ), "an inactive profile must 404 rather than silently count over the whole corpus"
+
+
+# ---------------------------------------------------------------------------
+# An unknown call id is a 404 on BOTH halves of the save pair, exactly as it is
+# on the hide pair (test_api_calls_hide.py::test_hide_404_for_unknown_call and
+# ::test_unhide_404_for_unknown_call). Un-save is otherwise IDEMPOTENT -- 200
+# with nothing to delete -- so without `session.get(Call, call_id)` a DELETE
+# naming a call that does not exist would answer 200 and tell the caller their
+# un-save succeeded. The 404 is what has teeth in both gates below; the surviving
+# / deleted rows are controls.
+# ---------------------------------------------------------------------------
+UNKNOWN_CALL_ID = 999999
+
+
+def test_save_404_for_unknown_call_and_writes_nothing(monkeypatch, pg_url, pg_session_factory):
+    uid, (p1, _p2), (cid,) = _seed(pg_session_factory)
+    app = _app(monkeypatch, pg_url)
+    with _client(app, uid) as client:
+        # Positive control FIRST: the same request against a real call is a 200,
+        # so the 404 below is the missing call and not a missing route.
+        assert client.post(f"/api/calls/{cid}/save", params={"profile_id": p1}).status_code == 200
+        r = client.post(f"/api/calls/{UNKNOWN_CALL_ID}/save", params={"profile_id": p1})
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
+    assert _rows(pg_session_factory, user_id=uid, call_id=UNKNOWN_CALL_ID) == [], (
+        "a refused save must not leave a decision row behind"
+    )
+    assert [
+        (pid, state) for pid, state, _at, _by in _rows(pg_session_factory, user_id=uid, call_id=cid)
+    ] == [(p1, "saved")], "the control's real decision must be untouched by the refusal"
+
+
+def test_unsave_404_for_unknown_call_and_deletes_nothing(monkeypatch, pg_url, pg_session_factory):
+    uid, (p1, _p2), (cid,) = _seed(pg_session_factory)
+    _decide(pg_session_factory, user_id=uid, profile_id=p1, call_id=cid, state="saved")
+    app = _app(monkeypatch, pg_url)
+    with _client(app, uid) as client:
+        r = client.delete(f"/api/calls/{UNKNOWN_CALL_ID}/save", params={"profile_id": p1})
+        assert r.status_code == 404
+        assert r.json()["error"]["code"] == "not_found"
+        assert [
+            (pid, state)
+            for pid, state, _at, _by in _rows(pg_session_factory, user_id=uid, call_id=cid)
+        ] == [(p1, "saved")], "the row the refused DELETE did not name must survive it"
+        # Positive control: the same DELETE against the REAL id is a 200 and DOES
+        # delete, so the 404 above is the unknown call id and not a route that
+        # refuses everything.
+        assert client.delete(f"/api/calls/{cid}/save", params={"profile_id": p1}).status_code == 200
+    assert _rows(pg_session_factory, user_id=uid, call_id=cid) == []

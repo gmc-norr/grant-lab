@@ -1,11 +1,9 @@
 // frontend/src/routes/CallDetail.tsx
 import { Anchor, Button, Group, Stack, Text } from "@mantine/core";
-import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { useCallDetail, useHideCall, useUnhideCall } from "../api/calls";
-import { invalidateDecisions } from "../api/decisions";
 import { CallDetailBody } from "./CallDetailBody";
 
 export function CallDetail() {
@@ -15,7 +13,6 @@ export function CallDetail() {
   const profileParam = sp.get("profile");
   const profile = profileParam != null && profileParam !== "" ? Number(profileParam) : null;
   const navigate = useNavigate();
-  const qc = useQueryClient();
   // THE URL IS THE STATE (D11). The reader arrived from a triage view on some
   // profile, and `to="/"` would land them in the Inbox of no profile in
   // particular — not where they were. `sp` is what they arrived with, verbatim.
@@ -48,16 +45,14 @@ export function CallDetail() {
             <Text span c="dimmed">Call hidden.</Text>
             <Button variant="subtle" size="xs" disabled={unhide.isPending}
                     onClick={async () => {
-                      // useUnhideCall (api/calls.ts) invalidates only ["calls"]
-                      // — it predates the triage rail and is shared with this
-                      // page, which has no rail of its own. Without this the
-                      // feed's ["decision-counts"] query (staleTime 20 s,
-                      // App.tsx) still reads "Hidden 1" for up to twenty seconds
-                      // after this undo. See invalidateDecisions and
-                      // TriageFeed.decide for the same pattern.
-                      await unhide.mutateAsync(hidden, {
-                        onSuccess: () => invalidateDecisions(qc),
-                      });
+                      // No per-call onSuccess: useUnhideCall (api/calls.ts)
+                      // invalidates ["calls"] AND ["decision-counts"] itself, so
+                      // the feed's rail is current whether or not this page is
+                      // still mounted when the DELETE lands. In THIS edition
+                      // there is no rail mounted at all and the counts half is a
+                      // no-op — which is exactly why it must not be this page's
+                      // job to remember it.
+                      await unhide.mutateAsync(hidden);
                       setHidden(null);
                     }}>
               Undo
@@ -72,10 +67,7 @@ export function CallDetail() {
             <Button variant="default" size="xs" disabled={hide.isPending || profile === null}
                     onClick={async () => {
                       if (profile === null) return;
-                      await hide.mutateAsync(
-                        { id: call.id, profileId: profile },
-                        { onSuccess: () => invalidateDecisions(qc) },
-                      );
+                      await hide.mutateAsync({ id: call.id, profileId: profile });
                       setConfirmHide(false);
                       setHidden({ id: call.id, profileId: profile });
                     }}>

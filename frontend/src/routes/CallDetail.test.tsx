@@ -222,12 +222,14 @@ it("renders deadline_local_date instead of slicing the UTC string", async () => 
 
 // -------------------------------------------------------------------------
 // Gate 15 — the triage rail sits on another screen, and this page's decisions
-// move it. `useHideCall`/`useUnhideCall` (api/calls.ts) invalidate only
-// ["calls"]: they predate the rail and CallDetail has no rail of its own. With
-// App.tsx's staleTime of 20 s, a decision made here leaves the feed's
-// ["decision-counts"] query reading its pre-decision numbers for up to twenty
-// seconds — measured, and the reason both mutations pass invalidateDecisions as
-// a per-call onSuccess. See TriageFeed.decide for the same pattern.
+// move it. With App.tsx's staleTime of 20 s, a decision made here would
+// otherwise leave the feed's ["decision-counts"] query reading its pre-decision
+// numbers for up to twenty seconds — measured. `useHideCall`/`useUnhideCall`
+// (api/calls.ts) therefore invalidate BOTH keys in their own onSuccess, and
+// this page adds nothing per call: a mutate-level callback is dropped when the
+// component unmounts before the request lands, and navigating away right after
+// an undo is exactly what a reader does. So what is asserted here is the HOOK's
+// contract, observed through this page.
 // -------------------------------------------------------------------------
 it("Undo also invalidates the rail's decision-counts, not only the calls list", async () => {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: RANKED, error: undefined } as never);

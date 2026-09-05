@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api, unwrap } from "./client";
+import { invalidateDecisions } from "./decisions";
 import type { components } from "./schema.gen";
 
 export type CallDetail = components["schemas"]["CallDetailOut"];
@@ -33,9 +34,20 @@ export type DecisionArgs = { id: number; profileId: number };
 // Hide is repeatable, but NOT a no-op the second time: the server upserts with
 // DO UPDATE, so re-hiding an already-hidden call re-stamps `decided_at` and the
 // call moves back to the TOP of the Hidden list (which is ordered by most recent
-// decision). Invalidates the dashboard list cache; the CALLER navigates back to
-// "/" (keeps this hook free of Router context, so it unit-tests with only a
-// QueryClientProvider).
+// decision). The CALLER navigates back to "/" (keeps this hook free of Router
+// context, so it unit-tests with only a QueryClientProvider).
+//
+// BOTH caches, HERE, via the one `invalidateDecisions` (api/decisions.ts) —
+// never as a per-call `onSuccess` at the mutate() site. TanStack v5 runs
+// mutate-level callbacks only while the observer still has listeners
+// (query-core mutationObserver.js: `if (this.#mutateOptions &&
+// this.hasListeners())`), and triage is a keyboard loop: press `h`, click into
+// the call before the POST lands, and the rail's invalidation was simply
+// dropped — the counts then read one triage behind for the whole of App.tsx's
+// 20 s staleTime. A hook-level onSuccess lives on the Mutation itself and needs
+// no observer. In the FULL edition, where CallDetail also mounts this hook,
+// there is no rail and no ["decision-counts"] observer at all, so that half is
+// an inexpensive no-op rather than a wasted fetch.
 export function useHideCall() {
   const qc = useQueryClient();
   return useMutation({
@@ -45,11 +57,12 @@ export function useHideCall() {
           params: { path: { call_id: id }, query: { profile_id: profileId } },
         }),
       ),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["calls"] }),
+    onSuccess: () => invalidateDecisions(qc),
   });
 }
 
-// Idempotent unhide — succeeds even when the call was not hidden on this profile.
+// Idempotent unhide — succeeds even when the call was not hidden on this
+// profile. Invalidates both caches at hook level, for the reason above.
 export function useUnhideCall() {
   const qc = useQueryClient();
   return useMutation({
@@ -59,6 +72,6 @@ export function useUnhideCall() {
           params: { path: { call_id: id }, query: { profile_id: profileId } },
         }),
       ),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["calls"] }),
+    onSuccess: () => invalidateDecisions(qc),
   });
 }

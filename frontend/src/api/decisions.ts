@@ -40,10 +40,14 @@ export function decisionCountsKey(profileId: number | null, filters: CountsFilte
 // the counts sit one triage behind for the rest of the session (App.tsx's
 // staleTime is 20 s).
 //
-// `useHideCall`/`useUnhideCall` (api/calls.ts) invalidate only ["calls"] — they
-// predate the rail and are shared with CallDetail, which has no rail of its own.
-// So both of their callers pass this as a per-call `onSuccess`. If a third
-// caller ever decides from a screen with counts, it needs the same line.
+// Every decision hook calls this in its OWN `onSuccess` — the four in this file
+// and `useHideCall`/`useUnhideCall` in api/calls.ts, which import it. It is
+// deliberately not passed per-call at a mutate() site: TanStack v5 runs
+// mutate-level callbacks only while the observer still has listeners
+// (query-core mutationObserver.js: `if (this.#mutateOptions &&
+// this.hasListeners())`), so a decision followed by a navigation before the
+// request lands silently loses them. A new decision hook needs this line; a new
+// CALLER of an existing one needs nothing.
 export function invalidateDecisions(qc: QueryClient) {
   return Promise.all([
     qc.invalidateQueries({ queryKey: ["calls"] }),

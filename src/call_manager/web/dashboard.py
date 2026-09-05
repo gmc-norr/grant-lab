@@ -423,11 +423,20 @@ def build_dashboard_view(
         if profile_obj is None:
             profile_id = None
 
-    # `CallOut` (web/api/calls.py) is built from eight scalars; none of them is
-    # `embedding`, `full_text` or `raw`. Selecting them anyway made each row ship
-    # a 1024-dim vector as ~9 kB of text for pgvector's PURE-PYTHON parser to turn
-    # back into 1024 floats — measured at 71% (50 rows) and 78% (200 rows) of the
-    # whole ORM row-load, on data the response never contains.
+    # THREE columns, and this list is the whole of what a dashboard row must not
+    # load: `embedding`, `full_text` and `raw`. `CallOut` (web/api/calls.py)
+    # renders 18 fields and none of them is one of these — the match card's body
+    # (programme, budget, url, `summary`, keywords) is plain columns the query
+    # already loads, so widening the response does NOT mean widening this tuple.
+    # Selecting the three anyway made each row ship a 1024-dim vector as ~9 kB of
+    # text for pgvector's PURE-PYTHON parser to turn back into 1024 floats —
+    # measured at 71% (50 rows) and 78% (200 rows) of the whole ORM row-load, on
+    # data the response never contains.
+    #
+    # The list may only ever SHRINK toward those three. In particular `summary`
+    # must NOT be added back (D10): it is rendered on every card, so deferring it
+    # buys nothing and costs one extra SELECT per row — an N+1 where the payload
+    # lever is a `?fields=` projection instead.
     #
     # `raiseload=True` makes this a contract, not a hope: a consumer that reads
     # one of these off a dashboard row raises instead of silently issuing one

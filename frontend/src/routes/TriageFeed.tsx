@@ -1,12 +1,10 @@
 // frontend/src/routes/TriageFeed.tsx
-import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
 import { useHideCall, useUnhideCall } from "../api/calls";
 import { dashboardParamsFrom, useDashboard, type CallItem } from "../api/dashboard";
 import {
-  invalidateDecisions,
   useDecisionCounts,
   useSaveCall,
   useUnsaveCall,
@@ -96,7 +94,6 @@ function EmptyView({ view, profileName }: { view: TriageView; profileName: strin
 
 export function TriageFeed() {
   const [sp] = useSearchParams();
-  const qc = useQueryClient();
   const params = dashboardParamsFrom(sp);
   // A PROJECTION of the wire's four views onto the feed's three, NOT a second
   // sanitiser: dashboardParamsFrom has already dropped anything that is not one
@@ -168,12 +165,14 @@ export function TriageFeed() {
       // that button on stale rows while the next view's fetch is in flight.
       if (isFetching) return;
       const args = { id: call.id, profileId };
+      // Both hooks invalidate ["calls"] AND ["decision-counts"] themselves (see
+      // invalidateDecisions). Nothing is added per call here on purpose: a
+      // mutate-level onSuccess is dropped when this component unmounts before
+      // the request lands, which on a keyboard triage loop is the normal case.
       if (kind === "save") save.mutate(args);
-      // useHideCall predates the rail and invalidates only ["calls"], so the
-      // counts are refreshed here explicitly. See invalidateDecisions.
-      else hide.mutate(args, { onSuccess: () => invalidateDecisions(qc) });
+      else hide.mutate(args);
     },
-    [hide, isFetching, profileId, qc, save],
+    [hide, isFetching, profileId, save],
   );
 
   // UN-DECIDE (D2): back to undecided, which is the ABSENCE of a decision row —
@@ -186,12 +185,10 @@ export function TriageFeed() {
       if (isFetching) return;
       const args = { id: call.id, profileId };
       if (view === "saved") unsave.mutate(args);
-      else if (view === "hidden")
-        // useUnhideCall, like useHideCall, invalidates only ["calls"].
-        unhide.mutate(args, { onSuccess: () => invalidateDecisions(qc) });
+      else if (view === "hidden") unhide.mutate(args);
       // The Inbox has no decision row to delete, so `u` there does nothing.
     },
-    [isFetching, profileId, qc, unhide, unsave, view],
+    [isFetching, profileId, unhide, unsave, view],
   );
 
   useEffect(() => {

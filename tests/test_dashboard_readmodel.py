@@ -220,10 +220,13 @@ def _seed_call_with_heavy_columns(pg_session_factory, *, ranked):
 
 @pytest.mark.parametrize("ranked", [False, True])
 def test_dashboard_view_never_loads_the_columns_it_never_renders(pg_session_factory, ranked):
-    # `CallOut` (web/api/calls.py) is built from eight scalars; `embedding`,
-    # `full_text` and `raw` are not among them. Loading them cost 71-78% of the
-    # ORM row-load time at 50-200 rows, all of it spent parsing a 1024-dim
-    # vector out of text into Python floats for a payload that never contains it.
+    # `embedding`, `full_text` and `raw` are the ONLY three columns a dashboard
+    # row must not load; `CallOut` (web/api/calls.py) renders 18 fields and none
+    # of them is one of these. Loading them cost 71-78% of the ORM row-load time
+    # at 50-200 rows, all of it spent parsing a 1024-dim vector out of text into
+    # Python floats for a payload that never contains it. `summary` in
+    # particular must NOT join the deferred list (D10) -- every card renders it,
+    # so deferring it buys nothing and costs one SELECT per row.
     #
     # They are deferred with `raiseload=True`, so a future consumer that reads
     # one off a dashboard row fails HERE rather than silently issuing one extra

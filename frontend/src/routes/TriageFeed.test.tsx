@@ -1,3 +1,4 @@
+import { QueryClient } from "@tanstack/react-query";
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -98,14 +99,20 @@ function stub({
   return { get, post, del };
 }
 
-function renderFeed(route = "/", extra: ReactNode = null) {
-  return renderWithProviders(
-    <>
-      <TriageFeed />
-      {extra}
-    </>,
-    { route },
-  );
+// `qc` is injectable and RETURNED, because the unmount gate below spies on
+// invalidateQueries and therefore has to hold the same QueryClient the feed
+// uses (the pattern CallDetail.test.tsx:31-34 already needed).
+function renderFeed(route = "/", extra: ReactNode = null, qc = new QueryClient()) {
+  return {
+    qc,
+    ...renderWithProviders(
+      <>
+        <TriageFeed />
+        {extra}
+      </>,
+      { route, queryClient: qc },
+    ),
+  };
 }
 
 // Structural, not `ReturnType<typeof vi.spyOn>`: openapi-fetch's ClientMethod is
@@ -553,11 +560,11 @@ describe("gate 10 — a decision refetches BOTH caches (T7-12)", () => {
   });
 
   it("a hide refetches the rail counts too, which useHideCall alone does not", async () => {
-    // B29b killer. MEASURED, not assumed: useHideCall's OWN onSuccess
-    // (api/calls.ts) already invalidates ["calls"], so the per-call onSuccess
-    // the feed adds is the ONLY source of a second ["decision-counts"] fetch.
-    // Deleting it leaves the list refetching and the counts frozen — which is
-    // why the counts assertion, not the list one, is what has teeth here.
+    // B29b killer. MEASURED, not assumed: useHideCall invalidates ["calls"] and
+    // ["decision-counts"] in ONE onSuccess (invalidateDecisions), and dropping
+    // the counts half leaves the list refetching and the rail frozen — which is
+    // why the counts assertion, not the list one, is what has teeth here. Gate
+    // 10b pins the other half of that contract: it survives an unmount.
     const { post, get } = stub();
     renderFeed();
     await screen.findByText("Call one");
@@ -574,6 +581,52 @@ describe("gate 10 — a decision refetches BOTH caches (T7-12)", () => {
     fireEvent.keyDown(document.body, { key: "u" });
     await waitFor(() => expect(decisions(del)).toEqual(["/api/calls/1/save"]));
     await waitFor(() => expect(gets(get, "/api/calls/decisions/counts")).toHaveLength(2));
+  });
+});
+
+describe("gate 10b — the counts invalidation outlives the feed (F1)", () => {
+  it("a hide invalidates ['decision-counts'] even when the feed unmounts first", async () => {
+    // TanStack v5 drops a mutate()-level callback the moment the observer has
+    // no listeners left (query-core/build/modern/mutationObserver.js:77 —
+    // `if (this.#mutateOptions && this.hasListeners())`). Triage is a keyboard
+    // loop: `h` and then a click through to the call page inside the same few
+    // hundred milliseconds is the ORDINARY path, and it lost the rail's
+    // invalidation completely — the counts then read one triage behind for the
+    // rest of App.tsx's 20 s staleTime. So ["decision-counts"] is invalidated by
+    // useHideCall ITSELF (api/calls.ts), where the Mutation carries the callback
+    // and no live observer is required.
+    let land = () => {};
+    const landed = new Promise<void>((r) => {
+      land = r;
+    });
+    const { post } = stub();
+    post.mockImplementation((() =>
+      landed.then(() => ({
+        data: { hidden: true },
+        error: undefined,
+        response: new Response(),
+      }))) as never);
+
+    const qc = new QueryClient();
+    const invalidate = vi.spyOn(qc, "invalidateQueries");
+    const { unmount } = renderFeed("/", null, qc);
+    await screen.findByText("Call one");
+    fireEvent.keyDown(document.body, { key: "h" });
+    // The POST is genuinely in flight BEFORE the reader leaves — without this
+    // the gate would pass on a hide that never happened at all.
+    await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/1/hide"]));
+
+    unmount();
+    // Everything below is measured AFTER the last listener is gone.
+    invalidate.mockClear();
+    await act(async () => {
+      land();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ["decision-counts"] }));
+    // Additive, not instead-of: the list invalidation useHideCall always had.
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["calls"] });
   });
 });
 
