@@ -9,11 +9,10 @@ from sqlalchemy import and_, exists, func, or_, select
 
 from call_manager.db.models import (
     Call,
+    CallDecision,
     CallRanking,
     GoldenSetTriple,
     Profile,
-    Subscription,
-    UserCallDismissal,
 )
 
 _CANDIDATE_LIMIT = 20
@@ -92,7 +91,19 @@ def _not_already_a_triple():
 
 
 def candidates_dismissed_high_score(session) -> list[CandidateRow]:
-    """Ranked >= 60 for a profile, dismissed by a user subscribed to that profile."""
+    """Ranked >= 60 for a profile, and HIDDEN by someone on THAT SAME profile.
+
+    The decision now carries its own profile_id, so this is a direct correlation
+    rather than a join through `subscriptions` to guess which profile a global
+    dismissal belonged to.
+
+    This DELIBERATELY WIDENS who can contribute a negative label, from
+    subscribers of the profile to READERS of it (D13). Task 1's write rule
+    already requires the hider to be able to read the profile, and a hide on
+    profile P is a statement about P — which is what "a decision is per profile"
+    means. Pinned by
+    tests/test_golden_set_mining.py::test_candidates_dismissed_high_score_sees_a_non_subscribed_readers_hide.
+    """
     q = (
         select(CallRanking, Call.title, Profile.name)
         .join(Call, Call.id == CallRanking.call_id)
@@ -102,9 +113,12 @@ def candidates_dismissed_high_score(session) -> list[CandidateRow]:
             _not_already_a_triple(),
             exists().where(
                 and_(
-                    UserCallDismissal.call_id == CallRanking.call_id,
-                    Subscription.user_id == UserCallDismissal.user_id,
-                    Subscription.profile_id == CallRanking.profile_id,
+                    CallDecision.call_id == CallRanking.call_id,
+                    CallDecision.profile_id == CallRanking.profile_id,
+                    # A SAVED call is not a negative label. Without this the
+                    # golden set mines the calls the user explicitly KEPT as
+                    # "the model scored this too high" evidence.
+                    CallDecision.state == "hidden",
                 )
             ),
         )

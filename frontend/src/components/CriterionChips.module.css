@@ -1,0 +1,69 @@
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3rem;
+  padding: 0.05rem 0.45rem;
+  border: 0;
+  border-radius: 999px;
+  background: var(--app-hover);
+  color: var(--app-muted);
+  font: inherit;
+  font-size: 0.8rem;
+  text-align: left;
+}
+
+button.chip {
+  cursor: pointer;
+}
+
+.value {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.pass .value { color: var(--app-good); }
+.fail .value { color: var(--app-dim); }
+
+/* unsure is NOT the deadline band: spec §5 reserves the amber warn colour for
+   the ≤30-day deadline-urgency signal, and §4.2's "coloured by rating" governs
+   pass/fail — a gate that could not judge gets a neutral border and muted
+   text, no fill, so amber stays exclusively the deadline signal. */
+.unsure {
+  border: 1px solid var(--app-border-strong);
+}
+.unsure .value { color: var(--app-muted); }
+
+.detail {
+  padding-left: 0.45rem;
+  border-left: 2px solid var(--app-border-strong);
+}
+
+/* Spec §5: quoted evidence is the ONE serif in the product, so the quote reads
+   as *the funder said this* rather than *the model thinks this*. */
+.quote {
+  margin: 0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 0.9rem;
+}
+
+.reasoning {
+  margin: 0.3rem 0 0;
+  color: var(--app-dim);
+  font-size: 0.8rem;
+}
+
+.reasoningLabel {
+  font-weight: 600;
+}

@@ -5,6 +5,7 @@ from sqlalchemy import select
 
 from call_manager.db.models import (
     Call,
+    CallDecision,
     CallRanking,
     DigestRun,
     Profile,
@@ -12,7 +13,6 @@ from call_manager.db.models import (
     Source,
     Subscription,
     User,
-    UserCallDismissal,
 )
 from call_manager.digest.assemble import assemble_for_user
 
@@ -324,18 +324,93 @@ def test_assemble_borderline_only_when_no_top(pg_session_factory, now):
     assert len(border) == 2
 
 
-def test_assemble_excludes_dismissed(pg_session_factory, now):
+def test_assemble_excludes_hidden(pg_session_factory, now):
     with pg_session_factory() as s:
         uid, pid = _seed_user_with_profile(s)
         _seed_call(s, title="V", score=80, profile_id=pid)
         cid_hidden = _seed_call(s, title="H", score=80, profile_id=pid)
-        s.add(UserCallDismissal(user_id=uid, call_id=cid_hidden))
+        s.add(CallDecision(user_id=uid, profile_id=pid, call_id=cid_hidden, state="hidden"))
         s.commit()
     with pg_session_factory() as s:
         payload = assemble_for_user(s, user_id=uid, now=now)
     titles = [e.title for sec in payload.sections for e in sec.entries]
     assert "V" in titles
     assert "H" not in titles
+
+
+# ---------------------------------------------------------------------------
+# Gate 2 - the exclusion set is PER PROFILE. One user, two subscribed profiles,
+# one call ranked high for both: hidden under P1, still delivered under P2.
+#
+# A single-profile fixture cannot see the difference, and neither can a fixture
+# where the call is only ranked for one of them - so the ranking is written for
+# BOTH profiles here on purpose.
+# ---------------------------------------------------------------------------
+def test_assemble_hiding_on_one_profile_leaves_the_call_in_the_other_section(
+    pg_session_factory, now
+):
+    with pg_session_factory() as s:
+        uid, p1 = _seed_user_with_profile(s, profile_name="P1")
+        p2 = Profile(
+            name="P2",
+            kind=ProfileKind.ORGANIZATIONAL_UNIT,
+            description="",
+            structured={"must_include": []},
+            created_by=uid,
+        )
+        s.add(p2)
+        s.flush()
+        s.add(Subscription(user_id=uid, profile_id=p2.id, digest_enabled=True))
+        cid = _seed_call(s, title="Shared", score=80, profile_id=p1)
+        s.add(
+            CallRanking(
+                call_id=cid,
+                profile_id=p2.id,
+                aggregate_score=80,
+                rationale="r",
+                model="m",
+                prompt_version="v4.1",
+                ranked_at=now,
+            )
+        )
+        s.add(CallDecision(user_id=uid, profile_id=p1, call_id=cid, state="hidden"))
+        s.commit()
+        p2_name = p2.name
+    with pg_session_factory() as s:
+        payload = assemble_for_user(s, user_id=uid, now=now)
+    assert payload is not None
+    placed = {sec.profile_name: [e.title for e in sec.entries] for sec in payload.sections}
+    assert placed.get(p2_name) == ["Shared"], (
+        "hidden under P1 must NOT remove the call from P2's section - a single "
+        f"user-wide exclusion set does exactly that. Got {placed}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Gate 2b - the exclusion set is STATE-scoped. Gate 2's fixture only ever HIDES,
+# so it stays green under "exclude every decision"; this one saves. A SECOND
+# candidate call is seeded because with only the saved one an over-broad
+# exclusion empties the digest and `assemble_for_user` returns None - the gate
+# would then die with an AttributeError for the wrong reason.
+# ---------------------------------------------------------------------------
+def test_assemble_keeps_a_saved_call_in_its_own_profiles_digest(pg_session_factory, now):
+    with pg_session_factory() as s:
+        uid, pid = _seed_user_with_profile(s)
+        _seed_call(s, title="Other", score=80, profile_id=pid)
+        cid = _seed_call(s, title="Saved", score=80, profile_id=pid)
+        s.add(CallDecision(user_id=uid, profile_id=pid, call_id=cid, state="saved"))
+        s.commit()
+    with pg_session_factory() as s:
+        payload = assemble_for_user(s, user_id=uid, now=now)
+    assert payload is not None, (
+        "the second candidate keeps the digest non-empty, so a None here means the "
+        "exclusion swallowed BOTH calls, not just the saved one"
+    )
+    titles = [e.title for sec in payload.sections for e in sec.entries]
+    assert "Saved" in titles, (
+        "'saved' is the user saying they WANT this call. Excluding every decision "
+        f"instead of only the hidden ones drops it out of the digest. Got {titles}"
+    )
 
 
 def test_assemble_excludes_already_in_prior_digest(pg_session_factory, now):

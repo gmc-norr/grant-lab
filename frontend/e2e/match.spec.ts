@@ -40,13 +40,50 @@ const CALLS = {
       source_name: "Vinnova",
       source_slug: "vinnova",
       deadline: null,
+      deadline_local_date: null,
       published_at: null,
       aggregate_score: 82,
+      // THE CARD'S OWN FIELDS. This fixture was written for CallRow, which read
+      // none of them; TriageCard calls `call.criteria.find(...)` and
+      // `call.keywords.map(...)` unconditionally, so an item without them takes
+      // the whole route into react-router's error boundary. MEASURED on this
+      // branch the moment the feed was mounted: 8 failed / 6 passed, every
+      // failure reported as "/ crashed" rather than as anything about the feed.
+      programme: null,
+      budget_min: null,
+      budget_max: null,
+      currency: null,
+      url: "https://example.org/calls/1",
+      summary: null,
+      keywords: [],
+      criteria: [],
+      applicant_note_count: 0,
+      escalated: false,
     },
   ],
   summary: { open_count: 1, high_score: 1, soon_deadline: 0 },
   pagination: { page: 1, limit: 50, has_prev: false, has_next: false, total: 1 },
   ranking: { pending: 0, failed: 0 },
+  // A RESOLVED PROFILE. `profile_id: null` was the shipped shape here while the
+  // index was the archive list, where it meant "no profile filter". The triage
+  // feed reads it as "there is nothing to record a decision on": the rail's
+  // counts are not even requested, and every decision control stands down. A
+  // fixture in that state exercises none of the screen this task added.
+  effective: { profile_id: 1, source: null, sort: "newest", show_closed: false },
+  facets: { sources: [], profiles: [{ id: 1, name: "Group A" }] },
+};
+
+// The rail's counts. The catch-all's `{}` would render three blank counts rather
+// than crash, so this is realism, not a fix — but a blank rail is not what the
+// a11y and landing specs below are meant to be looking at.
+const DECISION_COUNTS = { inbox: 1, saved: 0, hidden: 0 };
+
+// The OTHER index screen: no profile resolved. Release 1's answer is an
+// invitation, NOT the fifty-call archive. It keeps CALLS' item deliberately —
+// the server really does answer with calls in this state — so the scenario below
+// can assert the browser renders none of them.
+const CALLS_NO_PROFILE = {
+  ...CALLS,
   effective: { profile_id: null, source: null, sort: "newest", show_closed: false },
   facets: { sources: [], profiles: [] },
 };
@@ -200,14 +237,23 @@ const ADMIN_DASH = {
 // unmatched call would get index.html, and `unwrap` turns a non-JSON or 401
 // response into a full-page nav to /login — a spec that silently ended up on the
 // login page would then "pass" its absence assertions.
+// The decision surface, whose QUERY STRING is half of what the request means:
+// `profile_id` is what makes a decision per-profile, and a client that dropped
+// it would look identical in a path-only log while 422-ing against the server.
+const DECISION_PATH = /^\/api\/calls\/(?:\d+\/(?:save|hide)|decisions\/counts)$/;
+
 async function mockApi(page: Page, seen: string[] = []): Promise<string[]> {
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
-    seen.push(`${route.request().method()} ${url.pathname}`);
+    const query = DECISION_PATH.test(url.pathname) ? url.search : "";
+    seen.push(`${route.request().method()} ${url.pathname}${query}`);
     const json = (body: unknown) =>
       route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
     if (url.pathname === "/api/me") return json(ME);
     if (url.pathname === "/api/calls") return json(CALLS);
+    if (url.pathname === "/api/calls/decisions/counts") return json(DECISION_COUNTS);
+    if (/^\/api\/calls\/\d+\/save$/.test(url.pathname)) return json({ state: "saved" });
+    if (/^\/api\/calls\/\d+\/hide$/.test(url.pathname)) return json({ hidden: true });
     if (/^\/api\/calls\/\d+$/.test(url.pathname)) return json(CALL_DETAIL);
     if (url.pathname === "/api/admin/dashboard") return json(ADMIN_DASH);
     if (url.pathname === "/api/admin/users") return json(ADMIN_USERS);
@@ -389,6 +435,34 @@ test("no critical a11y violations on the release-1 landing page", async ({ page 
   expect(results.violations.filter((v) => v.impact === "critical")).toEqual([]);
 });
 
+test("with no profile the landing page is an invitation, not the archive", async ({ page }) => {
+  // The server still answers with calls in this state — dashboard.py's unranked
+  // fallback is deliberately untouched, and the full edition keeps it — so the
+  // fixture keeps CALLS' one item on purpose: the point is that the browser
+  // renders NONE of them. This is the only place the branch is checked against
+  // the REAL match bundle rather than a jsdom render of the component.
+  await mockApi(page);
+  await page.route(
+    (url) => url.pathname === "/api/calls",
+    (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(CALLS_NO_PROFILE),
+      }),
+  );
+  await gotoRendered(page, "/");
+  await expect(page.getByRole("heading", { name: "No research profile yet." })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Create a research profile" })).toHaveAttribute(
+    "href",
+    "/profiles/new",
+  );
+  // THE FEED IS GONE, and these are the assertions with teeth: a screen that
+  // rendered the onboarding copy ABOVE the list would pass the two above.
+  await expect(page.getByRole("link", { name: "Genomics Grant" })).toHaveCount(0);
+  await expect(page.getByRole("navigation", { name: "Triage views" })).toHaveCount(0);
+});
+
 test("the account menu offers Settings as well as Sign out", async ({ page }) => {
   // /me is mounted by router.simple.tsx and the account menu is its ONLY entry
   // point in release 1 — SimpleShell's nav has Calls / Profiles / Admin and
@@ -517,4 +591,506 @@ test("a non-viewer's profile list has no trace of the private profile", async ({
   // absence check vacuously.
   await expect(page.getByRole("link", { name: "Neuro Imaging Group" })).toBeVisible();
   await expect(page.getByText("Digital Pathology Lab")).toHaveCount(0);
+});
+
+// --- the triage feed (spec §5), against a STATEFUL mock -------------------
+//
+// Everything above this line is edition SHAPE — which router compiled in, which
+// links render, which palette paints. The rest is the PRODUCT: a per-profile
+// inbox you empty with two keys and undo with a third.
+//
+// The mock below holds WHICH STATE EACH CALL IS IN, PER PROFILE, and derives
+// both the list and the rail counts from it. So a rail count, a card leaving the
+// inbox and the same card appearing under Saved are three consequences of one
+// write, not three separately-stubbed constants.
+//
+// IT ALSO RECORDS THE READ PATH, and that is not decoration (T9-7). The dry run
+// of this task recorded only the decision writes, so a client that dropped
+// `?profile=` from the post-decision refetch — or `profile_id` from the counts
+// request, which is WHOSE inbox the rail is counting — looked identical in every
+// scenario. Both reads are recorded here with the two parameters that give them
+// meaning, and the scenarios assert on them.
+//
+// Registered AFTER mockApi so it WINS (page.route matches handlers in REVERSE
+// registration order) and hands back everything it does not own with
+// route.fallback().
+type TriageState = "inbox" | "saved" | "hidden";
+
+// Two DIFFERENT quotes on purpose. The card renders topic_fit's quote as the
+// matched sentence with no interaction at all, so a chip-expansion scenario
+// written against that string would pass without the chip ever opening.
+const QUOTE_TOPIC = "The call funds cancer diagnostics in clinical settings.";
+const QUOTE_ELIGIBILITY = "Applicants must be established in at least two member states.";
+const REASONING = "Two named partners satisfy the consortium requirement.";
+
+// The deadline as a Stockholm calendar date N days out, computed the SAME way
+// Deadline.tsx's deadlineLocalView does. "12 days left" is COMPUTED by the card
+// from this string, so a hard-coded date would drift into the past and the
+// assertion would quietly become a check that the call is closed.
+function stockholmDatePlus(days: number): string {
+  const today = new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Stockholm" });
+  return new Date(new Date(`${today}T00:00:00Z`).getTime() + days * 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+}
+const DAYS_OUT = 12;
+
+// A CallOut the triage card can actually render: every field TriageCard reads,
+// with the optional ones POPULATED, because the collapsed-card path is already
+// covered by CALLS above and this one has to exercise programme, budget,
+// days-left and chips. `deadlineDays` goes NEGATIVE for the closed-call
+// scenario (D1).
+function feedCall(id: number, title: string, opts: { deadlineDays?: number } = {}) {
+  const local = stockholmDatePlus(opts.deadlineDays ?? DAYS_OUT);
+  return {
+    id,
+    title,
+    source_name: "Vinnova",
+    source_slug: "vinnova",
+    deadline: `${local}T23:59:00Z`,
+    deadline_local_date: local,
+    published_at: null,
+    aggregate_score: 82,
+    programme: "Life Science 2026",
+    budget_min: 500_000,
+    budget_max: 2_000_000,
+    currency: "SEK",
+    url: `https://example.org/calls/${id}`,
+    summary: null,
+    keywords: [],
+    criteria: [
+      {
+        criterion: "topic_fit",
+        label: "Topic fit",
+        rating: "4",
+        is_topic_fit: true,
+        is_reason_code: false,
+        rationale: null,
+        quoted_evidence: QUOTE_TOPIC,
+      },
+      {
+        criterion: "eligibility",
+        label: "Eligibility",
+        rating: "pass",
+        is_topic_fit: false,
+        is_reason_code: false,
+        rationale: REASONING,
+        quoted_evidence: QUOTE_ELIGIBILITY,
+      },
+    ],
+    applicant_note_count: 0,
+    escalated: false,
+  };
+}
+
+type TriageMock = {
+  /**
+   * Every triage request the browser made.
+   *
+   *  * decisions: method, path AND query string, verbatim — `profile_id` is
+   *    WHOSE decision this is, and a write that dropped it would empty the
+   *    inbox on screen just as convincingly while 422-ing in production.
+   *  * `GET /api/calls`, normalised to the two parameters that decide what
+   *    comes back: `?profile=` and `?view=`.
+   *  * `GET /api/calls/decisions/counts`, normalised to `?profile_id=`.
+   */
+  requests: string[];
+};
+
+async function mockTriage(
+  page: Page,
+  opts: {
+    calls?: ReturnType<typeof feedCall>[];
+    /** The effective profile when the URL carries no `?profile=`. */
+    profileId?: number | null;
+    profiles?: { id: number; name: string }[];
+    /** Seeded decisions, keyed profile -> call -> state. */
+    decided?: Record<number, Record<number, TriageState>>;
+  } = {},
+): Promise<TriageMock> {
+  const calls = opts.calls ?? [feedCall(1, "Genomics Grant")];
+  const defaultProfile = opts.profileId === undefined ? 1 : opts.profileId;
+  const profiles = opts.profiles ?? [{ id: 1, name: "Group A" }];
+  const requests: string[] = [];
+  // PER PROFILE, because "a decision is per profile" is the rule the whole
+  // table exists for: the picker scenario needs profile 2's hidden set to be a
+  // different set, not the same one relabelled.
+  const byProfile = new Map<number, Map<number, TriageState>>();
+  const stateFor = (pid: number): Map<number, TriageState> => {
+    const known = byProfile.get(pid);
+    if (known) return known;
+    const seeded = new Map<number, TriageState>(
+      calls.map((c) => [c.id, opts.decided?.[pid]?.[c.id] ?? "inbox"]),
+    );
+    byProfile.set(pid, seeded);
+    return seeded;
+  };
+  const unprocessable = (route: { fulfill: (o: object) => Promise<void> }) =>
+    route.fulfill({
+      status: 422,
+      contentType: "application/json",
+      body: JSON.stringify({ error: { code: "unprocessable", message: "profile_id is required" } }),
+    });
+
+  await mockApi(page);
+  await page.route("**/api/**", async (route) => {
+    const req = route.request();
+    const url = new URL(req.url());
+    const json = (body: unknown) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+
+    const decision = /^\/api\/calls\/(\d+)\/(save|hide)$/.exec(url.pathname);
+    if (decision) {
+      requests.push(`${req.method()} ${url.pathname}${url.search}`);
+      const pid = url.searchParams.get("profile_id");
+      // The real route 422s without it, and answering 200 anyway would let a
+      // client that dropped the parameter pass every scenario below.
+      if (pid === null) return unprocessable(route);
+      const [, rawId, kind] = decision;
+      // The real routes: POST /save -> saved, POST /hide -> hidden, DELETE
+      // either -> undecided, and undecided IS the inbox (the absence of a row).
+      const next: TriageState =
+        req.method() === "DELETE" ? "inbox" : kind === "save" ? "saved" : "hidden";
+      stateFor(Number(pid)).set(Number(rawId), next);
+      // THE UN-DECIDED SHAPES, from web/api/calls.py: DELETE /save answers
+      // CallDecisionOut{state: null} and DELETE /hide answers
+      // CallHideOut{hidden: false}. The dry run's mock echoed the DECIDED
+      // bodies back for both deletes, which is a wire contract no route has.
+      return json(
+        kind === "save"
+          ? { state: next === "inbox" ? null : "saved" }
+          : { hidden: next === "hidden" },
+      );
+    }
+
+    if (url.pathname === "/api/calls") {
+      const profileParam = url.searchParams.get("profile");
+      const view = url.searchParams.get("view") ?? "archive";
+      requests.push(`GET /api/calls?profile=${profileParam ?? "none"}&view=${view}`);
+      const effective =
+        profileParam !== null && profileParam !== "" ? Number(profileParam) : defaultProfile;
+      const items = effective === null ? [] : calls.filter((c) => stateFor(effective).get(c.id) === view);
+      return json({
+        items,
+        summary: { open_count: items.length, high_score: 0, soon_deadline: 0 },
+        pagination: { page: 1, limit: 50, has_prev: false, has_next: false, total: items.length },
+        ranking: { pending: 0, failed: 0 },
+        effective: { profile_id: effective, source: null, sort: "newest", show_closed: false },
+        facets: { sources: [], profiles },
+      });
+    }
+
+    if (url.pathname === "/api/calls/decisions/counts") {
+      const pid = url.searchParams.get("profile_id");
+      requests.push(`GET ${url.pathname}?profile_id=${pid ?? "none"}`);
+      if (pid === null) return unprocessable(route);
+      const state = stateFor(Number(pid));
+      const n = (s: TriageState) => [...state.values()].filter((v) => v === s).length;
+      return json({ inbox: n("inbox"), saved: n("saved"), hidden: n("hidden") });
+    }
+
+    // Everything else — /api/me, /api/calls/{id}, the profile pages — is
+    // mockApi's, and fallback() is what hands it back rather than answering
+    // {} over it.
+    return route.fallback();
+  });
+  return { requests };
+}
+
+const railOf = (page: Page) => page.getByRole("navigation", { name: "Triage views" });
+const cardsOf = (page: Page) => page.locator("article[data-call-id]");
+
+test("the triage feed renders the rail, its counts and the focused call's card", async ({
+  page,
+}) => {
+  const mock = await mockTriage(page);
+  await gotoRendered(page, "/");
+  const rail = railOf(page);
+  // aria-current is how a screen reader is told which view it is in; the rail is
+  // three identical-looking links otherwise.
+  await expect(rail.getByRole("link", { name: /Inbox/ })).toHaveAttribute("aria-current", "page");
+  await expect(rail.getByRole("link", { name: /Saved/ })).not.toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+  // FROM THE COUNTS ENDPOINT, and the fixture makes that visible: with one call
+  // in the inbox, `saved` and `hidden` can only read 0 if the rail asked.
+  await expect(rail.locator('[data-count="inbox"]')).toHaveText("1");
+  await expect(rail.locator('[data-count="saved"]')).toHaveText("0");
+  await expect(rail.locator('[data-count="hidden"]')).toHaveText("0");
+  await expect(rail).toContainText("Matching against Group A");
+
+  const card = page.locator('article[data-call-id="1"]');
+  await expect(card).toHaveAttribute("data-expanded", "true");
+  await expect(card.getByRole("link", { name: "Genomics Grant" })).toBeVisible();
+  await expect(card.locator('[data-field="funder"]')).toHaveText("Vinnova");
+  await expect(card.locator('[data-field="programme"]')).toHaveText("Life Science 2026");
+  // COMPUTED, not echoed: nothing in the payload says "12 days left".
+  await expect(card.locator('[data-field="days-left"]')).toContainText(`${DAYS_OUT} days left`);
+  // A RANGE, because min differs from max (§5) — "500,000 SEK" would be a
+  // different and wrong claim about the money.
+  await expect(card.locator('[data-field="budget"]')).toHaveText("500,000 – 2,000,000 SEK");
+  // The source has no description, so §5 requires a sentence and a link out
+  // rather than a collapsed section.
+  await expect(card.locator('[data-field="no-summary"]')).toContainText(
+    "This source publishes no description with the call.",
+  );
+  await expect(card.locator('[data-criterion="topic_fit"]')).toHaveAttribute("data-tone", "pass");
+  // BOTH READS ARE PROFILE-SCOPED (T9-7). The rail counts whose inbox? The list
+  // ranks against which profile? A build that dropped either parameter renders
+  // exactly this screen against the wrong data.
+  expect(mock.requests).toContain("GET /api/calls?profile=none&view=inbox");
+  expect(mock.requests).toContain("GET /api/calls/decisions/counts?profile_id=1");
+});
+
+test("pressing s saves the focused call, and Saved is where it lands", async ({ page }) => {
+  const mock = await mockTriage(page);
+  await gotoRendered(page, "/");
+  await expect(page.locator('article[data-call-id="1"]')).toBeVisible();
+  await page.keyboard.press("s");
+
+  // THE MOVE FIRST, because it also settles the write: the rail is derived from
+  // the same state the POST changed, so a count of 1 under Saved cannot be true
+  // until the request landed.
+  const rail = railOf(page);
+  await expect(rail.locator('[data-count="saved"]')).toHaveText("1");
+  await expect(rail.locator('[data-count="inbox"]')).toHaveText("0");
+  // THE WRITE, exactly: endpoint AND the profile the decision belongs to. `s`
+  // bound to /hide would empty the inbox just as convincingly on screen.
+  expect(mock.requests.filter((r) => r.startsWith("POST "))).toEqual([
+    "POST /api/calls/1/save?profile_id=1",
+  ]);
+
+  await rail.getByRole("link", { name: /Saved/ }).click();
+  await expect(page).toHaveURL(/view=saved/);
+  await expect(page.locator('article[data-call-id="1"]')).toBeVisible();
+  expect(mock.requests).toContain("GET /api/calls?profile=none&view=saved");
+});
+
+test("pressing h hides the focused call, and Hidden keeps it rather than dropping it", async ({
+  page,
+}) => {
+  const mock = await mockTriage(page);
+  await gotoRendered(page, "/");
+  await expect(page.locator('article[data-call-id="1"]')).toBeVisible();
+  await page.keyboard.press("h");
+
+  const rail = railOf(page);
+  await expect(rail.locator('[data-count="hidden"]')).toHaveText("1");
+  await expect(rail.locator('[data-count="inbox"]')).toHaveText("0");
+  expect(mock.requests.filter((r) => r.startsWith("POST "))).toEqual([
+    "POST /api/calls/1/hide?profile_id=1",
+  ]);
+
+  // "Kept here, not deleted" is the promise the Hidden empty state makes, so the
+  // call has to actually be THERE.
+  await rail.getByRole("link", { name: /Hidden/ }).click();
+  await expect(page).toHaveURL(/view=hidden/);
+  await expect(page.locator('article[data-call-id="1"]')).toBeVisible();
+  await expect(page.locator('[data-empty="hidden"]')).toHaveCount(0);
+});
+
+test("pressing u in Hidden returns the call to the inbox, and the rail count moves with it", async ({
+  page,
+}) => {
+  // D2. The un-decide control release 1 ships, on the path a reader actually
+  // walks: they are IN Hidden looking at the call, not on its detail page after
+  // hiding it twice to reveal an Undo.
+  const mock = await mockTriage(page, { decided: { 1: { 1: "hidden" } } });
+  await gotoRendered(page, "/?view=hidden");
+  const card = page.locator('article[data-call-id="1"]');
+  await expect(card).toBeVisible();
+  const rail = railOf(page);
+  await expect(rail.locator('[data-count="hidden"]')).toHaveText("1");
+  // Keys are undiscoverable, so the same act has a control (D2).
+  await expect(card.getByRole("button", { name: "Return to inbox" })).toBeVisible();
+
+  await page.keyboard.press("u");
+
+  // D19. THE RAIL IS CORRECT IMMEDIATELY. `useUnhideCall` invalidates BOTH
+  // ["calls"] and ["decision-counts"] at hook level (invalidateDecisions); without
+  // that the rail reads "Hidden 1 / Inbox 0" over a feed showing the opposite for
+  // the whole of App.tsx's 20 s staleTime. The dry run of this task MEASURED that
+  // stale rail and wrote it down as a live bug; it is fixed, so this asserts the
+  // right number rather than describing the wrong one.
+  await expect(rail.locator('[data-count="hidden"]')).toHaveText("0");
+  await expect(rail.locator('[data-count="inbox"]')).toHaveText("1");
+  // A DELETE OF THE ROW, never a write: undecided is the ABSENCE of a decision,
+  // and a POST would re-stamp the very row this is meant to remove.
+  expect(mock.requests.filter((r) => r.includes("/api/calls/1/hide"))).toEqual([
+    "DELETE /api/calls/1/hide?profile_id=1",
+  ]);
+
+  // GONE from Hidden...
+  await expect(page.locator('[data-empty="hidden"]')).toContainText("Nothing hidden.");
+  await expect(cardsOf(page)).toHaveCount(0);
+  // ...and BACK IN THE INBOX, which is the claim. A delete that only removed the
+  // row would satisfy everything above.
+  await rail.getByRole("link", { name: /Inbox/ }).click();
+  await expect(page).toHaveURL(/view=inbox/);
+  await expect(page.locator('article[data-call-id="1"]')).toBeVisible();
+});
+
+test("the detail round trip lands back in the view it left", async ({ page }) => {
+  // D11, and the assertion the dry run of this task got BACKWARDS: its version
+  // asserted the reader lands in the INBOX after opening a hidden call, which
+  // passed only because `view` was being dropped from the card's link. The URL
+  // is the state, and every link preserves it.
+  await mockTriage(page, { decided: { 1: { 1: "hidden" } } });
+  await gotoRendered(page, "/?view=hidden");
+  const card = page.locator('article[data-call-id="1"]');
+  await expect(card).toBeVisible();
+
+  await card.getByRole("link", { name: "Genomics Grant" }).click();
+  // BOTH parameters travel: the profile because it decides which ranking the
+  // page shows, the view because the back link has to know where to return to.
+  await expect(page).toHaveURL(/\/calls\/1\?profile=1&view=hidden$/);
+  await expect(page.getByRole("heading", { name: "Genomics Grant" })).toBeVisible();
+
+  await page.getByRole("link", { name: "← All calls" }).click();
+  await expect(page).toHaveURL(/\/\?profile=1&view=hidden$/);
+  await expect(railOf(page).getByRole("link", { name: /Hidden/ })).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+  await expect(page.locator('article[data-call-id="1"]')).toBeVisible();
+  // NOT THE INBOX. With `to="/"` the reader lands on this profile's inbox, which
+  // for this fixture is empty — so inbox zero is the screen a lost `view`
+  // produces, and its absence is what pins the round trip.
+  await expect(page.getByText("Inbox zero.")).toHaveCount(0);
+});
+
+test("the rail's profile picker switches profile, and the hidden set changes with it", async ({
+  page,
+}) => {
+  // D11. The match index has NO other profile switcher — it left with
+  // DashboardHeader in Task 7 — so without the rail's picker the product's own
+  // smoke ("switching profile changes which calls are hidden") is unperformable.
+  const mock = await mockTriage(page, {
+    calls: [feedCall(1, "Genomics Grant"), feedCall(2, "Imaging Grant")],
+    profiles: [
+      { id: 1, name: "Group A" },
+      { id: 2, name: "Group B" },
+    ],
+    decided: { 1: { 1: "hidden" }, 2: { 2: "hidden" } },
+  });
+  await gotoRendered(page, "/?profile=1&view=hidden");
+  await expect(page.locator('article[data-call-id="1"]')).toBeVisible();
+  await expect(page.locator('article[data-call-id="2"]')).toHaveCount(0);
+
+  const pick = railOf(page).locator('[data-profile-pick="2"]');
+  // THE LINK CARRIES THE VIEW. Without it the switch dumps the reader in the
+  // Inbox, and "switching profile changes which calls are hidden" cannot be
+  // observed at all.
+  await expect(pick).toHaveAttribute("href", "/?profile=2&view=hidden");
+  await pick.click();
+  await expect(page).toHaveURL(/\/\?profile=2&view=hidden$/);
+
+  // A DIFFERENT SET, not the same set relabelled.
+  await expect(page.locator('article[data-call-id="2"]')).toBeVisible();
+  await expect(page.locator('article[data-call-id="1"]')).toHaveCount(0);
+  await expect(railOf(page)).toContainText("Matching against Group B");
+  // And both reads followed the switch (T9-7).
+  expect(mock.requests).toContain("GET /api/calls?profile=2&view=hidden");
+  expect(mock.requests).toContain("GET /api/calls/decisions/counts?profile_id=2");
+});
+
+test("deciding the last call in the inbox reaches the inbox-zero screen", async ({ page }) => {
+  // TWO calls, because "the inbox ends" is a claim about the LAST decision. With
+  // one call the scenario cannot tell inbox-zero from a screen that renders the
+  // empty state whenever anything is decided.
+  await mockTriage(page, { calls: [feedCall(1, "Genomics Grant"), feedCall(2, "Imaging Grant")] });
+  await gotoRendered(page, "/");
+  await expect(cardsOf(page)).toHaveCount(2);
+
+  await page.keyboard.press("s");
+  await expect(cardsOf(page)).toHaveCount(1);
+  await expect(page.locator('[data-empty="inbox"]')).toHaveCount(0);
+
+  await page.keyboard.press("s");
+  const zero = page.locator('[data-empty="inbox"]');
+  await expect(zero).toBeVisible();
+  await expect(zero).toContainText("Inbox zero.");
+  // The profile's own name, not "your profile": the copy is per-view and
+  // per-profile, and a shared string would be wrong for one of them.
+  await expect(zero).toContainText("You have triaged every call matched against Group A.");
+  await expect(cardsOf(page)).toHaveCount(0);
+});
+
+test("a criterion chip expands to the funder's own sentence and the model's reasoning", async ({
+  page,
+}) => {
+  await mockTriage(page);
+  await gotoRendered(page, "/");
+  const chip = page.locator('button[data-criterion="eligibility"]');
+  await expect(chip).toHaveAttribute("aria-expanded", "false");
+  // HIDDEN UNTIL ASKED. Without this the two assertions after the click could be
+  // satisfied by a card that renders every quote all the time.
+  await expect(page.getByText(QUOTE_ELIGIBILITY)).toHaveCount(0);
+
+  await chip.click();
+  await expect(chip).toHaveAttribute("aria-expanded", "true");
+  // A BLOCKQUOTE carrying THIS chip's quote. The card already shows topic_fit's
+  // quote as the matched sentence with no interaction at all, so the two strings
+  // differ on purpose — otherwise this passes without the chip opening.
+  await expect(page.locator("blockquote", { hasText: QUOTE_ELIGIBILITY })).toHaveCount(1);
+  await expect(page.getByText("The model's reasoning:")).toBeVisible();
+  await expect(page.getByText(REASONING)).toBeVisible();
+});
+
+test("a saved call whose deadline has passed is still in Saved, marked closed", async ({ page }) => {
+  // D1. Saved and Hidden list DECISIONS, so `open_expr` is not applied to them:
+  // a researcher who saved a call because they intend to apply must not watch it
+  // vanish exactly when they go looking for it. The server half is pinned by
+  // tests/test_api_calls_feed_behavior.py; this is the browser half — the client
+  // must not re-impose the filter the server deliberately dropped.
+  await mockTriage(page, {
+    calls: [feedCall(1, "Genomics Grant"), feedCall(2, "Closed Grant", { deadlineDays: -30 })],
+    decided: { 1: { 2: "saved" } },
+  });
+  await gotoRendered(page, "/?view=saved");
+  const card = page.locator('article[data-call-id="2"]');
+  await expect(card).toBeVisible();
+  await expect(card.getByRole("link", { name: "Closed Grant" })).toBeVisible();
+  // MARKED closed, not silently listed as if it were still open.
+  await expect(card.locator('[data-deadline-state="closed"]')).toContainText("Closed ·");
+  // ...and no "-30 days left" beside it: a past deadline already reads "Closed".
+  await expect(card.locator('[data-field="days-left"]')).toHaveCount(0);
+  // Non-vacuous: the empty state would satisfy nothing above, but the count says
+  // the server's own answer for Saved still holds one call.
+  await expect(railOf(page).locator('[data-count="saved"]')).toHaveText("1");
+  await expect(page.locator('[data-empty="saved"]')).toHaveCount(0);
+});
+
+test("with profiles but none picked the landing page offers the picker, not the feed", async ({
+  page,
+}) => {
+  // The OTHER no-profile branch. "with no profile the landing page is an
+  // invitation" above covers a user with no profiles at all; this one has two and
+  // has selected neither, and sending that user to "Create a research profile"
+  // would ask them to duplicate what they already own.
+  await mockTriage(page, {
+    profileId: null,
+    profiles: [
+      { id: 4, name: "Molecular oncology" },
+      { id: 9, name: "Neuro imaging" },
+    ],
+  });
+  await gotoRendered(page, "/");
+  await expect(page.getByRole("heading", { name: "Pick a research profile." })).toBeVisible();
+  await expect(page.locator("[data-profile-pick]")).toHaveCount(2);
+  const pick = page.locator('[data-profile-pick="4"]');
+  await expect(pick).toHaveText("Molecular oncology");
+  // A PLAIN LINK carrying ?profile=, so back and reload both work — and NOT a
+  // write of the user's stored default.
+  await expect(pick).toHaveAttribute("href", "/?profile=4");
+  await expect(page.getByRole("link", { name: "Create another profile" })).toHaveAttribute(
+    "href",
+    "/profiles/new",
+  );
+  // NEITHER of the two screens it could be confused with: not the feed (the
+  // fixture still has a call), and not inbox zero, which says *you are done*
+  // rather than *you have not started*.
+  await expect(cardsOf(page)).toHaveCount(0);
+  await expect(page.getByText("Inbox zero.")).toHaveCount(0);
 });

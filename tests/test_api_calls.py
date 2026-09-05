@@ -86,6 +86,9 @@ def test_api_calls_returns_seeded_call_shape(authed_client, pg_session_factory):
 
     assert len(body["items"]) == 1
     item = body["items"][0]
+    # The match card (spec §5) reads its whole body off this row, so the key set
+    # is pinned by EQUALITY: a field silently dropped from CallOut is a blank
+    # card, and a field silently added is payload nobody asked for on every row.
     assert set(item) == {
         "id",
         "title",
@@ -95,10 +98,27 @@ def test_api_calls_returns_seeded_call_shape(authed_client, pg_session_factory):
         "source_name",
         "source_slug",
         "aggregate_score",
+        "programme",
+        "budget_min",
+        "budget_max",
+        "currency",
+        "url",
+        "summary",
+        "keywords",
+        "criteria",
+        "applicant_note_count",
+        "escalated",
     }
     assert item["source_slug"] == src_slug
     assert item["source_name"] == src_name
     assert item["aggregate_score"] == 82
+    assert item["url"] == "https://example.test/call/1"
+    assert item["keywords"] == []
+    # This call is ranked but has no criteria and no applicant notes -- the
+    # shape a Gemma-only ranking produces.
+    assert item["criteria"] == []
+    assert item["applicant_note_count"] == 0
+    assert item["escalated"] is False
 
     # Typed containers now expose their fields (would catch a key rename).
     assert set(body["pagination"]) == {"page", "limit", "has_prev", "has_next", "total"}

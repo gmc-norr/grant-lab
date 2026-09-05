@@ -375,6 +375,69 @@ class Subscription(Base):
     )
 
 
+class CallDecision(Base):
+    """A user's triage decision about one call, for one profile.
+
+    Supersedes the table migration 0071 drops. (Its NAME is deliberately not
+    written here: the "no consumer remains" gate greps src/ for it, and a
+    docstring mention makes that gate fail on correct code. The old name lives
+    in the migration, where the grep never looks.) The old key was
+    (user_id, call_id): a dismissal was GLOBAL, so a researcher matching against
+    two profiles who dismissed a call for one silently dismissed it for both. A
+    decision is per profile because that is the entire point of the table.
+
+    THERE IS NO 'undecided' STATE. Undecided is the ABSENCE of a row, so the
+    inbox query is a NOT EXISTS and a newly ingested call arrives undecided with
+    no backfill. Adding an 'undecided' value here would make every ingest write
+    a row per (user, profile, call) and break that.
+    """
+
+    __tablename__ = "call_decisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "profile_id", "call_id", name="uq_call_decisions_user_profile_call"
+        ),
+        CheckConstraint("state IN ('saved','hidden')", name="ck_call_decisions_state"),
+        # The inbox query is NOT EXISTS (user_id, profile_id, call_id) -- covered
+        # by the unique index above. This second index serves the Saved and
+        # Hidden LISTS, which filter (user_id, profile_id, state) and order by
+        # decided_at DESC (Phase 2 decision D12).
+        Index("ix_call_decisions_user_profile_state", "user_id", "profile_id", "state"),
+        # Both FKs CASCADE; without these, deleting a Call or a Profile
+        # sequentially scans the largest per-user table (D20).
+        Index("ix_call_decisions_call_id", "call_id"),
+        Index("ix_call_decisions_profile_id", "profile_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    profile_id: Mapped[int] = mapped_column(
+        ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False
+    )
+    call_id: Mapped[int] = mapped_column(ForeignKey("calls.id", ondelete="CASCADE"), nullable=False)
+    # 'saved' | 'hidden'. Enforced by ck_call_decisions_state, not a native enum:
+    # String + CHECK is what profiles.visibility uses (the closest precedent --
+    # ranking_remote_attempts.outcome is Text + CHECK), and it does not force an
+    # ALTER TYPE when a later release adds a state.
+    state: Mapped[str] = mapped_column(String(10), nullable=False)
+    # The user's own reasoning. NOTHING WRITES THIS IN RELEASE 1 -- the column is
+    # created now so the note UI is a frontend change later, not a migration.
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    decided_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # Who pressed the key. EQUAL TO user_id FOR EVERY ROW AN ENDPOINT CAN WRITE
+    # IN RELEASE 1: the key is per user, so a colleague's decision on a shared
+    # profile is their own row, not a rewrite of this one. Kept because spec 4.1
+    # asks for it, and so that a per-PROFILE key later does not need a migration
+    # for the column. NULLABLE + ON DELETE SET NULL: the backfill sets it to
+    # user_id, so RESTRICT would block deleting an ordinary account even though
+    # user_id itself CASCADEs. The decision still dies with its OWNER.
+    decided_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
+
 class CallRanking(Base):
     __tablename__ = "call_rankings"
     __table_args__ = (
@@ -481,20 +544,6 @@ class RankingJob(Base):
         nullable=False,
         server_default=func.now(),
         onupdate=func.now(),
-    )
-
-
-class UserCallDismissal(Base):
-    __tablename__ = "user_call_dismissals"
-
-    user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
-    )
-    call_id: Mapped[int] = mapped_column(
-        ForeignKey("calls.id", ondelete="CASCADE"), primary_key=True
-    )
-    dismissed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
 

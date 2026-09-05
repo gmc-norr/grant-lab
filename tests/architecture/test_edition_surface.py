@@ -135,6 +135,15 @@ def test_match_edition_still_serves_the_release_1_surface(monkeypatch, _base_env
 # /api/profiles/{profile_id}/viewers and /api/profiles/{profile_id}/visibility
 # (the sharing endpoints). The count below moves with the file, in the same
 # commit, so a route added without intent is still red.
+#
+# 2026-09-05, Call Match release 1 Task 3: 107 -> 109. The two added paths are
+# /api/calls/decisions/counts (the triage rail's counts) and
+# /api/calls/{call_id}/save. POST and DELETE /save are ONE line here -- this
+# file holds unique PATHS, not operations -- and the four `?view=` triage views
+# add none, being a query parameter on the existing /api/calls. Regenerating
+# this file alone leaves test_the_baseline_is_not_empty red on purpose: the
+# literal below is bumped BY HAND in the same commit, so a route that arrives
+# without intent cannot be waved through by a regeneration.
 _BASELINE = Path(__file__).with_name("full_edition_routes.txt")
 
 
@@ -163,7 +172,7 @@ def test_full_edition_route_set_matches_the_committed_baseline(monkeypatch, _bas
 def test_the_baseline_is_not_empty():
     """A baseline of zero routes would make the comparison above vacuous on an
     app that also served nothing."""
-    assert len(_BASELINE.read_text().split()) == 107
+    assert len(_BASELINE.read_text().split()) == 109
 
 
 def test_full_edition_is_unchanged(monkeypatch, _base_env):

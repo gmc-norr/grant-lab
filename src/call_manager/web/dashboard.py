@@ -26,13 +26,13 @@ from sqlalchemy.orm import Session, defer, joinedload
 
 from call_manager.db.models import (
     Call,
+    CallDecision,
     CallRanking,
     Profile,
     RankingJob,
     RankingJobStatus,
     Source,
     User,
-    UserCallDismissal,
 )
 from call_manager.web.profile_access import can_read_profile, readable_profile_ids
 
@@ -46,6 +46,49 @@ DASHBOARD_HIGH_SCORE_THRESHOLD = 70
 # ranked branch; for the unranked branch we offer the two ordering primitives
 # that don't depend on rankings.
 Sort = Literal["newest", "deadline"]
+
+# The four views of ONE query. Everything else -- source, q, show_closed, the
+# ranking join, pagination -- is shared, so a saved call renders with the SAME
+# card as an inbox call and there is no second endpoint to keep in sync.
+#
+# 'archive' is the default so an omitted parameter is exactly today's behaviour:
+# the full edition sends no `view` and cannot notice this change.
+#
+# NOT re-used as the type of the HTTP query parameter in web/api/calls.py: ruff
+# B008 exempts a `Query()` default under an INLINE Literal but flags it under a
+# module-level alias, which is why the existing `sort` parameter duplicates its
+# Literal inline too.
+View = Literal["archive", "inbox", "saved", "hidden"]
+
+
+def _decision_predicate(view: View, *, user_id: int, profile_id: int | None):
+    """The ONLY thing that differs between the four views' row sets.
+
+    profile_id is None -> archive/inbox: the full edition's unranked archive,
+    suppressing a call hidden on ANY of the user's profiles (today's behaviour
+    verbatim; NOT "hidden on every profile", a different query that would
+    re-surface calls the user has dealt with). For saved/hidden with no profile
+    there is nothing to scope a decision to, and the ANY rule would WIDEN --
+    so those views are EMPTY (Phase 2 decision D8), never the cross-profile
+    union. The match frontend still needs a 200 with `effective.profile_id:
+    null` to branch to its onboarding screen, which is why this is an empty
+    page rather than a 422.
+    """
+    rows = select(CallDecision.call_id).where(CallDecision.user_id == user_id)
+    if profile_id is not None:
+        rows = rows.where(CallDecision.profile_id == profile_id)
+    if view == "inbox":
+        return Call.id.notin_(rows.scalar_subquery())
+    if view in ("saved", "hidden"):
+        if profile_id is None:
+            return Call.id.in_([])  # empty, never the union
+        return Call.id.in_(rows.where(CallDecision.state == view).scalar_subquery())
+    if view != "archive":
+        # The HTTP Literal is the guard for the route; this is the tripwire for
+        # a caller INSIDE the package that invents a fifth name -- without it a
+        # typo silently gets the archive.
+        raise ValueError(f"unknown view {view!r}")
+    return Call.id.notin_(rows.where(CallDecision.state == "hidden").scalar_subquery())
 
 
 @dataclass
@@ -259,6 +302,78 @@ def _search_predicate(q: str):
     return and_(*term_clauses)
 
 
+def _base_call_filters(
+    view: View, *, user_id: int, profile_id: int | None, source_id: int | None, q: str | None
+):
+    """The ONE definition of the call-matching filters, shared by the list, its
+    badges and the rail counts.
+
+    One definition, so the rail cannot say "3" over a feed showing 2. The `view`
+    predicate is the only per-view part; `source` and free text restrict the same
+    corpus in every view. `build_dashboard_view` and `count_decision_views` are
+    the only callers and MUST NOT grow separate copies of this -- a second copy
+    is how the rail and the feed drift apart under a filter nobody re-tested.
+
+    `open_expr` is deliberately NOT here. It is applied by the caller, because it
+    is applied CONDITIONALLY and per view: `show_closed` governs inbox/archive
+    and never saved/hidden (D1). Folding it in would force both callers to undo
+    it for two of the four views.
+    """
+    filters = [_decision_predicate(view, user_id=user_id, profile_id=profile_id)]
+    if source_id is not None:
+        filters.append(Call.source_id == source_id)
+    if q and q.strip():
+        filters.append(_search_predicate(q.strip()))
+    return filters
+
+
+def count_decision_views(
+    session: Session,
+    *,
+    user_id: int,
+    profile_id: int,
+    source: str | None = None,
+    q: str | None = None,
+    show_closed: bool = False,
+) -> dict[str, int]:
+    """How many calls sit in each triage view, for ONE profile. Inbox-zero.
+
+    THREE calls to `_base_call_filters`, one per view -- not one shared "the list
+    predicate" call. No single predicate is both: the inbox excludes every
+    decision, saved and hidden select one state each.
+
+    Takes the list's filters, with the LIST'S NAMES, defaults and semantics --
+    `source`, `q`, `show_closed` -- so the rail and the feed agree under a filter
+    and not only in the unfiltered case. `open_expr` is applied exactly as the
+    list applies it: to `inbox` unless `show_closed`, and NEVER to `saved` or
+    `hidden`, which list DECISIONS and keep a call that has closed (D1).
+
+    `min_score` is deliberately NOT accepted (D18). A score floor needs the
+    ranking join and `score_floor_active`'s three-way rule, and duplicating that
+    here is exactly how the rail and the feed drift; no release-1 surface can
+    observe the difference (the match edition ships no `min_score` control). A
+    `min_score`-filtered list can therefore show FEWER calls than these counts
+    report for the same view.
+
+    `profile_id` is REQUIRED, unlike the list's optional `?profile`. There is no
+    honest "counts for the unranked archive": the archive is one view, not three,
+    and saved/hidden with no profile are empty by D8.
+    """
+    open_expr = or_(Call.deadline.is_(None), Call.deadline > datetime.now(UTC))
+    # Unknown/stale slug degrades to "all sources", exactly as the list does.
+    source_id = session.scalar(select(Source.id).where(Source.slug == source)) if source else None
+
+    def count(view: View) -> int:
+        filters = _base_call_filters(
+            view, user_id=user_id, profile_id=profile_id, source_id=source_id, q=q
+        )
+        if not show_closed and view not in ("saved", "hidden"):
+            filters.append(open_expr)
+        return session.scalar(select(func.count()).select_from(Call).where(*filters)) or 0
+
+    return {"inbox": count("inbox"), "saved": count("saved"), "hidden": count("hidden")}
+
+
 def build_dashboard_view(
     session: Session,
     *,
@@ -271,6 +386,7 @@ def build_dashboard_view(
     show_closed: bool,
     q: str | None = None,
     min_score: int | None = None,
+    view: View = "archive",
 ) -> DashboardView:
     """Build the dashboard read-model (read-only; no writes).
 
@@ -307,11 +423,20 @@ def build_dashboard_view(
         if profile_obj is None:
             profile_id = None
 
-    # `CallOut` (web/api/calls.py) is built from eight scalars; none of them is
-    # `embedding`, `full_text` or `raw`. Selecting them anyway made each row ship
-    # a 1024-dim vector as ~9 kB of text for pgvector's PURE-PYTHON parser to turn
-    # back into 1024 floats — measured at 71% (50 rows) and 78% (200 rows) of the
-    # whole ORM row-load, on data the response never contains.
+    # THREE columns, and this list is the whole of what a dashboard row must not
+    # load: `embedding`, `full_text` and `raw`. `CallOut` (web/api/calls.py)
+    # renders 18 fields and none of them is one of these — the match card's body
+    # (programme, budget, url, `summary`, keywords) is plain columns the query
+    # already loads, so widening the response does NOT mean widening this tuple.
+    # Selecting the three anyway made each row ship a 1024-dim vector as ~9 kB of
+    # text for pgvector's PURE-PYTHON parser to turn back into 1024 floats —
+    # measured at 71% (50 rows) and 78% (200 rows) of the whole ORM row-load, on
+    # data the response never contains.
+    #
+    # The list may only ever SHRINK toward those three. In particular `summary`
+    # must NOT be added back (D10): it is rendered on every card, so deferring it
+    # buys nothing and costs one extra SELECT per row — an N+1 where the payload
+    # lever is a `?fields=` projection instead.
     #
     # `raiseload=True` makes this a contract, not a hope: a consumer that reads
     # one of these off a dashboard row raises instead of silently issuing one
@@ -327,6 +452,14 @@ def build_dashboard_view(
     # When a profile is selected, LEFT JOIN call_rankings for THAT profile and
     # sort by score desc (nulls last). Without a profile, fall back to the
     # unranked sort (newest/deadline).
+    # Saved and Hidden are DECISION views -- a log of what the user just did --
+    # so they are ordered most-recent-decision-first (D12), not by score. The
+    # join IS the EXISTS: (user_id, profile_id, call_id) is unique, so it can
+    # match at most one row per call, and it is what puts `decided_at` in scope
+    # for the ORDER BY. It cannot fire without a profile: `_decision_predicate`
+    # returns the empty set for saved/hidden when profile_id is None (D8), and
+    # profile_id is None there is exactly the branch below.
+    decision_ordered = view in ("saved", "hidden") and profile_id is not None
     if profile_id is not None and profile_obj is not None:
         stmt = (
             select(Call, CallRanking)
@@ -335,16 +468,24 @@ def build_dashboard_view(
                 CallRanking,
                 (CallRanking.call_id == Call.id) & (CallRanking.profile_id == profile_id),
             )
-            .order_by(
+        )
+        if decision_ordered:
+            stmt = stmt.join(
+                CallDecision,
+                (CallDecision.call_id == Call.id)
+                & (CallDecision.user_id == user_id)
+                & (CallDecision.profile_id == profile_id)
+                & (CallDecision.state == view),
+            ).order_by(CallDecision.decided_at.desc(), Call.id.desc())
+        else:
+            stmt = stmt.order_by(
                 closed_expr.asc(),  # open (False=0) before closed (True=1)
                 CallRanking.aggregate_score.desc().nullslast(),
                 CallRanking.embed_similarity.desc().nullslast(),
                 Call.published_at.desc().nullslast(),
                 Call.id.desc(),
             )
-            .limit(limit)
-            .offset(offset)
-        )
+        stmt = stmt.limit(limit).offset(offset)
     else:
         stmt = (
             select(Call, None)
@@ -354,21 +495,21 @@ def build_dashboard_view(
             .offset(offset)
         )
 
-    dismissed_subq = (
-        select(UserCallDismissal.call_id)
-        .where(UserCallDismissal.user_id == user_id)
-        .scalar_subquery()
-    )
     # Filters shared by the page query and the summary aggregates, so the badges
-    # reflect the whole filtered dataset — not just the page.
-    base_filters = [Call.id.notin_(dismissed_subq)]
-    if source_id is not None:
-        base_filters.append(Call.source_id == source_id)
-    if q and q.strip():
-        base_filters.append(_search_predicate(q.strip()))
-    # The list (and its pagination total) hide closed calls by default.
+    # reflect the whole filtered dataset — not just the page. `profile_id` here
+    # is the EFFECTIVE one: an unknown/inactive/unreadable id was degraded to
+    # None above, so the decision scope and the ranking join always agree about
+    # which profile this is.
+    base_filters = _base_call_filters(
+        view, user_id=user_id, profile_id=profile_id, source_id=source_id, q=q
+    )
+    # The list (and its pagination total) hide closed calls by default -- but
+    # NOT in the Saved and Hidden views (D1). Those list DECISIONS: a researcher
+    # who saved a call because they intend to apply must not watch it vanish
+    # exactly when they go looking for it, and a hidden call that closed is
+    # still a hidden call. `show_closed` therefore affects only inbox/archive.
     list_filters = list(base_filters)
-    if not show_closed:
+    if not show_closed and view not in ("saved", "hidden"):
         list_filters.append(open_expr)
     # Score floor: ranked branch only (unranked calls have no score). The ranked
     # `stmt` already has CallRanking in its FROM, so the predicate resolves there;

@@ -49,6 +49,7 @@ Read this before claiming two tables share, or do not share, a rule.
 | `attachment_jobs` | `AttachmentJob` | 9 | 2 | 2 | 2 |
 | `attachments` | `Attachment` | 12 | 2 | 1 | 1 |
 | `branches` | `Branch` | 5 | 1 | 0 | 0 |
+| `call_decisions` | `CallDecision` | 8 | 4 | 1 | 3 |
 | `call_ranking_criteria` | `CallRankingCriterion` | 7 | 2 | 0 | 0 |
 | `call_rankings` | `CallRanking` | 17 | 2 | 0 | 1 |
 | `call_rubrics` | `CallRubric` | 7 | 1 | 0 | 0 |
@@ -82,7 +83,6 @@ Read this before claiming two tables share, or do not share, a rule.
 | `subscriptions` | `Subscription` | 4 | 2 | 0 | 0 |
 | `turn_jobs` | `TurnJob` | 11 | 3 | 1 | 2 |
 | `uncited_claims_jobs` | `UncitedClaimsJob` | 15 | 2 | 1 | 2 |
-| `user_call_dismissals` | `UserCallDismissal` | 3 | 2 | 0 | 0 |
 | `user_claim_annotations` | `UserClaimAnnotation` | 19 | 3 | 2 | 1 |
 | `users` | `User` | 16 | 2 | 3 | 1 |
 | `workspace_events` | `WorkspaceEvent` | 6 | 2 | 0 | 2 |
@@ -125,6 +125,7 @@ Every CHECK constraining a `status`-like column. Divergence here is a real defec
 | `attachment_jobs` | `workspace_id` → `workspaces.id` (CASCADE)<br>`attachment_id` → `attachments.id` (CASCADE) |
 | `attachments` | `workspace_id` → `workspaces.id` (CASCADE)<br>`uploaded_by` → `users.id` (RESTRICT) |
 | `branches` | `workspace_id` → `workspaces.id` (CASCADE) |
+| `call_decisions` | `user_id` → `users.id` (CASCADE)<br>`profile_id` → `profiles.id` (CASCADE)<br>`call_id` → `calls.id` (CASCADE)<br>`decided_by` → `users.id` (SET NULL) |
 | `call_ranking_criteria` | `call_id` → `calls.id` (CASCADE)<br>`profile_id` → `profiles.id` (CASCADE) |
 | `call_rankings` | `call_id` → `calls.id` (CASCADE)<br>`profile_id` → `profiles.id` (CASCADE) |
 | `call_rubrics` | `call_id` → `calls.id` (CASCADE) |
@@ -157,7 +158,6 @@ Every CHECK constraining a `status`-like column. Divergence here is a real defec
 | `subscriptions` | `user_id` → `users.id` (CASCADE)<br>`profile_id` → `profiles.id` (CASCADE) |
 | `turn_jobs` | `workspace_id` → `workspaces.id` (CASCADE)<br>`user_turn_id` → `chat_turns.id` (SET NULL)<br>`submitted_by_user_id` → `users.id` (RESTRICT) |
 | `uncited_claims_jobs` | `workspace_id` → `workspaces.id` (CASCADE)<br>`requested_by` → `users.id` (SET NULL) |
-| `user_call_dismissals` | `user_id` → `users.id` (CASCADE)<br>`call_id` → `calls.id` (CASCADE) |
 | `user_claim_annotations` | `workspace_id` → `workspaces.id` (CASCADE)<br>`reference_id` → `references.id` (SET NULL)<br>`resolved_by_user_id` → `users.id` (SET NULL) |
 | `users` | `approved_by_user_id` → `users.id` (SET NULL)<br>`default_profile_id` → `profiles.id` (SET NULL) |
 | `workspace_events` | `workspace_id` → `workspaces.id` (CASCADE)<br>`actor_id` → `users.id` (SET NULL) |

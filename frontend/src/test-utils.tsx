@@ -6,7 +6,10 @@ import { MemoryRouter } from "react-router-dom";
 
 import { theme } from "./theme/theme";
 
-type Options = { route?: string } & Omit<RenderOptions, "wrapper">;
+// `queryClient`: a test that spies on invalidateQueries must hold the SAME
+// client the component uses, so the instance is injectable rather than buried
+// in here. Defaulted, so every existing caller is unchanged.
+type Options = { route?: string; queryClient?: QueryClient } & Omit<RenderOptions, "wrapper">;
 
 export function queryWrapper(queryClient = new QueryClient()) {
   return function QueryWrapper({ children }: { children: ReactNode }) {
@@ -18,8 +21,8 @@ export function queryWrapper(queryClient = new QueryClient()) {
 // MantineProvider is forced to the dark scheme to match production. Components
 // using useLocation / NavLink get a MemoryRouter at `route` (default "/").
 export function renderWithProviders(ui: ReactElement, opts: Options = {}) {
-  const { route = "/", ...rest } = opts;
-  const qc = new QueryClient();
+  const { route = "/", queryClient, ...rest } = opts;
+  const qc = queryClient ?? new QueryClient();
   function Wrapper({ children }: { children: ReactNode }) {
     return (
       <MantineProvider theme={theme} defaultColorScheme="dark">

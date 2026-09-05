@@ -92,6 +92,23 @@ PREDICATE_PINS: tuple[str, ...] = (
     # tests/test_profile_access.py::test_sharing_ops_404_for_a_stranger_with_no_existence_oracle
     # did go red, so the hole was in THIS file, not in the coverage.
     "web/api/profiles.py::_profile_for_edit",
+    # The decision write rule. `POST /api/calls/{id}/hide` takes a
+    # caller-supplied profile_id and writes a row keyed on it, so it resolves a
+    # profile for a user like any other surface here. It is pinned BY HAND
+    # because nothing in this file could find it on its own: the pin tests are
+    # parametrized over these tuples, and `test_no_module_builds_a_second_read
+    # _predicate` only looks for a HAND-ROLLED predicate -- so a brand-new
+    # function that correctly calls can_read_profile is invisible to every test
+    # in the file until someone writes its name down.
+    #
+    # `unhide_call` and `list_hidden_calls` are DELIBERATELY ABSENT. They take
+    # the same caller-supplied profile_id and deliberately do NOT check it:
+    # every row they can reach is already scoped to `user_id == user.id`, so
+    # there is nothing to leak, and adding the check would strand a user's own
+    # rows behind a 404 the moment a profile is deactivated or un-shared. Pinned
+    # from the other side by tests/web/test_call_decisions_api.py, by
+    # test_unhide_after_the_profile_is_unshared_still_removes_the_row.
+    "web/api/calls.py::_readable_active_profile_or_404",
 )
 
 # Pinned on DELEGATION rather than on the predicate. `set_default` is a
@@ -109,32 +126,63 @@ DELEGATION_PINS: dict[str, str] = {
     "web/api/profiles.py::replace_profile_viewers": "_profile_for_edit",
     "web/api/profiles.py::add_profile_viewer": "_profile_for_edit",
     "web/api/profiles.py::set_profile_visibility": "_profile_for_edit",
+    # The decision write route. `hide_call` itself contains no `can_read_profile`
+    # call -- it delegates the whole check to `_readable_active_profile_or_404`
+    # (pinned above), which is the shape this dict exists for. What must not
+    # happen is the route quietly dropping the call and writing straight to
+    # call_decisions with a profile_id it never validated.
+    "web/api/calls.py::hide_call": "_readable_active_profile_or_404",
+    # The other two decision surfaces that take a caller-supplied profile_id and
+    # act on it. `save_call` WRITES a row keyed on it; `get_decision_counts`
+    # answers a per-profile question about that user's decisions, so an
+    # unreadable id there is an existence oracle just as much as on a write.
+    # Both are pinned BY HAND for the reason spelled out above: the pin tests
+    # are parametrized over these literals, so a brand-new function is invisible
+    # to every test in this file until someone writes its name down (T2-13).
+    #
+    # `unsave_call` is DELIBERATELY ABSENT, exactly like `unhide_call` above: it
+    # takes the same caller-supplied profile_id and deliberately does NOT check
+    # it, because every row it can delete is already scoped to
+    # `user_id == user.id` and checking would strand a user's own saved row
+    # behind a 404 the moment the profile is deactivated or un-shared. Pinned
+    # from the other side by tests/web/test_call_decisions_api.py::
+    # test_unsave_after_the_profile_is_deactivated_still_removes_the_row.
+    "web/api/calls.py::save_call": "_readable_active_profile_or_404",
+    "web/api/calls.py::get_decision_counts": "_readable_active_profile_or_404",
 }
 
 # The pin sets, written out a SECOND time as literals. Deliberate duplication:
 # the point is that changing PREDICATE_PINS alone cannot pass. A legitimate new
 # surface changes both, in one diff, where a reviewer sees the pair.
-EXPECTED_PREDICATE_PINS = frozenset({
-    "web/api/profiles.py::list_profiles",
-    "web/api/profiles.py::get_profile",
-    "web/api/profiles.py::update_profile",
-    "web/api/profiles.py::_profile_for_edit",
-    "web/dashboard.py::resolve_profile_selection",
-    "web/dashboard.py::set_default_profile",
-    "web/dashboard.py::build_dashboard_view",
-    "web/api/me.py::get_settings",
-    "web/api/me.py::update_subscriptions",
-    "web/api/calls.py::get_call_detail",
-    "digest/assemble.py::assemble_for_user",
-    "web/api/workspaces.py::create_workspace_api",
-})
-EXPECTED_DELEGATION_PINS = frozenset({
-    "web/api/me.py::set_default",
-    "web/api/profiles.py::list_profile_viewers",
-    "web/api/profiles.py::replace_profile_viewers",
-    "web/api/profiles.py::add_profile_viewer",
-    "web/api/profiles.py::set_profile_visibility",
-})
+EXPECTED_PREDICATE_PINS = frozenset(
+    {
+        "web/api/profiles.py::list_profiles",
+        "web/api/profiles.py::get_profile",
+        "web/api/profiles.py::update_profile",
+        "web/api/profiles.py::_profile_for_edit",
+        "web/dashboard.py::resolve_profile_selection",
+        "web/dashboard.py::set_default_profile",
+        "web/dashboard.py::build_dashboard_view",
+        "web/api/me.py::get_settings",
+        "web/api/me.py::update_subscriptions",
+        "web/api/calls.py::get_call_detail",
+        "web/api/calls.py::_readable_active_profile_or_404",
+        "digest/assemble.py::assemble_for_user",
+        "web/api/workspaces.py::create_workspace_api",
+    }
+)
+EXPECTED_DELEGATION_PINS = frozenset(
+    {
+        "web/api/me.py::set_default",
+        "web/api/profiles.py::list_profile_viewers",
+        "web/api/profiles.py::replace_profile_viewers",
+        "web/api/profiles.py::add_profile_viewer",
+        "web/api/profiles.py::set_profile_visibility",
+        "web/api/calls.py::hide_call",
+        "web/api/calls.py::save_call",
+        "web/api/calls.py::get_decision_counts",
+    }
+)
 
 
 # --------------------------------------------------------------------------
@@ -448,9 +496,7 @@ def test_pinned_function_still_exists(qualname: str) -> None:
     _resolve(qualname)
 
 
-@pytest.mark.parametrize(
-    "qualname", [pytest.param(q, id=q) for q in PREDICATE_PINS]
-)
+@pytest.mark.parametrize("qualname", [pytest.param(q, id=q) for q in PREDICATE_PINS])
 def test_pinned_surface_calls_the_single_source(qualname: str) -> None:
     fn = _resolve(qualname)
     called = _body_calls(fn)
@@ -573,11 +619,23 @@ def test_pin_set_has_not_shrunk() -> None:
     The plan's own history is the reason: its first draft pinned seven surfaces
     and outside review found three more; the controller found an eleventh, and
     the final whole-branch review a twelfth (`create_workspace_api`, PD-9). A
-    tuple that can quietly lose an entry is the same failure in reverse. 11 and
-    1 are the counts MEASURED after that twelfth pin landed (2026-09-04); the
-    11 was 10 until `web/api/workspaces.py::create_workspace_api` was added. A
-    task that legitimately adds or removes a surface changes these numbers in
-    the same diff, where a reviewer sees it.
+    tuple that can quietly lose an entry is the same failure in reverse.
+
+    THE COUNTS ARE 13 PREDICATE PINS AND 8 DELEGATION PINS, MEASURED on
+    2026-09-05 after the save/counts endpoints landed. The thirteenth predicate
+    pin is `web/api/calls.py::_readable_active_profile_or_404` (the decision
+    write rule) and the sixth delegation pin is `hide_call` delegating to it;
+    the seventh and eighth are `save_call` and `get_decision_counts`, the other
+    two decision surfaces that resolve a caller-supplied profile_id. The
+    predicate count did NOT move for those two -- they delegate to the same
+    helper, which is the shape DELEGATION_PINS exists for. Before the
+    `call_decisions` commit the real sets held 12 and 5 -- while this docstring
+    still said "11 and 1", which it had said since the twelfth pin
+    (`create_workspace_api`, PD-9) landed on 2026-09-04. A count in prose rots;
+    that is why the assertions below are on
+    the SETS and on the length, and why this paragraph is the only place a
+    number is written. A task that legitimately adds or removes a surface
+    changes both literal sets in the same diff, where a reviewer sees it.
     """
     assert set(PREDICATE_PINS) == EXPECTED_PREDICATE_PINS, {
         "unexpectedly added": sorted(set(PREDICATE_PINS) - EXPECTED_PREDICATE_PINS),
