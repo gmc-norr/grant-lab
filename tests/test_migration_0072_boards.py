@@ -5,10 +5,10 @@ one"). This file asserts what `test_schema_drift.py` would NOT catch on its
 own: a CHECK constraint's actual body (compare_metadata does not compare
 CHECK bodies) and the composite PK on `board_items`.
 
-`pg_session_factory` is requested solely for its teardown TRUNCATE, so a test
-that leaves the shared session-scoped container below head does not break
-every later test on the same xdist worker (precedent:
-tests/test_migration_0071_call_decisions.py).
+Every test here uses `pg_session_factory` as its session and reads the
+already-migrated shared container; none drives alembic itself. Its teardown
+TRUNCATE is what keeps a failed INSERT from leaking a row into a later test on
+the same xdist worker.
 """
 
 from __future__ import annotations

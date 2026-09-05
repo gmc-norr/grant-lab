@@ -20,13 +20,6 @@ from sqlalchemy import inspect, text
 from sqlalchemy.exc import IntegrityError
 
 
-def _mk_user(s, email: str) -> int:
-    return s.scalar(
-        text("INSERT INTO users (email, status) VALUES (:e, 'active') RETURNING id"),
-        {"e": email},
-    )
-
-
 # ---------------------------------------------------------------------------
 # Gate 1 - the column exists and is NOT NULL.
 # ---------------------------------------------------------------------------
