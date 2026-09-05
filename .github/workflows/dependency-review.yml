@@ -18,6 +18,6 @@ jobs:
 
       - name: Dependency Review
         # actions/dependency-review-action ships no moving major tag; pin the latest v4.x release.
-        uses: actions/dependency-review-action@bc41886e18ea39df68b1b1245f4184881938e050 # v4.7.2
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: high
