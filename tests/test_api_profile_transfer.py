@@ -437,3 +437,41 @@ def test_transfer_when_recipient_already_has_a_subscription(
     with pg_session_factory() as s:
         rows = s.query(Subscription).filter_by(profile_id=pid, user_id=new_owner_id).all()
         assert len(rows) == 1
+        # The seeded digest_enabled=False is load-bearing: len(rows) == 1 alone
+        # passes a delete-then-reinsert, which silently resets the recipient's
+        # preference -- the same hazard the outgoing owner's case pins.
+        assert rows[0].digest_enabled is False
+
+
+def test_a_default_pointing_at_a_DIFFERENT_profile_survives(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """The second conjunct of the Open-7 clear, which the pair above cannot see.
+
+    Both Open-7 tests set default_profile_id to the profile being transferred,
+    so `if outgoing_lost_read and outgoing.default_profile_id == p.id` passes
+    them with the second half deleted -- and that mutant wipes a default
+    pointing at an UNRELATED profile the outgoing owner still owns and can
+    still read. Here the owner's default is a second profile they keep.
+    """
+    app = _setup(monkeypatch, pg_url)
+    with pg_session_factory() as s:
+        owner = _user(s, "owner16@umu.se")
+        _user(s, "newowner16@umu.se")
+        transferred = _profile(s, owner, visibility="private", name="transferred")
+        kept = _profile(s, owner, visibility="private", name="kept")
+        s.flush()
+        owner.default_profile_id = kept.id
+        s.commit()
+        pid, kept_id, owner_id = transferred.id, kept.id, owner.id
+
+    client = _client_for(app, owner_id)
+    with client:
+        r = client.put(f"/api/profiles/{pid}/owner", json={"email": "newowner16@umu.se"})
+    assert r.status_code == 200, r.text
+    # The transfer DID cost read on the transferred profile...
+    assert r.json()["outgoing_lost_read"] is True
+
+    with pg_session_factory() as s:
+        # ...but the default points somewhere else entirely and must survive.
+        assert s.get(User, owner_id).default_profile_id == kept_id

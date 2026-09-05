@@ -827,6 +827,11 @@ def transfer_profile_owner(
                     ProfileViewer.user_id == outgoing.id,
                 )
             )
+            # Unlike the three `outgoing is not None` guards this function
+            # dropped, this one STAYS: the owner-never-has-a-row invariant is
+            # docstring-only (db/models/profiles.py:135-136), enforced by the
+            # three writers agreeing and not by the database, so a row here is
+            # unreachable-by-agreement rather than unreachable-by-constraint.
             if already_viewer is None:
                 session.add(ProfileViewer(profile_id=p.id, user_id=outgoing.id))
 
