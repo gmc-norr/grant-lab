@@ -132,30 +132,47 @@ export function TriageFeed() {
   // the array can shrink under the cursor between renders.
   const focused = items.length === 0 ? -1 : Math.min(focusIndex, items.length - 1);
 
-  // A new view is a new list; the cursor belongs at the top of it (D20).
+  // A new view OR a new page is a new list; the cursor belongs at the top of
+  // it (D20). `params.page` too, not just `view`: the Next-page link (D15)
+  // changes only `?page=`, so a view-only dependency here left a page-2 load
+  // holding the page-1 index — e.g. focused on a card that does not exist at
+  // this scroll position, or on the wrong one entirely.
   useEffect(() => {
     setFocusIndex(0);
     hasMoved.current = false;
-  }, [view]);
+  }, [view, params.page]);
+
+  // The card actually holding focus, so the effect below re-runs when a
+  // decision changes WHICH call sits at `focused` even though the numeric
+  // index itself is unchanged (a decided card at a non-final index unmounts,
+  // the ones after it shift down one slot, and the id at `focused` is now a
+  // different call's — the index never moved so `[focused]` alone would not
+  // re-fire and the newly-shifted card would sit expanded but un-focused).
+  const focusedCallId = focused >= 0 ? items[focused]?.id : undefined;
 
   useEffect(() => {
     if (!hasMoved.current || focused < 0) return;
     cardEls.current[focused]?.focus();
     cardEls.current[focused]?.scrollIntoView?.({ block: "nearest" });
-  }, [focused]);
+  }, [focused, focusedCallId]);
 
   const decide = useCallback(
     (kind: "save" | "hide", call: CallItem) => {
       // A decision belongs to a profile; with none resolved there is nowhere to
       // record it and the route would 422.
       if (profileId === null) return;
+      // D20, restated HERE rather than trusted to the caller: the "Return to
+      // inbox" button (TriageCard) calls undecide() directly, bypassing the key
+      // listener's own isFetching check entirely, and keepPreviousData renders
+      // that button on stale rows while the next view's fetch is in flight.
+      if (isFetching) return;
       const args = { id: call.id, profileId };
       if (kind === "save") save.mutate(args);
       // useHideCall predates the rail and invalidates only ["calls"], so the
       // counts are refreshed here explicitly. See invalidateDecisions.
       else hide.mutate(args, { onSuccess: () => invalidateDecisions(qc) });
     },
-    [hide, profileId, qc, save],
+    [hide, isFetching, profileId, qc, save],
   );
 
   // UN-DECIDE (D2): back to undecided, which is the ABSENCE of a decision row —
@@ -164,6 +181,8 @@ export function TriageFeed() {
   const undecide = useCallback(
     (call: CallItem) => {
       if (profileId === null) return;
+      // See decide()'s comment: this is the guard the button actually needs.
+      if (isFetching) return;
       const args = { id: call.id, profileId };
       if (view === "saved") unsave.mutate(args);
       else if (view === "hidden")
@@ -171,7 +190,7 @@ export function TriageFeed() {
         unhide.mutate(args, { onSuccess: () => invalidateDecisions(qc) });
       // The Inbox has no decision row to delete, so `u` there does nothing.
     },
-    [profileId, qc, unhide, unsave, view],
+    [isFetching, profileId, qc, unhide, unsave, view],
   );
 
   useEffect(() => {

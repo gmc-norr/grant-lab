@@ -610,3 +610,153 @@ describe("D20 — a key cannot decide a card from the list it just left", () => 
     });
   });
 });
+
+describe("reviewer Minor 1 — decide()/undecide() are gated on isFetching, not just the key listener", () => {
+  it('the "Return to inbox" button issues no request while a refetch is in flight, and issues it once released', async () => {
+    // The D20 comment on the key listener only covers keystrokes. TriageCard's
+    // "Return to inbox" button calls onUndecide (= undecide()) directly and
+    // never goes near the listener, and keepPreviousData renders that button
+    // on the STALE view's rows for the whole window a refetch is in flight —
+    // e.g. a Saved→Hidden switch shows the Hidden button over a row from the
+    // list being left. Without the guard INSIDE undecide()/decide() themselves,
+    // a click in that window issues the mutation anyway.
+    let release = () => {};
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    const { post, del } = stub({ hold: held });
+    renderFeed("/?view=hidden");
+    await screen.findByText("Call one");
+
+    // Put a refetch in flight through a DIFFERENT trigger than the one under
+    // test: `s` in Hidden is a flip (still a valid action, kind "save") whose
+    // onSuccess invalidates ["calls"], and the held stub keeps that refetch
+    // hanging — the same D20 window, reached a different way.
+    fireEvent.keyDown(document.body, { key: "s" });
+    await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/1/save"]));
+
+    const delCountBefore = del.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "Return to inbox" }));
+    // Awaited flush, not a synchronous assertion — TanStack defers mutate() to
+    // a microtask (T7-1).
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(del.mock.calls.length).toBe(delCountBefore);
+
+    // POSITIVE CONTROL, same render: once the refetch settles, the identical
+    // click does issue the DELETE — so a button whose handler is simply
+    // broken cannot pass this gate.
+    release();
+    await waitFor(() => expect(screen.getByText("Call one")).toBeInTheDocument());
+    // Click INSIDE waitFor and retried, like the D20 gate's own positive
+    // control: isFetching does not necessarily read false the instant
+    // release() resolves, so a single un-retried click can race the state
+    // update it depends on.
+    await waitFor(() => {
+      fireEvent.click(screen.getByRole("button", { name: "Return to inbox" }));
+      expect(del.mock.calls.length).toBe(delCountBefore + 1);
+    });
+  });
+});
+
+describe("reviewer Minor 2 — focus follows a decided card, not just the numeric index", () => {
+  it("s on a non-final card refocuses the DOM article that slides into its slot", async () => {
+    // Local mock, not the shared stub(): this gate needs the refetched list to
+    // actually be SHORTER after a decision, which the shared stub's static
+    // `items` cannot express — every other gate is content with a fixed list,
+    // so that behaviour is not folded into stub() itself. THREE cards; the
+    // decision removes the SECOND ("Call two") and "Call three" slides into
+    // its slot — the numeric focus index (1) never moves, only the id sitting
+    // at it does, so a focus effect keyed on the index alone would not re-run
+    // and the newly-shifted card would sit expanded but un-focused.
+    const decidedIds = new Set<number>();
+    vi.spyOn(clientMod.api, "GET").mockImplementation((async (path: string) => {
+      if (path === "/api/calls/decisions/counts") {
+        return {
+          data: { inbox: 99, saved: 4, hidden: 12 },
+          error: undefined,
+          response: new Response(),
+        };
+      }
+      const visible = THREE.filter((c) => !decidedIds.has(c.id));
+      return {
+        data: {
+          items: visible,
+          summary: { open_count: 0, high_score: 0, soon_deadline: 0 },
+          pagination: {
+            page: 1,
+            limit: 50,
+            has_prev: false,
+            has_next: false,
+            total: visible.length,
+          },
+          ranking: { pending: 0, failed: 0 },
+          effective: { profile_id: 7, source: null, sort: "newest", show_closed: false },
+          facets: { sources: [], profiles: [{ id: 7, name: "Molecular oncology" }] },
+        },
+        error: undefined,
+        response: new Response(),
+      };
+    }) as never);
+    vi.spyOn(clientMod.api, "POST").mockImplementation((async (_path: string, opts: unknown) => {
+      const { params } = opts as { params: { path: { call_id: number } } };
+      decidedIds.add(params.path.call_id);
+      return { data: { state: "saved" }, error: undefined, response: new Response() };
+    }) as never);
+    vi.spyOn(clientMod.api, "DELETE").mockResolvedValue({
+      data: { state: null },
+      error: undefined,
+      response: new Response(),
+    } as never);
+
+    const { container } = renderFeed();
+    await screen.findByText("Call one");
+
+    fireEvent.keyDown(document.body, { key: "j" });
+    await waitFor(() =>
+      expect(document.activeElement).toBe(container.querySelectorAll("article")[1]),
+    );
+
+    fireEvent.keyDown(document.body, { key: "s" });
+    await waitFor(() => expect(screen.queryByText("Call two")).toBeNull());
+    await waitFor(() =>
+      expect(container.querySelectorAll("article")[1]).toHaveTextContent("Call three"),
+    );
+    await waitFor(() =>
+      expect(document.activeElement).toBe(container.querySelectorAll("article")[1]),
+    );
+  });
+});
+
+describe("reviewer Minor 3 — the cursor also resets when the PAGE changes, not just the view", () => {
+  it("clicking Next page resets focus to the first card of the new page", async () => {
+    // D15's Next-page link changes only `?page=`; `view` stays "saved" across
+    // the click, so a reset effect keyed on `[view]` alone would carry a
+    // page-1 cursor straight onto page 2.
+    stub({ hasNext: true });
+    const { container } = renderFeed("/?view=saved&profile=7");
+    await screen.findByText("Call one");
+
+    fireEvent.keyDown(document.body, { key: "j" });
+    await waitFor(() =>
+      expect(container.querySelectorAll("[data-expanded]")[1]).toHaveAttribute(
+        "data-expanded",
+        "true",
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("link", { name: /next page/i }));
+
+    await waitFor(() =>
+      expect(container.querySelectorAll("[data-expanded]")[0]).toHaveAttribute(
+        "data-expanded",
+        "true",
+      ),
+    );
+    expect(container.querySelectorAll("[data-expanded]")[1]).toHaveAttribute(
+      "data-expanded",
+      "false",
+    );
+  });
+});
