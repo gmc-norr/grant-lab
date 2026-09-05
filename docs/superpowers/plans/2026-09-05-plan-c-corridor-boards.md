@@ -99,6 +99,23 @@ copy it from `tests/test_api_profile_detail.py:8-20`, which is the shortest live
 - **Re-derive a count; never increment one.**
 - **A verification that reddens nothing is a finding**, not a pass.
 - **Your cwd resets between tool calls.** Absolute paths everywhere; `git -C <abs>` for every git command. Subagent git operations default to the MAIN tree's cwd, so force `cd`, use `git -C <abs worktree>`, and verify the branch before any commit.
+- **A "prove the gate BITES" step's expected failing set is a FLOOR, not an exact set.** Every `Record:` line below names the tests a mutation is *known* to redden. Seeing MORE red is the gate being stronger than predicted — record the real set and move on. Seeing FEWER, or a different test, is the finding. The dry run hit this three times (Tasks 4, 5 and 6 each named one test where two fail).
+
+### Counting rules this repo's gates impose
+
+Three ways a task's test delta is not the number of test names it wrote. All three were measured, and two of them cost the dry run a debugging cycle.
+
+- **A pin added to `PREDICATE_PINS` or `DELEGATION_PINS` is worth TWO tests, not one.** `test_pinned_function_still_exists` is parametrized over `(*PREDICATE_PINS, *DELEGATION_PINS)` (`tests/architecture/test_profile_access_single_source.py:484-486`) and `test_pinned_delegate_still_delegates` over `DELEGATION_PINS.items()` (`:517-519`), so one dict entry becomes two test IDs. `EXEMPT_PROFILE_FUNCTIONS` is **not** parametrized over — an entry there is worth zero, which is why Task 1's delta is clean and Task 3's is not.
+- **Adding a router to `_ALWAYS` requires a matching `_ALWAYS_ROUTERS` edit** in `tests/architecture/test_edition_surface.py:242-249`. `test_the_always_mounted_routers_are_exactly_the_reviewed_set` (`:279-284`) AST-parses `_ALWAYS` and compares **element for element, in order**, so the new entry goes in the same position in both. It adds no tests; it just goes red if you forget. Its own failure message states the intent: "adding one is a product decision: does the match edition need it?"
+- **The `schema.gen.ts` drift check is CI-ONLY.** `.github/workflows/ci.yml:112-115` runs `bash scripts/gen_openapi_types.sh` then `git diff --exit-code frontend/src/api/schema.gen.ts`. **`pytest` cannot see a stale generated file** — the whole backend suite stays green. Any task that changes a response model regenerates it in the same commit, including tasks whose route SET does not change.
+
+### What the match-edition process-cut gate does and does not prove
+
+`tests/architecture/test_match_edition_process_cut.py` boots a subprocess and reads `sys.modules` **after `create_app()`, which is BEFORE the FastAPI lifespan runs.** Measured 2026-09-05 under `APP_EDITION=match DRAFTING_ENABLED=false`: **0** proposal-assist modules after `create_app()`, **41** after the lifespan's seven unguarded imports (`main.py:212, 229-233, 251`), and **pycrdt loads**.
+
+- It **is** a real gate for anything reachable from `create_app()` — routers, dependencies, module-level imports. That is exactly where every board module lives, so it bites for this plan and must stay green.
+- **Do not write "a match boot imports zero proposal-assist modules" into this plan, a docstring or a commit message.** It is false. Say "constructing the match app imports none", which is what the gate measures.
+- Fixing that gate is **out of scope for Plan C.**
 
 ### Regeneration steps a change of each kind requires, in the SAME commit
 
@@ -108,7 +125,9 @@ copy it from `tests/test_api_profile_detail.py:8-20`, which is the shortest live
 | `pyproject.toml` dependencies | `uv lock` (CI runs `uv lock --check`) |
 | any route | `bash scripts/gen_openapi_types.sh` |
 | `frontend/routes.json` | `uv run python scripts/gen_routes.py` |
-| the full edition's route set | regenerate `tests/architecture/full_edition_routes.txt` **and** bump the `109` literal in `test_edition_surface.py::test_the_baseline_is_not_empty` **by hand** |
+| the full edition's route set | regenerate `tests/architecture/full_edition_routes.txt` **and** bump the `109` literal in `test_edition_surface.py::test_the_baseline_is_not_empty` (`:175`) **by hand** |
+| any response model (even with no new route) | `bash scripts/gen_openapi_types.sh` — the drift check is CI-only |
+| `_ALWAYS` in `web/api/__init__.py` | add the same element, in the same position, to `_ALWAYS_ROUTERS` (`test_edition_surface.py:242-249`) |
 
 `scripts/gen_openapi_types.sh` pins `EMBEDDING_MODEL=bge-m3`, `--python 3.12` and `APP_EDITION=full` for reasons its own header records. Always invoke that script; never a hand-rolled equivalent.
 
@@ -133,9 +152,19 @@ Two deviations are deliberate. Both quote the spec beside them so a later reader
 `boards.created_by`, because §4.3 lets any profile *editor* create a board, so an admin
 can build a board on a profile they do not own. Only D1's **public** query stays userless.
 
-This makes the queue a **third caller** of `dashboard._base_call_filters`, whose docstring
-(`dashboard.py:308-321`) forbids *copies* and enumerates its callers. Task 4 calls it and
-updates that enumeration in the same commit.
+This makes the queue the **first caller of `dashboard._decision_predicate` outside
+`web/dashboard.py`**. Measured at `05bd151c`: `_decision_predicate` (`dashboard.py:64`) has
+exactly one call site today, `dashboard.py:322`, inside `_base_call_filters`.
+
+**It is NOT a third caller of `_base_call_filters`.** An earlier revision of this plan said
+so and told Task 4 to rewrite that function's docstring accordingly; the dry run measured
+that `_base_call_filters` still has exactly two callers — `count_decision_views`
+(`dashboard.py:367`) and `build_dashboard_view` (`:503`) — so its enumeration
+(`dashboard.py:313-315`) is **true today**, and the instruction would have made it false.
+`_base_call_filters` adds only the `source` and free-text filters the queue has no use for,
+and inheriting a future dashboard-only filter is coupling, not reuse. Task 4 therefore
+calls `_decision_predicate` directly and puts the caller note on **that** function, whose
+docstring enumerates no callers at all. See `PLAN-DEFECTS.md` D6.
 
 ### Deviation 2 (D7) — orientation is STORED, not inferred from the viewport
 
@@ -314,16 +343,41 @@ row a no-op and an unshared private profile has no others. The endpoint is alrea
 owner-or-admin gated, so the act is privileged.
 
 **Why email and why the vague refusal.** It mirrors `POST /api/profiles/{id}/viewers`
-(`profiles.py:586`), whose docstring (`:598-601`) gives the reason: "one GENERIC 400, the
+(`profiles.py:586`), whose docstring (`:599-601`) gives the reason: "one GENERIC 400, the
 same answer every time, so this endpoint is not a directory of who has an account."
 
 **Implemented by:** Task 3.
 
 ### Open-9 (not in the note's list; forced by measurement) — QR codes are encoded server-side
 
-**Decision:** add `segno` to the backend. The public payload carries per item
-`qr_path` (an SVG `d` string built from `segno`'s documented `q.matrix`) and
-`qr_modules` (the module count). React composes `<svg viewBox="-4 -4 n+8 n+8"><path d={qr_path}/></svg>`.
+**Decision:** add `segno` to the backend and encode with **`segno.make_qr`**. The public
+payload carries per item `qr_path` (an SVG `d` string built from `segno`'s documented
+`q.matrix`) and `qr_modules` (the module count). React composes
+`<svg viewBox="-4 -4 n+8 n+8"><path d={qr_path}/></svg>`.
+
+**`make_qr`, never `make`.** `error="m"` constrains the correction LEVEL, not the symbol
+FAMILY, and Micro QR M4 supports level M — so `segno.make` returns a Micro QR for a short
+URL. Many phone cameras and a lot of scanner hardware cannot read one, and on a corridor
+wall that is a silent per-card failure that looks exactly like a working QR. Measured here
+with segno 1.6.6:
+
+```
+$ uv run python -c "import segno; [print(repr(u), 'len', len(u),
+    '| make(error=m) ver', segno.make(u, error='m').version, 'micro', segno.make(u, error='m').is_micro,
+    '| make_qr(error=m) ver', segno.make_qr(u, error='m').version, 'micro', segno.make_qr(u, error='m').is_micro)
+    for u in ['https://a.se/', 'https://a.se/x', 'https://example.test/x']]"
+'https://a.se/' len 13 | make(error=m) ver M4 micro True | make_qr(error=m) ver 1 micro False
+'https://a.se/x' len 14 | make(error=m) ver 1 micro False | make_qr(error=m) ver 1 micro False
+'https://example.test/x' len 22 | make(error=m) ver 2 micro False | make_qr(error=m) ver 2 micro False
+```
+
+**Both segno commands in this section were run in a worktree where Task 7 Step 1 had
+already run `uv add segno`.** `segno` is not installed at `05bd151c`, so re-deriving them
+before Task 7 needs `uv add segno` first (or a throwaway venv). Both reproduce verbatim.
+
+A 13-character URL is the trigger. Every fixture in this plan is longer than that, which is
+exactly why no other test in Task 7 can see the bug — a Micro QR round-trips perfectly.
+`PLAN-DEFECTS.md` D14.
 
 **Why server-side at all.** Measured: no QR encoder exists in this repo on either side,
 and `pnpm add` is blocked by the 7-day cooldown, so the frontend cannot gain one.
@@ -343,8 +397,38 @@ renderer supplies the 4-module quiet zone through the viewBox.
 markup. Prod CSP is `default-src 'self'` / `script-src 'self'` (`web/middleware.py:20`),
 which an inline `<path d=…>` composed in React does not touch.
 
-**Cost, measured:** 7998 bytes for the longest realistic URL (129 chars, 49 modules);
-≈ **192 KB** for a full 24-item board. Task 7's gate is written against that number.
+**Cost, re-measured 2026-09-05 (the authoring estimate of 7998 bytes did NOT reproduce):**
+
+```
+$ uv run python -c "
+import segno
+BASE='https://www.vinnova.se/en/calls-for-proposals/'
+def qr_path(q):
+    parts=[]
+    for y,row in enumerate(q.matrix):
+        x=0
+        while x < len(row):
+            if row[x]:
+                run=1
+                while x+run < len(row) and row[x+run]: run+=1
+                parts.append(f'M{x} {y}h{run}v1h-{run}z'); x+=run
+            else: x+=1
+    return ''.join(parts)
+u = BASE + 'a'*83
+q = segno.make_qr(u, error='m'); p = qr_path(q)
+print('url len', len(u), 'modules', len(q.matrix), 'path bytes', len(p), 'x24', len(p)*24)"
+url len 129 modules 49 path bytes 9100 x24 218400
+```
+
+**9100 bytes** of path for a 129-character URL at 49 modules — **218,400 bytes (213 KB) of
+path data** for a full 24-item board. `segno.make(u, error='m')` gives the identical
+numbers at this length; the `make_qr` choice costs nothing here. The dry run additionally
+measured the whole serialized HTTP body at **226,040 bytes (221 KB)** with the endpoint
+built; that figure is not re-derived here because it needs the endpoint. Task 7's gate
+stays at **512 KB**, which is 2.3× headroom over the measured body. `PLAN-DEFECTS.md` D15.
+
+Note `BASE` is **46** characters, so the 129-character fixture is `BASE + "a" * 83`. An
+earlier draft wrote `"a" * 84`, which is 130.
 
 **Implemented by:** Task 7.
 
@@ -373,7 +457,7 @@ which an inline `<path d=…>` composed in React does not touch.
 | --- | --- |
 | `src/grant_lab/db/models/__init__.py` | Import and re-export `Board`, `BoardItem`. |
 | `src/grant_lab/db/models/profiles.py` | Add `Subscription.board_alerts_enabled`. |
-| `src/grant_lab/web/dashboard.py` | `_base_call_filters` docstring: name the third caller. |
+| `src/grant_lab/web/dashboard.py` | `_decision_predicate` docstring (`:65-77`): name its out-of-package caller. **Not** `_base_call_filters`'s — see Task 4 Step 4. |
 | `src/grant_lab/web/api/__init__.py` | Add both routers to `_ALWAYS`. |
 | `src/grant_lab/web/api/profiles.py` | Add `transfer_profile_owner`. **It must live here** — see Task 3. |
 | `src/grant_lab/digest/send.py` | Send the board alert alongside the digest. |
@@ -536,9 +620,23 @@ hazard seen from the other side, and a `visibility == 'private'` shortcut would 
 cd <worktree> && uv run pytest tests/test_profile_transfer_effect.py -q
 ```
 
-Expected: **4 FAILED**, each `ImportError: cannot import name 'transfer_read_effect'`.
-**If you see 4 ERRORs and 0 FAILED, read the traceback** — a collection error is this
-repo's false-pass signature and does not mean the test is measuring anything.
+Expected: **1 collection ERROR**, `ImportError: cannot import name 'transfer_read_effect'`
+— not four failures. Step 1's file puts that import at **module level**, so pytest never
+reaches a test body and reports one error for the module:
+
+```
+ERROR tests/test_profile_transfer_effect.py
+!!!! Interrupted: 1 error during collection !!!!
+1 error in 1.29s
+```
+
+**This is the one place an ERROR is the right red** — there is no function yet. Same
+situation as Task 2 Step 2, which says the same thing. Confirm the ImportError names
+`transfer_read_effect`: a DIFFERENT ImportError (a typo in a fixture import, say) looks
+identical and means something else entirely.
+
+An earlier draft of this step expected "4 FAILED" and warned that ERRORs meant trouble —
+so it fired its own alarm on the correct result. `PLAN-DEFECTS.md` D1.
 
 - [ ] **Step 3: Implement**
 
@@ -790,7 +888,11 @@ place an ERROR is the right red — there is no module yet.
 
 MATCH-edition tables. Nothing here may import from grant_lab.proposal_assist --
 tests/architecture/test_match_edition_process_cut.py boots a match process in a
-fresh interpreter and asserts ZERO proposal_assist modules are loaded.
+fresh interpreter and asserts that CONSTRUCTING the app (create_app()) imports
+zero proposal_assist modules. It measures construction, not boot: the lifespan
+that runs afterwards imports seven of them unguarded (main.py:212, 229-233, 251).
+Everything in this plan is reachable from create_app(), so the gate does bite
+here -- but do not restate it as "a match boot imports none".
 
 `orientation` is STORED rather than inferred from the viewport. Spec §6 said the
 renderer picks it from the aspect ratio; the 2026-09-05 decisions note (D7)
@@ -1004,7 +1106,11 @@ cd <worktree> && uv run pytest -n 16 --dist loadfile -q
 cd <worktree> && uv run ruff check src tests alembic scripts
 ```
 
-**Expected DELTA: +5 (models) + the migration tests you actually wrote.** Count them with
+**Expected DELTA: +6 (models) + the migration tests you actually wrote.** Step 1's file
+defines **six** test functions — an earlier draft said +5 against its own six-test code
+block (`PLAN-DEFECTS.md` D2). Verify with
+`uv run pytest tests/test_models_boards.py --collect-only -q | tail -1` before trusting
+either number. Count the migration tests with
 `uv run pytest tests/test_migration_0072_boards.py tests/test_migration_0073_board_alerts.py --collect-only -q | tail -1`
 and carry that number — do not estimate it. `1 skipped` unchanged.
 
@@ -1020,10 +1126,10 @@ subscriptions so muting the weekly digest does not mute the board alert."
 ### Task 3: `PUT /api/profiles/{profile_id}/owner`
 
 **Files:**
-- Modify: `src/grant_lab/web/api/profiles.py`
+- Modify: `src/grant_lab/web/api/profiles.py` — `transfer_profile_owner`, **and** `ProfileDetailOut` (`:85`) + `get_profile` (`:177`), which gain `outgoing_lost_read`
 - Modify: `tests/architecture/test_profile_access_single_source.py` (three pin sets)
-- Modify: `tests/architecture/full_edition_routes.txt` + the `109` literal in `test_edition_surface.py`
-- Modify: `frontend/src/api/schema.gen.ts` (**generated**)
+- Modify: `tests/architecture/full_edition_routes.txt` + the `109` literal in `test_edition_surface.py` (`:175`) — **one** new path, the PUT; the detail-payload field adds no route
+- Modify: `frontend/src/api/schema.gen.ts` (**generated**) — changed by BOTH the new route and the new detail field
 - Test: `tests/test_api_profile_transfer.py`
 
 **Interfaces:**
@@ -1032,6 +1138,19 @@ subscriptions so muting the weekly digest does not mute the board alert."
 - Produces: `PUT /api/profiles/{profile_id}/owner`, body
   `{"email": str, "keep_read_access": bool = false}`, response
   `{"owner": {"id": int, "name": str, "email": str}, "outgoing_lost_read": bool}`
+- Produces, **and this half is not optional**: `outgoing_lost_read: bool` on
+  `ProfileDetailOut`, i.e. on `GET /api/profiles/{profile_id}`, computed in `get_profile`
+  with the Task-1 helper as `transfer_read_effect(session, profile=p, outgoing=user)`.
+
+**Why the detail payload too.** Open-6's whole reason for existing is the note's sentence
+"the transfer UI must say so **before the act** rather than after". A field that only
+appears on the `PUT` **response** exists solely *after* the transfer has happened, so
+Task 10's card would have nothing to read at render time and its gate
+(`it("does NOT warn an admin owner, because they lose nothing")`) could not be built at
+all. An earlier draft produced the value only on the response. `PLAN-DEFECTS.md` D17.
+
+`transfer_read_effect` returns `False` when the caller is not the owner, so the field is
+honest for every reader of the detail payload, not just the owner.
 
 **Why this endpoint must live in `web/api/profiles.py` and nowhere else.**
 `tests/architecture/test_profile_access_single_source.py::test_no_module_builds_a_second_read_predicate`
@@ -1048,11 +1167,11 @@ decisions; all four are in ONE transaction):
    `profiles.py:612` only refuses to add a viewer row for whoever is owner *at that
    moment*, so an active non-owner may hold one legitimately. Transfer to that person
    leaves it behind, and the `ProfileViewer` docstring's invariant
-   (`db/models/profiles.py:136`, "the OWNER never has a row") stops being true.
+   (`db/models/profiles.py:135-136`, "the OWNER never has a row") stops being true.
 2. **Set `profile.created_by = new_owner.id`.**
 3. **Create the new owner's `Subscription` if absent**, mirroring `profiles/create.py:79`
    — otherwise D9 notifies nobody. **Never touch the old owner's row:**
-   `digest/assemble.py:86-89` is explicit that deleting it destroys their `digest_enabled`
+   `digest/assemble.py:86-88` is explicit that deleting it destroys their `digest_enabled`
    preference and a re-share cannot restore it, and `assemble.py:97` already filters the
    digest through `readable_profile_ids`, so their section simply stops appearing.
 4. **Open-6:** if `keep_read_access`, add a `ProfileViewer` row for the outgoing owner.
@@ -1063,7 +1182,8 @@ Step 4 is computed **after** step 2 so it asks the real post-transfer predicate.
 
 - [ ] **Step 1: Write the failing tests**
 
-`tests/test_api_profile_transfer.py`. Nine cases, each pinning one decision:
+`tests/test_api_profile_transfer.py`. **Thirteen** cases, each pinning one decision (an
+earlier draft's prose said "nine" over a twelve-name list; the thirteenth is D17's):
 
 ```python
 def test_owner_can_transfer_to_an_active_user(monkeypatch, pg_url, pg_session_factory, ...): ...           # happy path
@@ -1074,18 +1194,41 @@ def test_an_inactive_recipient_is_refused_generically(monkeypatch, pg_url, pg_se
 def test_an_unknown_email_gets_the_SAME_generic_400(monkeypatch, pg_url, pg_session_factory, ...): ...     # not a directory
 def test_the_incoming_owners_viewer_row_is_deleted(monkeypatch, pg_url, pg_session_factory, ...): ...      # D10 stale row
 def test_the_new_owner_gets_a_subscription_row(monkeypatch, pg_url, pg_session_factory, ...): ...          # D9 depends on it
-def test_the_old_owners_subscription_row_SURVIVES(monkeypatch, pg_url, pg_session_factory, ...): ...       # assemble.py:86-89
+def test_the_old_owners_subscription_row_SURVIVES(monkeypatch, pg_url, pg_session_factory, ...): ...       # assemble.py:86-88
 def test_keep_read_access_writes_a_viewer_row_for_the_outgoing_owner(monkeypatch, pg_url, pg_session_factory, ...): ...  # Open-6
 def test_a_now_unreadable_default_profile_id_is_cleared(monkeypatch, pg_url, pg_session_factory, ...): ...       # Open-7
 def test_a_still_readable_default_profile_id_is_LEFT(monkeypatch, pg_url, pg_session_factory, ...): ...          # Open-7
+def test_the_detail_payload_says_whether_the_owner_would_lose_read(monkeypatch, pg_url, pg_session_factory, ...): ...  # D17
 ```
 
-The last two are a pair on purpose: a rule that clears unconditionally passes the first
-and fails the second, and one that never clears does the reverse.
+The last two of the Open-7 pair are a pair on purpose: a rule that clears unconditionally
+passes the first and fails the second, and one that never clears does the reverse.
 
 `test_an_unknown_email_gets_the_SAME_generic_400` must assert the **response bodies are
 byte-equal** to the inactive-recipient case, not merely both 400. Two different messages
 are the directory the endpoint must not be.
+
+`test_the_detail_payload_says_whether_the_owner_would_lose_read` reads
+`GET /api/profiles/{id}` as a **non-admin owner of a private profile** (expects `True`) and
+as an **admin owner of the same** (expects `False`), so a hardcoded `True` fails. It must
+not go through the transfer at all — the point is the value existing *before* the act.
+
+**`test_a_stranger_gets_404_not_403` must assert the 404 BODY, not just the status.**
+Measured: with no route registered at all, this app answers
+`404 {"error":{"code":"not_found","message":"Not Found"}}` — so a test whose only
+assertion is `r.status_code == 404` is **GREEN before a line of the endpoint is written**,
+and stays green if the route is later deleted, unregistered or renamed. Measured with the
+plan's original twelve cases and no endpoint: `11 failed, 1 passed`, and the one that
+passed was this one. The real refusal comes from `_profile_for_edit`
+(`profiles.py:139/141`), which raises `HTTPException(404, detail="profile not found")`, and
+`main.py:548` renders `exc.detail` into the envelope's `message`. So:
+
+```python
+    assert r.status_code == 404 and b"profile not found" in r.content
+```
+
+Better still, put a **positive control in the same test**: the owner's identical request
+returns 200, so "the route exists" is inside the gate rather than assumed. `PLAN-DEFECTS.md` D3.
 
 - [ ] **Step 2: Run and confirm they fail**
 
@@ -1093,7 +1236,17 @@ are the directory the endpoint must not be.
 cd <worktree> && uv run pytest tests/test_api_profile_transfer.py -q
 ```
 
-Expected: every case **FAILED** with a 405 or 404 from FastAPI (no such route). Not ERROR.
+Expected: **13 FAILED, 0 passed.** Not ERROR — nothing here is imported at module scope
+that does not exist yet, so the failures are assertion failures against FastAPI's own
+404 for a route that is not registered.
+
+**If the stranger case PASSES, its body assertion is missing** — go back to Step 1. That
+is the one case that can be green before the endpoint exists, and the reason it asserts
+the body.
+
+`test_the_detail_payload_says_whether_the_owner_would_lose_read` fails differently from
+the rest: `GET /api/profiles/{id}` already exists, so it fails on the missing key rather
+than on a 404. That is the correct red for it.
 
 - [ ] **Step 3: Implement**
 
@@ -1130,13 +1283,26 @@ def transfer_profile_owner(
     unshared private profile has no viewer rows at all, so a
     viewers-only rule would make transfer impossible for exactly the case it
     exists for. The refusal is ONE generic 400 for unknown, inactive and
-    ineligible alike -- mirroring add_profile_viewer (:598-601), so this is not a
+    ineligible alike -- mirroring add_profile_viewer (:599-601), so this is not a
     directory of who has an account.
     """
 ```
 
 Body follows the four ordered steps above, inside a single `with sf() as session:` block
 with one `session.commit()`.
+
+**And the other half — the detail payload (D17).** In the same commit, add
+`outgoing_lost_read: bool` to `ProfileDetailOut` (`profiles.py:85`) and compute it in
+`get_profile` (`:177`), which already holds `p`, `user` and `session` at `:196`:
+
+```python
+        outgoing_lost_read = transfer_read_effect(session, profile=p, outgoing=user)
+```
+
+`get_profile` is in `EXPECTED_PREDICATE_PINS` for calling `can_read_profile`; adding a call
+to `transfer_read_effect` does not disturb that, and the function gains **no**
+`ProfileViewer` or `Profile.visibility` reference, so it needs no exemption — the helper
+owns those (Task 1).
 
 - [ ] **Step 4: Update the three pin sets in `test_profile_access_single_source.py`**
 
@@ -1156,8 +1322,22 @@ with one `session.commit()`.
         "web/api/profiles.py::transfer_profile_owner",
 ```
 
-`EXPECTED_DELEGATION_PINS` is the deliberate second literal (`:154-156`: "changing
-PREDICATE_PINS alone cannot pass"). **Both must change, in this one diff.**
+`EXPECTED_DELEGATION_PINS` (`:174`) is the deliberate second literal — the comment at
+`:154-156` says why: "changing PREDICATE_PINS alone cannot pass". **Both must change, in
+this one diff.**
+
+**This one dict entry is worth TWO tests, not one.** `test_pinned_function_still_exists`
+is parametrized over `(*PREDICATE_PINS, *DELEGATION_PINS)` (`:484-486`) and
+`test_pinned_delegate_still_delegates` over `DELEGATION_PINS.items()` (`:517-519`), so
+adding `web/api/profiles.py::transfer_profile_owner` creates:
+
+```
+tests/architecture/test_profile_access_single_source.py::test_pinned_function_still_exists[web/api/profiles.py::transfer_profile_owner]
+tests/architecture/test_profile_access_single_source.py::test_pinned_delegate_still_delegates[web/api/profiles.py::transfer_profile_owner]
+```
+
+The `EXEMPT_PROFILE_FUNCTIONS` entry adds **zero** — nothing is parametrized over that
+dict, which is why Task 1's delta is clean and this one is not. `PLAN-DEFECTS.md` D4.
 
 - [ ] **Step 5: Regenerate the route artifacts — SAME commit**
 
@@ -1172,9 +1352,12 @@ cd <worktree> && APP_EDITION=full DRAFTING_ENABLED=true SPA_MODE=disabled \
 cd <worktree> && wc -l tests/architecture/full_edition_routes.txt
 ```
 
-Then bump `test_edition_surface.py::test_the_baseline_is_not_empty`'s literal **by hand**
-to whatever `wc -l` just printed. **Do not compute it** — the measured 109 plus one new
-path is 110, and if `wc -l` says anything else, find the term that changed.
+Then bump `test_edition_surface.py::test_the_baseline_is_not_empty`'s literal (`:175`)
+**by hand** to whatever `wc -l` just printed. **Do not compute it** — the measured 109 plus
+one new path is 110, and if `wc -l` says anything else, find the term that changed.
+
+The `outgoing_lost_read` field on `ProfileDetailOut` changes `schema.gen.ts` but **not** the
+route set, so only the PUT moves this file. `gen_openapi_types.sh` picks up both.
 
 - [ ] **Step 6: Run every gate this touched**
 
@@ -1200,9 +1383,15 @@ cd <worktree> && cd frontend && pnpm vitest run && pnpm lint && pnpm -C . build
 - Mutate: delete the `_profile_for_edit(...)` call from `transfer_profile_owner` and
   inline `session.get(Profile, profile_id)`.
 - Expected: `test_profile_access_single_source.py` FAILS on the delegation pin.
-  **Record whether it also stays green on the four behavioural tests** — if it does, that
-  is exactly the hole outside review 2026-09-04 (Sol #9) found for `_profile_for_edit` and
-  the reason this pin exists.
+  **Record whether it also stays green on the thirteen behavioural tests** — if it does,
+  that is exactly the hole outside review 2026-09-04 (Sol #9) found for `_profile_for_edit`
+  and the reason this pin exists.
+- **This gate's own evidence depends on the stranger case asserting the body** (Step 1).
+  The dry run measured, with the tightened assertion:
+  `FAILED test_a_stranger_gets_404_not_403` and
+  `FAILED test_a_reader_who_cannot_edit_gets_403` — **two** behavioural failures. With a
+  status-only stranger assertion it would have been one, and this gate would have read as a
+  weaker catch than it is. `PLAN-DEFECTS.md` D5.
 
 **Gate C — the route baseline.**
 - *What trivially passes it:* regenerating `full_edition_routes.txt` without touching the
@@ -1216,8 +1405,16 @@ task's files.
 
 - [ ] **Step 8: Full suite and commit**
 
-**Expected DELTA: +12** (the twelve cases above) plus whatever `--collect-only` reports if
-you split any of them. `1 skipped` unchanged.
+**Expected DELTA: +15** — thirteen endpoint cases **plus two** from Step 4, because
+`DELEGATION_PINS` is parametrized by both `test_pinned_function_still_exists` and
+`test_pinned_delegate_still_delegates`, so one dict entry is two test IDs.
+
+An earlier draft carried **+12**: it counted twelve cases (while its prose said nine) and
+missed the parametrization entirely. The dry run measured **+14** for the twelve-case
+version — 12 + 2 — which is the arithmetic that names the term. This plan adds D17's
+thirteenth case, hence +15. Re-derive with `--collect-only` on both files rather than
+trusting any of these numbers, and if it differs, name the term that changed.
+`1 skipped` unchanged.
 
 ```bash
 cd <worktree> && git commit -m "feat(profiles): transfer a profile to another owner
@@ -1233,7 +1430,7 @@ created, and the outgoing owner's subscription deliberately left alone."
 
 **Files:**
 - Create: `src/grant_lab/boards/queue.py`
-- Modify: `src/grant_lab/web/dashboard.py` (the `_base_call_filters` docstring, `:308-321`)
+- Modify: `src/grant_lab/web/dashboard.py` — the **`_decision_predicate`** docstring (`:65-77`). **Not** `_base_call_filters`'s (`:308-321`), which is true today and must stay true; see Step 4 and `PLAN-DEFECTS.md` D6.
 - Test: `tests/test_boards_queue.py`
 
 **Interfaces:**
@@ -1255,9 +1452,16 @@ created, and the outgoing owner's subscription deliberately left alone."
 boards.profile_id` — **not** `boards.created_by`, because §4.3 lets any profile editor
 create a board, so an admin can build one on a profile they do not own.
 
-**It REUSES the predicate; it must not fork it.** Measured, `_decision_predicate` with
-`view="archive"` is exactly `Call.id.notin_(<hidden rows for (user_id, profile_id)>)`
-(`dashboard.py:91`) — which is "apply this user's hides on this profile" and nothing else.
+**It REUSES the predicate; it must not fork it.** Re-measured at `05bd151c`:
+`_decision_predicate` with `view="archive"` is exactly
+`Call.id.notin_(rows.where(CallDecision.state == "hidden").scalar_subquery())` at
+**`dashboard.py:91`** (line 90 is the `raise ValueError` tripwire above it) — which is
+"apply this user's hides on this profile" and nothing else.
+
+> The dry run reported this citation as off by one. It is not: the dry run measured its own
+> worktree, where its D6 fix had already lengthened `_decision_predicate`'s docstring. At
+> `05bd151c` the archive return is line 91. Re-derived here; `PLAN-DEFECTS.md` D19 item 1 is
+> **rejected**.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1281,7 +1485,16 @@ def test_below_min_score_is_absent(pg_session_factory, ...): ...
 def test_a_past_deadline_is_absent(pg_session_factory, ...): ...
 def test_an_already_approved_call_is_flagged_not_dropped(pg_session_factory, ...): ...
 def test_the_waiting_count_counts_UNAPPROVED_candidates_only(pg_session_factory, ...): ...
+def test_a_call_the_owner_SAVED_is_still_in_the_queue(pg_session_factory, ...): ...
 ```
+
+**Nine cases, and the ninth is not padding.** `test_a_call_the_owner_SAVED_is_still_in_the_queue`
+has the profile owner **save** a call on the board's own profile and asserts it is still
+offered. Without it nothing in this file creates a non-hidden `CallDecision` row, so the
+`state == "hidden"` clause inside `_decision_predicate` is **invisible to every test here**
+— a hand-rolled copy that drops it passes the whole file. The dry run proved that by
+running exactly that mutation and watching the state clause survive untouched.
+`PLAN-DEFECTS.md` D8.
 
 `test_a_call_the_BOARD_CREATOR_hid_is_still_in_the_queue` is the specific case D2 calls
 out: build the board with an **admin** who is not the profile owner, have that admin hide
@@ -1347,30 +1560,53 @@ with `board_queue` composing:
 written anyway: it states the intent at the site, and the same pair is read back by the
 public query and by the frontend's local expiry check.
 
-- [ ] **Step 4: Update `_base_call_filters`'s enumeration of its callers**
+- [ ] **Step 4: Put the caller note on `_decision_predicate`, and LEAVE `_base_call_filters` alone**
 
-`dashboard.py:313-315` currently reads:
-
-```
-    One definition, so the rail cannot say "3" over a feed showing 2. ...
-    `build_dashboard_view` and `count_decision_views` are the only callers and
-    MUST NOT grow separate copies of this
-```
-
-That sentence becomes **false** the moment the queue exists. Change it to name the third
-caller and say what is different about it:
+**Do not touch `_base_call_filters`'s docstring.** An earlier draft of this plan told you
+to rewrite `dashboard.py:313-315` to name `boards.queue.board_queue` as a third caller.
+That is the exact failure the sentence exists to prevent — it would have made a true
+docstring false. Re-measured at `05bd151c`:
 
 ```
-    `build_dashboard_view`, `count_decision_views` and `boards.queue.board_queue`
-    are the callers and MUST NOT grow separate copies of this -- a second copy is
-    how the rail and the feed drift apart under a filter nobody re-tested.
-    `board_queue` is the odd one: it passes the PROFILE OWNER's user_id rather
-    than the requesting user's, which is exactly why it CALLS this instead of
-    forking it (decisions note D2).
+$ grep -rn "_base_call_filters" src/
+src/grant_lab/web/dashboard.py:305:def _base_call_filters(
+src/grant_lab/web/dashboard.py:341:    THREE calls to `_base_call_filters`, one per view -- not one shared "the list
+src/grant_lab/web/dashboard.py:367:        filters = _base_call_filters(
+src/grant_lab/web/dashboard.py:503:    base_filters = _base_call_filters(
+
+$ grep -rn "_decision_predicate" src/
+src/grant_lab/web/dashboard.py:64:def _decision_predicate(view: View, *, user_id: int, profile_id: int | None):
+src/grant_lab/web/dashboard.py:322:    filters = [_decision_predicate(view, user_id=user_id, profile_id=profile_id)]
+src/grant_lab/web/dashboard.py:459:    # for the ORDER BY. It cannot fire without a profile: `_decision_predicate`
 ```
 
-**This is not documentation tidying.** A docstring that enumerates its callers and is
-wrong is the failure the docstring exists to prevent.
+`_base_call_filters` has **two** callers and keeps them. `_decision_predicate` has **one**
+call site (`:322`, inside `_base_call_filters`) and its docstring (`:65-77`) enumerates
+none. Step 3 makes `board_queue` its second, and its first outside `web/dashboard.py`.
+
+**The decision, stated so it is not re-litigated.** The alternative was to make
+`board_queue` genuinely call `_base_call_filters(view="archive", user_id=owner_id,
+profile_id=board.profile_id, source_id=None, q=None)`, which would have made the old
+Step-4 text true. This plan **rejects** that: with `source_id` and `q` both `None` it
+returns exactly `[_decision_predicate("archive", ...)]` — the same thing Step 3 builds, via
+two `None`s the queue never uses — and it silently subscribes the corridor board to any
+future dashboard-only filter. Reuse of the predicate is the guarantee D2 wants; reuse of
+the dashboard's filter *assembly* is coupling. `PLAN-DEFECTS.md` D6, option (a).
+
+So: append to `_decision_predicate`'s docstring (`dashboard.py:65-77`), inside the existing
+triple quotes:
+
+```
+    CALLERS. `_base_call_filters` (:322) and, from OUTSIDE this module,
+    `grant_lab.boards.queue.board_queue`. The board queue is the odd one: it
+    passes the PROFILE OWNER's user_id rather than the requesting user's, which
+    is exactly why it CALLS this instead of forking it (2026-09-05 decisions
+    note D2). A second copy is how the rail and the feed drift apart under a
+    filter nobody re-tested.
+```
+
+**This is not documentation tidying.** An out-of-package caller of a private function is
+the thing a later reader will "clean up"; the note is what stops them.
 
 - [ ] **Step 5: Run the tests**
 
@@ -1381,30 +1617,50 @@ cd <worktree> && uv run pytest tests/test_boards_queue.py -q
 - [ ] **Step 6: Prove the gate BITES on the exact confusion D2 names**
 
 - *What trivially passes it:* keying the predicate on `boards.created_by`. That is the
-  mistake D2 exists to prevent and it passes seven of the eight tests.
+  mistake D2 exists to prevent, and it passes most of this file.
 - Mutate: `owner_id = board.created_by`.
 
 ```bash
 cd <worktree> && uv run pytest tests/test_boards_queue.py -q
 ```
 
-Record: `against good input: PASS` / `against owner_id = board.created_by: FAIL on
-test_a_call_the_BOARD_CREATOR_hid_is_still_in_the_queue, because that test builds the
-board with an admin who is not the profile owner`.
+Record: `against good input: PASS` / `against owner_id = board.created_by: FAIL on at
+least test_a_call_the_BOARD_CREATOR_hid_is_still_in_the_queue AND
+test_a_call_the_owner_hid_is_absent_from_the_queue — the wrong key does not merely ADD the
+admin's hides, it drops the OWNER's, so the positive case goes red too`.
+
+**Do not carry a pass-count literal here.** An earlier draft said "passes seven of the
+eight" and named one failing test; the dry run measured `2 failed, 6 passed` on eight
+tests. With the ninth case added the arithmetic moves again. Re-derive it; the gate is
+stronger than either number claimed. `PLAN-DEFECTS.md` D7.
 
 Second mutation, for the reuse claim: replace the `_decision_predicate` call with an
 inline `Call.id.notin_(select(CallDecision.call_id).where(CallDecision.user_id ==
-owner_id))` — a hand-rolled copy that **drops the `state == "hidden"` filter**.
+owner_id))` — a hand-rolled copy that drops **two** clauses: `state == "hidden"` and
+`CallDecision.profile_id == profile_id`.
 
-Record: `against a hand-rolled copy missing the state filter: FAIL on
-test_an_already_approved_call_is_flagged_not_dropped and
-test_a_call_a_COLLEAGUE_hid_is_still_in_the_queue, because a saved call is also a
-CallDecision row`. If that mutation reddens **nothing**, the tests do not cover saves and
-that is a finding to write down, not a pass.
+Record: `against a hand-rolled copy missing the state and profile filters: FAIL on
+test_a_hide_on_a_DIFFERENT_profile_does_not_suppress (the dropped profile_id) and
+test_a_call_the_owner_SAVED_is_still_in_the_queue (the dropped state) — two tests, two
+dropped clauses, one each`.
+
+**An earlier draft attributed both failures to the state clause and named two tests that
+stay green.** Neither `test_an_already_approved_call_is_flagged_not_dropped` nor
+`test_a_call_a_COLLEAGUE_hid_is_still_in_the_queue` creates a saved decision, so neither
+can see the state clause; the dry run measured exactly one failure from this mutation, and
+it was the profile one. The ninth case (Step 1) is what makes the state clause visible at
+all. `PLAN-DEFECTS.md` D8.
+
+To isolate the state clause on its own, use a mutation that **keeps** `profile_id` and
+drops only `CallDecision.state == "hidden"`; that must fail on
+`test_a_call_the_owner_SAVED_is_still_in_the_queue` alone. If either mutation reddens
+**nothing**, the tests do not cover saves and that is a finding to write down, not a pass.
 
 - [ ] **Step 7: Full suite, lint, commit**
 
-**Expected DELTA: +8.** `1 skipped` unchanged.
+**Expected DELTA: +9** — the eight original cases plus D8's
+`test_a_call_the_owner_SAVED_is_still_in_the_queue`. The docstring edit in Step 4 adds no
+tests. `1 skipped` unchanged.
 
 ```bash
 cd <worktree> && git commit -m "feat(boards): the approval queue applies the profile owner's hides
@@ -1420,8 +1676,9 @@ keep a call off a public wall. Calls _decision_predicate rather than forking it.
 
 **Files:**
 - Create: `src/grant_lab/web/api/boards.py`
-- Modify: `src/grant_lab/web/api/__init__.py` (`_ALWAYS`, `:35-42`)
-- Modify: `tests/architecture/full_edition_routes.txt` + the literal in `test_edition_surface.py`
+- Modify: `src/grant_lab/web/api/__init__.py` (the eager import block `:14-21`, and `_ALWAYS` `:35-42`)
+- Modify: `tests/architecture/test_edition_surface.py` — **two** literals: `_ALWAYS_ROUTERS` (`:242-249`) **and** the `109` route-count literal (`:175`)
+- Modify: `tests/architecture/full_edition_routes.txt`
 - Modify: `frontend/src/api/schema.gen.ts` (**generated**)
 - Test: `tests/web/test_api_boards_crud.py`
 
@@ -1491,15 +1748,43 @@ that honours it look identical from outside.
 **body names the number to remove**, not merely that it is a 409. Open-4's whole point is
 that the human can see the loss.
 
+**`test_a_stranger_gets_404_not_403` must assert the 404 BODY here too** — same vacuity as
+Task 3 Step 1, same fix. A route that does not exist yet answers
+`404 {"error":{"code":"not_found","message":"Not Found"}}` (measured), so a status-only
+assertion is green before any of this task is written, and stays green if the router is
+never registered — which is a real failure mode, because Step 3's `_ALWAYS` edit is easy to
+forget. The refusal you actually want comes from `_profile_for_edit`
+(`profiles.py:139/141`), so assert `b"profile not found" in r.content`, and add the owner's
+identical request returning 200 as a positive control in the same test.
+`PLAN-DEFECTS.md` D3.
+
 - [ ] **Step 2: Run and confirm failure**
 
 ```bash
 cd <worktree> && uv run pytest tests/web/test_api_boards_crud.py -q
 ```
 
-Expected: every case FAILED with a 404 from FastAPI. Not ERROR.
+Expected: **17 FAILED, 0 passed** — every case, on a 404 from FastAPI for a route that is
+not registered. Not ERROR. **If the stranger case PASSES, its body assertion is missing**;
+go back to Step 1.
 
 - [ ] **Step 3: Implement the router, and register it**
+
+The router itself opens:
+
+```python
+router = APIRouter(tags=["boards"])
+```
+
+**No `prefix`.** `build_api_router` already mounts every `_ALWAYS` sub-router under `/api`
+— `web/api/__init__.py:100-101` constructs `APIRouter(prefix="/api", ...)` and `:105`
+does `r.include_router(sub)` — and every existing sub-router is bare (`auth.py:20`,
+`calls.py:36`, `profiles.py:35`, all `APIRouter()`). So paths in this file are written
+`"/boards"`, **not** `"/api/boards"`, even though every path in this plan is quoted with
+the `/api`. Writing `APIRouter(prefix="/api", ...)` — the natural reading of the Produces
+block above — mounts everything at `/api/api/boards`, and the symptom is a 404 on all 17
+tests, **indistinguishable from "the router was never registered"**. It cost the dry run a
+full test cycle plus a traceback read. `PLAN-DEFECTS.md` D10.
 
 In `src/grant_lab/web/api/__init__.py`, add to the eager import block (`:14-21`) and to
 `_ALWAYS` (`:35-42`), with a one-line reason:
@@ -1534,6 +1819,31 @@ _ALWAYS = (
 
 (`public_boards` is created in Task 7; add it there, not here, so each task's route
 regeneration is its own.)
+
+**And the second literal, in the SAME diff.** `tests/architecture/test_edition_surface.py`
+holds `_ALWAYS_ROUTERS` (`:242-249`), and
+`test_the_always_mounted_routers_are_exactly_the_reviewed_set` (`:279-284`) AST-parses
+`_ALWAYS` and compares it to that list **element for element, in order**:
+
+```python
+_ALWAYS_ROUTERS = [
+    "auth.router",
+    "me.router",
+    "admin.router",
+    "admin_users.router",
+    "calls.router",
+    "profiles.router",
+    # Boards are a MATCH-edition feature: the corridor screen is release 1's
+    # public face.
+    "boards.router",
+]
+```
+
+Editing `_ALWAYS` alone is red, and the plan's earlier draft did not mention this file at
+all. The gate's own failure message says why it exists: "adding one is a product decision:
+does the match edition need it? If yes, add it to `_ALWAYS_ROUTERS` with that reasoning."
+The comment above is that reasoning. Task 7 hits the same gate for `public_boards.router`.
+`PLAN-DEFECTS.md` D9.
 
 The flip refusal:
 
@@ -1589,9 +1899,27 @@ cd <worktree> && uv run pytest tests/web/test_api_boards_crud.py tests/architect
 cd <worktree> && uv run pytest tests/architecture/test_match_edition_process_cut.py -q
 ```
 
-Expected: FAIL on `test_a_match_boot_imports_no_proposal_assist_module_at_all` with a
-non-zero count, **and** on the pycrdt/prosemirror/claude_agent_sdk assertion. Record both.
-This gate boots a **subprocess**, so an in-process check would have proven nothing.
+Expected: **2 failed, 2 passed** in that file — `test_a_match_boot_imports_no_proposal_assist_module_at_all`
+with a non-zero count, **and** `test_a_match_boot_loads_none_of_the_heavy_proposal_assist_dependencies`.
+The dry run measured:
+
+```
+AssertionError: a match boot imported pycrdt, which only the full edition needs.
+  probe: {'proposal_assist': 61, 'grant_lab': 156, 'pycrdt': True,
+          'claude_agent_sdk': False, 'prosemirror': True, 'routes': 50}
+AssertionError: a match boot imported 61 proposal_assist modules.
+```
+
+**`claude_agent_sdk` stays `False`.** That import pulls pycrdt and prosemirror but not the
+SDK. The second test loops over three deps (`test_match_edition_process_cut.py:87-88`) and
+fails on the first that flips, so expect it to name **pycrdt** — an earlier draft listed all
+three as expected flips. `PLAN-DEFECTS.md` D11.
+
+This gate boots a **subprocess**, so an in-process check would have proven nothing. It
+measures after `create_app()` and before the lifespan — see "What the match-edition
+process-cut gate does and does not prove" in Global Constraints. A module-scope import in
+`web/api/boards.py` is reachable from `create_app()` (the router is in `_ALWAYS`, eagerly
+imported by the package `__init__`), so it is squarely inside what this gate can see.
 
 Restore after each; clear `__pycache__`; `git status --porcelain`.
 
@@ -1692,16 +2020,21 @@ they record who made it public and when, and that question survives the board co
   every landscape board, and `test_capacity_uses_the_STORED_items_per_page_not_a_default`
   is the portrait board that catches it.
 - Mutate: `cap = 8 * board.max_pages`.
-- Expected: FAIL on `test_capacity_uses_the_STORED_items_per_page_not_a_default`.
+- Expected: FAIL on **at least two** — `test_capacity_uses_the_STORED_items_per_page_not_a_default`
+  **and** `test_a_bulk_approve_that_would_exceed_capacity_approves_NONE`. The dry run
+  measured `2 failed, 31 passed`: both fixtures are portrait boards, so both see the wrong
+  cap. An earlier draft named only the first. `PLAN-DEFECTS.md` D11.
 
 **Gate B — publish is admin-only.**
 - *What trivially passes it:* `Depends(get_current_user)` instead of `require_admin`.
   `tests/architecture/test_auth_allowlist.py` stays **green** on that swap — its own
   docstring says so: "This is an AUTHENTICATION gate, not an authorization one."
 - Mutate: swap the dependency.
-- Expected: `test_an_editor_who_is_not_admin_CANNOT_publish` FAILS and
-  `tests/architecture/test_auth_allowlist.py` stays green. **Record both halves** — the
-  green half is the finding: this authorization rule is held by the API test alone.
+- Expected: **at least two** API tests FAIL — `test_an_editor_who_is_not_admin_CANNOT_publish`
+  and `test_unpublishing_is_admin_only_too`, since both routes lose the same guard — while
+  `tests/architecture/test_auth_allowlist.py` stays at **10 passed**. The dry run measured
+  that green half verbatim. **Record both halves** — the green half is the finding: this
+  authorization rule is held by the API tests alone.
 
 - [ ] **Step 6: Full suite, lint, commit**
 
@@ -1727,7 +2060,8 @@ truncation §6 forbids performed by the server instead of the display."
 - Modify: `src/grant_lab/web/api/__init__.py`
 - Modify: `src/grant_lab/main.py` (a board IP limiter beside the two at `:842-845`)
 - Modify: `tests/architecture/test_auth_allowlist.py` (`PUBLIC_ROUTES`, `:38-50`)
-- Modify: `tests/architecture/full_edition_routes.txt` + the literal
+- Modify: `tests/architecture/test_edition_surface.py` — **two** literals again: `_ALWAYS_ROUTERS` (`:242-249`), for `public_boards.router`, **and** the route-count literal (`:175`). Same gate as Task 5 Step 3; it fires a second time here.
+- Modify: `tests/architecture/full_edition_routes.txt`
 - Test: `tests/test_boards_qr.py`, `tests/web/test_api_public_board.py`
 
 **Interfaces:**
@@ -1819,12 +2153,28 @@ def test_the_matrix_excludes_the_quiet_zone(): ...
 def test_the_path_is_only_move_line_and_close_commands(): ...
 def test_a_longer_url_needs_more_modules(): ...
 def test_the_path_contains_no_angle_bracket_or_quote(): ...
+def test_the_symbol_is_never_a_micro_qr(): ...
 ```
 
-`test_a_qr_encodes_the_url_and_round_trips` **decodes** the emitted path back to a matrix
-and compares it to `segno.make(url).matrix`. A test that only checks the path is non-empty
-would pass on a QR that encodes the wrong string — which is the failure that matters,
-because a wrong QR on a wall looks exactly like a right one.
+`test_a_qr_encodes_the_url_and_round_trips` parses the emitted path back into a **matrix**
+(a path parser, not a QR decoder — see Step 4) and compares it to
+**`segno.make_qr(url, error="m").matrix`** — the SAME call `qr_for` makes. A test that only
+checks the path is non-empty would pass on a QR that encodes the wrong string, which is the
+failure that matters, because a wrong QR on a wall looks exactly like a right one.
+
+**It must be `make_qr(url, error="m")`, not `segno.make(url)`.** Those are different
+encoders, and an earlier draft compared the two. `segno.make()` with no `error` picks the
+smallest symbol that fits **including a Micro QR**, and Micro QR M4 only supports level L.
+Re-measured with segno 1.6.6: for `https://a.se/x` (14 chars) `make()` gives **M4 / level L
+/ 17 rows** where `make_qr(error="m")` gives **version 1 / 21 rows**; for
+`https://example.test/x` (22 chars) they agree. So the round-trip gate's verdict would be a
+property of how long the fixture URL happens to be, and a later reader who shortens one
+turns it red for no reason a traceback explains. `PLAN-DEFECTS.md` D12.
+
+`test_the_symbol_is_never_a_micro_qr` uses **`https://a.se/` (13 characters)** as its
+fixture and asserts `is_micro is False`. That fixture is deliberate: every other URL in this
+task is long enough to hide the bug D14 found, and a Micro QR round-trips perfectly, so no
+other test in this file can see it. `PLAN-DEFECTS.md` D14.
 
 `test_the_path_contains_no_angle_bracket_or_quote` is the injection gate: the path is
 rendered into an SVG **attribute**, and this pins that the generator can never emit
@@ -1843,8 +2193,17 @@ def qr_for(url: str) -> QrCode:
 
     Error level M: spec §6 puts the QR at 170 px on a screen someone steps up to,
     where the extra correction of Q/H buys nothing and costs modules.
+
+    `make_qr`, NOT `make`. `error="m"` constrains the correction LEVEL, not the
+    symbol FAMILY, and Micro QR M4 supports level M -- so `segno.make(url,
+    error="m")` returns a 17x17 Micro QR for a 13-character URL (measured, segno
+    1.6.6: 'https://a.se/' -> version M4, is_micro True, 17 rows; `make_qr` gives
+    version 1, 21 rows). Many phone cameras and much scanner hardware cannot read
+    a Micro QR, and on a corridor wall that is a silent per-card failure that
+    looks exactly like a working QR. `make_qr` refuses the family outright;
+    `make(url, error="m", micro=False)` is equivalent.
     """
-    q = segno.make(url, error="m")
+    q = segno.make_qr(url, error="m")
     parts: list[str] = []
     for y, row in enumerate(q.matrix):
         x = 0
@@ -1888,11 +2247,38 @@ inverse of Task 4's queue tests. Together they pin F-10's asymmetry — which th
 `test_a_nonexistent_slug_is_the_SAME_404` compares **response bodies**, not just status
 codes. Two different 404 messages make the endpoint a slug oracle.
 
-`test_the_qr_points_at_the_funder_url_not_this_app` decodes the path and asserts the
-decoded string equals `Call.url`. §6: "A QR that dead-ends on a login screen is worse than
-no QR."
+`test_the_qr_points_at_the_funder_url_not_this_app` **rebuilds the matrix from `qr_path`
+and asserts it equals `segno.make_qr(call.url, error="m").matrix`** — a re-encode, not a
+decode. §6: "A QR that dead-ends on a login screen is worse than no QR."
+
+**Why not a decode.** Turning a module matrix back into the encoded STRING needs a QR
+*decoder*, and segno is an encoder only — it has no `decode`. Measured, nothing in this
+environment can do it either:
+
+```
+$ for m in pyzbar zxing cv2 qrcode PIL numpy zxingcpp qreader; do
+    uv run python -c "import $m" 2>/dev/null && echo "$m PRESENT" || echo "$m ABSENT"; done
+pyzbar ABSENT   zxing ABSENT   cv2 ABSENT   qrcode ABSENT
+PIL PRESENT     numpy PRESENT  zxingcpp ABSENT   qreader ABSENT
+```
+
+PIL and numpy read pixels; neither decodes QR. Adding a decoder is a new dependency for a
+test. The re-encode has the same discriminating power for the failure that matters — a QR
+pointing at the wrong URL — because two different strings do not produce the same matrix.
+Step 2's wording ("back to a matrix") was already fine; this one said "the decoded string".
+`PLAN-DEFECTS.md` D13.
 
 - [ ] **Step 5: Implement, register, and allowlist the route**
+
+`public_boards.py` opens `router = APIRouter(tags=["public-boards"])` — **no `prefix`**, for
+the same reason as Task 5 Step 3 (`web/api/__init__.py:100-101` supplies `/api`). Its path
+is written `"/public/boards/{slug}"`.
+
+Register it in the eager import block and `_ALWAYS` (`web/api/__init__.py:14-21`, `:35-42`)
+**and add `"public_boards.router"` to `_ALWAYS_ROUTERS`** in
+`tests/architecture/test_edition_surface.py:242-249`, in the same position, with its own
+one-line reason. This is the second time this gate fires; see Task 5 Step 3.
+`PLAN-DEFECTS.md` D9.
 
 Add to `tests/architecture/test_auth_allowlist.py::PUBLIC_ROUTES`:
 
@@ -1918,10 +2304,14 @@ That file's docstring calls adding an entry "the reviewed act" — this comment 
 
 **Gate B — the QR encodes the right string.**
 - *What trivially passes it:* asserting `len(path) > 0`. Every QR passes that.
-- Mutate: `segno.make(url[:-1], error="m")` — one character short.
+- Mutate: `segno.make_qr(url[:-1], error="m")` — one character short.
 - Expected: `test_a_qr_encodes_the_url_and_round_trips` and
   `test_the_qr_points_at_the_funder_url_not_this_app` both FAIL. If only the first fires,
-  the endpoint test is not decoding and should be.
+  the endpoint test is not **re-encoding and comparing** and should be.
+- **Watch `test_the_symbol_is_never_a_micro_qr` under this mutation.** Its fixture is 13
+  characters, so `url[:-1]` makes it 12 — still short. Under the ORIGINAL `segno.make`
+  implementation this mutation is what exposed D14 in the first place. With `make_qr` it
+  stays green, which is the point.
 
 **Gate C — the public query is userless.**
 - *What trivially passes it:* a query that happens to return the right rows because no
@@ -1936,20 +2326,34 @@ That file's docstring calls adding an entry "the reviewed act" — this comment 
 - Mutate: return `detail="board is not published"` for the unpublished case.
 - Expected: FAIL on `test_a_nonexistent_slug_is_the_SAME_404` on the **body** comparison.
 
-- [ ] **Step 8: Measure the payload size against the authoring estimate**
+- [ ] **Step 8: Measure the payload size, and gate it**
 
 ```bash
 cd <worktree> && uv run pytest tests/web/test_api_public_board.py -q -k payload_size
 ```
 
 Add a test that builds a full 24-item board with realistic URLs and asserts the serialized
-payload is **under 512 KB**. Authoring measured a worst case of 7998 bytes of path for a
-129-character URL, ≈192 KB for 24 items; 512 KB is that with room, and the point of the
-assertion is that a future change which doubles the encoding cost is noticed.
+payload is **under 512 KB**.
+
+Build the fixture URL as `"https://www.vinnova.se/en/calls-for-proposals/" + "a" * 83` —
+that base is **46** characters, so this is 129. (An earlier draft wrote `"a" * 84`, which
+is 130.) Assert `len(long_url) == 129` in the test so the fixture cannot drift, and print
+the real byte count.
+
+**Re-measured 2026-09-05, and the authoring estimate did NOT reproduce:** 129 chars → 49
+modules → **9100 bytes of path**, so **218,400 bytes (213 KB) of path data** for 24 items.
+The command is in Open-9. An earlier draft said 7998 bytes / ≈192 KB and added "Task 7's
+gate is written against that number" — it was not the number this plan's own `qr_for`
+produces. The dry run additionally measured the whole serialized body at **226,040 bytes
+(221 KB)**. 512 KB is 2.3× that, and the point of the assertion is that a future change
+which doubles the encoding cost is noticed. `PLAN-DEFECTS.md` D15.
 
 - [ ] **Step 9: Full suite, lint, commit**
 
-**Expected DELTA: +5 (qr) +16 (endpoint) +1 (payload size) = +22.** `1 skipped` unchanged.
+**Expected DELTA: +6 (qr) +16 (endpoint) +1 (payload size) = +23.** The qr file gains
+`test_the_symbol_is_never_a_micro_qr` over the earlier draft's five, which is where +22
+became +23. The `_ALWAYS_ROUTERS` and `PUBLIC_ROUTES` edits add no tests. `1 skipped`
+unchanged.
 
 ```bash
 cd <worktree> && git commit -m "feat(boards): the public board endpoint, with server-side QR codes
@@ -1967,7 +2371,13 @@ D6's last-good copy must survive a network drop with its QRs intact."
 - Create: `src/grant_lab/boards/alerts.py`
 - Modify: `src/grant_lab/digest/send.py`
 - Modify: `src/grant_lab/web/api/boards.py` (surface the suppression on board detail)
+- Modify: `frontend/src/api/schema.gen.ts` (**generated**) — `BoardOut` gains `owner_undeliverable`
 - Test: `tests/test_boards_alerts.py`
+
+**The route SET does not change**, so `tests/architecture/full_edition_routes.txt` and the
+count literal do **not** move. Every other route-touching task in this plan moves both;
+this one moves neither. Say so out loud, because a worker who regenerates the baseline here
+for nothing will then have to explain a no-op diff.
 
 **Interfaces:**
 - Produces:
@@ -2040,7 +2450,28 @@ other test in this file.
 
 - [ ] **Step 3: Implement**
 
-- [ ] **Step 4: Prove three gates BITE**
+- [ ] **Step 4: Regenerate the OpenAPI types — SAME commit**
+
+```bash
+cd <worktree> && bash scripts/gen_openapi_types.sh
+cd <worktree> && git diff --stat frontend/src/api/schema.gen.ts   # must be non-empty
+```
+
+**`pytest` cannot see a stale `schema.gen.ts`.** Adding `owner_undeliverable` to `BoardOut`
+changes the OpenAPI schema, but the drift check is **CI-only** —
+`.github/workflows/ci.yml:112-115` runs the generator and then
+`git diff --exit-code frontend/src/api/schema.gen.ts`. The dry run followed this task
+literally, saw `13 passed` and a green full suite, committed, and would have found out on
+CI. Task 10 then consumes the field from the frontend and would have been typechecking
+against a schema that does not declare it. The regenerated diff should be exactly:
+
+```
++            owner_undeliverable: boolean;
+```
+
+`PLAN-DEFECTS.md` D16.
+
+- [ ] **Step 5: Prove three gates BITE**
 
 **Gate A — the two flags are genuinely separate.**
 - *What trivially passes it:* reading `digest_enabled`. Both columns default to `True`, so
@@ -2066,9 +2497,17 @@ other test in this file.
   reddens nothing, the test is not deleting the row and the gate is hollow** — fix the
   test, and record that the first version was hollow.
 
-- [ ] **Step 5: Full suite, lint, commit**
+- [ ] **Step 6: Full suite, lint, commit**
 
-**Expected DELTA: +13.** `1 skipped` unchanged. Watch `digest/send.py` — its tests
+Because `schema.gen.ts` moved, the frontend must still typecheck and build:
+
+```bash
+cd <worktree>/frontend && pnpm vitest run && pnpm lint
+cd <worktree> && pnpm -C frontend build
+```
+
+**Expected DELTA: +13** backend, frontend unchanged. `1 skipped` unchanged. Watch
+`digest/send.py` — its tests
 (`tests/test_digest_send.py`) must stay green; a board alert that changes the digest's own
 recipient set is a defect, not a feature.
 
@@ -2094,8 +2533,15 @@ owner escalates to active admins and the suppression is shown in-app."
 
 **The manifest entry is `"/b"`, not `"/b/:slug"`.** `is_spa_route`
 (`scripts/gen_routes.py:75-91`) matches exact-or-subtree
-(`path == r or path.startswith(r.rstrip("/") + "/")`), so `"/b"` owns `/b/anything` the way
-`"/calls"` owns `/calls/1` today. Then:
+(`path == r or path.startswith(r.rstrip("/") + "/")`, `:89`), so `"/b"` owns `/b/anything`
+the way `"/calls"` owns `/calls/1` today.
+
+**Ignore `frontend/routes.json`'s own `_comment`.** It says spa_routes are "matched EXACTLY
+(not by prefix)", which contradicts the function above and the behaviour the whole app
+relies on. A worker who reads the file they are editing is told the opposite of the truth;
+that comment predates the `/calls/1` sub-path behaviour. `PLAN-DEFECTS.md` D19 item 8.
+
+Then:
 
 ```bash
 cd <worktree> && uv run python scripts/gen_routes.py
@@ -2127,9 +2573,19 @@ Two different numbers, and the note is explicit that the plan must name both: th
 interval is **~5 minutes**; the maximum age of a last-good copy is **60 minutes**. They are
 not the same bound and neither implies the other.
 
-**`unwrap()` cannot express this.** Measured (`frontend/src/api/client.ts:47-72`): a 404
-and a 502 both surface as `ApiError("network_error"|<code>, …)` with no status to branch
-on, and a 401 triggers a **full-page navigation to `/login`** — catastrophic on a wall.
+**`unwrap()` cannot express this, and the load-bearing reason is the redirect.** Measured:
+`unwrap` calls `redirectToLogin()` on a 401 (`frontend/src/api/client.ts:48-50`) and
+`redirectToNoAccess()` on a 403 `account_inactive` (`:60-61`) — **full-page navigations**,
+which on an unattended corridor screen means the board is replaced by a login page and
+never comes back. That alone disqualifies it.
+
+Secondarily, `ApiError` (`client.ts:8-19`) carries `code` and `userMessage` and **no
+status**, so the four-way branch above cannot be expressed on the object it throws. Note
+that a 404 from this API *is* distinguishable by its `code` (`"not_found"`) where a 502
+gives `"network_error"` — so do not write "a 404 and a 502 are indistinguishable"; it
+invites a reviewer to "correct" the design back to `unwrap`. The redirect is the reason.
+`PLAN-DEFECTS.md` D19 item 6.
+
 `publicBoard.ts` therefore uses `fetch` directly and reads `response.status`.
 
 **Deadlines expire locally too.** Even while serving a stale copy the page drops any card
@@ -2277,7 +2733,7 @@ forever. Deadlines expire locally even while a stale copy is on screen."
 - Create: `frontend/src/routes/BoardsList.tsx`, `BoardDetail.tsx`, `BoardQueue.tsx`
 - Create: `frontend/src/routes/ProfileTransferCard.tsx`
 - Modify: `frontend/src/routes/ProfileDetail.tsx`, `routes.json` (+ generated), both routers and both router tests
-- Test: one `.test.tsx` beside each new component
+- Test: a `.test.tsx` beside each new component **except `BoardsList`** — see below
 
 **The queue screen is the one that decides whether the gate survives.** §4.3: "An approval
 UI that costs a minute per call will be abandoned, and an abandoned gate is worse than no
@@ -2288,10 +2744,17 @@ gate because the board silently stops updating." So it ships with all three affo
 2. an "approve everything at or above N" action,
 3. a visible count of what is waiting.
 
-**The transfer card renders a COMPUTED warning.** It reads `outgoing_lost_read` from the
-endpoint (Task 3), which comes from `transfer_read_effect` (Task 1). A hardcoded "you will
-lose access to this profile" is wrong for an admin and the note records that exact error
-being made once.
+**The transfer card renders a COMPUTED warning, read BEFORE the act.** It reads
+`outgoing_lost_read` from **`GET /api/profiles/{id}`** — the profile detail payload the card
+is already mounted on (Task 3's second half) — **not** from the `PUT .../owner` response,
+which only exists once the transfer has happened. A warning derived from the response is
+the after-the-fact version the note explicitly rejects: "the transfer UI must say so before
+the act rather than after". An earlier draft produced the value only on the PUT response, so
+this card had nothing to read at render time and its admin gate could not have been built.
+`PLAN-DEFECTS.md` D17.
+
+A hardcoded "you will lose access to this profile" is wrong for an admin, and the note
+records that exact error being made once.
 
 **The title field carries D4's caution** at the point the title is set: a board title is
 free text an author chose and may name the group even when the profile is private.
@@ -2322,6 +2785,14 @@ it("shows one generic error for an unknown and for an inactive address", ...)   
 
 `it("does NOT warn an admin owner, because they lose nothing")` is the frontend half of
 Task 1's gate. A hardcoded warning passes the first test and fails only this one.
+
+**`BoardsList` ships without a test, deliberately.** The Files list above used to promise
+"one `.test.tsx` beside each new component" while listing test blocks for only three of the
+four, which made the sentence and the +14 delta contradict each other. This plan resolves it
+by narrowing the sentence rather than by padding the count: `BoardsList` is a list-and-link
+with no branching a wrong implementation would get past a test that only asserts "a row
+renders per board". If review wants it covered, two cases (empty state; a link per board)
+raise the delta to **+16** — say which, and re-derive. `PLAN-DEFECTS.md` D18.
 
 - [ ] **Step 2: Run and confirm failure**
 
@@ -2391,14 +2862,17 @@ with a named implementing task.
 
 **Numbers.** Every baseline in Global Constraints was measured in this worktree at
 `05bd151c` and its raw output is in `/home/parlar_ai/plan-c-run/PLAN-AUTHORING-MEASUREMENTS.md`.
+The **per-task deltas were re-derived after the dry run** — six reproduced exactly and four
+did not; see "What the dry run changed" at the end of this file for which term moved in each.
 Every `file.py:NN` was opened, not copied — including from the decisions note, one of whose
 citations had already gone stale (`PLAN-DEFECTS.md` N1). Per-task figures are **DELTAS**
 against the measured 5137 / 1062; the route-count arithmetic (109 + 1 per new path) is
 stated so it can be checked, and each task re-derives it with `wc -l` rather than
 incrementing.
 
-**Type consistency.** `transfer_read_effect` (Task 1) → consumed by Task 3 → surfaced as
-`outgoing_lost_read` → read by Task 10. `board_queue` / `QueueRow` (Task 4) → Task 6.
+**Type consistency.** `transfer_read_effect` (Task 1) → surfaced by Task 3 on **BOTH**
+`GET /api/profiles/{id}` (so Task 10's card can warn **before** the act) **and** the
+`PUT .../owner` response (so the caller learns what actually happened) → read by Task 10. `board_queue` / `QueueRow` (Task 4) → Task 6.
 `qr_for` / `QrCode{modules, path}` (Task 7) → serialized as `qr_modules` / `qr_path` →
 read by Task 9. `ORIENTATION_ITEMS_PER_PAGE` (Task 2) → Tasks 5, 6, 8, 9.
 `BoardAlert.owner_undeliverable` (Task 8) → Task 10.
@@ -2414,3 +2888,116 @@ read by Task 9. `ORIENTATION_ITEMS_PER_PAGE` (Task 2) → Tasks 5, 6, 8, 9.
   number here.
 - **`e2e/` is untouched.** A Playwright case for the corridor screen is worth having and is
   not in this plan; `frontend/e2e/match.spec.ts` is the file it would join.
+- **`BoardsList` ships untested** (Task 10, `PLAN-DEFECTS.md` D18). Named, not hidden.
+- **The match-edition process-cut gate pins CONSTRUCTION, not boot.** Measured: the FastAPI
+  lifespan imports seven proposal-assist modules with no edition guard (`main.py:212,
+  229-233, 251`), so **41** of them and `pycrdt` are loaded after a match boot even though
+  the gate reports zero after `create_app()`. Every module this plan adds is reachable from
+  `create_app()`, so the gate does its job here — but fixing it is **out of scope for Plan C**
+  and no commit message or docstring in this plan may claim a clean match boot.
+- **A QR decoder is not available and is not added.** Task 7's two "does the QR point at the
+  right URL" tests re-encode and compare matrices instead (`PLAN-DEFECTS.md` D13). A QR that
+  segno encodes and re-encodes identically but that a real phone camera cannot read is
+  outside what any test here can see; `test_the_symbol_is_never_a_micro_qr` is the one
+  scanner-compatibility property that is pinned, and it is pinned because it was the one
+  that actually bit.
+
+---
+
+## What the dry run changed
+
+The whole plan was **executed for real** in a throwaway worktree (`.worktrees/plan-c-dry`,
+branch `dry/plan-c`, ten commits, code discarded) specifically to find the plan's defects
+before a build depends on them. It found **19**, on top of the four input defects phase 1
+had already recorded. Every one has an outcome below — fixed, or rejected with the
+measurement that rejects it.
+
+**Every number and every `file.py:NN` folded in was re-derived here against the worktree,
+not copied from the defect list.** That caught three cases where the correction was wrong
+in the opposite direction from the original error.
+
+### ESCALATE
+
+**None, in either phase.** Nothing found required merging, pushing, editing
+`docs/superpowers/specs/`, reading `.env`, hand-editing `docs/ARCHITECTURE.md`, or moving
+`master` off `05bd151c`. The one item that touches an identity line — the match-edition
+process-cut gate pinning construction rather than boot — is **recorded and declared out of
+scope for Plan C**, in Global Constraints and in Known gaps, with the plan forbidden from
+restating the false version of what it proves.
+
+### The three that would have shipped a real bug
+
+| | What it was | Where it is fixed |
+| --- | --- | --- |
+| **D14** | `segno.make(url, error="m")` returns a **Micro QR** for a 13-character URL. Many phone cameras cannot read one; on a wall it looks exactly like a working QR, and every other test round-trips it perfectly. | Open-9 and Task 7 Step 3 use `segno.make_qr`; Task 7 Step 2 adds `test_the_symbol_is_never_a_micro_qr` with a 13-char fixture |
+| **D17** | The transfer warning had nothing to read at render time — `outgoing_lost_read` existed only on the `PUT` **response**, i.e. after the act Open-6 says it must precede. | Task 3 now surfaces it on `GET /api/profiles/{id}` too; Task 10 and the self-review chain updated |
+| **D12** | The QR round-trip gate compared against a **different encoder** (`segno.make(url)` vs the implementation's `error="m"`), so its verdict was a property of the fixture URL's length. | Task 7 Step 2 compares against the same `segno.make_qr(url, error="m")` call |
+
+### Every defect and its outcome
+
+| ID | Sev | Outcome |
+| --- | --- | --- |
+| **S1** | — | Already carried before the dry run: §6's `PreAuthLayout` is a 352 px card, so Task 9 uses a third pathless layout. Dry run **confirmed** both halves. No change. |
+| **S2** | — | Already carried: no QR encoder exists on either side. Open-9. **Amended** by D14 and D15. |
+| **N1** | — | Already carried: `seed_dev_data.py:328`, not the note's `:302`. **Re-verified** here. |
+| **N2** | — | Already carried: the seed omits the flag, so `server_default=text("true")` is load-bearing. **Re-verified.** |
+| **N3** | — | Nothing to do. |
+| **D1** | Important | **FIXED.** Task 1 Step 2 expected "4 FAILED" and warned that ERRORs meant trouble — but its own Step 1 puts the import at module level, so the only possible outcome is **one collection error**, and the step fired its own alarm on the correct result. Now reads like Task 2 Step 2, which had it right. |
+| **D2** | Minor | **FIXED.** Task 2 Step 8: `+5` → `+6`. Step 1's own code block defines six test functions. |
+| **D3** | Important | **FIXED, in two tasks.** `test_a_stranger_gets_404_not_403` asserted only the status, and a missing route also answers 404 — so it was **green before the endpoint existed** and would stay green if the route were deleted or unregistered. Re-derived here: a missing route returns `404 {"error":{"code":"not_found","message":"Not Found"}}`, while `_profile_for_edit` (`profiles.py:139/141`) raises `detail="profile not found"` and `main.py:548` renders it into `message`. Tasks 3 **and** 5 now assert the body plus a positive control. |
+| **D4** | Important | **FIXED.** Task 3 `+12` → `+15`. `DELEGATION_PINS` is parametrized by two tests (`test_profile_access_single_source.py:484-486` and `:517-519`), so one dict entry is two test IDs; `EXEMPT_PROFILE_FUNCTIONS` is parametrized over nothing, which is why Task 1 was clean. Promoted to a Global Constraints counting rule. (+15 = 13 cases after D17 + 2.) |
+| **D5** | Minor | **FIXED.** Task 3 Gate B said "the four behavioural tests"; Task 3 has thirteen. Also records that this gate's evidence *depends on* D3's fix — with a status-only stranger assertion it reads as a one-test catch instead of two. |
+| **D6** | Important | **FIXED — option (a), and the rejected option is written down.** Task 4 Step 4 told you to add `boards.queue.board_queue` to `_base_call_filters`'s caller enumeration, but Step 3 calls `_decision_predicate`. Re-derived: `_base_call_filters` has exactly two callers (`:367`, `:503`) and its docstring is **true today**; the instruction would have made it false — the exact failure its own closing sentence names. `_decision_predicate` has one call site (`:322`) and enumerates none. Step 4 now targets `_decision_predicate` and leaves `_base_call_filters` alone. Option (b) — make `board_queue` genuinely call `_base_call_filters` — is **rejected** in the plan text, with the reason: with `source_id` and `q` both `None` it returns the same list via two `None`s the queue never uses, and subscribes the corridor board to any future dashboard-only filter. |
+| **D7** | Minor | **FIXED by deletion, not correction.** Task 4 Step 6's "passes seven of the eight tests" did not reproduce (the dry run measured `2 failed, 6 passed`), and the ninth case from D8 moves it again. The pass-count literal is **removed** rather than swapped for another guess; the two failing tests are named, with an explicit "do not carry a pass-count literal here". |
+| **D8** | Important | **FIXED.** Task 4's eight cases could not see the `state == "hidden"` clause at all — nothing in the file created a non-hidden `CallDecision` — and Step 6's second mutation named two tests that stay green plus a cause the one real failure did not have. Adds `test_a_call_the_owner_SAVED_is_still_in_the_queue`, carries `+9`, and rewrites the record line as two dropped clauses with one test each. |
+| **D9** | Important | **FIXED, in Tasks 5 and 7 and in Global Constraints.** Adding a router to `_ALWAYS` also requires the `_ALWAYS_ROUTERS` literal in `test_edition_surface.py`; the plan named neither. **The defect's own citations were off** — re-derived: `_ALWAYS_ROUTERS` is at `:242-249` (not `:246`) and the test at `:279-284` (not `:283`). It is a **list compared element-for-element in order**, so the plan now says to add the entry in the same position in both. |
+| **D10** | Minor | **FIXED, with a corrected citation.** A sub-router must carry **no `prefix`** — `build_api_router` supplies `/api`. The defect cited `web/api/__init__.py:106-107`; re-derived, the `APIRouter(prefix="/api", ...)` is at **`:100-101`** and `include_router` at `:105`. Task 5 Step 3 and Task 7 Step 5 now say so, and name the symptom (404 on every test, indistinguishable from an unregistered router). |
+| **D11** | Minor | **FIXED, plus a general rule.** Three "prove the gate BITES" steps named one failing test where two fail (Tasks 4, 5, 6). Each now names the real set, `claude_agent_sdk` is dropped from Task 5 Gate C's expected flips (that import pulls pycrdt and prosemirror but not the SDK), and Global Constraints adds: **an expected failing set is a FLOOR — more red is the gate being stronger, fewer red is the finding.** |
+| **D12** | **Critical** | **FIXED.** See the table above. Re-measured: `https://a.se/x` (14 chars) gives M4/level-L/17 rows under `make()` and version 1/21 rows under `error="m"`; `https://example.test/x` (22 chars) agrees. Different encoders, and the disagreement is a function of URL length. |
+| **D13** | Important | **FIXED.** `test_the_qr_points_at_the_funder_url_not_this_app` asked for a **decoded string**; segno is an encoder only and nothing in this environment decodes QR (re-derived: pyzbar, zxing, cv2, qrcode, zxingcpp, qreader all ABSENT; PIL and numpy present but cannot decode). Reworded to **re-encode and compare matrices**, which has the same discriminating power for a QR pointing at the wrong URL. Named in Known gaps as a real limit. |
+| **D14** | **Critical** | **FIXED.** See the table above. |
+| **D15** | Minor | **FIXED, and re-derived rather than copied.** The plan claimed 7998 bytes / ≈192 KB and said "Task 7's gate is written against that number". Measured here with the plan's own `qr_for`: a 129-char URL gives 49 modules and **9100 bytes** of path, **218,400 bytes (213 KB)** for 24 items. The dry run's whole-body figure (226,040 bytes / 221 KB) is carried as **the dry run's measurement**, flagged as not re-derived. The exact command is now printed beside the number. Also fixes an off-by-one: the base is 46 chars, so 129 is `+ "a" * 83`, not 84. |
+| **D16** | Important | **FIXED.** Task 8 changes `BoardOut` but never regenerated `schema.gen.ts`, and **`pytest` cannot see a stale generated file** — the drift check is CI-only (`ci.yml:112-115`). New Step 4 regenerates it in the same commit, the Files list gains the file, the "route set does NOT move" is stated explicitly so nobody regenerates the baseline for nothing, and it is a Global Constraints rule. |
+| **D17** | **Critical** | **FIXED.** See the table above. Task 3's Files, Interfaces, Step 1 (a thirteenth case), Step 3 (the `get_profile` half), Step 5 and Step 8; Task 10's transfer-card paragraph; and the self-review's type-consistency chain. |
+| **D18** | Minor | **FIXED — option (a), stated.** The Files sentence promised a test per component while listing three of four. Narrowed to "except `BoardsList`", with the reason (a list-and-link with no branching worth pinning), the alternative priced (+16 with two cases), and the omission named in Known gaps. The `+14` delta was right; the sentence was wrong. |
+| **D19.1** | — | **REJECTED.** The plan's `dashboard.py:91` for the archive predicate is **correct**. Re-derived at `05bd151c`: line 90 is the `raise ValueError` tripwire, line 91 is `return Call.id.notin_(...)`. The dry run measured its own worktree, where its D6 fix had already lengthened that docstring. The plan now carries the re-derivation beside the citation so this does not get "corrected" a third time. |
+| **D19.2** | — | **FIXED.** `add_profile_viewer`'s generic-400 sentence is `:599-601`; line 598 is blank. Corrected in Open-8 and in Task 3's docstring. |
+| **D19.3** | — | **REJECTED as stated, citation widened anyway.** The claim was that "the OWNER never has a row" is at `db/models/profiles.py:135`, not `:136`. Re-derived: the sentence spans 135-136 and the quoted phrase is on **136**; 137 is the closing `"""`. The plan's `:136` pointed at the phrase. Now written `:135-136`, which is unambiguous. |
+| **D19.4** | — | **REJECTED.** `dashboard.py:377-390` for `build_dashboard_view`'s signature is **correct**: `def build_dashboard_view(` is at 377 and `user_id` at 380. The defect's "def is at 386" is the dry worktree again. |
+| **D19.5** | — | **FIXED.** `digest/assemble.py:86-88`, not `:86-89` — 89 is `profiles = (`. |
+| **D19.6** | — | **FIXED, and the reasoning re-ordered.** Task 9 now leads with the disqualifying fact — `unwrap` performs **full-page navigations** on 401 (`client.ts:48-50`) and on 403 `account_inactive` (`:60-61`), catastrophic on an unattended wall — and explicitly warns **not** to claim a 404 and a 502 are indistinguishable, because a 404 does carry `code: "not_found"`. The over-strong claim invited a reviewer to "correct" the design back to `unwrap`. |
+| **D19.7** | — | **FIXED** with D11 (`claude_agent_sdk` does not flip). |
+| **D19.8** | — | **FIXED.** Task 9 now warns that `frontend/routes.json`'s own `_comment` says spa_routes are "matched EXACTLY (not by prefix)", which contradicts `is_spa_route` (`gen_routes.py:75-91`, the exact-or-subtree match at `:89`) and the behaviour `/calls/1` relies on. The file you are editing tells you the opposite of the truth. |
+| **D20** | Minor | **FIXED — found while folding, not by the dry run.** Task 3's prose said "**Nine** cases" directly above a list of **twelve**. Now "Thirteen", matching the list after D17's addition. |
+
+### Deltas that moved, and the term that moved each
+
+Six of ten reproduced exactly in the dry run and are unchanged. The four that moved:
+
+| Task | Was | Now | The term |
+| --- | --- | --- | --- |
+| 2 | +5 models | **+6** models | the plan's own Step 1 block always had six tests (D2) |
+| 3 | +12 | **+15** | +2 from the `DELEGATION_PINS` parametrization (D4), +1 for D17's detail-payload case |
+| 4 | +8 | **+9** | the ninth case that makes the `state == "hidden"` clause visible (D8) |
+| 7 | +22 | **+23** | `test_the_symbol_is_never_a_micro_qr` (D12/D14) |
+
+Unchanged: Task 1 **+4**, Task 5 **+17**, Task 6 **+16**, Task 8 **+13** backend, Task 9
+backend **+0** / frontend **+21**, Task 10 frontend **+14**.
+
+**These are still deltas, not totals, and they are still to be re-derived.** Every task
+says so; the dry run's own end-state totals (5248 backend / 1099 frontend) include six
+extra tests it wrote while working around defects and must not be carried anywhere.
+
+### What the dry run confirmed
+
+Worth recording, because a defect list read alone makes a plan look worse than it is.
+
+- **The measured baselines are exact.** 5137 passed / 1 skipped, 140 frontend files / 1062
+  tests, migration head 0071, 109 route paths — all re-measured in the dry worktree.
+- **Every "prove the gate BITES" mutation reddened something**, and 22 of ~26 named exactly
+  the right test. Tasks 8 and 9's four-gate blocks were perfect.
+- **The fixture warning earned its space.** `pg_session_factory` is a factory,
+  `profile_factory` returns a tuple, `ProfileKind` has two values — all three correct, and
+  each would have cost a task.
+- **Both deviations from the spec held up**, and Deviation 1's override is right even though
+  its citation was not (D6): the queue does key off the profile owner.
