@@ -23,6 +23,7 @@ from sqlalchemy import select
 
 from grant_lab.auth.session_cookie import SessionSigner
 from grant_lab.db.models import (
+    ORIENTATION_ITEMS_PER_PAGE,
     Board,
     BoardItem,
     Call,
@@ -267,7 +268,10 @@ def test_approving_past_capacity_is_refused_and_names_the_overflow(
 
     assert r.status_code == 409, r.text
     detail = r.json()["error"]["message"]
-    assert "1" in detail  # names the overflow: 1 to drop
+    assert "drop 1" in detail  # names the overflow: 1 to drop. A substring
+    # of just "1" is also satisfied by "approving 1 more" and would stay
+    # green even if the "drop N" clause were dropped from the message
+    # entirely (MINOR 4).
     rows = _items(pg_session_factory, board_id)
     assert len(rows) == 24
 
@@ -275,24 +279,51 @@ def test_approving_past_capacity_is_refused_and_names_the_overflow(
 def test_capacity_uses_the_STORED_items_per_page_not_a_default(
     monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    """D7: a PORTRAIT board's cap is 4 * max_pages, not landscape's 8 *
-    max_pages. Gate A's hardcode mutant (`cap = 8 * board.max_pages`) reads
-    every board as if it holds 24, so a portrait board's 13th approval would
-    wrongly succeed under that mutant."""
+    """D7: `items_per_page` remains an OVERRIDE after creation, applied via
+    `PUT`. A board created straight through the route (as the old version of
+    this test did) has `items_per_page` exactly equal to
+    `ORIENTATION_ITEMS_PER_PAGE[orientation]` -- the DEFAULT -- so it cannot
+    tell a cap that reads the board's own STORED column apart from one that
+    falls back to `ORIENTATION_ITEMS_PER_PAGE[board.orientation]` and ignores
+    the column entirely (IMPORTANT 3): both compute the same number. This
+    test PUTs the board to a non-default `items_per_page` first, then proves
+    the cap follows THAT stored value: seeded up to the (now stale) default
+    cap, one more approval should SUCCEED because the true, overridden cap
+    is higher -- a cap that fell back to the default would wrongly REFUSE it.
+
+    Also derives every count from the imported `ORIENTATION_ITEMS_PER_PAGE`
+    and the board's own `max_pages`, never restating either as a literal."""
     app = _setup(monkeypatch, pg_url)
-    pid, owner_id = profile_factory(name="Portrait capacity profile")
+    pid, owner_id = profile_factory(name="Stored override capacity profile")
     owner = _client_for(app, owner_id)
     board_id = _create_board(owner, profile_id=pid, orientation="portrait").json()["id"]
-    # portrait cap = 4 * max_pages(3) = 12.
-    _approve_n(pg_session_factory, board_id=board_id, approved_by=owner_id, n=12)
-    extra_id = _make_call(pg_session_factory, external_id="the-13th")
-    _rank(pg_session_factory, call_id=extra_id, profile_id=pid, score=90)
+    default_items_per_page = ORIENTATION_ITEMS_PER_PAGE["portrait"]
+    overridden_items_per_page = default_items_per_page + 1  # a non-default override
+    put_r = owner.put(
+        f"/api/boards/{board_id}", json={"items_per_page": overridden_items_per_page}
+    )
+    assert put_r.status_code == 200, put_r.text
+    board = _get_board_row(pg_session_factory, board_id)
+    default_cap = default_items_per_page * board.max_pages
+    true_cap = overridden_items_per_page * board.max_pages
+    assert true_cap > default_cap  # the override must actually raise capacity
 
-    r = owner.post(f"/api/boards/{board_id}/items", json={"call_ids": [extra_id]})
+    # Seed right up to the (stale) DEFAULT cap directly -- a cap that fell
+    # back to the default would refuse the next approval; the true,
+    # overridden cap must allow the remaining room it actually has.
+    _approve_n(pg_session_factory, board_id=board_id, approved_by=owner_id, n=default_cap)
+    extra_ids = [
+        _make_call(pg_session_factory, external_id=f"stored-override-{i}")
+        for i in range(true_cap - default_cap)
+    ]
+    for cid in extra_ids:
+        _rank(pg_session_factory, call_id=cid, profile_id=pid, score=90)
 
-    assert r.status_code == 409, r.text
+    r = owner.post(f"/api/boards/{board_id}/items", json={"call_ids": extra_ids})
+
+    assert r.status_code == 200, r.text
     rows = _items(pg_session_factory, board_id)
-    assert len(rows) == 12
+    assert len(rows) == true_cap
 
 
 def test_a_bulk_approve_that_would_exceed_capacity_approves_NONE(
@@ -316,6 +347,61 @@ def test_a_bulk_approve_that_would_exceed_capacity_approves_NONE(
     rows = _items(pg_session_factory, board_id)
     assert len(rows) == 10  # NONE of the 5 landed -- not "2 fit, 3 refused"
     assert {row.call_id for row in rows}.isdisjoint(set(new_ids))
+
+
+def test_approving_zero_call_ids_is_a_noop_even_over_capacity(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """MINOR 6: an empty selection changes nothing, so it must succeed even
+    on a board that somehow already sits OVER its own cap (e.g. legacy data,
+    or a cap that was never enforced on a direct-write path). `approved_count
+    + len(new_ids) > cap` with `new_ids == []` reduces to `approved_count >
+    cap` -- true here by construction -- a 409 for a request that would not
+    have changed anything. (A board merely AT its cap, `approved_count ==
+    cap`, does NOT trigger the pre-fix bug: `cap > cap` is false either way,
+    so the test must put the board strictly OVER cap to distinguish the two
+    behaviours -- seeding directly via `_approve_n`, which bypasses the
+    route's own cap check, same as a legacy/over-cap board would arise.)"""
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Zero call_ids over capacity profile")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid, orientation="landscape").json()["id"]
+    board = _get_board_row(pg_session_factory, board_id)
+    cap = board.items_per_page * board.max_pages
+    _approve_n(pg_session_factory, board_id=board_id, approved_by=owner_id, n=cap + 1)
+
+    r = owner.post(f"/api/boards/{board_id}/items", json={"call_ids": []})
+
+    assert r.status_code == 200, r.text
+    rows = _items(pg_session_factory, board_id)
+    assert len(rows) == cap + 1  # unchanged
+
+
+def test_approving_an_id_outside_the_queues_candidate_set_is_allowed(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """MINOR 5, pinned deliberately -- NOT a bug being fixed here.
+    `approve_items` validates `call_ids` only against `Call` existing at all;
+    it never checks that a call is a CANDIDATE in this board's own queue
+    (`board_queue`'s filters: a `CallRanking` row for this profile,
+    `aggregate_score >= board.min_score`, and a future deadline). A call with
+    NO `CallRanking` row at all for this profile -- so it would never even
+    appear in `GET .../queue` -- can still be approved directly by id. D3
+    treats approval and the queue as deliberately different states; this
+    test pins the current behaviour so a later change to it is a deliberate
+    product decision, not an accident."""
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Candidate bypass profile")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid).json()["id"]
+    # Deliberately no _rank() call -- no CallRanking row for `pid` at all.
+    unranked_id = _make_call(pg_session_factory, external_id="no-ranking-at-all")
+
+    r = owner.post(f"/api/boards/{board_id}/items", json={"call_ids": [unranked_id]})
+
+    assert r.status_code == 200, r.text
+    rows = _items(pg_session_factory, board_id)
+    assert [row.call_id for row in rows] == [unranked_id]
 
 
 # --- permissions: approve/un-approve are editor-level, publish is admin ------
@@ -351,6 +437,118 @@ def test_an_editor_who_is_not_admin_can_UNapprove(
     r = owner.delete(f"/api/boards/{board_id}/items/{call_id}")
 
     assert r.status_code == 204, r.text
+    assert _items(pg_session_factory, board_id) == []
+
+
+# --- IMPORTANT 2: _board_for_edit itself, pinned on the two mutating routes --
+# Before this, no test in this file could tell `_board_for_edit(session,
+# board_id=board_id, user=user)` apart from `session.get(Board, board_id)` on
+# ANY of the six new routes -- swapping it in `approve_items` or
+# `unapprove_item` left all 17 (then) tests green, meaning any authenticated
+# org user could approve onto or strip any board. Each test below follows
+# tests/web/test_api_boards_crud.py's own shape for the identical check on
+# `POST /api/boards` (asserting the response BODY, not just the status code --
+# a missing route also answers 404/403-shaped errors) and pairs the refusal
+# with a positive control: the owner's IDENTICAL request, in the same test,
+# succeeding -- so a 404 that only means "route doesn't exist" cannot pass.
+
+
+def test_a_reader_who_cannot_edit_the_profile_gets_403_on_approve(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """A reader is a user who CAN read the board's profile (default
+    visibility='org') but does not own it and is not an admin -- so
+    `_profile_for_edit` refuses with 403 "not authorized", not 404."""
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Reader cannot approve profile")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid).json()["id"]
+    reader_id = _new_user(pg_session_factory, "reader-approve@umu.se")
+    reader = _client_for(app, reader_id)
+
+    r = reader.post(f"/api/boards/{board_id}/items", json={"call_ids": []})
+
+    assert r.status_code == 403, r.text
+    assert b"not authorized" in r.content
+    assert _items(pg_session_factory, board_id) == []
+
+    # Positive control: the owner's identical request succeeds, so the 403
+    # above is the edit-permission check and not a broken route.
+    r2 = owner.post(f"/api/boards/{board_id}/items", json={"call_ids": []})
+    assert r2.status_code == 200, r2.text
+
+
+def test_a_stranger_gets_404_not_403_on_approve(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """A stranger has NO access at all (private profile, not owner, not
+    admin) -- `_profile_for_edit` refuses with 404 "profile not found", never
+    revealing the profile exists."""
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Stranger cannot approve profile")
+    _set_visibility(pg_session_factory, pid, "private")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid).json()["id"]
+    stranger_id = _new_user(pg_session_factory, "stranger-approve@umu.se")
+    stranger = _client_for(app, stranger_id)
+
+    r = stranger.post(f"/api/boards/{board_id}/items", json={"call_ids": []})
+
+    assert r.status_code == 404, r.text
+    assert b"profile not found" in r.content
+    assert _items(pg_session_factory, board_id) == []
+
+    # Positive control: the owner's identical request succeeds.
+    r2 = owner.post(f"/api/boards/{board_id}/items", json={"call_ids": []})
+    assert r2.status_code == 200, r2.text
+
+
+def test_a_reader_who_cannot_edit_the_profile_gets_403_on_unapprove(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Reader cannot unapprove profile")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid).json()["id"]
+    _approve_n(pg_session_factory, board_id=board_id, approved_by=owner_id, n=1)
+    call_id = _items(pg_session_factory, board_id)[0].call_id
+    reader_id = _new_user(pg_session_factory, "reader-unapprove@umu.se")
+    reader = _client_for(app, reader_id)
+
+    r = reader.delete(f"/api/boards/{board_id}/items/{call_id}")
+
+    assert r.status_code == 403, r.text
+    assert b"not authorized" in r.content
+    assert [row.call_id for row in _items(pg_session_factory, board_id)] == [call_id]
+
+    # Positive control: the owner's identical request succeeds.
+    r2 = owner.delete(f"/api/boards/{board_id}/items/{call_id}")
+    assert r2.status_code == 204, r2.text
+    assert _items(pg_session_factory, board_id) == []
+
+
+def test_a_stranger_gets_404_not_403_on_unapprove(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Stranger cannot unapprove profile")
+    _set_visibility(pg_session_factory, pid, "private")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid).json()["id"]
+    _approve_n(pg_session_factory, board_id=board_id, approved_by=owner_id, n=1)
+    call_id = _items(pg_session_factory, board_id)[0].call_id
+    stranger_id = _new_user(pg_session_factory, "stranger-unapprove@umu.se")
+    stranger = _client_for(app, stranger_id)
+
+    r = stranger.delete(f"/api/boards/{board_id}/items/{call_id}")
+
+    assert r.status_code == 404, r.text
+    assert b"profile not found" in r.content
+    assert [row.call_id for row in _items(pg_session_factory, board_id)] == [call_id]
+
+    # Positive control: the owner's identical request succeeds.
+    r2 = owner.delete(f"/api/boards/{board_id}/items/{call_id}")
+    assert r2.status_code == 204, r2.text
     assert _items(pg_session_factory, board_id) == []
 
 

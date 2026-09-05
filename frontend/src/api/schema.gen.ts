@@ -566,6 +566,19 @@ export interface paths {
          *     edit (a bare title rename) on a board that was already over capacity, and
          *     would blame `new_orientation` for a shrink that `items_per_page` alone
          *     caused.
+         *
+         *     CONCURRENCY (fix round 1 / IMPORTANT 1). This route takes the SAME
+         *     `SELECT ... FOR UPDATE` row lock `approve_items` takes, and takes it
+         *     BEFORE `approved_count` is read -- not only before the eventual `UPDATE`.
+         *     Locking only at commit time (what a bare `session.commit()` gives for
+         *     free from Postgres's own write-write blocking) is not enough: this
+         *     route's capacity guard is a decision made from a READ, and a concurrent
+         *     `approve_items` that lands its own approvals between this read and this
+         *     route's `UPDATE` is invisible to a guard that already finished reading.
+         *     Taking the lock first forces this route to read the count AFTER any
+         *     approval that got the lock first has committed, so the guard always sees
+         *     the true, current count. See `approve_items`'s own docstring for the
+         *     approve-vs-approve half of this same mechanism.
          */
         put: operations["update_board_api_boards__board_id__put"];
         post?: never;
@@ -616,17 +629,41 @@ export interface paths {
          *     exactly the silent truncation spec §6 forbids, just performed by the
          *     server instead of the display.
          *
-         *     CONCURRENCY (Task 5 review note carried forward). Task 5's own capacity
-         *     guard reads the approved count, then writes, with no lock -- an approve
-         *     landing between its read and its commit can leave a board over cap. This
-         *     route closes that gap from the approval side: it re-reads `board` under
-         *     `SELECT ... FOR UPDATE` before counting, so a second concurrent approve on
-         *     the SAME board blocks here until the first commits, then counts what the
-         *     first actually landed. Postgres also blocks Task 5's own settings-PUT
-         *     UPDATE on this row for the same reason (any UPDATE needs the row lock),
-         *     so the two paths end up mutually serialized on one primitive without
-         *     Task 5's code changing. Different boards do not contend -- the lock is
-         *     per-row.
+         *     CANDIDATE-SET BYPASS (deliberate -- MINOR 5, not changed here).
+         *     `call_ids` is validated only against `Call` existing at all (below) --
+         *     NEVER against this board's queue candidate set. A call with no
+         *     `CallRanking` row for this profile, one scoring below `board.min_score`,
+         *     or one already past its deadline can all still be approved directly by
+         *     id: none of `board_queue`'s filters (boards/queue.py) run on this path.
+         *     D3 treats approval and the queue as deliberately different states, so
+         *     this is a product decision, not a bug the plan asked to close. The
+         *     consequence is real, though: an expired call approved this way consumes
+         *     a cap slot indefinitely -- `BoardItem`'s own docstring notes "the only
+         *     automatic removal is the deadline filter" (db/models/boards.py), which is
+         *     the QUEUE's filter, not this route's -- yet it never renders, because the
+         *     public board only shows non-expired items. See
+         *     `test_approving_an_id_outside_the_queues_candidate_set_is_allowed`, which
+         *     pins this behaviour so a later change here is deliberate.
+         *
+         *     CONCURRENCY (Task 5 review note carried forward; corrected in fix round
+         *     1 -- see IMPORTANT 1). This route re-reads `board` under
+         *     `SELECT ... FOR UPDATE` (`_lock_board_row`) BEFORE counting anything the
+         *     capacity decision depends on, so a second concurrent approve on the SAME
+         *     board blocks here until the first commits, then counts what the first
+         *     actually landed -- closing approve-vs-approve.
+         *
+         *     `update_board`'s settings PUT now takes the SAME lock, in the SAME
+         *     position (before its own `_approved_counts` read, not only before its
+         *     `UPDATE`), which is what actually closes the approve-vs-settings-PUT
+         *     race too. Plain write-write blocking on the two routes' eventual
+         *     `UPDATE`s -- the mechanism this docstring used to (wrongly) credit -- does
+         *     NOT close that race: `update_board`'s guard is a decision made from a
+         *     READ that happens well before its `UPDATE`, so a concurrent approve that
+         *     commits in that window is invisible to a guard that already finished
+         *     reading, no matter what the later `UPDATE`s contend on. Locking the row
+         *     up front, on BOTH routes, is what forces the second locker's read to
+         *     happen after the first's commit. Different boards do not contend -- the
+         *     lock is per-row.
          */
         post: operations["approve_items_api_boards__board_id__items_post"];
         delete?: never;
