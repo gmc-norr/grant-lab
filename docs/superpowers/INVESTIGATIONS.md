@@ -1,6 +1,6 @@
 # Prior investigations — read this before measuring anything
 
-33 documents in `notes/` and `reviews/` record work already done: spikes with verdicts,
+34 documents in `notes/` and `reviews/` record work already done: spikes with verdicts,
 multi-agent reviews with verified defect tallies, and outside opinions. They are indexed
 here **by the question they answer**, because they are named by date and slice, which is
 useless when you are trying to find out whether someone has already looked at something.
@@ -182,6 +182,22 @@ F5 run live: 11 escalations, 5 flips ≥15, mostly downward. `claude-sonnet-5` v
 for the ranking client. Principle verdict: rubric not Likert (only `topic_fit` is bare),
 the system must measure itself, no filter without an audit sample. Blind labelling helper
 left in `data/golden_labelling/` (gitignored).
+
+**[notes/2026-09-05-plan-c-board-decisions.md](notes/2026-09-05-plan-c-board-decisions.md)**
+*What does Plan C (corridor boards) have to decide that the release-1 spec does not?*
+Eight decisions, two of them deliberate **overrides** of the spec. **D2**: the admin
+approval queue applies the profile OWNER's hides (the spec's queue is userless), keyed off
+`profiles.created_by`, never `boards.created_by` — an admin can build a board on a profile
+they do not own. **D7**: orientation is STORED on the board, because §6 caps approval at
+`items_per_page x max_pages` while also letting the renderer pick orientation from the
+viewport — so a board approved at 24 landing on a portrait screen would have to drop 12,
+which §6 forbids. **D8**: the board shows live call data, never a snapshot; `Call` has no
+status or withdrawn column, so "the board drops withdrawn calls" is not implementable.
+Also closes three questions the code already answered: deadline timezone
+(`web/filters.py:37`, Europe/Stockholm, one shared helper), "closes in N days"
+(`Deadline.tsx`), and the rate limit (reuse `SlidingWindowLimiter`). Two questions remain
+open for the human: who is told the approval queue needs attention, and what happens to a
+board when the profile owner leaves.
 
 ## Implementation maps
 
