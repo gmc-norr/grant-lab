@@ -1,6 +1,6 @@
 # Prior investigations — read this before measuring anything
 
-35 documents in `notes/` and `reviews/` record work already done: spikes with verdicts,
+36 documents in `notes/` and `reviews/` record work already done: spikes with verdicts,
 multi-agent reviews with verified defect tallies, and outside opinions. They are indexed
 here **by the question they answer**, because they are named by date and slice, which is
 useless when you are trying to find out whether someone has already looked at something.
@@ -103,6 +103,19 @@ revocation drift. Confirms the prior critical CRDT decoder issue is fixed.
 
 **[reviews/2026-08-29-third-pass-expansion.md](reviews/2026-08-29-third-pass-expansion.md)**
 **The review of record.** Supersedes the second pass's severity ranking. Start here.
+
+**[reviews/2026-09-05-gate-audit-and-freshness-review.md](reviews/2026-09-05-gate-audit-and-freshness-review.md)**
+*Which of our gates cannot see the thing they name?* **Three of fourteen.** The second pass
+by the same outside reviewer, briefed to reproduce rather than survey: a `git archive`
+snapshot, its own environment, disposable databases, and a named adverse input for **every**
+architecture gate file. Found that an unfenced git commit escapes all **239** fencing tests
+when its argv is a local variable; that `if: false` and `continue-on-error: true` pass the
+CI wiring gate; and that relative-import cycles are invisible to the cycle scanner while
+failing at runtime. All three **fixed in `77e746eb`**. It also reproduced the Git/Postgres
+rollback window for the first time, and found a **new, deterministic** freshness bug needing
+no crash: clearing a description while keeping `areas` commits an embed-text change and
+schedules no refresh at all. Read the disposition section for what was re-run here and what
+was not.
 
 **[reviews/2026-09-05-runtime-ownership-and-state-consistency-review.md](reviews/2026-09-05-runtime-ownership-and-state-consistency-review.md)**
 *Is the problem module organization, or runtime ownership?* **Runtime ownership.** An
