@@ -454,3 +454,256 @@ def test_list_boards_only_shows_boards_on_profiles_the_caller_can_read(
     ids = {b["id"] for b in r.json()["boards"]}
     assert visible_board_id in ids  # org-visible profile: readable by anyone
     assert hidden_board_id not in ids  # private profile: not this caller's
+
+
+def test_list_boards_excludes_a_board_on_an_archived_profile(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """Review round 1, IMPORTANT 2. `readable_profile_ids` deliberately does
+    NOT filter `is_active` (profile_access.py's own docstring: "Callers
+    already do"); `_profile_for_edit` DOES filter it, 404ing on an archived
+    profile. Without list_boards filtering it too, an archived profile's board
+    would keep listing here while GET/PUT/DELETE on it all 404 -- a listed
+    board nothing can open, edit or remove."""
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Archived profile")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid).json()["id"]
+
+    with pg_session_factory() as s:
+        p = s.get(Profile, pid)
+        p.is_active = False
+        s.commit()
+
+    r = owner.get("/api/boards")
+
+    assert r.status_code == 200, r.text
+    ids = {b["id"] for b in r.json()["boards"]}
+    assert board_id not in ids
+
+    # Positive control: the same board on the same (still-active) profile
+    # DOES list before archiving -- proves the assertion above is the archive
+    # filter biting, not some other reason the board never listed at all.
+    with pg_session_factory() as s:
+        p = s.get(Profile, pid)
+        p.is_active = True
+        s.commit()
+    r2 = owner.get("/api/boards")
+    assert board_id in {b["id"] for b in r2.json()["boards"]}
+
+
+# --- review round 1, IMPORTANT 1: settings bounds ---------------------------
+# items_per_page had a DB CHECK (ck_boards_items_per_page) but no pydantic
+# bound, so 0 reached it as an uncaught IntegrityError -> 500. min_score and
+# page_seconds had NEITHER a pydantic bound NOR a DB CHECK, so an out-of-range
+# value returned 200 and persisted silently. Each case below is checked at
+# both ends: the HTTP status, and the row itself where a silent persist is the
+# failure mode a status-only assertion would miss.
+
+
+def test_creating_a_board_with_an_empty_title_is_422(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Empty create-title profile")
+    owner = _client_for(app, owner_id)
+
+    r = _create_board(owner, profile_id=pid, title="")
+
+    assert r.status_code == 422, r.text
+
+
+def test_settings_title_empty_string_is_422_and_does_not_persist(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Empty settings-title profile")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid, title="Original title").json()["id"]
+
+    r = owner.put(f"/api/boards/{board_id}", json={"title": ""})
+
+    assert r.status_code == 422, r.text
+    row = _get_board_row(pg_session_factory, board_id)
+    assert row.title == "Original title"
+
+
+def test_settings_items_per_page_zero_is_422_not_500(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Items per page zero profile")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid).json()["id"]
+
+    r = owner.put(f"/api/boards/{board_id}", json={"items_per_page": 0})
+
+    assert r.status_code == 422, r.text
+    row = _get_board_row(pg_session_factory, board_id)
+    assert row.items_per_page == 8  # unchanged -- landscape's default
+
+
+def test_settings_items_per_page_boundary_one_is_accepted(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Items per page boundary profile")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid).json()["id"]
+
+    r = owner.put(f"/api/boards/{board_id}", json={"items_per_page": 1})
+
+    assert r.status_code == 200, r.text
+    assert r.json()["items_per_page"] == 1
+    row = _get_board_row(pg_session_factory, board_id)
+    assert row.items_per_page == 1
+
+
+def test_settings_min_score_below_zero_is_422_and_does_not_persist(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Min score negative profile")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid).json()["id"]
+
+    r = owner.put(f"/api/boards/{board_id}", json={"min_score": -50})
+
+    assert r.status_code == 422, r.text
+    row = _get_board_row(pg_session_factory, board_id)
+    assert row.min_score == 60  # unchanged -- the model's own default
+
+
+def test_settings_min_score_above_hundred_is_422_and_does_not_persist(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Min score too high profile")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid).json()["id"]
+
+    r = owner.put(f"/api/boards/{board_id}", json={"min_score": 101})
+
+    assert r.status_code == 422, r.text
+    row = _get_board_row(pg_session_factory, board_id)
+    assert row.min_score == 60
+
+
+def test_settings_min_score_boundaries_zero_and_hundred_are_accepted(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Min score boundary profile")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid).json()["id"]
+
+    r0 = owner.put(f"/api/boards/{board_id}", json={"min_score": 0})
+    assert r0.status_code == 200, r0.text
+    assert r0.json()["min_score"] == 0
+
+    r100 = owner.put(f"/api/boards/{board_id}", json={"min_score": 100})
+    assert r100.status_code == 200, r100.text
+    assert r100.json()["min_score"] == 100
+    row = _get_board_row(pg_session_factory, board_id)
+    assert row.min_score == 100
+
+
+def test_settings_page_seconds_zero_is_422_and_does_not_persist(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Page seconds zero profile")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid).json()["id"]
+
+    r = owner.put(f"/api/boards/{board_id}", json={"page_seconds": 0})
+
+    assert r.status_code == 422, r.text
+    row = _get_board_row(pg_session_factory, board_id)
+    assert row.page_seconds == 30  # unchanged -- the model's own default
+
+
+def test_settings_page_seconds_boundary_one_is_accepted(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Page seconds boundary profile")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid).json()["id"]
+
+    r = owner.put(f"/api/boards/{board_id}", json={"page_seconds": 1})
+
+    assert r.status_code == 200, r.text
+    assert r.json()["page_seconds"] == 1
+    row = _get_board_row(pg_session_factory, board_id)
+    assert row.page_seconds == 1
+
+
+def test_the_title_field_carries_the_open5_publish_warning_in_the_schema(monkeypatch, pg_url):
+    """Open-5: a private profile's board MAY be published, and the title is
+    free text that may name the group. The plan pins this task to carry the
+    warning at the point the title is SET so it reaches the OpenAPI schema --
+    and, via codegen, Task 10's form. Checking the model class directly would
+    not prove that; FastAPI's generated schema is what codegen actually
+    reads."""
+    app = _setup(monkeypatch, pg_url)
+    schema = app.openapi()
+    create_title = schema["components"]["schemas"]["BoardCreateIn"]["properties"]["title"]
+    settings_title = schema["components"]["schemas"]["BoardSettingsIn"]["properties"]["title"]
+    for prop in (create_title, settings_title):
+        assert "description" in prop, prop
+        assert "publicly visible" in prop["description"]
+
+
+# --- review round 1, MINOR 3 + MINOR 4: the 409 guard -----------------------
+
+
+def test_the_409_does_not_blame_orientation_when_items_per_page_alone_shrinks_it(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """MINOR 3. A pure `{"items_per_page": 6}` request on an unchanged
+    landscape board must not report "landscape holds 18" -- landscape's own
+    default holds 24; the shrink came from items_per_page, not the
+    orientation."""
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Items-per-page shrink profile")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid, orientation="landscape").json()["id"]
+    # landscape cap = 8*3 = 24; shrinking items_per_page to 6 -> cap 18 < 20.
+    _approve_n(pg_session_factory, board_id=board_id, approved_by=owner_id, n=20)
+
+    r = owner.put(f"/api/boards/{board_id}", json={"items_per_page": 6})
+
+    assert r.status_code == 409, r.text
+    detail = r.json()["error"]["message"]
+    assert "landscape" not in detail.lower()
+    assert "20" in detail
+    assert "18" in detail
+    assert "2" in detail  # 20 - 18 = 2 to remove
+    row = _get_board_row(pg_session_factory, board_id)
+    assert row.items_per_page == 8  # refused, unchanged
+
+
+def test_a_bare_title_rename_is_allowed_on_a_board_already_over_capacity(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """MINOR 4. `new_cap < approved_count` alone would refuse every subsequent
+    PUT on a board that is already over capacity, including one that touches
+    neither orientation nor items_per_page. The guard must fire only when THIS
+    request reduces the cap."""
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Already over-capacity profile")
+    owner = _client_for(app, owner_id)
+    board_id = _create_board(owner, profile_id=pid, orientation="portrait").json()["id"]
+    # portrait cap = 4*3 = 12; approve past it directly (this file's shortcut,
+    # standing in for calls approved under a since-lowered max_pages).
+    _approve_n(pg_session_factory, board_id=board_id, approved_by=owner_id, n=15)
+
+    r = owner.put(f"/api/boards/{board_id}", json={"title": "Renamed corridor"})
+
+    assert r.status_code == 200, r.text
+    assert r.json()["title"] == "Renamed corridor"
+    row = _get_board_row(pg_session_factory, board_id)
+    assert row.title == "Renamed corridor"
+    assert row.orientation == "portrait"
+    assert row.items_per_page == 4

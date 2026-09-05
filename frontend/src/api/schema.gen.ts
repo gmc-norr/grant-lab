@@ -516,6 +516,13 @@ export interface paths {
          * @description Boards on profiles the caller can READ -- the wider rule, matching
          *     `GET /api/profiles`. Editing a board's settings is narrower and enforced
          *     per-route by `_board_for_edit`.
+         *
+         *     `readable_profile_ids` deliberately does not filter `is_active` (its own
+         *     docstring: "Callers already do"); `_profile_for_edit` does filter it, 404ing
+         *     on an archived profile. Without this join's `Profile.is_active` clause, an
+         *     archived profile's boards would keep listing here while their detail, PUT
+         *     and DELETE routes all 404 -- a listed board nothing can open, edit or
+         *     remove.
          */
         get: operations["list_boards_api_boards_get"];
         put?: never;
@@ -544,13 +551,21 @@ export interface paths {
         get: operations["get_board_api_boards__board_id__get"];
         /**
          * Update Board
-         * @description Update settings, refusing a capacity-shrinking orientation flip.
+         * @description Update settings, refusing a capacity-REDUCING change.
          *
          *     `items_per_page` only resets to the new orientation's default when
          *     orientation is ACTUALLY changing in this request. Sending back the same
          *     orientation a settings form already had (with no `items_per_page` in the
          *     body) must not silently clobber a previously chosen override -- only a
          *     real flip re-derives the default, per D7 ("remains an override").
+         *
+         *     The guard fires only when THIS request would make the cap smaller than it
+         *     already is (`new_cap < old_cap`) and that shrunk cap can't hold what is
+         *     already approved. Firing on `new_cap < approved_count` alone -- with no
+         *     comparison to the cap the board already had -- would refuse an unrelated
+         *     edit (a bare title rename) on a board that was already over capacity, and
+         *     would blame `new_orientation` for a shrink that `items_per_page` alone
+         *     caused.
          */
         put: operations["update_board_api_boards__board_id__put"];
         post?: never;
@@ -2587,7 +2602,10 @@ export interface components {
             orientation: "landscape" | "portrait";
             /** Profile Id */
             profile_id: number;
-            /** Title */
+            /**
+             * Title
+             * @description The board is publicly visible once published, and the title is the one piece of free text on it, so it should not name anything the profile's owner would not put on a corridor wall.
+             */
             title: string;
         };
         /** BoardOut */
@@ -2650,7 +2668,10 @@ export interface components {
             orientation?: ("landscape" | "portrait") | null;
             /** Page Seconds */
             page_seconds?: number | null;
-            /** Title */
+            /**
+             * Title
+             * @description The board is publicly visible once published, and the title is the one piece of free text on it, so it should not name anything the profile's owner would not put on a corridor wall.
+             */
             title?: string | null;
         };
         /** BoardsListOut */

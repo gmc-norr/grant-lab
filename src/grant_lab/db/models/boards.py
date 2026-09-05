@@ -46,14 +46,23 @@ ORIENTATION_ITEMS_PER_PAGE = {"landscape": 8, "portrait": 4}
 class Board(Base):
     __tablename__ = "boards"
     __table_args__ = (
-        CheckConstraint(
-            "orientation IN ('landscape','portrait')", name="ck_boards_orientation"
-        ),
+        CheckConstraint("orientation IN ('landscape','portrait')", name="ck_boards_orientation"),
         # >= 16 chars, per §4.3. Enforced in the DB so a hand-written INSERT
         # cannot create a guessable public URL.
         CheckConstraint("char_length(slug) >= 16", name="ck_boards_slug_length"),
         CheckConstraint("items_per_page > 0", name="ck_boards_items_per_page"),
         CheckConstraint("max_pages > 0", name="ck_boards_max_pages"),
+        # Matches CallRanking.aggregate_score's own 0-100 scale
+        # (ranking/aggregate.py: "gates + LLM rubric -> 0-100 score") --
+        # `min_score` is compared directly against that column in
+        # boards/queue.py. Migration 0074; the API's own bound is
+        # BoardSettingsIn.min_score (web/api/boards.py) -- this is the floor,
+        # not a restatement of it.
+        CheckConstraint("min_score BETWEEN 0 AND 100", name="ck_boards_min_score_range"),
+        # Migration 0074, alongside ck_boards_min_score_range. Task 10's
+        # rotation timer divides by this; 0 or negative had no DB backstop
+        # before this constraint and returned 200 from PUT.
+        CheckConstraint("page_seconds > 0", name="ck_boards_page_seconds"),
         Index("ix_boards_profile_id", "profile_id"),
     )
 
@@ -88,9 +97,7 @@ class Board(Base):
     published_by: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
     )
-    published_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

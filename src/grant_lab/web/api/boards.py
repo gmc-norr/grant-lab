@@ -40,15 +40,25 @@ from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from grant_lab.auth.dependencies import get_current_user
-from grant_lab.db.models import ORIENTATION_ITEMS_PER_PAGE, Board, BoardItem, User
+from grant_lab.db.models import ORIENTATION_ITEMS_PER_PAGE, Board, BoardItem, Profile, User
 from grant_lab.web.api.profiles import _profile_for_edit
 from grant_lab.web.profile_access import readable_profile_ids
 
 router = APIRouter(tags=["boards"])
+
+# One plain sentence, carried on both title fields so it reaches the OpenAPI
+# schema and, via codegen, Task 10's form. Open-5: a private profile's board
+# MAY be published, and the title is free text an owner could use to name the
+# group -- the warning has to land at the point the title is SET.
+_TITLE_DESCRIPTION = (
+    "The board is publicly visible once published, and the title is the one "
+    "piece of free text on it, so it should not name anything the profile's "
+    "owner would not put on a corridor wall."
+)
 
 # secrets.token_urlsafe(16) -> 16 random bytes, 22 URL-safe characters: over
 # the >=16-char floor ck_boards_slug_length enforces and under the model's
@@ -135,13 +145,25 @@ def _board_for_edit(session, *, board_id: int, user: User) -> Board:
 def list_boards(request: Request, user: User = Depends(get_current_user)):  # noqa: B008
     """Boards on profiles the caller can READ -- the wider rule, matching
     `GET /api/profiles`. Editing a board's settings is narrower and enforced
-    per-route by `_board_for_edit`."""
+    per-route by `_board_for_edit`.
+
+    `readable_profile_ids` deliberately does not filter `is_active` (its own
+    docstring: "Callers already do"); `_profile_for_edit` does filter it, 404ing
+    on an archived profile. Without this join's `Profile.is_active` clause, an
+    archived profile's boards would keep listing here while their detail, PUT
+    and DELETE routes all 404 -- a listed board nothing can open, edit or
+    remove.
+    """
     sf = request.app.state.session_factory
     with sf() as session:
         boards = list(
             session.execute(
                 select(Board)
-                .where(Board.profile_id.in_(readable_profile_ids(user)))
+                .join(Profile, Profile.id == Board.profile_id)
+                .where(
+                    Board.profile_id.in_(readable_profile_ids(user)),
+                    Profile.is_active.is_(True),
+                )
                 .order_by(Board.created_at.desc())
             ).scalars()
         )
@@ -151,7 +173,7 @@ def list_boards(request: Request, user: User = Depends(get_current_user)):  # no
 
 
 class BoardCreateIn(BaseModel):
-    title: str
+    title: str = Field(..., min_length=1, description=_TITLE_DESCRIPTION)
     profile_id: int
     orientation: Literal["landscape", "portrait"]
 
@@ -204,11 +226,23 @@ class BoardSettingsIn(BaseModel):
     see the module docstring -- so a client that sends it has it dropped by
     pydantic's default `extra="ignore"`, not honoured and not rejected."""
 
-    title: str | None = None
+    title: str | None = Field(default=None, min_length=1, description=_TITLE_DESCRIPTION)
     orientation: Literal["landscape", "portrait"] | None = None
-    items_per_page: int | None = None
-    min_score: int | None = None
-    page_seconds: int | None = None
+    # >= 1: the DB floor is ck_boards_items_per_page ("items_per_page > 0"). 0
+    # passed pydantic before this fix and reached that CHECK as an uncaught
+    # IntegrityError -> 500 on ordinary authenticated input.
+    items_per_page: int | None = Field(default=None, ge=1)
+    # 0-100: matched against CallRanking.aggregate_score (boards/queue.py),
+    # which ranking/aggregate.py documents as "gates + LLM rubric -> 0-100
+    # score" and which calls.py's own `min_score` query param already bounds
+    # the same way (`Query(default=None, ge=0, le=100)`, web/api/calls.py:718).
+    # Unlike items_per_page and page_seconds, this had NO CHECK constraint at
+    # all -- an out-of-range value returned 200 and persisted silently.
+    min_score: int | None = Field(default=None, ge=0, le=100)
+    # >= 1: matched by the new ck_boards_page_seconds CHECK (migration 0074).
+    # Had no CHECK before this fix either -- 0 or a negative value returned 200
+    # and would drive Task 10's rotation timer into a busy-loop or no-op.
+    page_seconds: int | None = Field(default=None, ge=1)
 
 
 @router.put("/boards/{board_id}", response_model=BoardOut)
@@ -218,22 +252,28 @@ def update_board(
     body: BoardSettingsIn,
     user: User = Depends(get_current_user),  # noqa: B008
 ):
-    """Update settings, refusing a capacity-shrinking orientation flip.
+    """Update settings, refusing a capacity-REDUCING change.
 
     `items_per_page` only resets to the new orientation's default when
     orientation is ACTUALLY changing in this request. Sending back the same
     orientation a settings form already had (with no `items_per_page` in the
     body) must not silently clobber a previously chosen override -- only a
     real flip re-derives the default, per D7 ("remains an override").
+
+    The guard fires only when THIS request would make the cap smaller than it
+    already is (`new_cap < old_cap`) and that shrunk cap can't hold what is
+    already approved. Firing on `new_cap < approved_count` alone -- with no
+    comparison to the cap the board already had -- would refuse an unrelated
+    edit (a bare title rename) on a board that was already over capacity, and
+    would blame `new_orientation` for a shrink that `items_per_page` alone
+    caused.
     """
     sf = request.app.state.session_factory
     with sf() as session:
         board = _board_for_edit(session, board_id=board_id, user=user)
         approved_count = _approved_counts(session, [board.id]).get(board.id, 0)
 
-        orientation_changed = (
-            body.orientation is not None and body.orientation != board.orientation
-        )
+        orientation_changed = body.orientation is not None and body.orientation != board.orientation
         new_orientation = body.orientation if body.orientation is not None else board.orientation
         if body.items_per_page is not None:
             new_items_per_page = body.items_per_page
@@ -242,21 +282,32 @@ def update_board(
         else:
             new_items_per_page = board.items_per_page
 
+        old_cap = board.items_per_page * board.max_pages
         new_cap = new_items_per_page * board.max_pages
-        if new_cap < approved_count:
+        if new_cap < old_cap and new_cap < approved_count:
+            # Only name the orientation when THIS request actually changed it --
+            # a pure items_per_page shrink on an unchanged orientation is not
+            # that orientation's fault, and "landscape holds 18" reads as if 18
+            # were landscape's own default (it's 24).
+            if body.orientation is not None:
+                cap_description = f"{new_orientation} holds {new_cap}"
+            else:
+                cap_description = f"the new settings hold {new_cap}"
             raise HTTPException(
                 status_code=409,
                 detail=(
                     f"this board has {approved_count} approved calls; "
-                    f"{new_orientation} holds {new_cap} — remove "
+                    f"{cap_description} — remove "
                     f"{approved_count - new_cap} first"
                 ),
             )
 
         if body.title is not None:
             board.title = body.title
-        board.orientation = new_orientation
-        board.items_per_page = new_items_per_page
+        if orientation_changed:
+            board.orientation = new_orientation
+        if body.items_per_page is not None or orientation_changed:
+            board.items_per_page = new_items_per_page
         if body.min_score is not None:
             board.min_score = body.min_score
         if body.page_seconds is not None:
