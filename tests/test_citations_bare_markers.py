@@ -1,4 +1,4 @@
-from call_manager.proposal_assist.citations.markers import find_bare_markers
+from grant_lab.proposal_assist.citations.markers import find_bare_markers
 
 
 def test_bare_marker_detected():

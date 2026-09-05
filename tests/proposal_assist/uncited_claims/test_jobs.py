@@ -1,8 +1,8 @@
 from datetime import UTC, datetime, timedelta
 
-from call_manager.config import Settings
-from call_manager.db.models import UncitedClaimsJob, WorkspaceEvent
-from call_manager.proposal_assist.uncited_claims import jobs
+from grant_lab.config import Settings
+from grant_lab.db.models import UncitedClaimsJob, WorkspaceEvent
+from grant_lab.proposal_assist.uncited_claims import jobs
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 

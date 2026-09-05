@@ -15,11 +15,11 @@ from zoneinfo import ZoneInfo
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from call_manager.auth.session_cookie import SessionSigner
-from call_manager.db.models import Call, Source, User
-from call_manager.main import create_app
-from call_manager.web.filters import deadline_local_date as _shared_helper
-from call_manager.web.filters import display_date
+from grant_lab.auth.session_cookie import SessionSigner
+from grant_lab.db.models import Call, Source, User
+from grant_lab.main import create_app
+from grant_lab.web.filters import deadline_local_date as _shared_helper
+from grant_lab.web.filters import display_date
 
 _STOCKHOLM = ZoneInfo("Europe/Stockholm")
 

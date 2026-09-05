@@ -7,8 +7,8 @@ from joserfc import jwt
 from joserfc.jwk import RSAKey
 from joserfc.jwt import JWTClaimsRegistry
 
-from call_manager.db.models import User
-from call_manager.main import create_app
+from grant_lab.db.models import User
+from grant_lab.main import create_app
 
 ISS = "https://accounts.google.com"
 AUD = "test-client-id"
@@ -27,7 +27,7 @@ class FakeOIDC:
         return f"{ISS}/auth?state={state}&nonce={nonce}&code_challenge={code_challenge}"
 
     def exchange_code(self, *, code, code_verifier, redirect_uri):
-        from call_manager.auth.oidc import OIDCError
+        from grant_lab.auth.oidc import OIDCError
 
         if self.fail_exchange or code not in self._codes:
             raise OIDCError("bad code")
@@ -41,7 +41,7 @@ class FakeOIDC:
         }
 
     def validate_id_token(self, id_token, *, expected_nonce):
-        from call_manager.auth.oidc import IdTokenInvalid
+        from grant_lab.auth.oidc import IdTokenInvalid
 
         claims = jwt.decode(id_token, _KEY, algorithms=["RS256"]).claims
         JWTClaimsRegistry().validate(claims)

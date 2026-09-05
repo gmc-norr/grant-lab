@@ -7,14 +7,14 @@ import uuid
 import pytest
 from sqlalchemy import text
 
-from call_manager.proposal_assist.citations.gitio import GitCommitError, current_head
-from call_manager.proposal_assist.drafting.locking import (
+from grant_lab.proposal_assist.citations.gitio import GitCommitError, current_head
+from grant_lab.proposal_assist.drafting.locking import (
     CommitMutexTimeout,
     acquire_commit_mutex,
     commit_mutex_key,
     workspace_lock_key,
 )
-from call_manager.proposal_assist.paths import workspace_repo_dir
+from grant_lab.proposal_assist.paths import workspace_repo_dir
 
 
 def test_commit_mutex_key_differs_from_subprocess_lock_key():

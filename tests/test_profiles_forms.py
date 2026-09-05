@@ -1,7 +1,7 @@
 import pytest
 from fastapi import HTTPException
 
-from call_manager.profiles.forms import (
+from grant_lab.profiles.forms import (
     ALLOWED_CURRENCIES,
     BUDGET_MAX,
     bounded_int_or_400,

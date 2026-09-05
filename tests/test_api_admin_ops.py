@@ -2,8 +2,8 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
-from call_manager.db.models import Call, RankingJob, Source, User
-from call_manager.main import create_app
+from grant_lab.db.models import Call, RankingJob, Source, User
+from grant_lab.main import create_app
 
 
 def _setup(monkeypatch, pg_url):

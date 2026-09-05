@@ -2,8 +2,8 @@ from dataclasses import dataclass
 
 import pytest
 
-from call_manager.email.client import ResendClient, SMTPClient
-from call_manager.email.factory import EmailConfigError, build_email_client
+from grant_lab.email.client import ResendClient, SMTPClient
+from grant_lab.email.factory import EmailConfigError, build_email_client
 
 
 @dataclass

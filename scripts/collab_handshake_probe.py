@@ -48,16 +48,16 @@ def main() -> int:
         command.upgrade(cfg, "head")
 
         # --- build app + seed ---
-        from call_manager.main import create_app
+        from grant_lab.main import create_app
         app = create_app()
 
         # Override the session_factory so the app uses this testcontainers DB
-        from call_manager.db.session import make_engine, make_session_factory
+        from grant_lab.db.session import make_engine, make_session_factory
         engine = make_engine(db_url)
         Session = make_session_factory(engine)
         app.state.session_factory = Session
 
-        from call_manager.proposal_assist.collab import state as collab_state
+        from grant_lab.proposal_assist.collab import state as collab_state
         from tests.proposal_assist.conftest import make_user, make_workspace
         from tests.test_editing_save import _init_repo
 

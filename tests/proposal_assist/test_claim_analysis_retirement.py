@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import text
 
-from call_manager.db.models import ClaimAnalysisJob, Workspace
+from grant_lab.db.models import ClaimAnalysisJob, Workspace
 from tests.proposal_assist.conftest import make_call, make_workspace
 
 _SHA = "0" * 40
@@ -46,7 +46,7 @@ def test_the_claim_cancel_skips_a_row_a_worker_holds_without_waiting(
     forever BEFORE the finally that releases the holder — hanging the suite instead
     of failing. A mutation must fail, never hang.
     """
-    from call_manager.proposal_assist.jobs_retirement import (
+    from grant_lab.proposal_assist.jobs_retirement import (
         cancel_claim_analysis_jobs_for_workspace,
     )
 
@@ -95,7 +95,7 @@ def test_the_claim_cancel_skips_a_row_a_worker_holds_without_waiting(
 
 def test_the_claim_cancel_terminalizes_rows_nobody_holds(pg_session_factory, current_user):
     """The ordinary path — both non-terminal states go to 'failed'."""
-    from call_manager.proposal_assist.jobs_retirement import (
+    from grant_lab.proposal_assist.jobs_retirement import (
         cancel_claim_analysis_jobs_for_workspace,
     )
 
@@ -128,7 +128,7 @@ def test_mark_failed_does_not_requeue_a_job_whose_workspace_is_deleted(
 ):
     """attempts=1 is deliberately well under MAX_ATTEMPTS so the requeue branch is
     the one that WOULD run. At the cap this would pass without the fix."""
-    from call_manager.proposal_assist.analysis.queue import mark_failed
+    from grant_lab.proposal_assist.analysis.queue import mark_failed
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
@@ -180,7 +180,7 @@ def test_a_delete_committing_mid_mark_failed_cannot_resurrect_the_job(
 
     Mutation: drop `.with_for_update()` and this must FAIL with status 'queued'.
     """
-    from call_manager.proposal_assist.analysis.queue import mark_failed
+    from grant_lab.proposal_assist.analysis.queue import mark_failed
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
@@ -229,7 +229,7 @@ def test_a_delete_committing_mid_mark_failed_cannot_resurrect_the_job(
 
 def test_claim_skips_jobs_for_a_soft_deleted_workspace(pg_session_factory, current_user):
     """The durable half — survives restart, like the four pass claim queries."""
-    from call_manager.proposal_assist.analysis.queue import claim_queued_jobs
+    from grant_lab.proposal_assist.analysis.queue import claim_queued_jobs
 
     with pg_session_factory() as s:
         # Distinct external_ids: make_call defaults to EXT-1 and two workspaces
@@ -267,7 +267,7 @@ def test_reconcile_terminalizes_a_claim_row_on_a_workspace_with_no_setup_jobs(
     cooperative checkpoint cannot be what saves us) -> a later reconcile marks it
     failed.
     """
-    from call_manager.proposal_assist.jobs_retirement import (
+    from grant_lab.proposal_assist.jobs_retirement import (
         build_jobs_retirement_hook,
         reconcile_cancelled_jobs,
     )
@@ -314,7 +314,7 @@ def test_the_abort_callback_is_checked_PER_ROW_not_once_per_job(pg_session_facto
 
     Mutation: move the check above `for row in evidence:` and this fails.
     """
-    from call_manager.proposal_assist.citations.audit import (
+    from grant_lab.proposal_assist.citations.audit import (
         ClaimAnalysisAborted,
         validate_citations_semantic,
     )
@@ -356,8 +356,8 @@ def test_an_aborted_job_is_terminalized_and_never_marked_done(
     Mutation: delete the `except ClaimAnalysisAborted` branch — the generic handler
     then routes through mark_failed and (attempts < MAX) requeues it to 'queued'.
     """
-    from call_manager.proposal_assist.analysis import pipeline as pl
-    from call_manager.proposal_assist.citations.audit import ClaimAnalysisAborted
+    from grant_lab.proposal_assist.analysis import pipeline as pl
+    from grant_lab.proposal_assist.citations.audit import ClaimAnalysisAborted
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
@@ -440,10 +440,10 @@ def test_the_abort_fires_in_the_UNCITED_loop_for_a_section_with_no_ev_markers(
     Mutation: move the check above `for occ in sentences:` (pipeline.py:418) —
     n == 1, no exception, job runs to completion.
     """
-    from call_manager.proposal_assist.analysis.pipeline import analyze_job
-    from call_manager.proposal_assist.analysis.queue import claim_queued_jobs
-    from call_manager.proposal_assist.citations.audit import ClaimAnalysisAborted
-    from call_manager.proposal_assist.references.embed import FakeEmbedder
+    from grant_lab.proposal_assist.analysis.pipeline import analyze_job
+    from grant_lab.proposal_assist.analysis.queue import claim_queued_jobs
+    from grant_lab.proposal_assist.citations.audit import ClaimAnalysisAborted
+    from grant_lab.proposal_assist.references.embed import FakeEmbedder
     from tests.test_analysis_pipeline import (
         FakeCitationService,
         _enqueue_section,
@@ -511,8 +511,8 @@ def test_mark_done_cannot_resurrect_a_job_the_retirement_hook_terminalized(
     Mutation: drop the FOR UPDATE re-read + status guard from
     `analysis/queue.py:mark_done` — the row ends 'done' with last_error=None.
     """
-    from call_manager.proposal_assist.analysis.queue import mark_done
-    from call_manager.proposal_assist.jobs_retirement import build_jobs_retirement_hook
+    from grant_lab.proposal_assist.analysis.queue import mark_done
+    from grant_lab.proposal_assist.jobs_retirement import build_jobs_retirement_hook
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
@@ -560,8 +560,8 @@ def test_mark_done_gives_up_on_the_job_row_instead_of_waiting_unboundedly(
     `analysis/queue.py:mark_done` — the thread is still blocked when the join
     times out.
     """
-    from call_manager.proposal_assist.analysis import queue as q
-    from call_manager.proposal_assist.row_locks import RowLockTimeout
+    from grant_lab.proposal_assist.analysis import queue as q
+    from grant_lab.proposal_assist.row_locks import RowLockTimeout
 
     monkeypatch.setattr(q, "MARK_DONE_LOCK_TIMEOUT_SECONDS", 0.25)
 
@@ -631,9 +631,9 @@ def test_a_job_the_hook_terminalized_is_COUNTED_by_the_drain_not_silently_droppe
         superseded: 0};
       * drop the `elif status == "failed"` arm from drain_analysis_queue — same.
     """
-    from call_manager.proposal_assist.analysis import pipeline as pl
-    from call_manager.proposal_assist.analysis.queue import mark_done
-    from call_manager.proposal_assist.jobs_retirement import build_jobs_retirement_hook
+    from grant_lab.proposal_assist.analysis import pipeline as pl
+    from grant_lab.proposal_assist.analysis.queue import mark_done
+    from grant_lab.proposal_assist.jobs_retirement import build_jobs_retirement_hook
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
@@ -696,10 +696,10 @@ def test_the_abort_callback_is_actually_WIRED_INTO_the_cited_audit_call_site(
     Mutation: delete `should_abort=should_abort` at pipeline.py:385 — the abort
     then surfaces from pipeline.py's uncited loop and no audit.py frame appears.
     """
-    from call_manager.proposal_assist.analysis.pipeline import analyze_job
-    from call_manager.proposal_assist.analysis.queue import claim_queued_jobs
-    from call_manager.proposal_assist.citations.audit import ClaimAnalysisAborted
-    from call_manager.proposal_assist.references.embed import FakeEmbedder
+    from grant_lab.proposal_assist.analysis.pipeline import analyze_job
+    from grant_lab.proposal_assist.analysis.queue import claim_queued_jobs
+    from grant_lab.proposal_assist.citations.audit import ClaimAnalysisAborted
+    from grant_lab.proposal_assist.references.embed import FakeEmbedder
     from tests.test_analysis_pipeline import (
         FakeCitationService,
         _enqueue_section,

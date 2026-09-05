@@ -30,15 +30,15 @@ _ROOT = pathlib.Path(__file__).resolve().parents[2]
 #: a SET of holders additionally collapses two calls inside one function to one
 #: entry. Both are how an added site hides. Identity plus a call count closes it.
 _NINE_HOLDERS = {
-    ("src/call_manager/web/api/workspaces.py", "post_init_spec._git"),
-    ("src/call_manager/proposal_assist/citations/core.py", "_insert_citation_locked"),
-    ("src/call_manager/proposal_assist/citations/bibliography.py", "build_bibliography"),
-    ("src/call_manager/proposal_assist/citations/human_cite.py", "insert_citation_for_user"),
-    ("src/call_manager/proposal_assist/phases/setup.py", "Phase0Worker._init_repo"),
-    ("src/call_manager/proposal_assist/editing/save.py", "save_section"),
-    ("src/call_manager/proposal_assist/collab/checkpoint.py", "checkpoint_artifact"),
-    ("src/call_manager/proposal_assist/review/pass_runner.py", "run_review_pass"),
-    ("src/call_manager/proposal_assist/analysis/insert.py", "insert_from_annotation"),
+    ("src/grant_lab/web/api/workspaces.py", "post_init_spec._git"),
+    ("src/grant_lab/proposal_assist/citations/core.py", "_insert_citation_locked"),
+    ("src/grant_lab/proposal_assist/citations/bibliography.py", "build_bibliography"),
+    ("src/grant_lab/proposal_assist/citations/human_cite.py", "insert_citation_for_user"),
+    ("src/grant_lab/proposal_assist/phases/setup.py", "Phase0Worker._init_repo"),
+    ("src/grant_lab/proposal_assist/editing/save.py", "save_section"),
+    ("src/grant_lab/proposal_assist/collab/checkpoint.py", "checkpoint_artifact"),
+    ("src/grant_lab/proposal_assist/review/pass_runner.py", "run_review_pass"),
+    ("src/grant_lab/proposal_assist/analysis/insert.py", "insert_from_annotation"),
 }
 
 

@@ -46,24 +46,24 @@ from datetime import UTC, datetime
 
 from sqlalchemy import event, select
 
-import call_manager.proposal_assist.jobs_retirement as jr
-from call_manager.db.models import (
+import grant_lab.proposal_assist.jobs_retirement as jr
+from grant_lab.db.models import (
     ChatTurn,
     TurnJob,
     Workspace,
     WorkspaceEvent,
     WorkspaceSetupJob,
 )
-from call_manager.proposal_assist.lifecycle import (
+from grant_lab.proposal_assist.lifecycle import (
     WorkspaceLifecycle,
     signal_workspace_restored,
 )
-from call_manager.proposal_assist.phases.setup import (
+from grant_lab.proposal_assist.phases.setup import (
     Phase0Worker,
     WorkspaceGoneDuringSetup,
     claim_next_setup_job,
 )
-from call_manager.workspaces import restore_workspace_db
+from grant_lab.workspaces import restore_workspace_db
 from tests.admin_retention_helpers import (
     _dispose_created_app_engines as _dispose_created_app_engines,
 )
@@ -247,7 +247,7 @@ def test_the_late_apply_landing_after_the_retry_leaves_the_workspace_live(
 
         # First apply: parked, barrier expires → bridge reports False.
         monkeypatch.setattr(lifecycle, "apply", _slow_first_apply)
-        monkeypatch.setattr("call_manager.proposal_assist.lifecycle._RESTORE_BARRIER_SECONDS", 0.2)
+        monkeypatch.setattr("grant_lab.proposal_assist.lifecycle._RESTORE_BARRIER_SECONDS", 0.2)
         assert signal_workspace_restored(req, workspace_id=ws, generation=5) is False
         assert lifecycle.applied_generation(ws) == 0, "the slow apply must not have landed"
 

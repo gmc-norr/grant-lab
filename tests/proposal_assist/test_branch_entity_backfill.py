@@ -12,11 +12,11 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from call_manager.db.models import Branch, Workspace
-from call_manager.proposal_assist.branch_entity_backfill import backfill_branch_entities
-from call_manager.proposal_assist.branches import BranchInUse, delete_workspace_branch
-from call_manager.proposal_assist.citations.gitio import GitCommitError, branch_exists
-from call_manager.proposal_assist.paths import workspace_repo_dir
+from grant_lab.db.models import Branch, Workspace
+from grant_lab.proposal_assist.branch_entity_backfill import backfill_branch_entities
+from grant_lab.proposal_assist.branches import BranchInUse, delete_workspace_branch
+from grant_lab.proposal_assist.citations.gitio import GitCommitError, branch_exists
+from grant_lab.proposal_assist.paths import workspace_repo_dir
 from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 
@@ -955,7 +955,7 @@ def test_an_unreadable_HEAD_skips_the_workspace_instead_of_clearing_its_root(
         raise GitCommitError("cannot read HEAD")
 
     monkeypatch.setattr(
-        "call_manager.proposal_assist.branch_entity_backfill.head_branch", _unreadable
+        "grant_lab.proposal_assist.branch_entity_backfill.head_branch", _unreadable
     )
 
     with pg_session_factory() as s:
@@ -1017,7 +1017,7 @@ def test_the_reconciler_never_selects_a_whole_workspace_row():
     import ast
     import pathlib
 
-    src = pathlib.Path("src/call_manager/proposal_assist/branch_entity_backfill.py").read_text()
+    src = pathlib.Path("src/grant_lab/proposal_assist/branch_entity_backfill.py").read_text()
     offenders = []
     for node in ast.walk(ast.parse(src)):
         if not isinstance(node, ast.Call):
@@ -1087,7 +1087,7 @@ def test_every_arm_of_the_skip_handler_is_reachable(pg_session_factory, tmp_path
         s.commit()
     _repo(tmp_path, wid, "main")
 
-    import call_manager.proposal_assist.branch_entity_backfill as mod
+    import grant_lab.proposal_assist.branch_entity_backfill as mod
 
     real = mod.list_branches
     mod.list_branches = lambda _d: (_ for _ in ()).throw(boom)

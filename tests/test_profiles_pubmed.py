@@ -1,8 +1,8 @@
 import httpx
 import pytest
 
-from call_manager.profiles.pubmed import PubMedClient, PubMedError
-from call_manager.profiles.seed import Member
+from grant_lab.profiles.pubmed import PubMedClient, PubMedError
+from grant_lab.profiles.seed import Member
 
 # Representative esearch response: returns 2 PMIDs
 _FAKE_ESEARCH = {
@@ -113,7 +113,7 @@ def test_query_for_sanitizes_entrez_injection():
     """Injection defense: a member name/affiliation containing field tags or
     boolean operators must not change the structure of the Entrez term — the
     values are stripped of metacharacters and matched as quoted phrases."""
-    from call_manager.profiles.pubmed import _query_for
+    from grant_lab.profiles.pubmed import _query_for
 
     member = Member(
         name='Smith J"[au] OR 1[uid] OR "',
@@ -132,7 +132,7 @@ def test_query_for_sanitizes_entrez_injection():
 
 
 def test_query_for_orcid_unaffected():
-    from call_manager.profiles.pubmed import _query_for
+    from grant_lab.profiles.pubmed import _query_for
 
     assert _query_for(Member(orcid="0000-0001-2345-6789")) == "0000-0001-2345-6789[AUID]"
 

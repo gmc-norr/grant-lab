@@ -10,7 +10,7 @@ RFC 6266 / 5987: an ASCII fallback in `filename=` plus the real name in
 
 from __future__ import annotations
 
-from call_manager.web.http_headers import content_disposition
+from grant_lab.web.http_headers import content_disposition
 
 
 def test_ascii_name_is_unchanged_and_carries_no_star_form():

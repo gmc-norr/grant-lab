@@ -3,10 +3,10 @@ import uuid
 
 import pytest
 
-from call_manager.db.models import Reference
-from call_manager.proposal_assist.references.embed import FakeEmbedder
-from call_manager.proposal_assist.references.ingest import ReprocessConflict, reprocess_reference
-from call_manager.proposal_assist.references.storage import ReferenceStorage
+from grant_lab.db.models import Reference
+from grant_lab.proposal_assist.references.embed import FakeEmbedder
+from grant_lab.proposal_assist.references.ingest import ReprocessConflict, reprocess_reference
+from grant_lab.proposal_assist.references.storage import ReferenceStorage
 from tests.proposal_assist.conftest import make_workspace
 
 
@@ -108,7 +108,7 @@ def test_reprocess_reverts_to_failed_if_bytes_missing(pg_session_factory, tmp_pa
 def test_reprocess_clears_leftover_chunks(pg_session_factory, tmp_path):
     from sqlalchemy import select
 
-    from call_manager.db.models import ReferenceChunk
+    from grant_lab.db.models import ReferenceChunk
 
     with pg_session_factory() as s:
         ws = make_workspace(s)

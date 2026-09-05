@@ -1,8 +1,8 @@
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from call_manager.db.models import WorkspaceEvent
-from call_manager.proposal_assist.activity.feed import (
+from grant_lab.db.models import WorkspaceEvent
+from grant_lab.proposal_assist.activity.feed import (
     actor_user_id,
     build_activity_feed,
 )
@@ -199,7 +199,7 @@ def test_collapsed_row_id_and_time_come_from_most_recent():
 
 
 def test_member_added_renders_under_member_category_with_email():
-    from call_manager.proposal_assist.activity.feed import build_activity_feed
+    from grant_lab.proposal_assist.activity.feed import build_activity_feed
 
     ev = _ev(
         "member_added", actor_id=1, payload={"target_user_id": 2, "target_email": "alice@umu.se"}
@@ -212,7 +212,7 @@ def test_member_added_renders_under_member_category_with_email():
 
 
 def test_workspace_activated_renders_under_rubric_category():
-    from call_manager.proposal_assist.activity.feed import build_activity_feed
+    from grant_lab.proposal_assist.activity.feed import build_activity_feed
 
     ev = _ev("workspace_activated", actor_id=1, payload={})
     rows = build_activity_feed([ev], {1: "owner@umu.se"})

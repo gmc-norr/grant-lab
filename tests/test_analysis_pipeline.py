@@ -7,7 +7,7 @@ real claim_analysis_jobs queue. The citation LLM + embedder are faked.
 import subprocess
 from datetime import UTC, datetime
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     ClaimAnalysisJob,
     ClaimClassification,
     Reference,
@@ -16,13 +16,13 @@ from call_manager.db.models import (
     UserClaimAnnotation,
     Workspace,
 )
-from call_manager.proposal_assist.analysis import pipeline
-from call_manager.proposal_assist.analysis.pipeline import drain_analysis_queue
-from call_manager.proposal_assist.analysis.queue import enqueue_section_job
-from call_manager.proposal_assist.citations.gitio import _git_env, current_head
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.paths import workspace_repo_dir
-from call_manager.proposal_assist.references.embed import FakeEmbedder
+from grant_lab.proposal_assist.analysis import pipeline
+from grant_lab.proposal_assist.analysis.pipeline import drain_analysis_queue
+from grant_lab.proposal_assist.analysis.queue import enqueue_section_job
+from grant_lab.proposal_assist.citations.gitio import _git_env, current_head
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.paths import workspace_repo_dir
+from grant_lab.proposal_assist.references.embed import FakeEmbedder
 
 # --------------------------------------------------------------------------- #
 # Fakes
@@ -470,7 +470,7 @@ def test_classification_progress_survives_later_exception(
 
     # The first sentence's classification must SURVIVE the outer rollback.
     with pg_session_factory() as s:
-        from call_manager.proposal_assist.analysis.pipeline import ANALYSIS_PROMPT_VERSION
+        from grant_lab.proposal_assist.analysis.pipeline import ANALYSIS_PROMPT_VERSION
 
         first_sha = pipeline._claim_sha("This is the first factual claim")
         cached = (
@@ -541,7 +541,7 @@ def test_stale_supported_cache_refreshes_to_no_match(pg_session_factory, tmp_pat
     # outcome='supported' and evidence fields populated.
     claim_sha = pipeline._claim_sha(claim_sentence)
     with pg_session_factory() as s:
-        from call_manager.proposal_assist.analysis.pipeline import ANALYSIS_PROMPT_VERSION
+        from grant_lab.proposal_assist.analysis.pipeline import ANALYSIS_PROMPT_VERSION
 
         s.add(
             ClaimClassification(
@@ -570,7 +570,7 @@ def test_stale_supported_cache_refreshes_to_no_match(pg_session_factory, tmp_pat
     assert counts["done"] == 1
 
     with pg_session_factory() as s:
-        from call_manager.proposal_assist.analysis.pipeline import ANALYSIS_PROMPT_VERSION
+        from grant_lab.proposal_assist.analysis.pipeline import ANALYSIS_PROMPT_VERSION
 
         cc = (
             s.query(ClaimClassification)

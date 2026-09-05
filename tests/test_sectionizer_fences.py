@@ -5,7 +5,7 @@ collab bridge. The sectionizer used to toggle on every ```-prefixed line, so the
 inner ``` "closed" the fence, the closing ```` "opened" one, and every heading
 after the block was swallowed into it."""
 
-from call_manager.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
 
 
 def _headings(md: str) -> list[str]:

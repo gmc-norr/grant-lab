@@ -6,12 +6,12 @@ from datetime import UTC, datetime
 
 import pytest
 
-from call_manager.db.models import User, Workspace, WorkspaceViewer
-from call_manager.proposal_assist.collab.permissions import (
+from grant_lab.db.models import User, Workspace, WorkspaceViewer
+from grant_lab.proposal_assist.collab.permissions import (
     refresh_permissions,
     signal_permission_change,
 )
-from call_manager.proposal_assist.collab.room import MANAGER, ClientState
+from grant_lab.proposal_assist.collab.room import MANAGER, ClientState
 from tests.proposal_assist.collab.test_collab_room import FakeClient  # reuse the fake
 
 
@@ -138,7 +138,7 @@ async def test_refresh_live_last_client_revoke_checkpoints(
     # Codex High #2: a member removed while the LAST connected client on a LIVE
     # workspace must go through release(on_evict=checkpoint) — preserving the
     # normal last-leave checkpoint — NOT the no-checkpoint drop_client path.
-    import call_manager.proposal_assist.collab.permissions as perm
+    import grant_lab.proposal_assist.collab.permissions as perm
     seen = {"factory": 0, "evict": 0}
 
     def _spy_factory(sf, wd, wid, art):
@@ -198,7 +198,7 @@ async def test_refresh_soft_delete_revokes_all_without_checkpoint(
     # Soft-delete makes resolve_access return is_member=False for EVERYONE (owner
     # included, ws_auth.py:106), so every client is closed+deregistered and the room
     # empties -> evicted via drop_client WITHOUT a checkpoint (workspace is gone).
-    import call_manager.proposal_assist.collab.permissions as perm
+    import grant_lab.proposal_assist.collab.permissions as perm
     seen = {"factory": 0}
     monkeypatch.setattr(perm, "make_checkpoint_on_evict",
                         lambda *a, **k: seen.__setitem__("factory", seen["factory"] + 1))
@@ -229,7 +229,7 @@ async def test_checkpoint_on_evict_skips_soft_deleted_workspace(
     # Robustness for the ws_deleted split (Codex High #2 review follow-up): even when
     # the WS route's own finally-release wins the last-leave race and passes this
     # callback for a soft-deleted workspace, the callback itself must NOT checkpoint.
-    import call_manager.proposal_assist.collab.permissions as perm
+    import grant_lab.proposal_assist.collab.permissions as perm
 
     called = {"n": 0}
     monkeypatch.setattr(perm, "checkpoint_artifact",
@@ -263,7 +263,7 @@ async def test_refresh_permissions_holds_recon_lock_during_pass(
 ):
     # cluster (a): the reconcile pass runs UNDER room.recon_lock, so overlapping
     # signals serialize (a second pass cannot interleave into a stale can_write).
-    import call_manager.proposal_assist.collab.permissions as perm
+    import grant_lab.proposal_assist.collab.permissions as perm
     ws_id, owner_id, member_id = _seed_ws_owner_member(pg_session_factory)
     key = (ws_id, "spec")
     member_c = FakeClient()
@@ -294,7 +294,7 @@ async def test_refresh_permissions_holds_recon_lock_during_pass(
 async def test_reconcile_client_downgrades_on_locked_spec(pg_session_factory, tmp_path):
     # (b) The connect self-reconcile helper flips a just-registered client's
     # can_write when the DB says it should be read-only.
-    from call_manager.proposal_assist.collab.permissions import reconcile_client
+    from grant_lab.proposal_assist.collab.permissions import reconcile_client
     ws_id, owner_id, member_id = _seed_ws_owner_member(pg_session_factory)
     key = (ws_id, "spec")
     member_c = FakeClient()
@@ -322,8 +322,8 @@ async def test_reconcile_client_fails_closed_on_resolve_error(
     # (d) On a resolve error (DB blip), the client is DOWNGRADED to read-only, NOT
     # disconnected — no stale write access leaks, but a transient blip does not
     # drop an innocent editor.
-    import call_manager.proposal_assist.collab.permissions as perm
-    from call_manager.proposal_assist.collab.permissions import reconcile_client
+    import grant_lab.proposal_assist.collab.permissions as perm
+    from grant_lab.proposal_assist.collab.permissions import reconcile_client
     ws_id, owner_id, member_id = _seed_ws_owner_member(pg_session_factory)
     key = (ws_id, "spec")
     member_c = FakeClient()
@@ -406,7 +406,7 @@ def test_resolve_fails_closed_for_disabled_user(pg_session_factory):
     # not-member, so any permission reconcile closes+deregisters its live socket
     # (defense-in-depth beneath the prompt revocation sweep). _resolve is sync
     # (runs in a threadpool in prod), so it is called directly here.
-    from call_manager.proposal_assist.collab import permissions as perms
+    from grant_lab.proposal_assist.collab import permissions as perms
 
     ws_id, _owner_id, member_id = _seed_ws_owner_member(pg_session_factory)
 

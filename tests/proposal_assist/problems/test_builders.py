@@ -1,5 +1,5 @@
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.problems.builders import (
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.problems.builders import (
     broken_citation_problems,
     coherence_drift_problem,
     count_by_severity,

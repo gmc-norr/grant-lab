@@ -1,7 +1,7 @@
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from call_manager.db.models import User
+from grant_lab.db.models import User
 
 
 def test_new_user_defaults_to_pending(pg_session_factory):

@@ -8,9 +8,9 @@ import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
-from call_manager.db.models import ArtifactVersion, WorkspaceEvent
-from call_manager.proposal_assist.drafting.locking import commit_mutex_key
-from call_manager.proposal_assist.reconcile import reconcile_workspace_git_drift
+from grant_lab.db.models import ArtifactVersion, WorkspaceEvent
+from grant_lab.proposal_assist.drafting.locking import commit_mutex_key
+from grant_lab.proposal_assist.reconcile import reconcile_workspace_git_drift
 from tests.proposal_assist.conftest import make_workspace
 
 
@@ -174,9 +174,9 @@ def test_reconcile_preserves_commit_timestamp(pg_session_factory, tmp_path):
 async def test_controller_launch_runs_reconciliation(pg_session_factory, tmp_path):
     """controller.launch backfills orphan commits before the subprocess
     is launched."""
-    from call_manager.proposal_assist.drafting.controller import WorkspaceController
-    from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
-    from call_manager.proposal_assist.drafting.registry import SubprocessRegistry
+    from grant_lab.proposal_assist.drafting.controller import WorkspaceController
+    from grant_lab.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
+    from grant_lab.proposal_assist.drafting.registry import SubprocessRegistry
 
     adapter = FakeAgentAdapter()
     registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)

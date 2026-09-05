@@ -13,14 +13,14 @@ import uuid
 
 import pytest
 
-from call_manager.proposal_assist.ports.errors import (
+from grant_lab.proposal_assist.ports.errors import (
     BUSY_ERROR_MESSAGE,
     DELETED_ERROR_MESSAGE,
     CommitMutexTimeout,
     EffectRejected,
     WorkspaceGenerationStale,
 )
-from call_manager.proposal_assist.tools.proposal import _propose_artifact_edit_impl
+from grant_lab.proposal_assist.tools.proposal import _propose_artifact_edit_impl
 from tests.proposal_assist.test_f3d2_conversions import _G, _ctx_and_invocation
 
 
@@ -67,7 +67,7 @@ def test_the_artifact_edit_uses_the_invocation_snapshot_not_the_live_context():
     import inspect
     import textwrap
 
-    from call_manager.proposal_assist.tools import proposal as mod
+    from grant_lab.proposal_assist.tools import proposal as mod
 
     tree = ast.parse(textwrap.dedent(inspect.getsource(mod._propose_artifact_edit_impl)))
 
@@ -152,7 +152,7 @@ def test_the_citation_propose_writes_through_the_port_and_reads_through_a_sessio
     """
     import inspect
 
-    from call_manager.proposal_assist.tools import citations as mod
+    from grant_lab.proposal_assist.tools import citations as mod
 
     src = inspect.getsource(mod.propose_citation_impl)
     assert "ports.effects.propose_citation_insert" in src, "does not call the effect port"
@@ -184,7 +184,7 @@ def test_the_citekey_cache_is_untouched():
     converting the accept path — which is F3e's job and needs a mechanism-2 operation."""
     import inspect
 
-    from call_manager.proposal_assist.citations import core
+    from grant_lab.proposal_assist.citations import core
 
     src = inspect.getsource(core._write_citekey_cache)
     assert "session.commit()" in src
@@ -195,7 +195,7 @@ def test_the_citekey_cache_is_untouched():
 def test_no_new_effect_operation_was_added():
     """EFFECT_MECHANISMS and EFFECT_NAMES are set-equality gates; this slice converts
     onto operations F3d1 already built and adds none."""
-    from call_manager.proposal_assist.ports.effects import EFFECT_MECHANISMS
+    from grant_lab.proposal_assist.ports.effects import EFFECT_MECHANISMS
 
     assert set(EFFECT_MECHANISMS) == {
         "submit_scorecard",

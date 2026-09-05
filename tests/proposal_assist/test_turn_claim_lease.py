@@ -3,7 +3,7 @@ mutex linearizes against it rather than racing it (spec §6.3)."""
 
 import inspect
 
-from call_manager.proposal_assist.turns import processor
+from grant_lab.proposal_assist.turns import processor
 
 
 def test_claim_turn_job_takes_the_shared_lease():

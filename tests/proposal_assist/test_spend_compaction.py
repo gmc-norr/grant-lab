@@ -8,13 +8,13 @@ cap, so it could spend past a ceiling that had already stopped every chat turn.
 import pytest
 from sqlalchemy import select
 
-from call_manager.db.models import LlmSpend
-from call_manager.proposal_assist.spend import record_spend
-from call_manager.proposal_assist.turns.caps import GlobalTokenCapExceeded
-from call_manager.proposal_assist.turns.compaction import (
+from grant_lab.db.models import LlmSpend
+from grant_lab.proposal_assist.spend import record_spend
+from grant_lab.proposal_assist.turns.caps import GlobalTokenCapExceeded
+from grant_lab.proposal_assist.turns.compaction import (
     compact_workspace,
 )
-from call_manager.proposal_assist.turns.compaction import (
+from grant_lab.proposal_assist.turns.compaction import (
     run_compaction_tick as _run_compaction_tick,
 )
 from tests.proposal_assist.conftest import make_chat_turn, make_user, make_workspace
@@ -53,10 +53,10 @@ def run_compaction(pg_session_factory, monkeypatch, _settings_env):
     vacuous. Returns the workspace id. `outcome="failed"` makes the stub raise,
     which the recipe records then re-raises.
     """
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     def _run(*, tokens_in=0, tokens_out=0, workspace_id=None, outcome="ok"):
-        from call_manager.db.models import Workspace
+        from grant_lab.db.models import Workspace
 
         settings = Settings()
         with pg_session_factory() as s:
@@ -91,7 +91,7 @@ def run_compaction_tick(pg_session_factory, monkeypatch, _settings_env):
     monkeypatch.setenv("COMPACTION_TURN_THRESHOLD", "2")
 
     def _run():
-        from call_manager.config import Settings
+        from grant_lab.config import Settings
 
         settings = Settings()
         with pg_session_factory() as s:

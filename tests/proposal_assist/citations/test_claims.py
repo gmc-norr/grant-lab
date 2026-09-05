@@ -6,7 +6,7 @@ span [marker_start, marker_end) is computed by embedding a sentinel marker in
 the text so the offsets match what find_markers would report in real prose.
 """
 
-from call_manager.proposal_assist.citations.claims import (
+from grant_lab.proposal_assist.citations.claims import (
     claim_sentence_around,
     iter_proposal_sentences,
 )
@@ -174,7 +174,7 @@ def test_iter_boundary_agreement_with_claim_sentence_around():
 def test_iter_offset_skips_leading_marker_to_prose():
     # A non-trailing marker preceding the prose: the offset must point at the
     # first prose char ('P'), not the marker's '['.
-    from call_manager.proposal_assist.citations.markers import build_marker
+    from grant_lab.proposal_assist.citations.markers import build_marker
 
     marker = build_marker("k", "ev-000000000000")
     text = f"First sentence. {marker} Prose after marker is here."

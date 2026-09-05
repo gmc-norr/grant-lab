@@ -18,7 +18,7 @@ import pathlib
 
 import pytest
 
-from call_manager.config import Settings
+from grant_lab.config import Settings
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 PRODUCTION_DEFAULT = (REPO / "var" / "workspaces").resolve()

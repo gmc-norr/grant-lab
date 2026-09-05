@@ -1,4 +1,4 @@
-from call_manager.main import create_app
+from grant_lab.main import create_app
 
 
 def _app(monkeypatch, pg_url):
@@ -33,7 +33,7 @@ def test_no_web_jinja_env_or_templates(monkeypatch, pg_url):
 
 
 def test_deleted_static_assets_absent():
-    import call_manager.main as m
+    import grant_lab.main as m
 
     static = m.STATIC_DIR
     for gone in ("pico.min.css", "app.css", "app.js", "htmx.min.js", "htmx-sse.js", "dedup.js"):

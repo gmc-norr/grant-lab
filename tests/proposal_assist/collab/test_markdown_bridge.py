@@ -1,5 +1,5 @@
-from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
-from call_manager.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
 
 from .fixtures import CORPUS
 
@@ -87,7 +87,7 @@ def test_multi_paragraph_list_item_roundtrips():
 def test_production_layout_hydrates():
     # The exact tests/test_editing_save.py doc (H1 + bare marker + tight layout)
     # must round-trip idempotently and preserve its H2 sections.
-    from call_manager.proposal_assist.editing.sectionizer import split_sections
+    from grant_lab.proposal_assist.editing.sectionizer import split_sections
 
     md = dict(CORPUS)["production_layout"]
     out = pm_to_markdown(markdown_to_pm(md))
@@ -397,7 +397,7 @@ def test_no_table_line_ever_starts_with_hash():
     out = pm_to_markdown(doc)
     for line in out.splitlines():
         assert line.startswith("| ")
-    from call_manager.proposal_assist.editing.sectionizer import split_sections
+    from grant_lab.proposal_assist.editing.sectionizer import split_sections
 
     assert len(split_sections(out)) == 1  # no phantom section boundary
 
@@ -565,7 +565,7 @@ def test_whitespace_never_lands_inside_an_emphasis_delimiter():
 def test_a_bold_citation_does_not_corrupt_its_own_paragraph():
     """The end-to-end shape. A round trip through the CRDT strips the atom's mark;
     serializing must still emit markdown that means what it says."""
-    from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc, ydoc_to_pm_json
+    from grant_lab.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc, ydoc_to_pm_json
 
     md = "**bold [@jones2020]<!-- ev:ev-111111111111 --> tail**\n"
     once = pm_to_markdown(ydoc_to_pm_json(pm_json_to_ydoc(markdown_to_pm(md))))
@@ -621,8 +621,8 @@ import re  # noqa: E402
 
 import pytest  # noqa: E402
 
-from call_manager.proposal_assist.collab.markdown_bridge import _mark_key  # noqa: E402
-from call_manager.proposal_assist.collab.yjs_bridge import (  # noqa: E402
+from grant_lab.proposal_assist.collab.markdown_bridge import _mark_key  # noqa: E402
+from grant_lab.proposal_assist.collab.yjs_bridge import (  # noqa: E402
     pm_json_to_ydoc,
     ydoc_to_pm_json,
 )

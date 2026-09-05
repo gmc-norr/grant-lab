@@ -4,8 +4,8 @@ from dataclasses import dataclass
 import pytest
 from sqlalchemy import select
 
-from call_manager.db.models import CallRubric, CallSectionExtract
-from call_manager.proposal_assist.extractors.refresh import (
+from grant_lab.db.models import CallRubric, CallSectionExtract
+from grant_lab.proposal_assist.extractors.refresh import (
     compute_rubric,
     compute_section_extracts,
     persist_rubric,
@@ -13,8 +13,8 @@ from call_manager.proposal_assist.extractors.refresh import (
     rubric_is_fresh,
     section_extracts_are_fresh,
 )
-from call_manager.proposal_assist.extractors.sections import SECTION_NAMES
-from call_manager.proposal_assist.hashing import source_text_hash
+from grant_lab.proposal_assist.extractors.sections import SECTION_NAMES
+from grant_lab.proposal_assist.hashing import source_text_hash
 from tests.proposal_assist.conftest import make_call
 
 

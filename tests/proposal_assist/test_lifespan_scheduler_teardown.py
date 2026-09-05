@@ -14,7 +14,7 @@ import threading
 import pytest
 from fastapi.testclient import TestClient
 
-from call_manager.main import create_app
+from grant_lab.main import create_app
 
 
 @pytest.fixture
@@ -79,8 +79,8 @@ def test_teardown_survives_the_lock_not_acquired_path(_app, pg_session_factory, 
     plain BackgroundScheduler, which is the only reason it exists.
     """
     # The lifespan imports this INSIDE the function body, so it rebinds from
-    # call_manager.scheduler on every entry — patch it there, not on main.
-    from call_manager import scheduler as scheduler_module
+    # grant_lab.scheduler on every entry — patch it there, not on main.
+    from grant_lab import scheduler as scheduler_module
 
     monkeypatch.setattr(
         scheduler_module, "probe_scheduler_lock", lambda _e: (None, "held_elsewhere")
@@ -102,7 +102,7 @@ def test_drafting_subprocesses_are_terminated_before_the_scheduler_wait(
     subprocess. The order is the property."""
     import uuid
 
-    from call_manager import scheduler as scheduler_module
+    from grant_lab import scheduler as scheduler_module
 
     # Standby path (no advisory lock → inert scheduler): a RUNNING scheduler's
     # registry-reconcile tick sees the fake entry below as a deleted workspace

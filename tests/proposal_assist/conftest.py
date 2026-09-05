@@ -12,10 +12,10 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from call_manager.auth.session_cookie import SessionSigner
-from call_manager.db.models import Call, Source, User
-from call_manager.main import create_app
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
+from grant_lab.auth.session_cookie import SessionSigner
+from grant_lab.db.models import Call, Source, User
+from grant_lab.main import create_app
+from grant_lab.proposal_assist.artifacts import PROPOSAL_FILENAME
 
 # Hostnames that reference-fetch tests mock via pytest-httpx. The SSRF
 # resolver in fetcher.py validates via socket.getaddrinfo BEFORE httpx
@@ -202,7 +202,7 @@ def make_user(session, *, email: str = "owner@umu.se") -> "User":  # noqa: F821
     NOT unique per call: a second call in the same test/session with no
     explicit `email` collides on `uq_users_email`. Callers that need more than
     one user must pass a distinct `email` themselves."""
-    from call_manager.db.models import User
+    from grant_lab.db.models import User
 
     u = User(status="active", email=email)
     session.add(u)
@@ -213,7 +213,7 @@ def make_user(session, *, email: str = "owner@umu.se") -> "User":  # noqa: F821
 def make_profile(session, *, name: str = "Test PI Profile") -> "Profile":  # noqa: F821
     """Build a Profile owned by a fresh User. Real Profile requires
     `kind: ProfileKind` and `created_by` FK — no `slug`."""
-    from call_manager.db.models import Profile, ProfileKind
+    from grant_lab.db.models import Profile, ProfileKind
 
     u = make_user(session, email=f"profile-owner-{name.lower().replace(' ', '-')}@umu.se")
     p = Profile(
@@ -257,7 +257,7 @@ def make_workspace(
     without a call_id, so any test that drives the real Phase0Worker needs
     one; callers that already pass `call_id` explicitly are unaffected.
     """
-    from call_manager.db.models import Workspace, WorkspaceEvent
+    from grant_lab.db.models import Workspace, WorkspaceEvent
 
     if owner is None:
         owner = make_user(session)
@@ -297,8 +297,8 @@ def stamp_for(session, workspace_id):
     generation (see the retire/straddle tests), which this helper supports by being
     called at the moment the caller's belief was formed.
     """
-    from call_manager.db.models import Workspace
-    from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
+    from grant_lab.db.models import Workspace
+    from grant_lab.proposal_assist.ports.stamp import stamp_for_workspace
 
     return stamp_for_workspace(session.get(Workspace, workspace_id))
 
@@ -313,7 +313,7 @@ def make_chat_turn(
     tokens_out: int | None = None,
     model: str | None = None,
 ):
-    from call_manager.db.models import ChatTurn
+    from grant_lab.db.models import ChatTurn
 
     turn = ChatTurn(
         workspace_id=workspace.id,
@@ -337,7 +337,7 @@ def make_chat_summary(
     tokens: int = 100,
     model: str = "claude-haiku-4-5",
 ):
-    from call_manager.db.models import ChatSummary
+    from grant_lab.db.models import ChatSummary
 
     cs = ChatSummary(
         workspace_id=workspace.id,
@@ -400,8 +400,8 @@ def review_stamp(session_factory, run_id, generation: int = 0):
     helper that let a caller pass a mismatching pair would make that assert
     untestable from the outside.
     """
-    from call_manager.db.models import ReviewRun
-    from call_manager.proposal_assist.ports.stamp import FenceStamp
+    from grant_lab.db.models import ReviewRun
+    from grant_lab.proposal_assist.ports.stamp import FenceStamp
 
     with session_factory() as s:
         run = s.get(ReviewRun, run_id)

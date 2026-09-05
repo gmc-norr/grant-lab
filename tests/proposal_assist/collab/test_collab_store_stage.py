@@ -1,4 +1,4 @@
-from call_manager.proposal_assist.collab import store
+from grant_lab.proposal_assist.collab import store
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 

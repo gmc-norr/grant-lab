@@ -17,7 +17,7 @@ from tests.fencing.inventory import (
     scan_tree,
 )
 
-P = "src/call_manager/proposal_assist/tools/a.py"
+P = "src/grant_lab/proposal_assist/tools/a.py"
 
 
 def _row(symbol, *, fenced=False, category="semantic", **extra):
@@ -125,12 +125,12 @@ def test_a_rename_can_move_a_row_into_the_relocated_scope():
 
     old = (
         "tool_commit",
-        "src/call_manager/proposal_assist/tools/citations.py",
+        "src/grant_lab/proposal_assist/tools/citations.py",
         "_write_citekey_cache",
     )
     new = (
         "tool_commit",
-        "src/call_manager/proposal_assist/citations/core.py",
+        "src/grant_lab/proposal_assist/citations/core.py",
         "_write_citekey_cache",
     )
     previous = [
@@ -163,12 +163,12 @@ def test_a_rename_into_an_undeclared_path_is_still_refused():
 
     old = (
         "tool_commit",
-        "src/call_manager/proposal_assist/tools/citations.py",
+        "src/grant_lab/proposal_assist/tools/citations.py",
         "_write_citekey_cache",
     )
     new = (
         "tool_commit",
-        "src/call_manager/proposal_assist/editing/save.py",
+        "src/grant_lab/proposal_assist/editing/save.py",
         "_write_citekey_cache",
     )
     previous = [

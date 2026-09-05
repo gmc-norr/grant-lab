@@ -1,7 +1,7 @@
 import pytest
 
-from call_manager.config import Settings
-from call_manager.main import create_app
+from grant_lab.config import Settings
+from grant_lab.main import create_app
 
 
 def test_spa_mode_defaults_to_disabled(monkeypatch):
@@ -43,7 +43,7 @@ def test_disabled_mode_serves_no_spa(monkeypatch, pg_url, pg_session_factory, te
 
 
 def test_prod_mode_missing_build_fails_fast(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    import call_manager.web.spa_serving as spa_serving
+    import grant_lab.web.spa_serving as spa_serving
 
     monkeypatch.setattr(spa_serving, "SPA_DIR", tmp_path / "spa")
     _env(monkeypatch, pg_url, SPA_MODE="prod")
@@ -54,7 +54,7 @@ def test_prod_mode_missing_build_fails_fast(monkeypatch, pg_url, pg_session_fact
 def test_prod_mode_serves_index_for_spa_routes(
     monkeypatch, pg_url, pg_session_factory, tmp_path, test_client_factory
 ):
-    import call_manager.web.spa_serving as spa_serving
+    import grant_lab.web.spa_serving as spa_serving
 
     spa_dir = tmp_path / "spa"
     (spa_dir / "assets").mkdir(parents=True)
@@ -146,7 +146,7 @@ def test_assets_have_immutable_cache_control(
 ):
     """Vite-hashed assets under /assets/ must carry Cache-Control: public,
     max-age=31536000, immutable so browsers and CDNs cache them for 1 year."""
-    import call_manager.web.spa_serving as spa_serving
+    import grant_lab.web.spa_serving as spa_serving
 
     spa_dir = tmp_path / "spa"
     (spa_dir / "assets").mkdir(parents=True)
@@ -169,7 +169,7 @@ def test_index_html_does_not_have_immutable_cache_control(
 ):
     """index.html is NOT content-hashed so must NOT receive the immutable header.
     It should be served without a long-lived cache directive."""
-    import call_manager.web.spa_serving as spa_serving
+    import grant_lab.web.spa_serving as spa_serving
 
     spa_dir = tmp_path / "spa"
     (spa_dir / "assets").mkdir(parents=True)
@@ -195,7 +195,7 @@ def test_backend_path_404_does_not_walk_routes(
     """An unknown /api/* path must return 404 without walking all app routes
     (the /api/ short-circuit fires first). Unknown non-SPA, non-/api paths
     (e.g. /workspaces/unknown) also 404 via the route walk finding no match."""
-    import call_manager.web.spa_serving as spa_serving
+    import grant_lab.web.spa_serving as spa_serving
 
     spa_dir = tmp_path / "spa"
     (spa_dir / "assets").mkdir(parents=True)

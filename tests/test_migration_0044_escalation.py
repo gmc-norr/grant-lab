@@ -11,7 +11,7 @@ def _cfg(pg_url):
 
 
 def test_0044_adds_columns_ledger_and_backfills_analysis_model(pg_url):
-    from call_manager.db.session import make_engine
+    from grant_lab.db.session import make_engine
 
     cfg = _cfg(pg_url)
     # Arrange: at 0043, insert a call_rankings row WITH a summary so the

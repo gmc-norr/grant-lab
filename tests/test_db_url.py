@@ -3,7 +3,7 @@ failed exactly as written — alembic/env.py read only `os.environ["DATABASE_URL
 while the app reads `.env`, and nothing said to export the file. The natural
 workaround put the production password on the command line.
 
-`call_manager.db.url.resolve_database_url` is the one resolver: explicit URL,
+`grant_lab.db.url.resolve_database_url` is the one resolver: explicit URL,
 then the environment, then `.env` through the app's own Settings.
 """
 
@@ -13,7 +13,7 @@ import pathlib
 
 import pytest
 
-from call_manager.db.url import resolve_database_url
+from grant_lab.db.url import resolve_database_url
 
 ENV_PY = pathlib.Path(__file__).resolve().parents[1] / "alembic/env.py"
 
@@ -45,7 +45,7 @@ def test_dotenv_is_read_when_nothing_is_exported(monkeypatch, tmp_path):
     """The README path: a `.env` in the working directory and a bare shell.
     The test suite disables Settings' env_file so the repo's own .env never
     leaks into tests; restore the production default for this one test."""
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     monkeypatch.setitem(Settings.model_config, "env_file", ".env")
     monkeypatch.chdir(tmp_path)
@@ -63,6 +63,6 @@ def test_nothing_configured_names_all_three_sources(monkeypatch, tmp_path):
 
 def test_alembic_env_uses_the_shared_resolver():
     src = ENV_PY.read_text()
-    assert "from call_manager.db.url import resolve_database_url" in src
+    assert "from grant_lab.db.url import resolve_database_url" in src
     assert "resolve_database_url(config.get_main_option(" in src
     assert 'os.environ.get("DATABASE_URL")' not in src, "env.py must not keep its own copy"

@@ -5,8 +5,8 @@ import json
 import httpx
 import pytest
 
-from call_manager.embeddings.client import EmbedResult, OllamaEmbedClient
-from call_manager.ranking.ollama_client import LLMError
+from grant_lab.embeddings.client import EmbedResult, OllamaEmbedClient
+from grant_lab.ranking.ollama_client import LLMError
 
 
 def _client_returning(payload: dict, *, status: int = 200) -> OllamaEmbedClient:

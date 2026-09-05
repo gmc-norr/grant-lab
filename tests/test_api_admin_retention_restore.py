@@ -16,8 +16,8 @@ import uuid
 
 from sqlalchemy import select
 
-from call_manager.db.models import Workspace, WorkspaceEvent
-from call_manager.web.api import admin_retention as ws_api
+from grant_lab.db.models import Workspace, WorkspaceEvent
+from grant_lab.web.api import admin_retention as ws_api
 from tests.admin_retention_helpers import (
     _dispose_created_app_engines as _dispose_created_app_engines,
 )
@@ -160,7 +160,7 @@ def test_second_restore_is_204_with_exactly_one_audit_row(
 
 def test_commit_mutex_timeout_is_429(monkeypatch, pg_url, pg_session_factory, tmp_path):
     """CommitMutexTimeout must surface as 429 + Retry-After: 2 with BUSY_ERROR_MESSAGE."""
-    from call_manager.proposal_assist.drafting.locking import (
+    from grant_lab.proposal_assist.drafting.locking import (
         BUSY_ERROR_MESSAGE,
         CommitMutexTimeout,
     )
@@ -246,7 +246,7 @@ def test_fault_injection_503_then_retry_with_real_bridge(
     """Force signal_workspace_restored to return False → 503 + Retry-After.
     Then retry with the real bridge → 204, workspace is usable, exactly one
     audit row across both calls."""
-    from call_manager.proposal_assist.lifecycle import signal_workspace_restored as _real_signal
+    from grant_lab.proposal_assist.lifecycle import signal_workspace_restored as _real_signal
 
     app = setup_app(monkeypatch, pg_url, tmp_path)
     c, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)

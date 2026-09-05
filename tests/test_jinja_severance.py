@@ -14,7 +14,7 @@ import pathlib
 import re
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-_SRC = _REPO_ROOT / "src" / "call_manager"
+_SRC = _REPO_ROOT / "src" / "grant_lab"
 
 _DOOMED = ("workspaces", "files", "references", "sections", "citations", "annotations")
 
@@ -37,7 +37,7 @@ _KEPT = _KEPT_API + _KEPT_JSON
 
 # Absolute import of a doomed proposal_assist.web module (unambiguous).
 _ABS = re.compile(
-    r"from\s+call_manager\.proposal_assist\.web\.(" + "|".join(_DOOMED) + r")\s+import"
+    r"from\s+grant_lab\.proposal_assist\.web\.(" + "|".join(_DOOMED) + r")\s+import"
 )
 # Same-package relative import (only meaningful inside proposal_assist/web,
 # where `.workspaces` IS the doomed module). NOT applied to web/api, whose

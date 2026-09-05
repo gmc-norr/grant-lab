@@ -4,7 +4,7 @@ through it, verify the closure properly bound ctx."""
 import subprocess
 from pathlib import Path
 
-from call_manager.proposal_assist.tools.registry import (
+from grant_lab.proposal_assist.tools.registry import (
     ToolContext,
     build_proposal_assist_mcp_server,
 )
@@ -33,7 +33,7 @@ def test_mcp_server_contains_tools_bound_to_context(
     No actual SDK calls happen here (no API key in CI). The full agent
     loop is gated on ANTHROPIC_API_KEY in the dedicated claude-adapter
     smoke (test_drafting_claude_adapter.py)."""
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
     with pg_session_factory() as s:

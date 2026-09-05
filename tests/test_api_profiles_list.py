@@ -1,8 +1,8 @@
 from fastapi.testclient import TestClient
 
-from call_manager.auth.session_cookie import SessionSigner
-from call_manager.db.models import User
-from call_manager.main import create_app
+from grant_lab.auth.session_cookie import SessionSigner
+from grant_lab.db.models import User
+from grant_lab.main import create_app
 
 
 def _setup(monkeypatch, pg_url):
@@ -32,7 +32,7 @@ def test_list_active_by_name(monkeypatch, pg_url, pg_session_factory, profile_fa
     profile_factory(name="Alpha", structured={"areas": ["x"]})
     profile_factory(name="Archived")  # active by default; archive it below
     # archive the third
-    from call_manager.db.models import Profile
+    from grant_lab.db.models import Profile
     with pg_session_factory() as s:
         s.execute(Profile.__table__.select().where(Profile.name == "Archived")).first()
         archived_update = (

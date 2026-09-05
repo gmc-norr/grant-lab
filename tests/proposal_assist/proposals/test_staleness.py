@@ -1,13 +1,13 @@
 import subprocess
 from pathlib import Path
 
-from call_manager.db.models import ProposedChange
-from call_manager.proposal_assist.editing.save import save_section
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
-from call_manager.proposal_assist.proposals.proposing import capture_base, propose_prose_edit
-from call_manager.proposal_assist.proposals.staleness import refresh_staleness
-from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
+from grant_lab.db.models import ProposedChange
+from grant_lab.proposal_assist.editing.save import save_section
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.ports.stamp import stamp_for_workspace
+from grant_lab.proposal_assist.proposals.proposing import capture_base, propose_prose_edit
+from grant_lab.proposal_assist.proposals.staleness import refresh_staleness
+from grant_lab.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 from tests.proposal_assist.conftest import make_workspace
 
 

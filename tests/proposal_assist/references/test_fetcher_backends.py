@@ -4,7 +4,7 @@ the SSRF-safe download."""
 
 import pytest
 
-from call_manager.proposal_assist.references.fetcher import (
+from grant_lab.proposal_assist.references.fetcher import (
     FetchError,
     fetch_arxiv,
     fetch_crossref_doi,

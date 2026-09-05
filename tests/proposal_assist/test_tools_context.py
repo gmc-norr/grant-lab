@@ -2,17 +2,17 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.proposal_assist.port_impl import build_ports
-from call_manager.proposal_assist.tools.context import (
+from grant_lab.proposal_assist.port_impl import build_ports
+from grant_lab.proposal_assist.tools.context import (
     get_call_details_impl,
     get_profile_impl,
 )
-from call_manager.proposal_assist.tools.registry import ToolContext
+from grant_lab.proposal_assist.tools.registry import ToolContext
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
 def _build_ctx(pg_session_factory, wsid):
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     return ToolContext(
         workspace_id=wsid,
@@ -112,7 +112,7 @@ async def test_the_profile_snapshot_is_workspace_scoped_not_profile_scoped(
     The rule that still holds: only members reach this tool. A stranger to the
     workspace gets nothing, because turns are gated on require_member.
     """
-    from call_manager.db.models import Profile, ProfileKind
+    from grant_lab.db.models import Profile, ProfileKind
 
     with pg_session_factory() as s:
         owner = make_user(s, email="profile-owner@umu.se")

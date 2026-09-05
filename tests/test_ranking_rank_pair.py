@@ -6,9 +6,9 @@ from functools import partial
 
 import httpx
 
-from call_manager.ranking.ollama_client import OllamaClient
-from call_manager.ranking.rank_pair import RankResult
-from call_manager.ranking.rank_pair import rank_pair as _rank_pair
+from grant_lab.ranking.ollama_client import OllamaClient
+from grant_lab.ranking.rank_pair import RankResult
+from grant_lab.ranking.rank_pair import rank_pair as _rank_pair
 
 _NOW = datetime(2026, 4, 17, 12, 0, tzinfo=UTC)
 # Mirrors Settings.embedding_pregate_threshold default. Most tests don't tune
@@ -347,7 +347,7 @@ def test_rank_pair_no_escalation_when_remote_disabled():
 def test_rank_pair_remote_failure_keeps_local_records_attempt():
     """Sonnet raises LLMError ⇒ keep the local result, escalated=False,
     escalation_attempted=True, outcome='llm_error'. Job still succeeds."""
-    from call_manager.ranking.ollama_client import LLMError
+    from grant_lab.ranking.ollama_client import LLMError
 
     profile = _Profile(structured={"areas": [], "hard_exclusions": []})
     call = _Call(deadline=_NOW.replace(year=2099))
@@ -636,7 +636,7 @@ def test_rank_pair_returns_none_similarity_on_model_mismatch(caplog):
 
     client = _happy_path_v2_client()
 
-    with caplog.at_level(logging.WARNING, logger="call_manager.ranking.rank_pair"):
+    with caplog.at_level(logging.WARNING, logger="grant_lab.ranking.rank_pair"):
         result = rank_pair(client=client, profile=profile, call=call, now=datetime.now(UTC))
 
     # LLM ran (gate was UNKNOWN, not FAIL)
@@ -729,7 +729,7 @@ def test_call_matches_must_include_searches_full_text():
     missed by both the timeline-bypass logic and the digest bucket."""
     from types import SimpleNamespace
 
-    from call_manager.ranking.rank_pair import _call_matches_must_include
+    from grant_lab.ranking.rank_pair import _call_matches_must_include
 
     profile = SimpleNamespace(structured={"must_include": ["ferroptosis"]})
     call = SimpleNamespace(
@@ -747,7 +747,7 @@ def test_call_matches_must_include_word_boundary_no_substring():
     the paid LLM/escalation path)."""
     from types import SimpleNamespace
 
-    from call_manager.ranking.rank_pair import _call_matches_must_include
+    from grant_lab.ranking.rank_pair import _call_matches_must_include
 
     profile = SimpleNamespace(structured={"must_include": ["pathology"]})
     # 'pathology' as a term, but the call only contains 'pathological' — a real
@@ -770,7 +770,7 @@ def test_call_matches_must_include_standalone_token_case_insensitive():
     'rna' matches as a whole word regardless of case."""
     from types import SimpleNamespace
 
-    from call_manager.ranking.rank_pair import _call_matches_must_include
+    from grant_lab.ranking.rank_pair import _call_matches_must_include
 
     profile = SimpleNamespace(structured={"must_include": ["rna"]})
     call = SimpleNamespace(
@@ -787,7 +787,7 @@ def test_call_matches_must_include_short_term_ignored():
     so it can never force-include a call — even a standalone 'AI' token."""
     from types import SimpleNamespace
 
-    from call_manager.ranking.rank_pair import _call_matches_must_include
+    from grant_lab.ranking.rank_pair import _call_matches_must_include
 
     profile = SimpleNamespace(structured={"must_include": ["ai", "eu"]})
     call = SimpleNamespace(
@@ -809,7 +809,7 @@ def test_settings_embedding_pregate_threshold_reads_env_var(monkeypatch):
     monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
     monkeypatch.setenv("EMBEDDING_PREGATE_THRESHOLD", "0.42")
 
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     assert Settings().embedding_pregate_threshold == 0.42
 

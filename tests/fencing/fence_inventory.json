@@ -1,7 +1,7 @@
 [
   {
     "kind": "claim_fn",
-    "path": "src/call_manager/proposal_assist/analysis/queue.py",
+    "path": "src/grant_lab/proposal_assist/analysis/queue.py",
     "symbol": "claim_queued_jobs",
     "category": "semantic",
     "fenced": false,
@@ -9,7 +9,7 @@
   },
   {
     "kind": "claim_fn",
-    "path": "src/call_manager/proposal_assist/coherence/jobs.py",
+    "path": "src/grant_lab/proposal_assist/coherence/jobs.py",
     "symbol": "claim_next_coherence_job",
     "category": "semantic",
     "fenced": true,
@@ -17,7 +17,7 @@
   },
   {
     "kind": "claim_fn",
-    "path": "src/call_manager/proposal_assist/evaluator/jobs.py",
+    "path": "src/grant_lab/proposal_assist/evaluator/jobs.py",
     "symbol": "claim_next_evaluator_job",
     "category": "semantic",
     "fenced": true,
@@ -25,7 +25,7 @@
   },
   {
     "kind": "claim_fn",
-    "path": "src/call_manager/proposal_assist/phases/setup.py",
+    "path": "src/grant_lab/proposal_assist/phases/setup.py",
     "symbol": "claim_next_setup_job",
     "category": "semantic",
     "fenced": false,
@@ -33,7 +33,7 @@
   },
   {
     "kind": "claim_fn",
-    "path": "src/call_manager/proposal_assist/review/jobs.py",
+    "path": "src/grant_lab/proposal_assist/review/jobs.py",
     "symbol": "claim_next_review_run",
     "category": "semantic",
     "fenced": true,
@@ -41,7 +41,7 @@
   },
   {
     "kind": "claim_fn",
-    "path": "src/call_manager/proposal_assist/uncited_claims/jobs.py",
+    "path": "src/grant_lab/proposal_assist/uncited_claims/jobs.py",
     "symbol": "claim_next_uncited_claims_job",
     "category": "semantic",
     "fenced": true,
@@ -49,7 +49,7 @@
   },
   {
     "kind": "git_commit",
-    "path": "src/call_manager/proposal_assist/analysis/insert.py",
+    "path": "src/grant_lab/proposal_assist/analysis/insert.py",
     "symbol": "insert_from_annotation",
     "category": "semantic",
     "fenced": true,
@@ -57,7 +57,7 @@
   },
   {
     "kind": "git_commit",
-    "path": "src/call_manager/proposal_assist/citations/bibliography.py",
+    "path": "src/grant_lab/proposal_assist/citations/bibliography.py",
     "symbol": "build_bibliography",
     "category": "semantic",
     "fenced": false,
@@ -65,7 +65,7 @@
   },
   {
     "kind": "git_commit",
-    "path": "src/call_manager/proposal_assist/citations/core.py",
+    "path": "src/grant_lab/proposal_assist/citations/core.py",
     "symbol": "_insert_citation_locked",
     "category": "semantic",
     "fenced": false,
@@ -73,7 +73,7 @@
   },
   {
     "kind": "git_commit",
-    "path": "src/call_manager/proposal_assist/citations/human_cite.py",
+    "path": "src/grant_lab/proposal_assist/citations/human_cite.py",
     "symbol": "insert_citation_for_user",
     "category": "semantic",
     "fenced": true,
@@ -81,7 +81,7 @@
   },
   {
     "kind": "git_commit",
-    "path": "src/call_manager/proposal_assist/collab/checkpoint.py",
+    "path": "src/grant_lab/proposal_assist/collab/checkpoint.py",
     "symbol": "checkpoint_artifact",
     "category": "semantic",
     "fenced": true,
@@ -89,7 +89,7 @@
   },
   {
     "kind": "git_commit",
-    "path": "src/call_manager/proposal_assist/editing/save.py",
+    "path": "src/grant_lab/proposal_assist/editing/save.py",
     "symbol": "save_section",
     "category": "semantic",
     "fenced": true,
@@ -97,7 +97,7 @@
   },
   {
     "kind": "git_commit",
-    "path": "src/call_manager/proposal_assist/phases/setup.py",
+    "path": "src/grant_lab/proposal_assist/phases/setup.py",
     "symbol": "Phase0Worker._init_repo",
     "category": "semantic",
     "fenced": false,
@@ -105,7 +105,7 @@
   },
   {
     "kind": "git_commit",
-    "path": "src/call_manager/proposal_assist/review/pass_runner.py",
+    "path": "src/grant_lab/proposal_assist/review/pass_runner.py",
     "symbol": "run_review_pass",
     "category": "semantic",
     "fenced": false,
@@ -113,7 +113,7 @@
   },
   {
     "kind": "git_commit",
-    "path": "src/call_manager/web/api/workspaces.py",
+    "path": "src/grant_lab/web/api/workspaces.py",
     "symbol": "post_init_spec._git",
     "category": "semantic",
     "fenced": false,
@@ -121,7 +121,7 @@
   },
   {
     "kind": "tool_commit",
-    "path": "src/call_manager/proposal_assist/citations/core.py",
+    "path": "src/grant_lab/proposal_assist/citations/core.py",
     "symbol": "_write_citekey_cache",
     "category": "caller_fenced",
     "fenced": false,
@@ -130,7 +130,7 @@
   },
   {
     "kind": "tool_commit",
-    "path": "src/call_manager/proposal_assist/tools/citations.py",
+    "path": "src/grant_lab/proposal_assist/tools/citations.py",
     "symbol": "propose_citation_impl",
     "category": "semantic",
     "fenced": true,
@@ -138,7 +138,7 @@
   },
   {
     "kind": "tool_commit",
-    "path": "src/call_manager/proposal_assist/tools/proposal.py",
+    "path": "src/grant_lab/proposal_assist/tools/proposal.py",
     "symbol": "_propose_artifact_edit_impl",
     "category": "semantic",
     "fenced": true,
@@ -146,7 +146,7 @@
   },
   {
     "kind": "tool_commit",
-    "path": "src/call_manager/proposal_assist/tools/references.py",
+    "path": "src/grant_lab/proposal_assist/tools/references.py",
     "symbol": "fetch_reference_impl",
     "category": "accounting",
     "fenced": true,
@@ -154,7 +154,7 @@
   },
   {
     "kind": "tool_commit",
-    "path": "src/call_manager/proposal_assist/tools/references.py",
+    "path": "src/grant_lab/proposal_assist/tools/references.py",
     "symbol": "fetch_reference_impl._do_fetch_and_ingest",
     "category": "semantic",
     "fenced": false,
@@ -162,7 +162,7 @@
   },
   {
     "kind": "tool_commit",
-    "path": "src/call_manager/proposal_assist/tools/references.py",
+    "path": "src/grant_lab/proposal_assist/tools/references.py",
     "symbol": "fetch_reference_impl._refund_fetch_slot",
     "category": "accounting",
     "fenced": true,
@@ -170,7 +170,7 @@
   },
   {
     "kind": "tool_commit",
-    "path": "src/call_manager/proposal_assist/tools/review_submit.py",
+    "path": "src/grant_lab/proposal_assist/tools/review_submit.py",
     "symbol": "submit_review_impl",
     "category": "semantic",
     "fenced": true,
@@ -178,7 +178,7 @@
   },
   {
     "kind": "tool_commit",
-    "path": "src/call_manager/proposal_assist/tools/scorecard.py",
+    "path": "src/grant_lab/proposal_assist/tools/scorecard.py",
     "symbol": "submit_scorecard_impl",
     "category": "semantic",
     "fenced": true,
@@ -186,7 +186,7 @@
   },
   {
     "kind": "tool_commit",
-    "path": "src/call_manager/proposal_assist/tools/uncited_claims.py",
+    "path": "src/grant_lab/proposal_assist/tools/uncited_claims.py",
     "symbol": "submit_uncited_claims_impl",
     "category": "semantic",
     "fenced": true,
@@ -194,7 +194,7 @@
   },
   {
     "kind": "tool_context",
-    "path": "src/call_manager/proposal_assist/coherence/agent.py",
+    "path": "src/grant_lab/proposal_assist/coherence/agent.py",
     "symbol": "build_keeper_adapter.tools_factory",
     "category": "semantic",
     "fenced": true,
@@ -203,7 +203,7 @@
   },
   {
     "kind": "tool_context",
-    "path": "src/call_manager/proposal_assist/drafting/factory.py",
+    "path": "src/grant_lab/proposal_assist/drafting/factory.py",
     "symbol": "_build_adapter.tools_factory",
     "category": "semantic",
     "fenced": true,
@@ -212,7 +212,7 @@
   },
   {
     "kind": "tool_context",
-    "path": "src/call_manager/proposal_assist/evaluator/agent.py",
+    "path": "src/grant_lab/proposal_assist/evaluator/agent.py",
     "symbol": "build_evaluator_adapter.tools_factory",
     "category": "semantic",
     "fenced": true,
@@ -221,7 +221,7 @@
   },
   {
     "kind": "tool_context",
-    "path": "src/call_manager/proposal_assist/review/agent.py",
+    "path": "src/grant_lab/proposal_assist/review/agent.py",
     "symbol": "build_review_adapter.tools_factory",
     "category": "semantic",
     "fenced": true,
@@ -230,7 +230,7 @@
   },
   {
     "kind": "tool_context",
-    "path": "src/call_manager/proposal_assist/uncited_claims/agent.py",
+    "path": "src/grant_lab/proposal_assist/uncited_claims/agent.py",
     "symbol": "build_uncited_claims_adapter.tools_factory",
     "category": "semantic",
     "fenced": true,

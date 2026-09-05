@@ -3,8 +3,8 @@ import uuid
 import pytest
 from fastapi import HTTPException
 
-from call_manager.db.models import WorkspaceViewer
-from call_manager.proposal_assist.web._perms import require_member, require_owner
+from grant_lab.db.models import WorkspaceViewer
+from grant_lab.proposal_assist.web._perms import require_member, require_owner
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 

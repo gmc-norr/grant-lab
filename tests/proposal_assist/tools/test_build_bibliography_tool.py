@@ -17,13 +17,13 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.db.models import Reference
-from call_manager.proposal_assist.citations.bibliography import BIBLIOGRAPHY_FILENAME
-from call_manager.proposal_assist.citations.markers import build_marker
-from call_manager.proposal_assist.tools.audit import build_bibliography_impl
-from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
-from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
-from call_manager.proposal_assist.tools.registry import ToolContext, _collect_tools
+from grant_lab.db.models import Reference
+from grant_lab.proposal_assist.citations.bibliography import BIBLIOGRAPHY_FILENAME
+from grant_lab.proposal_assist.citations.markers import build_marker
+from grant_lab.proposal_assist.tools.audit import build_bibliography_impl
+from grant_lab.proposal_assist.tools.citations import CITATIONS_FILENAME
+from grant_lab.proposal_assist.tools.proposal import PROPOSAL_FILENAME
+from grant_lab.proposal_assist.tools.registry import ToolContext, _collect_tools
 from tests.proposal_assist.conftest import make_workspace
 
 SMITH_CSL = {

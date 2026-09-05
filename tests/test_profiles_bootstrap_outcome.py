@@ -1,7 +1,7 @@
-from call_manager.profiles.bootstrap import bootstrap_profile
-from call_manager.profiles.pubmed import PubMedError
-from call_manager.profiles.seed import Member, Publication, SeedInput
-from call_manager.ranking.ollama_client import LLMError
+from grant_lab.profiles.bootstrap import bootstrap_profile
+from grant_lab.profiles.pubmed import PubMedError
+from grant_lab.profiles.seed import Member, Publication, SeedInput
+from grant_lab.ranking.ollama_client import LLMError
 
 _FAKE_PUB = Publication(pmid="1", title="Fake title", year=2024)
 

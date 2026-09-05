@@ -11,12 +11,12 @@ import asyncio
 import threading
 import uuid
 
-from call_manager.proposal_assist.lifecycle import (
+from grant_lab.proposal_assist.lifecycle import (
     _RESTORE_BARRIER_SECONDS,
     WorkspaceLifecycle,
     signal_workspace_restored,
 )
-from call_manager.proposal_assist.retirement import _RETIREMENT_BARRIER_SECONDS
+from grant_lab.proposal_assist.retirement import _RETIREMENT_BARRIER_SECONDS
 
 
 class _FakeState:
@@ -87,7 +87,7 @@ def test_a_timed_out_apply_reports_False_and_is_NOT_cancelled(monkeypatch):
         return await real_apply(workspace_id, generation=generation, retired=retired)
 
     monkeypatch.setattr(lifecycle, "apply", _slow_apply)
-    monkeypatch.setattr("call_manager.proposal_assist.lifecycle._RESTORE_BARRIER_SECONDS", 0.2)
+    monkeypatch.setattr("grant_lab.proposal_assist.lifecycle._RESTORE_BARRIER_SECONDS", 0.2)
     try:
         req = _FakeRequest(_FakeApp(loop, lifecycle))
         assert signal_workspace_restored(req, workspace_id=ws, generation=5) is False

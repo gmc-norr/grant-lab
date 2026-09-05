@@ -50,7 +50,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
-SRC = REPO / "src" / "call_manager"
+SRC = REPO / "src" / "grant_lab"
 
 # The two entry points. Either one satisfies a pin: the set-valued callers use
 # the subquery, the single-object callers use the wrapper, and the wrapper is
@@ -421,7 +421,7 @@ def _visibility_compare_operands(module: ast.Module) -> set[ast.AST]:
     and would be exempted into meaninglessness by the end of the week.
 
     Not narrowed by the OTHER operand: `.visibility` occurs five times under
-    src/call_manager (measured 2026-09-04) -- the predicate's own
+    src/grant_lab (measured 2026-09-04) -- the predicate's own
     `Profile.visibility == "org"` plus its docstring, and three lines in
     profiles.py -- so no second model carries a `visibility` attribute for this
     to collide with. Narrow it the day one does.
@@ -503,7 +503,7 @@ def test_pinned_surface_calls_the_single_source(qualname: str) -> None:
     assert called & set(PREDICATE_NAMES), (
         f"{qualname} does not CALL {' or '.join(PREDICATE_NAMES)}. Every surface "
         f"that resolves a profile for a user must go through "
-        f"src/call_manager/{DEFINITION}; an import alone is not enough."
+        f"src/grant_lab/{DEFINITION}; an import alone is not enough."
     )
     assert _predicate_is_load_bearing(fn), (
         f"{qualname} CALLS {' or '.join(PREDICATE_NAMES)} but does not USE the "
@@ -592,7 +592,7 @@ def test_no_module_builds_a_second_read_predicate() -> None:
             violations.append(f"{where} line {node.lineno}: {what}")
     assert not violations, (
         "The profile read rule has exactly one definition, "
-        f"src/call_manager/{DEFINITION}. These references build a second one "
+        f"src/grant_lab/{DEFINITION}. These references build a second one "
         "(a `.visibility` COMPARISON is one whatever it is compared to and "
         "whatever object it is read from -- reading the column to display it or "
         "writing it is not):\n  "

@@ -1,9 +1,9 @@
 from fastapi.testclient import TestClient
 
-import call_manager.web.api.auth as apiauth
-from call_manager.auth.passwords import hash_password
-from call_manager.db.models import User
-from call_manager.main import create_app
+import grant_lab.web.api.auth as apiauth
+from grant_lab.auth.passwords import hash_password
+from grant_lab.db.models import User
+from grant_lab.main import create_app
 
 
 def _app(monkeypatch, pg_url, **extra):
@@ -135,7 +135,7 @@ def test_login_dummy_hash_invoked_for_unknown_email(monkeypatch, pg_url, pg_sess
 def test_login_rate_limited_folds_into_400(monkeypatch, pg_url, pg_session_factory):
     app = _app(monkeypatch, pg_url)
     _user(app.state.session_factory, email="a@umu.se", status="active", password="correct-horse-1")
-    from call_manager.auth.rate_limit import SlidingWindowLimiter
+    from grant_lab.auth.rate_limit import SlidingWindowLimiter
 
     app.state.email_limiter = SlidingWindowLimiter(max_requests=2, window_seconds=60)
     with TestClient(app) as c:
@@ -218,7 +218,7 @@ def test_register_rate_limited_silent_no_row(monkeypatch, pg_url, pg_session_fac
     from sqlalchemy import select as _select
 
     app = _app(monkeypatch, pg_url)
-    from call_manager.auth.rate_limit import SlidingWindowLimiter
+    from grant_lab.auth.rate_limit import SlidingWindowLimiter
 
     app.state.ip_limiter = SlidingWindowLimiter(max_requests=0, window_seconds=60)
     with TestClient(app) as c:

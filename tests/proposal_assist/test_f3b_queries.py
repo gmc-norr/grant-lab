@@ -6,9 +6,9 @@ import dataclasses
 import uuid
 from datetime import UTC, datetime
 
-from call_manager.db.models import Reference, ReferenceChunk
-from call_manager.proposal_assist.port_impl.queries import SqlQueries
-from call_manager.proposal_assist.ports.queries import (
+from grant_lab.db.models import Reference, ReferenceChunk
+from grant_lab.proposal_assist.port_impl.queries import SqlQueries
+from grant_lab.proposal_assist.ports.queries import (
     Queries,
     ReferenceChunkView,
     ReferenceView,

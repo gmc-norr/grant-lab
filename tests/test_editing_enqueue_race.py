@@ -15,11 +15,11 @@ import time
 
 import pytest
 
-from call_manager.db.models import TurnJob, User, Workspace
-from call_manager.proposal_assist.drafting.locking import (
+from grant_lab.db.models import TurnJob, User, Workspace
+from grant_lab.proposal_assist.drafting.locking import (
     acquire_commit_mutex,
 )
-from call_manager.proposal_assist.turns.submit import submit_user_turn
+from grant_lab.proposal_assist.turns.submit import submit_user_turn
 
 
 @pytest.fixture()
@@ -52,7 +52,7 @@ def test_submit_blocks_while_commit_mutex_held(pg_session_factory, _settings_env
       4. s_hold commits (releases the xact lock); the thread unblocks and
          completes the enqueue.
     """
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
 

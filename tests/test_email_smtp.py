@@ -2,7 +2,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from call_manager.email.client import EmailTransportError, SMTPClient
+from grant_lab.email.client import EmailTransportError, SMTPClient
 
 
 def test_smtp_success_returns_ok(monkeypatch):
@@ -10,7 +10,7 @@ def test_smtp_success_returns_ok(monkeypatch):
     fake_conn = MagicMock()
     fake_smtp_class.return_value.__enter__.return_value = fake_conn
     fake_conn.sendmail.return_value = {}  # dict of refused recipients; empty = success
-    monkeypatch.setattr("call_manager.email.client.smtplib.SMTP", fake_smtp_class)
+    monkeypatch.setattr("grant_lab.email.client.smtplib.SMTP", fake_smtp_class)
 
     client = SMTPClient(
         host="smtp.example.com", port=587, user="u", password="p", from_addr="bot@umu.se"
@@ -33,7 +33,7 @@ def test_smtp_recipient_refused_is_bounce(monkeypatch):
     fake_conn.sendmail.side_effect = smtplib.SMTPRecipientsRefused(
         {"u@umu.se": (550, b"5.1.1 user unknown")}
     )
-    monkeypatch.setattr("call_manager.email.client.smtplib.SMTP", fake_smtp_class)
+    monkeypatch.setattr("grant_lab.email.client.smtplib.SMTP", fake_smtp_class)
 
     client = SMTPClient(
         host="smtp.example.com", port=587, user="u", password="p", from_addr="bot@umu.se"
@@ -47,7 +47,7 @@ def test_smtp_connection_error_raises_transport(monkeypatch):
     import smtplib
 
     fake_smtp_class = MagicMock(side_effect=smtplib.SMTPConnectError(421, "down"))
-    monkeypatch.setattr("call_manager.email.client.smtplib.SMTP", fake_smtp_class)
+    monkeypatch.setattr("grant_lab.email.client.smtplib.SMTP", fake_smtp_class)
 
     client = SMTPClient(
         host="smtp.example.com", port=587, user="u", password="p", from_addr="bot@umu.se"
@@ -61,7 +61,7 @@ def test_smtp_no_login_when_no_user(monkeypatch):
     fake_conn = MagicMock()
     fake_smtp_class.return_value.__enter__.return_value = fake_conn
     fake_conn.sendmail.return_value = {}
-    monkeypatch.setattr("call_manager.email.client.smtplib.SMTP", fake_smtp_class)
+    monkeypatch.setattr("grant_lab.email.client.smtplib.SMTP", fake_smtp_class)
 
     client = SMTPClient(
         host="smtp.example.com", port=587, user=None, password=None, from_addr="bot@umu.se"
@@ -79,12 +79,12 @@ def test_magic_link_smtp_starttls_uses_verifying_context(monkeypatch):
     """
     import ssl
 
-    from call_manager.auth.email import SMTPEmailSender
+    from grant_lab.auth.email import SMTPEmailSender
 
     fake_smtp_class = MagicMock()
     fake_conn = MagicMock()
     fake_smtp_class.return_value.__enter__.return_value = fake_conn
-    monkeypatch.setattr("call_manager.auth.email.smtplib.SMTP", fake_smtp_class)
+    monkeypatch.setattr("grant_lab.auth.email.smtplib.SMTP", fake_smtp_class)
 
     sender = SMTPEmailSender(
         host="smtp.example.com",

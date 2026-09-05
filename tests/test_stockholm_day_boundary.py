@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from call_manager.timeutil import STOCKHOLM, stockholm_day_start_utc
+from grant_lab.timeutil import STOCKHOLM, stockholm_day_start_utc
 
 
 @pytest.mark.parametrize(

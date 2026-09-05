@@ -1,4 +1,4 @@
-from call_manager.config import Settings
+from grant_lab.config import Settings
 
 
 def test_proposal_assist_settings_have_defaults(monkeypatch, _settings_env):

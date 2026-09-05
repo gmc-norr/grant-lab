@@ -1,10 +1,10 @@
 import pytest
 
-from call_manager.config import Settings
-from call_manager.db.models import EvaluatorJob, Workspace
-from call_manager.proposal_assist.port_impl import build_ports
-from call_manager.proposal_assist.tools.registry import ToolContext, snapshot_invocation
-from call_manager.proposal_assist.tools.scorecard import submit_scorecard_impl
+from grant_lab.config import Settings
+from grant_lab.db.models import EvaluatorJob, Workspace
+from grant_lab.proposal_assist.port_impl import build_ports
+from grant_lab.proposal_assist.tools.registry import ToolContext, snapshot_invocation
+from grant_lab.proposal_assist.tools.scorecard import submit_scorecard_impl
 from tests.proposal_assist.conftest import make_workspace
 
 _RUBRIC = [{"name": "Quality", "weight": 0.7}, {"name": "Impact", "weight": 0.3}]

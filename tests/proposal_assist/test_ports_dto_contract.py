@@ -12,9 +12,9 @@ import uuid
 
 import pytest
 
-from call_manager.db.models import Reference, ReferenceChunk
-from call_manager.proposal_assist.port_impl.queries import SqlQueries
-from call_manager.proposal_assist.ports.queries import Queries
+from grant_lab.db.models import Reference, ReferenceChunk
+from grant_lab.proposal_assist.port_impl.queries import SqlQueries
+from grant_lab.proposal_assist.ports.queries import Queries
 from tests.proposal_assist.dto_contract import assert_detached
 from tests.proposal_assist.f3b_seeds import seed_workspace
 

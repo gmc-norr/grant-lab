@@ -1,9 +1,9 @@
 # tests/proposal_assist/collab/test_collab_ws_auth.py
 import pytest
 
-from call_manager.auth.session_cookie import SessionSigner
-from call_manager.db.models import User, WorkspaceViewer
-from call_manager.proposal_assist.collab.ws_auth import (
+from grant_lab.auth.session_cookie import SessionSigner
+from grant_lab.db.models import User, WorkspaceViewer
+from grant_lab.proposal_assist.collab.ws_auth import (
     WSAuthError,
     resolve_access,
     user_from_cookie,
@@ -138,7 +138,7 @@ class _FakeWS:
 
 
 def test_check_origin_matrix():
-    from call_manager.proposal_assist.collab.ws_auth import check_origin
+    from grant_lab.proposal_assist.collab.ws_auth import check_origin
 
     assert check_origin(_FakeWS("http://testserver")) is True      # same origin
     assert check_origin(_FakeWS(None)) is True                     # non-browser (no Origin)

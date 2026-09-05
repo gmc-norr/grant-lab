@@ -2,8 +2,8 @@ from unittest.mock import MagicMock
 
 from sqlalchemy import select
 
-from call_manager.db.models import ChatSummary
-from call_manager.proposal_assist.turns.compaction import (
+from grant_lab.db.models import ChatSummary
+from grant_lab.proposal_assist.turns.compaction import (
     compact_workspace,
     needs_compaction,
     run_compaction_tick,
@@ -27,7 +27,7 @@ def test_needs_compaction_under_thresholds_returns_false(
     pg_session_factory,
     _settings_env,
 ):
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
     with pg_session_factory() as s:
@@ -43,7 +43,7 @@ def test_needs_compaction_over_turn_threshold_returns_true(
     monkeypatch,
 ):
     monkeypatch.setenv("COMPACTION_TURN_THRESHOLD", "2")
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
     with pg_session_factory() as s:
@@ -60,7 +60,7 @@ def test_needs_compaction_over_token_threshold_returns_true(
     monkeypatch,
 ):
     monkeypatch.setenv("COMPACTION_TOKEN_THRESHOLD", "100")
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
     with pg_session_factory() as s:
@@ -82,7 +82,7 @@ def test_compact_workspace_writes_summary_row(
 ):
     """Happy path: un-summarized turns are rolled into a chat_summaries row;
     summarized_through points at the last turn included."""
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
     with pg_session_factory() as s:
@@ -118,8 +118,8 @@ def test_compact_workspace_resets_sdk_session_by_default(
     session (claude_adapter only passes resume=<id> when the column is
     non-NULL). Without this, the resumed session grows unbounded until the
     daily token cap wedges the workspace."""
-    from call_manager.config import Settings
-    from call_manager.db.models import Workspace
+    from grant_lab.config import Settings
+    from grant_lab.db.models import Workspace
 
     settings = Settings()
     with pg_session_factory() as s:
@@ -152,8 +152,8 @@ def test_compact_workspace_keeps_sdk_session_when_reset_disabled(
 ):
     """reset_sdk_session=False preserves last_sdk_session_id (escape hatch
     for callers that want a summary without a cold-session reset)."""
-    from call_manager.config import Settings
-    from call_manager.db.models import Workspace
+    from grant_lab.config import Settings
+    from grant_lab.db.models import Workspace
 
     settings = Settings()
     with pg_session_factory() as s:
@@ -183,7 +183,7 @@ def test_compact_workspace_only_summarizes_new_turns_after_prior_summary(
 ):
     """If a prior summary exists, only turns AFTER its summarized_through
     boundary are included in the next summary."""
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
     client = _stub_summarizer_client("Second summary.")
@@ -236,7 +236,7 @@ def test_compact_workspace_noop_when_no_new_turns(
     _settings_env,
 ):
     """If summarized_through already points to the latest turn, no work."""
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
     client = _stub_summarizer_client("(should not be called)")
@@ -270,7 +270,7 @@ def test_run_compaction_tick_processes_only_workspaces_over_threshold(
     monkeypatch,
 ):
     monkeypatch.setenv("COMPACTION_TURN_THRESHOLD", "2")
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
     client = _stub_summarizer_client("Summary.")

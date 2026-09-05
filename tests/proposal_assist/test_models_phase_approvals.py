@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from call_manager.db.models import PhaseApproval
+from grant_lab.db.models import PhaseApproval
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
@@ -49,7 +49,7 @@ def test_phase_approval_phase_check_constraint(pg_session_factory):
 def test_phase_approval_cascade_on_workspace_delete(pg_session_factory):
     from sqlalchemy import delete
 
-    from call_manager.db.models import Workspace
+    from grant_lab.db.models import Workspace
 
     with pg_session_factory() as s:
         ws = make_workspace(s)

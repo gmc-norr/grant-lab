@@ -23,7 +23,7 @@ dist
 frontend/dist
 
 # Container-emitted SPA bundle (an OUTPUT, not an input)
-src/call_manager/web/spa
+src/grant_lab/web/spa
 
 # Secrets / confidential tenant data — MUST NOT enter the build context
 var

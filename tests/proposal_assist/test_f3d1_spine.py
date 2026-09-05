@@ -14,15 +14,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from call_manager.proposal_assist.ports.accounting import Accounting
-from call_manager.proposal_assist.ports.effects import Effects
-from call_manager.proposal_assist.ports.queries import Queries
+from grant_lab.proposal_assist.ports.accounting import Accounting
+from grant_lab.proposal_assist.ports.effects import Effects
+from grant_lab.proposal_assist.ports.queries import Queries
 
 
 def test_the_artifact_filenames_are_reachable_from_ports():
     """A converted tool may import only stdlib and ports, and it still has to name
     proposal.md. These constants are the reason ports/artifacts.py exists."""
-    from call_manager.proposal_assist.ports.artifacts import (
+    from grant_lab.proposal_assist.ports.artifacts import (
         CITATIONS_FILENAME,
         PROPOSAL_FILENAME,
         SPEC_FILENAME,
@@ -36,8 +36,8 @@ def test_the_artifact_filenames_are_reachable_from_ports():
 def test_the_old_artifacts_module_re_exports_the_same_objects():
     """GC-4: one source of truth. Every existing importer keeps working, and the
     value it gets is the value ports defines — not a second copy that can drift."""
-    from call_manager.proposal_assist import artifacts as old
-    from call_manager.proposal_assist.ports import artifacts as new
+    from grant_lab.proposal_assist import artifacts as old
+    from grant_lab.proposal_assist.ports import artifacts as new
 
     assert old.PROPOSAL_FILENAME is new.PROPOSAL_FILENAME
     assert old.SPEC_FILENAME is new.SPEC_FILENAME
@@ -48,8 +48,8 @@ def test_the_old_artifacts_module_re_exports_the_same_objects():
 def test_spec_skeleton_stays_out_of_ports():
     """Seeded page content is not a capability. Keeping it behind is what stops
     ports/ from becoming the place things go when nobody knows where they belong."""
-    from call_manager.proposal_assist import artifacts as old
-    from call_manager.proposal_assist.ports import artifacts as new
+    from grant_lab.proposal_assist import artifacts as old
+    from grant_lab.proposal_assist.ports import artifacts as new
 
     assert hasattr(old, "SPEC_SKELETON")
     assert not hasattr(new, "SPEC_SKELETON")
@@ -64,11 +64,11 @@ def test_no_module_redefines_the_citations_filename_except_the_unconverted_tool(
     web/api/citation_audit.py, problems/aggregate.py), so leaving it out would leave
     the widest-blast-radius literal unguarded. The fourth is tools/citations.py,
     which F3d3 converts — until then this test is what stops the copies drifting."""
-    from call_manager.proposal_assist import reconcile
-    from call_manager.proposal_assist.editing import save
-    from call_manager.proposal_assist.ports.artifacts import CITATIONS_FILENAME
-    from call_manager.proposal_assist.references import deletion
-    from call_manager.proposal_assist.tools import citations
+    from grant_lab.proposal_assist import reconcile
+    from grant_lab.proposal_assist.editing import save
+    from grant_lab.proposal_assist.ports.artifacts import CITATIONS_FILENAME
+    from grant_lab.proposal_assist.references import deletion
+    from grant_lab.proposal_assist.tools import citations
 
     assert reconcile.CITATIONS_FILENAME is CITATIONS_FILENAME
     assert deletion.CITATIONS_FILENAME is CITATIONS_FILENAME
@@ -80,7 +80,7 @@ def test_the_busy_error_is_reachable_from_ports():
     """Every Effects method can raise this — the shared lease has a 10s cap. A
     converted tool that cannot NAME it has to let it reach _safe_tool's catch-all,
     which turns "busy, retry" into "internal error"."""
-    from call_manager.proposal_assist.ports.errors import (
+    from grant_lab.proposal_assist.ports.errors import (
         BUSY_ERROR_MESSAGE,
         CommitMutexTimeout,
     )
@@ -93,8 +93,8 @@ def test_locking_re_exports_the_identical_error_class():
     """GC-4, and it is load-bearing here: collab/test_collab_retire_mutex.py asserts
     membership of this class in a set of clean errors. Two classes that merely look
     alike would pass every equality test in the tree and fail that one."""
-    from call_manager.proposal_assist.drafting import locking
-    from call_manager.proposal_assist.ports import errors
+    from grant_lab.proposal_assist.drafting import locking
+    from grant_lab.proposal_assist.ports import errors
 
     assert locking.CommitMutexTimeout is errors.CommitMutexTimeout
     assert locking.BUSY_ERROR_MESSAGE is errors.BUSY_ERROR_MESSAGE
@@ -104,8 +104,8 @@ def test_locking_re_exports_the_identical_error_class():
 def test_an_existing_raise_site_is_still_caught_by_the_ports_class():
     """The relocation must not fork the taxonomy: something raised through the old
     import path is catchable through the new one."""
-    from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout as Old
-    from call_manager.proposal_assist.ports.errors import CommitMutexTimeout as New
+    from grant_lab.proposal_assist.drafting.locking import CommitMutexTimeout as Old
+    from grant_lab.proposal_assist.ports.errors import CommitMutexTimeout as New
 
     try:
         raise Old("busy")
@@ -118,7 +118,7 @@ def test_invocation_is_reachable_from_ports():
     tools.registry import, a converted impl needs Invocation in its signature, and
     `from __future__ import annotations` does not save you — ruff reports F821 for a
     lazily-annotated name with no import. So the type must live in ports."""
-    from call_manager.proposal_assist.ports.invocation import Invocation
+    from grant_lab.proposal_assist.ports.invocation import Invocation
 
     assert hasattr(Invocation, "stamp")
 
@@ -126,8 +126,8 @@ def test_invocation_is_reachable_from_ports():
 def test_the_snapshot_factory_stays_with_the_context_it_reads():
     """ports/ is stdlib-only, so nothing in it may name ToolContext. The factory
     belongs beside its only production caller, _safe_tool."""
-    from call_manager.proposal_assist.ports.invocation import Invocation
-    from call_manager.proposal_assist.tools.registry import snapshot_invocation
+    from grant_lab.proposal_assist.ports.invocation import Invocation
+    from grant_lab.proposal_assist.tools.registry import snapshot_invocation
 
     assert not hasattr(Invocation, "snapshot")
     assert callable(snapshot_invocation)
@@ -135,8 +135,8 @@ def test_the_snapshot_factory_stays_with_the_context_it_reads():
 
 def test_registry_still_exports_invocation_as_the_same_class():
     """GC-4. Two test files and any future reader import it from registry."""
-    from call_manager.proposal_assist.ports.invocation import Invocation as FromPorts
-    from call_manager.proposal_assist.tools.registry import Invocation as FromRegistry
+    from grant_lab.proposal_assist.ports.invocation import Invocation as FromPorts
+    from grant_lab.proposal_assist.tools.registry import Invocation as FromRegistry
 
     assert FromPorts is FromRegistry
 
@@ -148,8 +148,8 @@ def test_a_snapshot_still_stamps_and_still_refuses_an_unfenced_actor():
 
     import pytest
 
-    from call_manager.proposal_assist.ports.errors import UnfencedInvocation
-    from call_manager.proposal_assist.tools.registry import (
+    from grant_lab.proposal_assist.ports.errors import UnfencedInvocation
+    from grant_lab.proposal_assist.tools.registry import (
         ToolContext,
         snapshot_invocation,
     )
@@ -176,7 +176,7 @@ def test_a_snapshot_still_stamps_and_still_refuses_an_unfenced_actor():
 #: omission is SILENT, because ToolContext.ports defaults to None.
 _TOOL_SURFACE_FACTORIES = [
     pytest.param(
-        "call_manager.proposal_assist.evaluator.agent",
+        "grant_lab.proposal_assist.evaluator.agent",
         "build_evaluator_adapter",
         lambda: {
             "requested_by": 1,
@@ -188,13 +188,13 @@ _TOOL_SURFACE_FACTORIES = [
         id="evaluator",
     ),
     pytest.param(
-        "call_manager.proposal_assist.coherence.agent",
+        "grant_lab.proposal_assist.coherence.agent",
         "build_keeper_adapter",
         lambda: {"requested_by": 1, "job_id": uuid.uuid4(), "locked": False},
         id="coherence_keeper",
     ),
     pytest.param(
-        "call_manager.proposal_assist.review.agent",
+        "grant_lab.proposal_assist.review.agent",
         "build_review_adapter",
         lambda: {
             "review_run_id": uuid.uuid4(),
@@ -204,7 +204,7 @@ _TOOL_SURFACE_FACTORIES = [
         id="review",
     ),
     pytest.param(
-        "call_manager.proposal_assist.uncited_claims.agent",
+        "grant_lab.proposal_assist.uncited_claims.agent",
         "build_uncited_claims_adapter",
         lambda: {"requested_by": 1, "job_id": uuid.uuid4(), "draft_section_count": 0},
         id="uncited_claims",
@@ -302,7 +302,7 @@ def test_a_context_without_ports_is_still_constructible():
     keep them out of the inventory. They must not gain a ports argument (there is no
     session_factory there to build a bundle from), so the field has to default.
     No line numbers here on purpose: Task 3 already moved the registry site."""
-    from call_manager.proposal_assist.tools.registry import ToolContext
+    from grant_lab.proposal_assist.tools.registry import ToolContext
 
     ctx = ToolContext(
         workspace_id=uuid.uuid4(), repo_dir=None, session_factory=None, settings=None
@@ -313,8 +313,8 @@ def test_a_context_without_ports_is_still_constructible():
 async def test_safe_tool_threads_the_ports_bundle_to_the_impl():
     """The dispatch half of the spine. F3d2 flips pass_ports per tool as sites are
     converted; this proves the wire works before anything rides on it."""
-    from call_manager.proposal_assist.port_impl import build_ports
-    from call_manager.proposal_assist.tools.registry import ToolContext, _safe_tool
+    from grant_lab.proposal_assist.port_impl import build_ports
+    from grant_lab.proposal_assist.tools.registry import ToolContext, _safe_tool
 
     seen: dict = {}
 
@@ -343,7 +343,7 @@ async def test_asking_for_ports_a_surface_never_built_fails_loudly():
     """Not a runtime condition — a tool surface built by a path that never called
     build_ports. Handing the impl None would surface later as an AttributeError deep
     inside a tool, attributed to the wrong cause."""
-    from call_manager.proposal_assist.tools.registry import ToolContext, _safe_tool
+    from grant_lab.proposal_assist.tools.registry import ToolContext, _safe_tool
 
     async def _impl(ctx, *, ports=None):
         return {"ok": True}
@@ -359,7 +359,7 @@ async def test_asking_for_ports_a_surface_never_built_fails_loudly():
 async def test_an_unconverted_tool_is_dispatched_exactly_as_before():
     """GC-1. Nothing is converted in this slice, so the default path must be
     untouched: no ports keyword reaches an impl that did not ask for one."""
-    from call_manager.proposal_assist.tools.registry import ToolContext, _safe_tool
+    from grant_lab.proposal_assist.tools.registry import ToolContext, _safe_tool
 
     seen: dict = {}
 

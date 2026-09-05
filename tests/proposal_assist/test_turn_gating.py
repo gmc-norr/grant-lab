@@ -1,4 +1,4 @@
-from call_manager.proposal_assist.drafting.turn_gating import (
+from grant_lab.proposal_assist.drafting.turn_gating import (
     MODIFY_TOOLS,
     READ_ONLY_TOOLS,
     allowed_tools_for_content,

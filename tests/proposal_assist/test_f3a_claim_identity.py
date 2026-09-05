@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import select, update
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     ChatTurn,
     CoherenceJob,
     EvaluatorJob,
@@ -20,10 +20,10 @@ from call_manager.db.models import (
     UncitedClaimsJob,
     Workspace,
 )
-from call_manager.proposal_assist.coherence.jobs import claim_next_coherence_job
-from call_manager.proposal_assist.evaluator.jobs import claim_next_evaluator_job
-from call_manager.proposal_assist.review.jobs import claim_next_review_run
-from call_manager.proposal_assist.uncited_claims.jobs import claim_next_uncited_claims_job
+from grant_lab.proposal_assist.coherence.jobs import claim_next_coherence_job
+from grant_lab.proposal_assist.evaluator.jobs import claim_next_evaluator_job
+from grant_lab.proposal_assist.review.jobs import claim_next_review_run
+from grant_lab.proposal_assist.uncited_claims.jobs import claim_next_uncited_claims_job
 from tests.proposal_assist.conftest import make_workspace
 
 
@@ -59,7 +59,7 @@ def test_the_interactive_claim_stores_the_workspaces_current_generation(pg_sessi
         job_id = _seed_queued_turn(s, generation=7)
         ws_id = s.scalar(select(TurnJob.workspace_id).where(TurnJob.id == job_id))
 
-    from call_manager.proposal_assist.turns.processor import claim_turn_job
+    from grant_lab.proposal_assist.turns.processor import claim_turn_job
 
     claimed = claim_turn_job(pg_session_factory, job_id, ws_id)
 
@@ -77,7 +77,7 @@ def test_a_second_claim_of_the_same_turn_job_returns_none(pg_session_factory):
         job_id = _seed_queued_turn(s, generation=0)
         ws_id = s.scalar(select(TurnJob.workspace_id).where(TurnJob.id == job_id))
 
-    from call_manager.proposal_assist.turns.processor import claim_turn_job
+    from grant_lab.proposal_assist.turns.processor import claim_turn_job
 
     assert claim_turn_job(pg_session_factory, job_id, ws_id) is not None
     assert claim_turn_job(pg_session_factory, job_id, ws_id) is None
@@ -95,7 +95,7 @@ def test_the_claim_writes_the_generation_in_ONE_statement(pg_session_factory):
         job_id = _seed_queued_turn(s, generation=2)
         ws_id = s.scalar(select(TurnJob.workspace_id).where(TurnJob.id == job_id))
 
-    from call_manager.proposal_assist.turns.processor import claim_turn_job
+    from grant_lab.proposal_assist.turns.processor import claim_turn_job
 
     engine = pg_session_factory.kw["bind"]
 
@@ -178,7 +178,7 @@ def test_every_background_claim_captures_the_generation(
 #: `uncited_claims/agent.py:47`). This table is that check's replacement.
 _ONE_SHOT_BUILDERS = [
     pytest.param(
-        "call_manager.proposal_assist.evaluator.agent",
+        "grant_lab.proposal_assist.evaluator.agent",
         "build_evaluator_adapter",
         lambda: {
             "requested_by": 1,
@@ -190,13 +190,13 @@ _ONE_SHOT_BUILDERS = [
         id="evaluator",
     ),
     pytest.param(
-        "call_manager.proposal_assist.coherence.agent",
+        "grant_lab.proposal_assist.coherence.agent",
         "build_keeper_adapter",
         lambda: {"requested_by": 1, "job_id": uuid.uuid4(), "locked": False},
         id="coherence_keeper",
     ),
     pytest.param(
-        "call_manager.proposal_assist.review.agent",
+        "grant_lab.proposal_assist.review.agent",
         "build_review_adapter",
         lambda: {
             "review_run_id": uuid.uuid4(),
@@ -206,7 +206,7 @@ _ONE_SHOT_BUILDERS = [
         id="review",
     ),
     pytest.param(
-        "call_manager.proposal_assist.uncited_claims.agent",
+        "grant_lab.proposal_assist.uncited_claims.agent",
         "build_uncited_claims_adapter",
         lambda: {"requested_by": 1, "job_id": uuid.uuid4(), "draft_section_count": 0},
         id="uncited_claims",
@@ -306,7 +306,7 @@ def test_the_interactive_claim_is_immune_to_a_generation_advance_mid_claim(
 ):
     from sqlalchemy import event
 
-    from call_manager.proposal_assist.turns.processor import claim_turn_job
+    from grant_lab.proposal_assist.turns.processor import claim_turn_job
 
     with pg_session_factory() as s:
         job_id = _seed_queued_turn(s, generation=5)

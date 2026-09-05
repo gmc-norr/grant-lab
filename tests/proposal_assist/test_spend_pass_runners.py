@@ -22,23 +22,23 @@ import subprocess
 import pytest
 from sqlalchemy import select
 
-from call_manager.config import Settings
-from call_manager.db.models import (
+from grant_lab.config import Settings
+from grant_lab.db.models import (
     CoherenceJob,
     EvaluatorJob,
     LlmSpend,
     ReviewRunItem,
     UncitedClaimsJob,
 )
-from call_manager.proposal_assist.coherence.pass_runner import run_coherence_pass
-from call_manager.proposal_assist.drafting.contract import TurnDoneEvent
-from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
-from call_manager.proposal_assist.evaluator.pass_runner import run_evaluator_pass
-from call_manager.proposal_assist.review.jobs import enqueue_review_run
-from call_manager.proposal_assist.review.pass_runner import run_review_pass
-from call_manager.proposal_assist.review.personas import WAVE1_KINDS
-from call_manager.proposal_assist.spend import record_spend, sum_spend_today
-from call_manager.proposal_assist.uncited_claims.pass_runner import run_uncited_claims_pass
+from grant_lab.proposal_assist.coherence.pass_runner import run_coherence_pass
+from grant_lab.proposal_assist.drafting.contract import TurnDoneEvent
+from grant_lab.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
+from grant_lab.proposal_assist.evaluator.pass_runner import run_evaluator_pass
+from grant_lab.proposal_assist.review.jobs import enqueue_review_run
+from grant_lab.proposal_assist.review.pass_runner import run_review_pass
+from grant_lab.proposal_assist.review.personas import WAVE1_KINDS
+from grant_lab.proposal_assist.spend import record_spend, sum_spend_today
+from grant_lab.proposal_assist.uncited_claims.pass_runner import run_uncited_claims_pass
 from tests.proposal_assist.conftest import make_user, make_workspace, review_stamp
 
 FAMILIES = ["coherence", "evaluator", "uncited_claims"]

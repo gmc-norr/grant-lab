@@ -5,8 +5,8 @@ import uuid
 
 import pytest
 
-from call_manager.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
-from call_manager.proposal_assist.drafting.contract import AgentHandle
+from grant_lab.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
+from grant_lab.proposal_assist.drafting.contract import AgentHandle
 
 
 class _HangingClient:
@@ -107,7 +107,7 @@ async def test_unreapable_client_stays_retiring_for_the_sweep(tmp_path):
 async def test_connect_failure_still_retires_the_generation(tmp_path, monkeypatch):
     """Registration happens BEFORE connect(), so a connect-time failure is
     discoverable instead of leaving an unowned half-built subprocess."""
-    from call_manager.proposal_assist.drafting.contract import LaunchContext
+    from grant_lab.proposal_assist.drafting.contract import LaunchContext
 
     adapter = _adapter(tmp_path, disconnect_deadline_seconds=0.05, reap_deadline_seconds=0.5)
 
@@ -117,7 +117,7 @@ async def test_connect_failure_still_retires_the_generation(tmp_path, monkeypatc
 
     client = _BoomConnect()
     monkeypatch.setattr(
-        "call_manager.proposal_assist.drafting.claude_adapter.ClaudeSDKClient",
+        "grant_lab.proposal_assist.drafting.claude_adapter.ClaudeSDKClient",
         lambda options: client,
     )
 

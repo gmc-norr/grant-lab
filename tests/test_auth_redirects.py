@@ -1,6 +1,6 @@
 import pytest
 
-from call_manager.auth.redirects import MAX_NEXT_BYTES, safe_next
+from grant_lab.auth.redirects import MAX_NEXT_BYTES, safe_next
 
 
 @pytest.mark.parametrize(

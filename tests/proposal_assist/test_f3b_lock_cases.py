@@ -24,16 +24,16 @@ from contextlib import contextmanager
 import pytest
 from sqlalchemy import event, select, text
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     EvaluatorJob,
     ProposedChange,
     ReviewRunItem,
     UncitedClaimsJob,
     Workspace,
 )
-from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
-from call_manager.proposal_assist.port_impl.effects import SqlEffects
-from call_manager.proposal_assist.ports.effects import (
+from grant_lab.proposal_assist.drafting.locking import acquire_commit_mutex
+from grant_lab.proposal_assist.port_impl.effects import SqlEffects
+from grant_lab.proposal_assist.ports.effects import (
     EFFECT_MECHANISMS,
     ProposeArtifactEdit,
     ProposeCitationInsert,
@@ -41,8 +41,8 @@ from call_manager.proposal_assist.ports.effects import (
     SubmitScorecard,
     SubmitUncitedClaims,
 )
-from call_manager.proposal_assist.ports.errors import WorkspaceGenerationStale
-from call_manager.proposal_assist.ports.stamp import FenceStamp, Provenance
+from grant_lab.proposal_assist.ports.errors import WorkspaceGenerationStale
+from grant_lab.proposal_assist.ports.stamp import FenceStamp, Provenance
 from tests.proposal_assist.f3b_seeds import (
     bump_generation,
     seed_evaluator_job,

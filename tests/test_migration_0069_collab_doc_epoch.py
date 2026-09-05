@@ -4,7 +4,7 @@ client so a retained Y.Doc can prove which document it holds (spec
 
 from sqlalchemy import inspect, text
 
-from call_manager.db.models import CollabArtifactState, User, Workspace
+from grant_lab.db.models import CollabArtifactState, User, Workspace
 
 
 def _ws(session):

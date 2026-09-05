@@ -2,14 +2,14 @@ import uuid
 
 import pytest
 
-from call_manager.config import Settings
-from call_manager.db.models import CoherenceJob, ProposedChange
-from call_manager.proposal_assist.coherence.pass_runner import run_coherence_pass
-from call_manager.proposal_assist.drafting.contract import (
+from grant_lab.config import Settings
+from grant_lab.db.models import CoherenceJob, ProposedChange
+from grant_lab.proposal_assist.coherence.pass_runner import run_coherence_pass
+from grant_lab.proposal_assist.drafting.contract import (
     AssistantTextEvent,
     TurnDoneEvent,
 )
-from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
+from grant_lab.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
 from tests.proposal_assist.conftest import make_workspace
 
 

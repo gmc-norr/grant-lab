@@ -2,14 +2,14 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.db.models import User
-from call_manager.proposal_assist.collab import state
-from call_manager.proposal_assist.collab.hydrate import load_or_hydrate
-from call_manager.proposal_assist.collab.markdown_bridge import pm_to_markdown
-from call_manager.proposal_assist.collab.room import MANAGER, ClientState
-from call_manager.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.proposals.kernel_accept import accept_via_kernel
+from grant_lab.db.models import User
+from grant_lab.proposal_assist.collab import state
+from grant_lab.proposal_assist.collab.hydrate import load_or_hydrate
+from grant_lab.proposal_assist.collab.markdown_bridge import pm_to_markdown
+from grant_lab.proposal_assist.collab.room import MANAGER, ClientState
+from grant_lab.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.proposals.kernel_accept import accept_via_kernel
 from tests.proposal_assist.collab.test_collab_kernel_accept import _git_head, _init_repo, _mk_pc
 from tests.proposal_assist.collab.test_collab_room import FakeClient
 from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
@@ -80,7 +80,7 @@ async def test_post_mutation_failure_evicts(pg_session_factory, tmp_path, monkey
     # POST-mutation failure (checkpoint_artifact raises AFTER the fragment mutation)
     # → evict. Discriminating: WITH a client registered, the room would survive on
     # exit if the evict arm were removed (client present), so this pins the evict.
-    import call_manager.proposal_assist.collab.kernel as kmod
+    import grant_lab.proposal_assist.collab.kernel as kmod
     wid, oid, repo = _seed_repo(pg_session_factory, tmp_path, "evict-post@umu.se")
     key = (wid, "draft")
     client = await _acquire_client(pg_session_factory, tmp_path, wid, oid)

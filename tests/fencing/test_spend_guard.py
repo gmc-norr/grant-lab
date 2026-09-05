@@ -13,13 +13,13 @@ from tests.fencing.spend_guard import (
 # does. The guard resolves writer names through imports (a bare name match let a
 # module define its own `def record_spend` and bless every stamp in it), so a
 # fixture without this header is not a faithful stand-in for the code under gate.
-_WRITER_IMPORT = "from call_manager.proposal_assist.spend import record_spend\n"
+_WRITER_IMPORT = "from grant_lab.proposal_assist.spend import record_spend\n"
 
 
 def _tree(tmp_path, monkeypatch, name, source, writer_import=True):
     import tests.fencing.spend_guard as g
 
-    fake = tmp_path / "call_manager" / name
+    fake = tmp_path / "grant_lab" / name
     fake.parent.mkdir(parents=True, exist_ok=True)
     body = textwrap.dedent(source)
     if writer_import and "record_spend" in body and "import record_spend" not in body:
@@ -54,9 +54,9 @@ def test_stale_pin_detection_can_actually_fail(monkeypatch):
     import tests.fencing.spend_guard as g
 
     monkeypatch.setattr(
-        g, "PINNED", {("call_manager/proposal_assist/spend.py", "sum_spend_today"): "x"}
+        g, "PINNED", {("grant_lab/proposal_assist/spend.py", "sum_spend_today"): "x"}
     )
-    assert g.stale_pins() == ["call_manager/proposal_assist/spend.py::sum_spend_today"]
+    assert g.stale_pins() == ["grant_lab/proposal_assist/spend.py::sum_spend_today"]
 
 
 def test_the_guard_can_actually_fail(tmp_path, monkeypatch):
@@ -71,7 +71,7 @@ def test_the_guard_can_actually_fail(tmp_path, monkeypatch):
             job.input_tokens = done.tokens_in or 0
         """,
     )
-    assert g.offenders() == ["call_manager/bad.py::f"]
+    assert g.offenders() == ["grant_lab/bad.py::f"]
 
 
 def test_the_guard_accepts_a_function_that_records(tmp_path, monkeypatch):
@@ -120,7 +120,7 @@ def test_every_assignment_form_that_stamps_is_reported(tmp_path, monkeypatch, la
             {body}
         """,
     )
-    assert g.offenders() == [f"call_manager/{label}.py::f"]
+    assert g.offenders() == [f"grant_lab/{label}.py::f"]
 
 
 def test_a_widened_form_still_passes_when_it_records(tmp_path, monkeypatch):
@@ -155,7 +155,7 @@ def test_a_sibling_that_records_does_not_bless_this_function(tmp_path, monkeypat
             record_spend(session, workspace_id=job.workspace_id, kind='evaluator', status='ok')
         """,
     )
-    assert g.offenders() == ["call_manager/two.py::_fail"]
+    assert g.offenders() == ["grant_lab/two.py::_fail"]
 
 
 def test_an_unrelated_record_usage_does_not_bless_a_stamping_function(tmp_path, monkeypatch):
@@ -174,7 +174,7 @@ def test_an_unrelated_record_usage_does_not_bless_a_stamping_function(tmp_path, 
             record_usage(session)
         """,
     )
-    assert g.offenders() == ["call_manager/unrelated.py::stamps"]
+    assert g.offenders() == ["grant_lab/unrelated.py::stamps"]
 
 
 def test_an_aliased_import_writer_is_not_reported(tmp_path, monkeypatch):
@@ -185,7 +185,7 @@ def test_an_aliased_import_writer_is_not_reported(tmp_path, monkeypatch):
         monkeypatch,
         "aliased.py",
         """
-        from call_manager.proposal_assist.spend import record_spend as rs
+        from grant_lab.proposal_assist.spend import record_spend as rs
 
         def f(session, job, done):
             job.input_tokens = done.tokens_in or 0
@@ -236,7 +236,7 @@ def test_a_locally_defined_record_spend_does_not_bless_the_module(tmp_path, monk
         """,
         writer_import=False,
     )
-    assert g.offenders() == ["call_manager/shadow.py::f"]
+    assert g.offenders() == ["grant_lab/shadow.py::f"]
 
 
 def test_an_unrelated_attribute_call_does_not_bless_the_module(tmp_path, monkeypatch):
@@ -255,7 +255,7 @@ def test_an_unrelated_attribute_call_does_not_bless_the_module(tmp_path, monkeyp
         """,
         writer_import=False,
     )
-    assert g.offenders() == ["call_manager/attr.py::f"]
+    assert g.offenders() == ["grant_lab/attr.py::f"]
 
 
 @pytest.mark.parametrize(
@@ -264,7 +264,7 @@ def test_an_unrelated_attribute_call_does_not_bless_the_module(tmp_path, monkeyp
         (
             "module_alias",
             """
-            from call_manager.proposal_assist import spend
+            from grant_lab.proposal_assist import spend
 
             def f(s, job, done):
                 job.input_tokens = done.tokens_in
@@ -279,7 +279,7 @@ def test_an_unrelated_attribute_call_does_not_bless_the_module(tmp_path, monkeyp
             # test pins.
             "proposal_assist/citations/usage_writer",
             """
-            from call_manager.proposal_assist.citations.usage import record_usage
+            from grant_lab.proposal_assist.citations.usage import record_usage
 
             def f(s, job, done):
                 job.tokens_in = done.tokens_in
@@ -300,7 +300,7 @@ def test_real_import_shapes_are_still_accepted(tmp_path, monkeypatch, label, sou
         (
             "qualified",
             """
-            from call_manager.db import models
+            from grant_lab.db import models
 
             def mk(**k):
                 return models.LlmSpend(**k)
@@ -309,7 +309,7 @@ def test_real_import_shapes_are_still_accepted(tmp_path, monkeypatch, label, sou
         (
             "aliased",
             """
-            from call_manager.db.models import LlmSpend as SpendRow
+            from grant_lab.db.models import LlmSpend as SpendRow
 
             def mk(**k):
                 return SpendRow(**k)
@@ -318,7 +318,7 @@ def test_real_import_shapes_are_still_accepted(tmp_path, monkeypatch, label, sou
         (
             "plain",
             """
-            from call_manager.db.models import LlmSpend
+            from grant_lab.db.models import LlmSpend
 
             def mk(**k):
                 return LlmSpend(**k)
@@ -329,7 +329,7 @@ def test_real_import_shapes_are_still_accepted(tmp_path, monkeypatch, label, sou
             """
             from sqlalchemy import insert
 
-            from call_manager.db.models import LlmSpend
+            from grant_lab.db.models import LlmSpend
 
             def mk(s, **k):
                 return s.execute(insert(LlmSpend).values(**k))
@@ -338,7 +338,7 @@ def test_real_import_shapes_are_still_accepted(tmp_path, monkeypatch, label, sou
         (
             "bulk_mappings",
             """
-            from call_manager.db.models import LlmSpend
+            from grant_lab.db.models import LlmSpend
 
             def mk(s, rows):
                 return s.bulk_insert_mappings(LlmSpend, rows)
@@ -354,7 +354,7 @@ def test_every_write_shape_is_seen(tmp_path, monkeypatch, label, source):
     have existed and this assertion would still have passed.
     """
     g = _tree(tmp_path, monkeypatch, f"{label}.py", source, writer_import=False)
-    assert g.llm_spend_writers() == [f"call_manager/{label}.py"]
+    assert g.llm_spend_writers() == [f"grant_lab/{label}.py"]
 
 
 def test_record_usage_does_not_bless_a_non_citation_module(tmp_path, monkeypatch):
@@ -370,7 +370,7 @@ def test_record_usage_does_not_bless_a_non_citation_module(tmp_path, monkeypatch
         monkeypatch,
         "cross_writer.py",
         """
-        from call_manager.proposal_assist.citations.usage import record_usage
+        from grant_lab.proposal_assist.citations.usage import record_usage
 
         def f(s, job, done):
             job.input_tokens = done.tokens_in
@@ -378,7 +378,7 @@ def test_record_usage_does_not_bless_a_non_citation_module(tmp_path, monkeypatch
         """,
         writer_import=False,
     )
-    assert g.offenders() == ["call_manager/cross_writer.py::f"]
+    assert g.offenders() == ["grant_lab/cross_writer.py::f"]
 
 
 def test_a_fully_qualified_writer_import_is_accepted(tmp_path, monkeypatch):
@@ -389,11 +389,11 @@ def test_a_fully_qualified_writer_import_is_accepted(tmp_path, monkeypatch):
         monkeypatch,
         "fq.py",
         """
-        import call_manager.proposal_assist.spend
+        import grant_lab.proposal_assist.spend
 
         def f(s, job, done):
             job.input_tokens = done.tokens_in
-            call_manager.proposal_assist.spend.record_spend(s)
+            grant_lab.proposal_assist.spend.record_spend(s)
         """,
         writer_import=False,
     )
@@ -417,7 +417,7 @@ def test_unpacked_values_kwargs_are_seen(tmp_path, monkeypatch):
         """,
         writer_import=False,
     )
-    assert g.offenders() == ["call_manager/kwargs_values.py::f"]
+    assert g.offenders() == ["grant_lab/kwargs_values.py::f"]
 
 
 def test_unpacked_values_on_an_unrelated_field_is_not_reported(tmp_path, monkeypatch):
@@ -448,7 +448,7 @@ def test_a_shadowed_writer_import_does_not_count(tmp_path, monkeypatch):
         monkeypatch,
         "shadowed_import.py",
         """
-        from call_manager.proposal_assist.spend import record_spend
+        from grant_lab.proposal_assist.spend import record_spend
 
         def record_spend(*a, **k):
             pass
@@ -459,14 +459,14 @@ def test_a_shadowed_writer_import_does_not_count(tmp_path, monkeypatch):
         """,
         writer_import=False,
     )
-    assert g.offenders() == ["call_manager/shadowed_import.py::f"]
+    assert g.offenders() == ["grant_lab/shadowed_import.py::f"]
 
 
 def test_an_orm_constructor_with_token_fields_is_seen(tmp_path, monkeypatch):
     """`EvaluatorJob(input_tokens=n)` — building a row, the natural shape.
 
     Same family as `+=`: not an evasion, just a form nobody had written down.
-    Restricted to classes imported from call_manager.db.models on purpose — the
+    Restricted to classes imported from grant_lab.db.models on purpose — the
     first draft flagged ANY call with a `tokens_in=` keyword and reported twelve
     legitimate functions, `record_spend` itself among them.
     """
@@ -475,14 +475,14 @@ def test_an_orm_constructor_with_token_fields_is_seen(tmp_path, monkeypatch):
         monkeypatch,
         "ctor.py",
         """
-        from call_manager.db.models import EvaluatorJob
+        from grant_lab.db.models import EvaluatorJob
 
         def f(s, n):
             s.add(EvaluatorJob(input_tokens=n))
         """,
         writer_import=False,
     )
-    assert g.offenders() == ["call_manager/ctor.py::f"]
+    assert g.offenders() == ["grant_lab/ctor.py::f"]
 
 
 def test_a_non_model_call_with_a_token_keyword_is_not_reported(tmp_path, monkeypatch):
@@ -507,19 +507,19 @@ def test_a_non_model_call_with_a_token_keyword_is_not_reported(tmp_path, monkeyp
         (
             "root_shadow",
             """
-            import call_manager.proposal_assist.spend
+            import grant_lab.proposal_assist.spend
 
-            call_manager = object()
+            grant_lab = object()
 
             def f(s, job, done):
                 job.input_tokens = done.tokens_in
-                call_manager.proposal_assist.spend.record_spend(s)
+                grant_lab.proposal_assist.spend.record_spend(s)
             """,
         ),
         (
             "param_shadow",
             """
-            from call_manager.proposal_assist.spend import record_spend
+            from grant_lab.proposal_assist.spend import record_spend
 
             def f(s, job, done, record_spend=None):
                 job.input_tokens = done.tokens_in
@@ -529,7 +529,7 @@ def test_a_non_model_call_with_a_token_keyword_is_not_reported(tmp_path, monkeyp
         (
             "for_shadow",
             """
-            from call_manager.proposal_assist.spend import record_spend
+            from grant_lab.proposal_assist.spend import record_spend
 
             def f(s, job, done, xs):
                 for record_spend in xs:
@@ -541,7 +541,7 @@ def test_a_non_model_call_with_a_token_keyword_is_not_reported(tmp_path, monkeyp
         (
             "local_import_as_shadow",
             """
-            from call_manager.proposal_assist.spend import record_spend
+            from grant_lab.proposal_assist.spend import record_spend
 
             def f(s, job, done):
                 import unrelated as record_spend
@@ -552,7 +552,7 @@ def test_a_non_model_call_with_a_token_keyword_is_not_reported(tmp_path, monkeyp
         (
             "local_from_import_shadow",
             """
-            from call_manager.proposal_assist.spend import record_spend
+            from grant_lab.proposal_assist.spend import record_spend
 
             def f(s, job, done):
                 from unrelated import record_spend
@@ -572,7 +572,7 @@ def test_every_shadowing_form_invalidates_the_writer(tmp_path, monkeypatch, labe
     set subtraction kept it.
     """
     g = _tree(tmp_path, monkeypatch, f"{label}.py", source, writer_import=False)
-    assert g.offenders() == [f"call_manager/{label}.py::f"]
+    assert g.offenders() == [f"grant_lab/{label}.py::f"]
 
 
 def test_a_sibling_parameter_does_not_invalidate_this_functions_import(tmp_path, monkeypatch):
@@ -588,7 +588,7 @@ def test_a_sibling_parameter_does_not_invalidate_this_functions_import(tmp_path,
         monkeypatch,
         "sibling.py",
         """
-        from call_manager.proposal_assist.spend import record_spend
+        from grant_lab.proposal_assist.spend import record_spend
 
         def helper(record_spend=None):
             return record_spend
@@ -611,7 +611,7 @@ def test_an_import_rebinding_the_writer_name_shadows_it(tmp_path, monkeypatch):
         monkeypatch,
         "import_shadow.py",
         """
-        from call_manager.proposal_assist.spend import record_spend
+        from grant_lab.proposal_assist.spend import record_spend
         import json as record_spend
 
         def f(s, job, done):
@@ -620,7 +620,7 @@ def test_an_import_rebinding_the_writer_name_shadows_it(tmp_path, monkeypatch):
         """,
         writer_import=False,
     )
-    assert g.offenders() == ["call_manager/import_shadow.py::f"]
+    assert g.offenders() == ["grant_lab/import_shadow.py::f"]
 
 
 def test_the_ledger_has_exactly_one_writer():
@@ -633,8 +633,8 @@ def test_the_ledger_has_exactly_one_writer():
     # is the declaration; spend.py is the writer. Anything else appearing here is
     # a second module touching the ledger class and needs a reason.
     assert llm_spend_writers() == [
-        "call_manager/db/models.py",
-        "call_manager/proposal_assist/spend.py",
+        "grant_lab/db/models.py",
+        "grant_lab/proposal_assist/spend.py",
     ]
 
 
@@ -645,7 +645,7 @@ def test_the_ledger_has_exactly_one_writer():
             "local_establishing_from",
             """
             def f(s, job, done):
-                from call_manager.proposal_assist.spend import record_spend
+                from grant_lab.proposal_assist.spend import record_spend
                 job.input_tokens = done.tokens_in
                 record_spend(s)
             """,
@@ -654,7 +654,7 @@ def test_the_ledger_has_exactly_one_writer():
             "local_establishing_alias",
             """
             def f(s, job, done):
-                import call_manager.proposal_assist.spend as spend
+                import grant_lab.proposal_assist.spend as spend
                 job.input_tokens = done.tokens_in
                 spend.record_spend(s)
             """,

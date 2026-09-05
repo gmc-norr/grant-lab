@@ -19,7 +19,7 @@ from alembic.config import Config
 from sqlalchemy import select
 
 from alembic import command
-from call_manager.db.models import Reference
+from grant_lab.db.models import Reference
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 # ---------------------------------------------------------------------------
@@ -52,7 +52,7 @@ def _make_ref(session, workspace, *, suffix: str = ".pdf") -> Reference:
 
 def test_backfill_fills_present_skips_absent(pg_session_factory, tmp_path):
     """Ref A has its file on disk → gets hashed. Ref B has no file → stays NULL."""
-    from call_manager.proposal_assist.references.backfill import backfill_original_sha256
+    from grant_lab.proposal_assist.references.backfill import backfill_original_sha256
 
     file_bytes = b"hello world pdf content"
     expected_hash = hashlib.sha256(file_bytes).hexdigest()
@@ -94,7 +94,7 @@ def test_backfill_fills_present_skips_absent(pg_session_factory, tmp_path):
 
 def test_backfill_idempotent(pg_session_factory, tmp_path):
     """Second call on already-filled rows returns 0 and doesn't alter the hash."""
-    from call_manager.proposal_assist.references.backfill import backfill_original_sha256
+    from grant_lab.proposal_assist.references.backfill import backfill_original_sha256
 
     file_bytes = b"idempotent test content"
     expected_hash = hashlib.sha256(file_bytes).hexdigest()
@@ -139,7 +139,7 @@ def test_backfill_idempotent(pg_session_factory, tmp_path):
 
 def test_backfill_returns_zero_when_nothing_to_do(pg_session_factory, tmp_path):
     """If there are no NULL rows, returns 0 immediately."""
-    from call_manager.proposal_assist.references.backfill import backfill_original_sha256
+    from grant_lab.proposal_assist.references.backfill import backfill_original_sha256
 
     with pg_session_factory() as session:
         count = backfill_original_sha256(session, tmp_path)
@@ -150,8 +150,8 @@ def test_backfill_returns_zero_when_nothing_to_do(pg_session_factory, tmp_path):
 def test_backfill_skips_unreadable_file(pg_session_factory, tmp_path, monkeypatch):
     """If reading a file raises an exception, the row is skipped and the
     function still returns normally (does NOT propagate the error)."""
-    from call_manager.proposal_assist.references import backfill as backfill_mod
-    from call_manager.proposal_assist.references.backfill import backfill_original_sha256
+    from grant_lab.proposal_assist.references import backfill as backfill_mod
+    from grant_lab.proposal_assist.references.backfill import backfill_original_sha256
 
     with pg_session_factory() as session:
         owner = make_user(session)
@@ -189,7 +189,7 @@ def test_backfill_skips_escaping_storage_path(pg_session_factory, tmp_path):
     """A Reference whose storage_path escapes references_root (e.g. via '../..')
     must be silently skipped — original_sha256 stays NULL, no exception raised,
     no file outside the root is read."""
-    from call_manager.proposal_assist.references.backfill import backfill_original_sha256
+    from grant_lab.proposal_assist.references.backfill import backfill_original_sha256
 
     with pg_session_factory() as session:
         owner = make_user(session)

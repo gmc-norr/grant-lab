@@ -23,9 +23,9 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.db.models import Workspace, WorkspaceEvent
-from call_manager.proposal_assist.citations.gitio import GitCommitError
-from call_manager.proposal_assist.paths import workspace_repo_dir
+from grant_lab.db.models import Workspace, WorkspaceEvent
+from grant_lab.proposal_assist.citations.gitio import GitCommitError
+from grant_lab.proposal_assist.paths import workspace_repo_dir
 from tests.admin_retention_helpers import (
     _dispose_created_app_engines as _dispose_created_app_engines,
 )
@@ -102,8 +102,8 @@ def test_a_contended_mutex_is_429_with_retry_after(
     maps it to 429 + Retry-After: 2 with BUSY_ERROR_MESSAGE (see
     web/api/workspaces.py:444) and this must match, or the SPA's busy handling
     does not apply to admin routes."""
-    from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
-    from call_manager.web.api import admin_retention
+    from grant_lab.proposal_assist.drafting.locking import CommitMutexTimeout
+    from grant_lab.web.api import admin_retention
 
     app = setup_app(monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
@@ -170,7 +170,7 @@ def test_live_workspace_404s_without_waiting_on_the_mutex(
     whole request: the pre-lock liveness check must 404 immediately without
     ever trying to acquire it.
     """
-    from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
+    from grant_lab.proposal_assist.drafting.locking import acquire_commit_mutex
 
     app = setup_app(monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
@@ -210,7 +210,7 @@ def test_a_restore_in_the_mutex_window_is_seen_by_the_fresh_reread(
     one, and by then nobody would notice the guard had been dropped as a
     redundant-looking duplicate of the pre-lock check.
     """
-    from call_manager.web.api import admin_retention
+    from grant_lab.web.api import admin_retention
 
     app = setup_app(monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
@@ -249,7 +249,7 @@ def test_the_restore_probe_itself_does_not_break_the_route(
 ):
     """Negative control for the test above. Same wrapper around the mutex, no
     restore — so a 404 there cannot be the wrapper's fault."""
-    from call_manager.web.api import admin_retention
+    from grant_lab.web.api import admin_retention
 
     app = setup_app(monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
@@ -280,7 +280,7 @@ def test_an_unreadable_history_is_not_reported_as_an_empty_one(
 
     `history_available` carries the difference; `commits: []` alone cannot.
     """
-    from call_manager.web.api import admin_retention
+    from grant_lab.web.api import admin_retention
 
     app = setup_app(monkeypatch, pg_url, tmp_path)
     admin, admin_id = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
@@ -446,7 +446,7 @@ def test_no_content_is_served_when_the_audit_write_fails(
     """The ordering guarantee. If the audit cannot be recorded, the draft must
     not be served — otherwise a crash mid-response leaves content read with no
     trace that anyone read it."""
-    from call_manager.web.api import admin_retention
+    from grant_lab.web.api import admin_retention
 
     app = setup_app(monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
@@ -475,7 +475,7 @@ def test_the_audit_write_precedes_response_construction(
     `_record_inspection` runs, then simply returns it; that mutation was
     verified to keep all other tests green too. This test asserts the actual
     ORDER of the two operations, not just that a failure of one propagates."""
-    from call_manager.web.api import admin_retention
+    from grant_lab.web.api import admin_retention
 
     app = setup_app(monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)
@@ -516,7 +516,7 @@ def test_inspection_starts_no_collab_room(monkeypatch, pg_url, pg_session_factor
     # The room manager is a module-level singleton (collab/room.py:776), NOT an
     # app.state attribute — `app.state.collab_manager` does not exist. This is
     # how tests/proposal_assist/test_workspaces_delete_route.py:58 reaches it.
-    from call_manager.proposal_assist.collab.room import MANAGER
+    from grant_lab.proposal_assist.collab.room import MANAGER
 
     before = len(MANAGER._rooms)
     admin.get(f"/api/admin/workspaces/deleted/{ws_id}")
@@ -553,7 +553,7 @@ def test_untruncated_history_says_so(monkeypatch, pg_url, pg_session_factory, tm
 def test_inspection_creates_no_commit(monkeypatch, pg_url, pg_session_factory, tmp_path):
     """Reading must not write. A new commit would rewrite the history an admin
     is inspecting."""
-    from call_manager.proposal_assist.citations.gitio import current_head
+    from grant_lab.proposal_assist.citations.gitio import current_head
 
     app = setup_app(monkeypatch, pg_url, tmp_path)
     admin, _ = client_for(app, pg_session_factory, email="admin@umu.se", is_admin=True)

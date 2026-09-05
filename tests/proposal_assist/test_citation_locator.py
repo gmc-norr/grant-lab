@@ -1,4 +1,4 @@
-from call_manager.proposal_assist.citations.reader import locate_evidence
+from grant_lab.proposal_assist.citations.reader import locate_evidence
 
 FULL = (
     "Intro paragraph about methods.\n\n"

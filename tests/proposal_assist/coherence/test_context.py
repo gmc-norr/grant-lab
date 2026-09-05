@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from call_manager.proposal_assist.coherence.context import assemble_coherence_context
+from grant_lab.proposal_assist.coherence.context import assemble_coherence_context
 from tests.proposal_assist.conftest import make_workspace
 
 

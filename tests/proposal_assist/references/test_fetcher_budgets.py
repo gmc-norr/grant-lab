@@ -10,7 +10,7 @@ on every redirect hop and use a fresh `timeout_s` per hop.  The fix must:
 import httpx
 import pytest
 
-from call_manager.proposal_assist.references.fetcher import (
+from grant_lab.proposal_assist.references.fetcher import (
     FetchError,
     _fetch_url_bytes,
 )
@@ -62,7 +62,7 @@ def test_cumulative_bytes_across_redirect_hops(monkeypatch):
     """
     # We monkeypatch _resolve_and_validate and _pinned_transport so the
     # MockTransport is used instead of real sockets.
-    import call_manager.proposal_assist.references.fetcher as fetcher_mod
+    import grant_lab.proposal_assist.references.fetcher as fetcher_mod
 
     monkeypatch.setattr(fetcher_mod, "_resolve_and_validate", lambda host, port: "1.2.3.4")
 
@@ -95,7 +95,7 @@ def test_redirect_hop_bytes_successful_under_cap(monkeypatch):
     """Verify the successful (non-bomb) redirect path still works with the
     new cumulative total: a redirect to a different host followed by a small
     response that stays under max_bytes succeeds normally."""
-    import call_manager.proposal_assist.references.fetcher as fetcher_mod
+    import grant_lab.proposal_assist.references.fetcher as fetcher_mod
 
     monkeypatch.setattr(fetcher_mod, "_resolve_and_validate", lambda host, port: "1.2.3.4")
 
@@ -139,7 +139,7 @@ def test_budget_exhausted_before_hop_raises(monkeypatch):
     We achieve a zero remaining budget by monkeypatching time.monotonic
     so it always returns a time far in the future relative to the deadline.
     """
-    import call_manager.proposal_assist.references.fetcher as fetcher_mod
+    import grant_lab.proposal_assist.references.fetcher as fetcher_mod
 
     monkeypatch.setattr(fetcher_mod, "_resolve_and_validate", lambda host, port: "1.2.3.4")
 
@@ -207,7 +207,7 @@ def test_error_status_reads_at_most_a_snippet_of_the_body(monkeypatch):
     """F2: `response.read()` on a 4xx/5xx materialised the whole body — 200 MB
     served with `max_bytes=1 MiB` was read in full (peak RSS 626 MB). The error
     path must pull one small piece for the message snippet and stop."""
-    import call_manager.proposal_assist.references.fetcher as fetcher_mod
+    import grant_lab.proposal_assist.references.fetcher as fetcher_mod
 
     monkeypatch.setattr(fetcher_mod, "_resolve_and_validate", lambda host, port: "1.2.3.4")
     body, pulled = _counting_body(b"x" * 65536, 80)  # 5 MiB, served under a 1 MiB cap
@@ -229,7 +229,7 @@ def test_deadline_is_enforced_inside_the_body_read(monkeypatch):
     ingest slot throughout). The deadline must be re-checked between pieces."""
     import types
 
-    import call_manager.proposal_assist.references.fetcher as fetcher_mod
+    import grant_lab.proposal_assist.references.fetcher as fetcher_mod
 
     monkeypatch.setattr(fetcher_mod, "_resolve_and_validate", lambda host, port: "1.2.3.4")
     clock = [1000.0]
@@ -259,7 +259,7 @@ def test_per_read_timeout_is_capped_even_with_a_long_budget(monkeypatch):
     """F3, second half: the per-read timeout handed to httpx is
     `min(remaining, _READ_TIMEOUT_S)`, so a single silent read cannot consume
     the whole budget before the in-loop check gets a chance to run."""
-    import call_manager.proposal_assist.references.fetcher as fetcher_mod
+    import grant_lab.proposal_assist.references.fetcher as fetcher_mod
 
     monkeypatch.setattr(fetcher_mod, "_resolve_and_validate", lambda host, port: "1.2.3.4")
     monkeypatch.setattr(

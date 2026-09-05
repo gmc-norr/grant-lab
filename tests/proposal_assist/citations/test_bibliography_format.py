@@ -6,7 +6,7 @@ partial / malformed CSL input.
 
 from __future__ import annotations
 
-from call_manager.proposal_assist.citations.bibliography import (
+from grant_lab.proposal_assist.citations.bibliography import (
     _suffix_from_citekey,
     _year_of,
     format_author_list,
@@ -499,7 +499,7 @@ def test_render_vancouver_numbering_intact_with_multiline_fields():
 # In-text author-year citation (_inline_author_year)
 # ---------------------------------------------------------------------------
 
-from call_manager.proposal_assist.citations.bibliography import _inline_author_year  # noqa: E402
+from grant_lab.proposal_assist.citations.bibliography import _inline_author_year  # noqa: E402
 
 
 def test_inline_author_year_single_author_year_suffix():

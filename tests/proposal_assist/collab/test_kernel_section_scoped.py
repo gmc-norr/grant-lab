@@ -2,12 +2,12 @@ from pathlib import Path
 
 import pycrdt
 
-from call_manager.db.models import User
-from call_manager.proposal_assist.collab import state, store
-from call_manager.proposal_assist.collab.kernel import kernel_accept_prose
-from call_manager.proposal_assist.collab.markdown_bridge import pm_to_markdown
-from call_manager.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
-from call_manager.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.db.models import User
+from grant_lab.proposal_assist.collab import state, store
+from grant_lab.proposal_assist.collab.kernel import kernel_accept_prose
+from grant_lab.proposal_assist.collab.markdown_bridge import pm_to_markdown
+from grant_lab.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
 from tests.proposal_assist.collab.test_collab_kernel_accept import (
     _git_head,
     _init_repo,

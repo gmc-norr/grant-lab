@@ -1,4 +1,4 @@
-from call_manager.proposal_assist.evaluator.context import (
+from grant_lab.proposal_assist.evaluator.context import (
     assemble_evaluator_context,
     content_sha,
 )

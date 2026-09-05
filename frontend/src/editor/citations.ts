@@ -9,7 +9,7 @@ import {
 } from "@codemirror/view";
 
 // Ported VERBATIM from the backend MARKER_RE
-// (src/call_manager/proposal_assist/citations/markers.py:23). A full marker is
+// (src/grant_lab/proposal_assist/citations/markers.py:23). A full marker is
 // `[@<citekey>]<!-- ev:ev-<>=6 hex> -->`. The `g` flag is required for the
 // scanning loop; named groups mirror the Python ones. A hand-typed BARE `[@key]`
 // (no ev comment) is intentionally NOT matched, so it stays plain editable text.

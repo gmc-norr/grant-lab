@@ -26,8 +26,8 @@ import json
 import os
 import pathlib
 
-from call_manager.proposal_assist.collab.hydrate import build_doc
-from call_manager.proposal_assist.collab.yjs_bridge import (
+from grant_lab.proposal_assist.collab.hydrate import build_doc
+from grant_lab.proposal_assist.collab.yjs_bridge import (
     pm_json_to_ydoc,
     ydoc_to_pm_json,
 )
@@ -128,8 +128,8 @@ _INCR_CASES = [
 
 
 def _build_incremental_entries():
-    from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
-    from call_manager.proposal_assist.collab.yjs_bridge import apply_pm_section_to_fragment
+    from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm
+    from grant_lab.proposal_assist.collab.yjs_bridge import apply_pm_section_to_fragment
 
     entries = []
     for name, base_md, idx, new_md in _INCR_CASES:

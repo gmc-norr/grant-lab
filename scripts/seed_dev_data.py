@@ -36,8 +36,8 @@ from sqlalchemy import select
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_here, os.pardir, "src"))
 
-from call_manager.config import Settings  # noqa: E402
-from call_manager.db.models import (  # noqa: E402
+from grant_lab.config import Settings  # noqa: E402
+from grant_lab.db.models import (  # noqa: E402
     Call,
     Profile,
     ProfileKind,
@@ -45,8 +45,8 @@ from call_manager.db.models import (  # noqa: E402
     Subscription,
     User,
 )
-from call_manager.db.session import make_engine, make_session_factory  # noqa: E402
-from call_manager.ranking.queue import enqueue_for_pair  # noqa: E402
+from grant_lab.db.session import make_engine, make_session_factory  # noqa: E402
+from grant_lab.ranking.queue import enqueue_for_pair  # noqa: E402
 
 _NOW = datetime.now(UTC)
 

@@ -17,8 +17,8 @@ from datetime import UTC, datetime
 import pytest
 from fastapi.testclient import TestClient
 
-from call_manager.db.models import User, Workspace
-from call_manager.main import create_app
+from grant_lab.db.models import User, Workspace
+from grant_lab.main import create_app
 
 _CREATED_APPS = []
 

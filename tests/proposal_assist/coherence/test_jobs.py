@@ -1,9 +1,9 @@
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from call_manager.config import Settings
-from call_manager.db.models import CoherenceJob, ProposedChange
-from call_manager.proposal_assist.coherence import jobs
+from grant_lab.config import Settings
+from grant_lab.db.models import CoherenceJob, ProposedChange
+from grant_lab.proposal_assist.coherence import jobs
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 

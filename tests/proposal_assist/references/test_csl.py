@@ -1,7 +1,7 @@
 """Tests for CSL-JSON helper functions.
 
 Written before the implementation (TDD red-first):
-  src/call_manager/proposal_assist/references/csl.py
+  src/grant_lab/proposal_assist/references/csl.py
 
 Covers:
 - csl_from_source_meta: crossref / arxiv / pubmed / unknown
@@ -15,8 +15,8 @@ import uuid
 
 from reportlab.pdfgen.canvas import Canvas
 
-from call_manager.db.models import Reference
-from call_manager.proposal_assist.references.csl import (
+from grant_lab.db.models import Reference
+from grant_lab.proposal_assist.references.csl import (
     csl_from_pdf_info,
     csl_from_source_meta,
     generate_citekey,

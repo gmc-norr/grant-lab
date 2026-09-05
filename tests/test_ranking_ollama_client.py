@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 
-from call_manager.ranking.ollama_client import LLMError, OllamaClient
+from grant_lab.ranking.ollama_client import LLMError, OllamaClient
 
 _FAKE_RESPONSE = {
     "id": "chatcmpl-test",

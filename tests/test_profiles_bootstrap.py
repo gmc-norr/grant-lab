@@ -2,10 +2,10 @@ import json
 
 import httpx
 
-from call_manager.profiles.bootstrap import bootstrap_profile
-from call_manager.profiles.pubmed import PubMedClient
-from call_manager.profiles.seed import Member, SeedInput
-from call_manager.ranking.ollama_client import OllamaClient
+from grant_lab.profiles.bootstrap import bootstrap_profile
+from grant_lab.profiles.pubmed import PubMedClient
+from grant_lab.profiles.seed import Member, SeedInput
+from grant_lab.ranking.ollama_client import OllamaClient
 
 _ESEARCH = {"esearchresult": {"count": "1", "idlist": ["111"]}}
 _ESUMMARY = {

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from call_manager.proposal_assist.spend import record_spend
+from grant_lab.proposal_assist.spend import record_spend
 from tests.proposal_assist.conftest import make_workspace
 
 ENDPOINTS = [

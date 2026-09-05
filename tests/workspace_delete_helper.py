@@ -20,7 +20,7 @@ import uuid
 
 from sqlalchemy.orm import Session
 
-from call_manager.workspaces import soft_delete_workspace_db
+from grant_lab.workspaces import soft_delete_workspace_db
 
 
 def soft_delete_workspace_for_test(

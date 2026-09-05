@@ -16,21 +16,21 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select, update
 
-from call_manager.config import Settings
-from call_manager.db.models import ChatTurn, LlmSpend, TurnJob
-from call_manager.proposal_assist.drafting.contract import (
+from grant_lab.config import Settings
+from grant_lab.db.models import ChatTurn, LlmSpend, TurnJob
+from grant_lab.proposal_assist.drafting.contract import (
     AssistantTextEvent,
     SDKTurnError,
     TurnDoneEvent,
 )
-from call_manager.proposal_assist.drafting.controller import WorkspaceController
-from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
-from call_manager.proposal_assist.drafting.registry import SubprocessRegistry
-from call_manager.proposal_assist.spend import record_spend, sum_spend_today
-from call_manager.proposal_assist.turns.outcomes import record_terminal_outcome
-from call_manager.proposal_assist.turns.processor import process_turn_once
-from call_manager.proposal_assist.turns.reaper import reap_stuck_turns
-from call_manager.proposal_assist.turns.submit import submit_user_turn
+from grant_lab.proposal_assist.drafting.controller import WorkspaceController
+from grant_lab.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
+from grant_lab.proposal_assist.drafting.registry import SubprocessRegistry
+from grant_lab.proposal_assist.spend import record_spend, sum_spend_today
+from grant_lab.proposal_assist.turns.outcomes import record_terminal_outcome
+from grant_lab.proposal_assist.turns.processor import process_turn_once
+from grant_lab.proposal_assist.turns.reaper import reap_stuck_turns
+from grant_lab.proposal_assist.turns.submit import submit_user_turn
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 

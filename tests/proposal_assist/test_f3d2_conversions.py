@@ -11,7 +11,7 @@ import uuid
 
 import pytest
 
-from call_manager.proposal_assist.tools.registry import ToolContext, snapshot_invocation
+from grant_lab.proposal_assist.tools.registry import ToolContext, snapshot_invocation
 from tests.proposal_assist.f3b_seeds import (
     bump_generation,
     seed_evaluator_job,
@@ -58,7 +58,7 @@ def test_the_band_rollup_is_reachable_from_ports():
     """A converted submit_scorecard_impl still has to compute the overall band —
     Effects.submit_scorecard returns None and the tool reports the band back to the
     agent — and it may import only stdlib and ports."""
-    from call_manager.proposal_assist.ports.scoring import compute_overall_band
+    from grant_lab.proposal_assist.ports.scoring import compute_overall_band
 
     assert callable(compute_overall_band)
 
@@ -66,8 +66,8 @@ def test_the_band_rollup_is_reachable_from_ports():
 def test_the_old_scoring_module_re_exports_the_same_function():
     """GC-4 of F3d1, still binding: one source of truth, and the moved object stays
     the SAME object so no caller can drift onto a second copy."""
-    from call_manager.proposal_assist.evaluator import scoring as old
-    from call_manager.proposal_assist.ports import scoring as new
+    from grant_lab.proposal_assist.evaluator import scoring as old
+    from grant_lab.proposal_assist.ports import scoring as new
 
     assert old.compute_overall_band is new.compute_overall_band
 
@@ -75,9 +75,9 @@ def test_the_old_scoring_module_re_exports_the_same_function():
 @pytest.mark.asyncio
 async def test_scorecard_writes_through_the_port(pg_session_factory):
     """The conversion itself: the tool no longer opens a session, and the row lands."""
-    from call_manager.db.models import EvaluatorJob
-    from call_manager.proposal_assist.port_impl import build_ports
-    from call_manager.proposal_assist.tools.scorecard import submit_scorecard_impl
+    from grant_lab.db.models import EvaluatorJob
+    from grant_lab.proposal_assist.port_impl import build_ports
+    from grant_lab.proposal_assist.tools.scorecard import submit_scorecard_impl
 
     with pg_session_factory() as s:
         ws_id = seed_workspace(s, generation=_G)
@@ -105,9 +105,9 @@ async def test_scorecard_does_not_land_after_the_generation_moves(pg_session_fac
     workspace's still-running evaluator run) is left SATISFIED: the job stays
     running and owned. Only the generation moves. If the write still lands, the
     fence is decorative and this test is the only thing that would have said so."""
-    from call_manager.db.models import EvaluatorJob
-    from call_manager.proposal_assist.port_impl import build_ports
-    from call_manager.proposal_assist.tools.scorecard import submit_scorecard_impl
+    from grant_lab.db.models import EvaluatorJob
+    from grant_lab.proposal_assist.port_impl import build_ports
+    from grant_lab.proposal_assist.tools.scorecard import submit_scorecard_impl
 
     with pg_session_factory() as s:
         ws_id = seed_workspace(s, generation=_G)
@@ -140,9 +140,9 @@ async def test_scorecard_refusal_messages_are_unchanged(pg_session_factory):
     """GC-6. The port reproduces the tool's strings verbatim and in the same order:
     a stale ctx pointing at a finished run must still get the TARGET message, not
     'already submitted'."""
-    from call_manager.db.models import EvaluatorJob
-    from call_manager.proposal_assist.port_impl import build_ports
-    from call_manager.proposal_assist.tools.scorecard import submit_scorecard_impl
+    from grant_lab.db.models import EvaluatorJob
+    from grant_lab.proposal_assist.port_impl import build_ports
+    from grant_lab.proposal_assist.tools.scorecard import submit_scorecard_impl
 
     with pg_session_factory() as s:
         ws_id = seed_workspace(s, generation=_G)
@@ -172,7 +172,7 @@ async def test_scorecard_validation_still_runs_before_any_port_call():
     """The validation half is pure and unchanged. A bad payload must be refused
     without the port being touched at all — a converted tool that reaches for a
     capability before validating has widened its blast radius. No database here."""
-    from call_manager.proposal_assist.tools.scorecard import submit_scorecard_impl
+    from grant_lab.proposal_assist.tools.scorecard import submit_scorecard_impl
 
     ctx, invocation = _ctx_and_invocation(
         uuid.uuid4(), origin_job_id=uuid.uuid4(), eval_rubric_criteria=[{"name": "A"}]
@@ -189,9 +189,9 @@ async def test_scorecard_validation_still_runs_before_any_port_call():
 
 @pytest.mark.asyncio
 async def test_review_writes_through_the_port(pg_session_factory):
-    from call_manager.db.models import ReviewRunItem
-    from call_manager.proposal_assist.port_impl import build_ports
-    from call_manager.proposal_assist.tools.review_submit import submit_review_impl
+    from grant_lab.db.models import ReviewRunItem
+    from grant_lab.proposal_assist.port_impl import build_ports
+    from grant_lab.proposal_assist.tools.review_submit import submit_review_impl
 
     with pg_session_factory() as s:
         ws_id = seed_workspace(s, generation=_G)
@@ -219,7 +219,7 @@ async def test_review_writes_through_the_port(pg_session_factory):
 async def test_review_still_rejects_an_empty_body_without_touching_the_port():
     """The strip-and-reject step lives in the tool. A conversion that hands an
     empty string to the port loses it silently — the port stores verbatim."""
-    from call_manager.proposal_assist.tools.review_submit import submit_review_impl
+    from grant_lab.proposal_assist.tools.review_submit import submit_review_impl
 
     ctx, invocation = _ctx_and_invocation(
         uuid.uuid4(), origin_job_id=uuid.uuid4(), review_run_item_id=uuid.uuid4()
@@ -235,9 +235,9 @@ async def test_review_does_not_land_after_the_generation_moves(pg_session_factor
     """GC-4 — THE COMPENSATION IS DISABLED. The item stays running and owned by a
     running run in this workspace, so every guard the tool used to apply is
     SATISFIED. Only the generation moves."""
-    from call_manager.db.models import ReviewRunItem
-    from call_manager.proposal_assist.port_impl import build_ports
-    from call_manager.proposal_assist.tools.review_submit import submit_review_impl
+    from grant_lab.db.models import ReviewRunItem
+    from grant_lab.proposal_assist.port_impl import build_ports
+    from grant_lab.proposal_assist.tools.review_submit import submit_review_impl
 
     with pg_session_factory() as s:
         ws_id = seed_workspace(s, generation=_G)
@@ -264,9 +264,9 @@ async def test_review_does_not_land_after_the_generation_moves(pg_session_factor
 
 @pytest.mark.asyncio
 async def test_uncited_claims_writes_through_the_port(pg_session_factory):
-    from call_manager.db.models import UncitedClaimsJob
-    from call_manager.proposal_assist.port_impl import build_ports
-    from call_manager.proposal_assist.tools.uncited_claims import (
+    from grant_lab.db.models import UncitedClaimsJob
+    from grant_lab.proposal_assist.port_impl import build_ports
+    from grant_lab.proposal_assist.tools.uncited_claims import (
         submit_uncited_claims_impl,
     )
 
@@ -295,9 +295,9 @@ async def test_uncited_claims_does_not_land_after_the_generation_moves(
 ):
     """GC-4 — THE COMPENSATION IS DISABLED. The job stays running and owned; only
     the generation moves."""
-    from call_manager.db.models import UncitedClaimsJob
-    from call_manager.proposal_assist.port_impl import build_ports
-    from call_manager.proposal_assist.tools.uncited_claims import (
+    from grant_lab.db.models import UncitedClaimsJob
+    from grant_lab.proposal_assist.port_impl import build_ports
+    from grant_lab.proposal_assist.tools.uncited_claims import (
         submit_uncited_claims_impl,
     )
 
@@ -328,7 +328,7 @@ async def test_uncited_claims_does_not_land_after_the_generation_moves(
 async def test_uncited_claims_validation_still_runs_before_any_port_call():
     """The section-index bound comes from ctx.uncited_draft_section_count, which the
     converted tool still reads. A bad index must be refused without the port."""
-    from call_manager.proposal_assist.tools.uncited_claims import (
+    from grant_lab.proposal_assist.tools.uncited_claims import (
         submit_uncited_claims_impl,
     )
 
@@ -362,8 +362,8 @@ async def test_the_refund_does_not_touch_a_later_turns_row(pg_session_factory):
     That is what binding to active_turn_job_id buys, and what the code this
     replaces (references.py:465-473, matching workspace + status) did NOT.
     """
-    from call_manager.db.models import TurnJob
-    from call_manager.proposal_assist.port_impl import build_ports
+    from grant_lab.db.models import TurnJob
+    from grant_lab.proposal_assist.port_impl import build_ports
 
     ports = build_ports(pg_session_factory)
     with pg_session_factory() as s:
@@ -396,8 +396,8 @@ async def test_the_reserve_is_bound_to_the_turn_not_the_workspace(pg_session_fac
     """The tightening the port makes over the code it replaces. A reserve against a
     turn id that is not running returns None even though ANOTHER turn in the same
     workspace is running and under cap."""
-    from call_manager.db.models import TurnJob
-    from call_manager.proposal_assist.port_impl import build_ports
+    from grant_lab.db.models import TurnJob
+    from grant_lab.proposal_assist.port_impl import build_ports
 
     ports = build_ports(pg_session_factory)
     with pg_session_factory() as s:
@@ -414,7 +414,7 @@ async def test_the_cap_constant_is_the_one_the_tool_reports():
     """The tool tells the agent 'fetch cap reached (3 per turn)'. That 3 was a
     literal at references.py:469 while the port carried its own constant — two
     numbers that must agree and nothing making them. No database here."""
-    from call_manager.proposal_assist.ports.accounting import MAX_FETCHES_PER_TURN
+    from grant_lab.proposal_assist.ports.accounting import MAX_FETCHES_PER_TURN
 
     assert MAX_FETCHES_PER_TURN == 3
 
@@ -426,7 +426,7 @@ async def test_the_snapshot_view_carries_no_session(pg_session_factory):
     proxy. A frozen DTO of plain values cannot do that."""
     import dataclasses
 
-    from call_manager.proposal_assist.port_impl import build_ports
+    from grant_lab.proposal_assist.port_impl import build_ports
 
     with pg_session_factory() as s:
         ws_id = seed_workspace(s, generation=_G)
@@ -440,7 +440,7 @@ async def test_the_snapshot_view_carries_no_session(pg_session_factory):
 
 @pytest.mark.asyncio
 async def test_a_missing_workspace_reads_as_none(pg_session_factory):
-    from call_manager.proposal_assist.port_impl import build_ports
+    from grant_lab.proposal_assist.port_impl import build_ports
 
     ports = build_ports(pg_session_factory)
     assert ports.queries.get_workspace_snapshot(uuid.uuid4()) is None
@@ -448,9 +448,9 @@ async def test_a_missing_workspace_reads_as_none(pg_session_factory):
 
 @pytest.mark.asyncio
 async def test_call_details_reads_through_the_port(pg_session_factory):
-    from call_manager.db.models import Workspace
-    from call_manager.proposal_assist.port_impl import build_ports
-    from call_manager.proposal_assist.tools.context import get_call_details_impl
+    from grant_lab.db.models import Workspace
+    from grant_lab.proposal_assist.port_impl import build_ports
+    from grant_lab.proposal_assist.tools.context import get_call_details_impl
 
     with pg_session_factory() as s:
         ws_id = seed_workspace(s, generation=_G)
@@ -476,8 +476,8 @@ async def test_an_unlinked_workspace_still_answers_linked_false(pg_session_facto
     """GC-6. The empty-snapshot contract is the shape the agent depends on, and it
     is answered for BOTH tools by the same absent-or-empty rule. seed_workspace
     creates exactly this: a workspace with empty snapshots."""
-    from call_manager.proposal_assist.port_impl import build_ports
-    from call_manager.proposal_assist.tools.context import (
+    from grant_lab.proposal_assist.port_impl import build_ports
+    from grant_lab.proposal_assist.tools.context import (
         get_call_details_impl,
         get_profile_impl,
     )
@@ -497,8 +497,8 @@ async def test_a_deleted_workspace_reads_as_unlinked_not_an_error(pg_session_fac
     """Reads are NOT fenced (spec §8), so there is no stamp and no refusal. The
     None the port returns for a vanished workspace must surface as the SAME shape
     an empty snapshot produces — not as an exception the agent has to parse."""
-    from call_manager.proposal_assist.port_impl import build_ports
-    from call_manager.proposal_assist.tools.context import get_call_details_impl
+    from grant_lab.proposal_assist.port_impl import build_ports
+    from grant_lab.proposal_assist.tools.context import get_call_details_impl
 
     ctx, _inv = _ctx_and_invocation(uuid.uuid4())  # never existed
     out = await get_call_details_impl(ctx, ports=build_ports(pg_session_factory))

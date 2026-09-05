@@ -7,9 +7,9 @@ from unittest.mock import Mock
 
 from sqlalchemy import select
 
-from call_manager.db.models import WorkspaceSetupJob
-from call_manager.proposal_assist.extractors.sections import SECTION_NAMES
-from call_manager.proposal_assist.phases.setup import run_phase0_tick
+from grant_lab.db.models import WorkspaceSetupJob
+from grant_lab.proposal_assist.extractors.sections import SECTION_NAMES
+from grant_lab.proposal_assist.phases.setup import run_phase0_tick
 from tests.proposal_assist.conftest import make_call, make_workspace
 
 
@@ -132,9 +132,9 @@ def test_build_scheduler_registers_phase0_tick(monkeypatch, pg_url):
     (e.g. the closure receiving args it can't unpack)."""
     from unittest.mock import MagicMock
 
-    from call_manager.config import Settings
-    from call_manager.db.session import make_engine, make_session_factory
-    from call_manager.scheduler import build_scheduler
+    from grant_lab.config import Settings
+    from grant_lab.db.session import make_engine, make_session_factory
+    from grant_lab.scheduler import build_scheduler
 
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
@@ -147,7 +147,7 @@ def test_build_scheduler_registers_phase0_tick(monkeypatch, pg_url):
     try:
         session_factory = make_session_factory(engine)
 
-        from call_manager.proposal_assist.drafting.factory import (
+        from grant_lab.proposal_assist.drafting.factory import (
             build_workspace_controller,
         )
 

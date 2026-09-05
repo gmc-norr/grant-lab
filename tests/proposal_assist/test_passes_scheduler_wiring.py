@@ -7,7 +7,7 @@ import logging
 
 import pytest
 
-from call_manager import scheduler as scheduler_module
+from grant_lab import scheduler as scheduler_module
 
 
 class _CancelledFuture:

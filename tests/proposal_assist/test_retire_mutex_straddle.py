@@ -27,19 +27,19 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select, text
 
-from call_manager.db.models import CollabArtifactState, ProposedChange, User, Workspace
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
-from call_manager.proposal_assist.collab import state
-from call_manager.proposal_assist.collab.hydrate import build_doc, load_or_hydrate
-from call_manager.proposal_assist.collab.kernel import kernel_accept_prose
-from call_manager.proposal_assist.collab.markdown_bridge import pm_to_markdown
-from call_manager.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
-from call_manager.proposal_assist.drafting.locking import (
+from grant_lab.db.models import CollabArtifactState, ProposedChange, User, Workspace
+from grant_lab.proposal_assist.artifacts import PROPOSAL_FILENAME
+from grant_lab.proposal_assist.collab import state
+from grant_lab.proposal_assist.collab.hydrate import build_doc, load_or_hydrate
+from grant_lab.proposal_assist.collab.kernel import kernel_accept_prose
+from grant_lab.proposal_assist.collab.markdown_bridge import pm_to_markdown
+from grant_lab.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
+from grant_lab.proposal_assist.drafting.locking import (
     WorkspaceDeleted,
     acquire_commit_mutex,
 )
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.ports.stamp import stamp_for_workspace
 from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 
@@ -107,7 +107,7 @@ def _straddle(pg_session_factory, ws_id, writer):
 
 def test_blocked_save_section_refuses_and_leaves_git_untouched(pg_session_factory, tmp_path):
     """The legacy git-first writer."""
-    from call_manager.proposal_assist.editing.save import save_section
+    from grant_lab.proposal_assist.editing.save import save_section
 
     md0 = "## Background\noriginal.\n"
     with pg_session_factory() as s:
@@ -229,7 +229,7 @@ def test_blocked_enable_on_touch_returns_false_and_writes_no_state_row(
 ):
     """The flip.py variant: it COMMITS a CollabArtifactState row, so it must not
     run on a workspace whose deletion landed while it waited."""
-    from call_manager.proposal_assist.collab.flip import maybe_auto_enable
+    from grant_lab.proposal_assist.collab.flip import maybe_auto_enable
 
     md0 = "## Background\noriginal.\n"  # a live workspace here WOULD be enabled
     with pg_session_factory() as s:

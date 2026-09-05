@@ -83,10 +83,10 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
-FILTERS = REPO / "src" / "call_manager" / "web" / "filters.py"
-WORKER = REPO / "src" / "call_manager" / "ranking" / "worker.py"
-CRITERIA_PY = REPO / "src" / "call_manager" / "ranking" / "criteria.py"
-PROMPT = REPO / "src" / "call_manager" / "ranking" / "prompt.py"
+FILTERS = REPO / "src" / "grant_lab" / "web" / "filters.py"
+WORKER = REPO / "src" / "grant_lab" / "ranking" / "worker.py"
+CRITERIA_PY = REPO / "src" / "grant_lab" / "ranking" / "criteria.py"
+PROMPT = REPO / "src" / "grant_lab" / "ranking" / "prompt.py"
 CHIPS = REPO / "frontend" / "src" / "components" / "CriterionChips.tsx"
 
 # The name of the list `worker.py` iterates to write the four gate criteria.

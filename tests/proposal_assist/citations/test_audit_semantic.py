@@ -8,22 +8,22 @@ Patterns reused from test_audit_deterministic.py (seeding) and
 test_metadata_extractor.py (the _StubCitationService).
 """
 
-from call_manager.db.models import Reference, ReferenceChunk
-from call_manager.proposal_assist.citations import CitationLLMResult
-from call_manager.proposal_assist.citations.audit import (
+from grant_lab.db.models import Reference, ReferenceChunk
+from grant_lab.proposal_assist.citations import CitationLLMResult
+from grant_lab.proposal_assist.citations.audit import (
     chunk_content_sha,
     claim_context_sha,
     evidence_quote_sha,
     validate_citations_semantic,
 )
-from call_manager.proposal_assist.citations.claims import claim_sentence_around
-from call_manager.proposal_assist.citations.ledger import (
+from grant_lab.proposal_assist.citations.claims import claim_sentence_around
+from grant_lab.proposal_assist.citations.ledger import (
     append_evidence,
     build_evidence_row,
     empty_ledger,
 )
-from call_manager.proposal_assist.citations.markers import build_marker, find_markers
-from call_manager.proposal_assist.citations.verdict_cache import (
+from grant_lab.proposal_assist.citations.markers import build_marker, find_markers
+from grant_lab.proposal_assist.citations.verdict_cache import (
     VALIDATOR_VERSION,
     build_cache_key,
     get_verdict,
@@ -726,7 +726,7 @@ def test_capped_daily_cap_counts_remaining_rows_as_deferred(
 ):
     """When the daily LLM cap (res.cap_exceeded) trips mid-loop, the rows not yet
     iterated must be counted as ``deferred`` so the re-poll signal is accurate."""
-    from call_manager.proposal_assist.citations.audit import (
+    from grant_lab.proposal_assist.citations.audit import (
         validate_citations_semantic_capped,
     )
 

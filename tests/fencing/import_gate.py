@@ -27,7 +27,7 @@ import pathlib
 import sys
 
 #: The one project package a tool may name. Submodules included.
-PORTS_PREFIX = "call_manager.proposal_assist.ports"
+PORTS_PREFIX = "grant_lab.proposal_assist.ports"
 
 #: Resource locators (section 4.1). Closing imports alone does not close semantic
 #: authority: ToolContext exposes repo_dir, so
@@ -101,14 +101,14 @@ def check_file(path: pathlib.Path) -> list[str]:
     return check_source(path.read_text(encoding="utf-8"), path=shown)
 
 
-TOOLS_DIR = REPO / "src" / "call_manager" / "proposal_assist" / "tools"
+TOOLS_DIR = REPO / "src" / "grant_lab" / "proposal_assist" / "tools"
 
 #: The composition root may name project modules a tool may not, but it must not do
-#: database work. The `call_manager.db` PACKAGE is forbidden outright — naming a model
+#: database work. The `grant_lab.db` PACKAGE is forbidden outright — naming a model
 #: is naming a table, and `db/__init__.py:7` re-exports `models`, so importing the
 #: package alone hands you `db.models.Workspace`. SQLAlchemy is forbidden at RUNTIME
 #: only: an import that exists solely to annotate a field cannot execute anything.
-_DB_PACKAGE = "call_manager.db"
+_DB_PACKAGE = "grant_lab.db"
 
 
 def tool_modules() -> list[pathlib.Path]:
@@ -196,8 +196,8 @@ def _type_checking_node_ids(tree: ast.AST) -> set[int]:
 def _imported_names(node: ast.Import | ast.ImportFrom) -> list[str]:
     """Every dotted module path an import statement can bind.
 
-    `from call_manager.db import models` binds the SUBMODULE `call_manager.db.models`,
-    but `node.module` says only `call_manager.db` — so the aliases have to be joined
+    `from grant_lab.db import models` binds the SUBMODULE `grant_lab.db.models`,
+    but `node.module` says only `grant_lab.db` — so the aliases have to be joined
     onto the module, or the most natural spelling of the forbidden import is invisible.
     """
     if isinstance(node, ast.Import):

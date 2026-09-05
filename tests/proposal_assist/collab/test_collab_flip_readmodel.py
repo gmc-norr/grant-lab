@@ -4,11 +4,11 @@ import subprocess
 
 import pytest
 
-from call_manager.db.models import CollabArtifactState
-from call_manager.proposal_assist.collab import state, store
-from call_manager.proposal_assist.collab.checkpoint import serialize_doc_to_markdown
-from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
-from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
+from grant_lab.db.models import CollabArtifactState
+from grant_lab.proposal_assist.collab import state, store
+from grant_lab.proposal_assist.collab.checkpoint import serialize_doc_to_markdown
+from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm
+from grant_lab.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
 from tests.proposal_assist.conftest import make_workspace
 from tests.test_analysis_pipeline import _init_repo
 

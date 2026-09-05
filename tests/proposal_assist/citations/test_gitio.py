@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-import call_manager.proposal_assist.citations.gitio as _gitio_mod
-from call_manager.proposal_assist.citations.gitio import (
+import grant_lab.proposal_assist.citations.gitio as _gitio_mod
+from grant_lab.proposal_assist.citations.gitio import (
     GitCommitError,
     write_and_commit_files,
 )
@@ -143,7 +143,7 @@ def test_rollback_on_commit_failure(repo: Path, monkeypatch: pytest.MonkeyPatch)
 
     # Monkeypatch subprocess.run inside the gitio module so only
     # the commit call raises; add/reset still run for real.
-    import call_manager.proposal_assist.citations.gitio as _gitio_mod
+    import grant_lab.proposal_assist.citations.gitio as _gitio_mod
 
     real_run = _gitio_mod.subprocess.run
 

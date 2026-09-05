@@ -9,7 +9,7 @@ import uuid
 
 from sqlalchemy import select
 
-from call_manager.db.models import ChatTurn, TurnJob, Workspace, WorkspaceEvent
+from grant_lab.db.models import ChatTurn, TurnJob, Workspace, WorkspaceEvent
 from tests.test_api_workspaces import _app, _client, _seed
 
 
@@ -82,7 +82,7 @@ def test_submit_turn_needs_disclosure_403(monkeypatch, pg_url, pg_session_factor
 
 
 def test_submit_turn_token_cap_429(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    from call_manager.proposal_assist.turns.caps import TokenCapExceeded
+    from grant_lab.proposal_assist.turns.caps import TokenCapExceeded
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
@@ -98,7 +98,7 @@ def test_submit_turn_token_cap_429(monkeypatch, pg_url, pg_session_factory, tmp_
             reason="input_cap_exceeded",
         )
 
-    monkeypatch.setattr("call_manager.web.api.turns.submit_user_turn", _boom)
+    monkeypatch.setattr("grant_lab.web.api.turns.submit_user_turn", _boom)
     r = _client(app, owner_id).post(f"/api/workspaces/{ws_id}/turns", json={"content": "hi"})
     assert r.status_code == 429
 
@@ -131,8 +131,8 @@ def test_turns_read_model_non_member_403(monkeypatch, pg_url, pg_session_factory
 
 
 def test_json_turn_stream_emits_turns_then_done(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    from call_manager.db.models import ChatTurn as CT
-    from call_manager.web.api.turns import _json_turn_stream
+    from grant_lab.db.models import ChatTurn as CT
+    from grant_lab.web.api.turns import _json_turn_stream
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
@@ -201,7 +201,7 @@ def test_api_submit_turn_with_attachment_builds_image_block(
 ):
     import uuid as _uuid
 
-    from call_manager.db.models import Attachment, ChatTurn
+    from grant_lab.db.models import Attachment, ChatTurn
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "x\n")
@@ -254,7 +254,7 @@ def test_api_submit_turn_cross_workspace_attachment_is_400(
 
 
 def test_turns_disabled_reason_branches(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    from call_manager.db.models import Workspace
+    from grant_lab.db.models import Workspace
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, member_id, _, ws_id = _seed(app, pg_session_factory, tmp_path, "x\n")
@@ -304,7 +304,7 @@ def test_turn_stream_response_carries_sse_anti_buffer_headers(
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
     # A completed job gives the stream something to emit and terminate quickly.
-    from call_manager.db.models import ChatTurn as CT
+    from grant_lab.db.models import ChatTurn as CT
 
     with pg_session_factory() as s:
         u = CT(workspace_id=ws_id, role="user", content={"type": "text", "text": "hi"})
@@ -327,7 +327,7 @@ def test_turn_stream_response_carries_sse_anti_buffer_headers(
 
 
 def _three_turns(pg_session_factory, ws_id):
-    from call_manager.db.models import ChatTurn as CT
+    from grant_lab.db.models import ChatTurn as CT
 
     with pg_session_factory() as s:
         for i in range(3):
@@ -364,7 +364,7 @@ def test_list_turns_is_paginated_newest_last(monkeypatch, pg_url, pg_session_fac
 
 
 def _running_job(pg_session_factory, ws_id):
-    from call_manager.db.models import ChatTurn as CT
+    from grant_lab.db.models import ChatTurn as CT
 
     with pg_session_factory() as s:
         u = CT(workspace_id=ws_id, role="user", content={"type": "text", "text": "hi"})
@@ -387,7 +387,7 @@ def _stream_until_done(
 ):
     """Drive the generator; call `on_first_poll` after the first poll so the
     revocation lands while the stream is open (the case that was never checked)."""
-    from call_manager.web.api.turns import _json_turn_stream
+    from grant_lab.web.api.turns import _json_turn_stream
 
     async def _collect():
         out = []
@@ -427,7 +427,7 @@ def test_turn_stream_ends_when_the_session_is_revoked_mid_stream(
     """The stream authorized once at connect and then outlived logout, admin
     disable and membership removal. It re-checks the identity it was opened
     with on every poll and ends with a terminal `done` when it no longer holds."""
-    from call_manager.db.models import User
+    from grant_lab.db.models import User
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")
@@ -458,7 +458,7 @@ def test_turn_stream_ends_when_the_session_is_revoked_mid_stream(
 def test_turn_stream_ends_when_the_account_is_disabled_mid_stream(
     monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
-    from call_manager.db.models import User
+    from grant_lab.db.models import User
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "preamble\n")

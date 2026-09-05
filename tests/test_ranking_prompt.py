@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from call_manager.ranking.prompt import (
+from grant_lab.ranking.prompt import (
     PROMPT_VERSION,
     Parsed,
     ParseError,
@@ -271,7 +271,7 @@ def test_build_messages_truncates_at_call_text_limit():
     from datetime import UTC, datetime, timedelta
     from types import SimpleNamespace
 
-    from call_manager.ranking.prompt import CALL_TEXT_LIMIT
+    from grant_lab.ranking.prompt import CALL_TEXT_LIMIT
 
     assert CALL_TEXT_LIMIT == 16000
 
@@ -307,7 +307,7 @@ def test_build_messages_truncates_combined_summary_plus_full_text():
     from datetime import UTC, datetime, timedelta
     from types import SimpleNamespace
 
-    from call_manager.ranking.prompt import CALL_TEXT_LIMIT
+    from grant_lab.ranking.prompt import CALL_TEXT_LIMIT
 
     profile = SimpleNamespace(
         name="P",
@@ -712,7 +712,7 @@ def test_prompt_version_bumped():
 def test_parse_caps_rationale_length():
     """Model-authored rationale is capped to a sane max (no XSS today, but
     these flow verbatim into analyst-facing columns + the digest)."""
-    from call_manager.ranking.prompt import _FREE_TEXT_MAX
+    from grant_lab.ranking.prompt import _FREE_TEXT_MAX
 
     long = "x" * (_FREE_TEXT_MAX + 500)
     content = json.dumps(
@@ -727,7 +727,7 @@ def test_parse_caps_rationale_length():
 
 
 def test_parse_caps_summary_length():
-    from call_manager.ranking.prompt import _FREE_TEXT_MAX
+    from grant_lab.ranking.prompt import _FREE_TEXT_MAX
 
     long = "y" * (_FREE_TEXT_MAX + 500)
     content = json.dumps(
@@ -744,7 +744,7 @@ def test_parse_caps_summary_length():
 
 
 def test_parse_caps_applicant_notes_text_length():
-    from call_manager.ranking.prompt import _ANALYSIS_CATEGORIES, _FREE_TEXT_MAX
+    from grant_lab.ranking.prompt import _ANALYSIS_CATEGORIES, _FREE_TEXT_MAX
 
     category = next(iter(_ANALYSIS_CATEGORIES))
     long = "z" * (_FREE_TEXT_MAX + 500)

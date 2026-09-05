@@ -1,7 +1,7 @@
 import uuid
 
-from call_manager.config import Settings
-from call_manager.proposal_assist.evaluator.agent import (
+from grant_lab.config import Settings
+from grant_lab.proposal_assist.evaluator.agent import (
     build_evaluator_adapter,
     evaluator_allowed_tools,
 )

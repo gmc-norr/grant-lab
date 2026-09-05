@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import uuid
 
-from call_manager.proposal_assist.ports import Ports
-from call_manager.proposal_assist.ports.effects import SubmitScorecard
-from call_manager.proposal_assist.ports.errors import EffectRejected
-from call_manager.proposal_assist.ports.stamp import FenceStamp
+from grant_lab.proposal_assist.ports import Ports
+from grant_lab.proposal_assist.ports.effects import SubmitScorecard
+from grant_lab.proposal_assist.ports.errors import EffectRejected
+from grant_lab.proposal_assist.ports.stamp import FenceStamp
 
 
 def submit(ports: Ports, stamp: FenceStamp, scorecard: dict) -> dict:

@@ -4,11 +4,11 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from call_manager.config import Settings
-from call_manager.db.models import ChatTurn, TurnJob, WorkspaceEvent
-from call_manager.proposal_assist.turns.caps import check_daily_token_cap
-from call_manager.proposal_assist.turns.outcomes import outcome_message, record_terminal_outcome
-from call_manager.proposal_assist.turns.processor import _finalize_failed
+from grant_lab.config import Settings
+from grant_lab.db.models import ChatTurn, TurnJob, WorkspaceEvent
+from grant_lab.proposal_assist.turns.caps import check_daily_token_cap
+from grant_lab.proposal_assist.turns.outcomes import outcome_message, record_terminal_outcome
+from grant_lab.proposal_assist.turns.processor import _finalize_failed
 from tests.proposal_assist.conftest import make_chat_turn, make_user, make_workspace
 
 
@@ -405,7 +405,7 @@ def test_default_still_clears_estimate_when_nothing_consumed(pg_session_factory)
 
 
 def test_post_terminal_usage_stamps_truth_clears_estimate_and_is_idempotent(pg_session_factory):
-    from call_manager.proposal_assist.turns.outcomes import stamp_post_terminal_usage
+    from grant_lab.proposal_assist.turns.outcomes import stamp_post_terminal_usage
 
     with pg_session_factory() as s:
         ws = make_workspace(s)
@@ -493,7 +493,7 @@ def test_post_terminal_usage_is_atomic_under_concurrency(pg_session_factory):
     SELECT ... FOR UPDATE on the TurnJob row."""
     import threading
 
-    from call_manager.proposal_assist.turns.outcomes import stamp_post_terminal_usage
+    from grant_lab.proposal_assist.turns.outcomes import stamp_post_terminal_usage
 
     with pg_session_factory() as s:
         ws = make_workspace(s)
@@ -552,7 +552,7 @@ def test_post_terminal_usage_is_atomic_under_concurrency(pg_session_factory):
 
 
 def test_post_terminal_usage_refuses_non_terminal_or_foreign_job(pg_session_factory):
-    from call_manager.proposal_assist.turns.outcomes import stamp_post_terminal_usage
+    from grant_lab.proposal_assist.turns.outcomes import stamp_post_terminal_usage
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=make_user(s, email="a-owner@umu.se"))

@@ -1,7 +1,7 @@
 import subprocess
 from pathlib import Path
 
-from call_manager.proposal_assist.citations.gitio import (
+from grant_lab.proposal_assist.citations.gitio import (
     blob_sha,
     read_blob,
     write_and_commit_files,
@@ -28,7 +28,7 @@ def test_blob_sha_missing_path_raises(tmp_path):
     repo = _init_repo(tmp_path)
     import pytest
 
-    from call_manager.proposal_assist.citations.gitio import GitCommitError
+    from grant_lab.proposal_assist.citations.gitio import GitCommitError
 
     with pytest.raises(GitCommitError):
         blob_sha(repo, "HEAD", "nope.md")

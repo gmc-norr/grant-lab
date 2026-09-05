@@ -32,7 +32,7 @@ import uuid
 import pytest
 from sqlalchemy import select
 
-from call_manager.db.models import Call, Source, Workspace
+from grant_lab.db.models import Call, Source, Workspace
 from tests.test_profile_access import (
     NO_SUCH_PROFILE_ID,
     World,

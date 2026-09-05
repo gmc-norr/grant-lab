@@ -58,14 +58,14 @@ def test_the_direct_gate_catches_the_sink_holder_not_the_enclosing_caller():
     from tests.fencing.live_mutex_gate import check_sources
 
     source = (
-        "from call_manager.proposal_assist.citations.gitio import write_and_commit_files\n"
+        "from grant_lab.proposal_assist.citations.gitio import write_and_commit_files\n"
         "def inner(repo, files, msg):\n"
         "    return write_and_commit_files(repo, files, msg)\n"
         "def outer(session, wid, repo):\n"
         "    acquire_commit_mutex_live(session, wid)\n"
         "    return inner(repo, {}, 'm')\n"
     )
-    problems = check_sources({"call_manager/_synthetic/two_function.py": source})
+    problems = check_sources({"grant_lab/_synthetic/two_function.py": source})
     reported = {p.split("::")[1].split(" ")[0] for p in problems}
     assert "inner" in reported, problems
     assert "outer" not in reported, problems

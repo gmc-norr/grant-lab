@@ -7,7 +7,7 @@ import uuid
 
 import pytest
 
-from call_manager.proposal_assist.tools.registry import ToolContext
+from grant_lab.proposal_assist.tools.registry import ToolContext
 
 
 def _ctx() -> ToolContext:
@@ -24,7 +24,7 @@ async def test_two_turns_through_one_retained_context_carry_different_generation
     """The retained subprocess and its ctx are reused across turns, so a stamp
     missed once leaks the previous turn's value. registry.py documents the same
     trap for provenance. No static check can see this; only a runtime one can."""
-    from call_manager.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
+    from grant_lab.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
 
     adapter = ClaudeAgentSDKAdapter.__new__(ClaudeAgentSDKAdapter)
     ctx = _ctx()
@@ -59,7 +59,7 @@ async def test_the_stamp_is_unconditional_even_when_the_generation_repeats():
     """A conditional stamp leaks active_turn_job_id across turns whenever the
     generation happens NOT to change — which is the common case, since most
     turns run against a workspace nobody deleted."""
-    from call_manager.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
+    from grant_lab.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
 
     adapter = ClaudeAgentSDKAdapter.__new__(ClaudeAgentSDKAdapter)
     ctx = _ctx()
@@ -88,7 +88,7 @@ async def test_an_in_flight_invocation_keeps_its_generation_across_a_restamp():
     because it looks correct."""
     import asyncio
 
-    from call_manager.proposal_assist.tools.registry import _safe_tool
+    from grant_lab.proposal_assist.tools.registry import _safe_tool
 
     ctx = _ctx()
     ctx.lifecycle_generation = 3
@@ -127,7 +127,7 @@ async def test_an_in_flight_invocation_keeps_its_generation_across_a_restamp():
 async def test_the_snapshot_survives_run_in_threadpool():
     from starlette.concurrency import run_in_threadpool
 
-    from call_manager.proposal_assist.tools.registry import _safe_tool
+    from grant_lab.proposal_assist.tools.registry import _safe_tool
 
     ctx = _ctx()
     ctx.lifecycle_generation = 3
@@ -153,7 +153,7 @@ def test_the_snapshot_is_immune_to_a_mutation_of_the_SOURCE_selection():
     This is safe today only because set_turn_provenance REPLACES the dict rather
     than mutating it. An immutability guarantee must not rest on that.
     """
-    from call_manager.proposal_assist.tools.registry import snapshot_invocation
+    from grant_lab.proposal_assist.tools.registry import snapshot_invocation
 
     ctx = _ctx()
     ctx.turn_selection = {"kind": "turn one", "nested": {"n": 1}}

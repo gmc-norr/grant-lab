@@ -351,19 +351,19 @@ PROVEN_NON_COMMIT: tuple[Fingerprint, ...] = (
     # git commands themselves did not change.
     # -----------------------------------------------------------------------
     (  # _git_log_proposal: git log -n{limit} ... — reads commit log, no write
-        "call_manager/proposal_assist/tools/history.py",
+        "grant_lab/proposal_assist/tools/history.py",
         "_git_log_proposal",
         1,
         "List(elts=[Constant(value='git'), Constant(value='log'), JoinedStr(values=[Constant(value='-n'), FormattedValue(value=Name(id='limit', ctx=Load()), conversion=-1)]), Constant(value='--pretty=format:%H%x00%ct%x00%s'), Constant(value='--'), Name(id='PROPOSAL_FILENAME', ctx=Load())], ctx=Load())",  # noqa: E501
     ),
     (  # _git_show_proposal: git show {sha}:{path} — reads a blob, no write
-        "call_manager/proposal_assist/tools/history.py",
+        "grant_lab/proposal_assist/tools/history.py",
         "_git_show_proposal",
         1,
         "List(elts=[Constant(value='git'), Constant(value='show'), JoinedStr(values=[FormattedValue(value=Name(id='commit_sha', ctx=Load()), conversion=-1), Constant(value=':'), FormattedValue(value=Name(id='PROPOSAL_FILENAME', ctx=Load()), conversion=-1)])], ctx=Load())",  # noqa: E501
     ),
     (  # _git_diff_proposal: git diff {sha_a} {sha_b} -- file — reads a diff, no write
-        "call_manager/proposal_assist/tools/history.py",
+        "grant_lab/proposal_assist/tools/history.py",
         "_git_diff_proposal",
         1,
         "List(elts=[Constant(value='git'), Constant(value='diff'), Name(id='commit_a', ctx=Load()), Name(id='commit_b', ctx=Load()), Constant(value='--'), Name(id='PROPOSAL_FILENAME', ctx=Load())], ctx=Load())",  # noqa: E501
@@ -374,13 +374,13 @@ PROVEN_NON_COMMIT: tuple[Fingerprint, ...] = (
     # locally-built argv variable to Popen.
     # -----------------------------------------------------------------------
     (  # blob_sha: git rev-parse {ref}:{path} — resolves a blob SHA, no write
-        "call_manager/proposal_assist/citations/gitio.py",
+        "grant_lab/proposal_assist/citations/gitio.py",
         "blob_sha",
         6,
         "List(elts=[Constant(value='git'), Constant(value='rev-parse'), JoinedStr(values=[FormattedValue(value=Name(id='ref', ctx=Load()), conversion=-1), Constant(value=':'), FormattedValue(value=Name(id='path', ctx=Load()), conversion=-1)])], ctx=Load())",  # noqa: E501
     ),
     (  # read_blob: git cat-file -p {sha} — reads blob content, no write
-        "call_manager/proposal_assist/citations/gitio.py",
+        "grant_lab/proposal_assist/citations/gitio.py",
         "read_blob",
         8,
         "List(elts=[Constant(value='git'), Constant(value='cat-file'), Constant(value='-p'), Name(id='sha', ctx=Load())], ctx=Load())",  # noqa: E501
@@ -393,7 +393,7 @@ PROVEN_NON_COMMIT: tuple[Fingerprint, ...] = (
         # `all_branches` block and their docstring paragraphs went in. DERIVED
         # from `pristine_stray_git_report()`, not counted by hand. The call
         # itself is unchanged, and `git log` still writes nothing.
-        "call_manager/proposal_assist/citations/gitio.py",
+        "grant_lab/proposal_assist/citations/gitio.py",
         "list_commits",
         67,
         "Name(id='argv', ctx=Load())",
@@ -411,13 +411,13 @@ PROVEN_NON_COMMIT: tuple[Fingerprint, ...] = (
     #     pure name-validation read with no repository write of any kind.
     # -----------------------------------------------------------------------
     (  # _git: subprocess.run(["git", *args]) — shared helper, ref reads/moves only, never commits
-        "call_manager/proposal_assist/citations/gitio.py",
+        "grant_lab/proposal_assist/citations/gitio.py",
         "_git",
         4,
         "List(elts=[Constant(value='git'), Starred(value=Name(id='args', ctx=Load()), ctx=Load())], ctx=Load())",  # noqa: E501
     ),
     (  # is_valid_branch_name: git check-ref-format --branch {name} — validates a name, no write
-        "call_manager/proposal_assist/citations/gitio.py",
+        "grant_lab/proposal_assist/citations/gitio.py",
         "is_valid_branch_name",
         24,
         "List(elts=[Constant(value='git'), Constant(value='check-ref-format'), Constant(value='--branch'), Name(id='name', ctx=Load())], ctx=Load())",  # noqa: E501

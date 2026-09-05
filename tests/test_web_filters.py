@@ -1,4 +1,4 @@
-from call_manager.web.filters import phase_label
+from grant_lab.web.filters import phase_label
 
 
 def test_phase_label_two_mode():

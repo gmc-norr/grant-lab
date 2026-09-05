@@ -11,13 +11,13 @@ from dataclasses import dataclass
 import pytest
 from sqlalchemy import select
 
-from call_manager.db.models import Reference, ReferenceChunk
-from call_manager.proposal_assist.references.embed import FakeEmbedder
-from call_manager.proposal_assist.references.ingest import (
+from grant_lab.db.models import Reference, ReferenceChunk
+from grant_lab.proposal_assist.references.embed import FakeEmbedder
+from grant_lab.proposal_assist.references.ingest import (
     IngestResult,
     ingest_bytes,
 )
-from call_manager.proposal_assist.references.storage import ReferenceStorage
+from grant_lab.proposal_assist.references.storage import ReferenceStorage
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 # ---------------------------------------------------------------------------
@@ -261,10 +261,10 @@ def test_ingest_records_original_sha256(pg_session_factory, tmp_path):
 
     from sqlalchemy import select
 
-    from call_manager.db.models import Reference
-    from call_manager.proposal_assist.references.embed import FakeEmbedder
-    from call_manager.proposal_assist.references.ingest import ingest_bytes
-    from call_manager.proposal_assist.references.storage import ReferenceStorage
+    from grant_lab.db.models import Reference
+    from grant_lab.proposal_assist.references.embed import FakeEmbedder
+    from grant_lab.proposal_assist.references.ingest import ingest_bytes
+    from grant_lab.proposal_assist.references.storage import ReferenceStorage
     from tests.proposal_assist.conftest import make_user, make_workspace
 
     storage = ReferenceStorage(root=tmp_path)
@@ -466,7 +466,7 @@ def test_phase3_failure_is_nonfatal(pg_session_factory, tmp_path, monkeypatch):
     The ref row must still exist and metadata_status must be 'failed'.
     IngestResult is returned normally (text_status='done').
     """
-    import call_manager.proposal_assist.references.ingest as ingest_module
+    import grant_lab.proposal_assist.references.ingest as ingest_module
 
     storage = ReferenceStorage(root=tmp_path)
     embedder = FakeEmbedder()
@@ -632,7 +632,7 @@ def test_phase3_retry_on_integrity_error_recovers_citekey(
     """
     import uuid as _uuid
 
-    import call_manager.proposal_assist.references.ingest as ingest_module
+    import grant_lab.proposal_assist.references.ingest as ingest_module
 
     storage = ReferenceStorage(root=tmp_path)
     embedder = FakeEmbedder()
@@ -651,7 +651,7 @@ def test_phase3_retry_on_integrity_error_recovers_citekey(
 
     preexisting_id = _uuid.uuid4()
     with pg_session_factory() as s:
-        from call_manager.db.models import Reference as _Ref
+        from grant_lab.db.models import Reference as _Ref
 
         dummy_bytes = b"dummy"
         preexisting = _Ref(
@@ -745,7 +745,7 @@ def test_phase3_retry_exhaustion_marks_metadata_failed(pg_session_factory, tmp_p
     import hashlib as _hashlib
     import uuid as _uuid
 
-    import call_manager.proposal_assist.references.ingest as ingest_module
+    import grant_lab.proposal_assist.references.ingest as ingest_module
 
     storage = ReferenceStorage(root=tmp_path)
     embedder = FakeEmbedder()
@@ -764,7 +764,7 @@ def test_phase3_retry_exhaustion_marks_metadata_failed(pg_session_factory, tmp_p
     blocker_id = _uuid.uuid4()
     dummy = b"blocker"
     with pg_session_factory() as s:
-        from call_manager.db.models import Reference as _Ref
+        from grant_lab.db.models import Reference as _Ref
 
         blocker = _Ref(
             id=blocker_id,

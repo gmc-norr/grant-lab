@@ -8,8 +8,8 @@ import logging
 
 import pytest
 
-from call_manager.config import Settings
-from call_manager.logging import QUIET_LOGGERS, configure_logging
+from grant_lab.config import Settings
+from grant_lab.logging import QUIET_LOGGERS, configure_logging
 
 
 @pytest.fixture
@@ -61,7 +61,7 @@ def test_settings_validate_log_level(monkeypatch):
 def test_create_app_applies_the_configured_level(monkeypatch, _restore_levels):
     monkeypatch.setenv("LOG_LEVEL", "WARNING")
     _settings(monkeypatch)  # sets the rest of the env
-    from call_manager.main import create_app
+    from grant_lab.main import create_app
 
     create_app()  # lifespan not entered: no DB needed
     assert logging.getLogger().level == logging.WARNING

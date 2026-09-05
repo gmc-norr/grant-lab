@@ -32,9 +32,9 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select, text
 
-import call_manager.profiles.post_edit as post_edit
-from call_manager.auth.session_cookie import SessionSigner
-from call_manager.db.models import (
+import grant_lab.profiles.post_edit as post_edit
+from grant_lab.auth.session_cookie import SessionSigner
+from grant_lab.db.models import (
     Call,
     CallRanking,
     CallRankingCriterion,
@@ -43,7 +43,7 @@ from call_manager.db.models import (
     Source,
     User,
 )
-from call_manager.main import create_app
+from grant_lab.main import create_app
 
 # An id no profile can have. Used for the "does a profile exist here?" oracle
 # probes, which must be indistinguishable from an unreadable real profile.

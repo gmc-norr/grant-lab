@@ -73,7 +73,7 @@ def test_every_model_declares_the_column_matching_the_migration():
 
     Reads the mapped columns directly, so it needs no database.
     """
-    from call_manager.db.models import (
+    from grant_lab.db.models import (
         AttachmentJob,
         ClaimAnalysisJob,
         CoherenceJob,

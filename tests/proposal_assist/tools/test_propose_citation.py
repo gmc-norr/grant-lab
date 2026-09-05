@@ -9,22 +9,22 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.config import Settings
-from call_manager.db.models import ProposedChange, Reference, ReferenceChunk
-from call_manager.proposal_assist.port_impl import build_ports
-from call_manager.proposal_assist.ports.errors import (
+from grant_lab.config import Settings
+from grant_lab.db.models import ProposedChange, Reference, ReferenceChunk
+from grant_lab.proposal_assist.port_impl import build_ports
+from grant_lab.proposal_assist.ports.errors import (
     BUSY_ERROR_MESSAGE,
     DELETED_ERROR_MESSAGE,
     CommitMutexTimeout,
     EffectRejected,
     WorkspaceGenerationStale,
 )
-from call_manager.proposal_assist.tools.citations import propose_citation_impl
-from call_manager.proposal_assist.tools.proposal import (
+from grant_lab.proposal_assist.tools.citations import propose_citation_impl
+from grant_lab.proposal_assist.tools.proposal import (
     PROPOSAL_FILENAME,
     read_proposal_impl,
 )
-from call_manager.proposal_assist.tools.registry import ToolContext, snapshot_invocation
+from grant_lab.proposal_assist.tools.registry import ToolContext, snapshot_invocation
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 EMBED_DIM = 1024

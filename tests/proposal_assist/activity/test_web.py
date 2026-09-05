@@ -1,7 +1,7 @@
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from call_manager.db.models import User, WorkspaceEvent
+from grant_lab.db.models import User, WorkspaceEvent
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
@@ -162,8 +162,8 @@ def test_activity_member_category_owner_only_pii(
     """Owner sees member_added rows (with email); non-owner members do not."""
     from fastapi.testclient import TestClient
 
-    from call_manager.auth.session_cookie import SessionSigner
-    from call_manager.db.models import WorkspaceEvent, WorkspaceViewer
+    from grant_lab.auth.session_cookie import SessionSigner
+    from grant_lab.db.models import WorkspaceEvent, WorkspaceViewer
 
     _app.state.settings.workspaces_dir = str(tmp_path)
     member_email = "viewer@umu.se"

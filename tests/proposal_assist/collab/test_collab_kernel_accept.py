@@ -16,21 +16,21 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
-from call_manager.db.models import ArtifactVersion, ProposedChange, User, Workspace
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME, Artifact, filename_for
-from call_manager.proposal_assist.collab import state, store
-from call_manager.proposal_assist.collab.hydrate import build_doc, load_or_hydrate
-from call_manager.proposal_assist.collab.kernel import kernel_accept_prose
-from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
-from call_manager.proposal_assist.collab.yjs_bridge import (
+from grant_lab.db.models import ArtifactVersion, ProposedChange, User, Workspace
+from grant_lab.proposal_assist.artifacts import PROPOSAL_FILENAME, Artifact, filename_for
+from grant_lab.proposal_assist.collab import state, store
+from grant_lab.proposal_assist.collab.hydrate import build_doc, load_or_hydrate
+from grant_lab.proposal_assist.collab.kernel import kernel_accept_prose
+from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
+from grant_lab.proposal_assist.collab.yjs_bridge import (
     apply_pm_json_to_fragment,
     pm_json_to_ydoc,
     ydoc_to_pm_json,
 )
-from call_manager.proposal_assist.editing.save import SpecLockedError
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.proposals.accepting import ProposedChangeNotFound
-from call_manager.proposal_assist.proposals.kernel_accept import _CLEAN_ACCEPT_ERRORS
+from grant_lab.proposal_assist.editing.save import SpecLockedError
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.proposals.accepting import ProposedChangeNotFound
+from grant_lab.proposal_assist.proposals.kernel_accept import _CLEAN_ACCEPT_ERRORS
 from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 

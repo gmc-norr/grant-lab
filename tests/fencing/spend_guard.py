@@ -37,7 +37,7 @@ SPEND_WRITERS = frozenset({"record_spend", "record_usage"})
 # every sibling function in the same file forever.
 PINNED: dict[tuple[str, str], str] = {
     (
-        "call_manager/proposal_assist/spend.py",
+        "grant_lab/proposal_assist/spend.py",
         "record_spend",
     ): (
         "this IS the writer — it constructs the LlmSpend row, which the ORM-constructor "
@@ -45,7 +45,7 @@ PINNED: dict[tuple[str, str], str] = {
         "one-writer property is asserted separately by llm_spend_writers()"
     ),
     (
-        "call_manager/proposal_assist/turns/submit.py",
+        "grant_lab/proposal_assist/turns/submit.py",
         "submit_user_turn",
     ): (
         "writes an ESTIMATE, not spend: ChatTurn(tokens_in=...) at submit time is "
@@ -55,7 +55,7 @@ PINNED: dict[tuple[str, str], str] = {
         "charge the cap for a call that has not happened yet"
     ),
     (
-        "call_manager/proposal_assist/review/jobs.py",
+        "grant_lab/proposal_assist/review/jobs.py",
         "rollup_run_totals",
     ): (
         "pure re-derivation of run totals from items that each already recorded "
@@ -118,8 +118,8 @@ def _own_nodes(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.AST]:
 # was BOUND by an import from one of these — see _spend_writer_names.
 WRITER_MODULES = frozenset(
     {
-        "call_manager.proposal_assist.spend",
-        "call_manager.proposal_assist.citations.usage",
+        "grant_lab.proposal_assist.spend",
+        "grant_lab.proposal_assist.citations.usage",
     }
 )
 
@@ -128,7 +128,7 @@ WRITER_MODULES = frozenset(
 # modules inside the citations package. Elsewhere it was a real bypass: a function
 # could stamp `job.input_tokens` on an evaluator job while recording unrelated
 # citation spend, and the gate went green.
-CITATION_PREFIX = "call_manager/proposal_assist/citations/"
+CITATION_PREFIX = "grant_lab/proposal_assist/citations/"
 
 
 def _writers_for(rel: str) -> frozenset[str]:
@@ -187,7 +187,7 @@ def _spend_writer_names(
         elif isinstance(node, ast.Import):
             # `import fake as record_spend` rebinds the name to something that is
             # not the writer. The writer modules are excluded, or
-            # `import call_manager.proposal_assist.spend` would shadow the very
+            # `import grant_lab.proposal_assist.spend` would shadow the very
             # path it establishes — the control test caught exactly that.
             for alias in node.names:
                 if alias.name in WRITER_MODULES:
@@ -200,7 +200,7 @@ def _spend_writer_names(
             mod = node.module or ""
             for alias in node.names:
                 # Skip BOTH shapes that establish a writer: a name imported FROM a
-                # writer module, and a name that IS one (`from call_manager
+                # writer module, and a name that IS one (`from grant_lab
                 # .proposal_assist import spend`). Without the second, this rule
                 # shadowed the very module alias it establishes — the same trap the
                 # ast.Import branch above hit, caught by the same control test.
@@ -215,7 +215,7 @@ def _spend_writer_names(
                 for alias in node.names:
                     if alias.name in allowed:
                         names.add(alias.asname or alias.name)
-            # `from call_manager.proposal_assist import spend` -> `spend.record_spend`
+            # `from grant_lab.proposal_assist import spend` -> `spend.record_spend`
             for alias in node.names:
                 if f"{mod}.{alias.name}" in WRITER_MODULES:
                     module_aliases.add(alias.asname or alias.name)
@@ -291,7 +291,7 @@ def _non_assignment_stamp(node: ast.AST, model_names: frozenset[str]) -> bool:
                 # to catch a shape nobody writes. Pins are how gates rot, so the
                 # honest limit beats four standing pins. An inline dict IS caught.
     # Model(input_tokens=n) — building a ROW with token fields. Restricted to
-    # classes imported from call_manager.db.models, because "any call with a
+    # classes imported from grant_lab.db.models, because "any call with a
     # tokens_in= keyword" is far too wide: it reported twelve legitimate
     # functions, `record_spend` itself among them, since `tokens_in` IS in
     # TOKEN_FIELDS. Measured against the real tree, not reasoned about — the
@@ -317,11 +317,11 @@ def _non_assignment_stamp(node: ast.AST, model_names: frozenset[str]) -> bool:
 
 
 def _model_names(tree: ast.AST) -> frozenset[str]:
-    """Names bound by an import from call_manager.db.models — the ORM rows."""
+    """Names bound by an import from grant_lab.db.models — the ORM rows."""
     out: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and (node.module or "") == (
-            "call_manager.db.models"
+            "grant_lab.db.models"
         ):
             for alias in node.names:
                 out.add(alias.asname or alias.name)
@@ -372,7 +372,7 @@ def _local_bindings(nodes: list[ast.AST], func: ast.AST) -> frozenset[str]:
             # THIS function while the module-level import stays live in `writer_names`.
             # Without this branch the function's unrelated call satisfied the gate.
             # Writer modules are excluded for the same reason as at module level:
-            # a local `import call_manager.proposal_assist.spend` ESTABLISHES the
+            # a local `import grant_lab.proposal_assist.spend` ESTABLISHES the
             # writer, and shadowing it would break the very path it opens.
             for alias in node.names:
                 if alias.name in WRITER_MODULES:
@@ -507,13 +507,13 @@ def llm_spend_writers() -> list[str]:
             if isinstance(node, ast.ImportFrom):
                 mod = node.module or ""
                 for alias in node.names:
-                    if mod == "call_manager.db.models" and alias.name == "LlmSpend":
+                    if mod == "grant_lab.db.models" and alias.name == "LlmSpend":
                         local_names.add(alias.asname or alias.name)
-                    elif f"{mod}.{alias.name}" == "call_manager.db.models":
+                    elif f"{mod}.{alias.name}" == "grant_lab.db.models":
                         module_aliases.add(alias.asname or alias.name)
             elif isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.name == "call_manager.db.models":
+                    if alias.name == "grant_lab.db.models":
                         module_aliases.add(alias.asname or alias.name)
         hit = False
         for node in ast.walk(tree):

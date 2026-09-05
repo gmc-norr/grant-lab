@@ -94,7 +94,7 @@ export default defineConfig(({ mode }) => {
   },
   // Build to frontend/dist (INSIDE the frontend dir — writable by the non-root
   // container builder; the package tree at ../src is NOT copied into the build
-  // image). The packaging step (Task 6) copies dist/ -> src/call_manager/web/spa/.
+  // image). The packaging step (Task 6) copies dist/ -> src/grant_lab/web/spa/.
   // Do NOT point outDir outside __dirname: in the container __dirname is /build,
   // so ../src/... would resolve to /src/... which is neither present nor writable.
   build: { outDir: resolve(__dirname, "dist"), emptyOutDir: true },

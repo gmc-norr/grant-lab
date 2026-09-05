@@ -11,7 +11,7 @@ def _cfg(pg_url):
 
 
 def test_0045_nulls_profile_vectors_only(pg_url):
-    from call_manager.db.session import make_engine
+    from grant_lab.db.session import make_engine
 
     cfg = _cfg(pg_url)
     command.upgrade(cfg, "head")

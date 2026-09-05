@@ -206,7 +206,7 @@ def test_0007_check_constraint_rejects_orphan_embedding(pg_session_factory):
     from sqlalchemy import select
     from sqlalchemy.exc import IntegrityError
 
-    from call_manager.db.models import Call, Source
+    from grant_lab.db.models import Call, Source
 
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()

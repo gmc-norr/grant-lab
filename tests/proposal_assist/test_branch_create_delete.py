@@ -4,7 +4,7 @@ import subprocess
 
 import pytest
 
-from call_manager.proposal_assist.branches import (
+from grant_lab.proposal_assist.branches import (
     BranchExists,
     BranchInUse,
     BranchLast,
@@ -15,14 +15,14 @@ from call_manager.proposal_assist.branches import (
     delete_workspace_branch,
     list_workspace_branches,
 )
-from call_manager.proposal_assist.citations.gitio import (
+from grant_lab.proposal_assist.citations.gitio import (
     branch_exists,
     branch_tips,
     current_branch,
     current_head,
 )
-from call_manager.proposal_assist.collab import store
-from call_manager.proposal_assist.paths import workspace_repo_dir
+from grant_lab.proposal_assist.collab import store
+from grant_lab.proposal_assist.paths import workspace_repo_dir
 from tests.proposal_assist.conftest import init_workspace_repo, make_workspace, stamp_for
 
 

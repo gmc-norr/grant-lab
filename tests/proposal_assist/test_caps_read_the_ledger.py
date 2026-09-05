@@ -10,8 +10,8 @@ from dataclasses import dataclass
 
 import pytest
 
-from call_manager.proposal_assist.spend import record_spend
-from call_manager.proposal_assist.turns.caps import check_global_daily_token_cap
+from grant_lab.proposal_assist.spend import record_spend
+from grant_lab.proposal_assist.turns.caps import check_global_daily_token_cap
 from tests.proposal_assist.conftest import make_workspace
 
 
@@ -97,7 +97,7 @@ def test_stale_job_columns_no_longer_move_the_cap(pg_session_factory, settings_a
     # The columns are a display cache now. Writing a huge value into one and no
     # ledger row must NOT trip the cap — that is what "the ledger is the source
     # of truth" means, stated as a test rather than a comment.
-    from call_manager.db.models import CoherenceJob
+    from grant_lab.db.models import CoherenceJob
 
     ws_id = seed_ws()
     with pg_session_factory() as s:

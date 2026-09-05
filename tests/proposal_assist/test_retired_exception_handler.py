@@ -13,8 +13,8 @@ import uuid
 
 from fastapi.testclient import TestClient
 
-from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
-from call_manager.proposal_assist.drafting.locking import DELETED_ERROR_MESSAGE, WorkspaceDeleted
+from grant_lab.proposal_assist.drafting.contract import WorkspaceRetired
+from grant_lab.proposal_assist.drafting.locking import DELETED_ERROR_MESSAGE, WorkspaceDeleted
 
 
 def test_the_two_exceptions_are_siblings_so_one_handler_cannot_serve_both():

@@ -1,7 +1,7 @@
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from call_manager.db.models import Profile, ProfileKind, User
+from grant_lab.db.models import Profile, ProfileKind, User
 
 
 def test_can_insert_and_read_user(pg_session_factory):

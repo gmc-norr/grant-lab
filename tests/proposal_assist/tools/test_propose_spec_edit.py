@@ -7,15 +7,15 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.config import Settings
-from call_manager.db.models import ProposedChange
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.port_impl import build_ports
-from call_manager.proposal_assist.tools.proposal import (
+from grant_lab.config import Settings
+from grant_lab.db.models import ProposedChange
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.port_impl import build_ports
+from grant_lab.proposal_assist.tools.proposal import (
     propose_spec_edit_impl,
     read_spec_impl,
 )
-from call_manager.proposal_assist.tools.registry import ToolContext, snapshot_invocation
+from grant_lab.proposal_assist.tools.registry import ToolContext, snapshot_invocation
 from tests.proposal_assist.conftest import make_workspace
 
 

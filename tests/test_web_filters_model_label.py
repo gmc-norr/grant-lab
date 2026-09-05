@@ -8,8 +8,8 @@ this app actually runs should always have an entry.
 
 import pytest
 
-from call_manager.config import Settings
-from call_manager.web.filters import model_label
+from grant_lab.config import Settings
+from grant_lab.web.filters import model_label
 
 
 @pytest.mark.parametrize(

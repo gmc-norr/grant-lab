@@ -8,8 +8,8 @@ column replaces.
 
 from __future__ import annotations
 
-from call_manager.db.models import Workspace
-from call_manager.workspaces import bump_lifecycle_generation, soft_delete_workspace_db
+from grant_lab.db.models import Workspace
+from grant_lab.workspaces import bump_lifecycle_generation, soft_delete_workspace_db
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 

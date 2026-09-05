@@ -2,7 +2,7 @@ import time
 
 import pytest
 
-from call_manager.auth.session_cookie import (
+from grant_lab.auth.session_cookie import (
     InvalidSession,
     SessionSigner,
 )

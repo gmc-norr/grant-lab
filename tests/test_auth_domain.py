@@ -1,6 +1,6 @@
 import pytest
 
-from call_manager.auth.domain import domain_allowed, extract_domain, normalize_domain
+from grant_lab.auth.domain import domain_allowed, extract_domain, normalize_domain
 
 
 @pytest.mark.parametrize(

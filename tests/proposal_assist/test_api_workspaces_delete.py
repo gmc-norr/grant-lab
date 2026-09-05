@@ -8,7 +8,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     ChatTurn,
     CoherenceJob,
     TurnJob,
@@ -16,9 +16,9 @@ from call_manager.db.models import (
     WorkspaceEvent,
     WorkspaceViewer,
 )
-from call_manager.proposal_assist.attachments.storage import AttachmentStorage
-from call_manager.proposal_assist.paths import workspace_repo_dir
-from call_manager.proposal_assist.references.storage import ReferenceStorage
+from grant_lab.proposal_assist.attachments.storage import AttachmentStorage
+from grant_lab.proposal_assist.paths import workspace_repo_dir
+from grant_lab.proposal_assist.references.storage import ReferenceStorage
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 

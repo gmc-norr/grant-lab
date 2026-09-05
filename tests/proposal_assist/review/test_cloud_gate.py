@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from call_manager.proposal_assist.web._cloud_gate import gate_cloud_llm
+from grant_lab.proposal_assist.web._cloud_gate import gate_cloud_llm
 
 
 def _req(drafting_enabled=True):
@@ -66,7 +66,7 @@ def _real_req(drafting_enabled=True):
 
 
 def test_one_members_ack_does_not_consent_for_another(pg_session_factory):
-    from call_manager.db.models import WorkspaceViewer
+    from grant_lab.db.models import WorkspaceViewer
     from tests.proposal_assist.conftest import make_user, make_workspace
 
     with pg_session_factory() as s:

@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from call_manager.db.models import ArtifactVersion, ChatTurn
+from grant_lab.db.models import ArtifactVersion, ChatTurn
 from tests.proposal_assist.conftest import make_workspace
 
 

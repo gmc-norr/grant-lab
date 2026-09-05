@@ -19,9 +19,9 @@ from datetime import UTC, datetime
 
 import pytest
 
-from call_manager.sources.eu_portal import EUPortalAdapter
-from call_manager.sources.types import AdapterError
-from call_manager.sources.vinnova import VinnovaAdapter
+from grant_lab.sources.eu_portal import EUPortalAdapter
+from grant_lab.sources.types import AdapterError
+from grant_lab.sources.vinnova import VinnovaAdapter
 
 
 @pytest.mark.parametrize(
@@ -33,8 +33,8 @@ from call_manager.sources.vinnova import VinnovaAdapter
 )
 def test_a_refused_ssrf_target_aborts_instead_of_connecting_unpinned(name, make, monkeypatch):
     # `pinned_transport_for` refuses. The adapter must NOT reach httpx.
-    import call_manager.sources.eu_portal as eu
-    import call_manager.sources.vinnova as vin
+    import grant_lab.sources.eu_portal as eu
+    import grant_lab.sources.vinnova as vin
 
     for mod in (eu, vin):
         monkeypatch.setattr(mod, "pinned_transport_for", lambda _url: None)

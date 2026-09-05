@@ -1,4 +1,4 @@
-from call_manager.embeddings.calibration import (
+from grant_lab.embeddings.calibration import (
     BGE_M3_DEFAULTS,
     check_threshold_calibration,
 )

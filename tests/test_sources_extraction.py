@@ -5,12 +5,12 @@ from pathlib import Path
 
 import httpx
 
-from call_manager.sources.extraction import (
+from grant_lab.sources.extraction import (
     _resolve_transport,
     fetch_html_main_content,
     fetch_pdf_text,
 )
-from call_manager.sources.types import _PinnedNetworkBackend
+from grant_lab.sources.types import _PinnedNetworkBackend
 
 
 def _fake_getaddrinfo(*ips):
@@ -153,7 +153,7 @@ def test_fetch_pdf_text_rejects_oversized_response():
 def test_fetch_html_main_content_logs_warning_on_failure(caplog):
     import logging
 
-    with caplog.at_level(logging.WARNING, logger="call_manager.sources.extraction"):
+    with caplog.at_level(logging.WARNING, logger="grant_lab.sources.extraction"):
         fetch_html_main_content(
             "https://example.com/missing",
             transport=_html_transport("", status=500),
@@ -167,7 +167,7 @@ def test_fetch_html_main_content_logs_warning_on_failure(caplog):
 def test_fetch_pdf_text_logs_warning_on_failure(caplog):
     import logging
 
-    with caplog.at_level(logging.WARNING, logger="call_manager.sources.extraction"):
+    with caplog.at_level(logging.WARNING, logger="grant_lab.sources.extraction"):
         fetch_pdf_text(
             "https://example.com/missing.pdf",
             transport=_pdf_transport(b"", status=500),
@@ -266,7 +266,7 @@ def test_fetch_html_main_content_caps_extracted_text():
     oversized output is truncated with a marker."""
     from unittest.mock import patch
 
-    from call_manager.sources.extraction import _MAX_EXTRACTED_TEXT_CHARS
+    from grant_lab.sources.extraction import _MAX_EXTRACTED_TEXT_CHARS
 
     huge_text = "x" * (_MAX_EXTRACTED_TEXT_CHARS + 10_000)
     with patch("trafilatura.extract", return_value=huge_text):
@@ -289,7 +289,7 @@ def test_fetch_html_main_content_returns_none_on_extractor_exception(caplog):
 
     with (
         patch("trafilatura.extract", side_effect=RuntimeError("simulated parser error")),
-        caplog.at_level(logging.WARNING, logger="call_manager.sources.extraction"),
+        caplog.at_level(logging.WARNING, logger="grant_lab.sources.extraction"),
     ):
         text = fetch_html_main_content(
             "https://example.com/call",

@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from pydantic_core import PydanticUndefined  # noqa: E402
 
-from call_manager.config import Settings  # noqa: E402
+from grant_lab.config import Settings  # noqa: E402
 
 # Keys a fresh deployment must decide on day one. Emitted UNCOMMENTED with the
 # value given here, or the code default when the value is None. Everything else
@@ -74,7 +74,7 @@ DAY_ONE: dict[str, str | None] = {
 }
 
 HEADER = """\
-# .env.example — GENERATED from src/call_manager/config.py by
+# .env.example — GENERATED from src/grant_lab/config.py by
 # scripts/gen_env_example.py. Do not hand-edit: regenerate with
 #     uv run python scripts/gen_env_example.py
 # and tests/test_env_example.py fails while this file is stale.

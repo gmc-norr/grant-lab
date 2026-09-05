@@ -12,8 +12,8 @@ import uuid
 
 import pytest
 
-from call_manager.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
-from call_manager.proposal_assist.drafting.contract import AgentHandle, LaunchContext
+from grant_lab.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
+from grant_lab.proposal_assist.drafting.contract import AgentHandle, LaunchContext
 
 
 def _adapter(**kw):

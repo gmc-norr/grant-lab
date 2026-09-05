@@ -1,8 +1,8 @@
 from fastapi.testclient import TestClient
 
-from call_manager.auth.email import InMemoryEmailSender
-from call_manager.auth.rate_limit import SlidingWindowLimiter
-from call_manager.main import create_app
+from grant_lab.auth.email import InMemoryEmailSender
+from grant_lab.auth.rate_limit import SlidingWindowLimiter
+from grant_lab.main import create_app
 
 # A 12+ char password so the form's required `password` field is populated and
 # the login handler actually runs (these tests exercise IP/limiter plumbing and
@@ -120,7 +120,7 @@ def test_api_admin_requires_auth(monkeypatch, pg_url):
 def test_api_admin_forbidden_for_non_admin(monkeypatch, pg_url, pg_session_factory):
     """An authenticated non-admin gets 403 (the require_admin backstop)."""
     app, _ = _mk_app(monkeypatch, pg_url)
-    from call_manager.db.models import User
+    from grant_lab.db.models import User
 
     with pg_session_factory() as s:
         u = User(status="active", email="plain@umu.se", is_admin=False)

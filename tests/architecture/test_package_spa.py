@@ -36,7 +36,7 @@ def _tree(tmp_path: Path, *, modules: list[str]) -> Path:
     (dist / "index.html").write_text("<!doctype html>")
     (dist / "module-manifest.json").write_text(json.dumps(modules))
 
-    spa = tmp_path / "src" / "call_manager" / "web" / "spa"
+    spa = tmp_path / "src" / "grant_lab" / "web" / "spa"
     spa.mkdir(parents=True)
     (spa / SENTINEL).write_text("the previously served bundle")
     return tmp_path
@@ -69,7 +69,7 @@ def test_the_refusal_does_not_destroy_the_served_tree(tmp_path):
     is what goes red. A script that deletes before it validates has already
     destroyed the served bundle by the time it reports the failure."""
     root = _tree(tmp_path, modules=DIRTY)
-    spa = root / "src" / "call_manager" / "web" / "spa"
+    spa = root / "src" / "grant_lab" / "web" / "spa"
     before = sorted(p.name for p in spa.iterdir())
 
     assert _run(root, VITE_APP_EDITION="match").returncode == 1
@@ -83,7 +83,7 @@ def test_a_clean_bundle_packages_and_replaces_the_previous_one(tmp_path):
     root = _tree(tmp_path, modules=CLEAN)
     out = _run(root, VITE_APP_EDITION="match")
     assert out.returncode == 0, out.stdout + out.stderr
-    spa = root / "src" / "call_manager" / "web" / "spa"
+    spa = root / "src" / "grant_lab" / "web" / "spa"
     assert (spa / "index.html").exists()
     assert not (spa / SENTINEL).exists(), "the previous bundle must not survive"
     assert not (spa / "module-manifest.json").exists(), "a build artefact, not an asset"
@@ -98,7 +98,7 @@ def test_the_edition_comes_from_the_bundle_not_the_variable(tmp_path, env):
     out = _run(root, **env)
     assert out.returncode == 0, out.stdout + out.stderr
     assert "edition=match" in out.stdout, out.stdout
-    assert (root / "src/call_manager/web/spa/edition.txt").read_text().startswith("edition=match")
+    assert (root / "src/grant_lab/web/spa/edition.txt").read_text().startswith("edition=match")
 
 
 def test_a_full_bundle_packages_as_full(tmp_path):
@@ -155,7 +155,7 @@ def test_the_bundle_gate_accepts_a_clean_manifest(tmp_path):
 
 # --- the served tree has exactly one writer ----------------------------------
 # package_spa.sh is the gate: it asks dist/module-manifest.json which edition the
-# bundle actually is and stamps src/call_manager/web/spa/edition.txt with the
+# bundle actually is and stamps src/grant_lab/web/spa/edition.txt with the
 # answer. That only governs the deployed artefact if nothing ELSE writes that
 # directory. Two things did — ci.yml's `docker cp` for the wheel and
 # collab_e2e_run.sh's `rsync --delete` — and both were invisible, because
@@ -163,7 +163,7 @@ def test_the_bundle_gate_accepts_a_clean_manifest(tmp_path):
 # shipped a full SPA past every gate, and a local prod e2e run erased the marker a
 # `pnpm package:match` had left. Both now call the script. This keeps it true.
 
-_SERVED = "src/call_manager/web/spa"
+_SERVED = "src/grant_lab/web/spa"
 
 # Write verbs, shell and Python. `docker cp` matches on `cp`. Deliberately NOT a
 # bare `>`: YAML block scalars are `run: >`.
@@ -171,7 +171,7 @@ _WRITE = re.compile(
     r"\b(rm|rsync|cp|mkdir|mv|tee|install|unzip|tar"
     r"|rmtree|copytree|copy2|unlink|write_text|write_bytes|rename|replace|makedirs)\b"
 )
-# `SPA="$ROOT/src/call_manager/web/spa"` — an assignment that captures the path.
+# `SPA="$ROOT/src/grant_lab/web/spa"` — an assignment that captures the path.
 _ASSIGN = re.compile(r"^(?:export\s+|let\s+|const\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$")
 
 
@@ -202,7 +202,7 @@ def _writer_lines(text: str, name: str) -> list[str]:
     Variable indirection is the whole point of this pass. The first version
     required the literal path and a write verb on the SAME line — and
     `package_spa.sh`, the one script that certainly writes the tree, does
-    `SPA="$ROOT/src/call_manager/web/spa"` and then `rm -rf "$SPA"`. Measured: the
+    `SPA="$ROOT/src/grant_lab/web/spa"` and then `rm -rf "$SPA"`. Measured: the
     detector flagged ZERO lines in it. It only ever passed because that file is
     skipped by name, and a brand-new rogue script copying the same idiom sailed
     through all fifteen tests. Found independently by three outside models;
@@ -270,9 +270,9 @@ def test_the_detector_sees_the_real_writer():
 def test_the_writer_detector_actually_detects():
     """The historical forms. These three lines were really in the tree."""
     flagged = _writer_lines(
-        "rsync -a --delete frontend/dist/ src/call_manager/web/spa/\n"
-        "rm -rf src/call_manager/web/spa && mkdir -p src/call_manager/web/spa\n"
-        'docker cp "$c:/build/dist/." src/call_manager/web/spa/\n',
+        "rsync -a --delete frontend/dist/ src/grant_lab/web/spa/\n"
+        "rm -rf src/grant_lab/web/spa && mkdir -p src/grant_lab/web/spa\n"
+        'docker cp "$c:/build/dist/." src/grant_lab/web/spa/\n',
         "fixture",
     )
     assert len(flagged) == 3, flagged
@@ -281,7 +281,7 @@ def test_the_writer_detector_actually_detects():
 def test_the_detector_follows_variable_indirection():
     """The form that defeated the first version, in shell and in Python."""
     shell = _writer_lines(
-        'SPA_DIR="src/call_manager/web/spa"\n'
+        'SPA_DIR="src/grant_lab/web/spa"\n'
         'rm -rf "$SPA_DIR"\n'
         'mkdir -p "$SPA_DIR"\n'
         'cp -R frontend/dist/. "$SPA_DIR"/\n',
@@ -290,13 +290,13 @@ def test_the_detector_follows_variable_indirection():
     assert len(shell) == 3, shell
 
     chained = _writer_lines(
-        'SPA="$ROOT/src/call_manager/web/spa"\nDEST="$SPA"\nrsync -a x/ "$DEST"/\n',
+        'SPA="$ROOT/src/grant_lab/web/spa"\nDEST="$SPA"\nrsync -a x/ "$DEST"/\n',
         "rogue2.sh",
     )
     assert len(chained) == 1, chained
 
     python_writer = _writer_lines(
-        'SPA = REPO / "src/call_manager/web/spa"\nshutil.rmtree(SPA)\nshutil.copytree(DIST, SPA)\n',
+        'SPA = REPO / "src/grant_lab/web/spa"\nshutil.rmtree(SPA)\nshutil.copytree(DIST, SPA)\n',
         "rogue.py",
     )
     assert len(python_writer) == 2, python_writer
@@ -309,9 +309,9 @@ def test_the_detector_does_not_flag_reads_or_comments():
     write either — only a write verb applied to the alias is."""
     assert (
         _writer_lines(
-            '  if ! git check-ignore -q "src/call_manager/web/spa/"; then\n'
-            "# NOTE: rm -rf src/call_manager/web/spa used to live here\n"
-            '  SPA="$ROOT/src/call_manager/web/spa"\n'
+            '  if ! git check-ignore -q "src/grant_lab/web/spa/"; then\n'
+            "# NOTE: rm -rf src/grant_lab/web/spa used to live here\n"
+            '  SPA="$ROOT/src/grant_lab/web/spa"\n'
             '  echo "serving from $SPA"\n',
             "fixture",
         )
@@ -326,7 +326,7 @@ def test_no_other_writer_of_the_served_tree():
             continue  # the gate itself; pinned by test_the_detector_sees_the_real_writer
         offenders += _writer_lines(f.read_text(), str(f.relative_to(REPO)))
     assert offenders == [], (
-        "these write src/call_manager/web/spa without going through "
+        "these write src/grant_lab/web/spa without going through "
         "scripts/package_spa.sh, so the bundle gate and edition.txt do not "
         "govern what they leave behind:\n" + "\n".join(offenders)
     )

@@ -1,5 +1,5 @@
-from call_manager.proposal_assist.artifacts import SPEC_SKELETON
-from call_manager.proposal_assist.citations.markers import build_marker
+from grant_lab.proposal_assist.artifacts import SPEC_SKELETON
+from grant_lab.proposal_assist.citations.markers import build_marker
 
 _CITE = build_marker("smith2021", "ev-0a1b2c3d4e5f")   # full marker → citation node
 _CITE2 = build_marker("jones2020", "ev-9f8e7d6c5b4a")

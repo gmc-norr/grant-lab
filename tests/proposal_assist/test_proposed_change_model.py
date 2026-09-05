@@ -1,4 +1,4 @@
-from call_manager.db.models import ProposedChange
+from grant_lab.db.models import ProposedChange
 from tests.proposal_assist.conftest import make_workspace
 
 

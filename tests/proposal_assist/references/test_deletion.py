@@ -12,9 +12,9 @@ import uuid
 import pytest
 from sqlalchemy import func, select
 
-from call_manager.db.models import Reference, ReferenceChunk, WorkspaceEvent
-from call_manager.proposal_assist.references.deletion import delete_or_tombstone_reference
-from call_manager.proposal_assist.references.storage import ReferenceStorage
+from grant_lab.db.models import Reference, ReferenceChunk, WorkspaceEvent
+from grant_lab.proposal_assist.references.deletion import delete_or_tombstone_reference
+from grant_lab.proposal_assist.references.storage import ReferenceStorage
 from tests.proposal_assist.conftest import make_user, make_workspace
 from tests.proposal_assist.references.test_reprocess import _insert_failed_ref
 

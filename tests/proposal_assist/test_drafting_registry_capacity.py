@@ -13,12 +13,12 @@ import uuid
 
 import pytest
 
-from call_manager.proposal_assist.drafting.contract import (
+from grant_lab.proposal_assist.drafting.contract import (
     DraftingAtCapacity,
     LaunchContext,
 )
-from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
-from call_manager.proposal_assist.drafting.registry import SubprocessRegistry
+from grant_lab.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
+from grant_lab.proposal_assist.drafting.registry import SubprocessRegistry
 
 
 async def _install_handle(registry, workspace_id):

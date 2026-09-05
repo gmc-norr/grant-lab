@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, update
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     Call,
     CallRanking,
     Profile,
@@ -10,7 +10,7 @@ from call_manager.db.models import (
     RankingJobStatus,
     Source,
 )
-from call_manager.ranking.queue import (
+from grant_lab.ranking.queue import (
     _STUCK_AFTER,
     claim_pending_jobs,
     enqueue_for_pair,
@@ -447,8 +447,8 @@ def test_requeue_stuck_running_leaves_recently_running_alone(pg_session_factory,
 def test_max_attempts_single_source_of_truth():
     """B11 Defect 5: MAX_ATTEMPTS must be defined ONCE and shared, not
     duplicated across queue.py and worker.py where they can drift."""
-    from call_manager.ranking import queue as queue_mod
-    from call_manager.ranking import worker as worker_mod
+    from grant_lab.ranking import queue as queue_mod
+    from grant_lab.ranking import worker as worker_mod
 
     # worker.MAX_ATTEMPTS IS queue.MAX_ATTEMPTS — same object, no duplicate literal.
     assert worker_mod.MAX_ATTEMPTS is queue_mod.MAX_ATTEMPTS

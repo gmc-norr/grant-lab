@@ -12,8 +12,8 @@ import uuid
 
 import pytest
 
-from call_manager.proposal_assist.ports.errors import UnfencedInvocation
-from call_manager.proposal_assist.ports.stamp import FenceStamp, stamp_for_workspace
+from grant_lab.proposal_assist.ports.errors import UnfencedInvocation
+from grant_lab.proposal_assist.ports.stamp import FenceStamp, stamp_for_workspace
 
 
 class _WS:

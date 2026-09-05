@@ -102,8 +102,8 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.web.api import rubric as rubric_api
-from call_manager.web.api import settings as settings_api
+from grant_lab.web.api import rubric as rubric_api
+from grant_lab.web.api import settings as settings_api
 
 # The six routes, named explicitly and keyed by the module that holds them.
 # Deliberately NOT derived from the modules: a list read out of the source would
@@ -126,15 +126,15 @@ from call_manager.web.api import settings as settings_api
 # If the rule is ever extended to another module, extending this gate means adding
 # that module as a key here — not widening the walk.
 EXPECTED_BOUNDED_WRITERS: dict[str, frozenset[str]] = {
-    "call_manager.web.api.settings": frozenset(
+    "grant_lab.web.api.settings": frozenset(
         {"update_settings", "add_member", "remove_member"}
     ),
-    "call_manager.web.api.rubric": frozenset({"update_rubric", "activate", "retry_setup"}),
+    "grant_lab.web.api.rubric": frozenset({"update_rubric", "activate", "retry_setup"}),
 }
 
 _MODULES = {
-    "call_manager.web.api.settings": settings_api,
-    "call_manager.web.api.rubric": rubric_api,
+    "grant_lab.web.api.settings": settings_api,
+    "grant_lab.web.api.rubric": rubric_api,
 }
 
 

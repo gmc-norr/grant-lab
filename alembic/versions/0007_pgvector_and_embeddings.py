@@ -13,7 +13,7 @@ Adds the vector extension and embedding storage:
 - partial NULL-only indexes for the daily backfill tick
 
 Per spec §4. No data backfill here — historical embeddings are populated
-by `python -m call_manager.embeddings.cli backfill` (Task 9), which is
+by `python -m grant_lab.embeddings.cli backfill` (Task 9), which is
 part of the deploy procedure between `alembic upgrade head` and app start.
 """
 

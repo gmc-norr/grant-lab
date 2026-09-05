@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     ArtifactVersion,
     Call,
     Profile,
@@ -31,13 +31,13 @@ from call_manager.db.models import (
     WorkspaceSetupJob,
     WorkspaceViewer,
 )
-from call_manager.main import create_app
-from call_manager.proposal_assist import row_locks
-from call_manager.proposal_assist.artifacts import SPEC_FILENAME
-from call_manager.proposal_assist.citations.gitio import _git_env
-from call_manager.proposal_assist.citations.ledger import dump_ledger, empty_ledger
-from call_manager.proposal_assist.editing.save import CITATIONS_FILENAME, PROPOSAL_FILENAME
-from call_manager.proposal_assist.paths import workspace_repo_dir
+from grant_lab.main import create_app
+from grant_lab.proposal_assist import row_locks
+from grant_lab.proposal_assist.artifacts import SPEC_FILENAME
+from grant_lab.proposal_assist.citations.gitio import _git_env
+from grant_lab.proposal_assist.citations.ledger import dump_ledger, empty_ledger
+from grant_lab.proposal_assist.editing.save import CITATIONS_FILENAME, PROPOSAL_FILENAME
+from grant_lab.proposal_assist.paths import workspace_repo_dir
 from tests.proposal_assist.conftest import stamp_for
 from tests.test_editing_save import _init_repo
 
@@ -308,7 +308,7 @@ def test_draft_folds_whole_proposal_citation_map(monkeypatch, pg_url, pg_session
         }
     )
     (repo / CITATIONS_FILENAME).write_text(dump_ledger(ledger))
-    from call_manager.proposal_assist.citations.gitio import _git_env
+    from grant_lab.proposal_assist.citations.gitio import _git_env
 
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True, env=_git_env())
     subprocess.run(["git", "commit", "-qm", "ledger"], cwd=repo, check=True, env=_git_env())
@@ -373,7 +373,7 @@ def test_draft_does_not_leak_cross_workspace_reference_title(
         }
     )
     (repo / CITATIONS_FILENAME).write_text(dump_ledger(ledger))
-    from call_manager.proposal_assist.citations.gitio import _git_env
+    from grant_lab.proposal_assist.citations.gitio import _git_env
 
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True, env=_git_env())
     subprocess.run(["git", "commit", "-qm", "ledger"], cwd=repo, check=True, env=_git_env())
@@ -393,10 +393,10 @@ def test_draft_does_not_leak_cross_workspace_reference_title(
 def test_draft_collab_returns_room_canonical_sections(
     monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
-    from call_manager.proposal_assist.collab import state, store
-    from call_manager.proposal_assist.collab.hydrate import build_doc, load_or_hydrate
-    from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
-    from call_manager.proposal_assist.collab.yjs_bridge import apply_pm_json_to_fragment
+    from grant_lab.proposal_assist.collab import state, store
+    from grant_lab.proposal_assist.collab.hydrate import build_doc, load_or_hydrate
+    from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm
+    from grant_lab.proposal_assist.collab.yjs_bridge import apply_pm_json_to_fragment
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _m, _s, ws_id = _seed(
@@ -428,7 +428,7 @@ def test_draft_collab_returns_room_canonical_sections(
     assert "original." not in joined
 
 
-from call_manager.proposal_assist.proposals.proposing import capture_base  # noqa: E402
+from grant_lab.proposal_assist.proposals.proposing import capture_base  # noqa: E402
 
 
 def _capture(tmp_path, ws_id, index):
@@ -506,7 +506,7 @@ def test_save_section_stale_is_409(monkeypatch, pg_url, pg_session_factory, tmp_
     # Move HEAD AND change the section's bytes underneath the captured base.
     # (Use the same author env as _init_repo so the concurrent commit succeeds
     # without relying on a global git identity.)
-    from call_manager.proposal_assist.citations.gitio import _git_env
+    from grant_lab.proposal_assist.citations.gitio import _git_env
 
     repo = workspace_repo_dir(tmp_path, ws_id)
     (repo / PROPOSAL_FILENAME).write_text("preamble\n\n## Methods\nSOMEONE ELSE EDITED.\n")
@@ -658,7 +658,7 @@ def test_save_section_busy_is_retriable_429_with_message(
     not distinguish busy from a real 500. The route maps CommitMutexTimeout to 429
     (too_many_requests) with BUSY_ERROR_MESSAGE + a Retry-After header, which the
     4xx branch (main.py:344) echoes verbatim."""
-    from call_manager.proposal_assist.drafting.locking import (
+    from grant_lab.proposal_assist.drafting.locking import (
         BUSY_ERROR_MESSAGE,
         CommitMutexTimeout,
     )
@@ -672,7 +672,7 @@ def test_save_section_busy_is_retriable_429_with_message(
     def _boom(*args, **kwargs):
         raise CommitMutexTimeout("busy")
 
-    monkeypatch.setattr("call_manager.web.api.workspaces.save_section", _boom)
+    monkeypatch.setattr("grant_lab.web.api.workspaces.save_section", _boom)
     c = _client(app, owner_id)
     r = c.post(
         f"/api/workspaces/{ws_id}/sections/1",
@@ -691,8 +691,8 @@ def test_save_section_busy_is_retriable_429_with_message(
 
 
 # --- SP2a-4a: citation source endpoint --------------------------------------
-from call_manager.db.models import ReferenceChunk  # noqa: E402
-from call_manager.proposal_assist.references.storage import ReferenceStorage  # noqa: E402
+from grant_lab.db.models import ReferenceChunk  # noqa: E402
+from grant_lab.proposal_assist.references.storage import ReferenceStorage  # noqa: E402
 
 
 def _seed_source_reference(
@@ -749,7 +749,7 @@ def _seed_source_reference(
 
 def _commit_ledger(tmp_path, ws_id, rows):
     """Write citations.json with `rows` and commit it into the workspace repo."""
-    from call_manager.proposal_assist.citations.gitio import _git_env
+    from grant_lab.proposal_assist.citations.gitio import _git_env
 
     repo = workspace_repo_dir(tmp_path, ws_id)
     ledger = empty_ledger()
@@ -851,7 +851,7 @@ def test_citation_source_cross_workspace_reference_is_404(
     ev_id = "ev-abc123def456"
     # Make a second workspace to own the reference.
     with pg_session_factory() as s:
-        from call_manager.db.models import User, Workspace
+        from grant_lab.db.models import User, Workspace
 
         other_owner = User(status="active", email="other@umu.se")
         s.add(other_owner)
@@ -946,7 +946,7 @@ def test_citation_source_corrupt_ledger_is_404(monkeypatch, pg_url, pg_session_f
     owner_id, _, _, ws_id, _ = _source_setup(
         app, pg_session_factory, tmp_path, ev_id=ev_id, quote="The cat sat on the mat."
     )
-    from call_manager.proposal_assist.citations.gitio import _git_env
+    from grant_lab.proposal_assist.citations.gitio import _git_env
 
     repo = workspace_repo_dir(tmp_path, ws_id)
     (repo / CITATIONS_FILENAME).write_text("{ this is not valid json ")
@@ -1133,7 +1133,7 @@ def test_post_citation_foreign_reference_is_404(monkeypatch, pg_url, pg_session_
 
 
 def test_post_citation_busy_is_429(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
+    from grant_lab.proposal_assist.drafting.locking import CommitMutexTimeout
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(
@@ -1145,7 +1145,7 @@ def test_post_citation_busy_is_429(monkeypatch, pg_url, pg_session_factory, tmp_
     def _boom(**kwargs):
         raise CommitMutexTimeout("busy")
 
-    monkeypatch.setattr("call_manager.web.api.workspaces.insert_citation_for_user", _boom)
+    monkeypatch.setattr("grant_lab.web.api.workspaces.insert_citation_for_user", _boom)
     c = _client(app, owner_id)
     r = c.post(f"/api/workspaces/{ws_id}/citations", json=_cite_body(bc, bs, rid))
     assert r.status_code == 429
@@ -1191,9 +1191,9 @@ def test_post_citation_no_proposal_is_404(monkeypatch, pg_url, pg_session_factor
 
 
 def _room_base_sha(app, pg_session_factory, tmp_path, ws_id, section_index=1):
-    from call_manager.proposal_assist.collab.canonical import canonical_artifact_markdown
-    from call_manager.proposal_assist.editing.sectionizer import split_sections
-    from call_manager.proposal_assist.paths import workspace_repo_dir
+    from grant_lab.proposal_assist.collab.canonical import canonical_artifact_markdown
+    from grant_lab.proposal_assist.editing.sectionizer import split_sections
+    from grant_lab.proposal_assist.paths import workspace_repo_dir
 
     with pg_session_factory() as s:
         raw = canonical_artifact_markdown(
@@ -1203,7 +1203,7 @@ def _room_base_sha(app, pg_session_factory, tmp_path, ws_id, section_index=1):
 
 
 def _enable_collab(pg_session_factory, ws_id):
-    from call_manager.proposal_assist.collab import state
+    from grant_lab.proposal_assist.collab import state
 
     with pg_session_factory() as s:
         state.enable_collab(s, workspace_id=ws_id, artifact="draft")
@@ -1688,7 +1688,7 @@ def test_create_workspace_stores_profile_and_deadline(
 
 
 def test_references_list_includes_library_fields(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    from call_manager.db.models import Reference
+    from grant_lab.db.models import Reference
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "x\n")
@@ -1719,7 +1719,7 @@ def test_references_list_includes_library_fields(monkeypatch, pg_url, pg_session
 
 # --- Task 1 (Slice D): MemberOut.user_id -----------------------------------
 def test_members_list_includes_user_id(monkeypatch, pg_url, pg_session_factory, tmp_path):
-    from call_manager.db.models import User, WorkspaceViewer
+    from grant_lab.db.models import User, WorkspaceViewer
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "x\n")

@@ -1,6 +1,6 @@
-from call_manager.admin_bootstrap import bootstrap_admins
-from call_manager.auth.passwords import hash_password, verify_password
-from call_manager.db.models import User
+from grant_lab.admin_bootstrap import bootstrap_admins
+from grant_lab.auth.passwords import hash_password, verify_password
+from grant_lab.db.models import User
 
 
 def test_sets_password_when_provided(pg_session_factory):

@@ -3,7 +3,7 @@ from datetime import datetime
 
 from sqlalchemy import select
 
-from call_manager.db.models import WorkspaceEvent
+from grant_lab.db.models import WorkspaceEvent
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 

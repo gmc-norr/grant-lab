@@ -10,7 +10,7 @@ functions run under pytest-asyncio automatically (no decorator needed).
 import asyncio
 import uuid
 
-from call_manager.proposal_assist.collab.room import ClientState, RoomManager
+from grant_lab.proposal_assist.collab.room import ClientState, RoomManager
 from tests.proposal_assist.collab.test_collab_room import FakeClient
 
 
@@ -175,7 +175,7 @@ async def test_last_client_release_during_op_checkpoints_on_op_exit():
 
 
 def _hydration(epoch: int):
-    from call_manager.proposal_assist.collab.hydrate import Hydration
+    from grant_lab.proposal_assist.collab.hydrate import Hydration
 
     async def load():
         return Hydration([], doc_epoch=epoch)

@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from call_manager.main import create_app
+from grant_lab.main import create_app
 
 
 def _app(monkeypatch, pg_url, mode):

@@ -1,24 +1,24 @@
 import pytest
 from sqlalchemy import select
 
-from call_manager.db.models import ChatTurn, TurnJob, Workspace, WorkspaceEvent
-from call_manager.proposal_assist.drafting.contract import (
+from grant_lab.db.models import ChatTurn, TurnJob, Workspace, WorkspaceEvent
+from grant_lab.proposal_assist.drafting.contract import (
     AssistantTextEvent,
     SDKTurnError,
     ToolResultEvent,
     ToolUseEvent,
     TurnDoneEvent,
 )
-from call_manager.proposal_assist.drafting.controller import WorkspaceController
-from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
-from call_manager.proposal_assist.drafting.registry import SubprocessRegistry
-from call_manager.proposal_assist.turns.processor import process_turn_once
-from call_manager.proposal_assist.turns.submit import submit_user_turn
+from grant_lab.proposal_assist.drafting.controller import WorkspaceController
+from grant_lab.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
+from grant_lab.proposal_assist.drafting.registry import SubprocessRegistry
+from grant_lab.proposal_assist.turns.processor import process_turn_once
+from grant_lab.proposal_assist.turns.submit import submit_user_turn
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
 def _build_controller_and_submit(pg_session_factory, _settings_env, events):
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
     adapter = FakeAgentAdapter()
@@ -144,7 +144,7 @@ async def test_process_turn_handles_sdk_turn_error(
         session_factory=pg_session_factory,
     )
 
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
     with pg_session_factory() as s:
@@ -278,7 +278,7 @@ async def test_process_turn_survives_stale_running_row_from_prior_crash(
     so the unique partial index doesn't fire."""
     from datetime import UTC, datetime
 
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
     adapter = FakeAgentAdapter()
@@ -355,7 +355,7 @@ async def test_process_turn_leaves_row_queued_when_launch_raises(
     No claim, no chat_turns assistant rows, no cloud_turn_failed
     outcome event (the launch failure path is documented as audit-
     trail-incomplete; B6/B8 may surface after K retries)."""
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
     from tests.proposal_assist.conftest import make_user
 
     settings = Settings()
@@ -424,7 +424,7 @@ async def test_process_turn_finalizes_failed_when_user_turn_row_missing(
     """If the linked chat_turns row was deleted between submit and
     processing, the processor marks the job failed via _finalize_failed
     (which writes cloud_turn_failed)."""
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
     from tests.proposal_assist.conftest import make_user
 
     settings = Settings()
@@ -570,7 +570,7 @@ async def test_finalize_success_persists_tokens_on_user_turn_when_no_assistant_t
         session_factory=pg_session_factory,
     )
 
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
     with pg_session_factory() as s:
@@ -646,7 +646,7 @@ async def test_finalize_failed_clears_user_turn_pre_count(
         session_factory=pg_session_factory,
     )
 
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
     with pg_session_factory() as s:

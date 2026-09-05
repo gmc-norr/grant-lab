@@ -5,7 +5,7 @@ Retention Slice B. Reads only; this endpoint can remove nothing.
 
 from datetime import UTC, datetime
 
-from call_manager.db.models import Workspace
+from grant_lab.db.models import Workspace
 from tests.admin_retention_helpers import (
     _dispose_created_app_engines as _dispose_created_app_engines,
 )
@@ -48,7 +48,7 @@ def test_the_row_model_keeps_soft_deleted_at_required(monkeypatch, pg_url, tmp_p
     written beside it) would silently remove it and leave only the filter. Pin
     it, so removing the guard is a decision rather than a side effect.
     """
-    from call_manager.web.api.admin_retention import DeletedWorkspaceRow
+    from grant_lab.web.api.admin_retention import DeletedWorkspaceRow
 
     field = DeletedWorkspaceRow.model_fields["soft_deleted_at"]
     assert field.is_required(), (

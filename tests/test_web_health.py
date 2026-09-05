@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 
-from call_manager.db.session import make_engine
-from call_manager.main import create_app
+from grant_lab.db.session import make_engine
+from grant_lab.main import create_app
 
 
 # `migrated_engine` is requested by every test below: `pg_url` alone is an

@@ -1,6 +1,6 @@
 import pytest
 
-from call_manager.config import Settings
+from grant_lab.config import Settings
 
 
 def test_settings_parse_domain_list_from_csv(monkeypatch):
@@ -119,8 +119,8 @@ def test_create_app_allows_console_sender_in_dev_without_resend_key(monkeypatch,
     """Converse of the refuse-to-start test: plain HTTP APP_BASE_URL is
     dev, so ConsoleEmailSender is the intended fallback and create_app
     must NOT raise."""
-    from call_manager.auth.email import ConsoleEmailSender
-    from call_manager.main import create_app
+    from grant_lab.auth.email import ConsoleEmailSender
+    from grant_lab.main import create_app
 
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
@@ -140,7 +140,7 @@ def test_citation_llm_provider_defaults_to_local(monkeypatch):
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     assert Settings().citation_llm_provider == "ollama"
 
@@ -150,7 +150,7 @@ def test_reference_ingest_settings_defaults(monkeypatch):
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     s = Settings()
     assert s.reference_ingest_concurrency == 3

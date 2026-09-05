@@ -1,9 +1,9 @@
 import pytest
 
-from call_manager.proposal_assist.drafting.controller import (
+from grant_lab.proposal_assist.drafting.controller import (
     WorkspaceController,
 )
-from call_manager.proposal_assist.drafting.factory import (
+from grant_lab.proposal_assist.drafting.factory import (
     build_workspace_controller,
 )
 
@@ -18,7 +18,7 @@ def test_factory_with_fake_adapter_returns_controller(
     monkeypatch.setenv("DRAFTING_ADAPTER", "fake")
     monkeypatch.setenv("WORKSPACES_DIR", "/tmp/test_workspaces")
 
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
 
@@ -39,7 +39,7 @@ def test_factory_with_claude_adapter_returns_controller(
     monkeypatch.delenv("DRAFTING_ADAPTER", raising=False)  # default = claude
     monkeypatch.setenv("WORKSPACES_DIR", "/tmp/test_workspaces")
 
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
 
@@ -58,7 +58,7 @@ def test_factory_raises_on_unknown_adapter_choice(
     monkeypatch.setenv("DRAFTING_ADAPTER", "totally-bogus")
     monkeypatch.setenv("WORKSPACES_DIR", "/tmp/test_workspaces")
 
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
 

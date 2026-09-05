@@ -1,4 +1,4 @@
-from call_manager.proposal_assist.artifacts import (
+from grant_lab.proposal_assist.artifacts import (
     PROPOSAL_FILENAME,
     SPEC_FILENAME,
     Artifact,

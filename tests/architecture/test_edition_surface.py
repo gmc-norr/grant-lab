@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.main import create_app
+from grant_lab.main import create_app
 
 # Path prefixes the proposal-assist half owns. A match build must register NONE
 # of these.
@@ -125,7 +125,7 @@ def test_match_edition_still_serves_the_release_1_surface(monkeypatch, _base_env
 # and as it must still stand. Regenerate ONLY when a route change is intended:
 #
 #   APP_EDITION=full DRAFTING_ENABLED=true SPA_MODE=disabled ... python -c \
-#     "from call_manager.main import create_app; \
+#     "from grant_lab.main import create_app; \
 #      print('\n'.join(sorted({r.path for r in create_app().routes})))" \
 #     > tests/architecture/full_edition_routes.txt
 #
@@ -253,7 +253,7 @@ def _tuple_elements(name: str) -> list[str]:
     """Source text of each element of a module-level tuple in web/api/__init__.py."""
     import ast
 
-    src = (Path(__file__).resolve().parents[2] / "src/call_manager/web/api/__init__.py").read_text()
+    src = (Path(__file__).resolve().parents[2] / "src/grant_lab/web/api/__init__.py").read_text()
     tree = ast.parse(src)
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(

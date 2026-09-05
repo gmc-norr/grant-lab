@@ -12,14 +12,14 @@ the offset recomputed from the live section.
 
 from __future__ import annotations
 
-from call_manager.db.models import WorkspaceEvent
-from call_manager.proposal_assist.collab import state, store
-from call_manager.proposal_assist.collab.canonical import canonical_artifact_markdown
-from call_manager.proposal_assist.collab.hydrate import build_doc, load_or_hydrate
-from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
-from call_manager.proposal_assist.collab.yjs_bridge import apply_pm_section_to_fragment
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.paths import workspace_repo_dir
+from grant_lab.db.models import WorkspaceEvent
+from grant_lab.proposal_assist.collab import state, store
+from grant_lab.proposal_assist.collab.canonical import canonical_artifact_markdown
+from grant_lab.proposal_assist.collab.hydrate import build_doc, load_or_hydrate
+from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm
+from grant_lab.proposal_assist.collab.yjs_bridge import apply_pm_section_to_fragment
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.paths import workspace_repo_dir
 from tests.proposal_assist.conftest import stamp_for
 from tests.test_api_workspaces import _app, _client, _seed
 

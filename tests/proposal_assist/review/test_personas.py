@@ -1,4 +1,4 @@
-from call_manager.proposal_assist.review.personas import (
+from grant_lab.proposal_assist.review.personas import (
     PERSONA_KINDS,
     REVIEW_KINDS,
     WAVE1_KINDS,

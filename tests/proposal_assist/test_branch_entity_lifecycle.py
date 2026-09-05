@@ -10,19 +10,19 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy import update as sql_update
 
-from call_manager.db.models import Branch, Workspace
-from call_manager.proposal_assist.branches import (
+from grant_lab.db.models import Branch, Workspace
+from grant_lab.proposal_assist.branches import (
     BranchExists,
     BranchInUse,
     create_workspace_branch,
     delete_workspace_branch,
 )
-from call_manager.proposal_assist.citations.gitio import (
+from grant_lab.proposal_assist.citations.gitio import (
     GitCommitError,
     branch_exists,
     list_branches,
 )
-from call_manager.proposal_assist.paths import workspace_repo_dir
+from grant_lab.proposal_assist.paths import workspace_repo_dir
 from tests.proposal_assist.conftest import init_workspace_repo, make_workspace, stamp_for
 
 
@@ -344,7 +344,7 @@ def test_the_orphaned_root_is_cleared_before_git_runs(pg_session_factory, tmp_pa
         s.get(Workspace, wid).current_branch = "side"
         s.commit()
 
-    import call_manager.proposal_assist.branches as branches_mod
+    import grant_lab.proposal_assist.branches as branches_mod
 
     real = branches_mod.git_create_branch
     seen = {}
@@ -441,7 +441,7 @@ def test_the_row_delete_runs_before_git_so_RESTRICT_protects_the_ref(pg_session_
         s.add(Branch(workspace_id=wid, name="new_ideas"))
         s.commit()
 
-    import call_manager.proposal_assist.branches as branches_mod
+    import grant_lab.proposal_assist.branches as branches_mod
 
     real = branches_mod.git_delete_branch
     seen = {}
@@ -486,7 +486,7 @@ def test_a_create_GIT_refuses_writes_no_row(pg_session_factory, tmp_path):
     """
     wid, repo = _ws(pg_session_factory, tmp_path)
 
-    import call_manager.proposal_assist.branches as branches_mod
+    import grant_lab.proposal_assist.branches as branches_mod
 
     real = branches_mod.git_create_branch
 

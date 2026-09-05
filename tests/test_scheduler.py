@@ -5,8 +5,8 @@ import pytest
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
-from call_manager.config import Settings
-from call_manager.scheduler import build_scheduler
+from grant_lab.config import Settings
+from grant_lab.scheduler import build_scheduler
 
 
 class _NullAlerter:
@@ -35,7 +35,7 @@ def _settings_env(monkeypatch):
 def test_build_scheduler_returns_one_job_per_active_adapter(_settings_env):
     """Smoke: the scheduler is constructed with a job per source. We don't
     actually start it — that would fire HTTP requests."""
-    from call_manager.proposal_assist.drafting.factory import build_workspace_controller
+    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
 
     settings = Settings()
 
@@ -79,8 +79,8 @@ def test_build_scheduler_includes_rate_limit_sweep_when_limiters_given(_settings
     turnover in failed-login attempts will leak memory indefinitely. The
     scheduler wires up a sweep job when callers hand it the limiters to
     sweep."""
-    from call_manager.auth.rate_limit import SlidingWindowLimiter
-    from call_manager.proposal_assist.drafting.factory import build_workspace_controller
+    from grant_lab.auth.rate_limit import SlidingWindowLimiter
+    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
 
     email = SlidingWindowLimiter(max_requests=5, window_seconds=60, name="email")
     ip = SlidingWindowLimiter(max_requests=30, window_seconds=60, name="ip")
@@ -116,7 +116,7 @@ def test_build_scheduler_includes_rate_limit_sweep_when_limiters_given(_settings
 def test_build_scheduler_omits_rate_limit_sweep_when_limiters_empty(_settings_env):
     """No limiters ⇒ no sweep job. Mirrors digest's opt-in pattern so
     unit tests that don't need the sweep don't accumulate it."""
-    from call_manager.proposal_assist.drafting.factory import build_workspace_controller
+    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
 
     settings = Settings()
 
@@ -146,7 +146,7 @@ def test_build_scheduler_omits_rate_limit_sweep_when_limiters_empty(_settings_en
 
 
 def test_build_scheduler_includes_rank_drain_job(_settings_env):
-    from call_manager.proposal_assist.drafting.factory import build_workspace_controller
+    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
 
     settings = Settings()
 
@@ -178,7 +178,7 @@ def test_build_scheduler_includes_rank_drain_job(_settings_env):
 def test_build_scheduler_includes_turn_reaper_job(_settings_env):
     """The stuck-turn reaper must be scheduled so a wedged workspace
     (turn_jobs row stuck status='running') gets unwedged."""
-    from call_manager.proposal_assist.drafting.factory import build_workspace_controller
+    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
 
     settings = Settings()
 
@@ -219,7 +219,7 @@ def test_build_scheduler_includes_turn_reaper_job(_settings_env):
 
     calls: list[object] = []
     with patch(
-        "call_manager.proposal_assist.turns.reaper.reap_stuck_turns",
+        "grant_lab.proposal_assist.turns.reaper.reap_stuck_turns",
         side_effect=lambda **kw: calls.append(kw["session_factory"]),
     ):
         job.func()
@@ -228,7 +228,7 @@ def test_build_scheduler_includes_turn_reaper_job(_settings_env):
     # And a failing tick must not kill the scheduler thread: the wrapper logs
     # and swallows, which is what lets the next tick run at all.
     with patch(
-        "call_manager.proposal_assist.turns.reaper.reap_stuck_turns",
+        "grant_lab.proposal_assist.turns.reaper.reap_stuck_turns",
         side_effect=RuntimeError("db down"),
     ):
         job.func()  # must not raise
@@ -242,7 +242,7 @@ _ANALYSIS_JOB_IDS = ("claim_analysis_drain", "claim_analysis_reconcile")
 def _build_with_analysis_deps(settings, **kw):
     """Shared builder for the claim-analysis conditional-registration tests —
     same arguments as the smoke tests above, plus the analysis kwargs."""
-    from call_manager.proposal_assist.drafting.factory import build_workspace_controller
+    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
 
     def session_factory():
         return None
@@ -311,7 +311,7 @@ def test_daily_cron_jobs_set_misfire_grace_time(_settings_env):
     """Daily crons must set an explicit misfire_grace_time well above the
     1-second APScheduler default so a restart at the fire instant doesn't
     drop the run."""
-    from call_manager.proposal_assist.drafting.factory import build_workspace_controller
+    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
 
     settings = Settings()
 
@@ -351,9 +351,9 @@ def test_daily_cron_jobs_set_misfire_grace_time(_settings_env):
 def test_build_scheduler_wires_collab_checkpoint_job(_settings_env, monkeypatch):
     from unittest.mock import MagicMock
 
-    import call_manager.proposal_assist.collab.checkpoint as cp
-    from call_manager.config import Settings
-    from call_manager.proposal_assist.drafting.factory import build_workspace_controller
+    import grant_lab.proposal_assist.collab.checkpoint as cp
+    from grant_lab.config import Settings
+    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
 
     settings = Settings()
 
@@ -401,8 +401,8 @@ def test_build_scheduler_omits_collab_checkpoint_when_disabled(_settings_env, mo
     from unittest.mock import MagicMock
 
     monkeypatch.setenv("COLLAB_CHECKPOINT_SCAN_SECONDS", "0")
-    from call_manager.config import Settings
-    from call_manager.proposal_assist.drafting.factory import build_workspace_controller
+    from grant_lab.config import Settings
+    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
 
     settings = Settings()
 

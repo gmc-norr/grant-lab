@@ -1,6 +1,6 @@
 // Dev-server route carve-out for vite.config.ts. Built from the generated
 // manifest (routes.gen.ts), never a hand-edited regex. Mirrors is_spa_route /
-// is_backend_route in src/call_manager/web/spa_routes.py.
+// is_backend_route in src/grant_lab/web/spa_routes.py.
 //
 // Dev posture: Vite forwards EVERYTHING to uvicorn by default and carves out
 // only (a) SPA-owned page routes (served the SPA shell) and (b) Vite's own dev

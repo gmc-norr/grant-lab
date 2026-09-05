@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
-from call_manager.auth.email import (
+from grant_lab.auth.email import (
     ConsoleEmailSender,
     EmailSendFailed,
     InMemoryEmailSender,
@@ -30,7 +30,7 @@ def test_in_memory_sender_records_messages():
 
 def test_console_sender_logs_full_body(caplog):
     sender = ConsoleEmailSender()
-    with caplog.at_level(logging.INFO, logger="call_manager.auth.email"):
+    with caplog.at_level(logging.INFO, logger="grant_lab.auth.email"):
         sender.send(
             to="alice@umu.se",
             subject="Your login link",
@@ -108,7 +108,7 @@ def test_smtp_email_sender_sends_magic_link(monkeypatch):
     fake_conn = MagicMock()
     fake_smtp_class.return_value.__enter__.return_value = fake_conn
     fake_conn.sendmail.return_value = {}
-    monkeypatch.setattr("call_manager.auth.email.smtplib.SMTP", fake_smtp_class)
+    monkeypatch.setattr("grant_lab.auth.email.smtplib.SMTP", fake_smtp_class)
 
     sender = SMTPEmailSender(
         host="smtp.umu.se",
@@ -135,7 +135,7 @@ def test_smtp_email_sender_raises_email_send_failed_on_smtp_error(monkeypatch):
     import smtplib
 
     fake_smtp_class = MagicMock(side_effect=smtplib.SMTPConnectError(421, "down"))
-    monkeypatch.setattr("call_manager.auth.email.smtplib.SMTP", fake_smtp_class)
+    monkeypatch.setattr("grant_lab.auth.email.smtplib.SMTP", fake_smtp_class)
 
     sender = SMTPEmailSender(
         host="smtp.umu.se", port=587, user="u", password="p", from_address="no-reply@umu.se"

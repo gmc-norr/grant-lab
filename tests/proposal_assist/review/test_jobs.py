@@ -1,9 +1,9 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from call_manager.config import Settings
-from call_manager.db.models import ReviewRun, ReviewRunItem, Workspace
-from call_manager.proposal_assist.review.jobs import (
+from grant_lab.config import Settings
+from grant_lab.db.models import ReviewRun, ReviewRunItem, Workspace
+from grant_lab.proposal_assist.review.jobs import (
     active_review_run,
     cancel_review_runs_and_items_for_workspace,
     claim_next_review_run,

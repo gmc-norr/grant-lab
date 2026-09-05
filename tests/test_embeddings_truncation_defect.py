@@ -12,11 +12,11 @@ import json
 import httpx
 from sqlalchemy import select
 
-from call_manager.db.models import ReferenceChunk
-from call_manager.embeddings.client import EmbedResult, OllamaEmbedClient
-from call_manager.proposal_assist.references.embed import FakeEmbedder, OllamaEmbedderAdapter
-from call_manager.proposal_assist.references.ingest import ingest_bytes
-from call_manager.proposal_assist.references.storage import ReferenceStorage
+from grant_lab.db.models import ReferenceChunk
+from grant_lab.embeddings.client import EmbedResult, OllamaEmbedClient
+from grant_lab.proposal_assist.references.embed import FakeEmbedder, OllamaEmbedderAdapter
+from grant_lab.proposal_assist.references.ingest import ingest_bytes
+from grant_lab.proposal_assist.references.storage import ReferenceStorage
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 # ---------------------------------------------------------------------------

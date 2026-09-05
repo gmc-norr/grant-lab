@@ -16,8 +16,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from call_manager.config import Settings
-from call_manager.scheduler import (
+from grant_lab.config import Settings
+from grant_lab.scheduler import (
     SCHEDULER_EXECUTOR_MAX_WORKERS,
     SchedulerLock,
     build_scheduler,
@@ -162,7 +162,7 @@ def test_release_actually_frees_advisory_lock_against_real_pg(pg_url):
 
 
 def _build(settings):
-    from call_manager.proposal_assist.drafting.factory import build_workspace_controller
+    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
 
     def session_factory():
         return None
@@ -202,7 +202,7 @@ def test_executor_pool_is_sized_above_default(_settings_env):
 
 
 def test_probe_reports_acquired_held_elsewhere_and_unavailable():
-    from call_manager.scheduler import probe_scheduler_lock
+    from grant_lab.scheduler import probe_scheduler_lock
 
     lock, state = probe_scheduler_lock(_FakeEngine(acquired=True))
     assert state == "acquired" and isinstance(lock, SchedulerLock)

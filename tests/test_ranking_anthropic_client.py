@@ -11,12 +11,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from call_manager.ranking.anthropic_client import (
+from grant_lab.ranking.anthropic_client import (
     AnthropicClient,
     _split_system,
     _strip_markdown_fence,
 )
-from call_manager.ranking.ollama_client import LLMError
+from grant_lab.ranking.ollama_client import LLMError
 
 
 def _fake_response(text: str, *, stop_reason: str = "end_turn", model: str = "claude-sonnet-4-6"):
@@ -305,7 +305,7 @@ def test_finish_reason_maps_anthropic_stop_to_openai_vocab():
     LLMError (see test_chat_raises_on_max_tokens_truncation), so we
     verify the vocabulary mapping on the helper rather than the envelope.
     """
-    from call_manager.ranking.anthropic_client import _map_stop_reason
+    from grant_lab.ranking.anthropic_client import _map_stop_reason
 
     assert _map_stop_reason("max_tokens") == "length"
     assert _map_stop_reason("end_turn") == "stop"

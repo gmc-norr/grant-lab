@@ -17,13 +17,13 @@ from fastapi import FastAPI
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
-from call_manager.db.models import Workspace, WorkspaceSetupJob
-from call_manager.proposal_assist.drafting.locking import (
+from grant_lab.db.models import Workspace, WorkspaceSetupJob
+from grant_lab.proposal_assist.drafting.locking import (
     BUSY_ERROR_MESSAGE,
     CommitMutexTimeout,
     acquire_commit_mutex,
 )
-from call_manager.proposal_assist.fencing import acquire_commit_mutex_at_generation
+from grant_lab.proposal_assist.fencing import acquire_commit_mutex_at_generation
 from tests.proposal_assist.conftest import make_workspace, stamp_for
 
 
@@ -46,7 +46,7 @@ def _probe_app(app: FastAPI, sqlstate: str) -> None:
 def _handler_records(caplog):
     """Only the records this handler emitted. Filtering by logger name keeps an
     unrelated WARNING from SQLAlchemy or httpx out of the counts below."""
-    return [r for r in caplog.records if r.name == "call_manager.main"]
+    return [r for r in caplog.records if r.name == "grant_lab.main"]
 
 
 def test_a_lock_timeout_becomes_the_same_429_envelope_the_routes_emit(
@@ -62,7 +62,7 @@ def test_a_lock_timeout_becomes_the_same_429_envelope_the_routes_emit(
     also log at ERROR, or every timeout pages someone.
     """
     _probe_app(_app, "55P03")
-    with caplog.at_level(logging.WARNING, logger="call_manager.main"):
+    with caplog.at_level(logging.WARNING, logger="grant_lab.main"):
         # The query string is deliberate: the handler must log the PATH and not
         # the query string (nor the body), so this marker must not appear.
         resp = client_authed_owner.get("/api/_c3_probe", params={"q": "MUST-NOT-BE-LOGGED"})
@@ -101,7 +101,7 @@ def test_a_non_lock_OperationalError_is_still_a_500(_app, client_authed_owner, c
     500 with no trace anywhere.
     """
     _probe_app(_app, "08006")
-    with caplog.at_level(logging.WARNING, logger="call_manager.main"):
+    with caplog.at_level(logging.WARNING, logger="grant_lab.main"):
         resp = client_authed_owner.get("/api/_c3_probe")
     assert resp.status_code == 500, resp.text
     assert resp.json()["error"]["code"] == "internal_error"
@@ -229,7 +229,7 @@ def test_acquire_commit_mutex_reapplies_the_tail_cap_after_the_advisory_lock():
     import ast
     import inspect
 
-    from call_manager.proposal_assist.drafting import locking
+    from grant_lab.proposal_assist.drafting import locking
 
     tree = ast.parse(inspect.getsource(locking))
     fn = next(
@@ -317,7 +317,7 @@ def test_a_bounded_m1_failure_requeues_the_setup_job_rather_than_losing_it(
     dead-letters at MAX_SETUP_ATTEMPTS. A test that merely asserts "it raised"
     would pass just as happily if the job were lost.
     """
-    from call_manager.proposal_assist.phases import setup as setup_mod
+    from grant_lab.proposal_assist.phases import setup as setup_mod
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
@@ -380,11 +380,11 @@ def test_a_lock_timeout_is_not_on_any_kernel_clean_list():
     _CLEAN_CITE_ERRORS and is easy to miss, but its except at collab_cite.py:142
     wraps a body that commits after mutating the doc — exactly as exposed.
     """
-    from call_manager.proposal_assist.citations.collab_cite import (
+    from grant_lab.proposal_assist.citations.collab_cite import (
         _CLEAN_CITE_ERRORS,
         _CLEAN_INIT_SPEC_ERRORS,
     )
-    from call_manager.proposal_assist.proposals.kernel_accept import _CLEAN_ACCEPT_ERRORS
+    from grant_lab.proposal_assist.proposals.kernel_accept import _CLEAN_ACCEPT_ERRORS
 
     for name, clean in (
         ("_CLEAN_ACCEPT_ERRORS", _CLEAN_ACCEPT_ERRORS),
@@ -411,9 +411,9 @@ def test_hydration_really_can_raise_a_lock_timeout_after_the_mutex(
     """
     from pathlib import Path
 
-    from call_manager.proposal_assist.collab import state as collab_state
-    from call_manager.proposal_assist.collab.hydrate import load_or_hydrate
-    from call_manager.proposal_assist.drafting.locking import is_lock_timeout
+    from grant_lab.proposal_assist.collab import state as collab_state
+    from grant_lab.proposal_assist.collab.hydrate import load_or_hydrate
+    from grant_lab.proposal_assist.drafting.locking import is_lock_timeout
     from tests.proposal_assist.conftest import init_workspace_repo
 
     with pg_session_factory() as s:
@@ -452,8 +452,8 @@ def test_a_bounded_flip_commit_defers_instead_of_erroring_the_read(
     defeat the defer arm. The row wait is real, not stubbed: the INSERT takes an FK
     parent lock on `workspaces`.
     """
-    from call_manager.proposal_assist.collab import state as collab_state
-    from call_manager.proposal_assist.collab.flip import maybe_auto_enable
+    from grant_lab.proposal_assist.collab import state as collab_state
+    from grant_lab.proposal_assist.collab.flip import maybe_auto_enable
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, current_phase="active")
@@ -514,8 +514,8 @@ def test_the_collab_checkpoint_route_still_answers_503_not_the_new_429(
     `collab.checkpoint` module, with raising=True so a future rename fails loudly
     instead of installing a dead attribute.
     """
-    import call_manager.proposal_assist.collab.checkpoint as checkpoint_mod
-    from call_manager.proposal_assist.collab import state as collab_state
+    import grant_lab.proposal_assist.collab.checkpoint as checkpoint_mod
+    from grant_lab.proposal_assist.collab import state as collab_state
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, current_phase="active")

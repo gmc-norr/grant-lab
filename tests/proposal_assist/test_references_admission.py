@@ -1,8 +1,8 @@
 import pytest
 
-from call_manager.proposal_assist.port_impl import build_ports
-from call_manager.proposal_assist.references.admission import IngestLimiter, OverCapacity
-from call_manager.proposal_assist.tools.registry import snapshot_invocation
+from grant_lab.proposal_assist.port_impl import build_ports
+from grant_lab.proposal_assist.references.admission import IngestLimiter, OverCapacity
+from grant_lab.proposal_assist.tools.registry import snapshot_invocation
 
 
 def test_limiter_admits_up_to_capacity():
@@ -34,11 +34,11 @@ async def test_fetch_reference_returns_busy_when_limiter_exhausted(pg_session_fa
 
     from sqlalchemy import select
 
-    from call_manager.config import Settings
-    from call_manager.db.models import ChatTurn, TurnJob, User, Workspace
-    from call_manager.proposal_assist.references.embed import FakeEmbedder
-    from call_manager.proposal_assist.tools.references import fetch_reference_impl
-    from call_manager.proposal_assist.tools.registry import ToolContext
+    from grant_lab.config import Settings
+    from grant_lab.db.models import ChatTurn, TurnJob, User, Workspace
+    from grant_lab.proposal_assist.references.embed import FakeEmbedder
+    from grant_lab.proposal_assist.tools.references import fetch_reference_impl
+    from grant_lab.proposal_assist.tools.registry import ToolContext
 
     # Seed workspace + running TurnJob.
     with pg_session_factory() as s:

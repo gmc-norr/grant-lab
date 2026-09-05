@@ -7,10 +7,10 @@ import subprocess
 
 import pytest
 
-from call_manager.db.models import ArtifactVersion
-from call_manager.proposal_assist.citations.gitio import _git_env
-from call_manager.proposal_assist.collab import state as collab_state
-from call_manager.proposal_assist.paths import workspace_repo_dir
+from grant_lab.db.models import ArtifactVersion
+from grant_lab.proposal_assist.citations.gitio import _git_env
+from grant_lab.proposal_assist.collab import state as collab_state
+from grant_lab.proposal_assist.paths import workspace_repo_dir
 from tests.test_api_workspaces import _app, _client, _seed
 
 
@@ -198,7 +198,7 @@ def test_save_spec_section_busy_is_429(
 ):
     # CommitMutexTimeout -> 429 + Retry-After + busy message (NOT a sanitized 500).
     # Mirror tests/test_api_workspaces.py::test_save_section_busy_is_retriable_429.
-    from call_manager.proposal_assist.drafting.locking import (
+    from grant_lab.proposal_assist.drafting.locking import (
         BUSY_ERROR_MESSAGE,
         CommitMutexTimeout,
     )
@@ -213,7 +213,7 @@ def test_save_spec_section_busy_is_429(
         raise CommitMutexTimeout("busy")
 
     # Both routes call the same imported save_section; patch the symbol, hit /spec.
-    monkeypatch.setattr("call_manager.web.api.workspaces.save_section", _boom)
+    monkeypatch.setattr("grant_lab.web.api.workspaces.save_section", _boom)
     r = c.post(
         f"/api/workspaces/{ws_id}/spec/sections/1",
         json={

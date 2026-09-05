@@ -1,4 +1,4 @@
-from call_manager.proposal_assist.citations.reader import (
+from grant_lab.proposal_assist.citations.reader import (
     build_citation_numbering,
     build_citation_stances,
     build_source_window,

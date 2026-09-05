@@ -2,10 +2,10 @@ import uuid
 
 import pytest
 
-from call_manager.db.models import ReviewRunItem
-from call_manager.proposal_assist.port_impl import build_ports
-from call_manager.proposal_assist.tools.registry import ToolContext, snapshot_invocation
-from call_manager.proposal_assist.tools.review_submit import submit_review_impl
+from grant_lab.db.models import ReviewRunItem
+from grant_lab.proposal_assist.port_impl import build_ports
+from grant_lab.proposal_assist.tools.registry import ToolContext, snapshot_invocation
+from grant_lab.proposal_assist.tools.review_submit import submit_review_impl
 
 
 def _ctx(session_factory, ws_id, run_id, item_id):

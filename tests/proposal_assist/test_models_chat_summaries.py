@@ -2,7 +2,7 @@ import uuid
 
 from sqlalchemy import select
 
-from call_manager.db.models import ChatSummary, ChatTurn
+from grant_lab.db.models import ChatSummary, ChatTurn
 from tests.proposal_assist.conftest import make_workspace
 
 

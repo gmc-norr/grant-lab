@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from call_manager.proposal_assist.uncited_claims.context import assemble_uncited_claims_context
+from grant_lab.proposal_assist.uncited_claims.context import assemble_uncited_claims_context
 from tests.proposal_assist.conftest import make_workspace
 
 

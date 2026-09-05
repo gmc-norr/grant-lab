@@ -15,9 +15,9 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
-from call_manager.auth.email import InMemoryEmailSender
-from call_manager.db.models import Source
-from call_manager.ingestion.alerts import ConsecutiveFailureTracker, check_stale_sources
+from grant_lab.auth.email import InMemoryEmailSender
+from grant_lab.db.models import Source
+from grant_lab.ingestion.alerts import ConsecutiveFailureTracker, check_stale_sources
 
 # ---------------------------------------------------------------------------
 # Helper: read Source from DB

@@ -6,12 +6,12 @@ import uuid
 
 import pytest
 
-from call_manager.config import Settings
-from call_manager.db.models import Reference as _Reference
-from call_manager.proposal_assist.references.embed import FakeEmbedder
-from call_manager.proposal_assist.references.ingest import ingest_bytes
-from call_manager.proposal_assist.references.storage import ReferenceStorage
-from call_manager.proposal_assist.tools.references import (
+from grant_lab.config import Settings
+from grant_lab.db.models import Reference as _Reference
+from grant_lab.proposal_assist.references.embed import FakeEmbedder
+from grant_lab.proposal_assist.references.ingest import ingest_bytes
+from grant_lab.proposal_assist.references.storage import ReferenceStorage
+from grant_lab.proposal_assist.tools.references import (
     list_references_impl,
     navigate_reference_impl,
     read_reference_impl,
@@ -19,7 +19,7 @@ from call_manager.proposal_assist.tools.references import (
     search_references_impl,
     summarize_data_impl,
 )
-from call_manager.proposal_assist.tools.registry import ToolContext
+from grant_lab.proposal_assist.tools.registry import ToolContext
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 

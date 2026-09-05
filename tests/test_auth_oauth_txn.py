@@ -1,7 +1,7 @@
 # tests/test_auth_oauth_txn.py
 import pytest
 
-from call_manager.auth.oauth_txn import InvalidTransaction, TransactionCipher
+from grant_lab.auth.oauth_txn import InvalidTransaction, TransactionCipher
 
 
 def test_round_trip():

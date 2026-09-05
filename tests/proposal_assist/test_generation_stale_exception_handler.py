@@ -41,13 +41,13 @@ import uuid
 
 from fastapi.testclient import TestClient
 
-from call_manager.db.models import UserClaimAnnotation
-from call_manager.proposal_assist.drafting.locking import (
+from grant_lab.db.models import UserClaimAnnotation
+from grant_lab.proposal_assist.drafting.locking import (
     DELETED_ERROR_MESSAGE,
     WorkspaceDeleted,
 )
-from call_manager.proposal_assist.ports.errors import WorkspaceGenerationStale
-from call_manager.workspaces import restore_workspace_db, soft_delete_workspace_db
+from grant_lab.proposal_assist.ports.errors import WorkspaceGenerationStale
+from grant_lab.workspaces import restore_workspace_db, soft_delete_workspace_db
 from tests.proposal_assist.test_api_annotations_insert import _seed_supported
 
 
@@ -143,7 +143,7 @@ def test_the_converted_insert_route_answers_404_when_the_epoch_moved(
         s.commit()
         ws_id = ws.id
 
-    import call_manager.web.api.annotations as annotations_mod
+    import grant_lab.web.api.annotations as annotations_mod
 
     real = annotations_mod._annotation_or_404
     calls: list[int] = []

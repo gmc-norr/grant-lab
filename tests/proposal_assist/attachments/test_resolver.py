@@ -16,8 +16,8 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from call_manager.db.models import Attachment, User, Workspace
-from call_manager.proposal_assist.attachments.resolver import (
+from grant_lab.db.models import Attachment, User, Workspace
+from grant_lab.proposal_assist.attachments.resolver import (
     AttachmentResolutionError,
     resolve_user_content,
 )
@@ -314,8 +314,8 @@ def test_resolve_unsupported_suffix_raises(pg_session_factory, tmp_path):
 def test_resolve_reference_block_injects_truncated_text(pg_session_factory, tmp_path):
     """A reference block resolves to a text block wrapped in an explicitly
     untrusted container with a data-only notice, truncated at the budget."""
-    from call_manager.db.models import Reference
-    from call_manager.proposal_assist.attachments.resolver import (
+    from grant_lab.db.models import Reference
+    from grant_lab.proposal_assist.attachments.resolver import (
         resolve_user_content,
     )
 
@@ -366,8 +366,8 @@ def test_resolve_reference_block_injects_truncated_text(pg_session_factory, tmp_
 
 def test_resolve_reference_truncates_at_budget(pg_session_factory, tmp_path):
     """Text longer than REFERENCE_TEXT_BUDGET_CHARS gets cut + truncation suffix."""
-    from call_manager.db.models import Reference
-    from call_manager.proposal_assist.attachments.resolver import (
+    from grant_lab.db.models import Reference
+    from grant_lab.proposal_assist.attachments.resolver import (
         REFERENCE_TEXT_BUDGET_CHARS,
         resolve_user_content,
     )
@@ -425,8 +425,8 @@ def test_resolve_reference_neutralizes_system_tag_breakout(pg_session_factory, t
     literal ``</system>`` must NOT be able to close the trusted wrapper
     and inject elevated-trust instructions. Both the body and the
     display label are sanitised."""
-    from call_manager.db.models import Reference
-    from call_manager.proposal_assist.attachments.resolver import (
+    from grant_lab.db.models import Reference
+    from grant_lab.proposal_assist.attachments.resolver import (
         resolve_user_content,
     )
 
@@ -487,8 +487,8 @@ def test_resolve_reference_neutralizes_system_tag_breakout(pg_session_factory, t
 
 def test_resolve_reference_cross_workspace_rejected(pg_session_factory, tmp_path):
     """IDOR: reference belongs to a different workspace than the content."""
-    from call_manager.db.models import Reference
-    from call_manager.proposal_assist.attachments.resolver import (
+    from grant_lab.db.models import Reference
+    from grant_lab.proposal_assist.attachments.resolver import (
         AttachmentResolutionError,
         resolve_user_content,
     )
@@ -532,8 +532,8 @@ def test_resolve_reference_cross_workspace_rejected(pg_session_factory, tmp_path
 def test_resolve_reference_missing_text_file_rejected(pg_session_factory, tmp_path):
     """text_status='done' but text.txt missing → AttachmentResolutionError.
     This is the contract: 'done' means the file is on disk."""
-    from call_manager.db.models import Reference
-    from call_manager.proposal_assist.attachments.resolver import (
+    from grant_lab.db.models import Reference
+    from grant_lab.proposal_assist.attachments.resolver import (
         AttachmentResolutionError,
         resolve_user_content,
     )

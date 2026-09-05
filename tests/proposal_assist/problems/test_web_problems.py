@@ -1,7 +1,7 @@
 import uuid
 
-from call_manager.db.models import EvaluatorJob, Workspace
-from call_manager.proposal_assist.paths import workspace_repo_dir
+from grant_lab.db.models import EvaluatorJob, Workspace
+from grant_lab.proposal_assist.paths import workspace_repo_dir
 from tests.proposal_assist.conftest import make_workspace
 
 

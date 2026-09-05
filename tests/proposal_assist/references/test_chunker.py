@@ -1,7 +1,7 @@
 """Section-aware chunker: one chunk per section when small enough;
 sub-chunks within large sections via recursive split with overlap."""
 
-from call_manager.proposal_assist.references.chunker import chunk_sections
+from grant_lab.proposal_assist.references.chunker import chunk_sections
 
 
 def test_small_section_becomes_one_chunk():

@@ -2,11 +2,11 @@ import asyncio
 
 import pytest
 
-from call_manager.config import Settings
-from call_manager.db.models import UncitedClaimsJob
-from call_manager.proposal_assist.drafting.contract import TurnDoneEvent
-from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
-from call_manager.proposal_assist.uncited_claims.pass_runner import run_uncited_claims_pass
+from grant_lab.config import Settings
+from grant_lab.db.models import UncitedClaimsJob
+from grant_lab.proposal_assist.drafting.contract import TurnDoneEvent
+from grant_lab.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
+from grant_lab.proposal_assist.uncited_claims.pass_runner import run_uncited_claims_pass
 from tests.proposal_assist.conftest import make_workspace
 
 

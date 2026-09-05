@@ -7,9 +7,9 @@ from unittest.mock import MagicMock, patch
 
 from sqlalchemy import select
 
-from call_manager.db.models import Call, Profile, ProfileKind, Source, User
-from call_manager.embeddings.cli import backfill_main
-from call_manager.embeddings.client import EmbedResult
+from grant_lab.db.models import Call, Profile, ProfileKind, Source, User
+from grant_lab.embeddings.cli import backfill_main
+from grant_lab.embeddings.client import EmbedResult
 
 
 def _embed_result(vec: list[float]) -> EmbedResult:
@@ -53,7 +53,7 @@ def test_cli_backfill_embeds_all_null_rows(pg_session_factory, capsys):
     fake_client.model = "bge-m3"
     fake_client.embed.return_value = _embed_result([0.5] * 1024)
 
-    with patch("call_manager.embeddings.cli._build_embed_client", return_value=fake_client):
+    with patch("grant_lab.embeddings.cli._build_embed_client", return_value=fake_client):
         exit_code = backfill_main(
             argv=["backfill"],
             session_factory=pg_session_factory,
@@ -94,7 +94,7 @@ def test_cli_backfill_loops_until_all_done(pg_session_factory):
     fake_client.model = "bge-m3"
     fake_client.embed.return_value = _embed_result([0.5] * 1024)
 
-    with patch("call_manager.embeddings.cli._build_embed_client", return_value=fake_client):
+    with patch("grant_lab.embeddings.cli._build_embed_client", return_value=fake_client):
         exit_code = backfill_main(
             argv=["backfill", "--batch-size", "2"],
             session_factory=pg_session_factory,
@@ -135,7 +135,7 @@ def test_cli_backfill_terminates_when_only_blank_description_profiles_remain(
     fake_client.model = "bge-m3"
     fake_client.embed.side_effect = AssertionError("embed should not be invoked")
 
-    with patch("call_manager.embeddings.cli._build_embed_client", return_value=fake_client):
+    with patch("grant_lab.embeddings.cli._build_embed_client", return_value=fake_client):
         exit_code = backfill_main(
             argv=["backfill"],
             session_factory=pg_session_factory,
@@ -169,7 +169,7 @@ def test_cli_backfill_force_flag_re_embeds_already_embedded_rows(pg_session_fact
     fake_client.model = "bge-m3"
     fake_client.embed.return_value = _embed_result([0.1] * 1024)
 
-    with patch("call_manager.embeddings.cli._build_embed_client", return_value=fake_client):
+    with patch("grant_lab.embeddings.cli._build_embed_client", return_value=fake_client):
         exit_code = backfill_main(
             argv=["backfill", "--force"],
             session_factory=pg_session_factory,
@@ -208,7 +208,7 @@ def test_cli_backfill_force_terminates_with_small_batch_size(pg_session_factory)
     fake_client.model = "bge-m3"
     fake_client.embed.return_value = _embed_result([0.1] * 1024)
 
-    with patch("call_manager.embeddings.cli._build_embed_client", return_value=fake_client):
+    with patch("grant_lab.embeddings.cli._build_embed_client", return_value=fake_client):
         exit_code = backfill_main(
             argv=["backfill", "--force", "--batch-size", "2"],
             session_factory=pg_session_factory,
@@ -220,7 +220,7 @@ def test_cli_backfill_force_terminates_with_small_batch_size(pg_session_factory)
 
 def test_cli_backfill_returns_nonzero_on_persistent_failures(pg_session_factory):
     """If any row fails to embed (LLM down etc), exit 1 so deploy scripts catch it."""
-    from call_manager.ranking.ollama_client import LLMError
+    from grant_lab.ranking.ollama_client import LLMError
 
     with pg_session_factory() as s:
         _seed(s, n_calls=1, n_profiles=0)
@@ -230,7 +230,7 @@ def test_cli_backfill_returns_nonzero_on_persistent_failures(pg_session_factory)
     fake_client.model = "bge-m3"
     fake_client.embed.side_effect = LLMError("down")
 
-    with patch("call_manager.embeddings.cli._build_embed_client", return_value=fake_client):
+    with patch("grant_lab.embeddings.cli._build_embed_client", return_value=fake_client):
         exit_code = backfill_main(
             argv=["backfill"],
             session_factory=pg_session_factory,
@@ -282,8 +282,8 @@ def test_cli_backfill_force_keeps_going_after_first_all_failed_batch(pg_session_
     fake_client.model = "bge-m3"
 
     with (
-        patch("call_manager.embeddings.cli._build_embed_client", return_value=fake_client),
-        patch("call_manager.embeddings.cli.refresh_missing_embeddings_tick", side_effect=fake_tick),
+        patch("grant_lab.embeddings.cli._build_embed_client", return_value=fake_client),
+        patch("grant_lab.embeddings.cli.refresh_missing_embeddings_tick", side_effect=fake_tick),
     ):
         exit_code = backfill_main(
             argv=["backfill", "--force"],

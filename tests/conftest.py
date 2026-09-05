@@ -9,9 +9,9 @@ from sqlalchemy.orm import close_all_sessions
 from testcontainers.postgres import PostgresContainer
 
 from alembic import command
-from call_manager.config import Settings
-from call_manager.db.base import Base
-from call_manager.db.session import make_engine, make_session_factory
+from grant_lab.config import Settings
+from grant_lab.db.base import Base
+from grant_lab.db.session import make_engine, make_session_factory
 
 
 class _ExplicitEventLoopPolicy(asyncio.DefaultEventLoopPolicy):
@@ -165,7 +165,7 @@ def profile_factory(pg_session_factory):
     """Yield a factory that creates a Profile owned by a fresh User.
     Returns the (profile_id, user_id) tuple so tests can use the IDs
     after the session closes."""
-    from call_manager.db.models import Profile, ProfileKind, User
+    from grant_lab.db.models import Profile, ProfileKind, User
 
     created: list[int] = []
 
@@ -208,7 +208,7 @@ def _close_helper_entered_lifespans():
     analysis queue under other tests, while holding the single-instance advisory
     lock that test_scheduler_single_instance asserts is free.
 
-    Imported lazily so this root conftest does not pull in call_manager.main at
+    Imported lazily so this root conftest does not pull in grant_lab.main at
     collection time. A no-op for the vast majority of tests, which never call it.
     """
     yield

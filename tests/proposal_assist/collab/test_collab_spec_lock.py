@@ -16,12 +16,12 @@ from pathlib import Path
 
 from pycrdt import Doc
 
-from call_manager.db.models import SpecLockEvent
-from call_manager.proposal_assist.artifacts import SPEC_FILENAME
-from call_manager.proposal_assist.collab import state as collab_state
-from call_manager.proposal_assist.collab import store
-from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
-from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
+from grant_lab.db.models import SpecLockEvent
+from grant_lab.proposal_assist.artifacts import SPEC_FILENAME
+from grant_lab.proposal_assist.collab import state as collab_state
+from grant_lab.proposal_assist.collab import store
+from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm
+from grant_lab.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
 from tests.test_api_spec import _add_spec
 from tests.test_api_workspaces import _app, _client, _seed
 
@@ -32,7 +32,7 @@ from tests.test_api_workspaces import _app, _client, _seed
 
 def _init_spec_repo(tmp_path: Path, ws_id, *, spec_content: str) -> Path:
     """Initialise a workspace repo with both proposal.md and proposal-spec.md committed."""
-    from call_manager.proposal_assist.paths import workspace_repo_dir
+    from grant_lab.proposal_assist.paths import workspace_repo_dir
 
     repo = workspace_repo_dir(str(tmp_path), ws_id)
     # repo already exists from _seed; spec file may not — write and commit it.
@@ -45,7 +45,7 @@ def _init_spec_repo(tmp_path: Path, ws_id, *, spec_content: str) -> Path:
 
 def _git_env():
     """Minimal git environment for test commits (avoids ~/.gitconfig lookup)."""
-    from call_manager.proposal_assist.citations.gitio import _git_env as _real
+    from grant_lab.proposal_assist.citations.gitio import _git_env as _real
 
     return _real()
 
@@ -96,7 +96,7 @@ def test_collab_lock_stamps_fresh_checkpoint_sha(
 
     # Seed an uncheckpointed live-room edit (actor = owner)
     edited_md = "## Aims\n\nedited by owner.\n"
-    from call_manager.proposal_assist.collab.checkpoint import serialize_doc_to_markdown
+    from grant_lab.proposal_assist.collab.checkpoint import serialize_doc_to_markdown
 
     doc = _seed_spec_room_update(pg_session_factory, ws_id, owner_id, edited_md)
     expected_md = serialize_doc_to_markdown(doc)
@@ -161,8 +161,8 @@ def test_collab_lock_post_checkpoint_empty_is_409(
 ):
     """Collab enabled; checkpoint writes whitespace-only content to disk (simulating
     a room whose serialized markdown is empty) → post-checkpoint empty-check fires → 409."""
-    from call_manager.proposal_assist.collab.checkpoint import CheckpointResult
-    from call_manager.proposal_assist.paths import workspace_repo_dir
+    from grant_lab.proposal_assist.collab.checkpoint import CheckpointResult
+    from grant_lab.proposal_assist.paths import workspace_repo_dir
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
@@ -188,7 +188,7 @@ def test_collab_lock_post_checkpoint_empty_is_409(
         return CheckpointResult(committed=True, commit_sha=head, authors=[owner_id])
 
     monkeypatch.setattr(
-        "call_manager.web.api.workspaces.checkpoint_artifact", _fake_checkpoint_writes_empty
+        "grant_lab.web.api.workspaces.checkpoint_artifact", _fake_checkpoint_writes_empty
     )
 
     c = _client(app, owner_id)
@@ -248,7 +248,7 @@ def test_collab_lock_no_committable_head_is_404(
     """Collab enabled; workspace has NO git repo (collab enabled pre-repo) →
     checkpoint_artifact returns commit_sha="" → POST spec/lock → 404 (not an
     empty-SHA lock).  Spec file must exist on disk for the pre-mutex check to pass."""
-    from call_manager.proposal_assist.paths import workspace_repo_dir
+    from grant_lab.proposal_assist.paths import workspace_repo_dir
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
@@ -271,13 +271,13 @@ def test_collab_lock_no_committable_head_is_404(
     _seed_spec_room_update(pg_session_factory, ws_id, owner_id, "## Aims\n\ncontent.\n")
 
     # Monkeypatch checkpoint_artifact to simulate "no committable HEAD" (returns commit_sha="")
-    from call_manager.proposal_assist.collab.checkpoint import CheckpointResult
+    from grant_lab.proposal_assist.collab.checkpoint import CheckpointResult
 
     def _fake_checkpoint(*args, **kwargs):
         return CheckpointResult(committed=False, commit_sha="", authors=[])
 
     monkeypatch.setattr(
-        "call_manager.web.api.workspaces.checkpoint_artifact", _fake_checkpoint
+        "grant_lab.web.api.workspaces.checkpoint_artifact", _fake_checkpoint
     )
 
     c = _client(app, owner_id)
@@ -293,7 +293,7 @@ def test_collab_unlock_no_committable_head_is_404(
 ):
     """Symmetric to the lock case: collab enabled, checkpoint returns empty SHA →
     POST spec/unlock → 404."""
-    from call_manager.proposal_assist.paths import workspace_repo_dir
+    from grant_lab.proposal_assist.paths import workspace_repo_dir
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
@@ -316,13 +316,13 @@ def test_collab_unlock_no_committable_head_is_404(
         s.commit()
 
     # Monkeypatch checkpoint_artifact to return empty SHA
-    from call_manager.proposal_assist.collab.checkpoint import CheckpointResult
+    from grant_lab.proposal_assist.collab.checkpoint import CheckpointResult
 
     def _fake_checkpoint(*args, **kwargs):
         return CheckpointResult(committed=False, commit_sha="", authors=[])
 
     monkeypatch.setattr(
-        "call_manager.web.api.workspaces.checkpoint_artifact", _fake_checkpoint
+        "grant_lab.web.api.workspaces.checkpoint_artifact", _fake_checkpoint
     )
 
     r_unlock = c.post(f"/api/workspaces/{ws_id}/spec/unlock")
@@ -342,7 +342,7 @@ def _install_flip_on_acquire(monkeypatch, pg_session_factory, ws_id):
     """Monkeypatch workspaces.acquire_commit_mutex_at_generation to enable spec collab
     (on a separate committed session) as a side effect before acquiring — simulating a
     first-touch flip that committed just before we got the mutex."""
-    import call_manager.web.api.workspaces as workspaces_mod
+    import grant_lab.web.api.workspaces as workspaces_mod
 
     real_acquire = workspaces_mod.acquire_commit_mutex_at_generation
 
@@ -363,7 +363,7 @@ def test_lock_reads_flag_under_mutex_after_concurrent_flip(
     runs (disk gains the room content) and SpecLockEvent.artifact_commit_sha is
     the NEW checkpoint SHA — not the stale pre-flip HEAD a pre-mutex read would
     have stamped."""
-    from call_manager.proposal_assist.collab.checkpoint import serialize_doc_to_markdown
+    from grant_lab.proposal_assist.collab.checkpoint import serialize_doc_to_markdown
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
@@ -432,7 +432,7 @@ def test_flag_off_lock_unchanged(monkeypatch, pg_url, pg_session_factory, tmp_pa
     _add_spec(tmp_path, ws_id, "## Aims\nbe great.\n")
     # Collab deliberately NOT enabled
 
-    with patch("call_manager.web.api.workspaces.checkpoint_artifact") as mock_cp:
+    with patch("grant_lab.web.api.workspaces.checkpoint_artifact") as mock_cp:
         c = _client(app, owner_id)
         r = c.post(f"/api/workspaces/{ws_id}/spec/lock")
         assert r.status_code == 200, r.text

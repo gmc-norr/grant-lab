@@ -1,6 +1,6 @@
-from call_manager.db.models import CoherenceJob, EvaluatorJob, ProposedChange
-from call_manager.proposal_assist.paths import workspace_repo_dir
-from call_manager.proposal_assist.problems.aggregate import (
+from grant_lab.db.models import CoherenceJob, EvaluatorJob, ProposedChange
+from grant_lab.proposal_assist.paths import workspace_repo_dir
+from grant_lab.proposal_assist.problems.aggregate import (
     assemble_problems,
     count_pending_coherence_proposals,
 )

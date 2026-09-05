@@ -3,24 +3,24 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.db.models import ProposedChange, Reference, ReferenceChunk
-from call_manager.proposal_assist.citations.ledger import load_ledger
-from call_manager.proposal_assist.citations.markers import find_markers
-from call_manager.proposal_assist.editing.save import save_section
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
-from call_manager.proposal_assist.proposals.accepting import (
+from grant_lab.db.models import ProposedChange, Reference, ReferenceChunk
+from grant_lab.proposal_assist.citations.ledger import load_ledger
+from grant_lab.proposal_assist.citations.markers import find_markers
+from grant_lab.proposal_assist.editing.save import save_section
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.ports.stamp import stamp_for_workspace
+from grant_lab.proposal_assist.proposals.accepting import (
     ProposedChangeNotFound,
     ProposedChangeNotPending,
     accept_proposed_change,
 )
-from call_manager.proposal_assist.proposals.proposing import (
+from grant_lab.proposal_assist.proposals.proposing import (
     capture_base,
     propose_citation_insert,
     propose_prose_edit,
 )
-from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
-from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
+from grant_lab.proposal_assist.tools.citations import CITATIONS_FILENAME
+from grant_lab.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
@@ -486,7 +486,7 @@ def test_resolve_takes_row_lock_blocking_concurrent_resolver(pg_session_factory,
     from sqlalchemy import select
     from sqlalchemy.exc import OperationalError
 
-    from call_manager.proposal_assist.proposals.accepting import _load_scoped
+    from grant_lab.proposal_assist.proposals.accepting import _load_scoped
 
     with pg_session_factory() as setup:
         ws, repo = _setup(setup, tmp_path)
@@ -525,7 +525,7 @@ def test_resolve_takes_row_lock_blocking_concurrent_resolver(pg_session_factory,
 
 
 def test_reject_sets_status_and_approver(pg_session_factory, tmp_path):
-    from call_manager.proposal_assist.proposals.accepting import reject_proposed_change
+    from grant_lab.proposal_assist.proposals.accepting import reject_proposed_change
 
     with pg_session_factory() as s:
         ws, repo = _setup(s, tmp_path)
@@ -567,7 +567,7 @@ def test_citation_accept_citekey_cache_integrity_error_is_savepointed(pg_session
     #     guaranteeing the flush will hit the partial unique index.
     import unittest.mock
 
-    from call_manager.proposal_assist.citations import core as citations_mod
+    from grant_lab.proposal_assist.citations import core as citations_mod
 
     with pg_session_factory() as s:
         ws, repo = _setup(s, tmp_path)
@@ -621,7 +621,7 @@ def test_citation_accept_citekey_cache_integrity_error_is_savepointed(pg_session
 
         # The citekey-cache write rolled back to the savepoint — ref A citekey
         # is still None (the collision was absorbed, not committed).
-        from call_manager.db.models import Reference
+        from grant_lab.db.models import Reference
 
         ref_a = s.get(Reference, rid_a)
         assert ref_a.citekey is None
@@ -635,8 +635,8 @@ def test_citation_accept_git_commit_error_is_retryable_not_stale(pg_session_fact
     # the row "pending" so the caller can retry.
     import unittest.mock
 
-    from call_manager.proposal_assist.citations import core as citations_mod
-    from call_manager.proposal_assist.citations.gitio import GitCommitError
+    from grant_lab.proposal_assist.citations import core as citations_mod
+    from grant_lab.proposal_assist.citations.gitio import GitCommitError
 
     with pg_session_factory() as s:
         ws, repo = _setup(s, tmp_path)
@@ -700,7 +700,7 @@ def _spec_repo(tmp_path, ws_id, spec_text):
 
 
 def test_accept_spec_prose_commits_to_spec(pg_session_factory, tmp_path):
-    from call_manager.proposal_assist.artifacts import Artifact
+    from grant_lab.proposal_assist.artifacts import Artifact
 
     with pg_session_factory() as s:
         owner = make_user(s)
@@ -735,8 +735,8 @@ def test_accept_spec_prose_commits_to_spec(pg_session_factory, tmp_path):
 def test_accept_spec_prose_blocked_when_locked(pg_session_factory, tmp_path):
     from datetime import UTC, datetime
 
-    from call_manager.proposal_assist.artifacts import Artifact
-    from call_manager.proposal_assist.editing.save import SpecLockedError
+    from grant_lab.proposal_assist.artifacts import Artifact
+    from grant_lab.proposal_assist.editing.save import SpecLockedError
 
     with pg_session_factory() as s:
         owner = make_user(s)

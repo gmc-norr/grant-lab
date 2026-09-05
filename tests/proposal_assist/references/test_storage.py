@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-from call_manager.proposal_assist.references.storage import ReferenceStorage
+from grant_lab.proposal_assist.references.storage import ReferenceStorage
 
 
 def test_path_for_shape(tmp_path):

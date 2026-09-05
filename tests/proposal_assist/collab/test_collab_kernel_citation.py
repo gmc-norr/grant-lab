@@ -15,33 +15,33 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     ArtifactVersion,
     ProposedChange,
     Reference,
     ReferenceChunk,
 )
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
-from call_manager.proposal_assist.citations.ledger import load_ledger
-from call_manager.proposal_assist.citations.markers import find_markers
-from call_manager.proposal_assist.collab import state, store
-from call_manager.proposal_assist.collab.hydrate import build_doc, load_or_hydrate
-from call_manager.proposal_assist.collab.kernel import kernel_accept_citation
-from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
-from call_manager.proposal_assist.collab.yjs_bridge import (
+from grant_lab.proposal_assist.artifacts import PROPOSAL_FILENAME
+from grant_lab.proposal_assist.citations.ledger import load_ledger
+from grant_lab.proposal_assist.citations.markers import find_markers
+from grant_lab.proposal_assist.collab import state, store
+from grant_lab.proposal_assist.collab.hydrate import build_doc, load_or_hydrate
+from grant_lab.proposal_assist.collab.kernel import kernel_accept_citation
+from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
+from grant_lab.proposal_assist.collab.yjs_bridge import (
     apply_pm_json_to_fragment,
     ydoc_to_pm_json,
 )
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
-from call_manager.proposal_assist.proposals.accepting import (
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.ports.stamp import stamp_for_workspace
+from grant_lab.proposal_assist.proposals.accepting import (
     accept_proposed_change,
 )
-from call_manager.proposal_assist.proposals.proposing import (
+from grant_lab.proposal_assist.proposals.proposing import (
     capture_base,
     propose_citation_insert,
 )
-from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
+from grant_lab.proposal_assist.tools.citations import CITATIONS_FILENAME
 from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 EMBED_DIM = 1024
@@ -124,8 +124,8 @@ def test_compute_citation_insert_is_pure(pg_session_factory, tmp_path, monkeypat
     citekey stable, ref.citekey untouched); to assert new_proposal_text identity,
     monkeypatch new_ev_id to a fixed value first.
     """
-    from call_manager.proposal_assist.citations import core as citations_mod
-    from call_manager.proposal_assist.citations.core import compute_citation_insert
+    from grant_lab.proposal_assist.citations import core as citations_mod
+    from grant_lab.proposal_assist.citations.core import compute_citation_insert
 
     with pg_session_factory() as s:
         ws, repo = _setup(s, tmp_path)
@@ -416,7 +416,7 @@ def test_kernel_accept_citation_applies_marker_and_cocommits_ledger(pg_session_f
             base_section_sha=base_sha, reference_id=ref.id,
         )
     with pg_session_factory() as s:
-        from call_manager.db.models import User
+        from grant_lab.db.models import User
         approver = s.get(User, oid)
         res = kernel_accept_citation(
             s,
@@ -492,7 +492,7 @@ def test_kernel_accept_citation_stale_against_live_room(pg_session_factory, tmp_
             base_section_sha=base_sha, reference_id=ref.id,
         )
     with pg_session_factory() as s:
-        from call_manager.db.models import User
+        from grant_lab.db.models import User
         approver = s.get(User, oid)
         res = kernel_accept_citation(
             s, stamp=stamp_for(s, wid), room_doc=room_doc, proposed_change_id=pc_id,
@@ -522,7 +522,7 @@ def test_kernel_accept_citation_verify_fail_is_stale(pg_session_factory, tmp_pat
             evidence_quote="this text is nowhere in the chunk",
         )
     with pg_session_factory() as s:
-        from call_manager.db.models import User
+        from grant_lab.db.models import User
         approver = s.get(User, oid)
         res = kernel_accept_citation(
             s, stamp=stamp_for(s, wid), room_doc=room_doc, proposed_change_id=pc_id,
@@ -570,7 +570,7 @@ def test_kernel_accept_citation_anchor_moved_is_stale(pg_session_factory, tmp_pa
             base_section_sha=base_sha, reference_id=ref.id,
         )
     with pg_session_factory() as s:
-        from call_manager.db.models import User
+        from grant_lab.db.models import User
         approver = s.get(User, oid)
         res = kernel_accept_citation(
             s, stamp=stamp_for(s, wid), room_doc=room_doc, proposed_change_id=pc_id,
@@ -591,7 +591,7 @@ def test_kernel_accept_citation_idempotent_no_new_version(pg_session_factory, tm
         pg_session_factory, tmp_path, ref_citekey="smith2021"
     )
     head0 = _git_head(repo)
-    from call_manager.db.models import User
+    from grant_lab.db.models import User
 
     # First accept — commits the marker + ledger row.
     with pg_session_factory() as s:
@@ -666,7 +666,7 @@ def test_kernel_accept_citation_corrupt_ledger_is_stale(pg_session_factory, tmp_
             base_section_sha=base_sha, reference_id=ref.id,
         )
     with pg_session_factory() as s:
-        from call_manager.db.models import User
+        from grant_lab.db.models import User
         approver = s.get(User, oid)
         res = kernel_accept_citation(
             s, stamp=stamp_for(s, wid), room_doc=room_doc, proposed_change_id=pc_id,
@@ -698,7 +698,7 @@ def test_kernel_accept_citation_caches_citekey_in_one_transaction(pg_session_fac
             s, wid, section_index=1, base_commit_sha=head,
             base_section_sha=base_sha, reference_id=ref.id,
         )
-    from call_manager.db.models import User
+    from grant_lab.db.models import User
 
     with pg_session_factory() as s:
         approver = s.get(User, oid)

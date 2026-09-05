@@ -44,7 +44,7 @@ DATABASE_URL="${DATABASE_URL:-postgresql+psycopg://u:p@localhost:5432/db}" \
   EMBEDDING_MODEL=bge-m3 \
   SPA_MODE=disabled \
   APP_EDITION=full \
-  uv run --python 3.12 python -c "import json,sys; from call_manager.main import create_app; json.dump(create_app().openapi(), sys.stdout, sort_keys=True)" >"$tmp"
+  uv run --python 3.12 python -c "import json,sys; from grant_lab.main import create_app; json.dump(create_app().openapi(), sys.stdout, sort_keys=True)" >"$tmp"
 
 mkdir -p "$ROOT/frontend/src/api"
 cd "$ROOT/frontend"

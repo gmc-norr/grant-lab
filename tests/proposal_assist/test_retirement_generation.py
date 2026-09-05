@@ -15,8 +15,8 @@ from __future__ import annotations
 import asyncio
 import uuid
 
-from call_manager.proposal_assist.lifecycle import WorkspaceLifecycle
-from call_manager.proposal_assist.retirement import WorkspaceRetirement
+from grant_lab.proposal_assist.lifecycle import WorkspaceLifecycle
+from grant_lab.proposal_assist.retirement import WorkspaceRetirement
 
 
 def _coordinator(lifecycle, **hooks):

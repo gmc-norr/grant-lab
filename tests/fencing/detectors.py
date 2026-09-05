@@ -18,8 +18,8 @@ from __future__ import annotations
 import ast
 from typing import NamedTuple
 
-from call_manager.proposal_assist.ports.accounting import Accounting
-from call_manager.proposal_assist.ports.effects import Effects
+from grant_lab.proposal_assist.ports.accounting import Accounting
+from grant_lab.proposal_assist.ports.effects import Effects
 from tests.fencing.git_fence import fenced_qualnames, sink_calls
 
 KIND_TOOL_COMMIT = "tool_commit"
@@ -42,7 +42,7 @@ _CLAIM_PREFIXES = ("claim_next_", "claim_queued_")
 #: domain-layer commit as an UNCLASSIFIED site and the gate would stop being read.
 #: A path enters this set in the SAME slice that moves an effect into it.
 RELOCATED_EFFECT_PATHS: frozenset[str] = frozenset({
-    "src/call_manager/proposal_assist/citations/core.py",  # F3d3a
+    "src/grant_lab/proposal_assist/citations/core.py",  # F3d3a
 })
 
 

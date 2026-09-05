@@ -1,4 +1,4 @@
-from call_manager.db.models import User
+from grant_lab.db.models import User
 
 
 def test_password_hash_defaults_none_and_persists(pg_session_factory):

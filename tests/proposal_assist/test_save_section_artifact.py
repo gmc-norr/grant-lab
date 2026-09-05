@@ -1,12 +1,12 @@
 import subprocess
 from pathlib import Path
 
-from call_manager.db.models import ArtifactVersion, ClaimAnalysisJob, WorkspaceEvent
-from call_manager.proposal_assist.artifacts import Artifact
-from call_manager.proposal_assist.citations.gitio import _git_env
-from call_manager.proposal_assist.editing.save import save_section
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
+from grant_lab.db.models import ArtifactVersion, ClaimAnalysisJob, WorkspaceEvent
+from grant_lab.proposal_assist.artifacts import Artifact
+from grant_lab.proposal_assist.citations.gitio import _git_env
+from grant_lab.proposal_assist.editing.save import save_section
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.ports.stamp import stamp_for_workspace
 from tests.proposal_assist.conftest import make_workspace
 
 SPEC_DOC = "## Aims\nbe great.\n\n## Approach\ndo science.\n"
@@ -72,7 +72,7 @@ def test_spec_save_commits_spec_file_and_skips_tier1_tier2(pg_session_factory, t
 def test_spec_save_still_enforces_structure_guard(pg_session_factory, tmp_path):
     import pytest
 
-    from call_manager.proposal_assist.editing.save import SectionStructureError
+    from grant_lab.proposal_assist.editing.save import SectionStructureError
 
     with pg_session_factory() as s:
         ws = make_workspace(s)
@@ -172,7 +172,7 @@ def test_spec_save_survives_cross_artifact_head_move(pg_session_factory, tmp_pat
 def test_spec_save_stale_section_raises(pg_session_factory, tmp_path):
     import pytest
 
-    from call_manager.proposal_assist.editing.save import StaleSectionError
+    from grant_lab.proposal_assist.editing.save import StaleSectionError
 
     with pg_session_factory() as s:
         ws = make_workspace(s)

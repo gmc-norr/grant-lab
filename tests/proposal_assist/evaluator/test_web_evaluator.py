@@ -3,7 +3,7 @@ import uuid
 import pytest
 from sqlalchemy import select
 
-from call_manager.db.models import EvaluatorJob, Workspace, WorkspaceEvent
+from grant_lab.db.models import EvaluatorJob, Workspace, WorkspaceEvent
 from tests.proposal_assist.conftest import make_workspace
 
 

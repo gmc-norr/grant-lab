@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from call_manager.config import Settings
+from grant_lab.config import Settings
 
 
 def _env(monkeypatch, **extra):

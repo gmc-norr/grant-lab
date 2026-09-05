@@ -1,11 +1,11 @@
 
 from pathlib import Path
 
-from call_manager.proposal_assist.collab import state, store
-from call_manager.proposal_assist.collab.canonical import build_doc
-from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
-from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
-from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc, ydoc_to_pm_json
+from grant_lab.proposal_assist.collab import state, store
+from grant_lab.proposal_assist.collab.canonical import build_doc
+from grant_lab.proposal_assist.collab.checkpoint import checkpoint_artifact
+from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
+from grant_lab.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc, ydoc_to_pm_json
 from tests.proposal_assist.collab.test_collab_checkpoint import _init_repo
 from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 

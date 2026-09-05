@@ -50,15 +50,15 @@ import asyncio
 import threading
 import uuid
 
-import call_manager.proposal_assist.jobs_retirement as jr
-from call_manager.db.models import Workspace, WorkspaceSetupJob
-from call_manager.proposal_assist.collab.room import ClientState, RoomManager
-from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
-from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
-from call_manager.proposal_assist.drafting.registry import SubprocessRegistry
-from call_manager.proposal_assist.lifecycle import WorkspaceLifecycle
-from call_manager.proposal_assist.retirement import WorkspaceRetirement
-from call_manager.workspaces import bump_lifecycle_generation
+import grant_lab.proposal_assist.jobs_retirement as jr
+from grant_lab.db.models import Workspace, WorkspaceSetupJob
+from grant_lab.proposal_assist.collab.room import ClientState, RoomManager
+from grant_lab.proposal_assist.drafting.contract import WorkspaceRetired
+from grant_lab.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
+from grant_lab.proposal_assist.drafting.registry import SubprocessRegistry
+from grant_lab.proposal_assist.lifecycle import WorkspaceLifecycle
+from grant_lab.proposal_assist.retirement import WorkspaceRetirement
+from grant_lab.workspaces import bump_lifecycle_generation
 from tests.proposal_assist.conftest import make_workspace
 
 # ---------------------------------------------------------------------------

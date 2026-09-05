@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from call_manager.proposal_assist.tools import history
+from grant_lab.proposal_assist.tools import history
 
 
 @pytest.fixture

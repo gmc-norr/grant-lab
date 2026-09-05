@@ -17,15 +17,15 @@ from datetime import UTC, datetime
 import pytest
 from fastapi import HTTPException
 
-import call_manager.proposal_assist.web._writes as writes_module
-from call_manager.db.models import Workspace, WorkspaceEvent
-from call_manager.proposal_assist.drafting.locking import (
+import grant_lab.proposal_assist.web._writes as writes_module
+from grant_lab.db.models import Workspace, WorkspaceEvent
+from grant_lab.proposal_assist.drafting.locking import (
     BUSY_ERROR_MESSAGE,
     WorkspaceDeleted,
     acquire_commit_mutex,
 )
-from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
-from call_manager.proposal_assist.web._writes import workspace_write
+from grant_lab.proposal_assist.ports.stamp import stamp_for_workspace
+from grant_lab.proposal_assist.web._writes import workspace_write
 from tests.proposal_assist.conftest import make_workspace
 
 

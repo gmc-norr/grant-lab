@@ -1,7 +1,7 @@
 """B7 Task 3 — ``submit_user_turn`` with attachment_ids.
 
 These tests cover the attachment branch of
-:func:`call_manager.proposal_assist.turns.submit.submit_user_turn`,
+:func:`grant_lab.proposal_assist.turns.submit.submit_user_turn`,
 including the NULL-tokens_estimate re-probe path that closes the
 T2→T3 migration cap-bypass window (Codex review of plan rev1).
 """
@@ -16,11 +16,11 @@ import pytest
 from PIL import Image
 from sqlalchemy import select
 
-from call_manager.config import Settings
-from call_manager.db.models import Attachment, ChatTurn
-from call_manager.proposal_assist.attachments.storage import AttachmentStorage
-from call_manager.proposal_assist.attachments.tokens import estimate_image_tokens
-from call_manager.proposal_assist.turns.submit import submit_user_turn
+from grant_lab.config import Settings
+from grant_lab.db.models import Attachment, ChatTurn
+from grant_lab.proposal_assist.attachments.storage import AttachmentStorage
+from grant_lab.proposal_assist.attachments.tokens import estimate_image_tokens
+from grant_lab.proposal_assist.turns.submit import submit_user_turn
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 

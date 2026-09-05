@@ -5,7 +5,7 @@ from functools import partial
 import httpx
 from sqlalchemy import select
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     Call,
     CallRanking,
     CallRankingCriterion,
@@ -16,9 +16,9 @@ from call_manager.db.models import (
     Source,
     User,
 )
-from call_manager.embeddings.client import EmbedResult
-from call_manager.ranking.ollama_client import OllamaClient
-from call_manager.ranking.worker import drain_queue as _drain_queue
+from grant_lab.embeddings.client import EmbedResult
+from grant_lab.ranking.ollama_client import OllamaClient
+from grant_lab.ranking.worker import drain_queue as _drain_queue
 
 # drain_queue now requires embedding_threshold (no module-level default).
 # Mirrors Settings.embedding_pregate_threshold default of 0.30.
@@ -227,7 +227,7 @@ def _setup_profile(pg_session_factory, *, profile_embedding):
     """Create a User + active Profile with a pre-loaded embedding vector
     (so the orchestrator's enqueue step + worker's rank_pair see a
     profile that's already been embedded). Returns (profile_id, user_id)."""
-    from call_manager.db.models import Profile, ProfileKind, User
+    from grant_lab.db.models import Profile, ProfileKind, User
 
     with pg_session_factory() as s:
         u = User(email="e2e-pregate@umu.se")
@@ -269,10 +269,10 @@ def test_e2e_ingest_then_drain_short_circuits_when_embedding_dissimilar(
     from datetime import UTC, datetime
     from unittest.mock import MagicMock
 
-    from call_manager.auth.email import InMemoryEmailSender
-    from call_manager.ingestion.alerts import ConsecutiveFailureTracker
-    from call_manager.ingestion.orchestrator import run_ingestion
-    from call_manager.sources.types import NormalizedCall
+    from grant_lab.auth.email import InMemoryEmailSender
+    from grant_lab.ingestion.alerts import ConsecutiveFailureTracker
+    from grant_lab.ingestion.orchestrator import run_ingestion
+    from grant_lab.sources.types import NormalizedCall
 
     # Profile vector: [1, 0, 0, ...]. Off-topic call vector: [0.05, ~1, ...] so
     # cosine ≈ 0.05 (well below the 0.30 default threshold → gate FAIL).
@@ -370,10 +370,10 @@ def test_e2e_ingest_then_drain_invokes_llm_when_embedding_similar(
     from datetime import UTC, datetime
     from unittest.mock import MagicMock
 
-    from call_manager.auth.email import InMemoryEmailSender
-    from call_manager.ingestion.alerts import ConsecutiveFailureTracker
-    from call_manager.ingestion.orchestrator import run_ingestion
-    from call_manager.sources.types import NormalizedCall
+    from grant_lab.auth.email import InMemoryEmailSender
+    from grant_lab.ingestion.alerts import ConsecutiveFailureTracker
+    from grant_lab.ingestion.orchestrator import run_ingestion
+    from grant_lab.sources.types import NormalizedCall
 
     # Both vectors near-aligned → cosine ~0.95 → gate PASS.
     profile_vec = [1.0] + [0.0] * 1023

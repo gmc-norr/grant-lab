@@ -15,8 +15,8 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-import call_manager.proposal_assist.jobs_retirement as jr
-from call_manager.db.models import Workspace, WorkspaceSetupJob
+import grant_lab.proposal_assist.jobs_retirement as jr
+from grant_lab.db.models import Workspace, WorkspaceSetupJob
 from tests.proposal_assist.conftest import make_workspace
 
 

@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import pytest
 
-from call_manager.db.models import WorkspaceEvent
-from call_manager.proposal_assist.citations.gitio import current_head
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.paths import workspace_repo_dir
+from grant_lab.db.models import WorkspaceEvent
+from grant_lab.proposal_assist.citations.gitio import current_head
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.paths import workspace_repo_dir
 from tests.test_api_workspaces import _app, _client, _seed
 
 # Proposal with a preamble (index 0) and two H2 sections (index 1, 2).

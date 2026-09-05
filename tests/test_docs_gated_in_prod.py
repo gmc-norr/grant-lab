@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from call_manager.main import create_app
+from grant_lab.main import create_app
 
 
 def _make_app(monkeypatch, *, spa_mode: str):

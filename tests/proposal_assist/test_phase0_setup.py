@@ -4,10 +4,10 @@ from unittest.mock import Mock
 
 from sqlalchemy import select
 
-from call_manager.db.models import Workspace, WorkspaceEvent, WorkspaceSetupJob
-from call_manager.proposal_assist.extractors.sections import SECTION_NAMES
-from call_manager.proposal_assist.hashing import source_text_hash
-from call_manager.proposal_assist.phases.setup import (
+from grant_lab.db.models import Workspace, WorkspaceEvent, WorkspaceSetupJob
+from grant_lab.proposal_assist.extractors.sections import SECTION_NAMES
+from grant_lab.proposal_assist.hashing import source_text_hash
+from grant_lab.proposal_assist.phases.setup import (
     MAX_SETUP_ATTEMPTS,
     Phase0Worker,
     claim_next_setup_job,
@@ -478,7 +478,7 @@ def test_claim_next_returns_oldest_by_queued_at(pg_session_factory):
     """Claim order is FIFO on queued_at, not arbitrary by UUID."""
     import time
 
-    from call_manager.db.models import User
+    from grant_lab.db.models import User
 
     with pg_session_factory() as s:
         owner_a = User(email="fifo-owner-a@umu.se")
@@ -509,7 +509,7 @@ def test_requeue_stuck_setup_jobs_requeues_crashed_running(pg_session_factory):
     re-claims it — otherwise it's invisible to the queued-only peek forever."""
     from datetime import UTC, datetime, timedelta
 
-    from call_manager.proposal_assist.phases.setup import STUCK_SETUP_AFTER
+    from grant_lab.proposal_assist.phases.setup import STUCK_SETUP_AFTER
 
     with pg_session_factory() as s:
         ws = make_workspace(s)
@@ -539,7 +539,7 @@ def test_requeue_stuck_setup_jobs_dead_letters_after_max_attempts(pg_session_fac
     'failed' rather than looping forever."""
     from datetime import UTC, datetime, timedelta
 
-    from call_manager.proposal_assist.phases.setup import STUCK_SETUP_AFTER
+    from grant_lab.proposal_assist.phases.setup import STUCK_SETUP_AFTER
 
     with pg_session_factory() as s:
         ws = make_workspace(s)

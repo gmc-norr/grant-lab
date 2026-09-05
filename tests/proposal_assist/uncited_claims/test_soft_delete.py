@@ -1,4 +1,4 @@
-from call_manager.db.models import UncitedClaimsJob
+from grant_lab.db.models import UncitedClaimsJob
 from tests.proposal_assist.conftest import make_workspace
 
 

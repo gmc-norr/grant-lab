@@ -19,8 +19,8 @@ import logging
 import pytest
 from fastapi.testclient import TestClient
 
-from call_manager.main import create_app
-from call_manager.scheduler import SingleInstanceViolation, probe_scheduler_lock
+from grant_lab.main import create_app
+from grant_lab.scheduler import SingleInstanceViolation, probe_scheduler_lock
 
 
 # `migrated_engine` is requested by every test below: `pg_url` alone is an
@@ -76,7 +76,7 @@ def test_an_unavailable_lock_backend_keeps_the_tolerant_path(
     """A database that cannot answer the probe is an outage, not a second
     instance: boot with a warning and no scheduler (as before), and let
     /healthz's own DB check report the outage."""
-    from call_manager import scheduler as scheduler_module
+    from grant_lab import scheduler as scheduler_module
 
     _set_min_env(monkeypatch, pg_url)
     monkeypatch.setattr(scheduler_module, "probe_scheduler_lock", lambda _e: (None, "unavailable"))
@@ -91,7 +91,7 @@ def test_a_startup_failure_after_the_lock_releases_it(pg_url, migrated_engine, m
     """The lock is taken FIRST, so a later startup step that raises must give
     it back — otherwise the next boot in this process (or the next test) is
     refused as a second instance."""
-    from call_manager import admin_bootstrap
+    from grant_lab import admin_bootstrap
 
     _set_min_env(monkeypatch, pg_url)
 

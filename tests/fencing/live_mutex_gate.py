@@ -7,7 +7,7 @@ proves the acquisition precedes the sink, not that the mutex is still held.
 **The rule** (built directly on ``git_fence.unprotected_sinks``):
 
     Every ``(path, qualname)`` that ``unprotected_sinks`` reports across
-    ``src/call_manager/`` must be in ``UNCONVERTED_LIVE_CALLERS``.
+    ``src/grant_lab/`` must be in ``UNCONVERTED_LIVE_CALLERS``.
 
 This is the gate that would have caught spec revision 1's defect: converting the
 shared ``checkpoint_artifact`` while five kernel operations still took ``_live``
@@ -56,7 +56,7 @@ from tests.fencing import git_fence
 # ---------------------------------------------------------------------------
 
 _REPO = pathlib.Path(__file__).resolve().parents[2]
-_SRC = _REPO / "src" / "call_manager"
+_SRC = _REPO / "src" / "grant_lab"
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +79,7 @@ UNCONVERTED_LIVE_CALLERS: frozenset[tuple[str, str]] = frozenset(
     {
         # (repo-relative path, qualname) — derived from Step 2 probe output, not guessed
         (
-            "src/call_manager/proposal_assist/citations/bibliography.py",
+            "src/grant_lab/proposal_assist/citations/bibliography.py",
             "build_bibliography",
         ),
         # _insert_citation_locked: converted to Primitive B in endgame Task 6, but its
@@ -88,7 +88,7 @@ UNCONVERTED_LIVE_CALLERS: frozenset[tuple[str, str]] = frozenset(
         # and cannot prove order — it stays pinned with a §5.2 runtime proof, exactly
         # the shape this list exists for. It no longer calls acquire_commit_mutex_live.
         (
-            "src/call_manager/proposal_assist/citations/core.py",
+            "src/grant_lab/proposal_assist/citations/core.py",
             "_insert_citation_locked",
         ),
         # checkpoint_artifact: converted to Primitive B in endgame Task 5. Its
@@ -100,11 +100,11 @@ UNCONVERTED_LIVE_CALLERS: frozenset[tuple[str, str]] = frozenset(
         # own write_and_commit_files sink, so the checker proves it fenced and it leaves
         # this pin list (it gained a git_commit inventory row instead).
         (
-            "src/call_manager/proposal_assist/phases/setup.py",
+            "src/grant_lab/proposal_assist/phases/setup.py",
             "Phase0Worker._init_repo",
         ),
         (
-            "src/call_manager/proposal_assist/review/pass_runner.py",
+            "src/grant_lab/proposal_assist/review/pass_runner.py",
             "run_review_pass",
         ),
         # post_init_spec._git: converted to Primitive B in endgame Task 4.
@@ -113,7 +113,7 @@ UNCONVERTED_LIVE_CALLERS: frozenset[tuple[str, str]] = frozenset(
         # The §5.2 runtime proof is that require_owner stamps the generation before the
         # mutex, and write_and_commit_files is only reached under that mutex.
         (
-            "src/call_manager/web/api/workspaces.py",
+            "src/grant_lab/web/api/workspaces.py",
             "post_init_spec._git",
         ),
     }
@@ -231,7 +231,7 @@ def live_acquirer_qualnames() -> set[tuple[str, str]]:
 
 def all_unprotected() -> set[tuple[str, str]]:
     """Every ``(repo-relative-path, qualname)`` that ``unprotected_sinks`` reports
-    across ``src/call_manager/``.
+    across ``src/grant_lab/``.
 
     ``sink_calls`` already resolves aliases, so nothing is hidden.  The set
     over-approximates the truly-unfenced set (``unprotected_sinks`` under-reports

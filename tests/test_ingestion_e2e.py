@@ -3,14 +3,14 @@ from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 
-from call_manager.auth.email import InMemoryEmailSender
-from call_manager.auth.session_cookie import SessionSigner
-from call_manager.db.models import User
-from call_manager.embeddings.client import EmbedResult
-from call_manager.ingestion.alerts import ConsecutiveFailureTracker
-from call_manager.ingestion.orchestrator import run_ingestion
-from call_manager.main import create_app
-from call_manager.sources.types import NormalizedCall
+from grant_lab.auth.email import InMemoryEmailSender
+from grant_lab.auth.session_cookie import SessionSigner
+from grant_lab.db.models import User
+from grant_lab.embeddings.client import EmbedResult
+from grant_lab.ingestion.alerts import ConsecutiveFailureTracker
+from grant_lab.ingestion.orchestrator import run_ingestion
+from grant_lab.main import create_app
+from grant_lab.sources.types import NormalizedCall
 
 
 class _FakeAdapter:

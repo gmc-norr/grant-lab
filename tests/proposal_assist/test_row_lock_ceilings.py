@@ -172,9 +172,9 @@ import inspect
 import re
 from pathlib import Path
 
-from call_manager.proposal_assist import retirement, row_locks
-from call_manager.proposal_assist.drafting import locking
-from call_manager.workspaces import soft_delete_workspace_db
+from grant_lab.proposal_assist import retirement, row_locks
+from grant_lab.proposal_assist.drafting import locking
+from grant_lab.workspaces import soft_delete_workspace_db
 
 # The LARGEST number of CONTENDED rows any single bounded transaction in these
 # families acquires — the multiplier that turns a per-lock cap into that
@@ -215,14 +215,14 @@ _ALL_CAPS = {
 # The value is kept HERE rather than in the test body so a second entry cannot be
 # added without stating what it is worth.
 _EXCLUDED_FROM_CEILINGS = {
-    "call_manager.proposal_assist.citations.gitio._GIT_TIMEOUT_SECONDS": (
+    "grant_lab.proposal_assist.citations.gitio._GIT_TIMEOUT_SECONDS": (
         30.0,
         "subprocess time, not a lock cap; see gitio.py",
     ),
     # setup.py's own copy, with identical exposure: _m1 takes the commit mutex
     # (setup.py:363) and then runs up to four _run_git calls inside _init_repo while
     # holding both that mutex and the `workspaces` row FOR UPDATE.
-    "call_manager.proposal_assist.phases.setup._GIT_TIMEOUT_SECONDS": (
+    "grant_lab.proposal_assist.phases.setup._GIT_TIMEOUT_SECONDS": (
         30.0,
         "M1's git subprocess time, not a lock cap; mutex-held, same trade as gitio",
     ),

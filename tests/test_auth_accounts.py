@@ -1,6 +1,6 @@
-import call_manager.auth.accounts as acc
-from call_manager.auth.accounts import link_google_identity, resolve_google_account
-from call_manager.db.models import User
+import grant_lab.auth.accounts as acc
+from grant_lab.auth.accounts import link_google_identity, resolve_google_account
+from grant_lab.db.models import User
 
 ISS = "https://accounts.google.com"
 

@@ -7,14 +7,14 @@ import uuid
 import pytest
 from sqlalchemy import select
 
-from call_manager.config import Settings
-from call_manager.db.models import (
+from grant_lab.config import Settings
+from grant_lab.db.models import (
     ChatTurn,
     Reference,
     User,
     Workspace,
 )
-from call_manager.proposal_assist.turns.submit import submit_user_turn
+from grant_lab.proposal_assist.turns.submit import submit_user_turn
 
 
 def _seed_workspace(s, *, owner_email=None):

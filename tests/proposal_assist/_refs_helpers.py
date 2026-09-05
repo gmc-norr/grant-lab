@@ -4,9 +4,9 @@ from contextlib import suppress
 
 from fastapi.testclient import TestClient
 
-from call_manager.db.models import WorkspaceViewer
-from call_manager.embeddings.client import EmbedResult
-from call_manager.main import create_app
+from grant_lab.db.models import WorkspaceViewer
+from grant_lab.embeddings.client import EmbedResult
+from grant_lab.main import create_app
 
 
 def build_app(monkeypatch, pg_url, tmp_path, pg_session_factory):

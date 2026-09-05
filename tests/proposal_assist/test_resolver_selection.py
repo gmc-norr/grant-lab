@@ -14,8 +14,8 @@ import uuid
 
 import pytest
 
-from call_manager.db.models import User, Workspace
-from call_manager.proposal_assist.attachments.resolver import (
+from grant_lab.db.models import User, Workspace
+from grant_lab.proposal_assist.attachments.resolver import (
     resolve_user_content,
 )
 

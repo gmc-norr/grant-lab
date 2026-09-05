@@ -168,7 +168,7 @@ Every CHECK constraining a `status`-like column. Divergence here is a real defec
 
 ## The epoch fence
 
-Public primitives in `src/call_manager/proposal_assist/fencing.py`.
+Public primitives in `src/grant_lab/proposal_assist/fencing.py`.
 **Read the docstring for the exact SCOPE of each rule before relying on it** —
 a rule that looks absolute usually is not.
 

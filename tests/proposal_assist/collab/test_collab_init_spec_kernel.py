@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME, SPEC_FILENAME, SPEC_SKELETON
-from call_manager.proposal_assist.citations.gitio import current_head
-from call_manager.proposal_assist.collab import state, store
-from call_manager.proposal_assist.collab.canonical import canonical_artifact_markdown
+from grant_lab.proposal_assist.artifacts import PROPOSAL_FILENAME, SPEC_FILENAME, SPEC_SKELETON
+from grant_lab.proposal_assist.citations.gitio import current_head
+from grant_lab.proposal_assist.collab import state, store
+from grant_lab.proposal_assist.collab.canonical import canonical_artifact_markdown
 from tests.proposal_assist.conftest import make_workspace
 
 
@@ -132,7 +132,7 @@ def test_disabled_init_severs_when_flag_flips_after_guard(
         s.commit()
         wid = ws.id
 
-    import call_manager.web.api.workspaces as workspaces_mod
+    import grant_lab.web.api.workspaces as workspaces_mod
 
     real_acquire_commit_mutex = workspaces_mod.acquire_commit_mutex_at_generation
 

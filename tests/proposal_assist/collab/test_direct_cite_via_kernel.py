@@ -3,16 +3,16 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.proposal_assist.citations.collab_cite import direct_cite_via_kernel
-from call_manager.proposal_assist.citations.human_cite import CiteStale
-from call_manager.proposal_assist.citations.ledger import load_ledger
-from call_manager.proposal_assist.collab import state
-from call_manager.proposal_assist.collab.hydrate import build_doc, load_or_hydrate
-from call_manager.proposal_assist.collab.markdown_bridge import pm_to_markdown
-from call_manager.proposal_assist.collab.room import MANAGER
-from call_manager.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
-from call_manager.proposal_assist.editing.save import CITATIONS_FILENAME, PROPOSAL_FILENAME
-from call_manager.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.citations.collab_cite import direct_cite_via_kernel
+from grant_lab.proposal_assist.citations.human_cite import CiteStale
+from grant_lab.proposal_assist.citations.ledger import load_ledger
+from grant_lab.proposal_assist.collab import state
+from grant_lab.proposal_assist.collab.hydrate import build_doc, load_or_hydrate
+from grant_lab.proposal_assist.collab.markdown_bridge import pm_to_markdown
+from grant_lab.proposal_assist.collab.room import MANAGER
+from grant_lab.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
+from grant_lab.proposal_assist.editing.save import CITATIONS_FILENAME, PROPOSAL_FILENAME
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
 from tests.proposal_assist.collab.test_collab_kernel_citation import _init_repo, _seed_reference
 from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
@@ -119,7 +119,7 @@ async def test_direct_cite_post_mutation_failure_evicts(pg_session_factory, tmp_
         bsha = _base_sha(s, wid, str(tmp_path))
         stamp = stamp_for(s, wid)
     # Fail AFTER the fragment mutation (during checkpoint) → room.doc ahead of log → evict.
-    import call_manager.proposal_assist.collab.kernel as kmod
+    import grant_lab.proposal_assist.collab.kernel as kmod
     def _boom(*a, **k): raise RuntimeError("disk full")
     monkeypatch.setattr(kmod, "checkpoint_artifact", _boom)
     evict_calls: list = []
@@ -146,8 +146,8 @@ async def test_direct_cite_section_structure_error_does_not_evict(
     # Review A: a pre-mutation SectionStructureError (e.g. a section-map divergence in
     # the apply) must be re-raised WITHOUT evicting a clean room — it belongs in
     # _CLEAN_CITE_ERRORS, mirroring _CLEAN_ACCEPT_ERRORS.
-    import call_manager.proposal_assist.citations.collab_cite as ccmod
-    from call_manager.proposal_assist.editing.save import SectionStructureError
+    import grant_lab.proposal_assist.citations.collab_cite as ccmod
+    from grant_lab.proposal_assist.editing.save import SectionStructureError
 
     md0 = "preamble\n\n## Methods\nThe claim here.\n"
     with pg_session_factory() as s:

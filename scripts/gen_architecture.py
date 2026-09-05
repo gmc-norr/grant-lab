@@ -18,9 +18,9 @@ import pathlib
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-MODELS = REPO / "src/call_manager/db/models.py"
-CONFIG = REPO / "src/call_manager/config.py"
-FENCING = REPO / "src/call_manager/proposal_assist/fencing.py"
+MODELS = REPO / "src/grant_lab/db/models.py"
+CONFIG = REPO / "src/grant_lab/config.py"
+FENCING = REPO / "src/grant_lab/proposal_assist/fencing.py"
 INVENTORY = REPO / "tests/fencing/inventory.py"
 OUT = REPO / "docs/ARCHITECTURE.md"
 
@@ -243,7 +243,7 @@ def render() -> str:
     # --- fence
     A("## The epoch fence")
     A("")
-    A("Public primitives in `src/call_manager/proposal_assist/fencing.py`.")
+    A("Public primitives in `src/grant_lab/proposal_assist/fencing.py`.")
     A("**Read the docstring for the exact SCOPE of each rule before relying on it** —")
     A("a rule that looks absolute usually is not.")
     A("")

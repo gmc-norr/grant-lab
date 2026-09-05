@@ -3,7 +3,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from call_manager.main import create_app
+from grant_lab.main import create_app
 
 
 def _connect_src_directive(csp: str) -> str:
@@ -106,7 +106,7 @@ def test_413_early_reject_carries_csp_and_hsts_over_https(migrated_engine, pg_ur
 
 
 def test_build_csp_prod_has_same_origin_ws_token():
-    from call_manager.web.middleware import build_csp
+    from grant_lab.web.middleware import build_csp
 
     csp = build_csp(dev=False, ws_origin="wss://grants.example.org")
     assert _connect_src_directive(csp) == "connect-src 'self' wss://grants.example.org"
@@ -115,20 +115,20 @@ def test_build_csp_prod_has_same_origin_ws_token():
 
 
 def test_build_csp_http_base_gets_ws_token():
-    from call_manager.web.middleware import build_csp
+    from grant_lab.web.middleware import build_csp
 
     csp = build_csp(ws_origin="ws://lanhost:8000")
     assert _connect_src_directive(csp) == "connect-src 'self' ws://lanhost:8000"
 
 
 def test_build_csp_dev_output_unchanged():
-    from call_manager.web.middleware import build_csp
+    from grant_lab.web.middleware import build_csp
 
     assert "connect-src 'self' ws: http://localhost:5173" in build_csp(dev=True)
     # dev ignores ws_origin (its broad ws: token already covers the Yjs socket)
     assert build_csp(dev=True) == build_csp(dev=True, ws_origin="wss://x")
     # Pinned golden: byte-for-byte dev CSP, captured pre-3b-5d.D4 review-#10 fix
-    # via `uv run python -c "from call_manager.web.middleware import build_csp;
+    # via `uv run python -c "from grant_lab.web.middleware import build_csp;
     # print(repr(build_csp(dev=True)))"`. dev=True must NEVER change shape as a
     # side effect of the ws_origin-validation fix at the derivation site.
     assert build_csp(dev=True) == (
@@ -141,7 +141,7 @@ def test_build_csp_dev_output_unchanged():
 
 
 def test_build_csp_no_origin_stays_strict():
-    from call_manager.web.middleware import build_csp
+    from grant_lab.web.middleware import build_csp
 
     assert "connect-src 'self';" in build_csp() + ";"
 
@@ -159,14 +159,14 @@ def test_build_csp_no_origin_stays_strict():
 
 
 def test_ws_origin_injection_rejected_at_startup():
-    from call_manager.main import _derive_ws_origin
+    from grant_lab.main import _derive_ws_origin
 
     with pytest.raises(RuntimeError):
         _derive_ws_origin("https://app.umu.se; script-src * 'unsafe-inline'")
 
 
 def test_ws_origin_whitespace_netloc_rejected_at_startup():
-    from call_manager.main import _derive_ws_origin
+    from grant_lab.main import _derive_ws_origin
 
     with pytest.raises(RuntimeError):
         _derive_ws_origin("https://   ")

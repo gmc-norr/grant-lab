@@ -1,4 +1,4 @@
-from call_manager.profiles.seed import SeedInput
+from grant_lab.profiles.seed import SeedInput
 
 
 def test_seedinput_carries_level_and_mission():

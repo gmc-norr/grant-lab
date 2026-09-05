@@ -3,12 +3,12 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.proposal_assist.tools.history import (
+from grant_lab.proposal_assist.tools.history import (
     diff_artifact_impl,
     get_artifact_history_impl,
     read_artifact_at_impl,
 )
-from call_manager.proposal_assist.tools.registry import ToolContext
+from grant_lab.proposal_assist.tools.registry import ToolContext
 
 
 def _init_repo_with_history(repo_dir: Path) -> list[str]:
@@ -37,7 +37,7 @@ def _init_repo_with_history(repo_dir: Path) -> list[str]:
 def _build_ctx(repo_dir, pg_session_factory):
     import uuid as _uuid
 
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     return ToolContext(
         workspace_id=_uuid.uuid4(),

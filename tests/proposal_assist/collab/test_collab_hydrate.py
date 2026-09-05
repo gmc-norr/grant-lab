@@ -4,13 +4,13 @@ from pathlib import Path
 
 from pycrdt import Doc, Text
 
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
-from call_manager.proposal_assist.collab import state, store
-from call_manager.proposal_assist.collab.checkpoint import serialize_doc_to_markdown
-from call_manager.proposal_assist.collab.hydrate import _EMPTY_DOC, build_doc, load_or_hydrate
-from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
-from call_manager.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
-from call_manager.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.artifacts import PROPOSAL_FILENAME
+from grant_lab.proposal_assist.collab import state, store
+from grant_lab.proposal_assist.collab.checkpoint import serialize_doc_to_markdown
+from grant_lab.proposal_assist.collab.hydrate import _EMPTY_DOC, build_doc, load_or_hydrate
+from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm
+from grant_lab.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
 from tests.proposal_assist.collab.test_collab_recovery import _canonical
 from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
@@ -150,7 +150,7 @@ def test_existing_updates_are_replayed_not_rehydrated(pg_session_factory, tmp_pa
 
 
 def test_warm_path_returns_a_hydration_carrying_the_rows_epoch(pg_session_factory, tmp_path):
-    from call_manager.proposal_assist.collab.hydrate import Hydration
+    from grant_lab.proposal_assist.collab.hydrate import Hydration
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=make_user(s, email="hy-ep-warm@umu.se"))

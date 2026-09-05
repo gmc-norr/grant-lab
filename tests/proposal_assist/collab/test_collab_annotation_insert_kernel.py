@@ -4,10 +4,10 @@ the marker lands in the LIVE room + ledger + checkpoint; annotation flips to
 
 import pytest
 
-from call_manager.db.models import ArtifactVersion, UserClaimAnnotation, WorkspaceEvent
-from call_manager.proposal_assist.collab import state
-from call_manager.proposal_assist.collab.canonical import canonical_artifact_markdown
-from call_manager.proposal_assist.paths import workspace_repo_dir
+from grant_lab.db.models import ArtifactVersion, UserClaimAnnotation, WorkspaceEvent
+from grant_lab.proposal_assist.collab import state
+from grant_lab.proposal_assist.collab.canonical import canonical_artifact_markdown
+from grant_lab.proposal_assist.paths import workspace_repo_dir
 from tests.proposal_assist.test_api_annotations_insert import _seed_supported
 
 
@@ -90,7 +90,7 @@ def test_same_evidence_elsewhere_still_inserts_here(
     # second OPEN annotation, same reference/chunk/quote, different sentence:
     # clone ann1's row against another claim sentence appended to the section
     with pg_session_factory() as s:
-        from call_manager.proposal_assist.editing.sectionizer import split_sections
+        from grant_lab.proposal_assist.editing.sectionizer import split_sections
 
         a1 = s.get(UserClaimAnnotation, ann1_id)
         doc = (repo / "proposal.md").read_text()
@@ -110,7 +110,7 @@ def test_same_evidence_elsewhere_still_inserts_here(
             evidence_quote=a1.evidence_quote, status="open",
         )
         s.add(a2)
-        from call_manager.proposal_assist.collab import state as collab_state_mod
+        from grant_lab.proposal_assist.collab import state as collab_state_mod
         collab_state_mod.enable_collab(s, workspace_id=wid, artifact="draft")
         s.commit()
         ann2_id = a2.id
@@ -143,7 +143,7 @@ def test_indexerror_maps_to_409_and_does_not_burn_annotation(
         s.commit()
         wid = ws.id
 
-    import call_manager.web.api.annotations as annotations_mod
+    import grant_lab.web.api.annotations as annotations_mod
 
     async def _boom(**kwargs):
         raise IndexError("section map shrank underneath the annotation")

@@ -1,6 +1,6 @@
 import pytest
 
-from call_manager.auth.passwords import (
+from grant_lab.auth.passwords import (
     MIN_PASSWORD_LENGTH,
     WeakPassword,
     hash_password,

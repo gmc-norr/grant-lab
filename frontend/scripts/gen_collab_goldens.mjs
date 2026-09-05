@@ -62,7 +62,7 @@ function buildMarker(citekey, evId) {
 // ---------------------------------------------------------------------------
 // Citation inline rule for markdown-it
 //
-// Mirrors src/call_manager/proposal_assist/collab/markdown_bridge.py::_citation_rule
+// Mirrors src/grant_lab/proposal_assist/collab/markdown_bridge.py::_citation_rule
 // Runs before "link" so the full marker is consumed as one atom.
 // ---------------------------------------------------------------------------
 function citationInlineRule(state, silent) {

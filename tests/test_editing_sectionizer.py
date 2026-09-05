@@ -1,6 +1,6 @@
 """Sectionizer: byte-round-trip split/join of proposal.md on ## headings."""
 
-from call_manager.proposal_assist.editing.sectionizer import Section, split_sections
+from grant_lab.proposal_assist.editing.sectionizer import Section, split_sections
 
 DOC = (
     "# Title\n"

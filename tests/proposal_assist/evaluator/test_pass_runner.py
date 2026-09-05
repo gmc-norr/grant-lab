@@ -2,11 +2,11 @@ import asyncio
 
 import pytest
 
-from call_manager.config import Settings
-from call_manager.db.models import EvaluatorJob
-from call_manager.proposal_assist.drafting.contract import TurnDoneEvent
-from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
-from call_manager.proposal_assist.evaluator.pass_runner import run_evaluator_pass
+from grant_lab.config import Settings
+from grant_lab.db.models import EvaluatorJob
+from grant_lab.proposal_assist.drafting.contract import TurnDoneEvent
+from grant_lab.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
+from grant_lab.proposal_assist.evaluator.pass_runner import run_evaluator_pass
 from tests.proposal_assist.conftest import make_workspace
 
 

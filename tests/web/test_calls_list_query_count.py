@@ -25,7 +25,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import event, select
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     Call,
     CallRanking,
     CallRankingCriterion,
@@ -34,7 +34,7 @@ from call_manager.db.models import (
     Source,
     User,
 )
-from call_manager.main import create_app
+from grant_lab.main import create_app
 
 
 @pytest.fixture()

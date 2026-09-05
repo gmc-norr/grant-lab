@@ -1,5 +1,5 @@
-from call_manager.db.models import User
-from call_manager.main import create_app
+from grant_lab.db.models import User
+from grant_lab.main import create_app
 
 
 def _app(monkeypatch, pg_url):

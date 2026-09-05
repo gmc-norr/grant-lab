@@ -11,7 +11,7 @@ def test_claude_adapter_constructor_accepts_tools_factory():
     `tools_factory=` and silently dropped it passed. Identity is the property
     the name claims: the factory the adapter was handed is the factory it kept.
     """
-    from call_manager.proposal_assist.drafting.claude_adapter import (
+    from grant_lab.proposal_assist.drafting.claude_adapter import (
         ClaudeAgentSDKAdapter,
     )
 
@@ -33,8 +33,8 @@ def test_factory_wires_tools_into_adapter(monkeypatch, _settings_env):
     """build_workspace_controller passes a tools_factory closure to the
     claude adapter; the closure is what builds the per-workspace MCP
     server."""
-    from call_manager.config import Settings
-    from call_manager.proposal_assist.drafting.factory import (
+    from grant_lab.config import Settings
+    from grant_lab.proposal_assist.drafting.factory import (
         build_workspace_controller,
     )
 
@@ -64,8 +64,8 @@ def test_adapter_launch_passes_mcp_servers_and_allowed_tools(monkeypatch):
     """When tools_factory is set, adapter.launch passes
     ClaudeAgentOptions(mcp_servers=..., tools=[], strict_mcp_config=True,
     allowed_tools=<fully-qualified MCP names>)."""
-    from call_manager.proposal_assist.drafting import claude_adapter as ca
-    from call_manager.proposal_assist.drafting.contract import LaunchContext
+    from grant_lab.proposal_assist.drafting import claude_adapter as ca
+    from grant_lab.proposal_assist.drafting.contract import LaunchContext
 
     captured: dict = {}
     real_options = ca.ClaudeAgentOptions
@@ -154,10 +154,10 @@ def test_options_strip_builtin_tools_even_without_tools_factory():
     factory is present, and that no MCP wiring leaks through. The default
     permission_mode is now "default" (the bypassPermissions footgun is gone).
     """
-    from call_manager.proposal_assist.drafting.claude_adapter import (
+    from grant_lab.proposal_assist.drafting.claude_adapter import (
         ClaudeAgentSDKAdapter,
     )
-    from call_manager.proposal_assist.drafting.contract import LaunchContext
+    from grant_lab.proposal_assist.drafting.contract import LaunchContext
 
     adapter = ClaudeAgentSDKAdapter(
         model="x",
@@ -192,18 +192,18 @@ def test_every_collected_tool_is_allowlisted(_settings_env):
     """
     import uuid as _uuid
 
-    from call_manager.proposal_assist.drafting.claude_adapter import (
+    from grant_lab.proposal_assist.drafting.claude_adapter import (
         ClaudeAgentSDKAdapter,
     )
-    from call_manager.proposal_assist.drafting.contract import LaunchContext
-    from call_manager.proposal_assist.evaluator.agent import evaluator_allowed_tools
-    from call_manager.proposal_assist.review.agent import review_allowed_tools
-    from call_manager.proposal_assist.tools.registry import (
+    from grant_lab.proposal_assist.drafting.contract import LaunchContext
+    from grant_lab.proposal_assist.evaluator.agent import evaluator_allowed_tools
+    from grant_lab.proposal_assist.review.agent import review_allowed_tools
+    from grant_lab.proposal_assist.tools.registry import (
         ToolContext,
         _collect_tools,
         build_proposal_assist_mcp_server,
     )
-    from call_manager.proposal_assist.uncited_claims.agent import uncited_claims_allowed_tools
+    from grant_lab.proposal_assist.uncited_claims.agent import uncited_claims_allowed_tools
 
     # Background-only submit tools, sourced from the background adapters that own
     # them (not a hand-maintained literal — so a new background tool that forgets

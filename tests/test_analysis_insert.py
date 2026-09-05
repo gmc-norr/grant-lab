@@ -11,24 +11,24 @@ from datetime import UTC, datetime
 
 import pytest
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     ArtifactVersion,
     Reference,
     TurnJob,
     UserClaimAnnotation,
     WorkspaceEvent,
 )
-from call_manager.proposal_assist.analysis.insert import InsertConflict, insert_from_annotation
-from call_manager.proposal_assist.citations.audit import validate_citations_deterministic
-from call_manager.proposal_assist.citations.gitio import _git_env, current_head
-from call_manager.proposal_assist.citations.ledger import (
+from grant_lab.proposal_assist.analysis.insert import InsertConflict, insert_from_annotation
+from grant_lab.proposal_assist.citations.audit import validate_citations_deterministic
+from grant_lab.proposal_assist.citations.gitio import _git_env, current_head
+from grant_lab.proposal_assist.citations.ledger import (
     build_evidence_row,
     dump_ledger,
     empty_ledger,
     load_ledger,
 )
-from call_manager.proposal_assist.citations.markers import find_markers
-from call_manager.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.citations.markers import find_markers
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
 from tests.test_analysis_pipeline import _init_repo, _seed_reference, _ws
 
 DOC = "# T\nintro\n## Body\nThis is a factual claim.\n"
@@ -89,8 +89,8 @@ def test_insert_severed_when_collab_flips_after_guard(pg_session_factory, tmp_pa
     """Item 2b: draft collab is enabled by the time insert_from_annotation rechecks
     UNDER the mutex (the route's pre-mutex guard raced enable-on-touch) -> abort
     with CollabSeveranceConflict, writing NOTHING to git."""
-    from call_manager.proposal_assist.collab import state
-    from call_manager.proposal_assist.collab.state import CollabSeveranceConflict
+    from grant_lab.proposal_assist.collab import state
+    from grant_lab.proposal_assist.collab.state import CollabSeveranceConflict
 
     with pg_session_factory() as s:
         ws, user = _ws(s)

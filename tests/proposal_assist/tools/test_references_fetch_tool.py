@@ -10,18 +10,18 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import select
 
-from call_manager.config import Settings
-from call_manager.db.models import (
+from grant_lab.config import Settings
+from grant_lab.db.models import (
     ChatTurn,
     Reference,
     TurnJob,
     User,
     Workspace,
 )
-from call_manager.proposal_assist.port_impl import build_ports
-from call_manager.proposal_assist.references.embed import FakeEmbedder
-from call_manager.proposal_assist.tools.references import fetch_reference_impl
-from call_manager.proposal_assist.tools.registry import ToolContext, snapshot_invocation
+from grant_lab.proposal_assist.port_impl import build_ports
+from grant_lab.proposal_assist.references.embed import FakeEmbedder
+from grant_lab.proposal_assist.tools.references import fetch_reference_impl
+from grant_lab.proposal_assist.tools.registry import ToolContext, snapshot_invocation
 
 # Every test reaches the SSRF resolver through fetch_reference_impl;
 # apply the shared fake_public_dns fixture from tests/proposal_assist/
@@ -307,7 +307,7 @@ async def test_fetch_reference_impl_passes_source_meta_and_citation_service(
 
     from reportlab.pdfgen.canvas import Canvas
 
-    from call_manager.proposal_assist.references.ingest import IngestResult
+    from grant_lab.proposal_assist.references.ingest import IngestResult
 
     captured: dict = {}
 
@@ -331,8 +331,8 @@ async def test_fetch_reference_impl_passes_source_meta_and_citation_service(
     fake_service = _FakeCitationService()
 
     # Build a ToolContext with citation_service set.
-    from call_manager.config import Settings
-    from call_manager.proposal_assist.tools.registry import ToolContext
+    from grant_lab.config import Settings
+    from grant_lab.proposal_assist.tools.registry import ToolContext
 
     settings = Settings.model_construct(workspaces_dir=str(tmp_path))
 
@@ -349,11 +349,11 @@ async def test_fetch_reference_impl_passes_source_meta_and_citation_service(
     )
 
     # Monkeypatch ingest_bytes at its canonical import path. fetch_reference_impl
-    # uses `from call_manager.proposal_assist.references.ingest import ingest_bytes`
+    # uses `from grant_lab.proposal_assist.references.ingest import ingest_bytes`
     # inside the function, so we patch the ingest module directly.
     import uuid as _uuid
 
-    import call_manager.proposal_assist.references.ingest as _ingest_mod
+    import grant_lab.proposal_assist.references.ingest as _ingest_mod
 
     def _fake_ingest_bytes(**kwargs):
         captured.update(kwargs)

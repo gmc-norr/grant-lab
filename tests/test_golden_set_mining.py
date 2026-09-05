@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     Call,
     CallDecision,
     CallRanking,
@@ -13,7 +13,7 @@ from call_manager.db.models import (
     Subscription,
     User,
 )
-from call_manager.ranking.golden_set import (
+from grant_lab.ranking.golden_set import (
     add_triple,
     candidates_cosine_disagreement,
     candidates_dismissed_high_score,

@@ -1,4 +1,4 @@
-from call_manager.proposal_assist.evaluator.scoring import compute_overall_band
+from grant_lab.proposal_assist.evaluator.scoring import compute_overall_band
 
 
 def test_empty_is_gap():

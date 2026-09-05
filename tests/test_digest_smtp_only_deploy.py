@@ -20,7 +20,7 @@ selectors consume, not two agreeing copies.
 
 import pytest
 
-from call_manager.email.factory import (
+from grant_lab.email.factory import (
     EmailConfigError,
     build_email_client,
     resolve_email_transport,
@@ -106,7 +106,7 @@ def test_an_smtp_only_app_actually_builds_the_digest_client(
     # could not catch it: it passes `digest_email_client` in directly.
     from fastapi.testclient import TestClient
 
-    from call_manager.main import create_app
+    from grant_lab.main import create_app
 
     for k, v in {
         "DATABASE_URL": pg_url,
@@ -159,8 +159,8 @@ def test_an_smtp_only_app_actually_builds_the_digest_client(
     ],
 )
 def test_both_selectors_always_agree(env, expect_sender, expect_client, monkeypatch, pg_url):
-    from call_manager.config import Settings
-    from call_manager.main import create_app
+    from grant_lab.config import Settings
+    from grant_lab.main import create_app
 
     base = {
         "DATABASE_URL": pg_url,

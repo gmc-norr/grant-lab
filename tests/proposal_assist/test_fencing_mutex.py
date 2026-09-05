@@ -14,12 +14,12 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import event, update
 
-from call_manager.db.models import Workspace
-from call_manager.proposal_assist.drafting.locking import (
+from grant_lab.db.models import Workspace
+from grant_lab.proposal_assist.drafting.locking import (
     WorkspaceDeleted,
     acquire_commit_mutex,
 )
-from call_manager.proposal_assist.fencing import (
+from grant_lab.proposal_assist.fencing import (
     WorkspaceGenerationStale,
     acquire_commit_mutex_at_generation,
 )

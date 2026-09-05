@@ -1,6 +1,6 @@
-from call_manager.db.models import CitationLlmUsage
-from call_manager.proposal_assist.citations.llm import LLMResult, LLMUsage
-from call_manager.proposal_assist.citations.service import CitationLLMService
+from grant_lab.db.models import CitationLlmUsage
+from grant_lab.proposal_assist.citations.llm import LLMResult, LLMUsage
+from grant_lab.proposal_assist.citations.service import CitationLLMService
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
@@ -14,7 +14,7 @@ def _settings(**over):
         "APP_BASE_URL": "http://localhost:8000",
     }.items():
         os.environ.setdefault(k, v)
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     s = Settings()
     for k, v in over.items():
@@ -127,7 +127,7 @@ def test_cap_exceeded_returns_typed_result_without_calling(pg_session_factory):
 
 
 def test_global_cap_blocks_without_calling(pg_session_factory):
-    from call_manager.db.models import CitationLlmUsage
+    from grant_lab.db.models import CitationLlmUsage
 
     # Two distinct workspaces.
     with pg_session_factory() as s:
@@ -163,7 +163,7 @@ def test_global_cap_blocks_without_calling(pg_session_factory):
 def test_success_path_survives_ledger_write_failure(pg_session_factory, monkeypatch):
     wsid = _ws(pg_session_factory)
     svc = CitationLLMService(session_factory=pg_session_factory, llm=_OkLLM(), settings=_settings())
-    import call_manager.proposal_assist.citations.service as service_mod
+    import grant_lab.proposal_assist.citations.service as service_mod
 
     def _boom(*a, **k):
         raise RuntimeError("db down")
@@ -180,7 +180,7 @@ def test_repeated_ledger_write_failures_circuit_break(pg_session_factory, monkey
     unbounded. After N consecutive record FAILURES the service circuit-breaks and
     returns a cap-exceeded result WITHOUT invoking the LLM, so spend that the cap
     can no longer see cannot run away."""
-    import call_manager.proposal_assist.citations.service as service_mod
+    import grant_lab.proposal_assist.citations.service as service_mod
 
     wsid = _ws(pg_session_factory)
     llm = _OkLLM()
@@ -209,7 +209,7 @@ def test_repeated_ledger_write_failures_circuit_break(pg_session_factory, monkey
 def test_successful_record_resets_failure_streak(pg_session_factory, monkeypatch):
     """A successful record after some failures resets the streak, so the circuit
     does not trip on non-consecutive failures."""
-    import call_manager.proposal_assist.citations.service as service_mod
+    import grant_lab.proposal_assist.citations.service as service_mod
 
     wsid = _ws(pg_session_factory)
     svc = CitationLLMService(session_factory=pg_session_factory, llm=_OkLLM(), settings=_settings())

@@ -1,9 +1,9 @@
 # tests/test_digest_status_filter.py
 from datetime import UTC, datetime
 
-from call_manager.db.models import Profile, ProfileKind, Subscription, User
-from call_manager.digest.assemble import assemble_for_user
-from call_manager.digest.send import candidate_user_ids
+from grant_lab.db.models import Profile, ProfileKind, Subscription, User
+from grant_lab.digest.assemble import assemble_for_user
+from grant_lab.digest.send import candidate_user_ids
 
 
 def _profile_owned_by(s, owner_id) -> int:

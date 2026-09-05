@@ -14,6 +14,18 @@ The v1 design spec (`docs/superpowers/specs/2026-04-14-call-monitor-design.md`) 
   security-relevant change a future reader would never find from its subject line
   (review 2026-09-02 §12). A title that would fit any commit in the repo is the tell.
 
+- **The Python package is `grant_lab`** (renamed from `call_manager` on 2026-09-05).
+  Documents under `docs/` written before that date still say `call_manager`, and are
+  **deliberately left as written** — they are records of what the code was called at the
+  time, and rewriting them would falsify their own history. Read `src/call_manager/x.py`
+  in an old spec or plan as `src/grant_lab/x.py`. Two things keep the old name on
+  purpose and must NOT be "made consistent": the **database role and database name**
+  (`call_manager`, in `docker-compose.yml` and your `DATABASE_URL` — renaming them
+  requires an edit to the live `.env` and a Postgres rename), and the
+  `CALL_MANAGER_DATA_DIR` env var for the same reason. Also still deliberate: the
+  session-cookie salt, the OAuth HKDF info string and `SCHEDULER_LOCK_NAME` — see the
+  `chore(naming)` commit for why each would break something real.
+
 - **Research artefacts live in `docs/research/`**, not the repo root. `README.pdf` is a
   rendered copy of the README and is gitignored — do not re-add it.
 
@@ -66,7 +78,7 @@ The v1 design spec (`docs/superpowers/specs/2026-04-14-call-monitor-design.md`) 
 - FastAPI backend. PostgreSQL 16 + SQLAlchemy 2.x + Alembic, with `pgvector` for embeddings.
 - APScheduler, in-process — **single-instance hard constraint** (the scheduler must not run on more than one process).
 - **Frontend is a React 19 + Vite SPA** (react-router, TanStack Query, `openapi-fetch` against types generated from the FastAPI OpenAPI schema; `pnpm`). It owns the calls dashboard, proposal-assist workspace, admin, auth, profile, and settings pages. Jinja remains only for email-digest rendering; there is no server-rendered web UI.
-- SPA serving is gated by `SPA_MODE`: `dev` (Vite dev server + proxy), `prod` (FastAPI serves the built bundle from `src/call_manager/web/spa/` — **prod MUST ship a built SPA**), `disabled`.
+- SPA serving is gated by `SPA_MODE`: `dev` (Vite dev server + proxy), `prod` (FastAPI serves the built bundle from `src/grant_lab/web/spa/` — **prod MUST ship a built SPA**), `disabled`.
 
 ## LLM
 

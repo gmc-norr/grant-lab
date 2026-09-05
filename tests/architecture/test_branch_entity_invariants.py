@@ -9,11 +9,11 @@ import subprocess
 
 from sqlalchemy import select
 
-from call_manager.db.models import Branch, Workspace
-from call_manager.proposal_assist.branch_entity_backfill import backfill_branch_entities
-from call_manager.proposal_assist.branches import create_workspace_branch
-from call_manager.proposal_assist.citations.gitio import head_branch, list_branches
-from call_manager.proposal_assist.paths import workspace_repo_dir
+from grant_lab.db.models import Branch, Workspace
+from grant_lab.proposal_assist.branch_entity_backfill import backfill_branch_entities
+from grant_lab.proposal_assist.branches import create_workspace_branch
+from grant_lab.proposal_assist.citations.gitio import head_branch, list_branches
+from grant_lab.proposal_assist.paths import workspace_repo_dir
 from tests.proposal_assist.conftest import (
     init_workspace_repo,
     make_user,

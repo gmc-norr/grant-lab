@@ -13,9 +13,9 @@ import subprocess
 
 import pytest
 
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
-from call_manager.proposal_assist.citations import gitio
-from call_manager.proposal_assist.citations.gitio import (
+from grant_lab.proposal_assist.artifacts import PROPOSAL_FILENAME
+from grant_lab.proposal_assist.citations import gitio
+from grant_lab.proposal_assist.citations.gitio import (
     GitCommitError,
     current_head,
     write_and_commit_files,

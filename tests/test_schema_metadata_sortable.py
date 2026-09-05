@@ -20,7 +20,7 @@ import warnings
 
 from sqlalchemy import Table
 
-from call_manager.db.models import Base
+from grant_lab.db.models import Base
 
 
 def test_metadata_sorts_without_a_cycle_warning():

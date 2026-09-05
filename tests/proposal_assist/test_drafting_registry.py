@@ -3,9 +3,9 @@ import uuid
 
 import pytest
 
-from call_manager.proposal_assist.drafting.contract import AgentHandle, LaunchContext
-from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
-from call_manager.proposal_assist.drafting.registry import SubprocessRegistry
+from grant_lab.proposal_assist.drafting.contract import AgentHandle, LaunchContext
+from grant_lab.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
+from grant_lab.proposal_assist.drafting.registry import SubprocessRegistry
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -174,7 +174,7 @@ async def test_registry_terminate_calls_adapter_before_releasing_lock():
     released: list[uuid.UUID] = []
 
     async def _do_terminate():
-        import call_manager.proposal_assist.drafting.locking as _lock_mod
+        import grant_lab.proposal_assist.drafting.locking as _lock_mod
 
         orig = _lock_mod.release_workspace_lock
 

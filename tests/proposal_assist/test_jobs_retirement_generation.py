@@ -19,9 +19,9 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import event
 
-import call_manager.proposal_assist.jobs_retirement as jr
-from call_manager.db.models import ClaimAnalysisJob, Workspace, WorkspaceSetupJob
-from call_manager.proposal_assist.jobs_retirement import build_jobs_retirement_hook
+import grant_lab.proposal_assist.jobs_retirement as jr
+from grant_lab.db.models import ClaimAnalysisJob, Workspace, WorkspaceSetupJob
+from grant_lab.proposal_assist.jobs_retirement import build_jobs_retirement_hook
 from tests.proposal_assist.conftest import make_workspace
 
 

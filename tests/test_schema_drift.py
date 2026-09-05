@@ -15,7 +15,7 @@ from __future__ import annotations
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 
-from call_manager.db.models import Base
+from grant_lab.db.models import Base
 
 
 def _describe(op) -> str:

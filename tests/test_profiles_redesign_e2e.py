@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-from call_manager.ranking.prompt import build_messages
+from grant_lab.ranking.prompt import build_messages
 
 
 def _make_call():
@@ -36,7 +36,7 @@ def test_embedding_text_includes_org_capabilities():
     """Phase 5 (Task 28): org capabilities + patient_populations now feed the
     embed text so structured org context shapes retrieval. Task 31 NULLs
     existing vectors to force a re-embed under this richer text."""
-    from call_manager.embeddings.similarity import build_profile_text
+    from grant_lab.embeddings.similarity import build_profile_text
 
     class _P:
         description = "Hepatology unit"

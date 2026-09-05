@@ -7,12 +7,12 @@ Strict mode models two real-adapter hazards invisible to normal fake-backed test
 
 import pytest
 
-from call_manager.proposal_assist.drafting.contract import (
+from grant_lab.proposal_assist.drafting.contract import (
     AssistantTextEvent,
     LaunchContext,
     TurnDoneEvent,
 )
-from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
+from grant_lab.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
 
 # ---------------------------------------------------------------------------
 # Helpers

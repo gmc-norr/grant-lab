@@ -21,19 +21,19 @@ from dataclasses import dataclass, field
 import pytest
 from sqlalchemy import func, select
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     CallRubric,
     CallSectionExtract,
     Workspace,
     WorkspaceEvent,
     WorkspaceSetupJob,
 )
-from call_manager.proposal_assist.phases.setup import (
+from grant_lab.proposal_assist.phases.setup import (
     Phase0Worker,
     WorkspaceGoneDuringSetup,
     claim_next_setup_job,
 )
-from call_manager.workspaces import restore_workspace_db, soft_delete_workspace_db
+from grant_lab.workspaces import restore_workspace_db, soft_delete_workspace_db
 from tests.proposal_assist.conftest import make_user, make_workspace
 from tests.proposal_assist.test_phase0_transaction_boundaries import _StubClient, _worker
 

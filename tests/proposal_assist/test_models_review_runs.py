@@ -1,7 +1,7 @@
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from call_manager.db.models import ReviewRun, ReviewRunItem
+from grant_lab.db.models import ReviewRun, ReviewRunItem
 from tests.proposal_assist.conftest import make_workspace
 
 

@@ -6,8 +6,8 @@ import uuid
 
 import pytest
 
-from call_manager.proposal_assist.collab import permissions as perms
-from call_manager.proposal_assist.collab.room import MANAGER, ClientState
+from grant_lab.proposal_assist.collab import permissions as perms
+from grant_lab.proposal_assist.collab.room import MANAGER, ClientState
 
 
 @pytest.fixture
@@ -194,7 +194,7 @@ def test_signal_user_revocation_blocks_until_teardown_completes(
     # it from this background loop raises "got Future attached to a different
     # loop". Use a FRESH RoomManager monkeypatched into permissions.MANAGER and do
     # ALL manager ops on the background loop, so its lock binds to THIS loop.
-    from call_manager.proposal_assist.collab.room import RoomManager
+    from grant_lab.proposal_assist.collab.room import RoomManager
 
     fresh = RoomManager()
     monkeypatch.setattr(perms, "MANAGER", fresh)

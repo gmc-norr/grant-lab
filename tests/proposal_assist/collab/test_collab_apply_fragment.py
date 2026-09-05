@@ -1,12 +1,12 @@
 import pycrdt
 
-from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
-from call_manager.proposal_assist.collab.yjs_bridge import (
+from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
+from grant_lab.proposal_assist.collab.yjs_bridge import (
     apply_pm_json_to_fragment,
     pm_json_to_ydoc,
     ydoc_to_pm_json,
 )
-from call_manager.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
 
 
 def test_apply_fragment_mutates_and_client_converges_via_incremental_update():

@@ -3,8 +3,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from call_manager.db.models import Call, CallRanking, Profile, ProfileKind, Source, User
-from call_manager.main import create_app
+from grant_lab.db.models import Call, CallRanking, Profile, ProfileKind, Source, User
+from grant_lab.main import create_app
 
 
 def _app(monkeypatch, pg_url):

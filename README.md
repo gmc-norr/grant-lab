@@ -82,7 +82,7 @@ Use the same port in `DATABASE_URL` below.
 Create `.env` in the repository root:
 
 ```dotenv
-DATABASE_URL=postgresql+psycopg://call_manager:call_manager@localhost:5432/call_manager
+DATABASE_URL=postgresql+psycopg://grant_lab:grant_lab@localhost:5432/grant_lab
 SESSION_SECRET=local-development-secret-change-me
 ALLOWED_EMAIL_DOMAINS=example.org
 INITIAL_ADMIN_EMAIL=admin@example.org
@@ -118,7 +118,7 @@ uv run alembic upgrade head
 In the repository root:
 
 ```bash
-uv run uvicorn call_manager.main:create_app --factory --reload --port 8000
+uv run uvicorn grant_lab.main:create_app --factory --reload --port 8000
 ```
 
 ### 6. Start the frontend
@@ -151,7 +151,7 @@ Set `OLLAMA_URL` to that server's URL when it runs on another host. After the mo
 available, missing embeddings can be generated with:
 
 ```bash
-uv run python -m call_manager.embeddings.cli backfill
+uv run python -m grant_lab.embeddings.cli backfill
 ```
 
 To enable the collaborative drafting assistant, set these values and restart FastAPI:
@@ -190,11 +190,11 @@ Build the SPA before starting FastAPI in production mode:
 ```bash
 docker build -f frontend/Dockerfile -t grant-lab-spa-build .
 container=$(docker create grant-lab-spa-build)
-rm -rf src/call_manager/web/spa
-mkdir -p src/call_manager/web/spa
-docker cp "$container:/build/dist/." src/call_manager/web/spa/
+rm -rf src/grant_lab/web/spa
+mkdir -p src/grant_lab/web/spa
+docker cp "$container:/build/dist/." src/grant_lab/web/spa/
 docker rm "$container"
-test -f src/call_manager/web/spa/index.html
+test -f src/grant_lab/web/spa/index.html
 ```
 
 Set `SPA_MODE=prod`, use an `https://` `APP_BASE_URL`, configure a strong production
@@ -203,7 +203,7 @@ TLS-terminating reverse proxy:
 
 ```bash
 uv run alembic upgrade head
-uv run uvicorn call_manager.main:create_app --factory --host 127.0.0.1 --port 8000 \
+uv run uvicorn grant_lab.main:create_app --factory --host 127.0.0.1 --port 8000 \
   --timeout-graceful-shutdown 30
 ```
 
@@ -245,7 +245,7 @@ alembic/                 Database migrations
 docs/                    Architecture, specifications, and investigations
 frontend/                React SPA, unit tests, and Playwright tests
 scripts/                 Code generation and operational scripts
-src/call_manager/        FastAPI application and domain modules
+src/grant_lab/        FastAPI application and domain modules
 tests/                   Backend and architecture tests
 var/                     Local workspace data; ignored and confidential
 ```

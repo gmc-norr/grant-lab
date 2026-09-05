@@ -1,8 +1,8 @@
 import pytest
 
-from call_manager.db.models import Profile, ProfileBootstrapJob, Subscription, User
-from call_manager.profiles.create import create_profile_with_bootstrap, merge_bootstrap_into_profile
-from call_manager.profiles.seed import DraftProfile
+from grant_lab.db.models import Profile, ProfileBootstrapJob, Subscription, User
+from grant_lab.profiles.create import create_profile_with_bootstrap, merge_bootstrap_into_profile
+from grant_lab.profiles.seed import DraftProfile
 
 
 class _P:
@@ -106,7 +106,7 @@ def test_create_rolls_back_on_failure(pg_session_factory):
 
 
 def test_merge_drops_overlong_areas_item():
-    from call_manager.profiles.fields import MAX_TAG_LEN
+    from grant_lab.profiles.fields import MAX_TAG_LEN
 
     overlong = "x" * (MAX_TAG_LEN + 5)
     p = _P("individual", "", {"areas": []})

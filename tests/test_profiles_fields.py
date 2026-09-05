@@ -1,6 +1,6 @@
 import pytest
 
-from call_manager.profiles.fields import (
+from grant_lab.profiles.fields import (
     APPLICANT_TYPES,
     CAREER_STAGES,
     FUNDING_INSTRUMENTS,
@@ -77,7 +77,7 @@ def test_parse_structured_rejects_over_100_items():
 
 
 def test_sanitize_structured_drops_bad_llm_values():
-    from call_manager.profiles.fields import sanitize_structured
+    from grant_lab.profiles.fields import sanitize_structured
 
     out = sanitize_structured(
         kind="individual",

@@ -1,7 +1,7 @@
 # tests/test_config_google_oidc.py
 import pytest
 
-from call_manager.config import Settings
+from grant_lab.config import Settings
 
 
 def _base(monkeypatch, **extra):

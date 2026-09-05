@@ -17,14 +17,14 @@ import threading
 
 import pytest
 
-from call_manager.proposal_assist.citations import CitationLLMResult
-from call_manager.proposal_assist.references.embed import EmbedResult
-from call_manager.proposal_assist.tools import audit as audit_tools
-from call_manager.proposal_assist.tools.audit import (
+from grant_lab.proposal_assist.citations import CitationLLMResult
+from grant_lab.proposal_assist.references.embed import EmbedResult
+from grant_lab.proposal_assist.tools import audit as audit_tools
+from grant_lab.proposal_assist.tools.audit import (
     list_unsupported_claims_impl,
     validate_citations_impl,
 )
-from call_manager.proposal_assist.tools.references import search_references_impl
+from grant_lab.proposal_assist.tools.references import search_references_impl
 from tests.proposal_assist.tools.test_list_unsupported_claims import _build_ctx
 
 

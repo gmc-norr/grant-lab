@@ -7,13 +7,13 @@ from pathlib import Path
 
 from pycrdt import Doc
 
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME, SPEC_FILENAME
-from call_manager.proposal_assist.citations.gitio import current_head, write_and_commit_files
-from call_manager.proposal_assist.collab import handover, state, store
-from call_manager.proposal_assist.collab.checkpoint import serialize_doc_to_markdown
-from call_manager.proposal_assist.collab.hydrate import load_or_hydrate
-from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
-from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
+from grant_lab.proposal_assist.artifacts import PROPOSAL_FILENAME, SPEC_FILENAME
+from grant_lab.proposal_assist.citations.gitio import current_head, write_and_commit_files
+from grant_lab.proposal_assist.collab import handover, state, store
+from grant_lab.proposal_assist.collab.checkpoint import serialize_doc_to_markdown
+from grant_lab.proposal_assist.collab.hydrate import load_or_hydrate
+from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm
+from grant_lab.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
 from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 
@@ -109,7 +109,7 @@ def test_fully_checkpointed_log_is_still_truncated(pg_session_factory, tmp_path)
     """Exit-direction guard: even with NO uncheckpointed tail, the stale log must
     go — otherwise post-switch replay resurrects pre-kill content over
     kill-window git edits."""
-    from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
+    from grant_lab.proposal_assist.collab.checkpoint import checkpoint_artifact
 
     wid, oid, repo = _setup(pg_session_factory, tmp_path, "ho2@umu.se")
     _seed_room_edit(pg_session_factory, wid, oid, "## Background\n\ncheckpointed edit.\n")
@@ -142,7 +142,7 @@ def test_fully_checkpointed_log_is_still_truncated(pg_session_factory, tmp_path)
         s.commit()
         rows = store.load_rows(s, workspace_id=wid, artifact="draft")
     assert len(rows) == 1  # fresh hydration seed
-    from call_manager.proposal_assist.collab.hydrate import build_doc
+    from grant_lab.proposal_assist.collab.hydrate import build_doc
 
     assert "kill-window truth." in serialize_doc_to_markdown(build_doc([rows[0][2]]))
 

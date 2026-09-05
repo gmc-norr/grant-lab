@@ -11,8 +11,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
-from call_manager.db.models import LlmSpend, User, Workspace
-from call_manager.proposal_assist.spend import record_spend, sum_spend_today
+from grant_lab.db.models import LlmSpend, User, Workspace
+from grant_lab.proposal_assist.spend import record_spend, sum_spend_today
 
 
 def _ws(session, email="spend@umu.se"):
@@ -78,7 +78,7 @@ def test_sum_today_totals_every_kind(pg_session_factory):
 
 def test_sum_today_ignores_yesterday(pg_session_factory):
     # The boundary is Stockholm midnight, from timeutil — NOT a fourth copy.
-    from call_manager.timeutil import stockholm_day_start_utc
+    from grant_lab.timeutil import stockholm_day_start_utc
 
     with pg_session_factory() as s:
         ws_id = _ws(s)

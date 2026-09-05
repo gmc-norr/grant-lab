@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     Call,
     CallRanking,
     GoldenSetTriple,
@@ -11,7 +11,7 @@ from call_manager.db.models import (
     Source,
     User,
 )
-from call_manager.main import create_app
+from grant_lab.main import create_app
 
 
 def _setup(monkeypatch, pg_url):

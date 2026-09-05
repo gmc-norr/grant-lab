@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from call_manager.db.models import ChatTurn
+from grant_lab.db.models import ChatTurn
 from tests.proposal_assist.conftest import make_workspace
 
 

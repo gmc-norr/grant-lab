@@ -13,7 +13,7 @@ def _setup(
     last_error=None,
 ):
     """Return (ws_id, owner_id, member_id, stranger_id)."""
-    from call_manager.db.models import WorkspaceSetupJob
+    from grant_lab.db.models import WorkspaceSetupJob
 
     with pg_session_factory() as s:
         owner = make_user(s, email="owner@umu.se")
@@ -101,7 +101,7 @@ def test_put_rubric_saves_and_preserves_subcriteria_and_bumps(
 ):  # noqa: E501
     from sqlalchemy import func, select
 
-    from call_manager.db.models import Workspace, WorkspaceEvent
+    from grant_lab.db.models import Workspace, WorkspaceEvent
 
     app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
     ws_id, owner_id, _, _ = _setup(pg_session_factory, phase="active")
@@ -141,7 +141,7 @@ def test_put_rubric_unchanged_is_noop(monkeypatch, pg_url, tmp_path, pg_session_
     """Round-tripping the current rubric (incl. subcriteria) writes no event."""
     from sqlalchemy import func, select
 
-    from call_manager.db.models import Workspace, WorkspaceEvent
+    from grant_lab.db.models import Workspace, WorkspaceEvent
 
     app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
     ws_id, owner_id, _, _ = _setup(pg_session_factory, phase="active")
@@ -195,7 +195,7 @@ def test_activate_owner_advances_phase_and_audits(
 ):  # noqa: E501
     from sqlalchemy import select
 
-    from call_manager.db.models import Workspace, WorkspaceEvent, WorkspaceSetupJob
+    from grant_lab.db.models import Workspace, WorkspaceEvent, WorkspaceSetupJob
 
     app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
     ws_id, owner_id, _, _ = _setup(pg_session_factory)  # setup phase, waiting job
@@ -228,7 +228,7 @@ def test_activate_owner_advances_phase_and_audits(
 
 
 def test_activate_when_not_waiting_409(monkeypatch, pg_url, tmp_path, pg_session_factory):
-    from call_manager.db.models import Workspace
+    from grant_lab.db.models import Workspace
 
     app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
     ws_id, owner_id, _, _ = _setup(pg_session_factory, phase="active", job_status="done")

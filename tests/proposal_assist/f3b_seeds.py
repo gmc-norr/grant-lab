@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import update
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     ChatTurn,
     EvaluatorJob,
     ReviewRun,

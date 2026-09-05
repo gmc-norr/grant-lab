@@ -3,8 +3,8 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 
-from call_manager.sources.eu_portal import EUPortalAdapter
-from call_manager.sources.types import AdapterError
+from grant_lab.sources.eu_portal import EUPortalAdapter
+from grant_lab.sources.types import AdapterError
 
 _FAKE_OK_BODY = {
     "results": [

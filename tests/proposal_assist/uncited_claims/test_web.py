@@ -2,7 +2,7 @@ import uuid
 
 import pytest
 
-from call_manager.db.models import UncitedClaimsJob, WorkspaceEvent
+from grant_lab.db.models import UncitedClaimsJob, WorkspaceEvent
 from tests.proposal_assist.conftest import make_workspace
 
 

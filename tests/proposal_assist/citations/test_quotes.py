@@ -5,7 +5,7 @@ Written first (TDD/RED) before quotes.py exists.
 
 import pytest
 
-from call_manager.proposal_assist.citations.quotes import (
+from grant_lab.proposal_assist.citations.quotes import (
     QuoteAmbiguous,
     QuoteNotFound,
     find_quote_offsets,

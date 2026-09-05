@@ -1,9 +1,9 @@
 from fastapi.testclient import TestClient
 
-from call_manager.auth.dependencies import AccountInactive, get_current_user
-from call_manager.auth.session_cookie import SessionSigner
-from call_manager.db.models import User
-from call_manager.main import create_app
+from grant_lab.auth.dependencies import AccountInactive, get_current_user
+from grant_lab.auth.session_cookie import SessionSigner
+from grant_lab.db.models import User
+from grant_lab.main import create_app
 
 
 def _app(monkeypatch, pg_url):
@@ -60,7 +60,7 @@ def test_get_current_user_raises_account_inactive(pg_url, pg_session_factory):
     import pytest
     from fastapi import FastAPI, Request
 
-    from call_manager.db.session import make_engine, make_session_factory
+    from grant_lab.db.session import make_engine, make_session_factory
 
     signer = SessionSigner(secret="x" * 32, max_age_seconds=3600)
     engine = make_engine(pg_url)

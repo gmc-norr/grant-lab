@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     ArtifactVersion,
     ClaimAnalysisJob,
     TurnJob,
@@ -16,9 +16,9 @@ from call_manager.db.models import (
     Workspace,
     WorkspaceEvent,
 )
-from call_manager.proposal_assist.artifacts import Artifact
-from call_manager.proposal_assist.citations.gitio import _git_env, current_head
-from call_manager.proposal_assist.editing.save import (
+from grant_lab.proposal_assist.artifacts import Artifact
+from grant_lab.proposal_assist.citations.gitio import _git_env, current_head
+from grant_lab.proposal_assist.editing.save import (
     BranchMismatchError,
     SaveResult,
     SectionStructureError,
@@ -26,9 +26,9 @@ from call_manager.proposal_assist.editing.save import (
     StaleSectionError,
     save_section,
 )
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.paths import workspace_repo_dir
-from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.paths import workspace_repo_dir
+from grant_lab.proposal_assist.ports.stamp import stamp_for_workspace
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 DOC = "# T\nintro\n## Background\nold body [@x9]\n## Aims\naims\n"

@@ -7,13 +7,13 @@ import uuid
 
 import pytest
 
-from call_manager.proposal_assist.ports.errors import (
+from grant_lab.proposal_assist.ports.errors import (
     EffectRejected,
     UnfencedInvocation,
     WorkspaceGenerationStale,
 )
-from call_manager.proposal_assist.ports.stamp import FenceStamp, Provenance
-from call_manager.proposal_assist.tools.registry import ToolContext, snapshot_invocation
+from grant_lab.proposal_assist.ports.stamp import FenceStamp, Provenance
+from grant_lab.proposal_assist.tools.registry import ToolContext, snapshot_invocation
 
 
 def _ctx(**over) -> ToolContext:
@@ -90,7 +90,7 @@ def test_provenance_carries_the_row_data_the_stamp_deliberately_does_not():
 
 def test_the_stale_error_still_imports_from_its_original_home():
     """fencing.py re-exports it so every pre-F3b import site keeps working."""
-    from call_manager.proposal_assist.fencing import (
+    from grant_lab.proposal_assist.fencing import (
         WorkspaceGenerationStale as ReExported,
     )
 

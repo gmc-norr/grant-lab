@@ -1,11 +1,11 @@
 import json
 
-from call_manager.profiles.bootstrap_prompt import (
+from grant_lab.profiles.bootstrap_prompt import (
     BOOTSTRAP_PROMPT_VERSION,
     build_bootstrap_messages,
     parse_bootstrap_response,
 )
-from call_manager.profiles.seed import Publication
+from grant_lab.profiles.seed import Publication
 
 _FAKE_PUBS = [
     Publication(pmid="1", title="AI for digital pathology", year=2024, authors=["Smith J"]),
@@ -67,7 +67,7 @@ def test_parse_missing_optional_fields_uses_defaults():
 def test_parse_invalid_json_raises():
     import pytest
 
-    from call_manager.profiles.bootstrap_prompt import BootstrapParseError
+    from grant_lab.profiles.bootstrap_prompt import BootstrapParseError
 
     with pytest.raises(BootstrapParseError):
         parse_bootstrap_response("not json")

@@ -4,8 +4,8 @@ import uuid
 import pytest
 from pycrdt import Awareness, Doc
 
-from call_manager.proposal_assist.collab import protocol as P
-from call_manager.proposal_assist.collab.room import ClientState, Room
+from grant_lab.proposal_assist.collab import protocol as P
+from grant_lab.proposal_assist.collab.room import ClientState, Room
 
 
 @pytest.fixture
@@ -160,7 +160,7 @@ async def test_awareness_snapshot_is_none_when_empty():
 # Task 6: presence removal on teardown paths
 # ---------------------------------------------------------------------------
 
-from call_manager.proposal_assist.collab.room import RoomManager  # noqa: E402
+from grant_lab.proposal_assist.collab.room import RoomManager  # noqa: E402
 
 
 @pytest.mark.anyio
@@ -257,7 +257,7 @@ async def test_broadcast_drop_of_failing_client_scrubs_its_presence():
 # 3b-5d.D2: awareness relay-spoof ownership filter
 # ---------------------------------------------------------------------------
 
-ROOM_LOGGER = "call_manager.proposal_assist.collab.room"
+ROOM_LOGGER = "grant_lab.proposal_assist.collab.room"
 
 
 def _vu(n: int) -> bytes:
@@ -612,7 +612,7 @@ async def test_partial_apply_cannot_poison_snapshot():
 async def test_binding_quota_is_per_user_not_per_room(caplog):
     # Finding 2: the quota must confine a binding-spammer to exhausting only
     # its OWN presence — another user's first-announce still binds and relays.
-    from call_manager.proposal_assist.collab.room import _MAX_AWARENESS_BINDINGS_PER_USER
+    from grant_lab.proposal_assist.collab.room import _MAX_AWARENESS_BINDINGS_PER_USER
 
     room = Room((uuid.uuid4(), "draft"))
     b, c, peer = FakeClient(), FakeClient(), FakeClient()
@@ -653,7 +653,7 @@ async def test_binding_quota_is_per_user_not_per_room(caplog):
 async def test_renewal_of_bound_ids_is_not_quota_checked():
     # A user AT the cap can still renew already-bound ids: only NEW bindings
     # count against the quota (heartbeats/caret moves must never be dropped).
-    from call_manager.proposal_assist.collab.room import _MAX_AWARENESS_BINDINGS_PER_USER
+    from grant_lab.proposal_assist.collab.room import _MAX_AWARENESS_BINDINGS_PER_USER
 
     room = Room((uuid.uuid4(), "draft"))
     b, peer = FakeClient(), FakeClient()
@@ -682,7 +682,7 @@ async def test_reload_recycles_dead_bindings_instead_of_silencing(caplog):
     # user's OLDEST bindings whose ids have no live caret (not in states) are
     # recycled first; the cap only drops when all bound ids ARE live carets —
     # the actual abuse shape.
-    from call_manager.proposal_assist.collab.room import _MAX_AWARENESS_BINDINGS_PER_USER
+    from grant_lab.proposal_assist.collab.room import _MAX_AWARENESS_BINDINGS_PER_USER
 
     room = Room((uuid.uuid4(), "draft"))
     b, peer = FakeClient(), FakeClient()
@@ -724,7 +724,7 @@ async def test_quota_drop_preserves_renewals_and_foreign_logging(caplog):
     # foreign spoof] must NOT be whole-dropped — the renewal still relays, only
     # the new id is dropped, and the foreign entry STILL fires the WARNING
     # spoof signature (foreign logging precedes the quota).
-    from call_manager.proposal_assist.collab.room import _MAX_AWARENESS_BINDINGS_PER_USER
+    from grant_lab.proposal_assist.collab.room import _MAX_AWARENESS_BINDINGS_PER_USER
 
     room = Room((uuid.uuid4(), "draft"))
     victim, b, peer = FakeClient(), FakeClient(), FakeClient()

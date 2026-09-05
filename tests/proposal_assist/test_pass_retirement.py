@@ -14,12 +14,12 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
-from call_manager.config import Settings
-from call_manager.db.models import CoherenceJob, Workspace
-from call_manager.proposal_assist.coherence.pass_runner import run_coherence_pass
-from call_manager.proposal_assist.paths import workspace_repo_dir
-from call_manager.proposal_assist.review.pass_runner import run_review_pass
-from call_manager.workspaces import soft_delete_workspace_db
+from grant_lab.config import Settings
+from grant_lab.db.models import CoherenceJob, Workspace
+from grant_lab.proposal_assist.coherence.pass_runner import run_coherence_pass
+from grant_lab.proposal_assist.paths import workspace_repo_dir
+from grant_lab.proposal_assist.review.pass_runner import run_review_pass
+from grant_lab.workspaces import soft_delete_workspace_db
 from tests.proposal_assist.conftest import make_workspace, review_stamp
 
 
@@ -107,7 +107,7 @@ def test_the_coherence_prefix_holds_the_workspace_row_then_releases_it(
     prefix is paused deterministically inside context assembly and the row is probed
     with FOR UPDATE NOWAIT at two chosen moments.
     """
-    from call_manager.proposal_assist.coherence import pass_runner as cp
+    from grant_lab.proposal_assist.coherence import pass_runner as cp
 
     job_id, ws_id = _seed(pg_session_factory, current_user)
 
@@ -180,7 +180,7 @@ def test_deleting_a_workspace_leaves_no_review_item_in_running(
     Mutation: revert cancel_review_runs_and_items_for_workspace to updating runs
     only, and this must FAIL with the item still 'running'.
     """
-    from call_manager.db.models import ReviewRun, ReviewRunItem
+    from grant_lab.db.models import ReviewRun, ReviewRunItem
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
@@ -205,7 +205,7 @@ def test_deleting_a_workspace_leaves_no_review_item_in_running(
 
 
 def _seed_review(pg_session_factory, current_user, *, item_status="queued"):
-    from call_manager.db.models import ReviewRun, ReviewRunItem
+    from grant_lab.db.models import ReviewRun, ReviewRunItem
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
@@ -229,12 +229,12 @@ def test_the_child_prefix_blocks_on_the_run_row_instead_of_committing_running(
     holder still owns the run row: WITH the fix the child is blocked in its prefix
     and the item is still 'queued'; WITHOUT it the child commits 'running'.
     """
-    from call_manager.db.models import ReviewRunItem
-    from call_manager.proposal_assist.review.pass_runner import _run_one_call
+    from grant_lab.db.models import ReviewRunItem
+    from grant_lab.proposal_assist.review.pass_runner import _run_one_call
 
     run_id, ws_id = _seed_review(pg_session_factory, current_user)
 
-    from call_manager.db.models import ReviewRun
+    from grant_lab.db.models import ReviewRun
 
     child_done = threading.Event()
 
@@ -328,8 +328,8 @@ def test_finalization_takes_the_run_row_before_the_item_row(
 
     Mutation: restore finalization to item-then-run and this must FAIL.
     """
-    from call_manager.db.models import ReviewRun, ReviewRunItem
-    from call_manager.proposal_assist.review.pass_runner import _run_one_call
+    from grant_lab.db.models import ReviewRun, ReviewRunItem
+    from grant_lab.proposal_assist.review.pass_runner import _run_one_call
 
     run_id, ws_id = _seed_review(pg_session_factory, current_user, item_status="queued")
     with pg_session_factory() as s:
@@ -407,8 +407,8 @@ async def test_every_review_child_is_tracked_as_its_own_entry(
     Mutation: delete the child's `async with PASS_REGISTRY.track(...)` and this
     must FAIL.
     """
-    from call_manager.proposal_assist.passes import PASS_REGISTRY
-    from call_manager.proposal_assist.review.pass_runner import _run_one_call
+    from grant_lab.proposal_assist.passes import PASS_REGISTRY
+    from grant_lab.proposal_assist.review.pass_runner import _run_one_call
 
     run_id, ws_id = _seed_review(pg_session_factory, current_user)
     peak: list[int] = []
@@ -446,8 +446,8 @@ def test_the_evaluator_prefix_writes_nothing_for_a_deleted_workspace(
 ):
     """Unlike coherence, this prefix COMMITS progress — so a missing guard is a
     durable write against a deleted workspace, not just wasted work."""
-    from call_manager.db.models import EvaluatorJob
-    from call_manager.proposal_assist.evaluator.pass_runner import run_evaluator_pass
+    from grant_lab.db.models import EvaluatorJob
+    from grant_lab.proposal_assist.evaluator.pass_runner import run_evaluator_pass
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
@@ -482,8 +482,8 @@ def test_the_uncited_prefix_writes_nothing_for_a_deleted_workspace(
     pg_session_factory, current_user
 ):
     """This prefix commits evaluated_draft_sha."""
-    from call_manager.db.models import UncitedClaimsJob
-    from call_manager.proposal_assist.uncited_claims.pass_runner import (
+    from grant_lab.db.models import UncitedClaimsJob
+    from grant_lab.proposal_assist.uncited_claims.pass_runner import (
         run_uncited_claims_pass,
     )
 
@@ -518,8 +518,8 @@ def test_the_review_parent_prefix_writes_nothing_for_a_deleted_workspace(
 ):
     """Review's parent prefix commits the ReviewRunItem rows and run.draft_sha, so
     it needs the same workspace guard as the other three runners."""
-    from call_manager.db.models import ReviewRun, ReviewRunItem
-    from call_manager.proposal_assist.review.pass_runner import run_review_pass
+    from grant_lab.db.models import ReviewRun, ReviewRunItem
+    from grant_lab.proposal_assist.review.pass_runner import run_review_pass
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
@@ -563,7 +563,7 @@ _PREFIX_KINDS = ["coherence", "evaluator", "uncited", "review"]
 
 def _seed_for(kind, pg_session_factory, current_user):
     """One 'running' job/run row on a fresh live workspace. Returns (row_id, ws_id)."""
-    from call_manager.db.models import EvaluatorJob, ReviewRun, UncitedClaimsJob
+    from grant_lab.db.models import EvaluatorJob, ReviewRun, UncitedClaimsJob
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
@@ -584,18 +584,18 @@ def _seed_for(kind, pg_session_factory, current_user):
 def _runner_for(kind):
     """Returns (runner, id_kwarg, module, assemble_attr) for one pass."""
     if kind == "coherence":
-        from call_manager.proposal_assist.coherence import pass_runner as m
+        from grant_lab.proposal_assist.coherence import pass_runner as m
 
         return m.run_coherence_pass, "job_id", m, "assemble_coherence_context"
     if kind == "evaluator":
-        from call_manager.proposal_assist.evaluator import pass_runner as m
+        from grant_lab.proposal_assist.evaluator import pass_runner as m
 
         return m.run_evaluator_pass, "job_id", m, "assemble_evaluator_context"
     if kind == "uncited":
-        from call_manager.proposal_assist.uncited_claims import pass_runner as m
+        from grant_lab.proposal_assist.uncited_claims import pass_runner as m
 
         return m.run_uncited_claims_pass, "job_id", m, "assemble_uncited_claims_context"
-    from call_manager.proposal_assist.review import pass_runner as m
+    from grant_lab.proposal_assist.review import pass_runner as m
 
     return m.run_review_pass, "run_id", m, "assemble_review_context"
 
@@ -653,7 +653,7 @@ def test_a_prefix_gives_up_instead_of_pinning_a_workspace_row_it_cannot_get(
     Mutation: delete `bounded_prefix_lock_waits(s)` from the prefix's
     `with session_factory() as s, ...` line — this must FAIL.
     """
-    from call_manager.proposal_assist import row_locks
+    from grant_lab.proposal_assist import row_locks
 
     monkeypatch.setattr(row_locks, "PASS_PREFIX_LOCK_TIMEOUT_SECONDS", 1)
     row_id, ws_id = _seed_for(kind, pg_session_factory, current_user)
@@ -829,7 +829,7 @@ def _completing_then_parking_adapter_builder(gate: threading.Event, entered: thr
                     yield  # pragma: no cover
                 # Persist markdown so this Wave-1 item finalizes 'done' — the deciding
                 # condition in _run_one_call is item.raw_response_json.get("markdown").
-                from call_manager.db.models import ReviewRunItem
+                from grant_lab.db.models import ReviewRunItem
 
                 with session_factory() as s:
                     item = s.get(ReviewRunItem, item_id)
@@ -869,7 +869,7 @@ def test_no_git_commit_lands_for_a_workspace_deleted_mid_review_pass(
     `files` is non-empty; only then does deleting mid-pass (which cancels the run)
     versus the finalize's still-running guard actually decide whether HEAD moves.
     """
-    from call_manager.db.models import ReviewRun
+    from grant_lab.db.models import ReviewRun
 
     run_id, ws_id = _seed_review(pg_session_factory, current_user)
     repo_dir = workspace_repo_dir(Settings().workspaces_dir, ws_id)

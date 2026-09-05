@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import uuid
 
-from call_manager.db.models import TurnJob
-from call_manager.proposal_assist.port_impl.accounting import SqlAccounting
-from call_manager.proposal_assist.ports.accounting import (
+from grant_lab.db.models import TurnJob
+from grant_lab.proposal_assist.port_impl.accounting import SqlAccounting
+from grant_lab.proposal_assist.ports.accounting import (
     MAX_FETCHES_PER_TURN,
     Accounting,
 )

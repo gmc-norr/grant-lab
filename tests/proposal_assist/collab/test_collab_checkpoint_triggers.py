@@ -19,15 +19,15 @@ from pycrdt import Doc
 from sqlalchemy import select
 from starlette.websockets import WebSocketDisconnect
 
-from call_manager.auth.session_cookie import SessionSigner
-from call_manager.db.models import ArtifactVersion, WorkspaceEvent, WorkspaceViewer, YjsUpdate
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
-from call_manager.proposal_assist.collab import protocol as P
-from call_manager.proposal_assist.collab import state as collab_state
-from call_manager.proposal_assist.collab import store
-from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
-from call_manager.proposal_assist.collab.room import MANAGER
-from call_manager.proposal_assist.collab.yjs_bridge import (
+from grant_lab.auth.session_cookie import SessionSigner
+from grant_lab.db.models import ArtifactVersion, WorkspaceEvent, WorkspaceViewer, YjsUpdate
+from grant_lab.proposal_assist.artifacts import PROPOSAL_FILENAME
+from grant_lab.proposal_assist.collab import protocol as P
+from grant_lab.proposal_assist.collab import state as collab_state
+from grant_lab.proposal_assist.collab import store
+from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm
+from grant_lab.proposal_assist.collab.room import MANAGER
+from grant_lab.proposal_assist.collab.yjs_bridge import (
     _FRAGMENT_KEY,
     _append_node,
     pm_json_to_ydoc,
@@ -340,7 +340,7 @@ def test_explicit_endpoint_404s_for_a_deleted_workspace(_app, pg_session_factory
     app-level handler → 404."""
     from datetime import UTC, datetime
 
-    from call_manager.db.models import Workspace
+    from grant_lab.db.models import Workspace
 
     _app.state.session_factory = pg_session_factory
     _app.state.settings.workspaces_dir = str(tmp_path)

@@ -14,20 +14,20 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.db.models import ProposedChange, User, Workspace
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
-from call_manager.proposal_assist.collab import state
-from call_manager.proposal_assist.collab.hydrate import build_doc, load_or_hydrate
-from call_manager.proposal_assist.collab.kernel import (
+from grant_lab.db.models import ProposedChange, User, Workspace
+from grant_lab.proposal_assist.artifacts import PROPOSAL_FILENAME
+from grant_lab.proposal_assist.collab import state
+from grant_lab.proposal_assist.collab.hydrate import build_doc, load_or_hydrate
+from grant_lab.proposal_assist.collab.kernel import (
     kernel_accept_citation,
     kernel_accept_prose,
     kernel_init_spec,
 )
-from call_manager.proposal_assist.collab.markdown_bridge import pm_to_markdown
-from call_manager.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
-from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout, WorkspaceDeleted
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.lifecycle import LIFECYCLE
+from grant_lab.proposal_assist.collab.markdown_bridge import pm_to_markdown
+from grant_lab.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
+from grant_lab.proposal_assist.drafting.locking import CommitMutexTimeout, WorkspaceDeleted
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.lifecycle import LIFECYCLE
 from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 
@@ -114,8 +114,8 @@ async def test_accept_via_kernel_lets_workspace_retired_reach_the_route(
 
     Nothing is mutated on the way out: no git commit, proposal still pending.
     """
-    from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
-    from call_manager.proposal_assist.proposals.kernel_accept import accept_via_kernel
+    from grant_lab.proposal_assist.drafting.contract import WorkspaceRetired
+    from grant_lab.proposal_assist.proposals.kernel_accept import accept_via_kernel
 
     wid, oid, repo, _room_doc, base_sha, stamp = _setup(
         pg_session_factory, tmp_path, "kernel-retired@umu.se"
@@ -315,11 +315,11 @@ def test_workspace_deleted_is_a_clean_error_so_a_refusal_never_evicts_a_room():
     raised from the identical place — so a new list that forgets WorkspaceDeleted
     is caught here rather than by a room full of disconnected editors.
     """
-    from call_manager.proposal_assist.citations.collab_cite import (
+    from grant_lab.proposal_assist.citations.collab_cite import (
         _CLEAN_CITE_ERRORS,
         _CLEAN_INIT_SPEC_ERRORS,
     )
-    from call_manager.proposal_assist.proposals.kernel_accept import _CLEAN_ACCEPT_ERRORS
+    from grant_lab.proposal_assist.proposals.kernel_accept import _CLEAN_ACCEPT_ERRORS
 
     for clean in (_CLEAN_ACCEPT_ERRORS, _CLEAN_CITE_ERRORS, _CLEAN_INIT_SPEC_ERRORS):
         assert CommitMutexTimeout in clean  # the invariant's anchor
@@ -333,7 +333,7 @@ def test_workspace_deleted_is_a_clean_error_so_a_refusal_never_evicts_a_room():
 
 def test_checkpoint_artifact_refuses_a_deleted_workspace(pg_session_factory, tmp_path):
     """Checkpointing writes git + DB rows — exactly what deletion must stop."""
-    from call_manager.proposal_assist.collab.checkpoint import checkpoint_artifact
+    from grant_lab.proposal_assist.collab.checkpoint import checkpoint_artifact
 
     wid, _oid, _repo, _room_doc, _sha, stamp = _setup(pg_session_factory, tmp_path, "cp-del@umu.se")
     _delete(pg_session_factory, wid)
@@ -352,7 +352,7 @@ def test_checkpoint_active_tails_skips_a_deleted_workspace_without_failing(
     """The background tick must SKIP, not blow up. Its pre-mutex liveness screen is
     a TOCTOU; the under-mutex raise closes it, and this proves the closure is a
     quiet skip rather than an error."""
-    from call_manager.proposal_assist.collab.checkpoint import checkpoint_active_tails
+    from grant_lab.proposal_assist.collab.checkpoint import checkpoint_active_tails
 
     wid, _oid, repo, _room_doc, _sha, _stamp = _setup(
         pg_session_factory, tmp_path, "cp-tail@umu.se"
@@ -370,7 +370,7 @@ def test_checkpoint_active_tails_skips_a_deleted_workspace_without_failing(
 def test_enable_on_touch_refuses_a_deleted_workspace(pg_session_factory, tmp_path):
     """Enable-on-touch must never flip collab ON for a deleted workspace: it writes
     a CollabArtifactState row and COMMITS."""
-    from call_manager.proposal_assist.collab.flip import maybe_auto_enable
+    from grant_lab.proposal_assist.collab.flip import maybe_auto_enable
 
     md0 = "## Background\noriginal.\n"
     with pg_session_factory() as s:
@@ -415,7 +415,7 @@ def test_checkpoint_active_tails_skips_an_under_mutex_refusal_QUIETLY(
     on behaviour that was already correct."""
     import logging
 
-    from call_manager.proposal_assist.collab import checkpoint as checkpoint_mod
+    from grant_lab.proposal_assist.collab import checkpoint as checkpoint_mod
 
     wid, _oid, repo, _room_doc, _sha, _stamp = _setup(
         pg_session_factory, tmp_path, "cp-straddle@umu.se"
@@ -449,7 +449,7 @@ def test_hydration_refuses_to_seed_a_deleted_workspace(pg_session_factory, tmp_p
     from 'no content yet' and would let a kernel accept write to an empty doc)."""
     from sqlalchemy import select
 
-    from call_manager.db.models import YjsUpdate
+    from grant_lab.db.models import YjsUpdate
 
     md0 = "## Background\noriginal.\n"
     with pg_session_factory() as s:

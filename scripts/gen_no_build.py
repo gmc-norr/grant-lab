@@ -4,7 +4,7 @@ Supply-chain baseline (see the supply-chain design spec, §3.2): we want uv to
 refuse building any *third-party* source distribution at install time, so no
 dependency's sdist build backend runs arbitrary code on the build host. uv's
 ``no-build = true`` is global and would also block the editable install of our
-own first-party ``call_manager`` package (which has no wheel) — and uv exposes
+own first-party ``grant_lab`` package (which has no wheel) — and uv exposes
 no allow-list to exempt the project root. So instead we enumerate every
 third-party dependency in ``no-build-package`` (the per-package form), leaving
 our own package free to build editable for the app + CLIs.

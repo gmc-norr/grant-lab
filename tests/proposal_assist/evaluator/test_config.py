@@ -1,4 +1,4 @@
-from call_manager.config import Settings
+from grant_lab.config import Settings
 
 
 def test_evaluator_settings_defaults(_settings_env):

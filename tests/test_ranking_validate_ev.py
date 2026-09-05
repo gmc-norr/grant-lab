@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     Call,
     CallRanking,
     Profile,
@@ -11,7 +11,7 @@ from call_manager.db.models import (
     Source,
     User,
 )
-from call_manager.ranking.validate_ev import run_validation
+from grant_lab.ranking.validate_ev import run_validation
 
 
 class _FakeOllama:
@@ -110,7 +110,7 @@ def test_validation_threads_settings_thresholds_into_gates(
         _seed_ranked_pair(s, "x")
         s.commit()
 
-    from call_manager.ranking import validate_ev as ve_mod
+    from grant_lab.ranking import validate_ev as ve_mod
 
     seen = {}
     original = ve_mod.evaluate_gates

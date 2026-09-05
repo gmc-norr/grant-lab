@@ -15,8 +15,8 @@ from tests.fencing.detectors import (
     find_sites,
 )
 
-TOOLS = "src/call_manager/proposal_assist/tools/thing.py"
-JOBS = "src/call_manager/proposal_assist/coherence/jobs.py"
+TOOLS = "src/grant_lab/proposal_assist/tools/thing.py"
+JOBS = "src/grant_lab/proposal_assist/coherence/jobs.py"
 
 
 def test_finds_a_committing_tool_function():
@@ -117,7 +117,7 @@ def do_thing(ctx):
     with ctx.session_factory() as s:
         s.commit()
 """
-    assert find_sites(src, "src/call_manager/web/api/workspaces.py") == set()
+    assert find_sites(src, "src/grant_lab/web/api/workspaces.py") == set()
 
 
 def test_finds_claim_functions_by_prefix():
@@ -142,7 +142,7 @@ def claim_context_sha(claim_text):
 def claim_drift_hash(claim, anchor):
     return ""
 """
-    assert find_sites(src, "src/call_manager/proposal_assist/citations/audit.py") == set()
+    assert find_sites(src, "src/grant_lab/proposal_assist/citations/audit.py") == set()
 
 
 def test_finds_a_tool_context_construction():
@@ -151,7 +151,7 @@ def build(session_factory):
     ctx = ToolContext(workspace_id=w, session_factory=session_factory)
     return ctx
 """
-    path = "src/call_manager/proposal_assist/drafting/factory.py"
+    path = "src/grant_lab/proposal_assist/drafting/factory.py"
     assert find_sites(src, path) == {Site(KIND_TOOL_CONTEXT, path, "build")}
 
 
@@ -164,13 +164,13 @@ def accept(session, pc):
     ctx = ToolContext(workspace_id=pc.workspace_id, session_factory=None, settings=None)
     return ctx
 """
-    path = "src/call_manager/proposal_assist/proposals/accepting.py"
+    path = "src/grant_lab/proposal_assist/proposals/accepting.py"
     assert find_sites(src, path) == set()
 
 
 def test_a_module_level_tool_context_reports_module():
     src = "ctx = ToolContext(workspace_id=w, session_factory=sf)\n"
-    path = "src/call_manager/proposal_assist/tools/registry.py"
+    path = "src/grant_lab/proposal_assist/tools/registry.py"
     assert find_sites(src, path) == {Site(KIND_TOOL_CONTEXT, path, "<module>")}
 
 
@@ -192,7 +192,7 @@ def test_a_port_write_call_is_a_tool_commit_site():
         "async def submit_scorecard_impl(ctx, *, ports, invocation):\n"
         "    ports.effects.submit_scorecard(invocation.stamp(), cmd)\n"
     )
-    sites = find_sites(src, "src/call_manager/proposal_assist/tools/scorecard.py")
+    sites = find_sites(src, "src/grant_lab/proposal_assist/tools/scorecard.py")
     assert (KIND_TOOL_COMMIT, "submit_scorecard_impl") in {
         (s.kind, s.symbol) for s in sites
     }
@@ -208,7 +208,7 @@ def test_an_accounting_call_is_a_tool_commit_site_too():
         "    def _refund_fetch_slot():\n"
         "        ports.accounting.refund_fetch_slot(job_id)\n"
     )
-    sites = find_sites(src, "src/call_manager/proposal_assist/tools/references.py")
+    sites = find_sites(src, "src/grant_lab/proposal_assist/tools/references.py")
     assert (KIND_TOOL_COMMIT, "fetch_reference_impl._refund_fetch_slot") in {
         (s.kind, s.symbol) for s in sites
     }
@@ -220,14 +220,14 @@ def test_a_port_call_outside_tools_is_not_a_site():
     from tests.fencing.detectors import find_sites
 
     src = "def helper(ports):\n    ports.effects.submit_review(stamp, cmd)\n"
-    assert find_sites(src, "src/call_manager/proposal_assist/proposals/accepting.py") == set()
+    assert find_sites(src, "src/grant_lab/proposal_assist/proposals/accepting.py") == set()
 
 
 def test_the_port_method_list_is_derived_from_the_protocols():
     """A hand-written list drifts the first time a port gains a method, and the
     drift is silent: the new effect simply stops being detected."""
-    from call_manager.proposal_assist.ports.accounting import Accounting
-    from call_manager.proposal_assist.ports.effects import Effects
+    from grant_lab.proposal_assist.ports.accounting import Accounting
+    from grant_lab.proposal_assist.ports.effects import Effects
     from tests.fencing.detectors import PORT_WRITE_METHODS
 
     assert frozenset(Effects.__protocol_attrs__) | frozenset(
@@ -246,7 +246,7 @@ def test_a_lookalike_receiver_is_not_a_site():
     qualname fenced that never touched a real capability."""
     from tests.fencing.detectors import find_sites
 
-    path = "src/call_manager/proposal_assist/tools/scorecard.py"
+    path = "src/grant_lab/proposal_assist/tools/scorecard.py"
     src = (
         "async def submit_scorecard_impl(ctx):\n"
         "    fake = _Local()\n"
@@ -267,7 +267,7 @@ def test_a_declared_relocated_effect_still_owns_a_site():
     src = (
         pathlib.Path(__file__).parent / "fixtures" / "relocated_effect.py"
     ).read_text(encoding="utf-8")
-    path = "src/call_manager/proposal_assist/citations/core.py"
+    path = "src/grant_lab/proposal_assist/citations/core.py"
     assert (KIND_TOOL_COMMIT, "_write_citekey_cache") in {
         (s.kind, s.symbol) for s in find_sites(src, path)
     }
@@ -284,7 +284,7 @@ def test_an_ordinary_domain_commit_is_not_a_site():
     src = (
         pathlib.Path(__file__).parent / "fixtures" / "unrelated_domain_commit.py"
     ).read_text(encoding="utf-8")
-    assert find_sites(src, "src/call_manager/proposal_assist/editing/save.py") == set()
+    assert find_sites(src, "src/grant_lab/proposal_assist/editing/save.py") == set()
 
 
 def test_the_relocated_scope_is_declared_and_currently_holds_the_citation_core():
@@ -293,7 +293,7 @@ def test_the_relocated_scope_is_declared_and_currently_holds_the_citation_core()
     from tests.fencing.detectors import RELOCATED_EFFECT_PATHS
 
     assert frozenset(
-        {"src/call_manager/proposal_assist/citations/core.py"}
+        {"src/grant_lab/proposal_assist/citations/core.py"}
     ) == RELOCATED_EFFECT_PATHS
 
 
@@ -308,7 +308,7 @@ def test_the_fenced_measurement_uses_the_same_scope():
     src = (
         pathlib.Path(__file__).parent / "fixtures" / "relocated_effect.py"
     ).read_text(encoding="utf-8")
-    path = "src/call_manager/proposal_assist/citations/core.py"
+    path = "src/grant_lab/proposal_assist/citations/core.py"
     # It commits directly, so it is NOT fenced — but the function must have looked,
     # which an out-of-scope path would not have done.
     assert find_fenced_tool_commits(src, path) == set()
@@ -333,7 +333,7 @@ def test_a_begin_block_is_discovered_as_a_tool_commit_site():
     from tests.fencing.detectors import KIND_TOOL_COMMIT, find_sites
 
     src = "def ingest(session):\n    with session.begin():\n        session.add(1)\n"
-    path = "src/call_manager/proposal_assist/tools/references.py"
+    path = "src/grant_lab/proposal_assist/tools/references.py"
     assert (KIND_TOOL_COMMIT, "ingest") in {
         (s.kind, s.symbol) for s in find_sites(src, path)
     }
@@ -350,7 +350,7 @@ def test_discovery_and_measurement_share_one_definition_of_a_raw_commit():
     """
     from tests.fencing.detectors import _RAW_COMMIT_ATTRS, KIND_TOOL_COMMIT, find_sites
 
-    path = "src/call_manager/proposal_assist/tools/references.py"
+    path = "src/grant_lab/proposal_assist/tools/references.py"
     bodies = {
         "commit": "def w(session):\n    session.commit()\n",
         "begin": "def w(session):\n    with session.begin():\n        session.add(1)\n",

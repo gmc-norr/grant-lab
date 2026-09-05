@@ -1,9 +1,9 @@
 from fastapi.testclient import TestClient
 
-import call_manager.profiles.post_edit as post_edit
-from call_manager.auth.session_cookie import SessionSigner
-from call_manager.db.models import Profile, ProfileBootstrapJob, User
-from call_manager.main import create_app
+import grant_lab.profiles.post_edit as post_edit
+from grant_lab.auth.session_cookie import SessionSigner
+from grant_lab.db.models import Profile, ProfileBootstrapJob, User
+from grant_lab.main import create_app
 
 
 def _setup(monkeypatch, pg_url):

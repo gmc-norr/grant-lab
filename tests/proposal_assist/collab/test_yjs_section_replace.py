@@ -1,14 +1,14 @@
 import pycrdt
 import pytest
 
-from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
-from call_manager.proposal_assist.collab.yjs_bridge import (
+from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
+from grant_lab.proposal_assist.collab.yjs_bridge import (
     SectionMapDivergenceError,
     apply_pm_section_to_fragment,
     pm_json_to_ydoc,
     ydoc_to_pm_json,
 )
-from call_manager.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
 
 _DOC = "Preamble.\n\n## A\n\nBody a.\n\n## B\n\nBody b.\n"
 
@@ -150,7 +150,7 @@ def test_hard_break_before_heading_text_is_no_longer_a_phantom_boundary():
     doc = pm_json_to_ydoc(_pm_doc(_PHANTOM))
     pm_json = ydoc_to_pm_json(doc)
     md = pm_to_markdown(pm_json)
-    from call_manager.proposal_assist.collab.yjs_bridge import _block_starts_section
+    from grant_lab.proposal_assist.collab.yjs_bridge import _block_starts_section
 
     starts = [0] + [i for i, b in enumerate(pm_json["content"]) if _block_starts_section(b)]
     assert len(split_sections(md)) == len(starts) == 2
@@ -165,7 +165,7 @@ def test_divergence_guard_raises_before_mutation(monkeypatch):
     # No editor-producible shape diverges any more, so the guard is exercised
     # with an injected disagreement: the line scan reports one section more
     # than the block map. It must raise BEFORE touching the doc.
-    from call_manager.proposal_assist.collab import yjs_bridge
+    from grant_lab.proposal_assist.collab import yjs_bridge
 
     doc = pm_json_to_ydoc(_pm_doc(_PHANTOM))
     md_before = pm_to_markdown(ydoc_to_pm_json(doc))
@@ -196,7 +196,7 @@ def test_fence_flip_divergence_raises():
     n_line = len(split_sections(md))
     blocks_json = pm_json.get("content") or []
 
-    from call_manager.proposal_assist.collab.yjs_bridge import _block_starts_section
+    from grant_lab.proposal_assist.collab.yjs_bridge import _block_starts_section
     starts = [0] + [i for i, b in enumerate(blocks_json) if _block_starts_section(b)]
     if n_line == len(starts):
         # No divergence in this repo: backtick escaping prevents fence-flip.

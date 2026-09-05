@@ -2,8 +2,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from call_manager.db.models import ClaimAnalysisJob, User, Workspace
-from call_manager.proposal_assist.analysis.queue import (
+from grant_lab.db.models import ClaimAnalysisJob, User, Workspace
+from grant_lab.proposal_assist.analysis.queue import (
     claim_queued_jobs,
     enqueue_section_job,
     enqueue_uncovered_sections,
@@ -13,7 +13,7 @@ from call_manager.proposal_assist.analysis.queue import (
     requeue_stuck_running,
     touch_running_job,
 )
-from call_manager.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
 
 
 def _ws(session):

@@ -13,7 +13,7 @@ def _cfg(pg_url):
 def test_0042_upgrade_creates_table_then_downgrade_drops(pg_url):
     cfg = _cfg(pg_url)
     command.upgrade(cfg, "0042")
-    from call_manager.db.session import make_engine
+    from grant_lab.db.session import make_engine
 
     engine = make_engine(pg_url)
     try:

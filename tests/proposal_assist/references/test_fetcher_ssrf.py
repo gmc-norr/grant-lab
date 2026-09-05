@@ -10,7 +10,7 @@ collide with an autouse fixture."""
 
 import pytest
 
-from call_manager.proposal_assist.references.fetcher import (
+from grant_lab.proposal_assist.references.fetcher import (
     FetchError,
     SSRFError,
     fetch_bytes,
@@ -105,7 +105,7 @@ def test_pinned_connection_resolves_host_exactly_once(httpx_mock, monkeypatch):
     public IP is what gets pinned, which is the load-bearing behavior.)"""
     import socket
 
-    from call_manager.proposal_assist.references import fetcher
+    from grant_lab.proposal_assist.references import fetcher
 
     calls = {"n": 0}
 

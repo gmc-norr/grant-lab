@@ -10,7 +10,7 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from call_manager.db.models import ArtifactVersion
+from grant_lab.db.models import ArtifactVersion
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
@@ -143,7 +143,7 @@ def test_a_version_carries_the_prompt_that_caused_it(
     """Goal 1 is "who made each one AND WHY". `triggering_turn_id` points at the
     USER turn (turns/processor.py:359), and that turn's `content` is JSONB, so
     the prompt has to be extracted, not read off a column."""
-    from call_manager.db.models import ChatTurn
+    from grant_lab.db.models import ChatTurn
 
     ws_id = _make_ws(_app, current_user, pg_session_factory, tmp_path)
     repo = tmp_path / ws_id / "repo"
@@ -181,7 +181,7 @@ def test_a_block_list_turn_still_yields_its_text(
     of blocks whose FIRST block is the text (turns/submit.py:109). A reader that
     handles only the dict shape silently loses the reason on exactly the turns
     that had the most context."""
-    from call_manager.db.models import ChatTurn
+    from grant_lab.db.models import ChatTurn
 
     ws_id = _make_ws(_app, current_user, pg_session_factory, tmp_path)
     repo = tmp_path / ws_id / "repo"

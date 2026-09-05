@@ -12,14 +12,14 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.config import Settings
-from call_manager.db.models import Workspace
-from call_manager.proposal_assist.citations.core import insert_citation_impl
-from call_manager.proposal_assist.drafting.locking import DELETED_ERROR_MESSAGE
-from call_manager.proposal_assist.ports.stamp import FenceStamp
-from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
-from call_manager.proposal_assist.tools.registry import ToolContext
-from call_manager.workspaces import restore_workspace_db, soft_delete_workspace_db
+from grant_lab.config import Settings
+from grant_lab.db.models import Workspace
+from grant_lab.proposal_assist.citations.core import insert_citation_impl
+from grant_lab.proposal_assist.drafting.locking import DELETED_ERROR_MESSAGE
+from grant_lab.proposal_assist.ports.stamp import FenceStamp
+from grant_lab.proposal_assist.tools.proposal import PROPOSAL_FILENAME
+from grant_lab.proposal_assist.tools.registry import ToolContext
+from grant_lab.workspaces import restore_workspace_db, soft_delete_workspace_db
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 

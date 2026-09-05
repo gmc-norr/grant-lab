@@ -15,15 +15,15 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.db.models import Reference
-from call_manager.proposal_assist.citations.bibliography import (
+from grant_lab.db.models import Reference
+from grant_lab.proposal_assist.citations.bibliography import (
     BIBLIOGRAPHY_FILENAME,
     BuildBibliographyBlocked,
     build_bibliography,
     compose_export,
 )
-from call_manager.proposal_assist.citations.markers import build_marker
-from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
+from grant_lab.proposal_assist.citations.markers import build_marker
+from grant_lab.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 SMITH_CSL = {

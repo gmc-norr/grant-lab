@@ -1,6 +1,6 @@
 import pytest
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     Call,
     Profile,
     ProfileKind,
@@ -9,13 +9,13 @@ from call_manager.db.models import (
     Source,
     User,
 )
-from call_manager.web.api.calls import (
+from grant_lab.web.api.calls import (
     EffectiveOut,
     PaginationOut,
     RankingOut,
     SummaryOut,
 )
-from call_manager.web.dashboard import build_dashboard_view, resolve_profile_selection
+from grant_lab.web.dashboard import build_dashboard_view, resolve_profile_selection
 
 
 def _seed(pg_session_factory):

@@ -2,8 +2,8 @@
 
 from sqlalchemy import select
 
-from call_manager.db.models import CitationAuditVerdict
-from call_manager.proposal_assist.citations.verdict_cache import (
+from grant_lab.db.models import CitationAuditVerdict
+from grant_lab.proposal_assist.citations.verdict_cache import (
     build_cache_key,
     get_verdict,
     store_verdict,

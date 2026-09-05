@@ -26,27 +26,27 @@ from fastapi.testclient import TestClient
 from pycrdt import Doc
 from sqlalchemy import select
 
-from call_manager.auth.session_cookie import SessionSigner
-from call_manager.db.models import ArtifactVersion, ProposedChange, Reference, ReferenceChunk
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
-from call_manager.proposal_assist.citations.gitio import GitCommitError
-from call_manager.proposal_assist.citations.ledger import load_ledger
-from call_manager.proposal_assist.citations.markers import find_markers
-from call_manager.proposal_assist.collab import kernel as kernel_mod
-from call_manager.proposal_assist.collab import protocol as P
-from call_manager.proposal_assist.collab import state as collab_state
-from call_manager.proposal_assist.collab import store
-from call_manager.proposal_assist.collab.hydrate import load_or_hydrate
-from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
-from call_manager.proposal_assist.collab.room import MANAGER
-from call_manager.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
-from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.proposals.proposing import (
+from grant_lab.auth.session_cookie import SessionSigner
+from grant_lab.db.models import ArtifactVersion, ProposedChange, Reference, ReferenceChunk
+from grant_lab.proposal_assist.artifacts import PROPOSAL_FILENAME
+from grant_lab.proposal_assist.citations.gitio import GitCommitError
+from grant_lab.proposal_assist.citations.ledger import load_ledger
+from grant_lab.proposal_assist.citations.markers import find_markers
+from grant_lab.proposal_assist.collab import kernel as kernel_mod
+from grant_lab.proposal_assist.collab import protocol as P
+from grant_lab.proposal_assist.collab import state as collab_state
+from grant_lab.proposal_assist.collab import store
+from grant_lab.proposal_assist.collab.hydrate import load_or_hydrate
+from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
+from grant_lab.proposal_assist.collab.room import MANAGER
+from grant_lab.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
+from grant_lab.proposal_assist.drafting.locking import CommitMutexTimeout
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.proposals.proposing import (
     capture_base,
     propose_citation_insert,
 )
-from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
+from grant_lab.proposal_assist.tools.citations import CITATIONS_FILENAME
 from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 # ---------------------------------------------------------------------------
@@ -380,7 +380,7 @@ def test_stale_vs_live(_app, pg_session_factory, tmp_path):
         "## Background\nlive edit, uncommitted.\n" if sec.index == 1 else sec.text
         for sec in live_sections
     )
-    from call_manager.proposal_assist.collab.yjs_bridge import apply_pm_json_to_fragment
+    from grant_lab.proposal_assist.collab.yjs_bridge import apply_pm_json_to_fragment
     live_update = apply_pm_json_to_fragment(doc, markdown_to_pm(edited_md))
     with pg_session_factory() as s:
         store.append_update(
@@ -616,7 +616,7 @@ def test_flag_off_parity_git_first(_app, pg_session_factory, tmp_path):
     _init_repo(repo, md0)
 
     # For the git-first path, base_section_sha is from raw git markdown (no Yjs round-trip)
-    from call_manager.proposal_assist.proposals.proposing import capture_base
+    from grant_lab.proposal_assist.proposals.proposing import capture_base
     base_commit_sha, base_section_sha = capture_base(repo, 1)
 
     with pg_session_factory() as s:

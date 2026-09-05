@@ -4,12 +4,12 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import select
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     DigestRun,
     User,
 )
-from call_manager.digest.send import run_digest
-from call_manager.email.client import EmailTransportError, SendResult
+from grant_lab.digest.send import run_digest
+from grant_lab.email.client import EmailTransportError, SendResult
 
 
 @dataclass
@@ -39,7 +39,7 @@ class _FakeEmail:
 
 def _seed_user_with_payload(s, *, email):
     """Reuse the helper from test_digest_assemble — copy/paste shape here."""
-    from call_manager.db.models import (
+    from grant_lab.db.models import (
         Call,
         CallRanking,
         Profile,
@@ -270,7 +270,7 @@ def test_run_digest_continues_when_one_user_assembly_fails(pg_session_factory, n
         s.commit()
 
     real_assemble = __import__(
-        "call_manager.digest.send", fromlist=["assemble_for_user"]
+        "grant_lab.digest.send", fromlist=["assemble_for_user"]
     ).assemble_for_user
 
     def flaky_assemble(session, *, user_id, now):
@@ -278,7 +278,7 @@ def test_run_digest_continues_when_one_user_assembly_fails(pg_session_factory, n
             raise RuntimeError("simulated profile-data corruption")
         return real_assemble(session, user_id=user_id, now=now)
 
-    monkeypatch.setattr("call_manager.digest.send.assemble_for_user", flaky_assemble)
+    monkeypatch.setattr("grant_lab.digest.send.assemble_for_user", flaky_assemble)
 
     email = _FakeEmail()
     summary = run_digest(

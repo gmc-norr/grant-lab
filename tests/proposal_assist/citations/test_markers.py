@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from call_manager.proposal_assist.citations.markers import (
+from grant_lab.proposal_assist.citations.markers import (
     AnchorError,
     build_marker,
     find_markers,

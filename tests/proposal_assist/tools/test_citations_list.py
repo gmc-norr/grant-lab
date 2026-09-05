@@ -12,17 +12,17 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.config import Settings
-from call_manager.db.models import Reference, ReferenceChunk
-from call_manager.proposal_assist.citations.core import insert_citation_impl
-from call_manager.proposal_assist.citations.ledger import dump_ledger, empty_ledger
-from call_manager.proposal_assist.ports.stamp import FenceStamp
-from call_manager.proposal_assist.tools.citations import (
+from grant_lab.config import Settings
+from grant_lab.db.models import Reference, ReferenceChunk
+from grant_lab.proposal_assist.citations.core import insert_citation_impl
+from grant_lab.proposal_assist.citations.ledger import dump_ledger, empty_ledger
+from grant_lab.proposal_assist.ports.stamp import FenceStamp
+from grant_lab.proposal_assist.tools.citations import (
     CITATIONS_FILENAME,
     list_citations_impl,
 )
-from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
-from call_manager.proposal_assist.tools.registry import ToolContext
+from grant_lab.proposal_assist.tools.proposal import PROPOSAL_FILENAME
+from grant_lab.proposal_assist.tools.registry import ToolContext
 from tests.proposal_assist.conftest import make_workspace
 
 

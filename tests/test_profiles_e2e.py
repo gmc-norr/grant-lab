@@ -3,14 +3,14 @@ from functools import partial
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from call_manager.auth.session_cookie import SessionSigner
-from call_manager.db.models import Call, CallRanking, Profile, RankingJob, Source, User
-from call_manager.main import create_app
-from call_manager.profiles.seed import DraftProfile
-from call_manager.ranking.criteria import GateResult, Gates, GateStatus
-from call_manager.ranking.prompt import Parsed
-from call_manager.ranking.rank_pair import RankResult
-from call_manager.ranking.worker import drain_queue as _drain_queue
+from grant_lab.auth.session_cookie import SessionSigner
+from grant_lab.db.models import Call, CallRanking, Profile, RankingJob, Source, User
+from grant_lab.main import create_app
+from grant_lab.profiles.seed import DraftProfile
+from grant_lab.ranking.criteria import GateResult, Gates, GateStatus
+from grant_lab.ranking.prompt import Parsed
+from grant_lab.ranking.rank_pair import RankResult
+from grant_lab.ranking.worker import drain_queue as _drain_queue
 
 # drain_queue now requires embedding_threshold (no module-level default).
 drain_queue = partial(_drain_queue, embedding_threshold=0.30)
@@ -139,7 +139,7 @@ def test_e2e_create_profile_then_rank_then_browse(monkeypatch, pg_url, pg_sessio
 
         # 2. Run the bootstrap worker → writes the description, embeds (mocked),
         #    and enqueues the ranking backfill for the seeded call.
-        from call_manager.profiles import bootstrap_worker as bw
+        from grant_lab.profiles import bootstrap_worker as bw
 
         monkeypatch.setattr(bw, "bootstrap_profile", lambda **_: fake_draft)
         monkeypatch.setattr(bw, "refresh_profile_embedding", lambda *a, **k: None)
@@ -161,7 +161,7 @@ def test_e2e_create_profile_then_rank_then_browse(monkeypatch, pg_url, pg_sessio
         assert len(jobs) == 1
 
         # 3. Drain the ranking queue with a stub rank_pair.
-        from call_manager.ranking import worker as worker_mod
+        from grant_lab.ranking import worker as worker_mod
 
         monkeypatch.setattr(worker_mod, "rank_pair", _stub_rank_pair_returning(score=80))
         drain_queue(

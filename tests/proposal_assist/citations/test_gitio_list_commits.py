@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.proposal_assist.citations import gitio
-from call_manager.proposal_assist.citations.gitio import (
+from grant_lab.proposal_assist.citations import gitio
+from grant_lab.proposal_assist.citations.gitio import (
     _MAX_SUBJECT_CHARS,
     _SUBJECT_TRUNCATION_MARKER,
     GitCommitError,
@@ -205,7 +205,7 @@ def test_an_unparseable_author_date_raises_gitcommiterror_not_valueerror(tmp_pat
     raises ValueError, which is neither OSError nor GitCommitError and so
     escapes callers' except clauses. Framing can only shift on a malformed
     stream, but when it does the caller must still see the handled type."""
-    from call_manager.proposal_assist.citations import gitio
+    from grant_lab.proposal_assist.citations import gitio
 
     repo = _repo(tmp_path, 1)
     monkeypatch.setattr(
@@ -304,7 +304,7 @@ def test_the_reader_caps_each_field_before_it_is_buffered():
     """
     import io as _io
 
-    from call_manager.proposal_assist.citations.gitio import (
+    from grant_lab.proposal_assist.citations.gitio import (
         _MAX_FIELD_BYTES,
         _read_capped_fields,
     )
@@ -336,7 +336,7 @@ def test_the_reader_refuses_a_pathological_stream_rather_than_reading_forever():
     a crash."""
     import io as _io
 
-    from call_manager.proposal_assist.citations.gitio import _MAX_SCAN_BYTES, _read_capped_fields
+    from grant_lab.proposal_assist.citations.gitio import _MAX_SCAN_BYTES, _read_capped_fields
 
     stream = _io.BytesIO(b"X" * (_MAX_SCAN_BYTES + 1024))
 
@@ -582,7 +582,7 @@ def test_a_malformed_parent_token_is_dropped_not_half_parsed(tmp_path, caplog):
     """
     import logging
 
-    from call_manager.proposal_assist.citations.gitio import _parse_parents
+    from grant_lab.proposal_assist.citations.gitio import _parse_parents
 
     good = "a" * 40
     assert _parse_parents("", sha_len=40) == ()

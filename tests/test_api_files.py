@@ -6,7 +6,7 @@ import uuid
 from PIL import Image
 from sqlalchemy import func, select
 
-from call_manager.db.models import Attachment
+from grant_lab.db.models import Attachment
 from tests.proposal_assist._refs_helpers import add_member, authed_client, build_app
 from tests.proposal_assist.conftest import make_user, make_workspace
 

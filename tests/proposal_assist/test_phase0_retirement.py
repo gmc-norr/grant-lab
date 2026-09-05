@@ -10,12 +10,12 @@ from alembic.config import Config
 from sqlalchemy import select, text
 
 from alembic import command
-from call_manager.db.models import WorkspaceEvent, WorkspaceSetupJob
-from call_manager.proposal_assist.jobs_retirement import (
+from grant_lab.db.models import WorkspaceEvent, WorkspaceSetupJob
+from grant_lab.proposal_assist.jobs_retirement import (
     _JOBS_CANCEL_SECONDS,
     build_jobs_retirement_hook,
 )
-from call_manager.proposal_assist.phases.setup import (
+from grant_lab.proposal_assist.phases.setup import (
     MAX_SETUP_ATTEMPTS,
     Phase0Worker,
     WorkspaceGoneDuringSetup,
@@ -191,7 +191,7 @@ def test_reconcile_cancels_a_waiting_for_rubric_review_row_the_hook_skipped(
     row, so only reconcile_cancelled_jobs can terminalize it."""
     import threading
 
-    from call_manager.proposal_assist.jobs_retirement import reconcile_cancelled_jobs
+    from grant_lab.proposal_assist.jobs_retirement import reconcile_cancelled_jobs
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
@@ -247,7 +247,7 @@ def test_reconcile_cancels_a_queued_row_the_hook_skipped(pg_session_factory, cur
     """
     import threading
 
-    from call_manager.proposal_assist.jobs_retirement import reconcile_cancelled_jobs
+    from grant_lab.proposal_assist.jobs_retirement import reconcile_cancelled_jobs
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
@@ -334,7 +334,7 @@ def test_a_locked_row_is_skipped_not_waited_on(pg_session_factory, current_user)
 
 def test_the_hook_is_bounded_by_wait_for(pg_session_factory, current_user, monkeypatch):
     """Declaring a constant bounds nothing; the wait_for is the bound."""
-    import call_manager.proposal_assist.jobs_retirement as jr
+    import grant_lab.proposal_assist.jobs_retirement as jr
 
     def _never_returns(session, workspace_id, generation):
         # NOTE: kept short (not 30s) deliberately. asyncio.run()'s cleanup
@@ -383,7 +383,7 @@ def test_a_row_the_hook_skipped_is_converged_by_the_tick(pg_session_factory, cur
     later tick cancels it."""
     import threading
 
-    from call_manager.proposal_assist.jobs_retirement import reconcile_cancelled_jobs
+    from grant_lab.proposal_assist.jobs_retirement import reconcile_cancelled_jobs
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
@@ -443,7 +443,7 @@ def test_a_row_the_hook_skipped_is_converged_by_the_tick(pg_session_factory, cur
 
 
 def test_reconcile_leaves_live_workspaces_alone(pg_session_factory, current_user):
-    from call_manager.proposal_assist.jobs_retirement import reconcile_cancelled_jobs
+    from grant_lab.proposal_assist.jobs_retirement import reconcile_cancelled_jobs
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
@@ -471,9 +471,9 @@ def test_the_reconcile_tick_is_registered_without_an_llm_client(monkeypatch, pg_
     """
     from unittest.mock import MagicMock
 
-    from call_manager.config import Settings
-    from call_manager.db.session import make_engine, make_session_factory
-    from call_manager.scheduler import build_scheduler
+    from grant_lab.config import Settings
+    from grant_lab.db.session import make_engine, make_session_factory
+    from grant_lab.scheduler import build_scheduler
 
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
@@ -490,7 +490,7 @@ def test_the_reconcile_tick_is_registered_without_an_llm_client(monkeypatch, pg_
     try:
         session_factory = make_session_factory(engine)
 
-        from call_manager.proposal_assist.drafting.factory import (
+        from grant_lab.proposal_assist.drafting.factory import (
             build_workspace_controller,
         )
 

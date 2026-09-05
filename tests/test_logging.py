@@ -3,7 +3,7 @@ import logging
 
 import pytest
 
-from call_manager.logging import JsonFormatter, configure_logging
+from grant_lab.logging import JsonFormatter, configure_logging
 
 
 @pytest.fixture(autouse=True)

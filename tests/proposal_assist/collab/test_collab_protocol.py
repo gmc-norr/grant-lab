@@ -1,7 +1,7 @@
 import pytest
 from pycrdt import Doc, Text
 
-from call_manager.proposal_assist.collab import protocol as P
+from grant_lab.proposal_assist.collab import protocol as P
 
 
 def _make_update_message(text: str) -> bytes:

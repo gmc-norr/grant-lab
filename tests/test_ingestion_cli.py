@@ -1,4 +1,4 @@
-"""Tests for the ingestion CLI: `python -m call_manager.ingestion.cli run --source <slug>`.
+"""Tests for the ingestion CLI: `python -m grant_lab.ingestion.cli run --source <slug>`.
 
 The CLI is a deploy-script entry point (per spec 2026-04-19 §9). Its exit
 code is load-bearing — deploy chains on `&&`, so any silent zero on a real
@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from call_manager.ingestion.cli import ingest_main
+from grant_lab.ingestion.cli import ingest_main
 
 
 @pytest.fixture
@@ -34,7 +34,7 @@ def test_cli_invokes_orchestrator_for_named_source(
 ):
     """`run --source vinnova` calls the orchestrator with the Vinnova adapter."""
     fake_run = MagicMock(return_value=None)
-    with patch("call_manager.ingestion.cli._run_for_source", fake_run):
+    with patch("grant_lab.ingestion.cli._run_for_source", fake_run):
         exit_code = ingest_main(
             argv=["run", "--source", "vinnova"],
             session_factory=pg_session_factory,
@@ -78,7 +78,7 @@ def test_cli_returns_nonzero_when_orchestrator_reports_error(
     proceed past a real failure."""
     fake_failed_result = MagicMock(error="adapter timed out", inserted=0, updated=0)
     with patch(
-        "call_manager.ingestion.cli._run_for_source",
+        "grant_lab.ingestion.cli._run_for_source",
         return_value=fake_failed_result,
     ):
         exit_code = ingest_main(

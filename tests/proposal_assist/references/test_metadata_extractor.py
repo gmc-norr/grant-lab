@@ -1,7 +1,7 @@
 """TDD tests for extract_reference_metadata (Slice 1B Task 3).
 
 Written before the implementation (TDD red-first):
-  src/call_manager/proposal_assist/references/metadata.py
+  src/grant_lab/proposal_assist/references/metadata.py
 
 Covers:
 - Fetched crossref with usable source_meta → verified_external; LLM not called.
@@ -18,8 +18,8 @@ import uuid
 
 from reportlab.pdfgen.canvas import Canvas
 
-from call_manager.proposal_assist.citations import CitationLLMResult
-from call_manager.proposal_assist.references.metadata import extract_reference_metadata
+from grant_lab.proposal_assist.citations import CitationLLMResult
+from grant_lab.proposal_assist.references.metadata import extract_reference_metadata
 
 # ---------------------------------------------------------------------------
 # Helpers

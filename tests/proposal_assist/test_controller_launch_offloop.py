@@ -10,7 +10,7 @@ import threading
 
 import pytest
 
-from call_manager.proposal_assist.drafting import controller as controller_module
+from grant_lab.proposal_assist.drafting import controller as controller_module
 from tests.proposal_assist.test_turns_processor import _build_controller_and_submit
 
 

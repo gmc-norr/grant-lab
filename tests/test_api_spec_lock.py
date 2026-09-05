@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import pytest
 
-from call_manager.db.models import SpecLockEvent
-from call_manager.proposal_assist.collab import state as collab_state
+from grant_lab.db.models import SpecLockEvent
+from grant_lab.proposal_assist.collab import state as collab_state
 from tests.test_api_spec import _add_spec
 from tests.test_api_workspaces import _app, _client, _seed
 
@@ -114,7 +114,7 @@ def test_lock_no_head_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
     # A GitCommitError from current_head (unborn HEAD) maps to 404, not a
     # sanitized 500 — mirrors the /spec read/save routes. Patch current_head to
     # raise so the test is independent of git's unborn-branch behaviour.
-    from call_manager.proposal_assist.citations.gitio import GitCommitError
+    from grant_lab.proposal_assist.citations.gitio import GitCommitError
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
@@ -123,7 +123,7 @@ def test_lock_no_head_is_404(monkeypatch, pg_url, pg_session_factory, tmp_path):
     def _boom(*args, **kwargs):
         raise GitCommitError("no HEAD")
 
-    monkeypatch.setattr("call_manager.web.api.workspaces.current_head", _boom)
+    monkeypatch.setattr("grant_lab.web.api.workspaces.current_head", _boom)
     r = _client(app, owner_id).post(f"/api/workspaces/{ws_id}/spec/lock")
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "not_found"

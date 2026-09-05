@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.turns.selection import (
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.turns.selection import (
     MAX_SELECTION_CODEPOINTS,
     SelectionConflictError,
     SelectionInput,

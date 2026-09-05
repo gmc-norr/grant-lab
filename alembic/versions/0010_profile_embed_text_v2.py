@@ -20,7 +20,7 @@ lag before the pre-gate is active again.
 Operators who can't wait for the nightly tick can run the backfill
 CLI for immediate refresh:
 
-    uv run python -m call_manager.embeddings.cli backfill
+    uv run python -m grant_lab.embeddings.cli backfill
 
 No-op column changes; this migration is pure DML. No downgrade path
 for the DML (the old vectors are derivable; nothing's lost).

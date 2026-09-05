@@ -45,19 +45,19 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import select, text
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     User,
     Workspace,
     WorkspaceEvent,
     WorkspaceSetupJob,
     WorkspaceViewer,
 )
-from call_manager.proposal_assist.drafting.locking import (
+from grant_lab.proposal_assist.drafting.locking import (
     BUSY_ERROR_MESSAGE,
     acquire_commit_mutex,
     commit_mutex_key,
 )
-from call_manager.proposal_assist.web import _writes as writes_module
+from grant_lab.proposal_assist.web import _writes as writes_module
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
@@ -249,7 +249,7 @@ def test_update_settings_straddled_by_a_delete_returns_404_and_writes_nothing(
 def test_update_settings_returns_429_when_the_commit_mutex_is_wedged(
     client_authed_owner, current_user, pg_session_factory, monkeypatch
 ):
-    import call_manager.web.api.settings as settings_api
+    import grant_lab.web.api.settings as settings_api
 
     patch_route_mutex_timeout(monkeypatch, settings_api, seconds=1)
 
@@ -313,7 +313,7 @@ def test_add_member_straddled_by_a_delete_returns_404_and_writes_nothing(
 def test_add_member_returns_429_when_the_commit_mutex_is_wedged(
     client_authed_owner, current_user, pg_session_factory, monkeypatch
 ):
-    import call_manager.web.api.settings as settings_api
+    import grant_lab.web.api.settings as settings_api
 
     patch_route_mutex_timeout(monkeypatch, settings_api, seconds=1)
 
@@ -374,7 +374,7 @@ def test_remove_member_straddled_by_a_delete_returns_404_and_writes_nothing(
 def test_remove_member_returns_429_when_the_commit_mutex_is_wedged(
     client_authed_owner, current_user, pg_session_factory, monkeypatch
 ):
-    import call_manager.web.api.settings as settings_api
+    import grant_lab.web.api.settings as settings_api
 
     patch_route_mutex_timeout(monkeypatch, settings_api, seconds=1)
 
@@ -438,7 +438,7 @@ def test_update_rubric_straddled_by_a_delete_returns_404_and_writes_nothing(
 def test_update_rubric_returns_429_when_the_commit_mutex_is_wedged(
     client_authed_owner, current_user, pg_session_factory, monkeypatch
 ):
-    import call_manager.web.api.rubric as rubric_api
+    import grant_lab.web.api.rubric as rubric_api
 
     patch_route_mutex_timeout(monkeypatch, rubric_api, seconds=1)
 
@@ -500,7 +500,7 @@ def test_retry_setup_straddled_by_a_delete_returns_404_and_writes_nothing(
 def test_retry_setup_returns_429_when_the_commit_mutex_is_wedged(
     client_authed_owner, current_user, pg_session_factory, monkeypatch
 ):
-    import call_manager.web.api.rubric as rubric_api
+    import grant_lab.web.api.rubric as rubric_api
 
     patch_route_mutex_timeout(monkeypatch, rubric_api, seconds=1)
 
@@ -557,7 +557,7 @@ def test_activate_straddled_by_a_delete_returns_404_and_writes_nothing(
 def test_activate_returns_429_when_the_commit_mutex_is_wedged(
     client_authed_owner, current_user, pg_session_factory, monkeypatch
 ):
-    import call_manager.web.api.rubric as rubric_api
+    import grant_lab.web.api.rubric as rubric_api
 
     patch_route_mutex_timeout(monkeypatch, rubric_api, seconds=1)
 
@@ -605,7 +605,7 @@ def _assert_hook_can_cancel_while_route_is_blocked(pg_session_factory, ws_id, jo
     is released would let the route's own rollback free the row and repair the
     very thing under test.
     """
-    from call_manager.proposal_assist.jobs_retirement import cancel_setup_jobs_for_workspace
+    from grant_lab.proposal_assist.jobs_retirement import cancel_setup_jobs_for_workspace
 
     holding = threading.Event()
     release = threading.Event()
@@ -735,7 +735,7 @@ def test_retry_setup_gives_up_on_a_held_setup_job_row_instead_of_pinning_the_mut
     # value into rubric's namespace at import time — patching row_locks would
     # silently no-op and this test would pass at the production 2s instead of 1s,
     # proving nothing about the bound.
-    import call_manager.web.api.rubric as rubric_api
+    import grant_lab.web.api.rubric as rubric_api
 
     monkeypatch.setattr(rubric_api, "SETUP_JOB_LOCK_TIMEOUT_SECONDS", 1)
 
@@ -795,7 +795,7 @@ def test_activate_gives_up_on_a_held_setup_job_row_instead_of_pinning_the_mutex(
     the retry_setup gate: the route holds the commit mutex across this row wait,
     so an unbounded wait pins the mutex and a concurrent DELETE 429s behind it
     after burning its whole budget."""
-    import call_manager.web.api.rubric as rubric_api
+    import grant_lab.web.api.rubric as rubric_api
 
     monkeypatch.setattr(rubric_api, "SETUP_JOB_LOCK_TIMEOUT_SECONDS", 1)
 
@@ -876,7 +876,7 @@ def test_activate_maps_a_post_job_lock_row_timeout_to_429_not_500(
     exactly the stretch a narrow wrap leaves untranslated. The sibling gate above
     holds the job row and covers the acquisition itself.
     """
-    import call_manager.web.api.rubric as rubric_api
+    import grant_lab.web.api.rubric as rubric_api
 
     monkeypatch.setattr(rubric_api, "SETUP_JOB_LOCK_TIMEOUT_SECONDS", 1)
 
@@ -1027,7 +1027,7 @@ def test_update_settings_gives_up_on_a_held_workspace_row_instead_of_pinning_the
     # the value into settings' namespace at import time — patching row_locks
     # would silently no-op and this gate would run at the production 2s, proving
     # nothing about the bound.
-    import call_manager.web.api.settings as settings_api
+    import grant_lab.web.api.settings as settings_api
 
     monkeypatch.setattr(settings_api, "WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS", 1)
 
@@ -1063,7 +1063,7 @@ def test_add_member_gives_up_on_a_held_workspace_row_instead_of_pinning_the_mute
     """add_member never UPDATEs the workspace row, but its WorkspaceViewer and
     WorkspaceEvent inserts take FOR KEY SHARE on it as their FK parent — which
     conflicts with the holder's FOR UPDATE. Same hazard, same contract."""
-    import call_manager.web.api.settings as settings_api
+    import grant_lab.web.api.settings as settings_api
 
     monkeypatch.setattr(settings_api, "WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS", 1)
 
@@ -1096,7 +1096,7 @@ def test_remove_member_gives_up_on_a_held_workspace_row_instead_of_pinning_the_m
     """The viewer DELETE itself takes no parent lock, but the WorkspaceEvent
     insert that follows it does — so the transaction blocks at COMMIT, after the
     DELETE has already been issued. The rollback must put the row back."""
-    import call_manager.web.api.settings as settings_api
+    import grant_lab.web.api.settings as settings_api
 
     monkeypatch.setattr(settings_api, "WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS", 1)
 
@@ -1131,7 +1131,7 @@ def test_update_rubric_gives_up_on_a_held_workspace_row_instead_of_pinning_the_m
     mutex — the sibling of activate's post-job-lock case, minus the job row (this
     route never takes one, which is why it reads its own
     WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS)."""
-    import call_manager.web.api.rubric as rubric_api
+    import grant_lab.web.api.rubric as rubric_api
 
     monkeypatch.setattr(rubric_api, "WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS", 1)
 
@@ -1261,7 +1261,7 @@ def test_update_rubric_maps_a_commit_time_users_fk_wait_to_429_not_500(
     """update_rubric's last lock wait is at COMMIT, on a row the route never
     names: the `rubric_edited` event's `actor_id` FK takes `FOR KEY SHARE` on the
     acting user. Bounded AND translated -> the house 429, nothing written."""
-    import call_manager.web.api.rubric as rubric_api
+    import grant_lab.web.api.rubric as rubric_api
 
     # WORKSPACE_ROW_LOCK_TIMEOUT_SECONDS is the constant THIS route's bound reads
     # (rubric.py's update_rubric); activate's reads SETUP_JOB_LOCK_TIMEOUT_SECONDS.
@@ -1300,7 +1300,7 @@ def test_activate_maps_a_commit_time_users_fk_wait_to_429_not_500(
     its commit takes the same `FOR KEY SHARE` on the acting user — after the job
     row and the workspace re-read have both succeeded, which is what puts the
     wait past every acquisition in its bound."""
-    import call_manager.web.api.rubric as rubric_api
+    import grant_lab.web.api.rubric as rubric_api
 
     # activate's bound reads SETUP_JOB_LOCK_TIMEOUT_SECONDS — it covers the whole
     # transaction, job row included — so that is the name to patch here.
@@ -1392,7 +1392,7 @@ def _normalized(body: dict) -> tuple[list[dict], str]:
     Normalizing through _validate_criteria/CriterionIn is what makes "identical"
     mean identical.
     """
-    import call_manager.web.api.rubric as rubric_api
+    import grant_lab.web.api.rubric as rubric_api
 
     criteria = rubric_api._validate_criteria(
         [rubric_api.CriterionIn(**c) for c in body["criteria"]]
@@ -1409,7 +1409,7 @@ def _seed_rubric(session, ws, body: dict) -> None:
 def apply_rubric_under_the_mutex(pg_session_factory, ws_id, user, body, send):
     """Run `send` so it blocks on the commit mutex, then commit a rubric edit
     underneath it via the route's own _apply_rubric. Returns send()'s response."""
-    import call_manager.web.api.rubric as rubric_api
+    import grant_lab.web.api.rubric as rubric_api
 
     criteria, notes = _normalized(body)
     holding = threading.Event()

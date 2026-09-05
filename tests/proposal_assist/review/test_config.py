@@ -3,7 +3,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from call_manager.config import Settings
+from grant_lab.config import Settings
 
 
 def test_review_defaults(_settings_env):

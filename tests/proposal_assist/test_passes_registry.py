@@ -13,7 +13,7 @@ import uuid
 
 import pytest
 
-from call_manager.proposal_assist.passes import PassRegistry
+from grant_lab.proposal_assist.passes import PassRegistry
 
 
 @pytest.fixture

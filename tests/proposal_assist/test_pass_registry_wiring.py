@@ -5,7 +5,7 @@ test_passes_registry.py builds a fresh `PassRegistry()` per test — correct for
 unit isolation, but it means nothing there can observe whether the production
 runners actually use the singleton the retirement hook retires. This file is the
 other half: it drives the REAL runners and the REAL delete route, and it only
-ever looks at `call_manager.proposal_assist.passes.PASS_REGISTRY`.
+ever looks at `grant_lab.proposal_assist.passes.PASS_REGISTRY`.
 
 It closes two measured gaps:
 
@@ -48,15 +48,15 @@ import uuid
 
 import pytest
 
-from call_manager.config import Settings
-from call_manager.db.models import (
+from grant_lab.config import Settings
+from grant_lab.db.models import (
     CoherenceJob,
     EvaluatorJob,
     ReviewRun,
     ReviewRunItem,
     UncitedClaimsJob,
 )
-from call_manager.proposal_assist.passes import PASS_REGISTRY, PassRegistry
+from grant_lab.proposal_assist.passes import PASS_REGISTRY, PassRegistry
 from tests.proposal_assist.conftest import make_workspace, review_stamp
 
 
@@ -162,18 +162,18 @@ def _seed(site, pg_session_factory, tmp_path):
 
 def _module_for(site):
     if site == "coherence":
-        from call_manager.proposal_assist.coherence import pass_runner as m
+        from grant_lab.proposal_assist.coherence import pass_runner as m
 
         return m
     if site == "evaluator":
-        from call_manager.proposal_assist.evaluator import pass_runner as m
+        from grant_lab.proposal_assist.evaluator import pass_runner as m
 
         return m
     if site == "uncited":
-        from call_manager.proposal_assist.uncited_claims import pass_runner as m
+        from grant_lab.proposal_assist.uncited_claims import pass_runner as m
 
         return m
-    from call_manager.proposal_assist.review import pass_runner as m
+    from grant_lab.proposal_assist.review import pass_runner as m
 
     return m
 

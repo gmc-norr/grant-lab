@@ -97,7 +97,7 @@ TS = (
     f"export const BACKEND_PREFIXES: string[] = {json.dumps(BACKEND)};\n"
 )
 
-PY_PATH = ROOT / "src/call_manager/web/spa_routes.py"
+PY_PATH = ROOT / "src/grant_lab/web/spa_routes.py"
 TS_PATH = ROOT / "frontend/src/routes.gen.ts"
 
 

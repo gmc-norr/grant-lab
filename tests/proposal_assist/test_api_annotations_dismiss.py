@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
-from call_manager.db.models import UserClaimAnnotation, WorkspaceEvent
+from grant_lab.db.models import UserClaimAnnotation, WorkspaceEvent
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 

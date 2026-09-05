@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
-from call_manager.proposal_assist.turns.caps import (
+from grant_lab.proposal_assist.turns.caps import (
     TokenCapExceeded,
     check_daily_token_cap,
 )
@@ -15,7 +15,7 @@ def test_check_daily_token_cap_under_limit_returns_allowed(
     _settings_env,
 ):
     """Workspace with zero token usage today is allowed."""
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
     with pg_session_factory() as s:
@@ -37,7 +37,7 @@ def test_check_daily_token_cap_over_input_limit_returns_not_allowed(
     """A workspace whose summed input tokens today >= cap is not allowed."""
     monkeypatch.setenv("DAILY_TOKEN_CAP_INPUT", "100")
     monkeypatch.setenv("DAILY_TOKEN_CAP_OUTPUT", "1000000")
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
     with pg_session_factory() as s:
@@ -59,7 +59,7 @@ def test_check_daily_token_cap_respects_per_workspace_override(
     """The override on workspaces.daily_token_cap_in_override takes
     precedence over the setting default."""
     monkeypatch.setenv("DAILY_TOKEN_CAP_INPUT", "100")
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
     with pg_session_factory() as s:
@@ -81,7 +81,7 @@ def test_check_daily_token_cap_only_counts_today(
 ):
     """Yesterday's turns don't count toward today's cap (Stockholm day boundary)."""
     monkeypatch.setenv("DAILY_TOKEN_CAP_INPUT", "100")
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
     with pg_session_factory() as s:
@@ -121,7 +121,7 @@ def test_check_daily_token_cap_rejects_at_exact_boundary(
     workspace tens of thousands of tokens past budget."""
     monkeypatch.setenv("DAILY_TOKEN_CAP_INPUT", "100")
     monkeypatch.setenv("DAILY_TOKEN_CAP_OUTPUT", "1000000")
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
     with pg_session_factory() as s:
@@ -143,7 +143,7 @@ def test_check_daily_token_cap_override_zero_pauses_workspace(
 ):
     """Override=0 is the documented admin "pause this workspace" hook:
     any turn is blocked, even with zero accumulated usage."""
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
     with pg_session_factory() as s:

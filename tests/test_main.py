@@ -1,12 +1,12 @@
 """Tests for create_app() email-sender startup selection logic."""
 
-from call_manager.auth.email import (
+from grant_lab.auth.email import (
     ConsoleEmailSender,
     NoOpEmailSender,
     ResendEmailSender,
     SMTPEmailSender,
 )
-from call_manager.main import create_app
+from grant_lab.main import create_app
 
 
 def _set_min_env(monkeypatch, database_url):
@@ -64,7 +64,7 @@ def test_no_email_creds_https_selects_noop_email_sender(monkeypatch, pg_url):
 def test_create_app_exposes_citation_service(monkeypatch, pg_url):
     """create_app() must set app.state.citation_service to a CitationLLMService
     instance so the upload/fetch routes can pass it to ingest_bytes."""
-    from call_manager.proposal_assist.citations import CitationLLMService
+    from grant_lab.proposal_assist.citations import CitationLLMService
 
     _set_min_env(monkeypatch, pg_url)
     monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")

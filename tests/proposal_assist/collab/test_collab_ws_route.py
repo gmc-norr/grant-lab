@@ -1,10 +1,10 @@
 from pycrdt import Doc, Text
 from sqlalchemy import select
 
-from call_manager.auth.session_cookie import SessionSigner
-from call_manager.db.models import WorkspaceViewer, YjsUpdate
-from call_manager.proposal_assist.collab import protocol as P
-from call_manager.proposal_assist.collab import state as collab_state
+from grant_lab.auth.session_cookie import SessionSigner
+from grant_lab.db.models import WorkspaceViewer, YjsUpdate
+from grant_lab.proposal_assist.collab import protocol as P
+from grant_lab.proposal_assist.collab import state as collab_state
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
@@ -90,7 +90,7 @@ def test_persist_failure_closes_socket_without_double_close_crash(
     from fastapi.testclient import TestClient
     from starlette.websockets import WebSocketDisconnect
 
-    from call_manager.proposal_assist.collab import store
+    from grant_lab.proposal_assist.collab import store
 
     _app.state.session_factory = pg_session_factory
     with pg_session_factory() as s:
@@ -199,7 +199,7 @@ def test_member_connecting_to_locked_spec_is_read_only(_app, pg_session_factory)
 
     from fastapi.testclient import TestClient
 
-    from call_manager.db.models import WorkspaceViewer, YjsUpdate
+    from grant_lab.db.models import WorkspaceViewer, YjsUpdate
 
     _app.state.session_factory = pg_session_factory
     with pg_session_factory() as s:
@@ -301,8 +301,8 @@ def test_connect_straddle_revalidates_and_closes_stale_epoch(
     from fastapi.testclient import TestClient
     from starlette.websockets import WebSocketDisconnect
 
-    from call_manager.proposal_assist.collab import ws_auth
-    from call_manager.proposal_assist.collab.room import MANAGER
+    from grant_lab.proposal_assist.collab import ws_auth
+    from grant_lab.proposal_assist.collab.room import MANAGER
 
     _app.state.session_factory = pg_session_factory
     with pg_session_factory() as s:
@@ -322,7 +322,7 @@ def test_connect_straddle_revalidates_and_closes_stale_epoch(
         raise ws_auth.WSAuthError("session revoked")       # straddle: now stale
 
     monkeypatch.setattr(
-        "call_manager.proposal_assist.web.collab_ws.resolve_ws_user", _staggered
+        "grant_lab.proposal_assist.web.collab_ws.resolve_ws_user", _staggered
     )
 
     client = TestClient(_app)
@@ -388,7 +388,7 @@ def _epoch_setup(_app, pg_session_factory, email: str):
     (client, wid, oid) with the client's session cookie set."""
     from fastapi.testclient import TestClient
 
-    from call_manager.proposal_assist.collab import store
+    from grant_lab.proposal_assist.collab import store
 
     _app.state.session_factory = pg_session_factory
     with pg_session_factory() as s:
@@ -408,7 +408,7 @@ def _epoch_setup(_app, pg_session_factory, email: str):
 
 
 def _body_text(pg_session_factory, wid) -> str:
-    from call_manager.proposal_assist.collab import store
+    from grant_lab.proposal_assist.collab import store
 
     d = Doc()
     d["body"] = Text()
@@ -421,7 +421,7 @@ def _body_text(pg_session_factory, wid) -> str:
 def _truncate_and_replace(pg_session_factory, wid, oid, text: str) -> None:
     """What a branch switch does to the log (branches.py step 6) followed by
     new content on the new document — without the git choreography."""
-    from call_manager.proposal_assist.collab import store
+    from grant_lab.proposal_assist.collab import store
 
     with pg_session_factory() as s:
         store.truncate_log(s, workspace_id=wid, artifact="draft")
@@ -455,7 +455,7 @@ def test_the_reviews_reproduction_is_refused_before_step1(_app, pg_session_facto
     import pytest
     from starlette.websockets import WebSocketDisconnect
 
-    from call_manager.proposal_assist.collab.room import MANAGER
+    from grant_lab.proposal_assist.collab.room import MANAGER
 
     client, wid, oid = _epoch_setup(_app, pg_session_factory, "route-epoch-stale@umu.se")
     try:

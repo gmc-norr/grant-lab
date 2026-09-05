@@ -8,12 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.tools.proposal import (
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.tools.proposal import (
     PROPOSAL_FILENAME,
     read_proposal_impl,
 )
-from call_manager.proposal_assist.tools.registry import ToolContext
+from grant_lab.proposal_assist.tools.registry import ToolContext
 
 
 def _init_repo(repo_dir: Path, content: str) -> None:

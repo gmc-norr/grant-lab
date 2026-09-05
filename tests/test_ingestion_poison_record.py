@@ -26,9 +26,9 @@ row or skips the record — the two outcomes the module already had.
 import pytest
 from sqlalchemy import select
 
-from call_manager.db.models import Call, Source
-from call_manager.ingestion.upsert import upsert_call
-from call_manager.sources.types import NormalizedCall
+from grant_lab.db.models import Call, Source
+from grant_lab.ingestion.upsert import upsert_call
+from grant_lab.sources.types import NormalizedCall
 
 
 def _sid(s):

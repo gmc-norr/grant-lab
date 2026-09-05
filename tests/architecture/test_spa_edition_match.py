@@ -2,7 +2,7 @@
 
 scripts/package_spa.sh records which edition the BUNDLE is (read from
 dist/module-manifest.json, not from the caller's environment) in
-src/call_manager/web/spa/edition.txt — and until this gate nothing read it. The
+src/grant_lab/web/spa/edition.txt — and until this gate nothing read it. The
 failure that leaves open is silent in every direction that matters:
 APP_EDITION=match served alongside a full SPA gives the full router, with cockpit
 links, the full edition's dark theme, and every proposal-assist request 404ing,
@@ -22,8 +22,8 @@ from __future__ import annotations
 
 import pytest
 
-import call_manager.web.spa_serving as spa_serving
-from call_manager.main import create_app
+import grant_lab.web.spa_serving as spa_serving
+from grant_lab.main import create_app
 
 
 @pytest.fixture

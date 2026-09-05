@@ -1,13 +1,13 @@
 import pytest
 
-from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
-from call_manager.proposal_assist.collab.yjs_bridge import (
+from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
+from grant_lab.proposal_assist.collab.yjs_bridge import (
     SectionMapDivergenceError,
     apply_pm_section_to_fragment,
     pm_json_to_ydoc,
     ydoc_to_pm_json,
 )
-from call_manager.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
 
 
 def _blocks_of(md):
@@ -54,7 +54,7 @@ def test_attribution_catches_compensating_divergence(monkeypatch):
     # count yet misaligns the partitions. Since 2026-09-02 the serializer emits
     # no hidden line-boundaries, so the misalignment is injected: the line scan
     # returns the same NUMBER of sections with the boundary shifted by one block.
-    from call_manager.proposal_assist.collab import yjs_bridge
+    from grant_lab.proposal_assist.collab import yjs_bridge
 
     blocks = [
         {"type": "paragraph", "content": [{"type": "text", "text": "pre"}]},

@@ -38,7 +38,7 @@ def upgrade() -> None:
 
         from sqlalchemy import orm
 
-        from call_manager.proposal_assist.references.backfill import backfill_original_sha256
+        from grant_lab.proposal_assist.references.backfill import backfill_original_sha256
 
         # Resolve the workspaces root using the same env var the app reads.
         references_root = Path(os.environ.get("WORKSPACES_DIR", "var/workspaces"))

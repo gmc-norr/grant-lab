@@ -1,2 +1,2 @@
 def test_package_importable():
-    import call_manager  # noqa: F401
+    import grant_lab  # noqa: F401

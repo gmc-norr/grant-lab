@@ -10,14 +10,14 @@ from pathlib import Path
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from call_manager.proposal_assist.port_impl import build_ports
-from call_manager.proposal_assist.ports import Ports
-from call_manager.proposal_assist.ports.accounting import Accounting
-from call_manager.proposal_assist.ports.effects import Effects
-from call_manager.proposal_assist.ports.queries import Queries
+from grant_lab.proposal_assist.port_impl import build_ports
+from grant_lab.proposal_assist.ports import Ports
+from grant_lab.proposal_assist.ports.accounting import Accounting
+from grant_lab.proposal_assist.ports.effects import Effects
+from grant_lab.proposal_assist.ports.queries import Queries
 
 PORTS_DIR = (
-    Path(__file__).resolve().parents[2] / "src" / "call_manager" / "proposal_assist" / "ports"
+    Path(__file__).resolve().parents[2] / "src" / "grant_lab" / "proposal_assist" / "ports"
 )
 PORT_IMPL_DIR = PORTS_DIR.parent / "port_impl"
 
@@ -31,7 +31,7 @@ def _ports_module_names() -> list[str]:
         parts = list(path.relative_to(PORTS_DIR.parent).with_suffix("").parts)
         if parts[-1] == "__init__":
             parts.pop()
-        names.append("call_manager.proposal_assist." + ".".join(parts))
+        names.append("grant_lab.proposal_assist." + ".".join(parts))
     return names
 
 
@@ -95,9 +95,9 @@ def test_no_implementation_module_holds_a_session_factory_as_a_module_global():
     offenders = []
     for path in sorted(PORT_IMPL_DIR.glob("*.py")):
         module = importlib.import_module(
-            f"call_manager.proposal_assist.port_impl.{path.stem}"
+            f"grant_lab.proposal_assist.port_impl.{path.stem}"
             if path.stem != "__init__"
-            else "call_manager.proposal_assist.port_impl"
+            else "grant_lab.proposal_assist.port_impl"
         )
         for attr, value in vars(module).items():
             if isinstance(value, (sessionmaker, Engine, Session)):

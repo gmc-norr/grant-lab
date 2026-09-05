@@ -9,14 +9,14 @@ from __future__ import annotations
 
 import pytest
 
-from call_manager.config import Settings
-from call_manager.sources.eu_portal import EUPortalAdapter
-from call_manager.sources.registry import (
+from grant_lab.config import Settings
+from grant_lab.sources.eu_portal import EUPortalAdapter
+from grant_lab.sources.registry import (
     SOURCES,
     build_adapter,
     known_slugs,
 )
-from call_manager.sources.vinnova import VinnovaAdapter
+from grant_lab.sources.vinnova import VinnovaAdapter
 
 
 @pytest.fixture

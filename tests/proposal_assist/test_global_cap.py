@@ -5,13 +5,13 @@ spend; small overshoot from concurrent submits is acceptable."""
 
 import pytest
 
-from call_manager.config import Settings
-from call_manager.proposal_assist.spend import record_spend
-from call_manager.proposal_assist.turns.caps import (
+from grant_lab.config import Settings
+from grant_lab.proposal_assist.spend import record_spend
+from grant_lab.proposal_assist.turns.caps import (
     GlobalTokenCapExceeded,
     check_global_daily_token_cap,
 )
-from call_manager.proposal_assist.turns.submit import submit_user_turn
+from grant_lab.proposal_assist.turns.submit import submit_user_turn
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 

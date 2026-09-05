@@ -13,9 +13,9 @@ import uuid
 
 import pytest
 
-from call_manager.proposal_assist import retirement
-from call_manager.proposal_assist.lifecycle import WorkspaceLifecycle
-from call_manager.proposal_assist.retirement import (
+from grant_lab.proposal_assist import retirement
+from grant_lab.proposal_assist.lifecycle import WorkspaceLifecycle
+from grant_lab.proposal_assist.retirement import (
     MissingRetirementHook,
     WorkspaceRetirement,
     signal_workspace_retirement,
@@ -39,9 +39,9 @@ def test_the_barrier_exceeds_every_hooks_own_worst_case():
 
     Reads the LIVE constants (and the adapter's real signature defaults) so raising
     any sub-bound fails here instead of silently eroding the barrier."""
-    from call_manager.proposal_assist.collab import room as room_module
-    from call_manager.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
-    from call_manager.proposal_assist.jobs_retirement import _JOBS_CANCEL_SECONDS
+    from grant_lab.proposal_assist.collab import room as room_module
+    from grant_lab.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
+    from grant_lab.proposal_assist.jobs_retirement import _JOBS_CANCEL_SECONDS
 
     # collab: the two artifact rooms retire CONCURRENTLY (see
     # test_collab_retire.test_both_artifact_rooms_retire_concurrently), so the hook's
@@ -62,7 +62,7 @@ def test_the_barrier_exceeds_every_hooks_own_worst_case():
 
 
 def test_jobs_is_a_required_hook():
-    from call_manager.proposal_assist import retirement
+    from grant_lab.proposal_assist import retirement
 
     assert "jobs" in retirement.REQUIRED_HOOKS
     with pytest.raises(retirement.MissingRetirementHook):
@@ -258,10 +258,10 @@ def test_the_barrier_exceeds_every_hooks_own_worst_case_including_passes():
     of silently eroding the barrier."""
     import inspect
 
-    from call_manager.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
-    from call_manager.proposal_assist.jobs_retirement import _JOBS_CANCEL_SECONDS
-    from call_manager.proposal_assist.passes import _PASS_RETIRE_SECONDS
-    from call_manager.proposal_assist.retirement import _RETIREMENT_BARRIER_SECONDS
+    from grant_lab.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
+    from grant_lab.proposal_assist.jobs_retirement import _JOBS_CANCEL_SECONDS
+    from grant_lab.proposal_assist.passes import _PASS_RETIRE_SECONDS
+    from grant_lab.proposal_assist.retirement import _RETIREMENT_BARRIER_SECONDS
 
     sig = inspect.signature(ClaudeAgentSDKAdapter.__init__)
     disconnect = sig.parameters["disconnect_deadline_seconds"].default

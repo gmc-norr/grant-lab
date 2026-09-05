@@ -5,13 +5,13 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from call_manager.db.models import ArtifactVersion, CollabArtifactState, Workspace, WorkspaceEvent
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
-from call_manager.proposal_assist.collab import checkpoint as cp
-from call_manager.proposal_assist.collab import handover, state, store
-from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
-from call_manager.proposal_assist.collab.permissions import make_checkpoint_on_evict
-from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
+from grant_lab.db.models import ArtifactVersion, CollabArtifactState, Workspace, WorkspaceEvent
+from grant_lab.proposal_assist.artifacts import PROPOSAL_FILENAME
+from grant_lab.proposal_assist.collab import checkpoint as cp
+from grant_lab.proposal_assist.collab import handover, state, store
+from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm
+from grant_lab.proposal_assist.collab.permissions import make_checkpoint_on_evict
+from grant_lab.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
 from tests.proposal_assist.conftest import init_workspace_repo, make_user, make_workspace
 
 

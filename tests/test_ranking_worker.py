@@ -5,7 +5,7 @@ from functools import partial
 import httpx
 from sqlalchemy import select
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     Call,
     CallRanking,
     CallRankingCriterion,
@@ -16,8 +16,8 @@ from call_manager.db.models import (
     Source,
     User,
 )
-from call_manager.ranking.ollama_client import OllamaClient
-from call_manager.ranking.worker import drain_queue as _drain_queue
+from grant_lab.ranking.ollama_client import OllamaClient
+from grant_lab.ranking.worker import drain_queue as _drain_queue
 
 # Mirrors Settings.embedding_pregate_threshold default. drain_queue now requires
 # the threshold (no module-level constant); tests get the same default via
@@ -350,10 +350,10 @@ def test_worker_rerank_clears_stale_criterion_rows(pg_session_factory):
 def test_worker_writes_embed_similarity_on_clean_path(pg_session_factory, monkeypatch):
     """When rank_pair returns a clean result with embed_similarity=0.45,
     the worker persists that value to call_rankings.embed_similarity."""
-    from call_manager.ranking import worker as worker_mod
-    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
-    from call_manager.ranking.prompt import Parsed
-    from call_manager.ranking.rank_pair import RankResult
+    from grant_lab.ranking import worker as worker_mod
+    from grant_lab.ranking.criteria import GateResult, Gates, GateStatus
+    from grant_lab.ranking.prompt import Parsed
+    from grant_lab.ranking.rank_pair import RankResult
 
     with pg_session_factory() as s:
         cid, pid = _seed(s)
@@ -403,9 +403,9 @@ def test_worker_writes_embed_similarity_on_clean_path(pg_session_factory, monkey
 def test_worker_writes_embed_similarity_on_gate_fail_path(pg_session_factory, monkeypatch):
     """Even on gate-FAIL short-circuits (e.g. embedding gate FAILed), the
     cosine should still be persisted — useful for tuning the threshold later."""
-    from call_manager.ranking import worker as worker_mod
-    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
-    from call_manager.ranking.rank_pair import RankResult
+    from grant_lab.ranking import worker as worker_mod
+    from grant_lab.ranking.criteria import GateResult, Gates, GateStatus
+    from grant_lab.ranking.rank_pair import RankResult
 
     with pg_session_factory() as s:
         cid, pid = _seed(s)
@@ -445,9 +445,9 @@ def test_worker_writes_embed_similarity_on_gate_fail_path(pg_session_factory, mo
 def test_worker_summary_renders_embedding_fail_reason():
     """When aggregate_reason == 'embedding', the one-line summary mentions
     'topic_dissimilar' and the cosine value to 3 decimals."""
-    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
-    from call_manager.ranking.rank_pair import RankResult
-    from call_manager.ranking.worker import _rank_summary
+    from grant_lab.ranking.criteria import GateResult, Gates, GateStatus
+    from grant_lab.ranking.rank_pair import RankResult
+    from grant_lab.ranking.worker import _rank_summary
 
     r = RankResult(
         score=0,
@@ -532,9 +532,9 @@ def test_worker_writes_embedding_criterion_row_on_gate_fail(
     would render three "pass" rows for timeline/budget/trl and leave the
     operator wondering why the headline score is 0 — Codex finding from
     Plan D bug review."""
-    from call_manager.ranking import worker as worker_mod
-    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
-    from call_manager.ranking.rank_pair import RankResult
+    from grant_lab.ranking import worker as worker_mod
+    from grant_lab.ranking.criteria import GateResult, Gates, GateStatus
+    from grant_lab.ranking.rank_pair import RankResult
 
     with pg_session_factory() as s:
         cid, pid = _seed(s)
@@ -589,9 +589,9 @@ def test_worker_criteria_terminal_fail_row_matches_aggregate_reason(
     in that same precedence, otherwise — with both budget and timeline
     failing — it would stop at timeline and write a 'timeline' FAIL row that
     contradicts the 'budget' headline. Regression for that divergence."""
-    from call_manager.ranking import worker as worker_mod
-    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
-    from call_manager.ranking.rank_pair import RankResult
+    from grant_lab.ranking import worker as worker_mod
+    from grant_lab.ranking.criteria import GateResult, Gates, GateStatus
+    from grant_lab.ranking.rank_pair import RankResult
 
     with pg_session_factory() as s:
         cid, pid = _seed(s)
@@ -637,10 +637,10 @@ def test_worker_writes_current_cosine_verbatim_not_preserved(
 ):
     """R4: once cosine affects ordering, a None current cosine must OVERWRITE
     a stale prior value (model-mismatch case), not preserve it."""
-    from call_manager.ranking import worker as worker_mod
-    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
-    from call_manager.ranking.prompt import Parsed
-    from call_manager.ranking.rank_pair import RankResult
+    from grant_lab.ranking import worker as worker_mod
+    from grant_lab.ranking.criteria import GateResult, Gates, GateStatus
+    from grant_lab.ranking.prompt import Parsed
+    from grant_lab.ranking.rank_pair import RankResult
 
     with pg_session_factory() as s:
         cid, pid = _seed(s)
@@ -696,10 +696,10 @@ def test_worker_writes_current_cosine_verbatim_not_preserved(
 
 
 def test_worker_persists_topic_fit_expected(pg_session_factory, monkeypatch):
-    from call_manager.ranking import worker as worker_mod
-    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
-    from call_manager.ranking.prompt import Parsed
-    from call_manager.ranking.rank_pair import RankResult
+    from grant_lab.ranking import worker as worker_mod
+    from grant_lab.ranking.criteria import GateResult, Gates, GateStatus
+    from grant_lab.ranking.prompt import Parsed
+    from grant_lab.ranking.rank_pair import RankResult
 
     with pg_session_factory() as s:
         cid, pid = _seed(s)
@@ -743,11 +743,11 @@ def test_worker_persists_topic_fit_expected(pg_session_factory, monkeypatch):
 
 
 def test_worker_writes_ledger_row_on_escalation_success(pg_session_factory, monkeypatch):
-    from call_manager.db.models import RankingRemoteAttempt
-    from call_manager.ranking import worker as worker_mod
-    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
-    from call_manager.ranking.prompt import Parsed
-    from call_manager.ranking.rank_pair import RankResult
+    from grant_lab.db.models import RankingRemoteAttempt
+    from grant_lab.ranking import worker as worker_mod
+    from grant_lab.ranking.criteria import GateResult, Gates, GateStatus
+    from grant_lab.ranking.prompt import Parsed
+    from grant_lab.ranking.rank_pair import RankResult
 
     with pg_session_factory() as s:
         cid, pid = _seed(s)
@@ -826,10 +826,10 @@ def test_worker_tick_budget_stops_claiming_and_leaves_remainder_pending(
     """B11 Defect 6: a soft per-tick deadline must stop processing once exceeded,
     leaving the unprocessed claimed jobs PENDING for the next tick instead of
     letting one escalation-heavy batch monopolize the scheduler slot."""
-    from call_manager.ranking import worker as worker_mod
-    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
-    from call_manager.ranking.prompt import Parsed
-    from call_manager.ranking.rank_pair import RankResult
+    from grant_lab.ranking import worker as worker_mod
+    from grant_lab.ranking.criteria import GateResult, Gates, GateStatus
+    from grant_lab.ranking.prompt import Parsed
+    from grant_lab.ranking.rank_pair import RankResult
 
     # Seed THREE pending jobs.
     with pg_session_factory() as s:
@@ -927,11 +927,11 @@ def test_worker_escalation_ledger_survives_main_commit_failure(pg_session_factor
     re-bill a fresh rank_pair. We assert (a) the ledger row survives the failed
     commit, and (b) rank_pair is invoked only ONCE more on the retry (i.e. the
     paid escalation is counted, not silently re-run uncounted)."""
-    from call_manager.db.models import RankingRemoteAttempt
-    from call_manager.ranking import worker as worker_mod
-    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
-    from call_manager.ranking.prompt import Parsed
-    from call_manager.ranking.rank_pair import RankResult
+    from grant_lab.db.models import RankingRemoteAttempt
+    from grant_lab.ranking import worker as worker_mod
+    from grant_lab.ranking.criteria import GateResult, Gates, GateStatus
+    from grant_lab.ranking.prompt import Parsed
+    from grant_lab.ranking.rank_pair import RankResult
 
     with pg_session_factory() as s:
         cid, pid = _seed(s)
@@ -1034,11 +1034,11 @@ def test_worker_escalation_ledger_survives_main_commit_failure(pg_session_factor
 def test_worker_cap_disables_remote_when_exhausted(pg_session_factory, monkeypatch):
     """When today's ledger count >= cap, the worker passes remote_client=None
     into rank_pair (asserted by capturing the kwarg)."""
-    from call_manager.ranking import worker as worker_mod
-    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
-    from call_manager.ranking.prompt import Parsed
-    from call_manager.ranking.rank_pair import RankResult
-    from call_manager.ranking.remote_attempts import record_attempt
+    from grant_lab.ranking import worker as worker_mod
+    from grant_lab.ranking.criteria import GateResult, Gates, GateStatus
+    from grant_lab.ranking.prompt import Parsed
+    from grant_lab.ranking.rank_pair import RankResult
+    from grant_lab.ranking.remote_attempts import record_attempt
 
     with pg_session_factory() as s:
         cid, pid = _seed(s)
@@ -1097,11 +1097,11 @@ def test_worker_cap_disables_remote_when_exhausted(pg_session_factory, monkeypat
 def test_worker_cap_boundary_allows_attempt_below_cap(pg_session_factory, monkeypatch):
     """At count == cap-1 the gate condition (>= cap) is FALSE, so the worker
     passes the real remote_client through to rank_pair. Pins >= semantics."""
-    from call_manager.ranking import worker as worker_mod
-    from call_manager.ranking.criteria import GateResult, Gates, GateStatus
-    from call_manager.ranking.prompt import Parsed
-    from call_manager.ranking.rank_pair import RankResult
-    from call_manager.ranking.remote_attempts import record_attempt
+    from grant_lab.ranking import worker as worker_mod
+    from grant_lab.ranking.criteria import GateResult, Gates, GateStatus
+    from grant_lab.ranking.prompt import Parsed
+    from grant_lab.ranking.rank_pair import RankResult
+    from grant_lab.ranking.remote_attempts import record_attempt
 
     with pg_session_factory() as s:
         cid, pid = _seed(s)

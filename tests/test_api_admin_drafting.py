@@ -1,6 +1,6 @@
-from call_manager.db.models import ChatTurn, User, Workspace, WorkspaceEvent
-from call_manager.main import create_app
-from call_manager.proposal_assist.spend import record_spend
+from grant_lab.db.models import ChatTurn, User, Workspace, WorkspaceEvent
+from grant_lab.main import create_app
+from grant_lab.proposal_assist.spend import record_spend
 
 
 def _setup(monkeypatch, pg_url, *, drafting_enabled=True):

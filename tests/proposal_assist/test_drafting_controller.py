@@ -3,20 +3,20 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import select
 
-from call_manager.db.models import TurnJob
-from call_manager.proposal_assist.drafting.contract import (
+from grant_lab.db.models import TurnJob
+from grant_lab.proposal_assist.drafting.contract import (
     AssistantTextEvent,
     TurnDoneEvent,
 )
-from call_manager.proposal_assist.drafting.controller import (
+from grant_lab.proposal_assist.drafting.controller import (
     WorkspaceController,
 )
-from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
-from call_manager.proposal_assist.drafting.locking import (
+from grant_lab.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
+from grant_lab.proposal_assist.drafting.locking import (
     acquire_workspace_lock,
     release_workspace_lock,
 )
-from call_manager.proposal_assist.drafting.registry import SubprocessRegistry
+from grant_lab.proposal_assist.drafting.registry import SubprocessRegistry
 from tests.proposal_assist.conftest import make_workspace
 
 
@@ -139,7 +139,7 @@ async def test_controller_launch_returns_cached_handle_on_second_call(
 async def test_controller_send_turn_yields_events(pg_session_factory):
     """Controller.send_turn iterates the adapter's stream and touches
     the registry's idle timer along the way."""
-    from call_manager.proposal_assist.drafting.contract import (
+    from grant_lab.proposal_assist.drafting.contract import (
         AssistantTextEvent,
         TurnDoneEvent,
     )
@@ -197,7 +197,7 @@ async def test_controller_launch_releases_lock_if_adapter_launch_raises(
     with pg_session_factory() as s2:
         assert acquire_workspace_lock(s2, wsid) is True
         # cleanup so we don't leak this test's lock
-        from call_manager.proposal_assist.drafting.locking import (
+        from grant_lab.proposal_assist.drafting.locking import (
             release_workspace_lock,
         )
 
@@ -213,7 +213,7 @@ async def test_controller_launch_closes_session_if_acquire_raises(
     stale pooled connection), the opened lock_session must still be closed
     so the connection doesn't leak. Without the cleanup, the connection
     would sit checked-out until GC."""
-    from call_manager.proposal_assist.drafting import controller as ctrl_mod
+    from grant_lab.proposal_assist.drafting import controller as ctrl_mod
 
     adapter = FakeAgentAdapter()
     registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
@@ -286,7 +286,7 @@ async def test_controller_launch_cleans_up_handle_if_fulfill_path_cancelled(
     # Lock was released — fresh session can re-acquire.
     with pg_session_factory() as s2:
         assert acquire_workspace_lock(s2, wsid) is True
-        from call_manager.proposal_assist.drafting.locking import (
+        from grant_lab.proposal_assist.drafting.locking import (
             release_workspace_lock,
         )
 
@@ -321,7 +321,7 @@ async def test_controller_sweep_idle_releases_advisory_lock(pg_session_factory):
     # Lock must be released.
     with pg_session_factory() as s2:
         assert acquire_workspace_lock(s2, wsid) is True
-        from call_manager.proposal_assist.drafting.locking import (
+        from grant_lab.proposal_assist.drafting.locking import (
             release_workspace_lock,
         )
 
@@ -440,8 +440,8 @@ async def test_send_turn_decrements_in_flight_on_early_exit(pg_session_factory):
 
 @pytest.mark.asyncio
 async def test_launch_refuses_soft_deleted_workspace(pg_session_factory, tmp_path):
-    from call_manager.db.models import Workspace
-    from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
+    from grant_lab.db.models import Workspace
+    from grant_lab.proposal_assist.drafting.contract import WorkspaceRetired
 
     adapter = FakeAgentAdapter()
     registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
@@ -467,8 +467,8 @@ async def test_launch_refuses_deleted_workspace_even_when_handle_is_cached(
 ):
     """The cached/pending path returns early at controller.py:109, so the check
     MUST precede claim_launch_or_wait."""
-    from call_manager.db.models import Workspace
-    from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
+    from grant_lab.db.models import Workspace
+    from grant_lab.proposal_assist.drafting.contract import WorkspaceRetired
 
     adapter = FakeAgentAdapter()
     registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
@@ -501,7 +501,7 @@ async def test_precheck_race_is_documented_not_closed(pg_session_factory, tmp_pa
     """CONCEDED RACE (spec v8): a deletion committing AFTER the precheck can still
     see a cached handle returned. This test pins the documented behavior so a
     future change cannot silently claim more than the design promises."""
-    from call_manager.db.models import Workspace
+    from grant_lab.db.models import Workspace
 
     adapter = FakeAgentAdapter()
     registry = SubprocessRegistry(adapter=adapter, idle_seconds=600)
@@ -538,7 +538,7 @@ async def test_precheck_race_is_documented_not_closed(pg_session_factory, tmp_pa
 async def test_reconcile_pops_deleted_entries_even_when_in_flight(pg_session_factory, tmp_path):
     """A deleted workspace's entry must be torn down (releasing its advisory-lock
     session) even mid-turn — the idle sweep deliberately skips in_flight > 0."""
-    from call_manager.db.models import Workspace
+    from grant_lab.db.models import Workspace
     from tests.proposal_assist.conftest import make_user
 
     adapter = FakeAgentAdapter()
@@ -570,7 +570,7 @@ async def test_reconcile_pops_deleted_entries_even_when_in_flight(pg_session_fac
 
 @pytest.mark.asyncio
 async def test_reconcile_passes_soft_delete_predicate_to_the_adapter(pg_session_factory, tmp_path):
-    from call_manager.db.models import Workspace
+    from grant_lab.db.models import Workspace
     from tests.proposal_assist.conftest import make_user
 
     seen: list = []

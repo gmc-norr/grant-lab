@@ -27,13 +27,13 @@ import hashlib
 
 import pytest
 
-from call_manager.db.models import EvaluatorJob, UncitedClaimsJob, Workspace
-from call_manager.proposal_assist.collab import state, store
-from call_manager.proposal_assist.collab.canonical import current_artifact_text_and_sha
-from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
-from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
-from call_manager.proposal_assist.paths import workspace_repo_dir
-from call_manager.proposal_assist.problems.aggregate import assemble_problems
+from grant_lab.db.models import EvaluatorJob, UncitedClaimsJob, Workspace
+from grant_lab.proposal_assist.collab import state, store
+from grant_lab.proposal_assist.collab.canonical import current_artifact_text_and_sha
+from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
+from grant_lab.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
+from grant_lab.proposal_assist.paths import workspace_repo_dir
+from grant_lab.proposal_assist.problems.aggregate import assemble_problems
 from tests.proposal_assist.collab.test_collab_kernel_accept import _init_repo
 from tests.proposal_assist.conftest import make_user, make_workspace
 
@@ -117,7 +117,7 @@ def test_flag_off_the_panel_still_judges_raw_git(pg_session_factory, tmp_path):
 def _audit_types(monkeypatch, pg_url, tmp_path, pg_session_factory, *, collab):
     from fastapi.testclient import TestClient
 
-    from call_manager.main import create_app
+    from grant_lab.main import create_app
 
     for k, v in {
         "DATABASE_URL": pg_url,

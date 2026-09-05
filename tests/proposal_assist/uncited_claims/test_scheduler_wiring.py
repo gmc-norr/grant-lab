@@ -1,15 +1,15 @@
 import pytest
 
-from call_manager.config import Settings
+from grant_lab.config import Settings
 
 
 @pytest.mark.asyncio
 async def test_build_scheduler_registers_uncited_claims_ticks(monkeypatch, pg_url):
     from unittest.mock import MagicMock
 
-    from call_manager.db.session import make_engine, make_session_factory
-    from call_manager.proposal_assist.drafting.factory import build_workspace_controller
-    from call_manager.scheduler import build_scheduler
+    from grant_lab.db.session import make_engine, make_session_factory
+    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
+    from grant_lab.scheduler import build_scheduler
 
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")

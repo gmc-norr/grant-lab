@@ -1,6 +1,6 @@
 # tests/test_admin_bootstrap_status.py
-from call_manager.admin_bootstrap import bootstrap_admins
-from call_manager.db.models import User
+from grant_lab.admin_bootstrap import bootstrap_admins
+from grant_lab.db.models import User
 
 
 def test_creates_active_admin(pg_session_factory):

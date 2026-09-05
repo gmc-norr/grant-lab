@@ -1,11 +1,11 @@
 import uuid
 
-from call_manager.config import Settings
-from call_manager.proposal_assist.coherence.agent import (
+from grant_lab.config import Settings
+from grant_lab.proposal_assist.coherence.agent import (
     build_keeper_adapter,
     keeper_allowed_tools,
 )
-from call_manager.proposal_assist.drafting.contract import LaunchContext
+from grant_lab.proposal_assist.drafting.contract import LaunchContext
 
 
 def test_allowlist_excludes_spec_propose_when_locked():

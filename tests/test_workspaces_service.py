@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import select
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     ChatTurn,
     CoherenceJob,
     EvaluatorJob,
@@ -23,9 +23,9 @@ from call_manager.db.models import (
     Workspace,
     WorkspaceEvent,
 )
-from call_manager.proposal_assist.attachments.storage import AttachmentStorage
-from call_manager.proposal_assist.references.storage import ReferenceStorage
-from call_manager.workspaces import scrub_workspace_bytes
+from grant_lab.proposal_assist.attachments.storage import AttachmentStorage
+from grant_lab.proposal_assist.references.storage import ReferenceStorage
+from grant_lab.workspaces import scrub_workspace_bytes
 from tests.proposal_assist.conftest import make_workspace
 from tests.workspace_delete_helper import soft_delete_workspace_for_test
 
@@ -102,8 +102,8 @@ def test_soft_delete_cascades_and_keeps_bytes(pg_session_factory, tmp_path):
 
 
 def test_soft_delete_terminalizes_running_turn_and_finalize_is_noop(pg_session_factory):
-    from call_manager.db.models import ChatTurn, TurnJob
-    from call_manager.proposal_assist.turns.processor import _finalize_success
+    from grant_lab.db.models import ChatTurn, TurnJob
+    from grant_lab.proposal_assist.turns.processor import _finalize_success
     from tests.proposal_assist.conftest import make_chat_turn, make_workspace
     from tests.workspace_delete_helper import soft_delete_workspace_for_test
 
@@ -152,7 +152,7 @@ def test_soft_delete_refuses_a_second_deletion(pg_session_factory):
     block on the mutex, so a concurrent deletion that committed while we waited
     would be invisible to it. Sequential here; the concurrent form is the route
     test."""
-    from call_manager.proposal_assist.drafting.locking import WorkspaceDeleted
+    from grant_lab.proposal_assist.drafting.locking import WorkspaceDeleted
     from tests.proposal_assist.conftest import make_workspace
 
     with pg_session_factory() as s:
@@ -175,7 +175,7 @@ def test_soft_delete_propagates_commit_mutex_timeout_without_committing(
     half-apply: nothing committed, the workspace still live."""
     import threading
 
-    from call_manager.proposal_assist.drafting.locking import (
+    from grant_lab.proposal_assist.drafting.locking import (
         CommitMutexTimeout,
         acquire_commit_mutex,
     )
@@ -222,8 +222,8 @@ def test_the_db_half_stamps_terminalizes_and_refuses_a_redelete(pg_session_facto
     Slice C2 §9 deleted that wrapper — it composed the halves while skipping
     retirement entirely — so the comparison is gone and the assertions it made
     about the halves stay here."""
-    from call_manager.proposal_assist.drafting.locking import WorkspaceDeleted
-    from call_manager.workspaces import soft_delete_workspace_db
+    from grant_lab.proposal_assist.drafting.locking import WorkspaceDeleted
+    from grant_lab.workspaces import soft_delete_workspace_db
     from tests.proposal_assist.conftest import make_chat_turn, make_user, make_workspace
 
     # The DB half, run explicitly — no route calls it in isolation.
@@ -255,7 +255,7 @@ def test_the_production_soft_delete_wrapper_stays_deleted():
     """Slice C2 §9. The wrapper composed the DB and FS halves WITHOUT retirement,
     while looking exactly like the entry point you would reach for. If it comes
     back, every caller silently skips pass, job and collab-room teardown."""
-    import call_manager.workspaces as ws_mod
+    import grant_lab.workspaces as ws_mod
 
     assert not hasattr(ws_mod, "soft_delete_workspace"), (
         "soft_delete_workspace is back in production. It skips retirement. Use "

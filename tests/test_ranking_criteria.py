@@ -2,8 +2,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
 
-from call_manager.ranking.criteria import GateStatus
-from call_manager.ranking.criteria import evaluate_gates as _evaluate_gates
+from grant_lab.ranking.criteria import GateStatus
+from grant_lab.ranking.criteria import evaluate_gates as _evaluate_gates
 
 # Default cosine threshold mirrors Settings.embedding_pregate_threshold (0.30).
 # Tests that don't care about the threshold (i.e. don't pass embed_similarity)
@@ -154,14 +154,14 @@ def test_trl_unknown_when_either_side_missing():
 
 
 def test_embedding_gate_passes_above_threshold():
-    from call_manager.ranking.criteria import GateStatus, _embedding
+    from grant_lab.ranking.criteria import GateStatus, _embedding
 
     g = _embedding(_DEFAULT_EMBEDDING_THRESHOLD + 0.01, threshold=_DEFAULT_EMBEDDING_THRESHOLD)
     assert g.status == GateStatus.PASS
 
 
 def test_embedding_gate_fails_below_threshold():
-    from call_manager.ranking.criteria import GateStatus, _embedding
+    from grant_lab.ranking.criteria import GateStatus, _embedding
 
     g = _embedding(_DEFAULT_EMBEDDING_THRESHOLD - 0.01, threshold=_DEFAULT_EMBEDDING_THRESHOLD)
     assert g.status == GateStatus.FAIL
@@ -170,7 +170,7 @@ def test_embedding_gate_fails_below_threshold():
 
 def test_embedding_gate_passes_at_exact_threshold():
     """Spec: >= threshold passes. Exactly-equal is PASS."""
-    from call_manager.ranking.criteria import GateStatus, _embedding
+    from grant_lab.ranking.criteria import GateStatus, _embedding
 
     g = _embedding(_DEFAULT_EMBEDDING_THRESHOLD, threshold=_DEFAULT_EMBEDDING_THRESHOLD)
     assert g.status == GateStatus.PASS
@@ -181,7 +181,7 @@ def test_embedding_gate_unknown_in_review_band():
     returns UNKNOWN so the LLM adjudicates rather than silently zeroing
     a potentially-on-topic pair. The hard FAIL stays reserved for
     obviously-off-topic pairs (sim < hard_fail)."""
-    from call_manager.ranking.criteria import GateStatus, _embedding
+    from grant_lab.ranking.criteria import GateStatus, _embedding
 
     # 0.25 is between hard_fail=0.20 and threshold=0.30 → UNKNOWN
     g = _embedding(0.25, threshold=0.30, hard_fail_threshold=0.20)
@@ -190,7 +190,7 @@ def test_embedding_gate_unknown_in_review_band():
 
 def test_embedding_gate_fails_below_hard_threshold():
     """Sim below the hard-fail threshold still short-circuits the LLM."""
-    from call_manager.ranking.criteria import GateStatus, _embedding
+    from grant_lab.ranking.criteria import GateStatus, _embedding
 
     g = _embedding(0.10, threshold=0.30, hard_fail_threshold=0.20)
     assert g.status == GateStatus.FAIL
@@ -198,7 +198,7 @@ def test_embedding_gate_fails_below_hard_threshold():
 
 
 def test_embedding_gate_passes_above_pass_threshold():
-    from call_manager.ranking.criteria import GateStatus, _embedding
+    from grant_lab.ranking.criteria import GateStatus, _embedding
 
     g = _embedding(0.50, threshold=0.30, hard_fail_threshold=0.20)
     assert g.status == GateStatus.PASS
@@ -208,7 +208,7 @@ def test_embedding_gate_fails_when_hard_and_pass_collapse():
     """Legacy behavior: when hard_fail_threshold == threshold the gate
     is strictly two-state (FAIL below, PASS at/above) — no UNKNOWN band.
     Tests that construct `_embedding` without hard_fail must keep working."""
-    from call_manager.ranking.criteria import GateStatus, _embedding
+    from grant_lab.ranking.criteria import GateStatus, _embedding
 
     g_below = _embedding(0.29, threshold=0.30, hard_fail_threshold=0.30)
     g_at = _embedding(0.30, threshold=0.30, hard_fail_threshold=0.30)
@@ -219,7 +219,7 @@ def test_embedding_gate_fails_when_hard_and_pass_collapse():
 def test_embedding_gate_unknown_when_similarity_is_none():
     """Missing embedding (model down or backfill incomplete) -> UNKNOWN,
     not FAIL. Caller falls through to LLM."""
-    from call_manager.ranking.criteria import GateStatus, _embedding
+    from grant_lab.ranking.criteria import GateStatus, _embedding
 
     g = _embedding(None, threshold=_DEFAULT_EMBEDDING_THRESHOLD)
     assert g.status == GateStatus.UNKNOWN
@@ -230,7 +230,7 @@ def test_evaluate_gates_includes_embedding_field():
     from datetime import UTC, datetime, timedelta
     from types import SimpleNamespace
 
-    from call_manager.ranking.criteria import Gates
+    from grant_lab.ranking.criteria import Gates
 
     profile = SimpleNamespace(structured={}, budget_currency=None)
     call = SimpleNamespace(
@@ -251,7 +251,7 @@ def test_evaluate_gates_default_embed_similarity_none_yields_unknown():
     from datetime import UTC, datetime, timedelta
     from types import SimpleNamespace
 
-    from call_manager.ranking.criteria import GateStatus
+    from grant_lab.ranking.criteria import GateStatus
 
     profile = SimpleNamespace(structured={}, budget_currency=None)
     call = SimpleNamespace(

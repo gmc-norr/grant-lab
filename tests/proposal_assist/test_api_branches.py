@@ -11,8 +11,8 @@ Fixture shapes, measured from tests/proposal_assist/conftest.py:
 
 import pytest
 
-from call_manager.db.models import Branch, Workspace
-from call_manager.proposal_assist.paths import workspace_repo_dir
+from grant_lab.db.models import Branch, Workspace
+from grant_lab.proposal_assist.paths import workspace_repo_dir
 from tests.proposal_assist.conftest import init_workspace_repo, make_user, make_workspace
 
 
@@ -32,7 +32,7 @@ def test_list_returns_branches_and_current(
     """Deliberately EXACT equality, not a subset check. This is the only
     assertion in the file that notices a response-shape change at all, and a
     subset assertion is a gate that cannot fail."""
-    from call_manager.proposal_assist.citations.gitio import branch_tips
+    from grant_lab.proposal_assist.citations.gitio import branch_tips
 
     with pg_session_factory() as s:
         wid = _seed(s, _app, current_user)
@@ -173,7 +173,7 @@ def test_a_MEMBER_can_list_but_cannot_mutate(
     # require_member too, so a stranger-only test passes even if the route were
     # downgraded to require_member — it would prove nothing about "owner only".
     # `require_member` = owner OR a workspace_viewers row (_perms.py:29-45).
-    from call_manager.db.models import WorkspaceViewer
+    from grant_lab.db.models import WorkspaceViewer
 
     with pg_session_factory() as s:
         other_owner = make_user(s, email="branch-owner@umu.se")
@@ -252,7 +252,7 @@ def test_create_from_sha_at_the_api(client_authed_owner, current_user, pg_sessio
     """
     import subprocess
 
-    from call_manager.proposal_assist.citations.gitio import branch_tips, current_head
+    from grant_lab.proposal_assist.citations.gitio import branch_tips, current_head
 
     with pg_session_factory() as s:
         wid = _seed(s, _app, current_user)
@@ -361,8 +361,8 @@ def test_a_save_from_the_previous_branch_is_refused_with_both_names(
     git-first save with its own 409 -- which would make this test pass for
     entirely the wrong reason.
     """
-    from call_manager.proposal_assist.citations.gitio import current_head
-    from call_manager.proposal_assist.editing.sectionizer import split_sections
+    from grant_lab.proposal_assist.citations.gitio import current_head
+    from grant_lab.proposal_assist.editing.sectionizer import split_sections
 
     with pg_session_factory() as s:
         wid = _seed(s, _app, current_user)
@@ -423,8 +423,8 @@ def test_artifact_snapshot_stays_on_the_recorded_branch_during_checkout(
     """
     import subprocess
 
-    from call_manager.proposal_assist import branches as branches_mod
-    from call_manager.proposal_assist.citations.gitio import current_head, read_branch_file
+    from grant_lab.proposal_assist import branches as branches_mod
+    from grant_lab.proposal_assist.citations.gitio import current_head, read_branch_file
 
     with pg_session_factory() as s:
         wid = _seed(s, _app, current_user)
@@ -492,7 +492,7 @@ def test_the_switch_response_carries_real_tips_not_an_empty_map(
     """
     import subprocess
 
-    from call_manager.proposal_assist.citations.gitio import current_head
+    from grant_lab.proposal_assist.citations.gitio import current_head
 
     with pg_session_factory() as s:
         wid = _seed(s, _app, current_user)

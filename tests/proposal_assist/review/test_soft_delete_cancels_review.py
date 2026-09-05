@@ -1,4 +1,4 @@
-from call_manager.db.models import ReviewRun
+from grant_lab.db.models import ReviewRun
 from tests.proposal_assist.conftest import make_workspace
 
 

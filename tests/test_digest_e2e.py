@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import select
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     Call,
     CallDecision,
     CallRanking,
@@ -15,8 +15,8 @@ from call_manager.db.models import (
     Subscription,
     User,
 )
-from call_manager.digest.send import run_digest
-from call_manager.email.client import SendResult
+from grant_lab.digest.send import run_digest
+from grant_lab.email.client import SendResult
 
 
 class _RecordingEmail:

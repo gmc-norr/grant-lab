@@ -9,7 +9,7 @@
  *
  * This is the JS source of truth for golden generation (Task 4) and the
  * future Tiptap/ProseMirror editor.  The Python schema in
- * ``src/call_manager/proposal_assist/collab/schema.py`` must remain in
+ * ``src/grant_lab/proposal_assist/collab/schema.py`` must remain in
  * sync with it.
  */
 

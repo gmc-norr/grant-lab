@@ -3,8 +3,8 @@
 import functools
 import threading
 
-from call_manager.db.models import Workspace
-from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
+from grant_lab.db.models import Workspace
+from grant_lab.proposal_assist.drafting.locking import acquire_commit_mutex
 from tests.proposal_assist.conftest import make_workspace
 
 
@@ -13,7 +13,7 @@ def test_delete_returns_429_when_the_commit_mutex_is_held(
 ):
     """Deletion now takes the commit mutex, so a wedged writer makes it busy —
     the house 429, having committed NOTHING (not a 500, not a partial delete)."""
-    import call_manager.web.api.workspaces as ws_api
+    import grant_lab.web.api.workspaces as ws_api
 
     # Pin a short mutex timeout for this test only: we are exercising the route's
     # error mapping, not the production timeout value, and the 10s default would
@@ -55,7 +55,7 @@ def test_delete_returns_429_when_the_commit_mutex_is_held(
         assert s.get(Workspace, ws_id).soft_deleted_at is None
     # ...and NO retirement ran: the route bails before the retirement bridge, so
     # a contended delete must not tombstone the workspace in-process either.
-    from call_manager.proposal_assist.collab.room import MANAGER
+    from grant_lab.proposal_assist.collab.room import MANAGER
 
     assert not MANAGER._lifecycle.is_retired(ws_id)
 
@@ -97,7 +97,7 @@ def test_delete_returns_204_and_retires(
     retirement bridge actually ran (the workspace is tombstoned in the
     process-global room manager). ORDERING is asserted separately, by
     test_delete_runs_db_then_retire_then_204_in_that_order below."""
-    from call_manager.proposal_assist.collab.room import MANAGER
+    from grant_lab.proposal_assist.collab.room import MANAGER
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
@@ -123,9 +123,9 @@ def test_delete_runs_db_then_retire_then_204_in_that_order(
 
     NOTE: both names are patched ON THE ROUTE MODULE (ws_api.<name>), not on
     their defining modules — the route imported them by value at module load, so
-    patching call_manager.workspaces.soft_delete_workspace_db would not affect it.
+    patching grant_lab.workspaces.soft_delete_workspace_db would not affect it.
     """
-    import call_manager.web.api.workspaces as ws_api
+    import grant_lab.web.api.workspaces as ws_api
 
     calls: list[str] = []
     real_db = ws_api.soft_delete_workspace_db
@@ -165,7 +165,7 @@ def test_no_new_turn_dispatches_after_delete_and_row_is_terminal(
     """Spec test 14: after deletion no NEW turn dispatches and the turn row is
     terminal. We do NOT assert 'no send after the response' — that contradicts the
     conceded in-flight query race the design documents."""
-    from call_manager.db.models import TurnJob
+    from grant_lab.db.models import TurnJob
     from tests.proposal_assist.conftest import make_chat_turn  # conftest.py:247
 
     with pg_session_factory() as s:
@@ -218,7 +218,7 @@ def test_delete_reaches_the_turns_registry_tombstone(
     """
     import asyncio
 
-    from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
+    from grant_lab.proposal_assist.drafting.contract import WorkspaceRetired
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user)
@@ -251,7 +251,7 @@ def test_the_route_signals_retirement_with_the_generation_it_committed(
     landing in between would make this delete's teardown look current. Pinned by
     asserting the value passed equals the value the commit produced, not the
     value the row happens to hold when the signal runs."""
-    import call_manager.web.api.workspaces as ws_api
+    import grant_lab.web.api.workspaces as ws_api
 
     captured: dict = {}
 

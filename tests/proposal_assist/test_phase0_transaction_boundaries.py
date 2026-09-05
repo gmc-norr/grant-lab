@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     Call,
     CallRubric,
     CallSectionExtract,
@@ -21,18 +21,18 @@ from call_manager.db.models import (
     WorkspaceEvent,
     WorkspaceSetupJob,
 )
-from call_manager.proposal_assist.drafting.locking import (
+from grant_lab.proposal_assist.drafting.locking import (
     CommitMutexTimeout,
     acquire_commit_mutex,
 )
-from call_manager.proposal_assist.extractors.refresh import (
+from grant_lab.proposal_assist.extractors.refresh import (
     persist_rubric,
     persist_section_extracts,
 )
-from call_manager.proposal_assist.extractors.sections import SECTION_NAMES
-from call_manager.proposal_assist.hashing import source_text_hash
-from call_manager.proposal_assist.phases import setup as setup_mod
-from call_manager.proposal_assist.phases.setup import (
+from grant_lab.proposal_assist.extractors.sections import SECTION_NAMES
+from grant_lab.proposal_assist.hashing import source_text_hash
+from grant_lab.proposal_assist.phases import setup as setup_mod
+from grant_lab.proposal_assist.phases.setup import (
     CallSourceChanged,
     Phase0Worker,
     WorkspaceGoneDuringSetup,
@@ -344,8 +344,8 @@ def test_m1_founds_the_first_branch_row_and_the_root_pointer(
     """
     from sqlalchemy import select
 
-    from call_manager.db.models import Branch
-    from call_manager.proposal_assist.citations.gitio import list_branches
+    from grant_lab.db.models import Branch
+    from grant_lab.proposal_assist.citations.gitio import list_branches
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
@@ -395,8 +395,8 @@ def test_m1_rolls_the_founded_branch_back_with_the_rest_of_m1(
     """
     from sqlalchemy import select
 
-    from call_manager.db.models import Branch
-    from call_manager.proposal_assist.phases import setup as setup_mod
+    from grant_lab.db.models import Branch
+    from grant_lab.proposal_assist.phases import setup as setup_mod
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
@@ -432,7 +432,7 @@ def test_m1_refuses_a_deleted_workspace_and_creates_nothing(
     pg_session_factory, current_user, tmp_path, phase0_client
 ):
     """The headline gate: no post-delete repo creation."""
-    from call_manager.proposal_assist.drafting.locking import WorkspaceDeleted
+    from grant_lab.proposal_assist.drafting.locking import WorkspaceDeleted
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
@@ -1341,7 +1341,7 @@ def test_m1_FAILS_when_the_founding_produces_no_root_pointer(
     Simulated at the git boundary rather than by stubbing the reconciler, so the
     test exercises the reconciler's real skip path.
     """
-    from call_manager.proposal_assist.citations.gitio import GitCommitError
+    from grant_lab.proposal_assist.citations.gitio import GitCommitError
 
     with pg_session_factory() as s:
         ws = make_workspace(s, owner=current_user, with_call=True)
@@ -1355,7 +1355,7 @@ def test_m1_FAILS_when_the_founding_produces_no_root_pointer(
         raise GitCommitError("cannot list branches")
 
     monkeypatch.setattr(
-        "call_manager.proposal_assist.branch_entity_backfill.list_branches", _unreadable
+        "grant_lab.proposal_assist.branch_entity_backfill.list_branches", _unreadable
     )
 
     with pytest.raises(RuntimeError, match="no root pointer"):

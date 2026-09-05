@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 
-from call_manager.proposal_assist.lifecycle import WorkspaceLifecycle
+from grant_lab.proposal_assist.lifecycle import WorkspaceLifecycle
 
 
 def test_an_unknown_workspace_is_not_retired():

@@ -55,12 +55,12 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/call_manager"]
-# The SPA bundle (src/call_manager/web/spa/) is emitted by the secretless
+packages = ["src/grant_lab"]
+# The SPA bundle (src/grant_lab/web/spa/) is emitted by the secretless
 # container build (frontend/Dockerfile) and is gitignored; hatchling excludes
 # VCS-ignored files by default, so this `artifacts` glob is REQUIRED to package
 # it into the wheel. CI asserts the built wheel contains spa/index.html.
-artifacts = ["src/call_manager/web/spa/**/*"]
+artifacts = ["src/grant_lab/web/spa/**/*"]
 
 [tool.uv]
 # Cooldown: only consider artifacts published before this instant. Bump
@@ -90,11 +90,11 @@ constraint-dependencies = ["mcp>=1.28.1,<2"]
 # spec §3.2, Surface A). uv's global `no-build = true` would also block the
 # editable install of our own first-party project (it has no wheel) and uv
 # offers no allow-list to exempt the project root, while the app + CLIs import
-# `call_manager` via `uv run`, so the project MUST install editable. We instead
+# `grant_lab` via `uv run`, so the project MUST install editable. We instead
 # scope wheels-only to every third-party dependency via `no-build-package`
 # (uv's per-package form of `no-build`). Every dep in uv.lock resolves to a
 # wheel today (verified), so this never runs a third-party build backend, while
-# our own `call_manager` still installs editable for the app + CLIs.
+# our own `grant_lab` still installs editable for the app + CLIs.
 #
 # This list is GENERATED from uv.lock — do not hand-edit. Regenerate after any
 # uv.lock change (CI enforces it stays in sync; see scripts/gen_no_build.py):

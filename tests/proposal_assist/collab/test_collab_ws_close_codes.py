@@ -3,7 +3,7 @@ and a document identity change that requires rebuilding the client Y.Doc."""
 
 import inspect
 
-from call_manager.proposal_assist.web import collab_ws
+from grant_lab.proposal_assist.web import collab_ws
 
 
 def _arm(src: str, header: str) -> str:

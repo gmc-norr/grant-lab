@@ -6,8 +6,8 @@ import subprocess
 
 import pytest
 
-from call_manager.proposal_assist.citations import gitio
-from call_manager.proposal_assist.citations.gitio import (
+from grant_lab.proposal_assist.citations import gitio
+from grant_lab.proposal_assist.citations.gitio import (
     GitCommitError,
     branch_exists,
     branch_tips,
@@ -389,7 +389,7 @@ def test_gitio_git_runs_hermetically(tmp_path):
     operator configures can introduce a hook, a signing helper or an interactive
     prompt into M1's locked region" depends on THIS environment too.
     """
-    from call_manager.proposal_assist.citations.gitio import _git_env
+    from grant_lab.proposal_assist.citations.gitio import _git_env
 
     env = _git_env(tmp_path)
     assert env["GIT_CONFIG_GLOBAL"] == "/dev/null"

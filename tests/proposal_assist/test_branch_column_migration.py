@@ -10,10 +10,10 @@ import subprocess
 import pytest
 from sqlalchemy import select
 
-from call_manager.db.models import Workspace
-from call_manager.proposal_assist.branch_backfill import backfill_current_branch
-from call_manager.proposal_assist.citations.gitio import GitCommitError
-from call_manager.proposal_assist.paths import workspace_repo_dir
+from grant_lab.db.models import Workspace
+from grant_lab.proposal_assist.branch_backfill import backfill_current_branch
+from grant_lab.proposal_assist.citations.gitio import GitCommitError
+from grant_lab.proposal_assist.paths import workspace_repo_dir
 from tests.proposal_assist.conftest import make_workspace
 
 _GIT_ENV = {

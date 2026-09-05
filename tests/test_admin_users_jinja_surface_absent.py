@@ -3,7 +3,7 @@ def test_no_jinja_admin_routes_remain(monkeypatch, pg_url):
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
-    from call_manager.main import create_app
+    from grant_lab.main import create_app
 
     app = create_app()
     paths = {r.path for r in app.routes}

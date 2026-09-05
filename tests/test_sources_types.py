@@ -1,7 +1,7 @@
 import socket
 from datetime import UTC, datetime
 
-from call_manager.sources.types import (
+from grant_lab.sources.types import (
     AdapterError,
     NormalizedCall,
     SourceAdapter,
@@ -181,7 +181,7 @@ def test_is_safe_fetch_url_resolves_dns_once(monkeypatch):
         return orig(host, *args, **kwargs)
     monkeypatch.setattr(socket, "getaddrinfo", counting_getaddrinfo)
     # Call is_safe_fetch_url with a public hostname
-    from call_manager.sources.types import is_safe_fetch_url
+    from grant_lab.sources.types import is_safe_fetch_url
     is_safe_fetch_url("https://example.com/path")
     # There should be at most ONE getaddrinfo call (not two)
     example_calls = [c for c in calls if c == "example.com"]

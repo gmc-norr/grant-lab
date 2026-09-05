@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import select
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     Call,
     CallRanking,
     Profile,
@@ -12,7 +12,7 @@ from call_manager.db.models import (
     Source,
     User,
 )
-from call_manager.ranking.eval import (
+from grant_lab.ranking.eval import (
     GoldenSetReport,
     kendalls_tau,
     run_golden_set_eval,
@@ -27,7 +27,7 @@ def _isolate_report_path(monkeypatch, tmp_path):
     the test body to a known path inside tmp_path (which this fixture
     has already pointed at). The override is harmless because monkeypatch
     re-applies cleanly inside a fixture scope."""
-    from call_manager.ranking import eval as eval_mod
+    from grant_lab.ranking import eval as eval_mod
 
     monkeypatch.setattr(eval_mod, "_REPORT_PATH", tmp_path / "auto_isolated.json")
     yield
@@ -219,7 +219,7 @@ def test_run_golden_set_eval_missing_fixture_returns_zeroed_report(
     nonexistent = tmp_path / "does-not-exist.json"
     assert not nonexistent.exists()
 
-    with caplog.at_level(logging.WARNING, logger="call_manager.ranking.eval"):
+    with caplog.at_level(logging.WARNING, logger="grant_lab.ranking.eval"):
         report = run_golden_set_eval(
             session_factory=pg_session_factory,
             fixture_path=str(nonexistent),
@@ -300,7 +300,7 @@ def test_run_golden_set_eval_persists_report_to_disk(
 ):
     """After computing the report, write it to disk so /admin can read
     the latest result without re-running the eval."""
-    from call_manager.ranking import eval as eval_mod
+    from grant_lab.ranking import eval as eval_mod
 
     # Override the persist path to a tmp location.
     monkeypatch.setattr(
@@ -326,21 +326,21 @@ def test_load_last_report_returns_none_when_never_persisted(
     tmp_path,
 ):
     """If the report file doesn't exist, load_last_report returns None."""
-    from call_manager.ranking import eval as eval_mod
+    from grant_lab.ranking import eval as eval_mod
 
     monkeypatch.setattr(
         eval_mod,
         "_REPORT_PATH",
         tmp_path / "nope.json",
     )
-    from call_manager.ranking.eval import load_last_report
+    from grant_lab.ranking.eval import load_last_report
 
     assert load_last_report() is None
 
 
 def test_load_last_report_reads_persisted_report(monkeypatch, tmp_path):
     """Round-trip: persist then load returns the same report."""
-    from call_manager.ranking import eval as eval_mod
+    from grant_lab.ranking import eval as eval_mod
 
     p = tmp_path / "last.json"
     monkeypatch.setattr(eval_mod, "_REPORT_PATH", p)
@@ -354,7 +354,7 @@ def test_load_last_report_reads_persisted_report(monkeypatch, tmp_path):
             }
         )
     )
-    from call_manager.ranking.eval import load_last_report
+    from grant_lab.ranking.eval import load_last_report
 
     r = load_last_report()
     assert r is not None
@@ -365,11 +365,11 @@ def test_load_last_report_reads_persisted_report(monkeypatch, tmp_path):
 
 def test_load_last_report_returns_none_on_corrupted_file(monkeypatch, tmp_path):
     """Corrupted JSON in the report file must not crash /admin — return None."""
-    from call_manager.ranking import eval as eval_mod
+    from grant_lab.ranking import eval as eval_mod
 
     p = tmp_path / "corrupt.json"
     p.write_text("{not json at all")  # truncated/invalid JSON
     monkeypatch.setattr(eval_mod, "_REPORT_PATH", p)
-    from call_manager.ranking.eval import load_last_report
+    from grant_lab.ranking.eval import load_last_report
 
     assert load_last_report() is None

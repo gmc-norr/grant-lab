@@ -7,10 +7,10 @@ import uuid
 
 import pytest
 
-from call_manager.proposal_assist.drafting.claude_adapter import (
+from grant_lab.proposal_assist.drafting.claude_adapter import (
     ClaudeAgentSDKAdapter,
 )
-from call_manager.proposal_assist.drafting.contract import (
+from grant_lab.proposal_assist.drafting.contract import (
     AssistantTextEvent,
     DraftingAgent,
     LaunchContext,
@@ -26,7 +26,7 @@ from call_manager.proposal_assist.drafting.contract import (
 def test_flatten_content_handles_single_dict():
     """ToolResultBlock content may be a single text-block dict.
     _flatten_content must extract .text, not iterate the dict's keys."""
-    from call_manager.proposal_assist.drafting.claude_adapter import (
+    from grant_lab.proposal_assist.drafting.claude_adapter import (
         _flatten_content,
     )
 
@@ -34,7 +34,7 @@ def test_flatten_content_handles_single_dict():
 
 
 def test_flatten_content_handles_list_of_dicts():
-    from call_manager.proposal_assist.drafting.claude_adapter import (
+    from grant_lab.proposal_assist.drafting.claude_adapter import (
         _flatten_content,
     )
 
@@ -46,7 +46,7 @@ def test_flatten_content_handles_list_of_dicts():
 
 
 def test_flatten_content_handles_string_passthrough():
-    from call_manager.proposal_assist.drafting.claude_adapter import (
+    from grant_lab.proposal_assist.drafting.claude_adapter import (
         _flatten_content,
     )
 
@@ -56,7 +56,7 @@ def test_flatten_content_handles_string_passthrough():
 def test_flatten_content_returns_empty_for_non_text_block():
     """Non-text ToolResultBlock content (image, tool_use) is dropped
     (returns empty string)."""
-    from call_manager.proposal_assist.drafting.claude_adapter import (
+    from grant_lab.proposal_assist.drafting.claude_adapter import (
         _flatten_content,
     )
 
@@ -78,11 +78,11 @@ async def test_send_turn_raises_on_sdk_error_result():
 
     from claude_agent_sdk.types import ResultMessage
 
-    from call_manager.proposal_assist.drafting.claude_adapter import (
+    from grant_lab.proposal_assist.drafting.claude_adapter import (
         ClaudeAgentSDKAdapter,
         SDKTurnError,
     )
-    from call_manager.proposal_assist.drafting.contract import AgentHandle
+    from grant_lab.proposal_assist.drafting.contract import AgentHandle
 
     adapter = ClaudeAgentSDKAdapter(
         model="claude-haiku-4-5",
@@ -127,7 +127,7 @@ def test_launch_uses_resume_session_id_in_options(monkeypatch):
     the prior conversation. Verified by spying on options construction."""
     import asyncio
 
-    from call_manager.proposal_assist.drafting import claude_adapter as ca
+    from grant_lab.proposal_assist.drafting import claude_adapter as ca
 
     captured: dict[str, object] = {}
     real_options = ca.ClaudeAgentOptions
@@ -166,7 +166,7 @@ def test_launch_omits_resume_when_session_id_is_none(monkeypatch):
     """No resume_session_id → no resume= in options (fresh session)."""
     import asyncio
 
-    from call_manager.proposal_assist.drafting import claude_adapter as ca
+    from grant_lab.proposal_assist.drafting import claude_adapter as ca
 
     captured: dict[str, object] = {}
     real_options = ca.ClaudeAgentOptions
@@ -207,7 +207,7 @@ async def test_send_turn_captures_session_id_on_turn_done():
 
     from claude_agent_sdk.types import ResultMessage
 
-    from call_manager.proposal_assist.drafting.contract import AgentHandle
+    from grant_lab.proposal_assist.drafting.contract import AgentHandle
 
     adapter = ClaudeAgentSDKAdapter(
         model="claude-haiku-4-5",
@@ -301,10 +301,10 @@ async def test_send_turn_uses_result_message_authoritative_usage():
 
     from claude_agent_sdk.types import AssistantMessage, ResultMessage, TextBlock
 
-    from call_manager.proposal_assist.drafting.claude_adapter import (
+    from grant_lab.proposal_assist.drafting.claude_adapter import (
         ClaudeAgentSDKAdapter,
     )
-    from call_manager.proposal_assist.drafting.contract import AgentHandle
+    from grant_lab.proposal_assist.drafting.contract import AgentHandle
 
     adapter = ClaudeAgentSDKAdapter(
         model="claude-opus-4-7",
@@ -386,10 +386,10 @@ async def test_send_turn_falls_back_to_assistant_usage_if_result_missing():
 
     from claude_agent_sdk.types import AssistantMessage, TextBlock
 
-    from call_manager.proposal_assist.drafting.claude_adapter import (
+    from grant_lab.proposal_assist.drafting.claude_adapter import (
         ClaudeAgentSDKAdapter,
     )
-    from call_manager.proposal_assist.drafting.contract import AgentHandle
+    from grant_lab.proposal_assist.drafting.contract import AgentHandle
 
     adapter = ClaudeAgentSDKAdapter(
         model="claude-haiku-4-5",
@@ -467,7 +467,7 @@ def test_build_options_appends_citation_instruction():
     """The system-prompt append includes the citation instruction naming the
     propose tools (propose_edit / propose_citation) and the read-only audit
     tools, and tells the agent to copy a verbatim evidence_quote."""
-    from call_manager.proposal_assist.drafting import claude_adapter as ca
+    from grant_lab.proposal_assist.drafting import claude_adapter as ca
 
     adapter = ClaudeAgentSDKAdapter(model="claude-haiku-4-5", workspaces_dir="/tmp/x")
     kwargs = adapter._build_options_kwargs(LaunchContext(workspace_id=uuid.uuid4()))
@@ -492,7 +492,7 @@ def test_build_options_appends_citation_instruction():
 def test_build_options_appends_selection_modify_response_contract():
     """One-click selection edits hand off to the inline review instead of
     repeating the diff or expanding into unrelated editorial advice."""
-    from call_manager.proposal_assist.drafting import claude_adapter as ca
+    from grant_lab.proposal_assist.drafting import claude_adapter as ca
 
     adapter = ClaudeAgentSDKAdapter(model="claude-haiku-4-5", workspaces_dir="/tmp/x")
     kwargs = adapter._build_options_kwargs(LaunchContext(workspace_id=uuid.uuid4()))
@@ -513,8 +513,8 @@ async def test_set_turn_provenance_stamps_retained_ctx_after_launch():
     import uuid as _uuid
     from pathlib import Path
 
-    from call_manager.proposal_assist.drafting.contract import LaunchContext
-    from call_manager.proposal_assist.tools.registry import ToolContext
+    from grant_lab.proposal_assist.drafting.contract import LaunchContext
+    from grant_lab.proposal_assist.tools.registry import ToolContext
 
     wsid = _uuid.uuid4()
     sink: dict = {}
@@ -582,8 +582,8 @@ async def test_terminate_evicts_tool_context_sink():
     import uuid as _uuid
     from pathlib import Path
 
-    from call_manager.proposal_assist.drafting.contract import AgentHandle, LaunchContext
-    from call_manager.proposal_assist.tools.registry import ToolContext
+    from grant_lab.proposal_assist.drafting.contract import AgentHandle, LaunchContext
+    from grant_lab.proposal_assist.tools.registry import ToolContext
 
     wsid = _uuid.uuid4()
     sink: dict = {}

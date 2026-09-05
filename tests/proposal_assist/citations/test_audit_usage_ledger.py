@@ -20,24 +20,24 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
-from call_manager.config import Settings
-from call_manager.db.models import CitationLlmUsage, Reference, ReferenceChunk
-from call_manager.proposal_assist.citations.audit import (
+from grant_lab.config import Settings
+from grant_lab.db.models import CitationLlmUsage, Reference, ReferenceChunk
+from grant_lab.proposal_assist.citations.audit import (
     chunk_content_sha,
     claim_context_sha,
     validate_citations_semantic,
 )
-from call_manager.proposal_assist.citations.ledger import (
+from grant_lab.proposal_assist.citations.ledger import (
     append_evidence,
     build_evidence_row,
     empty_ledger,
 )
-from call_manager.proposal_assist.citations.llm import LLMResult, LLMUsage
-from call_manager.proposal_assist.citations.markers import build_marker
-from call_manager.proposal_assist.citations.service import CitationLLMService
-from call_manager.proposal_assist.tools.audit import list_unsupported_claims_impl
-from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
-from call_manager.proposal_assist.tools.registry import ToolContext
+from grant_lab.proposal_assist.citations.llm import LLMResult, LLMUsage
+from grant_lab.proposal_assist.citations.markers import build_marker
+from grant_lab.proposal_assist.citations.service import CitationLLMService
+from grant_lab.proposal_assist.tools.audit import list_unsupported_claims_impl
+from grant_lab.proposal_assist.tools.proposal import PROPOSAL_FILENAME
+from grant_lab.proposal_assist.tools.registry import ToolContext
 from tests.proposal_assist.conftest import make_workspace
 
 EMBED_DIM = 1024
@@ -239,7 +239,7 @@ async def test_list_unsupported_op_recorded_in_ledger(pg_session_factory, _setti
 def test_audit_rows_visible_to_cap_checker(pg_session_factory, _settings_env):
     """The ledger rows written by audit ops are exactly what check_citation_caps
     sums -- proving caps apply to audit calls."""
-    from call_manager.proposal_assist.citations.usage import check_citation_caps
+    from grant_lab.proposal_assist.citations.usage import check_citation_caps
 
     wsid = _make_workspace(pg_session_factory)
     rid = _seed_reference(pg_session_factory, wsid)

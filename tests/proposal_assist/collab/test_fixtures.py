@@ -1,4 +1,4 @@
-from call_manager.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
 
 from .fixtures import CORPUS
 

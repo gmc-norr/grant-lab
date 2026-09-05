@@ -38,7 +38,7 @@ def test_the_whole_closure_lives_in_the_new_module():
     """The set is the transitive closure of the five symbols the spec names,
     computed from the AST — not a judgement call. Moving a subset leaves the new
     module calling a name it cannot see."""
-    from call_manager.proposal_assist.citations import core
+    from grant_lab.proposal_assist.citations import core
 
     missing = [n for n in MOVED + CONSTANTS if not hasattr(core, n)]
     assert not missing, f"not moved: {missing}"
@@ -48,12 +48,12 @@ def test_the_moved_functions_are_defined_there_not_imported_back():
     """GC-4: no re-export shim. If a moved function's __module__ still points at
     tools.citations, the move did not happen — an import was added instead, and
     tools/ keeps the violation the move exists to remove."""
-    from call_manager.proposal_assist.citations import core
+    from grant_lab.proposal_assist.citations import core
 
     wrong = [
         n
         for n in MOVED
-        if getattr(core, n).__module__ != "call_manager.proposal_assist.citations.core"
+        if getattr(core, n).__module__ != "grant_lab.proposal_assist.citations.core"
     ]
     assert not wrong, f"still owned by another module: {wrong}"
 
@@ -78,7 +78,7 @@ def test_the_tool_module_no_longer_defines_them():
     tool module at all, except the single one the staying tools genuinely call. That
     also subsumes the copy case a duplicated `def` would create.
     """
-    from call_manager.proposal_assist.tools import citations as tool_mod
+    from grant_lab.proposal_assist.tools import citations as tool_mod
 
     leaked = sorted(
         n for n in MOVED if hasattr(tool_mod, n) and n not in DELIBERATELY_IMPORTED_BACK
@@ -96,7 +96,7 @@ def test_the_signatures_are_unchanged():
     """GC-1: this is a MOVE. A changed signature is a conversion wearing a move's
     clothes, and it destroys the one review property this slice has — that the
     diff can be checked by comparing bytes."""
-    from call_manager.proposal_assist.citations import core
+    from grant_lab.proposal_assist.citations import core
 
     assert str(inspect.signature(core._write_citekey_cache)) == (
         "(session: 'Session', ref: 'Reference', citekey: 'str', *, owns_txn: 'bool') -> 'None'"
@@ -117,7 +117,7 @@ def test_the_relocated_module_may_hold_a_session_and_that_is_the_point():
     """GC-3. The new module is outside tools/, so the import gate does not apply.
     Do not try to make it gate-clean: being able to name a Session here is the
     reason the code moved."""
-    from call_manager.proposal_assist.citations import core
+    from grant_lab.proposal_assist.citations import core
 
     src = inspect.getsource(core)
     assert "from sqlalchemy" in src or "import sqlalchemy" in src
@@ -152,7 +152,7 @@ def test_the_monkeypatch_targets_are_the_module_that_actually_reads_them():
     """
     import importlib
 
-    core = importlib.import_module("call_manager.proposal_assist.citations.core")
+    core = importlib.import_module("grant_lab.proposal_assist.citations.core")
 
     for name, reader_name in PATCH_TARGETS:
         assert hasattr(core, name), f"citations.core has no {name}"
@@ -184,48 +184,48 @@ def test_no_tool_module_gained_a_port_call():
     assert fenced == {
         (
             "tool_commit",
-            "src/call_manager/proposal_assist/tools/scorecard.py",
+            "src/grant_lab/proposal_assist/tools/scorecard.py",
             "submit_scorecard_impl",
         ),
         (
             "tool_commit",
-            "src/call_manager/proposal_assist/tools/review_submit.py",
+            "src/grant_lab/proposal_assist/tools/review_submit.py",
             "submit_review_impl",
         ),
         (
             "tool_commit",
-            "src/call_manager/proposal_assist/tools/uncited_claims.py",
+            "src/grant_lab/proposal_assist/tools/uncited_claims.py",
             "submit_uncited_claims_impl",
         ),
         (
             "tool_commit",
-            "src/call_manager/proposal_assist/tools/references.py",
+            "src/grant_lab/proposal_assist/tools/references.py",
             "fetch_reference_impl",
         ),
         (
             "tool_commit",
-            "src/call_manager/proposal_assist/tools/references.py",
+            "src/grant_lab/proposal_assist/tools/references.py",
             "fetch_reference_impl._refund_fetch_slot",
         ),
         (
             "tool_commit",
-            "src/call_manager/proposal_assist/tools/proposal.py",
+            "src/grant_lab/proposal_assist/tools/proposal.py",
             "_propose_artifact_edit_impl",
         ),
         (
             "tool_commit",
-            "src/call_manager/proposal_assist/tools/citations.py",
+            "src/grant_lab/proposal_assist/tools/citations.py",
             "propose_citation_impl",
         ),
         # --- 2026-08-24 endgame, Task 2: the first two git_commit conversions ---
         (
             "git_commit",
-            "src/call_manager/proposal_assist/analysis/insert.py",
+            "src/grant_lab/proposal_assist/analysis/insert.py",
             "insert_from_annotation",
         ),
         (
             "git_commit",
-            "src/call_manager/proposal_assist/citations/human_cite.py",
+            "src/grant_lab/proposal_assist/citations/human_cite.py",
             "insert_citation_for_user",
         ),
         # --- 2026-08-24 endgame, Task 5: the collab cluster (Group D) ---
@@ -236,7 +236,7 @@ def test_no_tool_module_gained_a_port_call():
         # delegate to it and hold no sink themselves, so they add no git_commit row.
         (
             "git_commit",
-            "src/call_manager/proposal_assist/collab/checkpoint.py",
+            "src/grant_lab/proposal_assist/collab/checkpoint.py",
             "checkpoint_artifact",
         ),
         # --- 2026-08-24 endgame, Task 6: save_section (Group D orphan) ---
@@ -247,7 +247,7 @@ def test_no_tool_module_gained_a_port_call():
         # scanner cannot prove order (stmt_index=None) and adds NO git_commit row.
         (
             "git_commit",
-            "src/call_manager/proposal_assist/editing/save.py",
+            "src/grant_lab/proposal_assist/editing/save.py",
             "save_section",
         ),
     }, (
@@ -275,12 +275,12 @@ def test_no_tool_module_gained_a_port_call():
     assert len(f3d3_sites & fenced) == 2
     assert (
         "tool_commit",
-        "src/call_manager/proposal_assist/tools/proposal.py",
+        "src/grant_lab/proposal_assist/tools/proposal.py",
         "_propose_artifact_edit_impl",
     ) in fenced
     assert (
         "tool_commit",
-        "src/call_manager/proposal_assist/tools/citations.py",
+        "src/grant_lab/proposal_assist/tools/citations.py",
         "propose_citation_impl",
     ) in fenced
 
@@ -306,6 +306,6 @@ def test_the_moved_code_still_names_repo_dir_and_that_is_expected():
     propose_citation_impl, which stay. F3f owns the locator."""
     import inspect
 
-    from call_manager.proposal_assist.citations import core
+    from grant_lab.proposal_assist.citations import core
 
     assert "repo_dir" in inspect.getsource(core)

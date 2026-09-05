@@ -28,8 +28,8 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select
 
-from call_manager.db.models import Profile, ProfileKind, ProfileViewer, User
-from call_manager.web.profile_access import can_read_profile, readable_profile_ids
+from grant_lab.db.models import Profile, ProfileKind, ProfileViewer, User
+from grant_lab.web.profile_access import can_read_profile, readable_profile_ids
 
 
 @pytest.fixture()

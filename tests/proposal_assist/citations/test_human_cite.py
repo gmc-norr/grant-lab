@@ -7,18 +7,18 @@ import uuid
 
 import pytest
 
-from call_manager.db.models import Reference, ReferenceChunk, User, Workspace
-from call_manager.proposal_assist.citations.gitio import _git_env, current_head
-from call_manager.proposal_assist.citations.human_cite import (
+from grant_lab.db.models import Reference, ReferenceChunk, User, Workspace
+from grant_lab.proposal_assist.citations.gitio import _git_env, current_head
+from grant_lab.proposal_assist.citations.human_cite import (
     CiteInvalid,
     CiteRefNotFound,
     CiteStale,
     insert_citation_for_user,
 )
-from call_manager.proposal_assist.citations.ledger import load_ledger
-from call_manager.proposal_assist.editing.save import CITATIONS_FILENAME, PROPOSAL_FILENAME
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.paths import workspace_repo_dir
+from grant_lab.proposal_assist.citations.ledger import load_ledger
+from grant_lab.proposal_assist.editing.save import CITATIONS_FILENAME, PROPOSAL_FILENAME
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.paths import workspace_repo_dir
 
 
 def _init_repo(root, ws_id, doc):
@@ -446,7 +446,7 @@ def test_anchor_only_inside_marker_in_section_raises_stale(pg_session_factory, t
 def test_provenance_rows_added_but_not_committed(pg_session_factory, tmp_path):
     """The core adds ArtifactVersion + WorkspaceEvent rows to the session but does
     NOT commit (caller owns the transaction). Verify both, before any commit."""
-    from call_manager.db.models import ArtifactVersion, WorkspaceEvent
+    from grant_lab.db.models import ArtifactVersion, WorkspaceEvent
 
     owner_id, ws_id, ref_id = _seed_ws_ref(pg_session_factory, chunk_text="azure today")
     repo = _init_repo(tmp_path, ws_id, DOC)
@@ -541,7 +541,7 @@ def test_claim_context_falls_back_to_anchor(pg_session_factory, tmp_path, monkey
     repo = _init_repo(tmp_path, ws_id, DOC)
     bc, bs = _base(repo, 1)
     monkeypatch.setattr(
-        "call_manager.proposal_assist.citations.human_cite.claims.claim_sentence_around",
+        "grant_lab.proposal_assist.citations.human_cite.claims.claim_sentence_around",
         lambda *a, **k: "",
     )
     with pg_session_factory() as s:

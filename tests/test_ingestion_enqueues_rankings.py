@@ -2,12 +2,12 @@ from unittest.mock import MagicMock
 
 from sqlalchemy import select
 
-from call_manager.auth.email import InMemoryEmailSender
-from call_manager.db.models import Call, Profile, RankingJob
-from call_manager.embeddings.client import EmbedResult
-from call_manager.ingestion.alerts import ConsecutiveFailureTracker
-from call_manager.ingestion.orchestrator import run_ingestion
-from call_manager.sources.types import AdapterError, NormalizedCall
+from grant_lab.auth.email import InMemoryEmailSender
+from grant_lab.db.models import Call, Profile, RankingJob
+from grant_lab.embeddings.client import EmbedResult
+from grant_lab.ingestion.alerts import ConsecutiveFailureTracker
+from grant_lab.ingestion.orchestrator import run_ingestion
+from grant_lab.sources.types import AdapterError, NormalizedCall
 
 
 def _embed_client():

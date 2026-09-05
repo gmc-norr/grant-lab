@@ -15,15 +15,15 @@ the spend happens with no user present to notice the output is about the wrong t
 
 from __future__ import annotations
 
-from call_manager.proposal_assist.artifacts import Artifact, filename_for
-from call_manager.proposal_assist.coherence.context import assemble_coherence_context
-from call_manager.proposal_assist.collab import state, store
-from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
-from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
-from call_manager.proposal_assist.evaluator.context import assemble_evaluator_context
-from call_manager.proposal_assist.paths import workspace_repo_dir
-from call_manager.proposal_assist.review.context import assemble_review_context
-from call_manager.proposal_assist.uncited_claims.context import assemble_uncited_claims_context
+from grant_lab.proposal_assist.artifacts import Artifact, filename_for
+from grant_lab.proposal_assist.coherence.context import assemble_coherence_context
+from grant_lab.proposal_assist.collab import state, store
+from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
+from grant_lab.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
+from grant_lab.proposal_assist.evaluator.context import assemble_evaluator_context
+from grant_lab.proposal_assist.paths import workspace_repo_dir
+from grant_lab.proposal_assist.review.context import assemble_review_context
+from grant_lab.proposal_assist.uncited_claims.context import assemble_uncited_claims_context
 from tests.proposal_assist.collab.test_collab_kernel_accept import _init_repo
 from tests.proposal_assist.conftest import make_user, make_workspace
 

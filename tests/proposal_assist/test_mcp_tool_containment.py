@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.proposal_assist.tools.registry import (
+from grant_lab.proposal_assist.tools.registry import (
     ToolContext,
     _deny_if_out_of_turn,
     _safe_tool,
@@ -26,9 +26,9 @@ def _qualified(tool_name: str) -> str:
 def _build_options_for_role(allowed_tools: list[str]) -> dict:
     """Build ClaudeAgentOptions kwargs for a background role with a
     minimal tools_factory (no real DB needed — just building the options dict)."""
-    from call_manager.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
-    from call_manager.proposal_assist.drafting.contract import LaunchContext
-    from call_manager.proposal_assist.tools.registry import (
+    from grant_lab.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
+    from grant_lab.proposal_assist.drafting.contract import LaunchContext
+    from grant_lab.proposal_assist.tools.registry import (
         ToolContext,
         build_proposal_assist_mcp_server,
     )
@@ -93,7 +93,7 @@ def test_uncited_claims_disallowed_tools_excludes_dangerous_tools():
 
 def test_disallowed_plus_allowed_covers_all_mcp_tools():
     """disallowed_tools ∪ allowed_tools == all MCP tools (no gaps, no overlaps)."""
-    from call_manager.proposal_assist.tools.registry import collect_mcp_tool_names
+    from grant_lab.proposal_assist.tools.registry import collect_mcp_tool_names
 
     allowed_list = ["submit_scorecard"]
     kwargs = _build_options_for_role(allowed_list)
@@ -152,9 +152,9 @@ def test_can_use_tool_denies_non_allowlisted():
 def test_interactive_adapter_has_no_disallowed_tools():
     """The interactive adapter (allowed_tools=None) must NOT set disallowed_tools
     — it keeps the full MCP surface available."""
-    from call_manager.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
-    from call_manager.proposal_assist.drafting.contract import LaunchContext
-    from call_manager.proposal_assist.tools.registry import (
+    from grant_lab.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
+    from grant_lab.proposal_assist.drafting.contract import LaunchContext
+    from grant_lab.proposal_assist.tools.registry import (
         ToolContext,
         build_proposal_assist_mcp_server,
     )
@@ -180,9 +180,9 @@ def test_interactive_adapter_has_no_disallowed_tools():
 def test_background_agents_use_role_scoped_allowlist():
     """Verify evaluator/review/uncited-claims builders pass role-scoped allowed_tools
     that trigger the hard-deny path in _build_options_kwargs."""
-    from call_manager.proposal_assist.evaluator.agent import evaluator_allowed_tools
-    from call_manager.proposal_assist.review.agent import review_allowed_tools
-    from call_manager.proposal_assist.uncited_claims.agent import uncited_claims_allowed_tools
+    from grant_lab.proposal_assist.evaluator.agent import evaluator_allowed_tools
+    from grant_lab.proposal_assist.review.agent import review_allowed_tools
+    from grant_lab.proposal_assist.uncited_claims.agent import uncited_claims_allowed_tools
 
     assert evaluator_allowed_tools() == ["submit_scorecard"]
     assert review_allowed_tools() == ["submit_review"]

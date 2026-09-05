@@ -34,8 +34,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
-from call_manager.db.models import Call, CallRanking, Source, Subscription
-from call_manager.digest.assemble import DigestPayload, assemble_for_user
+from grant_lab.db.models import Call, CallRanking, Source, Subscription
+from grant_lab.digest.assemble import DigestPayload, assemble_for_user
 from tests.test_profile_access import (
     RankedWorld,
     World,

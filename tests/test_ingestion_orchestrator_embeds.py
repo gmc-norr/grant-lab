@@ -21,13 +21,13 @@ from unittest.mock import MagicMock
 
 from sqlalchemy import select
 
-from call_manager.auth.email import InMemoryEmailSender
-from call_manager.db.models import Call, RankingJob
-from call_manager.embeddings.client import EmbedResult
-from call_manager.ingestion.alerts import ConsecutiveFailureTracker
-from call_manager.ingestion.orchestrator import run_ingestion
-from call_manager.ranking.ollama_client import LLMError
-from call_manager.sources.types import NormalizedCall
+from grant_lab.auth.email import InMemoryEmailSender
+from grant_lab.db.models import Call, RankingJob
+from grant_lab.embeddings.client import EmbedResult
+from grant_lab.ingestion.alerts import ConsecutiveFailureTracker
+from grant_lab.ingestion.orchestrator import run_ingestion
+from grant_lab.ranking.ollama_client import LLMError
+from grant_lab.sources.types import NormalizedCall
 
 
 def _embed_result(vec: list[float]) -> EmbedResult:
@@ -232,7 +232,7 @@ def test_orchestrator_step1_failure_skips_embed_and_enqueue(
     """If step 1 (upsert + timestamp advance) fails, neither step 2 nor
     step 3 runs. We assert via a non-zero embed call count check —
     the embed client should never be invoked."""
-    from call_manager.sources.types import AdapterError
+    from grant_lab.sources.types import AdapterError
 
     profile_factory(name="Group V")
 
@@ -292,12 +292,12 @@ def test_orchestrator_step3_failure_invokes_alerter(
 
     # Force step 3's bulk_enqueue_for_calls to raise a DB-shaped error. We
     # patch the binding *inside* the orchestrator module (where it's looked up
-    # at call time) — patching call_manager.ranking.queue.bulk_enqueue_for_calls
+    # at call time) — patching grant_lab.ranking.queue.bulk_enqueue_for_calls
     # would not affect the already-imported reference in orchestrator.
     def _boom(*_a, **_kw):
         raise RuntimeError("simulated step-3 DB failure")
 
-    import call_manager.ingestion.orchestrator as orch_mod
+    import grant_lab.ingestion.orchestrator as orch_mod
 
     monkeypatch.setattr(orch_mod, "bulk_enqueue_for_calls", _boom)
 

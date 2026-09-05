@@ -2,7 +2,7 @@
 
 import uuid
 
-from call_manager.proposal_assist.drafting.live_clients import LiveClientRegistry
+from grant_lab.proposal_assist.drafting.live_clients import LiveClientRegistry
 
 
 def test_register_returns_distinct_generations_for_one_workspace():

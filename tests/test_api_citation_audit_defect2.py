@@ -16,18 +16,18 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from call_manager.db.models import Reference, ReferenceChunk, User, Workspace
-from call_manager.main import create_app
-from call_manager.proposal_assist.citations import CitationLLMResult
-from call_manager.proposal_assist.citations.audit import chunk_content_sha, claim_context_sha
-from call_manager.proposal_assist.citations.ledger import (
+from grant_lab.db.models import Reference, ReferenceChunk, User, Workspace
+from grant_lab.main import create_app
+from grant_lab.proposal_assist.citations import CitationLLMResult
+from grant_lab.proposal_assist.citations.audit import chunk_content_sha, claim_context_sha
+from grant_lab.proposal_assist.citations.ledger import (
     append_evidence,
     build_evidence_row,
     dump_ledger,
     empty_ledger,
 )
-from call_manager.proposal_assist.citations.markers import build_marker
-from call_manager.proposal_assist.paths import workspace_repo_dir
+from grant_lab.proposal_assist.citations.markers import build_marker
+from grant_lab.proposal_assist.paths import workspace_repo_dir
 
 EMBED_DIM = 1024
 CHUNK_TEXT = "Evidence text about therapy reducing recurrence."

@@ -1,4 +1,4 @@
-from call_manager.db.models import CoherenceJob, ProposedChange
+from grant_lab.db.models import CoherenceJob, ProposedChange
 from tests.proposal_assist.conftest import make_workspace
 
 

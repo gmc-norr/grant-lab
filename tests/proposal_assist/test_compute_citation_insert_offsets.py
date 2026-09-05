@@ -1,7 +1,7 @@
 import pytest
 
-from call_manager.proposal_assist.citations.core import compute_citation_insert
-from call_manager.proposal_assist.citations.ledger import empty_ledger
+from grant_lab.proposal_assist.citations.core import compute_citation_insert
+from grant_lab.proposal_assist.citations.ledger import empty_ledger
 
 # Reuse the REAL reference fixture — Reference has required NOT-NULL columns
 # (kind/source_type/filename/storage_path/mime_type/metadata_status); a hand-rolled

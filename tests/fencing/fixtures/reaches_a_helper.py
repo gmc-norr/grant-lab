@@ -10,7 +10,7 @@ PARSED by the import gate, never imported and never collected.
 
 from __future__ import annotations
 
-from call_manager.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
 
 
 def count_sections(markdown: str) -> int:

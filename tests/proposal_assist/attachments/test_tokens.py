@@ -9,7 +9,7 @@ import io
 import pytest
 from PIL import Image
 
-from call_manager.proposal_assist.attachments.tokens import (
+from grant_lab.proposal_assist.attachments.tokens import (
     estimate_image_tokens,
     estimate_image_tokens_from_bytes,
 )
@@ -56,7 +56,7 @@ def test_estimate_from_bytes_rejects_decompression_bomb(monkeypatch):
     (Pillow raises DecompressionBombError) rather than allocating GBs."""
     from PIL import Image
 
-    from call_manager.proposal_assist.attachments import tokens as tokens_mod
+    from grant_lab.proposal_assist.attachments import tokens as tokens_mod
 
     # The module must set a finite MAX_IMAGE_PIXELS cap.
     assert Image.MAX_IMAGE_PIXELS is not None

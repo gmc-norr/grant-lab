@@ -1,0 +1,109 @@
+"""Enable-on-touch flip seam (3b-5d.D4): the ONLY prod caller of enable_collab.
+
+maybe_auto_enable is invoked from the draft/spec read models — the first read
+of an artifact (kill-switch off) enables collab for it, stickily and
+per-artifact. New workspaces converge on their first cockpit load; existing
+ones on their next open. The D4 pipe-table hold-back was REMOVED by the tables
+slice (docs/superpowers/specs/2026-07-08-collab-tables-design.md §G) once the
+bridge gained lossless GFM table round-trip — previously held-back artifacts
+now enable lazily on their next read."""
+
+from __future__ import annotations
+
+import logging
+import uuid
+
+from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.orm import Session
+
+from grant_lab.proposal_assist.collab import state
+from grant_lab.proposal_assist.drafting.locking import (
+    CommitMutexTimeout,
+    WorkspaceDeleted,
+    is_lock_timeout,
+)
+from grant_lab.proposal_assist.fencing import (
+    WorkspaceGenerationStale,
+    acquire_commit_mutex_at_generation,
+)
+from grant_lab.proposal_assist.ports.stamp import FenceStamp
+
+logger = logging.getLogger(__name__)
+
+# The flip is a read-path side effect and must not stall an interactive GET on a
+# wedged writer. It acquires the commit mutex ONCE per artifact lifetime (the
+# is_collab_enabled short-circuit fires forever after), so a bounded, modest
+# timeout is safe: on contention we defer the flip and the NEXT read retries.
+_FLIP_MUTEX_TIMEOUT_SECONDS = 5
+
+
+def maybe_auto_enable(
+    session: Session,
+    *,
+    stamp: FenceStamp,
+    workspace_id: uuid.UUID,
+    artifact: str,
+) -> bool:
+    """Sticky lazy flip. Returns the artifact's EFFECTIVE enabled state.
+
+    Enables iff: kill-switch off AND not already enabled AND the workspace is
+    not soft-deleted and still at the caller's stamped generation (Primitive B:
+    acquire_commit_mutex_at_generation refuses a retired or moved-on workspace
+    under the lock). The enable is committed while HOLDING the
+    workspace commit mutex — the linearization anchor the D4 severance-recheck
+    family (writers' under-mutex re-reads) depends on; a route blocked on the
+    mutex re-checks the flag after us and sees the enable. If the mutex can't
+    be acquired (a writer holds it), we
+    defer: return False and stay legacy — the next read retries. COMMITS the
+    enable itself (read models otherwise never write; the session factory is
+    expire_on_commit=False so callers' loaded rows survive). The concurrent
+    first-read insert race resolves via IntegrityError → the other request
+    won → report enabled."""
+    if state.kill_switch_engaged():
+        return False
+    if state.is_collab_enabled(session, workspace_id=workspace_id, artifact=artifact):
+        return True
+    try:
+        acquire_commit_mutex_at_generation(
+            session,
+            stamp.workspace_id,
+            generation=stamp.generation,
+            timeout_seconds=_FLIP_MUTEX_TIMEOUT_SECONDS,
+        )
+    except CommitMutexTimeout:
+        session.rollback()
+        return False
+    except (WorkspaceDeleted, WorkspaceGenerationStale):
+        # Never enable collab on a deleted (or deleted-and-restored-past-our-
+        # generation) workspace — enable_collab writes a CollabArtifactState row and
+        # COMMITS. Stay legacy; there is no next read for this stale caller. The
+        # generation is threaded from the read route's access check, not re-read
+        # here.
+        session.rollback()
+        return False
+    state.enable_collab(session, workspace_id=workspace_id, artifact=artifact)
+    try:
+        session.commit()  # releases the mutex
+    except IntegrityError:
+        session.rollback()  # concurrent first read won the insert — same outcome
+    except OperationalError as exc:
+        # Slice C3: enable_collab's INSERT commits INSIDE the mutex-held tail and
+        # takes an FK parent lock on `workspaces`, so this COMMIT can now fail on a
+        # bounded row wait. Defer exactly as the acquisition timeout above does —
+        # maybe_auto_enable runs on READ paths, and letting this reach main.py's
+        # handler would turn a routine read into a 429, which is the outcome the
+        # defer arm exists to prevent. A non-lock OperationalError is a real
+        # database failure and must propagate.
+        if not is_lock_timeout(exc):
+            raise
+        session.rollback()
+        return False
+    logger.info(
+        "collab.flip_enabled",
+        extra={
+            "event": "collab_flip_enabled",
+            "workspace_id": str(workspace_id),
+            "artifact": artifact,
+        },
+    )
+    return True

@@ -6,7 +6,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from call_manager.db.models import CitationLlmUsage, Reference, ReferenceChunk, TurnJob
+from grant_lab.db.models import CitationLlmUsage, Reference, ReferenceChunk, TurnJob
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 

@@ -2,8 +2,8 @@ from alembic.config import Config
 from sqlalchemy import inspect
 
 from alembic import command
-from call_manager.db.base import Base
-from call_manager.db.session import make_engine
+from grant_lab.db.base import Base
+from grant_lab.db.session import make_engine
 
 
 def test_model_no_longer_defines_table():

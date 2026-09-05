@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     Call,
     DigestRun,
     Profile,
@@ -12,7 +12,7 @@ from call_manager.db.models import (
     Source,
     User,
 )
-from call_manager.main import create_app
+from grant_lab.main import create_app
 
 
 def _setup(monkeypatch, pg_url, *, model="bge-m3"):
@@ -259,7 +259,7 @@ def test_dashboard_golden_set_report_null(
 ):
     # load_last_report reads a sidecar file whose path is fixed at import time,
     # so monkeypatch the function (the endpoint lazy-imports it) for determinism.
-    monkeypatch.setattr("call_manager.ranking.eval.load_last_report", lambda: None)
+    monkeypatch.setattr("grant_lab.ranking.eval.load_last_report", lambda: None)
     app = _setup(monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory, test_client_factory)
     assert c.get("/api/admin/dashboard").json()["golden_set_report"] is None
@@ -268,10 +268,10 @@ def test_dashboard_golden_set_report_null(
 def test_dashboard_golden_set_report_present(
     monkeypatch, pg_url, pg_session_factory, test_client_factory
 ):
-    from call_manager.ranking.eval import GoldenSetReport
+    from grant_lab.ranking.eval import GoldenSetReport
 
     monkeypatch.setattr(
-        "call_manager.ranking.eval.load_last_report",
+        "grant_lab.ranking.eval.load_last_report",
         lambda: GoldenSetReport(n_fixture=5, n_compared=4, tau=0.812),
     )
     app = _setup(monkeypatch, pg_url)

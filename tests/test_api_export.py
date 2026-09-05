@@ -3,13 +3,13 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from call_manager.db.models import Reference, User, Workspace, WorkspaceViewer
-from call_manager.main import create_app
-from call_manager.proposal_assist.citations.ledger import dump_ledger, empty_ledger
-from call_manager.proposal_assist.collab import state, store
-from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
-from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
-from call_manager.proposal_assist.paths import workspace_repo_dir
+from grant_lab.db.models import Reference, User, Workspace, WorkspaceViewer
+from grant_lab.main import create_app
+from grant_lab.proposal_assist.citations.ledger import dump_ledger, empty_ledger
+from grant_lab.proposal_assist.collab import state, store
+from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm
+from grant_lab.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
+from grant_lab.proposal_assist.paths import workspace_repo_dir
 
 _CREATED_APPS = []
 

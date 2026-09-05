@@ -20,17 +20,17 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
-from call_manager.db.models import ClaimAnalysisJob
-from call_manager.proposal_assist.analysis.pipeline import analyze_job
-from call_manager.proposal_assist.analysis.queue import claim_queued_jobs, enqueue_section_job
-from call_manager.proposal_assist.analysis.reconcile import reconcile_analysis_coverage
-from call_manager.proposal_assist.collab import state, store
-from call_manager.proposal_assist.collab.canonical import canonical_artifact_markdown
-from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
-from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.paths import workspace_repo_dir
-from call_manager.proposal_assist.references.embed import FakeEmbedder
+from grant_lab.db.models import ClaimAnalysisJob
+from grant_lab.proposal_assist.analysis.pipeline import analyze_job
+from grant_lab.proposal_assist.analysis.queue import claim_queued_jobs, enqueue_section_job
+from grant_lab.proposal_assist.analysis.reconcile import reconcile_analysis_coverage
+from grant_lab.proposal_assist.collab import state, store
+from grant_lab.proposal_assist.collab.canonical import canonical_artifact_markdown
+from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
+from grant_lab.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.paths import workspace_repo_dir
+from grant_lab.proposal_assist.references.embed import FakeEmbedder
 from tests.proposal_assist.collab.test_collab_kernel_accept import _init_repo
 from tests.proposal_assist.conftest import make_user, make_workspace
 from tests.test_analysis_pipeline import FakeCitationService

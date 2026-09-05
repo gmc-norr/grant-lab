@@ -15,10 +15,10 @@ from datetime import UTC, datetime
 
 from sqlalchemy import text
 
-from call_manager.db.models import Reference, Workspace
-from call_manager.proposal_assist.citations.ledger import dump_ledger, empty_ledger
-from call_manager.proposal_assist.drafting.locking import commit_mutex_key
-from call_manager.proposal_assist.reconcile import (
+from grant_lab.db.models import Reference, Workspace
+from grant_lab.proposal_assist.citations.ledger import dump_ledger, empty_ledger
+from grant_lab.proposal_assist.drafting.locking import commit_mutex_key
+from grant_lab.proposal_assist.reconcile import (
     CITATIONS_FILENAME,
     reconcile_workspace_citekeys,
 )

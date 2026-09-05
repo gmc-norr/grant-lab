@@ -2,10 +2,10 @@
 from fastapi.testclient import TestClient
 from pycrdt import Doc, Text
 
-from call_manager.auth.session_cookie import SessionSigner
-from call_manager.proposal_assist.collab import protocol as P
-from call_manager.proposal_assist.collab import state as collab_state
-from call_manager.proposal_assist.collab.room import MANAGER
+from grant_lab.auth.session_cookie import SessionSigner
+from grant_lab.proposal_assist.collab import protocol as P
+from grant_lab.proposal_assist.collab import state as collab_state
+from grant_lab.proposal_assist.collab.room import MANAGER
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
@@ -94,8 +94,8 @@ def test_xmlfragment_doc_survives_recovery_via_the_bridge(_app, pg_session_facto
     # not a toy Text: seed a proposal doc, persist it through the route, evict
     # the room, reconnect, and confirm the recovered state reconstructs the
     # exact ProseMirror JSON.
-    from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
-    from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc, ydoc_to_pm_json
+    from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm
+    from grant_lab.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc, ydoc_to_pm_json
 
     _app.state.session_factory = pg_session_factory
     with pg_session_factory() as s:

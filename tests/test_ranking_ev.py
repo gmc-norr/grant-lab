@@ -3,7 +3,7 @@ import math
 
 import pytest
 
-from call_manager.ranking.ev import extract_topic_expected
+from grant_lab.ranking.ev import extract_topic_expected
 
 
 def _char_tokens(content: str, *, rating_top_logprobs: list[dict], rating_char: str):
@@ -63,7 +63,7 @@ def test_ev_logs_when_noops_with_logprobs_present(caplog):
             }
         ]
     }
-    with caplog.at_level(logging.WARNING, logger="call_manager.ranking.ev"):
+    with caplog.at_level(logging.WARNING, logger="grant_lab.ranking.ev"):
         ev = extract_topic_expected(env, 4)
     assert ev is None
     assert any(
@@ -78,7 +78,7 @@ def test_ev_no_log_when_logprobs_absent(caplog):
     import logging
 
     env = {"choices": [{"message": {"content": '{"topic_fit": {"rating": 4}}'}}]}
-    with caplog.at_level(logging.WARNING, logger="call_manager.ranking.ev"):
+    with caplog.at_level(logging.WARNING, logger="grant_lab.ranking.ev"):
         ev = extract_topic_expected(env, 4)
     assert ev is None
     assert not any(

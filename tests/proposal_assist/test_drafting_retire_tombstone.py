@@ -13,10 +13,10 @@ import uuid
 
 import pytest
 
-from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
-from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
-from call_manager.proposal_assist.drafting.registry import SubprocessRegistry
-from call_manager.proposal_assist.lifecycle import LIFECYCLE
+from grant_lab.proposal_assist.drafting.contract import WorkspaceRetired
+from grant_lab.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
+from grant_lab.proposal_assist.drafting.registry import SubprocessRegistry
+from grant_lab.proposal_assist.lifecycle import LIFECYCLE
 
 
 @pytest.mark.asyncio
@@ -140,7 +140,7 @@ async def test_controller_launch_tears_down_the_fresh_handle_when_install_refuse
     """The hand-off: fulfill returns False, so controller.launch raises
     WorkspaceRetired BEFORE handed_off=True and its existing except terminates the
     just-launched handle (leak-free)."""
-    from call_manager.proposal_assist.drafting.controller import WorkspaceController
+    from grant_lab.proposal_assist.drafting.controller import WorkspaceController
     from tests.proposal_assist.conftest import make_workspace
 
     adapter = _BlockingLaunchAdapter()

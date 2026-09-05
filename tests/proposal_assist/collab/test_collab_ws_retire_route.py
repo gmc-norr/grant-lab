@@ -6,10 +6,10 @@ neither is 1011/1006 (B3 + post-merge review)."""
 import pytest
 from starlette.websockets import WebSocketDisconnect
 
-from call_manager.auth.session_cookie import SessionSigner
-from call_manager.proposal_assist.collab import state as collab_state
-from call_manager.proposal_assist.lifecycle import LIFECYCLE
-from call_manager.proposal_assist.web import collab_ws as collab_ws_module
+from grant_lab.auth.session_cookie import SessionSigner
+from grant_lab.proposal_assist.collab import state as collab_state
+from grant_lab.proposal_assist.lifecycle import LIFECYCLE
+from grant_lab.proposal_assist.web import collab_ws as collab_ws_module
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
@@ -59,7 +59,7 @@ def test_hydration_mutex_timeout_closes_with_1013(_app, pg_session_factory, monk
     provider's no-reconnect set {1008, 1009}, so the editor retries with backoff."""
     from fastapi.testclient import TestClient
 
-    from call_manager.proposal_assist.drafting.locking import CommitMutexTimeout
+    from grant_lab.proposal_assist.drafting.locking import CommitMutexTimeout
 
     _app.state.session_factory = pg_session_factory
     with pg_session_factory() as s:

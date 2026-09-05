@@ -2,7 +2,7 @@ import uuid
 
 from sqlalchemy import inspect, text
 
-from call_manager.db.models import Profile, ProfileBootstrapJob, ProfileKind, User
+from grant_lab.db.models import Profile, ProfileBootstrapJob, ProfileKind, User
 
 
 def _mk_profile(session):

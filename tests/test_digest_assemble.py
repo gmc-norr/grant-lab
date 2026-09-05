@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     Call,
     CallDecision,
     CallRanking,
@@ -14,7 +14,7 @@ from call_manager.db.models import (
     Subscription,
     User,
 )
-from call_manager.digest.assemble import assemble_for_user
+from grant_lab.digest.assemble import assemble_for_user
 
 
 @pytest.fixture()
@@ -847,7 +847,7 @@ def test_total_must_include_cap_across_profiles(pg_session_factory, now):
     """With 3 profiles each having 20 must_include matches the total must_include
     count across all sections must not exceed DIGEST_TOTAL_MUST_INCLUDE_CAP (50).
     Non-must_include entries are never trimmed by this cap."""
-    from call_manager.digest.assemble import DIGEST_TOTAL_MUST_INCLUDE_CAP
+    from grant_lab.digest.assemble import DIGEST_TOTAL_MUST_INCLUDE_CAP
 
     with pg_session_factory() as s:
         # Create a single user subscribed to 3 profiles, each with a distinct

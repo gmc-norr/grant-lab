@@ -26,8 +26,8 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.auth.dependencies import get_current_user, require_admin
-from call_manager.main import create_app
+from grant_lab.auth.dependencies import get_current_user, require_admin
+from grant_lab.main import create_app
 
 # require_admin calls get_current_user inside its BODY, not as a sub-dependency,
 # so FastAPI's dependant tree does not carry get_current_user on admin routes.
@@ -91,7 +91,7 @@ def _env(monkeypatch):
 # docs routes (main.py:488-499, :906-912). The enforcing direction must run in
 # every mode that mounts something, or a route added inside the dev block is
 # governed by no test at all. `prod` is deliberately absent: mount_spa raises
-# unless src/call_manager/web/spa/index.html exists (spa_serving.py:37), so a
+# unless src/grant_lab/web/spa/index.html exists (spa_serving.py:37), so a
 # prod-mode case would couple this gate to a frontend build artefact.
 @pytest.mark.parametrize("spa_mode", ["disabled", "dev"])
 @pytest.mark.parametrize("edition", ["full", "match"])

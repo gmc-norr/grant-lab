@@ -1,12 +1,12 @@
 from datetime import UTC, datetime, timedelta
 
-from call_manager.db.models import Profile, ProfileBootstrapJob, ProfileKind, User
-from call_manager.profiles import bootstrap_worker as bw
-from call_manager.profiles.bootstrap_worker import (
+from grant_lab.db.models import Profile, ProfileBootstrapJob, ProfileKind, User
+from grant_lab.profiles import bootstrap_worker as bw
+from grant_lab.profiles.bootstrap_worker import (
     requeue_stuck_bootstrap_jobs,
     run_profile_bootstrap_tick,
 )
-from call_manager.profiles.seed import DraftProfile
+from grant_lab.profiles.seed import DraftProfile
 
 
 class _Embed:
@@ -146,9 +146,9 @@ def test_reaper_requeues_then_dead_letters(pg_session_factory):
 def test_scheduler_registers_bootstrap_tick(monkeypatch):
     from unittest.mock import MagicMock
 
-    from call_manager.config import Settings
-    from call_manager.proposal_assist.drafting.factory import build_workspace_controller
-    from call_manager.scheduler import build_scheduler
+    from grant_lab.config import Settings
+    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
+    from grant_lab.scheduler import build_scheduler
 
     for k, v in {
         "DATABASE_URL": "postgresql+psycopg://x:y@localhost/z",

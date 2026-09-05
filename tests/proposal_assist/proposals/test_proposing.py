@@ -1,13 +1,13 @@
 import subprocess
 from pathlib import Path
 
-from call_manager.db.models import ProposedChange
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.proposals.proposing import (
+from grant_lab.db.models import ProposedChange
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.proposals.proposing import (
     capture_base,
     propose_prose_edit,
 )
-from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
+from grant_lab.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 from tests.proposal_assist.conftest import make_workspace
 
 
@@ -51,7 +51,7 @@ def test_propose_prose_edit_captures_base(pg_session_factory, tmp_path):
 
 
 def test_propose_citation_insert_writes_row(pg_session_factory, tmp_path):
-    from call_manager.proposal_assist.proposals.proposing import (
+    from grant_lab.proposal_assist.proposals.proposing import (
         propose_citation_insert,
     )
 
@@ -96,8 +96,8 @@ def test_propose_citation_insert_writes_row(pg_session_factory, tmp_path):
 
 
 def test_propose_prose_edit_targets_spec_when_requested(pg_session_factory):
-    from call_manager.db.models import ProposedChange
-    from call_manager.proposal_assist.proposals.proposing import propose_prose_edit
+    from grant_lab.db.models import ProposedChange
+    from grant_lab.proposal_assist.proposals.proposing import propose_prose_edit
     from tests.proposal_assist.conftest import make_workspace
 
     with pg_session_factory() as s:
@@ -120,8 +120,8 @@ def test_propose_prose_edit_targets_spec_when_requested(pg_session_factory):
 
 
 def test_propose_prose_edit_defaults_to_draft(pg_session_factory):
-    from call_manager.db.models import ProposedChange
-    from call_manager.proposal_assist.proposals.proposing import propose_prose_edit
+    from grant_lab.db.models import ProposedChange
+    from grant_lab.proposal_assist.proposals.proposing import propose_prose_edit
     from tests.proposal_assist.conftest import make_workspace
 
     with pg_session_factory() as s:

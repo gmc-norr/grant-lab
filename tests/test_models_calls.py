@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from call_manager.db.models import Call, Source
+from grant_lab.db.models import Call, Source
 
 
 def test_seeded_sources_present(pg_session_factory):

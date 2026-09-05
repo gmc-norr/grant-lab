@@ -6,7 +6,7 @@ from tests/test_api_spec.py (same production repo layout).
 
 from __future__ import annotations
 
-from call_manager.proposal_assist.collab import state as collab_state
+from grant_lab.proposal_assist.collab import state as collab_state
 from tests.test_api_spec import _add_spec
 from tests.test_api_workspaces import _app, _client, _seed
 
@@ -88,7 +88,7 @@ def test_spec_locked_makes_member_can_write_false(
     lock branch, not hard-coded True."""
     from datetime import UTC, datetime
 
-    from call_manager.db.models import Workspace
+    from grant_lab.db.models import Workspace
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, member_id, _, ws_id = _seed(

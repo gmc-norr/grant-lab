@@ -16,7 +16,7 @@ import uuid
 
 import pytest
 
-from call_manager.proposal_assist.attachments.storage import (
+from grant_lab.proposal_assist.attachments.storage import (
     AttachmentStorage,
     attachment_path,
 )

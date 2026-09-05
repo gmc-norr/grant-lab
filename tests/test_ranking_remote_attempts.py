@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     Call,
     Profile,
     ProfileKind,
@@ -10,7 +10,7 @@ from call_manager.db.models import (
     Source,
     User,
 )
-from call_manager.ranking.remote_attempts import count_today, record_attempt
+from grant_lab.ranking.remote_attempts import count_today, record_attempt
 
 
 def _seed(s):

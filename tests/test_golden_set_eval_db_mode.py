@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     Call,
     CallRanking,
     GoldenSetTriple,
@@ -11,8 +11,8 @@ from call_manager.db.models import (
     Source,
     User,
 )
-from call_manager.ranking import eval as eval_mod
-from call_manager.ranking.eval import run_golden_set_eval
+from grant_lab.ranking import eval as eval_mod
+from grant_lab.ranking.eval import run_golden_set_eval
 
 
 def _seed_pair(s, *, external_id, score, expected):

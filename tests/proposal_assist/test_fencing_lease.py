@@ -8,12 +8,12 @@ import threading
 import pytest
 from sqlalchemy import text
 
-from call_manager.proposal_assist.drafting.locking import (
+from grant_lab.proposal_assist.drafting.locking import (
     MUTEX_TAIL_LOCK_TIMEOUT_SECONDS,
     CommitMutexTimeout,
     acquire_commit_mutex,
 )
-from call_manager.proposal_assist.fencing import acquire_shared_lease
+from grant_lab.proposal_assist.fencing import acquire_shared_lease
 from tests.proposal_assist.conftest import make_workspace
 
 

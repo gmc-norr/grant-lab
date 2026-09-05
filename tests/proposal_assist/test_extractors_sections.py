@@ -3,7 +3,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from call_manager.proposal_assist.extractors.sections import (
+from grant_lab.proposal_assist.extractors.sections import (
     SECTION_NAMES,
     extract_sections,
 )

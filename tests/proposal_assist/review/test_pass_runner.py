@@ -5,14 +5,14 @@ from decimal import Decimal
 
 import pytest
 
-from call_manager.config import Settings
-from call_manager.db.models import ReviewRun, ReviewRunItem
-from call_manager.proposal_assist.drafting.contract import TurnDoneEvent
-from call_manager.proposal_assist.review.jobs import (
+from grant_lab.config import Settings
+from grant_lab.db.models import ReviewRun, ReviewRunItem
+from grant_lab.proposal_assist.drafting.contract import TurnDoneEvent
+from grant_lab.proposal_assist.review.jobs import (
     enqueue_review_run,
     reap_stuck_review_runs,
 )
-from call_manager.proposal_assist.review.pass_runner import _run_one_call, run_review_pass
+from grant_lab.proposal_assist.review.pass_runner import _run_one_call, run_review_pass
 from tests.proposal_assist.conftest import review_stamp
 
 
@@ -161,7 +161,7 @@ async def test_all_personas_fail_is_failed(review_active_workspace, _settings_en
 async def test_subcall_skips_when_run_no_longer_running(review_active_workspace, _settings_env):
     # Codex High: a queued-behind-the-semaphore sub-call must NOT launch (spend
     # tokens / send workspace content) once the run has been cancelled/reaped.
-    from call_manager.proposal_assist.review import pass_runner as pr
+    from grant_lab.proposal_assist.review import pass_runner as pr
 
     session_factory, ws_id, wdir, repo, draft_sha = review_active_workspace
     with session_factory() as s:
@@ -222,8 +222,8 @@ async def test_artifact_commit_failure_fails_run(
 ):
     # Codex Medium: a git failure in finalize must fail the run immediately, not
     # leave it 'running' until the reaper TTL.
-    from call_manager.proposal_assist.citations.gitio import GitCommitError
-    from call_manager.proposal_assist.review import pass_runner as pr
+    from grant_lab.proposal_assist.citations.gitio import GitCommitError
+    from grant_lab.proposal_assist.review import pass_runner as pr
 
     session_factory, ws_id, wdir, repo, draft_sha = review_active_workspace
     run_id = _claim_running(session_factory, ws_id, draft_sha)
@@ -339,7 +339,7 @@ async def test_finalize_refuses_to_commit_when_the_workspace_moved_on(
     delete, a retirement) that lands while the panel's six hosted calls are in
     flight. The finalize must then write NOTHING to git.
     """
-    from call_manager.db.models import Workspace
+    from grant_lab.db.models import Workspace
 
     session_factory, ws_id, wdir, repo, draft_sha = review_active_workspace
     run_id = _claim_running(session_factory, ws_id, draft_sha)
@@ -400,7 +400,7 @@ async def test_a_stamp_naming_a_different_workspace_is_refused(
     """
     import uuid as _uuid
 
-    from call_manager.proposal_assist.ports.stamp import FenceStamp
+    from grant_lab.proposal_assist.ports.stamp import FenceStamp
 
     session_factory, ws_id, wdir, repo, draft_sha = review_active_workspace
     run_id = _claim_running(session_factory, ws_id, draft_sha)
@@ -446,7 +446,7 @@ def test_the_finalize_takes_the_mutex_BEFORE_the_review_run_row():
     import ast
     import inspect
 
-    from call_manager.proposal_assist.review import pass_runner as m
+    from grant_lab.proposal_assist.review import pass_runner as m
 
     tree = ast.parse(inspect.cleandoc(inspect.getsource(m.run_review_pass)))
     mutex, run_locks, git_writes = [], [], []

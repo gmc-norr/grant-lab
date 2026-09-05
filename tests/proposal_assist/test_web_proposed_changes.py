@@ -2,18 +2,18 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from call_manager.db.models import Reference, ReferenceChunk, WorkspaceViewer
-from call_manager.proposal_assist.citations.ledger import load_ledger
-from call_manager.proposal_assist.citations.markers import find_markers
-from call_manager.proposal_assist.editing.save import save_section
-from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
-from call_manager.proposal_assist.proposals.proposing import (
+from grant_lab.db.models import Reference, ReferenceChunk, WorkspaceViewer
+from grant_lab.proposal_assist.citations.ledger import load_ledger
+from grant_lab.proposal_assist.citations.markers import find_markers
+from grant_lab.proposal_assist.editing.save import save_section
+from grant_lab.proposal_assist.ports.stamp import stamp_for_workspace
+from grant_lab.proposal_assist.proposals.proposing import (
     capture_base,
     propose_citation_insert,
     propose_prose_edit,
 )
-from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
-from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
+from grant_lab.proposal_assist.tools.citations import CITATIONS_FILENAME
+from grant_lab.proposal_assist.tools.proposal import PROPOSAL_FILENAME
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 _EMBED_DIM = 1024
@@ -400,7 +400,7 @@ def test_accept_citation_endpoint_applies_marker_and_ledger(
 def _seed_spec_pending(s, ws, tmp_path, locked=False):
     from datetime import UTC, datetime
 
-    from call_manager.proposal_assist.artifacts import Artifact
+    from grant_lab.proposal_assist.artifacts import Artifact
 
     repo = Path(tmp_path) / str(ws.id) / "repo"
     if not (repo / ".git").exists():
@@ -462,7 +462,7 @@ def test_accept_spec_locked_returns_409(
     assert resp.status_code == 409
     assert resp.json()["error"]["code"] == "conflict"
     with pg_session_factory() as s:
-        from call_manager.db.models import ProposedChange
+        from grant_lab.db.models import ProposedChange
 
         assert s.get(ProposedChange, uuid.UUID(pc_id)).status == "pending"
 

@@ -1,4 +1,4 @@
-from call_manager.proposal_assist.problems.builders import uncited_claim_problems
+from grant_lab.proposal_assist.problems.builders import uncited_claim_problems
 
 
 def _claim(h, text="some claim", si=1, reason="needs cite"):

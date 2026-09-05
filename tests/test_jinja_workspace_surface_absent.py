@@ -6,7 +6,7 @@ swallowed by the SPA catch-all and look like 200, masking a stale route."""
 
 from __future__ import annotations
 
-from call_manager.main import create_app
+from grant_lab.main import create_app
 
 
 def test_no_bare_workspaces_route_registered(monkeypatch, pg_url):

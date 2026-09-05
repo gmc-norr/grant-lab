@@ -2,7 +2,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from call_manager.db.models import Profile, ProfileKind, ProfileLevel, User
+from grant_lab.db.models import Profile, ProfileKind, ProfileLevel, User
 
 
 def _user(s):

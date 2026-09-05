@@ -2,8 +2,8 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
-from call_manager.db.models import TurnJob
-from call_manager.proposal_assist.turns.reaper import (
+from grant_lab.db.models import TurnJob
+from grant_lab.proposal_assist.turns.reaper import (
     DEFAULT_REAP_TTL_SECONDS,
     reap_stuck_turns,
 )
@@ -95,7 +95,7 @@ def test_reaper_respects_custom_ttl(pg_session_factory):
 def test_reaper_writes_outcome_row_and_event(pg_session_factory):
     from sqlalchemy import select
 
-    from call_manager.db.models import ChatTurn, TurnJob, WorkspaceEvent
+    from grant_lab.db.models import ChatTurn, TurnJob, WorkspaceEvent
     from tests.proposal_assist.conftest import make_chat_turn, make_user, make_workspace
 
     old = datetime.now(UTC) - timedelta(seconds=DEFAULT_REAP_TTL_SECONDS + 60)

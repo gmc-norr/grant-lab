@@ -7,15 +7,15 @@ import uuid
 
 import pytest
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     ChatTurn,
     EvaluatorJob,
     ProposedChange,
     ReviewRunItem,
     UncitedClaimsJob,
 )
-from call_manager.proposal_assist.port_impl.effects import SqlEffects
-from call_manager.proposal_assist.ports.effects import (
+from grant_lab.proposal_assist.port_impl.effects import SqlEffects
+from grant_lab.proposal_assist.ports.effects import (
     EFFECT_MECHANISMS,
     Effects,
     ProposeArtifactEdit,
@@ -24,11 +24,11 @@ from call_manager.proposal_assist.ports.effects import (
     SubmitScorecard,
     SubmitUncitedClaims,
 )
-from call_manager.proposal_assist.ports.errors import (
+from grant_lab.proposal_assist.ports.errors import (
     EffectRejected,
     WorkspaceGenerationStale,
 )
-from call_manager.proposal_assist.ports.stamp import FenceStamp, Provenance
+from grant_lab.proposal_assist.ports.stamp import FenceStamp, Provenance
 from tests.proposal_assist.conftest import make_user
 from tests.proposal_assist.f3b_seeds import (
     bump_generation,
@@ -119,7 +119,7 @@ def test_submit_scorecard_refuses_a_stale_generation(pg_session_factory):
 def test_submit_scorecard_refuses_a_soft_deleted_workspace(pg_session_factory):
     from datetime import UTC, datetime
 
-    from call_manager.db.models import Workspace
+    from grant_lab.db.models import Workspace
 
     with pg_session_factory() as s:
         ws_id = seed_workspace(s, generation=4)
@@ -663,7 +663,7 @@ def test_propose_artifact_edit_refuses_a_stale_generation(pg_session_factory):
 def test_propose_artifact_edit_refuses_a_soft_deleted_workspace(pg_session_factory):
     from datetime import UTC, datetime
 
-    from call_manager.db.models import Workspace
+    from grant_lab.db.models import Workspace
 
     with pg_session_factory() as s:
         ws_id = seed_workspace(s, generation=5)

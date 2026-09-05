@@ -18,27 +18,27 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.config import Settings
-from call_manager.db.models import Reference, ReferenceChunk
-from call_manager.proposal_assist.citations.audit import (
+from grant_lab.config import Settings
+from grant_lab.db.models import Reference, ReferenceChunk
+from grant_lab.proposal_assist.citations.audit import (
     chunk_content_sha,
     claim_context_sha,
     evidence_quote_sha,
     validate_citations_deterministic,
 )
-from call_manager.proposal_assist.citations.claims import claim_sentence_around
-from call_manager.proposal_assist.citations.core import insert_citation_impl
-from call_manager.proposal_assist.citations.ledger import (
+from grant_lab.proposal_assist.citations.claims import claim_sentence_around
+from grant_lab.proposal_assist.citations.core import insert_citation_impl
+from grant_lab.proposal_assist.citations.ledger import (
     append_evidence,
     build_evidence_row,
     empty_ledger,
     load_ledger,
 )
-from call_manager.proposal_assist.citations.markers import build_marker, find_markers
-from call_manager.proposal_assist.ports.stamp import FenceStamp
-from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
-from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
-from call_manager.proposal_assist.tools.registry import ToolContext
+from grant_lab.proposal_assist.citations.markers import build_marker, find_markers
+from grant_lab.proposal_assist.ports.stamp import FenceStamp
+from grant_lab.proposal_assist.tools.citations import CITATIONS_FILENAME
+from grant_lab.proposal_assist.tools.proposal import PROPOSAL_FILENAME
+from grant_lab.proposal_assist.tools.registry import ToolContext
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 

@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from call_manager.email.client import (
+from grant_lab.email.client import (
     EmailTransportError,
     ResendClient,
     SendResult,

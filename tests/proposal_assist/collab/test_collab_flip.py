@@ -3,9 +3,9 @@
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from call_manager.proposal_assist.collab import flip, state
-from call_manager.proposal_assist.collab.flip import maybe_auto_enable
-from call_manager.proposal_assist.drafting.locking import acquire_commit_mutex
+from grant_lab.proposal_assist.collab import flip, state
+from grant_lab.proposal_assist.collab.flip import maybe_auto_enable
+from grant_lab.proposal_assist.drafting.locking import acquire_commit_mutex
 from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 

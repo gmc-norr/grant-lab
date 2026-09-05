@@ -7,16 +7,16 @@ import subprocess
 import pytest
 from sqlalchemy import select
 
-from call_manager.db.models import Workspace
-from call_manager.proposal_assist.branches import BranchBusy, BranchNotFound, switch_branch
-from call_manager.proposal_assist.citations.gitio import (
+from grant_lab.db.models import Workspace
+from grant_lab.proposal_assist.branches import BranchBusy, BranchNotFound, switch_branch
+from grant_lab.proposal_assist.citations.gitio import (
     create_branch,
     current_branch,
     current_head,
 )
-from call_manager.proposal_assist.collab import state, store
-from call_manager.proposal_assist.collab.room import BranchSwitchTeardown
-from call_manager.proposal_assist.paths import workspace_repo_dir
+from grant_lab.proposal_assist.collab import state, store
+from grant_lab.proposal_assist.collab.room import BranchSwitchTeardown
+from grant_lab.proposal_assist.paths import workspace_repo_dir
 from tests.proposal_assist.conftest import init_workspace_repo, make_workspace, stamp_for
 
 OK = BranchSwitchTeardown(closed=0, locked=True)
@@ -26,8 +26,8 @@ NOT_LOCKED = BranchSwitchTeardown(closed=1, locked=False)
 def _update_bytes(markdown: str) -> bytes:
     """A Yjs update that makes a room's document equal *markdown*, the way the
     collab tests build one (see tests/proposal_assist/collab/test_collab_room.py)."""
-    from call_manager.proposal_assist.collab.canonical import markdown_to_pm_or_empty
-    from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
+    from grant_lab.proposal_assist.collab.canonical import markdown_to_pm_or_empty
+    from grant_lab.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
 
     return pm_json_to_ydoc(markdown_to_pm_or_empty(markdown)).get_update()
 
@@ -265,7 +265,7 @@ def test_a_failure_after_truncate_rolls_the_DATABASE_back(
     # And leaves step 5's git commit in place, which is CORRECT: git is not in
     # the transaction, and that commit holds the source branch's own content on
     # the source branch. Spec §4.5.
-    from call_manager.proposal_assist import branches as B
+    from grant_lab.proposal_assist import branches as B
 
     wid, repo, actor = _ws_with_repo(pg_session_factory, tmp_path)
     create_branch(repo, "short-version")

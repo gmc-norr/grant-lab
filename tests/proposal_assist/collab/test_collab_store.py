@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
-from call_manager.db.models import Workspace, YjsUpdate
-from call_manager.proposal_assist.collab import state, store
+from grant_lab.db.models import Workspace, YjsUpdate
+from grant_lab.proposal_assist.collab import state, store
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 

@@ -141,7 +141,7 @@ jobs:
         run: docker build -f frontend/Dockerfile -t grant-lab-spa-build .
 
       # Extract to frontend/dist and then let scripts/package_spa.sh write the
-      # served tree. It used to `docker cp` straight into src/call_manager/web/spa,
+      # served tree. It used to `docker cp` straight into src/grant_lab/web/spa,
       # which bypassed the bundle gate AND left no edition.txt — so the wheel's SPA
       # was un-gated and unlabelled, and web/spa_serving.py's boot-time mismatch
       # check could never fire on it (absent marker = unknown = allowed). Routing
@@ -160,7 +160,7 @@ jobs:
       - name: Build the wheel and assert it contains the SPA
         run: |
           uv build --wheel
-          unzip -l dist/*.whl | grep -q "call_manager/web/spa/index.html"
+          unzip -l dist/*.whl | grep -q "grant_lab/web/spa/index.html"
 
   # Playwright e2e — the two specs the seed harness can drive end to end
   # (review 2026-09-02 §7 item 11; wired 2026-09-03). Both front doors are gated:

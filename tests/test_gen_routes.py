@@ -11,7 +11,7 @@ def test_generated_artifacts_in_sync_and_well_formed():
     # forgotten regenerate fails here instead of being silently repaired (the
     # old test ran the writing generator against the real tree, masking drift).
     subprocess.run([sys.executable, "scripts/gen_routes.py", "--check"], cwd=ROOT, check=True)
-    py = (ROOT / "src/call_manager/web/spa_routes.py").read_text()
+    py = (ROOT / "src/grant_lab/web/spa_routes.py").read_text()
     ts = (ROOT / "frontend/src/routes.gen.ts").read_text()
     assert "SPA_ROUTES" in py and "is_spa_route" in py
     assert "BACKEND_PREFIXES" in py and "is_backend_route" in py
@@ -23,7 +23,7 @@ def test_is_spa_route_is_exact_not_prefix():
     # ONLY. The root special-case must NOT collapse to match-everything (a naive
     # `path.startswith(r.rstrip("/") + "/")` would, since "/" → "" → matches all),
     # so every non-root path falls through to FastAPI's real 404.
-    from call_manager.web.spa_routes import is_spa_route
+    from grant_lab.web.spa_routes import is_spa_route
 
     assert is_spa_route("/") is True
     assert is_spa_route("/made-up-page") is False
@@ -43,7 +43,7 @@ def test_root_owns_only_itself(monkeypatch):
     # so a regression to the naive `path.startswith(r.rstrip("/") + "/")` form
     # (which matches all paths once the owned route is "/") fails here even if the
     # manifest ever changes.
-    import call_manager.web.spa_routes as sr
+    import grant_lab.web.spa_routes as sr
 
     monkeypatch.setattr(sr, "SPA_ROUTES", ("/",))
     assert sr.is_spa_route("/") is True
@@ -53,7 +53,7 @@ def test_root_owns_only_itself(monkeypatch):
 
 
 def test_is_backend_route_for_proxy_carveout():
-    from call_manager.web.spa_routes import is_backend_route
+    from grant_lab.web.spa_routes import is_backend_route
 
     assert is_backend_route("/api/me") is True
     # /calls retired from backend_prefixes (calls-detail)

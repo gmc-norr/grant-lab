@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     Call,
     CallRanking,
     Profile,
@@ -11,7 +11,7 @@ from call_manager.db.models import (
     Subscription,
     User,
 )
-from call_manager.digest.assemble import assemble_for_user
+from grant_lab.digest.assemble import assemble_for_user
 
 _FUTURE = datetime(2099, 12, 31, tzinfo=UTC)
 

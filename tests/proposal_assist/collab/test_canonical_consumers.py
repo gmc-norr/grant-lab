@@ -4,20 +4,20 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
-from call_manager.config import Settings
-from call_manager.db.models import ProposedChange, User
-from call_manager.proposal_assist.artifacts import Artifact, filename_for
-from call_manager.proposal_assist.collab import state, store
-from call_manager.proposal_assist.collab.kernel import kernel_accept_prose
-from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
-from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.paths import workspace_repo_dir
-from call_manager.proposal_assist.port_impl import build_ports
-from call_manager.proposal_assist.proposals.staleness import refresh_staleness
-from call_manager.proposal_assist.tools.citations import propose_citation_impl
-from call_manager.proposal_assist.tools.proposal import _read_artifact_impl, read_proposal_impl
-from call_manager.proposal_assist.tools.registry import ToolContext, snapshot_invocation
+from grant_lab.config import Settings
+from grant_lab.db.models import ProposedChange, User
+from grant_lab.proposal_assist.artifacts import Artifact, filename_for
+from grant_lab.proposal_assist.collab import state, store
+from grant_lab.proposal_assist.collab.kernel import kernel_accept_prose
+from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
+from grant_lab.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.paths import workspace_repo_dir
+from grant_lab.proposal_assist.port_impl import build_ports
+from grant_lab.proposal_assist.proposals.staleness import refresh_staleness
+from grant_lab.proposal_assist.tools.citations import propose_citation_impl
+from grant_lab.proposal_assist.tools.proposal import _read_artifact_impl, read_proposal_impl
+from grant_lab.proposal_assist.tools.registry import ToolContext, snapshot_invocation
 from tests.proposal_assist.collab.test_collab_kernel_accept import (
     _git_head,
     _init_repo,

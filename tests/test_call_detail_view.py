@@ -1,4 +1,4 @@
-from call_manager.web.call_detail_view import _money_range, _trl_range
+from grant_lab.web.call_detail_view import _money_range, _trl_range
 
 
 def test_money_range_formats_thousands_with_currency():

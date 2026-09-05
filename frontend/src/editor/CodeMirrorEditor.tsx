@@ -10,7 +10,7 @@ import { useEffect, useRef } from "react";
 import { citationPills } from "./citations";
 
 // An H2 boundary line, mirroring the backend sectionizer `_H2_RE`
-// (src/call_manager/proposal_assist/editing/sectionizer.py:20): "##" not followed
+// (src/grant_lab/proposal_assist/editing/sectionizer.py:20): "##" not followed
 // by "#". Used by the heading-delete client guard.
 const H2_LINE_RE = /^##(?!#)/;
 

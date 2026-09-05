@@ -10,9 +10,9 @@ from __future__ import annotations
 import subprocess
 import uuid
 
-from call_manager.db.models import ReviewRun, WorkspaceEvent
-from call_manager.proposal_assist.citations.gitio import blob_sha
-from call_manager.proposal_assist.paths import workspace_repo_dir
+from grant_lab.db.models import ReviewRun, WorkspaceEvent
+from grant_lab.proposal_assist.citations.gitio import blob_sha
+from grant_lab.proposal_assist.paths import workspace_repo_dir
 from tests.proposal_assist.conftest import make_workspace
 
 # ---------------------------------------------------------------------------

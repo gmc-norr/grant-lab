@@ -15,9 +15,9 @@ import uuid
 
 import pytest
 
-from call_manager.db.models import WorkspaceSetupJob
-from call_manager.proposal_assist.collab import state as collab_state
-from call_manager.proposal_assist.collab.room import MANAGER, ClientState
+from grant_lab.db.models import WorkspaceSetupJob
+from grant_lab.proposal_assist.collab import state as collab_state
+from grant_lab.proposal_assist.collab.room import MANAGER, ClientState
 from tests.proposal_assist.collab.test_collab_room import FakeClient
 from tests.test_api_spec import _add_spec
 from tests.test_api_workspaces import _app, _client, _seed
@@ -68,7 +68,7 @@ def _noop_signal(request, *, workspace_id, artifacts):
 
 def test_lock_route_signals_spec(monkeypatch, pg_url, pg_session_factory, tmp_path):
     """POST /spec/lock calls signal_from_request with artifacts=["spec"]."""
-    import call_manager.web.api.workspaces as wsmod
+    import grant_lab.web.api.workspaces as wsmod
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, ws_id = _seed_with_spec(app, pg_session_factory, tmp_path)
@@ -90,7 +90,7 @@ def test_lock_route_signals_spec(monkeypatch, pg_url, pg_session_factory, tmp_pa
 
 def test_lock_route_no_signal_on_error(monkeypatch, pg_url, pg_session_factory, tmp_path):
     """POST /spec/lock with empty spec (409) must NOT call signal_from_request."""
-    import call_manager.web.api.workspaces as wsmod
+    import grant_lab.web.api.workspaces as wsmod
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
@@ -115,7 +115,7 @@ def test_lock_route_no_signal_on_error(monkeypatch, pg_url, pg_session_factory, 
 
 def test_unlock_route_signals_spec(monkeypatch, pg_url, pg_session_factory, tmp_path):
     """POST /spec/unlock calls signal_from_request with artifacts=["spec"]."""
-    import call_manager.web.api.workspaces as wsmod
+    import grant_lab.web.api.workspaces as wsmod
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, ws_id = _seed_with_spec(app, pg_session_factory, tmp_path)
@@ -156,7 +156,7 @@ def test_soft_delete_route_signals_both_artifacts(
     to refresh. The coverage this test carries is unchanged — "deleting a workspace
     tells the collab layer, for BOTH artifacts" — only the mechanism moved, so the
     assertion moves with it rather than being dropped."""
-    import call_manager.web.api.workspaces as wsmod
+    import grant_lab.web.api.workspaces as wsmod
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
@@ -188,7 +188,7 @@ def test_soft_delete_route_signals_both_artifacts(
 def test_activate_route_signals_draft(monkeypatch, pg_url, pg_session_factory, tmp_path):
     """POST /workspaces/{id}/activate signals BOTH artifacts: setup gates draft AND
     spec to owner-only, so activation lifts the write-gate for both."""
-    import call_manager.web.api.rubric as rubmod
+    import grant_lab.web.api.rubric as rubmod
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, ws_id = _seed_for_activate(pg_session_factory, app)
@@ -217,7 +217,7 @@ def test_activate_route_signals_draft(monkeypatch, pg_url, pg_session_factory, t
 
 def test_activate_no_signal_on_wrong_phase(monkeypatch, pg_url, pg_session_factory, tmp_path):
     """POST /activate on an already-active workspace (409) must NOT call signal_from_request."""
-    import call_manager.web.api.rubric as rubmod
+    import grant_lab.web.api.rubric as rubmod
 
     # Seed workspace with current_phase=active and job status != waiting_for_rubric_review
     app = _app(monkeypatch, pg_url, tmp_path)
@@ -254,7 +254,7 @@ def test_remove_member_route_signals_both_artifacts(
     monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """DELETE /members/{user_id} calls signal_from_request with artifacts=["draft","spec"]."""
-    import call_manager.web.api.settings as setmod
+    import grant_lab.web.api.settings as setmod
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, member_id, _, ws_id = _seed(app, pg_session_factory, tmp_path, "draft\n")
@@ -278,7 +278,7 @@ def test_add_member_route_does_not_signal(
     monkeypatch, pg_url, pg_session_factory, tmp_path
 ):
     """POST /members never calls signal_from_request (new member has no live connection)."""
-    import call_manager.web.api.settings as setmod
+    import grant_lab.web.api.settings as setmod
 
     # We can only monkeypatch if the name exists in the module. If the import is
     # present, this succeeds; if signal_from_request is not imported into settings.py
@@ -288,7 +288,7 @@ def test_add_member_route_does_not_signal(
 
     # We need a user NOT already in the workspace — use a fresh user.
     with pg_session_factory() as s:
-        from call_manager.db.models import User
+        from grant_lab.db.models import User
         new_user = User(status="active", email="newmember@umu.se")
         s.add(new_user)
         s.commit()

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.proposal_assist.drafting.turn_gating import READ_ONLY_TOOLS
+from grant_lab.proposal_assist.drafting.turn_gating import READ_ONLY_TOOLS
 
 
 @pytest.fixture
@@ -14,8 +14,8 @@ def adapter_with_ctx():
     """Return (adapter, ctx, ws_id) — a ClaudeAgentSDKAdapter with a
     ToolContext already inserted into its _tool_context_sink, so that
     set_turn_provenance can find and stamp it."""
-    from call_manager.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
-    from call_manager.proposal_assist.tools.registry import ToolContext
+    from grant_lab.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
+    from grant_lab.proposal_assist.tools.registry import ToolContext
 
     ws_id = uuid.uuid4()
     ctx = ToolContext(
@@ -75,9 +75,9 @@ async def test_controller_forwards_gating_through_registry_to_fake():
     """controller.set_turn_provenance → registry.set_turn_provenance →
     FakeAgentAdapter.set_turn_provenance: both allowed_tool_names and
     turn_selection survive BOTH forwarding hops without being dropped."""
-    from call_manager.proposal_assist.drafting.controller import WorkspaceController
-    from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
-    from call_manager.proposal_assist.drafting.registry import SubprocessRegistry
+    from grant_lab.proposal_assist.drafting.controller import WorkspaceController
+    from grant_lab.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
+    from grant_lab.proposal_assist.drafting.registry import SubprocessRegistry
 
     fake = FakeAgentAdapter()
     registry = SubprocessRegistry(adapter=fake, idle_seconds=600)

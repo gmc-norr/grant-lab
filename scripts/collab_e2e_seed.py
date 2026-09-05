@@ -43,7 +43,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-# Add the repo root so `tests.*` and `call_manager.*` are importable.
+# Add the repo root so `tests.*` and `grant_lab.*` are importable.
 _REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_REPO_ROOT / "src"))
@@ -64,7 +64,7 @@ def main() -> int:
     # "prod" (E2E_SPA_MODE=prod) serves the BUILT bundle from FastAPI under the
     # strict CSP with ONLY the same-origin ws token derived from APP_BASE_URL —
     # the 3b-5d.D4 flip gate. prod REQUIRES a built SPA synced to
-    # src/call_manager/web/spa/ (the runner does this).
+    # src/grant_lab/web/spa/ (the runner does this).
     os.environ["SPA_MODE"] = os.environ.get("E2E_SPA_MODE", "dev")
     # APP_BASE_URL must match the origin the browser POSTs from (CSRF Origin
     # check + the CSP's derived ws token). In dev the browser talks to the Vite
@@ -93,20 +93,20 @@ def main() -> int:
         command.upgrade(cfg, "head")
 
         # --- build app ---
-        from call_manager.main import create_app
+        from grant_lab.main import create_app
 
         app = create_app()
 
         # Override session_factory so the app uses the testcontainers DB.
-        from call_manager.db.session import make_engine, make_session_factory
+        from grant_lab.db.session import make_engine, make_session_factory
 
         engine = make_engine(db_url)
         Session = make_session_factory(engine)
         app.state.session_factory = Session
 
         # --- seed: two users, two collab artifacts ---
-        from call_manager.auth.passwords import hash_password
-        from call_manager.db.models import (
+        from grant_lab.auth.passwords import hash_password
+        from grant_lab.db.models import (
             Call,
             Reference,
             ReferenceChunk,
@@ -114,8 +114,8 @@ def main() -> int:
             User,
             WorkspaceViewer,
         )
-        from call_manager.proposal_assist.citations.gitio import _git_env
-        from call_manager.proposal_assist.collab import state as collab_state
+        from grant_lab.proposal_assist.citations.gitio import _git_env
+        from grant_lab.proposal_assist.collab import state as collab_state
         from tests.proposal_assist.conftest import make_user, make_workspace
         from tests.test_editing_save import _init_repo
 

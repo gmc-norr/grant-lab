@@ -12,11 +12,11 @@ import uuid
 import pytest
 from pycrdt import Doc, Text
 
-from call_manager.proposal_assist.collab import protocol as P
-from call_manager.proposal_assist.collab import room as room_module
-from call_manager.proposal_assist.collab.room import ClientState, RoomManager
-from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
-from call_manager.proposal_assist.lifecycle import LIFECYCLE
+from grant_lab.proposal_assist.collab import protocol as P
+from grant_lab.proposal_assist.collab import room as room_module
+from grant_lab.proposal_assist.collab.room import ClientState, RoomManager
+from grant_lab.proposal_assist.drafting.contract import WorkspaceRetired
+from grant_lab.proposal_assist.lifecycle import LIFECYCLE
 
 
 @pytest.fixture

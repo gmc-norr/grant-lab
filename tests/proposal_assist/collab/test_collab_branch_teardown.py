@@ -9,7 +9,7 @@ import uuid
 
 import pytest
 
-from call_manager.proposal_assist.collab.room import MANAGER, WS_DOCUMENT_REPLACED, ClientState
+from grant_lab.proposal_assist.collab.room import MANAGER, WS_DOCUMENT_REPLACED, ClientState
 from tests.proposal_assist.collab.test_collab_room import FakeClient
 
 

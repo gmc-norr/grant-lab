@@ -12,11 +12,11 @@ import hashlib
 import subprocess
 from datetime import UTC, datetime
 
-from call_manager.db.models import ClaimAnalysisJob, User, Workspace
-from call_manager.proposal_assist.analysis.reconcile import reconcile_analysis_coverage
-from call_manager.proposal_assist.citations.gitio import _git_env, current_head
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.paths import workspace_repo_dir
+from grant_lab.db.models import ClaimAnalysisJob, User, Workspace
+from grant_lab.proposal_assist.analysis.reconcile import reconcile_analysis_coverage
+from grant_lab.proposal_assist.citations.gitio import _git_env, current_head
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.paths import workspace_repo_dir
 
 # Empty preamble (section 0 is "") + two non-empty ## sections.
 DOC = "## Alpha\nAlpha makes a factual claim.\n## Beta\nBeta makes another claim.\n"

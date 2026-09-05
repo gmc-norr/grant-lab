@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     Call,
     CallDecision,
     CallRanking,
@@ -28,7 +28,7 @@ from call_manager.db.models import (
     Source,
     User,
 )
-from call_manager.main import create_app
+from grant_lab.main import create_app
 
 
 def _app(monkeypatch, pg_url):

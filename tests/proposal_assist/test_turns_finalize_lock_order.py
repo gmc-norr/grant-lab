@@ -21,8 +21,8 @@ import re
 import pytest
 from sqlalchemy import event
 
-from call_manager.proposal_assist.drafting.contract import AssistantTextEvent, TurnDoneEvent
-from call_manager.proposal_assist.turns.processor import process_turn_once
+from grant_lab.proposal_assist.drafting.contract import AssistantTextEvent, TurnDoneEvent
+from grant_lab.proposal_assist.turns.processor import process_turn_once
 from tests.proposal_assist.test_turns_processor import _build_controller_and_submit
 
 _WS_LOCK = re.compile(r"SELECT workspaces\.id\s+FROM workspaces\s+WHERE .*FOR NO KEY UPDATE", re.S)

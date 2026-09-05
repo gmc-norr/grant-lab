@@ -5,8 +5,8 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 
-from call_manager.sources.types import AdapterError
-from call_manager.sources.vinnova import VinnovaAdapter
+from grant_lab.sources.types import AdapterError
+from grant_lab.sources.vinnova import VinnovaAdapter
 
 _STOCKHOLM = ZoneInfo("Europe/Stockholm")
 

@@ -1,7 +1,7 @@
 import pytest
 from fastapi import FastAPI, HTTPException, Request
 
-from call_manager.web.client_ip import MAX_EMAIL_LEN, client_ip, email_fingerprint
+from grant_lab.web.client_ip import MAX_EMAIL_LEN, client_ip, email_fingerprint
 
 
 def _req(*, headers=None, client=("203.0.113.5", 1234), trusted_proxy=False, hops=1):

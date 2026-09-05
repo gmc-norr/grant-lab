@@ -38,9 +38,9 @@ def test_future_annotations_are_allowed():
 
 def test_the_ports_package_is_allowed():
     src = (
-        "from call_manager.proposal_assist.ports import Ports\n"
-        "from call_manager.proposal_assist.ports.effects import SubmitScorecard\n"
-        "from call_manager.proposal_assist.ports.errors import EffectRejected\n"
+        "from grant_lab.proposal_assist.ports import Ports\n"
+        "from grant_lab.proposal_assist.ports.effects import SubmitScorecard\n"
+        "from grant_lab.proposal_assist.ports.errors import EffectRejected\n"
     )
     assert _check(src) == []
 
@@ -53,13 +53,13 @@ def test_sqlalchemy_is_rejected():
 
 
 def test_the_models_module_is_rejected():
-    assert len(_check("from call_manager.db.models import Workspace\n")) == 1
+    assert len(_check("from grant_lab.db.models import Workspace\n")) == 1
 
 
 def test_the_port_implementations_are_rejected():
     """The whole point of the split: a tool may name the contract, never the
     implementation that owns a session."""
-    src = "from call_manager.proposal_assist.port_impl.effects import SqlEffects\n"
+    src = "from grant_lab.proposal_assist.port_impl.effects import SqlEffects\n"
     assert len(_check(src)) == 1
 
 
@@ -67,19 +67,19 @@ def test_a_plausible_but_unapproved_internal_helper_is_rejected():
     """THE DECISIVE CASE (spec 9). `editing.sectionizer` contains no SQLAlchemy in
     its own module, so a forbidden-name implementation would wave it through — and
     a tool that can reach arbitrary project helpers can reach effectful ones."""
-    src = "from call_manager.proposal_assist.editing.sectionizer import split_sections\n"
+    src = "from grant_lab.proposal_assist.editing.sectionizer import split_sections\n"
     violations = _check(src)
     assert len(violations) == 1
     assert "sectionizer" in violations[0]
 
 
 def test_a_sibling_tool_module_is_rejected():
-    src = "from call_manager.proposal_assist.tools.citations import _read_proposal\n"
+    src = "from grant_lab.proposal_assist.tools.citations import _read_proposal\n"
     assert len(_check(src)) == 1
 
 
 def test_plain_import_of_a_project_module_is_rejected():
-    assert len(_check("import call_manager.proposal_assist.collab.canonical\n")) == 1
+    assert len(_check("import grant_lab.proposal_assist.collab.canonical\n")) == 1
 
 
 def test_a_third_party_package_is_rejected():
@@ -122,7 +122,7 @@ def test_a_violation_names_the_file_and_what_it_imported():
 def test_every_violation_is_reported_not_just_the_first():
     src = (
         "from sqlalchemy import select\n"
-        "from call_manager.db.models import Workspace\n"
+        "from grant_lab.db.models import Workspace\n"
         "import httpx\n"
     )
     assert len(_check(src)) == 3
@@ -133,7 +133,7 @@ def test_an_import_inside_a_function_is_still_checked():
     checker that only walked module-level nodes would miss exactly that."""
     src = (
         "def f():\n"
-        "    from call_manager.proposal_assist.proposals.proposing import propose\n"
+        "    from grant_lab.proposal_assist.proposals.proposing import propose\n"
         "    return propose\n"
     )
     assert len(_check(src)) == 1
@@ -379,36 +379,36 @@ def test_the_composition_root_rule_rejects_models_even_under_type_checking():
     src = (
         "from typing import TYPE_CHECKING\n"
         "if TYPE_CHECKING:\n"
-        "    from call_manager.db.models import Workspace\n"
+        "    from grant_lab.db.models import Workspace\n"
     )
     assert len(check_composition_root(src, path="registry.py")) == 1
 
 
 def test_the_composition_root_rule_sees_models_imported_as_a_submodule():
     """The most natural spelling of the forbidden import — the one the codebase
-    itself writes, at `src/call_manager/db/__init__.py:7`.
+    itself writes, at `src/grant_lab/db/__init__.py:7`.
 
     This one is caught by `node.module` alone, because the ban is on the PACKAGE and
-    `node.module` here IS `call_manager.db`. It pins the spelling, not the alias
+    `node.module` here IS `grant_lab.db`. It pins the spelling, not the alias
     join; `test_the_composition_root_rule_rejects_the_db_package_itself` is what
     proves that."""
-    plain = "from call_manager.db import models\n"
+    plain = "from grant_lab.db import models\n"
     assert len(check_composition_root(plain, path="registry.py")) == 1
-    aliased = "from call_manager.db import models as m\n"
+    aliased = "from grant_lab.db import models as m\n"
     assert len(check_composition_root(aliased, path="registry.py")) == 1
 
 
 def test_the_composition_root_rule_rejects_the_db_package_itself():
-    """The ban is on the PACKAGE. `src/call_manager/db/__init__.py:7` re-exports
+    """The ban is on the PACKAGE. `src/grant_lab/db/__init__.py:7` re-exports
     models as a side effect its own comment explains, so importing the package hands
     you `db.models.Workspace` without naming the models module at all.
 
     The FIRST assertion is the only thing in this file that proves `_imported_names`:
-    in `from call_manager import db` the package arrives as an ALIAS, so `node.module`
-    is just `call_manager` and reading it alone misses this entirely. The second
+    in `from grant_lab import db` the package arrives as an ALIAS, so `node.module`
+    is just `grant_lab` and reading it alone misses this entirely. The second
     assertion is an `ast.Import`, where the dotted name is already on the alias."""
-    assert len(check_composition_root("from call_manager import db\n", path="registry.py")) == 1
-    assert len(check_composition_root("import call_manager.db\n", path="registry.py")) == 1
+    assert len(check_composition_root("from grant_lab import db\n", path="registry.py")) == 1
+    assert len(check_composition_root("import grant_lab.db\n", path="registry.py")) == 1
 
 
 def test_the_composition_root_rule_rejects_a_counterfeit_type_checking_guard():

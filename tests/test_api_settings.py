@@ -36,7 +36,7 @@ def test_settings_get_member_403(monkeypatch, pg_url, tmp_path, pg_session_facto
 
 
 def test_settings_patch_owner_updates(monkeypatch, pg_url, tmp_path, pg_session_factory):
-    from call_manager.db.models import Workspace
+    from grant_lab.db.models import Workspace
 
     app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
     ws_id, owner_id, _, _ = _setup(pg_session_factory)
@@ -133,7 +133,7 @@ def _add_user(pg_session_factory, email):
 
 
 def test_members_add_owner_201_and_event(monkeypatch, pg_url, tmp_path, pg_session_factory):
-    from call_manager.db.models import WorkspaceEvent, WorkspaceViewer
+    from grant_lab.db.models import WorkspaceEvent, WorkspaceViewer
 
     app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
     ws_id, owner_id, _, _ = _setup(pg_session_factory)
@@ -203,7 +203,7 @@ def test_members_add_non_owner_403(monkeypatch, pg_url, tmp_path, pg_session_fac
 
 
 def test_members_delete_owner_204_and_event(monkeypatch, pg_url, tmp_path, pg_session_factory):
-    from call_manager.db.models import WorkspaceEvent, WorkspaceViewer
+    from grant_lab.db.models import WorkspaceEvent, WorkspaceViewer
 
     app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
     ws_id, owner_id, member_id, _ = _setup(pg_session_factory)
@@ -279,7 +279,7 @@ def test_add_member_no_op_paths_add_no_rows(monkeypatch, pg_url, tmp_path, pg_se
     "leaves no viewer" is unsatisfiable. If someone later adds a write above
     those returns, these counts move and this test says so.
     """
-    from call_manager.db.models import WorkspaceEvent, WorkspaceViewer
+    from grant_lab.db.models import WorkspaceEvent, WorkspaceViewer
 
     app = build_app(monkeypatch, pg_url, tmp_path, pg_session_factory)
     with pg_session_factory() as s:

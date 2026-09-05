@@ -1,6 +1,6 @@
 import pytest
 
-from call_manager.proposal_assist.collab.room import MANAGER
+from grant_lab.proposal_assist.collab.room import MANAGER
 
 
 @pytest.fixture(autouse=True)

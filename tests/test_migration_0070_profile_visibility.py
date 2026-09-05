@@ -29,9 +29,9 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
 from alembic import command
-from call_manager.auth.session_cookie import SessionSigner
-from call_manager.db.models import Profile, User
-from call_manager.main import create_app
+from grant_lab.auth.session_cookie import SessionSigner
+from grant_lab.db.models import Profile, User
+from grant_lab.main import create_app
 
 
 def _cfg(pg_url: str) -> Config:

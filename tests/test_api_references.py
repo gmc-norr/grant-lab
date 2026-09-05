@@ -4,8 +4,8 @@ from io import BytesIO
 
 from sqlalchemy import func, select
 
-from call_manager.db.models import Reference, WorkspaceEvent
-from call_manager.proposal_assist.references.storage import ReferenceStorage
+from grant_lab.db.models import Reference, WorkspaceEvent
+from grant_lab.proposal_assist.references.storage import ReferenceStorage
 from tests.proposal_assist._refs_helpers import (
     FakeEmbedClient,
     add_member,
@@ -129,8 +129,8 @@ def test_api_upload_dragdrop_dedup(monkeypatch, pg_url, tmp_path, pg_session_fac
 def test_api_upload_acquires_slot_before_reading(monkeypatch, pg_url, tmp_path, pg_session_factory):
     """Over-capacity upload returns 429 WITHOUT buffering the file: the limiter
     slot is acquired before _read_capped runs (parity with the Jinja path)."""
-    import call_manager.web.api.references as refmod
-    from call_manager.proposal_assist.references.admission import IngestLimiter
+    import grant_lab.web.api.references as refmod
+    from grant_lab.proposal_assist.references.admission import IngestLimiter
 
     app = _app(monkeypatch, pg_url, tmp_path, pg_session_factory)
     _, ws_id, owner_id, _, _ = _setup(pg_session_factory, tmp_path)
@@ -178,7 +178,7 @@ def test_api_fetch_success_audits(monkeypatch, pg_url, tmp_path, pg_session_fact
         return pdf, "fetched.pdf", "application/pdf", {"source": "crossref"}
 
     monkeypatch.setattr(
-        "call_manager.proposal_assist.references.dispatcher.dispatch_fetch", _fake_dispatch
+        "grant_lab.proposal_assist.references.dispatcher.dispatch_fetch", _fake_dispatch
     )
     r = authed_client(app, user_id=owner_id).post(
         f"/api/workspaces/{ws_id}/references/fetch",
@@ -398,7 +398,7 @@ def test_api_serve_reference_raw_missing_bytes_404(
 ):
     import uuid
 
-    from call_manager.proposal_assist.references.ingest import suffix_for_mime
+    from grant_lab.proposal_assist.references.ingest import suffix_for_mime
 
     app = _app(monkeypatch, pg_url, tmp_path, pg_session_factory)
     storage, ws_id, _, member_id, _ = _setup(pg_session_factory, tmp_path)

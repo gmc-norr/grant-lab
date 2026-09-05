@@ -2,7 +2,7 @@ import json
 
 import httpx
 
-from call_manager.ranking.ollama_client import OllamaClient
+from grant_lab.ranking.ollama_client import OllamaClient
 
 
 def test_logprobs_flags_flow_into_payload():

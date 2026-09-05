@@ -5,12 +5,12 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
-from call_manager.db.models import Reference
-from call_manager.proposal_assist.references import ingest as ingest_mod
-from call_manager.proposal_assist.references.embed import FakeEmbedder
-from call_manager.proposal_assist.references.extract import ExtractError
-from call_manager.proposal_assist.references.ingest import ingest_bytes
-from call_manager.proposal_assist.references.storage import ReferenceStorage
+from grant_lab.db.models import Reference
+from grant_lab.proposal_assist.references import ingest as ingest_mod
+from grant_lab.proposal_assist.references.embed import FakeEmbedder
+from grant_lab.proposal_assist.references.extract import ExtractError
+from grant_lab.proposal_assist.references.ingest import ingest_bytes
+from grant_lab.proposal_assist.references.storage import ReferenceStorage
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 

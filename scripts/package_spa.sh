@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Copy a built SPA into the directory FastAPI serves under SPA_MODE=prod.
 #
-# SPA_DIR is src/call_manager/web/spa (web/spa_serving.py:12). `vite build`
+# SPA_DIR is src/grant_lab/web/spa (web/spa_serving.py:12). `vite build`
 # writes to frontend/dist and NOTHING copies it across — so a smoke test run
 # straight after a build serves the PREVIOUS bundle. That is how a match
 # deployment ships a full-edition cockpit with every gate green.
@@ -18,12 +18,12 @@
 #
 # THIS IS NOW THE ONLY WRITER OF THE SERVED DIRECTORY, and that is load-bearing.
 # There used to be two others, and neither ran a gate:
-#   1. .github/workflows/ci.yml — `rm -rf src/call_manager/web/spa` + `docker cp`
+#   1. .github/workflows/ci.yml — `rm -rf src/grant_lab/web/spa` + `docker cp`
 #      of the container build, straight in. frontend/Dockerfile built the FULL
 #      edition unconditionally, so the WHEEL always shipped a full SPA, un-gated
 #      and with no edition.txt.
 #   2. scripts/collab_e2e_run.sh — under E2E_SPA_MODE=prod, `pnpm build` (full)
-#      then `rsync -a --delete frontend/dist/ src/call_manager/web/spa/`. The
+#      then `rsync -a --delete frontend/dist/ src/grant_lab/web/spa/`. The
 #      --delete removed the edition.txt a previous `pnpm package:match` had left,
 #      so a local e2e run downgraded a match deployment to full and erased the
 #      evidence.
@@ -45,7 +45,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$ROOT/frontend/dist"
-SPA="$ROOT/src/call_manager/web/spa"
+SPA="$ROOT/src/grant_lab/web/spa"
 
 # ROOT is derived from BASH_SOURCE, so a symlinked scripts/ dir resolves it to
 # the wrong tree. Cheap positive identity check before anything destructive.
@@ -97,4 +97,4 @@ cp -R "$DIST"/. "$SPA"/
 rm -f "$SPA/module-manifest.json"
 printf 'edition=%s\npackaged=%s\n' "$EDITION" "$(date -Is)" > "$SPA/edition.txt"
 
-echo "packaged $(du -sb "$SPA" | cut -f1) bytes into src/call_manager/web/spa (edition=$EDITION, from the bundle)"
+echo "packaged $(du -sb "$SPA" | cut -f1) bytes into src/grant_lab/web/spa (edition=$EDITION, from the bundle)"

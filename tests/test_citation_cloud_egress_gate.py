@@ -15,8 +15,8 @@ Two layers, because one cannot cover the other's ground:
 
 import pytest
 
-from call_manager.config import Settings
-from call_manager.proposal_assist.citations.llm import CitationLLMConfigError, build_citation_llm
+from grant_lab.config import Settings
+from grant_lab.proposal_assist.citations.llm import CitationLLMConfigError, build_citation_llm
 
 
 def _settings(**over):
@@ -69,26 +69,26 @@ def test_the_default_on_prem_provider_is_untouched_by_the_flag():
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from call_manager.db.models import (  # noqa: E402
+from grant_lab.db.models import (  # noqa: E402
     Reference,
     ReferenceChunk,
     User,
     Workspace,
     WorkspaceEvent,
 )
-from call_manager.main import create_app  # noqa: E402
-from call_manager.proposal_assist.citations.audit import (  # noqa: E402
+from grant_lab.main import create_app  # noqa: E402
+from grant_lab.proposal_assist.citations.audit import (  # noqa: E402
     chunk_content_sha,
     claim_context_sha,
 )
-from call_manager.proposal_assist.citations.ledger import (  # noqa: E402
+from grant_lab.proposal_assist.citations.ledger import (  # noqa: E402
     append_evidence,
     build_evidence_row,
     dump_ledger,
     empty_ledger,
 )
-from call_manager.proposal_assist.citations.markers import build_marker  # noqa: E402
-from call_manager.proposal_assist.paths import workspace_repo_dir  # noqa: E402
+from grant_lab.proposal_assist.citations.markers import build_marker  # noqa: E402
+from grant_lab.proposal_assist.paths import workspace_repo_dir  # noqa: E402
 
 CHUNK_TEXT = "Adjuvant therapy reduces recurrence by 30% in the treated cohort."
 EV_ID = "ev-aaaaaaaaaaaa"
@@ -129,7 +129,7 @@ def _record_egress(monkeypatch):
         sent.append(messages)
         raise RuntimeError("egress attempted")
 
-    from call_manager.ranking.anthropic_client import AnthropicClient
+    from grant_lab.ranking.anthropic_client import AnthropicClient
 
     monkeypatch.setattr(AnthropicClient, "chat", fake_chat)
     return sent

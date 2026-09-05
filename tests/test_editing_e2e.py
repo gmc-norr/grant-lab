@@ -9,21 +9,21 @@ below is recomputed via split_sections on the LIVE file at that step; job,
 annotation and provenance assertions are exact (counts + statuses + shas).
 """
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     ArtifactVersion,
     ClaimAnalysisJob,
     UserClaimAnnotation,
     Workspace,
     WorkspaceEvent,
 )
-from call_manager.proposal_assist.analysis.insert import insert_from_annotation
-from call_manager.proposal_assist.analysis.reconcile import reconcile_analysis_coverage
-from call_manager.proposal_assist.citations.audit import validate_citations_deterministic
-from call_manager.proposal_assist.citations.gitio import current_head
-from call_manager.proposal_assist.citations.ledger import load_ledger
-from call_manager.proposal_assist.editing.save import save_section
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
+from grant_lab.proposal_assist.analysis.insert import insert_from_annotation
+from grant_lab.proposal_assist.analysis.reconcile import reconcile_analysis_coverage
+from grant_lab.proposal_assist.citations.audit import validate_citations_deterministic
+from grant_lab.proposal_assist.citations.gitio import current_head
+from grant_lab.proposal_assist.citations.ledger import load_ledger
+from grant_lab.proposal_assist.editing.save import save_section
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.ports.stamp import stamp_for_workspace
 from tests.test_analysis_pipeline import (
     FakeCitationService,
     _drain,

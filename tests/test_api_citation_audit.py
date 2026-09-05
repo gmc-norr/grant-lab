@@ -1,9 +1,9 @@
 """JSON /api citation-audit endpoints (Cockpit Slice F)."""
 
-from call_manager.db.models import User, Workspace, WorkspaceViewer
-from call_manager.main import create_app
-from call_manager.proposal_assist.citations.ledger import dump_ledger, empty_ledger
-from call_manager.proposal_assist.paths import workspace_repo_dir
+from grant_lab.db.models import User, Workspace, WorkspaceViewer
+from grant_lab.main import create_app
+from grant_lab.proposal_assist.citations.ledger import dump_ledger, empty_ledger
+from grant_lab.proposal_assist.paths import workspace_repo_dir
 
 # The semantic/cap tests (added per the note below) import CitationLLMResult /
 # _StubCitationService themselves — keep this top import block F401-clean.
@@ -152,11 +152,11 @@ def test_deep_check_semantic_flags(
     monkeypatch, pg_url, pg_session_factory, tmp_path, test_client_factory
 ):
     """A judgeable citation with a contradicts stub produces a semantic issue."""
-    from call_manager.db.models import Reference, ReferenceChunk
-    from call_manager.proposal_assist.citations import CitationLLMResult
-    from call_manager.proposal_assist.citations.audit import chunk_content_sha, claim_context_sha
-    from call_manager.proposal_assist.citations.ledger import append_evidence, build_evidence_row
-    from call_manager.proposal_assist.citations.markers import build_marker
+    from grant_lab.db.models import Reference, ReferenceChunk
+    from grant_lab.proposal_assist.citations import CitationLLMResult
+    from grant_lab.proposal_assist.citations.audit import chunk_content_sha, claim_context_sha
+    from grant_lab.proposal_assist.citations.ledger import append_evidence, build_evidence_row
+    from grant_lab.proposal_assist.citations.markers import build_marker
 
     EMBED_DIM = 1024
     CHUNK_TEXT = (
@@ -264,7 +264,7 @@ def test_deep_check_cap_exceeded(
     monkeypatch, pg_url, pg_session_factory, tmp_path, test_client_factory
 ):
     """Seeding citation_llm_usage rows past the workspace cap makes cap_exceeded=True."""
-    from call_manager.proposal_assist.citations.usage import record_usage
+    from grant_lab.proposal_assist.citations.usage import record_usage
 
     app = _app(monkeypatch, pg_url, tmp_path)
     owner_id, _, ws_id = _seed(pg_session_factory)

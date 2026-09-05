@@ -3,9 +3,9 @@ import asyncio
 import pytest
 from sqlalchemy import select
 
-from call_manager.db.models import ChatTurn, TurnJob, WorkspaceEvent
-from call_manager.proposal_assist.turns.caps import TokenCapExceeded
-from call_manager.proposal_assist.turns.submit import submit_user_turn
+from grant_lab.db.models import ChatTurn, TurnJob, WorkspaceEvent
+from grant_lab.proposal_assist.turns.caps import TokenCapExceeded
+from grant_lab.proposal_assist.turns.submit import submit_user_turn
 from tests.proposal_assist.conftest import (
     make_chat_turn,
     make_user,
@@ -17,7 +17,7 @@ def test_submit_user_turn_writes_chat_turn_and_turn_job(
     pg_session_factory,
     _settings_env,
 ):
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
     with pg_session_factory() as s:
@@ -69,7 +69,7 @@ def test_submit_user_turn_raises_when_input_cap_exceeded(
     monkeypatch,
 ):
     monkeypatch.setenv("DAILY_TOKEN_CAP_INPUT", "100")
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
     with pg_session_factory() as s:
@@ -124,7 +124,7 @@ def test_submit_user_turn_accepts_null_submitter_for_system_initiated(
 ):
     """System-initiated turns (future auto-summarization, recovery)
     legitimately have no user actor — pass None."""
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
     with pg_session_factory() as s:
@@ -181,10 +181,10 @@ async def test_concurrent_submits_cannot_overshoot_cap(monkeypatch, pg_url, pg_s
     from concurrent.futures import ThreadPoolExecutor
     from datetime import UTC, datetime, timedelta
 
-    from call_manager.config import Settings
-    from call_manager.db.models import ChatTurn
-    from call_manager.proposal_assist.turns.caps import TokenCapExceeded
-    from call_manager.proposal_assist.turns.submit import submit_user_turn
+    from grant_lab.config import Settings
+    from grant_lab.db.models import ChatTurn
+    from grant_lab.proposal_assist.turns.caps import TokenCapExceeded
+    from grant_lab.proposal_assist.turns.submit import submit_user_turn
     from tests.proposal_assist.conftest import make_user, make_workspace
 
     monkeypatch.setenv("DATABASE_URL", pg_url)
@@ -255,9 +255,9 @@ def test_submit_rejected_on_soft_deleted_workspace(pg_session_factory, _settings
     import pytest
     from sqlalchemy import select
 
-    from call_manager.config import Settings
-    from call_manager.db.models import TurnJob, WorkspaceEvent
-    from call_manager.proposal_assist.turns.submit import submit_user_turn
+    from grant_lab.config import Settings
+    from grant_lab.db.models import TurnJob, WorkspaceEvent
+    from grant_lab.proposal_assist.turns.submit import submit_user_turn
     from tests.proposal_assist.conftest import make_user, make_workspace
 
     settings = Settings()
@@ -301,7 +301,7 @@ def test_submit_with_selection_block_pre_counts_its_chars(
     into the prompt; those chars must be folded into the token pre-count so a
     large selection can't escape the daily cap (it would otherwise be counted
     only post-call by the SDK's TurnDoneEvent)."""
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     settings = Settings()
     with pg_session_factory() as s:

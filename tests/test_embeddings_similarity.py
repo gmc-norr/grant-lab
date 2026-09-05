@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from types import SimpleNamespace
 
-from call_manager.embeddings.similarity import (
+from grant_lab.embeddings.similarity import (
     build_call_text,
     build_profile_text,
     cosine,

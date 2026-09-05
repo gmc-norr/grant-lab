@@ -11,7 +11,7 @@ import re
 
 import pytest
 
-from call_manager.proposal_assist.citations.ledger import (
+from grant_lab.proposal_assist.citations.ledger import (
     LEDGER_VERSION,
     append_evidence,
     build_evidence_row,

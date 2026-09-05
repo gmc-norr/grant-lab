@@ -13,8 +13,8 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import select
 
-from call_manager.db.models import Workspace
-from call_manager.proposal_assist.fencing import (
+from grant_lab.db.models import Workspace
+from grant_lab.proposal_assist.fencing import (
     WorkspaceGenerationStale,
     live_at_generation,
 )
@@ -125,7 +125,7 @@ def test_generation_stale_carries_both_generations():
 def test_generation_stale_is_not_a_workspace_deleted():
     """Distinct types: a caller must be able to tell 'your epoch ended' from
     'the workspace is gone' — they converge differently (spec 7)."""
-    from call_manager.proposal_assist.drafting.locking import WorkspaceDeleted
+    from grant_lab.proposal_assist.drafting.locking import WorkspaceDeleted
 
     exc = WorkspaceGenerationStale(uuid.uuid4(), expected=1, actual=2)
     assert not isinstance(exc, WorkspaceDeleted)
@@ -159,7 +159,7 @@ def test_the_retirement_predicate_and_the_fence_predicate_are_opposites(
     Importing a private helper is deliberate: this test exists to pin that
     private's contract against the public one.
     """
-    from call_manager.proposal_assist.jobs_retirement import _still_at_generation
+    from grant_lab.proposal_assist.jobs_retirement import _still_at_generation
 
     ws_id = _seed(pg_session_factory)
     with pg_session_factory() as s:

@@ -3,15 +3,15 @@ from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
 
 from alembic import context
-from call_manager.db.base import Base
-from call_manager.db.url import resolve_database_url
+from grant_lab.db.base import Base
+from grant_lab.db.url import resolve_database_url
 
 config = context.config
 if config.config_file_name is not None:
     # disable_existing_loggers=False is critical: the default (True) sets
     # `disabled=True` on every logger NOT named in the [loggers] section of
     # alembic.ini — silently turning off our app's own loggers (e.g.
-    # `call_manager.auth.email`) for the rest of the process. The damage
+    # `grant_lab.auth.email`) for the rest of the process. The damage
     # surfaces in tests as "the message was logged but caplog saw nothing"
     # because `Logger.disabled=True` short-circuits before any handler runs.
     fileConfig(config.config_file_name, disable_existing_loggers=False)
@@ -22,7 +22,7 @@ target_metadata = Base.metadata
 def _resolve_database_url() -> str:
     """Prefer an explicit URL injected via ``cfg.set_main_option(...)`` (the
     test fixture path); then ``DATABASE_URL`` in the environment; then the
-    app's own ``.env`` via ``Settings()`` (call_manager.db.url), so the README's
+    app's own ``.env`` via ``Settings()`` (grant_lab.db.url), so the README's
     ``uv run alembic upgrade head`` works with nothing exported. Resolved lazily
     so metadata-only commands (``alembic heads``, ``history``, ``branches``)
     don't require a database URL — only commands that actually run migrations

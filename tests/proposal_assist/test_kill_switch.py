@@ -3,7 +3,7 @@
 import pytest
 from sqlalchemy import select
 
-from call_manager.db.models import ChatTurn, TurnJob
+from grant_lab.db.models import ChatTurn, TurnJob
 
 
 @pytest.mark.asyncio
@@ -16,10 +16,10 @@ async def test_drain_tick_noops_when_kill_switch_off(
     re-enabling resumes work."""
     from datetime import UTC, datetime
 
-    from call_manager.proposal_assist.drafting.controller import WorkspaceController
-    from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
-    from call_manager.proposal_assist.drafting.registry import SubprocessRegistry
-    from call_manager.proposal_assist.turns.drain import drain_turn_queue_tick
+    from grant_lab.proposal_assist.drafting.controller import WorkspaceController
+    from grant_lab.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
+    from grant_lab.proposal_assist.drafting.registry import SubprocessRegistry
+    from grant_lab.proposal_assist.turns.drain import drain_turn_queue_tick
     from tests.proposal_assist.conftest import make_user, make_workspace
 
     adapter = FakeAgentAdapter()
@@ -69,9 +69,9 @@ def test_phase0_and_compaction_skip_when_disabled(monkeypatch):
     the user queue pause while extractors + compaction keep billing."""
     from unittest.mock import MagicMock
 
-    from call_manager.config import Settings
-    from call_manager.proposal_assist.drafting.factory import build_workspace_controller
-    from call_manager.scheduler import build_scheduler
+    from grant_lab.config import Settings
+    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
+    from grant_lab.scheduler import build_scheduler
 
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://x:y@127.0.0.1/z")
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
@@ -86,11 +86,11 @@ def test_phase0_and_compaction_skip_when_disabled(monkeypatch):
     phase0_calls: list = []
     compaction_calls: list = []
     monkeypatch.setattr(
-        "call_manager.scheduler.run_phase0_tick",
+        "grant_lab.scheduler.run_phase0_tick",
         lambda **kw: phase0_calls.append(kw),
     )
     monkeypatch.setattr(
-        "call_manager.proposal_assist.turns.compaction.run_compaction_tick",
+        "grant_lab.proposal_assist.turns.compaction.run_compaction_tick",
         lambda **kw: compaction_calls.append(kw),
     )
 
@@ -135,14 +135,14 @@ async def test_re_enable_drains_queued_backlog(pg_session_factory, _settings_env
     then with disabled=True (dispatches). Locks in re-enable resumption."""
     from datetime import UTC, datetime
 
-    from call_manager.proposal_assist.drafting.contract import (
+    from grant_lab.proposal_assist.drafting.contract import (
         AssistantTextEvent,
         TurnDoneEvent,
     )
-    from call_manager.proposal_assist.drafting.controller import WorkspaceController
-    from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
-    from call_manager.proposal_assist.drafting.registry import SubprocessRegistry
-    from call_manager.proposal_assist.turns.drain import drain_turn_queue_tick
+    from grant_lab.proposal_assist.drafting.controller import WorkspaceController
+    from grant_lab.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
+    from grant_lab.proposal_assist.drafting.registry import SubprocessRegistry
+    from grant_lab.proposal_assist.turns.drain import drain_turn_queue_tick
     from tests.proposal_assist.conftest import make_user, make_workspace
 
     adapter = FakeAgentAdapter()

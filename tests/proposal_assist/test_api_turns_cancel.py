@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 
-from call_manager.db.models import ChatTurn, TurnJob, WorkspaceEvent
+from grant_lab.db.models import ChatTurn, TurnJob, WorkspaceEvent
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 

@@ -1,11 +1,11 @@
 from datetime import UTC, datetime, timedelta
 
-from call_manager.digest.assemble import (
+from grant_lab.digest.assemble import (
     DigestCallEntry,
     DigestPayload,
     DigestProfileSection,
 )
-from call_manager.digest.render import build_subject, render_html, render_text
+from grant_lab.digest.render import build_subject, render_html, render_text
 
 
 def _payload():

@@ -7,10 +7,10 @@ import json
 
 import pytest
 
-from call_manager.proposal_assist.drafting.claude_adapter import (
+from grant_lab.proposal_assist.drafting.claude_adapter import (
     ClaudeAgentSDKAdapter,
 )
-from call_manager.proposal_assist.drafting.contract import AgentHandle
+from grant_lab.proposal_assist.drafting.contract import AgentHandle
 
 
 class _RecordingTransport:

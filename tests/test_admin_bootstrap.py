@@ -1,7 +1,7 @@
 import logging
 
-from call_manager.admin_bootstrap import bootstrap_admins
-from call_manager.db.models import User
+from grant_lab.admin_bootstrap import bootstrap_admins
+from grant_lab.db.models import User
 
 
 def test_creates_users_with_admin_flag(pg_session_factory):
@@ -38,7 +38,7 @@ def test_skips_email_outside_allowlist(pg_session_factory, caplog):
     """A typo or stale INITIAL_ADMIN_EMAIL pointing to a domain the app
     doesn't trust must not create an admin account. Silent creation is the
     exact failure mode the domain allowlist is there to prevent."""
-    with caplog.at_level(logging.WARNING, logger="call_manager.admin_bootstrap"):
+    with caplog.at_level(logging.WARNING, logger="grant_lab.admin_bootstrap"):
         bootstrap_admins(
             pg_session_factory,
             emails=["intruder@example.com"],
@@ -55,7 +55,7 @@ def test_skips_email_outside_allowlist(pg_session_factory, caplog):
 def test_skips_malformed_email(pg_session_factory, caplog):
     """An INITIAL_ADMIN_EMAIL without an @ must not persist a broken
     users row that no one can log in to."""
-    with caplog.at_level(logging.WARNING, logger="call_manager.admin_bootstrap"):
+    with caplog.at_level(logging.WARNING, logger="grant_lab.admin_bootstrap"):
         bootstrap_admins(
             pg_session_factory,
             emails=["not-an-email"],

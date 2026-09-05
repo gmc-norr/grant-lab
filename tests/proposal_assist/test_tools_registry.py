@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.proposal_assist.tools.registry import (
+from grant_lab.proposal_assist.tools.registry import (
     ToolContext,
     build_proposal_assist_mcp_server,
 )
@@ -41,8 +41,8 @@ def _make_ctx():
     import uuid
     from pathlib import Path
 
-    from call_manager.proposal_assist.port_impl import build_ports
-    from call_manager.proposal_assist.tools.registry import ToolContext
+    from grant_lab.proposal_assist.port_impl import build_ports
+    from grant_lab.proposal_assist.tools.registry import ToolContext
 
     return ToolContext(
         workspace_id=uuid.uuid4(),
@@ -66,7 +66,7 @@ def test_collect_tools_returns_expected_named_tools():
     be collected here even though only their own background adapter allows them
     (the interactive default allowlist deliberately excludes them — see the
     adapter wiring test)."""
-    from call_manager.proposal_assist.tools.registry import _collect_tools
+    from grant_lab.proposal_assist.tools.registry import _collect_tools
 
     tools = _collect_tools(_make_ctx())
     names = {t.name for t in tools}
@@ -108,7 +108,7 @@ async def test_tool_handler_returns_mcp_envelope_shape():
     plain dict the *_impl function produces. Use read_proposal against
     a missing repo so the impl returns an error — we only care about
     envelope shape, not content."""
-    from call_manager.proposal_assist.tools.registry import _collect_tools
+    from grant_lab.proposal_assist.tools.registry import _collect_tools
 
     tools = _collect_tools(_make_ctx())
     read = next(t for t in tools if t.name == "read_proposal")
@@ -132,7 +132,7 @@ async def test_tool_handler_envelope_success_path():
     import uuid
     from pathlib import Path
 
-    from call_manager.proposal_assist.tools.registry import (
+    from grant_lab.proposal_assist.tools.registry import (
         ToolContext,
         _collect_tools,
     )
@@ -167,7 +167,7 @@ async def test_safe_tool_converts_unexpected_exception_to_envelope():
     """The catch-all wrapper turns an impl that raises an UNEXPECTED
     exception into an MCP error envelope instead of propagating it, and
     does not leak the exception message to the user-facing text."""
-    from call_manager.proposal_assist.tools.registry import _safe_tool
+    from grant_lab.proposal_assist.tools.registry import _safe_tool
 
     async def _boom(ctx):
         raise RuntimeError("super-secret quote text that must not leak")
@@ -195,7 +195,7 @@ async def test_list_citations_closure_returns_envelope():
     import uuid
     from pathlib import Path
 
-    from call_manager.proposal_assist.tools.registry import (
+    from grant_lab.proposal_assist.tools.registry import (
         ToolContext,
         _collect_tools,
     )
@@ -231,7 +231,7 @@ async def test_list_citations_closure_non_coercible_limit_returns_envelope():
     import uuid
     from pathlib import Path
 
-    from call_manager.proposal_assist.tools.registry import (
+    from grant_lab.proposal_assist.tools.registry import (
         ToolContext,
         _collect_tools,
     )
@@ -282,11 +282,11 @@ async def test_propose_edit_closure_returns_pending_envelope(tmp_path):
     import subprocess
     import uuid as _uuid
 
-    from call_manager.proposal_assist.port_impl import build_ports
-    from call_manager.proposal_assist.tools.proposal import (
+    from grant_lab.proposal_assist.port_impl import build_ports
+    from grant_lab.proposal_assist.tools.proposal import (
         PROPOSAL_FILENAME,
     )
-    from call_manager.proposal_assist.tools.registry import (
+    from grant_lab.proposal_assist.tools.registry import (
         ToolContext,
         _collect_tools,
     )
@@ -322,7 +322,7 @@ async def test_propose_edit_closure_returns_pending_envelope(tmp_path):
 async def test_propose_citation_non_integer_chunk_index_returns_envelope():
     """propose_citation with a non-integer chunk_index returns an MCP error
     envelope (is_error=True), not a raise — mirrors insert_citation's guard."""
-    from call_manager.proposal_assist.tools.registry import _collect_tools
+    from grant_lab.proposal_assist.tools.registry import _collect_tools
 
     tools = _collect_tools(_make_ctx())
     propose = next(t for t in tools if t.name == "propose_citation")
@@ -343,7 +343,7 @@ async def test_propose_citation_non_integer_chunk_index_returns_envelope():
 @pytest.mark.asyncio
 async def test_propose_citation_closure_returns_error_envelope_for_bad_ref():
     """A bad (non-uuid) reference_id returns the MCP error envelope, not a raise."""
-    from call_manager.proposal_assist.tools.registry import _collect_tools
+    from grant_lab.proposal_assist.tools.registry import _collect_tools
 
     tools = _collect_tools(_make_ctx())
     propose = next(t for t in tools if t.name == "propose_citation")
@@ -363,7 +363,7 @@ def test_spec_tools_registered():
     """SP2b-2b: read_spec + propose_spec_edit are collected by the registry
     (so they EXIST as MCP tools). Allowlisting them (claude_adapter) is a
     separate guard checked by the wiring test."""
-    from call_manager.proposal_assist.tools.registry import _collect_tools
+    from grant_lab.proposal_assist.tools.registry import _collect_tools
 
     names = {t.name for t in _collect_tools(_make_ctx())}
     assert "read_spec" in names
@@ -374,7 +374,7 @@ def test_no_tool_description_names_a_removed_mutating_tool():
     """The 6 direct-mutation tools were de-registered in SP2a-2; no surviving
     tool's model-visible description may still tell the agent to call them
     (it would route the agent to a now-nonexistent tool and waste a turn)."""
-    from call_manager.proposal_assist.tools.registry import _collect_tools
+    from grant_lab.proposal_assist.tools.registry import _collect_tools
 
     removed = {
         "edit_proposal",

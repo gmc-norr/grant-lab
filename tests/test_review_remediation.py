@@ -7,7 +7,7 @@ import asyncio
 import pytest
 from fastapi.testclient import TestClient
 
-from call_manager.main import create_app
+from grant_lab.main import create_app
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -52,8 +52,8 @@ def test_login_max_password_accepted_at_validation(pg_url, monkeypatch, pg_sessi
 
 def test_change_password_oversized_new_password_422(pg_url, monkeypatch):
     """POST /api/me/password with a 1025-char new_password must 422."""
-    from call_manager.auth.passwords import hash_password
-    from call_manager.db.models import User
+    from grant_lab.auth.passwords import hash_password
+    from grant_lab.db.models import User
 
     app = _app(monkeypatch, pg_url)
     with app.state.session_factory() as s:
@@ -73,8 +73,8 @@ def test_change_password_oversized_new_password_422(pg_url, monkeypatch):
 
 def test_change_password_oversized_current_password_422(pg_url, monkeypatch):
     """POST /api/me/password with a 1025-char current_password must 422."""
-    from call_manager.auth.passwords import hash_password
-    from call_manager.db.models import User
+    from grant_lab.auth.passwords import hash_password
+    from grant_lab.db.models import User
 
     app = _app(monkeypatch, pg_url)
     with app.state.session_factory() as s:
@@ -99,7 +99,7 @@ def test_change_password_oversized_current_password_422(pg_url, monkeypatch):
 
 def test_verify_password_returns_tuple():
     """verify_password now returns (bool, bool)."""
-    from call_manager.auth.passwords import hash_password, verify_password
+    from grant_lab.auth.passwords import hash_password, verify_password
 
     h = hash_password("correct horse battery")
     ok, needs_rehash = verify_password(h, "correct horse battery")
@@ -108,7 +108,7 @@ def test_verify_password_returns_tuple():
 
 
 def test_verify_password_wrong_returns_false_false():
-    from call_manager.auth.passwords import hash_password, verify_password
+    from grant_lab.auth.passwords import hash_password, verify_password
 
     h = hash_password("correct horse battery")
     ok, needs_rehash = verify_password(h, "wrong-password-long")
@@ -117,7 +117,7 @@ def test_verify_password_wrong_returns_false_false():
 
 
 def test_verify_password_none_returns_false_false():
-    from call_manager.auth.passwords import verify_password
+    from grant_lab.auth.passwords import verify_password
 
     ok, needs_rehash = verify_password(None, "anything-long-enough")
     assert ok is False
@@ -128,9 +128,9 @@ def test_login_rehashes_on_param_upgrade(pg_url, monkeypatch, pg_session_factory
     """When verify_password signals needs_rehash=True, login persists a new hash."""
     from unittest.mock import patch
 
-    import call_manager.web.api.auth as apiauth
-    from call_manager.auth.passwords import hash_password
-    from call_manager.db.models import User
+    import grant_lab.web.api.auth as apiauth
+    from grant_lab.auth.passwords import hash_password
+    from grant_lab.db.models import User
 
     app = _app(monkeypatch, pg_url)
     original_hash = hash_password("correct-horse-1")
@@ -172,7 +172,7 @@ def test_connect_google_off_domain_rejected(pg_url, monkeypatch, pg_session_fact
     from joserfc.jwk import RSAKey
     from joserfc.jwt import JWTClaimsRegistry
 
-    from call_manager.db.models import User
+    from grant_lab.db.models import User
 
     _KEY = RSAKey.generate_key(2048, {"kid": "review-remediation"})
 
@@ -278,7 +278,7 @@ def test_413_body_cap_has_nosniff_header(pg_url, monkeypatch, pg_session_factory
 
 def test_duplicate_distinct_content_length_rejected():
     """Two DIFFERENT Content-Length values → 400."""
-    from call_manager.web.middleware import MaxBodySizeMiddleware
+    from grant_lab.web.middleware import MaxBodySizeMiddleware
 
     async def _run():
         received = []
@@ -318,7 +318,7 @@ def test_duplicate_distinct_content_length_rejected():
 
 def test_duplicate_identical_content_length_passes():
     """Two IDENTICAL Content-Length values → passes through (RFC 7230 §3.3.2)."""
-    from call_manager.web.middleware import MaxBodySizeMiddleware
+    from grant_lab.web.middleware import MaxBodySizeMiddleware
 
     async def _run():
         received = []
@@ -369,7 +369,7 @@ def test_transport_configured_rejects_example_com_email_from(monkeypatch):
     monkeypatch.setenv("APP_BASE_URL", "https://app.umu.se")
     monkeypatch.setenv("RESEND_API_KEY", "re_live_key")
     # EMAIL_FROM left at default (no-reply@example.com) → must raise
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     with pytest.raises(ValueError, match="example.com"):
         Settings()
@@ -384,7 +384,7 @@ def test_prod_without_transport_allows_default_email_from(monkeypatch):
     monkeypatch.setenv("APP_BASE_URL", "https://app.umu.se")
     monkeypatch.delenv("RESEND_API_KEY", raising=False)
     monkeypatch.delenv("SMTP_HOST", raising=False)
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     s = Settings()
     assert "example.com" in s.email_from
@@ -397,7 +397,7 @@ def test_https_real_email_from_ok(monkeypatch):
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "https://app.umu.se")
     monkeypatch.setenv("EMAIL_FROM", "noreply@umu.se")
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     s = Settings()
     assert s.email_from == "noreply@umu.se"
@@ -409,7 +409,7 @@ def test_http_default_email_from_ok(monkeypatch):
     monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     s = Settings()
     assert "example.com" in s.email_from
@@ -426,7 +426,7 @@ def test_create_app_rejects_mismatched_embedding_dim(monkeypatch):
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
     monkeypatch.setenv("EMBEDDING_DIM", "768")
-    from call_manager.main import create_app
+    from grant_lab.main import create_app
 
     with pytest.raises(RuntimeError, match="EMBEDDING_DIM"):
         create_app()
@@ -439,7 +439,7 @@ def test_create_app_accepts_default_embedding_dim(monkeypatch):
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
     monkeypatch.delenv("EMBEDDING_DIM", raising=False)
-    from call_manager.main import create_app
+    from grant_lab.main import create_app
 
     app = create_app()
     try:

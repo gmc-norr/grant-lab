@@ -2,10 +2,10 @@ import uuid
 
 import pytest
 
-from call_manager.proposal_assist.collab import protocol as P
-from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
-from call_manager.proposal_assist.collab.room import MANAGER, ClientState
-from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
+from grant_lab.proposal_assist.collab import protocol as P
+from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm
+from grant_lab.proposal_assist.collab.room import MANAGER, ClientState
+from grant_lab.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
 from tests.proposal_assist.collab.test_collab_room import FakeClient
 
 
@@ -63,13 +63,13 @@ async def test_kernel_accept_aborts_on_tombstoned_room(pg_session_factory, tmp_p
     # untested.
     from pathlib import Path
 
-    from call_manager.db.models import ProposedChange, User
-    from call_manager.proposal_assist.collab import state
-    from call_manager.proposal_assist.collab.hydrate import load_or_hydrate
-    from call_manager.proposal_assist.collab.markdown_bridge import pm_to_markdown
-    from call_manager.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
-    from call_manager.proposal_assist.editing.sectionizer import split_sections
-    from call_manager.proposal_assist.proposals.kernel_accept import (
+    from grant_lab.db.models import ProposedChange, User
+    from grant_lab.proposal_assist.collab import state
+    from grant_lab.proposal_assist.collab.hydrate import load_or_hydrate
+    from grant_lab.proposal_assist.collab.markdown_bridge import pm_to_markdown
+    from grant_lab.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
+    from grant_lab.proposal_assist.editing.sectionizer import split_sections
+    from grant_lab.proposal_assist.proposals.kernel_accept import (
         RoomEvicted,
         accept_via_kernel,
     )

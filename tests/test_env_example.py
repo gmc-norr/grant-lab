@@ -14,7 +14,7 @@ import pathlib
 
 import pytest
 
-from call_manager.config import Settings
+from grant_lab.config import Settings
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 EXAMPLE = REPO / ".env.example"
@@ -89,4 +89,4 @@ def test_the_admin_password_prose_matches_the_code():
 
 def test_the_generator_never_imports_the_running_app():
     src = SCRIPT.read_text()
-    assert "call_manager.main" not in src
+    assert "grant_lab.main" not in src

@@ -10,7 +10,7 @@
 #                     waits for both ports; browser talks to :5173 under the
 #                     dev CSP's broad ws: token.
 #   prod (E2E_SPA_MODE=prod) — builds the SPA (`pnpm build`), syncs
-#                     frontend/dist/ -> src/call_manager/web/spa/ (gitignored),
+#                     frontend/dist/ -> src/grant_lab/web/spa/ (gitignored),
 #                     boots the seed with SPA_MODE=prod so uvicorn:8000 serves
 #                     the built bundle directly under the STRICT CSP (Task 10's
 #                     same-origin ws token derived from APP_BASE_URL) — the
@@ -98,24 +98,24 @@ done
 
 if [ "$E2E_SPA_MODE" = "prod" ]; then
   # Safety net BEFORE touching the tree: refuse to sync the built bundle into
-  # src/call_manager/web/spa/ unless it's gitignored (the trailing slash makes
+  # src/grant_lab/web/spa/ unless it's gitignored (the trailing slash makes
   # check-ignore evaluate the directory-only .gitignore pattern even before the
   # directory exists — without it, a nonexistent path spuriously reports "not
   # ignored"). If this ever fires, someone un-ignored the path — STOP, don't sync.
-  if ! git check-ignore -q "src/call_manager/web/spa/"; then
-    echo "[run] src/call_manager/web/spa/ is NOT gitignored — refusing to sync the" \
+  if ! git check-ignore -q "src/grant_lab/web/spa/"; then
+    echo "[run] src/grant_lab/web/spa/ is NOT gitignored — refusing to sync the" \
          "built bundle there (would risk committing it). Aborting."
     exit 1
   fi
   echo "[run] E2E_SPA_MODE=prod — building the SPA (pnpm build)…"
   ( cd frontend && pnpm build )
-  # Was `rsync -a --delete frontend/dist/ src/call_manager/web/spa/`. That wrote
+  # Was `rsync -a --delete frontend/dist/ src/grant_lab/web/spa/`. That wrote
   # the served tree with no bundle gate and no edition.txt — and --delete removed
   # the marker a previous `pnpm package:match` had left, so an e2e run silently
   # downgraded a match deployment to full with nothing to detect it afterwards.
   # package_spa.sh does the same copy, asks dist/module-manifest.json which
   # edition it actually is, and records the answer.
-  echo "[run] packaging frontend/dist/ -> src/call_manager/web/spa/ (gate + edition marker)…"
+  echo "[run] packaging frontend/dist/ -> src/grant_lab/web/spa/ (gate + edition marker)…"
   bash "$ROOT/scripts/package_spa.sh"
 fi
 

@@ -8,18 +8,18 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.config import Settings
-from call_manager.db.models import ProposedChange
-from call_manager.proposal_assist.editing.save import save_section
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.port_impl import build_ports
-from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
-from call_manager.proposal_assist.tools.proposal import (
+from grant_lab.config import Settings
+from grant_lab.db.models import ProposedChange
+from grant_lab.proposal_assist.editing.save import save_section
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.port_impl import build_ports
+from grant_lab.proposal_assist.ports.stamp import stamp_for_workspace
+from grant_lab.proposal_assist.tools.proposal import (
     PROPOSAL_FILENAME,
     propose_edit_impl,
     read_proposal_impl,
 )
-from call_manager.proposal_assist.tools.registry import ToolContext, snapshot_invocation
+from grant_lab.proposal_assist.tools.registry import ToolContext, snapshot_invocation
 from tests.proposal_assist.conftest import make_workspace
 
 
@@ -65,7 +65,7 @@ async def test_propose_edit_uses_read_time_base_not_live(
 
     # A human edits the SAME section after the read (HEAD + section sha move).
     with pg_session_factory() as s:
-        ws = s.get(__import__("call_manager.db.models", fromlist=["Workspace"]).Workspace, wsid)
+        ws = s.get(__import__("grant_lab.db.models", fromlist=["Workspace"]).Workspace, wsid)
         base_commit, base_section = (ctx.agent_view_head, read_time_section_sha)
         save_section(
             session=s,

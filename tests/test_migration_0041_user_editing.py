@@ -2,7 +2,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     ClaimAnalysisJob,
     ClaimClassification,
     User,

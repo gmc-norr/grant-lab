@@ -13,13 +13,13 @@ from datetime import UTC, datetime
 
 import pytest
 
-from call_manager.db.models import Workspace
-from call_manager.proposal_assist.drafting.locking import (
+from grant_lab.db.models import Workspace
+from grant_lab.proposal_assist.drafting.locking import (
     CommitMutexTimeout,
     WorkspaceDeleted,
     acquire_commit_mutex,
 )
-from call_manager.proposal_assist.fencing import acquire_commit_mutex_at_generation
+from grant_lab.proposal_assist.fencing import acquire_commit_mutex_at_generation
 from tests.proposal_assist.conftest import make_workspace
 
 
@@ -138,8 +138,8 @@ def test_save_section_refuses_a_deleted_workspace(pg_session_factory, tmp_path):
     """Representative service-level writer: raises before any git commit."""
     import subprocess
 
-    from call_manager.proposal_assist.editing.save import PROPOSAL_FILENAME, save_section
-    from call_manager.proposal_assist.ports.stamp import stamp_for_workspace
+    from grant_lab.proposal_assist.editing.save import PROPOSAL_FILENAME, save_section
+    from grant_lab.proposal_assist.ports.stamp import stamp_for_workspace
 
     md0 = "## Background\noriginal.\n"
     with pg_session_factory() as s:
@@ -189,8 +189,8 @@ def test_submit_user_turn_keeps_its_own_stronger_guard(pg_session_factory):
     """PER-SITE DECISION: submit already re-checks under a FOR UPDATE row lock and
     raises ValueError (mapped to 400). Pinned so a later 'uniformity' refactor
     doesn't silently change that route's status code."""
-    from call_manager.config import Settings
-    from call_manager.proposal_assist.turns.submit import submit_user_turn
+    from grant_lab.config import Settings
+    from grant_lab.proposal_assist.turns.submit import submit_user_turn
 
     with pg_session_factory() as s:
         ws = make_workspace(s)

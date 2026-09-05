@@ -2,8 +2,8 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, update
 
-from call_manager.db.models import Call, Profile, RankingJob, RankingJobStatus, Source
-from call_manager.ranking.backfill import BACKFILL_DAYS, backfill_profile
+from grant_lab.db.models import Call, Profile, RankingJob, RankingJobStatus, Source
+from grant_lab.ranking.backfill import BACKFILL_DAYS, backfill_profile
 
 
 def _seed_calls(s, ages_days):

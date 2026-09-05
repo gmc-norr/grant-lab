@@ -300,7 +300,7 @@ def test_a_fully_converted_site_is_measured_as_fenced():
     src = (
         pathlib.Path(__file__).parent / "fixtures" / "converted_site.py"
     ).read_text(encoding="utf-8")
-    path = "src/call_manager/proposal_assist/tools/scorecard.py"
+    path = "src/grant_lab/proposal_assist/tools/scorecard.py"
     assert find_fenced_tool_commits(src, path) == {
         ("tool_commit", path, "submit_scorecard_impl")
     }
@@ -318,7 +318,7 @@ def test_a_half_converted_site_is_not_fenced():
     src = (
         pathlib.Path(__file__).parent / "fixtures" / "half_converted_site.py"
     ).read_text(encoding="utf-8")
-    path = "src/call_manager/proposal_assist/tools/references.py"
+    path = "src/grant_lab/proposal_assist/tools/references.py"
     # The row still EXISTS — it is a write site either way.
     assert any(s.symbol == "fetch_reference_impl" for s in find_sites(src, path))
     # It is simply not fenced.
@@ -479,7 +479,7 @@ def test_an_aliased_sink_import_is_still_discovered():
     from tests.fencing.detectors import find_sites
 
     src = (
-        "from call_manager.proposal_assist.citations.gitio import "
+        "from grant_lab.proposal_assist.citations.gitio import "
         "write_and_commit_files as commit_files\n"
         "def f(repo):\n"
         "    return commit_files(repo, {}, 'm')\n"
@@ -504,7 +504,7 @@ def test_an_aliased_run_git_keeps_its_argv_rule():
     against "_run_git" — so aliased `run_git(['init'])` was wrongly a commit."""
     from tests.fencing.detectors import find_sites
 
-    head = "from call_manager.proposal_assist.phases.setup import _run_git as run_git\n"
+    head = "from grant_lab.proposal_assist.phases.setup import _run_git as run_git\n"
     commits = head + "def f(d):\n    run_git(['commit', '-q', '-m', 'x'], cwd=d)\n"
     inits = head + "def g(d):\n    run_git(['init', '-q'], cwd=d)\n"
     assert any(s.kind == "git_commit" for s in find_sites(commits, "x/s.py"))

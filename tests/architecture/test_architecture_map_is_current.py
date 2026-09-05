@@ -45,8 +45,8 @@ def test_the_generator_never_imports_the_application():
     where a reader most needs it.
     """
     src = SCRIPT.read_text()
-    assert "import call_manager" not in src
-    assert "from call_manager" not in src
+    assert "import grant_lab" not in src
+    assert "from grant_lab" not in src
 
 
 @pytest.mark.parametrize(

@@ -4,8 +4,8 @@ block instead of republishing the old branch's room."""
 
 import pytest
 
-from call_manager.proposal_assist.collab import hydrate, store
-from call_manager.proposal_assist.collab.hydrate import load_or_hydrate
+from grant_lab.proposal_assist.collab import hydrate, store
+from grant_lab.proposal_assist.collab.hydrate import load_or_hydrate
 from tests.proposal_assist.conftest import make_workspace, stamp_for
 
 
@@ -90,8 +90,8 @@ def test_a_stale_generation_is_refused_on_the_WARM_path_too(pg_session_factory, 
     # Consequence of moving the lock, and the behaviour §4.4 relies on: a connect
     # stamped before a switch wakes holding an old generation and is refused,
     # rather than being handed the pre-switch log.
-    from call_manager.proposal_assist.fencing import WorkspaceGenerationStale
-    from call_manager.workspaces import bump_lifecycle_generation
+    from grant_lab.proposal_assist.fencing import WorkspaceGenerationStale
+    from grant_lab.workspaces import bump_lifecycle_generation
 
     with pg_session_factory() as s:
         ws = make_workspace(s, title="w")

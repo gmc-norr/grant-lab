@@ -8,7 +8,7 @@ Patterns checked in order:
 
 import pytest
 
-from call_manager.proposal_assist.references.dispatcher import (
+from grant_lab.proposal_assist.references.dispatcher import (
     detect_source_type,
     dispatch_fetch,
 )

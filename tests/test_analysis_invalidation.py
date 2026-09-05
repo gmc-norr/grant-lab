@@ -14,7 +14,7 @@ import hashlib
 import json
 import subprocess
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     ClaimAnalysisJob,
     ClaimClassification,
     Reference,
@@ -23,14 +23,14 @@ from call_manager.db.models import (
     UserClaimAnnotation,
     Workspace,
 )
-from call_manager.proposal_assist.analysis.invalidation import (
+from grant_lab.proposal_assist.analysis.invalidation import (
     on_reference_text_ingested,
     on_reference_unavailable,
 )
-from call_manager.proposal_assist.citations.gitio import _git_env
-from call_manager.proposal_assist.editing.sectionizer import split_sections
-from call_manager.proposal_assist.paths import workspace_repo_dir
-from call_manager.proposal_assist.references.deletion import delete_or_tombstone_reference
+from grant_lab.proposal_assist.citations.gitio import _git_env
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.paths import workspace_repo_dir
+from grant_lab.proposal_assist.references.deletion import delete_or_tombstone_reference
 
 DOC = "# T\nintro\n## Body\nThis is a factual claim.\n"
 CLAIM_TEXT = "This is a factual claim"

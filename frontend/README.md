@@ -24,7 +24,7 @@ An unknown/typo path therefore still reaches **FastAPI's real 404** in dev.
 SPA_MODE=dev APP_BASE_URL=http://localhost:5173 \
   DATABASE_URL=postgresql+psycopg://... SESSION_SECRET=dev-secret-at-least-16-chars \
   ALLOWED_EMAIL_DOMAINS=umu.se \
-  uv run uvicorn call_manager.main:create_app --factory --reload --port 8000
+  uv run uvicorn grant_lab.main:create_app --factory --reload --port 8000
 
 # Terminal 2 — frontend:
 cd frontend && pnpm install --frozen-lockfile && pnpm run dev   # http://localhost:5173
@@ -43,7 +43,7 @@ The **authoritative** production build runs in the secretless container (Task
 pnpm run build    # tsc typecheck + vite build -> frontend/dist/
 ```
 
-The container copies `dist/` → `src/call_manager/web/spa/`, which FastAPI serves
+The container copies `dist/` → `src/grant_lab/web/spa/`, which FastAPI serves
 when `SPA_MODE=prod`.
 
 ## Tests

@@ -4,7 +4,7 @@ import pathlib
 
 import pycrdt
 
-from call_manager.proposal_assist.collab.yjs_bridge import (
+from grant_lab.proposal_assist.collab.yjs_bridge import (
     pm_json_to_ydoc,
     ydoc_to_pm_json,
 )

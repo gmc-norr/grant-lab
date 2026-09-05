@@ -1,6 +1,6 @@
 import pytest
 
-from call_manager.proposal_assist.citations.llm import (
+from grant_lab.proposal_assist.citations.llm import (
     CitationLLMConfigError,
     StructuredLLM,
     build_citation_llm,
@@ -48,7 +48,7 @@ def test_complete_json_sums_anthropic_cache_tokens():
 def test_build_citation_llm_anthropic_requires_key():
     import os
 
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     for k, v in {
         "DATABASE_URL": "postgresql://x",
@@ -67,7 +67,7 @@ def test_build_citation_llm_anthropic_requires_key():
 def test_build_citation_llm_rejects_unknown_provider():
     import os
 
-    from call_manager.config import Settings
+    from grant_lab.config import Settings
 
     for k, v in {
         "DATABASE_URL": "postgresql://x",
@@ -108,7 +108,7 @@ def test_complete_json_raises_on_invalid_json():
 
 
 def test_complete_json_raises_on_non_dict_json():
-    from call_manager.proposal_assist.citations.llm import CitationLLMOutputError
+    from grant_lab.proposal_assist.citations.llm import CitationLLMOutputError
 
     client = _FakeClient("[1, 2, 3]")
     with pytest.raises(CitationLLMOutputError):

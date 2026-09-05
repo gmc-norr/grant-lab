@@ -5,14 +5,14 @@ from unittest.mock import MagicMock
 
 from sqlalchemy import select
 
-from call_manager.db.models import Call, Profile, ProfileKind, Source, User
-from call_manager.embeddings.client import EmbedResult
-from call_manager.embeddings.refresh import (
+from grant_lab.db.models import Call, Profile, ProfileKind, Source, User
+from grant_lab.embeddings.client import EmbedResult
+from grant_lab.embeddings.refresh import (
     refresh_call_embedding,
     refresh_missing_embeddings_tick,
     refresh_profile_embedding,
 )
-from call_manager.ranking.ollama_client import LLMError
+from grant_lab.ranking.ollama_client import LLMError
 
 
 def _embed_result(vec: list[float]) -> EmbedResult:
@@ -89,7 +89,7 @@ def test_refresh_call_embedding_returns_false_on_llm_error(pg_session_factory, c
         s.commit()
     client = _fake_client(raises=LLMError("ollama down"))
 
-    logger_name = "call_manager.embeddings.refresh"
+    logger_name = "grant_lab.embeddings.refresh"
     with pg_session_factory() as s, caplog.at_level(logging.WARNING, logger=logger_name):
         ok = refresh_call_embedding(s, client, cid)
         s.commit()

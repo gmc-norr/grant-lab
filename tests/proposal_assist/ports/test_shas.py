@@ -6,7 +6,7 @@ docstring names `--output=proposal.md` as the value it must refuse.
 
 import pytest
 
-from call_manager.proposal_assist.ports.shas import is_sha, sha_error
+from grant_lab.proposal_assist.ports.shas import is_sha, sha_error
 
 
 @pytest.mark.parametrize(

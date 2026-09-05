@@ -13,11 +13,11 @@ import uuid
 
 import pytest
 
-from call_manager.proposal_assist.collab.room import MANAGER, ClientState, RoomManager
-from call_manager.proposal_assist.drafting.contract import WorkspaceRetired
-from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
-from call_manager.proposal_assist.drafting.registry import SubprocessRegistry
-from call_manager.proposal_assist.lifecycle import LIFECYCLE, WorkspaceLifecycle
+from grant_lab.proposal_assist.collab.room import MANAGER, ClientState, RoomManager
+from grant_lab.proposal_assist.drafting.contract import WorkspaceRetired
+from grant_lab.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
+from grant_lab.proposal_assist.drafting.registry import SubprocessRegistry
+from grant_lab.proposal_assist.lifecycle import LIFECYCLE, WorkspaceLifecycle
 
 
 @pytest.fixture

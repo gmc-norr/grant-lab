@@ -4,8 +4,8 @@ import uuid
 import pytest
 from pycrdt import Doc, Text
 
-from call_manager.proposal_assist.collab import protocol as P
-from call_manager.proposal_assist.collab.room import ClientState, Room, RoomManager
+from grant_lab.proposal_assist.collab import protocol as P
+from grant_lab.proposal_assist.collab.room import ClientState, Room, RoomManager
 
 
 @pytest.fixture
@@ -187,7 +187,7 @@ async def test_persist_failure_poisons_room_and_does_not_broadcast():
     async def persist_boom(user_id, update):
         raise RuntimeError("db down")
 
-    from call_manager.proposal_assist.collab.room import PersistError
+    from grant_lab.proposal_assist.collab.room import PersistError
 
     frame = _update_frame("doomed")
     with pytest.raises(PersistError):

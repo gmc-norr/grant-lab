@@ -10,13 +10,13 @@ exactly once per reset.
 import pytest
 from sqlalchemy import select
 
-from call_manager.db.models import ChatSummary, Workspace
-from call_manager.proposal_assist.drafting.contract import AssistantTextEvent, TurnDoneEvent
-from call_manager.proposal_assist.drafting.controller import WorkspaceController
-from call_manager.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
-from call_manager.proposal_assist.drafting.registry import SubprocessRegistry
-from call_manager.proposal_assist.turns.processor import _SUMMARY_PREAMBLE, _prepend_summary
-from call_manager.proposal_assist.turns.submit import submit_user_turn
+from grant_lab.db.models import ChatSummary, Workspace
+from grant_lab.proposal_assist.drafting.contract import AssistantTextEvent, TurnDoneEvent
+from grant_lab.proposal_assist.drafting.controller import WorkspaceController
+from grant_lab.proposal_assist.drafting.fake_adapter import FakeAgentAdapter
+from grant_lab.proposal_assist.drafting.registry import SubprocessRegistry
+from grant_lab.proposal_assist.turns.processor import _SUMMARY_PREAMBLE, _prepend_summary
+from grant_lab.proposal_assist.turns.submit import submit_user_turn
 from tests.proposal_assist.conftest import make_chat_turn, make_user, make_workspace
 
 
@@ -76,8 +76,8 @@ def _build_controller(pg_session_factory):
 
 @pytest.mark.asyncio
 async def test_summary_injected_on_cold_session(pg_session_factory, _settings_env):
-    from call_manager.config import Settings
-    from call_manager.proposal_assist.turns.processor import process_turn_once
+    from grant_lab.config import Settings
+    from grant_lab.proposal_assist.turns.processor import process_turn_once
 
     uid, wsid = _setup_workspace_with_summary(pg_session_factory, last_sdk_session_id=None)
     controller, adapter = _build_controller(pg_session_factory)
@@ -111,8 +111,8 @@ async def test_summary_injected_on_cold_session(pg_session_factory, _settings_en
 
 @pytest.mark.asyncio
 async def test_summary_not_injected_on_resumed_session(pg_session_factory, _settings_env):
-    from call_manager.config import Settings
-    from call_manager.proposal_assist.turns.processor import process_turn_once
+    from grant_lab.config import Settings
+    from grant_lab.proposal_assist.turns.processor import process_turn_once
 
     uid, wsid = _setup_workspace_with_summary(
         pg_session_factory, last_sdk_session_id="existing-session"

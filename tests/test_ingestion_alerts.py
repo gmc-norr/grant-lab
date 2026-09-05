@@ -1,5 +1,5 @@
-from call_manager.auth.email import EmailSendFailed, InMemoryEmailSender
-from call_manager.ingestion.alerts import ConsecutiveFailureTracker
+from grant_lab.auth.email import EmailSendFailed, InMemoryEmailSender
+from grant_lab.ingestion.alerts import ConsecutiveFailureTracker
 
 
 class _FailingSender:

@@ -1,4 +1,4 @@
-from call_manager.proposal_assist.references.kinds import ALLOWED_KINDS
+from grant_lab.proposal_assist.references.kinds import ALLOWED_KINDS
 
 
 def test_allowed_kinds_exact_set():

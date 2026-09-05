@@ -1,9 +1,9 @@
 import uuid
 
-from call_manager.proposal_assist.artifacts import Artifact, filename_for
-from call_manager.proposal_assist.collab import canonical, store
-from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
-from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
+from grant_lab.proposal_assist.artifacts import Artifact, filename_for
+from grant_lab.proposal_assist.collab import canonical, store
+from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm, pm_to_markdown
+from grant_lab.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
 from tests.proposal_assist.conftest import make_user, make_workspace
 
 
@@ -75,7 +75,7 @@ def test_hydrate_shares_the_canonicalizer():
     # Divergence guard: hydrate must use the SAME empty-doc canonicalizer, else
     # the read projection and the hydration seed drift and the false-stale bug
     # returns on the whitespace-HEAD path.
-    from call_manager.proposal_assist.collab import hydrate
+    from grant_lab.proposal_assist.collab import hydrate
 
     assert hydrate.markdown_to_pm_or_empty is canonical.markdown_to_pm_or_empty
     assert hydrate._EMPTY_DOC is canonical._EMPTY_DOC

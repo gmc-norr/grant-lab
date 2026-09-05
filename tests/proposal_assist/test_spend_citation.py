@@ -7,11 +7,11 @@ false. `record_usage` is the one writer, so it gains one insert.
 
 from sqlalchemy import select
 
-from call_manager.config import Settings
-from call_manager.db.models import CitationLlmUsage, LlmSpend, User, Workspace
-from call_manager.proposal_assist.citations.service import CitationLLMService
-from call_manager.proposal_assist.citations.usage import record_usage
-from call_manager.proposal_assist.spend import record_spend, sum_spend_today
+from grant_lab.config import Settings
+from grant_lab.db.models import CitationLlmUsage, LlmSpend, User, Workspace
+from grant_lab.proposal_assist.citations.service import CitationLLMService
+from grant_lab.proposal_assist.citations.usage import record_usage
+from grant_lab.proposal_assist.spend import record_spend, sum_spend_today
 
 
 def _ws(session):
@@ -64,7 +64,7 @@ def test_the_two_ledgers_cannot_drift_because_there_is_one_writer(pg_session_fac
     # writer for CitationLlmUsage ever appears, this count goes wrong.
     import inspect
 
-    from call_manager.proposal_assist.citations import usage as mod
+    from grant_lab.proposal_assist.citations import usage as mod
 
     src = inspect.getsource(mod)
     assert src.count("CitationLlmUsage(") == 1, "a second citation writer would drift"

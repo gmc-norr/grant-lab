@@ -1,4 +1,4 @@
-from call_manager.db.models import EvaluatorJob
+from grant_lab.db.models import EvaluatorJob
 from tests.proposal_assist.conftest import make_workspace
 
 

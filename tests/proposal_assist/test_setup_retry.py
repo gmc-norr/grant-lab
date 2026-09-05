@@ -13,9 +13,9 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from call_manager.auth.session_cookie import SessionSigner
-from call_manager.db.models import User, WorkspaceSetupJob
-from call_manager.main import create_app
+from grant_lab.auth.session_cookie import SessionSigner
+from grant_lab.db.models import User, WorkspaceSetupJob
+from grant_lab.main import create_app
 from tests.proposal_assist.conftest import make_call, make_user, make_workspace
 
 # ---------------------------------------------------------------------------
@@ -182,7 +182,7 @@ def test_setup_retry_after_reset_job_is_claimable(
     pg_session_factory,
 ):
     """After retry the job is in 'queued' state and can be claimed by the next tick."""
-    from call_manager.proposal_assist.phases.setup import claim_next_setup_job
+    from grant_lab.proposal_assist.phases.setup import claim_next_setup_job
 
     ws_id = _make_ws_with_failed_job(pg_session_factory, owner)
 
@@ -231,7 +231,7 @@ def test_cockpit_meta_hides_setup_last_error_from_non_owner_member(
     HIDDEN (None) from a non-owner MEMBER — while setup_status (a non-PII state)
     is still visible. The member must be a viewer so they pass require_member;
     the owner-gate on setup_last_error is the only thing under test."""
-    from call_manager.db.models import WorkspaceViewer
+    from grant_lab.db.models import WorkspaceViewer
 
     ws_id = _make_ws_with_failed_job(pg_session_factory, owner)
     # Add the non-owner as a viewer so cockpit-meta's require_member passes.

@@ -6,9 +6,9 @@ import uuid
 
 import pytest
 
-from call_manager.proposal_assist.citations.gitio import current_head
-from call_manager.proposal_assist.collab import state
-from call_manager.proposal_assist.collab.state import CollabSeveranceConflict
+from grant_lab.proposal_assist.citations.gitio import current_head
+from grant_lab.proposal_assist.collab import state
+from grant_lab.proposal_assist.collab.state import CollabSeveranceConflict
 from tests.proposal_assist.conftest import make_user, make_workspace
 from tests.test_analysis_pipeline import _init_repo
 
@@ -35,8 +35,8 @@ def _seed(s, tmp_path, owner, *, enable=(), with_spec=False):
 
 
 def _save_payload(repo, fname="proposal.md", index=1, content="## Body\nrewritten.\n"):
-    from call_manager.proposal_assist.citations.gitio import current_head
-    from call_manager.proposal_assist.editing.sectionizer import split_sections
+    from grant_lab.proposal_assist.citations.gitio import current_head
+    from grant_lab.proposal_assist.editing.sectionizer import split_sections
 
     doc = (repo / fname).read_text()
     sec = split_sections(doc)[index]
@@ -124,7 +124,7 @@ def test_draft_save_severs_when_flag_flips_after_guard(
         s.commit()
         wid = ws.id
 
-    import call_manager.web.api.workspaces as workspaces_mod
+    import grant_lab.web.api.workspaces as workspaces_mod
 
     real_save_section = workspaces_mod.save_section
 
@@ -162,7 +162,7 @@ def test_spec_save_severs_when_flag_flips_after_guard(
         s.commit()
         wid = ws.id
 
-    import call_manager.web.api.workspaces as workspaces_mod
+    import grant_lab.web.api.workspaces as workspaces_mod
 
     real_save_section = workspaces_mod.save_section
 
@@ -196,7 +196,7 @@ def test_post_citation_git_path_severed_when_flag_flips_after_guard(
     (the route maps it to the 409 COLLAB_SEVERED_DETAIL), git HEAD unchanged.
     White-box direct call: the recheck fires before any reference/section
     validation, so a bogus reference_id proves nothing downstream ever ran."""
-    from call_manager.proposal_assist.citations.human_cite import insert_citation_for_user
+    from grant_lab.proposal_assist.citations.human_cite import insert_citation_for_user
 
     with pg_session_factory() as s:
         ws, repo = _seed(s, tmp_path, make_user(s, email="sever-cite@umu.se"), enable=("draft",))
@@ -232,10 +232,10 @@ def test_citation_accept_replay_severed_when_flag_flips_after_guard(
     RAISES (never the terminal error-dict path), so git is untouched AND the
     ProposedChange row stays PENDING — retryable via the kernel accept after the
     client reloads, never burned to 'stale'."""
-    from call_manager.proposal_assist.editing.sectionizer import split_sections
-    from call_manager.proposal_assist.ports.stamp import FenceStamp
-    from call_manager.proposal_assist.proposals.accepting import accept_proposed_change
-    from call_manager.proposal_assist.proposals.proposing import propose_citation_insert
+    from grant_lab.proposal_assist.editing.sectionizer import split_sections
+    from grant_lab.proposal_assist.ports.stamp import FenceStamp
+    from grant_lab.proposal_assist.proposals.accepting import accept_proposed_change
+    from grant_lab.proposal_assist.proposals.proposing import propose_citation_insert
 
     with pg_session_factory() as s:
         owner = make_user(s, email="sever-accept@umu.se")
@@ -277,6 +277,6 @@ def test_citation_accept_replay_severed_when_flag_flips_after_guard(
         s.rollback()
     assert current_head(repo) == head_before  # git untouched
     with pg_session_factory() as s:
-        from call_manager.db.models import ProposedChange
+        from grant_lab.db.models import ProposedChange
 
         assert s.get(ProposedChange, pc_id).status == "pending"  # NOT burned to stale

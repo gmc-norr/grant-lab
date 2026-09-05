@@ -1,5 +1,5 @@
-from call_manager.auth.email import ConsoleEmailSender, NoOpEmailSender
-from call_manager.main import create_app
+from grant_lab.auth.email import ConsoleEmailSender, NoOpEmailSender
+from grant_lab.main import create_app
 
 
 def _env(monkeypatch, pg_url, base_url, secret):

@@ -7,10 +7,10 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from call_manager.config import Settings
-from call_manager.main import create_app
-from call_manager.proposal_assist.collab import state as collab_state
-from call_manager.scheduler import build_scheduler
+from grant_lab.config import Settings
+from grant_lab.main import create_app
+from grant_lab.proposal_assist.collab import state as collab_state
+from grant_lab.scheduler import build_scheduler
 
 
 @pytest.fixture(autouse=True)
@@ -43,7 +43,7 @@ def test_lifespan_runs_handover_when_kill_switch_on(monkeypatch, pg_url, tmp_pat
     calls: list[bool] = []
     # Deferred import inside lifespan resolves this attribute at call time.
     monkeypatch.setattr(
-        "call_manager.proposal_assist.collab.handover.run_kill_switch_handover",
+        "grant_lab.proposal_assist.collab.handover.run_kill_switch_handover",
         lambda *a, **k: calls.append(True) or 0,
     )
     app = create_app()
@@ -59,7 +59,7 @@ def test_lifespan_skips_handover_when_kill_switch_off(monkeypatch, pg_url, tmp_p
     monkeypatch.delenv("COLLAB_KILL_SWITCH", raising=False)
     calls: list[bool] = []
     monkeypatch.setattr(
-        "call_manager.proposal_assist.collab.handover.run_kill_switch_handover",
+        "grant_lab.proposal_assist.collab.handover.run_kill_switch_handover",
         lambda *a, **k: calls.append(True) or 0,
     )
     app = create_app()
@@ -86,7 +86,7 @@ def _collab_tick_func(monkeypatch, pg_url):
     directly' without create_app in the way (the branch reads settings, not the
     module global)."""
     _base_env(monkeypatch, pg_url)
-    from call_manager.proposal_assist.drafting.factory import build_workspace_controller
+    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
 
     settings = Settings()
 
@@ -118,11 +118,11 @@ def test_scheduler_tick_routes_to_handover_when_kill_switch_on(monkeypatch, pg_u
     tick = _collab_tick_func(monkeypatch, pg_url)
     hits = {"handover": 0, "checkpoint": 0}
     monkeypatch.setattr(
-        "call_manager.proposal_assist.collab.handover.run_kill_switch_handover",
+        "grant_lab.proposal_assist.collab.handover.run_kill_switch_handover",
         lambda *a, **k: hits.__setitem__("handover", hits["handover"] + 1),
     )
     monkeypatch.setattr(
-        "call_manager.proposal_assist.collab.checkpoint.checkpoint_active_tails",
+        "grant_lab.proposal_assist.collab.checkpoint.checkpoint_active_tails",
         lambda *a, **k: hits.__setitem__("checkpoint", hits["checkpoint"] + 1),
     )
     tick()
@@ -134,11 +134,11 @@ def test_scheduler_tick_checkpoints_when_kill_switch_off(monkeypatch, pg_url):
     tick = _collab_tick_func(monkeypatch, pg_url)
     hits = {"handover": 0, "checkpoint": 0}
     monkeypatch.setattr(
-        "call_manager.proposal_assist.collab.handover.run_kill_switch_handover",
+        "grant_lab.proposal_assist.collab.handover.run_kill_switch_handover",
         lambda *a, **k: hits.__setitem__("handover", hits["handover"] + 1),
     )
     monkeypatch.setattr(
-        "call_manager.proposal_assist.collab.checkpoint.checkpoint_active_tails",
+        "grant_lab.proposal_assist.collab.checkpoint.checkpoint_active_tails",
         lambda *a, **k: hits.__setitem__("checkpoint", hits["checkpoint"] + 1),
     )
     tick()

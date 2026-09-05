@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from call_manager.db.models import UncitedClaimsJob, WorkspaceEvent
-from call_manager.proposal_assist.problems.aggregate import assemble_problems
+from grant_lab.db.models import UncitedClaimsJob, WorkspaceEvent
+from grant_lab.proposal_assist.problems.aggregate import assemble_problems
 from tests.proposal_assist.conftest import make_workspace
 
 

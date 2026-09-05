@@ -17,7 +17,7 @@ from tests.fencing.detectors import (
 )
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-SRC = REPO / "src" / "call_manager"
+SRC = REPO / "src" / "grant_lab"
 INVENTORY = pathlib.Path(__file__).resolve().parent / "fence_inventory.json"
 
 #: A site no human has classified yet. The gate REFUSES these, so a regeneration
@@ -56,11 +56,11 @@ CATEGORIES = frozenset().union(*CATEGORIES_BY_KIND.values())
 #: site cannot take an exemption by declaring one — it takes a diff here, which
 #: is the point.
 NON_SEMANTIC_PINS = {
-    ("tool_commit", "src/call_manager/proposal_assist/citations/core.py",
+    ("tool_commit", "src/grant_lab/proposal_assist/citations/core.py",
      "_write_citekey_cache"): "caller_fenced",
-    ("tool_commit", "src/call_manager/proposal_assist/tools/references.py",
+    ("tool_commit", "src/grant_lab/proposal_assist/tools/references.py",
      "fetch_reference_impl"): "accounting",
-    ("tool_commit", "src/call_manager/proposal_assist/tools/references.py",
+    ("tool_commit", "src/grant_lab/proposal_assist/tools/references.py",
      "fetch_reference_impl._refund_fetch_slot"): "accounting",
 }
 
@@ -69,7 +69,7 @@ NON_SEMANTIC_PINS = {
 #: (turns/processor.py:159 — the orphan sweep must run first). Every other
 #: context knows its generation at construction and must carry it.
 RETAINED_PINS = {
-    ("src/call_manager/proposal_assist/drafting/factory.py",
+    ("src/grant_lab/proposal_assist/drafting/factory.py",
      "_build_adapter.tools_factory"),
 }
 
@@ -219,54 +219,54 @@ OPTIONAL_KEYS = ("fenced_by", "ctx_lifetime")
 #: Cleaning up is free, and both the list and each entry can only shrink.
 TOOLS_NOT_YET_CONVERTED: dict[str, frozenset[str]] = {
     "audit.py": frozenset({
-        "from call_manager.db.models import ...",
-        "from call_manager.proposal_assist.citations.audit import ...",
-        "from call_manager.proposal_assist.citations.bibliography import ...",
-        "from call_manager.proposal_assist.citations.claims import ...",
-        "from call_manager.proposal_assist.citations.core import ...",
-        "from call_manager.proposal_assist.citations.markers import ...",
-        "from call_manager.proposal_assist.tools.registry import ...",
+        "from grant_lab.db.models import ...",
+        "from grant_lab.proposal_assist.citations.audit import ...",
+        "from grant_lab.proposal_assist.citations.bibliography import ...",
+        "from grant_lab.proposal_assist.citations.claims import ...",
+        "from grant_lab.proposal_assist.citations.core import ...",
+        "from grant_lab.proposal_assist.citations.markers import ...",
+        "from grant_lab.proposal_assist.tools.registry import ...",
         "names the resource locator repo_dir",
         "names the resource locator session_factory",
     }),
     "citations.py": frozenset({
-        "from call_manager.db.models import ...",
-        "from call_manager.proposal_assist.citations.core import ...",
-        "from call_manager.proposal_assist.citations.ledger import ...",
-        "from call_manager.proposal_assist.citations.markers import ...",
-        "from call_manager.proposal_assist.citations.quotes import ...",
-        "from call_manager.proposal_assist.collab import ...",
-        "from call_manager.proposal_assist.collab.state import ...",
-        "from call_manager.proposal_assist.editing.sectionizer import ...",
-        "from call_manager.proposal_assist.tools.proposal import ...",
-        "from call_manager.proposal_assist.tools.registry import ...",
+        "from grant_lab.db.models import ...",
+        "from grant_lab.proposal_assist.citations.core import ...",
+        "from grant_lab.proposal_assist.citations.ledger import ...",
+        "from grant_lab.proposal_assist.citations.markers import ...",
+        "from grant_lab.proposal_assist.citations.quotes import ...",
+        "from grant_lab.proposal_assist.collab import ...",
+        "from grant_lab.proposal_assist.collab.state import ...",
+        "from grant_lab.proposal_assist.editing.sectionizer import ...",
+        "from grant_lab.proposal_assist.tools.proposal import ...",
+        "from grant_lab.proposal_assist.tools.registry import ...",
         "names the resource locator repo_dir",
         "names the resource locator session_factory",
     }),
     "history.py": frozenset({
-        "from call_manager.proposal_assist.tools.proposal import ...",
-        "from call_manager.proposal_assist.tools.registry import ...",
+        "from grant_lab.proposal_assist.tools.proposal import ...",
+        "from grant_lab.proposal_assist.tools.registry import ...",
         "names the resource locator repo_dir",
     }),
     "proposal.py": frozenset({
-        "from call_manager.proposal_assist.artifacts import ...",
-        "from call_manager.proposal_assist.citations.gitio import ...",
-        "from call_manager.proposal_assist.collab import ...",
-        "from call_manager.proposal_assist.collab.state import ...",
-        "from call_manager.proposal_assist.editing.sectionizer import ...",
-        "from call_manager.proposal_assist.tools.registry import ...",
+        "from grant_lab.proposal_assist.artifacts import ...",
+        "from grant_lab.proposal_assist.citations.gitio import ...",
+        "from grant_lab.proposal_assist.collab import ...",
+        "from grant_lab.proposal_assist.collab.state import ...",
+        "from grant_lab.proposal_assist.editing.sectionizer import ...",
+        "from grant_lab.proposal_assist.tools.registry import ...",
         "names the resource locator repo_dir",
         "names the resource locator session_factory",
     }),
     "references.py": frozenset({
-        "from call_manager.db.models import ...",
-        "from call_manager.embeddings.client import ...",
-        "from call_manager.proposal_assist.references.dispatcher import ...",
-        "from call_manager.proposal_assist.references.embed import ...",
-        "from call_manager.proposal_assist.references.fetcher import ...",
-        "from call_manager.proposal_assist.references.ingest import ...",
-        "from call_manager.proposal_assist.references.storage import ...",
-        "from call_manager.proposal_assist.tools.registry import ...",
+        "from grant_lab.db.models import ...",
+        "from grant_lab.embeddings.client import ...",
+        "from grant_lab.proposal_assist.references.dispatcher import ...",
+        "from grant_lab.proposal_assist.references.embed import ...",
+        "from grant_lab.proposal_assist.references.fetcher import ...",
+        "from grant_lab.proposal_assist.references.ingest import ...",
+        "from grant_lab.proposal_assist.references.storage import ...",
+        "from grant_lab.proposal_assist.tools.registry import ...",
         "from sqlalchemy import ...",
         "from starlette.concurrency import ...",
         "names the resource locator session_factory",
@@ -281,7 +281,7 @@ TOOLS_NOT_YET_CONVERTED: dict[str, frozenset[str]] = {
 #: It necessarily names things a tool may not. `__init__.py` re-exports from it.
 #:
 #: The skip is narrow, not unconditional — `check_composition_root` still forbids
-#: both from importing the `call_manager.db` package at all (importing it hands you
+#: both from importing the `grant_lab.db` package at all (importing it hands you
 #: `db.models`, see db/__init__.py:7), or sqlalchemy outside a REAL `if TYPE_CHECKING`,
 #: so this cannot become where violations hide.
 GATE_SKIPS: frozenset[str] = frozenset({"registry.py", "__init__.py"})

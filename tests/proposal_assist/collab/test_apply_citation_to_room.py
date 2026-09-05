@@ -3,15 +3,15 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.proposal_assist.citations.human_cite import CiteStale
-from call_manager.proposal_assist.citations.ledger import load_ledger
-from call_manager.proposal_assist.collab import state
-from call_manager.proposal_assist.collab.hydrate import build_doc, load_or_hydrate
-from call_manager.proposal_assist.collab.kernel import apply_citation_to_room
-from call_manager.proposal_assist.collab.markdown_bridge import pm_to_markdown
-from call_manager.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
-from call_manager.proposal_assist.editing.save import CITATIONS_FILENAME, PROPOSAL_FILENAME
-from call_manager.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.citations.human_cite import CiteStale
+from grant_lab.proposal_assist.citations.ledger import load_ledger
+from grant_lab.proposal_assist.collab import state
+from grant_lab.proposal_assist.collab.hydrate import build_doc, load_or_hydrate
+from grant_lab.proposal_assist.collab.kernel import apply_citation_to_room
+from grant_lab.proposal_assist.collab.markdown_bridge import pm_to_markdown
+from grant_lab.proposal_assist.collab.yjs_bridge import ydoc_to_pm_json
+from grant_lab.proposal_assist.editing.save import CITATIONS_FILENAME, PROPOSAL_FILENAME
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
 
 # Reuse the citation-kernel harness helpers.
 from tests.proposal_assist.collab.test_collab_kernel_citation import _init_repo, _seed_reference

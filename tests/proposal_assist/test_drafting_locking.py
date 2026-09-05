@@ -2,7 +2,7 @@ import uuid
 
 import pytest
 
-from call_manager.proposal_assist.drafting.locking import (
+from grant_lab.proposal_assist.drafting.locking import (
     LockNotAcquired,
     acquire_workspace_lock,
     release_workspace_lock,

@@ -3,11 +3,11 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.config import Settings
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
-from call_manager.proposal_assist.port_impl import build_ports
-from call_manager.proposal_assist.tools.proposal import propose_edit_impl, read_proposal_impl
-from call_manager.proposal_assist.tools.registry import ToolContext, snapshot_invocation
+from grant_lab.config import Settings
+from grant_lab.proposal_assist.artifacts import PROPOSAL_FILENAME
+from grant_lab.proposal_assist.port_impl import build_ports
+from grant_lab.proposal_assist.tools.proposal import propose_edit_impl, read_proposal_impl
+from grant_lab.proposal_assist.tools.registry import ToolContext, snapshot_invocation
 
 
 def _ctx(repo_dir, session_factory, **overrides):
@@ -57,7 +57,7 @@ async def test_propose_defaults_to_interactive(tmp_path, pg_session_factory, _se
         new_text="## Aims\n\nReworded.\n",
     )
 
-    from call_manager.db.models import ProposedChange
+    from grant_lab.db.models import ProposedChange
 
     with pg_session_factory() as s:
         pc = s.query(ProposedChange).filter_by(workspace_id=ws_id).one()
@@ -92,7 +92,7 @@ async def test_propose_stamps_coherence_provenance(tmp_path, pg_session_factory,
         new_text="## Aims\n\nReworded.\n",
     )
 
-    from call_manager.db.models import ProposedChange
+    from grant_lab.db.models import ProposedChange
 
     with pg_session_factory() as s:
         pc = s.query(ProposedChange).filter_by(workspace_id=ws_id).one()

@@ -12,9 +12,9 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from call_manager.db.models import Reference
-from call_manager.main import create_app
-from call_manager.proposal_assist.references.storage import ReferenceStorage
+from grant_lab.db.models import Reference
+from grant_lab.main import create_app
+from grant_lab.proposal_assist.references.storage import ReferenceStorage
 from tests.proposal_assist._refs_helpers import FakeEmbedClient
 from tests.proposal_assist.conftest import make_user, make_workspace
 from tests.proposal_assist.references.test_reprocess import _insert_failed_ref

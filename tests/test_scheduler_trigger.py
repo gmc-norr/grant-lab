@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from call_manager.scheduler import trigger_job_now
+from grant_lab.scheduler import trigger_job_now
 
 
 class _FakeJob:

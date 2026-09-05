@@ -17,11 +17,11 @@ from pathlib import Path
 
 import pytest
 
-from call_manager.config import Settings
-from call_manager.proposal_assist.citations import CitationLLMResult
-from call_manager.proposal_assist.tools.audit import list_unsupported_claims_impl
-from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
-from call_manager.proposal_assist.tools.registry import ToolContext, _collect_tools
+from grant_lab.config import Settings
+from grant_lab.proposal_assist.citations import CitationLLMResult
+from grant_lab.proposal_assist.tools.audit import list_unsupported_claims_impl
+from grant_lab.proposal_assist.tools.proposal import PROPOSAL_FILENAME
+from grant_lab.proposal_assist.tools.registry import ToolContext, _collect_tools
 from tests.proposal_assist.conftest import make_workspace
 
 
@@ -219,8 +219,8 @@ async def test_registered_closure_smoke(pg_session_factory, _settings_env, tmp_p
 
 
 def test_list_unsupported_claims_in_allowed_tools():
-    from call_manager.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
-    from call_manager.proposal_assist.drafting.contract import LaunchContext
+    from grant_lab.proposal_assist.drafting.claude_adapter import ClaudeAgentSDKAdapter
+    from grant_lab.proposal_assist.drafting.contract import LaunchContext
 
     adapter = ClaudeAgentSDKAdapter(
         model="x",

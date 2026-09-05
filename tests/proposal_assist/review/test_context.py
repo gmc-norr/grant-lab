@@ -1,11 +1,11 @@
 import hashlib
 
-from call_manager.proposal_assist.review.context import (
+from grant_lab.proposal_assist.review.context import (
     assemble_review_context,
     consolidation_instruction,
     persona_instruction,
 )
-from call_manager.proposal_assist.review.personas import persona_prompt
+from grant_lab.proposal_assist.review.personas import persona_prompt
 
 
 def test_context_and_instructions(review_workspace):

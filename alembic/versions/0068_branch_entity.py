@@ -60,7 +60,7 @@ def upgrade() -> None:
 
     from sqlalchemy.orm import Session
 
-    from call_manager.proposal_assist.branch_entity_backfill import backfill_branch_entities
+    from grant_lab.proposal_assist.branch_entity_backfill import backfill_branch_entities
 
     workspaces_dir = os.environ.get("WORKSPACES_DIR", "var/workspaces")
     with Session(bind=op.get_bind()) as s:

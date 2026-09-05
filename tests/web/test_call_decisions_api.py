@@ -17,8 +17,8 @@ from datetime import UTC, datetime
 from fastapi.testclient import TestClient
 from sqlalchemy import select, text
 
-from call_manager.db.models import Call, CallDecision, Profile, ProfileKind, Source, User
-from call_manager.main import create_app
+from grant_lab.db.models import Call, CallDecision, Profile, ProfileKind, Source, User
+from grant_lab.main import create_app
 
 
 def _app(monkeypatch, pg_url):

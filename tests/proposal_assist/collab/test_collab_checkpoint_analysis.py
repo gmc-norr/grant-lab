@@ -9,16 +9,16 @@ from pathlib import Path
 from pycrdt import Doc
 from sqlalchemy import select
 
-from call_manager.db.models import ArtifactVersion, ClaimAnalysisJob
-from call_manager.proposal_assist.artifacts import PROPOSAL_FILENAME
-from call_manager.proposal_assist.collab import state, store
-from call_manager.proposal_assist.collab.checkpoint import (
+from grant_lab.db.models import ArtifactVersion, ClaimAnalysisJob
+from grant_lab.proposal_assist.artifacts import PROPOSAL_FILENAME
+from grant_lab.proposal_assist.collab import state, store
+from grant_lab.proposal_assist.collab.checkpoint import (
     checkpoint_artifact,
     serialize_doc_to_markdown,
 )
-from call_manager.proposal_assist.collab.markdown_bridge import markdown_to_pm
-from call_manager.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
-from call_manager.proposal_assist.editing.sectionizer import split_sections
+from grant_lab.proposal_assist.collab.markdown_bridge import markdown_to_pm
+from grant_lab.proposal_assist.collab.yjs_bridge import pm_json_to_ydoc
+from grant_lab.proposal_assist.editing.sectionizer import split_sections
 from tests.proposal_assist.conftest import make_user, make_workspace, stamp_for
 
 

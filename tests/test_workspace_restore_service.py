@@ -1,4 +1,4 @@
-"""Tests for restore_workspace_db in src/call_manager/workspaces.py.
+"""Tests for restore_workspace_db in src/grant_lab/workspaces.py.
 
 The restore function is the DB half of workspace un-deletion: it clears
 soft_deleted_at, allocates a lifecycle generation, repairs the setup job, and
@@ -17,13 +17,13 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import select
 
-from call_manager.db.models import (
+from grant_lab.db.models import (
     TurnJob,
     Workspace,
     WorkspaceEvent,
     WorkspaceSetupJob,
 )
-from call_manager.workspaces import restore_workspace_db
+from grant_lab.workspaces import restore_workspace_db
 from tests.proposal_assist.conftest import make_user, make_workspace
 from tests.workspace_delete_helper import soft_delete_workspace_for_test
 
@@ -384,7 +384,7 @@ def test_cancelled_turns_stay_cancelled(pg_session_factory):
         s.flush()
         ws_id = ws.id
         admin_id = owner.id
-        from call_manager.db.models import ChatTurn
+        from grant_lab.db.models import ChatTurn
 
         ut = ChatTurn(
             workspace_id=ws_id,
@@ -437,7 +437,7 @@ def test_returned_generation_is_the_one_bump_produced(pg_session_factory):
         soft_delete_workspace_for_test(s, workspace_id=ws_id)
 
     with pg_session_factory() as s, patch(
-        "call_manager.workspaces.bump_lifecycle_generation", return_value=4242
+        "grant_lab.workspaces.bump_lifecycle_generation", return_value=4242
     ):
         outcome = restore_workspace_db(s, workspace_id=ws_id, admin_id=admin_id)
 

@@ -13,8 +13,8 @@ import time
 
 import pytest
 
-from call_manager.proposal_assist.references.extract import ExtractError
-from call_manager.proposal_assist.references.extract_sandbox import extract_text_bounded
+from grant_lab.proposal_assist.references.extract import ExtractError
+from grant_lab.proposal_assist.references.extract_sandbox import extract_text_bounded
 
 
 def test_returns_sections_for_normal_input():
@@ -83,7 +83,7 @@ class _ListQueue:
 def test_worker_applies_the_memory_limit_before_extracting(monkeypatch):
     import resource
 
-    from call_manager.proposal_assist.references import extract_sandbox as sb
+    from grant_lab.proposal_assist.references import extract_sandbox as sb
 
     calls: list = []
     monkeypatch.setattr(sb.resource, "setrlimit", lambda res, lim: calls.append((res, lim)))
@@ -96,7 +96,7 @@ def test_worker_applies_the_memory_limit_before_extracting(monkeypatch):
 
 
 def test_memory_error_inside_the_child_is_reported_as_an_extraction_failure(monkeypatch):
-    from call_manager.proposal_assist.references import extract_sandbox as sb
+    from grant_lab.proposal_assist.references import extract_sandbox as sb
 
     monkeypatch.setattr(sb.resource, "setrlimit", lambda res, lim: None)
 
@@ -113,7 +113,7 @@ def test_memory_error_inside_the_child_is_reported_as_an_extraction_failure(monk
 
 def _allocate_under_the_limit(q) -> None:
     # Module-level so the spawn context can import it by qualified name.
-    from call_manager.proposal_assist.references import extract_sandbox as sb
+    from grant_lab.proposal_assist.references import extract_sandbox as sb
 
     sb._apply_memory_limit()
     try:
@@ -126,7 +126,7 @@ def _allocate_under_the_limit(q) -> None:
 def test_the_limit_bites_in_a_real_spawned_child():
     """The syscall, not a mock: under the worker's own limit a 3 GiB allocation
     fails in a real spawned child of this interpreter."""
-    from call_manager.proposal_assist.references.extract_sandbox import _CTX
+    from grant_lab.proposal_assist.references.extract_sandbox import _CTX
 
     q = _CTX.Queue()
     proc = _CTX.Process(target=_allocate_under_the_limit, args=(q,), daemon=True)

@@ -6,7 +6,7 @@ import io
 import pytest
 from openpyxl import Workbook
 
-from call_manager.proposal_assist.references.extract import (
+from grant_lab.proposal_assist.references.extract import (
     ExtractError,
     extract_text,
 )
@@ -163,7 +163,7 @@ def test_extract_pdf_truncation_emits_visible_marker():
     """A PDF over the page cap must surface a visible truncation marker, not
     silently drop the tail (so the agent isn't misled into treating the
     extracted text as the whole document)."""
-    from call_manager.proposal_assist.references import extract as extract_mod
+    from grant_lab.proposal_assist.references import extract as extract_mod
 
     pdf_bytes = _make_multi_page_pdf(extract_mod._MAX_PDF_PAGES + 5)
     sections = extract_text(mime="application/pdf", data=pdf_bytes)
@@ -255,7 +255,7 @@ def test_extract_docx_rejects_high_compression_ratio_entry():
     absolute declared size is under the 200 MB cap."""
     import zipfile
 
-    from call_manager.proposal_assist.references.extract import _MAX_ZIP_RATIO
+    from grant_lab.proposal_assist.references.extract import _MAX_ZIP_RATIO
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:

@@ -6,7 +6,7 @@ import pytest
 from joserfc import jwt
 from joserfc.jwk import RSAKey
 
-from call_manager.auth.oidc import (
+from grant_lab.auth.oidc import (
     IdTokenInvalid,
     OIDCClient,
     generate_pkce,

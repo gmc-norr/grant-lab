@@ -14,22 +14,22 @@ from pathlib import Path
 import pytest
 from sqlalchemy.orm import Session as SASession
 
-from call_manager.config import Settings
-from call_manager.db.models import Reference, ReferenceChunk
-from call_manager.proposal_assist.citations import core as citations_mod
-from call_manager.proposal_assist.citations import gitio
-from call_manager.proposal_assist.citations.core import insert_citation_impl
-from call_manager.proposal_assist.citations.ledger import load_ledger
-from call_manager.proposal_assist.citations.markers import find_markers
-from call_manager.proposal_assist.citations.quotes import normalize_for_quote_match
-from call_manager.proposal_assist.drafting.locking import (
+from grant_lab.config import Settings
+from grant_lab.db.models import Reference, ReferenceChunk
+from grant_lab.proposal_assist.citations import core as citations_mod
+from grant_lab.proposal_assist.citations import gitio
+from grant_lab.proposal_assist.citations.core import insert_citation_impl
+from grant_lab.proposal_assist.citations.ledger import load_ledger
+from grant_lab.proposal_assist.citations.markers import find_markers
+from grant_lab.proposal_assist.citations.quotes import normalize_for_quote_match
+from grant_lab.proposal_assist.drafting.locking import (
     acquire_workspace_lock,
     release_workspace_lock,
 )
-from call_manager.proposal_assist.ports.stamp import FenceStamp
-from call_manager.proposal_assist.tools.citations import CITATIONS_FILENAME
-from call_manager.proposal_assist.tools.proposal import PROPOSAL_FILENAME
-from call_manager.proposal_assist.tools.registry import ToolContext
+from grant_lab.proposal_assist.ports.stamp import FenceStamp
+from grant_lab.proposal_assist.tools.citations import CITATIONS_FILENAME
+from grant_lab.proposal_assist.tools.proposal import PROPOSAL_FILENAME
+from grant_lab.proposal_assist.tools.registry import ToolContext
 from tests.proposal_assist.conftest import make_workspace
 
 EMBED_DIM = 1024
@@ -809,7 +809,7 @@ async def test_insert_self_heals_on_ledger_citekey_collision(
     )
 
     # Pre-seed the ledger so a row binds "smith2021" to R1 (DB cache NULL).
-    from call_manager.proposal_assist.citations.ledger import dump_ledger, empty_ledger
+    from grant_lab.proposal_assist.citations.ledger import dump_ledger, empty_ledger
 
     ledger = {
         **empty_ledger(),
