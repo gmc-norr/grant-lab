@@ -1,3 +1,8 @@
+# Project name is PINNED. Compose otherwise derives it from the directory, so
+# renaming this folder would silently create a new, EMPTY database volume and
+# orphan the real one. The volume below is likewise pinned to its existing name.
+name: grant-lab
+
 services:
   db:
     # pgvector/pgvector:pg16 = Postgres 16 with the `vector` extension
@@ -24,3 +29,9 @@ services:
 
 volumes:
   call_manager_pgdata:
+    # Keeps the pre-rename volume, which holds the dev data (58 calls, 11
+    # workspaces at the 2026-09-05 rename). Compose warns that this volume
+    # was created for project "call-monitor"; that warning is cosmetic and it
+    # attaches correctly. Do NOT silence it with `external: true` — that makes
+    # a fresh clone fail instead of creating the volume.
+    name: call-monitor_call_manager_pgdata
