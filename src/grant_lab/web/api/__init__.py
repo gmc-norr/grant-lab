@@ -15,6 +15,7 @@ from grant_lab.web.api import (
     admin,
     admin_users,
     auth,
+    boards,
     calls,
     me,
     profiles,
@@ -39,6 +40,11 @@ _ALWAYS = (
     admin_users.router,
     calls.router,
     profiles.router,
+    # Boards are a MATCH-edition feature: the corridor screen is release 1's
+    # public face. Eager import is safe ONLY while neither module imports
+    # anything under grant_lab.proposal_assist -- this file is a package
+    # __init__, so an import here runs in every process.
+    boards.router,
 )
 
 

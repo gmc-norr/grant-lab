@@ -144,6 +144,11 @@ def test_match_edition_still_serves_the_release_1_surface(monkeypatch, _base_env
 # this file alone leaves test_the_baseline_is_not_empty red on purpose: the
 # literal below is bumped BY HAND in the same commit, so a route that arrives
 # without intent cannot be waved through by a regeneration.
+#
+# Plan C Task 5 (corridor boards): 110 -> 112. The two added paths are
+# /api/boards (GET list, POST create) and /api/boards/{board_id} (GET, PUT,
+# DELETE) -- five operations, two unique paths, matching this file's
+# unique-PATHS-not-operations convention above.
 _BASELINE = Path(__file__).with_name("full_edition_routes.txt")
 
 
@@ -172,7 +177,7 @@ def test_full_edition_route_set_matches_the_committed_baseline(monkeypatch, _bas
 def test_the_baseline_is_not_empty():
     """A baseline of zero routes would make the comparison above vacuous on an
     app that also served nothing."""
-    assert len(_BASELINE.read_text().split()) == 110
+    assert len(_BASELINE.read_text().split()) == 112
 
 
 def test_full_edition_is_unchanged(monkeypatch, _base_env):
@@ -246,6 +251,9 @@ _ALWAYS_ROUTERS = [
     "admin_users.router",
     "calls.router",
     "profiles.router",
+    # Boards are a MATCH-edition feature: the corridor screen is release 1's
+    # public face.
+    "boards.router",
 ]
 
 

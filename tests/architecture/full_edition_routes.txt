@@ -22,6 +22,8 @@
 /api/auth/login
 /api/auth/logout
 /api/auth/register
+/api/boards
+/api/boards/{board_id}
 /api/calls
 /api/calls/decisions/counts
 /api/calls/hidden
