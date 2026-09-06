@@ -5,6 +5,8 @@ import { createBrowserRouter } from "react-router-dom";
 import { AccountNoAccess } from "./routes/AccountNoAccess";
 import { AccountPending } from "./routes/AccountPending";
 import { AuthError } from "./routes/AuthError";
+import { BoardLayout } from "./routes/BoardLayout";
+import { BoardScreen } from "./routes/BoardScreen";
 import { CallDetail } from "./routes/CallDetail";
 import { Login } from "./routes/Login";
 import { PreAuthLayout } from "./routes/PreAuthLayout";
@@ -130,6 +132,14 @@ export const simpleRouter = createBrowserRouter([
       { path: "auth/no-access", element: <AccountNoAccess /> },
       { path: "auth/error", element: <AuthError /> },
     ],
+  },
+  {
+    // A THIRD pathless layout, sibling to SimpleShell and PreAuthLayout. A
+    // board is a match-edition feature (§4.3), so this edition mounts it too
+    // — see router.tsx for the same route and BoardLayout.tsx for why it does
+    // not use PreAuthLayout despite §6 asking for that.
+    element: <BoardLayout />,
+    children: [{ path: "b/:slug", element: <BoardScreen /> }],
   },
 ]);
 

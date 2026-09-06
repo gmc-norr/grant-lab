@@ -13,6 +13,7 @@ SPA_ROUTES: tuple[str, ...] = (
     "/admin",
     "/login",
     "/me",
+    "/b",
     "/",
 )
 # Backend prefixes — the real top-level prefixes mounted in main.py. Currently

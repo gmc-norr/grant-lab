@@ -7,6 +7,8 @@ import { CockpitSidebar } from "./cockpit/CockpitSidebar";
 import { AccountNoAccess } from "./routes/AccountNoAccess";
 import { AccountPending } from "./routes/AccountPending";
 import { AuthError } from "./routes/AuthError";
+import { BoardLayout } from "./routes/BoardLayout";
+import { BoardScreen } from "./routes/BoardScreen";
 import { CallDetail } from "./routes/CallDetail";
 import { CallReadingPane } from "./routes/CallReadingPane";
 import { CallsFilters } from "./routes/CallsFilters";
@@ -171,5 +173,14 @@ export const router = createBrowserRouter([
       { path: "auth/no-access", element: <AccountNoAccess /> },
       { path: "auth/error", element: <AuthError /> },
     ],
+  },
+  {
+    // THIRD top-level pathless layout, sibling to AppShell and PreAuthLayout.
+    // Full-bleed unattended corridor screen: no shell, no useSession (see
+    // BoardLayout's own docstring for why §6's "under PreAuthLayout" is not
+    // implementable as written). A board is a match-edition feature, so
+    // router.simple.tsx mounts this exact path too.
+    element: <BoardLayout />,
+    children: [{ path: "b/:slug", element: <BoardScreen /> }],
   },
 ]);

@@ -20,6 +20,7 @@ const RELEASE_1_ROUTES = [
   "/admin",
   "/admin/users",
   "/admin/users/pending",
+  "/b/:slug",
   "/login",
   "/register",
   "/auth/pending",

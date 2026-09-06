@@ -1,0 +1,84 @@
+import { Text } from "@mantine/core";
+
+import type { PublicBoardItemOut } from "../api/publicBoard";
+import { deadlineLocalView } from "./Deadline";
+import styles from "./BoardScreen.module.css";
+
+// Same shape as TriageCard.tsx's private helper (the two item types share
+// budget_min/budget_max/currency but are otherwise distinct payloads, so this
+// is not extracted into a shared util) — absent means absent, no "—" row.
+function budgetText(item: PublicBoardItemOut): string | null {
+  const { budget_min: lo, budget_max: hi, currency } = item;
+  if (lo == null && hi == null) return null;
+  const cur = currency ? ` ${currency}` : "";
+  const fmt = (n: number) => n.toLocaleString("en-US");
+  if (lo != null && hi != null) {
+    return lo === hi ? `${fmt(lo)}${cur}` : `${fmt(lo)} – ${fmt(hi)}${cur}`;
+  }
+  return lo != null ? `From ${fmt(lo)}${cur}` : `Up to ${fmt(hi as number)}${cur}`;
+}
+
+// deadlineLocalView's `days` field IS "Closes in N days" (Deadline.tsx:23-26)
+// — BoardScreen has already dropped any card whose deadline has passed
+// (state === "closed"), so this only ever renders the open branch here.
+// Exported: BoardScreen's header uses the same wording for the nearest
+// deadline across all pages, and a second copy of the day-count logic would
+// drift from this one.
+export function closesInText(localDate: string | null): string | null {
+  if (!localDate) return null;
+  const { days } = deadlineLocalView(localDate);
+  if (days < 0) return null;
+  return days === 1 ? "Closes in 1 day" : `Closes in ${days} days`;
+}
+
+// One slot in the grid. `item === null` is an empty slot (D5: no reflow, no
+// filler text) — BoardScreen pads the page out to `items_per_page` with these
+// rather than shrinking the grid to however many calls happen to be approved.
+export function BoardCard({ item }: { item: PublicBoardItemOut | null }) {
+  if (!item) {
+    return <div className={styles.cardEmpty} data-field="empty-slot" aria-hidden="true" />;
+  }
+
+  const budget = budgetText(item);
+  const closes = closesInText(item.deadline_local_date);
+  const m = item.qr_modules;
+
+  return (
+    <article className={styles.card} data-field="board-card">
+      <div className={styles.cardBody}>
+        <Text component="h2" fz={34} fw={700} lh={1.15} className={styles.cardTitle} data-field="title">
+          {item.title}
+        </Text>
+        <Text className={styles.cardMeta} data-field="funder">
+          {item.source_name}
+        </Text>
+        {closes && (
+          <Text className={styles.cardDeadline} data-field="deadline">
+            {closes}
+          </Text>
+        )}
+        {budget && (
+          <Text className={styles.cardBudget} data-field="budget">
+            {budget}
+          </Text>
+        )}
+      </div>
+      {/* qr_modules === 0 means segno's own overflow ceiling rejected this
+          URL (schema.gen.ts's doc comment on the field) -- render NO <svg> at
+          all rather than an empty/broken one. `d` is an attribute React
+          escapes like any other string prop; this is never
+          dangerouslySetInnerHTML, so the payload cannot inject markup even
+          though it travels as raw SVG path data. */}
+      {m > 0 && (
+        <svg
+          className={styles.cardQr}
+          viewBox={`-4 -4 ${m + 8} ${m + 8}`}
+          role="img"
+          aria-label={`QR code linking to ${item.title}`}
+        >
+          <path d={item.qr_path} fill="#000" />
+        </svg>
+      )}
+    </article>
+  );
+}
