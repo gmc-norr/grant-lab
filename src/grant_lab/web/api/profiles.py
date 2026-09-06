@@ -144,7 +144,34 @@ def _profile_for_edit(session, *, profile_id: int, user: User) -> Profile:
     Reading stays WIDER than editing. A colleague the profile is shared with
     reaches the 403; only someone who cannot read it at all sees the 404.
     """
-    p = session.get(Profile, profile_id)
+    # FOR UPDATE, not a bare get. Without the lock two writers can both read
+    # owner A, both pass the authorization check below, and the second then
+    # computes its effects for an owner that no longer holds the profile.
+    #
+    # The lock lives here rather than in the transfer handler on purpose:
+    # locking one caller would leave the other six racing it. The cost is that
+    # SEVEN call sites inherit it, reaching FIFTEEN routes -- and FOUR of those
+    # are reads, which now take an exclusive row lock they do not need:
+    #
+    #   profiles.py:609  GET  /profiles/{id}/viewers          <- read
+    #   profiles.py:643  PUT  /profiles/{id}/viewers
+    #   profiles.py:705  POST /profiles/{id}/viewers
+    #   profiles.py:750  PUT  /profiles/{id}/visibility
+    #   profiles.py:805  PUT  /profiles/{id}/owner            (transfer)
+    #   boards.py:235    POST /boards                         (create_board)
+    #   boards.py:162    _board_for_edit -> 9 board routes, of which
+    #                    GET /boards/{id}, GET .../queue and GET .../items
+    #                    are reads
+    #
+    # That is deliberate, not an oversight: a board's edit permission IS its
+    # profile's edit permission (boards.py:155), so the read paths share the
+    # gate and cannot be split from it without splitting the gate. Nothing
+    # slow runs under the lock and each route releases it at the end of its
+    # `with sf() as session:` block. If profile-scoped read latency ever
+    # matters, the fix is a separate lock-free read gate, not removing this.
+    p = session.execute(
+        select(Profile).where(Profile.id == profile_id).with_for_update()
+    ).scalar_one_or_none()
     if p is None or p.is_active is False:
         raise HTTPException(status_code=404, detail="profile not found")
     if not can_read_profile(session, user, p.id):
