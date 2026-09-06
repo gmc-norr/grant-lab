@@ -40,7 +40,7 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from grant_lab.boards.public import public_board_by_slug, public_board_items
 from grant_lab.boards.qr import qr_for
@@ -69,9 +69,21 @@ class PublicBoardItemOut(BaseModel):
     budget_max: int | None
     currency: str | None
     url: str
-    qr_modules: int  # 0 means NO QR: the url was over qr.py's legibility
-    # bound or segno's own overflow ceiling (see `qr_for`) -- render no
-    # `<svg>` for this card. Unambiguous: the smallest real QR is 21 modules.
+    # A bare `#` comment here is invisible to `openapi-fetch`'s generated
+    # types (fix round 3): `frontend/src/api/schema.gen.ts` is built from
+    # the OpenAPI schema, not from this source file, so a React caller
+    # typing `item.qr_modules` saw a bare `number` with no hint that 0 is a
+    # sentinel. `Field(description=...)` propagates into the schema (and
+    # from there into the generated type's doc comment) where a `#` comment
+    # cannot.
+    qr_modules: int = Field(
+        description=(
+            "Matrix width in modules, EXCLUDING the quiet zone. 0 means NO QR "
+            "was produced -- the url was too large for segno's own overflow "
+            "ceiling (see `qr_for`) -- and the caller should render no `<svg>` "
+            "for this card. Unambiguous: the smallest real QR is 21 modules."
+        )
+    )
     qr_path: str
 
 

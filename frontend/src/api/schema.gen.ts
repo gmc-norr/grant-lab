@@ -4152,7 +4152,10 @@ export interface components {
             currency: string | null;
             /** Deadline Local Date */
             deadline_local_date: string | null;
-            /** Qr Modules */
+            /**
+             * Qr Modules
+             * @description Matrix width in modules, EXCLUDING the quiet zone. 0 means NO QR was produced -- the url was too large for segno's own overflow ceiling (see `qr_for`) -- and the caller should render no `<svg>` for this card. Unambiguous: the smallest real QR is 21 modules.
+             */
             qr_modules: number;
             /** Qr Path */
             qr_path: string;

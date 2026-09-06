@@ -518,12 +518,13 @@ def test_an_over_long_url_costs_one_qr_not_the_whole_board(
     returns the sentinel (qr_modules=0, qr_path=""); this pins that the
     OTHER card on the same board is unaffected.
 
-    Fix round 2: this 3000-character URL is now also well past the new,
-    much smaller `_MAX_URL_BYTES` (180) legibility guard, so it returns the
-    sentinel via THAT branch, not the `DataOverflowError` one -- either way
-    the guarantee this test pins (one bad card, not a 500) holds. See
-    `test_a_url_just_over_the_legibility_bound_costs_one_qr_not_the_whole_board`
-    below for a test that lands exactly on the new, tighter boundary.
+    Fix round 3: this is now the ONLY way a URL can trigger the sentinel at
+    this route. Fix round 2 added a second, much tighter `_MAX_URL_BYTES`
+    (180) legibility guard with its own pair of boundary tests; round 3
+    removed that guard entirely (see `qr.py`'s docstrings for why: the spec
+    never bounded module count, only physical symbol size, and the bound
+    was never validated against a real scan), so this 3000-character URL's
+    sentinel now comes from `DataOverflowError` alone.
     """
     app = _setup(monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Overlong url profile")
@@ -556,112 +557,58 @@ def test_an_over_long_url_costs_one_qr_not_the_whole_board(
     assert items[1]["qr_path"] == ""
 
 
-def test_a_url_just_over_the_legibility_bound_costs_one_qr_not_the_whole_board(
+def test_the_default_24_item_board_payload_at_segnos_own_url_ceiling(
     monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    """CRITICAL, fix round 2: `_MAX_URL_BYTES` (180 UTF-8 bytes, derived from
-    spec Sec6's 170px legibility floor at ~3 px/module -- see `qr.py`) is a
-    much tighter ceiling than the `DataOverflowError` one the test above
-    exercises. One byte past IT must cost one missing QR, not the whole
-    board -- the same guarantee, at the boundary that actually governs real
-    funder URLs.
-    """
-    from grant_lab.boards.qr import _MAX_URL_BYTES
+    """Fix round 3: re-derived after `_MAX_URL_BYTES` (`qr.py`'s round-2
+    legibility guard) was REMOVED -- see `qr.py`'s docstrings for why
+    (removing a working QR from real calls over a never-validated ~3
+    px/module assumption is a product decision, not a side effect of a
+    performance fix). Renamed from `..._stays_under_budget`: that name
+    promised a budget that HOLDS, and round 2's own 512 KB number no longer
+    does once the URL-length axis reopens to segno's real ceiling -- this
+    name instead states what is actually measured, on which axis.
 
-    app = _setup(monkeypatch, pg_url)
-    pid, owner_id = profile_factory(name="Just-over-bound profile")
-    board_id = _make_board(pg_session_factory, profile_id=pid, created_by=owner_id, slug="u" * 16)
-    base = "https://funder.example/"
-    over_url = base + "x" * (_MAX_URL_BYTES + 1 - len(base))
-    assert len(over_url.encode("utf-8")) == _MAX_URL_BYTES + 1
-    ok_call = _make_call(pg_session_factory, external_id="just-over-ok", title="Fine card")
-    bad_call = _make_call(
-        pg_session_factory, external_id="just-over-bad", title="Just-over card", url=over_url
-    )
-    _approve(
-        pg_session_factory, board_id=board_id, call_id=ok_call, approved_by=owner_id, position=0
-    )
-    _approve(
-        pg_session_factory, board_id=board_id, call_id=bad_call, approved_by=owner_id, position=1
-    )
+    Fix round 2 measured this at its OWN 180-byte URL ceiling (276,916
+    bytes / 270 KB, under a 512 KB budget). Round 3 re-measures at the
+    ACTUAL worst URL length that still produces a real QR now that nothing
+    stands between a URL and segno's own `DataOverflowError` boundary: 2331
+    UTF-8 bytes at error level M (pinned in `tests/test_boards_qr.py`; one
+    byte more raises and `qr_for` returns the free empty-QR sentinel
+    instead, which is cheaper, not more expensive, so 2331 is the true
+    per-item worst case).
 
-    with TestClient(app) as c:
-        r = c.get(f"/api/public/boards/{'u' * 16}")
-
-    assert r.status_code == 200, r.text
-    items = r.json()["items"]
-    assert len(items) == 2
-    assert items[0]["title"] == "Fine card"
-    assert items[0]["qr_modules"] > 0
-    assert items[0]["qr_path"]
-    assert items[1]["title"] == "Just-over card"
-    assert items[1]["qr_modules"] == 0
-    assert items[1]["qr_path"] == ""
-
-
-def test_a_url_at_the_legibility_bound_still_gets_a_real_qr(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
-):
-    """The inverse of the test above: a URL AT `_MAX_URL_BYTES` (180 bytes,
-    exactly) is still within the legibility floor and must get a real,
-    scannable QR (measured: 53 modules, segno version 9), not the sentinel.
-    """
-    from grant_lab.boards.qr import _MAX_URL_BYTES
-
-    app = _setup(monkeypatch, pg_url)
-    pid, owner_id = profile_factory(name="At-bound profile")
-    board_id = _make_board(pg_session_factory, profile_id=pid, created_by=owner_id, slug="v" * 16)
-    base = "https://funder.example/"
-    at_bound_url = base + "x" * (_MAX_URL_BYTES - len(base))
-    assert len(at_bound_url.encode("utf-8")) == _MAX_URL_BYTES
-    call_id = _make_call(pg_session_factory, external_id="at-bound", url=at_bound_url)
-    _approve(pg_session_factory, board_id=board_id, call_id=call_id, approved_by=owner_id)
-
-    with TestClient(app) as c:
-        r = c.get(f"/api/public/boards/{'v' * 16}")
-
-    assert r.status_code == 200, r.text
-    item = r.json()["items"][0]
-    assert item["qr_modules"] == 53
-    assert item["qr_path"]
-
-
-def test_the_full_board_payload_size_stays_under_budget(
-    monkeypatch, pg_url, pg_session_factory, profile_factory
-):
-    """Fix round 2, IMPORTANT: re-derived against the `_MAX_URL_BYTES`
-    legibility guard (`qr.py`) -- the earlier version of this test used a
-    fixed 129-character fixture and never varied URL length, so it could
-    not see that a DEFAULT board (`items_per_page=8, max_pages=3` -> 24
-    items, no configuration change) with long ingested URLs breached the
-    512 KB budget by 6.3x before the guard existed (24 x 134,073-byte paths
-    at the old 2331-byte `DataOverflowError` boundary = 3.2 MB).
-
-    Both axes stated explicitly, per that finding:
+    Both axes stated explicitly:
     - ITEM COUNT: 24 -- this board's own `items_per_page * max_pages`
-      (8 * 3), i.e. a board nobody configured beyond the defaults.
-    - URL LENGTH: `_MAX_URL_BYTES` (180 bytes) exactly -- the WORST url the
-      guard still permits through to a real QR encode. Anything longer than
-      this returns the free `(modules=0, path="")` sentinel instead, so 180
-      bytes is now the true per-item worst case, not an arbitrary fixture
-      length.
+      (8 * 3), i.e. a board nobody configured beyond the defaults. Unchanged
+      from round 2 -- this axis was never in question.
+    - URL LENGTH: 2331 bytes -- the term that MOVED, from round 2's 180 (a
+      legibility guard that no longer exists) to segno's own encode
+      ceiling. This is the term responsible for the budget changing below.
 
-    So this is no longer merely a per-item-cost regression detector (as the
-    prior revision candidly admitted it was) -- with URL length now bounded
-    on this axis too, 24 items x the guard's own worst-case URL IS the
-    default board's true payload ceiling. Measured (this file's own `-s`
-    run, `uv run pytest tests/web/test_api_public_board.py -q -k
-    payload_size -s`): a 180-byte URL is 53 modules / 11,152 bytes of path
-    per item, 267,648 bytes of path data for 24 items, and **276,916 bytes**
-    (270 KB) for the whole serialized body -- comfortably under the 512 KB
-    (524,288 byte) budget (1.9x headroom), so 512 KB HOLDS for a default
-    board at the worst permitted URL length and is left unchanged.
+    Measured (this file's own `-s` run, `uv run pytest
+    tests/web/test_api_public_board.py -q -k default_24_item -s`): this
+    fixture's 2331-byte URL (`https://www.vinnova.se/en/calls-for-proposals/`
+    prefix + filler) is 177 modules / 133,497 bytes of path per item (a
+    DIFFERENT byte count than `qr.py`'s own docstring example at the same
+    2331 bytes and 177 modules -- see this file's 192-item test below and
+    item 5's fix for why: path length is fixture-dependent even at a fixed
+    byte length and module count), and **3,264,844 bytes** (~3.11 MiB) for
+    the whole serialized 24-item body. The budget below is set to 4 MiB
+    (4,194,304 bytes, ~1.28x headroom) -- tight enough that a future
+    regression is caught, loose enough to survive normal JSON-field-length
+    noise (title lengths, dates) between runs. CPU for this board is now
+    bounded by `qr_for`'s `lru_cache`, not by a URL-length guard: see
+    `qr.py`'s docstring for the measured cold (~127 ms) and warm (~0.09
+    us) per-URL cost this test's 24 identical `long_url` items exercise (23
+    of the 24 are cache hits).
     """
-    from grant_lab.boards.qr import _MAX_URL_BYTES
+    _WORST_URL_BYTES = 2331  # segno's own overflow ceiling, error level M --
+    # see tests/test_boards_qr.py; NOT `_MAX_URL_BYTES` (removed, fix round 3).
 
     base = "https://www.vinnova.se/en/calls-for-proposals/"
-    long_url = base + "a" * (_MAX_URL_BYTES - len(base))
-    assert len(long_url.encode("utf-8")) == _MAX_URL_BYTES
+    long_url = base + "a" * (_WORST_URL_BYTES - len(base))
+    assert len(long_url.encode("utf-8")) == _WORST_URL_BYTES
 
     app = _setup(monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Payload size profile")
@@ -691,50 +638,67 @@ def test_the_full_board_payload_size_stays_under_budget(
     assert r.status_code == 200, r.text
     assert len(r.json()["items"]) == 24
     size = len(r.content)
-    print(f"full 24-item board payload: {size} bytes")
-    assert size < 512 * 1024, f"payload grew to {size} bytes -- over the 512 KB budget"
+    print(f"full 24-item board payload at segno's own URL ceiling: {size} bytes")
+    assert size < 4 * 1024 * 1024, (
+        f"payload grew to {size} bytes -- over the re-derived 4 MiB bound"
+    )
 
 
-def test_the_full_board_payload_at_the_true_worst_case_ceiling(
+def test_the_192_item_ceiling_board_payload_at_segnos_own_url_ceiling(
     monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    """Fix round 2, IMPORTANT: renamed from
-    `..._at_the_true_capacity_ceiling`. That name was false: it and the
-    512 KB test above it both used the SAME fixed 129-character fixture, so
-    neither varied URL length, and the "true capacity ceiling" it claimed to
-    pin was really only an ITEM-COUNT ceiling at one arbitrary URL length --
-    before this round's guard, the real ceiling was 25.74 MB (a
-    2331-character URL x 192 items), 2.6x over the 10 MB this test asserted.
-    A reader trusting the old name would have concluded the response was
-    bounded at 10 MB when it was not.
+    """Fix round 3: re-derived after `_MAX_URL_BYTES` was removed -- see the
+    24-item test above for the full context, and `qr.py`'s docstrings for
+    why the guard is gone. Renamed from `..._at_the_true_worst_case_ceiling`:
+    that name (round 2's own rename of an earlier, actually-false name)
+    claimed the measured number below was "the actual maximum this endpoint
+    can ever emit, not a heuristic sample" -- true only of the ITEM-COUNT
+    axis (`approve_items`'s own 192 ceiling). The URL-LENGTH axis is
+    fixture-dependent at a fixed module count: this fixture's
+    `https://www.vinnova.se/en/calls-for-proposals/` prefix produces a
+    specific path length at 2331 bytes, and a different (still 2331-byte)
+    URL with different byte-mode segment boundaries could measure a few
+    percent off it (fix round 2's own comparison of the 180-byte boundary
+    across two fixtures found +2.9%). So this is a tight, representative
+    sample within the URL-ceiling's real headroom, not an exhaustive proof
+    of the largest byte this endpoint can ever emit.
 
-    With `_MAX_URL_BYTES` (`qr.py`) now capping the OTHER axis too, this
-    test uses that bound's own worst-permitted URL (not the old arbitrary
-    129-character one) together with the real item-count ceiling, so the
-    name can now honestly claim to be the true worst case:
+    Both axes stated explicitly:
     - ITEM COUNT: `items_per_page(<=64) * max_pages(default 3)` = 192,
       `web/api/boards.py`'s `approve_items` ceiling -- a legitimately
-      configured board's maximum, not a hypothetical.
-    - URL LENGTH: `_MAX_URL_BYTES` (180 bytes) exactly -- anything longer
-      returns the free sentinel instead of a real QR, so this is the most
-      any single item can ever cost.
+      configured board's maximum, not a hypothetical. Unchanged from round 2.
+    - URL LENGTH: 2331 bytes -- the term that MOVED, from round 2's 180 (a
+      legibility guard that no longer exists) to segno's own
+      `DataOverflowError` ceiling (`tests/test_boards_qr.py`). This is the
+      term responsible for the budget changing below.
 
-    Both axes are now bounded by something the CODE enforces (`approve_items`
-    for the first, `qr_for`'s own guard for the second), not by a fixture
-    choice, so the measured number below is the actual maximum this endpoint
-    can ever emit, not a heuristic sample. Measured (this file's own `-s`
-    run, `uv run pytest tests/web/test_api_public_board.py -q -k
-    worst_case_ceiling -s`): **2,214,385 bytes** (2.11 MB) -- 192 items x
-    (53-module / 11,152-byte-path QR + title/JSON overhead). The bound
-    asserted is TIGHT (3 MB, not the old loose 10 MB) because it no longer
-    needs headroom for a URL length nobody can reach; a future change that
-    grows this by even ~35% is worth someone's attention.
+    Measured (this file's own `-s` run, `uv run pytest
+    tests/web/test_api_public_board.py -q -k 192_item_ceiling -s`):
+    **26,117,809 bytes** (~24.9 MiB) -- 192 items x (177-module /
+    133,497-byte-path QR + title/JSON overhead; this fixture's per-item path
+    length is bigger than `qr.py`'s own 115,305-byte docstring example at
+    the SAME 2331 bytes / 177 modules, because path length depends on how
+    the dark/light runs fall for this specific URL's content, not just its
+    byte length or module count -- item 5's fix note explains the same
+    effect at the old 180-byte boundary). This is 11.8x round 2's own
+    2,214,385-byte measurement at its 180-byte guard, because the URL-length
+    term moved from 180 to 2331 bytes -- not a regression in anything this
+    round changed. CPU for this SAME request is NOT correspondingly 11.8x
+    round 2's, because `qr_for` is now `lru_cache`d and every item here
+    shares the one `long_url` fixture: see `qr.py`'s docstring for the
+    measured first-request-cold (~127 ms for the one real encode) vs.
+    repeat-request-warm (~0.03 ms for all 192 cache hits) cost this board's
+    access pattern actually produces. The bound asserted is 30 MiB (~20%
+    headroom over the measurement) -- loose enough to survive fixture noise,
+    tight enough that a future change growing this materially is worth
+    someone's attention.
     """
-    from grant_lab.boards.qr import _MAX_URL_BYTES
+    _WORST_URL_BYTES = 2331  # segno's own overflow ceiling, error level M --
+    # see tests/test_boards_qr.py; NOT `_MAX_URL_BYTES` (removed, fix round 3).
 
     base = "https://www.vinnova.se/en/calls-for-proposals/"
-    long_url = base + "a" * (_MAX_URL_BYTES - len(base))
-    assert len(long_url.encode("utf-8")) == _MAX_URL_BYTES
+    long_url = base + "a" * (_WORST_URL_BYTES - len(base))
+    assert len(long_url.encode("utf-8")) == _WORST_URL_BYTES
 
     app = _setup(monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Ceiling payload profile")
@@ -766,10 +730,10 @@ def test_the_full_board_payload_at_the_true_worst_case_ceiling(
     assert r.status_code == 200, r.text
     assert len(r.json()["items"]) == ceiling
     size = len(r.content)
-    print(f"full {ceiling}-item true worst-case board payload: {size} bytes")
-    assert size < 3 * 1024 * 1024, (
-        f"payload grew to {size} bytes at the true 192-item / "
-        f"{_MAX_URL_BYTES}-byte-URL worst case -- over the re-derived 3 MB bound"
+    print(f"full {ceiling}-item board payload at segno's own URL ceiling: {size} bytes")
+    assert size < 30 * 1024 * 1024, (
+        f"payload grew to {size} bytes at the 192-item / {_WORST_URL_BYTES}-byte-URL "
+        "worst case -- over the re-derived 30 MiB bound"
     )
 
 

@@ -46,10 +46,6 @@ def test_the_path_is_only_move_line_and_close_commands():
 
 
 def test_a_longer_url_needs_more_modules():
-    # "x" * 200 would total 221 bytes and now (fix round 2) return the
-    # empty-QR sentinel -- it is over `_MAX_URL_BYTES` (180). "x" * 100
-    # (121 bytes) stays comfortably under that bound while still growing
-    # the symbol.
     short = qr_for("https://a.se/short")
     long_ = qr_for("https://example.test/" + "x" * 100)
     assert long_.modules > short.modules
@@ -68,15 +64,18 @@ def test_an_over_long_url_returns_the_empty_qr_sentinel_not_a_raise():
     `segno.DataOverflowError`. `qr_for` must swallow exactly that boundary
     and hand back the sentinel (modules=0, path=""), not propagate.
 
-    Fix round 2: `_MAX_URL_BYTES` (180) is now far BELOW 2331/2332, so
-    `qr_for(overflows)` below returns the sentinel via the new length guard,
-    before segno is ever called -- see
-    `test_a_url_over_the_legibility_bound_returns_the_empty_qr_sentinel` for
-    that boundary. This test still calls `segno.make_qr` directly (not
-    through `qr_for`) to pin segno's OWN raw exception boundary, independent
-    of the length guard, in case a future reader ever needs to re-derive
-    `_MAX_URL_BYTES` upward and must know how much headroom is left before
-    hitting this second, harder ceiling.
+    Fix round 3: this is now the ONLY way `qr_for` returns the sentinel --
+    round 2's separate, tighter `_MAX_URL_BYTES` (180) legibility guard was
+    removed (see `qr.py`'s module and `qr_for` docstrings for why: the spec
+    never bounded module count, only physical symbol size, and the bound
+    was never validated against a real scan). This test still calls
+    `segno.make_qr` directly (not through `qr_for`) to pin segno's OWN raw
+    exception boundary on its own, independent of `qr_for`'s handling of it.
+
+    Uses a distinct 'x' run from every other test in this file and
+    `tests/web/test_api_public_board.py` -- `qr_for` is now `lru_cache`d, and
+    a shared fixture string across tests would hide a "does this actually
+    re-check overflow" bug behind a stale cache hit.
     """
     fits = "x" * 2331
     overflows = "x" * 2332
@@ -89,41 +88,28 @@ def test_an_over_long_url_returns_the_empty_qr_sentinel_not_a_raise():
     assert qr.path == ""
 
 
-def test_a_url_over_the_legibility_bound_returns_the_empty_qr_sentinel():
-    """CRITICAL, fix round 2: `_MAX_URL_BYTES` (180 UTF-8 bytes) is the
-    longest URL whose QR still clears spec Sec6's 170px legibility floor at
-    ~3 px/module -- derived in `qr.py`'s own module-level comment (segno
-    version 9 / 53 modules -> 3.21 px/module clears it; version 10 / 57
-    modules -> 2.98 px/module does not, and there is no real QR size between
-    the two). One byte past the bound must return the SAME sentinel `qr_for`
-    already returns for segno's `DataOverflowError` -- caught before segno
-    is ever called, capping CPU as well as bytes.
+def test_a_repeated_call_hits_the_cache_not_a_re_encode():
+    """Fix round 3: `qr_for` is `@lru_cache(maxsize=256)`d so a corridor
+    board's repeat requests (the realistic access pattern -- a static
+    display polling the same slug) cost one real encode per URL, not one
+    per request. `cache_info()` is the deterministic way to observe this
+    (preferred over timing, which is noisy under test-suite load): a fresh
+    URL, unlikely to have been cached by any other test in this file, must
+    register exactly one miss on first call and a hit -- not a second
+    miss -- on every call after.
     """
-    from grant_lab.boards.qr import _MAX_URL_BYTES
+    url = "https://example.test/cache-hit-check-" + "z" * 40
+    before = qr_for.cache_info()
+    first = qr_for(url)
+    after_first = qr_for.cache_info()
+    assert after_first.misses == before.misses + 1
+    assert after_first.hits == before.hits
 
-    base = "https://example.test/"
-    over = base + "x" * (_MAX_URL_BYTES + 1 - len(base))
-    assert len(over.encode("utf-8")) == _MAX_URL_BYTES + 1
-
-    qr = qr_for(over)
-    assert qr.modules == 0
-    assert qr.path == ""
-
-
-def test_a_url_at_the_legibility_bound_still_produces_a_real_qr():
-    """The bound is inclusive: a URL at exactly `_MAX_URL_BYTES` still gets a
-    real, scannable QR -- measured 53 modules (segno version 9), the largest
-    symbol that still clears the 170px / 3px-per-module floor.
-    """
-    from grant_lab.boards.qr import _MAX_URL_BYTES
-
-    base = "https://example.test/"
-    at_bound = base + "x" * (_MAX_URL_BYTES - len(base))
-    assert len(at_bound.encode("utf-8")) == _MAX_URL_BYTES
-
-    qr = qr_for(at_bound)
-    assert qr.modules == 53
-    assert qr.path
+    second = qr_for(url)
+    after_second = qr_for.cache_info()
+    assert after_second.misses == after_first.misses  # no new encode
+    assert after_second.hits == after_first.hits + 1
+    assert second is first  # same cached object, not merely equal
 
 
 def test_the_symbol_is_never_a_micro_qr():
