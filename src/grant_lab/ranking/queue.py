@@ -155,8 +155,9 @@ def reconcile_missing_rankings(session: Session) -> int:
     # VALUES list.
     # Column-limited, for the same reason Task 4 gives: `select(Profile)`
     # pulls the 1024-dim vector, and rank_fingerprint never reads it (it
-    # reads description, structured, budget_currency, name, kind and
-    # embedding_fingerprint). Task 4 asserts that principle in gate 6, whose
+    # reads description, structured, budget_currency, name, kind,
+    # embedding_fingerprint and embedding_model). Task 4 asserts that
+    # principle in gate 6, whose
     # scope is the EMBEDDING arm only -- so it does not cover this file, and
     # an earlier revision of this plan reintroduced the wholesale load here
     # three tasks later. `.all()`, not `.scalars()`: these are Rows.
@@ -164,7 +165,10 @@ def reconcile_missing_rankings(session: Session) -> int:
     # Verified: the Rows produce byte-identical rank_fingerprints to loaded
     # Profile objects (`kind` is String + CHECK, not a native enum, so both
     # sides give the same str through `getattr(x, "value", x)`), and the
-    # emitted SQL carries no `profiles.embedding AS` column.
+    # emitted SQL carries no `profiles.embedding AS` column. That claim is no
+    # longer only a comment: tests/test_ranking_queue_row_parity.py reads this
+    # column list out of this function's source and executes it. Adding a key
+    # to rank_fingerprint's payload without adding the column here reddens it.
     profiles = session.execute(
         select(
             Profile.id,
@@ -174,6 +178,7 @@ def reconcile_missing_rankings(session: Session) -> int:
             Profile.structured,
             Profile.budget_currency,
             Profile.embedding_fingerprint,
+            Profile.embedding_model,
         ).where(Profile.is_active.is_(True))
     ).all()
     if not profiles:
