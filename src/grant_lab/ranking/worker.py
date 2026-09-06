@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from sqlalchemy.orm import sessionmaker
 
 from grant_lab.db.models import Call, CallRanking, CallRankingCriterion, Profile
+from grant_lab.profiles.fingerprint import rank_fingerprint
 from grant_lab.ranking.criteria import GateStatus
 from grant_lab.ranking.ollama_client import LLMError, OllamaClient
 from grant_lab.ranking.prompt import ParseError
@@ -165,6 +166,14 @@ def drain_queue(
                 effective_remote = remote_client
                 if remote_client is not None and count_today(session) >= remote_daily_cap:
                     effective_remote = None
+                # Capture BEFORE the LLM call. Today `profile` cannot change
+                # between here and the merge below -- the session is not
+                # committed, refreshed or expired, and the spend ledger uses a
+                # separate session on purpose -- so this is equivalent to
+                # hashing at write time. It is captured here anyway so that a
+                # future refactor introducing a commit or a session.refresh in
+                # between cannot silently stamp a profile the ranker never saw.
+                captured_fingerprint = rank_fingerprint(profile)
                 try:
                     result = rank_pair(
                         client=client,
@@ -237,7 +246,14 @@ def drain_queue(
                 # under a single analysis_model, mis-attributing one of them.
                 if new_summary is None and new_notes is None:
                     existing = session.get(CallRanking, (call_id, profile_id))
-                    if existing is not None:
+                    # Only inherit advice that describes THIS profile. After an
+                    # edit the retained triple describes the old one, and
+                    # stamping it with the new fingerprint would make it
+                    # permanently invisible to repair.
+                    if (
+                        existing is not None
+                        and existing.profile_fingerprint == captured_fingerprint
+                    ):
                         new_summary = existing.summary
                         new_notes = existing.applicant_notes
                         new_analysis_model = existing.analysis_model
@@ -259,6 +275,7 @@ def drain_queue(
                         analysis_model=new_analysis_model,
                         escalated=result.escalated,
                         escalated_from_score=result.escalated_from_score,
+                        profile_fingerprint=captured_fingerprint,
                         ranked_at=datetime.now(UTC),
                     )
                 )
