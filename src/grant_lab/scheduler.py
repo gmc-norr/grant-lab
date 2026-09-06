@@ -459,12 +459,38 @@ def build_scheduler(
         misfire_grace_time=6 * 3600,
     )
 
+    # Where yesterday's tick stopped in the PROFILE table. `_TICK_MAX_BATCHES`
+    # bounds the drain, and a tick that stops on that cap has rows still ahead
+    # of it; restarting at 0 tomorrow would re-walk the same prefix and halt at
+    # the same wall, so a profile beyond it would never be repaired. Since the
+    # profile scan was widened (spec 5(a)) it is a scan of the WHOLE table, so
+    # a long prefix of fresh profiles can consume the whole allowance.
+    #
+    # NOT carried for CALLS. The call half is still narrowed in SQL
+    # (`embedding IS NULL OR embedding_model != current`), so a fresh call is
+    # never returned and can never eat the allowance: a capped call drain has
+    # recorded its progress in the DATA, and tomorrow's scan from 0 skips
+    # everything it already embedded. Carrying that cursor would instead be
+    # harmful — a row that failed to embed stays NULL and is meant to be
+    # retried by the next tick from 0, which a carried cursor would prevent.
+    #
+    # Held in this closure, not in the database. The scheduler is in-process
+    # and single-instance (a hard constraint), so one process owns this value
+    # and no other writer exists; the repo has no settings/KV table to put it
+    # in and adding one for a resume hint would be the larger change. The cost
+    # is that a process restart resets it to 0, which is exactly today's
+    # behaviour — the next tick re-walks from the start, which is slower but
+    # never skips a row.
+    embeddings_after_profile_id = 0
+
     def _embeddings_tick() -> None:
+        nonlocal embeddings_after_profile_id
         try:
-            refresh_missing_embeddings_tick(
+            summary = refresh_missing_embeddings_tick(
                 session_factory=session_factory,
                 embed_client=embed_client,
                 batch_size=200,
+                after_profile_id=embeddings_after_profile_id,
             )
         except Exception as e:  # noqa: BLE001
             _logger.exception(
@@ -472,7 +498,11 @@ def build_scheduler(
                 extra={"event": "embedding_refresh_tick_failed", "error": str(e)},
             )
             return
-        # No need to re-log summary — refresh_missing_embeddings_tick already does.
+        # Reset ONLY on an exhausted scan. A cursor that never went back to 0
+        # would be a worse bug than the one it fixes: a profile edited BEHIND
+        # the high-water mark would be permanently unreachable.
+        embeddings_after_profile_id = 0 if summary["scan_exhausted"] else summary["max_profile_id"]
+        # No need to re-log the summary — refresh_missing_embeddings_tick already does.
 
     sched.add_job(
         _embeddings_tick,

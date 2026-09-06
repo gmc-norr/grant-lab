@@ -169,6 +169,12 @@ def refresh_missing_embeddings_tick(
     looping `_refresh_missing_embeddings_batch` until a batch makes no
     progress (everything left is failing) or `max_batches` is reached.
 
+    The summary carries `scan_exhausted`: True when the drain ran off the end
+    of both tables, False when it stopped on `max_batches` with rows still
+    ahead of the cursor. The daily caller needs that distinction to decide
+    whether to carry `max_profile_id` into tomorrow's tick or reset to 0 —
+    see `_embeddings_tick` in scheduler.py.
+
     A single batch processes at most `batch_size` rows. Before this drain
     loop, recovery after a model swap silently took (backlog / batch_size)
     DAYS — one batch per daily tick. Now a single tick catches up the whole
@@ -199,6 +205,17 @@ def refresh_missing_embeddings_tick(
         "profiles_seen": 0,
         "max_call_id": after_call_id,
         "max_profile_id": after_profile_id,
+        # Did the drain walk PAST THE LAST ROW, or did it stop on max_batches
+        # with rows still ahead of the cursor? The counts cannot tell those
+        # apart: both come back with a cursor and possibly some work done.
+        # Named for the condition it reports rather than for its consumer
+        # ("capped" would name the other branch and reads as a config flag),
+        # because the caller's rule is stated in those terms: carry the cursor
+        # across a capped tick, reset it only on an exhausted scan. It is a
+        # bool; `bool` subclasses `int`, so the dict[str, int] return holds.
+        # Set on the non-force drain only — under force this function runs a
+        # single batch and the CLI owns the cursor walk and its termination.
+        "scan_exhausted": False,
     }
     # Walk forward with id-cursors so each batch processes NEW rows. This
     # both lets us drain a backlog larger than one batch AND avoids re-trying
@@ -242,6 +259,7 @@ def refresh_missing_embeddings_tick(
         # both halves, making `examined` 0.
         examined = summary["calls_embedded"] + summary["calls_failed"] + summary["profiles_seen"]
         if examined == 0:
+            totals["scan_exhausted"] = True
             break
         cursor_call_id = summary["max_call_id"]
         cursor_profile_id = summary["max_profile_id"]
