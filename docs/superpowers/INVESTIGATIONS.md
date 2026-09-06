@@ -1,6 +1,6 @@
 # Prior investigations — read this before measuring anything
 
-34 documents in `notes/` and `reviews/` record work already done: spikes with verdicts,
+36 documents in `notes/` and `reviews/` record work already done: spikes with verdicts,
 multi-agent reviews with verified defect tallies, and outside opinions. They are indexed
 here **by the question they answer**, because they are named by date and slice, which is
 useless when you are trying to find out whether someone has already looked at something.
@@ -103,6 +103,32 @@ revocation drift. Confirms the prior critical CRDT decoder issue is fixed.
 
 **[reviews/2026-08-29-third-pass-expansion.md](reviews/2026-08-29-third-pass-expansion.md)**
 **The review of record.** Supersedes the second pass's severity ranking. Start here.
+
+**[reviews/2026-09-05-gate-audit-and-freshness-review.md](reviews/2026-09-05-gate-audit-and-freshness-review.md)**
+*Which of our gates cannot see the thing they name?* **Three of fourteen.** The second pass
+by the same outside reviewer, briefed to reproduce rather than survey: a `git archive`
+snapshot, its own environment, disposable databases, and a named adverse input for **every**
+architecture gate file. Found that an unfenced git commit escapes all **239** fencing tests
+when its argv is a local variable; that `if: false` and `continue-on-error: true` pass the
+CI wiring gate; and that relative-import cycles are invisible to the cycle scanner while
+failing at runtime. All three **fixed in `77e746eb`**. It also reproduced the Git/Postgres
+rollback window for the first time, and found a **new, deterministic** freshness bug needing
+no crash: clearing a description while keeping `areas` commits an embed-text change and
+schedules no refresh at all. Read the disposition section for what was re-run here and what
+was not.
+
+**[reviews/2026-09-05-runtime-ownership-and-state-consistency-review.md](reviews/2026-09-05-runtime-ownership-and-state-consistency-review.md)**
+*Is the problem module organization, or runtime ownership?* **Runtime ownership.** An
+outside review at `4e6212e2`, carrying a **verification and disposition section written
+after each finding was run** — three confirmed, one confirmed but narrower than written,
+one deliberately not verified. Read that section before acting on any finding above it.
+Its two live ones: **`/healthz` returns 200 after the single-instance advisory lock is
+lost**, so an orchestrator keeps routing to a process that no longer owns the invariant;
+and **the embedding repair cannot tell "present" from "current"** — it selects NULL
+vectors and model mismatches only, so a profile edited while Ollama is down keeps its
+superseded vector forever and its rankings silently describe old text. It also caught
+that the match-edition gate measured `create_app()` rather than a running lifespan
+(**0 modules there, 45 once it booted**) — fixed in `1fdfe050`.
 
 **[reviews/2026-08-29-second-pass-architecture-review.md](reviews/2026-08-29-second-pass-architecture-review.md)**
 Superseded by the third pass. Contains a confirmed production race.
