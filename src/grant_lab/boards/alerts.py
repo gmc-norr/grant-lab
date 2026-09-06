@@ -365,7 +365,26 @@ def send_board_alerts(*, session_factory, email_client: EmailClient, settings) -
             continue
 
         title = board_titles.get(alert.board_id, f"board {alert.board_id}")
-        subject = f'Corridor board "{title}" is short {alert.shortfall} item(s)'
+        # Final security review, CRITICAL: `title` is free text any board
+        # editor can set (`BoardCreateIn.title` / `BoardSettingsIn.title`
+        # enforce only `min_length=1`), and it used to go straight into the
+        # email `subject` unfiltered. `SMTPClient.send` (email/client.py)
+        # does `msg["Subject"] = subject`, and `EmailMessage` raises
+        # `ValueError: Header values may not contain linefeed or carriage
+        # return characters` for a subject containing "\r" or "\n" --
+        # measured on Python 3.12. Not a header-injection risk (the stdlib
+        # refuses rather than folding the extra header in), but a
+        # SILENT-FOREVER one: the `except Exception` below catches that
+        # ValueError, logs `board_alert.recipient_failed`, and moves on --
+        # so a board owner (or, on the escalation path, EVERY deliverable
+        # admin) never receives the alert, every week, for as long as the
+        # title contains a newline. `digest/render.py:65`'s `build_subject`
+        # already strips CR/LF for exactly this reason -- this module's own
+        # docstring claims to mirror `run_digest`'s conventions; this line
+        # is the one place it hadn't. See
+        # `test_a_newline_in_the_board_title_does_not_silently_swallow_the_alert`.
+        safe_title = title.replace("\r", " ").replace("\n", " ")
+        subject = f'Corridor board "{safe_title}" is short {alert.shortfall} item(s)'
         sentence = (
             f'The corridor board "{title}" currently has {alert.shortfall} fewer '
             f"approved, still-open item(s) than its configured page size."
@@ -459,9 +478,15 @@ def send_board_alerts(*, session_factory, email_client: EmailClient, settings) -
 
             if not result.ok:
                 # Important 2 (Task 8 review round 2): a hard bounce is
-                # reported BY RETURN, not by raise
-                # (`email/client.py:118-122`, `:170-175`), so round 1's
-                # discarded `SendResult` counted every bounce as a delivered
+                # reported BY RETURN, not by raise -- MINOR (final security
+                # review): re-checked against the file, which had moved;
+                # the Resend return is `email/client.py:128-131`
+                # (`return SendResult(ok=False, bounce_reason=...)` inside
+                # `ResendClient.send`) and the SMTP return is `:187`
+                # (`return SendResult(ok=False, bounce_reason=f"refused:
+                # {details}")` inside `SMTPClient.send`), not the
+                # `:118-122`/`:170-175` this comment previously cited. So
+                # round 1's discarded `SendResult` counted every bounce as a delivered
                 # alert. Count it distinctly and deliberately do NOT touch
                 # `User.digest_bounce_count` / `digest_disabled_at` -- that is
                 # the weekly digest's own bounce-disable mechanism

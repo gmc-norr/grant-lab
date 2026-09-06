@@ -33,12 +33,34 @@ WHAT TRIVIALLY PASSES A WEAKER VERSION OF THIS, all measured on copies:
     adversarial code.
   * A call placed AFTER the write and the commit, which refuses a request that
     already persisted.
+  * `with contextlib.suppress(HTTPException): _board_for_edit(...)`. The
+    final security review found this GREEN against an earlier version of
+    this gate: `_always_entered` descended every `With` body unconditionally,
+    so the with-flavoured spelling of exactly the `try/except HTTPException:
+    pass` shape the module docstring above already calls out passed both
+    halves. `_is_suppress_call` (below) closes it the same way the
+    non-reraising `try` branch already does: a body that CAN swallow
+    `_board_for_edit`'s own `HTTPException` is not unconditionally entered,
+    so nothing inside it counts toward the positive half.
+  * `_board_for_edit(session, board_id=board_id, user=<somebody else>)`. The
+    same review found this GREEN too: the positive half checked only that
+    `board_id=` was the handler's own path parameter, never that `user=` was
+    the handler's own authenticated caller -- so a handler authorizing as
+    the profile owner, an admin, or any other `User` object passed. Fixed by
+    checking `user=` the same way `board_id=` already was.
+  * `session.scalar(select(Board).where(...))` in a handler body. The same
+    review found the negative half's `session.get(Board, ...)`-only ban did
+    not cover this -- a real lookup that does the same job by a different
+    method name. Fixed by banning any `select(Board` call in a keyed
+    handler's body, not just `.get(Board, ...)` -- see
+    `test_no_board_id_route_looks_a_board_up_directly`'s own docstring.
 
-WHY THE NEGATIVE HALF IS CHEAP AND STRONG. `session.get(Board, ...)` appears
-exactly once in the module -- inside `_board_for_edit` itself -- so banning it
-from handler bodies is green today and kills the ternary, `or`, lambda,
-comprehension and after-the-write bypasses by construction, without this file
-having to model Python's evaluation order.
+WHY THE NEGATIVE HALF IS CHEAP AND STRONG. `session.get(Board, ...)` and
+`select(Board` each appear exactly once in the module -- both inside
+`_board_for_edit` itself -- so banning them from handler bodies is green
+today and kills the ternary, `or`, lambda, comprehension, after-the-write and
+alternate-lookup-method bypasses by construction, without this file having to
+model Python's evaluation order.
 """
 
 from __future__ import annotations
@@ -133,6 +155,16 @@ def _always_entered(body: list[ast.stmt]) -> list[ast.stmt]:
     A `try` with a SWALLOWING handler is not descended, which is what keeps the
     `except HTTPException: pass` bypass red.
 
+    A `with` whose context manager is `contextlib.suppress(...)` (or bare
+    `suppress(...)`) is NOT descended either (final security review): that is
+    the with-flavoured spelling of the exact same swallowing shape, and an
+    earlier version of this function descended EVERY `with` body
+    unconditionally -- measured GREEN against
+    `with contextlib.suppress(HTTPException): _board_for_edit(...)`, which is
+    exactly the bypass the module docstring's `try/except HTTPException: pass`
+    bullet already calls out, just spelled as a context manager instead of a
+    handler. See `_is_suppress_call`.
+
     Never descends `if`, loops, or a nested function.
     """
     out: list[ast.stmt] = []
@@ -145,6 +177,12 @@ def _always_entered(body: list[ast.stmt]) -> list[ast.stmt]:
             # `session.get(Board, ...)` would have passed both.
             continue
         if isinstance(stmt, ast.With | ast.AsyncWith):
+            if any(_is_suppress_call(item.context_expr) for item in stmt.items):
+                # Swallows -- see this function's own docstring and
+                # `_is_suppress_call`. Nothing inside counts as unconditionally
+                # entered, the same way a swallowing `try` handler (below)
+                # already doesn't.
+                continue
             out.extend(_always_entered(stmt.body))
         elif isinstance(stmt, ast.Try):
             if all(_reraises(h) for h in stmt.handlers):
@@ -153,6 +191,24 @@ def _always_entered(body: list[ast.stmt]) -> list[ast.stmt]:
         else:
             out.append(stmt)
     return out
+
+
+def _is_suppress_call(expr: ast.expr) -> bool:
+    """True when `expr` is `contextlib.suppress(...)` or a bare `suppress(...)`
+    (`from contextlib import suppress`) -- the with-flavoured spelling of a
+    swallowing `try`/`except: pass`. Matched on the call's function name only
+    (not which exception classes are passed): a `with` whose context manager
+    CAN swallow is not unconditionally entered no matter which exception it
+    names, the same conservative call `_reraises` makes for `try` handlers.
+    """
+    if not isinstance(expr, ast.Call):
+        return False
+    func = expr.func
+    if isinstance(func, ast.Attribute):
+        return func.attr == "suppress"
+    if isinstance(func, ast.Name):
+        return func.id == "suppress"
+    return False
 
 
 def _reraises(handler: ast.ExceptHandler) -> bool:
@@ -309,7 +365,20 @@ def test_only_the_collection_routes_are_exempt_from_the_board_id_rule():
     ids=[f"{m.upper()} {p}" for m, p, _n in _board_id_handlers()],
 )
 def test_every_board_id_route_calls_board_for_edit(method, path, name):
-    """The positive half: the call is there, on this board_id, before the write."""
+    """The positive half: the call is there, on THIS board_id AND the
+    request's own authenticated user, before the write.
+
+    The `user=` check (final security review) closes a gap the `board_id=`
+    check alone left open: `_board_for_edit(session, board_id=board_id,
+    user=<somebody else>)` satisfied this test before, because nothing
+    checked WHICH `User` object was passed -- a handler that authorized as
+    the profile owner, an admin, or any other user entirely was
+    indistinguishable here from one authorizing the actual caller. Every
+    handler in this module takes its authenticated caller as a parameter
+    literally named `user` (`user: User = Depends(get_current_user)`), so
+    checking the keyword's value is the same `User`-typed name is the same
+    shape as the `board_id=` check just below it, not a new convention.
+    """
     node = next(n for m, p, n in _board_id_handlers() if n.name == name)
     calls = _gate_calls(node)
     assert calls, (
@@ -319,10 +388,18 @@ def test_every_board_id_route_calls_board_for_edit(method, path, name):
         f"happy-path test green."
     )
     for call in calls:
-        arg = {k.arg: k.value for k in call.keywords}.get("board_id")
-        assert isinstance(arg, ast.Name) and arg.id == "board_id", (
+        kwargs = {k.arg: k.value for k in call.keywords}
+        board_arg = kwargs.get("board_id")
+        assert isinstance(board_arg, ast.Name) and board_arg.id == "board_id", (
             f"{name} calls {_GATE} with a board_id that is not its own path "
             f"parameter, so it authorizes one board and acts on another"
+        )
+        user_arg = kwargs.get("user")
+        assert isinstance(user_arg, ast.Name) and user_arg.id == "user", (
+            f"{name} calls {_GATE} with a user that is not its own request's "
+            f"authenticated caller (the `user` parameter FastAPI's "
+            f"Depends(get_current_user) injects), so it can authorize as "
+            f"somebody else entirely"
         )
 
     # Ordering: a refusal issued after the commit refuses a request that has
@@ -349,24 +426,43 @@ def test_every_board_id_route_calls_board_for_edit(method, path, name):
 def test_no_board_id_route_looks_a_board_up_directly(method, path, name):
     """The negative half: the replacement shape must not appear at all.
 
-    `session.get(Board, ...)` occurs exactly once in this module -- inside
-    `_board_for_edit` itself -- so this is green today and stays cheap. It kills
-    by construction every bypass that satisfies the positive half while doing
-    the real lookup elsewhere: a ternary, an `or` fast path, a lambda, a
-    zero-iteration comprehension, and a gate call placed after the write.
+    `session.get(Board, ...)` and `select(Board...)` each occur exactly once
+    in this module -- both inside `_board_for_edit` itself -- so this is
+    green today and stays cheap. Between the two, it kills by construction
+    every bypass that satisfies the positive half while doing the real
+    lookup elsewhere: a ternary, an `or` fast path, a lambda, a
+    zero-iteration comprehension, a gate call placed after the write, AND
+    (final security review) the same lookup done through
+    `session.scalar(select(Board).where(...))` instead of `.get` -- the
+    ORIGINAL version of this test banned only `.get(Board, ...)`, so that
+    equally-real lookup passed both halves; its own claim to "kill by
+    construction every bypass that does the real lookup elsewhere" was
+    therefore overstated until this was added.
 
-    `session.get(BoardItem, ...)` is fine and is used; only `Board` is banned.
+    `session.get(BoardItem, ...)` is fine and is used; only `Board` is
+    banned, by EITHER lookup shape.
     """
     node = next(n for m, p, n in _board_id_handlers() if n.name == name)
     offenders = [
         n.lineno
         for n in ast.walk(node)
         if isinstance(n, ast.Call)
-        and isinstance(n.func, ast.Attribute)
-        and n.func.attr == "get"
-        and n.args
-        and isinstance(n.args[0], ast.Name)
-        and n.args[0].id == "Board"
+        and (
+            (
+                isinstance(n.func, ast.Attribute)
+                and n.func.attr == "get"
+                and n.args
+                and isinstance(n.args[0], ast.Name)
+                and n.args[0].id == "Board"
+            )
+            or (
+                isinstance(n.func, ast.Name)
+                and n.func.id == "select"
+                and n.args
+                and isinstance(n.args[0], ast.Name)
+                and n.args[0].id == "Board"
+            )
+        )
     ]
     assert not offenders, (
         f"{method.upper()} {path} ({name}) looks the board up directly at line(s) "

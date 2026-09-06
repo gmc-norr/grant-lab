@@ -69,6 +69,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from email.message import EmailMessage
 
 from sqlalchemy import select
 
@@ -766,7 +767,10 @@ def test_send_board_alerts_dry_run_sends_nothing(pg_session_factory, profile_fac
 def test_send_board_alerts_counts_a_bounce_not_a_delivery(pg_session_factory, profile_factory):
     """Important 2: `ResendClient`/`SMTPClient` report an address-level
     permanent failure BY RETURN (`SendResult(ok=False, bounce_reason=...)`),
-    not by raise (`email/client.py:118-122`, `:170-175`). Round 1 discarded
+    not by raise (`email/client.py:128-131` for `ResendClient.send`,
+    `:187` for `SMTPClient.send` -- corrected by the final security review;
+    this docstring previously cited `:118-122`/`:170-175`, stale after the
+    file moved). Round 1 discarded
     that return value, so `summary.messages_sent += 1` fired even for a
     bounce -- an escalation to a departed admin's dead mailbox would log
     `messages_sent: 1` and on-call would read that as delivered. This also
@@ -828,6 +832,82 @@ def test_send_board_alerts_escapes_the_title_in_html_not_text(
     # the dashboard URL is a live link of its own, not run on into the
     # sentence text
     assert '<a href="http://test/">http://test/</a>' in html_body
+
+
+## Final security review additions
+
+
+class _HeaderValidatingFakeEmail:
+    """Mimics the ONE real behaviour `_FakeEmail` above does not: actually
+    constructing an `EmailMessage()` and setting `["Subject"] = subject`,
+    exactly like the real `SMTPClient.send` (`email/client.py`) does. That
+    stdlib call really raises `ValueError: Header values may not contain
+    linefeed or carriage return characters` for a subject containing "\\r"
+    or "\\n" -- measured on Python 3.12, confirmed above. `_FakeEmail` never
+    touches `EmailMessage` at all, so it cannot catch this class of bug: it
+    would record the call and return `ok=True` no matter what the subject
+    contains. This fake exists so the newline-subject test below actually
+    bites against the real behaviour it stands in for, without a live SMTP
+    connection.
+    """
+
+    def __init__(self):
+        self.calls = []
+
+    def send(self, *, to, subject, html, text):
+        msg = EmailMessage()
+        msg["Subject"] = subject  # raises ValueError on "\r"/"\n" -- see above
+        self.calls.append({"to": to, "subject": subject, "html": html, "text": text})
+        return SendResult(ok=True, message_id="msg-0")
+
+
+def test_a_newline_in_the_board_title_does_not_silently_swallow_the_alert(
+    pg_session_factory, profile_factory
+):
+    """CRITICAL: a board title containing a newline used to reach
+    `email_client.send(subject=...)` unsanitized. The real `SMTPClient.send`
+    does `msg["Subject"] = subject`, and `EmailMessage` raises `ValueError`
+    for a subject containing "\\r" or "\\n" -- caught by
+    `send_board_alerts`'s own `except Exception`, logged, and swallowed, so
+    the alert reaches NOBODY -- including every admin on the escalation
+    path -- every week, forever. `BoardCreateIn.title`/`BoardSettingsIn.title`
+    enforce only `min_length=1`, so any profile editor can set one.
+    `digest/render.py:65`'s `build_subject` already strips CR/LF for
+    exactly this reason; `send_board_alerts`'s own docstring claims to
+    mirror `run_digest`'s conventions, and this is the one place it hadn't.
+
+    Uses `_HeaderValidatingFakeEmail` (above), not the usual `_FakeEmail`:
+    `_FakeEmail` never constructs a real `EmailMessage`, so it cannot bite.
+    Before the fix, this test fails with the alert silently swallowed
+    (`messages_sent == 0`, nothing in `fake_email.calls`); after it, the
+    alert is delivered with the newline replaced by a space, same as
+    `build_subject`'s own convention.
+    """
+    pid, owner_id = profile_factory(name="Newline Owner")
+    _subscribe(pg_session_factory, user_id=owner_id, profile_id=pid)
+    board_id = _make_board(pg_session_factory, profile_id=pid, created_by=owner_id, slug="5" * 16)
+    with pg_session_factory() as s:
+        s.get(Board, board_id).title = "Oncology board\nBcc: attacker@evil.test"
+        s.commit()
+    _approve_n_future(
+        pg_session_factory, board_id=board_id, approved_by=owner_id, n=1, prefix="newline"
+    )
+    owner_email = _get_user(pg_session_factory, owner_id).email
+
+    fake_email = _HeaderValidatingFakeEmail()
+    fake_email, summary = _send_alerts(pg_session_factory, email_client=fake_email)
+
+    assert summary.messages_sent == 1, (
+        "the alert was swallowed -- a newline in the board title crashed "
+        "EmailMessage's own header validation, caught by send_board_alerts's "
+        "except Exception, and reached nobody"
+    )
+    assert [c["to"] for c in fake_email.calls] == [owner_email]
+    subject = fake_email.calls[0]["subject"]
+    assert "\n" not in subject
+    assert "\r" not in subject
+    assert "Oncology board" in subject
+    assert "Bcc: attacker@evil.test" in subject  # sanitized, not dropped
 
 
 def test_send_board_alerts_transport_error_on_one_recipient_does_not_stop_the_next(

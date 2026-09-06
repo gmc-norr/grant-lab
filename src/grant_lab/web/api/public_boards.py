@@ -79,9 +79,10 @@ class PublicBoardItemOut(BaseModel):
     qr_modules: int = Field(
         description=(
             "Matrix width in modules, EXCLUDING the quiet zone. 0 means NO QR "
-            "was produced -- the url was too large for segno's own overflow "
-            "ceiling (see `qr_for`) -- and the caller should render no `<svg>` "
-            "for this card. Unambiguous: the smallest real QR is 21 modules."
+            "was produced -- the url exceeded a measured byte-cost bound (see "
+            "`qr_for`'s `_MAX_URL_BYTES`), or in principle segno's own overflow "
+            "ceiling -- and the caller should render no `<svg>` for this card. "
+            "Unambiguous: the smallest real QR is 21 modules."
         )
     )
     qr_path: str
