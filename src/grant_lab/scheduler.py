@@ -466,13 +466,21 @@ def build_scheduler(
     # profile scan was widened (spec 5(a)) it is a scan of the WHOLE table, so
     # a long prefix of fresh profiles can consume the whole allowance.
     #
-    # NOT carried for CALLS. The call half is still narrowed in SQL
-    # (`embedding IS NULL OR embedding_model != current`), so a fresh call is
-    # never returned and can never eat the allowance: a capped call drain has
-    # recorded its progress in the DATA, and tomorrow's scan from 0 skips
-    # everything it already embedded. Carrying that cursor would instead be
-    # harmful — a row that failed to embed stays NULL and is meant to be
-    # retried by the next tick from 0, which a carried cursor would prevent.
+    # NOT carried for CALLS, and that is deliberate: a call that failed to
+    # embed stays NULL and is MEANT to be retried by the next tick from 0,
+    # which a carried cursor would prevent.
+    #
+    # The bound, stated as a bound rather than as a guarantee: the call half is
+    # narrowed in SQL (`embedding IS NULL OR embedding_model != current`), so a
+    # call that embedded successfully is never returned again and a capped call
+    # drain has recorded its progress in the DATA. What the predicate does NOT
+    # exclude is a row that keeps FAILING — it records nothing, so it stays in
+    # the candidate set and re-consumes the allowance on every tick, ahead of
+    # the rows behind it. Measured at max_batches=3: three always-failing calls
+    # ahead of one good call leave the good call unembedded after six ticks. It
+    # takes more than `max_batches * batch_size` (40,000 at production
+    # settings) persistently-failing calls per tick for this to bite, which is
+    # a scale bound, not an impossibility.
     #
     # Held in this closure, not in the database. The scheduler is in-process
     # and single-instance (a hard constraint), so one process owns this value
@@ -498,10 +506,23 @@ def build_scheduler(
                 extra={"event": "embedding_refresh_tick_failed", "error": str(e)},
             )
             return
-        # Reset ONLY on an exhausted scan. A cursor that never went back to 0
+        # Reset ONLY on an exhausted scan — a cursor that never went back to 0
         # would be a worse bug than the one it fixes: a profile edited BEHIND
         # the high-water mark would be permanently unreachable.
-        embeddings_after_profile_id = 0 if summary["scan_exhausted"] else summary["max_profile_id"]
+        #
+        # Keyed on the PROFILE half's own exhaustion, NOT on the drain's joint
+        # `scan_exhausted`. The joint flag sums both halves, so a tick held at
+        # `max_batches` by the CALL half (a call that keeps failing to embed
+        # stays in the candidate set and is re-examined every batch, forever)
+        # reports False even when the profile half ran off the end of its own
+        # table on the first batch. Keying on it froze this cursor past the
+        # last profile id for as long as any call kept failing — measured
+        # after_profile_id values [0, 2, 2, 2, 2, 2] across six ticks — so a
+        # profile that went stale behind it was never repaired. Pinned by
+        # tests/test_scheduler_embedding_cursor.py (gate 9c).
+        embeddings_after_profile_id = (
+            0 if summary["profile_scan_exhausted"] else summary["max_profile_id"]
+        )
         # No need to re-log the summary — refresh_missing_embeddings_tick already does.
 
     sched.add_job(

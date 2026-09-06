@@ -174,11 +174,23 @@ def refresh_missing_embeddings_tick(
     work none of them, and breaking on that stops the drain at page one with
     the rest of the table unrepaired.
 
-    The summary carries `scan_exhausted`: True when the drain ran off the end
-    of both tables, False when it stopped on `max_batches` with rows still
-    ahead of the cursor. The daily caller needs that distinction to decide
-    whether to carry `max_profile_id` into tomorrow's tick or reset to 0 —
-    see `_embeddings_tick` in scheduler.py.
+    The summary carries TWO termination flags, one joint and one per-half:
+
+    - `scan_exhausted`: True when the drain ran off the end of BOTH tables,
+      False when it stopped on `max_batches`. This is the drain's own
+      termination condition and is what the log line reports.
+    - `profile_scan_exhausted`: True when the PROFILE half examined no rows on
+      the batch the drain stopped at, i.e. the profile cursor is past the last
+      profile id. This is the one the daily caller keys its cursor on.
+
+    They are not interchangeable, and reading one for the other is a bug this
+    module has already shipped once. `scan_exhausted` sums both halves, so a
+    tick held at `max_batches` by the CALL half reports False even when the
+    profile half ran off the end of its own table on the very first batch. A
+    caller that reset the profile cursor on `scan_exhausted` therefore carried
+    a cursor past the last profile FOREVER while any call kept failing to
+    embed, and a profile that went stale behind it was never repaired. See
+    `_embeddings_tick` in scheduler.py.
 
     A single batch processes at most `batch_size` rows. Before this drain
     loop, recovery after a model swap silently took (backlog / batch_size)
@@ -221,6 +233,17 @@ def refresh_missing_embeddings_tick(
         # Set on the non-force drain only — under force this function runs a
         # single batch and the CLI owns the cursor walk and its termination.
         "scan_exhausted": False,
+        # The PROFILE half's own exhaustion — see the docstring for why the
+        # joint flag above cannot stand in for it. Overwritten by every batch,
+        # so what survives the loop is the terminating batch's answer.
+        #
+        # Benign edge: when the cap lands EXACTLY on the last profile row, the
+        # terminating batch examined that row, so this is False and the caller
+        # carries a cursor that is already past the last id. That is not "rows
+        # remain" — the next tick examines nothing, sets this True, resets, and
+        # repairs. One tick is lost and the state self-corrects; False here
+        # means "not proven exhausted", not "rows remain".
+        "profile_scan_exhausted": False,
     }
     # Walk forward with id-cursors so each batch processes NEW rows. This
     # both lets us drain a backlog larger than one batch AND avoids re-trying
@@ -262,8 +285,15 @@ def refresh_missing_embeddings_tick(
         # non-breaking iteration consumes at least one row of a finite table,
         # and the final page — the one past the last id — returns nothing on
         # both halves, making `examined` 0.
+        #
+        # `examined` is JOINT. Whether the PROFILE half is done is a separate
+        # question, answered by that half alone, and the daily caller needs
+        # the per-half answer to decide about the profile cursor.
+        totals["profile_scan_exhausted"] = summary["profiles_seen"] == 0
         examined = summary["calls_embedded"] + summary["calls_failed"] + summary["profiles_seen"]
         if examined == 0:
+            # examined == 0 implies profiles_seen == 0, so the per-half flag
+            # set just above is already True on this path.
             totals["scan_exhausted"] = True
             break
         cursor_call_id = summary["max_call_id"]
