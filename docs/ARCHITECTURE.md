@@ -53,7 +53,7 @@ Read this before claiming two tables share, or do not share, a rule.
 | `branches` | `Branch` | 5 | 1 | 0 | 0 |
 | `call_decisions` | `CallDecision` | 8 | 4 | 1 | 3 |
 | `call_ranking_criteria` | `CallRankingCriterion` | 7 | 2 | 0 | 0 |
-| `call_rankings` | `CallRanking` | 17 | 2 | 0 | 1 |
+| `call_rankings` | `CallRanking` | 18 | 2 | 0 | 1 |
 | `call_rubrics` | `CallRubric` | 7 | 1 | 0 | 0 |
 | `call_section_extracts` | `CallSectionExtract` | 7 | 1 | 1 | 0 |
 | `calls` | `Call` | 19 | 1 | 1 | 7 |
@@ -72,7 +72,7 @@ Read this before claiming two tables share, or do not share, a rule.
 | `phase_approvals` | `PhaseApproval` | 6 | 2 | 1 | 1 |
 | `profile_bootstrap_jobs` | `ProfileBootstrapJob` | 11 | 1 | 1 | 0 |
 | `profile_viewers` | `ProfileViewer` | 3 | 2 | 0 | 0 |
-| `profiles` | `Profile` | 15 | 2 | 4 | 2 |
+| `profiles` | `Profile` | 16 | 2 | 4 | 2 |
 | `proposed_changes` | `ProposedChange` | 19 | 4 | 4 | 2 |
 | `ranking_jobs` | `RankingJob` | 8 | 2 | 0 | 4 |
 | `ranking_remote_attempts` | `RankingRemoteAttempt` | 6 | 2 | 1 | 1 |

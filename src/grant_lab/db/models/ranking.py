@@ -156,6 +156,11 @@ class CallRanking(Base):
     escalated: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     escalated_from_score: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
     analysis_model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Which profile this ranking describes: "v1:" + sha256 of the canonical
+    # rank payload, captured BEFORE rank_pair ran. 'legacy' marks a row that
+    # predates migration 0075. NULL after 0075 means a bug, and reconcile
+    # treats it as stale so the bug is loud rather than silent.
+    profile_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class RankingJob(Base):
