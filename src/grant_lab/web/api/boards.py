@@ -97,12 +97,17 @@ class BoardOut(BaseModel):
     # PENDING side of that; this is the other half, a straight count of
     # board_items, and Task 5 does not call board_queue -- Task 6 wires that up.
     approved_count: int
-    # D9 / Open-3 half 2: whether THIS board's profile owner cannot currently
-    # receive a digest-channel notification (`User.status != 'active'` or
-    # `digest_disabled_at IS NOT NULL` -- see `boards/alerts.py`). Independent
-    # of `board_alerts_enabled`: a muted owner is still reachable, so this is
-    # never true merely because alerts are off. "A delivery the system knows
-    # it suppressed is the one case where an in-app surface is not optional."
+    # D9 / Open-3 half 2: whether a board alert on THIS board's profile would
+    # currently be escalated away from its owner -- matches
+    # `owner_undeliverable_map`'s own docstring term for term (Task 8 review
+    # round 2, Important 4): the owner cannot be resolved, OR the owner has
+    # no Subscription row for this profile (D10 -- a convention, not a
+    # constraint, so `boards/alerts.py` asserts it rather than trusting it),
+    # OR `User.status != 'active'` or `digest_disabled_at IS NOT NULL` (see
+    # `boards/alerts.py`). Independent of `board_alerts_enabled` in all three
+    # cases: a muted owner is still reachable, so this is never true merely
+    # because alerts are off. "A delivery the system knows it suppressed is
+    # the one case where an in-app surface is not optional."
     owner_undeliverable: bool
 
 

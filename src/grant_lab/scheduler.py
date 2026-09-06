@@ -566,6 +566,7 @@ def build_scheduler(
                         "event": "board_alerts_tick_done",
                         "alerts_found": board_summary.alerts_found,
                         "messages_sent": board_summary.messages_sent,
+                        "bounces": board_summary.bounces,
                         "transport_errors": board_summary.transport_errors,
                         "no_recipients": board_summary.no_recipients,
                     },
@@ -590,7 +591,13 @@ def build_scheduler(
             # Weekly digest is the worst to drop on a misfire — a restart at
             # Mon 07:00 would skip the whole week. The DigestRun week-uniqueness
             # guard makes a generous grace safe (a late run still de-dupes), so
-            # allow a full day of grace to catch a delayed Monday wake.
+            # allow a full day of grace to catch a delayed Monday wake. This
+            # grace is now also shared with `send_board_alerts` (Task 8, D9),
+            # which has NO idempotency record of its own (Minor 1, Task 8
+            # review round 2) — a late-firing misfire replays the board-alert
+            # send too, which is harmless only because it is not idempotent
+            # by omission but by intent (an ongoing shortfall is meant to be
+            # re-reported next week; see `send_board_alerts`'s own docstring).
             misfire_grace_time=24 * 3600,
         )
     else:

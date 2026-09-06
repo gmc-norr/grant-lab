@@ -75,6 +75,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from html import escape as _escape_html
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -102,6 +103,16 @@ class BoardAlertSummary:
 
     alerts_found: int = 0
     messages_sent: int = 0
+    # Task 8 review (round 2), Important 2: a hard bounce -- `SendResult(ok=
+    # False, bounce_reason=...)`, the shape `ResendClient`/`SMTPClient` use to
+    # report an address-level permanent failure BY RETURN, not by raise --
+    # counted separately from `messages_sent`. Mirrors
+    # `DigestRunSummary.bounces` in shape only: a board alert must NOT touch
+    # `User.digest_bounce_count` or `digest_disabled_at` -- that is the weekly
+    # digest's own bounce-disable mechanism (`digest/send.py:183-201`) and a
+    # board alert tripping it would auto-disable a user's WEEKLY DIGEST over
+    # an address failure that has nothing to do with the digest.
+    bounces: int = 0
     transport_errors: int = 0
     # Minor 6: an alert whose recipient_ids is empty (no deliverable admin to
     # escalate to) sends nothing. Counted here so that case is visible in the
@@ -304,13 +315,18 @@ def send_board_alerts(*, session_factory, email_client: EmailClient, settings) -
 
     Mirrors `run_digest`'s (`digest/send.py`) per-recipient try/except so one
     bad address or one transport blip does not stop the rest of the batch,
-    and its logging-event-per-outcome convention. Unlike `run_digest`, this
-    has no idempotency table to consult: `_digest_tick` only fires weekly, so
-    an owner or admin is told about a still-underfull board again next week,
-    which is the intended behaviour for an ongoing shortfall, not a defect.
+    and its logging-event-per-outcome convention -- transport error, hard
+    bounce (`SendResult(ok=False, ...)`, counted but never raising
+    `digest_bounce_count`, Task 8 review round 2 Important 2), success. Unlike
+    `run_digest`, this has no idempotency table to consult: `_digest_tick`
+    only fires weekly, so an owner or admin is told about a still-underfull
+    board again next week, which is the intended behaviour for an ongoing
+    shortfall, not a defect.
 
-    `settings` is duck-typed the same way `run_digest`'s is -- only
-    `.admin_dashboard_url` is read here.
+    `settings` is duck-typed the same way `run_digest`'s is -- BOTH
+    `.digest_dry_run` and `.admin_dashboard_url` are read here (Task 8 review
+    round 2, Important 1: round 1's version read only the URL and sent real
+    mail regardless of `DIGEST_DRY_RUN`).
     """
     summary = BoardAlertSummary()
     with session_factory() as session:
@@ -350,12 +366,33 @@ def send_board_alerts(*, session_factory, email_client: EmailClient, settings) -
 
         title = board_titles.get(alert.board_id, f"board {alert.board_id}")
         subject = f'Corridor board "{title}" is short {alert.shortfall} item(s)'
-        text = (
+        sentence = (
             f'The corridor board "{title}" currently has {alert.shortfall} fewer '
-            f"approved, still-open item(s) than its configured page size.\n\n"
-            f"{settings.admin_dashboard_url}"
+            f"approved, still-open item(s) than its configured page size."
         )
-        html = f"<p>{text}</p>"
+        text = f"{sentence}\n\n{settings.admin_dashboard_url}"
+        # Important 3 (Task 8 review round 2): `title` is free text any board
+        # editor can set (`Board.title` is `Text`; `web/api/boards.py`
+        # enforces only `min_length=1`) and on the escalation path this HTML
+        # reaches every deliverable admin -- an unescaped `<a href>` in a
+        # title is an admin-wide phishing vector. `digest/render.py` sets
+        # `autoescape=True` on its Jinja env EXPLICITLY for exactly this
+        # reason (its own comment explains why `select_autoescape()` would
+        # not have caught it for a `.jinja` filename); this module builds its
+        # HTML by hand, so it escapes by hand. The plain-text alternative
+        # stays UNESCAPED -- escaping it would show a human a literal
+        # "&amp;". Two separate `<p>` tags (not one `\n\n`-joined block) so
+        # the URL doesn't collapse into a run-on sentence, and the URL is a
+        # live link the way `digest.html.jinja` always links
+        # `dashboard_url`.
+        html_sentence = (
+            f'The corridor board "{_escape_html(title)}" currently has {alert.shortfall} '
+            f"fewer approved, still-open item(s) than its configured page size."
+        )
+        html = (
+            f"<p>{html_sentence}</p>"
+            f'<p><a href="{settings.admin_dashboard_url}">{settings.admin_dashboard_url}</a></p>'
+        )
 
         for uid in alert.recipient_ids:
             to = recipient_emails.get(uid)
@@ -373,8 +410,29 @@ def send_board_alerts(*, session_factory, email_client: EmailClient, settings) -
                     },
                 )
                 continue
+
+            if settings.digest_dry_run:
+                # Important 1 (Task 8 review round 2): honour the SAME flag
+                # `run_digest` does (`digest/send.py:122`), the same way --
+                # skip the send, log an equivalent event, do not count it as
+                # sent. Round 1 read only `.admin_dashboard_url` off
+                # `settings` and called `email_client.send` unconditionally,
+                # so a dev/staging box with `DIGEST_DRY_RUN=true` and a
+                # configured transport would send real board-alert mail.
+                _logger.info(
+                    "board_alert.dry_run",
+                    extra={
+                        "event": "board_alert_dry_run",
+                        "board_id": alert.board_id,
+                        "user_id": uid,
+                        "to": to,
+                        "subject": subject,
+                    },
+                )
+                continue
+
             try:
-                email_client.send(to=to, subject=subject, html=html, text=text)
+                result = email_client.send(to=to, subject=subject, html=html, text=text)
             except EmailTransportError as e:
                 summary.transport_errors += 1
                 _logger.warning(
@@ -398,6 +456,29 @@ def send_board_alerts(*, session_factory, email_client: EmailClient, settings) -
                     },
                 )
                 continue
+
+            if not result.ok:
+                # Important 2 (Task 8 review round 2): a hard bounce is
+                # reported BY RETURN, not by raise
+                # (`email/client.py:118-122`, `:170-175`), so round 1's
+                # discarded `SendResult` counted every bounce as a delivered
+                # alert. Count it distinctly and deliberately do NOT touch
+                # `User.digest_bounce_count` / `digest_disabled_at` -- that is
+                # the weekly digest's own bounce-disable mechanism
+                # (`digest/send.py:183-201`) and a board alert must not trip
+                # it.
+                summary.bounces += 1
+                _logger.warning(
+                    "board_alert.bounce",
+                    extra={
+                        "event": "board_alert_bounce",
+                        "board_id": alert.board_id,
+                        "user_id": uid,
+                        "reason": result.bounce_reason,
+                    },
+                )
+                continue
+
             summary.messages_sent += 1
 
     return summary

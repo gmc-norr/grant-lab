@@ -41,6 +41,28 @@ other test below must call `_subscribe` explicitly or it would
   `test_board_alerts_enabled_false_suppresses_the_alert` already pins the
   other half ("muted AND deliverable produces no alert" -- its owner is
   never touched, so it stays reachable) and is annotated to say so.
+
+## Fix round 2 additions (Task 8 review round 2)
+
+Four defects introduced by round 1's OWN new sending code (not the pure
+`boards_needing_attention` half, which round 2 left untouched):
+
+- Important 1: `_FakeSettings` gained `digest_dry_run` (previously omitted
+  entirely -- that omission is HOW `send_board_alerts` got away with never
+  reading it); `test_send_board_alerts_dry_run_sends_nothing` pins it.
+- Important 2: `_FakeEmail` gained `results`/`error_at`, the same shape
+  `tests/test_digest_send.py`'s own fake already had, so a bounce or a
+  transport error can actually be produced here;
+  `test_send_board_alerts_counts_a_bounce_not_a_delivery` pins that a bounce
+  is counted separately from a delivery and never touches
+  `digest_bounce_count`.
+- Important 3: `test_send_board_alerts_escapes_the_title_in_html_not_text`
+  pins that a `<a href>` in a board title is escaped in the HTML alternative,
+  left alone in the text alternative, and that the dashboard URL renders as
+  its own linked paragraph rather than running on into the sentence.
+- Minor 2: `test_send_board_alerts_transport_error_on_one_recipient_does_not_stop_the_next`
+  -- `transport_errors` was asserted only `== 0` everywhere else in this
+  file; this is where Important 2's bug would have been caught.
 """
 
 from __future__ import annotations
@@ -52,7 +74,7 @@ from sqlalchemy import select
 
 from grant_lab.boards.alerts import boards_needing_attention, send_board_alerts
 from grant_lab.db.models import Board, BoardItem, Call, Source, Subscription, User
-from grant_lab.email.client import SendResult
+from grant_lab.email.client import EmailTransportError, SendResult
 
 FUTURE = datetime.now(UTC) + timedelta(days=30)
 PAST = datetime.now(UTC) - timedelta(days=1)
@@ -60,30 +82,45 @@ PAST = datetime.now(UTC) - timedelta(days=1)
 
 @dataclass
 class _FakeSettings:
-    """Settings duck-type stand-in -- send_board_alerts only reads this
-    field. Same shape as tests/test_digest_send.py's own _FakeSettings."""
+    """Settings duck-type stand-in -- send_board_alerts reads these two
+    fields. Same shape as tests/test_digest_send.py's own _FakeSettings
+    (Task 8 review round 2, Important 1: round 1's version omitted
+    `digest_dry_run` entirely, which is how `send_board_alerts` got away with
+    never reading it)."""
 
     admin_dashboard_url: str = "http://test/"
+    digest_dry_run: bool = False
 
 
 class _FakeEmail:
     """Records every send() call instead of making one. Same shape as
-    tests/test_digest_send.py's own _FakeEmail (no live network call)."""
+    tests/test_digest_send.py's own _FakeEmail (no live network call):
+    `results` are returned in order (default: a fresh `SendResult(ok=True)`
+    per call), `error_at` maps a call index to an exception to raise instead
+    (Task 8 review round 2, Minor 2 / Important 2 -- round 1's fake could
+    never produce a bounce or a transport error)."""
 
-    def __init__(self):
+    def __init__(self, results=None, error_at=None):
+        self._results = list(results or [])
+        self._error_at = error_at or {}
         self.calls = []
 
     def send(self, *, to, subject, html, text):
+        idx = len(self.calls)
         self.calls.append({"to": to, "subject": subject, "html": html, "text": text})
-        return SendResult(ok=True, message_id=f"msg-{len(self.calls)}")
+        if idx in self._error_at:
+            raise self._error_at[idx]
+        if self._results:
+            return self._results.pop(0)
+        return SendResult(ok=True, message_id=f"msg-{idx}")
 
 
-def _send_alerts(pg_session_factory, email_client=None):
+def _send_alerts(pg_session_factory, email_client=None, settings=None):
     email_client = email_client if email_client is not None else _FakeEmail()
     summary = send_board_alerts(
         session_factory=pg_session_factory,
         email_client=email_client,
-        settings=_FakeSettings(),
+        settings=settings if settings is not None else _FakeSettings(),
     )
     return email_client, summary
 
@@ -690,3 +727,138 @@ def test_send_board_alerts_counts_but_does_not_send_when_recipients_are_empty(
     assert summary.messages_sent == 0
     assert summary.no_recipients == 1
     assert fake_email.calls == []
+
+
+## Fix round 2 additions (Task 8 review round 2)
+
+
+def test_send_board_alerts_dry_run_sends_nothing(pg_session_factory, profile_factory):
+    """Important 1: round 1's `send_board_alerts` read only
+    `.admin_dashboard_url` off `settings` and called `email_client.send`
+    unconditionally -- bypassing `settings.digest_dry_run`, the same flag
+    `run_digest` honours (`digest/send.py:122`) and whose own field
+    description says 'Set true in development'. A dev/staging box with a
+    configured transport and DIGEST_DRY_RUN=true would otherwise send real
+    board-alert email, including admin-wide escalations. Mirrors
+    `test_run_digest_dry_run_does_not_send_or_write` in
+    tests/test_digest_send.py: no send, and the summary reports it the same
+    way (no increment to the sent counter -- `alerts_found` still reflects
+    what was FOUND, exactly as `run_digest` still counts `users_processed`
+    under dry run)."""
+    pid, owner_id = profile_factory(name="Dry Run Owner")
+    _subscribe(pg_session_factory, user_id=owner_id, profile_id=pid)
+    board_id = _make_board(pg_session_factory, profile_id=pid, created_by=owner_id, slug="1" * 16)
+    _approve_n_future(
+        pg_session_factory, board_id=board_id, approved_by=owner_id, n=1, prefix="dry-run"
+    )
+
+    fake_email, summary = _send_alerts(
+        pg_session_factory, settings=_FakeSettings(digest_dry_run=True)
+    )
+
+    assert summary.alerts_found == 1
+    assert summary.messages_sent == 0
+    assert summary.bounces == 0
+    assert summary.transport_errors == 0
+    assert fake_email.calls == []  # never called, same contract as run_digest's own test
+
+
+def test_send_board_alerts_counts_a_bounce_not_a_delivery(pg_session_factory, profile_factory):
+    """Important 2: `ResendClient`/`SMTPClient` report an address-level
+    permanent failure BY RETURN (`SendResult(ok=False, bounce_reason=...)`),
+    not by raise (`email/client.py:118-122`, `:170-175`). Round 1 discarded
+    that return value, so `summary.messages_sent += 1` fired even for a
+    bounce -- an escalation to a departed admin's dead mailbox would log
+    `messages_sent: 1` and on-call would read that as delivered. This also
+    pins that a bounce must NOT touch `User.digest_bounce_count` /
+    `digest_disabled_at`: that is the weekly digest's own bounce-disable
+    mechanism and a board alert must never trip it."""
+    pid, owner_id = profile_factory(name="Bounce Owner")
+    _subscribe(pg_session_factory, user_id=owner_id, profile_id=pid)
+    board_id = _make_board(pg_session_factory, profile_id=pid, created_by=owner_id, slug="2" * 16)
+    _approve_n_future(
+        pg_session_factory, board_id=board_id, approved_by=owner_id, n=1, prefix="bounce"
+    )
+
+    fake_email = _FakeEmail(results=[SendResult(ok=False, bounce_reason="invalid_email")])
+    fake_email, summary = _send_alerts(pg_session_factory, email_client=fake_email)
+
+    assert len(fake_email.calls) == 1  # the send WAS attempted
+    assert summary.messages_sent == 0
+    assert summary.bounces == 1
+    assert summary.transport_errors == 0
+
+    owner = _get_user(pg_session_factory, owner_id)
+    assert owner.digest_bounce_count == 0
+    assert owner.digest_disabled_at is None
+
+
+def test_send_board_alerts_escapes_the_title_in_html_not_text(
+    pg_session_factory, profile_factory
+):
+    """Important 3: `Board.title` is free text any board editor can set
+    (`db/models/boards.py:79` is `Text`; `web/api/boards.py` enforces only
+    `min_length=1`), and on the escalation path this HTML is delivered to
+    EVERY deliverable admin -- an unescaped `<a href>` in a title is an
+    admin-wide phishing vector. `digest/render.py` sets `autoescape=True` on
+    its Jinja env explicitly for exactly this class of bug; this module
+    builds HTML by hand and must escape by hand too. The plain-text
+    alternative must stay UNESCAPED -- a human must never see a literal
+    "&amp;". Also pins the related rendering fix: the dashboard URL is a live
+    link in its own paragraph, not run on into the sentence."""
+    pid, owner_id = profile_factory(name="XSS Owner")
+    _subscribe(pg_session_factory, user_id=owner_id, profile_id=pid)
+    board_id = _make_board(pg_session_factory, profile_id=pid, created_by=owner_id, slug="3" * 16)
+    with pg_session_factory() as s:
+        s.get(Board, board_id).title = 'Look <a href="https://evil.test">click</a> now'
+        s.commit()
+    _approve_n_future(
+        pg_session_factory, board_id=board_id, approved_by=owner_id, n=1, prefix="xss"
+    )
+
+    fake_email, summary = _send_alerts(pg_session_factory)
+
+    assert summary.messages_sent == 1
+    html_body = fake_email.calls[0]["html"]
+    text_body = fake_email.calls[0]["text"]
+
+    assert '<a href="https://evil.test"' not in html_body
+    assert "&lt;a href=" in html_body
+    assert 'Look <a href="https://evil.test">click</a> now' in text_body  # unescaped
+    # the dashboard URL is a live link of its own, not run on into the
+    # sentence text
+    assert '<a href="http://test/">http://test/</a>' in html_body
+
+
+def test_send_board_alerts_transport_error_on_one_recipient_does_not_stop_the_next(
+    pg_session_factory, profile_factory
+):
+    """Minor 2: `transport_errors` was asserted only `== 0` everywhere else
+    in this file -- nothing ever made the fake email client raise. This is
+    exactly where Important 2's SendResult-discarding bug would have been
+    caught: 'mirrors run_digest's per-recipient try/except' is worth nothing
+    if the isolation it buys is never exercised. Two admins are escalated to;
+    the first raises a transport error, the second must still be sent to."""
+    pid, owner_id = profile_factory(name="Transport Error Owner")
+    with pg_session_factory() as s:
+        s.get(User, owner_id).status = "disabled"
+        s.commit()
+    _subscribe(pg_session_factory, user_id=owner_id, profile_id=pid)
+    admin1_id = _new_user(pg_session_factory, "transport-admin-1@umu.se", is_admin=True)
+    admin2_id = _new_user(pg_session_factory, "transport-admin-2@umu.se", is_admin=True)
+    board_id = _make_board(pg_session_factory, profile_id=pid, created_by=owner_id, slug="4" * 16)
+    _approve_n_future(
+        pg_session_factory, board_id=board_id, approved_by=owner_id, n=1, prefix="transport"
+    )
+    admin1_email = _get_user(pg_session_factory, admin1_id).email
+    admin2_email = _get_user(pg_session_factory, admin2_id).email
+    assert admin1_id < admin2_id  # id order is what _active_admin_ids sends first
+
+    fake_email = _FakeEmail(error_at={0: EmailTransportError("boom")})
+    fake_email, summary = _send_alerts(pg_session_factory, email_client=fake_email)
+
+    assert summary.transport_errors == 1
+    assert summary.messages_sent == 1
+    assert summary.bounces == 0
+    recipients = [c["to"] for c in fake_email.calls]
+    assert recipients == [admin1_email, admin2_email]
