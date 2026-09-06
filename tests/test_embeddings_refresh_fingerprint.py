@@ -86,3 +86,33 @@ def test_non_force_failure_leaves_all_three_untouched(pg_session_factory):
         assert p.embedding_fingerprint == fp_before
         # ...and that is now provably stale:
         assert p.embedding_fingerprint != embedding_fingerprint(p)
+
+
+def test_blank_text_clears_a_stray_fingerprint_with_no_vector(pg_session_factory):
+    """The guard's third disjunct, which nothing else reaches.
+
+    A row can carry a fingerprint with no vector: `ck_profiles_embedding_model_paired`
+    pairs `embedding` with `embedding_model` only, and trap 1 deliberately leaves
+    `embedding_fingerprint` out of it. Without the `embedding_fingerprint is not None`
+    disjunct the guard skips such a row, and it keeps claiming to describe content it
+    has no vector for -- the state Task 7's reconcile arm reads.
+    """
+    with pg_session_factory() as s:
+        p = make_profile(
+            s,
+            description="",
+            structured={},
+            embedding=None,
+            embedding_model=None,
+            embedding_fingerprint="v1:" + "0" * 64,
+        )
+        s.commit()
+        pid = p.id
+    with pg_session_factory() as s:
+        assert refresh_profile_embedding(s, FakeEmbedder(), pid) is True
+        s.commit()
+    with pg_session_factory() as s:
+        p = s.get(Profile, pid)
+        assert p.embedding_fingerprint is None
+        assert p.embedding is None
+        assert p.embedding_model is None
