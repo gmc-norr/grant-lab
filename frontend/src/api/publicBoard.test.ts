@@ -5,6 +5,7 @@ import {
   applyPublicBoardResult,
   BOARD_MAX_AGE_MS,
   BOARD_REFRESH_MS,
+  BOARD_FETCH_TIMEOUT_MS,
   fetchPublicBoard,
   isBoardVisible,
   usePublicBoard,
@@ -232,5 +233,87 @@ describe("usePublicBoard — hook-level wiring (IMPORTANT 1 + 2)", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(result.current).toBeNull(); // must stay blank, not restored
+  });
+});
+
+describe("the shape guard rejects a poisoned items array", () => {
+  it("treats items: [null] as a transport error, keeping the last good copy", async () => {
+    // A review measured that guarding only `Array.isArray(items)` still let
+    // `items: [null]` through, and BoardScreen's `isOpen` then reads
+    // `item.deadline_local_date` -- throwing into the global ErrorBoundary,
+    // which unmounts the tree and shows a button nobody is standing there to
+    // press. Permanent, on a wall.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ title: "t", orientation: "landscape", items: [null] }),
+      }),
+    );
+    await expect(fetchPublicBoard("s".repeat(16))).resolves.toEqual({ kind: "transport_error" });
+  });
+
+  it("accepts a well-formed items array", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ title: "t", orientation: "landscape", items: [{ id: 1 }] }),
+      }),
+    );
+    const r = await fetchPublicBoard("s".repeat(16));
+    expect(r.kind).toBe("ok");
+  });
+});
+
+
+describe("the abort timeout spans the BODY read, not just the headers", () => {
+  it("settles a headers-then-stall response instead of hanging forever", async () => {
+    // `await fetch(...)` resolves at response HEADERS. An earlier version
+    // cleared the timer in a `finally` around the fetch alone, so a response
+    // that returned headers and then stalled its body -- a DPI proxy that
+    // ACKs then drops, an HTTP/2 HEADERS with no DATA, a load balancer
+    // draining mid-response -- left `res.json()` pending forever with the
+    // controller already inert. One per 5-minute tick holds a connection
+    // permanently; after a few ticks the per-origin limit is gone, the board
+    // darkens at BOARD_MAX_AGE_MS, and it does NOT recover when the network
+    // heals. This drives that exact shape: headers arrive, the body never does.
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+          const signal = init.signal as AbortSignal;
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            // Never resolves on its own -- only the abort can settle it.
+            json: () =>
+              new Promise((_resolve, reject) => {
+                signal.addEventListener("abort", () => reject(new Error("AbortError")));
+              }),
+          });
+        }),
+      );
+
+      const pending = fetchPublicBoard("s".repeat(16));
+      let settled = false;
+      void pending.then(() => {
+        settled = true;
+      });
+
+      await vi.advanceTimersByTimeAsync(BOARD_FETCH_TIMEOUT_MS - 1);
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(2);
+      // `transport_error` is the branch that PRESERVES the last good copy,
+      // so a timeout can never blank the wall.
+      await expect(pending).resolves.toEqual({ kind: "transport_error" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

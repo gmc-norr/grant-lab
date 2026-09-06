@@ -66,9 +66,15 @@ export type PublicBoardFetchResult =
 // serialize a `None` element). This one check closes the actual render-throw
 // gap without over-building for shapes the backend cannot emit.
 function hasItemsArray(data: unknown): data is PublicBoardOut {
-  return (
-    typeof data === "object" && data !== null && Array.isArray((data as { items?: unknown }).items)
-  );
+  if (typeof data !== "object" || data === null) return false;
+  const items = (data as { items?: unknown }).items;
+  // Every ELEMENT must be a non-null object too, not just the array. A review
+  // measured that `items: [null]` still threw one layer down -- BoardScreen's
+  // `isOpen` reads `item.deadline_local_date` -- reaching the same global
+  // ErrorBoundary with the same permanent outcome. A string or number element
+  // degrades to a blank card instead of throwing, so `null`/`undefined` were
+  // the entire residual hole.
+  return Array.isArray(items) && items.every((el) => typeof el === "object" && el !== null);
 }
 
 export async function fetchPublicBoard(slug: string): Promise<PublicBoardFetchResult> {
@@ -81,9 +87,18 @@ export async function fetchPublicBoard(slug: string): Promise<PublicBoardFetchRe
   // another, well inside one refresh cycle.
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), BOARD_FETCH_TIMEOUT_MS);
-  let res: Response;
+  // The timeout must span the BODY READ, not just the header phase. `await
+  // fetch(...)` resolves at response HEADERS; an earlier version cleared the
+  // timer in a `finally` around the fetch alone, so a headers-then-stall
+  // response -- a DPI proxy that ACKs then drops, an HTTP/2 HEADERS with no
+  // DATA, a load balancer draining mid-response -- left `res.json()` pending
+  // forever with the controller already inert. One such response per tick
+  // holds a connection permanently; after a few ticks the per-origin
+  // connection limit is gone, the board darkens at BOARD_MAX_AGE_MS, and it
+  // does NOT recover when the network heals. That is the exact failure this
+  // timeout exists to prevent, so the `finally` wraps everything.
   try {
-    res = await fetch(`/api/public/boards/${encodeURIComponent(slug)}`, {
+    const res = await fetch(`/api/public/boards/${encodeURIComponent(slug)}`, {
       // MINOR 3: this endpoint carries no auth dependency at all (it is the
       // one deliberately-public, unauthenticated route — see
       // web/api/public_boards.py's module docstring) — "omit" makes that
@@ -93,22 +108,21 @@ export async function fetchPublicBoard(slug: string): Promise<PublicBoardFetchRe
       credentials: "omit",
       signal: controller.signal,
     });
-  } catch {
-    return { kind: "transport_error" };
-  } finally {
-    clearTimeout(timeoutId);
-  }
-  // The unpublish path (§6: unpublished and nonexistent give the SAME 404).
-  // 410 is handled the same way in case the endpoint ever grows it — nothing
-  // downstream here distinguishes "unpublished" from "deleted for good".
-  if (res.status === 404 || res.status === 410) return { kind: "gone" };
-  if (!res.ok) return { kind: "transport_error" };
-  try {
+    // The unpublish path (§6: unpublished and nonexistent give the SAME 404).
+    // 410 is handled the same way in case the endpoint ever grows it —
+    // nothing downstream distinguishes "unpublished" from "deleted for good".
+    if (res.status === 404 || res.status === 410) return { kind: "gone" };
+    if (!res.ok) return { kind: "transport_error" };
     const data: unknown = await res.json();
     if (!hasItemsArray(data)) return { kind: "transport_error" };
     return { kind: "ok", data };
   } catch {
+    // Every failure funnels here, an AbortError included, and
+    // `transport_error` is the branch `applyPublicBoardResult` maps to
+    // `return prev` -- so a timeout can never discard the last good copy.
     return { kind: "transport_error" };
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
