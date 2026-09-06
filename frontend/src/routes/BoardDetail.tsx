@@ -7,7 +7,7 @@ import { Link, useParams } from "react-router-dom";
 
 import { apiErrorMessage } from "../api/client";
 import {
-  useBoard, useBoardItems, usePublishBoard, useUnapproveItem, useUpdateBoard,
+  useBoard, useBoardItems, usePublishBoard, useReorderItems, useUnapproveItem, useUpdateBoard,
   type Board, type BoardSettingsBody,
 } from "../api/boards";
 import { useSession } from "../api/session";
@@ -41,12 +41,19 @@ export function BoardDetail() {
     );
   }
 
-  // `key={board.data.id}` forces a full remount on navigating straight from one
-  // board's detail page to another's -- SettingsForm's fields are local state
-  // seeded from `board` ONCE on mount, so without this a `/boards/1` ->
-  // `/boards/2` transition (same route element, only the param changes) would
-  // keep board 1's title/orientation on screen under board 2's data. Same
-  // pattern as `key={id}` on the Cockpit route (router.tsx:33-34).
+  // MINOR 8: `key={board.data.id}` is DEFENSIVE, not a caught bug -- this
+  // component's own `if (board.isLoading) return <Text .../>` a few lines
+  // above already unmounts `DetailView` for the duration of a
+  // `/boards/1` -> `/boards/2` navigation (react-query's queryKey changes
+  // with `id`, so `useBoard` returns `isPending` and the tree briefly
+  // renders `<Text>` instead of `<DetailView>`), so `SettingsForm`'s
+  // mount-seeded local state is already gone by the time board 2's data
+  // arrives, with no `placeholderData`/`keepPreviousData` set to bridge that
+  // gap. A prior version of this comment claimed the key had CAUGHT that
+  // stale-form bug; it had not, because the scenario cannot occur. Kept
+  // anyway as cheap insurance against a future change (e.g. adding
+  // placeholderData to `useBoard` to remove the loading flash) that would
+  // make the remount stop happening for free.
   return (
     <DetailView
       key={board.data.id}
@@ -105,6 +112,16 @@ function SettingsForm({ board }: { board: Board }) {
   const [title, setTitle] = useState(board.title);
   const [orientation, setOrientation] = useState<Board["orientation"]>(board.orientation);
   const [itemsPerPage, setItemsPerPage] = useState<number>(board.items_per_page);
+  // IMPORTANT 2: the server treats an explicit items_per_page as an OVERRIDE
+  // that wins over its own orientation-driven default
+  // (ORIENTATION_ITEMS_PER_PAGE, boards.py:348-353) -- so if this always sent
+  // the seeded-at-mount value, flipping orientation without touching this
+  // field would save the OLD page size under the NEW orientation (a landscape
+  // 8/page flipped to portrait would save as portrait/8, four implicit rows
+  // overflowing the fixed-height wall). Track whether the user actually
+  // edited this field and omit it from the body when they have not, so the
+  // server's own derivation runs.
+  const [itemsPerPageTouched, setItemsPerPageTouched] = useState(false);
   const [minScore, setMinScore] = useState<number>(board.min_score);
   const [pageSeconds, setPageSeconds] = useState<number>(board.page_seconds);
 
@@ -113,9 +130,9 @@ function SettingsForm({ board }: { board: Board }) {
     const body: BoardSettingsBody = {
       title,
       orientation,
-      items_per_page: itemsPerPage,
       min_score: minScore,
       page_seconds: pageSeconds,
+      ...(itemsPerPageTouched ? { items_per_page: itemsPerPage } : {}),
     };
     update.mutate(body);
   }
@@ -146,12 +163,18 @@ function SettingsForm({ board }: { board: Board }) {
           <Group grow>
             <NumberInput
               label="Items per page"
+              description="1–64"
               min={1}
+              max={64}
               value={itemsPerPage}
-              onChange={(v) => setItemsPerPage(typeof v === "number" ? v : itemsPerPage)}
+              onChange={(v) => {
+                setItemsPerPageTouched(true);
+                setItemsPerPage(typeof v === "number" ? v : itemsPerPage);
+              }}
             />
             <NumberInput
               label="Minimum score"
+              description="0–100"
               min={0}
               max={100}
               value={minScore}
@@ -159,7 +182,9 @@ function SettingsForm({ board }: { board: Board }) {
             />
             <NumberInput
               label="Seconds per page"
+              description="1–3600"
               min={1}
+              max={3600}
               value={pageSeconds}
               onChange={(v) => setPageSeconds(typeof v === "number" ? v : pageSeconds)}
             />
@@ -247,6 +272,19 @@ function PublishControl({ board, isAdmin }: { board: Board; isAdmin: boolean }) 
 function ApprovedItems({ board }: { board: Board }) {
   const items = useBoardItems(board.id);
   const unapprove = useUnapproveItem(board.id);
+  const reorder = useReorderItems(board.id);
+
+  // IMPORTANT 3: PUT /api/boards/{id}/items is all-or-nothing -- it wants
+  // the COMPLETE permutation of every approved call_id, not one moved id, so
+  // moving a row rebuilds the whole ordered list and sends that.
+  function move(index: number, direction: -1 | 1) {
+    if (!items.data) return;
+    const order = items.data.items.map((it) => it.call_id);
+    const target = index + direction;
+    if (target < 0 || target >= order.length) return;
+    [order[index], order[target]] = [order[target], order[index]];
+    reorder.mutate(order);
+  }
 
   return (
     <Card withBorder radius="md" p="md" bg="var(--app-sidebar)" mb="md">
@@ -266,9 +304,29 @@ function ApprovedItems({ board }: { board: Board }) {
       )}
       {items.data && items.data.items.length > 0 && (
         <Stack gap={4}>
-          {items.data.items.map((item) => (
+          {items.data.items.map((item, index) => (
             <Group key={item.call_id} justify="space-between" wrap="nowrap">
               <Group gap="sm" wrap="nowrap">
+                <Group gap={2} wrap="nowrap">
+                  <Button
+                    variant="subtle"
+                    size="compact-sm"
+                    aria-label={`Move ${item.title} up`}
+                    disabled={index === 0 || reorder.isPending}
+                    onClick={() => move(index, -1)}
+                  >
+                    ↑
+                  </Button>
+                  <Button
+                    variant="subtle"
+                    size="compact-sm"
+                    aria-label={`Move ${item.title} down`}
+                    disabled={index === items.data.items.length - 1 || reorder.isPending}
+                    onClick={() => move(index, 1)}
+                  >
+                    ↓
+                  </Button>
+                </Group>
                 <Text size="sm">{item.title}</Text>
                 <Text size="xs" c="dimmed">
                   {item.source_name}

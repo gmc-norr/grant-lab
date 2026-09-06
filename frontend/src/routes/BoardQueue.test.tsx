@@ -147,6 +147,55 @@ it("refuses to submit a selection that would exceed capacity, naming the overflo
   expect(await screen.findByText(overflowMessage)).toBeInTheDocument();
 });
 
+it("the approve-at-or-above field clamps to 0-100 and says so in its helper text", async () => {
+  // Mantine's NumberInput does not expose min/max as DOM attributes (it is a
+  // type="text" input under the hood), so the only real pin is the CLAMPING
+  // behaviour itself -- typing past either edge and blurring.
+  const user = userEvent.setup();
+  renderQueue();
+  const input = (await screen.findByLabelText(
+    /approve everything at or above/i,
+  )) as HTMLInputElement;
+  expect(screen.getByText("0–100")).toBeInTheDocument();
+  await user.clear(input);
+  await user.type(input, "500");
+  await user.tab();
+  expect(input).toHaveValue("100");
+  await user.clear(input);
+  await user.type(input, "-5");
+  await user.tab();
+  expect(input).toHaveValue("0");
+});
+
+it("clearing the score field disables the approve-band button instead of arming a 0-threshold approval", async () => {
+  const user = userEvent.setup();
+  const { post } = renderQueue({ items: [call({ call_id: 1, score: 70 })] });
+  const input = await screen.findByLabelText(/approve everything at or above/i);
+  await user.clear(input);
+  const button = screen.getByRole("button", { name: /approve all/i });
+  expect(button).toBeDisabled();
+  await user.click(button);
+  // MINOR 6: Number("") is 0 and Number.isFinite(0) is true, so an unguarded
+  // implementation would post min_score: 0 here -- a whole-queue approval
+  // with no confirmation. Nothing may be posted while the field is empty.
+  expect(post).not.toHaveBeenCalled();
+});
+
+it("clears the selection after approve-at-or-above succeeds, not just after approve-selected", async () => {
+  const user = userEvent.setup();
+  renderQueue({ items: [call({ call_id: 1, title: "Selectable", score: 70 })] });
+  await user.click(await screen.findByRole("checkbox", { name: /selectable/i }));
+  expect(screen.getByRole("button", { name: /approve selected \(1\)/i })).toBeInTheDocument();
+  const input = screen.getByLabelText(/approve everything at or above/i);
+  await user.clear(input);
+  await user.type(input, "50");
+  await user.click(screen.getByRole("button", { name: /^approve all/i }));
+  // MINOR 7: without an onSuccess clearing `selected`, the checked row's id
+  // stays in the set after the refetch drops its checkbox, and "Approve
+  // selected" keeps showing a stale (1) even though nothing is checked.
+  await screen.findByRole("button", { name: /approve selected \(0\)/i });
+});
+
 it("shows remaining capacity from the board's stored items_per_page", async () => {
   const portraitBoard: Board = { ...BOARD, orientation: "portrait", items_per_page: 4, max_pages: 3, approved_count: 5 };
   renderQueue({ items: [], board: portraitBoard });

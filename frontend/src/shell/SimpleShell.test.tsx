@@ -88,21 +88,22 @@ describe("SimpleShell", () => {
     expect(screen.getByRole("main")).toHaveTextContent("a real page");
   });
 
-  it("offers the three release-1 destinations as nav links to an admin", () => {
+  it("offers the four release-1 destinations as nav links to an admin", () => {
     sessionData.value = ADMIN;
     renderAt("/");
     const nav = screen.getByRole("navigation", { name: /main/i });
-    for (const label of ["Calls", "Profiles", "Admin"]) {
+    for (const label of ["Calls", "Profiles", "Boards", "Admin"]) {
       expect(within(nav).getByRole("link", { name: label })).toBeInTheDocument();
     }
   });
 
-  it("hides the Admin destination from a non-admin", () => {
+  it("hides the Admin destination from a non-admin, but still offers Boards", () => {
     sessionData.value = MEMBER;
     renderAt("/");
     const nav = screen.getByRole("navigation", { name: /main/i });
     expect(within(nav).getByRole("link", { name: "Calls" })).toBeInTheDocument();
     expect(within(nav).getByRole("link", { name: "Profiles" })).toBeInTheDocument();
+    expect(within(nav).getByRole("link", { name: "Boards" })).toBeInTheDocument();
     // A non-admin must not be offered a destination that 403s.
     expect(screen.queryByRole("link", { name: "Admin" })).not.toBeInTheDocument();
   });

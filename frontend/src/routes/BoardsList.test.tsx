@@ -1,6 +1,6 @@
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
@@ -68,9 +68,27 @@ it("shows an empty state when there are no boards", async () => {
 });
 
 it("requires a title and a profile before submitting", async () => {
-  const user = userEvent.setup();
+  // MINOR 10 (measured): clicking the submit button with `userEvent.click`
+  // never even reaches this component's own `submit()` -- jsdom's native
+  // constraint validation for the TextInput/NativeSelect `required`
+  // attributes blocks the submit BEFORE the "submit" event fires, so a
+  // version of this test with the `if (!title.trim() || !profileId) return;`
+  // guard deleted from BoardsList.tsx still passed (verified by deleting the
+  // line and re-running this file: 4/4 green). `fireEvent.submit` dispatches
+  // the "submit" DOM event directly, bypassing that browser-native pipeline,
+  // so this actually exercises the component's own guard rather than jsdom's.
   const { post } = renderList();
-  await user.click(screen.getByRole("button", { name: /create board/i }));
+  await screen.findByRole("button", { name: /create board/i });
+  const form = screen.getByRole("button", { name: /create board/i }).closest("form");
+  fireEvent.submit(form as HTMLFormElement);
+  // Flush the mutation's internal microtask queue before asserting a
+  // negative -- react-query's `mutate()` does not invoke `mutationFn`
+  // (and so does not call the mocked `post`) perfectly synchronously with
+  // the "submit" event, so a bare synchronous assertion here would pass
+  // whether or not the guard exists, for the wrong reason.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
   expect(post).not.toHaveBeenCalled();
 });
 

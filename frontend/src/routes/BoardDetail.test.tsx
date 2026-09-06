@@ -57,6 +57,7 @@ function renderDetail({
   approvedItems = [] as BoardItem[],
   putResult,
   publishResult,
+  reorderResult,
 }: {
   admin?: boolean;
   board?: Board;
@@ -64,6 +65,7 @@ function renderDetail({
   approvedItems?: BoardItem[];
   putResult?: unknown;
   publishResult?: unknown;
+  reorderResult?: unknown;
 } = {}) {
   const get = vi.spyOn(clientMod.api, "GET").mockImplementation((async (path: string) => {
     if (path === "/api/me") return mockMe(admin);
@@ -85,6 +87,7 @@ function renderDetail({
   }) as never);
   const put = vi.spyOn(clientMod.api, "PUT").mockImplementation((async (path: string) => {
     if (path === PUBLISH_PATH) return publishResult ?? { data: { ...board, is_published: true }, error: undefined };
+    if (path === ITEMS_PATH) return reorderResult ?? { data: { items: approvedItems }, error: undefined };
     return putResult ?? { data: board, error: undefined };
   }) as never);
   const del = vi.spyOn(clientMod.api, "DELETE").mockResolvedValue({ data: undefined, error: undefined } as never);
@@ -155,7 +158,7 @@ it("an unknown or unreadable board shows not-found messaging", async () => {
   expect(await screen.findByRole("alert")).toHaveTextContent(/doesn.t exist|not found/i);
 });
 
-it("editing settings saves the whole form", async () => {
+it("editing settings saves the whole form, omitting items_per_page since it was never touched", async () => {
   const user = userEvent.setup();
   const { put } = renderDetail();
   await screen.findByText("Corridor board");
@@ -169,12 +172,75 @@ it("editing settings saves the whole form", async () => {
       body: {
         title: "New title",
         orientation: "landscape",
-        items_per_page: 8,
         min_score: 60,
         page_seconds: 30,
       },
     }),
   );
+});
+
+it("IMPORTANT 2: flipping orientation without touching items_per_page omits it from the saved body", async () => {
+  // The server treats an EXPLICIT items_per_page as an override that wins
+  // over its own orientation-driven default (boards.py:348-353). A landscape
+  // board (8/page) flipped to portrait without touching this field must let
+  // the server derive the new page size -- sending the stale seeded value
+  // would save "portrait" with items_per_page still 8, four implicit rows
+  // overflowing the fixed-height corridor wall.
+  const user = userEvent.setup();
+  const { put } = renderDetail();
+  await screen.findByText("Corridor board");
+  // Mantine's SegmentedControl hides its radio input from a11y queries in
+  // this Mantine version -- click the visible label, this codebase's
+  // established pattern (ProfileVisibilityCard.test.tsx, BoardsList.test.tsx).
+  await user.click(screen.getByText("Portrait"));
+  await user.click(screen.getByRole("button", { name: /save settings/i }));
+  await waitFor(() => expect(put).toHaveBeenCalled());
+  const [, callArgs] = put.mock.calls[0] as [string, { body: Record<string, unknown> }];
+  expect(callArgs.body).not.toHaveProperty("items_per_page");
+  expect(callArgs.body).toMatchObject({ orientation: "portrait" });
+});
+
+it("IMPORTANT 2: explicitly changing items_per_page still sends it", async () => {
+  const user = userEvent.setup();
+  const { put } = renderDetail();
+  await screen.findByText("Corridor board");
+  const itemsInput = screen.getByLabelText(/items per page/i);
+  await user.clear(itemsInput);
+  await user.type(itemsInput, "5");
+  await user.click(screen.getByRole("button", { name: /save settings/i }));
+  await waitFor(() =>
+    expect(put).toHaveBeenCalledWith(SETTINGS_PATH, {
+      params: { path: { board_id: 1 } },
+      body: {
+        title: "Corridor board",
+        orientation: "landscape",
+        min_score: 60,
+        page_seconds: 30,
+        items_per_page: 5,
+      },
+    }),
+  );
+});
+
+it("MINOR 5: the items-per-page and page-seconds fields clamp to their bounds and say so", async () => {
+  const user = userEvent.setup();
+  renderDetail();
+  await screen.findByText("Corridor board");
+  expect(screen.getByText("1–64")).toBeInTheDocument();
+  expect(screen.getByText("0–100")).toBeInTheDocument();
+  expect(screen.getByText("1–3600")).toBeInTheDocument();
+
+  const itemsInput = screen.getByLabelText(/items per page/i) as HTMLInputElement;
+  await user.clear(itemsInput);
+  await user.type(itemsInput, "500");
+  await user.tab();
+  expect(itemsInput).toHaveValue("64");
+
+  const secondsInput = screen.getByLabelText(/seconds per page/i) as HTMLInputElement;
+  await user.clear(secondsInput);
+  await user.type(secondsInput, "99999");
+  await user.tab();
+  expect(secondsInput).toHaveValue("3600");
 });
 
 it("a capacity-shrinking settings save shows the 409 message with its numbers intact", async () => {
@@ -211,4 +277,46 @@ it("removing an approved item calls DELETE for that call", async () => {
       params: { path: { board_id: 1, call_id: 42 } },
     }),
   );
+});
+
+const THREE_ITEMS: BoardItem[] = [
+  {
+    call_id: 1, title: "First", url: "https://example.test/1", deadline: null,
+    source_name: "Vinnova", position: 0, approved_by: 1, approved_at: "2026-01-01T00:00:00Z",
+  },
+  {
+    call_id: 2, title: "Second", url: "https://example.test/2", deadline: null,
+    source_name: "Vinnova", position: 1, approved_by: 1, approved_at: "2026-01-01T00:00:00Z",
+  },
+  {
+    call_id: 3, title: "Third", url: "https://example.test/3", deadline: null,
+    source_name: "Vinnova", position: 2, approved_by: 1, approved_at: "2026-01-01T00:00:00Z",
+  },
+];
+
+it("IMPORTANT 3: moving an item up sends the full reordered list, not a single moved id", async () => {
+  // PUT /api/boards/{id}/items is all-or-nothing (schema.gen.ts): it validates
+  // duplicates, unknowns and omissions against the COMPLETE set before the
+  // first write, so a caller sending only the moved id would be refused.
+  const user = userEvent.setup();
+  const { put } = renderDetail({ approvedItems: THREE_ITEMS });
+  await screen.findByText("Second");
+  await user.click(screen.getByRole("button", { name: /move second up/i }));
+  await waitFor(() =>
+    expect(put).toHaveBeenCalledWith(ITEMS_PATH, {
+      params: { path: { board_id: 1 } },
+      body: { call_ids: [2, 1, 3] },
+    }),
+  );
+});
+
+it("IMPORTANT 3: the first item cannot move up and the last cannot move down", async () => {
+  const { put } = renderDetail({ approvedItems: THREE_ITEMS });
+  await screen.findByText("First");
+  expect(screen.getByRole("button", { name: /move first up/i })).toBeDisabled();
+  expect(screen.getByRole("button", { name: /move third down/i })).toBeDisabled();
+  // And the interior buttons that SHOULD work are not disabled by the same rule.
+  expect(screen.getByRole("button", { name: /move first down/i })).not.toBeDisabled();
+  expect(screen.getByRole("button", { name: /move third up/i })).not.toBeDisabled();
+  expect(put).not.toHaveBeenCalled();
 });

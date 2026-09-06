@@ -63,10 +63,19 @@ export function BoardQueue({ board }: { board: Board }) {
     approve.mutate({ call_ids }, { onSuccess: () => setSelected(new Set()) });
   }
 
+  // An emptied field is "no threshold chosen", not zero -- Number("") is 0 and
+  // Number.isFinite(0) is true, so without this an emptied input would arm a
+  // whole-queue approval (min_score: 0) with no confirmation on a bulk action.
+  const scoreFloorIsEmpty = minScoreInput === "";
+
   function approveAtOrAbove() {
+    if (scoreFloorIsEmpty) return;
     const n = Number(minScoreInput);
     if (!Number.isFinite(n)) return;
-    approve.mutate({ min_score: n });
+    // Clear the selection here too (MINOR 7): otherwise a call approved by
+    // this path keeps its id in `selected` after the refetch drops its
+    // checkbox, leaving "Approve selected (N)" showing a stale count.
+    approve.mutate({ min_score: n }, { onSuccess: () => setSelected(new Set()) });
   }
 
   return (
@@ -86,14 +95,19 @@ export function BoardQueue({ board }: { board: Board }) {
       <Group align="flex-end" gap="sm">
         <NumberInput
           label="Approve everything at or above"
+          description="0–100"
           min={0}
           max={100}
           value={minScoreInput}
           onChange={setMinScoreInput}
           w={140}
         />
-        <Button variant="default" onClick={approveAtOrAbove} disabled={approve.isPending}>
-          Approve all ≥ {minScoreInput || 0}
+        <Button
+          variant="default"
+          onClick={approveAtOrAbove}
+          disabled={approve.isPending || scoreFloorIsEmpty}
+        >
+          Approve all ≥ {scoreFloorIsEmpty ? "…" : minScoreInput}
         </Button>
       </Group>
 

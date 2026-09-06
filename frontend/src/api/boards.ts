@@ -10,6 +10,7 @@ export type QueueCall = components["schemas"]["QueueCallOut"];
 export type BoardQueueResult = components["schemas"]["BoardQueueOut"];
 export type BoardItem = components["schemas"]["BoardItemOut"];
 export type ApproveBody = components["schemas"]["ApproveIn"];
+export type ReorderBody = components["schemas"]["ReorderIn"];
 
 // --- boards list + CRUD ----------------------------------------------------
 //
@@ -130,6 +131,26 @@ export function useApproveItems(boardId: number) {
       qc.invalidateQueries({ queryKey: ["board-queue", boardId] });
       qc.invalidateQueries({ queryKey: ["board", boardId] });
       qc.invalidateQueries({ queryKey: ["boards"] });
+    },
+  });
+}
+
+// Reorder -- all-or-nothing (Task 6's own contract): `call_ids` must be the
+// COMPLETE permutation of every approved item's id, validated against
+// duplicates/unknowns/omissions before the first write. Never send a single
+// moved id; the caller builds the whole new order.
+export function useReorderItems(boardId: number) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (call_ids: number[]) =>
+      unwrap(
+        await api.PUT("/api/boards/{board_id}/items", {
+          params: { path: { board_id: boardId } },
+          body: { call_ids },
+        }),
+      ),
+    onSuccess: (data) => {
+      qc.setQueryData(["board-items", boardId], data);
     },
   });
 }
