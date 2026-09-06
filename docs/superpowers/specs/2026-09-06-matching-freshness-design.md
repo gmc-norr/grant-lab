@@ -1,7 +1,7 @@
 # Matching freshness: telling "exists" from "current"
 
 **Date:** 2026-09-06
-**Status:** rev 2 — design, awaiting second review
+**Status:** rev 3 — design, ready for planning
 **Origin:** finding 2 of `docs/superpowers/reviews/2026-09-05-runtime-ownership-and-state-consistency-review.md`
 **Base:** `master` at the Plan C merge (`76c70a47`)
 
@@ -20,7 +20,22 @@ scenario that cannot occur. Rev 1 claimed the endpoint "discards" `embed_text_ch
 it does not, it passes it into the task and uses it there. Rev 1 counted three
 profile-text write sites; there are four.
 
-Everything below is rev 2.
+**Rev 3** applies a second review (one model; the other died in a server-error
+retry loop after reading the package, and was killed rather than waited on). Seven
+of its eight findings were confirmed against the source. The worst: rev 2's
+deferral would have **rolled back**, because `queue.revert_to_pending` does not
+commit and every other early exit in the worker does — the job would have stayed
+RUNNING, and the stuck-reaper would have burned the very retry the deferral exists
+to protect. Rev 2 also forgot the ORM mappings entirely, and its `'legacy'` fix
+closed only half the hole it was written for.
+
+One finding was **partly refuted by running the code**: rev 2 called the embedding
+tick and ranking reconcile "two independent scheduled jobs". They are ordered on
+purpose — 3:30 and 4:00, with a comment at `scheduler.py:514-516` saying so. The
+reviewer flagged this as unverifiable from its package and was right to. Rev 3
+states the real ordering and the real gap.
+
+Everything below is rev 3.
 
 ## The problem
 
@@ -67,8 +82,9 @@ and nothing else.
 **This spec does not fix hole 2.** It is closed only in the sense that hole 3's
 daily repair will eventually detect and correct whatever the request path lost.
 A transactional outbox is deliberately out of scope (see "Out of scope"). The
-honest promise of this design is *correct within a day*, not *correct within a
-second*.
+honest promise of this design is *correct within a day* in the normal case — and
+up to two daily cycles when the 03:30/04:00 tick ordering slips (see "The
+vector-ordering problem") — not *correct within a second*.
 
 ### Hole 3 — no repair path can see staleness
 
@@ -189,11 +205,18 @@ The ranker does not only read text. It reads the profile's **stored vector**:
 `post_edit.py:33-34` states the requirement outright — *"the ranking jobs must see
 the post-edit vector, not the pre-edit one"*.
 
-The request path honours that ordering. **The repair path has none**: the
-embedding tick and ranking reconcile are two independent scheduled jobs
-(`scheduler.py:464` and `:513`) and the ranking worker drains continuously. So a
-pair can be re-ranked against a vector that has not caught up yet, be stamped with
-the current text fingerprint, and become permanently invisible to repair.
+The request path honours that ordering. **The repair path orders the two ticks
+but does not enforce the ordering.** The embedding tick runs at 03:30 and reconcile
+at 04:00 (`scheduler.py:479` and `:517`), and the 30-minute gap is deliberate — the
+comment at `:514-516` says reconcile runs after embedding refresh "so we catch any
+gaps those left behind on the same day rather than a day late".
+
+Thirty minutes is a convention, not a guarantee. The embedding tick drains up to
+`_TICK_MAX_BATCHES` batches and can overrun it, and `misfire_grace_time=6*3600`
+lets a missed tick run hours late. Meanwhile the ranking worker drains
+continuously, on its own interval, tied to neither. So a pair can still be ranked
+against a vector that has not caught up, be stamped with the current text
+fingerprint, and become permanently invisible to repair.
 
 Two mechanisms close it, and they were chosen separately but reinforce each other:
 
@@ -202,8 +225,16 @@ Two mechanisms close it, and they were chosen separately but reinforce each othe
 mismatch, return the job to PENDING via the existing
 `queue.revert_to_pending(session, [job_id])` — which explicitly does *not* bump
 `attempts`, for exactly this reason ("the jobs were never actually attempted, so
-they must not burn a retry"). The pair is ranked on a later tick, once the
-embedding tick has caught up.
+they must not burn a retry") — **and then commit**. The pair is ranked on a later
+tick, once the embedding tick has caught up.
+
+`revert_to_pending` (`queue.py:302-318`) issues an `UPDATE` and returns a rowcount;
+it does **not** commit. Every other early exit in the worker commits before
+`continue` (`worker.py:139-140`, `:149-159`). Without that commit the deferral is
+rolled back when the session closes, the job stays RUNNING on its previously
+committed claim, and `requeue_stuck_running` picks it up — bumping `attempts` and,
+after enough cycles, dead-lettering the pair. The deferral would burn exactly the
+retries it was written to protect.
 
 **2. `embedding_fingerprint` is part of the rank payload.** This catches the case
 deferral alone cannot: editing the body of `build_profile_text` changes every
@@ -257,7 +288,16 @@ keys — and gate 1 must be the round-trip comparison, not the two-loads one.
 plus the private canonicalizer. No I/O, no session. May import
 `build_profile_text` from `embeddings.similarity`.
 
-### 2. Migration `0075_freshness_fingerprints.py`
+### 2. Migration `0075_freshness_fingerprints.py` **and the ORM mappings**
+
+Both columns need a mapping as well as a migration. Rev 2 listed only the
+migration, which would not have run: `Profile` (`db/models/profiles.py`) has no
+`embedding_fingerprint` and `CallRanking` (`db/models/ranking.py`) has no
+`profile_fingerprint`, and every read and write below goes through the ORM. Add
+`Mapped[str | None] = mapped_column(Text, nullable=True)` to each, and regenerate
+`docs/ARCHITECTURE.md` in the same commit.
+
+The migration itself:
 
 - `profiles.embedding_fingerprint TEXT NULL`
 - `call_rankings.profile_fingerprint TEXT NULL`
@@ -349,6 +389,16 @@ breaks on `examined == 0` — a genuinely exhausted scan — while advancing the
 cursor across pages that needed no work. Rev 1's "preserve termination" framing
 was the wrong worry: the danger is stopping too early, not never stopping.
 
+**The per-tick cap is a second, weaker version of the same trap.**
+`_TICK_MAX_BATCHES = 200` (`refresh.py:147`) bounds the drain at `:200`, and a tick
+that hits the cap restarts from `after_profile_id=0` tomorrow. Once the scan is
+widened, a long prefix of fresh profiles consumes that allowance every day, and a
+stale profile beyond it is never reached. At 200 batches x 200 rows the headroom is
+40,000 profiles, so at this project's scale (tens) it cannot bite — but the design
+must not silently depend on that. Carry the profile cursor across capped ticks and
+reset it only on an exhausted scan, and pin it with small `batch_size` and
+`max_batches` values rather than a realistic corpus.
+
 **(c) Include blank-but-populated profiles (hole 4).** The `:328` filter must stop
 excluding a profile whose text is blank while `embedding_fingerprint` or
 `embedding_model` is still set, so the existing invalidation branch can fire from
@@ -394,7 +444,7 @@ WHERE p.is_active = true
   AND NOT EXISTS (
     SELECT 1 FROM call_rankings cr
     WHERE cr.call_id = c.id AND cr.profile_id = p.id
-      AND (cr.profile_fingerprint = 'legacy'
+      AND ((cr.profile_fingerprint = 'legacy' AND cr.ranked_at >= p.updated_at)
            OR cr.profile_fingerprint = want.fingerprint)
   )
   AND NOT EXISTS (
@@ -405,6 +455,20 @@ WHERE p.is_active = true
 ON CONFLICT (call_id, profile_id)
   WHERE status IN ('pending', 'running') DO NOTHING
 ```
+
+**`cr.ranked_at >= p.updated_at` is what bounds the legacy exemption.** Rev 2's
+arm was unconditional, so a pre-0075 pair stayed exempt *forever* — including after
+its profile was edited and its background task was lost, which is precisely the
+case this spec exists to repair. Rev 2 believed the `'legacy'` sentinel had closed
+that; the sentinel only stopped a post-deploy NULL from being exempt. It did
+nothing about edits.
+
+`Profile.updated_at` carries `onupdate=func.now()`, so any edit moves it past
+`ranked_at` and revokes the exemption for that profile's pairs alone. It is a
+coarser signal than a fingerprint — a visibility toggle also bumps it — but the
+cost is bounded (one re-rank of one edited profile's window, once) and the row
+gets a real fingerprint afterwards, so it never recurs. Untouched profiles stay
+grandfathered, which is what was asked for.
 
 The dead-letter suppression is unchanged, so a pair that is stale *and* terminally
 failed does not re-enqueue every tick.
@@ -463,21 +527,22 @@ and confirm it fails for the stated reason rather than through an import error.
 
 | # | Gate | Mutation that must redden it |
 |---|---|---|
-| 1 | Fingerprint of an in-memory profile equals the fingerprint after commit + fresh load in a new session. Fixture must contain nested dict keys in non-sorted order, an integral float, and an empty list | drop `sort_keys=True`; separately, drop numeric canonicalization |
+| 1 | Fingerprint of an in-memory profile equals the fingerprint after commit + fresh load in a new session. Fixture must contain nested dict keys in non-sorted order and a number whose representation is **asserted to differ** across the round-trip before the fingerprints are compared | drop `sort_keys=True`; separately, drop numeric canonicalization |
 | 2 | An areas-only edit (empty description) schedules refresh + backfill | restore `if body.description.strip():` |
-| 3 | A PUT with an identical body, after a real save/reload cycle, schedules nothing | remove numeric canonicalization from the canonicalizer |
+| 3 | A PUT with an identical body, after a real save/reload cycle, schedules nothing. Seed the differing-representation number directly, not via a previous PUT that would already have normalized it | remove numeric canonicalization from the canonicalizer |
 | 4 | The tick re-embeds a profile whose text changed while its vector and model are both present and current | drop the fingerprint arm |
 | 5 | With more than `batch_size` profiles and the only stale one at the **highest** id, the tick still embeds it | restore the `processed == 0` break |
 | 6 | The staleness decision never loads the vector | select `Profile` wholesale; the test must redden |
 | 7 | Force mode is unchanged: every embeddable row is re-embedded regardless of fingerprint | apply the fingerprint arm under `force=True` |
 | 8 | A profile cleared to blank while still holding a vector is picked up and invalidated (hole 4) | restore the unconditional `build_profile_text(p).strip()` exclusion |
-| 9 | The worker hashes the profile the ranker saw | insert `session.refresh(profile)` before the hash; the test must redden |
+| 9 | The worker hashes the profile the ranker saw, and persistence keeps that value | move the hash to **after** a `session.refresh(profile)` that follows `rank_pair`; the test must redden |
 | 10 | Retained analysis is dropped when the previous ranking's fingerprint differs | keep the triple unconditionally |
 | 11 | Reconcile re-enqueues a pair whose ranking fingerprint differs | drop the fingerprint condition |
-| 12 | Reconcile skips a `'legacy'` pair | remove the `'legacy'` arm |
+| 12 | Reconcile skips a `'legacy'` pair whose profile has not been touched | remove the `'legacy'` arm |
+| 12b | Reconcile **re-enqueues** a `'legacy'` pair whose profile was edited after `ranked_at` | remove the `cr.ranked_at >= p.updated_at` condition |
 | 13 | Reconcile treats a **NULL** (post-deploy, i.e. buggy) fingerprint as stale | treat NULL as legacy |
-| 14 | Reconcile returns 0 without executing SQL when no profiles are active | remove the early return |
-| 15 | The worker defers a pair whose vector is stale, without bumping `attempts` | remove the deferral |
+| 14 | Reconcile issues no enqueue `INSERT` when the active-profile SELECT returns nothing | remove the early return |
+| 15 | The worker defers a pair whose vector is stale, without bumping `attempts`. Assert PENDING and `attempts` from a **fresh session**, so an uncommitted revert cannot pass | drop the commit after `revert_to_pending` |
 | 16 | Deferral is bounded: a job older than the cap ranks anyway | remove the age bound |
 | 17 | A missing vector (`embedding IS NULL`) does **not** defer | treat NULL embedding as a mismatch |
 | 18 | `force=True` embedding failure NULLs the fingerprint with vector and model | leave the fingerprint set |
@@ -500,6 +565,10 @@ reaching the rows it exists for, which is what rev 1 got wrong.
 - **The embedding tick's cursor logic** is the most intricate existing code being
   touched. The comment at `:330-332` documents an infinite-loop bug already fixed
   there once, and change 5(b) alters the same loop's exit condition.
+- **The 03:30 / 04:00 ordering is a convention, not a lock.** An embedding tick
+  that overruns 30 minutes, or misfires within its 6-hour grace, lets reconcile run
+  first. The promise is "correct within a day" in the normal case and up to two
+  cycles when that ordering slips.
 - **Deferral masking an embedder outage.** Bounded at 24h, but the deferral log
   line is the only signal; if nothing watches it, a persistent outage shows up as
   rankings that are a day late rather than as an alert.
