@@ -18,7 +18,7 @@ Read this before claiming two tables share, or do not share, a rule.
 | `claim_analysis_jobs` | `uq_claim_analysis_jobs_ws_sha_queued` | workspace_id, section_sha | `status = 'queued'` |
 | `coherence_jobs` | `uq_coherence_jobs_active` | workspace_id | `status IN ('queued','running')` |
 | `evaluator_jobs` | `uq_evaluator_jobs_active` | workspace_id | `status IN ('queued','running')` |
-| `profiles` | `uq_profiles_active_name` | name | `is_active = true` |
+| `profiles` | `uq_profiles_active_owner_name` | created_by, name | `is_active = true` |
 | `ranking_jobs` | `uq_ranking_jobs_active_pair` | call_id, profile_id | `status IN ('pending', 'running')` |
 | `references` | `uq_references_workspace_citekey` | workspace_id, citekey | `citekey IS NOT NULL` |
 | `review_runs` | `uq_review_runs_active` | workspace_id | `status IN ('queued','running')` |

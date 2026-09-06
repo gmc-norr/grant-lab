@@ -8,7 +8,8 @@ from grant_lab.digest.send import candidate_user_ids
 
 def _profile_owned_by(s, owner_id) -> int:
     # Name is per-owner unique: profiles has a partial UNIQUE index on active
-    # names (uq_profiles_active_name), so a fixed "P" would collide.
+    # names scoped to the owner (uq_profiles_active_owner_name, migration
+    # 0076), so a fixed "P" would collide.
     p = Profile(
         name=f"P-{owner_id}",
         kind=ProfileKind.ORGANIZATIONAL_UNIT,

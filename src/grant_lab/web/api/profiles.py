@@ -390,7 +390,15 @@ def create_profile(
     sf = request.app.state.session_factory
     with sf() as session:
         existing = session.execute(
-            select(Profile.id).where(Profile.name == body.name, Profile.is_active.is_(True))
+            select(Profile.id).where(
+                Profile.name == body.name,
+                Profile.is_active.is_(True),
+                # Scoped to the caller, matching uq_profiles_active_owner_name.
+                # The pre-check and the index must agree: a mismatch is how
+                # this defect happened -- the handler and the schema each
+                # enforced something, and neither enforced what :284 says.
+                Profile.created_by == user.id,
+            )
         ).scalar_one_or_none()
         if existing is not None:
             raise HTTPException(status_code=409, detail="profile name already exists")
@@ -817,79 +825,108 @@ def transfer_profile_owner(
     this is not a directory of who has an account.
     """
     sf = request.app.state.session_factory
-    with sf() as session:
-        p = _profile_for_edit(session, profile_id=profile_id, user=user)
-        email = (body.email or "").strip().lower()
-        target = session.scalar(select(User).where(User.email == email)) if email else None
-        if target is None or target.status != "active":
-            raise HTTPException(status_code=400, detail="could not transfer profile")
+    # The converter wraps the WHOLE `with` block, not just session.commit(),
+    # and it stays INSIDE this function on purpose.
+    #
+    # Why a converter at all: migration 0076 put `created_by` INTO the
+    # active-name unique key, so step 2's ownership change can now breach a
+    # constraint it never could before -- the recipient may already own an
+    # active profile with this name. Unhandled, the request 500s, and
+    # 500-vs-200 is the private-profile-name oracle 0076 closed at creation,
+    # re-served through this endpoint: POST a guessed name, PUT it at the
+    # victim, read the status. The failing case rolls back, so the probe is
+    # free and repeatable. The refusal is therefore the SAME generic 400 an
+    # unknown, inactive or ineligible recipient gets -- a distinct message
+    # would assert the oracle back into existence.
+    # tests/test_api_profile_name_privacy.py's gate 11 pins it.
+    #
+    # Why the whole block and not session.commit(): the breach surfaces at the
+    # next AUTOFLUSH -- the subscription and viewer lookups below -- several
+    # statements before any commit. Measured: `IntegrityError ... raised as a
+    # result of Query-invoked autoflush ... UPDATE profiles SET created_by=`.
+    # A try/except around commit() alone does NOT catch it.
+    #
+    # Why not extracted into a helper: tests/architecture/
+    # test_profile_access_single_source.py pins THIS function by name as a
+    # surface that must call the read predicate, and exempts it by name from
+    # the ProfileViewer ban. Moving the body to a helper reddens both halves --
+    # measured, 2 failed. The gate is right; the extraction was wrong.
+    try:
+        with sf() as session:
+            p = _profile_for_edit(session, profile_id=profile_id, user=user)
+            email = (body.email or "").strip().lower()
+            target = session.scalar(select(User).where(User.email == email)) if email else None
+            if target is None or target.status != "active":
+                raise HTTPException(status_code=400, detail="could not transfer profile")
 
-        # Never None: Profile.created_by is nullable=False with
-        # ondelete="RESTRICT" (db/models/profiles.py:96-97, set at table
-        # creation in migration 0003, never retrofitted onto existing rows),
-        # so a referenced user row cannot be deleted out from under it.
-        outgoing = session.get(User, p.created_by)
+            # Never None: Profile.created_by is nullable=False with
+            # ondelete="RESTRICT" (db/models/profiles.py:96-97, set at table
+            # creation in migration 0003, never retrofitted onto existing rows),
+            # so a referenced user row cannot be deleted out from under it.
+            outgoing = session.get(User, p.created_by)
 
-        # 1. D10's stale-row hazard: the incoming owner may already hold a
-        # legitimate viewer row (add_profile_viewer only refuses one for
-        # whoever is owner AT THAT MOMENT). Delete it so the ProfileViewer
-        # invariant "the owner never has a row" (db/models/profiles.py:135-136)
-        # stays true after the transfer.
-        session.execute(
-            delete(ProfileViewer).where(
-                ProfileViewer.profile_id == p.id,
-                ProfileViewer.user_id == target.id,
-            )
-        )
-
-        # 2. Move ownership.
-        p.created_by = target.id
-
-        # 3. Give the new owner a subscription, mirroring
-        # profiles/create.py:79 -- otherwise D9 notifies nobody. NEVER touch
-        # the outgoing owner's row: digest/assemble.py:86-88 is explicit that
-        # deleting it destroys their digest_enabled preference beyond a
-        # re-share's ability to restore it, and assemble.py:97 already filters
-        # the digest through readable_profile_ids, so their section simply
-        # stops appearing.
-        already_subscribed = session.scalar(
-            select(Subscription.user_id).where(
-                Subscription.user_id == target.id,
-                Subscription.profile_id == p.id,
-            )
-        )
-        if already_subscribed is None:
-            session.add(Subscription(user_id=target.id, profile_id=p.id, digest_enabled=True))
-
-        # 4. Open-6: keep the outgoing owner's read access if asked. Computed
-        # AFTER step 2, so can_read_profile below asks the REAL post-transfer
-        # predicate rather than a hypothetical. Guarded on outgoing.id !=
-        # target.id: a self-transfer (recipient email == the current owner's
-        # own address) would otherwise add a ProfileViewer row for someone who
-        # is STILL the owner after step 2, breaking the invariant this whole
-        # step exists to restore in step 1.
-        if body.keep_read_access and outgoing.id != target.id:
-            already_viewer = session.scalar(
-                select(ProfileViewer.user_id).where(
+            # 1. D10's stale-row hazard: the incoming owner may already hold a
+            # legitimate viewer row (add_profile_viewer only refuses one for
+            # whoever is owner AT THAT MOMENT). Delete it so the ProfileViewer
+            # invariant "the owner never has a row" (db/models/profiles.py:135-136)
+            # stays true after the transfer.
+            session.execute(
+                delete(ProfileViewer).where(
                     ProfileViewer.profile_id == p.id,
-                    ProfileViewer.user_id == outgoing.id,
+                    ProfileViewer.user_id == target.id,
                 )
             )
-            # Unlike the three `outgoing is not None` guards this function
-            # dropped, this one STAYS: the owner-never-has-a-row invariant is
-            # docstring-only (db/models/profiles.py:135-136), enforced by the
-            # three writers agreeing and not by the database, so a row here is
-            # unreachable-by-agreement rather than unreachable-by-constraint.
-            if already_viewer is None:
-                session.add(ProfileViewer(profile_id=p.id, user_id=outgoing.id))
 
-        # Open-7: a default_profile_id the outgoing owner can no longer read
-        # must not keep pointing the dashboard at a profile they cannot open.
-        outgoing_lost_read = not can_read_profile(session, outgoing, p.id)
-        if outgoing_lost_read and outgoing.default_profile_id == p.id:
-            outgoing.default_profile_id = None
+            # 2. Move ownership.
+            p.created_by = target.id
 
-        session.commit()
-        owner_out = ProfileViewerOut(user_id=target.id, name=target.name, email=target.email)
+            # 3. Give the new owner a subscription, mirroring
+            # profiles/create.py:79 -- otherwise D9 notifies nobody. NEVER touch
+            # the outgoing owner's row: digest/assemble.py:86-88 is explicit that
+            # deleting it destroys their digest_enabled preference beyond a
+            # re-share's ability to restore it, and assemble.py:97 already filters
+            # the digest through readable_profile_ids, so their section simply
+            # stops appearing.
+            already_subscribed = session.scalar(
+                select(Subscription.user_id).where(
+                    Subscription.user_id == target.id,
+                    Subscription.profile_id == p.id,
+                )
+            )
+            if already_subscribed is None:
+                session.add(Subscription(user_id=target.id, profile_id=p.id, digest_enabled=True))
+
+            # 4. Open-6: keep the outgoing owner's read access if asked. Computed
+            # AFTER step 2, so can_read_profile below asks the REAL post-transfer
+            # predicate rather than a hypothetical. Guarded on outgoing.id !=
+            # target.id: a self-transfer (recipient email == the current owner's
+            # own address) would otherwise add a ProfileViewer row for someone who
+            # is STILL the owner after step 2, breaking the invariant this whole
+            # step exists to restore in step 1.
+            if body.keep_read_access and outgoing.id != target.id:
+                already_viewer = session.scalar(
+                    select(ProfileViewer.user_id).where(
+                        ProfileViewer.profile_id == p.id,
+                        ProfileViewer.user_id == outgoing.id,
+                    )
+                )
+                # Unlike the three `outgoing is not None` guards this function
+                # dropped, this one STAYS: the owner-never-has-a-row invariant is
+                # docstring-only (db/models/profiles.py:135-136), enforced by the
+                # three writers agreeing and not by the database, so a row here is
+                # unreachable-by-agreement rather than unreachable-by-constraint.
+                if already_viewer is None:
+                    session.add(ProfileViewer(profile_id=p.id, user_id=outgoing.id))
+
+            # Open-7: a default_profile_id the outgoing owner can no longer read
+            # must not keep pointing the dashboard at a profile they cannot open.
+            outgoing_lost_read = not can_read_profile(session, outgoing, p.id)
+            if outgoing_lost_read and outgoing.default_profile_id == p.id:
+                outgoing.default_profile_id = None
+
+            session.commit()
+            owner_out = ProfileViewerOut(user_id=target.id, name=target.name, email=target.email)
+    except IntegrityError as e:
+        raise HTTPException(status_code=400, detail="could not transfer profile") from e
 
     return ProfileTransferOut(owner=owner_out, outgoing_lost_read=outgoing_lost_read)
