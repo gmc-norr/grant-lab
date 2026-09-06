@@ -69,7 +69,9 @@ class PublicBoardItemOut(BaseModel):
     budget_max: int | None
     currency: str | None
     url: str
-    qr_modules: int
+    qr_modules: int  # 0 means NO QR: the url was over qr.py's legibility
+    # bound or segno's own overflow ceiling (see `qr_for`) -- render no
+    # `<svg>` for this card. Unambiguous: the smallest real QR is 21 modules.
     qr_path: str
 
 
@@ -88,34 +90,48 @@ def get_public_board(request: Request, slug: str):
     if not request.app.state.board_limiter.allow(client_ip(request)):
         raise HTTPException(status_code=429, detail="too many requests")
     sf = request.app.state.session_factory
+    # CRITICAL (fix round 2): the DB session closes here, BEFORE any QR is
+    # encoded. `rows` is already a `list[PublicBoardRow]` of plain scalars
+    # (boards/public.py), not ORM objects, and `board_fields` below copies
+    # out the handful of ORM attributes this route still needs -- so nothing
+    # past this block touches the session. Round 1 bounded `qr_for`'s
+    # exception; the encode loop itself used to run INSIDE `with sf() as
+    # session:`, holding one of the pool's 30 connections
+    # (`pool_size=10, max_overflow=20`, `db/session.py`) for the whole
+    # (synchronous, CPU-bound) loop -- shared with every authenticated
+    # route. Encoding needs no connection, so it happens after the `with`
+    # exits instead.
     with sf() as session:
         board = public_board_by_slug(session, slug=slug)
         if board is None or not board.is_published:
             raise HTTPException(status_code=404, detail=_NOT_FOUND)
         rows = public_board_items(session, board_id=board.id)
-        items = []
-        for row in rows:
-            qr = qr_for(row.url)
-            items.append(
-                PublicBoardItemOut(
-                    title=row.title,
-                    source_name=row.source_name,
-                    deadline_local_date=deadline_local_date(row.deadline),
-                    budget_min=row.budget_min,
-                    budget_max=row.budget_max,
-                    currency=row.currency,
-                    url=row.url,
-                    qr_modules=qr.modules,
-                    qr_path=qr.path,
-                )
+        board_fields = {
+            "title": board.title,
+            "orientation": board.orientation,
+            "items_per_page": board.items_per_page,
+            "max_pages": board.max_pages,
+            "page_seconds": board.page_seconds,
+        }
+
+    items = []
+    for row in rows:
+        qr = qr_for(row.url)
+        items.append(
+            PublicBoardItemOut(
+                title=row.title,
+                source_name=row.source_name,
+                deadline_local_date=deadline_local_date(row.deadline),
+                budget_min=row.budget_min,
+                budget_max=row.budget_max,
+                currency=row.currency,
+                url=row.url,
+                qr_modules=qr.modules,
+                qr_path=qr.path,
             )
-        out = PublicBoardOut(
-            title=board.title,
-            generated_at=datetime.now(UTC),
-            orientation=board.orientation,
-            items_per_page=board.items_per_page,
-            max_pages=board.max_pages,
-            page_seconds=board.page_seconds,
-            items=items,
         )
-    return out
+    return PublicBoardOut(
+        generated_at=datetime.now(UTC),
+        items=items,
+        **board_fields,
+    )
