@@ -86,8 +86,10 @@ function DetailView({ board, isAdmin }: { board: Board; isAdmin: boolean }) {
         // case an in-app surface is not optional. Independent of
         // board_alerts_enabled -- this is about REACHABILITY, not preference.
         <Text role="alert" size="sm" c="red" mb="md">
-          The profile owner can't be notified about this board — no active email
-          subscription was found for them.
+          The profile owner can't be notified about this board by email, so
+          alerts about it go to admins instead. (Their account may be inactive,
+          their digest may be bounce-disabled, or they may have no subscription
+          to this profile.)
         </Text>
       )}
 

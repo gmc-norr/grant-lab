@@ -2,7 +2,7 @@ import { Badge, Button, Checkbox, Group, NumberInput, Stack, Text } from "@manti
 import { useState } from "react";
 
 import { apiErrorMessage } from "../api/client";
-import { useApproveItems, useBoardQueue, type Board, type QueueCall } from "../api/boards";
+import { QUEUE_PAGE_SIZE, useApproveItems, useBoardQueue, type Board, type QueueCall } from "../api/boards";
 import { Deadline } from "./Deadline";
 
 /** The admin approval checklist. Spec §4.3: an approval UI that costs a
@@ -86,6 +86,16 @@ export function BoardQueue({ board }: { board: Board }) {
             {queue.data.waiting_count}
           </Text>{" "}
           waiting for a decision
+          {queue.data.items.length >= QUEUE_PAGE_SIZE && (
+            // The list is one page of QUEUE_PAGE_SIZE, but `waiting_count` is
+            // the WHOLE waiting set -- so without this an admin working a long
+            // queue cannot tell they are deciding on a slice. (Both final
+            // reviews flagged the silent truncation.)
+            <Text span c="dimmed">
+              {" "}
+              — showing the first {QUEUE_PAGE_SIZE}
+            </Text>
+          )}
         </Text>
         <Text size="sm" c="dimmed">
           {board.approved_count} of {cap} slots used

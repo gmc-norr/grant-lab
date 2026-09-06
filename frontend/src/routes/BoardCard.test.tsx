@@ -83,10 +83,20 @@ it("shows 'Closes today' when the deadline is today, not 'Closes in 0 days'", ()
   expect(screen.queryByText("Closes in 0 days")).not.toBeInTheDocument();
 });
 
-it("shows the funder name and the budget", () => {
+it("shows the funder name and the budget, grouped the Swedish way", () => {
+  // sv-SE, not en-US: this is the app's only public-facing surface and the
+  // footer beside it already reads "Sida N av M".
+  //
+  // The assertion strips ALL whitespace rather than pinning a literal, because
+  // sv-SE's group separator is a space whose exact codepoint varies by ICU
+  // build (U+00A0 vs U+202F) -- a literal here passes on one machine and fails
+  // on another. Stripping whitespace still discriminates the thing that
+  // matters: en-US would leave COMMAS behind, sv-SE leaves none.
   renderCard(BASE);
   expect(screen.getByText("Vinnova")).toBeInTheDocument();
-  expect(screen.getByText("500,000 – 1,000,000 SEK")).toBeInTheDocument();
+  const budget = (screen.getByText((_, el) => el?.getAttribute("data-field") === "budget").textContent) ?? "";
+  expect(budget.replace(/\s+/gu, "")).toBe("500000–1000000SEK");
+  expect(budget).not.toContain(",");
 });
 
 it("an empty slot renders no title, funder or QR", () => {

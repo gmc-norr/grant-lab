@@ -145,6 +145,12 @@ def test_match_edition_still_serves_the_release_1_surface(monkeypatch, _base_env
 # literal below is bumped BY HAND in the same commit, so a route that arrives
 # without intent cannot be waved through by a regeneration.
 #
+# Plan C Task 3 (profile transfer): 109 -> 110. One added path,
+# /api/profiles/{profile_id}/owner (PUT). Recorded late -- a whole-branch
+# review found this entry missing while the literal and the baseline file were
+# both already correct, which is exactly the hole this ledger exists to close:
+# the numbers agreeing proves nothing about whether the route was intended.
+#
 # Plan C Task 5 (corridor boards): 110 -> 112. The two added paths are
 # /api/boards (GET list, POST create) and /api/boards/{board_id} (GET, PUT,
 # DELETE) -- five operations, two unique paths, matching this file's

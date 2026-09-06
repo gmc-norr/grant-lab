@@ -85,7 +85,7 @@ export function usePublishBoard(id: number) {
 // limit=200 (the route's own ceiling, boards.py:492) rather than the default
 // 50: the whole point of the checklist affordance is seeing everything at
 // once, not paging through a triage queue call by call.
-const QUEUE_PAGE_SIZE = 200;
+export const QUEUE_PAGE_SIZE = 200;
 
 export function useBoardQueue(boardId: number) {
   return useQuery({

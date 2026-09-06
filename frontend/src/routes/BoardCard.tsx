@@ -11,7 +11,11 @@ function budgetText(item: PublicBoardItemOut): string | null {
   const { budget_min: lo, budget_max: hi, currency } = item;
   if (lo == null && hi == null) return null;
   const cur = currency ? ` ${currency}` : "";
-  const fmt = (n: number) => n.toLocaleString("en-US");
+  // sv-SE, not en-US: this is the app's only public-facing surface and it
+// already says "Sida N av M" in the footer. The rest of the app uses
+// en-US for authenticated views; the wall is the one place a passer-by
+// who never logs in reads a number.
+const fmt = (n: number) => n.toLocaleString("sv-SE");
   if (lo != null && hi != null) {
     return lo === hi ? `${fmt(lo)}${cur}` : `${fmt(lo)} – ${fmt(hi)}${cur}`;
   }
