@@ -155,3 +155,70 @@ def test_a_url_changed_after_approval_serves_no_qr_rather_than_a_stale_one(
     # with every other gate green. It would not render (BoardCard.tsx gates the
     # <svg> on qr_modules > 0), so this is defence in depth.
     assert card["qr_path"] == "", "served the stale QR path bytes"
+
+
+def test_the_encode_does_not_run_while_the_approval_rows_are_locked(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """GATE 12 -- the lock-hold gate, and the load-bearing one for this change.
+
+    Asserting the stored QR is CORRECT passes with the encode still inside the
+    write transaction, which is the defect. The discriminating question is
+    whether a SECOND connection can take the rows `approve_items` locks at the
+    moment `qr_for` runs. `FOR UPDATE NOWAIT` raises instead of waiting, so it
+    answers that without a timeout.
+
+    Both rows are probed. The board row is what `_lock_board_row` takes; the
+    PROFILE row is taken through `_board_for_edit` -> `_profile_for_edit` and
+    matters more, because since that change it blocks 15 routes including 4
+    GETs.
+    """
+    from sqlalchemy import text
+    from sqlalchemy.exc import DBAPIError, OperationalError
+
+    from grant_lab.web.api import boards as boards_api
+
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="QR lock-hold profile")
+    board_id = _make_board(pg_session_factory, profile_id=pid, created_by=owner_id,
+                           slug="l" * 16)
+    cids = [
+        _make_call(pg_session_factory, external_id=f"qr-lock-{i}",
+                   url=f"https://example.org/lock/{i}")
+        for i in range(3)
+    ]
+
+    held: list[str] = []
+    real_qr_for = boards_api.qr_for
+
+    def _locked(sql: str, params: dict) -> bool:
+        try:
+            with pg_session_factory() as probe_session:
+                probe_session.execute(text(sql), params)
+            return False
+        except (OperationalError, DBAPIError):
+            return True
+
+    def probing_qr_for(url):
+        if _locked("SELECT id FROM boards WHERE id = :b FOR UPDATE NOWAIT", {"b": board_id}):
+            held.append("board")
+        if _locked("SELECT id FROM profiles WHERE id = :p FOR UPDATE NOWAIT", {"p": pid}):
+            held.append("profile")
+        return real_qr_for(url)
+
+    monkeypatch.setattr(boards_api, "qr_for", probing_qr_for)
+
+    r = _approve_via_api(app, board_id=board_id, owner_id=owner_id, call_ids=cids)
+    assert r.status_code == 200, r.text
+
+    # Vacuity guard: a run where qr_for never fires proves nothing at all.
+    with pg_session_factory() as s:
+        stored = s.scalars(
+            select(BoardItem.qr_modules).where(BoardItem.board_id == board_id)
+        ).all()
+    assert stored and all(m > 0 for m in stored), f"no QR was stored: {stored}"
+
+    assert not held, (
+        "the encode ran while approve_items held a row lock: "
+        f"{sorted(set(held))} (x{len(held)} of 3 encodes)"
+    )
