@@ -130,6 +130,17 @@ superseded vector forever and its rankings silently describe old text. It also c
 that the match-edition gate measured `create_app()` rather than a running lifespan
 (**0 modules there, 45 once it booted**) — fixed in `1fdfe050`.
 
+**[reviews/2026-09-06-plan-c-and-freshness-code-review.md](reviews/2026-09-06-plan-c-and-freshness-code-review.md)**
+*Does the Plan C board code and the matching-freshness release hold up to an outside reader?*
+**4 of 5 confirmed.** The first outside look at the Plan C code, by `gpt-6-astra` via GitHub
+Copilot against a 251,751-char package at `6f8ab1ee` — the 2026-09-05 architecture review
+stopped at `4e6212e2` and predates it entirely. Confirmed: anonymous `GET /b/<slug>` can force
+the cold QR path repeatedly through a global per-URL encode lock; two concurrent owner transfers
+both authorize against a stale owner; profile creation is an existence oracle for private
+profile NAMES via its 409; and an embedding-model swap leaves every ranking marked current
+while its stored cosine describes the old vectors. The fifth was a defect in the review package,
+not the code. Fixed by `docs/superpowers/plans/2026-09-06-review-fixes.md`.
+
 **[reviews/2026-08-29-second-pass-architecture-review.md](reviews/2026-08-29-second-pass-architecture-review.md)**
 Superseded by the third pass. Contains a confirmed production race.
 
