@@ -209,48 +209,67 @@ async def lifespan(app: FastAPI):
                     extra={"event": "digest_email_client_unavailable", "error": str(e)},
                 )
 
-        from grant_lab.proposal_assist.drafting.factory import (
-            build_workspace_controller,
-        )
+        # EDITION GATE. Everything below builds the proposal-assist half, and each
+        # import here pulls a large module graph (collab.room -> pycrdt). Deferring
+        # them to the lifespan kept them off `create_app()` but NOT off a running
+        # process, so a match deployment still loaded the stack it does not serve.
+        # `APP_EDITION=match` REQUIRES `DRAFTING_ENABLED=false`
+        # (config.py::_match_edition_disables_drafting), so this one flag is the
+        # edition boundary for the whole block.
+        #
+        # In a match boot `workspace_controller` and `analysis_embedder` stay None,
+        # and `app.state.workspace_retirement` / `workspace_lifecycle` are never set.
+        # Every consumer already tolerates that: build_scheduler takes both as
+        # `| None` and every tick that uses them guards on `settings.drafting_enabled`;
+        # the retirement and lifecycle signals read `getattr(app.state, ..., None)`
+        # and their only route lives in a _FULL_ONLY router. Pinned by
+        # tests/architecture/test_match_edition_process_cut.py, which boots BOTH
+        # editions through a real lifespan and counts what each loaded.
+        workspace_controller = None
+        analysis_embedder = None
+        if settings.drafting_enabled:
+            from grant_lab.proposal_assist.drafting.factory import (
+                build_workspace_controller,
+            )
 
-        workspace_controller = build_workspace_controller(
-            settings=settings,
-            session_factory=app.state.session_factory,
-            reference_ingest_limiter=app.state.reference_ingest_limiter,
-        )
-        app.state.workspace_controller = workspace_controller
+            workspace_controller = build_workspace_controller(
+                settings=settings,
+                session_factory=app.state.session_factory,
+                reference_ingest_limiter=app.state.reference_ingest_limiter,
+            )
+            app.state.workspace_controller = workspace_controller
 
-        # Workspace retirement (Slice B-retire): one coordinator fans a delete out to
-        # every subsystem that holds live per-workspace state. Constructed HERE, in the
-        # lifespan, so a missing required hook raises MissingRetirementHook and the app
-        # fails to boot rather than silently skipping a teardown on every delete (the
-        # spec's startup invariant). Local imports follow this module's lifespan
-        # convention (see build_workspace_controller above).
-        from grant_lab.proposal_assist.collab.room import MANAGER as _COLLAB_MANAGER
-        from grant_lab.proposal_assist.jobs_retirement import build_jobs_retirement_hook
-        from grant_lab.proposal_assist.lifecycle import LIFECYCLE
-        from grant_lab.proposal_assist.passes import PASS_REGISTRY
-        from grant_lab.proposal_assist.retirement import WorkspaceRetirement
+            # Workspace retirement (Slice B-retire): one coordinator fans a delete out to
+            # every subsystem that holds live per-workspace state. Constructed HERE, in the
+            # lifespan, so a missing required hook raises MissingRetirementHook and the app
+            # fails to boot rather than silently skipping a teardown on every delete (the
+            # spec's startup invariant). Local imports follow this module's lifespan
+            # convention (see build_workspace_controller above).
+            from grant_lab.proposal_assist.collab.room import MANAGER as _COLLAB_MANAGER
+            from grant_lab.proposal_assist.jobs_retirement import build_jobs_retirement_hook
+            from grant_lab.proposal_assist.lifecycle import LIFECYCLE
+            from grant_lab.proposal_assist.passes import PASS_REGISTRY
+            from grant_lab.proposal_assist.retirement import WorkspaceRetirement
 
-        app.state.workspace_lifecycle = LIFECYCLE
-        app.state.workspace_retirement = WorkspaceRetirement(
-            hooks={
-                "turns": workspace_controller.registry.retire_workspace,
-                "collab": _COLLAB_MANAGER.retire_workspace,
-                "jobs": build_jobs_retirement_hook(app.state.session_factory),
-                "passes": PASS_REGISTRY.retire_workspace,
-            },
-            lifecycle=LIFECYCLE,
-        )
+            app.state.workspace_lifecycle = LIFECYCLE
+            app.state.workspace_retirement = WorkspaceRetirement(
+                hooks={
+                    "turns": workspace_controller.registry.retire_workspace,
+                    "collab": _COLLAB_MANAGER.retire_workspace,
+                    "jobs": build_jobs_retirement_hook(app.state.session_factory),
+                    "passes": PASS_REGISTRY.retire_workspace,
+                },
+                lifecycle=LIFECYCLE,
+            )
 
-        # Claim-analysis embedder: the same construction reference ingest uses
-        # (web/references.py wraps the shared embed_client per request). Always
-        # constructible — embed_client is built unconditionally in create_app()
-        # and only fails at call time if Ollama is unreachable, which the drain
-        # tick surfaces as per-job failures (retry → dead-letter), not a crash.
-        from grant_lab.proposal_assist.references.embed import OllamaEmbedderAdapter
+            # Claim-analysis embedder: the same construction reference ingest uses
+            # (web/references.py wraps the shared embed_client per request). Always
+            # constructible — embed_client is built unconditionally in create_app()
+            # and only fails at call time if Ollama is unreachable, which the drain
+            # tick surfaces as per-job failures (retry → dead-letter), not a crash.
+            from grant_lab.proposal_assist.references.embed import OllamaEmbedderAdapter
 
-        analysis_embedder = OllamaEmbedderAdapter(app.state.embed_client)
+            analysis_embedder = OllamaEmbedderAdapter(app.state.embed_client)
 
         import asyncio as _asyncio
 
@@ -281,8 +300,10 @@ async def lifespan(app: FastAPI):
             digest_settings=settings,
             limiters=[app.state.email_limiter, app.state.ip_limiter],
             workspace_controller=workspace_controller,
-            # Never None here: build_citation_service raises in create_app() on
-            # misconfig, so a started app always has a real service.
+            # None in a MATCH boot — create_app() sets it to None for that edition
+            # (see the citation_service branch below). In FULL it is never None:
+            # build_citation_service raises in create_app() on misconfig. The
+            # analysis ticks already treat None as "skip".
             citation_service=app.state.citation_service,
             analysis_embedder=analysis_embedder,
             app_loop=_asyncio.get_running_loop(),
