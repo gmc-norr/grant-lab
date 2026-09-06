@@ -1,4 +1,4 @@
-"""The gate for the invariant `ranking/queue.py:163-167` states in a comment and
+"""The gate for the invariant `ranking/queue.py:165-171` states in a comment and
 nothing executes: the narrowed Row must produce a byte-identical rank_fingerprint
 to a loaded Profile.
 
@@ -30,14 +30,14 @@ def test_the_narrowed_row_and_the_loaded_profile_agree(session):
     session.add(u)
     session.flush()
     # embedding/embedding_model/embedding_fingerprint are all SET on purpose.
-    # Left NULL, _canonical (fingerprint.py:46) drops them from BOTH payloads
+    # Left NULL, _canonical (fingerprint.py:40) drops them from BOTH payloads
     # and the two sides agree on "key absent" -- so the gate would redden only
     # via AttributeError, and softening fingerprint.py to
     # `getattr(profile, "embedding_model", None)` (the natural way to silence
     # that AttributeError) would turn it green while the bug returned. With
     # real values the assertion compares VALUES, not attribute existence.
     # `embedding` is required alongside `embedding_model`:
-    # ck_profiles_embedding_model_paired (db/models/profiles.py:60-63) enforces
+    # ck_profiles_embedding_model_paired (db/models/profiles.py:72-75) enforces
     # (embedding IS NULL) = (embedding_model IS NULL), so setting one without
     # the other fails at commit.
     p = Profile(name="Hepatology", kind=ProfileKind.ORGANIZATIONAL_UNIT, level="group",

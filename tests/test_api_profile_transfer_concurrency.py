@@ -105,7 +105,7 @@ def test_two_concurrent_transfers_do_not_both_authorize_against_the_old_owner(
     COMMITTED the blocked SELECT ... FOR UPDATE re-reads the newly committed
     row, so the loser sees a private profile it no longer owns, and
     `_profile_for_edit` checks can_read_profile BEFORE ownership
-    (profiles.py:150-153). "Reading stays WIDER than editing"
+    (profiles.py:193-197). "Reading stays WIDER than editing"
     (profiles.py:144-145). Do not "correct" this to 403.
     """
     app = _setup(monkeypatch, pg_url)

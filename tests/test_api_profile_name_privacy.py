@@ -55,7 +55,7 @@ def _profile(session, owner, *, name, visibility="private"):
 def test_a_name_held_by_an_unreadable_private_profile_does_not_409(
     monkeypatch, pg_url, pg_session_factory
 ):
-    """GATE 8 -- the load-bearing one. profiles.py:284 states the rule this
+    """GATE 8 -- the load-bearing one. profiles.py:302 states the rule this
     closes: "A 403 confirms the profile exists, and profile NAMES are the thing
     worth not confirming: someone can walk /api/profiles/1..N and ENUMERATE who
     is working on what." The detail route returns 404 for that reason; creation
@@ -84,7 +84,7 @@ def test_a_duplicate_name_the_caller_DOES_own_still_409s(monkeypatch, pg_url, pg
     duplicate still 409s, which gate 8 alone would let you break by simply
     deleting the check.
 
-    It does NOT catch a deleted pre-check on its own: profiles.py:430-431
+    It does NOT catch a deleted pre-check on its own: profiles.py:448-449
     converts the resulting IntegrityError into the SAME 409 with the SAME
     message, so the two implementations are indistinguishable from here. The
     duplicate refusal is doubly enforced -- pre-check AND unique index -- and
@@ -105,7 +105,7 @@ def test_a_duplicate_name_the_caller_DOES_own_still_409s(monkeypatch, pg_url, pg
 def test_two_owners_may_both_hold_the_same_active_name(pg_session_factory):
     """GATE 10. Without this, keeping the index global passes gate 9 and the
     schema still enforces the oracle at the DATABASE level -- where
-    profiles.py:430-431 quietly re-serves it as the very same 409, so gate 8
+    profiles.py:448-449 quietly re-serves it as the very same 409, so gate 8
     would go red again with no visible change in the response."""
     with pg_session_factory() as s:
         a = _user(s, "a@umu.se")

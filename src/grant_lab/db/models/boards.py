@@ -138,6 +138,18 @@ class BoardItem(Base):
     below for why the QR itself is rendered once, at approval, rather than on
     the public path.
 
+    Withdrawal is ONE-WAY, and that is the cost of rendering at approval: there
+    is no re-render path. If a funder corrects a url -- or corrects it BACK --
+    the card stays QR-less until an admin removes the item and re-approves it
+    (DELETE /boards/{id}/items/{call_id} then POST /boards/{id}/items). Worth
+    knowing before treating a blank code as a rendering bug.
+
+    Freshness here is URL-only. `qr_for`'s output also depends on its error
+    level and `_MAX_URL_BYTES` (qr.py), neither of which is recorded on the row,
+    so re-parameterising the encoder does NOT withdraw QRs rendered under the
+    old parameters. The claim above is about the CALL moving, not the ENCODER
+    changing.
+
     `Call` has NO status or withdrawn column (measured), so "the board drops
     withdrawn calls" is not implementable in release 1 and must not be claimed.
     The only automatic removal is the deadline filter.

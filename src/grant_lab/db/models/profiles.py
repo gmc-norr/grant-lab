@@ -56,7 +56,7 @@ class Profile(Base):
         # `created_by` is in the key because a GLOBAL unique active name made
         # creation an existence oracle: POST a guessed name, read the 409, and
         # you have confirmed a private profile you cannot read. Note the oracle
-        # lived HERE, not in the handler -- web/api/profiles.py:430-431 turns
+        # lived HERE, not in the handler -- web/api/profiles.py:448-449 turns
         # this index's IntegrityError into the very same 409 the pre-check
         # raises, so scoping that pre-check alone changed nothing observable.
         # The 409 can now only ever name a profile the caller already owns.

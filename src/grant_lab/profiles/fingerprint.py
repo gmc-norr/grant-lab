@@ -2,7 +2,7 @@
 
 DERIVED, never stored as a claim about "current". There are four profile-text
 write sites (profiles/create.py:25, :51, the constructor at :68-75, and
-web/api/profiles.py:481 + :518); a fifth that forgot to maintain a stored hash
+web/api/profiles.py:534 + :573); a fifth that forgot to maintain a stored hash
 would assert "fresh" about a stale row. Recomputing from the row cannot rot.
 
 Both functions return "v2:<sha256 hex>". The version tag is not decoration:
@@ -43,7 +43,7 @@ def _canonical(value: Any) -> Any:
     Postgres does not preserve key order, and hands numbers back in whatever
     representation it stored: json.dumps(1) is "1" and json.dumps(1.0) is
     "1.0". The profile-update endpoint compares a DB-loaded row against a
-    freshly built Python dict (web/api/profiles.py:480 vs :520), so the two
+    freshly built Python dict (web/api/profiles.py:534 vs :573), so the two
     sides genuinely differ in representation. expire_on_commit=False
     (db/session.py:58) means committing does NOT reload the row, so this
     cannot be fixed by moving a line -- it is fixed here.
@@ -115,7 +115,7 @@ def rank_fingerprint(profile) -> str:
         deferral would strand the pair forever.
 
     `name` and `kind` are insurance, not cost: they reach the LLM prompt at
-    ranking/prompt.py:218-219, but ProfileUpdateIn (web/api/profiles.py:399-423)
+    ranking/prompt.py:218-219, but ProfileUpdateIn (web/api/profiles.py:453-480)
     has 22 fields and neither is among them, and nothing assigns either after
     profiles/create.py:68-75.
     """

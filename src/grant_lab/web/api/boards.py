@@ -690,10 +690,18 @@ def approve_items(
             # ceiling is `cap` above, items_per_page * max_pages. items_per_page
             # is bounded 1..64 (ck_boards_items_per_page) and max_pages is not
             # exposed on BoardSettingsIn at all, so the API-reachable worst case
-            # is 192 items x ~45.5 ms = ~8.7 s holding both a pooled connection
-            # and this board's `SELECT ... FOR UPDATE` -- the lock this route's
-            # docstring makes the linchpin of approve-vs-approve and
-            # approve-vs-settings-PUT.
+            # is 192 items x ~45.5 ms = ~8.7 s holding a pooled connection, this
+            # board's `SELECT ... FOR UPDATE` -- the lock this route's docstring
+            # makes the linchpin of approve-vs-approve and
+            # approve-vs-settings-PUT -- AND, through _board_for_edit, the
+            # PROFILE row lock that web/api/profiles.py's _profile_for_edit takes,
+            # which since that change blocks 15 routes including 4 GETs.
+            #
+            # ~8.7 s is the SINGLE-REQUEST worst case, not the ceiling.
+            # `qr.py`'s `_encode_lock` is a process-wide threading.Lock taken per
+            # item, so K concurrent approves serialise against each other and
+            # each one's row-lock hold scales with K. `db/session.py` sets no
+            # lock_timeout or statement_timeout, so a blocked reader waits.
             #
             # Why that is the accepted trade and not an oversight: this is an
             # authenticated, rate-limited admin action on ONE board, bounded and
@@ -702,8 +710,15 @@ def approve_items(
             # encode outside the transaction (read urls, commit, encode, store
             # in a second transaction) would remove the lock hold at the cost of
             # a window in which an approved board serves no QR at all.
-            # That restructuring is deliberately NOT done here; it is recorded
-            # for review.
+            #
+            # A THIRD shape has no such window and was not considered when this
+            # was written: encode BEFORE opening the write transaction, keyed on
+            # the requested call ids, and inside the transaction look up the
+            # prefetched value with a rare inline fallback for an id that
+            # arrived late. A stale prefetch is already safe -- that is exactly
+            # what qr_source_url and boards/public.py's comparison exist for.
+            # None of these restructurings is done here; they are recorded for
+            # review. Do not read the two-option framing above as exhaustive.
             for offset, cid in enumerate(new_ids):
                 url = urls.get(cid) or ""
                 # Skip the encoder for an empty url. Call.url is Text NOT NULL

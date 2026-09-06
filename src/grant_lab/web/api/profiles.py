@@ -153,22 +153,40 @@ def _profile_for_edit(session, *, profile_id: int, user: User) -> Profile:
     # SEVEN call sites inherit it, reaching FIFTEEN routes -- and FOUR of those
     # are reads, which now take an exclusive row lock they do not need:
     #
-    #   profiles.py:609  GET  /profiles/{id}/viewers          <- read
-    #   profiles.py:643  PUT  /profiles/{id}/viewers
-    #   profiles.py:705  POST /profiles/{id}/viewers
-    #   profiles.py:750  PUT  /profiles/{id}/visibility
-    #   profiles.py:805  PUT  /profiles/{id}/owner            (transfer)
-    #   boards.py:235    POST /boards                         (create_board)
-    #   boards.py:162    _board_for_edit -> 9 board routes, of which
-    #                    GET /boards/{id}, GET .../queue and GET .../items
-    #                    are reads
+    # Named, not numbered: line citations here were invalidated twice by other
+    # commits on this same branch. A name survives an edit above it.
+    #
+    #   GET  /profiles/{id}/viewers     list_profile_viewers        <- READ
+    #   PUT  /profiles/{id}/viewers     replace_profile_viewers
+    #   POST /profiles/{id}/viewers     add_profile_viewer
+    #   PUT  /profiles/{id}/visibility  set_profile_visibility
+    #   PUT  /profiles/{id}/owner       transfer_profile_owner
+    #   POST /boards                    boards.py::create_board
+    #   (via boards.py::_board_for_edit) 9 board routes, of which
+    #        GET /boards/{id}, GET .../queue and GET .../items are READS
     #
     # That is deliberate, not an oversight: a board's edit permission IS its
-    # profile's edit permission (boards.py:155), so the read paths share the
-    # gate and cannot be split from it without splitting the gate. Nothing
-    # slow runs under the lock and each route releases it at the end of its
-    # `with sf() as session:` block. If profile-scoped read latency ever
-    # matters, the fix is a separate lock-free read gate, not removing this.
+    # profile's edit permission, so the read paths share the gate and cannot
+    # be split from it without splitting the gate. Each route releases the lock
+    # at the end of its `with sf() as session:` block.
+    #
+    # ONE of those routes holds it for a long time, and it is not free:
+    # approve_items reaches here through _board_for_edit and then runs the QR
+    # encode loop inside its own session, so this profile row is locked for that
+    # whole batch -- bounded at ~8.7 s for one approve, and longer under
+    # concurrency because qr.py's `_encode_lock` is process-wide. The reversal
+    # is named and measured at that call site in web/api/boards.py; do not read
+    # this helper as "nothing slow runs under the lock". It did once.
+    #
+    # NOT every profile mutation passes here. `update_profile` inlines this
+    # same three-check ladder rather than calling this helper -- pinned that way
+    # by tests/architecture/test_profile_access_single_source.py -- so it
+    # authorizes against an UNLOCKED read and a rename racing a transfer is
+    # still possible. Out of scope for the transfer race this lock closes, but
+    # do not read the route inventory above as "profile mutations serialise".
+    #
+    # If profile-scoped read latency ever matters, the fix is a separate
+    # lock-free read gate, not removing this.
     p = session.execute(
         select(Profile).where(Profile.id == profile_id).with_for_update()
     ).scalar_one_or_none()
@@ -806,15 +824,19 @@ def transfer_profile_owner(
     user: User = Depends(get_current_user),  # noqa: B008
 ):
     """Move a profile to another user. Owner-or-admin, via `_profile_for_edit`'s
-    own check (profiles.py:151); `:468` is `update_profile`'s use of the same
-    gate.
+    own check; `update_profile` inlines the same ladder rather than calling it.
 
     The admin arm is not a convenience: the case that motivated this is an owner
     who can no longer log in, so only an admin can act.
 
-    Ownership is load-bearing in SEVEN places (profile_access.py:69,
-    profiles.py:151/261/468/612/678, calls.py:641), which is why this is one
-    transaction and not four endpoints.
+    Ownership is load-bearing in SEVEN places -- `readable_profile_ids`'s owner
+    arm (web/profile_access.py), `_profile_for_edit`, `get_profile`,
+    `update_profile`, `replace_profile_viewers`, `add_profile_viewer`, and
+    `get_call_detail`'s profile resolution (web/api/calls.py) -- which is why
+    this is one transaction and not four endpoints. Cited by name: the numeric
+    version of this list was already approximate at the base commit (one entry
+    pointed at a decorator, another at a parameter) and this branch shifted
+    every one of them.
 
     Recipient eligibility is `status == 'active'` and nothing narrower: an
     unshared private profile has no viewer rows at all, so a
@@ -838,6 +860,16 @@ def transfer_profile_owner(
     # free and repeatable. The refusal is therefore the SAME generic 400 an
     # unknown, inactive or ineligible recipient gets -- a distinct message
     # would assert the oracle back into existence.
+    #
+    # BLUNTED, NOT CLOSED, and the difference matters. 400-vs-200 is still an
+    # observable: create a profile named X, PUT it at the victim, and the status
+    # tells you whether the victim owns an active profile named X. What this
+    # removes is that the probe used to be FREE and REPEATABLE -- the 500 rolled
+    # back, so it cost nothing. Now each probe costs the attacker the profile it
+    # transferred away on a miss. The residual is inherent to putting created_by
+    # in the unique key: any refusal at all is observable. The only true close is
+    # to not refuse -- e.g. disambiguate the name on transfer -- which is a
+    # product decision, not a bug fix.
     # tests/test_api_profile_name_privacy.py's gate 11 pins it.
     #
     # Why the whole block and not session.commit(): the breach surfaces at the
@@ -860,7 +892,7 @@ def transfer_profile_owner(
                 raise HTTPException(status_code=400, detail="could not transfer profile")
 
             # Never None: Profile.created_by is nullable=False with
-            # ondelete="RESTRICT" (db/models/profiles.py:96-97, set at table
+            # ondelete="RESTRICT" (db/models/profiles.py:108-110, set at table
             # creation in migration 0003, never retrofitted onto existing rows),
             # so a referenced user row cannot be deleted out from under it.
             outgoing = session.get(User, p.created_by)
@@ -868,7 +900,7 @@ def transfer_profile_owner(
             # 1. D10's stale-row hazard: the incoming owner may already hold a
             # legitimate viewer row (add_profile_viewer only refuses one for
             # whoever is owner AT THAT MOMENT). Delete it so the ProfileViewer
-            # invariant "the owner never has a row" (db/models/profiles.py:135-136)
+            # invariant "the owner never has a row" (db/models/profiles.py:156-157)
             # stays true after the transfer.
             session.execute(
                 delete(ProfileViewer).where(
@@ -912,7 +944,7 @@ def transfer_profile_owner(
                 )
                 # Unlike the three `outgoing is not None` guards this function
                 # dropped, this one STAYS: the owner-never-has-a-row invariant is
-                # docstring-only (db/models/profiles.py:135-136), enforced by the
+                # docstring-only (db/models/profiles.py:156-157), enforced by the
                 # three writers agreeing and not by the database, so a row here is
                 # unreachable-by-agreement rather than unreachable-by-constraint.
                 if already_viewer is None:
