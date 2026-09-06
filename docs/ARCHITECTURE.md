@@ -48,7 +48,7 @@ Read this before claiming two tables share, or do not share, a rule.
 | `artifact_versions` | `ArtifactVersion` | 7 | 2 | 1 | 2 |
 | `attachment_jobs` | `AttachmentJob` | 9 | 2 | 2 | 2 |
 | `attachments` | `Attachment` | 12 | 2 | 1 | 1 |
-| `board_items` | `BoardItem` | 5 | 3 | 0 | 1 |
+| `board_items` | `BoardItem` | 8 | 3 | 0 | 1 |
 | `boards` | `Board` | 15 | 3 | 6 | 1 |
 | `branches` | `Branch` | 5 | 1 | 0 | 0 |
 | `call_decisions` | `CallDecision` | 8 | 4 | 1 | 3 |

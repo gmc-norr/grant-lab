@@ -25,7 +25,7 @@ from datetime import UTC, datetime, timedelta
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from grant_lab.boards.qr import _MAX_URL_BYTES
+from grant_lab.boards.qr import _MAX_URL_BYTES, qr_for
 from grant_lab.db.models import Board, BoardItem, Call, CallDecision, Source, User
 from grant_lab.main import create_app
 from grant_lab.web.filters import deadline_local_date
@@ -133,9 +133,17 @@ def _make_call(
 
 def _approve(pg_session_factory, *, board_id, call_id, approved_by, position=0):
     with pg_session_factory() as s:
+        # The QR is rendered at approval now, in the API. This helper bypasses
+        # that route, so it must render what the route renders -- otherwise
+        # qr_source_url stays NULL and the public route serves the qr_modules=0
+        # sentinel for every card this helper built.
+        url = s.get(Call, call_id).url
+        qr = qr_for(url)
         s.add(
             BoardItem(
-                board_id=board_id, call_id=call_id, position=position, approved_by=approved_by
+                board_id=board_id, call_id=call_id, position=position,
+                approved_by=approved_by,
+                qr_path=qr.path or None, qr_modules=qr.modules, qr_source_url=url or None,
             )
         )
         s.commit()

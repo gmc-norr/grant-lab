@@ -46,6 +46,7 @@ from sqlalchemy.orm.exc import ObjectDeletedError
 
 from grant_lab.auth.dependencies import get_current_user
 from grant_lab.boards.alerts import owner_undeliverable_map
+from grant_lab.boards.qr import qr_for
 from grant_lab.boards.queue import board_queue
 from grant_lab.db.models import ORIENTATION_ITEMS_PER_PAGE, Board, BoardItem, Call, Profile, User
 from grant_lab.web.api.profiles import _profile_for_edit
@@ -675,13 +676,53 @@ def approve_items(
                 select(func.max(BoardItem.position)).where(BoardItem.board_id == board.id)
             )
             next_position = 0 if existing_max is None else existing_max + 1
+            urls = dict(
+                session.execute(
+                    select(Call.id, Call.url).where(Call.id.in_(new_ids))
+                ).all()
+            )
+            # THE ENCODE NOW RUNS INSIDE THIS SESSION AND UNDER THE ROW LOCK,
+            # and that reverses -- for this route only -- the rule
+            # public_boards.py:105-115 states as CRITICAL for the ANONYMOUS
+            # route. Named here rather than discovered later.
+            #
+            # What it costs, from qr.py's own measured numbers: the batch
+            # ceiling is `cap` above, items_per_page * max_pages. items_per_page
+            # is bounded 1..64 (ck_boards_items_per_page) and max_pages is not
+            # exposed on BoardSettingsIn at all, so the API-reachable worst case
+            # is 192 items x ~45.5 ms = ~8.7 s holding both a pooled connection
+            # and this board's `SELECT ... FOR UPDATE` -- the lock this route's
+            # docstring makes the linchpin of approve-vs-approve and
+            # approve-vs-settings-PUT.
+            #
+            # Why that is the accepted trade and not an oversight: this is an
+            # authenticated, rate-limited admin action on ONE board, bounded and
+            # rare, and it is what buys the anonymous path -- unauthenticated,
+            # unbounded in callers -- its zero-encode guarantee. Moving the
+            # encode outside the transaction (read urls, commit, encode, store
+            # in a second transaction) would remove the lock hold at the cost of
+            # a window in which an approved board serves no QR at all.
+            # That restructuring is deliberately NOT done here; it is recorded
+            # for review.
             for offset, cid in enumerate(new_ids):
+                url = urls.get(cid) or ""
+                # Skip the encoder for an empty url. Call.url is Text NOT NULL
+                # but permits "", and qr_for("") returns a real 21-module QR of
+                # the empty string -- ~1.5 KB stored per row for a code that can
+                # never be served, since qr_source_url is then NULL and the
+                # public route's `qr_source_url == call.url` comparison is
+                # permanently False. The outcome was already correct; this makes
+                # it deliberate and skips the wasted work.
+                qr = qr_for(url) if url else None
                 session.add(
                     BoardItem(
                         board_id=board.id,
                         call_id=cid,
                         position=next_position + offset,
                         approved_by=user.id,
+                        qr_path=(qr.path or None) if qr else None,
+                        qr_modules=qr.modules if qr else 0,
+                        qr_source_url=url or None,
                     )
                 )
             session.commit()
