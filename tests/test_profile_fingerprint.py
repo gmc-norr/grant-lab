@@ -37,6 +37,39 @@ def test_embedding_fingerprint_tracks_the_text_builder_output():
     b = _profile(description="Liver  disease")  # different text, same fields
     assert embedding_fingerprint(a) != embedding_fingerprint(b)
 
+    # The pair above is NOT enough on its own: it differs only in
+    # `description`, so `_digest(profile.description or "")` -- an
+    # implementation that never calls build_profile_text at all -- passes it
+    # identically. Measured: that mutant left this whole file green. So pin
+    # the OTHER fields the builder folds in (similarity.py:88-97) with
+    # `description` held fixed.
+    #
+    # `areas` is the commonest real profile edit. If it stopped reaching the
+    # text, editing it would leave the stored vector marked current forever
+    # and the vector-staleness check would never fire.
+    areas_a = _profile(description="Liver disease", structured={"areas": ["liver cancer"]})
+    areas_b = _profile(description="Liver disease", structured={"areas": ["transplant rejection"]})
+    assert embedding_fingerprint(areas_a) != embedding_fingerprint(areas_b)
+
+
+def _org_profile(**org):
+    """A profile whose only variable is `structured["org"]`."""
+    return _profile(description="Liver disease", structured={"areas": ["liver"], "org": org})
+
+
+def test_embedding_fingerprint_tracks_the_org_fields_the_builder_folds_in():
+    """Task 28 appended `org.capabilities` and `org.patient_populations` to
+    the embedding text (similarity.py:93-99). Neither is a column on Profile,
+    so a fingerprint built from the row's scalar fields would miss both and
+    call a stale vector current."""
+    cap_a = _org_profile(capabilities=["biobank"])
+    cap_b = _org_profile(capabilities=["sequencing core"])
+    assert embedding_fingerprint(cap_a) != embedding_fingerprint(cap_b)
+
+    pop_a = _org_profile(patient_populations=["cirrhosis"])
+    pop_b = _org_profile(patient_populations=["hepatitis B"])
+    assert embedding_fingerprint(pop_a) != embedding_fingerprint(pop_b)
+
 
 def test_rank_fingerprint_covers_budget_and_trl():
     """Rev 1's enumeration omitted these; criteria.py:111 and :129 read them
@@ -44,6 +77,36 @@ def test_rank_fingerprint_covers_budget_and_trl():
     a = _profile(structured={"areas": ["liver"], "budget_min": 100})
     b = _profile(structured={"areas": ["liver"], "budget_min": 200})
     assert rank_fingerprint(a) != rank_fingerprint(b)
+
+    # TRL was covered by construction, not by assertion: varying only
+    # `budget_min` leaves this test green with every trl_* key stripped from
+    # the payload, so the name promised coverage the body did not deliver.
+    trl_min_a = _profile(structured={"areas": ["liver"], "trl_min": 3, "trl_max": 9})
+    trl_min_b = _profile(structured={"areas": ["liver"], "trl_min": 7, "trl_max": 9})
+    assert rank_fingerprint(trl_min_a) != rank_fingerprint(trl_min_b)
+
+    trl_max_a = _profile(structured={"areas": ["liver"], "trl_min": 3, "trl_max": 6})
+    trl_max_b = _profile(structured={"areas": ["liver"], "trl_min": 3, "trl_max": 9})
+    assert rank_fingerprint(trl_max_a) != rank_fingerprint(trl_max_b)
+
+
+def test_rank_fingerprint_covers_budget_currency_and_name():
+    """Measured on rev 1 of this file: deleting "budget_currency" from the
+    payload left all 8 tests green, and deleting "name" as well still left 8
+    green. `budget_currency` is a genuine ranking input -- criteria.py:115-120
+    returns UNKNOWN / currency_mismatch off it -- so a payload that dropped it
+    would call a ranking built under the wrong currency current forever."""
+    money = {"areas": ["liver"], "budget_min": 100, "budget_max": 200}
+    sek = _profile(structured=dict(money), budget_currency="SEK")
+    eur = _profile(structured=dict(money), budget_currency="EUR")
+    assert rank_fingerprint(sek) != rank_fingerprint(eur)
+
+    # `name` is insurance (nothing in ProfileUpdateIn writes it) but it does
+    # reach the LLM prompt at ranking/prompt.py:218-219, so it is in the
+    # payload and must stay pinned.
+    hepatology = _profile(name="Hepatology")
+    cardiology = _profile(name="Cardiology")
+    assert rank_fingerprint(hepatology) != rank_fingerprint(cardiology)
 
 
 def test_rank_fingerprint_covers_the_embedding_fingerprint():
