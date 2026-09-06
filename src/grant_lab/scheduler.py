@@ -476,11 +476,14 @@ def build_scheduler(
     # drain has recorded its progress in the DATA. What the predicate does NOT
     # exclude is a row that keeps FAILING — it records nothing, so it stays in
     # the candidate set and re-consumes the allowance on every tick, ahead of
-    # the rows behind it. Measured at max_batches=3: three always-failing calls
-    # ahead of one good call leave the good call unembedded after six ticks. It
-    # takes more than `max_batches * batch_size` (40,000 at production
-    # settings) persistently-failing calls per tick for this to bite, which is
-    # a scale bound, not an impossibility.
+    # the rows behind it. Measured at batch_size=1, max_batches=3: three
+    # always-failing calls ahead of one good call leave the good call
+    # unembedded after six ticks. The batch_size matters and is why that figure
+    # is quoted with it -- the SAME corpus at the production batch_size=200
+    # embeds the good call on the FIRST tick. It takes more than
+    # `max_batches * batch_size` (40,000 at production settings)
+    # persistently-failing calls per tick for this to bite, which is a scale
+    # bound, not an impossibility.
     #
     # Held in this closure, not in the database. The scheduler is in-process
     # and single-instance (a hard constraint), so one process owns this value

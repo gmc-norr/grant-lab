@@ -178,7 +178,9 @@ def refresh_missing_embeddings_tick(
 
     - `scan_exhausted`: True when the drain ran off the end of BOTH tables,
       False when it stopped on `max_batches`. This is the drain's own
-      termination condition and is what the log line reports.
+      termination condition. Do NOT key a profile cursor on it: a tick held
+      capped by the CALL half reports False while the profile scan is long
+      finished, which froze the profile cursor until it was fixed.
     - `profile_scan_exhausted`: True when the PROFILE half examined no rows on
       the batch the drain stopped at, i.e. the profile cursor is past the last
       profile id. This is the one the daily caller keys its cursor on.
@@ -236,6 +238,11 @@ def refresh_missing_embeddings_tick(
         # The PROFILE half's own exhaustion — see the docstring for why the
         # joint flag above cannot stand in for it. Overwritten by every batch,
         # so what survives the loop is the terminating batch's answer.
+        #
+        # Set on the non-force drain only, exactly like the flag above: under
+        # force this function runs a single batch and returns that batch's
+        # summary, which carries NEITHER flag. A force-mode consumer reading
+        # this key would KeyError.
         #
         # Benign edge: when the cap lands EXACTLY on the last profile row, the
         # terminating batch examined that row, so this is False and the caller
