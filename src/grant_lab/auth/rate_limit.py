@@ -56,13 +56,16 @@ class SlidingWindowLimiter:
     def sweep(self) -> int:
         """Drop keys whose entire event window has expired.
 
-        Callable from a periodic job if memory pressure becomes a concern.
-        Currently not wired to any scheduler because the dict is already
-        bounded: one entry per distinct client-IP or per-email, and both are
-        naturally finite in the hospital-internal deployment. If the app is
-        ever exposed to the public internet, hook this into a low-frequency
-        APScheduler job (e.g. every 5 minutes) to prevent unbounded growth
-        from scan traffic."""
+        IS wired to a scheduler: `main.py` builds every limiter passed to
+        `build_scheduler(limiters=[...])`, and `scheduler.py`'s
+        `_rate_limit_sweep` job calls `sweep()` on each of them hourly, so
+        memory stays bounded in a long-running process. `allow()` above
+        never deletes a key on its own -- it only pops expired timestamps
+        off the deque -- so a limiter left OUT of that `limiters=[...]` list
+        leaks one dict entry per distinct key forever. That is exactly the
+        board (public, unauthenticated) route's limiter: it must be in the
+        list too, not just the email/IP pair used by authenticated routes.
+        """
         with self._lock:
             now = self._clock()
             cutoff = now - self._window

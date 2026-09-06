@@ -145,6 +145,50 @@ def test_build_scheduler_omits_rate_limit_sweep_when_limiters_empty(_settings_en
     sched.shutdown(wait=False)
 
 
+def test_main_pys_rate_limit_sweep_covers_the_board_limiter(pg_url, migrated_engine, monkeypatch):
+    """IMPORTANT 2 (Plan C Task 7 review): `main.py`'s
+    `build_scheduler(limiters=[...])` call must include `board_limiter` --
+    the public board route's own counter -- alongside `email_limiter` and
+    `ip_limiter`. `SlidingWindowLimiter.allow()` never deletes a key on its
+    own (it only pops expired timestamps off one key's deque); only
+    `sweep()`, run by this job, removes the key entirely. A limiter left out
+    of that list leaks one dict entry per distinct source IP forever, and
+    the board route is the one anonymous route in the app -- the most
+    exposed to scan traffic.
+
+    This is the actual call site in `main.py`, not `build_scheduler`'s
+    generic mechanism (already covered above) -- a passing test there says
+    nothing about what `main.py` actually passes in.
+    """
+    from collections import deque
+
+    from fastapi.testclient import TestClient
+
+    from grant_lab.main import create_app
+
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+
+    app = create_app()
+    with TestClient(app):
+        board_limiter = app.state.board_limiter
+        assert app.state.email_limiter is not board_limiter
+        assert app.state.ip_limiter is not board_limiter
+        board_limiter._events["203.0.113.9"] = deque([0.0])  # long-expired
+
+        job = app.state.scheduler.get_job("rate_limit:sweep")
+        assert job is not None, "no rate_limit:sweep job was registered"
+        job.func()  # invokes sweep() on every limiter the closure was given
+
+        assert "203.0.113.9" not in board_limiter._events, (
+            "board_limiter's expired key survived the sweep -- it is "
+            "missing from main.py's limiters=[...] list"
+        )
+    app.state.engine.dispose()
+
+
 def test_build_scheduler_includes_rank_drain_job(_settings_env):
     from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
 

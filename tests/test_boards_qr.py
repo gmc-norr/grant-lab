@@ -12,33 +12,12 @@ regex over a library's output pins a private format.
 
 from __future__ import annotations
 
-import re
-
+import pytest
 import segno
 
 from grant_lab.boards.qr import qr_for
-
-_CMD = re.compile(r"M(\d+) (\d+)h(\d+)v1h-(\d+)z")
-
-
-def _matrix_from_path(path: str, modules: int) -> list[list[int]]:
-    """Rebuild a 0/1 matrix from `qr_for`'s path -- a path PARSER, not a QR
-    decoder (see the endpoint test's own docstring for why a decoder is out
-    of scope). Every command must be exactly `M{x} {y}h{run}v1h-{run}z`
-    (asserted via `pos`, so a stray/garbled command cannot be silently
-    skipped by `finditer`) and the two run lengths must agree.
-    """
-    matrix = [[0] * modules for _ in range(modules)]
-    pos = 0
-    for m in _CMD.finditer(path):
-        assert m.start() == pos, f"unparsed byte at offset {pos} in {path!r}"
-        x, y, run, run2 = int(m[1]), int(m[2]), int(m[3]), int(m[4])
-        assert run == run2, f"mismatched run lengths in command {m[0]!r}"
-        for i in range(run):
-            matrix[y][x + i] = 1
-        pos = m.end()
-    assert pos == len(path), f"trailing unparsed bytes: {path[pos:]!r}"
-    return matrix
+from tests.qr_path_test_helpers import QR_CMD as _CMD
+from tests.qr_path_test_helpers import matrix_from_qr_path as _matrix_from_path
 
 
 def test_a_qr_encodes_the_url_and_round_trips():
@@ -76,6 +55,24 @@ def test_the_path_contains_no_angle_bracket_or_quote():
     qr = qr_for('https://example.test/<script>alert(1)</script>?a="b"')
     for ch in "<>\"'&":
         assert ch not in qr.path, f"{ch!r} found in path meant for an SVG attribute"
+
+
+def test_an_over_long_url_returns_the_empty_qr_sentinel_not_a_raise():
+    """`Call.url` is `Text NOT NULL` with no length bound and is populated by
+    external ingestion adapters (IMPORTANT 1). Measured, segno 1.6.6, error
+    level M: 2331 'x' characters still fits; 2332 raises
+    `segno.DataOverflowError`. `qr_for` must swallow exactly that boundary
+    and hand back the sentinel (modules=0, path=""), not propagate.
+    """
+    fits = "x" * 2331
+    overflows = "x" * 2332
+    segno.make_qr(fits, error="m")  # does not raise -- pins the boundary
+    with pytest.raises(segno.DataOverflowError):
+        segno.make_qr(overflows, error="m")
+
+    qr = qr_for(overflows)
+    assert qr.modules == 0
+    assert qr.path == ""
 
 
 def test_the_symbol_is_never_a_micro_qr():

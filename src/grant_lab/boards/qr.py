@@ -41,8 +41,24 @@ def qr_for(url: str) -> QrCode:
     a Micro QR, and on a corridor wall that is a silent per-card failure that
     looks exactly like a working QR. `make_qr` refuses the family outright;
     `make(url, error="m", micro=False)` is equivalent.
+
+    An input too large for ANY QR version raises `segno.DataOverflowError`
+    (measured, segno 1.6.6, error level M: 2331 ASCII characters encodes,
+    2332 raises "Data too large. No QR Code can handle the provided data").
+    `Call.url` is `Text NOT NULL` with no length bound
+    (db/models/calls.py), populated by external ingestion adapters this task
+    does not own, so this WILL happen from real funder data. Caught HERE,
+    not at the call site: `qr_for` is the only module that imports segno, so
+    every caller -- today's one and any future one -- inherits the same
+    fallback without having to remember to wrap the call. Returns the
+    empty-QR sentinel (modules=0, path="") rather than raising, matching
+    `PublicBoardItemOut`'s non-optional `qr_modules`/`qr_path` fields: one
+    bad URL costs one missing QR, not the whole board.
     """
-    q = segno.make_qr(url, error="m")
+    try:
+        q = segno.make_qr(url, error="m")
+    except segno.DataOverflowError:
+        return QrCode(modules=0, path="")
     parts: list[str] = []
     for y, row in enumerate(q.matrix):
         x = 0

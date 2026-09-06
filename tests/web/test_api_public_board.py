@@ -20,7 +20,6 @@ status-only assertion would be green before the endpoint exists.
 
 from __future__ import annotations
 
-import re
 from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
@@ -29,6 +28,7 @@ from sqlalchemy import select
 from grant_lab.db.models import Board, BoardItem, Call, CallDecision, Source, User
 from grant_lab.main import create_app
 from grant_lab.web.filters import deadline_local_date
+from tests.qr_path_test_helpers import matrix_from_qr_path as _matrix_from_path
 
 FUTURE = datetime.now(UTC) + timedelta(days=30)
 PAST = datetime.now(UTC) - timedelta(days=1)
@@ -53,25 +53,6 @@ _TOP_KEYS = {
     "page_seconds",
     "items",
 }
-
-_QR_CMD = re.compile(r"M(\d+) (\d+)h(\d+)v1h-(\d+)z")
-
-
-def _matrix_from_path(path: str, modules: int) -> list[list[int]]:
-    """A path PARSER (not a QR decoder -- segno has no decoder, and nothing
-    else in this environment does either; see the brief's D13). Rebuilds the
-    0/1 matrix `qr_for` encoded so it can be compared to a fresh
-    `segno.make_qr(...).matrix` -- a RE-ENCODE, which has the same
-    discriminating power as a decode for the failure that matters: a QR
-    pointing at the wrong string.
-    """
-    matrix = [[0] * modules for _ in range(modules)]
-    for m in _QR_CMD.finditer(path):
-        x, y, run, run2 = int(m[1]), int(m[2]), int(m[3]), int(m[4])
-        assert run == run2
-        for i in range(run):
-            matrix[y][x + i] = 1
-    return matrix
 
 
 def _setup(monkeypatch, pg_url):
@@ -342,6 +323,15 @@ def test_the_payload_carries_no_profile_identity(
     with TestClient(app) as c:
         r = c.get(f"/api/public/boards/{'g' * 16}")
 
+    # IMPORTANT 3: without a real 200 body to inspect, the substring-absence
+    # checks below pass just as well on a 404/429/500/empty-items response --
+    # this endpoint's own RED run (a missing route) proved exactly that
+    # (this test was the ONE pass out of "15 failed, 1 passed"). Anchor the
+    # assertions to an actual card first.
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert len(body["items"]) == 1
+
     assert "Oncology Research Group Seven" not in r.text
     assert "profile_id" not in r.text
     assert "profile" not in r.text.lower()
@@ -493,7 +483,9 @@ def test_the_qr_points_at_the_funder_url_not_this_app(
 
     Rebuilds the matrix from the emitted `qr_path` and compares it to a FRESH
     `segno.make_qr(call.url, error="m").matrix` -- a re-encode, not a decode
-    (segno has no decoder; see this file's own `_matrix_from_path` docstring).
+    (segno has no decoder; see `tests/qr_path_test_helpers.py`'s
+    `matrix_from_qr_path` docstring, MINOR 6 -- shared with
+    `tests/test_boards_qr.py` so the two copies cannot diverge again).
     """
     import segno
 
@@ -515,10 +507,64 @@ def test_the_qr_points_at_the_funder_url_not_this_app(
     assert _matrix_from_path(item["qr_path"], item["qr_modules"]) == expected
 
 
+def test_an_over_long_url_costs_one_qr_not_the_whole_board(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """IMPORTANT 1: `Call.url` is `Text NOT NULL` with no length bound
+    (db/models/calls.py) and is populated by external ingestion adapters --
+    a funder URL over segno's error-M budget (measured: 2331 characters
+    fits, 2332 overflows, see tests/test_boards_qr.py) must not 500 the
+    entire corridor board. `qr_for` swallows `segno.DataOverflowError` and
+    returns the sentinel (qr_modules=0, qr_path=""); this pins that the
+    OTHER card on the same board is unaffected.
+    """
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Overlong url profile")
+    board_id = _make_board(pg_session_factory, profile_id=pid, created_by=owner_id, slug="r" * 16)
+    ok_call = _make_call(pg_session_factory, external_id="overlong-ok", title="Fine card")
+    bad_call = _make_call(
+        pg_session_factory,
+        external_id="overlong-bad",
+        title="Overlong card",
+        url="https://funder.example/" + "x" * 3000,
+    )
+    _approve(
+        pg_session_factory, board_id=board_id, call_id=ok_call, approved_by=owner_id, position=0
+    )
+    _approve(
+        pg_session_factory, board_id=board_id, call_id=bad_call, approved_by=owner_id, position=1
+    )
+
+    with TestClient(app) as c:
+        r = c.get(f"/api/public/boards/{'r' * 16}")
+
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    assert len(items) == 2
+    assert items[0]["title"] == "Fine card"
+    assert items[0]["qr_modules"] > 0
+    assert items[0]["qr_path"]
+    assert items[1]["title"] == "Overlong card"
+    assert items[1]["qr_modules"] == 0
+    assert items[1]["qr_path"] == ""
+
+
 def test_the_full_board_payload_size_stays_under_budget(
     monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
-    """A future change that doubles the encoding cost should be noticed.
+    """MINOR 4: this is a PER-ITEM ENCODING COST regression detector, not a
+    bound on what the endpoint can actually emit. 24 items is the brief's
+    fixture count, not a cap -- `approve_items` allows up to
+    `items_per_page * max_pages` (`web/api/boards.py`), and `items_per_page`
+    alone accepts up to 64 (`Field(..., le=64)`) with `max_pages` defaulting
+    to 3, so a legitimately configured board holds up to 192 items. At this
+    fixture's own 129-character URL that is ~1.75 MB (measured in
+    `test_the_full_board_payload_at_the_true_capacity_ceiling` below), 3.4x
+    the 512 KB this test asserts. This test's 512 KB budget is still a
+    useful regression detector for the per-item cost `qr_for` produces --
+    it would catch a change that doubles that cost -- it just does not bound
+    the payload a real 192-item board can produce; see the ceiling test for
+    that.
 
     The fixture URL: base = "https://www.vinnova.se/en/calls-for-proposals/"
     is 46 characters; `+ "a" * 83` makes it 129 -- asserted below so the
@@ -562,6 +608,63 @@ def test_the_full_board_payload_size_stays_under_budget(
     size = len(r.content)
     print(f"full 24-item board payload: {size} bytes")
     assert size < 512 * 1024, f"payload grew to {size} bytes -- over the 512 KB budget"
+
+
+def test_the_full_board_payload_at_the_true_capacity_ceiling(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """MINOR 4: the OTHER test above is a per-item cost regression detector,
+    not a bound on what the endpoint can actually be asked to emit. The real
+    ceiling is `items_per_page * max_pages` (`web/api/boards.py`'s
+    `approve_items`): `items_per_page` accepts up to 64
+    (`Field(..., le=64)`) and `max_pages` defaults to 3, so 192 is a
+    legitimately configured board's maximum, not a hypothetical. This
+    exercises that real ceiling with the same 129-character fixture URL and
+    records the real byte count -- deliberately with NO tight budget, since
+    3.4x the other test's own number is not "a doubling", it is the
+    documented cap; a future change that doubles THIS number is still worth
+    someone's attention, so the bound here is loose (10 MB) rather than
+    absent.
+    """
+    base = "https://www.vinnova.se/en/calls-for-proposals/"
+    long_url = base + "a" * 83
+    assert len(long_url) == 129
+
+    app = _setup(monkeypatch, pg_url)
+    pid, owner_id = profile_factory(name="Ceiling payload profile")
+    board_id = _make_board(
+        pg_session_factory,
+        profile_id=pid,
+        created_by=owner_id,
+        slug="s" * 16,
+        orientation="landscape",
+        items_per_page=64,
+        max_pages=3,
+    )
+    ceiling = 64 * 3
+    assert ceiling == 192
+    for i in range(ceiling):
+        call_id = _make_call(
+            pg_session_factory,
+            external_id=f"ceiling-{i}",
+            title=f"Realistic funding call title number {i}",
+            url=long_url,
+        )
+        _approve(
+            pg_session_factory, board_id=board_id, call_id=call_id, approved_by=owner_id, position=i
+        )
+
+    with TestClient(app) as c:
+        r = c.get(f"/api/public/boards/{'s' * 16}")
+
+    assert r.status_code == 200, r.text
+    assert len(r.json()["items"]) == ceiling
+    size = len(r.content)
+    print(f"full {ceiling}-item (true capacity) board payload: {size} bytes")
+    assert size < 10 * 1024 * 1024, (
+        f"payload grew to {size} bytes at the real 192-item ceiling -- "
+        "over the 10 MB loose regression bound"
+    )
 
 
 def test_the_rate_limiter_refuses_the_61st_request_in_a_window(

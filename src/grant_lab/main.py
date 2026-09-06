@@ -279,7 +279,14 @@ async def lifespan(app: FastAPI):
             embed_client=app.state.embed_client,
             digest_email_client=digest_email_client,
             digest_settings=settings,
-            limiters=[app.state.email_limiter, app.state.ip_limiter],
+            # board_limiter (Plan C Task 7) rides the same sweep: `allow()`
+            # never deletes a key on its own, only `sweep()` does, and the
+            # public board route is the one anonymous route in the app, so
+            # its limiter is the one most exposed to scan traffic filling
+            # the dict with distinct IPs. Set on app.state before this
+            # lifespan ever runs -- see the `app.state.board_limiter =`
+            # assignment below in create_app().
+            limiters=[app.state.email_limiter, app.state.ip_limiter, app.state.board_limiter],
             workspace_controller=workspace_controller,
             # Never None here: build_citation_service raises in create_app() on
             # misconfig, so a started app always has a real service.

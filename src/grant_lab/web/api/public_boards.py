@@ -58,6 +58,12 @@ _NOT_FOUND = "board not found"
 class PublicBoardItemOut(BaseModel):
     title: str
     source_name: str
+    # MINOR 5: typed Optional to match the shared `deadline_local_date()`
+    # helper's own signature (`web/filters.py:37`, also `str | None` because
+    # it also backs `CallOut`, where a deadline CAN be unset) -- not because
+    # this field can actually be null here. `public.py`'s
+    # `Call.deadline.is_not(None)` filter means every row this endpoint
+    # emits already has a deadline, so this branch never fires in practice.
     deadline_local_date: str | None
     budget_min: int | None
     budget_max: int | None
