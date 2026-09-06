@@ -182,3 +182,28 @@ def test_survives_a_real_postgres_round_trip(pg_session_factory):
         )
 
         assert rank_fingerprint(loaded) == before
+
+
+def test_a_model_swap_changes_the_rank_fingerprint():
+    """The embedding repair predicate knows about model identity; the ranking
+    one inherited only a text hash. So swapping EMBEDDING_MODEL replaced every
+    vector, left both fingerprints byte-identical, and reconcile treated every
+    ranking as current while its stored cosine described the old vectors.
+
+    This repo has already swapped embedding models once (mxbai -> bge-m3)."""
+    a = _profile()
+    # An OPAQUE sentinel. Deliberately not "v1:"/"v2:"-prefixed: its content is
+    # irrelevant here, and a version-shaped literal would contradict Step 4's
+    # rule against hardcoding the version two steps later.
+    a.embedding_fingerprint = "sentinel-same"
+    a.embedding_model = "mxbai-embed-large"
+    b = _profile()
+    b.embedding_fingerprint = "sentinel-same"
+    b.embedding_model = "bge-m3"
+    assert rank_fingerprint(a) != rank_fingerprint(b)
+
+
+def test_the_version_tag_is_v2():
+    p = _profile()
+    assert embedding_fingerprint(p).startswith("v2:")
+    assert rank_fingerprint(p).startswith("v2:")

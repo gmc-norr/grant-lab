@@ -2,14 +2,27 @@
 
 DERIVED, never stored as a claim about "current". There are four profile-text
 write sites (profiles/create.py:25, :51, the constructor at :68-75, and
-web/api/profiles.py:481 + :518); a fifth that forgot to maintain a stored hash
+web/api/profiles.py:534 + :573); a fifth that forgot to maintain a stored hash
 would assert "fresh" about a stale row. Recomputing from the row cannot rot.
 
-Both functions return "v1:<sha256 hex>". The version tag is not decoration:
+Both functions return "v2:<sha256 hex>". The version tag is not decoration:
 any later change to a hashed payload makes EVERY stored fingerprint mismatch
 at once and re-ranks the entire corpus on the next tick, with no operator
 signal. Bump the version and ship an explicit decision -- either "yes, re-rank
 everything" or a skip rule for the old version.
+
+v2 added "embedding_model" to rank_fingerprint's payload: adding this key is
+exactly the deliberate, visible payload change the version tag exists to force.
+(No line number here on purpose -- a self-referential citation in this same
+file rots on the next edit.)
+
+The decision shipped with v2 is "yes, re-rank everything", and it is free
+BEFORE the first production deploy: migration 0075 already leaves
+profiles.embedding_fingerprint NULL and so forces one full re-embed and
+re-rank on its first night. Note the tag is SHARED with embedding_fingerprint
+below, whose payload did not change in v2 -- so this bump invalidates stored
+embedding fingerprints too, and that is the same one re-embed, not a second.
+Shipping v2 after that first deploy buys an unplanned second corpus re-rank.
 """
 
 from __future__ import annotations
@@ -20,7 +33,7 @@ from typing import Any
 
 from grant_lab.embeddings.similarity import build_profile_text
 
-FINGERPRINT_VERSION = "v1"
+FINGERPRINT_VERSION = "v2"
 LEGACY_SENTINEL = "legacy"
 
 
@@ -30,7 +43,7 @@ def _canonical(value: Any) -> Any:
     Postgres does not preserve key order, and hands numbers back in whatever
     representation it stored: json.dumps(1) is "1" and json.dumps(1.0) is
     "1.0". The profile-update endpoint compares a DB-loaded row against a
-    freshly built Python dict (web/api/profiles.py:480 vs :520), so the two
+    freshly built Python dict (web/api/profiles.py:534 vs :573), so the two
     sides genuinely differ in representation. expire_on_commit=False
     (db/session.py:58) means committing does NOT reload the row, so this
     cannot be fixed by moving a line -- it is fixed here.
@@ -102,7 +115,7 @@ def rank_fingerprint(profile) -> str:
         deferral would strand the pair forever.
 
     `name` and `kind` are insurance, not cost: they reach the LLM prompt at
-    ranking/prompt.py:218-219, but ProfileUpdateIn (web/api/profiles.py:399-423)
+    ranking/prompt.py:218-219, but ProfileUpdateIn (web/api/profiles.py:453-480)
     has 22 fields and neither is among them, and nothing assigns either after
     profiles/create.py:68-75.
     """
@@ -114,5 +127,20 @@ def rank_fingerprint(profile) -> str:
             "name": profile.name,
             "kind": getattr(profile.kind, "value", profile.kind),
             "embedding_fingerprint": profile.embedding_fingerprint,
+            # The MODEL as well as the fingerprint. embedding_fingerprint
+            # digests build_profile_text's output, which is text only, so
+            # swapping EMBEDDING_MODEL replaces every vector while leaving that
+            # hash byte-identical -- and reconcile would then treat every
+            # ranking as current while its stored embed_similarity describes
+            # the previous vectors. The embedding repair predicate already
+            # knows about model identity; this is what carries it into ranking
+            # freshness.
+            #
+            # Every caller must supply this column. ranking/queue.py passes a
+            # column-limited Row, not a Profile; direct attribute access here is
+            # deliberate so a missing column fails loudly at the boundary
+            # instead of silently hashing None. tests/test_ranking_queue_row_parity.py
+            # is the gate.
+            "embedding_model": profile.embedding_model,
         }
     )

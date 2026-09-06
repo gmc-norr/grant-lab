@@ -39,6 +39,8 @@ class PublicBoardRow:
     budget_max: int | None
     currency: str | None
     url: str
+    qr_modules: int
+    qr_path: str
 
 
 def public_board_by_slug(session: Session, *, slug: str) -> Board | None:
@@ -67,7 +69,7 @@ def public_board_items(session: Session, *, board_id: int) -> list[PublicBoardRo
         Call.deadline > func.now(),
     ]
     rows = session.execute(
-        select(Call, Source.name)
+        select(Call, Source.name, BoardItem)
         .join(BoardItem, BoardItem.call_id == Call.id)
         .join(Source, Source.id == Call.source_id)
         .where(*filters)
@@ -82,6 +84,9 @@ def public_board_items(session: Session, *, board_id: int) -> list[PublicBoardRo
             budget_max=call.budget_max,
             currency=call.currency,
             url=call.url,
+            # Serve the stored QR only while it still describes this url.
+            qr_modules=(item.qr_modules if item.qr_source_url == call.url else 0),
+            qr_path=(item.qr_path or "") if item.qr_source_url == call.url else "",
         )
-        for call, source_name in rows
+        for call, source_name, item in rows
     ]

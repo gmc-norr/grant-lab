@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from grant_lab.db.models import CallRanking, Profile
-from grant_lab.profiles.fingerprint import rank_fingerprint
+from grant_lab.profiles.fingerprint import FINGERPRINT_VERSION, rank_fingerprint
 from grant_lab.ranking.queue import enqueue_for_pair
 from grant_lab.ranking.worker import drain_queue
 from tests.freshness_helpers import enqueue_job, make_call, make_profile, ollama_clean
@@ -51,7 +51,7 @@ def test_the_worker_stamps_the_fingerprint_it_ranked(session, ranked_pair):
     call_id, profile_id, profile = ranked_pair
     cr = session.get(CallRanking, (call_id, profile_id))
     assert cr.profile_fingerprint == rank_fingerprint(profile)
-    assert cr.profile_fingerprint.startswith("v1:")
+    assert cr.profile_fingerprint.startswith(f"{FINGERPRINT_VERSION}:")
 
 
 def test_the_stamp_is_captured_before_rank_pair_not_after(session, session_factory):

@@ -45,12 +45,24 @@ class ProfileLevel(enum.StrEnum):
 class Profile(Base):
     __tablename__ = "profiles"
     __table_args__ = (
-        # Partial UNIQUE on active names. Closes the race in the handler
-        # that pre-checks, releases the session, then inserts. Archived
-        # profiles (is_active=false) can reuse the name — that's why it's
-        # partial. See alembic/versions/0009_*.
+        # Partial UNIQUE on active names, scoped to the OWNER. Inactive
+        # profiles (is_active=false) can reuse the name -- that's why it's
+        # partial. See alembic/versions/0009_* and 0076_*.
+        #
+        # Still also the race closer 0009 added it for: the create handler
+        # pre-checks in one session block and inserts in a later one, so the
+        # index -- not the pre-check -- is what actually refuses a duplicate.
+        #
+        # `created_by` is in the key because a GLOBAL unique active name made
+        # creation an existence oracle: POST a guessed name, read the 409, and
+        # you have confirmed a private profile you cannot read. Note the oracle
+        # lived HERE, not in the handler -- web/api/profiles.py:448-449 turns
+        # this index's IntegrityError into the very same 409 the pre-check
+        # raises, so scoping that pre-check alone changed nothing observable.
+        # The 409 can now only ever name a profile the caller already owns.
         Index(
-            "uq_profiles_active_name",
+            "uq_profiles_active_owner_name",
+            "created_by",
             "name",
             unique=True,
             postgresql_where=text("is_active = true"),
@@ -112,7 +124,7 @@ class Profile(Base):
         nullable=True,
     )
     embedding_model: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # What `embedding` describes: "v1:" + sha256 of build_profile_text(self).
+    # What `embedding` describes: "v2:" + sha256 of build_profile_text(self).
     # Moves with `embedding` and `embedding_model` in every branch of
     # refresh_profile_embedding. NULL means unknown -> the daily tick treats
     # the row as stale and re-embeds it.

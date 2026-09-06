@@ -124,11 +124,31 @@ class Board(Base):
 class BoardItem(Base):
     """One approved call on one board.
 
-    Stores a `call_id` and nothing about the call. D8: the board shows LIVE call
-    data, so the public query joins `calls` and a funder's correction reaches the
-    wall with no renewed approval. A snapshot would keep showing a deadline the
-    funder has since fixed, and on a hospital wall a wrong date is worse than an
-    unreviewed title.
+    Everything DISPLAYED is joined live from `calls` -- D8: the public query
+    joins `calls` and a funder's correction reaches the wall with no renewed
+    approval. A snapshot would keep showing a deadline the funder has since
+    fixed, and on a hospital wall a wrong date is worse than an unreviewed
+    title. D8 holds for all of it, still.
+
+    The one stored copy is `qr_source_url`, a snapshot of `Call.url` as it was
+    at approval time. It is never displayed itself -- it exists only so a
+    stale QR can be WITHDRAWN: the public route compares it against the
+    call's current url and serves `qr_modules=0` on a mismatch, never a QR
+    pointing somewhere the call no longer lives. See `qr_path`/`qr_modules`
+    below for why the QR itself is rendered once, at approval, rather than on
+    the public path.
+
+    Withdrawal is ONE-WAY, and that is the cost of rendering at approval: there
+    is no re-render path. If a funder corrects a url -- or corrects it BACK --
+    the card stays QR-less until an admin removes the item and re-approves it
+    (DELETE /boards/{id}/items/{call_id} then POST /boards/{id}/items). Worth
+    knowing before treating a blank code as a rendering bug.
+
+    Freshness here is URL-only. `qr_for`'s output also depends on its error
+    level and `_MAX_URL_BYTES` (qr.py), neither of which is recorded on the row,
+    so re-parameterising the encoder does NOT withdraw QRs rendered under the
+    old parameters. The claim above is about the CALL moving, not the ENCODER
+    changing.
 
     `Call` has NO status or withdrawn column (measured), so "the board drops
     withdrawn calls" is not implementable in release 1 and must not be claimed.
@@ -151,3 +171,22 @@ class BoardItem(Base):
     approved_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    # The QR, rendered ONCE at approval by an admin in an authenticated,
+    # rate-limited request -- not on the anonymous /b/:slug path, where
+    # qr.py's per-URL global _encode_lock made two alternating max-shape
+    # boards a cache-thrash amplifier.
+    qr_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 0 means "no QR" -- the signal the frontend already honours
+    # (qr_modules === 0 => no <svg>).
+    # `default=0` as well as `server_default`, matching max_pages at :96-97:
+    # without it a BoardItem(...) built without the kwarg reads back None until
+    # flush, and five test files build one directly.
+    qr_modules: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    # The Call.url this QR was rendered from. NOT bookkeeping: a stored QR is
+    # derived data with the same exists-versus-current problem the freshness
+    # release fixed for embeddings, and a QR on a corridor wall pointing where
+    # the call no longer lives is worse than no QR. The public route compares
+    # this and serves qr_modules=0 on a mismatch.
+    qr_source_url: Mapped[str | None] = mapped_column(Text, nullable=True)

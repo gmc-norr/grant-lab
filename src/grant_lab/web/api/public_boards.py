@@ -43,7 +43,6 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from grant_lab.boards.public import public_board_by_slug, public_board_items
-from grant_lab.boards.qr import qr_for
 from grant_lab.web.client_ip import client_ip
 from grant_lab.web.filters import deadline_local_date
 
@@ -103,8 +102,16 @@ def get_public_board(request: Request, slug: str):
     if not request.app.state.board_limiter.allow(client_ip(request)):
         raise HTTPException(status_code=429, detail="too many requests")
     sf = request.app.state.session_factory
-    # CRITICAL (fix round 2): the DB session closes here, BEFORE any QR is
-    # encoded. `rows` is already a `list[PublicBoardRow]` of plain scalars
+    # CRITICAL (fix round 2): the DB session closes here, BEFORE any QR would
+    # be encoded. Since migration 0077 this route encodes NOTHING at all -- it
+    # reads the QR stored at approval (boards.py's approve_items) -- so the rule
+    # below is now about what must never come BACK, not about live behaviour
+    # here. It is also no longer global: approve_items deliberately encodes
+    # inside its session and under its row lock, which is sound there for
+    # reasons named at that call site and unsound here, because this route is
+    # anonymous and unbounded in callers.
+    #
+    # `rows` is already a `list[PublicBoardRow]` of plain scalars
     # (boards/public.py), not ORM objects, and `board_fields` below copies
     # out the handful of ORM attributes this route still needs -- so nothing
     # past this block touches the session. Round 1 bounded `qr_for`'s
@@ -129,7 +136,6 @@ def get_public_board(request: Request, slug: str):
 
     items = []
     for row in rows:
-        qr = qr_for(row.url)
         items.append(
             PublicBoardItemOut(
                 title=row.title,
@@ -139,8 +145,8 @@ def get_public_board(request: Request, slug: str):
                 budget_max=row.budget_max,
                 currency=row.currency,
                 url=row.url,
-                qr_modules=qr.modules,
-                qr_path=qr.path,
+                qr_modules=row.qr_modules,
+                qr_path=row.qr_path,
             )
         )
     return PublicBoardOut(
