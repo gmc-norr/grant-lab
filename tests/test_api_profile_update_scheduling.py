@@ -49,7 +49,7 @@ def owner_profile(app, pg_session_factory, profile_factory):
     return client, pid
 
 
-def test_an_areas_only_edit_schedules_the_refresh(owner_profile):
+def test_an_areas_edit_with_a_blank_description_schedules_the_refresh(owner_profile):
     """GATE 2. build_profile_text composes description OR areas OR org fields,
     so a profile with an empty description and non-empty areas has real
     embedding text -- but the guard read `body.description`, so editing one
@@ -66,7 +66,9 @@ def test_an_areas_only_edit_schedules_the_refresh(owner_profile):
             json={**_BODY, "description": "", "areas": "liver cancer\ntransplant rejection"},
         )
     assert r.status_code == 200, r.text
-    assert task.called, "an areas-only edit scheduled no refresh and no backfill"
+    assert task.called, (
+        "an areas edit under a blank description scheduled no refresh and no backfill"
+    )
 
 
 def test_an_identical_put_schedules_nothing(owner_profile, pg_session_factory):

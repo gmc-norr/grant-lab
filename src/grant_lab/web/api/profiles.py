@@ -527,8 +527,15 @@ def update_profile(
 
     # Schedule on the RANK fingerprint, not on `body.description`. The embed
     # inputs are a subset of the rank inputs, so this schedules a superset of
-    # the old behaviour and never less -- and an areas-only edit, which used to
-    # schedule nothing at all, now schedules both.
+    # the EMBED scheduling: `refresh_embedding` can never fire without
+    # `rank_inputs_changed`.
+    #
+    # It is NOT a superset of the old `body.description` guard, and deliberately
+    # so: an identical PUT with a non-empty description used to schedule 90 days
+    # of backfill and now schedules nothing (test_an_identical_put_schedules_nothing).
+    # What it gains is the other direction -- an edit that changes only
+    # `structured`, or that blanks the description, used to schedule nothing at
+    # all and left the vector describing content the profile no longer has.
     #
     # This comparison is in-memory (`new`) against DB-loaded (`old`):
     # expire_on_commit=False (db/session.py:58) means committing does NOT
