@@ -9,6 +9,7 @@ SPA_ROUTES: tuple[str, ...] = (
     "/profiles",
     "/register",
     "/cockpit",
+    "/boards",
     "/calls",
     "/admin",
     "/login",

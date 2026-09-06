@@ -7,8 +7,10 @@ import { CockpitSidebar } from "./cockpit/CockpitSidebar";
 import { AccountNoAccess } from "./routes/AccountNoAccess";
 import { AccountPending } from "./routes/AccountPending";
 import { AuthError } from "./routes/AuthError";
+import { BoardDetail } from "./routes/BoardDetail";
 import { BoardLayout } from "./routes/BoardLayout";
 import { BoardScreen } from "./routes/BoardScreen";
+import { BoardsList } from "./routes/BoardsList";
 import { CallDetail } from "./routes/CallDetail";
 import { CallReadingPane } from "./routes/CallReadingPane";
 import { CallsFilters } from "./routes/CallsFilters";
@@ -81,6 +83,8 @@ export const router = createBrowserRouter([
       { path: "profiles/new", element: <ProfileNew /> },
       { path: "profiles/:id", element: <ProfileDetail /> },
       { path: "profiles/:id/edit", element: <ProfileEdit /> },
+      { path: "boards", element: <BoardsList /> },
+      { path: "boards/:id", element: <BoardDetail /> },
       {
         path: "admin",
         element: (

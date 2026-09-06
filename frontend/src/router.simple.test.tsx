@@ -17,6 +17,8 @@ const RELEASE_1_ROUTES = [
   "/profiles/new",
   "/profiles/:id",
   "/profiles/:id/edit",
+  "/boards",
+  "/boards/:id",
   "/admin",
   "/admin/users",
   "/admin/users/pending",
