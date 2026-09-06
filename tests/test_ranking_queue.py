@@ -10,6 +10,7 @@ from grant_lab.db.models import (
     RankingJobStatus,
     Source,
 )
+from grant_lab.profiles.fingerprint import rank_fingerprint
 from grant_lab.ranking.queue import (
     _STUCK_AFTER,
     claim_pending_jobs,
@@ -235,7 +236,14 @@ def test_reconcile_enqueues_missing_pair(pg_session_factory, profile_factory):
 
 
 def test_reconcile_skips_already_ranked_pair(pg_session_factory, profile_factory):
-    """If a CallRanking already exists the pair is done — no enqueue."""
+    """If a CURRENT CallRanking exists the pair is done — no enqueue.
+
+    Migration 0075 changed what "done" means: reconcile now asks whether the
+    ranking describes the profile's present content, not merely whether a row
+    exists. A NULL `profile_fingerprint` after 0075 means a writer bug and is
+    deliberately treated as stale, so this seed stamps the fingerprint the
+    worker would have written.
+    """
     profile_id, _ = profile_factory()
     with pg_session_factory() as s:
         call_id = _seed_call_with(
@@ -250,6 +258,7 @@ def test_reconcile_skips_already_ranked_pair(pg_session_factory, profile_factory
                 model="m",
                 prompt_version="v3.0",
                 raw_response={},
+                profile_fingerprint=rank_fingerprint(s.get(Profile, profile_id)),
             )
         )
         s.commit()

@@ -112,6 +112,15 @@ class Profile(Base):
         nullable=True,
     )
     embedding_model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # What `embedding` describes: "v1:" + sha256 of build_profile_text(self).
+    # Moves with `embedding` and `embedding_model` in every branch of
+    # refresh_profile_embedding. NULL means unknown -> the daily tick treats
+    # the row as stale and re-embeds it.
+    #
+    # NOT covered by ck_profiles_embedding_model_paired, and must not be: on
+    # deploy every existing row has a vector and a NULL fingerprint, so a
+    # paired constraint would fail migration 0075.
+    embedding_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 'org'  -- every active user may read it. The DEFAULT, so migration 0070 is
     #           a no-op for existing rows and nobody's Monday changes.
     # 'private' -- owner, admins and explicit profile_viewers rows only.

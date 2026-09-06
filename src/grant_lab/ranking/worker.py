@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.orm import sessionmaker
 
-from grant_lab.db.models import Call, CallRanking, CallRankingCriterion, Profile
+from grant_lab.db.models import Call, CallRanking, CallRankingCriterion, Profile, RankingJob
+from grant_lab.profiles.fingerprint import embedding_fingerprint, rank_fingerprint
 from grant_lab.ranking.criteria import GateStatus
 from grant_lab.ranking.ollama_client import LLMError, OllamaClient
 from grant_lab.ranking.prompt import ParseError
@@ -27,6 +28,13 @@ _logger = logging.getLogger(__name__)
 # re-exported here for the worker's terminal-attempt checks below. queue.py
 # carries the full rationale (flat-retry deviation from the spec's backoff).
 
+# A pair whose profile vector has not caught up is deferred rather than ranked
+# against a stale cosine. Bounded because refresh_profile_embedding with
+# force=False PRESERVES the old vector on an embedder outage, so the mismatch
+# would otherwise persist forever. 24h is comfortably more than one 03:30
+# embedding-tick cycle.
+_STALE_VECTOR_MAX_DEFER_HOURS: int = 24
+
 
 def drain_queue(
     *,
@@ -42,8 +50,13 @@ def drain_queue(
     _clock=None,
 ) -> int:
     """Claim up to `batch_size` pending jobs, rank each, persist, mark
-    done-or-failed. Returns the number of jobs processed (whether or not
-    they succeeded).
+    done-or-failed. Returns the number of jobs the loop CONSUMED — successes,
+    failures, and jobs deferred back to PENDING for a stale vector alike.
+
+    A deferral counts, so this return is not "jobs that reached a terminal
+    state". A caller written as `while drain_queue(...) > 0:` would spin on a
+    pair that keeps deferring; the only production caller (`scheduler.py`) is
+    interval-driven and discards the value.
 
     `tick_budget_seconds` is a SOFT per-tick wall-clock budget (B11 Defect 6).
     A single job can take ~240s (local Gemma + a Sonnet escalation); an
@@ -157,6 +170,46 @@ def drain_queue(
                         },
                     )
                     continue
+                # Defer rather than rank against a vector that has not caught
+                # up. post_edit.py:33-34 states the ordering the request path
+                # honours ("the ranking jobs must see the post-edit vector");
+                # the repair path has no equivalent, so a pair could be ranked
+                # early, stamped with the current text fingerprint, and become
+                # permanently invisible to repair.
+                #
+                # A NULL fingerprint is unknown provenance, NOT a mismatch: on
+                # the first deploy every profile has a vector and a NULL
+                # fingerprint, and deferring on that would pause all ranking
+                # until the 03:30 tick. The pair is stamped with
+                # embedding_fingerprint=None in its payload, so it re-ranks
+                # itself once the tick fills the real value.
+                job_row = session.get(RankingJob, job_id)
+                too_old = job_row is not None and job_row.created_at < datetime.now(
+                    UTC
+                ) - timedelta(hours=_STALE_VECTOR_MAX_DEFER_HOURS)
+                if (
+                    profile.embedding is not None
+                    and profile.embedding_fingerprint is not None
+                    and profile.embedding_fingerprint != embedding_fingerprint(profile)
+                    and not too_old
+                ):
+                    revert_to_pending(session, [job_id])
+                    # revert_to_pending issues an UPDATE and does NOT commit.
+                    # Without this the revert rolls back on session close, the
+                    # job stays RUNNING on its committed claim, and
+                    # requeue_stuck_running bumps attempts and eventually
+                    # dead-letters the pair -- burning the very retry this
+                    # deferral exists to protect.
+                    session.commit()
+                    _logger.info(
+                        "ranking.job_deferred_stale_vector",
+                        extra={
+                            "event": "ranking_job_deferred_stale_vector",
+                            "job_id": job_id,
+                            "profile_id": profile_id,
+                        },
+                    )
+                    continue
                 # Daily-cap gate: once today's ledger has `remote_daily_cap`
                 # attempts, disable escalation for the rest of the day by
                 # passing remote_client=None — rank_pair then never consults
@@ -165,6 +218,14 @@ def drain_queue(
                 effective_remote = remote_client
                 if remote_client is not None and count_today(session) >= remote_daily_cap:
                     effective_remote = None
+                # Capture BEFORE the LLM call. Today `profile` cannot change
+                # between here and the merge below -- the session is not
+                # committed, refreshed or expired, and the spend ledger uses a
+                # separate session on purpose -- so this is equivalent to
+                # hashing at write time. It is captured here anyway so that a
+                # future refactor introducing a commit or a session.refresh in
+                # between cannot silently stamp a profile the ranker never saw.
+                captured_fingerprint = rank_fingerprint(profile)
                 try:
                     result = rank_pair(
                         client=client,
@@ -237,7 +298,14 @@ def drain_queue(
                 # under a single analysis_model, mis-attributing one of them.
                 if new_summary is None and new_notes is None:
                     existing = session.get(CallRanking, (call_id, profile_id))
-                    if existing is not None:
+                    # Only inherit advice that describes THIS profile. After an
+                    # edit the retained triple describes the old one, and
+                    # stamping it with the new fingerprint would make it
+                    # permanently invisible to repair.
+                    if (
+                        existing is not None
+                        and existing.profile_fingerprint == captured_fingerprint
+                    ):
                         new_summary = existing.summary
                         new_notes = existing.applicant_notes
                         new_analysis_model = existing.analysis_model
@@ -259,6 +327,7 @@ def drain_queue(
                         analysis_model=new_analysis_model,
                         escalated=result.escalated,
                         escalated_from_score=result.escalated_from_score,
+                        profile_fingerprint=captured_fingerprint,
                         ranked_at=datetime.now(UTC),
                     )
                 )

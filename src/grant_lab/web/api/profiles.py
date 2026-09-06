@@ -22,6 +22,7 @@ from grant_lab.embeddings.similarity import build_profile_text
 from grant_lab.profiles import post_edit
 from grant_lab.profiles.create import create_profile_with_bootstrap
 from grant_lab.profiles.fields import FieldValidationError, parse_structured
+from grant_lab.profiles.fingerprint import rank_fingerprint
 from grant_lab.profiles.forms import (
     ALLOWED_CURRENCIES,
     BUDGET_MAX,
@@ -478,6 +479,7 @@ def update_profile(
                 status_code=409, detail="profile is still drafting — try again shortly"
             )
         old_embed_text = build_profile_text(p)
+        old_rank_fp = rank_fingerprint(p)
         p.description = body.description
         if p.kind == ProfileKind.ORGANIZATIONAL_UNIT.value:
             lv = (body.level or "").strip() or None
@@ -519,9 +521,28 @@ def update_profile(
         p.budget_currency = normalized_currency or None
         new_embed_text = build_profile_text(p)
         embed_text_changed = old_embed_text.strip() != new_embed_text.strip()
+        new_rank_fp = rank_fingerprint(p)
+        rank_inputs_changed = old_rank_fp != new_rank_fp
         session.commit()
 
-    if body.description.strip():
+    # Schedule on the RANK fingerprint, not on `body.description`. The embed
+    # inputs are a subset of the rank inputs, so this schedules a superset of
+    # the EMBED scheduling: `refresh_embedding` can never fire without
+    # `rank_inputs_changed`.
+    #
+    # It is NOT a superset of the old `body.description` guard, and deliberately
+    # so: an identical PUT with a non-empty description used to schedule 90 days
+    # of backfill and now schedules nothing (test_an_identical_put_schedules_nothing).
+    # What it gains is the other direction -- an edit that changes only
+    # `structured`, or that blanks the description, used to schedule nothing at
+    # all and left the vector describing content the profile no longer has.
+    #
+    # This comparison is in-memory (`new`) against DB-loaded (`old`):
+    # expire_on_commit=False (db/session.py:58) means committing does NOT
+    # reload the row, so moving these lines cannot make the representations
+    # match. It is safe only because the canonicalizer in
+    # profiles/fingerprint.py normalizes numbers and omits empties.
+    if rank_inputs_changed:
         background.add_task(
             post_edit.refresh_and_backfill_in_background,
             session_factory=sf,
