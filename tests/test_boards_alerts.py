@@ -22,19 +22,70 @@ the owner -- that absence is exactly the fixture
 `test_a_MISSING_subscription_row_is_reported_not_skipped` needs, and every
 other test below must call `_subscribe` explicitly or it would
 (incorrectly) hit that same path.
+
+## Fix round 1 additions (Task 8 review)
+
+- Important 1: `send_board_alerts` is the sending half of this module (the
+  pure `boards_needing_attention` above never had a caller). Its own tests
+  use `_FakeEmail`/`_FakeSettings`, the SAME fake/recording shape
+  `tests/test_digest_send.py` uses for `run_digest` -- no test here makes a
+  live network call.
+- Important 2: `test_owner_undeliverable_is_surfaced_on_the_board_detail_route`
+  now calls `_subscribe` so its "owner reachable" half is genuinely backed by
+  a Subscription row, and a new test pins the missing-row case the SAME way
+  on both `boards_needing_attention` and the detail route.
+- Important 3/4: `test_a_DISABLED_owner_escalates_to_active_admins` gained a
+  second, disabled admin who must NOT appear in `recipient_ids`; a new test
+  does the same for a bounce-disabled admin.
+- Important 5: a new test pins "muted AND undeliverable still escalates";
+  `test_board_alerts_enabled_false_suppresses_the_alert` already pins the
+  other half ("muted AND deliverable produces no alert" -- its owner is
+  never touched, so it stays reachable) and is annotated to say so.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
-from grant_lab.boards.alerts import boards_needing_attention
+from grant_lab.boards.alerts import boards_needing_attention, send_board_alerts
 from grant_lab.db.models import Board, BoardItem, Call, Source, Subscription, User
+from grant_lab.email.client import SendResult
 
 FUTURE = datetime.now(UTC) + timedelta(days=30)
 PAST = datetime.now(UTC) - timedelta(days=1)
+
+
+@dataclass
+class _FakeSettings:
+    """Settings duck-type stand-in -- send_board_alerts only reads this
+    field. Same shape as tests/test_digest_send.py's own _FakeSettings."""
+
+    admin_dashboard_url: str = "http://test/"
+
+
+class _FakeEmail:
+    """Records every send() call instead of making one. Same shape as
+    tests/test_digest_send.py's own _FakeEmail (no live network call)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def send(self, *, to, subject, html, text):
+        self.calls.append({"to": to, "subject": subject, "html": html, "text": text})
+        return SendResult(ok=True, message_id=f"msg-{len(self.calls)}")
+
+
+def _send_alerts(pg_session_factory, email_client=None):
+    email_client = email_client if email_client is not None else _FakeEmail()
+    summary = send_board_alerts(
+        session_factory=pg_session_factory,
+        email_client=email_client,
+        settings=_FakeSettings(),
+    )
+    return email_client, summary
 
 
 def _make_board(
@@ -256,6 +307,11 @@ def test_the_BOARD_CREATOR_is_not_notified_when_they_are_not_the_owner(
 
 
 def test_board_alerts_enabled_false_suppresses_the_alert(pg_session_factory, profile_factory):
+    """Also THE test for Important 5's other half: this owner is never
+    touched, so they stay reachable (`deliverable_clause()` passes) -- a
+    muted AND deliverable owner produces no alert. The paired half, a muted
+    AND UNDELIVERABLE owner escalating anyway, is
+    `test_a_muted_AND_undeliverable_owner_still_escalates` below."""
     pid, owner_id = profile_factory(name="Muted Owner")
     _subscribe(
         pg_session_factory,
@@ -300,12 +356,19 @@ def test_digest_enabled_false_does_NOT_suppress_the_board_alert(
 
 
 def test_a_DISABLED_owner_escalates_to_active_admins(pg_session_factory, profile_factory):
+    """Important 3: every escalation test used to create exactly one admin,
+    and that admin was active -- so deleting the `status` filter out of
+    `_active_admin_ids` reddened nothing. A second, DISABLED admin here
+    means the filter actually has something to exclude."""
     pid, owner_id = profile_factory(name="Disabled Owner")
     with pg_session_factory() as s:
         s.get(User, owner_id).status = "disabled"
         s.commit()
     _subscribe(pg_session_factory, user_id=owner_id, profile_id=pid)
     admin_id = _new_user(pg_session_factory, "active-admin-1@umu.se", is_admin=True)
+    disabled_admin_id = _new_user(
+        pg_session_factory, "disabled-admin-1@umu.se", is_admin=True, status="disabled"
+    )
     board_id = _make_board(pg_session_factory, profile_id=pid, created_by=owner_id, slug="i" * 16)
     _approve_n_future(
         pg_session_factory, board_id=board_id, approved_by=owner_id, n=1, prefix="disabled-owner"
@@ -315,6 +378,36 @@ def test_a_DISABLED_owner_escalates_to_active_admins(pg_session_factory, profile
 
     assert alert.recipient_ids == [admin_id]
     assert owner_id not in alert.recipient_ids
+    assert disabled_admin_id not in alert.recipient_ids
+    assert alert.owner_undeliverable is True
+
+
+def test_a_BOUNCE_DISABLED_admin_is_excluded_from_escalation(pg_session_factory, profile_factory):
+    """Important 4: `_active_admin_ids` must use `deliverable_clause()`
+    (status AND digest_disabled_at), not `status == 'active'` alone --
+    otherwise a bounce-disabled admin receives an escalation that exists
+    precisely BECAUSE someone's mail bounces."""
+    pid, owner_id = profile_factory(name="Disabled Owner For Bounce Admin Test")
+    with pg_session_factory() as s:
+        s.get(User, owner_id).status = "disabled"
+        s.commit()
+    _subscribe(pg_session_factory, user_id=owner_id, profile_id=pid)
+    admin_id = _new_user(pg_session_factory, "active-admin-4@umu.se", is_admin=True)
+    bounce_admin_id = _new_user(
+        pg_session_factory,
+        "bounce-admin-1@umu.se",
+        is_admin=True,
+        digest_disabled_at=datetime.now(UTC),
+    )
+    board_id = _make_board(pg_session_factory, profile_id=pid, created_by=owner_id, slug="n" * 16)
+    _approve_n_future(
+        pg_session_factory, board_id=board_id, approved_by=owner_id, n=1, prefix="bounce-admin"
+    )
+
+    alert = _alert_for(_run_alerts(pg_session_factory), board_id)
+
+    assert alert.recipient_ids == [admin_id]
+    assert bounce_admin_id not in alert.recipient_ids
     assert alert.owner_undeliverable is True
 
 
@@ -360,6 +453,40 @@ def test_a_bounce_disabled_owner_is_still_status_active(pg_session_factory, prof
     assert owner.digest_disabled_at is not None
 
 
+def test_a_muted_AND_undeliverable_owner_still_escalates(pg_session_factory, profile_factory):
+    """Important 5: the CONTROLLER's decision, implemented -- deliverability
+    is evaluated BEFORE the mute for the escalation path. An owner who has
+    left the organization (status='disabled') AND muted board alerts on the
+    way out must still escalate to admins: `board_alerts_enabled` is a
+    per-user "don't email ME" preference, it cannot speak for admins, and an
+    undeliverable owner isn't receiving anything anyway. Before this fix,
+    `_alert_for` checked the mute FIRST and returned None here -- silencing
+    the board permanently, with nobody told."""
+    pid, owner_id = profile_factory(name="Muted And Disabled Owner")
+    with pg_session_factory() as s:
+        s.get(User, owner_id).status = "disabled"
+        s.commit()
+    _subscribe(
+        pg_session_factory,
+        user_id=owner_id,
+        profile_id=pid,
+        board_alerts_enabled=False,
+    )
+    admin_id = _new_user(pg_session_factory, "active-admin-5@umu.se", is_admin=True)
+    board_id = _make_board(
+        pg_session_factory, profile_id=pid, created_by=owner_id, slug="o" * 16
+    )
+    _approve_n_future(
+        pg_session_factory, board_id=board_id, approved_by=owner_id, n=1, prefix="muted-disabled"
+    )
+
+    alert = _alert_for(_run_alerts(pg_session_factory), board_id)
+
+    assert alert.recipient_ids == [admin_id]
+    assert owner_id not in alert.recipient_ids
+    assert alert.owner_undeliverable is True
+
+
 def test_a_MISSING_subscription_row_is_reported_not_skipped(pg_session_factory, profile_factory):
     """D10: the per-(user, profile) Subscription row is a CONVENTION, not a
     constraint (no CHECK, FK or unique index enforces it). `profile_factory`
@@ -387,7 +514,17 @@ def test_owner_undeliverable_is_surfaced_on_the_board_detail_route(
     """Open-3 half 2: 'a delivery the system knows it suppressed is the one
     case where an in-app surface is not optional.' Reads the SAME board twice
     through GET /api/boards/{id} as an ADMIN (whose own session survives the
-    owner's status flip): once while the owner is reachable, once after."""
+    owner's status flip): once while the owner is reachable, once after.
+
+    Important 2 fix: this test now calls `_subscribe` so the first read's
+    `False` is genuinely backed by a subscribed, reachable owner -- before
+    the fix, this board had NO Subscription row (profile_factory never
+    inserts one) and the route still said `False`, while
+    `test_a_MISSING_subscription_row_is_reported_not_skipped` proved
+    `boards_needing_attention` would treat the identical setup as
+    `owner_undeliverable=True`. See
+    `test_a_MISSING_subscription_row_reads_the_SAME_on_the_detail_route`
+    below for that exact contradiction, now pinned as agreeing."""
     from grant_lab.main import create_app
 
     monkeypatch.setenv("DATABASE_URL", pg_url)
@@ -397,6 +534,7 @@ def test_owner_undeliverable_is_surfaced_on_the_board_detail_route(
     app = create_app()
 
     pid, owner_id = profile_factory(name="Detail Route Owner")
+    _subscribe(pg_session_factory, user_id=owner_id, profile_id=pid)
     board_id = _make_board(pg_session_factory, profile_id=pid, created_by=owner_id, slug="l" * 16)
     admin_id = _new_user(pg_session_factory, "detail-admin@umu.se", is_admin=True)
 
@@ -414,3 +552,141 @@ def test_owner_undeliverable_is_surfaced_on_the_board_detail_route(
     r = client.get(f"/api/boards/{board_id}")
     assert r.status_code == 200
     assert r.json()["owner_undeliverable"] is True
+
+
+def test_a_MISSING_subscription_row_reads_the_SAME_on_the_detail_route(
+    monkeypatch, pg_url, pg_session_factory, profile_factory, test_client_factory
+):
+    """Important 2: the exact contradiction the review found.
+    `profile_factory` inserts no Subscription row; without the fix,
+    `owner_undeliverable_map` (which feeds this route) ignored that and said
+    `False`, while `boards_needing_attention`/`_alert_for` (Gate C,
+    `test_a_MISSING_subscription_row_is_reported_not_skipped`) would
+    escalate the SAME board with `owner_undeliverable=True`. Both must now
+    say `True` for a board with no Subscription row, whether or not it is
+    actually underfull (this route never checks items_per_page)."""
+    from grant_lab.main import create_app
+
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+    app = create_app()
+
+    pid, owner_id = profile_factory(name="No Subscription Detail Route Owner")
+    # Deliberately no _subscribe() call -- see test_a_MISSING_subscription_
+    # row_is_reported_not_skipped for why this is the case D10 exists for.
+    board_id = _make_board(pg_session_factory, profile_id=pid, created_by=owner_id, slug="p" * 16)
+    admin_id = _new_user(pg_session_factory, "detail-admin-2@umu.se", is_admin=True)
+
+    client = test_client_factory(app)
+    client.cookies.set("session", app.state.session_signer.make(user_id=admin_id))
+
+    r = client.get(f"/api/boards/{board_id}")
+
+    assert r.status_code == 200
+    assert r.json()["owner_undeliverable"] is True
+
+
+def test_send_board_alerts_emails_the_reachable_owner(pg_session_factory, profile_factory):
+    """Important 1: `boards_needing_attention` had no caller anywhere in
+    `src/`, so no board alert was ever delivered. This is the sending half:
+    a reachable, subscribed owner gets exactly one message, addressed to
+    their own email."""
+    pid, owner_id = profile_factory(name="Send Alerts Owner")
+    _subscribe(pg_session_factory, user_id=owner_id, profile_id=pid)
+    board_id = _make_board(pg_session_factory, profile_id=pid, created_by=owner_id, slug="q" * 16)
+    _approve_n_future(
+        pg_session_factory, board_id=board_id, approved_by=owner_id, n=1, prefix="send-owner"
+    )
+    owner_email = _get_user(pg_session_factory, owner_id).email
+
+    fake_email, summary = _send_alerts(pg_session_factory)
+
+    assert summary.alerts_found == 1
+    assert summary.messages_sent == 1
+    assert summary.transport_errors == 0
+    assert summary.no_recipients == 0
+    assert [c["to"] for c in fake_email.calls] == [owner_email]
+    assert "Corridor board" in fake_email.calls[0]["subject"]
+    assert "7" in fake_email.calls[0]["subject"]  # shortfall: items_per_page(8) - renderable(1)
+
+
+def test_send_board_alerts_emails_admins_not_the_owner_when_escalated(
+    pg_session_factory, profile_factory
+):
+    """An escalated alert's message goes to the admin addresses and NOT the
+    owner's -- the owner here is undeliverable (status='disabled'), so a
+    mutation that addressed the owner anyway (e.g. reading `[owner_id]`
+    unconditionally) would send to an address the escalation exists to
+    avoid."""
+    pid, owner_id = profile_factory(name="Send Alerts Escalated Owner")
+    with pg_session_factory() as s:
+        s.get(User, owner_id).status = "disabled"
+        s.commit()
+    _subscribe(pg_session_factory, user_id=owner_id, profile_id=pid)
+    admin_id = _new_user(pg_session_factory, "send-alerts-admin@umu.se", is_admin=True)
+    board_id = _make_board(pg_session_factory, profile_id=pid, created_by=owner_id, slug="r" * 16)
+    _approve_n_future(
+        pg_session_factory, board_id=board_id, approved_by=owner_id, n=1, prefix="send-escalated"
+    )
+    owner_email = _get_user(pg_session_factory, owner_id).email
+    admin_email = _get_user(pg_session_factory, admin_id).email
+
+    fake_email, summary = _send_alerts(pg_session_factory)
+
+    assert summary.messages_sent == 1
+    recipients = [c["to"] for c in fake_email.calls]
+    assert recipients == [admin_email]
+    assert owner_email not in recipients
+
+
+def test_send_board_alerts_sends_nothing_for_a_muted_board(pg_session_factory, profile_factory):
+    """A board_alerts_enabled=False board produces no message: it never even
+    becomes a BoardAlert (`_alert_for` returns None), so send_board_alerts
+    has nothing to iterate for it."""
+    pid, owner_id = profile_factory(name="Send Alerts Muted Owner")
+    _subscribe(
+        pg_session_factory,
+        user_id=owner_id,
+        profile_id=pid,
+        board_alerts_enabled=False,
+    )
+    board_id = _make_board(pg_session_factory, profile_id=pid, created_by=owner_id, slug="s" * 16)
+    _approve_n_future(
+        pg_session_factory, board_id=board_id, approved_by=owner_id, n=1, prefix="send-muted"
+    )
+
+    fake_email, summary = _send_alerts(pg_session_factory)
+
+    assert summary.alerts_found == 0
+    assert summary.messages_sent == 0
+    assert fake_email.calls == []
+
+
+def test_send_board_alerts_counts_but_does_not_send_when_recipients_are_empty(
+    pg_session_factory, profile_factory
+):
+    """Minor 6: an alert addressed to nobody (owner undeliverable AND zero
+    deliverable admins exist) must not look like a delivered one --
+    send_board_alerts must not crash on an empty recipient list, must send
+    nothing, and must count it distinctly via `no_recipients` rather than
+    silently reporting `messages_sent == 0` with no way to tell "nothing was
+    wrong" from "nobody could be told"."""
+    pid, owner_id = profile_factory(name="No Admins At All Owner")
+    with pg_session_factory() as s:
+        s.get(User, owner_id).status = "disabled"
+        s.commit()
+    _subscribe(pg_session_factory, user_id=owner_id, profile_id=pid)
+    # Deliberately zero admins anywhere in this database.
+    board_id = _make_board(pg_session_factory, profile_id=pid, created_by=owner_id, slug="u" * 16)
+    _approve_n_future(
+        pg_session_factory, board_id=board_id, approved_by=owner_id, n=1, prefix="no-admins"
+    )
+
+    fake_email, summary = _send_alerts(pg_session_factory)
+
+    assert summary.alerts_found == 1
+    assert summary.messages_sent == 0
+    assert summary.no_recipients == 1
+    assert fake_email.calls == []

@@ -17,6 +17,7 @@ from sqlalchemy import Engine, text
 from sqlalchemy.orm import sessionmaker
 
 from grant_lab.auth.rate_limit import SlidingWindowLimiter
+from grant_lab.boards.alerts import send_board_alerts
 from grant_lab.config import Settings
 from grant_lab.digest.send import run_digest
 from grant_lab.email.client import EmailClient
@@ -546,6 +547,33 @@ def build_scheduler(
                 _logger.exception(
                     "digest.tick.error",
                     extra={"event": "digest_tick_error", "error": str(e)},
+                )
+
+            # D9 (Plan C Task 8, Important 1): board alerts ride the SAME
+            # weekly cadence as the digest -- no new job, lock or route. Its
+            # own try/except so a board-alert failure is never folded into
+            # "digest.tick.error" (that event already means something
+            # specific to on-call) and never stops the digest send above.
+            try:
+                board_summary = send_board_alerts(
+                    session_factory=session_factory,
+                    email_client=digest_email_client,
+                    settings=digest_settings,
+                )
+                _logger.info(
+                    "board_alerts.tick.done",
+                    extra={
+                        "event": "board_alerts_tick_done",
+                        "alerts_found": board_summary.alerts_found,
+                        "messages_sent": board_summary.messages_sent,
+                        "transport_errors": board_summary.transport_errors,
+                        "no_recipients": board_summary.no_recipients,
+                    },
+                )
+            except Exception as e:  # noqa: BLE001
+                _logger.exception(
+                    "board_alerts.tick.error",
+                    extra={"event": "board_alerts_tick_error", "error": str(e)},
                 )
 
         sched.add_job(

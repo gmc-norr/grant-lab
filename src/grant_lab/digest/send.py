@@ -28,14 +28,19 @@ class DigestRunSummary:
     users_disabled: int = 0
 
 
-def _deliverable_clause() -> ColumnElement[bool]:
+def deliverable_clause() -> ColumnElement[bool]:
     """The two conditions that decide whether a `User` can receive a
     digest-channel notification: not disabled/pending (`status`) and not
     bounce-disabled (`digest_disabled_at`). Single-sourced here so
     `boards/alerts.py`'s escalation check (D9, Open-3) reuses the SAME two
-    conditions instead of restating them and drifting -- that module borrows
-    this function by name (leading underscore kept on purpose, same
-    convention `web/api/boards.py` uses for `_profile_for_edit`)."""
+    conditions instead of restating them and drifting.
+
+    Public on purpose (Task 8 review, Minor 8): a leading underscore marks
+    "do not import this from elsewhere", and `boards/alerts.py` does exactly
+    that on purpose -- single-sourcing the predicate is the point. Importing
+    this module also pulls in `digest.assemble`/`digest.render` (Jinja) and
+    `email.client`; `tests/architecture/test_match_edition_process_cut.py`
+    confirms that edge does not reach `proposal_assist` or its heavy deps."""
     return and_(User.digest_disabled_at.is_(None), User.status == "active")
 
 
@@ -46,7 +51,7 @@ def candidate_user_ids(session) -> list[int]:
         session.execute(
             select(distinct(Subscription.user_id))
             .join(User, User.id == Subscription.user_id)
-            .where(_deliverable_clause())
+            .where(deliverable_clause())
         )
         .scalars()
         .all()

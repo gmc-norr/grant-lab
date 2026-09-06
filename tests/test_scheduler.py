@@ -470,3 +470,99 @@ def test_build_scheduler_omits_collab_checkpoint_when_disabled(_settings_env, mo
         start=False,
     )
     assert sched.get_job("collab:checkpoint_tails") is None
+
+
+def test_digest_tick_also_sends_board_alerts(
+    pg_url, pg_session_factory, profile_factory, monkeypatch
+):
+    """Task 8 review, Important 1: `boards_needing_attention` had no caller
+    anywhere in `src/`, so no board alert was ever delivered, and Tasks 9/10
+    are pure frontend so nothing later in Plan C closed the gap either. The
+    fix wires `send_board_alerts` into the EXISTING `digest:weekly` job's
+    closure -- Plan C's own decision text says the trigger is "evaluated on
+    the existing digest schedule" -- rather than adding a new job, lock or
+    route. This test invokes the ACTUAL closure the scheduler registers
+    under that job id, not `send_board_alerts` in isolation, so it proves
+    the wiring, not just the function."""
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import select
+
+    from grant_lab.db.models import Board, BoardItem, Call, Source, Subscription, User
+    from grant_lab.email.client import SendResult
+    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
+
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+    monkeypatch.setenv("DRAFTING_ADAPTER", "fake")
+    settings = Settings()
+
+    pid, owner_id = profile_factory(name="Scheduler Wired Board Owner")
+    with pg_session_factory() as s:
+        owner_email = s.get(User, owner_id).email
+        s.add(Subscription(user_id=owner_id, profile_id=pid, board_alerts_enabled=True))
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        c = Call(
+            source_id=src.id,
+            external_id="scheduler-wired-call",
+            url="https://example.org/scheduler-wired-call",
+            title="Scheduler-wired call",
+            deadline=datetime.now(UTC) + timedelta(days=30),
+        )
+        s.add(c)
+        s.flush()
+        b = Board(
+            slug="w" * 16,
+            title="Scheduler Wired Board",
+            profile_id=pid,
+            created_by=owner_id,
+            items_per_page=5,
+            is_published=True,
+        )
+        s.add(b)
+        s.flush()
+        s.add(BoardItem(board_id=b.id, call_id=c.id, position=0, approved_by=owner_id))
+        s.commit()
+
+    class _FakeEmail:
+        def __init__(self):
+            self.calls = []
+
+        def send(self, *, to, subject, html, text):
+            self.calls.append({"to": to, "subject": subject})
+            return SendResult(ok=True, message_id="fake")
+
+    fake_email = _FakeEmail()
+
+    workspace_controller = build_workspace_controller(
+        settings=settings, session_factory=pg_session_factory
+    )
+    sched = build_scheduler(
+        session_factory=pg_session_factory,
+        settings=settings,
+        alerter=_NullAlerter(),
+        ollama_url="http://localhost:11434",
+        gemma_model="gemma4:e4b-q8",
+        ranking_tick_seconds=60,
+        ranking_queue_batch=10,
+        embedding_pregate_threshold=0.30,
+        embed_client=MagicMock(model="bge-m3"),
+        digest_email_client=fake_email,
+        digest_settings=settings,
+        workspace_controller=workspace_controller,
+        start=False,
+    )
+    job = sched.get_job("digest:weekly")
+    assert job is not None, "no digest:weekly job registered"
+
+    job.func()
+
+    board_alert_calls = [c for c in fake_email.calls if c["to"] == owner_email]
+    assert board_alert_calls, (
+        f"expected a board-alert email to the board's profile owner ({owner_email}); "
+        f"got {fake_email.calls!r}"
+    )
+    assert "Scheduler Wired Board" in board_alert_calls[0]["subject"]
+    sched.shutdown(wait=False)
