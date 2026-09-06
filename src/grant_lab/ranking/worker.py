@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.orm import sessionmaker
 
-from grant_lab.db.models import Call, CallRanking, CallRankingCriterion, Profile
-from grant_lab.profiles.fingerprint import rank_fingerprint
+from grant_lab.db.models import Call, CallRanking, CallRankingCriterion, Profile, RankingJob
+from grant_lab.profiles.fingerprint import embedding_fingerprint, rank_fingerprint
 from grant_lab.ranking.criteria import GateStatus
 from grant_lab.ranking.ollama_client import LLMError, OllamaClient
 from grant_lab.ranking.prompt import ParseError
@@ -27,6 +27,13 @@ _logger = logging.getLogger(__name__)
 # MAX_ATTEMPTS is the single source of truth in queue.py (B11 Defect 5) and
 # re-exported here for the worker's terminal-attempt checks below. queue.py
 # carries the full rationale (flat-retry deviation from the spec's backoff).
+
+# A pair whose profile vector has not caught up is deferred rather than ranked
+# against a stale cosine. Bounded because refresh_profile_embedding with
+# force=False PRESERVES the old vector on an embedder outage, so the mismatch
+# would otherwise persist forever. 24h is comfortably more than one 03:30
+# embedding-tick cycle.
+_STALE_VECTOR_MAX_DEFER_HOURS: int = 24
 
 
 def drain_queue(
@@ -153,6 +160,46 @@ def drain_queue(
                         "ranking.job_skipped_inactive_profile",
                         extra={
                             "event": "ranking_job_skipped_inactive",
+                            "job_id": job_id,
+                            "profile_id": profile_id,
+                        },
+                    )
+                    continue
+                # Defer rather than rank against a vector that has not caught
+                # up. post_edit.py:33-34 states the ordering the request path
+                # honours ("the ranking jobs must see the post-edit vector");
+                # the repair path has no equivalent, so a pair could be ranked
+                # early, stamped with the current text fingerprint, and become
+                # permanently invisible to repair.
+                #
+                # A NULL fingerprint is unknown provenance, NOT a mismatch: on
+                # the first deploy every profile has a vector and a NULL
+                # fingerprint, and deferring on that would pause all ranking
+                # until the 03:30 tick. The pair is stamped with
+                # embedding_fingerprint=None in its payload, so it re-ranks
+                # itself once the tick fills the real value.
+                job_row = session.get(RankingJob, job_id)
+                too_old = job_row is not None and job_row.created_at < datetime.now(
+                    UTC
+                ) - timedelta(hours=_STALE_VECTOR_MAX_DEFER_HOURS)
+                if (
+                    profile.embedding is not None
+                    and profile.embedding_fingerprint is not None
+                    and profile.embedding_fingerprint != embedding_fingerprint(profile)
+                    and not too_old
+                ):
+                    revert_to_pending(session, [job_id])
+                    # revert_to_pending issues an UPDATE and does NOT commit.
+                    # Without this the revert rolls back on session close, the
+                    # job stays RUNNING on its committed claim, and
+                    # requeue_stuck_running bumps attempts and eventually
+                    # dead-letters the pair -- burning the very retry this
+                    # deferral exists to protect.
+                    session.commit()
+                    _logger.info(
+                        "ranking.job_deferred_stale_vector",
+                        extra={
+                            "event": "ranking_job_deferred_stale_vector",
                             "job_id": job_id,
                             "profile_id": profile_id,
                         },
