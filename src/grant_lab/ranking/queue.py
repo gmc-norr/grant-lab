@@ -7,7 +7,8 @@ from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from grant_lab.db.models import RankingJob, RankingJobStatus
+from grant_lab.db.models import Profile, RankingJob, RankingJobStatus
+from grant_lab.profiles.fingerprint import LEGACY_SENTINEL, rank_fingerprint
 
 _logger = logging.getLogger(__name__)
 _LAST_ERROR_MAX = 2000
@@ -122,10 +123,14 @@ def reconcile_missing_rankings(session: Session) -> int:
     keeps the lag under 24h without requiring human intervention.
 
     SQL strategy: one bulk INSERT ... SELECT per tick. The `NOT EXISTS`
-    on CallRanking skips pairs we've already ranked; the ON CONFLICT on
-    the partial unique index (status IN ('pending','running')) skips
-    pairs we're already about to rank. The predicate must match the
-    index's WHERE clause verbatim or PG can't route the conflict.
+    on CallRanking skips pairs whose ranking is CURRENT — not merely pairs
+    that have one. A ranking counts as current when its stored
+    `profile_fingerprint` matches the fingerprint recomputed from the
+    profile's present content, or when it predates migration 0075 and its
+    profile has not been touched since. The ON CONFLICT on the partial
+    unique index (status IN ('pending','running')) skips pairs we're
+    already about to rank. The predicate must match the index's WHERE
+    clause verbatim or PG can't route the conflict.
 
     Excludes calls with NULL published_at (same as backfill_profile —
     we can't bound their age, so we defer to the manual-rerank path).
@@ -140,18 +145,79 @@ def reconcile_missing_rankings(session: Session) -> int:
     """
     cutoff = datetime.now(UTC) - timedelta(days=_RECONCILE_DAYS)
     dead_letter_cutoff = datetime.now(UTC) - timedelta(days=_DEAD_LETTER_SUPPRESS_DAYS)
+
+    # Fingerprints are Python over JSONB and cannot be computed in SQL, so the
+    # active profiles come back first and their fingerprints ride in as a
+    # VALUES list.
+    # Column-limited, for the same reason Task 4 gives: `select(Profile)`
+    # pulls the 1024-dim vector, and rank_fingerprint never reads it (it
+    # reads description, structured, budget_currency, name, kind and
+    # embedding_fingerprint). Task 4 asserts that principle in gate 6, whose
+    # scope is the EMBEDDING arm only -- so it does not cover this file, and
+    # an earlier revision of this plan reintroduced the wholesale load here
+    # three tasks later. `.all()`, not `.scalars()`: these are Rows.
+    #
+    # Verified: the Rows produce byte-identical rank_fingerprints to loaded
+    # Profile objects (`kind` is String + CHECK, not a native enum, so both
+    # sides give the same str through `getattr(x, "value", x)`), and the
+    # emitted SQL carries no `profiles.embedding AS` column.
+    profiles = session.execute(
+        select(
+            Profile.id,
+            Profile.name,
+            Profile.kind,
+            Profile.description,
+            Profile.structured,
+            Profile.budget_currency,
+            Profile.embedding_fingerprint,
+        ).where(Profile.is_active.is_(True))
+    ).all()
+    if not profiles:
+        # An empty VALUES list is a SYNTAX ERROR. Today's CROSS JOIN degrades
+        # to zero rows on an empty set; this early return preserves that.
+        return 0
+
+    values_sql = ", ".join(f"(:pid_{i}, :fp_{i})" for i in range(len(profiles)))
+    params: dict[str, object] = {
+        "cutoff": cutoff,
+        "dead_letter_cutoff": dead_letter_cutoff,
+        "legacy": LEGACY_SENTINEL,
+    }
+    for i, prof in enumerate(profiles):
+        params[f"pid_{i}"] = prof.id
+        params[f"fp_{i}"] = rank_fingerprint(prof)
+
     result = session.execute(
         text(
-            """
+            f"""
             INSERT INTO ranking_jobs (call_id, profile_id, status)
             SELECT c.id, p.id, 'pending'
             FROM calls c
-            CROSS JOIN profiles p
+            CROSS JOIN (VALUES {values_sql}) AS want(profile_id, fingerprint)
+            JOIN profiles p ON p.id = want.profile_id
             WHERE p.is_active = true
               AND c.published_at >= :cutoff
+              -- Currency, not existence. A ranking counts as current when its
+              -- fingerprint matches, OR when it predates migration 0075 AND
+              -- its profile has not been touched since it was written.
+              --
+              -- `cr.ranked_at >= p.updated_at` is what BOUNDS the legacy
+              -- exemption. An unconditional 'legacy' arm would exempt a
+              -- pre-0075 pair forever, including after the edit whose
+              -- background task was lost -- the exact case this repair exists
+              -- for. Profile.updated_at carries onupdate=func.now(), so any
+              -- edit revokes the exemption for that profile's pairs alone,
+              -- and the row gets a real fingerprint afterwards so it never
+              -- recurs.
+              --
+              -- A NULL fingerprint is NOT exempt: migration 0075 stamped every
+              -- pre-existing row 'legacy', so a NULL here means a writer bug.
               AND NOT EXISTS (
                 SELECT 1 FROM call_rankings cr
                 WHERE cr.call_id = c.id AND cr.profile_id = p.id
+                  AND ((cr.profile_fingerprint = :legacy
+                        AND cr.ranked_at >= p.updated_at)
+                       OR cr.profile_fingerprint = want.fingerprint)
               )
               AND NOT EXISTS (
                 SELECT 1 FROM ranking_jobs rj
@@ -164,7 +230,7 @@ def reconcile_missing_rankings(session: Session) -> int:
               WHERE status IN ('pending', 'running') DO NOTHING
             """
         ),
-        {"cutoff": cutoff, "dead_letter_cutoff": dead_letter_cutoff},
+        params,
     )
     n = result.rowcount or 0
     if n:
