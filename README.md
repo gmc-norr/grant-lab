@@ -185,17 +185,55 @@ pnpm run build
 
 ## Production launch
 
-Build the SPA before starting FastAPI in production mode:
+### Choose the edition first
+
+The repo ships **two editions from one codebase**, selected at build and boot time:
+
+| Edition | What it serves |
+|---|---|
+| `match` | Release 1 — calls triage, profiles, boards, the public corridor wall, admin |
+| `full` | Everything, plus the proposal-assist cockpit, drafting and collaborative editing |
+
+The edition is **not** a runtime flag. It is compiled into the frontend bundle and
+selected in the backend by `APP_EDITION`, and **the two must agree** — the app refuses
+to start if they do not (`web/spa_serving.py:82`). That check exists because a mismatch
+is silent in every other way: a `match` backend serving a `full` bundle renders cockpit
+links against endpoints that all 404, and no test anywhere notices.
+
+### Build and package
+
+`vite build` writes to `frontend/dist`, and **nothing copies it into the directory
+FastAPI serves**. Run the packaging script — it is the only supported writer of
+`src/grant_lab/web/spa/`, it derives the edition from the bundle itself rather than from
+your shell, and it leaves the `edition.txt` marker the boot-time check reads:
 
 ```bash
-docker build -f frontend/Dockerfile -t grant-lab-spa-build .
-container=$(docker create grant-lab-spa-build)
-rm -rf src/grant_lab/web/spa
-mkdir -p src/grant_lab/web/spa
-docker cp "$container:/build/dist/." src/grant_lab/web/spa/
-docker rm "$container"
-test -f src/grant_lab/web/spa/index.html
+# match edition (release 1)
+pnpm -C frontend install --frozen-lockfile
+pnpm -C frontend build:match
+pnpm -C frontend package:match
+
+# full edition
+pnpm -C frontend install --frozen-lockfile
+pnpm -C frontend build
+./scripts/package_spa.sh
 ```
+
+Do **not** hand-copy a bundle into `src/grant_lab/web/spa/`. Two paths used to do that
+and both shipped a full-edition cockpit into a match deployment with every gate green;
+`tests/architecture/test_package_spa.py::test_no_other_writer_of_the_served_tree` now
+fails if a third appears.
+
+Building in Docker takes the edition as a build arg:
+
+```bash
+docker build -f frontend/Dockerfile --build-arg VITE_APP_EDITION=match -t grant-lab-spa .
+```
+
+Extract the result to `frontend/dist` and run `./scripts/package_spa.sh` — do not
+`docker cp` straight into the served directory.
+
+### Configure
 
 Set `SPA_MODE=prod`, use an `https://` `APP_BASE_URL`, configure a strong production
 `SESSION_SECRET`, apply migrations, and launch exactly one Uvicorn process behind a
@@ -206,6 +244,24 @@ uv run alembic upgrade head
 uv run uvicorn grant_lab.main:create_app --factory --host 127.0.0.1 --port 8000 \
   --timeout-graceful-shutdown 30
 ```
+
+**For a `match` deployment**, also set:
+
+```
+APP_EDITION=match
+DRAFTING_ENABLED=false
+```
+
+`APP_EDITION=match` with `DRAFTING_ENABLED=true` is refused at start-up rather than
+silently corrected — a deploy that asks for drafting should hear that release 1 does not
+serve it.
+
+A match process needs no `ANTHROPIC_API_KEY`; leaving it unset keeps the hosted tier off
+and ranking runs entirely on the local Ollama. Every API route that writes under
+`WORKSPACES_DIR` — workspaces, turns, references, files, export, annotations,
+citation_audit, admin_retention — is full-only and absent from a match process, so in
+practice that directory stays empty. Back it up anyway: emptiness is a consequence of
+the current route split, not an invariant anything enforces.
 
 `--timeout-graceful-shutdown` bounds how long Uvicorn waits for in-flight requests (an
 SSE stream can otherwise hold shutdown open for as long as the turn runs). The lifespan
