@@ -35,16 +35,27 @@ function renderCard(item: PublicBoardItemOut | null) {
   );
 }
 
-it("renders the QR path as an attribute, not as HTML", () => {
-  const { container } = renderCard(BASE);
+// MINOR 4 fix: the old name ("renders the QR path as an attribute, not as
+// HTML") asserted `getAttribute("d")` plus an empty `innerHTML` on the
+// <path> — both would look IDENTICAL under a `dangerouslySetInnerHTML`
+// implementation, since a rendered <path> has no children either way. What
+// actually tells the two apart: a value containing an unescaped `"`. A JSX
+// `d={qr_path}` expression always sets the exact literal string via the DOM
+// attribute API, which never re-parses it as markup. A
+// `dangerouslySetInnerHTML` built from a template string like
+// `<path d="${qr_path}">` would instead let the browser's HTML parser treat
+// the embedded `"` as closing the attribute early, turning the rest of the
+// payload into a REAL new attribute on the element (e.g. an event handler).
+it("renders the QR path as a literal attribute value, not parsed HTML", () => {
+  const maliciousPath = 'M0 0h1v1h-1z" onmouseover="window.__pwned = true';
+  const { container } = renderCard({ ...BASE, qr_path: maliciousPath });
   const path = container.querySelector("svg path");
   expect(path).not.toBeNull();
-  expect(path?.getAttribute("d")).toBe(BASE.qr_path);
-  // The payload string never becomes markup: no element it could have
-  // injected (an <img>, a <script>) is present, and the path's own
-  // "content" as HTML is empty — everything it carries lives on the `d`
-  // attribute, which React always treats as a plain string.
-  expect(path?.innerHTML).toBe("");
+  // The FULL literal string survives, quote included — an HTML parser would
+  // have truncated it at the embedded `"` instead.
+  expect(path?.getAttribute("d")).toBe(maliciousPath);
+  expect(path?.getAttribute("onmouseover")).toBeNull();
+  expect(container.querySelector("[onmouseover]")).toBeNull();
 });
 
 it("the viewBox includes a 4-module quiet zone", () => {
@@ -61,6 +72,15 @@ it("qr_modules === 0 renders no <svg> at all", () => {
 it("shows 'Closes in N days' from deadlineLocalView", () => {
   renderCard(BASE);
   expect(screen.getByText("Closes in 10 days")).toBeInTheDocument();
+});
+
+// MINOR 1 fix: a deadline dated today is still open (days === 0) — the most
+// urgent case on the whole board — and used to render the literal string
+// "Closes in 0 days".
+it("shows 'Closes today' when the deadline is today, not 'Closes in 0 days'", () => {
+  renderCard({ ...BASE, deadline_local_date: "2026-01-01" }); // frozen "today"
+  expect(screen.getByText("Closes today")).toBeInTheDocument();
+  expect(screen.queryByText("Closes in 0 days")).not.toBeInTheDocument();
 });
 
 it("shows the funder name and the budget", () => {

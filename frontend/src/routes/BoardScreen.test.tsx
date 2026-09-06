@@ -204,6 +204,11 @@ it("renders no score, no rationale and no profile name", async () => {
   mockBoardFetchOnce(board);
   const { container } = renderScreen();
   await flush();
+  // MINOR 4 fix: a positive anchor first — without it this test passed on a
+  // completely blank render (three absence checks against an empty string
+  // are trivially true), which proves nothing about what the closed payload
+  // actually omits.
+  expect(screen.getByText("Call 1")).toBeInTheDocument();
   const text = container.textContent ?? "";
   expect(text).not.toMatch(/score/i);
   expect(text).not.toMatch(/rationale/i);
@@ -223,4 +228,37 @@ it("a 404 blanks a board that was previously showing cards", async () => {
   await flush(5 * 60 * 1000); // the ~5-minute refresh interval
   expect(screen.queryByText("Call 1")).not.toBeInTheDocument();
   expect(container.querySelector('[data-board-state="blank"]')).not.toBeNull();
+});
+
+// IMPORTANT 2: the mirror of the test above, through the SAME hook
+// (usePublicBoard, wired up inside BoardScreen) — a 500 must NOT blank the
+// board. This is the untested "stale copy survives" direction end to end;
+// the existing publicBoard.test.ts cases exercise the reducer in isolation,
+// which a bug INSIDE the hook's own wiring (not the reducer) can bypass.
+it("a 500 leaves the cards on the wall (through the hook)", async () => {
+  mockBoardFetchOnce(makeBoard({ items: [makeItem(1)] }));
+  const { container } = renderScreen();
+  await flush();
+  expect(screen.getByText("Call 1")).toBeInTheDocument();
+
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue({ ok: false, status: 500, json: async () => ({}) } as unknown as Response),
+  );
+  await flush(5 * 60 * 1000);
+  expect(screen.getByText("Call 1")).toBeInTheDocument();
+  expect(container.querySelector('[data-board-state="live"]')).not.toBeNull();
+});
+
+// Same mirror, for a rejected fetch (a network drop, not an HTTP error).
+it("a rejected fetch leaves the cards on the wall (through the hook)", async () => {
+  mockBoardFetchOnce(makeBoard({ items: [makeItem(1)] }));
+  const { container } = renderScreen();
+  await flush();
+  expect(screen.getByText("Call 1")).toBeInTheDocument();
+
+  vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+  await flush(5 * 60 * 1000);
+  expect(screen.getByText("Call 1")).toBeInTheDocument();
+  expect(container.querySelector('[data-board-state="live"]')).not.toBeNull();
 });

@@ -18,16 +18,23 @@ function budgetText(item: PublicBoardItemOut): string | null {
   return lo != null ? `From ${fmt(lo)}${cur}` : `Up to ${fmt(hi as number)}${cur}`;
 }
 
-// deadlineLocalView's `days` field IS "Closes in N days" (Deadline.tsx:23-26)
-// — BoardScreen has already dropped any card whose deadline has passed
-// (state === "closed"), so this only ever renders the open branch here.
-// Exported: BoardScreen's header uses the same wording for the nearest
-// deadline across all pages, and a second copy of the day-count logic would
-// drift from this one.
+// MINOR 2 fix: deadlineLocalView's `days` field is a plain day count;
+// Deadline.tsx:23-26's comment calls it "ADDITIVE" (returned alongside the
+// existing {state, date} shape without breaking the two prior callers) — it
+// is NOT itself worded "Closes in N days"; that wording lives here.
+// BoardScreen has already dropped any card whose deadline has passed
+// (state === "closed"), so this only ever renders days >= 0. Exported:
+// BoardScreen's header uses the same wording for the nearest deadline across
+// all pages, and a second copy of the day-count logic would drift from this.
 export function closesInText(localDate: string | null): string | null {
   if (!localDate) return null;
   const { days } = deadlineLocalView(localDate);
   if (days < 0) return null;
+  // MINOR 1 fix: a deadline dated today is still open (days === 0) and is
+  // the most urgent case on the board — "Closes in 0 days" read as a bug on
+  // the exact day it matters most. Matches TriageCard.tsx's own days===0
+  // special-case ("today", `daysLeftText`).
+  if (days === 0) return "Closes today";
   return days === 1 ? "Closes in 1 day" : `Closes in ${days} days`;
 }
 
