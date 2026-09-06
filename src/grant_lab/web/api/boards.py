@@ -45,6 +45,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm.exc import ObjectDeletedError
 
 from grant_lab.auth.dependencies import get_current_user
+from grant_lab.boards.alerts import owner_undeliverable_map
 from grant_lab.boards.queue import board_queue
 from grant_lab.db.models import ORIENTATION_ITEMS_PER_PAGE, Board, BoardItem, Call, Profile, User
 from grant_lab.web.api.profiles import _profile_for_edit
@@ -96,6 +97,13 @@ class BoardOut(BaseModel):
     # PENDING side of that; this is the other half, a straight count of
     # board_items, and Task 5 does not call board_queue -- Task 6 wires that up.
     approved_count: int
+    # D9 / Open-3 half 2: whether THIS board's profile owner cannot currently
+    # receive a digest-channel notification (`User.status != 'active'` or
+    # `digest_disabled_at IS NOT NULL` -- see `boards/alerts.py`). Independent
+    # of `board_alerts_enabled`: a muted owner is still reachable, so this is
+    # never true merely because alerts are off. "A delivery the system knows
+    # it suppressed is the one case where an in-app surface is not optional."
+    owner_undeliverable: bool
 
 
 class BoardsListOut(BaseModel):
@@ -114,7 +122,7 @@ def _approved_counts(session, board_ids: list[int]) -> dict[int, int]:
     return dict(rows)
 
 
-def _to_out(board: Board, approved_count: int) -> BoardOut:
+def _to_out(board: Board, approved_count: int, owner_undeliverable: bool) -> BoardOut:
     return BoardOut(
         id=board.id,
         slug=board.slug,
@@ -132,6 +140,7 @@ def _to_out(board: Board, approved_count: int) -> BoardOut:
         created_at=board.created_at,
         updated_at=board.updated_at,
         approved_count=approved_count,
+        owner_undeliverable=owner_undeliverable,
     )
 
 
@@ -195,7 +204,8 @@ def list_boards(request: Request, user: User = Depends(get_current_user)):  # no
             ).scalars()
         )
         counts = _approved_counts(session, [b.id for b in boards])
-        out = [_to_out(b, counts.get(b.id, 0)) for b in boards]
+        undeliverable = owner_undeliverable_map(session, [b.profile_id for b in boards])
+        out = [_to_out(b, counts.get(b.id, 0), undeliverable[b.profile_id]) for b in boards]
     return BoardsListOut(boards=out)
 
 
@@ -229,7 +239,8 @@ def create_board(
         session.add(board)
         session.commit()
         session.refresh(board)
-        out = _to_out(board, 0)
+        undeliverable = owner_undeliverable_map(session, [board.profile_id])[board.profile_id]
+        out = _to_out(board, 0, undeliverable)
     return out
 
 
@@ -243,7 +254,8 @@ def get_board(
     with sf() as session:
         board = _board_for_edit(session, board_id=board_id, user=user)
         count = _approved_counts(session, [board.id]).get(board.id, 0)
-        out = _to_out(board, count)
+        undeliverable = owner_undeliverable_map(session, [board.profile_id])[board.profile_id]
+        out = _to_out(board, count, undeliverable)
     return out
 
 
@@ -375,7 +387,8 @@ def update_board(
 
         session.commit()
         session.refresh(board)
-        out = _to_out(board, approved_count)
+        undeliverable = owner_undeliverable_map(session, [board.profile_id])[board.profile_id]
+        out = _to_out(board, approved_count, undeliverable)
     return out
 
 
@@ -790,5 +803,6 @@ def publish_board(
         approved_count = _approved_counts(session, [board.id]).get(board.id, 0)
         session.commit()
         session.refresh(board)
-        out = _to_out(board, approved_count)
+        undeliverable = owner_undeliverable_map(session, [board.profile_id])[board.profile_id]
+        out = _to_out(board, approved_count, undeliverable)
     return out

@@ -2863,6 +2863,8 @@ export interface components {
              * @enum {string}
              */
             orientation: "landscape" | "portrait";
+            /** Owner Undeliverable */
+            owner_undeliverable: boolean;
             /** Page Seconds */
             page_seconds: number;
             /** Profile Id */

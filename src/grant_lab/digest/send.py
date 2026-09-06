@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import distinct, select
+from sqlalchemy import ColumnElement, and_, distinct, select
 from sqlalchemy.exc import IntegrityError
 
 from grant_lab.db.models import DigestRun, Subscription, User
@@ -28,6 +28,17 @@ class DigestRunSummary:
     users_disabled: int = 0
 
 
+def _deliverable_clause() -> ColumnElement[bool]:
+    """The two conditions that decide whether a `User` can receive a
+    digest-channel notification: not disabled/pending (`status`) and not
+    bounce-disabled (`digest_disabled_at`). Single-sourced here so
+    `boards/alerts.py`'s escalation check (D9, Open-3) reuses the SAME two
+    conditions instead of restating them and drifting -- that module borrows
+    this function by name (leading underscore kept on purpose, same
+    convention `web/api/boards.py` uses for `_profile_for_edit`)."""
+    return and_(User.digest_disabled_at.is_(None), User.status == "active")
+
+
 def candidate_user_ids(session) -> list[int]:
     """Active, digest-enabled subscribers. Excludes disabled/pending accounts
     (status) and bounce-disabled digests (digest_disabled_at)."""
@@ -35,7 +46,7 @@ def candidate_user_ids(session) -> list[int]:
         session.execute(
             select(distinct(Subscription.user_id))
             .join(User, User.id == Subscription.user_id)
-            .where(User.digest_disabled_at.is_(None), User.status == "active")
+            .where(_deliverable_clause())
         )
         .scalars()
         .all()
