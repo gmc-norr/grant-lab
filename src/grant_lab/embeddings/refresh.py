@@ -17,6 +17,7 @@ from sqlalchemy import or_, select
 
 from grant_lab.db.models import Call, Profile
 from grant_lab.embeddings.similarity import build_call_text, build_profile_text
+from grant_lab.profiles.fingerprint import embedding_fingerprint
 from grant_lab.ranking.ollama_client import LLMError
 
 if TYPE_CHECKING:
@@ -110,9 +111,14 @@ def refresh_profile_embedding(
     if not text.strip():
         # Description cleared → invalidate the embedding. Counts as a
         # successful refresh (we're keeping state consistent), so return True.
-        if profile.embedding is not None or profile.embedding_model is not None:
+        if (
+            profile.embedding is not None
+            or profile.embedding_model is not None
+            or profile.embedding_fingerprint is not None
+        ):
             profile.embedding = None
             profile.embedding_model = None
+            profile.embedding_fingerprint = None
             _logger.info(
                 "embeddings.profile_embedding_cleared",
                 extra={"event": "profile_embedding_cleared", "profile_id": profile_id},
@@ -134,9 +140,11 @@ def refresh_profile_embedding(
         if force:
             profile.embedding = None
             profile.embedding_model = None
+            profile.embedding_fingerprint = None
         return False
     profile.embedding = result.vector
     profile.embedding_model = embed_client.model
+    profile.embedding_fingerprint = embedding_fingerprint(profile)
     return True
 
 
