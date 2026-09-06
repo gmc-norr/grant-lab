@@ -167,6 +167,18 @@ class Subscription(Base):
     digest_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("true")
     )
+    # SEPARATE from digest_enabled, deliberately. digest_enabled is read at
+    # digest/assemble.py:95 to decide whether a profile's ranked calls appear in
+    # the weekly email. Muting a weekly summary must not also mute the alert that
+    # a public corridor screen has gone underfull -- a different thing with a
+    # different urgency (decisions note D9, plan Open-1).
+    #
+    # server_default is load-bearing: scripts/seed_dev_data.py:328 inserts a
+    # Subscription with only user_id and profile_id, so without it every seeded
+    # profile would silently opt out of board alerts.
+    board_alerts_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

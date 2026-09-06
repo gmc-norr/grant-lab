@@ -73,6 +73,13 @@ def _decision_predicate(view: View, *, user_id: int, profile_id: int | None):
     union. The match frontend still needs a 200 with `effective.profile_id:
     null` to branch to its onboarding screen, which is why this is an empty
     page rather than a 422.
+
+    CALLERS. `_base_call_filters` (:329) and, from OUTSIDE this module,
+    `grant_lab.boards.queue.board_queue`. The board queue is the odd one: it
+    passes the PROFILE OWNER's user_id rather than the requesting user's, which
+    is exactly why it CALLS this instead of forking it (2026-09-05 decisions
+    note D2). A second copy is how the rail and the feed drift apart under a
+    filter nobody re-tested.
     """
     rows = select(CallDecision.call_id).where(CallDecision.user_id == user_id)
     if profile_id is not None:

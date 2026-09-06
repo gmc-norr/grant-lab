@@ -144,6 +144,27 @@ def test_match_edition_still_serves_the_release_1_surface(monkeypatch, _base_env
 # this file alone leaves test_the_baseline_is_not_empty red on purpose: the
 # literal below is bumped BY HAND in the same commit, so a route that arrives
 # without intent cannot be waved through by a regeneration.
+#
+# Plan C Task 3 (profile transfer): 109 -> 110. One added path,
+# /api/profiles/{profile_id}/owner (PUT). Recorded late -- a whole-branch
+# review found this entry missing while the literal and the baseline file were
+# both already correct, which is exactly the hole this ledger exists to close:
+# the numbers agreeing proves nothing about whether the route was intended.
+#
+# Plan C Task 5 (corridor boards): 110 -> 112. The two added paths are
+# /api/boards (GET list, POST create) and /api/boards/{board_id} (GET, PUT,
+# DELETE) -- five operations, two unique paths, matching this file's
+# unique-PATHS-not-operations convention above.
+#
+# Plan C Task 6 (approve, un-approve, reorder, publish): 112 -> 116. Four
+# added paths: /api/boards/{board_id}/queue (GET), /api/boards/{board_id}/items
+# (GET, POST, PUT), /api/boards/{board_id}/items/{call_id} (DELETE) and
+# /api/boards/{board_id}/publish (PUT) -- six operations, four unique paths.
+#
+# Plan C Task 7 (QR encoding and the userless public endpoint): 116 -> 117.
+# One added path: /api/public/boards/{slug} (GET) -- the one unauthenticated
+# route, deliberately in its own module (web/api/public_boards.py) and its own
+# gate exemption (test_boards_permission_single_source.py).
 _BASELINE = Path(__file__).with_name("full_edition_routes.txt")
 
 
@@ -172,7 +193,7 @@ def test_full_edition_route_set_matches_the_committed_baseline(monkeypatch, _bas
 def test_the_baseline_is_not_empty():
     """A baseline of zero routes would make the comparison above vacuous on an
     app that also served nothing."""
-    assert len(_BASELINE.read_text().split()) == 109
+    assert len(_BASELINE.read_text().split()) == 117
 
 
 def test_full_edition_is_unchanged(monkeypatch, _base_env):
@@ -246,6 +267,12 @@ _ALWAYS_ROUTERS = [
     "admin_users.router",
     "calls.router",
     "profiles.router",
+    # Boards are a MATCH-edition feature: the corridor screen is release 1's
+    # public face.
+    "boards.router",
+    # The public corridor-board JSON (Task 7): unauthenticated by design, so it
+    # ships in match too -- it IS release 1's public face.
+    "public_boards.router",
 ]
 
 

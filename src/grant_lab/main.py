@@ -298,7 +298,14 @@ async def lifespan(app: FastAPI):
             embed_client=app.state.embed_client,
             digest_email_client=digest_email_client,
             digest_settings=settings,
-            limiters=[app.state.email_limiter, app.state.ip_limiter],
+            # board_limiter (Plan C Task 7) rides the same sweep: `allow()`
+            # never deletes a key on its own, only `sweep()` does, and the
+            # public board route is the one anonymous route in the app, so
+            # its limiter is the one most exposed to scan traffic filling
+            # the dict with distinct IPs. Set on app.state before this
+            # lifespan ever runs -- see the `app.state.board_limiter =`
+            # assignment below in create_app().
+            limiters=[app.state.email_limiter, app.state.ip_limiter, app.state.board_limiter],
             workspace_controller=workspace_controller,
             # None in a MATCH boot — create_app() sets it to None for that edition
             # (see the citation_service branch below). In FULL it is never None:
@@ -864,6 +871,16 @@ def create_app() -> FastAPI:
         max_requests=5, window_seconds=15 * 60, name="email"
     )
     app.state.ip_limiter = SlidingWindowLimiter(max_requests=30, window_seconds=15 * 60, name="ip")
+    # The public corridor-board route has no session to key a limiter off, so
+    # it buckets by IP like `ip_limiter` above but keeps its OWN counter:
+    # sharing `ip_limiter` would let a burst of board views lock a hospital's
+    # shared egress IP out of login. 60/15min is 20x headroom over one
+    # legitimate screen's expected rate (Plan C D6: a 15-minute window over a
+    # ~5-minute client cache is ~3 requests) while still bounding a scraper
+    # that has no other rate-limit surface to hit.
+    app.state.board_limiter = SlidingWindowLimiter(
+        max_requests=60, window_seconds=15 * 60, name="board"
+    )
     app.state.session_signer = SessionSigner(
         secret=settings.session_secret,
         max_age_seconds=settings.session_max_age_seconds,

@@ -41,7 +41,7 @@ export const ACTIVITY_TOP: ActivityItem[] = [
   },
 ];
 
-// Bottom-pinned group. Profiles and Settings are both SPA routes.
+// Bottom-pinned group. Profiles, Boards and Settings are all SPA routes.
 export const ACTIVITY_BOTTOM: ActivityItem[] = [
   {
     id: "profiles",
@@ -49,6 +49,13 @@ export const ACTIVITY_BOTTOM: ActivityItem[] = [
     icon: "account",
     kind: "spa",
     to: "/profiles",
+  },
+  {
+    id: "boards",
+    label: "Boards",
+    icon: "device-desktop",
+    kind: "spa",
+    to: "/boards",
   },
   { id: "settings", label: "Settings", icon: "gear", kind: "spa", to: "/me" },
   { id: "admin", label: "Admin", icon: "shield", kind: "spa", to: "/admin" },

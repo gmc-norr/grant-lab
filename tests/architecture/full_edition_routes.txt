@@ -22,6 +22,12 @@
 /api/auth/login
 /api/auth/logout
 /api/auth/register
+/api/boards
+/api/boards/{board_id}
+/api/boards/{board_id}/items
+/api/boards/{board_id}/items/{call_id}
+/api/boards/{board_id}/publish
+/api/boards/{board_id}/queue
 /api/calls
 /api/calls/decisions/counts
 /api/calls/hidden
@@ -36,8 +42,10 @@
 /api/me/subscriptions
 /api/profiles
 /api/profiles/{profile_id}
+/api/profiles/{profile_id}/owner
 /api/profiles/{profile_id}/viewers
 /api/profiles/{profile_id}/visibility
+/api/public/boards/{slug}
 /api/workspaces
 /api/workspaces/{workspace_id}
 /api/workspaces/{workspace_id}/activate

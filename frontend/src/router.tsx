@@ -7,6 +7,10 @@ import { CockpitSidebar } from "./cockpit/CockpitSidebar";
 import { AccountNoAccess } from "./routes/AccountNoAccess";
 import { AccountPending } from "./routes/AccountPending";
 import { AuthError } from "./routes/AuthError";
+import { BoardDetail } from "./routes/BoardDetail";
+import { BoardLayout } from "./routes/BoardLayout";
+import { BoardScreen } from "./routes/BoardScreen";
+import { BoardsList } from "./routes/BoardsList";
 import { CallDetail } from "./routes/CallDetail";
 import { CallReadingPane } from "./routes/CallReadingPane";
 import { CallsFilters } from "./routes/CallsFilters";
@@ -79,6 +83,8 @@ export const router = createBrowserRouter([
       { path: "profiles/new", element: <ProfileNew /> },
       { path: "profiles/:id", element: <ProfileDetail /> },
       { path: "profiles/:id/edit", element: <ProfileEdit /> },
+      { path: "boards", element: <BoardsList /> },
+      { path: "boards/:id", element: <BoardDetail /> },
       {
         path: "admin",
         element: (
@@ -171,5 +177,14 @@ export const router = createBrowserRouter([
       { path: "auth/no-access", element: <AccountNoAccess /> },
       { path: "auth/error", element: <AuthError /> },
     ],
+  },
+  {
+    // THIRD top-level pathless layout, sibling to AppShell and PreAuthLayout.
+    // Full-bleed unattended corridor screen: no shell, no useSession (see
+    // BoardLayout's own docstring for why §6's "under PreAuthLayout" is not
+    // implementable as written). A board is a match-edition feature, so
+    // router.simple.tsx mounts this exact path too.
+    element: <BoardLayout />,
+    children: [{ path: "b/:slug", element: <BoardScreen /> }],
   },
 ]);

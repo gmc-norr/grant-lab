@@ -26,6 +26,7 @@ const DESTINATIONS = [
   // become load-bearing the moment this entry stops being the root.
   { to: "/", label: "Calls", end: true, adminOnly: false },
   { to: "/profiles", label: "Profiles", end: false, adminOnly: false },
+  { to: "/boards", label: "Boards", end: false, adminOnly: false },
   { to: "/admin", label: "Admin", end: false, adminOnly: true },
 ] as const;
 

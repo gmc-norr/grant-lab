@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 
 import type { ProfileDetail as Detail } from "../api/profiles";
 import { useProfile } from "../api/profiles";
+import { ProfileTransferCard } from "./ProfileTransferCard";
 import { ProfileVisibilityCard } from "./ProfileVisibilityCard";
 
 function Chips({ items }: { items: string[] }) {
@@ -87,6 +88,9 @@ function DetailView({ p }: { p: Detail }) {
       </Group>
 
       {p.can_edit && <ProfileVisibilityCard profileId={p.id} visibility={p.visibility} />}
+      {p.can_edit && (
+        <ProfileTransferCard profileId={p.id} outgoingLostRead={p.outgoing_lost_read} />
+      )}
 
       <Card withBorder radius="md" p="md" bg="var(--app-sidebar)" mb="md">
         <Title order={2} size="h5" mb="sm">

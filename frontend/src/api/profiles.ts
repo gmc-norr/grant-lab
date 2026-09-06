@@ -130,6 +130,29 @@ export function useReplaceProfileViewers(id: number) {
   });
 }
 
+// --- ownership transfer ----------------------------------------------------
+
+export type ProfileTransferBody = components["schemas"]["ProfileTransferIn"];
+
+/** PUT /api/profiles/{id}/owner. Owner-or-admin gated server-side
+ *  (`_profile_for_edit`). `outgoing_lost_read` on the RESPONSE is the
+ *  REALIZED outcome of this specific transfer -- distinct from the
+ *  same-named field `useProfile` already exposes from `GET`, which is the
+ *  HYPOTHETICAL read BEFORE the act (D17). Do not render one from the other. */
+export function useTransferProfileOwner(id: number) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: ProfileTransferBody) =>
+      unwrap(
+        await api.PUT("/api/profiles/{profile_id}/owner", {
+          params: { path: { profile_id: id } },
+          body,
+        }),
+      ),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["profile", id] }),
+  });
+}
+
 export function useSetProfileVisibility(id: number) {
   const qc = useQueryClient();
   return useMutation({

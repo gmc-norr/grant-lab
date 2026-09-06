@@ -20,7 +20,7 @@ const DETAIL = {
   org_type: "university_hospital", capabilities: ["biobank"], patient_populations: [],
   scale: null, career_stage: null, role: null, years_since_phd: null, applicant_types: [],
   funding_instruments: ["project_grant"], funder_exclusions: [], country: "SE", host_institution: "UmU",
-  can_edit: true, visibility: "private",
+  can_edit: true, visibility: "private", outgoing_lost_read: false,
   bootstrap_status: null, bootstrap_pubmed_status: null, publications_fetched: null,
 };
 
@@ -99,4 +99,27 @@ it("mounts the sharing card for an owner", async () => {
   renderDetail();
   expect(await screen.findByRole("heading", { name: /who can see this/i })).toBeInTheDocument();
   expect(screen.getByRole("radio", { name: "Only me and admins" })).toBeChecked();
+});
+
+// MINOR 4: pins that ProfileDetail forwards the payload's OWN
+// outgoing_lost_read to the transfer card, rather than re-deriving it from
+// can_edit (also true for a non-owner admin) -- exactly the bug the
+// design note records having shipped once. The negative case below is the
+// one that actually distinguishes the two: an `outgoingLostRead={p.can_edit}`
+// regression would still pass the positive case (both true here) but would
+// wrongly warn in the negative one.
+it("passes outgoing_lost_read=true through to the transfer card", async () => {
+  renderDetail({ ...DETAIL, can_edit: true, outgoing_lost_read: true });
+  expect(await screen.findByRole("heading", { name: /transfer ownership/i })).toBeInTheDocument();
+  expect(
+    screen.getByText(/you will lose access to this profile once it is transferred/i),
+  ).toBeInTheDocument();
+});
+
+it("does NOT warn when outgoing_lost_read is false, even though can_edit is true", async () => {
+  renderDetail({ ...DETAIL, can_edit: true, outgoing_lost_read: false });
+  expect(await screen.findByRole("heading", { name: /transfer ownership/i })).toBeInTheDocument();
+  expect(
+    screen.queryByText(/you will lose access to this profile once it is transferred/i),
+  ).toBeNull();
 });
