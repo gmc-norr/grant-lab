@@ -111,9 +111,11 @@ it("shows one generic error for an unknown and for an inactive address", async (
   expect(screen.queryByText(/inactive/i)).toBeNull();
 });
 
-it("navigates away when the transfer actually cost the caller their own read access", async () => {
+it("navigates an OWNER away when the transfer really cost them their read access", async () => {
   const user = userEvent.setup();
   renderCard({
+    // The GET prop is true only for a caller who IS the outgoing owner --
+    // transfer_read_effect returns False when profile.created_by != outgoing.id.
     outgoingLostRead: true, // the PRE-act hypothetical, same as the realized outcome here
     putResult: {
       data: { owner: { user_id: 9, name: "Bob", email: "bob@umu.se" }, outgoing_lost_read: true },
@@ -141,4 +143,40 @@ it("stays put when keep_read_access preserved the caller's own read access", asy
   await user.click(screen.getByRole("button", { name: /transfer/i }));
   await screen.findByText(/transferred to bob@umu.se/i);
   expect(screen.getByTestId("loc")).toHaveTextContent("/profiles/5");
+});
+
+
+it("does NOT navigate an admin away, though the PREVIOUS owner lost read", async () => {
+  // A whole-branch review found the bug this pins. `outgoing_lost_read` on the
+  // PUT response describes the PREVIOUS OWNER, not the caller: the server
+  // computes it for `session.get(User, p.created_by)` read before the
+  // ownership write. So an admin transferring somebody else's private profile
+  // gets `true` -- the previous owner lost read, the admin lost nothing and
+  // still reads it through the admin arm -- and navigating on that field alone
+  // yanked them off a page they can perfectly well see.
+  //
+  // The GET prop is the discriminator: false for a non-owner caller. Both
+  // conjuncts together mean "the caller IS the outgoing owner AND really lost it".
+  const user = userEvent.setup();
+  renderCard({
+    outgoingLostRead: false, // admin caller: the pre-act hypothetical costs them nothing
+    putResult: {
+      data: { owner: { user_id: 9, name: "Bob", email: "bob@umu.se" }, outgoing_lost_read: true },
+      error: undefined,
+    },
+  });
+  await user.type(screen.getByLabelText(/email/i), "bob@umu.se");
+  await user.click(screen.getByRole("button", { name: /transfer/i }));
+  await screen.findByText(/transferred to bob@umu.se/i);
+  expect(screen.getByTestId("loc")).toHaveTextContent("/profiles/5");
+});
+
+it("labels the keep-read checkbox for the CURRENT OWNER, not the caller", async () => {
+  // The server writes the ProfileViewer row for `outgoing` -- the current
+  // owner. Under an admin caller "Keep my own read access" grants the row to a
+  // third party and does nothing for the admin, who already reads everything.
+  renderCard();
+  const label = screen.getByRole("checkbox", { name: /keep.*read access/i });
+  expect(label).toBeTruthy();
+  expect(screen.queryByRole("checkbox", { name: /my own/i })).toBeNull();
 });

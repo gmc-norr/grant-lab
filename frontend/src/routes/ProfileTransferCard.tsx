@@ -54,11 +54,26 @@ export function ProfileTransferCard({
               onSuccess: (result) => {
                 setEmail("");
                 // The REALIZED outcome, off the PUT response -- distinct from
-                // the prop above, which is the pre-act hypothetical. If this
-                // transfer actually cost the caller their own read access,
-                // staying on this page would refetch straight into "not
-                // shared with you"; send them back to a page they can read.
-                if (result.outgoing_lost_read) navigate("/profiles");
+                // the prop above, which is the pre-act hypothetical.
+                //
+                // BOTH conjuncts are load-bearing, and the second one is the
+                // fix for a real bug. `outgoing_lost_read` on the PUT response
+                // describes the PREVIOUS OWNER, not the caller: the server
+                // computes it for `session.get(User, p.created_by)` read
+                // before the ownership write (web/api/profiles.py). So an
+                // ADMIN transferring somebody else's private profile gets
+                // `true` -- the previous owner lost read, the admin lost
+                // nothing and can still read it through the admin arm -- and
+                // navigating on that alone yanked them off a page they can
+                // perfectly well see.
+                //
+                // `outgoingLostRead` (the GET prop) is `false` for a non-owner
+                // caller, because transfer_read_effect returns False when
+                // `profile.created_by != outgoing.id`. Conjoining the two is
+                // therefore exactly "the caller IS the outgoing owner AND they
+                // really lost it": owner -> navigate; owner+keep_read_access
+                // -> stay; admin -> stay.
+                if (outgoingLostRead && result.outgoing_lost_read) navigate("/profiles");
               },
             },
           );
@@ -74,7 +89,13 @@ export function ProfileTransferCard({
             onChange={(e) => setEmail(e.currentTarget.value)}
           />
           <Checkbox
-            label="Keep my own read access to this profile"
+            // NOT "my own": the server writes the ProfileViewer row for
+            // `outgoing` -- the CURRENT owner (web/api/profiles.py). When an
+            // admin transfers somebody else's profile this grants access to
+            // that third party and does nothing for the admin, who already
+            // reads everything. The label must describe who actually gets the
+            // row.
+            label="Keep the current owner's read access to this profile"
             checked={keepReadAccess}
             onChange={(e) => setKeepReadAccess(e.currentTarget.checked)}
           />
