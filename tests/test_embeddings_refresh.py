@@ -296,8 +296,18 @@ def test_refresh_missing_tick_force_true_re_embeds_already_embedded_rows(pg_sess
 
 
 def test_refresh_missing_tick_force_false_default_skips_already_embedded(pg_session_factory):
-    """Regression guard: default behavior (force=False) is byte-identical to
-    today — already-embedded same-model rows are NOT re-embedded."""
+    """Regression guard: default behavior (force=False) does not re-embed a row
+    that is already current.
+
+    Migration 0075 changed what "current" MEANS for a profile: a vector and a
+    matching model are no longer enough, the embedding_fingerprint must also
+    describe the row's present text. A NULL fingerprint is stale by design (it
+    is how the first tick after deploy re-embeds the corpus), so this seed now
+    stamps the fingerprint too. The CALL half is unchanged -- calls have no
+    fingerprint column.
+    """
+    from grant_lab.profiles.fingerprint import embedding_fingerprint
+
     with pg_session_factory() as s:
         cid = _seed_call(s, title="ForceFalse1")
         s.flush()
@@ -305,8 +315,10 @@ def test_refresh_missing_tick_force_false_default_skips_already_embedded(pg_sess
         s.get(Call, cid).embedding_model = "bge-m3"
         pid = _seed_profile(s, name="ForceFalse2")
         s.flush()
-        s.get(Profile, pid).embedding = [0.9] * 1024
-        s.get(Profile, pid).embedding_model = "bge-m3"
+        prof = s.get(Profile, pid)
+        prof.embedding = [0.9] * 1024
+        prof.embedding_model = "bge-m3"
+        prof.embedding_fingerprint = embedding_fingerprint(prof)
         s.commit()
 
     client = _fake_client(vec=[0.1] * 1024)

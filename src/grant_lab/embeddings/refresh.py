@@ -196,6 +196,7 @@ def refresh_missing_embeddings_tick(
         "calls_failed": 0,
         "profiles_embedded": 0,
         "profiles_failed": 0,
+        "profiles_seen": 0,
         "max_call_id": after_call_id,
         "max_profile_id": after_profile_id,
     }
@@ -219,21 +220,28 @@ def refresh_missing_embeddings_tick(
             "calls_failed",
             "profiles_embedded",
             "profiles_failed",
+            "profiles_seen",
         ):
             totals[key] += summary[key]
         totals["max_call_id"] = max(totals["max_call_id"], summary["max_call_id"])
         totals["max_profile_id"] = max(totals["max_profile_id"], summary["max_profile_id"])
-        # Stop when a batch processed nothing — both cursors have walked past
-        # the end of the NULL/mismatched set. Using "rows processed" (embedded
-        # + failed) rather than "embeds succeeded" means an all-failing final
-        # batch still terminates: the cursor advanced past those ids.
-        processed = (
-            summary["calls_embedded"]
-            + summary["calls_failed"]
-            + summary["profiles_embedded"]
-            + summary["profiles_failed"]
-        )
-        if processed == 0:
+        # Break on rows EXAMINED, not rows worked. A page in which nothing was
+        # stale is progress, not exhaustion: breaking on "processed == 0" here
+        # would discard the advanced cursor two lines below, and every later
+        # tick would restart at after_profile_id=0 and halt at the same wall.
+        # Once the candidate set is widened, that page is the common case.
+        #
+        # Termination still holds. The call half is SQL-narrowed, so
+        # calls_embedded + calls_failed IS the number of call rows examined.
+        # The profile half is not, which is why it contributes profiles_seen.
+        # Whenever a page returns rows, the batch advances that cursor strictly
+        # (to max(profile_ids), or to max(row ids) when nothing was workable),
+        # and every returned id is > the cursor it started from. So each
+        # non-breaking iteration consumes at least one row of a finite table,
+        # and the final page — the one past the last id — returns nothing on
+        # both halves, making `examined` 0.
+        examined = summary["calls_embedded"] + summary["calls_failed"] + summary["profiles_seen"]
+        if examined == 0:
             break
         cursor_call_id = summary["max_call_id"]
         cursor_profile_id = summary["max_profile_id"]
@@ -243,6 +251,16 @@ def refresh_missing_embeddings_tick(
         extra={"event": "embedding_refresh_tick_drain_summary", **totals},
     )
     return totals
+
+
+def _digest_for_row(row) -> str:
+    """embedding_fingerprint() over a column-limited Row rather than a Profile.
+
+    Both build_profile_text and embedding_fingerprint duck-type on
+    `.description` and `.structured`, which the Row exposes. This exists so
+    the call site reads as a deliberate choice rather than an accident.
+    """
+    return embedding_fingerprint(row)
 
 
 def _refresh_missing_embeddings_batch(
@@ -276,6 +294,14 @@ def _refresh_missing_embeddings_batch(
     same rows would be re-selected every iteration). The summary includes
     `max_call_id` / `max_profile_id` so the caller can advance the cursor.
     Default 0 = start from the beginning (matches the daily-tick behavior).
+
+    Migration 0075: the PROFILE half no longer narrows in SQL. "Current"
+    now also means `embedding_fingerprint` describes the row's present text,
+    and that fingerprint hashes `build_profile_text`, which is Python over
+    JSONB. So every profile past the cursor is examined and the decision is
+    made per row. The summary therefore carries `profiles_seen` — rows
+    examined, distinct from rows embedded or failed — because the drain loop
+    can no longer read "worked nothing" as "nothing left".
     """
     current_model = embed_client.model
     summary = {
@@ -283,6 +309,10 @@ def _refresh_missing_embeddings_batch(
         "calls_failed": 0,
         "profiles_embedded": 0,
         "profiles_failed": 0,
+        # Rows EXAMINED, not rows worked. The drain loop breaks on this: with
+        # the staleness decision made in Python, a page can legitimately
+        # examine rows without working any, and that is progress.
+        "profiles_seen": 0,
         "max_call_id": after_call_id,
         "max_profile_id": after_profile_id,
     }
@@ -315,30 +345,64 @@ def _refresh_missing_embeddings_batch(
         summary["max_call_id"] = max(call_ids)
 
     with session_factory() as session:
-        # Codex #2: `build_profile_text` now uses description + areas, so
-        # the old SQL pre-filter on `length(trim(description)) > 0` would
-        # incorrectly skip an areas-only profile. Selecting all candidates
-        # and filtering in Python via `build_profile_text` is robust to
-        # future text-composition changes (no duplicated rules in SQL) and
-        # keeps the CLI's "no progress ⇒ break" termination correct: a
-        # truly blank profile isn't selected, so `profiles_embedded` stays
-        # at 0 and the CLI breaks. Batch-size overshoot is fine — callers
-        # aren't counting rows returned, they're counting embeds performed.
-        profile_q = select(Profile)
-        if not force:
-            profile_q = profile_q.where(
-                or_(Profile.embedding.is_(None), Profile.embedding_model != current_model)
-            )
+        # The staleness decision moved into Python because build_profile_text
+        # is Python over JSONB and cannot be evaluated in SQL. (The older
+        # reason still holds too: an areas-only profile has a blank
+        # description, so any SQL pre-filter on the description text would
+        # wrongly skip it.)
+        #
+        # Do NOT select Profile wholesale: `p.embedding is None` on a loaded
+        # Profile pulls the 1024-dim vector, which is the measured dominant
+        # cost of a profile load. Select a computed boolean instead.
         profile_q = (
-            profile_q.where(Profile.id > after_profile_id).order_by(Profile.id).limit(batch_size)
+            select(
+                Profile.id,
+                Profile.description,
+                Profile.structured,
+                Profile.embedding_model,
+                Profile.embedding_fingerprint,
+                Profile.embedding.is_(None).label("embedding_is_null"),
+            )
+            .where(Profile.id > after_profile_id)
+            .order_by(Profile.id)
+            .limit(batch_size)
         )
-        profiles = session.execute(profile_q).scalars().all()
-        profile_ids = [p.id for p in profiles if build_profile_text(p).strip()]
-        if profiles and not profile_ids:
-            # We paged past the end of the embeddable set — advance the
-            # cursor anyway so the next CLI iteration doesn't re-read the
-            # same blank profiles and infinite-loop in force mode.
-            summary["max_profile_id"] = max(p.id for p in profiles)
+        rows = session.execute(profile_q).all()
+        summary["profiles_seen"] = len(rows)
+
+        profile_ids = []
+        for r in rows:
+            text_now = build_profile_text(r)
+            if force:
+                # Force mode re-embeds every embeddable row, fingerprint or not.
+                if text_now.strip():
+                    profile_ids.append(r.id)
+                continue
+            if not text_now.strip():
+                # Hole 4: a profile cleared to blank while it still carries
+                # embedding state MUST reach refresh_profile_embedding, which
+                # is the only thing that wipes the vector. Previously these
+                # were filtered out, so the invalidation branch could only
+                # ever fire from the lossy request path. An already-cleared
+                # blank row is still skipped, so the scan still terminates.
+                if (
+                    not r.embedding_is_null
+                    or r.embedding_model is not None
+                    or r.embedding_fingerprint is not None
+                ):
+                    profile_ids.append(r.id)
+                continue
+            if (
+                r.embedding_is_null
+                or r.embedding_model != current_model
+                or r.embedding_fingerprint != _digest_for_row(r)
+            ):
+                profile_ids.append(r.id)
+
+        if rows and not profile_ids:
+            # Paged past the end of the work set -- advance the cursor anyway
+            # so the next iteration does not re-read the same rows.
+            summary["max_profile_id"] = max(r.id for r in rows)
     # D2-3 perf: one HTTP connection for the whole profile batch too.
     with embed_client.session() as http:
         for pid in profile_ids:
