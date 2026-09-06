@@ -490,7 +490,8 @@ def build_scheduler(
         # (see ingestion/orchestrator.py atomicity caveats). A mid-flight
         # crash leaves calls ingested but no ranking jobs queued; this
         # daily sweep enqueues any (recent call × active profile) pair
-        # that has no CallRanking and no active RankingJob.
+        # whose ranking is missing or no longer current, and that has no
+        # active RankingJob.
         try:
             with session_factory() as session:
                 n = reconcile_missing_rankings(session)

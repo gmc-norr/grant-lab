@@ -111,9 +111,13 @@ def bulk_enqueue_for_calls(session: Session, call_ids: list[int]) -> int:
 
 
 def reconcile_missing_rankings(session: Session) -> int:
-    """Enqueue ranking jobs for (recent call × active profile) pairs that
-    have no CallRanking and no active RankingJob. Returns the number of
-    jobs created.
+    """Enqueue ranking jobs for (recent call × active profile) pairs whose
+    ranking is missing OR no longer current, and that have no active
+    RankingJob. Returns the number of jobs created.
+
+    "Current" means the stored CallRanking.profile_fingerprint still equals
+    rank_fingerprint() recomputed from the profile row. A NULL fingerprint
+    is stale: it cannot say what it describes.
 
     Closes the orchestrator recovery gap documented in orchestrator.py:
     if step 3 (enqueue) fails or the process is killed between step 1

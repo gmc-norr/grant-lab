@@ -67,7 +67,13 @@ def test_a_differing_fingerprint_is_re_enqueued(session, ranked_pair):
 
 def test_a_legacy_pair_with_an_untouched_profile_is_skipped(session, ranked_pair):
     """GATE 12. The user's decision: grandfather the pre-0075 corpus rather
-    than re-rank everything on deploy."""
+    than re-rank everything on deploy.
+
+    This is a unit gate on the SQL and nothing more. It does NOT show the
+    corpus is grandfathered in production: the 03:30 embeddings tick writes
+    profiles.embedding_fingerprint, that UPDATE bumps Profile.updated_at
+    (onupdate=func.now()), and 04:00 reconcile then sees ranked_at <
+    updated_at for every legacy pair. See PLAN-DEFECTS.md D50."""
     call_id, profile_id, profile = ranked_pair
     cr = session.get(CallRanking, (call_id, profile_id))
     cr.profile_fingerprint = "legacy"
