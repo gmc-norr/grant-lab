@@ -1,6 +1,6 @@
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
@@ -126,7 +126,12 @@ it("navigates an OWNER away when the transfer really cost them their read access
   await user.click(screen.getByRole("button", { name: /transfer/i }));
   // Staying on THIS page would refetch straight into "not shared with you" --
   // the REALIZED field (the PUT response), not the pre-act prop, drives this.
-  expect(await screen.findByTestId("loc")).toHaveTextContent(/^\/profiles$/);
+  // findBy* waits for PRESENCE, and the probe is already mounted -- it would
+  // resolve instantly against the pre-navigation path. waitFor retries the
+  // ASSERTION, which is the thing that changes.
+  await waitFor(() => {
+    expect(screen.getByTestId("loc")).toHaveTextContent(/^\/profiles$/);
+  });
 });
 
 it("stays put when keep_read_access preserved the caller's own read access", async () => {

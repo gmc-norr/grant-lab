@@ -1,6 +1,6 @@
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
@@ -102,5 +102,9 @@ it("creating a board POSTs the form and navigates to its detail page", async () 
   expect(post).toHaveBeenCalledWith(BOARDS_PATH, {
     body: { title: "New wall", profile_id: 9, orientation: "portrait" },
   });
-  expect(await screen.findByTestId("loc")).toHaveTextContent("/boards/42");
+  // Same reason as ProfileTransferCard: the probe renders on BOTH routes, so
+  // findBy* resolves before the navigation lands. Retry the assertion.
+  await waitFor(() => {
+    expect(screen.getByTestId("loc")).toHaveTextContent("/boards/42");
+  });
 });
