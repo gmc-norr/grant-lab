@@ -467,8 +467,27 @@ nothing about edits.
 `ranked_at` and revokes the exemption for that profile's pairs alone. It is a
 coarser signal than a fingerprint — a visibility toggle also bumps it — but the
 cost is bounded (one re-rank of one edited profile's window, once) and the row
-gets a real fingerprint afterwards, so it never recurs. Untouched profiles stay
-grandfathered, which is what was asked for.
+gets a real fingerprint afterwards, so it never recurs.
+
+**Correction, added after the build (D50).** An earlier revision of this section
+claimed "untouched profiles stay grandfathered". **They do not, and the deploy is
+not inert.** The grandfather clause survives roughly thirty minutes:
+
+1. Migration 0075 deliberately leaves `profiles.embedding_fingerprint` NULL.
+2. The 03:30 tick therefore sees every profile as stale and re-embeds it.
+3. That write bumps `Profile.updated_at`.
+4. At 04:00 reconcile finds `cr.ranked_at >= p.updated_at` false for every row and
+   re-enqueues the entire pre-0075 corpus.
+
+Reproduced independently by two reviewers during the build and re-verified link by
+link against the merged code. It converges after one pass, and every ranking
+afterwards is provably current — which is the outcome the rejected alternative would
+have produced on purpose. **Accepted deliberately rather than fixed**; making
+grandfathering actually hold means finding a signal the embedding refresh does not
+touch, and that is a separate design decision.
+
+The clause still does real work after night one: from then on only an *edited*
+profile's pairs lose the exemption.
 
 The dead-letter suppression is unchanged, so a pair that is stale *and* terminally
 failed does not re-enqueue every tick.
