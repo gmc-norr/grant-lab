@@ -50,8 +50,13 @@ def drain_queue(
     _clock=None,
 ) -> int:
     """Claim up to `batch_size` pending jobs, rank each, persist, mark
-    done-or-failed. Returns the number of jobs processed (whether or not
-    they succeeded).
+    done-or-failed. Returns the number of jobs the loop CONSUMED — successes,
+    failures, and jobs deferred back to PENDING for a stale vector alike.
+
+    A deferral counts, so this return is not "jobs that reached a terminal
+    state". A caller written as `while drain_queue(...) > 0:` would spin on a
+    pair that keeps deferring; the only production caller (`scheduler.py`) is
+    interval-driven and discards the value.
 
     `tick_budget_seconds` is a SOFT per-tick wall-clock budget (B11 Defect 6).
     A single job can take ~240s (local Gemma + a Sonnet escalation); an

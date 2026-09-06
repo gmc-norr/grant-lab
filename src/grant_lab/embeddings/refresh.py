@@ -165,9 +165,14 @@ def refresh_missing_embeddings_tick(
     after_profile_id: int = 0,
     max_batches: int = _TICK_MAX_BATCHES,
 ) -> dict[str, int]:
-    """Daily tick entry point. Drains the NULL/mismatched-model backlog by
-    looping `_refresh_missing_embeddings_batch` until a batch makes no
-    progress (everything left is failing) or `max_batches` is reached.
+    """Daily tick entry point. Drains the stale-or-missing backlog by looping
+    `_refresh_missing_embeddings_batch` until a batch EXAMINES no rows (the
+    scan ran off the end of both tables) or `max_batches` is reached.
+
+    "Examines", not "makes progress": once the candidate scan is widened to
+    include fingerprint mismatches, a page can legitimately examine rows and
+    work none of them, and breaking on that stops the drain at page one with
+    the rest of the table unrepaired.
 
     The summary carries `scan_exhausted`: True when the drain ran off the end
     of both tables, False when it stopped on `max_batches` with rows still

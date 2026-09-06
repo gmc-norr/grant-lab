@@ -69,6 +69,9 @@ def test_an_areas_edit_with_a_blank_description_schedules_the_refresh(owner_prof
     assert task.called, (
         "an areas edit under a blank description scheduled no refresh and no backfill"
     )
+    # ...and it must ask for the EMBED refresh, not merely a rank backfill:
+    # `areas` is inside build_profile_text, so the stored vector is now wrong.
+    assert task.call_args.kwargs["refresh_embedding"] is True
 
 
 def test_an_identical_put_schedules_nothing(owner_profile, pg_session_factory):
