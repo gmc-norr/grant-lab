@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from grant_lab.db.models import CallRanking, RankingJob, RankingJobStatus
+from grant_lab.db.models import CallRanking, Profile, RankingJob, RankingJobStatus
 from grant_lab.profiles.fingerprint import embedding_fingerprint
 from grant_lab.ranking.worker import drain_queue
 from tests.freshness_helpers import enqueue_job, make_call, make_profile, ollama_clean
@@ -148,3 +149,79 @@ def test_a_current_vector_ranks_normally(
 
     with session_factory() as fresh:
         assert fresh.get(CallRanking, (call_id, profile_id)) is not None
+
+
+def test_a_missing_vector_does_not_defer_even_when_the_fingerprint_mismatches(
+    session, session_factory, queued_pair, fake_rank_client
+):
+    """GATE 17, isolated onto the `embedding is not None` conjunct.
+
+    The sibling above NULLs the fingerprint too, so it is carried entirely by
+    `embedding_fingerprint is not None` -- which the deploy case already pins,
+    and the spec's declared mutation for gate 17 ("treat NULL embedding as a
+    mismatch") left it green. Here every OTHER conjunct votes "defer": the
+    fingerprint is PRESENT and mismatched, the job is fresh. Only
+    `profile.embedding is not None` can produce the proceed.
+
+    ck_profiles_embedding_model_paired enforces
+    (embedding IS NULL) = (embedding_model IS NULL), so the model goes with the
+    vector; embedding_fingerprint is deliberately NOT in that constraint, so a
+    present fingerprint over a NULL vector is a legal row.
+    """
+    call_id, profile_id, profile, job_id = queued_pair
+    profile.embedding = None
+    profile.embedding_model = None
+    profile.embedding_fingerprint = "v1:deliberately_not_the_current_text"
+    session.commit()
+
+    with session_factory() as fresh:
+        seeded = fresh.get(Profile, profile_id)
+        assert seeded.embedding is None
+        assert seeded.embedding_fingerprint == "v1:deliberately_not_the_current_text"
+        assert seeded.embedding_fingerprint != embedding_fingerprint(seeded)
+
+    drain_queue(
+        session_factory=session_factory,
+        client=fake_rank_client,
+        embedding_threshold=0.0,
+        batch_size=1,
+    )
+
+    with session_factory() as fresh:
+        assert fresh.get(CallRanking, (call_id, profile_id)) is not None
+        assert fresh.get(RankingJob, job_id).status == RankingJobStatus.DONE
+
+
+def test_a_deferral_is_logged(session, session_factory, queued_pair, fake_rank_client, caplog):
+    """The deferral must be observable: the spec wants a pair that defers
+    repeatedly to read as an embedder problem, and nothing else in this file
+    would notice a refactor that dropped the log."""
+    call_id, profile_id, profile, job_id = queued_pair
+    profile.embedding_fingerprint = "v1:deliberately_not_the_current_text"
+    session.commit()
+
+    with caplog.at_level(logging.INFO, logger="grant_lab.ranking.worker"):
+        drain_queue(
+            session_factory=session_factory,
+            client=fake_rank_client,
+            embedding_threshold=0.0,
+            batch_size=1,
+        )
+
+    deferred = [
+        r
+        for r in caplog.records
+        if "ranking.job_deferred_stale_vector" in r.getMessage()
+        or getattr(r, "event", None) == "ranking_job_deferred_stale_vector"
+    ]
+    assert deferred, [r.getMessage() for r in caplog.records]
+    assert any("ranking.job_deferred_stale_vector" in r.getMessage() for r in deferred)
+    assert any(getattr(r, "event", None) == "ranking_job_deferred_stale_vector" for r in deferred)
+    # The identifiers are what make a repeatedly-deferring pair diagnosable.
+    assert any(getattr(r, "job_id", None) == job_id for r in deferred)
+    assert any(getattr(r, "profile_id", None) == profile_id for r in deferred)
+
+    # Guard the premise: this scenario really deferred.
+    with session_factory() as fresh:
+        assert fresh.get(RankingJob, job_id).status == RankingJobStatus.PENDING
+        assert fresh.get(CallRanking, (call_id, profile_id)) is None

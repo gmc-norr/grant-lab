@@ -85,10 +85,21 @@ def rank_fingerprint(profile) -> str:
     that is stale forever.
 
     `embedding_fingerprint` is in the payload so that editing build_profile_text
-    -- which changes no text field -- still invalidates rankings. It costs no
-    extra re-rank round because the worker defers a pair whose vector is stale
-    (ranking/worker.py), so a ranking is only ever written once the vector has
-    settled.
+    -- which changes no text field -- still invalidates rankings. Usually that
+    costs no extra re-rank round, because the worker defers a pair whose vector
+    has not caught up (ranking/worker.py:184-190). It is NOT a guarantee: that
+    deferral has two deliberate escapes, and a ranking written through either
+    one is stamped with a fingerprint the vector does not yet match, so the
+    pair re-ranks once more when the vector settles.
+
+      * A NULL `embedding_fingerprint` proceeds. It means unknown provenance,
+        not a mismatch: on first deploy every profile has a vector and a NULL
+        fingerprint, and deferring on that would pause all ranking until the
+        03:30 tick. (A NULL `embedding` proceeds for the same reason.)
+      * A job older than _STALE_VECTOR_MAX_DEFER_HOURS (24) proceeds. The
+        deferral is bounded because refresh_profile_embedding with force=False
+        preserves the old vector across an embedder outage, so an unbounded
+        deferral would strand the pair forever.
 
     `name` and `kind` are insurance, not cost: they reach the LLM prompt at
     ranking/prompt.py:218-219, but ProfileUpdateIn (web/api/profiles.py:399-423)
