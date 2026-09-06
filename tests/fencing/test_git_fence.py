@@ -433,3 +433,60 @@ def test_a_transaction_ending_AFTER_the_sink_also_disqualifies(ending):
     _disqualified_but_held(
         _ACQ + f"    sha = write_and_commit_files(repo, {{}}, 'm')\n    s.{ending}()\n"
     )
+
+
+# ---------------------------------------------------------------------------
+# Unknown argv at a known git executor must not read as "not a commit".
+#
+# Until 2026-09-05 it did. An outside review added this to setup.py:
+#
+#     def _review_unfenced_commit(repo):
+#         arguments = ["commit", "--allow-empty", "-m", "review-unfenced"]
+#         return _run_git(arguments, cwd=repo)
+#
+# and the ENTIRE fencing suite passed — 239 passed — while calling it against a
+# disposable repository really did move HEAD with no mutex and no session
+# (`git_exit=0 head_changed=True fence=none`). Writing the same list inline
+# reddened five tests across four files. One local variable was the difference.
+#
+# Reproduced here after the fix: the variable-argv mutant now reddens those same
+# five tests. These cases pin the classifier directly so the whole-suite
+# reproduction does not have to be redone to notice a regression.
+# ---------------------------------------------------------------------------
+
+import ast as _ast  # noqa: E402
+
+import pytest  # noqa: E402
+
+from tests.fencing.git_fence import _is_commit_call  # noqa: E402
+
+
+def _call(source: str) -> _ast.Call:
+    node = _ast.parse(source, mode="eval").body
+    assert isinstance(node, _ast.Call)
+    return node
+
+
+@pytest.mark.parametrize(
+    ("source", "expected", "why"),
+    [
+        ('_run_git(["commit", "-m", "x"], cwd=r)', True, "the literal commit case"),
+        ('_run_git(["add", "-A"], cwd=r)', False, "a literal non-commit verb"),
+        ('_run_git(["init", "-q", "-b", "main"], cwd=r)', False, "another literal"),
+        ("_run_git(arguments, cwd=r)", True, "a NAME — the review's mutant"),
+        ("_run_git(build_argv(), cwd=r)", True, "a call result"),
+        ("_run_git(ARGV_BY_MODE[mode], cwd=r)", True, "a subscript"),
+        ("_run_git([verb, '-m', msg], cwd=r)", True, "literal list, computed verb"),
+        ("_run_git([*base, '-m', msg], cwd=r)", True, "a splat in first position"),
+        ("_run_git()", True, "no arguments at all"),
+    ],
+)
+def test_only_a_provably_non_commit_literal_is_treated_as_safe(source, expected, why):
+    """False means "this call cannot commit". It must be earned, not assumed.
+
+    What trivially passes this: a classifier returning True for everything. The
+    three literal non-commit rows are what stop that — they are the reason
+    `_run_git(["add", "-A"])` does not become a fenced sink and flood the
+    inventory.
+    """
+    assert _is_commit_call("_run_git", _call(source)) is expected, why

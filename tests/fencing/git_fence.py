@@ -121,18 +121,33 @@ def _is_commit_call(canonical: str, node: ast.Call) -> bool:
     if kind == "always":
         return True
     if kind == "argv":
-        # _run_git(["commit", ...]) — first positional argument must be a list
-        # whose first element is the string "commit".
-        if node.args:
-            first_arg = node.args[0]
-            if (
-                isinstance(first_arg, ast.List)
-                and first_arg.elts
-                and isinstance(first_arg.elts[0], ast.Constant)
-                and first_arg.elts[0].value == "commit"
-            ):
-                return True
-        return False
+        # FAILS CLOSED. Only a literal list whose first element is a literal
+        # string proves what this call does; anything else is UNKNOWN argv at a
+        # known git executor, and unknown must not mean "not a commit".
+        #
+        # It used to. The 2026-09-05 outside review added
+        #     def _review_unfenced_commit(repo):
+        #         arguments = ["commit", "--allow-empty", "-m", "review-unfenced"]
+        #         return _run_git(arguments, cwd=repo)
+        # to setup.py and the ENTIRE fencing suite passed — 239 passed — while
+        # that function really did move HEAD with no mutex and no session
+        # (`git_exit=0 head_changed=True fence=none`). The identical function with
+        # the list written inline reddened five tests across four files. One local
+        # variable was the whole difference.
+        #
+        # Costs nothing today, measured: `_run_git` has 1 inline-commit call and
+        # 3 inline non-commit calls in src/, and ZERO variable-argv calls. So this
+        # rule reclassifies nothing that exists and fails closed on the next one.
+        # A genuine non-commit call with computed argv must be written as a
+        # literal, or added here as a reviewed exception with its own test.
+        if not node.args:
+            return True  # `_run_git()` — cannot prove it is not a commit
+        first_arg = node.args[0]
+        if not isinstance(first_arg, ast.List):
+            return True  # a name, call, subscript, splat… — unknown
+        if not first_arg.elts or not isinstance(first_arg.elts[0], ast.Constant):
+            return True  # `[cmd, "-m", msg]` — the verb itself is computed
+        return first_arg.elts[0].value == "commit"
     return False
 
 
