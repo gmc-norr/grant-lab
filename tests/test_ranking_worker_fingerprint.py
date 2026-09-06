@@ -164,4 +164,5 @@ def test_retained_analysis_survives_when_the_profile_did_not_change(
     with session_factory() as fresh:
         cr = fresh.get(CallRanking, (call_id, profile_id))
         assert cr.summary == "Advice that is still current"
+        assert cr.applicant_notes == [{"note": "still good"}]
         assert cr.analysis_model == "claude-sonnet-4-6"
