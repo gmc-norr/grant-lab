@@ -1,10 +1,13 @@
 // frontend/src/routes/TriageCard.tsx
+import { useState } from "react";
 import { Link } from "react-router-dom";
 
+import { useSetDecisionNote } from "../api/calls";
 import type { CallItem } from "../api/dashboard";
 import type { TriageView } from "../api/decisions";
 import { CriterionChips } from "../components/CriterionChips";
 import { DeadlineLocal, deadlineLocalView } from "./Deadline";
+import { DecisionNoteStrip } from "./DecisionNoteStrip";
 import styles from "./TriageFeed.module.css";
 
 // One call in the triage feed, in spec §5's field order — *what is this, what
@@ -58,6 +61,80 @@ function daysLeftText(call: CallItem): string | null {
   if (days < 0) return null;
   if (days === 0) return "today";
   return days === 1 ? "1 day left" : `${days} days left`;
+}
+
+// THE REASON, ON THE ROW IT BELONGS TO (D2, D4). Two halves, and the second is
+// the one that is easy to leave out: the feed's strip appears once, at the
+// moment of the decision, and is deliberately ignorable (D2) -- so a surface
+// that only DISPLAYS an existing note is a surface most people can never write
+// on. "I'll say why later" has to be reachable from the row itself.
+//
+// Saved and Hidden only, and only with a profile resolved: a note hangs off a
+// `call_decisions` row whose `profile_id` is NOT NULL, and the Inbox has no
+// such row -- an affordance there would offer to annotate a decision that does
+// not exist, and the endpoint would 404.
+//
+// Its own component, not a branch inside TriageCard, so `useSetDecisionNote`
+// is mounted on the rows that can actually write and on no others.
+function DecisionNote({
+  call,
+  profileId,
+  state,
+}: {
+  call: CallItem;
+  profileId: number;
+  state: "saved" | "hidden";
+}) {
+  const [editing, setEditing] = useState(false);
+  const setNote = useSetDecisionNote();
+  const note = call.decision_note;
+
+  if (editing) {
+    return (
+      <DecisionNoteStrip
+        // KEYED ON THE NOTE, not only on the call. `initialNote` is read into
+        // useState on MOUNT and never again -- it is a seed, not a controlled
+        // value. The feed gets away with that because it replaces the strip
+        // per decision; a ROW does not, because its note changes underneath an
+        // editor that stays open. The everyday way that happens is
+        // normalisation: the strip trims before sending (D8), so "  padded  "
+        // is stored as "padded", and without this key the box keeps the
+        // padding for the rest of the session and every later Enter re-sends a
+        // note the server already holds.
+        key={`${call.id}:${note ?? ""}`}
+        target={{ callId: call.id, profileId, title: call.title, state }}
+        // OPTIONAL on the strip because Task 6 only ever creates. Passed here
+        // because this surface EDITS, and a strip with no way to receive the
+        // current value can only ever replace it from blank.
+        initialNote={note}
+        // expectedState is the ROW's, supplied by the caller rather than read
+        // off the strip: the strip must not carry two ways to say which
+        // decision it is about (D11). The server 409s a note filed against a
+        // decision that has flipped since the box was opened.
+        onSave={(args) => setNote.mutateAsync({ ...args, expectedState: state })}
+        onDismiss={() => setEditing(false)}
+      />
+    );
+  }
+
+  return (
+    <p className={styles.cardNote}>
+      {note !== null ? (
+        <button
+          type="button"
+          data-field="decision-note"
+          className={styles.noteText}
+          onClick={() => setEditing(true)}
+        >
+          {note}
+        </button>
+      ) : (
+        <button type="button" className={styles.noteAdd} onClick={() => setEditing(true)}>
+          Add note
+        </button>
+      )}
+    </p>
+  );
 }
 
 // THE URL IS THE STATE (D11). Both parameters travel to the detail page: the
@@ -119,6 +196,15 @@ export function TriageCard({
       <h2 className={styles.cardTitle}>
         <Link to={detailTo}>{call.title}</Link>
       </h2>
+
+      {/* UNDER THE TITLE, and OUTSIDE the `expanded` block -- the same choice
+          the Save/Hide row below makes, for the same reason: an affordance
+          only on the focused card means reaching any other call requires
+          moving the cursor there first, which is the interaction that was
+          broken. The reason is also what the reader is scanning Hidden FOR. */}
+      {view !== "inbox" && profileId !== null && (
+        <DecisionNote call={call} profileId={profileId} state={view} />
+      )}
 
       <p className={styles.cardMeta}>
         <span data-field="funder">{call.source_name ?? "Unknown funder"}</span>

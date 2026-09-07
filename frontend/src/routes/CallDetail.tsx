@@ -3,8 +3,9 @@ import { Anchor, Button, Group, Stack, Text } from "@mantine/core";
 import { useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
-import { useCallDetail, useHideCall, useUnhideCall } from "../api/calls";
+import { useCallDetail, useHideCall, useSetDecisionNote, useUnhideCall } from "../api/calls";
 import { CallDetailBody } from "./CallDetailBody";
+import { DecisionNoteStrip } from "./DecisionNoteStrip";
 
 export function CallDetail() {
   const { id = "" } = useParams();
@@ -23,6 +24,11 @@ export function CallDetail() {
   // Remember the profile the hide was made ON, so Undo deletes the same row
   // even if the URL changes underneath us.
   const [hidden, setHidden] = useState<{ id: number; profileId: number } | null>(null);
+  const setNote = useSetDecisionNote();
+  // WHETHER THE BOX IS UP, held apart from `hidden` so Escape can dismiss it
+  // (D2 -- the prompt is ignorable) without also dismissing the Undo it sits
+  // beside. Both are cleared together by the Undo itself.
+  const [noteOpen, setNoteOpen] = useState(false);
   const { data, isLoading, isError, error } = useCallDetail(callId, profile);
 
   if (isLoading) return <Text p="md">Loading…</Text>;
@@ -54,12 +60,36 @@ export function CallDetail() {
                       // job to remember it.
                       await unhide.mutateAsync(hidden);
                       setHidden(null);
+                      // A note belongs to its decision and dies with it (D4),
+                      // so the box goes with the row it was about -- leaving it
+                      // up would solicit a reason whose write can only 404.
+                      setNoteOpen(false);
                     }}>
               Undo
             </Button>
             <Button variant="subtle" size="xs" onClick={() => navigate(backTo)}>
               Back to all calls
             </Button>
+            {/* WHY, asked where the decision was made (D2). The target carries
+                the {id, profileId} this page already remembers for the Undo,
+                for exactly the same reason: ?profile= can change under a late
+                write, and the note must land on the decision it was about, not
+                on whatever the URL says now.
+
+                No initialNote: the detail read-model carries no decision_note,
+                and a hide made a second ago has none. */}
+            {noteOpen && (
+              <DecisionNoteStrip
+                target={{
+                  callId: hidden.id,
+                  profileId: hidden.profileId,
+                  title: call.title,
+                  state: "hidden",
+                }}
+                onSave={(args) => setNote.mutateAsync({ ...args, expectedState: "hidden" })}
+                onDismiss={() => setNoteOpen(false)}
+              />
+            )}
           </>
         ) : confirmHide ? (
           <>
@@ -70,6 +100,10 @@ export function CallDetail() {
                       await hide.mutateAsync({ id: call.id, profileId: profile });
                       setConfirmHide(false);
                       setHidden({ id: call.id, profileId: profile });
+                      // ON SUCCESS, NEVER OPTIMISTICALLY (D10). A failed hide
+                      // that still asked for a reason would solicit a note for
+                      // a decision that did not happen.
+                      setNoteOpen(true);
                     }}>
               Yes, hide it
             </Button>

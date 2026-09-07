@@ -15,7 +15,31 @@ function CandidateRow({ c }: { c: Candidate }) {
       <Table.Td>{c.profile_name}</Table.Td>
       <Table.Td>{c.aggregate_score}</Table.Td>
       <Table.Td>{c.embed_similarity !== null ? c.embed_similarity.toFixed(3) : "-"}</Table.Td>
-      <Table.Td><Code>{c.reason}</Code></Table.Td>
+      <Table.Td>
+        <Code>{c.reason}</Code>
+        {/* THE HUMAN'S REASON, beside the signal that disagreed with them (D7).
+            This is what the whole note feature is collected FOR: the mining
+            query already surfaces "the ranker said 74, a researcher hid it" --
+            the note is the half that says why, and a curator setting an
+            expected score needs it in the same cell, not two columns away.
+
+            UNATTRIBUTED, and there is nothing to omit: CandidateOut sends bare
+            strings, with no user and no timestamp to render even by accident
+            (D3). The researcher was told their name is not attached, and a
+            privacy property that depends on this component remembering not to
+            print a field is not a privacy property -- so the field is not
+            there. Capped and ordered newest-first server-side. */}
+        {c.user_notes.length > 0 && (
+          <Box component="ul" data-user-notes="" fz="xs" mt={4} pl="1rem" c="dimmed">
+            {c.user_notes.map((n, i) => (
+              // Index key: the notes are unattributed strings off one row and
+              // two researchers can write the same words, so the text is not a
+              // stable identity. The list is read-only and never reordered.
+              <li key={i}>{n}</li>
+            ))}
+          </Box>
+        )}
+      </Table.Td>
       <Table.Td>
         <Box component="form" onSubmit={(e) => {
           e.preventDefault();

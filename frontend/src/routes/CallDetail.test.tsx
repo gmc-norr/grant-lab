@@ -1,6 +1,7 @@
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 
@@ -282,4 +283,62 @@ it("the back link is a bare / when the reader arrived with no search at all", as
   renderDetail("/calls/5");
   await screen.findByRole("heading", { name: "Genomics Grant" });
   expect(screen.getByRole("link", { name: /all calls/i })).toHaveAttribute("href", "/");
+});
+
+// -------------------------------------------------------------------------
+// Gate 16 (detail-page half) — a hide made HERE is a decision like any other,
+// and D2 asks for its reason at the moment it is made. The strip is mounted
+// beside the Undo, on the {id, profileId} this page already holds in state for
+// exactly the same reason the strip holds its own target: the URL can change
+// under a late write, and the note must land on the decision it was about.
+// -------------------------------------------------------------------------
+it("offers no note box before anything has been hidden", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: RANKED, error: undefined } as never);
+  renderDetail();
+  await screen.findByRole("heading", { name: "Genomics Grant" });
+  expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+});
+
+it("asks why beside the Undo, and the note reaches the endpoint with the hidden state", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: RANKED, error: undefined } as never);
+  vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { hidden: true }, error: undefined } as never);
+  vi.spyOn(clientMod.api, "DELETE").mockResolvedValue({ data: { hidden: false }, error: undefined } as never);
+  const put = vi
+    .spyOn(clientMod.api, "PUT")
+    .mockResolvedValue({ data: { decision_note: "not eligible" }, error: undefined } as never);
+  renderDetail("/calls/5?profile=7");
+  fireEvent.click(await screen.findByRole("button", { name: /hide this call/i }));
+  fireEvent.click(screen.getByRole("button", { name: /yes, hide it/i }));
+  // The Undo is the anchor: the box is beside it, in the same section, and only
+  // after the POST has actually succeeded (D10 — never optimistically).
+  const undoBtn = await screen.findByRole("button", { name: /undo/i });
+  const box = await screen.findByRole("textbox");
+  // BESIDE the Undo, in the same region -- not appended somewhere further down
+  // the page. `closest("section")` off the box would find the strip's OWN
+  // <section>, so the anchor is the labelled region both must share.
+  const region = undoBtn.closest('section[aria-label="Hide this call"]');
+  expect(region).not.toBeNull();
+  expect(region?.contains(box)).toBe(true);
+  expect(screen.getByText(/administrator can read/i)).toBeInTheDocument();
+  await userEvent.type(box, "not eligible{Enter}");
+  await waitFor(() =>
+    expect(put).toHaveBeenCalledWith("/api/calls/{call_id}/note", {
+      params: { path: { call_id: 5 }, query: { profile_id: 7 } },
+      body: { note: "not eligible", expected_state: "hidden" },
+    }),
+  );
+});
+
+it("takes the box away again when the hide is undone — the note died with the row (D4)", async () => {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: RANKED, error: undefined } as never);
+  vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { hidden: true }, error: undefined } as never);
+  vi.spyOn(clientMod.api, "DELETE").mockResolvedValue({ data: { hidden: false }, error: undefined } as never);
+  vi.spyOn(clientMod.api, "PUT").mockResolvedValue({ data: { decision_note: null }, error: undefined } as never);
+  renderDetail("/calls/5?profile=7");
+  fireEvent.click(await screen.findByRole("button", { name: /hide this call/i }));
+  fireEvent.click(screen.getByRole("button", { name: /yes, hide it/i }));
+  await screen.findByRole("textbox");
+  fireEvent.click(await screen.findByRole("button", { name: /undo/i }));
+  await screen.findByRole("button", { name: /hide this call/i });
+  expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
 });

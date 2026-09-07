@@ -1,13 +1,19 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { fireEvent, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import * as clientMod from "../api/client";
 import type { CallItem } from "../api/dashboard";
 import type { components } from "../api/schema.gen";
 import { renderWithProviders } from "../test-utils";
 import { TriageCard } from "./TriageCard";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 type Criterion = components["schemas"]["CallListCriterionOut"];
 
@@ -478,5 +484,206 @@ describe("gate 8 — no raw score on the card", () => {
       .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*"))
       .join("\n");
     expect(code).not.toContain("aggregate_score");
+  });
+});
+
+// -------------------------------------------------------------------------
+// Gate 16 — THE REASON, ON THE ROW IT BELONGS TO (D2/D4, spec §5).
+//
+// The strip in the feed is deliberately ignorable, so most decisions arrive
+// here with no note at all. A surface that only DISPLAYS an existing note is
+// therefore a surface most people can never write on: the note has to be
+// addable from the row too, and editable once written.
+//
+// Saved and Hidden only. A note hangs off a `call_decisions` row (D4) and the
+// Inbox has none, so an affordance there would offer to annotate a decision
+// that does not exist — and the endpoint would 404.
+// -------------------------------------------------------------------------
+describe("gate 16 — the decision note on the card", () => {
+  function stubPut(note: string | null = null) {
+    return vi.spyOn(clientMod.api, "PUT").mockResolvedValue({
+      data: { decision_note: note },
+      error: undefined,
+      response: new Response(),
+    } as never);
+  }
+
+  it("prints the note under the title in Hidden", () => {
+    const { container } = renderWithProviders(
+      <TriageCard
+        call={call({ decision_note: "wrong field" })}
+        expanded
+        profileId={7}
+        view="hidden"
+      />,
+    );
+    const shown = container.querySelector('[data-field="decision-note"]');
+    expect(shown).not.toBeNull();
+    expect(shown).toHaveTextContent("wrong field");
+    // UNDER THE TITLE, not appended at the end of the card: the note answers
+    // "why is this here" about the row it sits on, and a reason printed below
+    // the evidence is read after the decision it explains.
+    const title = container.querySelector("h2");
+    expect(title?.compareDocumentPosition(shown as Node)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  });
+
+  it("prints it in Saved too, and on a card that is not the focused one", () => {
+    // The Save/Hide controls are outside the `expanded` block for the same
+    // reason: an affordance only on the focused card means reaching any other
+    // call requires moving the cursor first.
+    const { container } = renderWithProviders(
+      <TriageCard
+        call={call({ decision_note: "worth a look in autumn" })}
+        expanded={false}
+        profileId={7}
+        view="saved"
+      />,
+    );
+    expect(container.querySelector('[data-field="decision-note"]')).toHaveTextContent(
+      "worth a look in autumn",
+    );
+  });
+
+  it("offers NOTHING in the Inbox — no note, no Add-note control", () => {
+    const { container } = renderWithProviders(
+      <TriageCard call={call({ decision_note: null })} expanded profileId={7} view="inbox" />,
+    );
+    expect(screen.queryByRole("button", { name: /add note/i })).toBeNull();
+    expect(container.querySelector('[data-field="decision-note"]')).toBeNull();
+    expect(container.querySelector("[data-note-strip]")).toBeNull();
+  });
+
+  it("still offers nothing in the Inbox when a note somehow arrives on the row", () => {
+    // The gate is on the VIEW, not on the null. Without this, deleting the
+    // `view !== "inbox"` check and keeping only `decision_note !== null` passes
+    // the test above for free — the API never sends a note on the inbox view,
+    // so that fixture proves nothing about which condition is doing the work.
+    const { container } = renderWithProviders(
+      <TriageCard call={call({ decision_note: "leaked" })} expanded profileId={7} view="inbox" />,
+    );
+    expect(container.querySelector('[data-field="decision-note"]')).toBeNull();
+    expect(screen.queryByText("leaked")).toBeNull();
+  });
+
+  it("offers 'Add note' on a hidden card that has none, and writing one reaches the endpoint", async () => {
+    // THE REACHABILITY HALF. The feed's strip appears once, at the moment of
+    // the decision, and is ignorable by design (D2) — so without a control
+    // here, "I'll say why later" is not a thing the product can do at all. A
+    // test that only checks the non-null path is green while that is true.
+    const put = stubPut("because it duplicates 2024");
+    renderWithProviders(
+      <TriageCard
+        call={call({ id: 42, decision_note: null })}
+        expanded
+        profileId={7}
+        view="hidden"
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: /add note/i }));
+    await userEvent.type(screen.getByRole("textbox"), "because it duplicates 2024{Enter}");
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith("/api/calls/{call_id}/note", {
+        params: { path: { call_id: 42 }, query: { profile_id: 7 } },
+        // expected_state comes from the ROW's view, not from the strip: the
+        // server 409s a note filed against a decision that has since flipped.
+        body: { note: "because it duplicates 2024", expected_state: "hidden" },
+      }),
+    );
+  });
+
+  it("edits an existing note through the same strip, seeded with what is already there", async () => {
+    const put = stubPut("second thoughts");
+    renderWithProviders(
+      <TriageCard
+        call={call({ id: 42, decision_note: "wrong field" })}
+        expanded
+        profileId={7}
+        view="saved"
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: /wrong field/i }));
+    const box = screen.getByRole("textbox");
+    // SEEDED, not empty: a component with no way to receive the current value
+    // can only ever create, so "edit" would silently be "replace from blank".
+    expect(box).toHaveValue("wrong field");
+    await userEvent.clear(box);
+    await userEvent.type(box, "second thoughts{Enter}");
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith("/api/calls/{call_id}/note", {
+        params: { path: { call_id: 42 }, query: { profile_id: 7 } },
+        body: { note: "second thoughts", expected_state: "saved" },
+      }),
+    );
+  });
+
+  it("re-seeds the open editor when the stored note changes under it", async () => {
+    // THE STALE-SEED GATE. DecisionNoteStrip reads `initialNote` into useState
+    // on MOUNT and never again — it is a seed, not a controlled value. The feed
+    // gets away with that because it keys the strip per decision; a row does
+    // not, because the row's note changes underneath the open editor.
+    //
+    // The everyday way that happens is normalisation: the strip trims before
+    // sending (D8), so typing "  padded  " stores "padded", and the box that
+    // is still open must show what was STORED, not the raw text that produced
+    // it. Without a `key` covering the note the box keeps the padding for the
+    // rest of the session and the next Enter re-sends a no-op.
+    //
+    // Entered through the EXISTING-note control rather than through "Add note",
+    // so this gate and the reachability gate above fail for different reasons:
+    // deleting the Add-note control must not redden this one too.
+    const put = stubPut("padded reason");
+    const { rerender } = renderWithProviders(
+      <TriageCard
+        call={call({ id: 42, decision_note: "first go" })}
+        expanded
+        profileId={7}
+        view="hidden"
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: /first go/i }));
+    const box = screen.getByRole("textbox");
+    await userEvent.clear(box);
+    await userEvent.type(box, "   padded reason   {Enter}");
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith("/api/calls/{call_id}/note", {
+        params: { path: { call_id: 42 }, query: { profile_id: 7 } },
+        body: { note: "padded reason", expected_state: "hidden" },
+      }),
+    );
+    // The invalidated ["calls"] query lands and the row now carries the STORED
+    // note -- trimmed, unlike the raw text still sitting in the box. The editor
+    // is still open.
+    rerender(
+      <TriageCard
+        call={call({ id: 42, decision_note: "padded reason" })}
+        expanded
+        profileId={7}
+        view="hidden"
+      />,
+    );
+    // Compared as a RAW string rather than through toHaveValue: the failure has
+    // to be legible, and jest-dom prints "   padded reason   " and "padded
+    // reason" identically once the terminal has eaten the padding.
+    await waitFor(() =>
+      expect((screen.getByRole("textbox") as HTMLInputElement).value).toBe("padded reason"),
+    );
+  });
+
+  it("writes nothing while there is no profile to write it against", () => {
+    // A note lives on `call_decisions`, whose profile_id is NOT NULL. With no
+    // profile resolved there is no row to annotate, so the control stands down
+    // rather than firing a request that cannot be satisfied.
+    const { container } = renderWithProviders(
+      <TriageCard
+        call={call({ decision_note: null })}
+        expanded
+        profileId={null}
+        view="hidden"
+      />,
+    );
+    expect(screen.queryByRole("button", { name: /add note/i })).toBeNull();
+    expect(container.querySelector('[data-field="decision-note"]')).toBeNull();
   });
 });
