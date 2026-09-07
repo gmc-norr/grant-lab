@@ -137,6 +137,15 @@ def test_0078_round_trip(migrated_engine, pg_url, profile_factory):
                 {"b": bid, "c": cid},
             ).scalar()
             assert remaining == 0, "the seeded NULL-approved row survived the downgrade's DELETE"
+            # Verify the ALTER COLUMN itself, not just its absence of an
+            # exception -- with every NULL row already deleted above, a
+            # downgrade that left approved_by NULLABLE (or dropped the
+            # ALTER COLUMN entirely) would raise nothing and this test would
+            # still pass without this check.
+            cols = {c["name"]: c["nullable"] for c in inspect(conn).get_columns("board_items")}
+            assert cols["approved_by"] is False, (
+                "downgrade must restore board_items.approved_by to NOT NULL"
+            )
     finally:
         # ALWAYS restore head, even if an assertion above failed -- later tests
         # in this session reuse the shared container at head.
