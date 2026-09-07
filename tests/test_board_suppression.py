@@ -121,3 +121,74 @@ def test_reapproving_on_one_board_leaves_another_boards_takedown_alone(
         assert s.get(BoardSuppression, (a, call_id)) is not None, (
             "approving on board B cleared board A's takedown - the clear is not board-scoped"
         )
+
+
+def test_a_threshold_sweep_does_not_undo_a_takedown(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """GATE 4 -- the one the whole suppression mechanism rests on.
+
+    `POST {"min_score": N}` approves everything at or above N. It is not
+    explicit about any particular call, so it must not clear a suppression it
+    never named -- the spec's justification for clearing is that an EXPLICIT
+    human approval is a newer, stronger signal, and a sweep is not explicit.
+
+    It must also not APPROVE the call. Clearing-but-not-approving and
+    approving-but-not-clearing are both wrong: the second leaves an auto board
+    showing a card at 09:00 that the 05:00 job removes again, forever.
+    """
+    from tests.test_board_auto_selection import _ranked_call
+
+    app = _setup(monkeypatch, pg_url)
+    pid, owner = profile_factory(name="sweep vs takedown")
+    board_id = _make_board(pg_session_factory, profile_id=pid, created_by=owner, slug="q" * 16)
+    kept = _ranked_call(pg_session_factory, external_id="sweep-keep", profile_id=pid, score=90)
+    removed = _ranked_call(pg_session_factory, external_id="sweep-gone", profile_id=pid, score=95)
+
+    client = _client_for(app, owner)
+    with client:
+        # Put the higher-scoring one up, then take it down deliberately.
+        assert client.post(
+            f"/api/boards/{board_id}/items", json={"call_ids": [removed]}
+        ).status_code == 200
+        assert client.delete(f"/api/boards/{board_id}/items/{removed}").status_code == 204
+        # Now sweep everything at or above a threshold BELOW both scores.
+        r = client.post(f"/api/boards/{board_id}/items", json={"min_score": 80})
+    assert r.status_code == 200, r.text
+
+    with pg_session_factory() as s:
+        assert s.get(BoardSuppression, (board_id, removed)) is not None, (
+            "the sweep cleared a takedown it never named"
+        )
+        assert s.get(BoardItem, (board_id, removed)) is None, (
+            "the sweep re-approved a suppressed call; the 05:00 job would drop it again"
+        )
+        # The control: the sweep still does its job for everything else.
+        assert s.get(BoardItem, (board_id, kept)) is not None, (
+            "the sweep stopped working entirely"
+        )
+
+
+def test_a_suppressed_call_is_not_counted_as_waiting(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """GATE 5. A suppressed call is DECIDED, not waiting. Counting it makes the
+    'N calls need review' badge name a number that can never go down --
+    the same reason already-approved calls drop out of that count."""
+    from tests.test_board_auto_selection import _ranked_call
+
+    app = _setup(monkeypatch, pg_url)
+    pid, owner = profile_factory(name="sweep waiting count")
+    board_id = _make_board(pg_session_factory, profile_id=pid, created_by=owner, slug="r" * 16)
+    call_id = _ranked_call(pg_session_factory, external_id="wait-gone", profile_id=pid, score=91)
+
+    client = _client_for(app, owner)
+    with client:
+        before = client.get(f"/api/boards/{board_id}/queue").json()["waiting_count"]
+        client.post(f"/api/boards/{board_id}/items", json={"call_ids": [call_id]})
+        client.delete(f"/api/boards/{board_id}/items/{call_id}")
+        after = client.get(f"/api/boards/{board_id}/queue").json()
+    assert before == 1, f"expected the call to start out waiting, got {before}"
+    assert after["waiting_count"] == 0, "a suppressed call is still counted as waiting"
+    row = [r for r in after["items"] if r["call_id"] == call_id][0]
+    assert row["suppressed"] is True, "the row does not say WHY it will not go up"

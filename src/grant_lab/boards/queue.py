@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from grant_lab.db.models import Board, BoardItem, Call, CallRanking, Profile
+from grant_lab.db.models import Board, BoardItem, BoardSuppression, Call, CallRanking, Profile
 from grant_lab.web.dashboard import _decision_predicate
 
 
@@ -35,6 +35,13 @@ class QueueRow:
     call: Call
     score: int
     already_approved: bool
+    # A call an operator took OFF this board. Like `already_approved` it is a
+    # DECIDED state, not a waiting one -- so it is flagged in the rows, dropped
+    # from the waiting count, and skipped by the bulk threshold sweep. Without
+    # the last of those, `POST {"min_score": N}` re-approves it and
+    # `approve_items` clears the suppression it never named: on an auto board
+    # that silently empties the exception list the 05:00 job depends on.
+    suppressed: bool
 
 
 def board_candidate_parts(session: Session, *, board: Board):
@@ -87,9 +94,19 @@ def board_queue(
     # so the next reader is not hunting for a use that is not there.
     _owner_id, filters, ranking_join, order_by = board_candidate_parts(session, board=board)
     approved_ids = select(BoardItem.call_id).where(BoardItem.board_id == board.id).scalar_subquery()
+    suppressed_ids = (
+        select(BoardSuppression.call_id)
+        .where(BoardSuppression.board_id == board.id)
+        .scalar_subquery()
+    )
 
     rows = session.execute(
-        select(Call, CallRanking.aggregate_score, Call.id.in_(approved_ids))
+        select(
+            Call,
+            CallRanking.aggregate_score,
+            Call.id.in_(approved_ids),
+            Call.id.in_(suppressed_ids),
+        )
         .join(CallRanking, ranking_join)
         .where(*filters)
         .order_by(*order_by)
@@ -97,18 +114,26 @@ def board_queue(
         .offset(offset)
     ).all()
     queue_rows = [
-        QueueRow(call=call, score=score, already_approved=bool(approved))
-        for call, score, approved in rows
+        QueueRow(
+            call=call,
+            score=score,
+            already_approved=bool(approved),
+            suppressed=bool(suppressed),
+        )
+        for call, score, approved, suppressed in rows
     ]
 
-    # Already-approved candidates stay in `queue_rows` (flagged, not dropped --
-    # D3: approval and the queue are different states) but drop out of the
-    # WAITING count, which is what a "N calls need review" badge means.
+    # Already-approved AND suppressed candidates stay in `queue_rows` (flagged,
+    # not dropped -- D3: approval and the queue are different states) but drop
+    # out of the WAITING count, which is what a "N calls need review" badge
+    # means. Both are decided; neither is waiting. Counting a suppressed call
+    # gives the badge a number that can never reach zero, because the only
+    # action that would clear it is the one the operator already refused.
     waiting = session.scalar(
         select(func.count())
         .select_from(Call)
         .join(CallRanking, ranking_join)
-        .where(*filters, Call.id.notin_(approved_ids))
+        .where(*filters, Call.id.notin_(approved_ids), Call.id.notin_(suppressed_ids))
     )
 
     return queue_rows, waiting

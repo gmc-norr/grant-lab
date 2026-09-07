@@ -580,6 +580,10 @@ class QueueCallOut(BaseModel):
     source_name: str | None
     score: int
     already_approved: bool
+    # Why this row will not go up on its own: an operator took it off this
+    # board. It stays in the list so the reason is visible rather than the row
+    # silently vanishing, and naming it in `call_ids` still brings it back.
+    suppressed: bool
 
 
 class BoardQueueOut(BaseModel):
@@ -658,6 +662,7 @@ def get_board_queue(
                 source_name=(row.call.source.name if row.call.source else None),
                 score=row.score,
                 already_approved=row.already_approved,
+                suppressed=row.suppressed,
             )
             for row in rows
         ]
@@ -717,7 +722,14 @@ def _candidates_at_or_above(
         for row in rows:
             if row.score < min_score:
                 return call_ids
-            if not row.already_approved:
+            # `suppressed` matters as much as `already_approved` here, and for
+            # a sharper reason. Approving a suppressed call would ALSO clear
+            # its suppression below -- so a sweep that never named the call
+            # would undo a deliberate takedown, and on an auto board empty the
+            # exception list the 05:00 job reads. The spec's licence to clear
+            # is that an EXPLICIT approval is the stronger signal; a threshold
+            # sweep is explicit about no call in particular.
+            if not row.already_approved and not row.suppressed:
                 call_ids.append(row.call.id)
         if len(rows) < page_size:
             return call_ids

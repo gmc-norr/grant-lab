@@ -4258,6 +4258,8 @@ export interface components {
             score: number;
             /** Source Name */
             source_name: string | null;
+            /** Suppressed */
+            suppressed: boolean;
             /** Title */
             title: string;
             /** Url */

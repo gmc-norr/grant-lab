@@ -46,6 +46,7 @@ function call(overrides: Partial<QueueCall>): QueueCall {
     source_name: "Vinnova",
     score: 50,
     already_approved: false,
+    suppressed: false,
     ...overrides,
   };
 }
@@ -203,4 +204,27 @@ it("shows remaining capacity from the board's stored items_per_page", async () =
   // cap = 4 * 3 = 12, not the landscape default of 24.
   expect(await screen.findByText(/12/)).toBeInTheDocument();
   expect(screen.queryByText(/24/)).toBeNull();
+});
+
+it("shows a call taken off this board, says so, and offers no checkbox", async () => {
+  // A suppressed row must stay VISIBLE. Dropping it would look like a ranking
+  // change, and the operator would have no way to see why a call they removed
+  // is not coming back. No checkbox, because "approve everything at or above
+  // N" deliberately skips it -- a tickable box would promise an action the
+  // bulk path will not take.
+  renderQueue({
+    items: [
+      call({ call_id: 1, title: "Taken down", suppressed: true, score: 95 }),
+      call({ call_id: 2, title: "Still waiting", score: 70 }),
+    ],
+    waiting_count: 1,
+  });
+  const row = (await screen.findByText("Taken down")).closest("[data-field='queue-row']");
+  expect(row).not.toBeNull();
+  expect(within(row as HTMLElement).getByText(/removed from this board/i)).toBeInTheDocument();
+  expect(within(row as HTMLElement).queryByRole("checkbox")).toBeNull();
+
+  // The control: an ordinary waiting row is still selectable.
+  const other = screen.getByText("Still waiting").closest("[data-field='queue-row']");
+  expect(within(other as HTMLElement).getByRole("checkbox")).toBeInTheDocument();
 });
