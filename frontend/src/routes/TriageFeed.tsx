@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
-import { useHideCall, useUnhideCall } from "../api/calls";
+import { useHideCall, useSetDecisionNote, useUnhideCall } from "../api/calls";
 import { dashboardParamsFrom, useDashboard, type CallItem } from "../api/dashboard";
 import {
   useDecisionCounts,
@@ -10,6 +10,7 @@ import {
   useUnsaveCall,
   type TriageView,
 } from "../api/decisions";
+import { DecisionNoteStrip, type NoteTarget } from "./DecisionNoteStrip";
 import { TriageCard } from "./TriageCard";
 import { TriageEmptyProfile } from "./TriageEmptyProfile";
 import styles from "./TriageFeed.module.css";
@@ -142,6 +143,13 @@ export function TriageFeed() {
   const unsave = useUnsaveCall();
   const hide = useHideCall();
   const unhide = useUnhideCall();
+  const setNote = useSetDecisionNote();
+
+  // WHICH decision the note strip is about, or null for no strip. Held here
+  // rather than derived from the cursor, because the cursor moves and the
+  // decision it was created for does not (D10) -- see DecisionNoteStrip's own
+  // header. Set ONLY in a decision's onSuccess, below.
+  const [noteTarget, setNoteTarget] = useState<NoteTarget | null>(null);
 
   const [focusIndex, setFocusIndex] = useState(0);
   const cardEls = useRef<(HTMLElement | null)[]>([]);
@@ -191,11 +199,29 @@ export function TriageFeed() {
       if (isFetching) return;
       const args = { id: call.id, profileId };
       // Both hooks invalidate ["calls"] AND ["decision-counts"] themselves (see
-      // invalidateDecisions). Nothing is added per call here on purpose: a
-      // mutate-level onSuccess is dropped when this component unmounts before
-      // the request lands, which on a keyboard triage loop is the normal case.
-      if (kind === "save") save.mutate(args);
-      else hide.mutate(args);
+      // invalidateDecisions). NOTHING CACHE-RELATED is added per call here on
+      // purpose: a mutate-level onSuccess is dropped when this component
+      // unmounts before the request lands, which on a keyboard triage loop is
+      // the normal case.
+      //
+      // The note strip is the one thing that IS mutate-level, and it has to be:
+      // it is per-call state on THIS component, so a hook-level callback in
+      // api/calls.ts (shared with CallDetail, which has no strip) is the wrong
+      // home for it, and the drop case is exactly the case where there is no
+      // feed left to render a strip on.
+      //
+      // ON SUCCESS, NEVER OPTIMISTICALLY (D10). A failed hide that still opened
+      // a strip would solicit a note for a decision that did not happen, and
+      // the note endpoint would then 404 on a row that was never created.
+      const onDecided = () =>
+        setNoteTarget({
+          callId: call.id,
+          profileId,
+          title: call.title,
+          state: kind === "save" ? "saved" : "hidden",
+        });
+      if (kind === "save") save.mutate(args, { onSuccess: onDecided });
+      else hide.mutate(args, { onSuccess: onDecided });
     },
     [hide, isFetching, profileId, save],
   );
@@ -209,8 +235,14 @@ export function TriageFeed() {
       // See decide()'s comment: this is the guard the button actually needs.
       if (isFetching) return;
       const args = { id: call.id, profileId };
-      if (view === "saved") unsave.mutate(args);
-      else if (view === "hidden") unhide.mutate(args);
+      // A note belongs to its decision and dies with it (D4), so un-deciding
+      // the call the strip is about leaves a box whose write can only 404.
+      // Cleared on SUCCESS, symmetrically with decide(): a failed un-decide has
+      // changed nothing.
+      const onUndecided = () =>
+        setNoteTarget((t) => (t !== null && t.callId === call.id ? null : t));
+      if (view === "saved") unsave.mutate(args, { onSuccess: onUndecided });
+      else if (view === "hidden") unhide.mutate(args, { onSuccess: onUndecided });
       // The Inbox has no decision row to delete, so `u` there does nothing.
     },
     [isFetching, profileId, unhide, unsave, view],
@@ -366,6 +398,27 @@ export function TriageFeed() {
       <div className={styles.column}>
         {data.ranking.pending > 0 && (
           <p className={styles.status}>Scoring {data.ranking.pending} calls…</p>
+        )}
+
+        {/* OUTSIDE the items.length branch, so the strip survives the list
+            emptying under it -- deciding the last card in a view is precisely
+            when a reason is worth asking for.
+
+            KEYED by the decision, so the next one REPLACES the strip rather
+            than re-labelling it: a fresh instance starts with an empty box and
+            its own bound target, and the outgoing instance's in-flight write
+            keeps the ids it was created with and is not cancelled (D10).
+
+            expectedState comes from THIS closure's noteTarget, not from the
+            strip: the strip must not carry two ways to say which decision it
+            is about (D11). */}
+        {noteTarget !== null && (
+          <DecisionNoteStrip
+            key={`${noteTarget.callId}:${noteTarget.state}`}
+            target={noteTarget}
+            onSave={(args) => setNote.mutateAsync({ ...args, expectedState: noteTarget.state })}
+            onDismiss={() => setNoteTarget(null)}
+          />
         )}
 
         {items.length === 0 ? (

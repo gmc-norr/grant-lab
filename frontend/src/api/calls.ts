@@ -75,3 +75,34 @@ export function useUnhideCall() {
     onSuccess: () => invalidateDecisions(qc),
   });
 }
+
+// The state the caller BELIEVED it was annotating. The server 409s if the
+// decision moved under it -- one user with two tabs is enough to hit this
+// (spec D11), and the consequence of omitting it is a reason about hiding
+// filed against a save.
+export type NoteArgs = {
+  id: number;
+  profileId: number;
+  note: string | null;
+  expectedState: "saved" | "hidden";
+};
+
+// NOT invalidateDecisions, and that is the whole difference between this hook
+// and the four above it: a note changes no count and moves no call between
+// views, so invalidating ["decision-counts"] here would refetch three counts on
+// every committed note for no observable change. ["calls"] IS invalidated --
+// the Saved and Hidden rows carry `decision_note`, so the list is the one cache
+// that goes stale when a note is written.
+export function useSetDecisionNote() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, profileId, note, expectedState }: NoteArgs) =>
+      unwrap(
+        await api.PUT("/api/calls/{call_id}/note", {
+          params: { path: { call_id: id }, query: { profile_id: profileId } },
+          body: { note, expected_state: expectedState },
+        }),
+      ),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["calls"] }),
+  });
+}

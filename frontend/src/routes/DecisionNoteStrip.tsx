@@ -1,0 +1,145 @@
+// frontend/src/routes/DecisionNoteStrip.tsx
+import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
+
+import { apiErrorMessage } from "../api/client";
+import styles from "./TriageFeed.module.css";
+
+// WHAT THE STRIP IS ABOUT, held as a prop rather than looked up (spec D10).
+// This is the whole defence against a late write landing on the next call: the
+// component never reads "the currently focused call", so a note typed about
+// call 7 carries call 7's ids even when the cursor has moved on and the strip
+// itself has already been replaced. `CallDetail` keeps {id, profileId} for its
+// Undo for the same reason.
+//
+// `state` is here for two jobs and not for a third: it words the prompt ("Why
+// did you hide…" vs "…save…"), and Task 7 needs it to edit an existing note.
+// It is deliberately NOT part of the onSave payload -- see NoteSaveArgs.
+export type NoteTarget = {
+  callId: number;
+  profileId: number;
+  title: string;
+  state: "saved" | "hidden";
+};
+
+// The three fields the strip knows about. `expectedState` (D11) is the PARENT's
+// to add: the parent holds the target it created the strip with, and the strip
+// having two ways to say the same thing is how they drift apart.
+export type NoteSaveArgs = { id: number; profileId: number; note: string | null };
+
+type Props = {
+  target: NoteTarget;
+  // OPTIONAL, defaulting to empty, because Task 6 only ever creates. Task 7
+  // reuses this component to EDIT, and a component with no way to receive the
+  // current value can only ever create.
+  initialNote?: string | null;
+  onSave: (args: NoteSaveArgs) => void | Promise<unknown>;
+  onDismiss: () => void;
+};
+
+// Whitespace is not a note (D8). Normalised HERE as well as on the server, so
+// "has a note" has one answer on both sides and a stray space does not count as
+// an edit worth a request.
+function normalize(value: string): string | null {
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
+}
+
+export function DecisionNoteStrip({ target, initialNote = null, onSave, onDismiss }: Props) {
+  const inputId = useId();
+  const [value, setValue] = useState(initialNote ?? "");
+  const [error, setError] = useState<string | null>(null);
+  // What the server is believed to already hold. Enter AND blur both commit
+  // (D10), so without this a note committed with Enter is sent a second time by
+  // the blur that follows it, and a blur with nothing typed sends a no-op
+  // request on every strip anyone ever ignores.
+  const committed = useRef<string | null>(normalize(initialNote ?? ""));
+  // The strip is REPLACED by the next decision while a write may still be in
+  // flight (D10: the request is not cancelled). Its failure still belongs to
+  // the mutation, but there is no longer a strip to show it on.
+  const mounted = useRef(true);
+  useEffect(
+    () => () => {
+      mounted.current = false;
+    },
+    [],
+  );
+
+  async function commit() {
+    const note = normalize(value);
+    if (note === committed.current) return;
+    const previous = committed.current;
+    committed.current = note;
+    setError(null);
+    try {
+      await onSave({ id: target.callId, profileId: target.profileId, note });
+    } catch (err) {
+      // Not committed after all, so the same text may be retried -- BY THE
+      // USER. The strip does not retry on its own (D10).
+      committed.current = previous;
+      if (!mounted.current) return;
+      setError(
+        `Couldn't save your note — ${apiErrorMessage(err, "the request failed")}. Your text is still here.`,
+      );
+    }
+  }
+
+  // NO stopPropagation, deliberately. The feed's window listener stands down
+  // for keystrokes inside a text field via isEditableTarget, and that guard is
+  // what gate 10 tests; swallowing the event here would make the gate green
+  // whether or not the guard exists.
+  function onKeyDown(e: KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      void commit();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      setValue(committed.current ?? "");
+      setError(null);
+      onDismiss();
+    }
+  }
+
+  return (
+    <section
+      className={styles.noteStrip}
+      data-note-strip={target.callId}
+      aria-label="Add a reason for this decision"
+    >
+      <label className={styles.noteLabel} htmlFor={inputId}>
+        Why did you {target.state === "hidden" ? "hide" : "save"}{" "}
+        <strong className={styles.noteTitle}>{target.title}</strong>?
+      </label>
+      {/* NO autoFocus, and that is the point of the whole screen: the feed is a
+          keyboard loop, and a strip that grabbed the caret would turn `h h h`
+          into typed text in the first box. The strip is ignorable (D2). */}
+      <input
+        id={inputId}
+        type="text"
+        className={styles.noteInput}
+        // Matches max_length=1000 on DecisionNoteIn, so the limit is felt while
+        // typing rather than discovered as a 422 after pressing Enter.
+        maxLength={1000}
+        value={value}
+        placeholder="Optional — Enter saves, Esc dismisses"
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={onKeyDown}
+        // Blur commits as well as Enter (D10). No autosave and no debounce: a
+        // timer that outlives the strip is the same bug as an unbound write.
+        onBlur={() => void commit()}
+      />
+      {/* D3, and worded so it stays true whichever surfaces are mounted: an
+          administrator has database access whether or not a page exists, so a
+          disclosure phrased around the page would be misleading in exactly the
+          deployment where it matters. No aria-live here -- the feed already
+          announces list changes and a second live region talks over it. */}
+      <p className={styles.noteDisclosure}>
+        An administrator can read this to improve matching. Your name is not attached.
+      </p>
+      {error !== null && (
+        <p role="alert" className={styles.noteError}>
+          {error}
+        </p>
+      )}
+    </section>
+  );
+}

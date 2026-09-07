@@ -353,3 +353,65 @@
 .createLink {
   color: var(--app-link);
 }
+
+/* --- the decision-note strip (D10) ---
+
+   It takes the place of the card that just left the list, at the top of the
+   column, and it is IGNORABLE by design (D2): quiet, no autofocus, and the
+   keyboard loop keeps working over it. So it is a rule and some type, not a
+   panel — a bordered box here reads as a modal step in a flow that has none. */
+.noteStrip {
+  margin: 0 0 1.25rem;
+  padding: 0.75rem 0 1rem;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.noteLabel {
+  display: block;
+  margin-bottom: 0.4rem;
+  color: var(--app-muted);
+  font-size: 0.9rem;
+}
+
+.noteTitle {
+  color: var(--app-text);
+  font-weight: 600;
+}
+
+.noteInput {
+  display: block;
+  width: 100%;
+  min-height: 36px;
+  padding: 0 0.6rem;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--app-text);
+  font: inherit;
+  font-size: 0.9rem;
+}
+
+.noteInput::placeholder {
+  color: var(--app-dim);
+}
+
+.noteInput:focus {
+  outline: none;
+  border-color: var(--app-accent-bright);
+}
+
+.noteDisclosure {
+  margin: 0.4rem 0 0;
+  color: var(--app-dim);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+/* The failure is inline and next to the text it failed to save, because the
+   recovery is to look at the text and try again (D10) — there is no toast in
+   this frontend and none is wanted. */
+.noteError {
+  margin: 0.4rem 0 0;
+  color: var(--app-bad);
+  font-size: 0.82rem;
+}

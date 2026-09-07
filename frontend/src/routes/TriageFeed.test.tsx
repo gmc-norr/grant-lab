@@ -1,5 +1,6 @@
 import { QueryClient } from "@tanstack/react-query";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -60,6 +61,10 @@ function stub({
   // That is how D20's "keys are ignored while the list is fetching" gets a
   // deterministic window instead of a race.
   hold = null as Promise<void> | null,
+  // The same trick for the NOTE write (PUT /calls/{id}/note): with it the write
+  // is still in flight while the next call is decided, which is the window
+  // gate 11 is about.
+  holdPut = null as Promise<void> | null,
 } = {}) {
   let listFetches = 0;
   const get = vi.spyOn(clientMod.api, "GET").mockImplementation((async (path: string) => {
@@ -97,7 +102,14 @@ function stub({
     error: undefined,
     response: new Response(),
   } as never);
-  return { get, post, del };
+  // STUBBED IN EVERY TEST, not only the note ones: the strip commits on blur,
+  // so any test that focuses and leaves it would otherwise reach the real
+  // openapi-fetch client.
+  const put = vi.spyOn(clientMod.api, "PUT").mockImplementation((async () => {
+    if (holdPut !== null) await holdPut;
+    return { data: { decision_note: null }, error: undefined, response: new Response() };
+  }) as never);
+  return { get, post, del, put };
 }
 
 // `qc` is injectable and RETURNED, because the unmount gate below spies on
@@ -142,6 +154,23 @@ function decisions(spy: SpyCalls): string[] {
   return spy.mock.calls.map((c) => {
     const [path, opts] = c as unknown as [string, { params: { path: { call_id: number } } }];
     return path.replace("{call_id}", String(opts.params.path.call_id));
+  });
+}
+
+// Every note write, WITH THE IDS IT CARRIED. Gate 11 is entirely about which
+// call_id ends up in the path, so the id is read from the request rather than
+// from anything the component says about itself.
+function notes(spy: SpyCalls): { callId: number; profileId: unknown; body: unknown }[] {
+  return spy.mock.calls.map((c) => {
+    const [, opts] = c as unknown as [
+      string,
+      { params: { path: { call_id: number }; query: { profile_id: number } }; body: unknown },
+    ];
+    return {
+      callId: opts.params.path.call_id,
+      profileId: opts.params.query.profile_id,
+      body: opts.body,
+    };
   });
 }
 
@@ -853,7 +882,11 @@ describe("reviewer Minor 2 — focus follows a decided card, not just the numeri
     );
 
     fireEvent.keyDown(document.body, { key: "s" });
-    await waitFor(() => expect(screen.queryByText("Call two")).toBeNull());
+    // THE CARD is gone, asserted on the card and not on the title text: since
+    // Task 6 the note strip names the call it was opened for, so "Call two" is
+    // still on screen — above the list, in the strip — after the row it belongs
+    // to has left. queryByText here would now be asserting the strip's absence.
+    await waitFor(() => expect(container.querySelector('[data-call-id="2"]')).toBeNull());
     await waitFor(() =>
       expect(container.querySelectorAll("article")[1]).toHaveTextContent("Call three"),
     );
@@ -976,5 +1009,178 @@ describe("Task 8 — no profile is an onboarding screen, not a firehose", () => 
     fireEvent.keyDown(document.body, { key: "s" });
     fireEvent.keyDown(document.body, { key: "h" });
     await expectNoDecision(post, del);
+  });
+});
+
+describe("Task 6 — the decision-note strip (D10, gates 10 and 11)", () => {
+  // Waits for the strip and hands it back, so every test below asserts on the
+  // real element rather than on `getByRole("textbox")` — the feed has exactly
+  // one text field today, and a gate that would silently start testing a
+  // different one when a search box lands is a gate with a shelf life.
+  async function stripFor(container: HTMLElement, callId: number): Promise<HTMLElement> {
+    return await waitFor(() => {
+      const el = container.querySelector(`[data-note-strip="${callId}"]`);
+      expect(el, `no note strip for call ${callId}`).not.toBeNull();
+      return el as HTMLElement;
+    });
+  }
+
+  it("the strip does not appear when the decision request fails", async () => {
+    // D10. Optimistic display would solicit a note for a decision that did not
+    // happen -- and the note endpoint would then 404 on a row that never existed.
+    const { post } = stub();
+    post.mockResolvedValue({
+      data: undefined,
+      error: { error: { code: "internal_error", message: "boom" } },
+      response: new Response(null, { status: 500 }),
+    } as never);
+    const { container } = renderFeed();
+    await screen.findByText("Call one");
+
+    fireEvent.keyDown(document.body, { key: "h" });
+    await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/1/hide"]));
+    // Past TanStack's microtask deferral AND past the rejection, so this is
+    // "the strip never appeared", not "the strip has not appeared yet".
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(container.querySelector("[data-note-strip]")).toBeNull();
+    expect(screen.queryByRole("textbox")).toBeNull();
+
+    // POSITIVE CONTROL, same render. Without it this gate is green for a feed
+    // that never renders a strip at all — which is both the likeliest way to
+    // "pass" it and the exact failure it cannot distinguish. One character
+    // changes: the POST now succeeds.
+    post.mockResolvedValue({
+      data: { hidden: true },
+      error: undefined,
+      response: new Response(),
+    } as never);
+    await waitFor(() => {
+      fireEvent.keyDown(document.body, { key: "h" });
+      expect(container.querySelector("[data-note-strip]")).not.toBeNull();
+    });
+  });
+
+  it("a keystroke inside the strip does not decide the focused call", async () => {
+    // G10 / spec gate 10. VACUITY, and it is the whole reason this test is
+    // written the way it is: a keydown fired at document.body carries body as
+    // its target whatever has focus, so a version of this test that never
+    // focuses the input passes whether or not isEditableTarget guards the
+    // listener. Focus it FIRST and fire AT IT.
+    const { post, del, put } = stub();
+    const { container } = renderFeed();
+    await screen.findByText("Call one");
+
+    fireEvent.keyDown(document.body, { key: "h" });
+    await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/1/hide"]));
+    const strip = await stripFor(container, 1);
+    const box = within(strip).getByRole("textbox");
+    act(() => box.focus());
+    expect(document.activeElement).toBe(box);
+
+    // Every triage key, typed as a letter of a reason would be.
+    fireEvent.keyDown(box, { key: "h" });
+    fireEvent.keyDown(box, { key: "s" });
+    fireEvent.keyDown(box, { key: "j" });
+    fireEvent.keyDown(box, { key: "k" });
+    fireEvent.keyDown(box, { key: "u" });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    // The one hide that OPENED the strip, and nothing since.
+    expect(decisions(post)).toEqual(["/api/calls/1/hide"]);
+    expect(del.mock.calls).toEqual([]);
+
+    // POSITIVE CONTROL, same render: blurred, the identical keystroke decides.
+    // It also proves `j` was SUPPRESSED rather than merely silent — the cursor
+    // never moved, so `s` saves call ONE. A feed whose keyboard is simply
+    // broken fails here, which is the failure a guard mutation is most easily
+    // confused with.
+    act(() => box.blur());
+    await waitFor(() => {
+      fireEvent.keyDown(document.body, { key: "s" });
+      expect(decisions(post)).toContain("/api/calls/1/save");
+    });
+    expect(decisions(post)).not.toContain("/api/calls/2/save");
+    // And leaving an untouched box wrote nothing: blur commits (D10), but only
+    // what changed.
+    expect(notes(put)).toEqual([]);
+  });
+
+  it("a late note write lands on its own call, not the next one", async () => {
+    // G11 / spec gate 11. TWO ways the write could reach the wrong call, and
+    // this drives both: the CURSOR moves off call one before the note is
+    // committed, and the next call is DECIDED — replacing the strip — before
+    // the PUT resolves. The request must still carry call one's id.
+    let releasePut = () => {};
+    const putHeld = new Promise<void>((r) => {
+      releasePut = r;
+    });
+    const { post, put } = stub({ holdPut: putHeld });
+    const { container } = renderFeed();
+    await screen.findByText("Call one");
+
+    fireEvent.keyDown(document.body, { key: "h" });
+    await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/1/hide"]));
+    const strip = await stripFor(container, 1);
+
+    // THE CURSOR MOVES OFF THE CALL THE STRIP IS ABOUT, before a single
+    // character is typed. Without this the adverse mutation is invisible:
+    // focus is still on call one at commit time, so "the strip's bound target"
+    // and "the currently focused call" give the same id and the gate is
+    // hollow.
+    fireEvent.keyDown(document.body, { key: "j" });
+    await waitFor(() =>
+      expect(container.querySelector('[data-expanded="true"]')).toHaveAttribute(
+        "data-call-id",
+        "2",
+      ),
+    );
+
+    await userEvent.type(within(strip).getByRole("textbox"), "wrong field{Enter}");
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(1));
+
+    // The PUT is hanging. Decide the NEXT call: the strip is replaced, the
+    // in-flight request is NOT cancelled (D10). Fired inside waitFor because a
+    // decision's refetch may still be in flight, and D20 stands `h` down for
+    // exactly that window.
+    await waitFor(() => {
+      fireEvent.keyDown(document.body, { key: "h" });
+      expect(decisions(post)).toContain("/api/calls/2/hide");
+    });
+    await stripFor(container, 2);
+    releasePut();
+
+    // ONE write, carrying call one's ids and call one's state — asserted off
+    // the request, not off the component.
+    await waitFor(() =>
+      expect(notes(put)).toEqual([
+        {
+          callId: 1,
+          profileId: 7,
+          body: { note: "wrong field", expected_state: "hidden" },
+        },
+      ]),
+    );
+  });
+
+  it("un-deciding the call the strip is about closes it", async () => {
+    // D4: a note belongs to its decision and dies with it. `u` deletes the
+    // decision row, so a strip left open over it can only ever 404.
+    const { post, del } = stub();
+    const { container } = renderFeed("/?view=hidden");
+    await screen.findByText("Call one");
+
+    // `s` in Hidden is a flip — still a decision, so it opens the strip.
+    fireEvent.keyDown(document.body, { key: "s" });
+    await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/1/save"]));
+    await stripFor(container, 1);
+
+    await waitFor(() => {
+      fireEvent.keyDown(document.body, { key: "u" });
+      expect(decisions(del)).toContain("/api/calls/1/hide");
+    });
+    await waitFor(() => expect(container.querySelector("[data-note-strip]")).toBeNull());
   });
 });
