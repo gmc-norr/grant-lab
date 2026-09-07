@@ -2,10 +2,10 @@
 
 A decision belongs to a profile: `call_decisions.profile_id` is NOT NULL, so a
 request without one has no row to write and the route answers 422 (D3, D9).
-Six operations carry that rule -- hide, un-hide, save, un-save, the hidden list
-and the rail's counts -- and every one of them is reached from the frontend
-through `frontend/src/api/schema.gen.ts`, which openapi-fetch uses to typecheck
-the call site.
+Seven operations carry that rule -- hide, un-hide, save, un-save, the hidden
+list, the rail's counts and the decision-note write -- and every one of them is
+reached from the frontend through `frontend/src/api/schema.gen.ts`, which
+openapi-fetch uses to typecheck the call site.
 
 WHAT THIS PINS THAT NOTHING ELSE DOES. The backend half is pinned by the API
 tests (a request with no `profile_id` gets 422). The generated-file half is
@@ -18,12 +18,15 @@ not move the schema (T8-3). So the guarantee is asserted as a SHAPE: if
 the 422 would only show up in a browser.
 
 WHAT IT CANNOT SEE. A brand-new decision path -- say `/api/calls/{call_id}/star`
--- is invisible here, because the four paths below are the ones someone wrote
-down (the T2-13 shape). What it DOES catch is the hazard F-12 #1 names: a new
-METHOD on an existing decision path (a `@router.patch("/calls/{call_id}/hide")`)
-moves no line in `tests/architecture/full_edition_routes.txt`, which holds unique
-PATHS -- but it does add an operation under that path, and the exact-set check
-below goes red on it.
+-- is invisible here, because the five paths below are the ones someone wrote
+down (the T2-13 shape). `PUT /api/calls/{call_id}/note` walked into exactly that
+blind spot on the decision-notes branch and was added here after the fact; a new
+one still will not announce itself. What it DOES catch is the hazard F-12 #1
+names: a new METHOD on an existing decision path (a
+`@router.patch("/calls/{call_id}/hide")`) moves no line in
+`tests/architecture/full_edition_routes.txt`, which holds unique PATHS -- but it
+does add an operation under that path, and the exact-set check below goes red on
+it.
 """
 
 from __future__ import annotations
@@ -36,16 +39,17 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 SCHEMA = REPO / "frontend" / "src" / "api" / "schema.gen.ts"
 
-# The four paths that write or read `call_decisions`.
+# The five paths that write or read `call_decisions`.
 DECISION_PATHS = (
     "/api/calls/{call_id}/hide",
     "/api/calls/{call_id}/save",
+    "/api/calls/{call_id}/note",
     "/api/calls/hidden",
     "/api/calls/decisions/counts",
 )
 
-# Their six operations, READ OUT OF THE FILE, not predicted. The set equality
-# below is what keeps this list honest: a seventh operation on any of those four
+# Their seven operations, READ OUT OF THE FILE, not predicted. The set equality
+# below is what keeps this list honest: an eighth operation on any of those five
 # paths reddens it rather than slipping past unlisted.
 EXPECTED_OPERATIONS = frozenset(
     {
@@ -55,6 +59,7 @@ EXPECTED_OPERATIONS = frozenset(
         "unsave_call_api_calls__call_id__save_delete",
         "list_hidden_calls_api_calls_hidden_get",
         "get_decision_counts_api_calls_decisions_counts_get",
+        "set_decision_note_api_calls__call_id__note_put",
     }
 )
 
@@ -89,7 +94,7 @@ def _member_block(src: str, header: str) -> list[str]:
 
 
 def declared_decision_operations(src: str) -> set[str]:
-    """Every operation id declared under the four decision paths."""
+    """Every operation id declared under the five decision paths."""
     found: set[str] = set()
     for path in DECISION_PATHS:
         for line in _member_block(src, f'    "{path}": {{'):
@@ -147,8 +152,8 @@ def test_every_decision_operation_requires_a_profile_id():
     )
 
 
-def test_the_decision_paths_declare_exactly_these_six_operations():
-    """The exact-count control. Without it, a seventh operation on one of these
+def test_the_decision_paths_declare_exactly_these_seven_operations():
+    """The exact-count control. Without it, an eighth operation on one of these
     paths -- the `@router.patch("/calls/{call_id}/hide")` that F-12 #1 warns moves
     no line in the route manifest -- would simply not be checked."""
     assert declared_decision_operations(SCHEMA.read_text()) == set(EXPECTED_OPERATIONS)

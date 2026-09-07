@@ -76,6 +76,37 @@ def test_inbox_does_not_query_the_note_column(monkeypatch, pg_url, pg_session_fa
     assert offenders == [], offenders
 
 
+def test_archive_does_not_query_the_note_column(monkeypatch, pg_url, pg_session_factory):
+    """G1's other half. The spec says "absent for `inbox` AND `archive`"; only
+    `inbox` was checked. `archive` is a SEPARATE branch of the same predicate --
+    `decision_ordered` is `view in ("saved", "hidden")`, so `archive` reaches the
+    add_columns() line by a different route than `inbox` does, and it is also the
+    DEFAULT view, so it is the one an unparameterised GET lands on. A null
+    assertion cannot see it either (`tests/test_api_calls.py` pins the null on
+    this branch already), so this is the compiled SQL again."""
+    _seed_call(pg_session_factory)
+    app = _setup(monkeypatch, pg_url)
+    client, _uid, pid = _login(app, pg_session_factory)
+    statements: list[str] = []
+    from sqlalchemy import event
+
+    # app.state.engine, NOT the session_factory's bind: the seeding fixtures
+    # run on pg_session_factory's engine, a DIFFERENT Engine on the same
+    # database, so only request traffic lands here. Precedent and the reason:
+    # _statement_counter in tests/web/test_calls_list_query_count.py.
+    engine = app.state.engine
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _capture(conn, cursor, statement, params, context, executemany):
+        statements.append(statement)
+
+    with client:
+        r = client.get("/api/calls", params={"view": "archive", "profile": pid})
+    assert r.status_code == 200
+    offenders = [s for s in statements if _NOTE_COLUMN.search(s)]
+    assert offenders == [], offenders
+
+
 def test_hidden_view_DOES_query_the_note_column(monkeypatch, pg_url, pg_session_factory):
     """The control. Without this, deleting the column entirely would also make
     the inbox gate above pass -- the pair pins a DIFFERENCE, not an absence."""
