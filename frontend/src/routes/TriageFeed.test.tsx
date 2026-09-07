@@ -391,6 +391,31 @@ describe("gate 4 — the key handler stands down inside an editable element", ()
 });
 
 describe("gate 5 — inbox zero is a designed screen", () => {
+  it("an empty PAGE TWO is not inbox zero", async () => {
+    // REPRODUCED by an outside review: deciding the last card on page two
+    // showed "you have triaged every call" while the rail beside it still said
+    // 50 were left. The rail was right -- the claim is about the whole list and
+    // was being made from the slice on screen. The counts here are deliberately
+    // NOT zero, which is the only thing that separates the two states.
+    stub({ items: [], counts: { inbox: 50, saved: 0, hidden: 0 } });
+    renderFeed("/?page=2");
+    await screen.findByText(/nothing left on this page/i);
+    expect(screen.queryByText(/inbox zero/i)).toBeNull();
+    expect(screen.getByText(/50 calls are still waiting/i)).toBeInTheDocument();
+    // Page two of a self-healing inbox is a dead end without a way back: page
+    // one has refilled and nothing else on this screen points at it.
+    expect(screen.getByRole("link", { name: /previous page/i })).toBeInTheDocument();
+  });
+
+  it("but a genuinely empty inbox still says inbox zero", async () => {
+    // Guards the gate above. "Never claim inbox zero" would pass it and delete
+    // the screen the product is actually for.
+    stub({ items: [], counts: { inbox: 0, saved: 0, hidden: 0 } });
+    renderFeed("/?page=2");
+    await screen.findByText(/inbox zero/i);
+    expect(screen.queryByText(/nothing left on this page/i)).toBeNull();
+  });
+
   it("renders the inbox-zero copy, not an empty div", async () => {
     // B26 killer, and it asserts the ACTUAL COPY: a `toBeEmptyDOMElement()`-style
     // check would pass over a bare <div/>.

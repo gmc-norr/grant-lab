@@ -105,6 +105,29 @@ class Board(Base):
     auto_publish: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
+    # --- board health (auto boards) ------------------------------------------
+    #
+    # THREE columns, not one, because "last success" on its own cannot tell a
+    # board that is running fine and changing nothing from one that has been
+    # failing every night since March. The pair that answers that is
+    # attempt-vs-success:
+    #
+    #   attempt old            -> the JOB is not running (scheduler down)
+    #   attempt new, success old -> this BOARD is failing; the error says why
+    #   attempt == success     -> healthy, whether or not anything changed
+    #
+    # Written in their OWN short transaction after each board's passes, never
+    # inside them: a failure recorded in the transaction that failed is rolled
+    # back with it, which is exactly the board whose health nobody can see.
+    last_reconcile_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_reconciled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Truncated at the write (see `_MAX_RECONCILE_ERROR`). A driver error can
+    # carry an entire failed statement, and this is served on an admin screen.
+    last_reconcile_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_by: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
     )

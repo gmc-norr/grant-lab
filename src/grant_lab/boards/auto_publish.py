@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -37,6 +38,48 @@ from grant_lab.boards.queue import board_candidate_parts
 from grant_lab.db.models import Board, BoardItem, BoardSuppression, Call, CallRanking
 
 _logger = logging.getLogger(__name__)
+
+# `boards.last_reconcile_error` is String(500) and this text reaches an admin
+# screen. A driver error can carry an entire failed statement -- parameters
+# included -- so it is cut at the WRITE rather than at the render: a column that
+# only ever holds what it can show cannot leak a 40 kB traceback into a page.
+_MAX_RECONCILE_ERROR = 500
+
+
+def _record_reconcile_outcome(
+    session_factory, *, board_id: int, attempted_at: datetime, error: str | None
+) -> None:
+    """Stamp one board's health in its OWN short transaction.
+
+    Not inside the board's passes, and that is the whole point: an outcome
+    written in the transaction that failed is rolled back with it, leaving
+    exactly the board whose health nobody can see -- the "a board silently
+    stops updating" outcome this feature exists to make visible.
+
+    Its own try/except for the same reason each board has one. A stamp that
+    raises must not cost the remaining boards their night; the reconciliation
+    it is describing has already committed.
+    """
+    try:
+        with session_factory() as session:
+            board = session.get(Board, board_id, with_for_update=True)
+            if board is None:
+                # Deleted mid-run. There is nothing left to be healthy.
+                return
+            board.last_reconcile_attempt_at = attempted_at
+            board.last_reconcile_error = (
+                None if error is None else error[:_MAX_RECONCILE_ERROR]
+            )
+            # ONLY on success. Leaving the old value standing on a failure is
+            # what makes attempt-vs-success readable as "failing since".
+            if error is None:
+                board.last_reconciled_at = attempted_at
+            session.commit()
+    except Exception:  # noqa: BLE001 - health bookkeeping must not fail a night
+        _logger.exception(
+            "boards.auto_publish.health_write_failed",
+            extra={"event": "boards_auto_publish_health_write_failed", "board_id": board_id},
+        )
 
 
 @dataclass(frozen=True)
@@ -143,12 +186,20 @@ def reconcile_auto_boards(*, session_factory) -> AutoPublishSummary:
         )
 
     for board_id in board_ids:
+        # Stamped in `finally`, so it is recorded whether the board succeeded,
+        # raised, or was skipped -- and taken BEFORE the work so the timestamp
+        # is when the attempt began, not when it happened to finish.
+        attempted_at = datetime.now(UTC)
+        failure: str | None = None
+        record = True
         try:
             # PASS 1 -- no lock held. Work out what is likely wanted and encode it.
             prefetch: dict[str, QrCode] = {}
             with session_factory() as session:
                 board = session.get(Board, board_id)
                 if board is None:
+                    # Deleted between the id query and now. No row to stamp.
+                    record = False
                     continue
                 likely = board_selection(session, board=board)
             for sel in likely:
@@ -180,6 +231,10 @@ def reconcile_auto_boards(*, session_factory) -> AutoPublishSummary:
             with session_factory() as session:
                 board = session.get(Board, board_id, with_for_update=True)
                 if board is None or not board.auto_publish:
+                    # Either deleted, or a settings PUT turned automation off
+                    # between the passes. Neither is this board's health: a
+                    # manual board has no nightly run to be late.
+                    record = False
                     continue
                 wanted = {s.call_id: s for s in board_selection(session, board=board)}
                 current = {
@@ -250,6 +305,7 @@ def reconcile_auto_boards(*, session_factory) -> AutoPublishSummary:
             # Count it, name the board, keep going. Same idiom as
             # scheduler.py's `_reconcile_rankings_tick`.
             summary.boards_failed += 1
+            failure = str(e)
             _logger.exception(
                 "boards.auto_publish.board_failed",
                 extra={
@@ -258,4 +314,15 @@ def reconcile_auto_boards(*, session_factory) -> AutoPublishSummary:
                     "error": str(e),
                 },
             )
+        finally:
+            # `finally`, not a line after the except: both skip paths above use
+            # `continue`, which would jump straight past ordinary trailing code
+            # and leave a board's health frozen at whatever it last said.
+            if record:
+                _record_reconcile_outcome(
+                    session_factory,
+                    board_id=board_id,
+                    attempted_at=attempted_at,
+                    error=failure,
+                )
     return summary

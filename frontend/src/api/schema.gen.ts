@@ -2927,6 +2927,12 @@ export interface components {
             is_published: boolean;
             /** Items Per Page */
             items_per_page: number;
+            /** Last Reconcile Attempt At */
+            last_reconcile_attempt_at: string | null;
+            /** Last Reconcile Error */
+            last_reconcile_error: string | null;
+            /** Last Reconciled At */
+            last_reconciled_at: string | null;
             /** Max Pages */
             max_pages: number;
             /** Min Score */

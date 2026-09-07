@@ -25,6 +25,7 @@ const BOARD: Board = {
   created_by: 1, published_by: 1, published_at: "2026-01-01T00:00:00Z",
   created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
   approved_count: 3, owner_undeliverable: false,
+  last_reconcile_attempt_at: null, last_reconciled_at: null, last_reconcile_error: null,
 };
 
 function LocationProbe() {

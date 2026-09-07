@@ -1,6 +1,6 @@
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
@@ -39,6 +39,9 @@ const BOARD: Board = {
   created_at: "2026-01-01T00:00:00Z",
   updated_at: "2026-01-01T00:00:00Z",
   approved_count: 2,
+  last_reconcile_attempt_at: null,
+  last_reconciled_at: null,
+  last_reconcile_error: null,
   owner_undeliverable: false,
 };
 
@@ -69,6 +72,7 @@ function renderDetail({
   publishResult,
   reorderResult,
   autoPreview = AUTO_PREVIEW,
+  deleteResult,
 }: {
   admin?: boolean;
   board?: Board;
@@ -78,6 +82,7 @@ function renderDetail({
   publishResult?: unknown;
   reorderResult?: unknown;
   autoPreview?: AutoPreview | ((query: AutoPreviewQuery) => AutoPreview);
+  deleteResult?: unknown;
 } = {}) {
   const get = vi.spyOn(clientMod.api, "GET").mockImplementation((async (
     path: string,
@@ -113,7 +118,9 @@ function renderDetail({
     if (path === ITEMS_PATH) return reorderResult ?? { data: { items: approvedItems }, error: undefined };
     return putResult ?? { data: board, error: undefined };
   }) as never);
-  const del = vi.spyOn(clientMod.api, "DELETE").mockResolvedValue({ data: undefined, error: undefined } as never);
+  const del = vi
+    .spyOn(clientMod.api, "DELETE")
+    .mockResolvedValue((deleteResult ?? { data: undefined, error: undefined }) as never);
   const qc = new QueryClient();
   render(
     <MantineProvider theme={theme} defaultColorScheme="dark">
@@ -588,4 +595,168 @@ it("the preview follows the orientation flip's page size, which only the server 
   });
   // Untouched, so the server derives it. Sending the stale 8 here is the defect.
   expect(seen[seen.length - 1].items_per_page).toBeUndefined();
+});
+
+
+it("a failed removal says so, and offers to try again", async () => {
+  // REPRODUCED by an outside review: an injected 500 left the card sitting on
+  // the board with no message anywhere. This is the control an admin reaches for
+  // to take something inappropriate off a PUBLIC wall, so "looks like nothing
+  // happened" is the worst answer the screen can give -- the operator walks away
+  // believing the card is gone.
+  const user = userEvent.setup();
+  const { del } = renderDetail({
+    approvedItems: [THREE_ITEMS[0]],
+    deleteResult: {
+      data: undefined,
+      error: { error: { code: "internal", message: "Something went wrong." } },
+      response: { status: 500 },
+    },
+  });
+  // Wait for the ITEM, not the board title: the items query resolves separately
+  // and the Remove button does not exist until it has.
+  await screen.findByText("First");
+  await user.click(screen.getByRole("button", { name: /remove/i }));
+
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent(/couldn't remove that call/i);
+  expect(del).toHaveBeenCalledTimes(1);
+
+  // A retry affordance, not just a notice: the failure is usually transient and
+  // the operator's next move is to try the same thing again.
+  await user.click(within(alert).getByRole("button", { name: /try again/i }));
+  await waitFor(() => expect(del).toHaveBeenCalledTimes(2));
+});
+
+it("saving settings refetches the QUEUE, whose contents the settings decide", async () => {
+  // The approval queue is filtered by the board's own min_score, so a settings
+  // save changes which candidates belong in it. Without invalidating it, raising
+  // the threshold from 60 to 95 left a score-70 candidate sitting there,
+  // approvable, under a board that no longer accepts it.
+  const user = userEvent.setup();
+  const { get } = renderDetail();
+  await screen.findByText("Corridor board");
+  const before = get.mock.calls.filter((c) => c[0] === "/api/boards/{board_id}/queue").length;
+
+  await user.click(screen.getByRole("button", { name: /save settings/i }));
+
+  await waitFor(() => {
+    const after = get.mock.calls.filter((c) => c[0] === "/api/boards/{board_id}/queue").length;
+    expect(after).toBeGreaterThan(before);
+  });
+});
+
+it("the page-size input takes the value the SERVER derived, not the one it was seeded with", async () => {
+  // items_per_page is the one setting this form does not decide: with the field
+  // untouched the server derives it from the orientation. After a flip to
+  // portrait the board really holds 4 and the input still read the seeded 8 -- a
+  // number that was simply false, and which the next save would then send back
+  // as an explicit override, undoing the derivation it was showing.
+  const user = userEvent.setup();
+  renderDetail({
+    putResult: { data: { ...BOARD, orientation: "portrait", items_per_page: 4 }, error: undefined },
+  });
+  await screen.findByText("Corridor board");
+  expect(screen.getByLabelText(/items per page/i)).toHaveValue("8");
+
+  await user.click(screen.getByRole("button", { name: /save settings/i }));
+
+  await waitFor(() => expect(screen.getByLabelText(/items per page/i)).toHaveValue("4"));
+});
+
+const HOURS_AGO = (n: number) => new Date(Date.now() - n * 3600_000).toISOString();
+
+it("an auto board that has never run says so, and does not invent a date", async () => {
+  // NULL is "never". Rendered through a date formatter it becomes 1970, which
+  // reads as a board that refreshed once and then died -- the opposite of the
+  // truth, and the exact confusion this panel exists to remove.
+  renderDetail({ board: { ...BOARD, auto_publish: true } });
+  await screen.findByText("Corridor board");
+  const line = document.querySelector('[data-field="health-never"]');
+  expect(line).toHaveTextContent(/hasn't run yet/i);
+  expect(line?.textContent).not.toMatch(/1970|ago/);
+});
+
+it("a healthy auto board says when it last refreshed", async () => {
+  renderDetail({
+    board: {
+      ...BOARD,
+      auto_publish: true,
+      last_reconcile_attempt_at: HOURS_AGO(3),
+      last_reconciled_at: HOURS_AGO(3),
+    },
+  });
+  await screen.findByText("Corridor board");
+  expect(document.querySelector('[data-field="health-ok"]')).toHaveTextContent(/3 hours ago/i);
+});
+
+it("a FAILING board names the error AND when it last actually worked", async () => {
+  // The pair is the whole point. "Last refresh failed" on its own does not say
+  // whether the wall is showing last night's cards or a fortnight's -- and on a
+  // corridor display, that is the only question anyone walking past cares about.
+  renderDetail({
+    board: {
+      ...BOARD,
+      auto_publish: true,
+      last_reconcile_attempt_at: HOURS_AGO(2),
+      last_reconciled_at: HOURS_AGO(72),
+      last_reconcile_error: "qr backend down",
+    },
+  });
+  await screen.findByText("Corridor board");
+  const alert = document.querySelector('[data-field="health-error"]') as HTMLElement;
+  expect(alert).toHaveTextContent(/failed 2 hours ago/i);
+  expect(alert).toHaveTextContent(/qr backend down/);
+  expect(alert).toHaveTextContent(/last successful refresh: 3 days ago/i);
+});
+
+it("a MANUAL board has no refresh panel at all", async () => {
+  // Guards the three above: a panel rendered unconditionally would invent a
+  // nightly process for a board nobody automated, and "hasn't run yet" would be
+  // true forever and mean nothing.
+  renderDetail({ board: { ...BOARD, auto_publish: false } });
+  await screen.findByText("Corridor board");
+  expect(screen.queryByText(/automatic refresh/i)).toBeNull();
+  expect(document.querySelector('[data-field="health-never"]')).toBeNull();
+});
+
+it("the preview renders the wall at its REAL size, not a mock-up", async () => {
+  // This is the panel that would have caught the corridor board growing to
+  // 1745px on a 1080px screen: nothing else on this page renders the board at
+  // the size it actually runs at, which is why the overflow reached a wall.
+  const user = userEvent.setup();
+  renderDetail({ board: { ...BOARD, is_published: true, orientation: "landscape" } });
+  await screen.findByText("Corridor board");
+  await user.click(screen.getByRole("button", { name: /show preview/i }));
+
+  const frame = await screen.findByTitle(/corridor board at 1920x1080/i);
+  // The DIMENSIONS are the assertion. A preview at any other size answers a
+  // question nobody asked; scaling it down for the panel is presentation.
+  expect(frame).toHaveStyle({ width: "1920px", height: "1080px" });
+  expect(frame).toHaveAttribute("src", "/b/abc123");
+});
+
+it("a portrait board previews at portrait dimensions", async () => {
+  // Guards the gate above: a hard-coded 1920x1080 would pass it and then show a
+  // portrait wall in the wrong aspect ratio, which is precisely the class of
+  // error the preview exists to catch.
+  const user = userEvent.setup();
+  renderDetail({ board: { ...BOARD, is_published: true, orientation: "portrait" } });
+  await screen.findByText("Corridor board");
+  await user.click(screen.getByRole("button", { name: /show preview/i }));
+
+  const frame = await screen.findByTitle(/corridor board at 1080x1920/i);
+  expect(frame).toHaveStyle({ width: "1080px", height: "1920px" });
+});
+
+it("an unpublished board says why it cannot be previewed, rather than showing a blank", async () => {
+  // `/b/:slug` reads the PUBLIC endpoint, which 404s while the board is
+  // unpublished -- so the iframe would render an honest empty rectangle that
+  // looks exactly like a broken board.
+  renderDetail({ board: { ...BOARD, is_published: false } });
+  await screen.findByText("Corridor board");
+  expect(document.querySelector('[data-field="preview-unpublished"]')).toHaveTextContent(
+    /publish this board to preview it/i,
+  );
+  expect(screen.queryByRole("button", { name: /show preview/i })).toBeNull();
 });

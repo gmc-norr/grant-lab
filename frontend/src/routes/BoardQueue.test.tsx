@@ -1,6 +1,6 @@
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 
@@ -34,6 +34,9 @@ const BOARD: Board = {
   created_at: "2026-01-01T00:00:00Z",
   updated_at: "2026-01-01T00:00:00Z",
   approved_count: 2,
+  last_reconcile_attempt_at: null,
+  last_reconciled_at: null,
+  last_reconcile_error: null,
   owner_undeliverable: false,
 };
 
@@ -227,4 +230,40 @@ it("shows a call taken off this board, says so, and offers no checkbox", async (
   // The control: an ordinary waiting row is still selectable.
   const other = screen.getByText("Still waiting").closest("[data-field='queue-row']");
   expect(within(other as HTMLElement).getByRole("checkbox")).toBeInTheDocument();
+});
+
+
+it("a suppressed row offers Restore, and it names only that call", async () => {
+  // REPRODUCED by an outside review: removal was a one-way door in the UI. The
+  // backend has always accepted an explicit re-approval, and the comment beside
+  // this row said so -- but the screen offered no way to name a call, so the
+  // capability existed only in prose.
+  //
+  // It must POST `call_ids`, not `min_score`. The threshold sweep deliberately
+  // SKIPS suppressed rows, so a restore routed through it would appear to do
+  // nothing; and were it ever changed to include them, one click would wipe the
+  // whole exception list instead of this one entry.
+  const { post } = renderQueue({
+    items: [
+      call({ call_id: 1, title: "Taken down", suppressed: true, score: 95 }),
+      call({ call_id: 2, title: "Also removed", suppressed: true, score: 91 }),
+    ],
+    waiting_count: 0,
+  });
+  const row = (await screen.findByText("Taken down")).closest("[data-field='queue-row']");
+  const restore = within(row as HTMLElement).getByRole("button", { name: /restore to board/i });
+  fireEvent.click(restore);
+
+  await waitFor(() => expect(post).toHaveBeenCalled());
+  const body = (post.mock.calls[0][1] as { body: unknown }).body;
+  expect(body).toEqual({ call_ids: [1] });
+});
+
+it("an ordinary waiting row has no Restore button", async () => {
+  // Guards the gate above: a Restore rendered on every row would satisfy a
+  // "the button exists" assertion while saying nothing about suppressed rows,
+  // and would offer a meaningless control on calls nobody removed.
+  renderQueue({ items: [call({ call_id: 2, title: "Still waiting", score: 70 })], waiting_count: 1 });
+  const row = (await screen.findByText("Still waiting")).closest("[data-field='queue-row']");
+  expect(within(row as HTMLElement).queryByRole("button", { name: /restore/i })).toBeNull();
 });

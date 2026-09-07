@@ -139,6 +139,15 @@ class BoardOut(BaseModel):
     # PENDING side of that; this is the other half, a straight count of
     # board_items, and Task 5 does not call board_queue -- Task 6 wires that up.
     approved_count: int
+    # BOARD HEALTH. Three fields because "last succeeded" alone cannot separate
+    # a board that runs nightly and changes nothing from one that has been
+    # failing since March -- and a corridor wall that quietly stopped updating
+    # looks exactly like one that is working. NULL everywhere means the job has
+    # never reached this board, which the UI must say as "not yet", never as a
+    # date. `last_reconcile_error` is already truncated at the write.
+    last_reconcile_attempt_at: datetime | None
+    last_reconciled_at: datetime | None
+    last_reconcile_error: str | None
     # D9 / Open-3 half 2: whether a board alert on THIS board's profile would
     # currently be escalated away from its owner -- matches
     # `owner_undeliverable_map`'s own docstring term for term (Task 8 review
@@ -188,6 +197,9 @@ def _to_out(board: Board, approved_count: int, owner_undeliverable: bool) -> Boa
         created_at=board.created_at,
         updated_at=board.updated_at,
         approved_count=approved_count,
+        last_reconcile_attempt_at=board.last_reconcile_attempt_at,
+        last_reconciled_at=board.last_reconciled_at,
+        last_reconcile_error=board.last_reconcile_error,
         owner_undeliverable=owner_undeliverable,
     )
 
@@ -1008,6 +1020,21 @@ def approve_items(
                 ).scalars()
             )
             likely_new = [cid for cid in likely if cid not in seen]
+            # CAPACITY PREFLIGHT. Mirrors the refusal the transaction below
+            # makes (`approved_count + len(new_ids) > cap`) using the numbers
+            # this pass already has, so a request that cannot succeed encodes
+            # nothing at all. MEASURED before this line existed: 200 requested
+            # calls on a 24-slot board ran `qr_for` 200 times and then returned
+            # 409 -- every one of those encodes thrown away.
+            #
+            # Skipping is safe for the same reason the whole pass is advisory:
+            # it removes work, never an outcome. If the board has shrunk its
+            # occupancy by the time the lock is taken and the request now fits,
+            # the transaction encodes inline exactly as it does for any url
+            # this pass missed. Slower, and still correct.
+            pre_cap = pre_board.items_per_page * pre_board.max_pages
+            if likely_new and len(seen) + len(likely_new) > pre_cap:
+                likely_new = []
             pre_urls = set(
                 pre_session.execute(
                     select(Call.url).where(Call.id.in_(likely_new))
