@@ -274,7 +274,15 @@ it("MINOR 5: the items-per-page and page-seconds fields clamp to their bounds an
 
 it("a capacity-shrinking settings save shows the 409 message with its numbers intact", async () => {
   const user = userEvent.setup();
-  const overflowMessage = "this board has 20 approved calls; the new settings hold 4 — remove 16 first";
+  // Kept in step with `update_board`'s 409 in src/grant_lab/web/api/boards.py.
+  // A hand-written fixture cannot redden when the backend's wording moves, so
+  // this is the one place the two can drift silently -- the "and each removal
+  // also suppresses" clause is the part that was added after removal stopped
+  // being a plain delete, and it is what an operator has to read here.
+  const overflowMessage =
+    "this board has 20 approved calls; the new settings hold 4 — remove 16 first, " +
+    "and each removal also suppresses that call, keeping it off this board until " +
+    "it is approved again";
   renderDetail({
     putResult: { data: undefined, error: { error: { code: "conflict", message: overflowMessage } } },
   });
