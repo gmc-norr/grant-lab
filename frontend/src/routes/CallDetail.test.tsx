@@ -292,6 +292,75 @@ it("the back link is a bare / when the reader arrived with no search at all", as
 // exactly the same reason the strip holds its own target: the URL can change
 // under a late write, and the note must land on the decision it was about.
 // -------------------------------------------------------------------------
+// The note the server already holds, on the same call. Re-hiding an
+// already-hidden call is `hidden -> hidden`, which the upsert's CASE PRESERVES
+// the note through -- so this is the state the page is really in when a reader
+// arrives from the Hidden view (the card title links straight here) and presses
+// "Hide this call".
+const HIDDEN_WITH_NOTE = {
+  ...RANKED,
+  call: { ...RANKED.call, decision_note: "not eligible — materials science" },
+};
+
+async function openTheBoxOverAnExistingNote() {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: HIDDEN_WITH_NOTE, error: undefined } as never);
+  vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { hidden: true }, error: undefined } as never);
+  const put = vi
+    .spyOn(clientMod.api, "PUT")
+    .mockResolvedValue({ data: { decision_note: null }, error: undefined } as never);
+  renderDetail("/calls/5?profile=7");
+  fireEvent.click(await screen.findByRole("button", { name: /hide this call/i }));
+  fireEvent.click(screen.getByRole("button", { name: /yes, hide it/i }));
+  return { put, box: await screen.findByRole("textbox") };
+}
+
+it("shows the note the decision already carries instead of an empty box", async () => {
+  const { box } = await openTheBoxOverAnExistingNote();
+  expect(box).toHaveValue("not eligible — materials science");
+});
+
+it("does not rewrite the note it was seeded with when the box is committed unchanged", async () => {
+  // The seed has to reach `committed.current`, not merely the visible value. If
+  // it only reached the value, an Enter or a blur over untouched text would PUT
+  // the same string back -- harmless here, but it is the same ref that decides
+  // whether an IGNORED box is safe, and the ignored case is the common one.
+  const { put, box } = await openTheBoxOverAnExistingNote();
+  await userEvent.type(box, "{Enter}");
+  fireEvent.blur(box);
+  await act(async () => { await Promise.resolve(); });
+  expect(put).not.toHaveBeenCalled();
+});
+
+it("carries the existing note into the write when the reader adds to it", async () => {
+  // THE DATA-LOSS GATE. Unseeded, this box is empty over a stored reason, and
+  // the first thing typed into it replaces that reason wholesale -- unseen,
+  // because the page never showed it. Here the PUT must carry BOTH halves.
+  const { put, box } = await openTheBoxOverAnExistingNote();
+  await userEvent.type(box, " — asked the PI{Enter}");
+  await waitFor(() =>
+    expect(put).toHaveBeenCalledWith("/api/calls/{call_id}/note", {
+      params: { path: { call_id: 5 }, query: { profile_id: 7 } },
+      body: {
+        note: "not eligible — materials science — asked the PI",
+        expected_state: "hidden",
+      },
+    }),
+  );
+});
+
+it("opens empty when the call carries no note, rather than rendering a null", async () => {
+  // The NEGATIVE control for the three above: `decision_note: null` is what a
+  // fresh hide returns, and it must produce an empty box -- not the string
+  // "null", and not the previous call's text.
+  const noNote = { ...RANKED, call: { ...RANKED.call, decision_note: null } };
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: noNote, error: undefined } as never);
+  vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { hidden: true }, error: undefined } as never);
+  renderDetail("/calls/5?profile=7");
+  fireEvent.click(await screen.findByRole("button", { name: /hide this call/i }));
+  fireEvent.click(screen.getByRole("button", { name: /yes, hide it/i }));
+  expect(await screen.findByRole("textbox")).toHaveValue("");
+});
+
 it("offers no note box before anything has been hidden", async () => {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: RANKED, error: undefined } as never);
   renderDetail();
@@ -329,7 +398,14 @@ it("asks why beside the Undo, and the note reaches the endpoint with the hidden 
   );
 });
 
-it("takes the box away again when the hide is undone — the note died with the row (D4)", async () => {
+// NAMED FOR WHAT IT PROVES, not for the line that inspired it. `setNoteOpen(false)`
+// in the Undo handler is correct defence-in-depth, and this test cannot see it:
+// deleting that line leaves all of this file green (measured 2026-09-07), because
+// Undo clears `hidden`, and the box lives inside the `hidden !== null` branch that
+// then unmounts wholesale. What IS pinned is the user-visible guarantee -- no box
+// soliciting a reason for a decision that no longer exists (D4) -- which is the
+// property that would actually break if the box were moved out of that branch.
+it("leaves no box soliciting a reason once the hide is undone (D4)", async () => {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: RANKED, error: undefined } as never);
   vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { hidden: true }, error: undefined } as never);
   vi.spyOn(clientMod.api, "DELETE").mockResolvedValue({ data: { hidden: false }, error: undefined } as never);

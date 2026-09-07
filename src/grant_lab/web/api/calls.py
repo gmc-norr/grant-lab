@@ -205,6 +205,20 @@ class CallDetailCallOut(BaseModel):
     url: str
     keywords: list[str]
     summary: str | None
+    # The CALLER'S OWN words about their own decision on this call, for the
+    # `?profile=` in scope (spec 2026-09-07 §5: "`CallDetail` -- beside the
+    # existing hide/undo control"). Same three-column scope as the list
+    # projection -- (user_id, profile_id, call_id) -- so a colleague reading the
+    # same profile's call page never sees it. None when there is no `?profile=`,
+    # when that profile is unreadable or inactive, when there is no decision
+    # row, and when the row's note is NULL: all four are "nothing to show", and
+    # a status that told them apart would make `?profile=` an oracle.
+    #
+    # Without this the page is CREATE-ONLY: arriving from the Hidden view and
+    # pressing "Hide this call" re-hides `hidden -> hidden`, which PRESERVES the
+    # note, and the strip would then open EMPTY over it -- one Enter replaces a
+    # reason the golden set exists to read, unseen.
+    decision_note: str | None
 
 
 class CallDetailNoteOut(BaseModel):
@@ -708,6 +722,7 @@ def get_call_detail(
         ranking = None
         criteria: list[CallRankingCriterion] = []
         profile_obj: Profile | None = None
+        decision_note: str | None = None
         # This route resolves `?profile=` ITSELF — it never goes through
         # `dashboard.resolve_profile_selection` — so it composes the read rule
         # here. It used to resolve by is_active ALONE, which made it the
@@ -724,6 +739,19 @@ def get_call_detail(
             p = session.get(Profile, profile_id)
             if p is not None and p.is_active and can_read_profile(session, user, p.id):
                 profile_obj = p
+                # ALL THREE columns, exactly as the list projection joins them
+                # (`build_dashboard_view`): `user_id` is the one that keeps a
+                # colleague's reason off this page, and it is the one the
+                # golden-set miner deliberately omits -- so it is the one a
+                # copy-paste from there would drop. `(user_id, profile_id,
+                # call_id)` is unique, so this is at most one row.
+                decision_note = session.scalar(
+                    select(CallDecision.note).where(
+                        CallDecision.user_id == user.id,
+                        CallDecision.profile_id == profile_id,
+                        CallDecision.call_id == call_id,
+                    )
+                )
                 ranking = session.execute(
                     select(CallRanking).where(
                         CallRanking.call_id == call_id,
@@ -785,6 +813,7 @@ def get_call_detail(
             url=call.url,
             keywords=list(call.keywords or []),
             summary=call.summary,
+            decision_note=decision_note,
         )
 
         ranking_out = None

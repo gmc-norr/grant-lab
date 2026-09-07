@@ -109,6 +109,11 @@ const CALL_DETAIL = {
     url: "https://example.invalid/call",
     keywords: ["dna"],
     summary: "Sum.",
+    // Required on CallDetailCallOut since the 2026-09-07 review fix: the page
+    // seeds the note box from it, so a fixture without it stops resembling the
+    // wire silently -- this file is typechecked NOWHERE (frontend/tsconfig.json
+    // includes only `src`), exactly as CALLS above says.
+    decision_note: null,
   },
   ranking: null,
   criteria: [],

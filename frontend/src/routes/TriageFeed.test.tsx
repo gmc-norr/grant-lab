@@ -1165,6 +1165,43 @@ describe("Task 6 — the decision-note strip (D10, gates 10 and 11)", () => {
     );
   });
 
+  it("opens over the note the row already carries, so a re-decision cannot replace it unseen", async () => {
+    // The feed's half of the same blind overwrite CallDetail had. `h` on an
+    // ALREADY-HIDDEN card re-runs the upsert, whose CASE preserves the note
+    // through `hidden -> hidden` -- so an unseeded box sits over a stored
+    // reason, and the first Enter destroys it. Less harmful than on the call
+    // page only because the note is rendered on the card two lines away; it is
+    // the same destruction.
+    const { post } = stub({
+      items: [call({ id: 1, title: "Call one", decision_note: "wrong field" })],
+    });
+    const { container } = renderFeed("/?view=hidden");
+    await screen.findByText("Call one");
+
+    fireEvent.keyDown(document.body, { key: "h" });
+    await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/1/hide"]));
+    const strip = await stripFor(container, 1);
+    expect(within(strip).getByRole("textbox")).toHaveValue("wrong field");
+  });
+
+  it("opens EMPTY on a flip, because the flip has just cleared that note (D9)", async () => {
+    // THE OTHER HALF, and the reason the seed is conditional rather than
+    // `call.decision_note ?? null`. `s` in Hidden writes `hidden -> saved`, and
+    // the save upsert's CASE writes NULL over the note. Seeding here would show
+    // text the server discarded a moment ago and re-save it on the next Enter --
+    // resurrecting, on a SAVE, a reason written about a HIDE.
+    const { post } = stub({
+      items: [call({ id: 1, title: "Call one", decision_note: "wrong field" })],
+    });
+    const { container } = renderFeed("/?view=hidden");
+    await screen.findByText("Call one");
+
+    fireEvent.keyDown(document.body, { key: "s" });
+    await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/1/save"]));
+    const strip = await stripFor(container, 1);
+    expect(within(strip).getByRole("textbox")).toHaveValue("");
+  });
+
   it("un-deciding the call the strip is about closes it", async () => {
     // D4: a note belongs to its decision and dies with it. `u` deletes the
     // decision row, so a strip left open over it can only ever 404.

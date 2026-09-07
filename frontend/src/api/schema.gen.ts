@@ -3118,6 +3118,8 @@ export interface components {
             deadline: string | null;
             /** Deadline Local Date */
             deadline_local_date: string | null;
+            /** Decision Note */
+            decision_note: string | null;
             /** External Id */
             external_id: string | null;
             /** Id */

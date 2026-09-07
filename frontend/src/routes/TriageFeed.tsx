@@ -149,7 +149,12 @@ export function TriageFeed() {
   // rather than derived from the cursor, because the cursor moves and the
   // decision it was created for does not (D10) -- see DecisionNoteStrip's own
   // header. Set ONLY in a decision's onSuccess, below.
-  const [noteTarget, setNoteTarget] = useState<NoteTarget | null>(null);
+  //
+  // `seed` rides in the SAME state object rather than beside it: the strip
+  // opens over a note that may already exist, and a second useState cleared by
+  // its own functional update in `undecide` is exactly how the two would come
+  // to disagree about which call they describe.
+  const [noteTarget, setNoteTarget] = useState<(NoteTarget & { seed: string | null }) | null>(null);
 
   const [focusIndex, setFocusIndex] = useState(0);
   const cardEls = useRef<(HTMLElement | null)[]>([]);
@@ -213,12 +218,27 @@ export function TriageFeed() {
       // ON SUCCESS, NEVER OPTIMISTICALLY (D10). A failed hide that still opened
       // a strip would solicit a note for a decision that did not happen, and
       // the note endpoint would then 404 on a row that was never created.
+      const nextState = kind === "save" ? "saved" : "hidden";
+      // THE NOTE THAT IS ALREADY THERE, or null. `h` on an already-hidden card
+      // in the Hidden view re-runs the upsert, whose CASE PRESERVES the note
+      // through `hidden -> hidden` -- so an unseeded box would open empty over
+      // a stored reason and the first Enter would replace it unseen.
+      //
+      // A FLIP is the opposite case and must NOT be seeded: `s` on a hidden
+      // card writes `hidden -> saved`, which by D9 CLEARS the note server-side,
+      // so seeding there would show text the server has just discarded and
+      // re-save it on the next Enter. `view` is the row's current state in the
+      // two views that have one, so `view === nextState` is exactly "same
+      // state, note preserved"; the Inbox matches neither and carries no
+      // decision row to have a note on.
+      const seed = view === nextState ? (call.decision_note ?? null) : null;
       const onDecided = () =>
         setNoteTarget({
           callId: call.id,
           profileId,
           title: call.title,
-          state: kind === "save" ? "saved" : "hidden",
+          state: nextState,
+          seed,
         });
       // onSuccess, never optimistically (D10): a failed hide must not solicit a
       // note for a decision that did not happen, and the note endpoint would
@@ -235,7 +255,7 @@ export function TriageFeed() {
       if (kind === "save") save.mutate(args, { onSuccess: onDecided });
       else hide.mutate(args, { onSuccess: onDecided });
     },
-    [hide, isFetching, profileId, save],
+    [hide, isFetching, profileId, save, view],
   );
 
   // UN-DECIDE (D2): back to undecided, which is the ABSENCE of a decision row —
@@ -423,11 +443,16 @@ export function TriageFeed() {
 
             expectedState comes from THIS closure's noteTarget, not from the
             strip: the strip must not carry two ways to say which decision it
-            is about (D11). */}
+            is about (D11).
+
+            NO autoFocus, and that is D2 itself: this strip appears on its own
+            after a keypress the user made, and grabbing the caret would turn
+            `h h h` into typed text in the first box. */}
         {noteTarget !== null && (
           <DecisionNoteStrip
             key={`${noteTarget.callId}:${noteTarget.state}`}
             target={noteTarget}
+            initialNote={noteTarget.seed}
             onSave={(args) => setNote.mutateAsync({ ...args, expectedState: noteTarget.state })}
             onDismiss={() => setNoteTarget(null)}
           />

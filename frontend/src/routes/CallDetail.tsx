@@ -76,8 +76,19 @@ export function CallDetail() {
                 write, and the note must land on the decision it was about, not
                 on whatever the URL says now.
 
-                No initialNote: the detail read-model carries no decision_note,
-                and a hide made a second ago has none. */}
+                SEEDED with the note the server already holds. A hide made a
+                second ago has none -- but arriving here from the Hidden view
+                and pressing "Hide this call" re-hides `hidden -> hidden`, which
+                the upsert's CASE deliberately PRESERVES the note through. An
+                unseeded box over an existing reason is a blind overwrite: one
+                Enter replaces the text the golden set exists to read, and the
+                writer never saw what they destroyed.
+
+                `call.decision_note` is the value from page load and stays that
+                way while the box is open: this page's query key is
+                `["call", id, profile]`, which `invalidateQueries(["calls"])`
+                does not prefix-match, so neither the hide nor the note write
+                refetches underneath the seed. */}
             {noteOpen && (
               <DecisionNoteStrip
                 target={{
@@ -86,6 +97,7 @@ export function CallDetail() {
                   title: call.title,
                   state: "hidden",
                 }}
+                initialNote={call.decision_note}
                 onSave={(args) => setNote.mutateAsync({ ...args, expectedState: "hidden" })}
                 onDismiss={() => setNoteOpen(false)}
               />
