@@ -99,7 +99,15 @@ def test_hidden_view_DOES_query_the_note_column(monkeypatch, pg_url, pg_session_
         client.post(f"/api/calls/{cid}/hide", params={"profile_id": pid})
         statements.clear()
         client.get("/api/calls", params={"view": "hidden", "profile": pid})
-    assert any(_NOTE_COLUMN.search(s) for s in statements), statements
+    # EXACTLY one, not `any`. `any` is satisfied by a second, separate
+    # statement -- a bulk `SELECT call_id, note ... WHERE call_id IN (...)`
+    # after the list query is still O(1) and still correct, so the N+1 gates
+    # (which compare 1 row against 10) cannot see it either. But it is no
+    # longer "one more column off the join that was already there", which is
+    # this shape's entire justification over the spec rev-1 subselect. Measured
+    # 2026-09-07: the count is 1 today.
+    hits = [s for s in statements if _NOTE_COLUMN.search(s)]
+    assert len(hits) == 1, hits
 
 
 def test_another_users_note_is_invisible(monkeypatch, pg_url, pg_session_factory):
