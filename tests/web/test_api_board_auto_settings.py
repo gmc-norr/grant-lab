@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+import inspect
+
 from grant_lab.db.models import Board
-from grant_lab.web.api.boards import MAX_BOARD_ITEMS
+from grant_lab.web.api.boards import (
+    MAX_BOARD_ITEMS,
+    ORIENTATION_ITEMS_PER_PAGE,
+    BoardSettingsIn,
+    auto_preview,
+)
 from tests.test_board_auto_selection import _ranked_call
 from tests.test_boards_qr_at_approval import _client_for, _make_board, _setup
 from tests.web.test_api_board_items import _approve_n
@@ -338,3 +345,137 @@ def test_turning_auto_ON_while_shrinking_is_allowed(
         board = s.get(Board, bid)
         assert board.max_pages == 1
         assert board.auto_publish is True
+
+
+def _bounds(metadata) -> dict[str, int]:
+    """The ge/le a pydantic field or a FastAPI Query actually declares.
+
+    Both keep their constraints as the same `annotated_types` objects, which is
+    what lets the preview's parameters and the PUT's model be compared without
+    either side being retyped into this test.
+    """
+    out = {}
+    for meta in metadata:
+        for attr in ("ge", "le"):
+            value = getattr(meta, attr, None)
+            if value is not None:
+                out[attr] = value
+    return out
+
+
+def test_the_preview_answers_for_a_threshold_that_is_not_saved(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """Spec Sec 6 requires this preview to be LIVE -- the admin reads the four
+    numbers BEFORE saving. It used to read only the stored board, so an admin
+    who had just lowered the minimum score was shown the OLD numbers, and
+    `truncated` -- the one number the preview exists to surface -- is exactly
+    what a lowered floor changes most.
+
+    Board default min_score is 60 (db/models/boards.py), so of these twenty
+    calls ten qualify as saved and all twenty qualify at a floor of 40.
+    """
+    app = _setup(monkeypatch, pg_url)
+    pid, owner = profile_factory(name="preview live")
+    bid = _make_board(pg_session_factory, profile_id=pid, created_by=owner, slug="J" * 16)
+    for i in range(10):
+        _ranked_call(pg_session_factory, external_id=f"live-hi-{i}", profile_id=pid, score=70)
+    for i in range(10):
+        _ranked_call(pg_session_factory, external_id=f"live-lo-{i}", profile_id=pid, score=50)
+
+    client = _client_for(app, owner)
+    with client:
+        saved = client.get(f"/api/boards/{bid}/auto-preview")
+        whatif = client.get(f"/api/boards/{bid}/auto-preview", params={"min_score": 40})
+
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["qualifying"] == 10, "a bare call must still describe the SAVED board"
+    assert whatif.status_code == 200, whatif.text
+    assert whatif.json()["qualifying"] == 20, "the preview ignored the threshold it was given"
+
+    # A GET that persists is the failure mode of doing this by assigning onto
+    # the loaded ORM row: it would look right in the response and save on the
+    # next flush.
+    with pg_session_factory() as s:
+        assert s.get(Board, bid).min_score == 60, "a read-only preview wrote to the board"
+
+
+def test_the_preview_derives_the_page_size_of_an_orientation_it_is_only_asked_about(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """The settings form OMITS `items_per_page` unless the user edited it, so
+    the server re-derives it from the new orientation. A preview that echoed
+    the stored landscape 8 would describe an 8-up board while Save built a 4-up
+    one -- and the client cannot fix that by keeping its own copy of the map,
+    because then two copies decide one number.
+
+    So the preview takes the ORIENTATION and runs `_effective_items_per_page`,
+    the same function `update_board` applies.
+    """
+    app = _setup(monkeypatch, pg_url)
+    pid, owner = profile_factory(name="preview orientation")
+    bid = _make_board(pg_session_factory, profile_id=pid, created_by=owner, slug="K" * 16)
+    for i in range(30):
+        _ranked_call(pg_session_factory, external_id=f"orient-{i}", profile_id=pid, score=90)
+
+    portrait_per_page = ORIENTATION_ITEMS_PER_PAGE["portrait"]
+    client = _client_for(app, owner)
+    with client:
+        r = client.get(f"/api/boards/{bid}/auto-preview", params={"orientation": "portrait"})
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # max_pages stays 3, so the cap follows the DERIVED page size, not the
+    # stored 8. Landscape would give 24 displayed and 6 truncated.
+    assert body["displayed"] == portrait_per_page * 3
+    assert body["truncated"] == 30 - portrait_per_page * 3
+    assert body["pages"] == 3
+    assert body["displayed"] != 24, "the preview used the stored landscape page size"
+
+
+def test_the_preview_refuses_the_same_product_the_PUT_refuses(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """Both fields cap at 64 and their PRODUCT does not, so without this an
+    authenticated caller could ask `board_selection` for a 4096-row LIMIT on a
+    GET -- the same unbounded product that made the public board route a
+    ~182 MB response (see MAX_BOARD_ITEMS).
+
+    It matters just as much that the refusal MATCHES the PUT's. A preview that
+    accepted a combination Save then rejects would show an admin numbers for a
+    board they cannot have, from the very screen they consult first.
+    """
+    app = _setup(monkeypatch, pg_url)
+    pid, owner = profile_factory(name="preview product")
+    bid = _make_board(pg_session_factory, profile_id=pid, created_by=owner, slug="L" * 16)
+    client = _client_for(app, owner)
+    with client:
+        preview = client.get(
+            f"/api/boards/{bid}/auto-preview", params={"items_per_page": 64, "max_pages": 64}
+        )
+        put = client.put(f"/api/boards/{bid}", json={"items_per_page": 64, "max_pages": 64})
+
+    assert preview.status_code == 409, f"a 4096-card preview was accepted: {preview.text}"
+    assert put.status_code == 409, put.text
+    assert preview.json()["error"]["message"] == put.json()["error"]["message"], (
+        "the preview and the PUT refuse the same board with different words"
+    )
+    assert str(MAX_BOARD_ITEMS) in preview.json()["error"]["message"]
+
+
+def test_the_previews_bounds_are_the_settings_PUTs_bounds():
+    """Retyping `ge=0, le=100` onto the preview is how these drift: the two
+    live in different statements, and the day someone widens the PUT nothing
+    goes red. Narrower, an admin cannot preview a board they may save; WIDER,
+    they preview one Save refuses -- numbers that look right under a button
+    that fails.
+
+    This reads what the route actually declares, so it fails whether the bound
+    was hard-coded or `_settings_bound` started returning the wrong thing.
+    """
+    declared = inspect.signature(auto_preview).parameters
+    for field in ("min_score", "items_per_page", "max_pages", "page_seconds"):
+        got = _bounds(declared[field].default.metadata)
+        expected = _bounds(BoardSettingsIn.model_fields[field].metadata)
+        assert expected, f"BoardSettingsIn.{field} declares no bounds for the preview to mirror"
+        assert got == expected, f"preview {field} bounds {got} != the PUT's {expected}"

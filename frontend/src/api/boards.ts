@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api, unwrap } from "./client";
-import type { components } from "./schema.gen";
+import type { components, paths } from "./schema.gen";
 
 export type Board = components["schemas"]["BoardOut"];
 export type BoardCreateBody = components["schemas"]["BoardCreateIn"];
@@ -12,6 +12,13 @@ export type BoardItem = components["schemas"]["BoardItemOut"];
 export type ApproveBody = components["schemas"]["ApproveIn"];
 export type ReorderBody = components["schemas"]["ReorderIn"];
 export type AutoPreview = components["schemas"]["AutoPreviewOut"];
+// The what-if settings the preview answers for. Derived from the generated
+// schema rather than hand-written, so a parameter renamed or dropped
+// server-side is a tsc error here instead of a query string the backend
+// silently ignores -- which would look exactly like a preview that works.
+export type AutoPreviewQuery = NonNullable<
+  paths["/api/boards/{board_id}/auto-preview"]["get"]["parameters"]["query"]
+>;
 
 // --- boards list + CRUD ----------------------------------------------------
 //
@@ -73,13 +80,22 @@ export function useUpdateBoard(id: number) {
 // silently dropping most of it" -- and the second is the failure the preview
 // exists to surface. Edit-gated like the rest of /api/boards/{id}, and
 // `enabled` so the settings form does not fetch it while the switch is off.
-export function useAutoPreview(id: number, opts?: { enabled?: boolean }) {
+// `query` carries the settings the admin has typed but not saved. Omitted, the
+// endpoint falls back to the stored board, so a bare call still describes the
+// saved settings. It is part of the queryKey because two different what-ifs are
+// two different answers; sharing one cache entry would show the previous
+// question's numbers under the current one's inputs.
+export function useAutoPreview(
+  id: number,
+  opts?: { enabled?: boolean; query?: AutoPreviewQuery },
+) {
+  const query = opts?.query ?? {};
   return useQuery({
-    queryKey: ["board-auto-preview", id],
+    queryKey: ["board-auto-preview", id, query],
     queryFn: async () =>
       unwrap(
         await api.GET("/api/boards/{board_id}/auto-preview", {
-          params: { path: { board_id: id } },
+          params: { path: { board_id: id }, query },
         }),
       ),
     enabled: opts?.enabled ?? true,

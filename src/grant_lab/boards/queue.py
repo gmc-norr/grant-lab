@@ -44,7 +44,7 @@ class QueueRow:
     suppressed: bool
 
 
-def board_candidate_parts(session: Session, *, board: Board):
+def board_candidate_parts(session: Session, *, board: Board, min_score: int | None = None):
     """The filters, join AND ORDER every view of a board's candidates shares.
 
     `board_queue` (the admin's list) and `boards/auto_publish.board_selection`
@@ -60,11 +60,29 @@ def board_candidate_parts(session: Session, *, board: Board):
     moves, and then the admin's top-24 and the corridor wall's 24 are
     different calls with nothing red to say so. Returned here so there is
     one copy.
+
+    `min_score` overrides the board's stored threshold WITHOUT touching it, and
+    is the one thing a caller may vary. It exists for the settings preview,
+    which the spec requires to be 'live': the admin drags the threshold and
+    reads the four numbers BEFORE saving, so the preview must ask a what-if
+    question about a board that does not exist yet.
+
+    This does not reopen the drift this function closes. Drift comes from a
+    SECOND COPY of the filters, join and order -- a copy that can be edited
+    without the other moving. An override changes one BOUND inside the single
+    copy; every caller still runs these exact filters in this exact order. The
+    preview asking 'what if the floor were 40' is a different question about
+    the same query, not a different query.
+
+    Passing it is also not enough on its own: a caller that overrides the
+    threshold here and then re-reads `board.min_score` somewhere else has
+    written two answers to one question. `board_selection` takes the same
+    argument and threads it through for exactly that reason.
     """
     owner_id = session.scalar(select(Profile.created_by).where(Profile.id == board.profile_id))
     filters = [
         _decision_predicate("archive", user_id=owner_id, profile_id=board.profile_id),
-        CallRanking.aggregate_score >= board.min_score,
+        CallRanking.aggregate_score >= (board.min_score if min_score is None else min_score),
         Call.deadline.is_not(None),
         Call.deadline > func.now(),
     ]

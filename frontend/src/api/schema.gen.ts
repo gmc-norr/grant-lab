@@ -551,7 +551,12 @@ export interface paths {
         get: operations["get_board_api_boards__board_id__get"];
         /**
          * Update Board
-         * @description Update settings, refusing a capacity-REDUCING change.
+         * @description Update settings, refusing a capacity-REDUCING change on a MANUAL board.
+         *
+         *     The guard protects a human's hand-picked cards from a cap too small to
+         *     hold them. An AUTO board has none, so it is exempt -- see
+         *     `new_auto_publish` below for why that flag is read off the request and
+         *     not off the board.
          *
          *     `items_per_page` only resets to the new orientation's default when
          *     orientation is ACTUALLY changing in this request. Sending back the same
@@ -603,7 +608,29 @@ export interface paths {
         };
         /**
          * Auto Preview
-         * @description What this board WOULD publish right now. Read-only, writes nothing.
+         * @description What this board WOULD publish. Read-only, writes nothing.
+         *
+         *     Every parameter is a WHAT-IF: omitted, it falls back to the stored board,
+         *     so a bare call still describes the saved settings. Supplied, it answers for
+         *     values the admin has typed but not saved -- which is what spec Sec 6 means
+         *     by a preview that is "live". Before this, an admin who lowered the threshold
+         *     read the OLD numbers as the new ones, and the truncation the preview exists
+         *     to surface was the number most likely to be stale.
+         *
+         *     `orientation` is here rather than a client-side copy of
+         *     ORIENTATION_ITEMS_PER_PAGE because the page size a flip produces is the
+         *     server's derivation to make -- see `_effective_items_per_page`.
+         *
+         *     Nothing here is written back. The overrides are passed as ARGUMENTS to the
+         *     query helpers rather than assigned onto `board`: this route holds a live ORM
+         *     row inside a session, so `board.min_score = ...` would be a pending change
+         *     that any later flush turns into a silent save from a GET.
+         *
+         *     The values reaching the query are the ones the response describes, and both
+         *     are the effective values -- not a mix of typed and stored. `pages` divides
+         *     by the SAME `items_per_page` the cap was built from, and `loop_seconds`
+         *     multiplies by the SAME `page_seconds` in the request; reading either back
+         *     off `board` would report a loop for a board nobody asked about.
          */
         get: operations["auto_preview_api_boards__board_id__auto_preview_get"];
         put?: never;
@@ -8254,7 +8281,13 @@ export interface operations {
     };
     auto_preview_api_boards__board_id__auto_preview_get: {
         parameters: {
-            query?: never;
+            query?: {
+                orientation?: ("landscape" | "portrait") | null;
+                min_score?: number | null;
+                items_per_page?: number | null;
+                max_pages?: number | null;
+                page_seconds?: number | null;
+            };
             header?: never;
             path: {
                 board_id: number;

@@ -402,14 +402,9 @@ def update_board(
         _lock_board_row(session, board)
         approved_count = _approved_counts(session, [board.id]).get(board.id, 0)
 
-        orientation_changed = body.orientation is not None and body.orientation != board.orientation
-        new_orientation = body.orientation if body.orientation is not None else board.orientation
-        if body.items_per_page is not None:
-            new_items_per_page = body.items_per_page
-        elif orientation_changed:
-            new_items_per_page = ORIENTATION_ITEMS_PER_PAGE[new_orientation]
-        else:
-            new_items_per_page = board.items_per_page
+        new_orientation, orientation_changed, new_items_per_page = _effective_items_per_page(
+            board, orientation=body.orientation, items_per_page=body.items_per_page
+        )
 
         # `new_max_pages` mirrors `new_items_per_page` above, and it is not
         # cosmetic. `max_pages` became settable in the same change that added
@@ -524,6 +519,59 @@ def update_board(
     return out
 
 
+def _effective_items_per_page(
+    board: Board, *, orientation: str | None, items_per_page: int | None
+) -> tuple[str, bool, int]:
+    """The orientation and page size a request WOULD produce, in one place.
+
+    `update_board` APPLIES this and `auto_preview` PREDICTS it, so a second
+    copy would let the preview answer for a different board than Save builds --
+    and it would diverge in exactly one case, which is the case the UI's
+    `itemsPerPageTouched` tracking exists to create: orientation flipped with
+    `items_per_page` left alone. There the server re-derives the page size from
+    the new orientation, so a preview that echoed the OLD page size would show
+    a landscape 8-up loop for a board about to be saved portrait 4-up.
+
+    An explicit `items_per_page` is an OVERRIDE and wins over the orientation's
+    default; only a REAL flip re-derives. Returning `orientation_changed`
+    alongside keeps `update_board`'s 409 attribution reading the same condition
+    that produced the number it is explaining.
+    """
+    new_orientation = board.orientation if orientation is None else orientation
+    orientation_changed = orientation is not None and orientation != board.orientation
+    if items_per_page is not None:
+        value = items_per_page
+    elif orientation_changed:
+        value = ORIENTATION_ITEMS_PER_PAGE[new_orientation]
+    else:
+        value = board.items_per_page
+    return new_orientation, orientation_changed, value
+
+
+def _settings_bound(field: str, attr: str) -> int:
+    """Read a bound off `BoardSettingsIn` so the preview cannot drift from the PUT.
+
+    The preview and the settings PUT must accept exactly the same values. If the
+    preview were narrower an admin could not preview a board they are allowed to
+    save; if it were wider they could preview one the PUT then refuses, which is
+    the worse half -- the numbers would look right and Save would fail.
+
+    Retyping `ge=0, le=100` here is how that drift happens: the two live in
+    different statements, and the day someone raises the PUT's ceiling nothing
+    goes red. So this reads the real constraint objects pydantic keeps on the
+    model, and RAISES at import if a bound it was promised is missing -- an app
+    that will not boot, rather than a `Query(ge=None)` that silently accepts
+    anything. That failure mode is why this returns int and never None.
+    """
+    for meta in BoardSettingsIn.model_fields[field].metadata:
+        value = getattr(meta, attr, None)
+        if value is not None:
+            return value
+    raise RuntimeError(
+        f"BoardSettingsIn.{field} declares no {attr} bound for the preview to mirror"
+    )
+
+
 class AutoPreviewOut(BaseModel):
     """The four numbers an admin needs before saving a threshold.
 
@@ -543,21 +591,92 @@ class AutoPreviewOut(BaseModel):
 def auto_preview(
     request: Request,
     board_id: int,
+    orientation: Literal["landscape", "portrait"] | None = None,
+    min_score: int | None = Query(  # noqa: B008
+        default=None,
+        ge=_settings_bound("min_score", "ge"),
+        le=_settings_bound("min_score", "le"),
+    ),
+    items_per_page: int | None = Query(  # noqa: B008
+        default=None,
+        ge=_settings_bound("items_per_page", "ge"),
+        le=_settings_bound("items_per_page", "le"),
+    ),
+    max_pages: int | None = Query(  # noqa: B008
+        default=None,
+        ge=_settings_bound("max_pages", "ge"),
+        le=_settings_bound("max_pages", "le"),
+    ),
+    page_seconds: int | None = Query(  # noqa: B008
+        default=None,
+        ge=_settings_bound("page_seconds", "ge"),
+        le=_settings_bound("page_seconds", "le"),
+    ),
     user: User = Depends(get_current_user),  # noqa: B008
 ):
-    """What this board WOULD publish right now. Read-only, writes nothing."""
+    """What this board WOULD publish. Read-only, writes nothing.
+
+    Every parameter is a WHAT-IF: omitted, it falls back to the stored board,
+    so a bare call still describes the saved settings. Supplied, it answers for
+    values the admin has typed but not saved -- which is what spec Sec 6 means
+    by a preview that is "live". Before this, an admin who lowered the threshold
+    read the OLD numbers as the new ones, and the truncation the preview exists
+    to surface was the number most likely to be stale.
+
+    `orientation` is here rather than a client-side copy of
+    ORIENTATION_ITEMS_PER_PAGE because the page size a flip produces is the
+    server's derivation to make -- see `_effective_items_per_page`.
+
+    Nothing here is written back. The overrides are passed as ARGUMENTS to the
+    query helpers rather than assigned onto `board`: this route holds a live ORM
+    row inside a session, so `board.min_score = ...` would be a pending change
+    that any later flush turns into a silent save from a GET.
+
+    The values reaching the query are the ones the response describes, and both
+    are the effective values -- not a mix of typed and stored. `pages` divides
+    by the SAME `items_per_page` the cap was built from, and `loop_seconds`
+    multiplies by the SAME `page_seconds` in the request; reading either back
+    off `board` would report a loop for a board nobody asked about.
+    """
     sf = request.app.state.session_factory
     with sf() as session:
         board = _board_for_edit(session, board_id=board_id, user=user)
-        qualifying = qualifying_count(session, board=board)
-        displayed = len(board_selection(session, board=board))
-        pages = -(-displayed // board.items_per_page) if displayed else 0
+        # The SAME derivation `update_board` applies, not a copy of it -- so a
+        # flip to portrait with `items_per_page` untouched previews the 4-up
+        # board Save will actually build, not the 8-up one it is replacing.
+        _orientation, _flipped, eff_items_per_page = _effective_items_per_page(
+            board, orientation=orientation, items_per_page=items_per_page
+        )
+        eff_max_pages = board.max_pages if max_pages is None else max_pages
+        eff_page_seconds = board.page_seconds if page_seconds is None else page_seconds
+        cap = eff_items_per_page * eff_max_pages
+        # The SAME refusal `update_board` makes, deliberately -- same status,
+        # same wording. A preview that accepted a combination the PUT rejects
+        # would show an admin numbers for a board Save then refuses, and this
+        # route is the one they consult BEFORE saving.
+        #
+        # It is also a cost bound in its own right, and this is a GET. Both
+        # fields cap at 64 and their PRODUCT does not, so without this an
+        # authenticated caller could ask `board_selection` for a 4096-row
+        # LIMIT per request -- the same unbounded product that made the public
+        # board route a ~182 MB response (see MAX_BOARD_ITEMS).
+        if cap > MAX_BOARD_ITEMS:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{eff_items_per_page} per page across {eff_max_pages} pages is "
+                    f"{cap} cards; a board holds at most {MAX_BOARD_ITEMS}"
+                ),
+            )
+        qualifying = qualifying_count(session, board=board, min_score=min_score)
+        displayed = len(board_selection(session, board=board, min_score=min_score, cap=cap))
+        pages = -(-displayed // eff_items_per_page) if displayed else 0
         return AutoPreviewOut(
             qualifying=qualifying,
             displayed=displayed,
             truncated=qualifying - displayed,
             pages=pages,
-            loop_seconds=pages * board.page_seconds,
+            loop_seconds=pages * eff_page_seconds,
         )
 
 

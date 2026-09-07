@@ -46,21 +46,35 @@ class Selected:
     score: int
 
 
-def board_selection(session: Session, *, board: Board) -> list[Selected]:
+def board_selection(
+    session: Session, *, board: Board, min_score: int | None = None, cap: int | None = None
+) -> list[Selected]:
     """The cards an auto board should carry, best score first, already capped.
 
     The threshold is the FLOOR and the capacity is the CEILING: everything
     qualifying is published, across as many pages as it needs, until
     `items_per_page * max_pages`. Past that the highest-scoring win. The
     settings preview shows the truncation so the cap is never silent.
+
+    `min_score` and `cap` are what-if overrides for that preview, which the
+    spec requires to be 'live' -- the admin reads these numbers BEFORE saving.
+    Both default to the stored board, so the 05:00 job's call is unchanged.
+
+    They travel TOGETHER on purpose. A preview that overrode the threshold but
+    kept the saved capacity would answer half the question and label it whole:
+    lowering the floor is exactly the edit that makes `truncated` jump, and
+    `truncated` is the number this preview exists to surface.
     """
-    _owner_id, filters, ranking_join, order_by = board_candidate_parts(session, board=board)
+    _owner_id, filters, ranking_join, order_by = board_candidate_parts(
+        session, board=board, min_score=min_score
+    )
     suppressed = (
         select(BoardSuppression.call_id)
         .where(BoardSuppression.board_id == board.id)
         .scalar_subquery()
     )
-    cap = board.items_per_page * board.max_pages
+    if cap is None:
+        cap = board.items_per_page * board.max_pages
     rows = session.execute(
         select(Call.id, Call.url, CallRanking.aggregate_score)
         .join(CallRanking, ranking_join)
@@ -73,7 +87,7 @@ def board_selection(session: Session, *, board: Board) -> list[Selected]:
     return [Selected(call_id=cid, url=url, score=score) for cid, url, score in rows]
 
 
-def qualifying_count(session: Session, *, board: Board) -> int:
+def qualifying_count(session: Session, *, board: Board, min_score: int | None = None) -> int:
     """How many calls clear the threshold, BEFORE the capacity cap.
 
     The preview needs this and `len(board_selection(...))` cannot give it --
@@ -81,7 +95,9 @@ def qualifying_count(session: Session, *, board: Board) -> int:
     """
     # `_order_by`: a COUNT has no order. Unpacked and unused so this call
     # site does not silently start ignoring a fourth part that grows a meaning.
-    _owner_id, filters, ranking_join, _order_by = board_candidate_parts(session, board=board)
+    _owner_id, filters, ranking_join, _order_by = board_candidate_parts(
+        session, board=board, min_score=min_score
+    )
     suppressed = (
         select(BoardSuppression.call_id)
         .where(BoardSuppression.board_id == board.id)
