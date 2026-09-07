@@ -57,7 +57,11 @@ const REQUIRED = [
   "/src/routes/Cockpit",
   "/src/routes/Workspace",
   "/src/routes/AdminDrafting",
-  "/src/routes/AdminGoldenSet",
+  // "/src/routes/AdminGoldenSet" left this list on 2026-09-07, with the script's
+  // own entry: router.simple.tsx mounts the page, so the match bundle contains
+  // that module by design and excluding it made the bundle gate red on correct
+  // code. REQUIRED is a minimum, so this file stayed green while the SCRIPT
+  // failed -- the pair only agrees because both were edited.
   "/src/routes/AdminDeletedWorkspace",
   // The six per-file /src/shell/ entries. Per-file and not "/src/shell/" because
   // the match edition legitimately ships SimpleShell + BrandMark out of that

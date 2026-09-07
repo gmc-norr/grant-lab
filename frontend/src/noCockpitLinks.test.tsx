@@ -8,9 +8,11 @@ import { expect, it } from "vitest";
 //
 // EVERY excluded prefix, not only /cockpit. The first draft of this gate matched
 // /cockpit alone and would have shipped a green run alongside four dead admin
-// links: AdminNav.tsx:7,8,11 links to /admin/drafting, /admin/golden-set and
-// /admin/deleted-workspaces, and AdminDashboard.tsx:164 links to /admin/golden-set.
+// links: AdminNav links to /admin/drafting, /admin/golden-set and
+// /admin/deleted-workspaces, and AdminDashboard links to /admin/golden-set.
 // AdminNav is reached through AdminLayout, which the simple router mounts.
+// Two of those four stopped being dead on 2026-09-07, when router.simple.tsx
+// began mounting /admin/golden-set.
 //
 // This is a source scan rather than a render walk because rendering every
 // release-1 screen with every data shape is not tractable, and a link inside a
@@ -28,7 +30,6 @@ const SRC = join(import.meta.dirname ?? __dirname, ".");
 const EXCLUDED_PREFIXES = [
   "/cockpit",
   "/admin/drafting",
-  "/admin/golden-set",
   "/admin/deleted-workspaces",
 ];
 
@@ -72,11 +73,17 @@ const EXEMPT = [
   //
   // KIND B — links that ARE in the release-1 graph and are gated on the edition
   // at their render site. The scan cannot tell a gated string literal from an
-  // ungated one, so these two are pinned by render tests over BOTH branches
-  // instead: AdminNav.test.tsx and AdminDashboard.test.tsx. Those tests are the
-  // only thing holding the gating for these files — keep them that way.
+  // ungated one, so this one is pinned by a render test over BOTH branches
+  // instead: AdminNav.test.tsx. That test is the only thing holding the gating
+  // for this file — keep it that way.
+  //
+  // routes/AdminDashboard.tsx was the second KIND-B entry and was REMOVED on
+  // 2026-09-07: its only excluded literal was /admin/golden-set, which is no
+  // longer excluded, and its edition gate went with it. The link now renders in
+  // both editions, so there is nothing here for a source scan to be wrong about.
+  // AdminDashboard.test.tsx still flips the edition and asserts the link is
+  // present either way, which is what would redden if a gate came back.
   "routes/AdminNav.tsx",
-  "routes/AdminDashboard.tsx",
   //
   // The two drafting entry points, restored under the same KIND-B gating after
   // run-record ESCALATE E1: deleting them left the FULL edition with no reachable

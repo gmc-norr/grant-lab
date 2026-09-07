@@ -6,10 +6,12 @@ import * as clientMod from "../api/client";
 import { renderWithProviders } from "../test-utils";
 import { AdminDashboard } from "./AdminDashboard";
 
-// The "Manage golden set" link is gated on the edition: /admin/golden-set is not
-// mounted by router.simple.tsx. noCockpitLinks.test.tsx EXEMPTs AdminDashboard
-// .tsx (a source scan cannot tell a gated literal from an ungated one), so the
-// two tests at the bottom of this file are the only thing pinning that gating.
+// The "Manage golden set" link is NO LONGER gated on the edition: router.simple
+// .tsx mounts /admin/golden-set in the match edition as of 2026-09-07, so a gate
+// here would hide a page release 1 can reach. The two tests at the bottom of this
+// file used to pin the gating; they now pin its ABSENCE, by flipping the edition
+// and asserting the link is present either way. Keeping both directions is the
+// point: a single un-flipped case would pass again the moment a guard came back.
 // See AdminNav.test.tsx for why the mock uses a getter.
 const edition = vi.hoisted(() => ({ isMatch: false }));
 vi.mock("../edition", () => ({
@@ -112,8 +114,9 @@ it("reenable posts the user id", async () => {
 });
 
 it("the FULL edition links out to the golden-set admin page", async () => {
-  // The control: without it, gating that hid the link in BOTH editions would
-  // still pass the match test below.
+  // The other direction. Together with the match case below, the pair says the
+  // link is edition-INDEPENDENT: either one alone would pass on a component that
+  // had reintroduced a guard pointing the other way.
   edition.isMatch = false;
   mockDash();
   renderWithProviders(<AdminDashboard />);
@@ -123,16 +126,20 @@ it("the FULL edition links out to the golden-set admin page", async () => {
   );
 });
 
-it("the MATCH edition renders no link to the unmounted golden-set page", async () => {
+it("the MATCH edition links out to the golden-set page too, now that it is mounted", async () => {
+  // The inversion of the 2026-09-04 assertion, which read "renders no link to the
+  // unmounted golden-set page". The page is mounted now (router.simple.test.tsx's
+  // RELEASE_1_ROUTES) and the API behind it is in _ALWAYS, so hiding the link
+  // would strand the only screen that shows the human reasons on the candidates.
   edition.isMatch = true;
   mockDash();
   renderWithProviders(<AdminDashboard />);
-  // Wait for the page to actually render first — an absence assertion against a
-  // still-loading page passes for the wrong reason.
+  // Wait for the page to actually render first, so this is not a claim about a
+  // still-loading screen.
   expect(await screen.findByText("Vinnova")).toBeInTheDocument();
   expect(screen.getByText(/Ranking quality/)).toBeInTheDocument(); // the card is still there
-  expect(screen.queryByRole("link", { name: /manage golden set/i })).not.toBeInTheDocument();
-  for (const a of screen.queryAllByRole("link")) {
-    expect(a.getAttribute("href") ?? "").not.toContain("/admin/golden-set");
-  }
+  expect(screen.getByRole("link", { name: /manage golden set/i })).toHaveAttribute(
+    "href",
+    "/admin/golden-set",
+  );
 });

@@ -39,6 +39,9 @@ const AdminLayout = lazy(() =>
 const AdminDashboard = lazy(() =>
   import("./routes/AdminDashboard").then((m) => ({ default: m.AdminDashboard })),
 );
+const AdminGoldenSet = lazy(() =>
+  import("./routes/AdminGoldenSet").then((m) => ({ default: m.AdminGoldenSet })),
+);
 const AdminPendingUsers = lazy(() =>
   import("./routes/AdminPendingUsers").then((m) => ({ default: m.AdminPendingUsers })),
 );
@@ -104,6 +107,20 @@ export const simpleRouter = createBrowserRouter([
             element: (
               <Suspense fallback={<RouteSpinner />}>
                 <AdminPendingUsers />
+              </Suspense>
+            ),
+          },
+          // Mounted 2026-09-07. The golden set is the ranking system's own
+          // evaluation surface, not proposal assist, and match is the only
+          // edition that ships — so the human reasons on the candidate rows
+          // had no reader until this line. The API behind it moved into
+          // web/api/__init__.py's _ALWAYS in the same commit; without that
+          // half this page renders its "Couldn't load" alert against a 404.
+          {
+            path: "golden-set",
+            element: (
+              <Suspense fallback={<RouteSpinner />}>
+                <AdminGoldenSet />
               </Suspense>
             ),
           },

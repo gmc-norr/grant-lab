@@ -41,18 +41,28 @@ EXCLUDED_PREFIXES = (
     "/api/citation-audit",
     "/api/export",
     "/api/files",
-    # The three admin routers behind proposal-assist-only pages, moved out of
-    # api/__init__.py's _ALWAYS. LIVE entries, not forward declarations: measured
-    # 2026-09-04, these three prefixes cover exactly the six PATHS (seven
-    # operations) the move drops — /api/admin/drafting,
-    # /api/admin/golden-set (GET + POST), /api/admin/golden-set/{triple_id},
-    # /api/admin/workspaces/deleted, /api/admin/workspaces/deleted/{workspace_id}
-    # and .../{workspace_id}/restore. They are NOT under /api/workspaces (the
-    # `/admin` segment comes first), which is why the existing entries missed
-    # them and why test_match_edition_drops_only_excluded_routes went red on the
+    # The admin routers behind proposal-assist-only pages, moved out of
+    # api/__init__.py's _ALWAYS. LIVE entries, not forward declarations.
+    #
+    # RE-MEASURED 2026-09-07, after admin_golden_set.router went back into
+    # _ALWAYS: these two prefixes now cover exactly the FOUR paths (four
+    # operations) the move drops, printed by diffing a full and a match app built
+    # in separate interpreters —
+    #   /api/admin/drafting                                     GET
+    #   /api/admin/workspaces/deleted                           GET
+    #   /api/admin/workspaces/deleted/{workspace_id}            GET
+    #   /api/admin/workspaces/deleted/{workspace_id}/restore    POST
+    # It was six paths / seven operations while /api/admin/golden-set was here:
+    # the three golden-set operations (GET + POST on /api/admin/golden-set,
+    # DELETE on /api/admin/golden-set/{triple_id}) are served in BOTH editions
+    # now, so the entry that declared them would be a forward declaration
+    # describing nothing.
+    #
+    # They are NOT under /api/workspaces (the `/admin` segment comes first),
+    # which is why the existing entries missed them and why
+    # test_match_edition_drops_only_excluded_routes went red on the 2026-09-04
     # move until they were declared here.
     "/api/admin/drafting",
-    "/api/admin/golden-set",
     "/api/admin/workspaces/deleted",
 )
 
@@ -111,6 +121,22 @@ def test_full_edition_still_mounts_the_collab_websocket(monkeypatch, _base_env):
     monkeypatch.setenv("APP_EDITION", "full")
     ws = _ws_paths(create_app())
     assert any("/ws/" in p for p in ws), f"no websocket route found at all: {sorted(ws)}"
+
+
+def test_match_serves_the_golden_set_api(monkeypatch, _base_env):
+    """G13, backend half. The golden-set PAGE is useless without the endpoint
+    behind it, and until the 2026-09-07 decision-notes work the match edition
+    served neither: admin_golden_set.router sat in _full_only_routers(), so a
+    match build had no handler to reach. Task 4 put the humans' own reasons on
+    the candidate rows; match is the only edition that ships, so without this
+    they had no reader at all.
+
+    _base_env sets DRAFTING_ENABLED=false because a match app refuses to start
+    with drafting enabled (config.py _match_edition_disables_drafting).
+    """
+    monkeypatch.setenv("APP_EDITION", "match")
+    paths = _paths(create_app())
+    assert "/api/admin/golden-set" in paths
 
 
 def test_match_edition_still_serves_the_release_1_surface(monkeypatch, _base_env):
@@ -285,6 +311,13 @@ _ALWAYS_ROUTERS = [
     # The public corridor-board JSON (Task 7): unauthenticated by design, so it
     # ships in match too -- it IS release 1's public face.
     "public_boards.router",
+    # The golden set, moved back here 2026-09-07 (decision notes Task 5). The
+    # product question this list exists to force: release 1 IS the only edition
+    # that ships, and the golden set is the ranking system's own evaluation
+    # surface -- the page where a human curates the triples the weekly tau is
+    # measured against. Leaving it full-only meant the human reasons Task 4 put
+    # on the candidate rows had no reader at all.
+    "admin_golden_set.router",
 ]
 
 
@@ -342,6 +375,7 @@ def test_the_full_only_routers_are_exactly_the_reviewed_set():
         # #27). All require_admin-gated, so not an authorization hole — but the
         # branch's headline claim is that the surface is ABSENT.
         "admin.drafting_router",
-        "admin_golden_set.router",
+        # admin_golden_set.router is deliberately NOT here: it went back to
+        # _ALWAYS on 2026-09-07 and is pinned in _ALWAYS_ROUTERS instead.
         "admin_retention.router",
     ]

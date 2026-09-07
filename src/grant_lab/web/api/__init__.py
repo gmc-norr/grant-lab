@@ -4,7 +4,7 @@ from typing import Literal
 
 from fastapi import APIRouter
 
-# ONLY the six both-edition routers are imported eagerly. The full-only ones are
+# ONLY the both-edition routers are imported eagerly. The full-only ones are
 # imported inside _full_only_routers() because this is a PACKAGE __init__: any
 # `import grant_lab.web.api.<anything>` runs it, so an eager import here pulled the
 # whole proposal-assist stack — pycrdt, prosemirror, claude_agent_sdk — into a match
@@ -13,6 +13,7 @@ from fastapi import APIRouter
 # a FRESH interpreter and reads sys.modules.
 from grant_lab.web.api import (
     admin,
+    admin_golden_set,
     admin_users,
     auth,
     boards,
@@ -47,6 +48,17 @@ _ALWAYS = (
     # __init__, so an import here runs in every process.
     boards.router,
     public_boards.router,
+    # Moved back out of _full_only_routers 2026-09-07. It went there on
+    # 2026-09-04 with drafting and retention, because six require_admin
+    # proposal-assist endpoints were live in a deployment that does not serve
+    # proposal assist. The golden set is NOT proposal assist: it is the
+    # ranking system's own evaluation surface, and the match edition is the
+    # only edition that ships. Its imports are dataclasses, FastAPI, Pydantic,
+    # SQLAlchemy, auth.dependencies, db.models and ranking.golden_set -- and
+    # ranking/golden_set.py imports only dataclasses, SQLAlchemy and
+    # db.models. Nothing from the proposal-assist half, so the process cut
+    # (tests/architecture/test_match_edition_process_cut.py) still reports 0.
+    admin_golden_set.router,
 )
 
 
@@ -61,7 +73,6 @@ def _full_only_routers() -> tuple:
     """
     import grant_lab.web.api.annotations as annotations_router
     from grant_lab.web.api import (
-        admin_golden_set,
         admin_retention,
         citation_audit,
         export,
@@ -87,18 +98,20 @@ def _full_only_routers() -> tuple:
         # — it is the proposal-assist workspace settings router, not app settings.
         # Leaving it in _ALWAYS leaked three /api/workspaces paths into a match build.
         settings.router,
-        # The three ADMIN routers behind proposal-assist-only pages. They were in
-        # _ALWAYS, which left six require_admin-gated proposal-assist endpoints live
-        # in a deployment that does not serve proposal assist — including the
-        # MUTATING /api/admin/workspaces/deleted/{id}/restore. Not an authorization
-        # hole (every one is admin-gated), but the branch's claim is that the surface
-        # is ABSENT. The pages they back — AdminDrafting.tsx, AdminGoldenSet.tsx,
+        # The TWO ADMIN routers behind proposal-assist-only pages. Three of them
+        # were in _ALWAYS, which left six require_admin-gated proposal-assist
+        # endpoints live in a deployment that does not serve proposal assist —
+        # including the MUTATING /api/admin/workspaces/deleted/{id}/restore. Not an
+        # authorization hole (every one is admin-gated), but the branch's claim is
+        # that the surface is ABSENT. The pages they back — AdminDrafting.tsx,
         # AdminDeletedWorkspaces.tsx, AdminDeletedWorkspaceDetail.tsx — are the only
-        # frontend consumers and router.simple.tsx mounts none of them. The
-        # AdminDashboard golden-set panel reads `golden_set_report` off
-        # /api/admin/dashboard, a different endpoint that stays in _ALWAYS.
+        # frontend consumers and router.simple.tsx mounts none of them.
+        #
+        # admin_golden_set.router was the third, and went back to _ALWAYS on
+        # 2026-09-07: the golden set is the ranking system's own evaluation
+        # surface, not proposal assist, and match is the only edition that ships.
+        # AdminGoldenSet.tsx is mounted in BOTH editions now.
         admin.drafting_router,
-        admin_golden_set.router,
         admin_retention.router,
     )
 

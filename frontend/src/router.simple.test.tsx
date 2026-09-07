@@ -22,6 +22,9 @@ const RELEASE_1_ROUTES = [
   "/admin",
   "/admin/users",
   "/admin/users/pending",
+  // Mounted 2026-09-07: the golden set is the ranking system's own evaluation
+  // surface, not proposal assist, and match is the only edition that ships.
+  "/admin/golden-set",
   "/b/:slug",
   "/login",
   "/register",
@@ -31,11 +34,11 @@ const RELEASE_1_ROUTES = [
 ];
 
 // Prefixes the match edition must never mount. Spec §3 "explicitly out of
-// release 1".
+// release 1". /admin/golden-set left this list on 2026-09-07 (spec §10) — it is
+// in RELEASE_1_ROUTES above instead, so the exact-equality test is what holds it.
 const EXCLUDED_PREFIXES = [
   "/cockpit",
   "/admin/drafting",
-  "/admin/golden-set",
   "/admin/deleted-workspaces",
 ];
 
