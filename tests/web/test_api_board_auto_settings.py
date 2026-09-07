@@ -90,6 +90,50 @@ def test_shrinking_max_pages_below_approved_count_is_refused(
         assert board.max_pages == 3, "the refused change was applied anyway"
 
 
+def test_orientation_is_not_blamed_for_a_max_pages_shrink(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """MINOR 1 (fix round 1). `update_board`'s 409 message named the
+    orientation as the cause of a capacity shrink whenever
+    `orientation_changed` was true, even when `body.max_pages` -- not the
+    orientation's own default -- is what actually produced the smaller cap.
+
+    Reachable in a single save from the real UI: the settings form always
+    sends both `orientation` and `max_pages` together. A portrait 4x3 board
+    (items_per_page 4 x max_pages 3 = 12, the board's real capacity) with 12
+    approved calls, flipped to landscape with max_pages: 1, was refused with
+    'landscape holds 8' -- though landscape's own default (8 x 3 = 24) does
+    not shrink anything; the max_pages override does.
+
+    The numbers and the refusal are correct; only the named cause was wrong.
+    """
+    app = _setup(monkeypatch, pg_url)
+    pid, owner = profile_factory(name="switch minor1")
+    bid = _make_board(pg_session_factory, profile_id=pid, created_by=owner, slug="F" * 16)
+    client = _client_for(app, owner)
+
+    with client:
+        # Flip to portrait first (no approved calls yet, so the guard cannot
+        # fire): items_per_page follows the orientation default, 4.
+        r = client.put(f"/api/boards/{bid}", json={"orientation": "portrait"})
+        assert r.status_code == 200, r.text
+        assert r.json()["items_per_page"] == 4
+
+        # Fill the portrait board to its real capacity: 4 x 3 = 12.
+        _approve_n(pg_session_factory, board_id=bid, approved_by=owner, n=12, profile_id=pid)
+
+        # Flip back to landscape AND shrink max_pages in the same body -- the
+        # shape the settings form always sends.
+        r = client.put(f"/api/boards/{bid}", json={"orientation": "landscape", "max_pages": 1})
+
+    assert r.status_code == 409, f"expected the shrink to be refused: {r.text}"
+    detail = r.json()["error"]["message"]
+    assert "landscape holds" not in detail, (
+        f"orientation was blamed for a max_pages-caused shrink: {detail!r}"
+    )
+    assert "the new settings hold 8" in detail, detail
+
+
 def test_a_partial_last_page_still_counts_as_a_page(
     monkeypatch, pg_url, pg_session_factory, profile_factory
 ):

@@ -416,6 +416,63 @@ it("no preview line is shown while the switch is off", async () => {
   expect(document.querySelector('[data-field="auto-preview"]')).toBeNull();
 });
 
+it("IMPORTANT 1: saving settings refetches the preview, so it shows the numbers AFTER the save", async () => {
+  // useUpdateBoard.onSuccess invalidates ["board", id] and ["boards"] but,
+  // before this fix, not ["board-auto-preview", id] -- the key useAutoPreview
+  // actually uses (boards.ts). Nothing else in the app invalidates it either,
+  // so an admin who raises Maximum pages specifically to fix the truncation
+  // this line reports would keep seeing the PRE-save numbers for the rest of
+  // the session (App.tsx's 20s staleTime, no refetchOnWindowFocus, and
+  // SettingsForm mounts unkeyed under BoardDetail's `key={board.data.id}`).
+  //
+  // The GET mock below answers the auto-preview path differently before and
+  // after the PUT resolves, so this asserts the line's CONTENT changes, not
+  // merely that a refetch fired -- `findByText` would only wait for the
+  // (always-mounted-once-the-switch-is-on) element to appear, which races the
+  // stale render and can pass against the OLD numbers.
+  const user = userEvent.setup();
+  let saved = false;
+  const AFTER_SAVE: AutoPreview = { qualifying: 142, displayed: 48, truncated: 94, pages: 6, loop_seconds: 180 };
+  vi.spyOn(clientMod.api, "GET").mockImplementation((async (path: string) => {
+    if (path === "/api/me") return mockMe(false);
+    if (path === BOARD_PATH) return { data: BOARD, error: undefined };
+    if (path === "/api/boards/{board_id}/queue") return { data: { items: [], waiting_count: 0 }, error: undefined };
+    if (path === ITEMS_PATH) return { data: { items: [] }, error: undefined };
+    if (path === AUTO_PREVIEW_PATH) return { data: saved ? AFTER_SAVE : AUTO_PREVIEW, error: undefined };
+    return { data: undefined, error: undefined };
+  }) as never);
+  vi.spyOn(clientMod.api, "PUT").mockImplementation((async (path: string) => {
+    if (path === SETTINGS_PATH) {
+      saved = true;
+      return { data: { ...BOARD, auto_publish: true, max_pages: 6 }, error: undefined };
+    }
+    return { data: BOARD, error: undefined };
+  }) as never);
+  const qc = new QueryClient();
+  render(
+    <MantineProvider theme={theme} defaultColorScheme="dark">
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={["/boards/1"]}>
+          <Routes>
+            <Route path="/boards/:id" element={<BoardDetail />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>
+    </MantineProvider>,
+  );
+  await screen.findByText("Corridor board");
+  await user.click(screen.getByRole("checkbox", { name: /publish new calls automatically/i }));
+  await waitFor(() => {
+    const line = document.querySelector('[data-field="auto-preview"]') as HTMLElement;
+    expect(line).toHaveTextContent("118 not shown");
+  });
+  await user.click(screen.getByRole("button", { name: /save settings/i }));
+  await waitFor(() => {
+    const line = document.querySelector('[data-field="auto-preview"]') as HTMLElement;
+    expect(line).toHaveTextContent("94 not shown");
+  });
+});
+
 it("turning the switch on warns that the existing cards will be replaced", async () => {
   const user = userEvent.setup();
   renderDetail({ board: { ...BOARD, approved_count: 7 } });

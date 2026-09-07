@@ -407,7 +407,17 @@ def update_board(
             # {"orientation":"landscape","items_per_page":3} got "landscape
             # holds 9", though landscape's own default holds 24 -- the shrink
             # came from the items_per_page override, not the flip.
-            if orientation_changed and body.items_per_page is None:
+            #
+            # The same misattribution reaches `max_pages` (fix round 1 /
+            # MINOR 1): `new_cap` is now `new_items_per_page * new_max_pages`,
+            # so a request that flips orientation AND shrinks `max_pages` in
+            # the same body -- the auto-publish settings form always sends
+            # both -- must not blame the orientation either. MEASURED: a
+            # portrait 4x3 board with 12 approved, flipped to landscape with
+            # `max_pages: 1`, said "landscape holds 8" though landscape's own
+            # default (8 x 3 = 24) does not shrink anything; the `max_pages`
+            # override is what caused the shrink.
+            if orientation_changed and body.items_per_page is None and body.max_pages is None:
                 cap_description = f"{new_orientation} holds {new_cap}"
             else:
                 cap_description = f"the new settings hold {new_cap}"

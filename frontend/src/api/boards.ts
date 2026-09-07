@@ -56,6 +56,13 @@ export function useUpdateBoard(id: number) {
     onSuccess: (data) => {
       qc.setQueryData(["board", id], data);
       qc.invalidateQueries({ queryKey: ["boards"] });
+      // The auto-preview line (`useAutoPreview` below) is keyed on its own
+      // ["board-auto-preview", id] and neither prefix above matches it, so
+      // without this it would keep showing the pre-save numbers -- e.g. the
+      // "not shown" count that raising max_pages was meant to fix -- for the
+      // rest of the session (App.tsx's 20s staleTime + no window-focus
+      // refetch, and SettingsForm is mounted unkeyed in BoardDetail).
+      qc.invalidateQueries({ queryKey: ["board-auto-preview", id] });
     },
   });
 }
