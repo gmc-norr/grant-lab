@@ -34,6 +34,7 @@
 /api/calls/hidden
 /api/calls/{call_id}
 /api/calls/{call_id}/hide
+/api/calls/{call_id}/note
 /api/calls/{call_id}/save
 /api/me
 /api/me/default-profile

@@ -6,7 +6,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import joinedload
 
@@ -269,6 +269,28 @@ class CallDecisionOut(BaseModel):
     state: Literal["saved", "hidden"] | None
 
 
+class DecisionNoteIn(BaseModel):
+    """The user's own words about one decision.
+
+    The field is `note`, not `decision_note`, and the asymmetry with
+    `CallOut.decision_note` is deliberate (D6). The collision that forces the
+    longer name exists on `CallOut`, which carries `applicant_note_count` --
+    the MODEL's inferred things-to-check -- right beside it. A single-field body
+    on an endpoint already named /note has no such neighbour.
+    """
+
+    note: str | None = Field(default=None, max_length=1000)
+    # The state the CLIENT believed it was annotating. Optional, so a curl
+    # user is not forced to know it; ALWAYS sent by the strip, which holds it
+    # in the target it was created with. This closes the stale-write race in
+    # the endpoint below.
+    expected_state: Literal["saved", "hidden"] | None = None
+
+
+class DecisionNoteOut(BaseModel):
+    decision_note: str | None
+
+
 class CallDecisionCountsOut(BaseModel):
     inbox: int
     saved: int
@@ -470,6 +492,64 @@ def unsave_call(
         )
         session.commit()
     return CallDecisionOut(state=None)
+
+
+@router.put("/calls/{call_id}/note", response_model=DecisionNoteOut)
+def set_decision_note(
+    request: Request,
+    call_id: int,
+    body: DecisionNoteIn,
+    profile_id: int = Query(...),
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    """Write the user's reason onto an EXISTING decision.
+
+    404, not an upsert, when there is no decision row (D5): `state` is NOT NULL
+    and constrained to saved|hidden, so creating one here would make this
+    endpoint guess a decision the user did not make.
+
+    DOES NOT TOUCH `decided_at`, `decided_by` or `state`. A note is not a new
+    decision, and the Saved/Hidden lists are ordered by `decided_at` (Phase 2
+    decision D12) -- bumping it would silently reorder the list under a user as
+    they annotate it. Both neighbouring endpoints DO set decided_at in their
+    upsert, which is exactly why the UPDATE below names `note` and nothing else.
+
+    Whitespace-only is stored as NULL (D8), so "has a note" has one answer.
+    """
+    sf = request.app.state.session_factory
+    with sf() as session:
+        if session.get(Call, call_id) is None:
+            raise HTTPException(status_code=404, detail="call not found")
+        _readable_active_profile_or_404(session, user, profile_id)
+        note = (body.note or "").strip() or None
+        where = [
+            CallDecision.user_id == user.id,
+            CallDecision.profile_id == profile_id,
+            CallDecision.call_id == call_id,
+        ]
+        # ONE conditional UPDATE, not a SELECT then an assignment. Read-then-
+        # write is a stale-write race, and it is reachable by ONE user with two
+        # tabs: read a SAVED decision here, flip it to hidden over there (which
+        # clears the note, D9), and this write then commits "we should apply"
+        # onto the HIDDEN decision -- exactly the misfiling D9 exists to
+        # prevent. (call_id, profile_id) does not identify WHICH decision was
+        # annotated. The state does.
+        stmt = update(CallDecision).where(*where).values(note=note)
+        if body.expected_state is not None:
+            stmt = stmt.where(CallDecision.state == body.expected_state)
+        if session.execute(stmt).rowcount == 0:
+            # "No decision" and "the decision moved under you" are both
+            # rowcount 0, and only a second read tells them apart. They are
+            # different answers: 404 means there is nothing to write to, 409
+            # means the user's words are fine but belong to a decision that no
+            # longer exists in that state.
+            current = session.scalar(select(CallDecision.state).where(*where))
+            session.rollback()
+            if current is None:
+                raise HTTPException(status_code=404, detail="decision not found")
+            raise HTTPException(status_code=409, detail="decision changed")
+        session.commit()
+    return DecisionNoteOut(decision_note=note)
 
 
 @router.get("/calls/hidden", response_model=HiddenListOut)

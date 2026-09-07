@@ -172,6 +172,11 @@ def test_match_edition_still_serves_the_release_1_surface(monkeypatch, _base_env
 # edit-gated like every other {board_id} board route, so unlike Task 7's public
 # endpoint it takes no gate exemption; it is pinned in
 # test_boards_permission_single_source.py's `_EXPECTED_ROUTES` instead.
+#
+# 2026-09-07, decision notes Task 1: 118 -> 119, one added path
+# /api/calls/{call_id}/note (PUT) -- the write endpoint for a researcher's own
+# reason on a decision they already made. It hangs off the existing
+# call_decisions row, so it adds no other path and no migration.
 _BASELINE = Path(__file__).with_name("full_edition_routes.txt")
 
 
@@ -200,7 +205,7 @@ def test_full_edition_route_set_matches_the_committed_baseline(monkeypatch, _bas
 def test_the_baseline_is_not_empty():
     """A baseline of zero routes would make the comparison above vacuous on an
     app that also served nothing."""
-    assert len(_BASELINE.read_text().split()) == 118
+    assert len(_BASELINE.read_text().split()) == 119
 
 
 def test_full_edition_is_unchanged(monkeypatch, _base_env):
