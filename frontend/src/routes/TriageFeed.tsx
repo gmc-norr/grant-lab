@@ -92,6 +92,31 @@ function EmptyView({ view, profileName }: { view: TriageView; profileName: strin
   );
 }
 
+/* AN EMPTY PAGE IS NOT AN EMPTY INBOX (Astra, Medium). Deciding the last card on
+   page two emptied `items`, and the component read that as inbox zero -- "you
+   have triaged every call" while the rail beside it still said 50. The rail was
+   right. The claim is about the whole list, so it has to be made from the whole
+   list's count, never from the slice on screen.
+
+   The way back matters as much as the wording: page two of a self-healing inbox
+   is a dead end without it, because page one has refilled and nothing on this
+   screen points at it. */
+function EmptyPageView({ total, prevHref }: { total: number | null; prevHref: string }) {
+  return (
+    <div className={styles.empty} data-empty="page">
+      <p className={styles.emptyHeadline}>Nothing left on this page.</p>
+      <p className={styles.emptyBody}>
+        {total === null
+          ? "There are still calls waiting on earlier pages."
+          : `${total} ${total === 1 ? "call is" : "calls are"} still waiting on earlier pages.`}
+      </p>
+      <p className={styles.emptyBody}>
+        <Link to={prevHref}>← Previous page</Link>
+      </p>
+    </div>
+  );
+}
+
 export function TriageFeed() {
   const [sp] = useSearchParams();
   const params = dashboardParamsFrom(sp);
@@ -275,6 +300,17 @@ export function TriageFeed() {
     next.set("page", String((params.page ?? 1) + 1));
     return `/?${next.toString()}`;
   };
+  const prevPageHref = () => {
+    const next = new URLSearchParams(sp);
+    next.set("view", view);
+    if (profileId != null) next.set("profile", String(profileId));
+    const prev = (params.page ?? 1) - 1;
+    // Page 1 is the ABSENCE of the parameter everywhere else in this file, so
+    // writing `page=1` would produce a second URL for the same list.
+    if (prev <= 1) next.delete("page");
+    else next.set("page", String(prev));
+    return `/?${next.toString()}`;
+  };
 
   return (
     <main className={styles.layout}>
@@ -333,7 +369,15 @@ export function TriageFeed() {
         )}
 
         {items.length === 0 ? (
-          <EmptyView view={view} profileName={profileName} />
+          // Past page one, an empty slice means this PAGE ran out -- not the
+          // list. While the counts are still loading we do not know, and the
+          // honest answer to "do not know" is the one that does not claim the
+          // work is finished.
+          (params.page ?? 1) > 1 && (counts.data?.[view] ?? 1) > 0 ? (
+            <EmptyPageView total={counts.data ? counts.data[view] : null} prevHref={prevPageHref()} />
+          ) : (
+            <EmptyView view={view} profileName={profileName} />
+          )
         ) : (
           <>
             <ol className={styles.feed}>
@@ -362,9 +406,11 @@ export function TriageFeed() {
                 </li>
               ))}
             </ol>
-            {data.pagination.has_next && (
+            {((params.page ?? 1) > 1 || data.pagination.has_next) && (
               <p className={styles.nextPage}>
-                <Link to={nextPageHref()}>Next page →</Link>
+                {(params.page ?? 1) > 1 && <Link to={prevPageHref()}>← Previous page</Link>}
+                {(params.page ?? 1) > 1 && data.pagination.has_next && " · "}
+                {data.pagination.has_next && <Link to={nextPageHref()}>Next page →</Link>}
               </p>
             )}
           </>

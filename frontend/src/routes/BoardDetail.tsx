@@ -1,9 +1,10 @@
 import {
-  Anchor, Badge, Box, Button, Card, Checkbox, Group, NumberInput, SegmentedControl, Stack,
+  Alert, Anchor, Badge, Box, Button, Card, Checkbox, Group, NumberInput, SegmentedControl,
+  Stack,
   Text, TextInput, Title,
 } from "@mantine/core";
 import { useDebouncedValue } from "@mantine/hooks";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { apiErrorMessage } from "../api/client";
@@ -126,6 +127,20 @@ function SettingsForm({ board }: { board: Board }) {
   // edited this field and omit it from the body when they have not, so the
   // server's own derivation runs.
   const [itemsPerPageTouched, setItemsPerPageTouched] = useState(false);
+  // RECONCILE WITH THE SERVER'S ANSWER. `items_per_page` is the one setting this
+  // form does not decide: when the field is untouched the server DERIVES it from
+  // the orientation, so after a flip to portrait the board really holds 4 and
+  // this input still read the seeded 8 -- a number that was simply false, and
+  // which the next save would then send back as an explicit override, undoing
+  // the derivation.
+  //
+  // Only this field needs it. Every other setting is sent as typed and echoed
+  // back unchanged, so it cannot disagree with the response.
+  useEffect(() => {
+    setItemsPerPage(board.items_per_page);
+    // The saved value IS the value now, so the override is no longer pending.
+    setItemsPerPageTouched(false);
+  }, [board.items_per_page]);
   const [minScore, setMinScore] = useState<number>(board.min_score);
   const [pageSeconds, setPageSeconds] = useState<number>(board.page_seconds);
   const [autoPublish, setAutoPublish] = useState<boolean>(board.auto_publish);
@@ -370,6 +385,41 @@ function ApprovedItems({ board }: { board: Board }) {
         <Text role="alert" c="red" size="sm">
           Couldn't load approved items.
         </Text>
+      )}
+      {/* WRITE FAILURES, SAID OUT LOUD. An injected 500 left the card sitting on
+          the board with no message anywhere -- and this is the control an admin
+          reaches for to take something inappropriate off a PUBLIC wall, so
+          "looks like nothing happened" is the worst answer the screen can give.
+          Reorder gets the same treatment: it is all-or-nothing too, so a failed
+          move silently leaves the wall in the old order while the rows on screen
+          have already been re-read from a cache that never changed. */}
+      {unapprove.isError && (
+        <Alert role="alert" color="red" mb="sm" data-field="unapprove-error">
+          <Group gap="sm">
+            <Text size="sm">Couldn&apos;t remove that call: {apiErrorMessage(unapprove.error, "the server refused it")}</Text>
+            <Button
+              size="compact-xs"
+              variant="light"
+              onClick={() => unapprove.variables !== undefined && unapprove.mutate(unapprove.variables)}
+            >
+              Try again
+            </Button>
+          </Group>
+        </Alert>
+      )}
+      {reorder.isError && (
+        <Alert role="alert" color="red" mb="sm" data-field="reorder-error">
+          <Group gap="sm">
+            <Text size="sm">Couldn&apos;t reorder the board: {apiErrorMessage(reorder.error, "the server refused it")}</Text>
+            <Button
+              size="compact-xs"
+              variant="light"
+              onClick={() => reorder.variables !== undefined && reorder.mutate(reorder.variables)}
+            >
+              Try again
+            </Button>
+          </Group>
+        </Alert>
       )}
       {items.data && items.data.items.length === 0 && (
         <Text size="sm" c="dimmed">

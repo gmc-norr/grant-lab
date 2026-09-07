@@ -222,3 +222,95 @@ def test_the_encode_does_not_run_while_the_approval_rows_are_locked(
         "the encode ran while approve_items held a row lock: "
         f"{sorted(set(held))} (x{len(held)} of 3 encodes)"
     )
+
+
+def _ranked(pg_session_factory, **kw):
+    """Imported lazily: `tests.test_board_auto_selection` imports `_make_board`
+    from THIS module, so a module-level import here is a cycle -- and it fails
+    at collection as an ERROR, not a FAILED, which is the shape that reads like
+    a passing suite.
+    """
+    from tests.test_board_auto_selection import _ranked_call
+
+    return _ranked_call(pg_session_factory, **kw)
+
+
+def _count_encodes(monkeypatch):
+    """Wrap `qr_for` where `approve_items` looks it up, and count the calls.
+
+    Patching `grant_lab.boards.qr.qr_for` instead would count NOTHING: boards.py
+    does `from ... import qr_for`, so it holds its own reference and never
+    consults the module again.
+    """
+    import grant_lab.web.api.boards as boards_api
+
+    seen = {"n": 0}
+    real = boards_api.qr_for
+
+    def counting(url):
+        seen["n"] += 1
+        return real(url)
+
+    monkeypatch.setattr(boards_api, "qr_for", counting)
+    return seen
+
+
+def test_a_request_that_cannot_fit_encodes_nothing(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """MEASURED by an outside review: 200 calls requested onto a 24-slot board
+    ran the encoder 200 times and then returned 409. Every one of those encodes
+    was thrown away, and the request is refused on numbers the prefetch already
+    has in front of it.
+
+    The encode is the expensive half of this route -- it is why the prefetch
+    exists at all, and why it runs outside the transaction. Doing it for a
+    request that cannot succeed is the one case where all of that cost buys
+    nothing.
+    """
+    app = _setup(monkeypatch, pg_url)
+    pid, owner = profile_factory(name="qr preflight")
+    bid = _make_board(pg_session_factory, profile_id=pid, created_by=owner, slug="Q" * 16)
+    # Landscape defaults: 8 x 3 = 24 slots. Ask for 40.
+    ids = [
+        _ranked(pg_session_factory, external_id=f"overcap-{i}", profile_id=pid, score=90)
+        for i in range(40)
+    ]
+    seen = _count_encodes(monkeypatch)
+
+    client = _client_for(app, owner)
+    with client:
+        r = client.post(f"/api/boards/{bid}/items", json={"call_ids": ids})
+
+    assert r.status_code == 409, r.text
+    assert seen["n"] == 0, f"{seen['n']} QR codes were encoded for a refused request"
+
+
+def test_a_request_that_FITS_still_encodes_its_qr_codes(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """Guards the gate above: a preflight left always-true would make "encodes
+    nothing" pass by encoding nothing EVER, and the cards would then carry no QR.
+
+    What this does NOT prove, despite the temptation to claim it: that the
+    encodes were PREFETCHED. MEASURED -- disabling the prefetch leaves this test
+    green, because the transaction encodes the same five urls inline and the
+    count is identical either way. The location is
+    `test_the_encode_does_not_run_while_the_approval_rows_are_locked`'s job, and
+    that is the test the same mutation actually reddens.
+    """
+    app = _setup(monkeypatch, pg_url)
+    pid, owner = profile_factory(name="qr preflight fits")
+    bid = _make_board(pg_session_factory, profile_id=pid, created_by=owner, slug="R" * 16)
+    ids = [
+        _ranked(pg_session_factory, external_id=f"fits-{i}", profile_id=pid, score=90)
+        for i in range(5)
+    ]
+    seen = _count_encodes(monkeypatch)
+
+    client = _client_for(app, owner)
+    with client:
+        r = client.post(f"/api/boards/{bid}/items", json={"call_ids": ids})
+
+    assert r.status_code == 200, r.text
+    assert seen["n"] == 5, f"expected 5 encodes for 5 new calls, got {seen['n']}"

@@ -70,6 +70,12 @@ export function useUpdateBoard(id: number) {
       // rest of the session (App.tsx's 20s staleTime + no window-focus
       // refetch, and SettingsForm is mounted unkeyed in BoardDetail).
       qc.invalidateQueries({ queryKey: ["board-auto-preview", id] });
+      // The APPROVAL QUEUE is filtered by the board's own `min_score`, so the
+      // settings that just changed decide which candidates belong in it. Without
+      // this, raising the threshold from 60 to 95 left a score-70 candidate
+      // sitting in the queue, approvable, under a board that no longer accepts
+      // it -- the screen showing two different answers to the same question.
+      qc.invalidateQueries({ queryKey: ["board-queue", id] });
     },
   });
 }

@@ -141,8 +141,17 @@ export function BoardQueue({ board }: { board: Board }) {
                    the reason is visible -- a row that just vanished would look
                    like a ranking change. No checkbox: "approve everything at
                    or above N" deliberately skips it, and ticking it here would
-                   promise an action the bulk path will not take. Re-approving
-                   is still possible by naming the call. */
+                   promise an action the bulk path will not take.
+
+                   RESTORE (Astra, Medium). The comment here used to end "re-
+                   approving is still possible by naming the call" -- true of the
+                   API and false of this screen, which offered no way to name
+                   one. Removal was therefore a one-way door in the UI. This
+                   button names exactly this call, which is the explicit,
+                   per-call signal `approve_items` treats as newer and stronger
+                   than the suppression; the bulk threshold sweep still skips it,
+                   so an exception list can only be undone deliberately, one row
+                   at a time. */
                 <Group gap="xs" wrap="nowrap">
                   <Text size="sm" c="dimmed">
                     {row.title}
@@ -150,6 +159,14 @@ export function BoardQueue({ board }: { board: Board }) {
                   <Badge color="gray" size="sm">
                     Removed from this board
                   </Badge>
+                  <Button
+                    size="compact-xs"
+                    variant="light"
+                    disabled={approve.isPending}
+                    onClick={() => approve.mutate({ call_ids: [row.call_id] })}
+                  >
+                    Restore to board
+                  </Button>
                 </Group>
               ) : (
                 <Checkbox

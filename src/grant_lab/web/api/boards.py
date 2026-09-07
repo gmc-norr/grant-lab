@@ -1008,6 +1008,21 @@ def approve_items(
                 ).scalars()
             )
             likely_new = [cid for cid in likely if cid not in seen]
+            # CAPACITY PREFLIGHT. Mirrors the refusal the transaction below
+            # makes (`approved_count + len(new_ids) > cap`) using the numbers
+            # this pass already has, so a request that cannot succeed encodes
+            # nothing at all. MEASURED before this line existed: 200 requested
+            # calls on a 24-slot board ran `qr_for` 200 times and then returned
+            # 409 -- every one of those encodes thrown away.
+            #
+            # Skipping is safe for the same reason the whole pass is advisory:
+            # it removes work, never an outcome. If the board has shrunk its
+            # occupancy by the time the lock is taken and the request now fits,
+            # the transaction encodes inline exactly as it does for any url
+            # this pass missed. Slower, and still correct.
+            pre_cap = pre_board.items_per_page * pre_board.max_pages
+            if likely_new and len(seen) + len(likely_new) > pre_cap:
+                likely_new = []
             pre_urls = set(
                 pre_session.execute(
                     select(Call.url).where(Call.id.in_(likely_new))

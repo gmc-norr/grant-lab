@@ -1,6 +1,6 @@
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
@@ -69,6 +69,7 @@ function renderDetail({
   publishResult,
   reorderResult,
   autoPreview = AUTO_PREVIEW,
+  deleteResult,
 }: {
   admin?: boolean;
   board?: Board;
@@ -78,6 +79,7 @@ function renderDetail({
   publishResult?: unknown;
   reorderResult?: unknown;
   autoPreview?: AutoPreview | ((query: AutoPreviewQuery) => AutoPreview);
+  deleteResult?: unknown;
 } = {}) {
   const get = vi.spyOn(clientMod.api, "GET").mockImplementation((async (
     path: string,
@@ -113,7 +115,9 @@ function renderDetail({
     if (path === ITEMS_PATH) return reorderResult ?? { data: { items: approvedItems }, error: undefined };
     return putResult ?? { data: board, error: undefined };
   }) as never);
-  const del = vi.spyOn(clientMod.api, "DELETE").mockResolvedValue({ data: undefined, error: undefined } as never);
+  const del = vi
+    .spyOn(clientMod.api, "DELETE")
+    .mockResolvedValue((deleteResult ?? { data: undefined, error: undefined }) as never);
   const qc = new QueryClient();
   render(
     <MantineProvider theme={theme} defaultColorScheme="dark">
@@ -588,4 +592,71 @@ it("the preview follows the orientation flip's page size, which only the server 
   });
   // Untouched, so the server derives it. Sending the stale 8 here is the defect.
   expect(seen[seen.length - 1].items_per_page).toBeUndefined();
+});
+
+
+it("a failed removal says so, and offers to try again", async () => {
+  // REPRODUCED by an outside review: an injected 500 left the card sitting on
+  // the board with no message anywhere. This is the control an admin reaches for
+  // to take something inappropriate off a PUBLIC wall, so "looks like nothing
+  // happened" is the worst answer the screen can give -- the operator walks away
+  // believing the card is gone.
+  const user = userEvent.setup();
+  const { del } = renderDetail({
+    approvedItems: [THREE_ITEMS[0]],
+    deleteResult: {
+      data: undefined,
+      error: { error: { code: "internal", message: "Something went wrong." } },
+      response: { status: 500 },
+    },
+  });
+  // Wait for the ITEM, not the board title: the items query resolves separately
+  // and the Remove button does not exist until it has.
+  await screen.findByText("First");
+  await user.click(screen.getByRole("button", { name: /remove/i }));
+
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent(/couldn't remove that call/i);
+  expect(del).toHaveBeenCalledTimes(1);
+
+  // A retry affordance, not just a notice: the failure is usually transient and
+  // the operator's next move is to try the same thing again.
+  await user.click(within(alert).getByRole("button", { name: /try again/i }));
+  await waitFor(() => expect(del).toHaveBeenCalledTimes(2));
+});
+
+it("saving settings refetches the QUEUE, whose contents the settings decide", async () => {
+  // The approval queue is filtered by the board's own min_score, so a settings
+  // save changes which candidates belong in it. Without invalidating it, raising
+  // the threshold from 60 to 95 left a score-70 candidate sitting there,
+  // approvable, under a board that no longer accepts it.
+  const user = userEvent.setup();
+  const { get } = renderDetail();
+  await screen.findByText("Corridor board");
+  const before = get.mock.calls.filter((c) => c[0] === "/api/boards/{board_id}/queue").length;
+
+  await user.click(screen.getByRole("button", { name: /save settings/i }));
+
+  await waitFor(() => {
+    const after = get.mock.calls.filter((c) => c[0] === "/api/boards/{board_id}/queue").length;
+    expect(after).toBeGreaterThan(before);
+  });
+});
+
+it("the page-size input takes the value the SERVER derived, not the one it was seeded with", async () => {
+  // items_per_page is the one setting this form does not decide: with the field
+  // untouched the server derives it from the orientation. After a flip to
+  // portrait the board really holds 4 and the input still read the seeded 8 -- a
+  // number that was simply false, and which the next save would then send back
+  // as an explicit override, undoing the derivation it was showing.
+  const user = userEvent.setup();
+  renderDetail({
+    putResult: { data: { ...BOARD, orientation: "portrait", items_per_page: 4 }, error: undefined },
+  });
+  await screen.findByText("Corridor board");
+  expect(screen.getByLabelText(/items per page/i)).toHaveValue("8");
+
+  await user.click(screen.getByRole("button", { name: /save settings/i }));
+
+  await waitFor(() => expect(screen.getByLabelText(/items per page/i)).toHaveValue("4"));
 });
