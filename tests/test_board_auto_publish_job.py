@@ -7,6 +7,8 @@ from sqlalchemy import select, text
 
 from grant_lab.boards import auto_publish as ap
 from grant_lab.boards.auto_publish import reconcile_auto_boards
+from grant_lab.boards.public import public_board_items
+from grant_lab.boards.qr import qr_for
 from grant_lab.db.models import BoardItem, BoardSuppression
 from tests.test_board_auto_selection import _ranked_call
 from tests.test_boards_qr_at_approval import _make_board
@@ -237,9 +239,7 @@ def test_one_boards_failure_does_not_cost_the_others(
     assert rows, "the second board got nothing -- the first board's failure aborted the run"
 
 
-def test_pass_2_decides_under_the_board_row_lock(
-    pg_session_factory, profile_factory, monkeypatch
-):
+def test_pass_2_decides_under_the_board_row_lock(pg_session_factory, profile_factory, monkeypatch):
     """GATE 9 -- the invariant this whole function is built on, which a review
     found pinned by nothing: deleting `with_for_update=True` at the top of pass
     2 reddened NONE of the eight gates. Gate 5's `held` stays empty (it asserts
@@ -344,13 +344,73 @@ def test_a_pass_2_failure_does_not_cost_the_other_boards(
     failed_board, surviving_board = seen[0], seen[2]
     assert failed_board != surviving_board, f"both passes ran on one board: {seen}"
     with pg_session_factory() as s:
-        assert s.scalars(
-            select(BoardItem).where(BoardItem.board_id == surviving_board)
-        ).all(), "the second board got nothing -- a pass-2 failure aborted the run"
-        assert (
-            s.scalars(select(BoardItem).where(BoardItem.board_id == failed_board)).all() == []
-        ), "the board that raised under the lock kept rows"
-    assert summary.boards_seen == 1, (
-        f"the rolled-back board was counted as reconciled: {summary}"
-    )
+        assert s.scalars(select(BoardItem).where(BoardItem.board_id == surviving_board)).all(), (
+            "the second board got nothing -- a pass-2 failure aborted the run"
+        )
+        assert s.scalars(select(BoardItem).where(BoardItem.board_id == failed_board)).all() == [], (
+            # NOT rollback evidence, and this message used to claim it was.
+            # `blow_up_in_pass_2` raises INSIDE `board_selection`, before the
+            # add/delete loop below it has run at all, so there is nothing for
+            # a rollback to undo and this assertion cannot fail. It pins the
+            # weaker, still-worth-pinning fact that a board whose pass 2 raised
+            # ends the night with no rows. The rollback evidence is
+            # `boards_seen == 1` on the assertion below.
+            "the board that raised in pass 2 somehow ended the night with rows"
+        )
+    assert summary.boards_seen == 1, f"the rolled-back board was counted as reconciled: {summary}"
     assert summary.rows_added == 1, f"rows_added counts work that was rolled back: {summary}"
+
+
+def test_a_changed_call_url_gets_a_fresh_qr_on_the_next_run(pg_session_factory, profile_factory):
+    """GATE 12 -- the branch review's IMPORTANT 2.
+
+    `public_board_items` serves the stored QR only while `qr_source_url ==
+    call.url`. When a call's url changes after its row was written -- an
+    ordinary ingestion outcome -- the card goes out with `qr_modules=0` from
+    that moment on. `BoardItem`'s docstring names the remedy as "an admin
+    removes the item and re-approves it"; on an AUTO board there is no admin
+    in that loop and the call keeps qualifying, so it is never removed and
+    the QR never comes back. The wall's primary artefact dies silently.
+
+    The middle third of this test is the part that makes it a gate and not a
+    tautology: it asserts the public route really is serving nothing BEFORE
+    the second run, so the final assertion is a repair and not a value that
+    was there all along."""
+    pid, owner = profile_factory(name="job qr refresh")
+    bid = _make_board(pg_session_factory, profile_id=pid, created_by=owner, slug="r" * 16)
+    _set_auto(pg_session_factory, bid)
+    cid = _ranked_call(pg_session_factory, external_id="job-q1", profile_id=pid, score=90)
+
+    reconcile_auto_boards(session_factory=pg_session_factory)
+    with pg_session_factory() as s:
+        item = s.get(BoardItem, (bid, cid))
+        stale_source, stale_path = item.qr_source_url, item.qr_path
+        assert item.qr_modules > 0, "the first run did not render a QR at all"
+
+    new_url = "https://funder.example/moved/" + "z" * 40
+    assert new_url != stale_source
+    with pg_session_factory() as s:
+        s.execute(text("UPDATE calls SET url = :u WHERE id = :c"), {"u": new_url, "c": cid})
+        s.commit()
+
+    # The damage, before the fix has a chance to run: the card is already
+    # going out with no QR.
+    with pg_session_factory() as s:
+        (row,) = public_board_items(s, board_id=bid)
+        assert row.url == new_url
+        assert row.qr_modules == 0, "the stale-QR precondition this gate needs did not hold"
+        assert row.qr_path == ""
+
+    reconcile_auto_boards(session_factory=pg_session_factory)
+
+    expected = qr_for(new_url)
+    assert expected.modules > 0
+    with pg_session_factory() as s:
+        item = s.get(BoardItem, (bid, cid))
+        assert item.qr_source_url == new_url, "the row still points at the old url"
+        assert item.qr_modules == expected.modules
+        assert item.qr_path == expected.path
+        assert item.qr_path != stale_path
+        (row,) = public_board_items(s, board_id=bid)
+        assert row.qr_modules == expected.modules, "the public route is still serving no QR"
+        assert row.qr_path == expected.path

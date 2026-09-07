@@ -221,8 +221,15 @@ function SettingsForm({ board }: { board: Board }) {
               onChange={(v) => setMaxPages(typeof v === "number" ? v : maxPages)}
             />
           </Group>
+          {/* "Fill", never "Publish". Two elements below, PublishControl's
+              own button says Publish/Unpublish and its confirmation says "It
+              becomes visible to anyone with the link" -- a different act, and
+              the one place in this product where the spec insists the two stay
+              visibly distinct: auto-publish FILLS a board, it never makes one
+              world-readable. Sharing the verb across two adjacent controls is
+              how an admin comes to believe this checkbox publishes the wall. */}
           <Checkbox
-            label="Publish new calls automatically"
+            label="Fill this board automatically"
             description="Each night at 05:00 this board is rebuilt from the calls that clear its minimum score."
             checked={autoPublish}
             onChange={(e) => setAutoPublish(e.currentTarget.checked)}
@@ -235,6 +242,14 @@ function SettingsForm({ board }: { board: Board }) {
               {preview.data.qualifying} qualify · {preview.data.displayed} shown ·{" "}
               {preview.data.truncated} not shown · {preview.data.pages} pages ·{" "}
               {preview.data.loop_seconds}s loop
+              {/* The endpoint reads the STORED board, not the values in these
+                  inputs, so until Save lands these numbers describe the last
+                  saved settings. Saying so is the honest half of a preview the
+                  spec calls "live": an admin who has just typed a new minimum
+                  score would otherwise read the old numbers as the new ones. */}{" "}
+              <Text span size="sm" c="dimmed" data-field="auto-preview-basis">
+                (for the saved settings — save to update)
+              </Text>
             </Text>
           )}
           {replacesExistingCards && (

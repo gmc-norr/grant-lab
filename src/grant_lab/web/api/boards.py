@@ -463,12 +463,21 @@ def update_board(
                 cap_description = f"{new_orientation} holds {new_cap}"
             else:
                 cap_description = f"the new settings hold {new_cap}"
+            # Removal is no longer a plain delete: `unapprove_item` writes a
+            # `BoardSuppression` for every card it takes down, which keeps that
+            # call off THIS board until somebody approves it again -- and on an
+            # auto board that is the only thing that can undo it, since the
+            # 05:00 job would otherwise put the card straight back. An operator
+            # told only to "remove N first" would not learn that from this
+            # message, so it says what removal now costs.
             raise HTTPException(
                 status_code=409,
                 detail=(
                     f"this board has {approved_count} approved calls; "
                     f"{cap_description} — remove "
-                    f"{approved_count - new_cap} first"
+                    f"{approved_count - new_cap} first, and each removal also "
+                    "suppresses that call, keeping it off this board until it "
+                    "is approved again"
                 ),
             )
 
@@ -873,8 +882,8 @@ def approve_items(
             # API ceiling x ~45.5 ms -- see `qr.py`'s ARITHMETIC block, which
             # names the same constant) holding a pooled connection, this
             # board's `SELECT ... FOR UPDATE`, AND -- through _board_for_edit
-            # -> _profile_for_edit -- the PROFILE row lock, which blocks 15
-            # routes including 4 GETs. `qr.py`'s `_encode_lock` is
+            # -> _profile_for_edit -- the PROFILE row lock, which blocks 16
+            # routes including 5 GETs. `qr.py`'s `_encode_lock` is
             # process-wide, so K concurrent approves scaled each other's hold,
             # and `db/session.py` sets no lock_timeout.
             #
@@ -884,6 +893,7 @@ def approve_items(
             # and is encoded here, under the lock, as before. That is bounded
             # by the same `cap` and is rare; it is not zero, and this comment
             # says so rather than claiming the hold is gone.
+
             # An explicit approval is a newer and stronger signal from the same
             # human than an old takedown. Without this a call removed once
             # could never be re-approved, on any board.

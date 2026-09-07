@@ -38,12 +38,21 @@ class QueueRow:
 
 
 def board_candidate_parts(session: Session, *, board: Board):
-    """The filters and join every view of a board's candidates shares.
+    """The filters, join AND ORDER every view of a board's candidates shares.
 
     `board_queue` (the admin's list) and `boards/auto_publish.board_selection`
     (what actually goes up) MUST agree about what qualifies. A second copy is
     how they drift under a filter nobody re-tested -- this module's own
     docstring makes the same argument about `_decision_predicate`.
+
+    The ORDER is part of that contract, not decoration. Both callers apply a
+    `LIMIT` -- `board_queue`'s page size, `board_selection`'s
+    `items_per_page * max_pages` capacity -- so the ordering decides WHICH
+    candidates survive it. Two independent copies of
+    `aggregate_score.desc(), Call.id.desc()` agree only until one of them
+    moves, and then the admin's top-24 and the corridor wall's 24 are
+    different calls with nothing red to say so. Returned here so there is
+    one copy.
     """
     owner_id = session.scalar(select(Profile.created_by).where(Profile.id == board.profile_id))
     filters = [
@@ -57,7 +66,10 @@ def board_candidate_parts(session: Session, *, board: Board):
     # the join fans out one row per profile and judges `min_score` against a
     # score another group produced.
     ranking_join = (CallRanking.call_id == Call.id) & (CallRanking.profile_id == board.profile_id)
-    return owner_id, filters, ranking_join
+    # Best score first; `Call.id.desc()` only breaks ties, so the order is
+    # total and two runs over an unchanged table return the same page.
+    order_by = (CallRanking.aggregate_score.desc(), Call.id.desc())
+    return owner_id, filters, ranking_join, order_by
 
 
 def board_queue(
@@ -73,14 +85,14 @@ def board_queue(
     # `_owner_id`: MEASURED dead after the extraction -- its only use in this
     # function was the `_decision_predicate` call that just moved. Underscored
     # so the next reader is not hunting for a use that is not there.
-    _owner_id, filters, ranking_join = board_candidate_parts(session, board=board)
+    _owner_id, filters, ranking_join, order_by = board_candidate_parts(session, board=board)
     approved_ids = select(BoardItem.call_id).where(BoardItem.board_id == board.id).scalar_subquery()
 
     rows = session.execute(
         select(Call, CallRanking.aggregate_score, Call.id.in_(approved_ids))
         .join(CallRanking, ranking_join)
         .where(*filters)
-        .order_by(CallRanking.aggregate_score.desc(), Call.id.desc())
+        .order_by(*order_by)
         .limit(limit)
         .offset(offset)
     ).all()

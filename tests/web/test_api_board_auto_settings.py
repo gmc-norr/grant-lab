@@ -86,6 +86,16 @@ def test_shrinking_max_pages_below_approved_count_is_refused(
         r = client.put(f"/api/boards/{bid}", json={"max_pages": 1})
     assert r.status_code == 409, f"a capacity-shrinking max_pages was accepted: {r.text}"
 
+    # IMPORTANT 6 (branch review). The remedy this 409 names -- "remove N
+    # first" -- was written when `unapprove_item` was a plain delete. It now
+    # writes a `BoardSuppression` per removal, which keeps that call off this
+    # board until somebody approves it again; on an auto board that is the
+    # only thing that can undo it. An operator who follows this instruction is
+    # taking a durable action, and the message has to say so.
+    detail = r.json()["error"]["message"]
+    assert "remove 16 first" in detail, detail  # 24 approved - (8 x 1) capacity
+    assert "suppress" in detail, f"the 409 does not say what removal now costs: {detail!r}"
+
     with pg_session_factory() as s:
         board = s.get(Board, bid)
         assert board.max_pages == 3, "the refused change was applied anyway"

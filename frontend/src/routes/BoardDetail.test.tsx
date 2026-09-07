@@ -354,7 +354,7 @@ it("turning the auto-publish switch on sends auto_publish: true", async () => {
   const user = userEvent.setup();
   const { put } = renderDetail();
   await screen.findByText("Corridor board");
-  await user.click(screen.getByRole("checkbox", { name: /publish new calls automatically/i }));
+  await user.click(screen.getByRole("checkbox", { name: /fill this board automatically/i }));
   await user.click(screen.getByRole("button", { name: /save settings/i }));
   await waitFor(() => expect(put).toHaveBeenCalled());
   const [, callArgs] = put.mock.calls[0] as [string, { body: Record<string, unknown> }];
@@ -397,7 +397,7 @@ it("the preview line shows all four numbers, so the cap is never silent", async 
   const user = userEvent.setup();
   renderDetail();
   await screen.findByText("Corridor board");
-  await user.click(screen.getByRole("checkbox", { name: /publish new calls automatically/i }));
+  await user.click(screen.getByRole("checkbox", { name: /fill this board automatically/i }));
   await waitFor(() => {
     const line = document.querySelector('[data-field="auto-preview"]') as HTMLElement;
     expect(line).toHaveTextContent("142 qualify");
@@ -461,7 +461,7 @@ it("IMPORTANT 1: saving settings refetches the preview, so it shows the numbers 
     </MantineProvider>,
   );
   await screen.findByText("Corridor board");
-  await user.click(screen.getByRole("checkbox", { name: /publish new calls automatically/i }));
+  await user.click(screen.getByRole("checkbox", { name: /fill this board automatically/i }));
   await waitFor(() => {
     const line = document.querySelector('[data-field="auto-preview"]') as HTMLElement;
     expect(line).toHaveTextContent("118 not shown");
@@ -477,7 +477,7 @@ it("turning the switch on warns that the existing cards will be replaced", async
   const user = userEvent.setup();
   renderDetail({ board: { ...BOARD, approved_count: 7 } });
   await screen.findByText("Corridor board");
-  await user.click(screen.getByRole("checkbox", { name: /publish new calls automatically/i }));
+  await user.click(screen.getByRole("checkbox", { name: /fill this board automatically/i }));
   const warning = await screen.findByText(/replaces the 7 cards/i);
   expect(warning).toBeInTheDocument();
 });
@@ -489,4 +489,36 @@ it("a board that is ALREADY auto-publishing gets no replacement warning", async 
   renderDetail({ board: { ...BOARD, auto_publish: true, approved_count: 7 } });
   await screen.findByText("Corridor board");
   expect(screen.queryByText(/replaces the 7 cards/i)).toBeNull();
+});
+
+it("the auto-fill switch does not borrow the publish control's verb", async () => {
+  // IMPORTANT 4. Two elements apart, PublishControl's button says Publish and
+  // its confirmation says "It becomes visible to anyone with the link". The
+  // two acts are different -- auto-publish FILLS a board, it never makes one
+  // world-readable -- and this is the one place the spec insists they stay
+  // visibly distinct. Rendered as ADMIN so the real publish button is on the
+  // page at the same time: the point is that the two controls read
+  // differently side by side, which a non-admin render cannot show.
+  renderDetail({ admin: true });
+  await screen.findByText("Corridor board");
+  const auto = screen.getByRole("checkbox", { name: /fill this board automatically/i });
+  expect(auto).toBeInTheDocument();
+  const autoLabel = auto.closest(".mantine-Checkbox-root")?.textContent ?? "";
+  expect(autoLabel).not.toMatch(/publish/i);
+  expect(screen.getByRole("button", { name: /^publish$/i })).toBeInTheDocument();
+});
+
+it("the preview line says it describes the SAVED settings", async () => {
+  // The endpoint reads the stored board, not the values sitting in the form,
+  // so an admin who has just typed a new minimum score is looking at the old
+  // numbers. Making the preview live is a product call that stays open; saying
+  // which settings it describes is the honest half, and this pins it.
+  const user = userEvent.setup();
+  renderDetail();
+  await screen.findByText("Corridor board");
+  await user.click(screen.getByRole("checkbox", { name: /fill this board automatically/i }));
+  await waitFor(() => {
+    const basis = document.querySelector('[data-field="auto-preview-basis"]') as HTMLElement;
+    expect(basis).toHaveTextContent(/saved settings/i);
+  });
 });
