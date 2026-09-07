@@ -113,6 +113,130 @@ def test_note_over_1000_chars_is_rejected(monkeypatch, pg_url, pg_session_factor
     assert r.status_code == 422
 
 
+def test_a_note_of_exactly_1000_chars_is_accepted(monkeypatch, pg_url, pg_session_factory):
+    """The ACCEPT half of the boundary. Without it, max_length=999 passes the
+    reject test above -- verified 2026-09-07: lowering the constraint to 999
+    left every other test in this file green."""
+    cid = _seed_call(pg_session_factory)
+    app = _setup(monkeypatch, pg_url)
+    client, uid, pid = _login(app, pg_session_factory)
+    with client:
+        client.post(f"/api/calls/{cid}/hide", params={"profile_id": pid})
+        r = client.put(
+            f"/api/calls/{cid}/note", params={"profile_id": pid}, json={"note": "x" * 1000}
+        )
+    assert r.status_code == 200
+    with pg_session_factory() as s:
+        row = s.execute(
+            select(CallDecision).where(CallDecision.user_id == uid)
+        ).scalar_one()
+    assert len(row.note) == 1000
+
+
+def test_a_colleague_cannot_overwrite_your_note_on_a_shared_profile(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """`CallDecision.user_id == user.id` in the UPDATE's WHERE is the ONLY thing
+    that scopes this write to its author, and nothing pinned it.
+
+    Profiles default to visibility "org" (web/profile_access.py), so
+    `_readable_active_profile_or_404` waves any colleague through -- the profile
+    check is a READ gate and cannot be a write gate. Verified 2026-09-07:
+    deleting the user_id predicate left all 19 tests in this file and
+    test_api_calls_hide.py green, while a second user's PUT returned 200 and
+    overwrote the victim's words. The neighbouring unhide/unsave endpoints say
+    the same thing about themselves in their own docstrings.
+
+    The profile_id predicate is asserted here too, for the same reason: it is
+    unpinned on its own, and one user with two profiles is the ordinary case.
+    """
+    cid = _seed_call(pg_session_factory)
+    app = _setup(monkeypatch, pg_url)
+    client, uid, pid = _login(app, pg_session_factory)
+    with client:
+        client.post(f"/api/calls/{cid}/hide", params={"profile_id": pid})
+        client.put(
+            f"/api/calls/{cid}/note", params={"profile_id": pid}, json={"note": "MINE"}
+        )
+
+    # A colleague who can READ the same org-visible profile, with their own
+    # decision on the same (profile, call).
+    from fastapi.testclient import TestClient
+
+    from grant_lab.auth.session_cookie import SessionSigner
+    from grant_lab.db.models import User
+
+    with pg_session_factory() as s:
+        other = User(status="active", email="colleague@umu.se")
+        s.add(other)
+        s.commit()
+        oid = other.id
+    signer: SessionSigner = app.state.session_signer
+    colleague = TestClient(app)
+    colleague.cookies.set("session", signer.make(user_id=oid))
+    with colleague:
+        assert (
+            colleague.post(f"/api/calls/{cid}/hide", params={"profile_id": pid}).status_code
+            == 200
+        ), "the colleague must be able to READ the profile, or this gate is vacuous"
+        r = colleague.put(
+            f"/api/calls/{cid}/note", params={"profile_id": pid}, json={"note": "THEIRS"}
+        )
+    assert r.status_code == 200
+
+    # Two rows, each keeping its own author's words. One row, or one text on
+    # both, means the write crossed a user.
+    with pg_session_factory() as s:
+        by_user = {
+            d.user_id: d.note
+            for d in s.execute(select(CallDecision).where(CallDecision.call_id == cid))
+            .scalars()
+            .all()
+        }
+    assert by_user == {uid: "MINE", oid: "THEIRS"}
+
+
+def test_a_note_cannot_cross_to_another_profile(monkeypatch, pg_url, pg_session_factory):
+    """The profile half, alone. One user, two of their OWN profiles, one call
+    hidden on both: a note written against profile A must not land on B."""
+    cid = _seed_call(pg_session_factory)
+    app = _setup(monkeypatch, pg_url)
+    client, uid, pid_a = _login(app, pg_session_factory)
+    from grant_lab.db.models import Profile, ProfileKind
+
+    with pg_session_factory() as s:
+        p = Profile(
+            name="Grp B",
+            kind=ProfileKind.ORGANIZATIONAL_UNIT.value,
+            level="group",
+            description="d",
+            structured={},
+            created_by=uid,
+        )
+        s.add(p)
+        s.commit()
+        pid_b = p.id
+    with client:
+        client.post(f"/api/calls/{cid}/hide", params={"profile_id": pid_a})
+        client.post(f"/api/calls/{cid}/hide", params={"profile_id": pid_b})
+        assert (
+            client.put(
+                f"/api/calls/{cid}/note",
+                params={"profile_id": pid_a},
+                json={"note": "A ONLY"},
+            ).status_code
+            == 200
+        )
+    with pg_session_factory() as s:
+        by_profile = {
+            d.profile_id: d.note
+            for d in s.execute(select(CallDecision).where(CallDecision.call_id == cid))
+            .scalars()
+            .all()
+        }
+    assert by_profile == {pid_a: "A ONLY", pid_b: None}
+
+
 def test_a_stale_expected_state_is_a_409_and_writes_nothing(
     monkeypatch, pg_url, pg_session_factory
 ):
