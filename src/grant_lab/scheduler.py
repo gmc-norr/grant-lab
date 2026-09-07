@@ -18,6 +18,7 @@ from sqlalchemy.orm import sessionmaker
 
 from grant_lab.auth.rate_limit import SlidingWindowLimiter
 from grant_lab.boards.alerts import send_board_alerts
+from grant_lab.boards.auto_publish import reconcile_auto_boards
 from grant_lab.config import Settings
 from grant_lab.digest.send import run_digest
 from grant_lab.email.client import EmailClient
@@ -572,6 +573,42 @@ def build_scheduler(
         trigger=CronTrigger(hour=4, minute=0),
         id="ranking:reconcile",
         name="Daily reconcile of orphaned ranking pairs",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=6 * 3600,
+    )
+
+    def _auto_publish_tick() -> None:
+        # 05:00, after the 04:00 reconcile has enqueued ranking work. The
+        # ranking queue drains on an INTERVAL (RANKING_TICK_SECONDS, default
+        # 60s), so there is no instant at which ranking is "finished" and no
+        # completion signal to wait for. This runs on the clock instead, is
+        # idempotent, and is correct if it runs mid-drain: it publishes what
+        # the scores say now, and tomorrow corrects it.
+        try:
+            summary = reconcile_auto_boards(session_factory=session_factory)
+            _logger.info(
+                "boards.auto_publish.tick.done",
+                extra={
+                    "event": "boards_auto_publish_tick_done",
+                    "boards_seen": summary.boards_seen,
+                    "rows_added": summary.rows_added,
+                    "rows_removed": summary.rows_removed,
+                    "boards_failed": summary.boards_failed,
+                },
+            )
+        except Exception as e:  # noqa: BLE001
+            _logger.exception(
+                "boards.auto_publish.failed",
+                extra={"event": "boards_auto_publish_failed", "error": str(e)},
+            )
+
+    sched.add_job(
+        _auto_publish_tick,
+        trigger=CronTrigger(hour=5, minute=0),
+        id="boards:auto-publish",
+        name="Daily rebuild of self-publishing corridor boards",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

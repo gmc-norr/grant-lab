@@ -8,13 +8,17 @@ they save.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from grant_lab.boards.qr import QrCode, qr_for
 from grant_lab.boards.queue import board_candidate_parts
-from grant_lab.db.models import Board, BoardSuppression, Call, CallRanking
+from grant_lab.db.models import Board, BoardItem, BoardSuppression, Call, CallRanking
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -67,3 +71,104 @@ def qualifying_count(session: Session, *, board: Board) -> int:
         .join(CallRanking, ranking_join)
         .where(*filters, Call.id.notin_(suppressed))
     )
+
+
+@dataclass
+class AutoPublishSummary:
+    boards_seen: int = 0
+    rows_added: int = 0
+    rows_removed: int = 0
+    # One board that raises must not cost the others their night. Counted so
+    # the tick can log a non-zero and an operator can see it.
+    boards_failed: int = 0
+
+
+def reconcile_auto_boards(*, session_factory) -> AutoPublishSummary:
+    """Make every auto board's items match what `board_selection` says.
+
+    Two passes per board. The encode is CPU-bound and must not run under the
+    board row lock -- see this module's docstring and the shape
+    `approve_items` uses since 5e8329dd.
+
+    PER-BOARD ISOLATION. Each board's two passes sit in their own try/except.
+    A bare loop would let the first board that raises -- a `qr_for` failure, an
+    FK conflict, a profile deleted mid-run -- abort boards N+1..M for that
+    night AND lose the summary with the exception, which is precisely the
+    "a board silently stops updating" outcome this feature exists to prevent.
+    APScheduler swallows the traceback into its own logger, so it would also be
+    invisible.
+    """
+    summary = AutoPublishSummary()
+    with session_factory() as session:
+        board_ids = list(
+            session.scalars(select(Board.id).where(Board.auto_publish.is_(True))).all()
+        )
+
+    for board_id in board_ids:
+        try:
+            # PASS 1 -- no lock held. Work out what is likely wanted and encode it.
+            prefetch: dict[str, QrCode] = {}
+            with session_factory() as session:
+                board = session.get(Board, board_id)
+                if board is None:
+                    continue
+                likely = board_selection(session, board=board)
+            for sel in likely:
+                if sel.url and sel.url not in prefetch:
+                    prefetch[sel.url] = qr_for(sel.url)
+
+            # PASS 2 -- under the lock, and everything is decided from the
+            # LOCKED row. A settings request may have turned auto_publish off,
+            # or moved min_score, between the passes; pass 1's answer is
+            # advisory only.
+            with session_factory() as session:
+                board = session.get(Board, board_id, with_for_update=True)
+                if board is None or not board.auto_publish:
+                    continue
+                summary.boards_seen += 1
+                wanted = {s.call_id: s for s in board_selection(session, board=board)}
+                current = {
+                    i.call_id: i
+                    for i in session.scalars(
+                        select(BoardItem).where(BoardItem.board_id == board.id)
+                    ).all()
+                }
+
+                for call_id in current.keys() - wanted.keys():
+                    session.delete(current[call_id])
+                    summary.rows_removed += 1
+
+                for position, sel in enumerate(wanted.values()):
+                    item = current.get(sel.call_id)
+                    if item is None:
+                        qr = (prefetch.get(sel.url) or qr_for(sel.url)) if sel.url else None
+                        session.add(
+                            BoardItem(
+                                board_id=board.id,
+                                call_id=sel.call_id,
+                                position=position,
+                                # NULL: nobody approved this. See BoardItem's
+                                # own comment on the column.
+                                approved_by=None,
+                                qr_path=(qr.path or None) if qr else None,
+                                qr_modules=qr.modules if qr else 0,
+                                qr_source_url=sel.url or None,
+                            )
+                        )
+                        summary.rows_added += 1
+                    else:
+                        item.position = position
+                session.commit()
+        except Exception as e:  # noqa: BLE001
+            # Count it, name the board, keep going. Same idiom as
+            # scheduler.py's `_reconcile_rankings_tick`.
+            summary.boards_failed += 1
+            _logger.exception(
+                "boards.auto_publish.board_failed",
+                extra={
+                    "event": "boards_auto_publish_board_failed",
+                    "board_id": board_id,
+                    "error": str(e),
+                },
+            )
+    return summary
