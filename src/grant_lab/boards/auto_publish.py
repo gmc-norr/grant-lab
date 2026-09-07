@@ -121,11 +121,28 @@ def reconcile_auto_boards(*, session_factory) -> AutoPublishSummary:
             # LOCKED row. A settings request may have turned auto_publish off,
             # or moved min_score, between the passes; pass 1's answer is
             # advisory only.
+            #
+            # `with_for_update=True` is the load-bearing token in this
+            # function. It is the same row lock `update_board`'s
+            # `_lock_board_row` takes, and it is what stops a settings PUT
+            # committing BETWEEN the re-check below and the commit at the
+            # bottom -- i.e. writing items onto a board whose automation was
+            # just switched off. Re-reading without the lock would pass every
+            # between-the-passes test in this module and still lose that race.
+            #
+            # The encode is NOT free of this lock: `prefetch` is advisory, so
+            # the fallback below runs `qr_for` inline, under this lock, for any
+            # url pass 1 did not see (a call that started qualifying between
+            # the passes). That is bounded by the same `cap` and is rare; it is
+            # not zero, and this comment says so rather than claiming the hold
+            # is gone -- the same wording `approve_items` uses for the same
+            # fallback.
+            rows_added = 0
+            rows_removed = 0
             with session_factory() as session:
                 board = session.get(Board, board_id, with_for_update=True)
                 if board is None or not board.auto_publish:
                     continue
-                summary.boards_seen += 1
                 wanted = {s.call_id: s for s in board_selection(session, board=board)}
                 current = {
                     i.call_id: i
@@ -136,7 +153,7 @@ def reconcile_auto_boards(*, session_factory) -> AutoPublishSummary:
 
                 for call_id in current.keys() - wanted.keys():
                     session.delete(current[call_id])
-                    summary.rows_removed += 1
+                    rows_removed += 1
 
                 for position, sel in enumerate(wanted.values()):
                     item = current.get(sel.call_id)
@@ -155,10 +172,18 @@ def reconcile_auto_boards(*, session_factory) -> AutoPublishSummary:
                                 qr_source_url=sel.url or None,
                             )
                         )
-                        summary.rows_added += 1
+                        rows_added += 1
                     else:
                         item.position = position
                 session.commit()
+            # Counted only once the commit RETURNED. Incremented inside the
+            # transaction -- as this did -- anything raising after the first
+            # increment leaves the summary counting rows the session's
+            # rollback erased, and the tick's operator log then reports
+            # `rows_added=8, boards_failed=1` for a night that wrote nothing.
+            summary.boards_seen += 1
+            summary.rows_added += rows_added
+            summary.rows_removed += rows_removed
         except Exception as e:  # noqa: BLE001
             # Count it, name the board, keep going. Same idiom as
             # scheduler.py's `_reconcile_rankings_tick`.

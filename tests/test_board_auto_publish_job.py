@@ -86,9 +86,11 @@ def test_a_call_that_stops_qualifying_leaves(pg_session_factory, profile_factory
     with pg_session_factory() as s:
         assert s.get(BoardItem, (bid, cid)) is not None
     _sql(pg_session_factory, bid, "UPDATE boards SET min_score = 95 WHERE id = :b")
-    reconcile_auto_boards(session_factory=pg_session_factory)
+    summary = reconcile_auto_boards(session_factory=pg_session_factory)
     with pg_session_factory() as s:
         assert s.get(BoardItem, (bid, cid)) is None
+    # The counters feed the tick's operator log and were pinned by nothing.
+    assert summary.rows_removed == 1, f"the departure was not counted: {summary}"
 
 
 def test_the_encode_does_not_run_under_the_board_lock(
@@ -103,8 +105,11 @@ def test_the_encode_does_not_run_under_the_board_lock(
     pid, owner = profile_factory(name="job lock")
     bid = _make_board(pg_session_factory, profile_id=pid, created_by=owner, slug="z" * 16)
     _set_auto(pg_session_factory, bid)
-    for i in range(3):
+    # Distinct scores, best first: `cids[0]` must end up at position 0.
+    cids = [
         _ranked_call(pg_session_factory, external_id=f"job-k{i}", profile_id=pid, score=90 - i)
+        for i in range(3)
+    ]
 
     held: list[str] = []
     real = ap.qr_for
@@ -123,8 +128,22 @@ def test_the_encode_does_not_run_under_the_board_lock(
     reconcile_auto_boards(session_factory=pg_session_factory)
 
     with pg_session_factory() as s:
-        stored = s.scalars(select(BoardItem.qr_modules).where(BoardItem.board_id == bid)).all()
-    assert stored and all(m > 0 for m in stored), f"nothing was published: {stored}"
+        rows = s.execute(
+            select(BoardItem.position, BoardItem.call_id, BoardItem.qr_modules)
+            .where(BoardItem.board_id == bid)
+            .order_by(BoardItem.position)
+        ).all()
+    # MINOR 5: `stored and ...` was the whole vacuity guard, so a run that
+    # published 1 of 3 passed while the message below still said "of 3". The
+    # COUNT is part of the guard.
+    assert len(rows) == 3 and all(m > 0 for _p, _c, m in rows), f"nothing was published: {rows}"
+    # The wall reads `position` -- that is what `ix_board_items_board_position`
+    # is for. Reversing this order puts the WORST-scoring call first on a
+    # corridor screen, and every other assertion in this module survives it.
+    assert [c for _p, c, _m in rows] == cids, (
+        f"cards are not in score order: got call_ids {[c for _p, c, _m in rows]}, "
+        f"best-first is {cids}"
+    )
     assert not held, f"the encode ran under the board lock ({len(held)} of 3)"
 
 
@@ -210,6 +229,128 @@ def test_one_boards_failure_does_not_cost_the_others(
     summary = reconcile_auto_boards(session_factory=pg_session_factory)
 
     assert summary.boards_failed == 1, f"the failure was not isolated: {summary}"
+    # The counters were pinned by NOTHING before this line; `boards_failed`
+    # alone let a regression that zeroed them ship green.
+    assert summary.rows_added == 1, f"the surviving board's row was not counted: {summary}"
     with pg_session_factory() as s:
         rows = s.scalars(select(BoardItem).where(BoardItem.board_id.in_([good, bad]))).all()
     assert rows, "the second board got nothing -- the first board's failure aborted the run"
+
+
+def test_pass_2_decides_under_the_board_row_lock(
+    pg_session_factory, profile_factory, monkeypatch
+):
+    """GATE 9 -- the invariant this whole function is built on, which a review
+    found pinned by nothing: deleting `with_for_update=True` at the top of pass
+    2 reddened NONE of the eight gates. Gate 5's `held` stays empty (it asserts
+    the lock is ABSENT during the encode, so losing it makes gate 5 *more*
+    green); gates 6 and 7 move their setting strictly BETWEEN the passes, where
+    an unlocked `session.get` re-reads the new value anyway and both still pass;
+    gates 1-4 and 8 never touch it.
+
+    What is lost without it: a settings PUT that commits DURING pass 2 -- after
+    the re-check, before the commit -- writes items onto a board whose
+    automation was just switched off. That is the promise `update_board`'s own
+    `_lock_board_row` exists to keep.
+
+    Shape. `board_selection` is the one seam called in BOTH passes, so the same
+    second-connection `FOR UPDATE NOWAIT` probe gate 5 uses can answer "is the
+    board row locked right now" at two points: it must be free in pass 1 (the
+    encode runs after it) and held in pass 2. NOWAIT means a missing lock FAILS
+    an assertion immediately instead of blocking into pytest-timeout's 120s and
+    surfacing as a hang.
+    """
+    from sqlalchemy.exc import DBAPIError, OperationalError
+
+    pid, owner = profile_factory(name="job pass2 lock")
+    bid = _make_board(pg_session_factory, profile_id=pid, created_by=owner, slug="V" * 16)
+    _set_auto(pg_session_factory, bid)
+    _ranked_call(pg_session_factory, external_id="job-p1", profile_id=pid, score=90)
+
+    real_selection = ap.board_selection
+    observed: list[bool] = []
+
+    def probing(session, *, board):
+        try:
+            with pg_session_factory() as probe:
+                probe.execute(
+                    text("SELECT id FROM boards WHERE id = :b FOR UPDATE NOWAIT"), {"b": bid}
+                )
+            observed.append(False)
+        except (OperationalError, DBAPIError):
+            observed.append(True)
+        return real_selection(session, board=board)
+
+    monkeypatch.setattr(ap, "board_selection", probing)
+    reconcile_auto_boards(session_factory=pg_session_factory)
+
+    # Vacuity first: a job that never reaches pass 2 observes nothing, and the
+    # lock assertion below would then be true of an empty run.
+    assert len(observed) == 2, f"the job did not run both passes over this board: {observed}"
+    with pg_session_factory() as s:
+        assert s.scalars(select(BoardItem).where(BoardItem.board_id == bid)).all(), (
+            "nothing was published -- the lock assertions here would be vacuous"
+        )
+    assert observed[0] is False, (
+        "pass 1 already held the board row lock -- the encode runs after this "
+        "point, so gate 5's promise is gone"
+    )
+    assert observed[1] is True, (
+        "pass 2 decided WITHOUT the board row lock: a settings PUT committing "
+        "between the re-check and the commit would be silently overwritten"
+    )
+
+
+def test_a_pass_2_failure_does_not_cost_the_other_boards(
+    pg_session_factory, profile_factory, monkeypatch
+):
+    """GATE 10. Gate 8 injects through `qr_for`, which the job calls in PASS 1 --
+    before the lock is taken and before any write. An implementation that
+    narrowed the per-board `try:` to cover only the pass-1 block would pass gate
+    8 green while leaving every pass-2 failure fatal to the whole night's
+    remaining boards, which is the same hole gates 6-8 exist to close.
+
+    This raises from INSIDE pass 2: under the lock, inside the write
+    transaction, where gate 8's injection never reaches.
+
+    It also pins `boards_seen` against the counter fix. Incremented inside the
+    transaction -- as it was -- the board whose work rolled back still counted
+    itself as reconciled, and the tick logged it to an operator.
+    """
+    pid, owner = profile_factory(name="job pass2 isolation")
+    for slug in ("W" * 16, "X" * 16):
+        _set_auto(
+            pg_session_factory,
+            _make_board(pg_session_factory, profile_id=pid, created_by=owner, slug=slug),
+        )
+    _ranked_call(pg_session_factory, external_id="job-x1", profile_id=pid, score=90)
+
+    real_selection = ap.board_selection
+    seen: list[int] = []
+
+    def blow_up_in_pass_2(session, *, board):
+        seen.append(board.id)
+        # The calls are [B1 pass 1, B1 pass 2, B2 pass 1, B2 pass 2]. The
+        # SECOND is the first board's pass 2 -- whichever board that is.
+        if len(seen) == 2:
+            raise RuntimeError("selection blew up under the board lock")
+        return real_selection(session, board=board)
+
+    monkeypatch.setattr(ap, "board_selection", blow_up_in_pass_2)
+    summary = reconcile_auto_boards(session_factory=pg_session_factory)
+
+    assert summary.boards_failed == 1, f"a pass-2 failure was not isolated: {summary}"
+    assert len(seen) == 4, f"the second board never ran its passes: {seen}"
+    failed_board, surviving_board = seen[0], seen[2]
+    assert failed_board != surviving_board, f"both passes ran on one board: {seen}"
+    with pg_session_factory() as s:
+        assert s.scalars(
+            select(BoardItem).where(BoardItem.board_id == surviving_board)
+        ).all(), "the second board got nothing -- a pass-2 failure aborted the run"
+        assert (
+            s.scalars(select(BoardItem).where(BoardItem.board_id == failed_board)).all() == []
+        ), "the board that raised under the lock kept rows"
+    assert summary.boards_seen == 1, (
+        f"the rolled-back board was counted as reconciled: {summary}"
+    )
+    assert summary.rows_added == 1, f"rows_added counts work that was rolled back: {summary}"
