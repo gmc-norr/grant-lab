@@ -23,6 +23,7 @@ from grant_lab.db.models.boards import (
     ORIENTATION_ITEMS_PER_PAGE,
     Board,
     BoardItem,
+    BoardSuppression,
 )
 from grant_lab.db.models.calls import (
     Call,
@@ -98,6 +99,7 @@ __all__ = [
     "Base",
     "Board",
     "BoardItem",
+    "BoardSuppression",
     "Branch",
     "Call",
     "CallDecision",

@@ -99,6 +99,12 @@ class Board(Base):
     page_seconds: Mapped[int] = mapped_column(
         Integer, nullable=False, default=30, server_default=text("30")
     )
+    # Off by default: every board that exists when 0078 lands keeps the
+    # approval gate. Turning this on replaces the board's hand-picked items on
+    # the next 05:00 run -- see the spec's "Flipping the switch".
+    auto_publish: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     created_by: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
     )
@@ -165,8 +171,11 @@ class BoardItem(Base):
         BigInteger, ForeignKey("calls.id", ondelete="CASCADE"), primary_key=True
     )
     position: Mapped[int] = mapped_column(Integer, nullable=False)
-    approved_by: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    # NULL means published automatically by boards/auto_publish.py. Inventing a
+    # system user to keep this NOT NULL would make the audit trail lie about
+    # who decided. The value survives a board returning to manual mode.
+    approved_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
     )
     approved_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -190,3 +199,33 @@ class BoardItem(Base):
     # the call no longer lives is worse than no QR. The public route compares
     # this and serves qr_modules=0 on a mismatch.
     qr_source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class BoardSuppression(Base):
+    """One call an operator took off ONE board.
+
+    This is an EXCEPTION list, not a second approval queue. It exists because
+    an auto board rebuilds itself at 05:00, so deleting a row is not a
+    takedown on its own -- the next run would put it back. It is written by
+    `unapprove_item` and cleared by `approve_items`, which is a newer and
+    stronger signal from the same human.
+
+    Scoped to one board on purpose. Archiving a call reaches every board on
+    that profile AND the owner's dashboard, and takes effect only at the next
+    run; both are wrong for "this one card should not be on this one wall".
+    """
+
+    __tablename__ = "board_suppressions"
+
+    board_id: Mapped[int] = mapped_column(
+        ForeignKey("boards.id", ondelete="CASCADE"), primary_key=True
+    )
+    call_id: Mapped[int] = mapped_column(
+        ForeignKey("calls.id", ondelete="CASCADE"), primary_key=True
+    )
+    suppressed_by: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    suppressed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
