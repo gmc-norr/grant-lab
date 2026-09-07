@@ -187,6 +187,10 @@ REQUIRED_SCENARIOS = [
     "a criterion chip expands to the funder's own sentence and the model's reasoning",
     "a saved call whose deadline has passed is still in Saved, marked closed",
     "with profiles but none picked the landing page offers the picker, not the feed",
+    # The corridor wall at its authored size. An outside review measured the
+    # page growing to 2292px at 1920x1080 with realistic funding titles, which
+    # puts the whole second row below a screen nobody can scroll.
+    "the corridor board fits 1920x1080 with realistic long titles",
 ]
 
 
@@ -218,7 +222,7 @@ def test_the_match_spec_actually_asserts_things():
     """`pnpm run e2e:match` over twenty-five empty test bodies exits 0. This is the
     count that stops that.
 
-    **120 assertion sites in live code, MEASURED 2026-09-05** by running this
+    **128 assertion sites in live code, MEASURED 2026-09-07** by running this
     test's own regex over the comment-stripped spec, and written down as what the
     command printed — not remembered. (An earlier draft of this line said 40 from
     memory and failed on its first run.) It was 34 until Task 8 added the
@@ -238,7 +242,7 @@ def test_the_match_spec_actually_asserts_things():
     behavioural mutation per scenario in the app source it drives (Task 9 step 3)."""
     src = "\n".join(_spec_source_lines())
     expects = len(EXPECT_SITE.findall(src))
-    assert expects == 120, (
+    assert expects == 128, (
         f"the browser smoke has {expects} expect() calls, this gate pins 120 — "
         "if the change was deliberate, re-measure and update the number here"
     )

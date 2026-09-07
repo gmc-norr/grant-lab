@@ -345,6 +345,16 @@ export function TriageFeed() {
                     profileId={profileId}
                     view={view}
                     onUndecide={undecide}
+                    onSave={(c) => decide("save", c)}
+                    onHide={(c) => decide("hide", c)}
+                    busy={isFetching}
+                    // The cursor follows REAL focus, so a click or a Tab moves
+                    // it the same way j/k do. Without this the two disagreed and
+                    // `s` decided whichever card j/k last visited -- Astra
+                    // focused the second call and watched the first get saved.
+                    // Setting the same index is a no-op re-render, so the effect
+                    // that calls .focus() on the focused card cannot loop.
+                    onFocus={() => setFocusIndex(i)}
                     cardRef={(el) => {
                       cardEls.current[i] = el;
                     }}

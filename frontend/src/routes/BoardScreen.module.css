@@ -5,7 +5,21 @@
 .screen {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  /* HEIGHT, not min-height (Astra, High). A corridor display has no scrollbar
+     and nobody standing there to scroll it, so a page taller than the screen
+     does not degrade -- the rows past 1080 simply do not exist. REPRODUCED at
+     1920x1080 with realistic funding titles: the page grew to 1745px and the
+     whole second row was off-screen. min-height let the grid push the page
+     down; height makes the viewport the budget the grid has to fit inside. */
+  height: 100vh;
+  /* HONEST NOTE: no gate reddens when these two lines are reverted to
+     `min-height` and no `overflow`. MEASURED -- the e2e board test still passes.
+     The card composition below is what actually fixes the overflow, by bounding
+     the content so nothing needs to grow. These stay because a wall display's
+     height IS the screen rather than a floor, and because they bound content
+     nobody has thought of yet; but they are a belt, not the braces, and should
+     not be cited as the fix. */
+  overflow: hidden;
   width: 100%;
   padding: 3vh 3vw;
   gap: 2vh;
@@ -41,23 +55,36 @@
   flex: 1;
   display: grid;
   gap: 2vh 2vw;
+  /* `1fr` is `minmax(auto, 1fr)`, and `auto` refuses to go below the content's
+     own height -- so a tall card grew its row and the row grew the grid, which
+     is how a fixed 4x2 layout became 1745px. `minmax(0, 1fr)` lets the row hold
+     the share it was given. */
+  min-height: 0;
 }
 
 .grid[data-orientation="landscape"] {
-  grid-template-columns: repeat(4, 1fr);
-  grid-template-rows: repeat(2, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
 }
 
 .grid[data-orientation="portrait"] {
-  grid-template-columns: 1fr;
-  grid-template-rows: repeat(4, 1fr);
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: repeat(4, minmax(0, 1fr));
 }
 
 .card {
+  /* A COLUMN, not a row (Astra, High). Beside a 170px QR in a 4-up grid the
+     title had about 165px to work with -- roughly four characters per line at
+     34px -- so a realistic funding title wrapped into a tower and took the row
+     with it. Stacked, the title gets the card's full width (~364px at 1920),
+     which is what actually fixes this; the clamp below is the bound, not the
+     mechanism. */
   display: flex;
-  align-items: center;
+  flex-direction: column;
   justify-content: space-between;
-  gap: 1.5vw;
+  gap: 1.5vh;
+  min-height: 0;
+  overflow: hidden;
   background: #fff;
   color: #111;
   border-radius: 0.5rem;
@@ -80,18 +107,71 @@
   border: 1px dashed var(--app-border);
 }
 
-.cardBody {
+/* The bottom row: the facts and the QR side by side, so they cost ONE 170px
+   band between them instead of stacking to 260px and stealing it from the
+   title. */
+.cardFoot {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1.5vw;
+  flex-shrink: 0;
+}
+
+.cardFacts {
   min-width: 0;
-  overflow: hidden;
 }
 
 .cardTitle {
+  /* Sized in vh like everything else on this screen (see the file header), not
+     the hard 34px it carried before. That px value was the last thing on the
+     wall not scaling with the display, and at 1920x1080 it fitted about 18
+     characters per line -- so every one of eight realistic 87-95 character
+     titles hit the clamp and showed an ellipsis.
+
+     2.6vh is MEASURED, not chosen: it is the LARGEST size at which all eight of
+     those titles fit whole in the 192px the QR band leaves. Stepping up truncates
+     (2.7-2.9vh: 2 of 8; 3vh: 5 of 8), and the old 34px never fitted at all --
+     it grew the page to 1745px instead of clipping, which is why nothing caught
+     it. Raise this and the e2e gate goes red with the count. */
+  font-size: 2.6vh;
+  font-weight: 700;
+  line-height: 1.15;
+  /* Take the whole band the QR row leaves, rather than shrink-to-fit. MEASURED:
+     as a plain `flex: 0 1 auto` item the title sized itself to 161px inside a
+     192px space and `overflow: hidden` then clipped its last line by 3px --
+     invisible in review, and a cut descender at four metres. */
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-wrap: break-word;
+  /* Clamped so a pathological title cannot reclaim the row after all the space
+     the stacked layout just gave it. Five lines at 34px/1.15 is ~196px, which
+     is what is left of a ~460px card once the 170px QR band and the padding
+     are taken. An ellipsis is a VISIBLE truncation the reader can act on --
+     the QR still resolves to the full call -- which is the difference between
+     this and clipping the layout so the card silently loses its bottom half. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 5;
+  line-clamp: 5;
+  overflow: hidden;
+  min-width: 0;
 }
 
 .cardMeta {
   font-size: 1.4rem;
   color: #333;
+  /* Clamped for the same reason the title is, and MEASURED the same way: the
+     facts column shares the bottom band with the QR, so an unbounded funder
+     name grows that band and takes the height straight out of the title above
+     it. A real one ("Stiftelsen for Strategisk Forskning i samverkan med
+     Vinnova och Formas") truncated all EIGHT titles while the page itself
+     still fitted -- so the page-height assertion alone would not have seen it. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
 }
 
 .cardDeadline {
