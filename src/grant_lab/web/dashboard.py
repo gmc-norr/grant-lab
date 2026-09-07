@@ -22,7 +22,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from sqlalchemy import and_, func, or_, select
-from sqlalchemy.orm import Session, defer, joinedload
+from sqlalchemy.orm import Session, joinedload
 
 from grant_lab.db.models import (
     Call,
@@ -34,6 +34,7 @@ from grant_lab.db.models import (
     Source,
     User,
 )
+from grant_lab.db.projections import call_columns_no_response_renders
 from grant_lab.web.profile_access import can_read_profile, readable_profile_ids
 
 # Score threshold for counting "high match" calls in the dashboard summary.
@@ -450,11 +451,13 @@ def build_dashboard_view(
     # extra SELECT per row. `build_dashboard_view` has exactly one production
     # caller (`/api/calls`), so widening this is a deliberate act — drop the
     # column from the tuple, do not catch the error.
-    _unrendered = (
-        defer(Call.embedding, raiseload=True),
-        defer(Call.full_text, raiseload=True),
-        defer(Call.raw, raiseload=True),
-    )
+    # ONE home for this list (db/projections.py). The board queue and the public
+    # board wall defer exactly the same three columns for exactly the same
+    # reason, and three copies of three column names is how they drift --
+    # silently, because a query that stops deferring gets slower and stays
+    # correct, so nothing goes red. The reasoning above is why THIS list; the
+    # shared function is what stops it becoming three lists.
+    _unrendered = call_columns_no_response_renders()
 
     # When a profile is selected, LEFT JOIN call_rankings for THAT profile and
     # sort by score desc (nulls last). Without a profile, fall back to the
