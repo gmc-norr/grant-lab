@@ -455,7 +455,12 @@ class BoardItemOut(BaseModel):
     deadline: datetime | None
     source_name: str | None
     position: int
-    approved_by: int
+    # NULL when boards/auto_publish.py published this row. The column went
+    # nullable in 0078 and this MUST move with it: _item_out passes the value
+    # straight through, so leaving this `int` turns every auto board's item
+    # list into a 500 raised inside the response model, far from the job that
+    # wrote the row.
+    approved_by: int | None
     approved_at: datetime
 
 

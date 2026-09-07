@@ -265,7 +265,7 @@ it("removing an approved item calls DELETE for that call", async () => {
         deadline: null,
         source_name: "Vinnova",
         position: 0,
-        approved_by: 1,
+        approved_by: null,
         approved_at: "2026-01-01T00:00:00Z",
       },
     ],

@@ -2822,7 +2822,7 @@ export interface components {
              */
             approved_at: string;
             /** Approved By */
-            approved_by: number;
+            approved_by: number | null;
             /** Call Id */
             call_id: number;
             /** Deadline */
