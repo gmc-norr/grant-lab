@@ -220,6 +220,18 @@ export function TriageFeed() {
           title: call.title,
           state: kind === "save" ? "saved" : "hidden",
         });
+      // onSuccess, never optimistically (D10): a failed hide must not solicit a
+      // note for a decision that did not happen, and the note endpoint would
+      // then 404 on a row that never existed.
+      //
+      // In practice this fires LATER than "the POST resolved". Both hooks
+      // return invalidateDecisions(qc)'s promise from their hook-level
+      // onSuccess, and TanStack v5 awaits that before running mutate-level
+      // callbacks -- so the strip appears once the list and the counts have
+      // settled, together with the list update rather than ahead of it.
+      // Measured 2026-09-07: holding the list refetch holds the strip. That
+      // reads better, but it means a hung refetch delays the prompt, which is
+      // the window D2 exists for. Recorded so the coupling is a choice.
       if (kind === "save") save.mutate(args, { onSuccess: onDecided });
       else hide.mutate(args, { onSuccess: onDecided });
     },

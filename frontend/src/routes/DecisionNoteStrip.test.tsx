@@ -2,6 +2,7 @@
 // precisely so these can be written without standing up the whole feed.
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { DecisionNoteStrip } from "./DecisionNoteStrip";
@@ -54,8 +55,21 @@ describe("D10 — the strip", () => {
   });
 
   it("keeps the typed text and shows the error when the save fails", async () => {
+    // Inside <StrictMode>, which is what main.tsx wraps the real app in and
+    // what renderWithProviders does NOT. StrictMode dev-double-invokes effects
+    // (mount -> cleanup -> mount), so a mounted-ref cleared only in cleanup is
+    // false for the component's whole life -- and commit()'s `if
+    // (!mounted.current) return` then swallows setError. Measured 2026-09-07:
+    // without StrictMode here the test passes against that bug, and every
+    // failed save in `pnpm dev` was silent while the user believed it saved.
+    // Production builds do not double-invoke, which is why only this wrapper
+    // can catch it. Precedent: collab/CollabEditor.test.tsx.
     const save = vi.fn().mockRejectedValue(new Error("boom"));
-    render(<DecisionNoteStrip target={target} onSave={save} onDismiss={vi.fn()} />);
+    render(
+      <StrictMode>
+        <DecisionNoteStrip target={target} onSave={save} onDismiss={vi.fn()} />
+      </StrictMode>,
+    );
     await userEvent.type(screen.getByRole("textbox"), "kept{Enter}");
     await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
     expect(screen.getByRole("textbox")).toHaveValue("kept");

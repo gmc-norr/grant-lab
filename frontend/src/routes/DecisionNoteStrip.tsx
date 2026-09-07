@@ -2,7 +2,7 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 
 import { apiErrorMessage } from "../api/client";
-import styles from "./TriageFeed.module.css";
+import styles from "./DecisionNoteStrip.module.css";
 
 // WHAT THE STRIP IS ABOUT, held as a prop rather than looked up (spec D10).
 // This is the whole defence against a late write landing on the next call: the
@@ -46,6 +46,10 @@ function normalize(value: string): string | null {
 
 export function DecisionNoteStrip({ target, initialNote = null, onSave, onDismiss }: Props) {
   const inputId = useId();
+  // Read on MOUNT only -- this is the seed, not a controlled value. Safe in the
+  // feed, which keys the strip per target. Task 7 mounts it on a row whose note
+  // can change underneath it: give it a `key` that covers the note, or it shows
+  // the stale one.
   const [value, setValue] = useState(initialNote ?? "");
   const [error, setError] = useState<string | null>(null);
   // What the server is believed to already hold. Enter AND blur both commit
@@ -57,12 +61,20 @@ export function DecisionNoteStrip({ target, initialNote = null, onSave, onDismis
   // flight (D10: the request is not cancelled). Its failure still belongs to
   // the mutation, but there is no longer a strip to show it on.
   const mounted = useRef(true);
-  useEffect(
-    () => () => {
+  // Re-ARMED in the effect body, not only cleared in its cleanup. <StrictMode>
+  // (main.tsx) dev-double-invokes effects: mount -> cleanup -> mount. A
+  // cleanup-only ref goes false on that first cleanup and never comes back, so
+  // in `pnpm dev` every failed save returned early at the guard below and the
+  // strip sat there unchanged -- text kept, no message -- and the user believed
+  // the note had saved. Production builds do not double-invoke, which is
+  // exactly why nothing would ever have caught it. The failure test below runs
+  // inside <StrictMode> for that reason.
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
       mounted.current = false;
-    },
-    [],
-  );
+    };
+  }, []);
 
   async function commit() {
     const note = normalize(value);
