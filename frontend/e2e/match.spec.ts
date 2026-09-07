@@ -424,7 +424,8 @@ test("every mounted release-1 route renders exactly one main landmark", async ({
   // release-1 pages render their own, and the unit test that should have caught it
   // asserted getByRole("main") against a harness child of <p>calls page</p> — so it
   // passed only because the fake child had no landmark. The assertion lives inside
-  // gotoRendered, so this test is the coverage claim: all fifteen routes, not two.
+  // gotoRendered, so this test is the coverage claim: every route in ALL_ROUTES,
+  // not two. The live count is the assertion below -- do not repeat it in prose.
   await mockApi(page);
   for (const path of ALL_ROUTES) await gotoRendered(page, path);
   expect(ALL_ROUTES.length).toBe(16); // the count is the claim; keep it in step with the router

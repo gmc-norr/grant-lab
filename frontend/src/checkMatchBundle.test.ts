@@ -68,7 +68,10 @@ const REQUIRED = [
   // directory.
   //
   // THREE of them — ActivityBar, TitleBar and nav-items — carry gate 4's
-  // whole-file EXEMPTions (noCockpitLinks.test.tsx:60-62), so without those a
+  // whole-file EXEMPTions (noCockpitLinks.test.tsx's EXEMPT, entries
+  // "shell/ActivityBar", "shell/TitleBar" and "shell/nav-items" -- named rather
+  // than cited by line, because a line range rots on the next edit and this one
+  // already had), so without those a
   // SimpleShell that imported ActivityBar would render nav-items' live
   // `to: "/cockpit"` with BOTH gates green. The other three (AppShell, Sidebar,
   // StatusBar) are here for the ordinary reason that they are full-edition
