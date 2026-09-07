@@ -6,7 +6,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import case, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import joinedload
 
@@ -339,9 +339,9 @@ def hide_call(
         _readable_active_profile_or_404(session, user, profile_id)
         # DO UPDATE, not DO NOTHING. The row now carries a STATE: hiding a call
         # the user had saved must flip it, and DO NOTHING would silently leave
-        # it saved while returning 200. All THREE columns move — `decided_at`
-        # because this IS a new decision and the Saved/Hidden lists order by it
-        # (D12), `decided_by` because it records who pressed the key.
+        # it saved while returning 200. `decided_at` moves because this IS a
+        # new decision and the Saved/Hidden lists order by it (D12),
+        # `decided_by` because it records who pressed the key.
         session.execute(
             pg_insert(CallDecision)
             .values(
@@ -353,7 +353,27 @@ def hide_call(
             )
             .on_conflict_do_update(
                 index_elements=["user_id", "profile_id", "call_id"],
-                set_={"state": "hidden", "decided_at": func.now(), "decided_by": user.id},
+                # FOUR columns now. `note` because a flip IS a new decision --
+                # this block already moves decided_at and decided_by for that
+                # reason -- and one decision's reasoning must not be filed
+                # against a different one (D9). Without it, hide->save->hide
+                # resurrects a note about a state the user has twice left, and
+                # hands it to the golden set as fresh evidence.
+                set_={
+                    "state": "hidden",
+                    "decided_at": func.now(),
+                    "decided_by": user.id,
+                    # Cleared ONLY on a real flip. An unconditional None would
+                    # also wipe the note on hidden -> hidden, and `h` is a
+                    # keyboard key people press twice -- so a double-tap would
+                    # silently destroy the reason just typed. In ON CONFLICT DO
+                    # UPDATE a bare column reference is the EXISTING row's
+                    # value, which is what makes this comparison meaningful.
+                    "note": case(
+                        (CallDecision.state != "hidden", None),
+                        else_=CallDecision.note,
+                    ),
+                },
             )
         )
         session.commit()
@@ -420,9 +440,10 @@ def save_call(
     on a missing row DO UPDATE and DO NOTHING are indistinguishable -- the
     behaviour this chooses is only observable on the flip: saving a HIDDEN call
     must move it to saved, where DO NOTHING would answer 200 and leave it
-    hidden. All THREE columns move: `decided_at` because this IS a new decision
-    and Saved/Hidden are ordered by it (D12), `decided_by` because it records
-    who pressed the key (D4).
+    hidden. `decided_at` moves because this IS a new decision and Saved/Hidden
+    are ordered by it (D12), `decided_by` because it records who pressed the key
+    (D4), and `note` because a flip is a new decision and the old decision's
+    reasoning must not be filed against it (D9).
 
     The conflict target is the full (user_id, profile_id, call_id) key, so this
     upsert can only ever touch the caller's own row -- a colleague holding their
@@ -444,7 +465,18 @@ def save_call(
             )
             .on_conflict_do_update(
                 index_elements=["user_id", "profile_id", "call_id"],
-                set_={"state": "saved", "decided_at": func.now(), "decided_by": user.id},
+                # See hide_call: `note` is cleared because a flip is a new
+                # decision (D9).
+                set_={
+                    "state": "saved",
+                    "decided_at": func.now(),
+                    "decided_by": user.id,
+                    # See hide_call: cleared on a real flip only (D9).
+                    "note": case(
+                        (CallDecision.state != "saved", None),
+                        else_=CallDecision.note,
+                    ),
+                },
             )
         )
         session.commit()

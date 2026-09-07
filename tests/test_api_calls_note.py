@@ -287,3 +287,103 @@ def test_note_requires_auth(monkeypatch, pg_url, pg_session_factory):
     with TestClient(app) as anon:
         r = anon.put(f"/api/calls/{cid}/note", params={"profile_id": 1}, json={"note": "x"})
     assert r.status_code == 401
+
+
+def test_hiding_a_saved_call_clears_its_note(monkeypatch, pg_url, pg_session_factory):
+    """G5, D9. Today the upserts leave `note` out of their set_, so a note
+    written while saving survives into the hide. The code already calls a flip
+    a NEW decision -- it moves decided_at and decided_by for that reason -- so
+    carrying the old decision's reasoning into it is wrong, and D7 would then
+    date that note by the new decision."""
+    cid = _seed_call(pg_session_factory)
+    app = _setup(monkeypatch, pg_url)
+    client, uid, pid = _login(app, pg_session_factory)
+    with client:
+        client.post(f"/api/calls/{cid}/save", params={"profile_id": pid})
+        client.put(
+            f"/api/calls/{cid}/note",
+            params={"profile_id": pid},
+            json={"note": "ask Anna before the deadline"},
+        )
+        client.post(f"/api/calls/{cid}/hide", params={"profile_id": pid})
+    with pg_session_factory() as s:
+        row = s.execute(
+            select(CallDecision).where(CallDecision.user_id == uid)
+        ).scalar_one()
+    assert (row.state, row.note) == ("hidden", None)
+
+
+def test_saving_a_hidden_call_clears_its_note(monkeypatch, pg_url, pg_session_factory):
+    """The other direction, written separately because the two set_ blocks are
+    separate code and either can be got wrong alone. (Parametrized cases are
+    independently identifiable too, so parametrizing would NOT have hidden the
+    split -- an earlier draft of this plan claimed it would, and that was
+    wrong.)"""
+    cid = _seed_call(pg_session_factory)
+    app = _setup(monkeypatch, pg_url)
+    client, uid, pid = _login(app, pg_session_factory)
+    with client:
+        client.post(f"/api/calls/{cid}/hide", params={"profile_id": pid})
+        client.put(
+            f"/api/calls/{cid}/note",
+            params={"profile_id": pid},
+            json={"note": "budget far too small"},
+        )
+        client.post(f"/api/calls/{cid}/save", params={"profile_id": pid})
+    with pg_session_factory() as s:
+        row = s.execute(
+            select(CallDecision).where(CallDecision.user_id == uid)
+        ).scalar_one()
+    assert (row.state, row.note) == ("saved", None)
+
+
+def test_re_hiding_an_already_hidden_call_keeps_the_note(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """D9 clears the note on a FLIP, not on every upsert. `h` is a keyboard key
+    and people press it twice; an unconditional note=None in the set_ would
+    silently destroy the reason they had just typed. The CASE expression is
+    what makes hidden -> hidden a no-op for the note."""
+    cid = _seed_call(pg_session_factory)
+    app = _setup(monkeypatch, pg_url)
+    client, uid, pid = _login(app, pg_session_factory)
+    with client:
+        client.post(f"/api/calls/{cid}/hide", params={"profile_id": pid})
+        client.put(
+            f"/api/calls/{cid}/note",
+            params={"profile_id": pid},
+            json={"note": "wrong field"},
+        )
+        client.post(f"/api/calls/{cid}/hide", params={"profile_id": pid})
+    with pg_session_factory() as s:
+        row = s.execute(
+            select(CallDecision).where(CallDecision.user_id == uid)
+        ).scalar_one()
+    assert row.note == "wrong field"
+
+
+def test_unhiding_destroys_the_note(monkeypatch, pg_url, pg_session_factory):
+    """G3, D4. Undecided is the ABSENCE of a row, so the note dies with the
+    decision, and re-hiding starts blank.
+
+    NOTHING IS WRITTEN AFTER THE UNHIDE. An earlier draft of this gate sent
+    PUT {"note": null} and then asserted null -- the endpoint echoing its own
+    input. It passed with the DELETE replaced by a no-op."""
+    cid = _seed_call(pg_session_factory)
+    app = _setup(monkeypatch, pg_url)
+    client, _uid, pid = _login(app, pg_session_factory)
+    with client:
+        client.post(f"/api/calls/{cid}/hide", params={"profile_id": pid})
+        client.put(
+            f"/api/calls/{cid}/note", params={"profile_id": pid}, json={"note": "no"}
+        )
+        client.delete(f"/api/calls/{cid}/hide", params={"profile_id": pid})
+    # The ROW is gone -- that IS the guarantee, and it is read, never written.
+    with pg_session_factory() as s:
+        assert s.execute(select(CallDecision)).scalars().all() == []
+    # Re-hide and INSPECT. No write between the unhide and the assertion.
+    with client:
+        client.post(f"/api/calls/{cid}/hide", params={"profile_id": pid})
+    with pg_session_factory() as s:
+        row = s.execute(select(CallDecision)).scalar_one()
+    assert row.note is None
