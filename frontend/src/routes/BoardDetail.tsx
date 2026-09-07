@@ -2,7 +2,8 @@ import {
   Anchor, Badge, Box, Button, Card, Checkbox, Group, NumberInput, SegmentedControl, Stack,
   Text, TextInput, Title,
 } from "@mantine/core";
-import { useState } from "react";
+import { useDebouncedValue } from "@mantine/hooks";
+import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { apiErrorMessage } from "../api/client";
@@ -133,9 +134,30 @@ function SettingsForm({ board }: { board: Board }) {
   // value back is a no-op rather than a clobber.
   const [maxPages, setMaxPages] = useState<number>(board.max_pages);
 
+  // The settings Save would send, minus the two the preview has no use for:
+  // `title` changes nothing it measures, and `auto_publish` is the switch that
+  // decides whether to ask at all. ONE object feeds both the preview and the
+  // submit body, so the numbers on screen are answers about the request the
+  // button will actually make -- including the `itemsPerPageTouched` rule, which
+  // a second copy would be free to get wrong in exactly the case it exists for.
+  const pendingSettings = useMemo(
+    () => ({
+      orientation,
+      min_score: minScore,
+      page_seconds: pageSeconds,
+      max_pages: maxPages,
+      ...(itemsPerPageTouched ? { items_per_page: itemsPerPage } : {}),
+    }),
+    [orientation, minScore, pageSeconds, maxPages, itemsPerPageTouched, itemsPerPage],
+  );
+  // Debounced because these are NumberInputs: without it every keystroke in the
+  // threshold is a request, and the intermediate values are ones the admin is
+  // typing THROUGH rather than asking about. 300ms matches CallsFilters.
+  const [debouncedSettings] = useDebouncedValue(pendingSettings, 300);
+
   // Only fetched while the switch is on -- the numbers are about what an auto
   // board would carry, and a manual board's owner has not asked the question.
-  const preview = useAutoPreview(board.id, { enabled: autoPublish });
+  const preview = useAutoPreview(board.id, { enabled: autoPublish, query: debouncedSettings });
 
   // The switch is being turned ON and there is hand-picked work on the board
   // that the next nightly run would replace. Shown BEFORE saving, because the
@@ -145,15 +167,7 @@ function SettingsForm({ board }: { board: Board }) {
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
-    const body: BoardSettingsBody = {
-      title,
-      orientation,
-      min_score: minScore,
-      page_seconds: pageSeconds,
-      auto_publish: autoPublish,
-      max_pages: maxPages,
-      ...(itemsPerPageTouched ? { items_per_page: itemsPerPage } : {}),
-    };
+    const body: BoardSettingsBody = { title, auto_publish: autoPublish, ...pendingSettings };
     update.mutate(body);
   }
 
@@ -242,14 +256,6 @@ function SettingsForm({ board }: { board: Board }) {
               {preview.data.qualifying} qualify · {preview.data.displayed} shown ·{" "}
               {preview.data.truncated} not shown · {preview.data.pages} pages ·{" "}
               {preview.data.loop_seconds}s loop
-              {/* The endpoint reads the STORED board, not the values in these
-                  inputs, so until Save lands these numbers describe the last
-                  saved settings. Saying so is the honest half of a preview the
-                  spec calls "live": an admin who has just typed a new minimum
-                  score would otherwise read the old numbers as the new ones. */}{" "}
-              <Text span size="sm" c="dimmed" data-field="auto-preview-basis">
-                (for the saved settings — save to update)
-              </Text>
             </Text>
           )}
           {replacesExistingCards && (

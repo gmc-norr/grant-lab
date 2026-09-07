@@ -6,7 +6,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 
 import * as clientMod from "../api/client";
-import type { AutoPreview, Board, BoardItem } from "../api/boards";
+import type { AutoPreview, AutoPreviewQuery, Board, BoardItem } from "../api/boards";
 import { theme } from "../theme/theme";
 import { BoardDetail } from "./BoardDetail";
 
@@ -77,9 +77,12 @@ function renderDetail({
   putResult?: unknown;
   publishResult?: unknown;
   reorderResult?: unknown;
-  autoPreview?: AutoPreview;
+  autoPreview?: AutoPreview | ((query: AutoPreviewQuery) => AutoPreview);
 } = {}) {
-  const get = vi.spyOn(clientMod.api, "GET").mockImplementation((async (path: string) => {
+  const get = vi.spyOn(clientMod.api, "GET").mockImplementation((async (
+    path: string,
+    opts?: { params?: { query?: AutoPreviewQuery } },
+  ) => {
     if (path === "/api/me") return mockMe(admin);
     if (path === BOARD_PATH) {
       if (boardError) {
@@ -95,7 +98,14 @@ function renderDetail({
       return { data: { items: [], waiting_count: 0 }, error: undefined };
     }
     if (path === ITEMS_PATH) return { data: { items: approvedItems }, error: undefined };
-    if (path === AUTO_PREVIEW_PATH) return { data: autoPreview, error: undefined };
+    if (path === AUTO_PREVIEW_PATH) {
+      // Answering as a function of the query is what lets a test tell a LIVE
+      // preview from a stored one: a fixed object comes back identical whether
+      // the component forwarded the form's values or ignored them.
+      const data =
+        typeof autoPreview === "function" ? autoPreview(opts?.params?.query ?? {}) : autoPreview;
+      return { data, error: undefined };
+    }
     return { data: undefined, error: undefined };
   }) as never);
   const put = vi.spyOn(clientMod.api, "PUT").mockImplementation((async (path: string) => {
@@ -516,17 +526,66 @@ it("the auto-fill switch does not borrow the publish control's verb", async () =
   expect(screen.getByRole("button", { name: /^publish$/i })).toBeInTheDocument();
 });
 
-it("the preview line says it describes the SAVED settings", async () => {
-  // The endpoint reads the stored board, not the values sitting in the form,
-  // so an admin who has just typed a new minimum score is looking at the old
-  // numbers. Making the preview live is a product call that stays open; saying
-  // which settings it describes is the honest half, and this pins it.
+it("the preview answers for the values in the FORM, not the saved board", async () => {
+  // Spec Sec 6 requires this preview to be LIVE: the admin drags the threshold
+  // and reads the four numbers BEFORE saving. It used to read only the stored
+  // board, so a just-lowered minimum score showed the OLD numbers -- and
+  // `truncated`, the one number this preview exists to surface, is precisely
+  // the one a lowered threshold changes most.
+  //
+  // The stub answers as a FUNCTION OF the query, which is what separates a live
+  // preview from a stored one here: a fixed fixture comes back identical whether
+  // the component forwarded the form's values or dropped them on the floor.
   const user = userEvent.setup();
-  renderDetail();
+  renderDetail({
+    autoPreview: (q: AutoPreviewQuery) => ({ ...AUTO_PREVIEW, qualifying: q.min_score ?? -1 }),
+  });
   await screen.findByText("Corridor board");
   await user.click(screen.getByRole("checkbox", { name: /fill this board automatically/i }));
+
+  // BOARD.min_score is 60, so that is what the first, untouched call asks about.
   await waitFor(() => {
-    const basis = document.querySelector('[data-field="auto-preview-basis"]') as HTMLElement;
-    expect(basis).toHaveTextContent(/saved settings/i);
+    expect(document.querySelector('[data-field="auto-preview"]')).toHaveTextContent("60 qualify");
   });
+
+  const threshold = screen.getByLabelText(/minimum score/i);
+  await user.clear(threshold);
+  await user.type(threshold, "40");
+
+  // No Save. The numbers move because the form's value moved.
+  await waitFor(() => {
+    expect(document.querySelector('[data-field="auto-preview"]')).toHaveTextContent("40 qualify");
+  });
+  expect(screen.queryByText(/saved settings/i)).toBeNull();
+});
+
+it("the preview follows the orientation flip's page size, which only the server derives", async () => {
+  // The form deliberately OMITS items_per_page when the user has not touched it,
+  // so the server re-derives it from the new orientation. A preview that echoed
+  // the stored 8 would describe an 8-up board while Save built a 4-up one.
+  //
+  // The fix is that the preview is told the ORIENTATION and does the same
+  // derivation the PUT does (`_effective_items_per_page`), rather than the
+  // client keeping its own copy of the orientation -> page size map. So what
+  // this pins is that `items_per_page` is NOT sent and `orientation` IS.
+  const user = userEvent.setup();
+  const seen: AutoPreviewQuery[] = [];
+  renderDetail({
+    autoPreview: (q: AutoPreviewQuery) => {
+      seen.push(q);
+      return AUTO_PREVIEW;
+    },
+  });
+  await screen.findByText("Corridor board");
+  await user.click(screen.getByRole("checkbox", { name: /fill this board automatically/i }));
+  await waitFor(() => expect(seen.length).toBeGreaterThan(0));
+
+  await user.click(screen.getByRole("radio", { name: /portrait/i }));
+
+  await waitFor(() => {
+    const last = seen[seen.length - 1];
+    expect(last.orientation).toBe("portrait");
+  });
+  // Untouched, so the server derives it. Sending the stale 8 here is the defect.
+  expect(seen[seen.length - 1].items_per_page).toBeUndefined();
 });
