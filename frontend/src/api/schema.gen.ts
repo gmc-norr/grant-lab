@@ -1114,15 +1114,19 @@ export interface paths {
         /**
          * Transfer Profile Owner
          * @description Move a profile to another user. Owner-or-admin, via `_profile_for_edit`'s
-         *     own check (profiles.py:151); `:468` is `update_profile`'s use of the same
-         *     gate.
+         *     own check; `update_profile` inlines the same ladder rather than calling it.
          *
          *     The admin arm is not a convenience: the case that motivated this is an owner
          *     who can no longer log in, so only an admin can act.
          *
-         *     Ownership is load-bearing in SEVEN places (profile_access.py:69,
-         *     profiles.py:151/261/468/612/678, calls.py:641), which is why this is one
-         *     transaction and not four endpoints.
+         *     Ownership is load-bearing in SEVEN places -- `readable_profile_ids`'s owner
+         *     arm (web/profile_access.py), `_profile_for_edit`, `get_profile`,
+         *     `update_profile`, `replace_profile_viewers`, `add_profile_viewer`, and
+         *     `get_call_detail`'s profile resolution (web/api/calls.py) -- which is why
+         *     this is one transaction and not four endpoints. Cited by name: the numeric
+         *     version of this list was already approximate at the base commit (one entry
+         *     pointed at a decorator, another at a parameter) and this branch shifted
+         *     every one of them.
          *
          *     Recipient eligibility is `status == 'active'` and nothing narrower: an
          *     unshared private profile has no viewer rows at all, so a
