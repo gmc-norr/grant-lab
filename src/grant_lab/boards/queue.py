@@ -75,10 +75,6 @@ def board_queue(
     # so the next reader is not hunting for a use that is not there.
     _owner_id, filters, ranking_join = board_candidate_parts(session, board=board)
     approved_ids = select(BoardItem.call_id).where(BoardItem.board_id == board.id).scalar_subquery()
-    # Scope the ranking join to the BOARD'S OWN profile. A call ranked on
-    # several profiles has a CallRanking row per profile; without this clause
-    # the join fans out one row per profile (inflating `waiting`) and judges
-    # `min_score` against a score another group produced, not this board's.
 
     rows = session.execute(
         select(Call, CallRanking.aggregate_score, Call.id.in_(approved_ids))

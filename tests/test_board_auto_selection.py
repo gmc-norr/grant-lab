@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from grant_lab.boards.auto_publish import board_selection
+from grant_lab.boards.auto_publish import board_selection, qualifying_count
 from grant_lab.db.models import Board, BoardSuppression
 from tests.test_boards_qr_at_approval import _make_board
 from tests.web.test_api_board_items import FUTURE, _make_call, _rank
@@ -67,6 +67,7 @@ def test_the_capacity_is_the_ceiling(pg_session_factory, profile_factory):
     board = _board(pg_session_factory, board_id)
     with pg_session_factory() as s:
         selection = board_selection(s, board=board)
+        count = qualifying_count(s, board=board)
 
     assert len(selection) == 24
     # The 24 returned are the HIGHEST-scoring: the first 24 calls inserted
@@ -74,6 +75,10 @@ def test_the_capacity_is_the_ceiling(pg_session_factory, profile_factory):
     assert [s.call_id for s in selection] == call_ids[:24]
     assert selection[0].score == 100
     assert selection[-1].score == 77
+    # Same candidate population, different treatment of the cap: all 30
+    # qualify, only 24 fit. This is where `board_selection` and
+    # `qualifying_count` must legitimately diverge.
+    assert count == 30
 
 
 def test_a_suppressed_call_is_excluded(pg_session_factory, profile_factory):
