@@ -38,6 +38,10 @@ class CandidateOut(BaseModel):
     aggregate_score: int
     embed_similarity: float | None
     reason: str
+    # THE BOUNDARY. `CandidateOut(**asdict(c))` below is a Pydantic v2 model,
+    # which IGNORES unknown keys -- so a field added only to the CandidateRow
+    # dataclass is dropped here silently, with no error and an absent key.
+    user_notes: list[str] = []
 
 
 class AdminGoldenSetOut(BaseModel):

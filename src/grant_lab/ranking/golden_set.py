@@ -3,9 +3,9 @@ Session; the web route owns the transaction (commit/rollback)."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from sqlalchemy import and_, exists, func, or_, select
+from sqlalchemy import and_, exists, func, or_, select, tuple_
 
 from grant_lab.db.models import (
     Call,
@@ -16,6 +16,7 @@ from grant_lab.db.models import (
 )
 
 _CANDIDATE_LIMIT = 20
+_NOTE_CAP = 3
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,10 @@ class CandidateRow:
     aggregate_score: int
     embed_similarity: float | None
     reason: str
+    # The HUMANS' own words, not the mining reason above. Unattributed (D3),
+    # hidden decisions only, newest decision first, at most _NOTE_CAP.
+    # Empty for the two candidate queries that need no decision at all.
+    user_notes: list[str] = field(default_factory=list)
 
 
 def add_triple(session, *, call_id, profile_id, expected_score, note=None, created_by=None) -> int:
@@ -90,6 +95,45 @@ def _not_already_a_triple():
     )
 
 
+def _notes_for(session, pairs: list[tuple[int, int]]) -> dict[tuple[int, int], list[str]]:
+    """The hidden decisions' notes for each (call_id, profile_id) pair.
+
+    ONE query for the whole candidate page, not one per candidate.
+
+    `state == "hidden"` is applied HERE, in the WHERE clause, and the cap is
+    applied afterwards in Python -- so the filter precedes the cap (D7). A
+    saved decision can carry a note too, and letting one through would file
+    "we should apply for this" as evidence that the model scored it too high.
+
+    Ordered newest DECISION first. There is no note-edit timestamp and this
+    feature does not add one, so a note edited today on a decision made in
+    March sorts as March. `id` breaks ties, which two decisions committed in
+    the same transaction will have.
+    """
+    if not pairs:
+        return {}
+    out: dict[tuple[int, int], list[str]] = {}
+    rows = session.execute(
+        select(CallDecision.call_id, CallDecision.profile_id, CallDecision.note)
+        .where(
+            tuple_(CallDecision.call_id, CallDecision.profile_id).in_(pairs),
+            CallDecision.state == "hidden",
+            CallDecision.note.is_not(None),
+        )
+        .order_by(CallDecision.decided_at.desc(), CallDecision.id.desc())
+        # The RESPONSE is capped at _NOTE_CAP per pair; this read is not, so
+        # cap it too. Notes per pair are bounded by readers-of-a-profile, which
+        # is small -- but "small in practice" is not a bound, and this is the
+        # one query here whose size no schema constraint limits.
+        .limit(_CANDIDATE_LIMIT * _NOTE_CAP * 10)
+    ).all()
+    for call_id, profile_id, note in rows:
+        bucket = out.setdefault((call_id, profile_id), [])
+        if len(bucket) < _NOTE_CAP:
+            bucket.append(note)
+    return out
+
+
 def candidates_dismissed_high_score(session) -> list[CandidateRow]:
     """Ranked >= 60 for a profile, and HIDDEN by someone on THAT SAME profile.
 
@@ -125,6 +169,8 @@ def candidates_dismissed_high_score(session) -> list[CandidateRow]:
         .order_by(CallRanking.aggregate_score.desc())
         .limit(_CANDIDATE_LIMIT)
     )
+    found = session.execute(q).all()
+    notes = _notes_for(session, [(r.call_id, r.profile_id) for r, _t, _n in found])
     return [
         CandidateRow(
             call_id=r.call_id,
@@ -134,8 +180,9 @@ def candidates_dismissed_high_score(session) -> list[CandidateRow]:
             aggregate_score=r.aggregate_score,
             embed_similarity=r.embed_similarity,
             reason="dismissed_high_score",
+            user_notes=notes.get((r.call_id, r.profile_id), []),
         )
-        for r, title, name in session.execute(q).all()
+        for r, title, name in found
     ]
 
 

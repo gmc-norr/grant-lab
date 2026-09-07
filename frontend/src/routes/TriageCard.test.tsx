@@ -35,6 +35,7 @@ function call(over: Partial<CallItem> = {}): CallItem {
     criteria: [],
     applicant_note_count: 0,
     escalated: false,
+    decision_note: null,
     ...over,
   };
 }
