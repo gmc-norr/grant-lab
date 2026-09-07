@@ -314,7 +314,14 @@ def test_turning_auto_OFF_while_shrinking_is_still_refused(
     assert r.status_code == 409, (
         f"a board being returned to MANUAL was let through the shrink guard: {r.text}"
     )
-    assert "remove 16 first" in r.json()["error"]["message"]
+    # The advice has to be right for THIS case. Refusing the request refuses
+    # the shrink with it, so the capacity is still 24 and the next run trims to
+    # 24 -- telling this admin to "just wait" would be wrong, and telling them
+    # to "remove 16 first" would cost 16 permanent suppressions. The smaller
+    # capacity has to be saved on its own first.
+    detail = r.json()["error"]["message"]
+    assert "Save the smaller capacity on its own first" in detail, detail
+    assert "remove 16 first" not in detail, detail
     with pg_session_factory() as s:
         board = s.get(Board, bid)
         assert board.max_pages == 3, "the refused change was applied anyway"
@@ -479,3 +486,75 @@ def test_the_previews_bounds_are_the_settings_PUTs_bounds():
         expected = _bounds(BoardSettingsIn.model_fields[field].metadata)
         assert expected, f"BoardSettingsIn.{field} declares no bounds for the preview to mirror"
         assert got == expected, f"preview {field} bounds {got} != the PUT's {expected}"
+
+
+def test_handing_an_over_capacity_auto_board_back_to_manual_is_refused(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """REPRODUCED by an outside review, in TWO requests that are each fine.
+
+    The auto exemption made an over-capacity board a legitimate, reachable
+    state -- the 05:00 job trims it. But that makes the moment control returns
+    to MANUAL the moment nothing is left to trim it, and the shrink guard could
+    not see that moment: request two shrinks nothing, so `new_cap < old_cap` is
+    False and the guard never ran.
+
+        1. auto board, 24 items, {"max_pages": 1}      -> 200 (the exemption)
+        2. {"auto_publish": false}, on its own         -> was 200, now 409
+
+    The single-request form (`{"auto_publish": false, "max_pages": 1}`) was
+    already refused. Splitting it in two walked around the guard, which is why
+    a gate written against ONE save proved less than its own comment claimed.
+    """
+    app = _setup(monkeypatch, pg_url)
+    pid, owner = profile_factory(name="handback")
+    bid = _make_board(pg_session_factory, profile_id=pid, created_by=owner, slug="M" * 16)
+    client = _client_for(app, owner)
+    with client:
+        assert client.put(f"/api/boards/{bid}", json={"auto_publish": True}).status_code == 200
+        _approve_n(pg_session_factory, board_id=bid, approved_by=owner, n=24, profile_id=pid)
+
+        shrink = client.put(f"/api/boards/{bid}", json={"max_pages": 1})
+        handback = client.put(f"/api/boards/{bid}", json={"auto_publish": False})
+
+    assert shrink.status_code == 200, f"the auto exemption stopped working: {shrink.text}"
+    assert handback.status_code == 409, (
+        f"a MANUAL board was left holding 24 cards in a cap of 8: {handback.text}"
+    )
+
+    # The remedy has to be the CHEAP one. Auto-fill is still on at this moment,
+    # so tonight's run trims for free; "remove 16 first" would cost 16 permanent
+    # suppressions to buy the same thing.
+    detail = handback.json()["error"]["message"]
+    assert "nightly run" in detail, f"the 409 does not name the free remedy: {detail!r}"
+    assert "remove 16 first" not in detail, f"the 409 prescribes 16 suppressions: {detail!r}"
+
+    with pg_session_factory() as s:
+        board = s.get(Board, bid)
+        assert board.auto_publish is True, "the refused request turned auto-fill off anyway"
+
+
+def test_turning_auto_off_on_a_board_that_FITS_is_still_allowed(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """The other side of the guard above, and the reason it is not simply
+    'refuse every hand-back'. A board whose items fit its capacity has nothing
+    for the nightly job to fix, so returning it to manual breaks no invariant.
+
+    Without this, the fix for the bypass would be indistinguishable from
+    banning the auto -> manual flip outright -- which the settings form offers
+    as an ordinary toggle.
+    """
+    app = _setup(monkeypatch, pg_url)
+    pid, owner = profile_factory(name="handback fits")
+    bid = _make_board(pg_session_factory, profile_id=pid, created_by=owner, slug="N" * 16)
+    client = _client_for(app, owner)
+    with client:
+        assert client.put(f"/api/boards/{bid}", json={"auto_publish": True}).status_code == 200
+        # 4 items against the landscape default capacity of 8 x 3 = 24.
+        _approve_n(pg_session_factory, board_id=bid, approved_by=owner, n=4, profile_id=pid)
+        r = client.put(f"/api/boards/{bid}", json={"auto_publish": False})
+
+    assert r.status_code == 200, f"a board that fits was refused the flip to manual: {r.text}"
+    with pg_session_factory() as s:
+        assert s.get(Board, bid).auto_publish is False

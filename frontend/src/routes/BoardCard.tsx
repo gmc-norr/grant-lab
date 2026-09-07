@@ -56,24 +56,28 @@ export function BoardCard({ item }: { item: PublicBoardItemOut | null }) {
 
   return (
     <article className={styles.card} data-field="board-card">
-      <div className={styles.cardBody}>
-        <Text component="h2" fz={34} fw={700} lh={1.15} className={styles.cardTitle} data-field="title">
-          {item.title}
-        </Text>
-        <Text className={styles.cardMeta} data-field="funder">
-          {item.source_name}
-        </Text>
-        {closes && (
-          <Text className={styles.cardDeadline} data-field="deadline">
-            {closes}
+      {/* The title owns the card's FULL width now. Beside the QR it had ~165px
+          at 34px type, so a realistic funding title wrapped into a tower and
+          pushed the whole second row of the wall off a 1920x1080 screen. */}
+      <Text component="h2" className={styles.cardTitle} data-field="title">
+        {item.title}
+      </Text>
+      <div className={styles.cardFoot}>
+        <div className={styles.cardFacts}>
+          <Text className={styles.cardMeta} data-field="funder">
+            {item.source_name}
           </Text>
-        )}
-        {budget && (
-          <Text className={styles.cardBudget} data-field="budget">
-            {budget}
-          </Text>
-        )}
-      </div>
+          {closes && (
+            <Text className={styles.cardDeadline} data-field="deadline">
+              {closes}
+            </Text>
+          )}
+          {budget && (
+            <Text className={styles.cardBudget} data-field="budget">
+              {budget}
+            </Text>
+          )}
+        </div>
       {/* qr_modules === 0 means segno's own overflow ceiling rejected this
           URL (schema.gen.ts's doc comment on the field) -- render NO <svg> at
           all rather than an empty/broken one. `d` is an attribute React
@@ -90,6 +94,7 @@ export function BoardCard({ item }: { item: PublicBoardItemOut | null }) {
           <path d={item.qr_path} fill="#000" />
         </svg>
       )}
+      </div>
     </article>
   );
 }

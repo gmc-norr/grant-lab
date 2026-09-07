@@ -454,7 +454,25 @@ def update_board(
                     f"{new_cap} cards; a board holds at most {MAX_BOARD_ITEMS}"
                 ),
             )
-        if not new_auto_publish and new_cap < old_cap and new_cap < approved_count:
+        # `new_cap < old_cap` exists so a bare title rename is not refused on a
+        # board that is ALREADY over capacity. That precondition was safe while
+        # only a shrink could break the invariant. The auto exemption broke it:
+        # an auto board is allowed over capacity, so the over-capacity state is
+        # now REACHABLE and legitimate, and the moment control returns to manual
+        # is the moment nothing is left to fix it.
+        #
+        # REPRODUCED (Astra, two requests, both 200): shrink an auto board with
+        # 24 items to a cap of 8, then send `{"auto_publish": false}` on its own.
+        # The second request shrinks nothing, `new_cap < old_cap` is False, and
+        # a MANUAL board is left holding 24 cards in 8 slots with no nightly job
+        # coming. The single-request form of this was already refused; splitting
+        # it in two walked around the guard.
+        returning_to_manual = board.auto_publish and not new_auto_publish
+        if (
+            not new_auto_publish
+            and new_cap < approved_count
+            and (new_cap < old_cap or returning_to_manual)
+        ):
             # Only name the orientation when it is what DETERMINED
             # new_items_per_page -- i.e. the same condition that branch above
             # uses to derive it from ORIENTATION_ITEMS_PER_PAGE. Branching on
@@ -486,16 +504,44 @@ def update_board(
             # 05:00 job would otherwise put the card straight back. An operator
             # told only to "remove N first" would not learn that from this
             # message, so it says what removal now costs.
-            raise HTTPException(
-                status_code=409,
-                detail=(
+            # Two different remedies, because they cost differently. On a
+            # board being handed back to manual, auto-fill is still on RIGHT
+            # NOW and tonight's run trims to the cap for free -- telling that
+            # admin to "remove 16 first" would cost 16 permanent suppressions
+            # to accomplish what waiting accomplishes for nothing.
+            if returning_to_manual and new_cap < old_cap:
+                # This request BOTH shrinks and hands back, and refusing it
+                # refuses the shrink too -- so the capacity is still the OLD
+                # one and tonight's run would trim to that. "Just wait" is
+                # wrong advice here; the smaller capacity has to be saved
+                # first, on its own, while auto-fill is still on.
+                detail = (
+                    f"this board has {approved_count} approved calls and "
+                    f"{cap_description} — auto-fill is what is allowed to "
+                    "exceed the capacity. Save the smaller capacity on its "
+                    "own first, let the next nightly run reduce the board to "
+                    f"{new_cap}, then turn auto-fill off"
+                )
+            elif returning_to_manual:
+                # The smaller capacity is already saved, so the next run really
+                # does trim to it and waiting costs nothing.
+                detail = (
+                    f"this board has {approved_count} approved calls and "
+                    f"{cap_description} — auto-fill is what is allowed to "
+                    "exceed the capacity, so turning it off now would leave a "
+                    "board nothing will trim. Either raise the capacity, or "
+                    "leave auto-fill on until the next nightly run reduces it "
+                    f"to {new_cap}, then turn it off"
+                )
+            else:
+                detail = (
                     f"this board has {approved_count} approved calls; "
                     f"{cap_description} — remove "
                     f"{approved_count - new_cap} first, and each removal also "
                     "suppresses that call, keeping it off this board until it "
                     "is approved again"
-                ),
-            )
+                )
+            raise HTTPException(status_code=409, detail=detail)
 
         if body.title is not None:
             board.title = body.title

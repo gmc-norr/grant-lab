@@ -76,6 +76,10 @@ export function TriageCard({
   profileId,
   view,
   onUndecide,
+  onSave,
+  onHide,
+  onFocus,
+  busy = false,
   cardRef,
 }: {
   call: CallItem;
@@ -83,6 +87,10 @@ export function TriageCard({
   profileId: number | null;
   view: TriageView;
   onUndecide?: (call: CallItem) => void;
+  onSave?: (call: CallItem) => void;
+  onHide?: (call: CallItem) => void;
+  onFocus?: () => void;
+  busy?: boolean;
   cardRef?: (el: HTMLElement | null) => void;
 }) {
   const detailTo = detailHref(call.id, profileId, view);
@@ -100,6 +108,13 @@ export function TriageCard({
       // Focusable so j/k can move REAL focus, not just a highlight — otherwise a
       // screen-reader user pressing j hears nothing move.
       tabIndex={-1}
+      // REPORT REAL FOCUS BACK (Astra, High). `focusIndex` used to move only on
+      // j/k, so clicking or tabbing to a card left the cursor pointing at the
+      // previous one: focus the second call, press `s`, and the FIRST call was
+      // saved. React's onFocus is focusin and therefore bubbles, so focusing
+      // this card's title link counts too -- which is what a keyboard user
+      // tabbing through the feed actually does.
+      onFocus={onFocus}
     >
       <h2 className={styles.cardTitle}>
         <Link to={detailTo}>{call.title}</Link>
@@ -196,6 +211,40 @@ export function TriageCard({
             </p>
           )}
         </div>
+      )}
+      {/* SAVE / HIDE (Astra, High). The inbox had no controls at all: the only
+          way to triage was `s` and `h`, which are undiscoverable, and which act
+          on whatever the cursor believes is current.
+
+          OUTSIDE the `expanded` block on purpose. Inside it, only the focused
+          card would carry buttons -- so reaching any other call still meant
+          moving the cursor first, which is the interaction that was broken. On
+          every card, a click carries its own call and cannot decide a different
+          one. Inbox only: a saved or hidden card's move is "Return to inbox"
+          above, and Save on an already-saved card would be a no-op control. */}
+      {view === "inbox" && (onSave || onHide) && (
+        <p className={styles.cardActions}>
+          {onSave && (
+            <button
+              type="button"
+              className={styles.decide}
+              disabled={busy}
+              onClick={() => onSave(call)}
+            >
+              Save
+            </button>
+          )}
+          {onHide && (
+            <button
+              type="button"
+              className={styles.decideSecondary}
+              disabled={busy}
+              onClick={() => onHide(call)}
+            >
+              Hide
+            </button>
+          )}
+        </p>
       )}
     </article>
   );

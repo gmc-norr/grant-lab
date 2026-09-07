@@ -239,6 +239,51 @@
   color: var(--app-text);
 }
 
+/* Save and Hide are the two halves of the decision this screen exists to make,
+   so unlike .undecide they are not corrections and are not styled as quiet. The
+   keys `s` and `h` do the same thing; keys are undiscoverable, and a triage
+   screen whose only controls are undocumented keystrokes is unusable by anyone
+   who has not been told about them. They also make the target unambiguous: a
+   click carries WHICH call with it, where a keystroke depends on the cursor
+   agreeing with what the user thinks is focused. */
+.decide {
+  min-height: 32px;
+  padding: 0 0.8rem;
+  border: 1px solid var(--app-accent);
+  border-radius: 4px;
+  background: var(--app-accent);
+  color: #fff;
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.decide:hover:not(:disabled) {
+  background: var(--app-accent-bright);
+  border-color: var(--app-accent-bright);
+}
+
+.decideSecondary {
+  composes: decide;
+  background: transparent;
+  border-color: var(--app-border-strong);
+  color: var(--app-text);
+}
+
+.decideSecondary:hover:not(:disabled) {
+  background: var(--app-hover);
+  border-color: var(--app-border-strong);
+}
+
+/* A control that silently does nothing is worse than no control: `decide()`
+   already refuses while a page is in flight, so say so rather than swallow the
+   click. */
+.decide:disabled,
+.decideSecondary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* --- inbox zero --- */
 
 .empty {

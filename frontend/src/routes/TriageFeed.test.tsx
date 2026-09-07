@@ -1,5 +1,5 @@
 import { QueryClient } from "@tanstack/react-query";
-import { act, fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -218,6 +218,61 @@ describe("gate 3 — j/k move the cursor, s and h decide", () => {
     fireEvent.keyDown(document.body, { key: "j" });
     fireEvent.keyDown(document.body, { key: "s" });
     await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/2/save"]));
+  });
+
+  it("focusing a card with a click or Tab moves the cursor there too", async () => {
+    // REPRODUCED by an outside review: focus the second call, press `s`, and
+    // the FIRST call was saved. `focusIndex` moved only on j/k, so the app's
+    // idea of "current" and the browser's real focus were two different things,
+    // and the keystroke used the stale one. Nothing about this is visible --
+    // the wrong call is simply decided.
+    const { post } = stub();
+    renderFeed();
+    await screen.findByText("Call one");
+    const second = document.querySelector('[data-call-id="2"]') as HTMLElement;
+    // `act` because .focus() is a raw DOM call, not a fireEvent: without it the
+    // resulting setState has not flushed when the keydown below runs, and the
+    // test fails against a fix that works.
+    act(() => second.focus());
+    fireEvent.keyDown(document.body, { key: "s" });
+    await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/2/save"]));
+  });
+
+  it("the Save button decides ITS OWN card, whatever the cursor believes", async () => {
+    // A click carries which call it belongs to, so it cannot decide a different
+    // one -- that is the whole reason visible controls fix this and a better
+    // keyboard cursor only narrows it. The cursor is deliberately left on card
+    // one here: a button wired to `focused` instead of to its own `call` would
+    // save call 1 and pass a weaker test.
+    const { post } = stub();
+    renderFeed();
+    await screen.findByText("Call three");
+    const third = document.querySelector('[data-call-id="3"]') as HTMLElement;
+    const save = within(third).getByRole("button", { name: /^save$/i });
+    fireEvent.click(save);
+    await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/3/save"]));
+  });
+
+  it("the Hide button does the same for the other half of the decision", async () => {
+    const { post } = stub();
+    renderFeed();
+    await screen.findByText("Call three");
+    const third = document.querySelector('[data-call-id="3"]') as HTMLElement;
+    fireEvent.click(within(third).getByRole("button", { name: /^hide$/i }));
+    await waitFor(() => expect(decisions(post)).toEqual(["/api/calls/3/hide"]));
+  });
+
+  it("EVERY inbox card carries the controls, not just the focused one", async () => {
+    // Guards the two gates above. Rendered only on the expanded card, the
+    // buttons would still require moving the cursor first to reach any other
+    // call -- which is the interaction that was broken. Then a test that
+    // clicked "the Save button" would silently be testing the focused card
+    // again.
+    stub();
+    renderFeed();
+    await screen.findByText("Call one");
+    expect(screen.getAllByRole("button", { name: /^save$/i })).toHaveLength(3);
+    expect(screen.getAllByRole("button", { name: /^hide$/i })).toHaveLength(3);
   });
 
   it("k walks back up: j j k s lands on the second card", async () => {

@@ -1094,3 +1094,106 @@ test("with profiles but none picked the landing page offers the picker, not the 
   await expect(cardsOf(page)).toHaveCount(0);
   await expect(page.getByText("Inbox zero.")).toHaveCount(0);
 });
+
+// --- the corridor board, at the size it was authored for ---------------------
+//
+// REPRODUCED by an outside review: at 1920x1080 with realistic funding titles
+// the page grew to 2292px and the entire second row sat below the screen. A
+// corridor display has no scrollbar and nobody standing there to scroll it, so
+// anything past 1080 does not exist. Short titles fitted, which is why every
+// unit test and every earlier browser pass stayed green.
+const LONG_TITLES = [
+  "Utlysning: Kompetenscentrum för hållbar och resurseffektiv produktion inom life science 2026",
+  "Horizon Europe Cluster 1 — Staff Exchanges for Personalised Medicine and Rare Disease Research",
+  "Forskningsanslag för klinisk behandlingsforskning inom cancer och sällsynta diagnoser 2026-2029",
+  "Vinnova: Avancerad digitalisering — datadrivna metoder för prevention och tidig upptäckt",
+  "Formas årliga öppna utlysning för forskning och utveckling inom hållbar samhällsbyggnad",
+  "EU4Health Direct Grant: Strengthening Cross-Border Cancer Screening Registries and Data Quality",
+  "Cancerfondens forskningsanslag för translationell och patientnära forskning, ansökan 2026",
+  "Marie Skłodowska-Curie Postdoctoral Fellowships — European Fellowships in Molecular Medicine",
+];
+
+const LONG_BOARD = {
+  title: "Aktuella utlysningar",
+  orientation: "landscape" as const,
+  items_per_page: 8,
+  max_pages: 3,
+  page_seconds: 30,
+  generated_at: "2026-09-07T05:00:00Z",
+  items: LONG_TITLES.map((title, i) => ({
+    title,
+    url: `https://example.org/call-${i}`,
+    source_name: "Stiftelsen for Strategisk Forskning i samverkan med Vinnova och Formas",
+    deadline_local_date: "2026-10-15",
+    budget_min: 500000,
+    budget_max: 5000000,
+    currency: "SEK",
+    qr_modules: 25,
+    qr_path: "M0 0h7v7h-7zM9 0h1v1h-1zM18 0h7v7h-7zM0 18h7v7h-7z",
+  })),
+};
+
+test("the corridor board fits 1920x1080 with realistic long titles", async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await mockApi(page);
+  await page.route("**/api/public/boards/**", async (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(LONG_BOARD),
+    }),
+  );
+  // Not gotoRendered: the board screen is deliberately full-bleed and renders no
+  // <main> landmark, which that helper asserts exactly one of.
+  await page.goto("/b/corridor-slug");
+  await expect(page.getByText("Aktuella utlysningar")).toBeVisible();
+
+  const cards = page.locator('[data-field="board-card"]');
+  await expect(cards).toHaveCount(8);
+
+  // 1. The PAGE must not grow. This is the number the review measured.
+  const scrollHeight = await page.evaluate(() => document.documentElement.scrollHeight);
+  expect(scrollHeight, "the board grew taller than the screen it is displayed on").toBeLessThanOrEqual(1080);
+
+  // 2. Every card must actually be ON the screen. A page that fits while a card
+  //    hangs below the fold would pass the check above on its own.
+  const bottoms = await cards.evaluateAll((els) =>
+    els.map((el) => el.getBoundingClientRect().bottom),
+  );
+  expect(Math.max(...bottoms), "a card sits below the bottom of the screen").toBeLessThanOrEqual(1080);
+
+  // 3. NOT by hiding things. The review asked for this explicitly: the fix must
+  //    not be `overflow: hidden` over a card whose content still overflows, and
+  //    must not shrink the QR below the 170px legibility floor a phone camera
+  //    needs at arm's length.
+  const qr = cards.first().locator("svg");
+  const box = await qr.boundingBox();
+  expect(box?.width ?? 0, "the QR was shrunk below its legibility floor").toBeGreaterThanOrEqual(170);
+
+  // 4. NOT by clipping. The review asked for this in as many words. Beside the
+  //    QR the title had ~165px; stacked it gets most of the card, and asserting
+  //    the WIDTH is what separates this fix from an `overflow: hidden` over the
+  //    old cramped column -- which would also have made the page fit.
+  const shape = await cards.first().evaluate((el) => {
+    const title = el.querySelector('[data-field="title"]') as HTMLElement;
+    return { card: el.getBoundingClientRect().width, title: title.getBoundingClientRect().width };
+  });
+  expect(shape.title, "the title is still squeezed beside the QR").toBeGreaterThan(shape.card * 0.7);
+
+  // 5. And every title must fit WHOLE. This is the assertion that makes the two
+  //    above honest: a page can fit, and a title can be wide, while every card
+  //    still shows an ellipsis. MEASURED at 2.6vh, the largest size at which all
+  //    eight of these 87-95 character titles fit; 2.7-2.9vh truncates two of
+  //    them and 3vh truncates five, so a future bump to the type size lands
+  //    here with a count rather than silently shipping clipped titles.
+  const clipped = await cards.evaluateAll((els) =>
+    els
+      .map((el) => el.querySelector('[data-field="title"]') as HTMLElement)
+      .filter((h) => h.scrollHeight > h.clientHeight + 1)
+      .map((h) => h.innerText.slice(0, 40)),
+  );
+  expect(clipped, `${clipped.length} of 8 titles are truncated on the wall`).toEqual([]);
+
+  const titleText = await cards.first().locator('[data-field="title"]').innerText();
+  expect(titleText.trim().length).toBeGreaterThan(20);
+});
