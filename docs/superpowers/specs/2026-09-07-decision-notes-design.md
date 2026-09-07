@@ -1,7 +1,7 @@
 # Decision notes — the user's own reason, attached to the call they hid
 
 Date: 2026-09-07
-Status: rev 2, design approved, not yet planned.
+Status: rev 3, design approved, not yet planned.
 Origin: suggestion 4 of an outside product review ("lightweight feedback"), the
 last of that review's four *Useful Additions* to be built. The other three are
 board health (merged), saved-call follow-up (blocked — see §8) and visible
@@ -10,6 +10,11 @@ matching status (deferred).
 **Rev 2** answers an outside review of rev 1: six Medium findings and four
 open questions, all confirmed against the code, none refuted. §9 records what
 changed and why. Rev 1 got one load-bearing mechanism wrong.
+
+**Rev 3** settles the edition question rev 2 left open. The deployment is
+`match` only and `full` is the next version, so §5's table has one shipping
+column — and the golden-set page must be mounted in `match` for this feature to
+close its loop. Rev 2 under-quoted that work; §10 measures it.
 
 ## 1. The problem
 
@@ -321,27 +326,23 @@ Only `dismissed_high_score` can populate it; `cosine_disagreement` and
 `escalation_disagreement` require no decision (§2) and return an empty list, not
 a null, so the UI renders nothing rather than branching.
 
-## 5. The UI — and it splits across the two editions in opposite directions
+## 5. The UI — and the edition it actually ships in
 
-**(rewritten in rev 2. Rev 1 promised the strip in both editions; it cannot be.)**
+**(rewritten twice. Rev 1 promised the strip in both editions; it cannot be.
+Rev 3 records the human's answer: the deployment is `match` only, and `full`
+is the next version, so `match` is the only column that ships today.)**
 
-| Surface | Match edition | Full edition |
+| Surface | Match — **ships now** | Full — next version |
 | --- | --- | --- |
-| The strip, after `s` / `h` in the feed | **yes** — `TriageFeed` | **no** — the full router mounts `<Dashboard/>` at `/`, and never imports `TriageFeed` |
-| Note on the Saved / Hidden rows | **yes** | **no** — those views are `TriageFeed`'s |
-| Note beside hide/undo on the call page | **yes** | **yes** — `CallDetail` is mounted in both routers and is the full edition's only decision surface |
-| Notes on the golden-set page | **no** — `/admin/golden-set` is in `MATCH_EXCLUDED` and is mounted only by `router.tsx` | **yes** |
-
-Read that table twice: **the match edition writes notes and cannot read the
-aggregate; the full edition reads the aggregate and can barely write.** That is
-not a design choice, it is the shape of the two editions, and stating it is the
-point — a reader testing in one edition will not find half of this and would
-reasonably conclude it was never built.
+| The strip, after `s` / `h` in the feed | **yes** — `TriageFeed` | no — the full router mounts `<Dashboard/>` at `/` and never imports `TriageFeed` |
+| Note on the Saved / Hidden rows | **yes** | no — those views are `TriageFeed`'s |
+| Note beside hide/undo on the call page | **yes** | yes — `CallDetail` is mounted in both routers |
+| Notes on the golden-set page | **yes, and this requires mounting that page in match** (§10) | yes |
 
 `CallRow` and `CallReadingPane` offer no save or hide at all (§2), so the full
-edition's list gets nothing. That is correct rather than a gap: the hide
+edition's list would get nothing. That is correct rather than a gap: the hide
 endpoint requires `profile_id`, and the release-1 spec's D3 deliberately removed
-the full archive's global hide.
+the full archive's global hide. It is also moot for now.
 
 **The strip** — `TriageFeed.tsx`. Plain markup. There is no notification library
 in this frontend and `pnpm add` is blocked by the seven-day cooldown
@@ -356,11 +357,17 @@ inert *while* the box has focus — and already exists.
 **Saved and Hidden rows** — the note renders under the title, click to edit.
 This is where a note gets corrected or added late.
 
-**`CallDetail`** — beside the existing hide/undo control, in both editions.
+**`CallDetail`** — beside the existing hide/undo control.
 
 **Golden set** — `AdminGoldenSet.tsx`, in the candidates table, beneath the
-existing `reason` code, with the D3 disclosure understood by the admin reading
-it. Unattributed.
+existing `reason` code. Unattributed (D3). Reaching it at all in the shipping
+edition is §10's work.
+
+**The disclosure line** (D3) is worded so it is true independent of which
+surfaces are mounted: *"An administrator can read this to improve matching.
+Your name is not attached."* An administrator has database access regardless of
+whether a page exists, so a disclosure phrased around the page would be
+misleading in exactly the deployment where it matters.
 
 ## 6. What this does not do
 
@@ -439,6 +446,15 @@ reason the gate is written the way it is.
     response** round trip, not a miner unit test — the rev-1 review confirmed by
     direct probe that a field added only to `CandidateRow` is dropped silently
     by `CandidateOut`. Assert `user_notes` is present in the JSON.
+13. **The golden-set page is reachable in a match build** (§10). Two halves,
+    proved separately: `/api/admin/golden-set` is registered when
+    `APP_EDITION=match`, and the nav renders the link. *Vacuity trap: asserting
+    only that the link renders passes while the route 404s.*
+    `AdminNav.test.tsx`'s *"every admin link the match edition renders is a
+    route the match router mounts"* already couples them — keep it green rather
+    than adding a weaker gate beside it. Adverse mutation: revert the `_ALWAYS`
+    move alone; the API half must redden while the nav half stays green, or the
+    two are not independent.
 
 Measure the `saved` / `hidden` page latency before and after, at a full page,
 and record both numbers in the commit. Adding a column to an existing join
@@ -505,33 +521,79 @@ The three citation errors caught in rev 1's own self-review — D12's home, the
 pnpm cooldown's file, and which commit optimised this query — are corrected in
 place above and not repeated here.
 
-## 10. One open question for the human
+## 10. Mounting the golden-set page in the match edition
 
-**Which edition does the hospital actually run?**
+**Settled by the human on 2026-09-07: the deployment is `match` only; `full` is
+the next version; and the golden-set page is to be mounted in `match` now
+rather than waiting.** Reading the notes as they arrive was judged worth more
+than the gate bookkeeping below.
 
-This spec cannot answer it. `APP_EDITION` and `VITE_APP_EDITION` live in `.env`,
-which is deliberately never read here, and there is no `edition.txt` marker in
-`src/grant_lab/web/spa/` to infer it from (a built bundle is present; the marker
-`pnpm package:match` leaves is not).
+The alternative — capture in release 1, read them when `full` lands — was
+rejected. It costs nothing now and would have opened the page onto months of
+real notes instead of three. Recorded because it remains the fallback if the
+task list below turns out larger than it measures.
 
-It matters because §5's table splits this feature across the two editions in
-opposite directions:
+### This is larger than it looks, and rev 2 under-quoted it
 
-- If the deployment is **`full`**, everything works as described.
-- If the deployment is **`match`** — which is what the README calls release 1,
-  and therefore the likely answer — then **notes are captured but the
-  golden-set page that reads them is not mounted.** `/admin/golden-set` is in
-  `MATCH_EXCLUDED`.
+Rev 2's estimate ("one allowlist line plus its pinned tests") was wrong. **The
+match edition does not serve the golden-set API at all.** `admin_golden_set.router`
+sits in `_full_only_routers()` in `web/api/__init__.py`, moved there
+deliberately on 2026-09-04 along with `admin.drafting_router` and
+`admin_retention.router`, because leaving them in `_ALWAYS` "left six
+require_admin-gated proposal-assist endpoints live in a deployment that does not
+serve proposal assist". So the page is not merely unlinked; the endpoint behind
+it does not exist in a match build.
 
-This is not fatal and it does not change any decision above. The notes are
-still written, still stored, and the miner is backend code that runs either way,
-so nothing is lost — but the loop this feature exists to close would stay open
-at its last step, and the person labelling candidates would still be guessing.
+### What has to change
 
-If the answer is `match`, the honest options are to un-exclude `/admin/golden-set`
-from the match edition (a one-line allowlist change plus its pinned
-`AdminNav.test.tsx` cases, which assert both halves of that gate), or to accept
-that release 1 collects the notes and a later release reads them. **That is a
-product call, and it belongs to the human, not to this spec.** It should be
-settled before planning, because the first option adds a task and the second
-changes what "done" means.
+Backend:
+
+1. `web/api/__init__.py` — move `admin_golden_set.router` out of
+   `_full_only_routers()` into `_ALWAYS`, and its import out of the deferred
+   block with it.
+2. `tests/architecture/test_edition_surface.py` — drop `/api/admin/golden-set`
+   from `EXCLUDED_PREFIXES`. **Its comment carries a measured claim** — that the
+   three admin prefixes cover "exactly the six PATHS (seven operations) the move
+   drops", enumerated inline. Two of those paths are golden-set's. Re-measure
+   and rewrite the comment; do not decrement it by arithmetic.
+3. `tests/architecture/full_edition_routes.txt` needs no edit — full's surface
+   is unchanged — but `test_match_edition_drops_only_excluded_routes` computes
+   full-minus-match and must be re-run, because that difference shrinks.
+
+Frontend:
+
+4. `router.simple.tsx` — mount `admin/golden-set`, lazily, matching the sibling
+   admin routes.
+5. `AdminNav.tsx` — remove `/admin/golden-set` from `MATCH_EXCLUDED` and rewrite
+   the comment above it, which names the three excluded destinations and says
+   release 1 "mounts only /admin, /admin/users and /admin/users/pending".
+6. `AdminNav.test.tsx` — the `MATCH_HIDDEN` constant (three entries), the
+   full-edition ordering case, and the match-edition omission case.
+7. `tests/architecture/test_match_gates_are_wired.py` — its scenario manifest
+   contains the string *"the admin subnav offers only the three sections release
+   1 mounts"*. This file pins equality, so the scenario list and any expect
+   count move together or it goes red on correct code.
+
+### Two things that make this safer than it sounds
+
+**No damage to the process cut.** `test_match_edition_process_cut.py` asserts a
+match boot loads **0** proposal-assist modules, and moving this router does not
+change that: `web/api/admin_golden_set.py` imports only `dataclasses`, FastAPI,
+Pydantic, SQLAlchemy, `auth.dependencies`, `db.models` and
+`ranking.golden_set` — and `ranking/golden_set.py` in turn imports only
+`dataclasses`, SQLAlchemy and `db.models`. Nothing from the proposal-assist
+half. The module count that gate reports will move; the property it pins will
+not. Re-measure the count rather than predicting it.
+
+**One of the gates is self-verifying.** `AdminNav.test.tsx`'s *"every admin link
+the match edition renders is a route the match router mounts"* fails if step 5
+lands without step 4. The nav and the router cannot drift apart silently, which
+is the failure mode this whole change is otherwise exposed to.
+
+### And one thing that does not help
+
+There is no cheaper door through the existing admin dashboard.
+`/api/admin/dashboard` stays in `_ALWAYS` and does carry a `golden_set_report` —
+but that is `ranking.eval.load_last_report()`, the evaluation summary
+(`n_fixture`, `n_compared`, `tau`). It is the scoreboard, not the candidate
+list, and it has nowhere to put a note.
