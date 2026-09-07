@@ -34,9 +34,12 @@ class QrCode:
 # Round 3's whole fix was `@lru_cache` (below): it bounds REPEAT cost, never
 # FIRST cost, and its own docstring already said so ("not a lower
 # worst-case first-request cost ... but a bounded, ~zero REPEAT cost"). A
-# board at its own worst PERMITTED shape (`items_per_page(<=64) *
-# max_pages(3)` = 192 items -- `web/api/boards.py`'s `approve_items`
-# ceiling) with 192 DISTINCT worst-case urls pays the full encode cost on
+# board at its own worst PERMITTED shape (`MAX_BOARD_ITEMS` = 192 items,
+# `web/api/boards.py`'s single ceiling constant -- enforced on the way in by
+# `update_board`'s total-item guard and on the way up by `approve_items`;
+# read the number off THAT constant, never off `64 * 3`, which stopped being
+# the arithmetic the moment `max_pages` became settable) with
+# `MAX_BOARD_ITEMS` DISTINCT worst-case urls pays the full encode cost on
 # its first request regardless of any cache. Measured on this branch at
 # segno's own ceiling (2330 UTF-8 bytes, error level M, byte mode -- see
 # `qr_for`'s docstring for the exact boundary and why it is mode-dependent):
@@ -95,11 +98,14 @@ class QrCode:
 # growth neither probe already accounts for.
 #
 # ARITHMETIC at the chosen bound, both ceilings named explicitly, for the
-# worst PERMITTED board shape (192 items, `approve_items`'s own ceiling),
-# cold, every item a distinct never-before-seen 800-byte url (the LRU-thrash
-# scenario this module's own `lru_cache` comment below describes: two
-# published boards x up to 192 distinct worst-case urls each can exceed
-# `maxsize=256` and land every request on the cold path):
+# worst PERMITTED board shape (`MAX_BOARD_ITEMS` = 192 items,
+# `web/api/boards.py`'s own ceiling constant), cold, every item a distinct
+# never-before-seen 800-byte url (the LRU-thrash scenario this module's own
+# `lru_cache` comment below describes: two published boards x up to
+# `MAX_BOARD_ITEMS` distinct worst-case urls each can exceed `maxsize=256`
+# and land every request on the cold path). Every 192 below is that
+# constant's CURRENT value, not an independent literal -- if the constant
+# moves, this whole block's products move with it:
 #   - CPU: 192 x ~45.5 ms (measured encode time at 800 bytes, above)
 #     ~= 8.7 s. Down from the unbounded case's measured 25.7 s -- a ~3x
 #     reduction on this axis alone, before `_encode_lock` (below) removes
@@ -156,8 +162,8 @@ def _cached_qr_for(url: str) -> QrCode:
     the module-level comment above) -- so that ~28.9 MiB figure is now a
     conservative OVER-estimate of the cache's real worst-case memory, not a
     stale one: the bound got safer, not looser, and 256 still comfortably
-    holds a full 192-item board's worth of distinct worst-case urls without
-    evicting mid-board.
+    holds a full `MAX_BOARD_ITEMS`-item board's worth of distinct worst-case
+    urls without evicting mid-board.
     """
     try:
         q = segno.make_qr(url, error="m")

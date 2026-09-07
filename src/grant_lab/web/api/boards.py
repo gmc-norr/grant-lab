@@ -80,6 +80,33 @@ _TITLE_DESCRIPTION = (
 # short.
 _SLUG_BYTES = 16
 
+# The largest board the API will let anyone build: `items_per_page * max_pages`
+# may not exceed this. It is a TOTAL, not a per-field bound, because the two
+# fields multiply -- `items_per_page`'s own `le=64` and `max_pages`'s own
+# `le=64` are guard-rails against nonsense in each field alone, and 64 x 64 is
+# 4096 cards, 21x the size every cost measurement on this route was taken at.
+#
+# 192 is not a new product policy. It is the bound that ALREADY held before
+# `max_pages` became settable: `max_pages` was then a DB default of 3 with no
+# API field at all, so the reachable maximum was `items_per_page(<=64) * 3`.
+# Two security fix rounds measured `qr.py`'s cost bound and this route's
+# response budget against exactly that number (see `qr.py`'s module comment
+# and `tests/web/test_api_public_board.py`'s payload-budget test, both of
+# which now name this constant rather than restating 64 * 3). Exposing
+# `max_pages` without this guard raised the API-reachable board to 4096 items
+# -- a ~182 MB response on the UNAUTHENTICATED `/api/public/boards/{slug}`
+# route, whose only other protection is a 60-req/15-min per-IP limiter, and
+# `boards/public.py` applies no limit of its own.
+#
+# Every documented shape still fits: the spec's own worked example tops out at
+# `max_pages: 18`, which at its `items_per_page: 8` is 144.
+#
+# NOT a DB CHECK. `ck_boards_max_pages` is still `max_pages > 0` and
+# `ck_boards_items_per_page` is still `BETWEEN 1 AND 64`; this is the API's
+# bound on what a request may build, enforced in `update_board` beside the
+# capacity-shrink guard, and the tests that name it read it from here.
+MAX_BOARD_ITEMS = 192
+
 
 class BoardOut(BaseModel):
     id: int
@@ -396,6 +423,21 @@ def update_board(
         new_max_pages = body.max_pages if body.max_pages is not None else board.max_pages
         old_cap = board.items_per_page * board.max_pages
         new_cap = new_items_per_page * new_max_pages
+        # The TOTAL bound, refused before the shrink guard below and computed
+        # from the SAME `new_items_per_page` / `new_max_pages` that guard uses.
+        # The shrink guard cannot cover this: it fires only when `new_cap <
+        # old_cap`, so a request that GROWS the board sails past it. Both
+        # fields are individually bounded at 64 and their product is not, so
+        # {"items_per_page": 64, "max_pages": 64} was a 4096-item board any
+        # profile editor could build in one PUT -- see `MAX_BOARD_ITEMS`.
+        if new_cap > MAX_BOARD_ITEMS:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{new_items_per_page} per page across {new_max_pages} pages is "
+                    f"{new_cap} cards; a board holds at most {MAX_BOARD_ITEMS}"
+                ),
+            )
         if new_cap < old_cap and new_cap < approved_count:
             # Only name the orientation when it is what DETERMINED
             # new_items_per_page -- i.e. the same condition that branch above
@@ -827,8 +869,9 @@ def approve_items(
             # Why: this loop used to call `qr_for` inline, inside this session
             # and after `_lock_board_row`, which reversed -- for this route --
             # the rule public_boards.py states as CRITICAL for the anonymous
-            # route. The measured cost was ~8.7 s (192-item API ceiling x
-            # ~45.5 ms, qr.py:101-103) holding a pooled connection, this
+            # route. The measured cost was ~8.7 s (the `MAX_BOARD_ITEMS`-item
+            # API ceiling x ~45.5 ms -- see `qr.py`'s ARITHMETIC block, which
+            # names the same constant) holding a pooled connection, this
             # board's `SELECT ... FOR UPDATE`, AND -- through _board_for_edit
             # -> _profile_for_edit -- the PROFILE row lock, which blocks 15
             # routes including 4 GETs. `qr.py`'s `_encode_lock` is

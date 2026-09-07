@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from grant_lab.db.models import Board
+from grant_lab.web.api.boards import MAX_BOARD_ITEMS
 from tests.test_board_auto_selection import _ranked_call
 from tests.test_boards_qr_at_approval import _client_for, _make_board, _setup
 from tests.web.test_api_board_items import _approve_n
@@ -165,3 +166,66 @@ def test_a_partial_last_page_still_counts_as_a_page(
     assert body["truncated"] == 0
     assert body["pages"] == 2, "a partial last page is still a page"
     assert body["loop_seconds"] == 60  # 2 pages x page_seconds 30
+
+
+def test_the_product_of_items_per_page_and_max_pages_is_capped(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """GATE 6 -- the branch review's CRITICAL 1.
+
+    `items_per_page` and `max_pages` are each bounded at 64; their PRODUCT was
+    not. `{"items_per_page": 64, "max_pages": 64}` is 4096 cards, 21x the 192
+    every cost measurement on the unauthenticated `/api/public/boards/{slug}`
+    route was taken at, and `boards/public.py` serves every row with no limit
+    of its own -- at the measured 44.4 KB/item that is a ~182 MB response
+    behind only a 60-req/15-min per-IP limiter. Any profile EDITOR could send
+    this PUT; on an auto board the 05:00 job then fills it with no further
+    human action.
+
+    Both halves are asserted: the refusal, AND a re-read from the database
+    proving NEITHER field was applied. A 409 that had already written the row
+    would be the same defect with a different status code."""
+    app = _setup(monkeypatch, pg_url)
+    pid, owner = profile_factory(name="switch gate6")
+    bid = _make_board(pg_session_factory, profile_id=pid, created_by=owner, slug="G" * 16)
+    client = _client_for(app, owner)
+    with client:
+        r = client.put(f"/api/boards/{bid}", json={"items_per_page": 64, "max_pages": 64})
+
+    assert r.status_code == 409, f"a 4096-item board was accepted: {r.text}"
+    detail = r.json()["error"]["message"]
+    assert "4096" in detail, detail
+    assert str(MAX_BOARD_ITEMS) in detail, detail
+
+    with pg_session_factory() as s:
+        board = s.get(Board, bid)
+        assert board.items_per_page == 8, "the refused items_per_page was applied anyway"
+        assert board.max_pages == 3, "the refused max_pages was applied anyway"
+        assert board.items_per_page * board.max_pages <= MAX_BOARD_ITEMS
+
+
+def test_a_large_board_inside_the_cap_is_still_accepted(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """GATE 7 -- the over-refusal half of GATE 6.
+
+    A total-item guard that refused everything would pass GATE 6 and break the
+    feature. The spec's own worked example tops out at `max_pages: 18`, which
+    at `items_per_page: 8` is 144 -- comfortably inside 192 and the largest
+    shape any document on this branch asks for. It must still return 200 and
+    persist both fields."""
+    app = _setup(monkeypatch, pg_url)
+    pid, owner = profile_factory(name="switch gate7")
+    bid = _make_board(pg_session_factory, profile_id=pid, created_by=owner, slug="H" * 16)
+    client = _client_for(app, owner)
+    with client:
+        r = client.put(f"/api/boards/{bid}", json={"items_per_page": 8, "max_pages": 18})
+
+    assert r.status_code == 200, f"a legitimate 144-item board was refused: {r.text}"
+    assert MAX_BOARD_ITEMS >= 8 * 18, "this gate must stay inside the cap it is not testing"
+    body = r.json()
+    assert body["items_per_page"] == 8
+    assert body["max_pages"] == 18
+    with pg_session_factory() as s:
+        board = s.get(Board, bid)
+        assert (board.items_per_page, board.max_pages) == (8, 18)

@@ -28,6 +28,7 @@ from sqlalchemy import select
 from grant_lab.boards.qr import _MAX_URL_BYTES, qr_for
 from grant_lab.db.models import Board, BoardItem, Call, CallDecision, Source, User
 from grant_lab.main import create_app
+from grant_lab.web.api.boards import MAX_BOARD_ITEMS
 from grant_lab.web.filters import deadline_local_date
 from tests.qr_path_test_helpers import matrix_from_qr_path as _matrix_from_path
 
@@ -643,7 +644,7 @@ def test_the_default_24_item_board_payload_at_the_cost_bound(
     )
 
 
-def test_the_192_item_ceiling_board_payload_at_the_cost_bound(
+def test_the_max_board_items_ceiling_payload_at_the_cost_bound(
     monkeypatch, pg_url, pg_session_factory, profile_factory
 ):
     """Fix round 4: re-derived after the final security review reintroduced
@@ -661,15 +662,22 @@ def test_the_192_item_ceiling_board_payload_at_the_cost_bound(
     exhaustive proof of the largest byte this endpoint can ever emit.
 
     Both axes stated explicitly:
-    - ITEM COUNT: `items_per_page(<=64) * max_pages(default 3)` = 192,
-      `web/api/boards.py`'s `approve_items` ceiling -- a legitimately
-      configured board's maximum, not a hypothetical. Unchanged since round 2.
+    - ITEM COUNT: `MAX_BOARD_ITEMS`, imported from `web/api/boards.py` and
+      READ, never restated. This line used to say `64 * 3` and assert
+      `== 192` -- the same arithmetic the API performed, until `max_pages`
+      became settable up to 64 and the API-reachable maximum became 4096
+      while this test stayed green at 192, pinning a worst case that was no
+      longer the worst case. It is a legitimately configured board's maximum
+      again because `update_board`'s total-item guard refuses anything
+      larger, and the guard and this test now read the SAME constant. The
+      board below is shaped from that constant too, so moving it moves this
+      test's payload rather than leaving the budget pinned to a stale 192.
     - URL LENGTH: `_MAX_URL_BYTES` bytes -- the term that MOVED again, from
       round 3's 2331 (segno's own ceiling, now unreachable in practice) to
       the largest url this route will still spend a real encode on.
 
     Measured (this file's own `-s` run, `uv run pytest
-    tests/web/test_api_public_board.py -q -k 192_item_ceiling -s`):
+    tests/web/test_api_public_board.py -q -k max_board_items_ceiling -s`):
     **8,531,185 bytes** (~8.14 MiB) -- down from round 3's 26,117,809 bytes
     (~24.9 MiB) at its own unbounded 2331-byte-url worst case, a ~3.06x
     reduction, because `_MAX_URL_BYTES` (800) now caps the per-item
@@ -693,6 +701,11 @@ def test_the_192_item_ceiling_board_payload_at_the_cost_bound(
     long_url = base + "a" * (_WORST_URL_BYTES - len(base))
     assert len(long_url.encode("utf-8")) == _WORST_URL_BYTES
 
+    # BoardSettingsIn.items_per_page's own `le`; `max_pages` is then whatever
+    # it takes to reach MAX_BOARD_ITEMS, so the board's shape FOLLOWS the
+    # constant instead of restating the product.
+    _CEILING_ITEMS_PER_PAGE = 64
+
     app = _setup(monkeypatch, pg_url)
     pid, owner_id = profile_factory(name="Ceiling payload profile")
     board_id = _make_board(
@@ -701,11 +714,10 @@ def test_the_192_item_ceiling_board_payload_at_the_cost_bound(
         created_by=owner_id,
         slug="s" * 16,
         orientation="landscape",
-        items_per_page=64,
-        max_pages=3,
+        items_per_page=_CEILING_ITEMS_PER_PAGE,
+        max_pages=-(-MAX_BOARD_ITEMS // _CEILING_ITEMS_PER_PAGE),
     )
-    ceiling = 64 * 3
-    assert ceiling == 192
+    ceiling = MAX_BOARD_ITEMS
     for i in range(ceiling):
         call_id = _make_call(
             pg_session_factory,
@@ -728,7 +740,7 @@ def test_the_192_item_ceiling_board_payload_at_the_cost_bound(
         f"({_MAX_URL_BYTES}B urls): {size} bytes"
     )
     assert size < 10 * 1024 * 1024, (
-        f"payload grew to {size} bytes at the 192-item / {_WORST_URL_BYTES}-byte-URL "
+        f"payload grew to {size} bytes at the {ceiling}-item / {_WORST_URL_BYTES}-byte-URL "
         "worst case -- over the re-derived 10 MiB bound"
     )
 
