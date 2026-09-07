@@ -101,7 +101,7 @@ def _notes_for(session, pairs: list[tuple[int, int]]) -> dict[tuple[int, int], l
     ONE query for the whole candidate page, not one per candidate.
 
     `state == "hidden"` is applied HERE, in the WHERE clause, and the cap is
-    applied afterwards in Python -- so the filter precedes the cap (D7). A
+    applied to the filtered rows -- so the filter precedes the cap (D7). A
     saved decision can carry a note too, and letting one through would file
     "we should apply for this" as evidence that the model scored it too high.
 
@@ -112,25 +112,46 @@ def _notes_for(session, pairs: list[tuple[int, int]]) -> dict[tuple[int, int], l
     """
     if not pairs:
         return {}
-    out: dict[tuple[int, int], list[str]] = {}
-    rows = session.execute(
-        select(CallDecision.call_id, CallDecision.profile_id, CallDecision.note)
+    # The cap is applied PER PAIR, in SQL, by a window -- not by a page-wide
+    # LIMIT over a global ORDER BY.
+    #
+    # A page-wide `.limit(_CANDIDATE_LIMIT * _NOTE_CAP * 10)` was the obvious
+    # way to bound this read, and it is silently wrong. That budget is spent in
+    # `decided_at DESC` order across ALL pairs, which has nothing to do with
+    # the page's own `aggregate_score DESC` ordering -- so once the page's
+    # annotated hidden decisions exceed the budget, the candidate whose hides
+    # are OLDEST returns [] with no signal. Measured 2026-09-07: 32 readers
+    # each annotating 19 of the 20 candidates is 611 rows, and the top-scoring
+    # candidate (99, position #1, hidden 200 days earlier) lost every note it
+    # had. That is the candidate whose reason a labeller can least reconstruct.
+    #
+    # The window is exactly bounded at _CANDIDATE_LIMIT * _NOTE_CAP rows and
+    # cannot starve one pair to feed another.
+    rn = (
+        func.row_number()
+        .over(
+            partition_by=(CallDecision.call_id, CallDecision.profile_id),
+            order_by=(CallDecision.decided_at.desc(), CallDecision.id.desc()),
+        )
+        .label("rn")
+    )
+    ranked = (
+        select(CallDecision.call_id, CallDecision.profile_id, CallDecision.note, rn)
         .where(
             tuple_(CallDecision.call_id, CallDecision.profile_id).in_(pairs),
             CallDecision.state == "hidden",
             CallDecision.note.is_not(None),
         )
-        .order_by(CallDecision.decided_at.desc(), CallDecision.id.desc())
-        # The RESPONSE is capped at _NOTE_CAP per pair; this read is not, so
-        # cap it too. Notes per pair are bounded by readers-of-a-profile, which
-        # is small -- but "small in practice" is not a bound, and this is the
-        # one query here whose size no schema constraint limits.
-        .limit(_CANDIDATE_LIMIT * _NOTE_CAP * 10)
+        .subquery()
+    )
+    out: dict[tuple[int, int], list[str]] = {}
+    rows = session.execute(
+        select(ranked.c.call_id, ranked.c.profile_id, ranked.c.note)
+        .where(ranked.c.rn <= _NOTE_CAP)
+        .order_by(ranked.c.call_id, ranked.c.profile_id, ranked.c.rn)
     ).all()
     for call_id, profile_id, note in rows:
-        bucket = out.setdefault((call_id, profile_id), [])
-        if len(bucket) < _NOTE_CAP:
-            bucket.append(note)
+        out.setdefault((call_id, profile_id), []).append(note)
     return out
 
 

@@ -178,3 +178,106 @@ def test_the_candidate_response_carries_no_author_metadata(
         for banned in ("user_id", "email", "name", "decided_by"):
             assert banned not in c, (banned, c)
     assert "@umu.se" not in r.text
+
+
+def test_a_busy_page_does_not_starve_the_oldest_candidates_notes(pg_session_factory):
+    """The cap must be PER PAIR, not a page-wide budget.
+
+    A page-wide `.limit(_CANDIDATE_LIMIT * _NOTE_CAP * 10)` over a global
+    `decided_at DESC` was the obvious way to bound this read, and it is
+    silently wrong: the budget is spent newest-first across ALL pairs, which
+    is unrelated to the page's own `aggregate_score DESC` ordering. Once the
+    page's annotated hidden decisions exceed it, the candidate whose hides are
+    OLDEST returns [] -- and that is the candidate whose reason a labeller can
+    least reconstruct.
+
+    Reproduced here at the shape that actually reaches it: not one
+    pathological pair, but ordinary use by enough readers. 32 readers each
+    annotating 19 of the 20 candidates is 611 rows against a 600 budget.
+    The 20th candidate is the highest-scoring one and its hides are the
+    oldest, so it is first on the page and last in the budget.
+
+    Verified 2026-09-07 against the page-wide LIMIT: this test fails with
+    `assert [] == ['old-0', ...]`, and passes with the window.
+    """
+    n_readers = 32
+    n_new_calls = 19
+    with pg_session_factory() as s:
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        owner = User(status="active", email="starveowner@umu.se")
+        s.add(owner)
+        s.flush()
+        prof = Profile(
+            name="Group Starve",
+            kind=ProfileKind.ORGANIZATIONAL_UNIT.value,
+            level="group",
+            description="x",
+            structured={},
+            created_by=owner.id,
+        )
+        s.add(prof)
+        s.flush()
+        readers = []
+        for i in range(n_readers):
+            u = User(status="active", email=f"starve{i}@umu.se")
+            s.add(u)
+            readers.append(u)
+        s.flush()
+
+        base = datetime.now(UTC)
+
+        def _seed(external_id: str, score: int, when, note_prefix: str, n: int) -> int:
+            call = Call(
+                source_id=src.id,
+                external_id=external_id,
+                url=f"https://example.org/{external_id}",
+                title=external_id,
+                published_at=base,
+            )
+            s.add(call)
+            s.flush()
+            s.add(
+                CallRanking(
+                    call_id=call.id,
+                    profile_id=prof.id,
+                    aggregate_score=score,
+                    rationale="",
+                    model="m",
+                    prompt_version="1",
+                    raw_response={},
+                    ranked_at=base,
+                )
+            )
+            for j in range(n):
+                s.add(
+                    CallDecision(
+                        user_id=readers[j].id,
+                        profile_id=prof.id,
+                        call_id=call.id,
+                        state="hidden",
+                        note=f"{note_prefix}-{j}",
+                        decided_at=when + timedelta(seconds=j),
+                        decided_by=readers[j].id,
+                    )
+                )
+            return call.id
+
+        # The victim: highest score, so FIRST on the page -- and oldest hides,
+        # so LAST in a page-wide newest-first budget.
+        old = base - timedelta(days=200)
+        victim = _seed("starve-victim", 99, old, "old", 3)
+        # 19 more candidates, each annotated by all 32 readers, all recent.
+        for k in range(n_new_calls):
+            _seed(f"starve-new-{k}", 61 + k, base, f"new{k}", n_readers)
+        s.commit()
+
+        rows = candidates_dismissed_high_score(s)
+
+    hit = [r for r in rows if r.call_id == victim]
+    assert hit, "the victim must be ON the page, or this gate is vacuous"
+    # 32 readers * 19 calls = 608 newer rows, above the 600-row page budget the
+    # window replaces.
+    assert hit[0].user_notes == ["old-2", "old-1", "old-0"], (
+        "the top-scoring candidate lost its notes to a page-wide budget spent "
+        "on newer decisions for lower-scoring candidates"
+    )
