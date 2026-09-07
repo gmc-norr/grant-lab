@@ -6,7 +6,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 
 import * as clientMod from "../api/client";
-import type { Board, BoardItem } from "../api/boards";
+import type { AutoPreview, Board, BoardItem } from "../api/boards";
 import { theme } from "../theme/theme";
 import { BoardDetail } from "./BoardDetail";
 
@@ -19,6 +19,7 @@ const SETTINGS_PATH = "/api/boards/{board_id}";
 const PUBLISH_PATH = "/api/boards/{board_id}/publish";
 const ITEMS_PATH = "/api/boards/{board_id}/items";
 const ITEM_DELETE_PATH = "/api/boards/{board_id}/items/{call_id}";
+const AUTO_PREVIEW_PATH = "/api/boards/{board_id}/auto-preview";
 
 const BOARD: Board = {
   id: 1,
@@ -30,6 +31,7 @@ const BOARD: Board = {
   max_pages: 3,
   page_seconds: 30,
   min_score: 60,
+  auto_publish: false,
   is_published: false,
   created_by: 1,
   published_by: null,
@@ -38,6 +40,14 @@ const BOARD: Board = {
   updated_at: "2026-01-01T00:00:00Z",
   approved_count: 2,
   owner_undeliverable: false,
+};
+
+const AUTO_PREVIEW: AutoPreview = {
+  qualifying: 142,
+  displayed: 24,
+  truncated: 118,
+  pages: 3,
+  loop_seconds: 90,
 };
 
 function mockMe(admin: boolean) {
@@ -58,6 +68,7 @@ function renderDetail({
   putResult,
   publishResult,
   reorderResult,
+  autoPreview = AUTO_PREVIEW,
 }: {
   admin?: boolean;
   board?: Board;
@@ -66,6 +77,7 @@ function renderDetail({
   putResult?: unknown;
   publishResult?: unknown;
   reorderResult?: unknown;
+  autoPreview?: AutoPreview;
 } = {}) {
   const get = vi.spyOn(clientMod.api, "GET").mockImplementation((async (path: string) => {
     if (path === "/api/me") return mockMe(admin);
@@ -83,6 +95,7 @@ function renderDetail({
       return { data: { items: [], waiting_count: 0 }, error: undefined };
     }
     if (path === ITEMS_PATH) return { data: { items: approvedItems }, error: undefined };
+    if (path === AUTO_PREVIEW_PATH) return { data: autoPreview, error: undefined };
     return { data: undefined, error: undefined };
   }) as never);
   const put = vi.spyOn(clientMod.api, "PUT").mockImplementation((async (path: string) => {
@@ -174,6 +187,8 @@ it("editing settings saves the whole form, omitting items_per_page since it was 
         orientation: "landscape",
         min_score: 60,
         page_seconds: 30,
+        auto_publish: false,
+        max_pages: 3,
       },
     }),
   );
@@ -216,19 +231,33 @@ it("IMPORTANT 2: explicitly changing items_per_page still sends it", async () =>
         orientation: "landscape",
         min_score: 60,
         page_seconds: 30,
+        auto_publish: false,
+        max_pages: 3,
         items_per_page: 5,
       },
     }),
   );
 });
 
+// The bound text a field actually ANNOUNCES, read through its own
+// `aria-describedby` rather than found loose in the document. Two fields now
+// legitimately carry "1–64" (items per page, and maximum pages), so a bare
+// `getByText("1–64")` is ambiguous -- and it was always the weaker check: it
+// passed as long as the string existed SOMEWHERE, including on a different
+// input entirely.
+function descriptionOf(label: RegExp): string | null | undefined {
+  const id = screen.getByLabelText(label).getAttribute("aria-describedby");
+  return id ? document.getElementById(id)?.textContent : null;
+}
+
 it("MINOR 5: the items-per-page and page-seconds fields clamp to their bounds and say so", async () => {
   const user = userEvent.setup();
   renderDetail();
   await screen.findByText("Corridor board");
-  expect(screen.getByText("1–64")).toBeInTheDocument();
-  expect(screen.getByText("0–100")).toBeInTheDocument();
-  expect(screen.getByText("1–3600")).toBeInTheDocument();
+  expect(descriptionOf(/items per page/i)).toBe("1–64");
+  expect(descriptionOf(/minimum score/i)).toBe("0–100");
+  expect(descriptionOf(/seconds per page/i)).toBe("1–3600");
+  expect(descriptionOf(/maximum pages/i)).toBe("1–64");
 
   const itemsInput = screen.getByLabelText(/items per page/i) as HTMLInputElement;
   await user.clear(itemsInput);
@@ -319,4 +348,88 @@ it("IMPORTANT 3: the first item cannot move up and the last cannot move down", a
   expect(screen.getByRole("button", { name: /move first down/i })).not.toBeDisabled();
   expect(screen.getByRole("button", { name: /move third up/i })).not.toBeDisabled();
   expect(put).not.toHaveBeenCalled();
+});
+
+it("turning the auto-publish switch on sends auto_publish: true", async () => {
+  const user = userEvent.setup();
+  const { put } = renderDetail();
+  await screen.findByText("Corridor board");
+  await user.click(screen.getByRole("checkbox", { name: /publish new calls automatically/i }));
+  await user.click(screen.getByRole("button", { name: /save settings/i }));
+  await waitFor(() => expect(put).toHaveBeenCalled());
+  const [, callArgs] = put.mock.calls[0] as [string, { body: Record<string, unknown> }];
+  expect(callArgs.body).toMatchObject({ auto_publish: true });
+});
+
+it("the maximum-pages input sends its value — the only lever that fixes a truncated auto board", async () => {
+  // Step 3's whole justification for exposing max_pages is that an admin who
+  // cannot raise it cannot fix a board the preview shows as truncated. A UI
+  // that renders the truncation and offers no way to act on it ships half the
+  // feature, so this asserts the value REACHES the body, not merely that the
+  // control exists.
+  const user = userEvent.setup();
+  const { put } = renderDetail();
+  await screen.findByText("Corridor board");
+  const maxPagesInput = screen.getByLabelText(/maximum pages/i);
+  await user.clear(maxPagesInput);
+  await user.type(maxPagesInput, "18");
+  await user.click(screen.getByRole("button", { name: /save settings/i }));
+  await waitFor(() => expect(put).toHaveBeenCalled());
+  const [, callArgs] = put.mock.calls[0] as [string, { body: Record<string, unknown> }];
+  expect(callArgs.body).toMatchObject({ max_pages: 18 });
+});
+
+it("the maximum-pages input clamps to the API's own 1–64 bounds", async () => {
+  // Mirrors the server's ge=1/le=64 so the control cannot send a 422.
+  const user = userEvent.setup();
+  renderDetail();
+  await screen.findByText("Corridor board");
+  const maxPagesInput = screen.getByLabelText(/maximum pages/i) as HTMLInputElement;
+  await user.clear(maxPagesInput);
+  await user.type(maxPagesInput, "900");
+  await user.tab();
+  expect(maxPagesInput).toHaveValue("64");
+});
+
+it("the preview line shows all four numbers, so the cap is never silent", async () => {
+  // The load-bearing assertion is `not shown`: a preview rendering only the
+  // displayed count would hide exactly the truncation it exists to surface.
+  const user = userEvent.setup();
+  renderDetail();
+  await screen.findByText("Corridor board");
+  await user.click(screen.getByRole("checkbox", { name: /publish new calls automatically/i }));
+  await waitFor(() => {
+    const line = document.querySelector('[data-field="auto-preview"]') as HTMLElement;
+    expect(line).toHaveTextContent("142 qualify");
+    expect(line).toHaveTextContent("24 shown");
+    expect(line).toHaveTextContent("118 not shown");
+    expect(line).toHaveTextContent("3 pages");
+    expect(line).toHaveTextContent("90s loop");
+  });
+});
+
+it("no preview line is shown while the switch is off", async () => {
+  // Guards the guard above: if the line rendered unconditionally, the
+  // four-number assertion would pass without the checkbox doing anything.
+  renderDetail();
+  await screen.findByText("Corridor board");
+  expect(document.querySelector('[data-field="auto-preview"]')).toBeNull();
+});
+
+it("turning the switch on warns that the existing cards will be replaced", async () => {
+  const user = userEvent.setup();
+  renderDetail({ board: { ...BOARD, approved_count: 7 } });
+  await screen.findByText("Corridor board");
+  await user.click(screen.getByRole("checkbox", { name: /publish new calls automatically/i }));
+  const warning = await screen.findByText(/replaces the 7 cards/i);
+  expect(warning).toBeInTheDocument();
+});
+
+it("a board that is ALREADY auto-publishing gets no replacement warning", async () => {
+  // The warning is about the transition, not the state: re-saving settings on
+  // a board that has been auto-publishing for weeks replaces nothing a human
+  // put there.
+  renderDetail({ board: { ...BOARD, auto_publish: true, approved_count: 7 } });
+  await screen.findByText("Corridor board");
+  expect(screen.queryByText(/replaces the 7 cards/i)).toBeNull();
 });

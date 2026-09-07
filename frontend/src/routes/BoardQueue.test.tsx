@@ -26,6 +26,7 @@ const BOARD: Board = {
   max_pages: 3,
   page_seconds: 30,
   min_score: 60,
+  auto_publish: false,
   is_published: false,
   created_by: 1,
   published_by: null,

@@ -21,7 +21,7 @@ const PROFILE = { id: 9, name: "Digital Pathology Lab", kind: "organizational_un
 
 const BOARD: Board = {
   id: 1, slug: "abc123", title: "Corridor board", profile_id: 9, orientation: "landscape",
-  items_per_page: 8, max_pages: 3, page_seconds: 30, min_score: 60, is_published: true,
+  items_per_page: 8, max_pages: 3, page_seconds: 30, min_score: 60, auto_publish: false, is_published: true,
   created_by: 1, published_by: 1, published_at: "2026-01-01T00:00:00Z",
   created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
   approved_count: 3, owner_undeliverable: false,

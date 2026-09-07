@@ -46,6 +46,7 @@ from sqlalchemy.orm.exc import ObjectDeletedError
 
 from grant_lab.auth.dependencies import get_current_user
 from grant_lab.boards.alerts import owner_undeliverable_map
+from grant_lab.boards.auto_publish import board_selection, qualifying_count
 from grant_lab.boards.qr import QrCode, qr_for
 from grant_lab.boards.queue import board_queue
 from grant_lab.db.models import (
@@ -96,6 +97,11 @@ class BoardOut(BaseModel):
     max_pages: int
     page_seconds: int
     min_score: int
+    # The switch. Read back on the OUTPUT side because the settings form seeds
+    # its checkbox from this response, and because `is_published` and this are
+    # different questions: auto_publish FILLS a board, it never makes one
+    # world-readable.
+    auto_publish: bool
     is_published: bool
     created_by: int
     published_by: int | None
@@ -147,6 +153,7 @@ def _to_out(board: Board, approved_count: int, owner_undeliverable: bool) -> Boa
         max_pages=board.max_pages,
         page_seconds=board.page_seconds,
         min_score=board.min_score,
+        auto_publish=board.auto_publish,
         is_published=board.is_published,
         created_by=board.created_by,
         published_by=board.published_by,
@@ -309,6 +316,16 @@ class BoardSettingsIn(BaseModel):
     # corridor display, so anything longer is a typo, not a setting -- a
     # guard-rail against nonsense, not a product limit.
     page_seconds: int | None = Field(default=None, ge=1, le=3600)
+    # Off by default and explicitly settable. Turning this on replaces the
+    # board's hand-picked items on the next 05:00 run -- the UI warns before
+    # saving, this does not, because a partial update has no place to say it.
+    auto_publish: bool | None = None
+    # 1-64. The DB floor is ck_boards_max_pages ("max_pages > 0"); the ceiling
+    # mirrors items_per_page's, and for the same measured reason -- a value
+    # clearing int4's range sails past pydantic and dies on the UPDATE as an
+    # uncaught 500. Exposed because on an auto board this is the ONLY lever
+    # that bounds loop length.
+    max_pages: int | None = Field(default=None, ge=1, le=64)
 
 
 @router.put("/boards/{board_id}", response_model=BoardOut)
@@ -362,8 +379,23 @@ def update_board(
         else:
             new_items_per_page = board.items_per_page
 
+        # `new_max_pages` mirrors `new_items_per_page` above, and it is not
+        # cosmetic. `max_pages` became settable in the same change that added
+        # this line, and BOTH sides of the comparison used to multiply by
+        # `board.max_pages` -- the OLD value -- so a request that shrank only
+        # `max_pages` gave `new_cap == old_cap`, `new_cap < old_cap` was False,
+        # and `approved_count` was never consulted. MEASURED: a full landscape
+        # board (8 x 3 = 24 approved) sent {"max_pages": 1} returned 200, kept
+        # all 24 rows, and left a board whose real capacity was 8.
+        #
+        # Assigning `board.max_pages = body.max_pages` BEFORE the guard is not
+        # the fix either, and was measured too: both caps then read the NEW
+        # value, collapse to `8 == 8`, and the comparison becomes structurally
+        # incapable of firing on a shrink. The old cap must be read off the
+        # BOARD and the new cap off the REQUEST.
+        new_max_pages = body.max_pages if body.max_pages is not None else board.max_pages
         old_cap = board.items_per_page * board.max_pages
-        new_cap = new_items_per_page * board.max_pages
+        new_cap = new_items_per_page * new_max_pages
         if new_cap < old_cap and new_cap < approved_count:
             # Only name the orientation when it is what DETERMINED
             # new_items_per_page -- i.e. the same condition that branch above
@@ -398,12 +430,53 @@ def update_board(
             board.min_score = body.min_score
         if body.page_seconds is not None:
             board.page_seconds = body.page_seconds
+        if body.auto_publish is not None:
+            board.auto_publish = body.auto_publish
+        if body.max_pages is not None:
+            board.max_pages = body.max_pages
 
         session.commit()
         session.refresh(board)
         undeliverable = owner_undeliverable_map(session, [board.profile_id])[board.profile_id]
         out = _to_out(board, approved_count, undeliverable)
     return out
+
+
+class AutoPreviewOut(BaseModel):
+    """The four numbers an admin needs before saving a threshold.
+
+    One number cannot express this: a threshold set too low truncates
+    invisibly, and a max_pages raised to fix that makes any given call visible
+    for a fraction of the loop. Both are decisions to make on purpose.
+    """
+
+    qualifying: int
+    displayed: int
+    truncated: int
+    pages: int
+    loop_seconds: int
+
+
+@router.get("/boards/{board_id}/auto-preview", response_model=AutoPreviewOut)
+def auto_preview(
+    request: Request,
+    board_id: int,
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    """What this board WOULD publish right now. Read-only, writes nothing."""
+    sf = request.app.state.session_factory
+    with sf() as session:
+        board = _board_for_edit(session, board_id=board_id, user=user)
+        qualifying = qualifying_count(session, board=board)
+        displayed = len(board_selection(session, board=board))
+        pages = -(-displayed // board.items_per_page) if displayed else 0
+        return AutoPreviewOut(
+            qualifying=qualifying,
+            displayed=displayed,
+            truncated=qualifying - displayed,
+            pages=pages,
+            loop_seconds=pages * board.page_seconds,
+        )
 
 
 @router.delete("/boards/{board_id}", status_code=204)

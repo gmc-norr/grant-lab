@@ -24,6 +24,7 @@
 /api/auth/register
 /api/boards
 /api/boards/{board_id}
+/api/boards/{board_id}/auto-preview
 /api/boards/{board_id}/items
 /api/boards/{board_id}/items/{call_id}
 /api/boards/{board_id}/publish

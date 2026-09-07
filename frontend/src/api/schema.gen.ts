@@ -594,6 +594,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/boards/{board_id}/auto-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Auto Preview
+         * @description What this board WOULD publish right now. Read-only, writes nothing.
+         */
+        get: operations["auto_preview_api_boards__board_id__auto_preview_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/boards/{board_id}/items": {
         parameters: {
             query?: never;
@@ -2799,6 +2819,26 @@ export interface components {
             /** Google Oidc Enabled */
             google_oidc_enabled: boolean;
         };
+        /**
+         * AutoPreviewOut
+         * @description The four numbers an admin needs before saving a threshold.
+         *
+         *     One number cannot express this: a threshold set too low truncates
+         *     invisibly, and a max_pages raised to fix that makes any given call visible
+         *     for a fraction of the loop. Both are decisions to make on purpose.
+         */
+        AutoPreviewOut: {
+            /** Displayed */
+            displayed: number;
+            /** Loop Seconds */
+            loop_seconds: number;
+            /** Pages */
+            pages: number;
+            /** Qualifying */
+            qualifying: number;
+            /** Truncated */
+            truncated: number;
+        };
         /** BoardCreateIn */
         BoardCreateIn: {
             /**
@@ -2845,6 +2885,8 @@ export interface components {
         BoardOut: {
             /** Approved Count */
             approved_count: number;
+            /** Auto Publish */
+            auto_publish: boolean;
             /**
              * Created At
              * Format: date-time
@@ -2905,8 +2947,12 @@ export interface components {
          *     pydantic's default `extra="ignore"`, not honoured and not rejected.
          */
         BoardSettingsIn: {
+            /** Auto Publish */
+            auto_publish?: boolean | null;
             /** Items Per Page */
             items_per_page?: number | null;
+            /** Max Pages */
+            max_pages?: number | null;
             /** Min Score */
             min_score?: number | null;
             /** Orientation */
@@ -8111,6 +8157,118 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    auto_preview_api_boards__board_id__auto_preview_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                board_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AutoPreviewOut"];
+                };
             };
             /** @description Bad Request */
             400: {
