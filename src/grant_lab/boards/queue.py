@@ -37,6 +37,29 @@ class QueueRow:
     already_approved: bool
 
 
+def board_candidate_parts(session: Session, *, board: Board):
+    """The filters and join every view of a board's candidates shares.
+
+    `board_queue` (the admin's list) and `boards/auto_publish.board_selection`
+    (what actually goes up) MUST agree about what qualifies. A second copy is
+    how they drift under a filter nobody re-tested -- this module's own
+    docstring makes the same argument about `_decision_predicate`.
+    """
+    owner_id = session.scalar(select(Profile.created_by).where(Profile.id == board.profile_id))
+    filters = [
+        _decision_predicate("archive", user_id=owner_id, profile_id=board.profile_id),
+        CallRanking.aggregate_score >= board.min_score,
+        Call.deadline.is_not(None),
+        Call.deadline > func.now(),
+    ]
+    # Scope the ranking join to the BOARD'S OWN profile. A call ranked on
+    # several profiles has a CallRanking row per profile; without this clause
+    # the join fans out one row per profile and judges `min_score` against a
+    # score another group produced.
+    ranking_join = (CallRanking.call_id == Call.id) & (CallRanking.profile_id == board.profile_id)
+    return owner_id, filters, ranking_join
+
+
 def board_queue(
     session: Session, *, board: Board, limit: int, offset: int
 ) -> tuple[list[QueueRow], int]:
@@ -47,19 +70,15 @@ def board_queue(
     count, so it is smaller than the returned population and must not be used
     to paginate them.
     """
-    owner_id = session.scalar(select(Profile.created_by).where(Profile.id == board.profile_id))
-    filters = [
-        _decision_predicate("archive", user_id=owner_id, profile_id=board.profile_id),
-        CallRanking.aggregate_score >= board.min_score,
-        Call.deadline.is_not(None),
-        Call.deadline > func.now(),
-    ]
+    # `_owner_id`: MEASURED dead after the extraction -- its only use in this
+    # function was the `_decision_predicate` call that just moved. Underscored
+    # so the next reader is not hunting for a use that is not there.
+    _owner_id, filters, ranking_join = board_candidate_parts(session, board=board)
     approved_ids = select(BoardItem.call_id).where(BoardItem.board_id == board.id).scalar_subquery()
     # Scope the ranking join to the BOARD'S OWN profile. A call ranked on
     # several profiles has a CallRanking row per profile; without this clause
     # the join fans out one row per profile (inflating `waiting`) and judges
     # `min_score` against a score another group produced, not this board's.
-    ranking_join = (CallRanking.call_id == Call.id) & (CallRanking.profile_id == board.profile_id)
 
     rows = session.execute(
         select(Call, CallRanking.aggregate_score, Call.id.in_(approved_ids))
