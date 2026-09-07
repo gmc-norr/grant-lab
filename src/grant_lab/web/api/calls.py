@@ -353,7 +353,8 @@ def hide_call(
             )
             .on_conflict_do_update(
                 index_elements=["user_id", "profile_id", "call_id"],
-                # FOUR columns now. `note` because a flip IS a new decision --
+                # state, decided_at, decided_by AND note. `note` joined them
+                # because a flip IS a new decision --
                 # this block already moves decided_at and decided_by for that
                 # reason -- and one decision's reasoning must not be filed
                 # against a different one (D9). Without it, hide->save->hide
@@ -367,8 +368,13 @@ def hide_call(
                     # also wipe the note on hidden -> hidden, and `h` is a
                     # keyboard key people press twice -- so a double-tap would
                     # silently destroy the reason just typed. In ON CONFLICT DO
-                    # UPDATE a bare column reference is the EXISTING row's
-                    # value, which is what makes this comparison meaningful.
+                    # UPDATE a TABLE-QUALIFIED column reference is the EXISTING
+                    # row's value (`call_decisions.state`, which is what
+                    # SQLAlchemy emits for `CallDecision.state`); `excluded.state`
+                    # is the proposed one. A truly BARE `state` is not a third
+                    # meaning -- Postgres rejects it as ambiguous. That
+                    # distinction is what makes this comparison meaningful, and
+                    # anyone hand-writing this upsert in raw SQL needs it.
                     "note": case(
                         (CallDecision.state != "hidden", None),
                         else_=CallDecision.note,

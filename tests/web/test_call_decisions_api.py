@@ -759,8 +759,14 @@ def test_save_puts_the_call_in_the_saved_view_and_leaves_the_other_two(
 # DO UPDATE and DO NOTHING are indistinguishable. Regress `save_call` to
 # DO NOTHING and gate 8 stays green while `s` on a hidden call returns 200 and
 # silently leaves the call hidden. The pre-existing row is seeded through raw
-# SQL with a FOREIGN `decided_by` and a 2020 `decided_at`, so all three columns
-# are observably rewritten (D4).
+# SQL with a FOREIGN `decided_by` and a 2020 `decided_at`, so its three
+# identity columns -- state, decided_at, decided_by -- are observably
+# rewritten (D4).
+#
+# NOT all the columns the set_ touches: since 2026-09-07 it also clears `note`
+# on a flip (D9), conditionally, via a CASE. That fourth column is gated in
+# tests/test_api_calls_note.py, which is where the note lives -- this test's
+# three are the identity of the decision and stay its subject.
 # ---------------------------------------------------------------------------
 def test_saving_a_hidden_call_flips_the_row_and_rewrites_three_columns(
     monkeypatch, pg_url, pg_session_factory

@@ -16,6 +16,20 @@ from grant_lab.db.models import CallDecision
 from tests.test_api_calls_hide import _login, _seed_call, _setup
 
 
+def _decided_at(pg_session_factory, user_id: int):
+    """The one decision row's decided_at, read in its own session.
+
+    The non-flip gates below need it: an upsert regressed to
+    `on_conflict_do_nothing` leaves the note standing AND returns 200, so only
+    a moved decided_at distinguishes "the CASE spared the note" from "nothing
+    was written".
+    """
+    with pg_session_factory() as s:
+        return s.execute(
+            select(CallDecision.decided_at).where(CallDecision.user_id == user_id)
+        ).scalar_one()
+
+
 def test_note_round_trips_on_a_hidden_call(monkeypatch, pg_url, pg_session_factory):
     cid = _seed_call(pg_session_factory)
     app = _setup(monkeypatch, pg_url)
@@ -354,12 +368,57 @@ def test_re_hiding_an_already_hidden_call_keeps_the_note(
             params={"profile_id": pid},
             json={"note": "wrong field"},
         )
+        before = _decided_at(pg_session_factory, uid)
         client.post(f"/api/calls/{cid}/hide", params={"profile_id": pid})
     with pg_session_factory() as s:
         row = s.execute(
             select(CallDecision).where(CallDecision.user_id == uid)
         ).scalar_one()
+    # decided_at FIRST. Without it the gate cannot tell "the CASE spared the
+    # note" from "the upsert wrote nothing at all" -- and the second reading is
+    # the likelier regression, because on_conflict_do_NOTHING also returns 200
+    # and also leaves the note standing. Verified 2026-09-07: with hide_call
+    # regressed to do_nothing, a status-code assertion stays green and only the
+    # decided_at assertion below reddens. `now()` is transaction_timestamp, and
+    # the two hides are separate requests, so a real DO UPDATE must move it.
+    assert row.decided_at > before, (
+        "the second hide must actually UPDATE the row, or this test proves nothing"
+    )
     assert row.note == "wrong field"
+
+
+def test_re_saving_an_already_saved_call_keeps_the_note(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """The save-side mirror, and it is NOT decorative.
+
+    hide_call has both a flip gate and this non-flip gate; save_call had only
+    the flip gate. Verified 2026-09-07: replacing save_call's case(...) with a
+    bare `"note": None` -- the obvious, wrong-looking-right version -- left the
+    ENTIRE suite green at 5498 passed. `s` is a keyboard key exactly as `h` is,
+    so that mutant destroys a reason the user just typed, in production, with
+    nothing in CI able to see it."""
+    cid = _seed_call(pg_session_factory)
+    app = _setup(monkeypatch, pg_url)
+    client, uid, pid = _login(app, pg_session_factory)
+    with client:
+        client.post(f"/api/calls/{cid}/save", params={"profile_id": pid})
+        client.put(
+            f"/api/calls/{cid}/note",
+            params={"profile_id": pid},
+            json={"note": "matches Anna's ERC angle"},
+        )
+        before = _decided_at(pg_session_factory, uid)
+        client.post(f"/api/calls/{cid}/save", params={"profile_id": pid})
+    with pg_session_factory() as s:
+        row = s.execute(
+            select(CallDecision).where(CallDecision.user_id == uid)
+        ).scalar_one()
+    # See the hide-side mirror above for why decided_at is asserted first.
+    assert row.decided_at > before, (
+        "the second save must actually UPDATE the row, or this test proves nothing"
+    )
+    assert (row.state, row.note) == ("saved", "matches Anna's ERC angle")
 
 
 def test_unhiding_destroys_the_note(monkeypatch, pg_url, pg_session_factory):
