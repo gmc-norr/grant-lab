@@ -408,10 +408,16 @@ def test_unhide_after_the_profile_is_unshared_still_removes_the_row(
 
 
 # ---------------------------------------------------------------------------
-# Gate 8 - hiding a SAVED call flips the row and rewrites ALL THREE columns.
+# Gate 8 - hiding a SAVED call flips the row and rewrites its three identity
+# columns: state, decided_at and decided_by.
 # `ON CONFLICT DO NOTHING` was correct when the row had one meaning; with two
 # states it silently does nothing. The pre-existing row is seeded with a
 # DIFFERENT decided_by and a 2020 decided_at so each column is observably moved.
+#
+# NOT all the columns the set_ touches: since 2026-09-07 it also clears `note`
+# on a flip (D9), conditionally, via a CASE. That fourth column is gated in
+# tests/test_api_calls_note.py, which is where the note lives -- this test's
+# three are the identity of the decision and stay its subject.
 # ---------------------------------------------------------------------------
 def test_hiding_a_saved_call_flips_the_row_and_rewrites_three_columns(
     monkeypatch, pg_url, pg_session_factory
