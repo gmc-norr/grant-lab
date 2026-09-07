@@ -41,14 +41,22 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm.exc import ObjectDeletedError
 
 from grant_lab.auth.dependencies import get_current_user
 from grant_lab.boards.alerts import owner_undeliverable_map
 from grant_lab.boards.qr import QrCode, qr_for
 from grant_lab.boards.queue import board_queue
-from grant_lab.db.models import ORIENTATION_ITEMS_PER_PAGE, Board, BoardItem, Call, Profile, User
+from grant_lab.db.models import (
+    ORIENTATION_ITEMS_PER_PAGE,
+    Board,
+    BoardItem,
+    BoardSuppression,
+    Call,
+    Profile,
+    User,
+)
 from grant_lab.web.api.profiles import _profile_for_edit
 from grant_lab.web.profile_access import readable_profile_ids
 
@@ -750,6 +758,15 @@ def approve_items(
             # and is encoded here, under the lock, as before. That is bounded
             # by the same `cap` and is rare; it is not zero, and this comment
             # says so rather than claiming the hold is gone.
+            # An explicit approval is a newer and stronger signal from the same
+            # human than an old takedown. Without this a call removed once
+            # could never be re-approved, on any board.
+            session.execute(
+                delete(BoardSuppression).where(
+                    BoardSuppression.board_id == board.id,
+                    BoardSuppression.call_id.in_(new_ids),
+                )
+            )
             for offset, cid in enumerate(new_ids):
                 url = urls.get(cid) or ""
                 # Skip the encoder for an empty url. Call.url is Text NOT NULL
@@ -848,6 +865,15 @@ def unapprove_item(
         if item is None:
             raise HTTPException(status_code=404, detail="item not found on this board")
         session.delete(item)
+        # Deleting the row is not a takedown on an auto board: the 05:00 job
+        # rebuilds from the candidate set and would put this card straight
+        # back. Record the decision so it survives. Written on MANUAL boards
+        # too -- uniform behaviour beats a rule that depends on a mode, and it
+        # means flipping a board to auto later does not resurrect everything
+        # its owner ever removed.
+        session.merge(
+            BoardSuppression(board_id=board.id, call_id=call_id, suppressed_by=user.id)
+        )
         session.commit()
     return Response(status_code=204)
 
