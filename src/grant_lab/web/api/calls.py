@@ -124,6 +124,12 @@ class CallOut(BaseModel):
     # Its OWN column, not `applicant_note_count > 0`: an escalation can succeed
     # and still carry zero notes when the analysis failed or was capped.
     escalated: bool
+    # The user's OWN words about their own decision (spec 2026-09-07). NOT
+    # `note`: `applicant_note_count` above is the MODEL's inferred
+    # things-to-check, a different thing on the same object. Non-null only on
+    # the saved and hidden views -- inbox and archive do not join the decision
+    # row at all, so this is None there by construction, not by accident.
+    decision_note: str | None
 
 
 class SummaryOut(BaseModel):
@@ -880,7 +886,7 @@ def get_calls(
         # on a full page. It runs INSIDE this `with sf() as session` block
         # because `dashboard.calls` holds instances attached to this session.
         # tests/web/test_calls_list_query_count.py is the gate.
-        call_ids = [call.id for call, _ in dashboard.calls]
+        call_ids = [call.id for call, _, _ in dashboard.calls]
         criteria_by_call: dict[int, list[CallRankingCriterion]] = defaultdict(list)
         if criteria_profile_id is not None and call_ids:
             for crit in session.execute(
@@ -926,8 +932,9 @@ def get_calls(
                 # is an AttributeError on the commonest row there is.
                 applicant_note_count=(0 if ranking is None else len(ranking.applicant_notes or [])),
                 escalated=bool(ranking is not None and ranking.escalated),
+                decision_note=decision_note,
             )
-            for call, ranking in dashboard.calls
+            for call, ranking, decision_note in dashboard.calls
         ]
         facets = FacetsOut(
             sources=[SourceFacet(slug=s.slug, name=s.name) for s in dashboard.sources],

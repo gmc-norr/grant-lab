@@ -101,7 +101,9 @@ def _decision_predicate(view: View, *, user_id: int, profile_id: int | None):
 
 @dataclass
 class DashboardView:
-    calls: list[tuple[Call, CallRanking | None]]
+    # Three-tuple since 2026-09-07: the third slot is the user's own decision
+    # note, non-None only on the saved/hidden views (spec §4).
+    calls: list[tuple[Call, CallRanking | None, str | None]]
     sources: list[Source]
     profiles: list[Profile]
     summary: dict[str, int]
@@ -480,13 +482,22 @@ def build_dashboard_view(
             )
         )
         if decision_ordered:
-            stmt = stmt.join(
-                CallDecision,
-                (CallDecision.call_id == Call.id)
-                & (CallDecision.user_id == user_id)
-                & (CallDecision.profile_id == profile_id)
-                & (CallDecision.state == view),
-            ).order_by(CallDecision.decided_at.desc(), Call.id.desc())
+            stmt = (
+                stmt.join(
+                    CallDecision,
+                    (CallDecision.call_id == Call.id)
+                    & (CallDecision.user_id == user_id)
+                    & (CallDecision.profile_id == profile_id)
+                    & (CallDecision.state == view),
+                )
+                # The row is ALREADY here, joined for the ORDER BY below. The
+                # note is one more column off it -- no new FROM entry, no
+                # subselect, no extra statement. Conditional, so inbox and
+                # archive (which do not join) pay nothing and cannot
+                # accidentally project it.
+                .add_columns(CallDecision.note)
+                .order_by(CallDecision.decided_at.desc(), Call.id.desc())
+            )
         else:
             stmt = stmt.order_by(
                 closed_expr.asc(),  # open (False=0) before closed (True=1)
@@ -532,9 +543,17 @@ def build_dashboard_view(
     if score_floor_active:
         list_where.append(CallRanking.aggregate_score >= min_score)
     rows = session.execute(stmt.where(*list_where)).unique().all()
-    # Normalize to (Call, CallRanking|None) shape regardless of branch.
-    calls: list[tuple[Call, CallRanking | None]] = [
-        (row[0], row[1] if profile_id is not None else None) for row in rows
+    # Normalize to (Call, CallRanking|None, note|None) shape regardless of
+    # branch. Only the decision_ordered branch added a third column, and
+    # `decision_ordered` is true exactly when that branch ran -- so indexing
+    # row[2] anywhere else would be an IndexError, not a None.
+    calls: list[tuple[Call, CallRanking | None, str | None]] = [
+        (
+            row[0],
+            row[1] if profile_id is not None else None,
+            row[2] if decision_ordered else None,
+        )
+        for row in rows
     ]
 
     # Summary metrics computed with aggregates over the full filtered set

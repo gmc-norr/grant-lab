@@ -247,7 +247,7 @@ def test_dashboard_view_never_loads_the_columns_it_never_renders(pg_session_fact
             show_closed=False,
         )
         assert len(view.calls) == 1
-        call, _ = view.calls[0]
+        call, _, _ = view.calls[0]
         # The scalars CallOut actually reads are present and correct.
         assert call.title == "Heavy call"
         assert call.source.slug == f"heavy-src-{'r' if ranked else 'u'}"
