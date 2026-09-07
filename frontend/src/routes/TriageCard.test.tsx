@@ -593,6 +593,69 @@ describe("gate 16 — the decision note on the card", () => {
     );
   });
 
+  it("puts the caret in the box it just opened, on both the add and edit paths", async () => {
+    // NOT a nicety -- the fix for a silent data-loss path. Clicking either
+    // control UNMOUNTS the button that was clicked, so document.activeElement
+    // falls back to <body> while a text box is visibly open. The feed's window
+    // listener guards on e.target (isEditableTarget), so with focus on <body>
+    // it is live: `u` on that row sends DELETE /api/calls/{id}/hide and the
+    // decision takes its note with it (D4), and `s` flips hidden -> saved,
+    // which clears the note server-side (D9). Either way the reason the user
+    // just opened is destroyed with no message.
+    //
+    // Both paths, because they are two call sites of the same swap and either
+    // can be got wrong alone.
+    stubPut("x");
+    const { unmount } = renderWithProviders(
+      <TriageCard call={call({ id: 42, decision_note: null })} expanded profileId={7} view="hidden" />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: /add note/i }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox")));
+    unmount();
+
+    renderWithProviders(
+      <TriageCard
+        call={call({ id: 43, decision_note: "wrong field" })}
+        expanded
+        profileId={7}
+        view="hidden"
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "wrong field" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox")));
+  });
+
+  it("keeps the caret across the remount a successful save causes", async () => {
+    // The SECOND half of the same gap, and it needs its own test because the
+    // fix is a different line. The strip is keyed on the note (so an edited
+    // note re-seeds the box), which means a successful save REMOUNTS it -- and
+    // a focus set only on first open is lost exactly then, silently re-opening
+    // the window above while the box still looks focused-and-open.
+    const put = stubPut("saved once");
+    const { rerender } = renderWithProviders(
+      <TriageCard
+        call={call({ id: 44, decision_note: "before" })}
+        expanded
+        profileId={7}
+        view="hidden"
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "before" }));
+    await userEvent.clear(screen.getByRole("textbox"));
+    await userEvent.type(screen.getByRole("textbox"), "saved once{Enter}");
+    await waitFor(() => expect(put).toHaveBeenCalled());
+    // The server's new value arrives as a prop, which changes the key.
+    rerender(
+      <TriageCard
+        call={call({ id: 44, decision_note: "saved once" })}
+        expanded
+        profileId={7}
+        view="hidden"
+      />,
+    );
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox")));
+  });
+
   it("edits an existing note through the same strip, seeded with what is already there", async () => {
     const put = stubPut("second thoughts");
     renderWithProviders(

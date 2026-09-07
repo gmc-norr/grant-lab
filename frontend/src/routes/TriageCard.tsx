@@ -107,6 +107,12 @@ function DecisionNote({
         // because this surface EDITS, and a strip with no way to receive the
         // current value can only ever replace it from blank.
         initialNote={note}
+        // The box is here because the user CLICKED for it, and that click
+        // unmounted the button they clicked -- so without this, focus falls to
+        // <body> while a text box is visibly open, the feed's window listener
+        // stays live, and `u` on that row deletes the decision the note hangs
+        // off (D4). See the prop's comment on DecisionNoteStrip.
+        autoFocus
         // expectedState is the ROW's, supplied by the caller rather than read
         // off the strip: the strip must not carry two ways to say which
         // decision it is about (D11). The server 409s a note filed against a
@@ -124,6 +130,9 @@ function DecisionNote({
           type="button"
           data-field="decision-note"
           className={styles.noteText}
+          // The rendered text is clamped to two lines; this gives the whole of
+          // it to a hover without adding a second control to the row.
+          title={note}
           onClick={() => setEditing(true)}
         >
           {note}
@@ -197,11 +206,16 @@ export function TriageCard({
         <Link to={detailTo}>{call.title}</Link>
       </h2>
 
-      {/* UNDER THE TITLE, and OUTSIDE the `expanded` block -- the same choice
-          the Save/Hide row below makes, for the same reason: an affordance
-          only on the focused card means reaching any other call requires
-          moving the cursor there first, which is the interaction that was
-          broken. The reason is also what the reader is scanning Hidden FOR. */}
+      {/* UNDER THE TITLE, and OUTSIDE the `expanded` block.
+          NOT the same choice the Save/Hide row makes -- that row renders only
+          when view === "inbox", and the control these two views actually have,
+          "Return to inbox", is INSIDE `expanded` and pinned there by
+          TriageCard.test.tsx's "does not offer it on a collapsed card either".
+          So this inverts the precedent for Saved and Hidden, deliberately: a
+          note is a scanning aid, not a decision, and the reason is what the
+          reader is scanning Hidden FOR. An affordance only on the focused card
+          would mean reaching any other call's reason requires moving the cursor
+          there first. Decided on that, not on the Save/Hide row. */}
       {view !== "inbox" && profileId !== null && (
         <DecisionNote call={call} profileId={profileId} state={view} />
       )}

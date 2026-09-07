@@ -2,6 +2,7 @@ import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 
+import type { AdminGoldenSet as AdminGoldenSetOut } from "../api/adminGoldenSet";
 import * as clientMod from "../api/client";
 import { renderWithProviders } from "../test-utils";
 import { AdminGoldenSet } from "./AdminGoldenSet";
@@ -10,7 +11,12 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-const GS = {
+// TYPED, not inferred. An untyped literal here is the same hole an `as CallItem`
+// cast opened one file over: a field added to CandidateOut would be missing from
+// this mock with no tsc error, and the component would read undefined. Measured
+// 2026-09-07: with the annotation and `user_notes` removed, tsc names it --
+// `TS2741: Property 'user_notes' is missing`. Without it, silence.
+const GS: AdminGoldenSetOut = {
   triples: [
     { id: 7, call_id: 3, profile_id: 4, expected_score: 65, note: "x", call_title: "C1", profile_name: "P" },
   ],

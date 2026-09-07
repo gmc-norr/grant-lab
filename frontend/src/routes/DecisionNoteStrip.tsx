@@ -32,6 +32,22 @@ type Props = {
   // reuses this component to EDIT, and a component with no way to receive the
   // current value can only ever create.
   initialNote?: string | null;
+  // OPT-IN, defaulting OFF, and it must stay that way. The feed's strip appears
+  // on its own after a decision the user made with the keyboard; grabbing the
+  // caret there would turn `h h h` into typed text in the first box and break
+  // D2's whole promise that the strip is ignorable.
+  //
+  // A strip the user opened by CLICKING a button is the opposite case, and
+  // leaving it unfocused is a data-loss path rather than a nicety: the click
+  // unmounts the button, so `document.activeElement` falls back to <body>
+  // while a text box is visibly open, and the feed's window listener is
+  // therefore live. Measured 2026-09-07 in the real feed: `u` on that row then
+  // sent DELETE /api/calls/{id}/hide, and by D4 the decision and its note die
+  // together -- silent destruction of the reason just written. `s` is worse
+  // still: it flips hidden -> saved, which by D9 clears the note server-side.
+  // The same gap reopens after a successful save, because the note-covering
+  // `key` remounts the strip while the editor stays visibly open.
+  autoFocus?: boolean;
   onSave: (args: NoteSaveArgs) => void | Promise<unknown>;
   onDismiss: () => void;
 };
@@ -44,8 +60,15 @@ function normalize(value: string): string | null {
   return trimmed === "" ? null : trimmed;
 }
 
-export function DecisionNoteStrip({ target, initialNote = null, onSave, onDismiss }: Props) {
+export function DecisionNoteStrip({
+  target,
+  initialNote = null,
+  autoFocus = false,
+  onSave,
+  onDismiss,
+}: Props) {
   const inputId = useId();
+  const input = useRef<HTMLInputElement | null>(null);
   // Read on MOUNT only -- this is the seed, not a controlled value. Safe in the
   // feed, which keys the strip per target. Task 7 mounts it on a row whose note
   // can change underneath it: give it a `key` that covers the note, or it shows
@@ -75,6 +98,13 @@ export function DecisionNoteStrip({ target, initialNote = null, onSave, onDismis
       mounted.current = false;
     };
   }, []);
+
+  // Runs on every MOUNT, which is what closes the post-save half of the gap:
+  // the caller keys this component on the note, so a successful save remounts
+  // it, and a focus set only on first open would be lost exactly then.
+  useEffect(() => {
+    if (autoFocus) input.current?.focus();
+  }, [autoFocus]);
 
   async function commit() {
     const note = normalize(value);
@@ -121,10 +151,15 @@ export function DecisionNoteStrip({ target, initialNote = null, onSave, onDismis
         Why did you {target.state === "hidden" ? "hide" : "save"}{" "}
         <strong className={styles.noteTitle}>{target.title}</strong>?
       </label>
-      {/* NO autoFocus, and that is the point of the whole screen: the feed is a
-          keyboard loop, and a strip that grabbed the caret would turn `h h h`
-          into typed text in the first box. The strip is ignorable (D2). */}
+      {/* No autofocus BY DEFAULT, and that is the point of the whole screen: the
+          feed is a keyboard loop, and a strip that grabbed the caret would turn
+          `h h h` into typed text in the first box. The strip is ignorable (D2).
+          A caller that opens the box from an explicit click passes autoFocus --
+          see the prop for why that case is the reverse. The focus is set in an
+          effect rather than via the React `autoFocus` attribute so it re-runs
+          on the keyed remount a save causes. */}
       <input
+        ref={input}
         id={inputId}
         type="text"
         className={styles.noteInput}

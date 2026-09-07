@@ -190,7 +190,17 @@
   cursor: pointer;
 }
 
+/* CLAMPED. A note is up to 1000 characters (D8) and this renders on every
+   collapsed row, so an unclamped paragraph-length reason on fifty hidden calls
+   destroys the scanning the note is on the row to serve. Two lines, then an
+   ellipsis; the whole text is one click away in the editor, and `title` gives
+   it to a hover without a second control. */
 .noteText {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
   color: var(--app-text);
 }
 
