@@ -34,6 +34,9 @@ const BOARD: Board = {
   created_at: "2026-01-01T00:00:00Z",
   updated_at: "2026-01-01T00:00:00Z",
   approved_count: 2,
+  last_reconcile_attempt_at: null,
+  last_reconciled_at: null,
+  last_reconcile_error: null,
   owner_undeliverable: false,
 };
 

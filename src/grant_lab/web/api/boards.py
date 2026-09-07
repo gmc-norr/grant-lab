@@ -139,6 +139,15 @@ class BoardOut(BaseModel):
     # PENDING side of that; this is the other half, a straight count of
     # board_items, and Task 5 does not call board_queue -- Task 6 wires that up.
     approved_count: int
+    # BOARD HEALTH. Three fields because "last succeeded" alone cannot separate
+    # a board that runs nightly and changes nothing from one that has been
+    # failing since March -- and a corridor wall that quietly stopped updating
+    # looks exactly like one that is working. NULL everywhere means the job has
+    # never reached this board, which the UI must say as "not yet", never as a
+    # date. `last_reconcile_error` is already truncated at the write.
+    last_reconcile_attempt_at: datetime | None
+    last_reconciled_at: datetime | None
+    last_reconcile_error: str | None
     # D9 / Open-3 half 2: whether a board alert on THIS board's profile would
     # currently be escalated away from its owner -- matches
     # `owner_undeliverable_map`'s own docstring term for term (Task 8 review
@@ -188,6 +197,9 @@ def _to_out(board: Board, approved_count: int, owner_undeliverable: bool) -> Boa
         created_at=board.created_at,
         updated_at=board.updated_at,
         approved_count=approved_count,
+        last_reconcile_attempt_at=board.last_reconcile_attempt_at,
+        last_reconciled_at=board.last_reconciled_at,
+        last_reconcile_error=board.last_reconcile_error,
         owner_undeliverable=owner_undeliverable,
     )
 

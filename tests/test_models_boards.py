@@ -33,6 +33,12 @@ def test_board_columns_match_the_spec():
         "max_pages",
         "page_seconds",
         "auto_publish",
+        # Board health: what the nightly job last tried, last achieved, and why
+        # it failed. Three, because attempt-vs-success is what separates a board
+        # that runs fine and changes nothing from one failing every night.
+        "last_reconcile_attempt_at",
+        "last_reconciled_at",
+        "last_reconcile_error",
         "created_by",
         "published_by",
         "published_at",

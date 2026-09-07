@@ -4,7 +4,7 @@ import {
   Text, TextInput, Title,
 } from "@mantine/core";
 import { useDebouncedValue } from "@mantine/hooks";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { apiErrorMessage } from "../api/client";
@@ -98,6 +98,10 @@ function DetailView({ board, isAdmin }: { board: Board; isAdmin: boolean }) {
 
       <PublishControl board={board} isAdmin={isAdmin} />
 
+      <BoardHealth board={board} />
+
+      <BoardPreview board={board} />
+
       <SettingsForm board={board} />
 
       <ApprovedItems board={board} />
@@ -109,6 +113,171 @@ function DetailView({ board, isAdmin }: { board: Board; isAdmin: boolean }) {
         <BoardQueue board={board} />
       </Card>
     </Box>
+  );
+}
+
+/* "x hours ago", locally. The cockpit has date helpers; none of them can be
+   imported here, because the match edition's bundle gate refuses any module
+   under an excluded path -- so this is a deliberate small duplicate, not an
+   oversight. Relative, because the question board health answers is "is this
+   stale?", and a reader cannot subtract two timestamps at a glance. */
+function agoText(iso: string): string {
+  const seconds = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (seconds < 90) return "just now";
+  const units: [number, string][] = [
+    [60, "minute"],
+    [3600, "hour"],
+    [86400, "day"],
+  ];
+  let value = seconds / 60;
+  let unit = "minute";
+  for (const [size, name] of units) {
+    if (seconds >= size) {
+      value = seconds / size;
+      unit = name;
+    }
+  }
+  const n = Math.floor(value);
+  return `${n} ${unit}${n === 1 ? "" : "s"} ago`;
+}
+
+/* BOARD HEALTH. A corridor wall that quietly stopped updating looks exactly
+   like one that is working -- the cards are still there, they are just
+   yesterday's -- so the only way to know is to say when the job last ran.
+
+   Shown for AUTO boards only: a manual board has no nightly run to be late,
+   and a "last refreshed" line on one would invent a process that does not
+   exist. */
+function BoardHealth({ board }: { board: Board }) {
+  if (!board.auto_publish) return null;
+
+  const attempted = board.last_reconcile_attempt_at;
+  const succeeded = board.last_reconciled_at;
+  const error = board.last_reconcile_error;
+
+  return (
+    <Card withBorder radius="md" p="md" bg="var(--app-sidebar)" mb="md">
+      <Title order={2} size="h5" mb="sm">
+        Automatic refresh
+      </Title>
+      {attempted === null ? (
+        /* NULL is "never", and must never render as a date. Every board that
+           existed when this shipped reads this way until its first run. */
+        <Text size="sm" c="dimmed" data-field="health-never">
+          Hasn&apos;t run yet. This board fills itself on the next nightly run.
+        </Text>
+      ) : error !== null ? (
+        <Alert role="alert" color="red" data-field="health-error">
+          <Text size="sm">
+            The last refresh failed {agoText(attempted)}: {error}
+          </Text>
+          {/* The pair is the point. "Failed" alone does not say whether the wall
+              is showing week-old cards or last night's. */}
+          <Text size="sm" mt={4}>
+            {succeeded === null
+              ? "This board has never refreshed successfully, so it is empty or stale."
+              : `Last successful refresh: ${agoText(succeeded)}. The wall is showing what it published then.`}
+          </Text>
+        </Alert>
+      ) : (
+        <Text size="sm" c="dimmed" data-field="health-ok">
+          Last refreshed {agoText(attempted)}.
+        </Text>
+      )}
+    </Card>
+  );
+}
+
+/* The sizes these boards are actually authored for (spec Sec 6). A preview at
+   any OTHER size is the reason the wall shipped broken: at 1920x1080 with real
+   funding titles the page grew to 1745px and the second row sat below the
+   screen, and nothing anybody could look at on this page would have shown it. */
+const TARGET_SIZE = {
+  landscape: { width: 1920, height: 1080 },
+  portrait: { width: 1080, height: 1920 },
+} as const;
+
+/* A REAL render at the REAL size, scaled to fit -- not a mock-up of one. The
+   iframe loads the same `/b/:slug` route the corridor screen runs, so what is
+   on this panel is what is on the wall, including any overflow.
+
+   Opt-in behind a button: it boots a second copy of the SPA, which is not a
+   cost worth paying on every visit to this page.
+
+   Published boards only. `/b/:slug` reads the PUBLIC endpoint, which 404s for
+   an unpublished board -- so the preview would be an honest blank rectangle
+   that looks exactly like a broken one. Better to say why. */
+function BoardPreview({ board }: { board: Board }) {
+  const [shown, setShown] = useState(false);
+  const [width, setWidth] = useState(0);
+  const box = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const measure = () => setWidth(el.clientWidth);
+    measure();
+    // Measured rather than assumed: a hard-coded panel width would squash the
+    // preview on a narrow window, and a squashed preview cannot answer the one
+    // question it exists for.
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [shown]);
+
+  const target = TARGET_SIZE[board.orientation];
+  const scale = width > 0 ? width / target.width : 0;
+
+  return (
+    <Card withBorder radius="md" p="md" bg="var(--app-sidebar)" mb="md">
+      <Group justify="space-between" mb="sm">
+        <Title order={2} size="h5">
+          Preview at {target.width}x{target.height}
+        </Title>
+        {board.is_published && (
+          <Button size="compact-sm" variant="light" onClick={() => setShown((s) => !s)}>
+            {shown ? "Hide preview" : "Show preview"}
+          </Button>
+        )}
+      </Group>
+      {!board.is_published ? (
+        <Text size="sm" c="dimmed" data-field="preview-unpublished">
+          Publish this board to preview it. The preview renders the real wall
+          screen, which reads the public address.
+        </Text>
+      ) : !shown ? (
+        <Text size="sm" c="dimmed">
+          Renders the actual {board.orientation} wall at full size, scaled to fit.
+        </Text>
+      ) : (
+        <div ref={box} style={{ width: "100%" }} data-field="preview-frame">
+          <div
+            style={{
+              width: "100%",
+              height: scale > 0 ? target.height * scale : 0,
+              overflow: "hidden",
+              position: "relative",
+              borderRadius: 4,
+            }}
+          >
+            <iframe
+              title={`${board.title} at ${target.width}x${target.height}`}
+              src={`/b/${board.slug}`}
+              style={{
+                width: target.width,
+                height: target.height,
+                border: 0,
+                position: "absolute",
+                top: 0,
+                left: 0,
+                transform: `scale(${scale})`,
+                transformOrigin: "top left",
+              }}
+            />
+          </div>
+        </div>
+      )}
+    </Card>
   );
 }
 

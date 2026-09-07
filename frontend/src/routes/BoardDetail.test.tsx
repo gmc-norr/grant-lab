@@ -39,6 +39,9 @@ const BOARD: Board = {
   created_at: "2026-01-01T00:00:00Z",
   updated_at: "2026-01-01T00:00:00Z",
   approved_count: 2,
+  last_reconcile_attempt_at: null,
+  last_reconciled_at: null,
+  last_reconcile_error: null,
   owner_undeliverable: false,
 };
 
@@ -659,4 +662,101 @@ it("the page-size input takes the value the SERVER derived, not the one it was s
   await user.click(screen.getByRole("button", { name: /save settings/i }));
 
   await waitFor(() => expect(screen.getByLabelText(/items per page/i)).toHaveValue("4"));
+});
+
+const HOURS_AGO = (n: number) => new Date(Date.now() - n * 3600_000).toISOString();
+
+it("an auto board that has never run says so, and does not invent a date", async () => {
+  // NULL is "never". Rendered through a date formatter it becomes 1970, which
+  // reads as a board that refreshed once and then died -- the opposite of the
+  // truth, and the exact confusion this panel exists to remove.
+  renderDetail({ board: { ...BOARD, auto_publish: true } });
+  await screen.findByText("Corridor board");
+  const line = document.querySelector('[data-field="health-never"]');
+  expect(line).toHaveTextContent(/hasn't run yet/i);
+  expect(line?.textContent).not.toMatch(/1970|ago/);
+});
+
+it("a healthy auto board says when it last refreshed", async () => {
+  renderDetail({
+    board: {
+      ...BOARD,
+      auto_publish: true,
+      last_reconcile_attempt_at: HOURS_AGO(3),
+      last_reconciled_at: HOURS_AGO(3),
+    },
+  });
+  await screen.findByText("Corridor board");
+  expect(document.querySelector('[data-field="health-ok"]')).toHaveTextContent(/3 hours ago/i);
+});
+
+it("a FAILING board names the error AND when it last actually worked", async () => {
+  // The pair is the whole point. "Last refresh failed" on its own does not say
+  // whether the wall is showing last night's cards or a fortnight's -- and on a
+  // corridor display, that is the only question anyone walking past cares about.
+  renderDetail({
+    board: {
+      ...BOARD,
+      auto_publish: true,
+      last_reconcile_attempt_at: HOURS_AGO(2),
+      last_reconciled_at: HOURS_AGO(72),
+      last_reconcile_error: "qr backend down",
+    },
+  });
+  await screen.findByText("Corridor board");
+  const alert = document.querySelector('[data-field="health-error"]') as HTMLElement;
+  expect(alert).toHaveTextContent(/failed 2 hours ago/i);
+  expect(alert).toHaveTextContent(/qr backend down/);
+  expect(alert).toHaveTextContent(/last successful refresh: 3 days ago/i);
+});
+
+it("a MANUAL board has no refresh panel at all", async () => {
+  // Guards the three above: a panel rendered unconditionally would invent a
+  // nightly process for a board nobody automated, and "hasn't run yet" would be
+  // true forever and mean nothing.
+  renderDetail({ board: { ...BOARD, auto_publish: false } });
+  await screen.findByText("Corridor board");
+  expect(screen.queryByText(/automatic refresh/i)).toBeNull();
+  expect(document.querySelector('[data-field="health-never"]')).toBeNull();
+});
+
+it("the preview renders the wall at its REAL size, not a mock-up", async () => {
+  // This is the panel that would have caught the corridor board growing to
+  // 1745px on a 1080px screen: nothing else on this page renders the board at
+  // the size it actually runs at, which is why the overflow reached a wall.
+  const user = userEvent.setup();
+  renderDetail({ board: { ...BOARD, is_published: true, orientation: "landscape" } });
+  await screen.findByText("Corridor board");
+  await user.click(screen.getByRole("button", { name: /show preview/i }));
+
+  const frame = await screen.findByTitle(/corridor board at 1920x1080/i);
+  // The DIMENSIONS are the assertion. A preview at any other size answers a
+  // question nobody asked; scaling it down for the panel is presentation.
+  expect(frame).toHaveStyle({ width: "1920px", height: "1080px" });
+  expect(frame).toHaveAttribute("src", "/b/abc123");
+});
+
+it("a portrait board previews at portrait dimensions", async () => {
+  // Guards the gate above: a hard-coded 1920x1080 would pass it and then show a
+  // portrait wall in the wrong aspect ratio, which is precisely the class of
+  // error the preview exists to catch.
+  const user = userEvent.setup();
+  renderDetail({ board: { ...BOARD, is_published: true, orientation: "portrait" } });
+  await screen.findByText("Corridor board");
+  await user.click(screen.getByRole("button", { name: /show preview/i }));
+
+  const frame = await screen.findByTitle(/corridor board at 1080x1920/i);
+  expect(frame).toHaveStyle({ width: "1080px", height: "1920px" });
+});
+
+it("an unpublished board says why it cannot be previewed, rather than showing a blank", async () => {
+  // `/b/:slug` reads the PUBLIC endpoint, which 404s while the board is
+  // unpublished -- so the iframe would render an honest empty rectangle that
+  // looks exactly like a broken board.
+  renderDetail({ board: { ...BOARD, is_published: false } });
+  await screen.findByText("Corridor board");
+  expect(document.querySelector('[data-field="preview-unpublished"]')).toHaveTextContent(
+    /publish this board to preview it/i,
+  );
+  expect(screen.queryByRole("button", { name: /show preview/i })).toBeNull();
 });

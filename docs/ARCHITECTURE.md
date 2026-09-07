@@ -50,7 +50,7 @@ Read this before claiming two tables share, or do not share, a rule.
 | `attachments` | `Attachment` | 12 | 2 | 1 | 1 |
 | `board_items` | `BoardItem` | 8 | 3 | 0 | 1 |
 | `board_suppressions` | `BoardSuppression` | 4 | 3 | 0 | 0 |
-| `boards` | `Board` | 16 | 3 | 6 | 1 |
+| `boards` | `Board` | 19 | 3 | 6 | 1 |
 | `branches` | `Branch` | 5 | 1 | 0 | 0 |
 | `call_decisions` | `CallDecision` | 8 | 4 | 1 | 3 |
 | `call_ranking_criteria` | `CallRankingCriterion` | 7 | 2 | 0 | 0 |

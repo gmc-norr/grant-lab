@@ -414,3 +414,96 @@ def test_a_changed_call_url_gets_a_fresh_qr_on_the_next_run(pg_session_factory, 
         (row,) = public_board_items(s, board_id=bid)
         assert row.qr_modules == expected.modules, "the public route is still serving no QR"
         assert row.qr_path == expected.path
+
+
+def _health(pg_session_factory, board_id):
+    from grant_lab.db.models import Board
+
+    with pg_session_factory() as s:
+        b = s.get(Board, board_id)
+        return (b.last_reconcile_attempt_at, b.last_reconciled_at, b.last_reconcile_error)
+
+
+def test_a_successful_run_records_that_it_succeeded(pg_session_factory, profile_factory):
+    """A corridor wall that quietly stopped updating looks exactly like one that
+    is working -- the cards are still there, they are just yesterday's. Nothing
+    recorded when the job ran, so nobody could tell.
+
+    Both timestamps, because a run that changes nothing is still a healthy run:
+    counting rows would report a board that is fine as a board that is dead.
+    """
+    pid, owner = profile_factory(name="health ok")
+    bid = _make_board(pg_session_factory, profile_id=pid, created_by=owner, slug="V" * 16)
+    _set_auto(pg_session_factory, bid)
+    _ranked_call(pg_session_factory, external_id="health-1", profile_id=pid, score=90)
+
+    assert _health(pg_session_factory, bid) == (None, None, None), "seeded dirty"
+    reconcile_auto_boards(session_factory=pg_session_factory)
+
+    attempt, success, error = _health(pg_session_factory, bid)
+    assert attempt is not None, "the run recorded no attempt"
+    assert success == attempt, "a successful run must stamp both, identically"
+    assert error is None
+
+
+def test_a_FAILING_board_keeps_the_time_it_last_SUCCEEDED(
+    pg_session_factory, profile_factory, monkeypatch
+):
+    """The pair that makes this readable. Overwriting `last_reconciled_at` on a
+    failure would say the board was reconciled tonight; leaving it alone says
+    'last worked on the 3rd, failing since', which is the sentence an operator
+    needs.
+
+    It also proves the stamp is written OUTSIDE the board's own transaction:
+    the run below rolls that transaction back, so an outcome recorded inside it
+    would be rolled back too -- leaving no trace of exactly the board whose
+    health is the question.
+    """
+    pid, owner = profile_factory(name="health fail")
+    bid = _make_board(pg_session_factory, profile_id=pid, created_by=owner, slug="W" * 16)
+    _set_auto(pg_session_factory, bid)
+    _ranked_call(pg_session_factory, external_id="health-2", profile_id=pid, score=90)
+
+    reconcile_auto_boards(session_factory=pg_session_factory)
+    _, first_success, _ = _health(pg_session_factory, bid)
+    assert first_success is not None
+
+    # A second call arrives, so pass 1 has an encode to make -- and it explodes.
+    _ranked_call(pg_session_factory, external_id="health-3", profile_id=pid, score=91)
+    monkeypatch.setattr(ap, "qr_for", lambda url: (_ for _ in ()).throw(RuntimeError("boom")))
+    summary = reconcile_auto_boards(session_factory=pg_session_factory)
+    assert summary.boards_failed == 1, summary
+
+    attempt, success, error = _health(pg_session_factory, bid)
+    assert success == first_success, "a failure overwrote the last SUCCESS time"
+    assert attempt is not None and attempt > first_success, "the failed attempt was not recorded"
+    assert error is not None and "boom" in error, f"the reason was not kept: {error!r}"
+
+
+def test_a_board_switched_to_manual_between_the_passes_is_not_stamped(
+    pg_session_factory, profile_factory, monkeypatch
+):
+    """Health belongs to boards the job is responsible for. A board whose
+    automation was switched off between the passes has no nightly run to be
+    late, so stamping it would put a live-looking timestamp on a board nothing
+    is watching -- and the skip path reaches the stamp through `continue`,
+    which is exactly the flow a plain trailing line would have missed.
+    """
+    pid, owner = profile_factory(name="health manual")
+    bid = _make_board(pg_session_factory, profile_id=pid, created_by=owner, slug="X" * 16)
+    _set_auto(pg_session_factory, bid)
+    _ranked_call(pg_session_factory, external_id="health-4", profile_id=pid, score=90)
+
+    real = ap.qr_for
+
+    def turn_it_off(url):
+        # Between the passes: pass 1 encodes, and by pass 2 the board is manual.
+        _set_auto(pg_session_factory, bid, on=False)
+        return real(url)
+
+    monkeypatch.setattr(ap, "qr_for", turn_it_off)
+    reconcile_auto_boards(session_factory=pg_session_factory)
+
+    assert _health(pg_session_factory, bid) == (None, None, None), (
+        "a board that is no longer automatic was stamped as if it had a nightly run"
+    )
