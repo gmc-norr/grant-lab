@@ -1,13 +1,14 @@
 import {
-  Anchor, Badge, Box, Button, Card, Group, NumberInput, SegmentedControl, Stack, Text,
-  TextInput, Title,
+  Anchor, Badge, Box, Button, Card, Checkbox, Group, NumberInput, SegmentedControl, Stack,
+  Text, TextInput, Title,
 } from "@mantine/core";
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { apiErrorMessage } from "../api/client";
 import {
-  useBoard, useBoardItems, usePublishBoard, useReorderItems, useUnapproveItem, useUpdateBoard,
+  useAutoPreview, useBoard, useBoardItems, usePublishBoard, useReorderItems, useUnapproveItem,
+  useUpdateBoard,
   type Board, type BoardSettingsBody,
 } from "../api/boards";
 import { useSession } from "../api/session";
@@ -126,6 +127,21 @@ function SettingsForm({ board }: { board: Board }) {
   const [itemsPerPageTouched, setItemsPerPageTouched] = useState(false);
   const [minScore, setMinScore] = useState<number>(board.min_score);
   const [pageSeconds, setPageSeconds] = useState<number>(board.page_seconds);
+  const [autoPublish, setAutoPublish] = useState<boolean>(board.auto_publish);
+  // Unlike items_per_page, this needs no "touched" tracking: the server has no
+  // orientation-driven default for max_pages to derive, so sending the seeded
+  // value back is a no-op rather than a clobber.
+  const [maxPages, setMaxPages] = useState<number>(board.max_pages);
+
+  // Only fetched while the switch is on -- the numbers are about what an auto
+  // board would carry, and a manual board's owner has not asked the question.
+  const preview = useAutoPreview(board.id, { enabled: autoPublish });
+
+  // The switch is being turned ON and there is hand-picked work on the board
+  // that the next nightly run would replace. Shown BEFORE saving, because the
+  // PUT itself has no place to warn: a partial update carries no confirmation
+  // step, and the loss happens hours later at 05:00 rather than on the save.
+  const replacesExistingCards = autoPublish && !board.auto_publish && board.approved_count > 0;
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -134,6 +150,8 @@ function SettingsForm({ board }: { board: Board }) {
       orientation,
       min_score: minScore,
       page_seconds: pageSeconds,
+      auto_publish: autoPublish,
+      max_pages: maxPages,
       ...(itemsPerPageTouched ? { items_per_page: itemsPerPage } : {}),
     };
     update.mutate(body);
@@ -190,7 +208,55 @@ function SettingsForm({ board }: { board: Board }) {
               value={pageSeconds}
               onChange={(v) => setPageSeconds(typeof v === "number" ? v : pageSeconds)}
             />
+            {/* The only lever that bounds an auto board's loop length, and
+                therefore the only way to fix a board the preview shows as
+                truncated. Bounds mirror the API's own ge=1/le=64 so the
+                control cannot send a 422. */}
+            <NumberInput
+              label="Maximum pages"
+              description="1–64"
+              min={1}
+              max={64}
+              value={maxPages}
+              onChange={(v) => setMaxPages(typeof v === "number" ? v : maxPages)}
+            />
           </Group>
+          {/* "Fill", never "Publish". Two elements below, PublishControl's
+              own button says Publish/Unpublish and its confirmation says "It
+              becomes visible to anyone with the link" -- a different act, and
+              the one place in this product where the spec insists the two stay
+              visibly distinct: auto-publish FILLS a board, it never makes one
+              world-readable. Sharing the verb across two adjacent controls is
+              how an admin comes to believe this checkbox publishes the wall. */}
+          <Checkbox
+            label="Fill this board automatically"
+            description="Each night at 05:00 this board is rebuilt from the calls that clear its minimum score."
+            checked={autoPublish}
+            onChange={(e) => setAutoPublish(e.currentTarget.checked)}
+          />
+          {autoPublish && preview.data && (
+            // Five numbers, not one: `qualifying` minus `displayed` IS the
+            // truncation, and a preview that showed only the displayed count
+            // would hide exactly the failure it exists to surface.
+            <Text size="sm" c="dimmed" data-field="auto-preview">
+              {preview.data.qualifying} qualify · {preview.data.displayed} shown ·{" "}
+              {preview.data.truncated} not shown · {preview.data.pages} pages ·{" "}
+              {preview.data.loop_seconds}s loop
+              {/* The endpoint reads the STORED board, not the values in these
+                  inputs, so until Save lands these numbers describe the last
+                  saved settings. Saying so is the honest half of a preview the
+                  spec calls "live": an admin who has just typed a new minimum
+                  score would otherwise read the old numbers as the new ones. */}{" "}
+              <Text span size="sm" c="dimmed" data-field="auto-preview-basis">
+                (for the saved settings — save to update)
+              </Text>
+            </Text>
+          )}
+          {replacesExistingCards && (
+            <Text role="alert" size="sm" c="orange" data-field="auto-publish-warning">
+              This replaces the {board.approved_count} cards on this board at the next nightly run.
+            </Text>
+          )}
           <Group gap="sm" align="center">
             <Button type="submit" disabled={update.isPending}>
               Save settings

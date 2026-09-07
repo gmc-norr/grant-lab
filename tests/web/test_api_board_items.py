@@ -732,3 +732,43 @@ def test_the_publish_response_schema_also_carries_the_open5_warning(monkeypatch,
     board_out_title = schema["components"]["schemas"]["BoardOut"]["properties"]["title"]
     assert "description" in board_out_title, board_out_title
     assert "publicly visible" in board_out_title["description"]
+
+
+def test_an_item_with_no_approver_serializes(
+    pg_session_factory, profile_factory, monkeypatch, pg_url
+):
+    """GATE. An auto-published row has approved_by = NULL. Listing items must
+    return it, not 500 in the response model."""
+    from sqlalchemy import text
+
+    # MEASURED: this module has `_setup`, `_client_for`, `_create_board` (via
+    # the API, needs a client, returns the RESPONSE not an id) and `_make_call`
+    # (which DERIVES the url as https://example.org/<external_id> and takes NO
+    # url kwarg -- that is the OTHER `_make_call`, in
+    # tests/test_boards_qr_at_approval.py, which REQUIRES url=). This module
+    # has no `_make_board`. Use what is there; the two `_make_call`s are not
+    # interchangeable.
+    app = _setup(monkeypatch, pg_url)
+    pid, owner = profile_factory(name="null approver api profile")
+    setup_client = _client_for(app, owner)
+    with setup_client:
+        # `_create_board` returns the RESPONSE, not an id (:72-77).
+        created = _create_board(setup_client, profile_id=pid)
+        assert created.status_code == 201, created.text
+        board_id = created.json()["id"]
+    call_id = _make_call(pg_session_factory, external_id="null-appr")
+    with pg_session_factory() as s:
+        s.execute(
+            text(
+                "INSERT INTO board_items (board_id, call_id, position, approved_by, qr_modules) "
+                "VALUES (:b, :c, 0, NULL, 0)"
+            ),
+            {"b": board_id, "c": call_id},
+        )
+        s.commit()
+
+    client = _client_for(app, owner)
+    with client:
+        r = client.get(f"/api/boards/{board_id}/items")
+    assert r.status_code == 200, r.text
+    assert r.json()["items"][0]["approved_by"] is None

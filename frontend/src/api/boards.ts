@@ -11,6 +11,7 @@ export type BoardQueueResult = components["schemas"]["BoardQueueOut"];
 export type BoardItem = components["schemas"]["BoardItemOut"];
 export type ApproveBody = components["schemas"]["ApproveIn"];
 export type ReorderBody = components["schemas"]["ReorderIn"];
+export type AutoPreview = components["schemas"]["AutoPreviewOut"];
 
 // --- boards list + CRUD ----------------------------------------------------
 //
@@ -55,7 +56,34 @@ export function useUpdateBoard(id: number) {
     onSuccess: (data) => {
       qc.setQueryData(["board", id], data);
       qc.invalidateQueries({ queryKey: ["boards"] });
+      // The auto-preview line (`useAutoPreview` below) is keyed on its own
+      // ["board-auto-preview", id] and neither prefix above matches it, so
+      // without this it would keep showing the pre-save numbers -- e.g. the
+      // "not shown" count that raising max_pages was meant to fix -- for the
+      // rest of the session (App.tsx's 20s staleTime + no window-focus
+      // refetch, and SettingsForm is mounted unkeyed in BoardDetail).
+      qc.invalidateQueries({ queryKey: ["board-auto-preview", id] });
     },
+  });
+}
+
+// What an auto board WOULD carry right now: qualifying, displayed, truncated,
+// pages, loop_seconds. Four numbers rather than one, because a single count
+// cannot distinguish "nothing qualifies" from "plenty qualifies and the cap is
+// silently dropping most of it" -- and the second is the failure the preview
+// exists to surface. Edit-gated like the rest of /api/boards/{id}, and
+// `enabled` so the settings form does not fetch it while the switch is off.
+export function useAutoPreview(id: number, opts?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["board-auto-preview", id],
+    queryFn: async () =>
+      unwrap(
+        await api.GET("/api/boards/{board_id}/auto-preview", {
+          params: { path: { board_id: id } },
+        }),
+      ),
+    enabled: opts?.enabled ?? true,
+    retry: false,
   });
 }
 

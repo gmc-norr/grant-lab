@@ -136,6 +136,21 @@ export function BoardQueue({ board }: { board: Board }) {
                     Approved
                   </Badge>
                 </Group>
+              ) : row.suppressed ? (
+                /* Someone took this off this board. It stays in the list so
+                   the reason is visible -- a row that just vanished would look
+                   like a ranking change. No checkbox: "approve everything at
+                   or above N" deliberately skips it, and ticking it here would
+                   promise an action the bulk path will not take. Re-approving
+                   is still possible by naming the call. */
+                <Group gap="xs" wrap="nowrap">
+                  <Text size="sm" c="dimmed">
+                    {row.title}
+                  </Text>
+                  <Badge color="gray" size="sm">
+                    Removed from this board
+                  </Badge>
+                </Group>
               ) : (
                 <Checkbox
                   label={row.title}

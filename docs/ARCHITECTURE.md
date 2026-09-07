@@ -41,7 +41,7 @@ Read this before claiming two tables share, or do not share, a rule.
 
 ## Tables
 
-47 mapped tables.
+48 mapped tables.
 
 | table | class | cols | FKs | CHECKs | indexes |
 |---|---|---|---|---|---|
@@ -49,7 +49,8 @@ Read this before claiming two tables share, or do not share, a rule.
 | `attachment_jobs` | `AttachmentJob` | 9 | 2 | 2 | 2 |
 | `attachments` | `Attachment` | 12 | 2 | 1 | 1 |
 | `board_items` | `BoardItem` | 8 | 3 | 0 | 1 |
-| `boards` | `Board` | 15 | 3 | 6 | 1 |
+| `board_suppressions` | `BoardSuppression` | 4 | 3 | 0 | 0 |
+| `boards` | `Board` | 16 | 3 | 6 | 1 |
 | `branches` | `Branch` | 5 | 1 | 0 | 0 |
 | `call_decisions` | `CallDecision` | 8 | 4 | 1 | 3 |
 | `call_ranking_criteria` | `CallRankingCriterion` | 7 | 2 | 0 | 0 |
@@ -127,6 +128,7 @@ Every CHECK constraining a `status`-like column. Divergence here is a real defec
 | `attachment_jobs` | `workspace_id` → `workspaces.id` (CASCADE)<br>`attachment_id` → `attachments.id` (CASCADE) |
 | `attachments` | `workspace_id` → `workspaces.id` (CASCADE)<br>`uploaded_by` → `users.id` (RESTRICT) |
 | `board_items` | `board_id` → `boards.id` (CASCADE)<br>`call_id` → `calls.id` (CASCADE)<br>`approved_by` → `users.id` (RESTRICT) |
+| `board_suppressions` | `board_id` → `boards.id` (CASCADE)<br>`call_id` → `calls.id` (CASCADE)<br>`suppressed_by` → `users.id` (RESTRICT) |
 | `boards` | `profile_id` → `profiles.id` (RESTRICT)<br>`created_by` → `users.id` (RESTRICT)<br>`published_by` → `users.id` (RESTRICT) |
 | `branches` | `workspace_id` → `workspaces.id` (CASCADE) |
 | `call_decisions` | `user_id` → `users.id` (CASCADE)<br>`profile_id` → `profiles.id` (CASCADE)<br>`call_id` → `calls.id` (CASCADE)<br>`decided_by` → `users.id` (SET NULL) |

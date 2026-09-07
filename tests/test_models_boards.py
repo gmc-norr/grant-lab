@@ -32,6 +32,7 @@ def test_board_columns_match_the_spec():
         "items_per_page",
         "max_pages",
         "page_seconds",
+        "auto_publish",
         "created_by",
         "published_by",
         "published_at",

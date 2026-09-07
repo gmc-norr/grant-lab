@@ -280,6 +280,92 @@ def test_build_scheduler_includes_turn_reaper_job(_settings_env):
     sched.shutdown(wait=False)
 
 
+def test_auto_publish_tick_logs_its_summary_and_swallows_a_failure(_settings_env, caplog):
+    """The 05:00 board rebuild registered as `boards:auto-publish` had ZERO
+    committed coverage of its closure BODY.
+
+    That gap is not cosmetic. The tick's log line names `_logger`, a module
+    global; a slip to `log` is a NameError raised INSIDE the closure --
+    invisible at import, invisible to a job-id assertion, caught either by the
+    tick's own `except` or by APScheduler's handler, and first seen at 05:00 in
+    production. So this calls `job.func()` on BOTH branches and asserts what
+    each one LOGS, because "did not raise" is exactly what the happy-branch
+    slip still looks like.
+
+    Same idiom as `test_build_scheduler_includes_turn_reaper_job` above: the
+    callable is a closure over `session_factory`, so calling it with the work
+    patched out is the only way to prove the wiring.
+    """
+    import logging
+
+    from grant_lab.boards.auto_publish import AutoPublishSummary
+    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
+
+    settings = Settings()
+
+    def session_factory():  # never invoked: reconcile_auto_boards is patched
+        return None
+
+    workspace_controller = build_workspace_controller(
+        settings=settings,
+        session_factory=session_factory,
+    )
+    sched = build_scheduler(
+        session_factory=session_factory,
+        settings=settings,
+        alerter=_NullAlerter(),
+        ollama_url="http://localhost:11434",
+        gemma_model="gemma4:e4b-q8",
+        ranking_tick_seconds=60,
+        ranking_queue_batch=10,
+        embedding_pregate_threshold=0.30,
+        embed_client=MagicMock(model="bge-m3"),
+        workspace_controller=workspace_controller,
+        start=False,
+    )
+    job = sched.get_job("boards:auto-publish")
+    assert job is not None, "no boards:auto-publish job was registered"
+
+    summary = AutoPublishSummary(boards_seen=2, rows_added=3, rows_removed=1)
+    captured: list[object] = []
+
+    # `reconcile_auto_boards` is bound at scheduler import time, so the patch
+    # target is the name in `grant_lab.scheduler`, not its defining module.
+    with (
+        caplog.at_level(logging.INFO, logger="grant_lab.scheduler"),
+        patch(
+            "grant_lab.scheduler.reconcile_auto_boards",
+            side_effect=lambda **kw: captured.append(kw["session_factory"]) or summary,
+        ),
+    ):
+        job.func()
+    assert captured == [session_factory], (
+        "the job under id 'boards:auto-publish' does not reconcile auto boards "
+        "with the factory the scheduler was built on"
+    )
+    assert "boards.auto_publish.tick.done" in caplog.text, (
+        "the tick's success log never fired. A NameError inside the closure -- "
+        f"the `log` vs `_logger` slip -- is swallowed by its own except branch: {caplog.text!r}"
+    )
+
+    # And a raising reconcile must not kill the scheduler thread, NOR reach
+    # APScheduler silently: the except branch has to log under its own name.
+    caplog.clear()
+    with (
+        caplog.at_level(logging.INFO, logger="grant_lab.scheduler"),
+        patch(
+            "grant_lab.scheduler.reconcile_auto_boards",
+            side_effect=RuntimeError("db down"),
+        ),
+    ):
+        job.func()  # must not raise
+    assert "boards.auto_publish.failed" in caplog.text, (
+        f"a failing tick logged nothing under its own name: {caplog.text!r}"
+    )
+
+    sched.shutdown(wait=False)
+
+
 _ANALYSIS_JOB_IDS = ("claim_analysis_drain", "claim_analysis_reconcile")
 
 

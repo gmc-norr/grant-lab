@@ -97,10 +97,14 @@ _EXPECTED_ROUTES = frozenset(
         # directly, and are the only routes exempt from the {board_id} rule.
         ("get", "/boards"),
         ("post", "/boards"),
-        # Keyed on a board. All nine must call `_board_for_edit`.
+        # Keyed on a board. All ten must call `_board_for_edit`.
         ("get", "/boards/{board_id}"),
         ("put", "/boards/{board_id}"),
         ("delete", "/boards/{board_id}"),
+        # Read-only, but NOT exempt: it reports what a board would publish,
+        # which is the board's own candidate pool, so it is edit-gated like
+        # every other {board_id} route rather than added to an exempt set.
+        ("get", "/boards/{board_id}/auto-preview"),
         ("get", "/boards/{board_id}/queue"),
         ("get", "/boards/{board_id}/items"),
         ("post", "/boards/{board_id}/items"),

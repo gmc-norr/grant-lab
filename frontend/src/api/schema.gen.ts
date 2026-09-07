@@ -594,6 +594,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/boards/{board_id}/auto-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Auto Preview
+         * @description What this board WOULD publish right now. Read-only, writes nothing.
+         */
+        get: operations["auto_preview_api_boards__board_id__auto_preview_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/boards/{board_id}/items": {
         parameters: {
             query?: never;
@@ -1114,15 +1134,19 @@ export interface paths {
         /**
          * Transfer Profile Owner
          * @description Move a profile to another user. Owner-or-admin, via `_profile_for_edit`'s
-         *     own check (profiles.py:151); `:468` is `update_profile`'s use of the same
-         *     gate.
+         *     own check; `update_profile` inlines the same ladder rather than calling it.
          *
          *     The admin arm is not a convenience: the case that motivated this is an owner
          *     who can no longer log in, so only an admin can act.
          *
-         *     Ownership is load-bearing in SEVEN places (profile_access.py:69,
-         *     profiles.py:151/261/468/612/678, calls.py:641), which is why this is one
-         *     transaction and not four endpoints.
+         *     Ownership is load-bearing in SEVEN places -- `readable_profile_ids`'s owner
+         *     arm (web/profile_access.py), `_profile_for_edit`, `get_profile`,
+         *     `update_profile`, `replace_profile_viewers`, `add_profile_viewer`, and
+         *     `get_call_detail`'s profile resolution (web/api/calls.py) -- which is why
+         *     this is one transaction and not four endpoints. Cited by name: the numeric
+         *     version of this list was already approximate at the base commit (one entry
+         *     pointed at a decorator, another at a parameter) and this branch shifted
+         *     every one of them.
          *
          *     Recipient eligibility is `status == 'active'` and nothing narrower: an
          *     unshared private profile has no viewer rows at all, so a
@@ -2795,6 +2819,26 @@ export interface components {
             /** Google Oidc Enabled */
             google_oidc_enabled: boolean;
         };
+        /**
+         * AutoPreviewOut
+         * @description The four numbers an admin needs before saving a threshold.
+         *
+         *     One number cannot express this: a threshold set too low truncates
+         *     invisibly, and a max_pages raised to fix that makes any given call visible
+         *     for a fraction of the loop. Both are decisions to make on purpose.
+         */
+        AutoPreviewOut: {
+            /** Displayed */
+            displayed: number;
+            /** Loop Seconds */
+            loop_seconds: number;
+            /** Pages */
+            pages: number;
+            /** Qualifying */
+            qualifying: number;
+            /** Truncated */
+            truncated: number;
+        };
         /** BoardCreateIn */
         BoardCreateIn: {
             /**
@@ -2818,7 +2862,7 @@ export interface components {
              */
             approved_at: string;
             /** Approved By */
-            approved_by: number;
+            approved_by: number | null;
             /** Call Id */
             call_id: number;
             /** Deadline */
@@ -2841,6 +2885,8 @@ export interface components {
         BoardOut: {
             /** Approved Count */
             approved_count: number;
+            /** Auto Publish */
+            auto_publish: boolean;
             /**
              * Created At
              * Format: date-time
@@ -2901,8 +2947,12 @@ export interface components {
          *     pydantic's default `extra="ignore"`, not honoured and not rejected.
          */
         BoardSettingsIn: {
+            /** Auto Publish */
+            auto_publish?: boolean | null;
             /** Items Per Page */
             items_per_page?: number | null;
+            /** Max Pages */
+            max_pages?: number | null;
             /** Min Score */
             min_score?: number | null;
             /** Orientation */
@@ -4208,6 +4258,8 @@ export interface components {
             score: number;
             /** Source Name */
             source_name: string | null;
+            /** Suppressed */
+            suppressed: boolean;
             /** Title */
             title: string;
             /** Url */
@@ -8107,6 +8159,118 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    auto_preview_api_boards__board_id__auto_preview_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                board_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AutoPreviewOut"];
+                };
             };
             /** @description Bad Request */
             400: {

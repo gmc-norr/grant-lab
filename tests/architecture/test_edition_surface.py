@@ -165,6 +165,13 @@ def test_match_edition_still_serves_the_release_1_surface(monkeypatch, _base_env
 # One added path: /api/public/boards/{slug} (GET) -- the one unauthenticated
 # route, deliberately in its own module (web/api/public_boards.py) and its own
 # gate exemption (test_boards_permission_single_source.py).
+#
+# Board auto-publish Task 6 (the switch, and the four numbers): 117 -> 118. One
+# added path, /api/boards/{board_id}/auto-preview (GET) -- the read-only
+# preview of what an auto board would carry right now. It is authenticated and
+# edit-gated like every other {board_id} board route, so unlike Task 7's public
+# endpoint it takes no gate exemption; it is pinned in
+# test_boards_permission_single_source.py's `_EXPECTED_ROUTES` instead.
 _BASELINE = Path(__file__).with_name("full_edition_routes.txt")
 
 
@@ -193,7 +200,7 @@ def test_full_edition_route_set_matches_the_committed_baseline(monkeypatch, _bas
 def test_the_baseline_is_not_empty():
     """A baseline of zero routes would make the comparison above vacuous on an
     app that also served nothing."""
-    assert len(_BASELINE.read_text().split()) == 117
+    assert len(_BASELINE.read_text().split()) == 118
 
 
 def test_full_edition_is_unchanged(monkeypatch, _base_env):

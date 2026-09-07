@@ -41,14 +41,23 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm.exc import ObjectDeletedError
 
 from grant_lab.auth.dependencies import get_current_user
 from grant_lab.boards.alerts import owner_undeliverable_map
+from grant_lab.boards.auto_publish import board_selection, qualifying_count
 from grant_lab.boards.qr import QrCode, qr_for
 from grant_lab.boards.queue import board_queue
-from grant_lab.db.models import ORIENTATION_ITEMS_PER_PAGE, Board, BoardItem, Call, Profile, User
+from grant_lab.db.models import (
+    ORIENTATION_ITEMS_PER_PAGE,
+    Board,
+    BoardItem,
+    BoardSuppression,
+    Call,
+    Profile,
+    User,
+)
 from grant_lab.web.api.profiles import _profile_for_edit
 from grant_lab.web.profile_access import readable_profile_ids
 
@@ -71,6 +80,33 @@ _TITLE_DESCRIPTION = (
 # short.
 _SLUG_BYTES = 16
 
+# The largest board the API will let anyone build: `items_per_page * max_pages`
+# may not exceed this. It is a TOTAL, not a per-field bound, because the two
+# fields multiply -- `items_per_page`'s own `le=64` and `max_pages`'s own
+# `le=64` are guard-rails against nonsense in each field alone, and 64 x 64 is
+# 4096 cards, 21x the size every cost measurement on this route was taken at.
+#
+# 192 is not a new product policy. It is the bound that ALREADY held before
+# `max_pages` became settable: `max_pages` was then a DB default of 3 with no
+# API field at all, so the reachable maximum was `items_per_page(<=64) * 3`.
+# Two security fix rounds measured `qr.py`'s cost bound and this route's
+# response budget against exactly that number (see `qr.py`'s module comment
+# and `tests/web/test_api_public_board.py`'s payload-budget test, both of
+# which now name this constant rather than restating 64 * 3). Exposing
+# `max_pages` without this guard raised the API-reachable board to 4096 items
+# -- a ~182 MB response on the UNAUTHENTICATED `/api/public/boards/{slug}`
+# route, whose only other protection is a 60-req/15-min per-IP limiter, and
+# `boards/public.py` applies no limit of its own.
+#
+# Every documented shape still fits: the spec's own worked example tops out at
+# `max_pages: 18`, which at its `items_per_page: 8` is 144.
+#
+# NOT a DB CHECK. `ck_boards_max_pages` is still `max_pages > 0` and
+# `ck_boards_items_per_page` is still `BETWEEN 1 AND 64`; this is the API's
+# bound on what a request may build, enforced in `update_board` beside the
+# capacity-shrink guard, and the tests that name it read it from here.
+MAX_BOARD_ITEMS = 192
+
 
 class BoardOut(BaseModel):
     id: int
@@ -88,6 +124,11 @@ class BoardOut(BaseModel):
     max_pages: int
     page_seconds: int
     min_score: int
+    # The switch. Read back on the OUTPUT side because the settings form seeds
+    # its checkbox from this response, and because `is_published` and this are
+    # different questions: auto_publish FILLS a board, it never makes one
+    # world-readable.
+    auto_publish: bool
     is_published: bool
     created_by: int
     published_by: int | None
@@ -139,6 +180,7 @@ def _to_out(board: Board, approved_count: int, owner_undeliverable: bool) -> Boa
         max_pages=board.max_pages,
         page_seconds=board.page_seconds,
         min_score=board.min_score,
+        auto_publish=board.auto_publish,
         is_published=board.is_published,
         created_by=board.created_by,
         published_by=board.published_by,
@@ -301,6 +343,16 @@ class BoardSettingsIn(BaseModel):
     # corridor display, so anything longer is a typo, not a setting -- a
     # guard-rail against nonsense, not a product limit.
     page_seconds: int | None = Field(default=None, ge=1, le=3600)
+    # Off by default and explicitly settable. Turning this on replaces the
+    # board's hand-picked items on the next 05:00 run -- the UI warns before
+    # saving, this does not, because a partial update has no place to say it.
+    auto_publish: bool | None = None
+    # 1-64. The DB floor is ck_boards_max_pages ("max_pages > 0"); the ceiling
+    # mirrors items_per_page's, and for the same measured reason -- a value
+    # clearing int4's range sails past pydantic and dies on the UPDATE as an
+    # uncaught 500. Exposed because on an auto board this is the ONLY lever
+    # that bounds loop length.
+    max_pages: int | None = Field(default=None, ge=1, le=64)
 
 
 @router.put("/boards/{board_id}", response_model=BoardOut)
@@ -354,8 +406,38 @@ def update_board(
         else:
             new_items_per_page = board.items_per_page
 
+        # `new_max_pages` mirrors `new_items_per_page` above, and it is not
+        # cosmetic. `max_pages` became settable in the same change that added
+        # this line, and BOTH sides of the comparison used to multiply by
+        # `board.max_pages` -- the OLD value -- so a request that shrank only
+        # `max_pages` gave `new_cap == old_cap`, `new_cap < old_cap` was False,
+        # and `approved_count` was never consulted. MEASURED: a full landscape
+        # board (8 x 3 = 24 approved) sent {"max_pages": 1} returned 200, kept
+        # all 24 rows, and left a board whose real capacity was 8.
+        #
+        # Assigning `board.max_pages = body.max_pages` BEFORE the guard is not
+        # the fix either, and was measured too: both caps then read the NEW
+        # value, collapse to `8 == 8`, and the comparison becomes structurally
+        # incapable of firing on a shrink. The old cap must be read off the
+        # BOARD and the new cap off the REQUEST.
+        new_max_pages = body.max_pages if body.max_pages is not None else board.max_pages
         old_cap = board.items_per_page * board.max_pages
-        new_cap = new_items_per_page * board.max_pages
+        new_cap = new_items_per_page * new_max_pages
+        # The TOTAL bound, refused before the shrink guard below and computed
+        # from the SAME `new_items_per_page` / `new_max_pages` that guard uses.
+        # The shrink guard cannot cover this: it fires only when `new_cap <
+        # old_cap`, so a request that GROWS the board sails past it. Both
+        # fields are individually bounded at 64 and their product is not, so
+        # {"items_per_page": 64, "max_pages": 64} was a 4096-item board any
+        # profile editor could build in one PUT -- see `MAX_BOARD_ITEMS`.
+        if new_cap > MAX_BOARD_ITEMS:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{new_items_per_page} per page across {new_max_pages} pages is "
+                    f"{new_cap} cards; a board holds at most {MAX_BOARD_ITEMS}"
+                ),
+            )
         if new_cap < old_cap and new_cap < approved_count:
             # Only name the orientation when it is what DETERMINED
             # new_items_per_page -- i.e. the same condition that branch above
@@ -367,16 +449,35 @@ def update_board(
             # {"orientation":"landscape","items_per_page":3} got "landscape
             # holds 9", though landscape's own default holds 24 -- the shrink
             # came from the items_per_page override, not the flip.
-            if orientation_changed and body.items_per_page is None:
+            #
+            # The same misattribution reaches `max_pages` (fix round 1 /
+            # MINOR 1): `new_cap` is now `new_items_per_page * new_max_pages`,
+            # so a request that flips orientation AND shrinks `max_pages` in
+            # the same body -- the auto-publish settings form always sends
+            # both -- must not blame the orientation either. MEASURED: a
+            # portrait 4x3 board with 12 approved, flipped to landscape with
+            # `max_pages: 1`, said "landscape holds 8" though landscape's own
+            # default (8 x 3 = 24) does not shrink anything; the `max_pages`
+            # override is what caused the shrink.
+            if orientation_changed and body.items_per_page is None and body.max_pages is None:
                 cap_description = f"{new_orientation} holds {new_cap}"
             else:
                 cap_description = f"the new settings hold {new_cap}"
+            # Removal is no longer a plain delete: `unapprove_item` writes a
+            # `BoardSuppression` for every card it takes down, which keeps that
+            # call off THIS board until somebody approves it again -- and on an
+            # auto board that is the only thing that can undo it, since the
+            # 05:00 job would otherwise put the card straight back. An operator
+            # told only to "remove N first" would not learn that from this
+            # message, so it says what removal now costs.
             raise HTTPException(
                 status_code=409,
                 detail=(
                     f"this board has {approved_count} approved calls; "
                     f"{cap_description} — remove "
-                    f"{approved_count - new_cap} first"
+                    f"{approved_count - new_cap} first, and each removal also "
+                    "suppresses that call, keeping it off this board until it "
+                    "is approved again"
                 ),
             )
 
@@ -390,12 +491,53 @@ def update_board(
             board.min_score = body.min_score
         if body.page_seconds is not None:
             board.page_seconds = body.page_seconds
+        if body.auto_publish is not None:
+            board.auto_publish = body.auto_publish
+        if body.max_pages is not None:
+            board.max_pages = body.max_pages
 
         session.commit()
         session.refresh(board)
         undeliverable = owner_undeliverable_map(session, [board.profile_id])[board.profile_id]
         out = _to_out(board, approved_count, undeliverable)
     return out
+
+
+class AutoPreviewOut(BaseModel):
+    """The four numbers an admin needs before saving a threshold.
+
+    One number cannot express this: a threshold set too low truncates
+    invisibly, and a max_pages raised to fix that makes any given call visible
+    for a fraction of the loop. Both are decisions to make on purpose.
+    """
+
+    qualifying: int
+    displayed: int
+    truncated: int
+    pages: int
+    loop_seconds: int
+
+
+@router.get("/boards/{board_id}/auto-preview", response_model=AutoPreviewOut)
+def auto_preview(
+    request: Request,
+    board_id: int,
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    """What this board WOULD publish right now. Read-only, writes nothing."""
+    sf = request.app.state.session_factory
+    with sf() as session:
+        board = _board_for_edit(session, board_id=board_id, user=user)
+        qualifying = qualifying_count(session, board=board)
+        displayed = len(board_selection(session, board=board))
+        pages = -(-displayed // board.items_per_page) if displayed else 0
+        return AutoPreviewOut(
+            qualifying=qualifying,
+            displayed=displayed,
+            truncated=qualifying - displayed,
+            pages=pages,
+            loop_seconds=pages * board.page_seconds,
+        )
 
 
 @router.delete("/boards/{board_id}", status_code=204)
@@ -438,6 +580,10 @@ class QueueCallOut(BaseModel):
     source_name: str | None
     score: int
     already_approved: bool
+    # Why this row will not go up on its own: an operator took it off this
+    # board. It stays in the list so the reason is visible rather than the row
+    # silently vanishing, and naming it in `call_ids` still brings it back.
+    suppressed: bool
 
 
 class BoardQueueOut(BaseModel):
@@ -455,7 +601,12 @@ class BoardItemOut(BaseModel):
     deadline: datetime | None
     source_name: str | None
     position: int
-    approved_by: int
+    # NULL when boards/auto_publish.py published this row. The column went
+    # nullable in 0078 and this MUST move with it: _item_out passes the value
+    # straight through, so leaving this `int` turns every auto board's item
+    # list into a 500 raised inside the response model, far from the job that
+    # wrote the row.
+    approved_by: int | None
     approved_at: datetime
 
 
@@ -511,6 +662,7 @@ def get_board_queue(
                 source_name=(row.call.source.name if row.call.source else None),
                 score=row.score,
                 already_approved=row.already_approved,
+                suppressed=row.suppressed,
             )
             for row in rows
         ]
@@ -570,7 +722,14 @@ def _candidates_at_or_above(
         for row in rows:
             if row.score < min_score:
                 return call_ids
-            if not row.already_approved:
+            # `suppressed` matters as much as `already_approved` here, and for
+            # a sharper reason. Approving a suppressed call would ALSO clear
+            # its suppression below -- so a sweep that never named the call
+            # would undo a deliberate takedown, and on an auto board empty the
+            # exception list the 05:00 job reads. The spec's licence to clear
+            # is that an EXPLICIT approval is the stronger signal; a threshold
+            # sweep is explicit about no call in particular.
+            if not row.already_approved and not row.suppressed:
                 call_ids.append(row.call.id)
         if len(rows) < page_size:
             return call_ids
@@ -731,11 +890,12 @@ def approve_items(
             # Why: this loop used to call `qr_for` inline, inside this session
             # and after `_lock_board_row`, which reversed -- for this route --
             # the rule public_boards.py states as CRITICAL for the anonymous
-            # route. The measured cost was ~8.7 s (192-item API ceiling x
-            # ~45.5 ms, qr.py:101-103) holding a pooled connection, this
+            # route. The measured cost was ~8.7 s (the `MAX_BOARD_ITEMS`-item
+            # API ceiling x ~45.5 ms -- see `qr.py`'s ARITHMETIC block, which
+            # names the same constant) holding a pooled connection, this
             # board's `SELECT ... FOR UPDATE`, AND -- through _board_for_edit
-            # -> _profile_for_edit -- the PROFILE row lock, which blocks 15
-            # routes including 4 GETs. `qr.py`'s `_encode_lock` is
+            # -> _profile_for_edit -- the PROFILE row lock, which blocks 16
+            # routes including 5 GETs. `qr.py`'s `_encode_lock` is
             # process-wide, so K concurrent approves scaled each other's hold,
             # and `db/session.py` sets no lock_timeout.
             #
@@ -745,6 +905,16 @@ def approve_items(
             # and is encoded here, under the lock, as before. That is bounded
             # by the same `cap` and is rare; it is not zero, and this comment
             # says so rather than claiming the hold is gone.
+
+            # An explicit approval is a newer and stronger signal from the same
+            # human than an old takedown. Without this a call removed once
+            # could never be re-approved, on any board.
+            session.execute(
+                delete(BoardSuppression).where(
+                    BoardSuppression.board_id == board.id,
+                    BoardSuppression.call_id.in_(new_ids),
+                )
+            )
             for offset, cid in enumerate(new_ids):
                 url = urls.get(cid) or ""
                 # Skip the encoder for an empty url. Call.url is Text NOT NULL
@@ -843,6 +1013,15 @@ def unapprove_item(
         if item is None:
             raise HTTPException(status_code=404, detail="item not found on this board")
         session.delete(item)
+        # Deleting the row is not a takedown on an auto board: the 05:00 job
+        # rebuilds from the candidate set and would put this card straight
+        # back. Record the decision so it survives. Written on MANUAL boards
+        # too -- uniform behaviour beats a rule that depends on a mode, and it
+        # means flipping a board to auto later does not resurrect everything
+        # its owner ever removed.
+        session.merge(
+            BoardSuppression(board_id=board.id, call_id=call_id, suppressed_by=user.id)
+        )
         session.commit()
     return Response(status_code=204)
 

@@ -150,7 +150,7 @@ def _profile_for_edit(session, *, profile_id: int, user: User) -> Profile:
     #
     # The lock lives here rather than in the transfer handler on purpose:
     # locking one caller would leave the other six racing it. The cost is that
-    # SEVEN call sites inherit it, reaching FIFTEEN routes -- and FOUR of those
+    # SEVEN call sites inherit it, reaching SIXTEEN routes -- and FIVE of those
     # are reads, which now take an exclusive row lock they do not need:
     #
     # Named, not numbered: line citations here were invalidated twice by other
@@ -162,8 +162,9 @@ def _profile_for_edit(session, *, profile_id: int, user: User) -> Profile:
     #   PUT  /profiles/{id}/visibility  set_profile_visibility
     #   PUT  /profiles/{id}/owner       transfer_profile_owner
     #   POST /boards                    boards.py::create_board
-    #   (via boards.py::_board_for_edit) 9 board routes, of which
-    #        GET /boards/{id}, GET .../queue and GET .../items are READS
+    #   (via boards.py::_board_for_edit) 10 board routes, of which
+    #        GET /boards/{id}, GET .../queue, GET .../items and
+    #        GET .../auto-preview are READS
     #
     # That is deliberate, not an oversight: a board's edit permission IS its
     # profile's edit permission, so the read paths share the gate and cannot
