@@ -1,7 +1,7 @@
 # Decision notes — the user's own reason, attached to the call they hid
 
 Date: 2026-09-07
-Status: rev 3, design approved, not yet planned.
+Status: rev 4, design approved, planned.
 Origin: suggestion 4 of an outside product review ("lightweight feedback"), the
 last of that review's four *Useful Additions* to be built. The other three are
 board health (merged), saved-call follow-up (blocked — see §8) and visible
@@ -10,6 +10,8 @@ matching status (deferred).
 **Rev 2** answers an outside review of rev 1: six Medium findings and four
 open questions, all confirmed against the code, none refuted. §9 records what
 changed and why. Rev 1 got one load-bearing mechanism wrong.
+
+**Rev 4** records three design questions the implementation plan surfaced, all found by an outside review of that plan: a stale-write race the endpoint had to answer (D11), that D9 clears on a *flip* and not on every upsert, and that "add a note later" was unreachable (D12). §11 carries them.
 
 **Rev 3** settles the edition question rev 2 left open. The deployment is
 `match` only and `full` is the next version, so §5's table has one shipping
@@ -223,9 +225,12 @@ has to remember to check both.
 Today the upserts do not touch `note` (§2), so hiding a call you had saved keeps
 the note you wrote while saving it, and vice versa. That is the wrong default.
 
-Both endpoints' `on_conflict_do_update` gain `note=None`. Rationale: the code
-already states that a flip **is a new decision** — it moves `decided_at` and
-`decided_by` for exactly that reason. D4 already establishes that a note belongs
+Both endpoints' `on_conflict_do_update` clear the note — but **only when the
+state actually changes**, via a `CASE` on the existing row's `state`. A bare
+`note=None` would also fire on `hidden → hidden`, and `h` is a keyboard key
+people press twice: a double-tap would silently destroy the reason just typed.
+Rationale for clearing at all: the code already states that a flip **is a new
+decision** — it moves `decided_at` and `decided_by` for exactly that reason. D4 already establishes that a note belongs
 to its decision and dies with it. A flip is the same principle applied to the
 case rev 1 missed; leaving the note would attach one decision's reasoning to a
 different decision, and D7's ordering would then date it by the new decision.
@@ -597,3 +602,51 @@ There is no cheaper door through the existing admin dashboard.
 but that is `ranking.eval.load_last_report()`, the evaluation summary
 (`n_fixture`, `n_compared`, `tau`). It is the scoreboard, not the candidate
 list, and it has nowhere to put a note.
+
+
+## 11. Three decisions the plan surfaced
+
+Rev 1–3 of this spec were reviewed against the code. Rev 4 adds what only
+writing the *implementation* exposed — recorded here rather than in the plan
+alone, because each is a design question with a user-visible answer.
+
+### D11 — A note write is conditional on the decision it was written about
+
+The obvious endpoint reads the decision row, then writes the note to it. That
+is a stale-write race, and it does not need two users to hit: **one person with
+two tabs is enough.** Hide a call in tab A and start typing; save the same call
+in tab B, which clears the note (D9); tab A's write then lands *"we should
+apply"* on a decision that is now `hidden`. `(call_id, profile_id)` does not
+identify which decision was annotated. The state does.
+
+So the request carries an optional `expected_state`, and the write is one
+conditional `UPDATE` whose `WHERE` includes it. Zero rows matched means either
+no decision (**404**) or the decision moved (**409**) — different answers, and
+only a second read tells them apart. The strip always sends it, because it
+already holds the state in the target it was created with (D10). A caller that
+omits it gets the unconditional write, so `curl` is not forced to know.
+
+409 is not an error the user must resolve: the strip already keeps the typed
+text on failure (D10), so the recovery is to look at what the call's state
+actually is now.
+
+### D12 — "Add a note later" has to be reachable
+
+The strip is deliberately ignorable (D2), which means **most notes will not be
+written at the moment of the decision.** A UI that offers editing only where a
+note already exists therefore offers it almost nowhere: the only path to a
+first note would be the strip that was just ignored.
+
+So the Saved and Hidden rows carry an **"Add note"** control when the note is
+null, opening the same editor. This is why the strip is a component with an
+`initialNote` input rather than markup inside the feed — one editor, three
+entry points.
+
+### D13 — The mined notes query is bounded, not merely small
+
+D7 caps the notes *in the response* at three per candidate. The query behind it
+was uncapped: it read every hidden note for every candidate pair and discarded
+the surplus in Python. Notes per pair are bounded by readers-of-a-profile,
+which is small — but "small in practice" is not a bound, and this is the one
+query in this feature whose size no schema constraint limits. It now carries an
+explicit `LIMIT`.

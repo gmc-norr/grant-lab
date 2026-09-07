@@ -26,6 +26,38 @@
 - **`max_length=1000`** on the request model (D8). Whitespace-only becomes `NULL`, never `""`.
 - **Regenerate `docs/ARCHITECTURE.md`** in the same commit as any structural move: `uv run python scripts/gen_architecture.py`. Do not hand-edit it.
 
+## The mutation protocol
+
+Every task ends by mutating the thing it just built and confirming the right
+test reddens. Use **this** shape every time. It is written out rather than
+described because the obvious shorter version is broken:
+
+```bash
+cd /home/parlar_ai/dev/grant-lab
+set -o pipefail          # `pytest | tail` returns TAIL's status otherwise:
+                         # `false | tail -1` exits 0. VERIFIED 2026-09-07.
+cp <FILE> /tmp/<BAK>
+python3 - <<'PY'
+# ... the mutation, with an assert on the anchor ...
+PY
+uv run pytest <TARGET> -v; echo "MUTANT EXIT=$?"
+# RESTORE EXPLICITLY, right here.
+cp /tmp/<BAK> <FILE>
+git diff --quiet <FILE> && echo RESTORED || { echo "MUTANT STILL IN TREE"; exit 1; }
+uv run pytest <TARGET> -q   # unmutated, must PASS, before any commit
+```
+
+**Do not use `trap ... EXIT` for this.** It fires when the *shell* exits, not
+between commands, so a mutation and a later `git commit` in the same shell
+commit the mutant. A second `trap ... EXIT` also **replaces** the first rather
+than adding to it. Both verified 2026-09-07:
+`bash -c 'trap "echo FIRST" EXIT; trap "echo SECOND" EXIT; true'` prints only
+`SECOND`. An earlier version of this plan relied on the trap at three sites.
+
+**Absolute paths everywhere.** A relative path in a restore that runs after a
+`cd` silently fails and leaves the mutant in the tree — that has happened here
+before.
+
 ## File Structure
 
 | File | Change | Responsibility |
@@ -183,6 +215,48 @@ def test_note_over_1000_chars_is_rejected(monkeypatch, pg_url, pg_session_factor
     assert r.status_code == 422
 
 
+def test_a_stale_expected_state_is_a_409_and_writes_nothing(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """One user, two tabs. Tab A hides and starts typing; tab B saves the same
+    call, which clears the note (D9). Tab A's write must NOT land: a reason
+    written about hiding, filed against a save, is the exact misfiling D9
+    exists to prevent, and (call_id, profile_id) cannot tell the two apart."""
+    cid = _seed_call(pg_session_factory)
+    app = _setup(monkeypatch, pg_url)
+    client, uid, pid = _login(app, pg_session_factory)
+    with client:
+        client.post(f"/api/calls/{cid}/hide", params={"profile_id": pid})
+        client.post(f"/api/calls/{cid}/save", params={"profile_id": pid})
+        r = client.put(
+            f"/api/calls/{cid}/note",
+            params={"profile_id": pid},
+            json={"note": "wrong field", "expected_state": "hidden"},
+        )
+    assert r.status_code == 409
+    with pg_session_factory() as s:
+        row = s.execute(
+            select(CallDecision).where(CallDecision.user_id == uid)
+        ).scalar_one()
+    assert (row.state, row.note) == ("saved", None)
+
+
+def test_without_expected_state_the_write_is_unconditional(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """The field is optional and the 409 arm must not fire without it, or every
+    caller that does not track state gets a 409 it cannot act on."""
+    cid = _seed_call(pg_session_factory)
+    app = _setup(monkeypatch, pg_url)
+    client, _uid, pid = _login(app, pg_session_factory)
+    with client:
+        client.post(f"/api/calls/{cid}/hide", params={"profile_id": pid})
+        r = client.put(
+            f"/api/calls/{cid}/note", params={"profile_id": pid}, json={"note": "ok"}
+        )
+    assert r.status_code == 200
+
+
 def test_note_requires_auth(monkeypatch, pg_url, pg_session_factory):
     cid = _seed_call(pg_session_factory)
     app = _setup(monkeypatch, pg_url)
@@ -218,6 +292,11 @@ class DecisionNoteIn(BaseModel):
     """
 
     note: str | None = Field(default=None, max_length=1000)
+    # The state the CLIENT believed it was annotating. Optional, so a curl
+    # user is not forced to know it; ALWAYS sent by the strip, which holds it
+    # in the target it was created with. This closes the stale-write race in
+    # the endpoint below.
+    expected_state: Literal["saved", "hidden"] | None = None
 
 
 class DecisionNoteOut(BaseModel):
@@ -257,39 +336,72 @@ def set_decision_note(
         if session.get(Call, call_id) is None:
             raise HTTPException(status_code=404, detail="call not found")
         _readable_active_profile_or_404(session, user, profile_id)
-        row = session.scalar(
-            select(CallDecision).where(
-                CallDecision.user_id == user.id,
-                CallDecision.profile_id == profile_id,
-                CallDecision.call_id == call_id,
-            )
-        )
-        if row is None:
-            raise HTTPException(status_code=404, detail="decision not found")
         note = (body.note or "").strip() or None
-        row.note = note
+        where = [
+            CallDecision.user_id == user.id,
+            CallDecision.profile_id == profile_id,
+            CallDecision.call_id == call_id,
+        ]
+        # ONE conditional UPDATE, not a SELECT then an assignment. Read-then-
+        # write is a stale-write race, and it is reachable by ONE user with two
+        # tabs: read a SAVED decision here, flip it to hidden over there (which
+        # clears the note, D9), and this write then commits "we should apply"
+        # onto the HIDDEN decision -- exactly the misfiling D9 exists to
+        # prevent. (call_id, profile_id) does not identify WHICH decision was
+        # annotated. The state does.
+        stmt = update(CallDecision).where(*where).values(note=note)
+        if body.expected_state is not None:
+            stmt = stmt.where(CallDecision.state == body.expected_state)
+        if session.execute(stmt).rowcount == 0:
+            # "No decision" and "the decision moved under you" are both
+            # rowcount 0, and only a second read tells them apart. They are
+            # different answers: 404 means there is nothing to write to, 409
+            # means the user's words are fine but belong to a decision that no
+            # longer exists in that state.
+            current = session.scalar(select(CallDecision.state).where(*where))
+            session.rollback()
+            if current is None:
+                raise HTTPException(status_code=404, detail="decision not found")
+            raise HTTPException(status_code=409, detail="decision changed")
         session.commit()
     return DecisionNoteOut(decision_note=note)
 ```
 
-`CallDecision` is already imported in this file's `from grant_lab.db.models import (...)` block; `select`, `Field`, `Query` and `HTTPException` are already imported. Verify with `grep -n 'CallDecision' src/grant_lab/web/api/calls.py | head -3` before assuming.
+`CallDecision`, `select`, `Field`, `Query`, `Literal` and `HTTPException` are already imported in this file. **`update` is NOT** — add it to the `from sqlalchemy import delete, func, select` line. Verify with `grep -n '^from sqlalchemy import' src/grant_lab/web/api/calls.py`.
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [ ] **Step 5: Update the full-edition route baseline**
+
+`tests/architecture/full_edition_routes.txt` is a **118-line snapshot of every
+route the full edition registers** — it already lists
+`/api/calls/{call_id}/hide` and `/api/calls/{call_id}/save`, so a new path
+breaks it. Regenerate with the command written in the comment near the top of
+`tests/architecture/test_edition_surface.py`; do not hand-add the line, or the
+file stops being a snapshot of anything.
 
 ```bash
-uv run pytest tests/test_api_calls_note.py -v
+uv run pytest tests/architecture/test_edition_surface.py -v
+git diff tests/architecture/full_edition_routes.txt
 ```
 
-Expected: 6 passed.
+Expected: exactly one added line, `/api/calls/{call_id}/note`. More than one
+means something else moved, and you must find out what before continuing.
 
-- [ ] **Step 6: Run the adverse mutation for G4**
+- [ ] **Step 6: Run the tests to verify they pass**
+
+```bash
+uv run pytest tests/test_api_calls_note.py tests/architecture/test_edition_surface.py -v
+```
+
+Expected: 8 passed in the note file, architecture green.
+
+- [ ] **Step 7: Run the adverse mutation for G4**
 
 The gate is only a gate if it can go red. Add `decided_at=func.now()` to the write and confirm `test_a_note_write_does_not_move_decided_at` fails:
 
 ```bash
 cd /home/parlar_ai/dev/grant-lab
+set -o pipefail
 cp src/grant_lab/web/api/calls.py /tmp/calls.py.bak
-trap 'cp /tmp/calls.py.bak /home/parlar_ai/dev/grant-lab/src/grant_lab/web/api/calls.py' EXIT
 python3 - <<'PY'
 from pathlib import Path
 p = Path("/home/parlar_ai/dev/grant-lab/src/grant_lab/web/api/calls.py")
@@ -299,21 +411,20 @@ new = "        row.note = note\n        row.decided_at = func.now()\n        ses
 assert s.count(old) == 1
 p.write_text(s.replace(old, new))
 PY
-uv run pytest tests/test_api_calls_note.py::test_a_note_write_does_not_move_decided_at -v
+uv run pytest tests/test_api_calls_note.py::test_a_note_write_does_not_move_decided_at -v; echo "MUTANT EXIT=$?"
+cp /tmp/calls.py.bak /home/parlar_ai/dev/grant-lab/src/grant_lab/web/api/calls.py
+git diff --quiet src/grant_lab/web/api/calls.py && echo "UNEXPECTEDLY CLEAN - your step 3/4 edits are gone" || echo RESTORED
+uv run pytest tests/test_api_calls_note.py -q
 ```
 
-Expected: **FAILED**. Then let the trap restore, and confirm:
+Expected: the mutant run **FAILED**, then `RESTORED`, then the unmutated run
+**passes**. See the mutation protocol above for why the restore is explicit and
+not a `trap`.
+
+- [ ] **Step 8: Commit**
 
 ```bash
-git diff --stat src/grant_lab/web/api/calls.py
-```
-
-Expected: the only changes are yours from steps 3–4. **Use the absolute path in the trap** — a relative path in a trap that runs after a `cd` silently fails and leaves the mutant in the tree.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add src/grant_lab/web/api/calls.py tests/test_api_calls_note.py
+git add src/grant_lab/web/api/calls.py tests/test_api_calls_note.py tests/architecture/full_edition_routes.txt
 git commit -m "feat(calls): let a researcher say why, on a decision they already made
 
 PUT /api/calls/{id}/note writes call_decisions.note -- a column migration
@@ -370,9 +481,11 @@ def test_hiding_a_saved_call_clears_its_note(monkeypatch, pg_url, pg_session_fac
 
 
 def test_saving_a_hidden_call_clears_its_note(monkeypatch, pg_url, pg_session_factory):
-    """The other direction. Written separately, not parametrized: dropping
-    note=None from ONE of the two set_ blocks must redden exactly one of these
-    two tests, and a parametrized pair makes that impossible to see."""
+    """The other direction, written separately because the two set_ blocks are
+    separate code and either can be got wrong alone. (Parametrized cases are
+    independently identifiable too, so parametrizing would NOT have hidden the
+    split -- an earlier draft of this plan claimed it would, and that was
+    wrong.)"""
     cid = _seed_call(pg_session_factory)
     app = _setup(monkeypatch, pg_url)
     client, uid, pid = _login(app, pg_session_factory)
@@ -391,9 +504,38 @@ def test_saving_a_hidden_call_clears_its_note(monkeypatch, pg_url, pg_session_fa
     assert (row.state, row.note) == ("saved", None)
 
 
+def test_re_hiding_an_already_hidden_call_keeps_the_note(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """D9 clears the note on a FLIP, not on every upsert. `h` is a keyboard key
+    and people press it twice; an unconditional note=None in the set_ would
+    silently destroy the reason they had just typed. The CASE expression is
+    what makes hidden -> hidden a no-op for the note."""
+    cid = _seed_call(pg_session_factory)
+    app = _setup(monkeypatch, pg_url)
+    client, uid, pid = _login(app, pg_session_factory)
+    with client:
+        client.post(f"/api/calls/{cid}/hide", params={"profile_id": pid})
+        client.put(
+            f"/api/calls/{cid}/note",
+            params={"profile_id": pid},
+            json={"note": "wrong field"},
+        )
+        client.post(f"/api/calls/{cid}/hide", params={"profile_id": pid})
+    with pg_session_factory() as s:
+        row = s.execute(
+            select(CallDecision).where(CallDecision.user_id == uid)
+        ).scalar_one()
+    assert row.note == "wrong field"
+
+
 def test_unhiding_destroys_the_note(monkeypatch, pg_url, pg_session_factory):
     """G3, D4. Undecided is the ABSENCE of a row, so the note dies with the
-    decision. Must reject a soft-delete: re-hiding starts blank."""
+    decision, and re-hiding starts blank.
+
+    NOTHING IS WRITTEN AFTER THE UNHIDE. An earlier draft of this gate sent
+    PUT {"note": null} and then asserted null -- the endpoint echoing its own
+    input. It passed with the DELETE replaced by a no-op."""
     cid = _seed_call(pg_session_factory)
     app = _setup(monkeypatch, pg_url)
     client, _uid, pid = _login(app, pg_session_factory)
@@ -403,11 +545,12 @@ def test_unhiding_destroys_the_note(monkeypatch, pg_url, pg_session_factory):
             f"/api/calls/{cid}/note", params={"profile_id": pid}, json={"note": "no"}
         )
         client.delete(f"/api/calls/{cid}/hide", params={"profile_id": pid})
+    # The ROW is gone -- that IS the guarantee, and it is read, never written.
+    with pg_session_factory() as s:
+        assert s.execute(select(CallDecision)).scalars().all() == []
+    # Re-hide and INSPECT. No write between the unhide and the assertion.
+    with client:
         client.post(f"/api/calls/{cid}/hide", params={"profile_id": pid})
-        r = client.put(
-            f"/api/calls/{cid}/note", params={"profile_id": pid}, json={"note": None}
-        )
-    assert r.json() == {"decision_note": None}
     with pg_session_factory() as s:
         row = s.execute(select(CallDecision)).scalar_one()
     assert row.note is None
@@ -438,12 +581,21 @@ In `hide_call`, change the `set_` dict:
                     "state": "hidden",
                     "decided_at": func.now(),
                     "decided_by": user.id,
-                    "note": None,
+                    # Cleared ONLY on a real flip. An unconditional None would
+                    # also wipe the note on hidden -> hidden, and `h` is a
+                    # keyboard key people press twice -- so a double-tap would
+                    # silently destroy the reason just typed. In ON CONFLICT DO
+                    # UPDATE a bare column reference is the EXISTING row's
+                    # value, which is what makes this comparison meaningful.
+                    "note": case(
+                        (CallDecision.state != "hidden", None),
+                        else_=CallDecision.note,
+                    ),
                 },
             )
 ```
 
-In `save_call`, the same, with `"state": "saved"`:
+Add `case` to the `from sqlalchemy import ...` line. In `save_call`, the same, with `"state": "saved"`:
 
 ```python
             .on_conflict_do_update(
@@ -454,7 +606,11 @@ In `save_call`, the same, with `"state": "saved"`:
                     "state": "saved",
                     "decided_at": func.now(),
                     "decided_by": user.id,
-                    "note": None,
+                    # See hide_call: cleared on a real flip only (D9).
+                    "note": case(
+                        (CallDecision.state != "saved", None),
+                        else_=CallDecision.note,
+                    ),
                 },
             )
 ```
@@ -471,8 +627,8 @@ Expected: 9 passed.
 
 ```bash
 cd /home/parlar_ai/dev/grant-lab
+set -o pipefail
 cp src/grant_lab/web/api/calls.py /tmp/calls2.bak
-trap 'cp /tmp/calls2.bak /home/parlar_ai/dev/grant-lab/src/grant_lab/web/api/calls.py' EXIT
 python3 - <<'PY'
 from pathlib import Path
 p = Path("/home/parlar_ai/dev/grant-lab/src/grant_lab/web/api/calls.py")
@@ -481,7 +637,16 @@ old = '''                set_={
                     "state": "hidden",
                     "decided_at": func.now(),
                     "decided_by": user.id,
-                    "note": None,
+                    # Cleared ONLY on a real flip. An unconditional None would
+                    # also wipe the note on hidden -> hidden, and `h` is a
+                    # keyboard key people press twice -- so a double-tap would
+                    # silently destroy the reason just typed. In ON CONFLICT DO
+                    # UPDATE a bare column reference is the EXISTING row's
+                    # value, which is what makes this comparison meaningful.
+                    "note": case(
+                        (CallDecision.state != "hidden", None),
+                        else_=CallDecision.note,
+                    ),
                 },'''
 new = '''                set_={
                     "state": "hidden",
@@ -491,12 +656,46 @@ new = '''                set_={
 assert s.count(old) == 1
 p.write_text(s.replace(old, new))
 PY
-uv run pytest tests/test_api_calls_note.py -v -k "clears_its_note"
+uv run pytest tests/test_api_calls_note.py -v -k "clears_its_note"; echo "MUTANT EXIT=$?"
+cp /tmp/calls2.bak /home/parlar_ai/dev/grant-lab/src/grant_lab/web/api/calls.py
+git diff --quiet src/grant_lab/web/api/calls.py && echo "UNEXPECTEDLY CLEAN - your edits are gone" || echo RESTORED
+uv run pytest tests/test_api_calls_note.py -q
 ```
 
-Expected: `test_hiding_a_saved_call_clears_its_note` **FAILED**, `test_saving_a_hidden_call_clears_its_note` **PASSED**. Exactly one red. If both go red, the two tests are not independent and one of them is testing the wrong direction.
+Expected: `test_hiding_a_saved_call_clears_its_note` **FAILED**, `test_saving_a_hidden_call_clears_its_note` **PASSED**. Exactly one red — if both go red the two tests are not independent, and one of them is testing the wrong direction. Then `RESTORED`, then the unmutated run passes.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Run the second mutation — prove the CASE is load-bearing**
+
+Replace the `case(...)` in `hide_call` with a bare `None` — the obvious,
+wrong-looking-right version this plan started with:
+
+```bash
+cd /home/parlar_ai/dev/grant-lab
+set -o pipefail
+cp src/grant_lab/web/api/calls.py /tmp/calls3.bak
+python3 - <<'PY'
+from pathlib import Path
+p = Path("/home/parlar_ai/dev/grant-lab/src/grant_lab/web/api/calls.py")
+s = p.read_text()
+old = """                    "note": case(
+                        (CallDecision.state != "hidden", None),
+                        else_=CallDecision.note,
+                    ),"""
+assert s.count(old) == 1
+p.write_text(s.replace(old, '                    "note": None,'))
+PY
+uv run pytest tests/test_api_calls_note.py -v; echo "MUTANT EXIT=$?"
+cp /tmp/calls3.bak /home/parlar_ai/dev/grant-lab/src/grant_lab/web/api/calls.py
+git diff --quiet src/grant_lab/web/api/calls.py && echo "UNEXPECTEDLY CLEAN - your edits are gone" || echo RESTORED
+uv run pytest tests/test_api_calls_note.py -q
+```
+
+Expected: **only** `test_re_hiding_an_already_hidden_call_keeps_the_note`
+reddens. Both flip tests must stay green — the mutant still clears on a flip,
+it just also clears when it should not. If a flip test goes red too, the
+double-tap test is not isolating the case expression.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add src/grant_lab/web/api/calls.py tests/test_api_calls_note.py
@@ -763,7 +962,15 @@ In `src/grant_lab/web/api/calls.py`, add to `CallOut` after `escalated: bool`:
     decision_note: str | None
 ```
 
-Then the two unpack sites. The first:
+**Three unpack sites, not two.** `tests/test_dashboard_readmodel.py` contains
+`call, _ = view.calls[0]`, which becomes a `ValueError: too many values to
+unpack` the moment the tuple widens. Find every one before you start:
+
+```bash
+grep -rn 'view\.calls\|dashboard\.calls' src tests --include=*.py
+```
+
+Change that test to `call, _, _ = view.calls[0]`. Then the two in `calls.py`. The first:
 
 ```python
         call_ids = [call.id for call, _, _ in dashboard.calls]
@@ -807,16 +1014,41 @@ Add the identical test for `saved`.
 - [ ] **Step 8: Run the full backend suite and re-measure**
 
 ```bash
+set -o pipefail   # else tail's exit status hides a failing suite
 uv run pytest -n 16 --dist loadfile -q 2>&1 | tail -5
 ```
 
 Expected: `1 skipped`, zero FAILED. Record the new collected total; the baseline is `5484` and your delta is the number of tests you added in Tasks 1–3. Do not adjust an expected number to make the arithmetic close.
 
-- [ ] **Step 9: Lint and commit**
+- [ ] **Step 9: Measure the page latency, before and after**
+
+Spec §7 requires this and rev 2 of the plan forgot it. Adding a column to an
+existing join should be close to free, but `8fee390e` took 71-78% off this
+query's row-load and an unmeasured regression would quietly undo measured work.
+
+Write a throwaway script under the scratch directory that seeds one profile
+with a full page (200 calls, all `hidden` with notes), times
+`build_dashboard_view(view="hidden", ...)` over 5 runs, and prints the median.
+Run it on `git stash`ed (pre-change) and unstashed (post-change) trees.
+
+```bash
+cd /home/parlar_ai/dev/grant-lab
+uv run python /tmp/claude-1066/bench_notes.py   # post-change
+git stash push src/grant_lab/web/dashboard.py src/grant_lab/web/api/calls.py
+uv run python /tmp/claude-1066/bench_notes.py   # pre-change
+git stash pop
+```
+
+**Assert the row count first.** A benchmark that measures zero rows reports a
+wonderful number — that has happened in this repo. Record both medians in the
+commit message. If the delta exceeds ~10%, stop and report it rather than
+committing; that is an ESCALATE, not a judgement call to make alone.
+
+- [ ] **Step 10: Lint and commit**
 
 ```bash
 uv run ruff check src tests && uv run ruff format --check src/grant_lab/web/dashboard.py src/grant_lab/web/api/calls.py
-git add src/grant_lab/web/dashboard.py src/grant_lab/web/api/calls.py tests/web/
+git add src/grant_lab/web/dashboard.py src/grant_lab/web/api/calls.py tests/web/ tests/test_dashboard_readmodel.py
 git commit -m "feat(calls): return the decision note on the Saved and Hidden views
 
 The note is read off a join that was already there. build_dashboard_view
@@ -1100,6 +1332,11 @@ def _notes_for(session, pairs: list[tuple[int, int]]) -> dict[tuple[int, int], l
             CallDecision.note.is_not(None),
         )
         .order_by(CallDecision.decided_at.desc(), CallDecision.id.desc())
+        # The RESPONSE is capped at _NOTE_CAP per pair; this read is not, so
+        # cap it too. Notes per pair are bounded by readers-of-a-profile, which
+        # is small -- but "small in practice" is not a bound, and this is the
+        # one query here whose size no schema constraint limits.
+        .limit(_CANDIDATE_LIMIT * _NOTE_CAP * 10)
     ).all()
     for call_id, profile_id, note in rows:
         bucket = out.setdefault((call_id, profile_id), [])
@@ -1165,8 +1402,8 @@ Expected: 5 passed.
 
 ```bash
 cd /home/parlar_ai/dev/grant-lab
+set -o pipefail
 cp src/grant_lab/web/api/admin_golden_set.py /tmp/ags.bak
-trap 'cp /tmp/ags.bak /home/parlar_ai/dev/grant-lab/src/grant_lab/web/api/admin_golden_set.py' EXIT
 python3 - <<'PY'
 from pathlib import Path
 p = Path("/home/parlar_ai/dev/grant-lab/src/grant_lab/web/api/admin_golden_set.py")
@@ -1175,10 +1412,13 @@ old = "    user_notes: list[str] = []\n"
 assert s.count(old) == 1
 p.write_text(s.replace(old, ""))
 PY
-uv run pytest tests/test_golden_set_notes.py -v
+uv run pytest tests/test_golden_set_notes.py -v; echo "MUTANT EXIT=$?"
+cp /tmp/ags.bak /home/parlar_ai/dev/grant-lab/src/grant_lab/web/api/admin_golden_set.py
+git diff --quiet src/grant_lab/web/api/admin_golden_set.py && echo "UNEXPECTEDLY CLEAN - your edits are gone" || echo RESTORED
+uv run pytest tests/test_golden_set_notes.py -q
 ```
 
-Expected: `test_the_http_response_carries_user_notes` **FAILED** (`KeyError: 'user_notes'`) while the three miner tests **PASS**. That split is the finding this gate exists for.
+Expected: `test_the_http_response_carries_user_notes` **FAILED** (`KeyError: 'user_notes'`) while the three miner tests **PASS**. That split is the finding this gate exists for. Then `RESTORED`, then the unmutated run passes.
 
 - [ ] **Step 8: Regenerate the OpenAPI types**
 
@@ -1191,12 +1431,29 @@ git diff --stat frontend/src/api/schema.gen.ts
 
 Expected: `schema.gen.ts` changed, carrying `decision_note` (Task 3) and `user_notes` plus the new `/api/calls/{call_id}/note` path. If the diff is empty the generator did not run — check its stdout; this script has a known stdout gotcha.
 
-- [ ] **Step 9: Lint, typecheck and commit**
+- [ ] **Step 9: Repair the TypeScript fixtures the regen just broke**
+
+`pnpm run build` will now fail: `decision_note` is a required field on
+`CallOut`, and every hand-written `CallItem` fixture in the frontend predates
+it. **This cannot wait for Task 7** — Task 4 ends with a build, and a task that
+cannot go green is not a task.
+
+```bash
+cd /home/parlar_ai/dev/grant-lab/frontend
+pnpm run build 2>&1 | grep -E "error TS" | head -20
+```
+
+Add `decision_note: null` to every fixture tsc names — `TriageFeed.test.tsx`,
+`TriageCard.test.tsx` and any other. **vitest does not typecheck, so `pnpm run
+build` is the only thing that finds these**; a green vitest run here means
+nothing.
+
+- [ ] **Step 10: Lint, typecheck and commit**
 
 ```bash
 uv run ruff check src tests
 cd frontend && pnpm run build && cd ..
-git add src/grant_lab/ranking/golden_set.py src/grant_lab/web/api/admin_golden_set.py tests/test_golden_set_notes.py frontend/src/api/schema.gen.ts
+git add src/grant_lab/ranking/golden_set.py src/grant_lab/web/api/admin_golden_set.py tests/test_golden_set_notes.py frontend/src/api/schema.gen.ts frontend/src/routes/
 git commit -m "feat(golden-set): show the human's reason beside the score they disagreed with
 
 candidates_dismissed_high_score already mines calls scoring >=60 that a
@@ -1227,6 +1484,9 @@ miner tests stay green."
 - Modify: `frontend/src/router.simple.tsx`
 - Modify: `frontend/src/routes/AdminNav.tsx`
 - Modify: `frontend/src/routes/AdminNav.test.tsx`
+- Modify: `frontend/src/router.simple.test.tsx`
+- Modify: `frontend/src/noCockpitLinks.test.tsx`
+- Modify: `frontend/src/routes/AdminDashboard.test.tsx` (check — see step 6)
 - Modify: `frontend/e2e/match.spec.ts`
 
 **Interfaces:**
@@ -1327,13 +1587,51 @@ Confirm the exported name with `grep -n 'export' frontend/src/routes/AdminGolden
 
 In `frontend/src/routes/AdminNav.tsx`, remove `"/admin/golden-set"` from `MATCH_EXCLUDED` and rewrite the comment above it, which currently reads "Release 1 mounts only /admin, /admin/users and /admin/users/pending". `routes.json`'s `spa_routes` already contains `/admin`, which owns `/admin/*` by subtree — **no `routes.json` change is needed**, and adding one would be wrong.
 
-- [ ] **Step 6: Update the three frontend gates**
+- [ ] **Step 6: Update the frontend gates — there are FIVE lists, and they cross-reference each other**
 
-`frontend/src/routes/AdminNav.test.tsx`: the `MATCH_HIDDEN` constant (drop the golden-set entry), the match-edition omission case, and the comment at the top naming the three unmounted routes.
+`/admin/golden-set` is named as excluded in four separate places that each say
+"keep in step with" the others. Start by finding them all:
 
-`frontend/e2e/match.spec.ts` line ~392: rename the test to `"the admin subnav offers only the four sections release 1 mounts"` and change its expected array to `["/admin", "/admin/users", "/admin/users/pending", "/admin/golden-set"]` — **in the order `AdminNav.tsx`'s `LINKS` array produces**, which puts golden-set third, before Users. Read `LINKS` and write the order it yields, not the order that reads nicely.
+```bash
+cd /home/parlar_ai/dev/grant-lab
+grep -rn 'admin/golden-set' frontend/src frontend/e2e --include='*.ts' --include='*.tsx'
+```
 
-`tests/architecture/test_match_gates_are_wired.py`: change the matching string in `REQUIRED_SCENARIOS`. This is a **rename, not an addition**, so `len(titles) == len(REQUIRED_SCENARIOS)` still balances. The `expects == 128` assertion should also hold — you are changing the contents of an existing `expect(...)`, not adding one — but re-measure rather than assume:
+Verified present 2026-09-07, all four:
+
+1. **`frontend/src/routes/AdminNav.test.tsx`** — the `MATCH_HIDDEN` constant,
+   the match-edition omission case, the full-edition ordering case, and the
+   comment at the top naming the three unmounted routes.
+2. **`frontend/src/router.simple.test.tsx`** — **two** lists: the exact
+   allowlist of mounted routes (the new route must be added, or *"the simple
+   router mounts exactly the release-1 route set"* reddens) and
+   `EXCLUDED_PREFIXES`.
+3. **`frontend/src/noCockpitLinks.test.tsx`** — its own `EXCLUDED_PREFIXES`,
+   whose comment says it is "Kept identical to router.simple.test.tsx's". Its
+   exemption list already carries `routes/AdminNav.tsx` and
+   `routes/AdminDashboard.tsx` as KIND B (gated at the render site, pinned by
+   render tests over both branches). Once golden-set is no longer excluded,
+   check whether `AdminDashboard.tsx` still needs its exemption for this
+   reason — the header comment names `AdminDashboard.tsx:164` as a link to
+   `/admin/golden-set`.
+4. **`frontend/e2e/match.spec.ts`** — **two** places: its `EXCLUDED_PREFIXES`
+   near the top (~line 26), and the subnav test (~line 392). Rename that test
+   to `"the admin subnav offers only the four sections release 1 mounts"` and
+   change its expected array — **in the order `AdminNav.tsx`'s `LINKS` array
+   produces**, which puts golden-set third, before Users. Read `LINKS` and
+   write the order it yields, not the order that reads nicely.
+
+Also check `frontend/src/routes/AdminDashboard.test.tsx`: it is the render test
+holding `AdminDashboard.tsx`'s gating over both branches, so if it asserts the
+golden-set link is absent in match, that assertion inverts.
+
+**Run the browser suite.** The unit tests do not cover the route walk:
+
+```bash
+cd /home/parlar_ai/dev/grant-lab/frontend && pnpm run e2e:match
+```
+
+Then `tests/architecture/test_match_gates_are_wired.py`: change the matching string in `REQUIRED_SCENARIOS`. This is a **rename, not an addition**, so `len(titles) == len(REQUIRED_SCENARIOS)` still balances. The `expects == 128` assertion should also hold — you are changing the contents of an existing `expect(...)`, not adding one — but re-measure rather than assume:
 
 ```bash
 uv run pytest tests/architecture/test_match_gates_are_wired.py -v
@@ -1345,6 +1643,7 @@ If the expect count moved, update the number **and** the stale message beside it
 
 ```bash
 cd /home/parlar_ai/dev/grant-lab
+set -o pipefail
 uv run pytest tests/architecture/ -v 2>&1 | tail -20
 cd frontend && pnpm run test -- AdminNav && pnpm run build && cd ..
 ```
@@ -1404,7 +1703,9 @@ the backend gate reddens alone."
 
 **Interfaces:**
 - Consumes: Task 1's endpoint via `schema.gen.ts` (regenerated in Task 4).
-- Produces: `useSetDecisionNote()` returning a mutation taking `{ id, profileId, note }`; `<DecisionNoteStrip target={{callId, profileId, title, state}} onDismiss={...} />`.
+- Produces: `useSetDecisionNote()` returning a mutation taking `{ id, profileId, note, expectedState }`; `<DecisionNoteStrip target={{callId, profileId, title, state}} initialNote={string | null} onSave={...} onDismiss={...} />`.
+
+**`initialNote` is not optional scaffolding.** Task 7 reuses this component to EDIT an existing note, and a component with no way to receive the current value can only ever create.
 
 **Read first:** spec D10. Every bullet there is a behaviour this task owes, and four of them are the reason the strip is its own component rather than markup inside `TriageFeed`.
 
@@ -1413,7 +1714,15 @@ the backend gate reddens alone."
 In `frontend/src/api/calls.ts`, after `useUnsaveCall`:
 
 ```ts
-export type NoteArgs = { id: number; profileId: number; note: string | null };
+export type NoteArgs = {
+  id: number;
+  profileId: number;
+  note: string | null;
+  // The state the caller believed it was annotating. The server 409s if the
+  // decision moved under it -- one user with two tabs is enough to hit this,
+  // and the consequence is a reason about hiding filed against a save.
+  expectedState: "saved" | "hidden";
+};
 
 // NOT invalidateDecisions: a note changes no count and moves no call between
 // views. Invalidating the rail here would refetch three counts on every
@@ -1422,11 +1731,11 @@ export type NoteArgs = { id: number; profileId: number; note: string | null };
 export function useSetDecisionNote() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async ({ id, profileId, note }: NoteArgs) =>
+    mutationFn: async ({ id, profileId, note, expectedState }: NoteArgs) =>
       unwrap(
         await api.PUT("/api/calls/{call_id}/note", {
           params: { path: { call_id: id }, query: { profile_id: profileId } },
-          body: { note },
+          body: { note, expected_state: expectedState },
         }),
       ),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["calls"] }),
@@ -1607,6 +1916,8 @@ In `CallDetail.test.tsx`: after hiding, a note input appears beside the existing
 
 In `AdminGoldenSet.test.tsx`: a candidate with `user_notes: ["a", "b"]` renders both, and one with `user_notes: []` renders no notes element.
 
+In `TriageCard.test.tsx`, additionally: a `hidden` card with `decision_note: null` renders an **"Add note"** control, and using it calls the mutation. This is the gate for the reachability half — a test that only checks the non-null path passes while "add a note later" is impossible.
+
 - [ ] **Step 2: Run to verify they fail**
 
 ```bash
@@ -1615,7 +1926,12 @@ cd frontend && pnpm run test -- TriageCard CallDetail AdminGoldenSet
 
 - [ ] **Step 3: Implement all three**
 
-`TriageCard.tsx`: render the note under the title when `view` is `saved` or `hidden` and `decision_note` is non-null; clicking it opens the same input the strip uses, committing through `useSetDecisionNote`.
+`TriageCard.tsx`: in the `saved` and `hidden` views, render the note under the
+title when `decision_note` is non-null **and an "Add note" control when it is
+null**. Without the second half, anyone who ignored the strip can never write a
+note at all — which is most people, since the strip is deliberately ignorable
+(D2). Both open the same `DecisionNoteStrip`, passing `initialNote` and the
+row's `state` as `expectedState`.
 
 `CallDetail.tsx`: the note input beside the existing hide/undo control, using the `{id, profileId}` it already holds in state.
 
@@ -1633,6 +1949,7 @@ Expected: all green. Fix every fixture tsc names.
 
 ```bash
 cd /home/parlar_ai/dev/grant-lab
+set -o pipefail   # else tail's exit status hides a failing suite
 uv run pytest -n 16 --dist loadfile -q 2>&1 | tail -5
 cd frontend && pnpm run test && pnpm run build && pnpm run lint && cd ..
 uv run ruff check src tests
@@ -1659,8 +1976,21 @@ not typecheck, so pnpm run build is the gate that found them."
 
 ## Self-Review
 
-**Spec coverage:** D1 (free text) — Task 1's `DecisionNoteIn`. D2 (strip) — Task 6. D3 (privacy, disclosure, unattributed) — Task 6 step 2's disclosure test, Task 4's G6 test. D4 (un-decide destroys) — Task 2. D5 (404) — Task 1. D6 (naming) — Global Constraints + Task 1 step 3. D7 (multi-user, ordering, cap, state filter before cap) — Task 4. D8 (length, whitespace) — Task 1. D9 (flip clears) — Task 2. D10 (strip contract) — Task 6. §4 wire — Tasks 1, 3, 4. §5 surfaces — Tasks 6, 7. §10 mount — Task 5. Gates G1–G13 — G1/G8/G9 Task 3, G2/G4 Task 1, G3/G5 Task 2, G6/G7/G12 Task 4, G10/G11 Task 6, G13 Task 5. **No gaps.**
+**Spec coverage:** D1 — Task 1's `DecisionNoteIn`. D2 — Task 6. D3 — Task 6's disclosure test, Task 4's G6 test. D4 — Task 2. D5 — Task 1. D6 — Global Constraints + Task 1. D7 — Task 4. D8 — Task 1. D9 — Task 2. D10 — Task 6. §4 wire — Tasks 1, 3, 4. §5 surfaces — Tasks 6, 7. §10 mount — Task 5. Gates G1–G13 mapped: G1/G8/G9 Task 3, G2/G4 Task 1, G3/G5 Task 2, G6/G7/G12 Task 4, G10/G11 Task 6, G13 Task 5.
 
-**Known soft spots, stated rather than hidden:** Task 3 step 7, Task 5 steps 1 and 6, Task 6 steps 4/6/7 and all of Task 7 describe changes against existing files whose exact current contents the implementer must read. Each names the file, the anchor and the property; none says "similar to Task N". Where a fixture name is uncertain (`_match_app`, the list query key, `is_admin`, `AdminGoldenSet`'s export style) the step says to grep for the real one rather than guessing — those are the places this plan is least able to be literal, and pretending otherwise would be worse than saying so.
+**Three design deltas this plan found, now in spec rev 4.** Writing the code surfaced questions the design had not answered, and they are design questions rather than implementation details: the stale-write race (`expected_state` + 409), that D9 must clear on a *flip* and not on every upsert, and that "add a note later" was unreachable. Each is recorded in the spec, not only here.
 
-**Type consistency:** `decision_note` (response, `CallOut` + `DecisionNoteOut`), `note` (request, `DecisionNoteIn` + DB column), `user_notes` (`CandidateRow` + `CandidateOut`), `NoteArgs {id, profileId, note}`, `DashboardView.calls` 3-tuple with both unpack sites named. Checked against every task.
+**What an outside review of this plan's first revision found.** Six findings, all confirmed against the code, none refuted. Kept because the errors are more instructive than the fixes:
+
+1. **`trap ... EXIT` does not restore between commands.** Three mutation blocks relied on it, and a later `trap ... EXIT` silently replaces an earlier one — so an unattended run could have committed a mutant. Verified: `bash -c 'trap "echo FIRST" EXIT; trap "echo SECOND" EXIT; true'` prints only `SECOND`. Every mutation now restores explicitly and re-runs unmutated before committing.
+2. **`pytest ... | tail` returns tail's status.** Verified: `false | tail -1` exits 0. A failing suite read as a pass at three sites. `set -o pipefail` everywhere now.
+3. **A read-then-write note endpoint is a stale-write race**, reachable by one user with two tabs, and it undoes D9's whole point.
+4. **Three route gates were missing**: `full_edition_routes.txt` pins every route and the new endpoint breaks it; `router.simple.test.tsx` holds an exact allowlist *and* an exclusion list; `noCockpitLinks.test.tsx` and `match.spec.ts` hold two more. Five lists, each documented as "kept in step with" the others.
+5. **Task ordering broke its own green checks.** Task 4 ran `pnpm run build` while the fixtures it needed were not repaired until Task 7, and `test_dashboard_readmodel.py` had a third two-value unpack the plan never named.
+6. **The unhide gate proved its own clearing operation** — it wrote `{"note": null}` and then asserted null. It passed with the DELETE replaced by a no-op. It now reads, and never writes, after the unhide.
+
+Plus: an unconditional `note=None` in the upsert also wiped the note on `hidden → hidden`, so a double-tap of `h` destroyed the reason just typed; the mining read was capped in the response but not in the query; and the spec's latency measurement had no execution step. All three are fixed above.
+
+**Where this plan is least literal, stated rather than hidden:** Task 5 step 6, Task 6 steps 4/6/7 and all of Task 7 describe changes against files whose current contents the implementer must read. Each names the file, the anchor and the property. Where a name is uncertain (`_match_app`, the list query key, `AdminGoldenSet`'s export style) the step says to grep for the real one — those are the places the plan cannot be literal, and the previous revision's silent guesses there were four of its defects.
+
+**Type consistency:** `decision_note` (response: `CallOut`, `DecisionNoteOut`), `note` + `expected_state` (request: `DecisionNoteIn`), `user_notes` (`CandidateRow`, `CandidateOut`), `NoteArgs {id, profileId, note, expectedState}`, `DecisionNoteStrip {target, initialNote, onSave, onDismiss}`, `DashboardView.calls` 3-tuple with all **three** unpack sites named. Checked against every task.
