@@ -48,6 +48,18 @@ type Props = {
   // The same gap reopens after a successful save, because the note-covering
   // `key` remounts the strip while the editor stays visibly open.
   autoFocus?: boolean;
+  // HOW the user last left the box, told to the caller the moment a commit
+  // starts. It exists for one caller shape: a surface that REMOUNTS this
+  // component on a successful save (a row editor keyed on the note, so the
+  // seed cannot go stale) re-runs the focus effect above -- and after a
+  // BLUR-commit that pulls the caret back into a box the user has already
+  // left. The strip cannot remember this for itself: the remount is a
+  // different instance and its refs went with the old one, so the bit has to
+  // be held by the caller that survives.
+  //
+  // Fired for EVERY commit, including one that turns out to be a no-op. It
+  // reports where the caret belongs, not whether a write happened.
+  onCommit?: (via: "enter" | "blur") => void;
   onSave: (args: NoteSaveArgs) => void | Promise<unknown>;
   onDismiss: () => void;
 };
@@ -64,6 +76,7 @@ export function DecisionNoteStrip({
   target,
   initialNote = null,
   autoFocus = false,
+  onCommit,
   onSave,
   onDismiss,
 }: Props) {
@@ -102,11 +115,24 @@ export function DecisionNoteStrip({
   // Runs on every MOUNT, which is what closes the post-save half of the gap:
   // the caller keys this component on the note, so a successful save remounts
   // it, and a focus set only on first open would be lost exactly then.
+  //
+  // AND IT IS THE CALLER WHO DECIDES, per mount, via `autoFocus` -- because
+  // "the save remounted us" is not on its own a reason to take the caret. A
+  // save committed with ENTER leaves the user in the box, and dropping focus
+  // there reopens the very window this effect exists to close. A save
+  // committed by BLUR means they are already somewhere else, and re-focusing
+  // then is a steal: it silently kills the feed's keyboard loop
+  // (`isEditableTarget` correctly stands the window listener down for a
+  // focused input), or lands the next keystrokes in the wrong call's box. The
+  // caller tells the two apart with `onCommit` and answers here.
   useEffect(() => {
     if (autoFocus) input.current?.focus();
   }, [autoFocus]);
 
-  async function commit() {
+  async function commit(via: "enter" | "blur") {
+    // BEFORE the early return: this reports where the caret belongs, which is
+    // just as true of a box committed unchanged as of one that wrote.
+    onCommit?.(via);
     const note = normalize(value);
     if (note === committed.current) return;
     const previous = committed.current;
@@ -132,7 +158,7 @@ export function DecisionNoteStrip({
   function onKeyDown(e: KeyboardEvent<HTMLInputElement>) {
     if (e.key === "Enter") {
       e.preventDefault();
-      void commit();
+      void commit("enter");
     } else if (e.key === "Escape") {
       e.preventDefault();
       setValue(committed.current ?? "");
@@ -172,7 +198,7 @@ export function DecisionNoteStrip({
         onKeyDown={onKeyDown}
         // Blur commits as well as Enter (D10). No autosave and no debounce: a
         // timer that outlives the strip is the same bug as an unbound write.
-        onBlur={() => void commit()}
+        onBlur={() => void commit("blur")}
       />
       {/* D3, and worded so it stays true whichever surfaces are mounted: an
           administrator has database access whether or not a page exists, so a

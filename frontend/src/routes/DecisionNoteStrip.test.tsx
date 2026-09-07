@@ -42,6 +42,36 @@ describe("D10 — the strip", () => {
     await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
   });
 
+  it("reports HOW each commit happened, including one that writes nothing", async () => {
+    // The signal a caller that REMOUNTS this strip on a save needs to tell an
+    // Enter-commit (the user is still in the box; keep the caret) from a
+    // blur-commit (they left; do not take it back). Fired BEFORE the
+    // no-op check on purpose: it says where the caret belongs, not whether a
+    // write happened -- so the third entry below is an Enter over unchanged
+    // text, which sends nothing and still means "the user is here".
+    const save = vi.fn().mockResolvedValue({});
+    const commits: string[] = [];
+    render(
+      <DecisionNoteStrip
+        target={target}
+        onSave={save}
+        onCommit={(via) => commits.push(via)}
+        onDismiss={vi.fn()}
+      />,
+    );
+    const box = screen.getByRole("textbox");
+    await userEvent.type(box, "wrong field{Enter}");
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    await userEvent.type(box, " indeed");
+    await userEvent.tab();
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+    await userEvent.click(box);
+    await userEvent.type(box, "{Enter}");
+    expect(commits).toEqual(["enter", "blur", "enter"]);
+    // The third commit really was a no-op: same text, so nothing was sent.
+    expect(save).toHaveBeenCalledTimes(2);
+  });
+
   it("Escape reverts and does not save", async () => {
     const save = setup();
     await userEvent.type(screen.getByRole("textbox"), "oops{Escape}");

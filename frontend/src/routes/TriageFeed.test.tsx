@@ -1221,3 +1221,110 @@ describe("Task 6 — the decision-note strip (D10, gates 10 and 11)", () => {
     await waitFor(() => expect(container.querySelector("[data-note-strip]")).toBeNull());
   });
 });
+
+// THE COMPOSITION, and it has to be tested here because neither half can see
+// it alone: TriageCard.test.tsx renders a card with no feed, so there is no
+// keyboard loop for a stolen caret to kill, and the feed's OWN strip above has
+// no autoFocus, so its remount steals nothing. The bug lives only where a
+// row's autofocused editor sits inside the feed that owns `j/k/s/h/u`.
+describe("a row's note editor, inside the feed (Important 1 — the focus steal)", () => {
+  // The PUT that changes the note on the server, so the refetch it triggers
+  // changes the card's `decision_note`, changes the strip's key, and REMOUNTS
+  // the strip. That remount is the whole event under test: without it the
+  // focus effect never re-fires and every assertion below passes vacuously.
+  function putThatEdits(put: SpyCalls, rows: CallItem[], index: number, after: string) {
+    (put as unknown as { mockImplementation: (fn: unknown) => void }).mockImplementation(
+      (async () => {
+        rows[index] = call({ ...rows[index], decision_note: after });
+        return { data: { decision_note: after }, error: undefined, response: new Response() };
+      }) as never,
+    );
+  }
+
+  it("does not pull the caret back after a BLUR commits the note, so j/k/s/h/u stay alive (D2)", async () => {
+    const rows = [call({ id: 1, title: "Call one", decision_note: "before" })];
+    const { put, del } = stub({ items: rows });
+    putThatEdits(put, rows, 0, "before and after");
+
+    renderFeed("/?view=hidden");
+    await screen.findByText("Call one");
+
+    await userEvent.click(screen.getByRole("button", { name: "before" }));
+    const box = await screen.findByRole("textbox");
+    await waitFor(() => expect(document.activeElement).toBe(box));
+    await userEvent.type(box, " and after");
+
+    // CLICKING AWAY, onto a part of the page that takes no focus. That leaves
+    // document.activeElement on <body> -- which is precisely the state the
+    // feed's window listener is live in, and the state the strip must not
+    // undo.
+    await userEvent.click(document.body);
+    await waitFor(() => expect(put).toHaveBeenCalled());
+    // The refetch has landed and the strip has been remounted with the new
+    // seed. Asserting on the VALUE, not on a timer: this is what proves the
+    // remount actually happened.
+    await waitFor(() => expect(screen.getByRole("textbox")).toHaveValue("before and after"));
+
+    expect(document.activeElement).not.toBe(screen.getByRole("textbox"));
+
+    // AND THE CONSEQUENCE, which is the half that matters. Fired AT the active
+    // element and never at document.body: a keydown dispatched on body carries
+    // body as its target whatever has focus, so `isEditableTarget` would stand
+    // down for nothing and this gate would be green on the broken build too.
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "u" });
+    await waitFor(() => expect(decisions(del)).toEqual(["/api/calls/1/hide"]));
+  });
+
+  it("leaves the caret in the SECOND row's box when the first row's blur-commit lands (D10)", async () => {
+    // The mis-filing D10 and D11 exist to prevent, arriving through focus
+    // instead of through ids: row one's round-trip yanks the caret out of row
+    // two's box, and row two's reason is then typed into row one's note.
+    const rows = [
+      call({ id: 1, title: "Call one", decision_note: "one" }),
+      call({ id: 2, title: "Call two", decision_note: "two" }),
+    ];
+    const { put } = stub({ items: rows });
+    putThatEdits(put, rows, 0, "one edited");
+
+    const { container } = renderFeed("/?view=hidden");
+    await screen.findByText("Call one");
+
+    await userEvent.click(screen.getByRole("button", { name: "one" }));
+    await userEvent.type(screen.getByRole("textbox"), " edited");
+    // Straight into the SECOND row's editor. This one click does both things:
+    // it blurs the first box (which commits it) and it opens and focuses the
+    // second.
+    await userEvent.click(screen.getByRole("button", { name: "two" }));
+    const secondBox = container.querySelector('[data-note-strip="2"] input');
+    expect(secondBox, "no editor on the second row").not.toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(secondBox));
+
+    await waitFor(() => expect(put).toHaveBeenCalled());
+    // Row one's strip has been remounted with the server's value -- the event
+    // that re-fires the focus effect.
+    await waitFor(() =>
+      expect(container.querySelector('[data-note-strip="1"] input')).toHaveValue("one edited"),
+    );
+    expect(document.activeElement).toBe(secondBox);
+  });
+
+  it("KEEPS the caret when the note was committed with Enter", async () => {
+    // The other side of the same fix, and the reason it is not "never focus on
+    // a remount". Enter leaves the user in the box; dropping focus there puts
+    // an open-but-unfocused editor over a live `u`, which deletes the decision
+    // the note hangs off (D4). TriageCard.test.tsx pins this without a feed;
+    // this pins that the feed composition did not lose it.
+    const rows = [call({ id: 1, title: "Call one", decision_note: "before" })];
+    const { put } = stub({ items: rows });
+    putThatEdits(put, rows, 0, "before and after");
+
+    renderFeed("/?view=hidden");
+    await screen.findByText("Call one");
+
+    await userEvent.click(screen.getByRole("button", { name: "before" }));
+    await userEvent.type(await screen.findByRole("textbox"), " and after{Enter}");
+    await waitFor(() => expect(put).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByRole("textbox")).toHaveValue("before and after"));
+    expect(document.activeElement).toBe(screen.getByRole("textbox"));
+  });
+});

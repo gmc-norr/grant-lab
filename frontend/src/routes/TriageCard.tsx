@@ -1,5 +1,5 @@
 // frontend/src/routes/TriageCard.tsx
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { useSetDecisionNote } from "../api/calls";
@@ -88,6 +88,22 @@ function DecisionNote({
   const [editing, setEditing] = useState(false);
   const setNote = useSetDecisionNote();
   const note = call.decision_note;
+  // WHETHER THE CARET STILL BELONGS IN THE BOX, across the remount a save
+  // causes. The click that opens the editor puts it there; an Enter-commit
+  // leaves it there; a BLUR-commit means the user went somewhere else and the
+  // remount must not fetch them back.
+  //
+  // This ref is why the fix lives here and not in the strip: the key below
+  // remounts the strip on every successful save, so the strip's own refs are
+  // thrown away exactly when this bit is needed. THIS component is not
+  // remounted -- it is the same `DecisionNote` for the same row -- so it is
+  // where the bit can survive.
+  //
+  // A ref rather than state, deliberately: it must not schedule a render (a
+  // render mid-typing is how the seed goes stale), and it is read during the
+  // render the key change triggers, by which time `onCommit` has already
+  // written it synchronously.
+  const keepCaret = useRef(true);
 
   if (editing) {
     return (
@@ -112,7 +128,22 @@ function DecisionNote({
         // <body> while a text box is visibly open, the feed's window listener
         // stays live, and `u` on that row deletes the decision the note hangs
         // off (D4). See the prop's comment on DecisionNoteStrip.
-        autoFocus
+        //
+        // NOT a bare `autoFocus`, and that is the composition bug this pair
+        // fixes. Both halves are individually right -- the key stops a stale
+        // seed, the focus effect stops an unfocused-but-open box leaving the
+        // feed's `u` live over the decision the note hangs off -- and together
+        // they stole the caret back after EVERY successful save. Measured
+        // 2026-09-07: after a blur-commit the caret returned to the box the
+        // user had left, `isEditableTarget` then stood the window listener
+        // down, and `j`/`k`/`s`/`h`/`u` were silently dead (D2 promises the
+        // opposite); with a second row's editor open, the yanked caret sent
+        // that row's reason into THIS row's note -- the mis-filing D10 and D11
+        // exist to prevent, arriving through focus instead of through ids.
+        autoFocus={keepCaret.current}
+        onCommit={(via) => {
+          keepCaret.current = via === "enter";
+        }}
         // expectedState is the ROW's, supplied by the caller rather than read
         // off the strip: the strip must not carry two ways to say which
         // decision it is about (D11). The server 409s a note filed against a
@@ -133,12 +164,26 @@ function DecisionNote({
           // The rendered text is clamped to two lines; this gives the whole of
           // it to a hover without adding a second control to the row.
           title={note}
-          onClick={() => setEditing(true)}
+          // RE-ARM. `keepCaret` is false after a blur-commit, and this click is
+          // the user coming back -- without this, reopening an editor that was
+          // last left by clicking away would open unfocused, which is the
+          // data-loss state `autoFocus` exists to prevent.
+          onClick={() => {
+            keepCaret.current = true;
+            setEditing(true);
+          }}
         >
           {note}
         </button>
       ) : (
-        <button type="button" className={styles.noteAdd} onClick={() => setEditing(true)}>
+        <button
+          type="button"
+          className={styles.noteAdd}
+          onClick={() => {
+            keepCaret.current = true;
+            setEditing(true);
+          }}
+        >
           Add note
         </button>
       )}
