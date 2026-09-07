@@ -362,7 +362,12 @@ def update_board(
     body: BoardSettingsIn,
     user: User = Depends(get_current_user),  # noqa: B008
 ):
-    """Update settings, refusing a capacity-REDUCING change.
+    """Update settings, refusing a capacity-REDUCING change on a MANUAL board.
+
+    The guard protects a human's hand-picked cards from a cap too small to
+    hold them. An AUTO board has none, so it is exempt -- see
+    `new_auto_publish` below for why that flag is read off the request and
+    not off the board.
 
     `items_per_page` only resets to the new orientation's default when
     orientation is ACTUALLY changing in this request. Sending back the same
@@ -423,6 +428,22 @@ def update_board(
         new_max_pages = body.max_pages if body.max_pages is not None else board.max_pages
         old_cap = board.items_per_page * board.max_pages
         new_cap = new_items_per_page * new_max_pages
+        # Read off the REQUEST, and that asymmetry with `old_cap` is deliberate.
+        # `old_cap` must come from the BOARD because the shrink guard compares
+        # before with after. This flag is a different question: who owns this
+        # board's items AFTER the request. If the board ends up auto,
+        # `reconcile_auto_boards` owns them -- it rebuilds the set from the
+        # candidate query every run and deletes whatever falls outside its own
+        # `LIMIT cap` -- so it trims to the new cap by itself. If the board ends
+        # up MANUAL, a human owns them and the cap must hold them.
+        #
+        # Keying this on `board.auto_publish` instead skips the guard on exactly
+        # the request that needs it most: `{"auto_publish": false, "max_pages":
+        # 1}`, one save from the settings form, which would leave a MANUAL board
+        # holding 24 cards in a cap of 8 with no job coming to fix it.
+        new_auto_publish = (
+            body.auto_publish if body.auto_publish is not None else board.auto_publish
+        )
         # The TOTAL bound, refused before the shrink guard below and computed
         # from the SAME `new_items_per_page` / `new_max_pages` that guard uses.
         # The shrink guard cannot cover this: it fires only when `new_cap <
@@ -438,7 +459,7 @@ def update_board(
                     f"{new_cap} cards; a board holds at most {MAX_BOARD_ITEMS}"
                 ),
             )
-        if new_cap < old_cap and new_cap < approved_count:
+        if not new_auto_publish and new_cap < old_cap and new_cap < approved_count:
             # Only name the orientation when it is what DETERMINED
             # new_items_per_page -- i.e. the same condition that branch above
             # uses to derive it from ORIENTATION_ITEMS_PER_PAGE. Branching on

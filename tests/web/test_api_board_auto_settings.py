@@ -239,3 +239,102 @@ def test_a_large_board_inside_the_cap_is_still_accepted(
     with pg_session_factory() as s:
         board = s.get(Board, bid)
         assert (board.items_per_page, board.max_pages) == (8, 18)
+
+
+def test_an_auto_board_may_shrink_below_its_item_count(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """The capacity-shrink guard exists to stop a human's hand-picked cards
+    being silently dropped by a smaller cap. An auto board has no hand-picked
+    cards: `reconcile_auto_boards` rebuilds the item set from the candidate
+    query every run and deletes whatever is not in the new, `LIMIT cap`
+    selection. So on an auto board the guard refuses a change on behalf of
+    rows that tonight's run deletes anyway -- and the remedy it names is
+    worse than the disease, because `unapprove_item` writes a
+    `BoardSuppression` per removal, permanently blacklisting 16 calls from
+    this board to accomplish a trim the job would have done for free.
+    """
+    app = _setup(monkeypatch, pg_url)
+    pid, owner = profile_factory(name="shrink auto")
+    bid = _make_board(pg_session_factory, profile_id=pid, created_by=owner, slug="G" * 16)
+    client = _client_for(app, owner)
+    with client:
+        # Flip to auto while the board is empty, so the guard cannot fire here
+        # and this test's subject is only the second PUT.
+        r = client.put(f"/api/boards/{bid}", json={"auto_publish": True})
+        assert r.status_code == 200, r.text
+
+        # Landscape defaults: 8 x 3 = 24, full.
+        _approve_n(pg_session_factory, board_id=bid, approved_by=owner, n=24, profile_id=pid)
+
+        r = client.put(f"/api/boards/{bid}", json={"max_pages": 1})
+
+    assert r.status_code == 200, f"an auto board was refused a shrink: {r.text}"
+    with pg_session_factory() as s:
+        board = s.get(Board, bid)
+        assert board.max_pages == 1, "the accepted change was not applied"
+        assert board.auto_publish is True
+
+
+def test_turning_auto_OFF_while_shrinking_is_still_refused(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """The trap in the exemption above, and the reason it reads the REQUEST.
+
+    `old_cap` is read off the BOARD and `new_cap` off the REQUEST, because the
+    guard compares before with after. The auto flag is the opposite: what
+    matters is who will own this board's items AFTER this request. If the
+    board ends up auto, the 05:00 job owns them and trims to the cap itself.
+    If it ends up MANUAL, a human owns them and the cap must hold them.
+
+    So an exemption keyed on `board.auto_publish` -- the value already stored
+    -- skips the guard on exactly the request that needs it most: auto off and
+    a smaller cap in one body, which the settings form can send in a single
+    save. That leaves a manual board holding 24 cards in a cap of 8, and the
+    only way out is 16 removals that each write a suppression.
+    """
+    app = _setup(monkeypatch, pg_url)
+    pid, owner = profile_factory(name="shrink auto off")
+    bid = _make_board(pg_session_factory, profile_id=pid, created_by=owner, slug="H" * 16)
+    client = _client_for(app, owner)
+    with client:
+        r = client.put(f"/api/boards/{bid}", json={"auto_publish": True})
+        assert r.status_code == 200, r.text
+        _approve_n(pg_session_factory, board_id=bid, approved_by=owner, n=24, profile_id=pid)
+
+        r = client.put(f"/api/boards/{bid}", json={"auto_publish": False, "max_pages": 1})
+
+    assert r.status_code == 409, (
+        f"a board being returned to MANUAL was let through the shrink guard: {r.text}"
+    )
+    assert "remove 16 first" in r.json()["error"]["message"]
+    with pg_session_factory() as s:
+        board = s.get(Board, bid)
+        assert board.max_pages == 3, "the refused change was applied anyway"
+        assert board.auto_publish is True, "the refused request still flipped the switch"
+
+
+def test_turning_auto_ON_while_shrinking_is_allowed(
+    monkeypatch, pg_url, pg_session_factory, profile_factory
+):
+    """The other half of reading the REQUEST. A board flipped manual -> auto
+    already loses its hand-picked items on the first run -- that is
+    spec-mandated ("replaces the board's hand-picked items") and the UI warns
+    with the count. Shrinking the cap in the same body therefore takes nothing
+    the flip was not already taking, so refusing it would guard rows that this
+    very request has already condemned.
+    """
+    app = _setup(monkeypatch, pg_url)
+    pid, owner = profile_factory(name="shrink auto on")
+    bid = _make_board(pg_session_factory, profile_id=pid, created_by=owner, slug="I" * 16)
+    _approve_n(pg_session_factory, board_id=bid, approved_by=owner, n=24, profile_id=pid)
+
+    client = _client_for(app, owner)
+    with client:
+        r = client.put(f"/api/boards/{bid}", json={"auto_publish": True, "max_pages": 1})
+
+    assert r.status_code == 200, f"the manual -> auto flip was refused a shrink: {r.text}"
+    with pg_session_factory() as s:
+        board = s.get(Board, bid)
+        assert board.max_pages == 1
+        assert board.auto_publish is True
