@@ -71,9 +71,18 @@ cleanup() {
     for _ in $(seq 1 10); do kill -0 -"$VITE_PGID" 2>/dev/null || break; sleep 0.3; done
     kill -KILL -"$VITE_PGID" 2>/dev/null || true
   fi
+  # Nothing was launched, so there is nothing of ours to back-stop and the ports
+  # belong to somebody else. The trap is installed above the preflight, so
+  # WITHOUT this the preflight's own `exit 1` ran the loop below and SIGKILLed
+  # the very server it had just refused to run alongside — as did a failed
+  # `pnpm build` in prod mode, and the check-ignore refusal.
+  if [ -z "$SEED_PGID" ] && [ -z "$VITE_PGID" ]; then
+    return 0
+  fi
   # Backstop: the Vite node can escape the group-kill (esbuild service detaches),
   # leaving :5173 held. Free the ports by whoever still listens so the NEXT run's
-  # preflight isn't tripped by our own leak.
+  # preflight isn't tripped by our own leak. Safe only because the preflight
+  # above already proved both ports were free before we started anything.
   for port in 5173 8000; do
     local pid
     pid="$(ss -ltnp "sport = :$port" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -1 || true)"

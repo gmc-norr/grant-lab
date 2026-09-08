@@ -676,6 +676,31 @@ def read_file_at_commit(repo_dir: Path, commit_sha: str, path: str) -> str:
     return read_blob(repo_dir, blob_sha(repo_dir, commit_sha, path))
 
 
+def path_exists_at_commit(repo_dir: Path, commit_sha: str, path: str) -> bool:
+    """Whether *path* is present in the tree of *commit_sha*.
+
+    `git ls-tree` is the primitive that can say "absent" without also saying
+    "broken". `rev-parse <sha>:<path>` cannot — measured on this box:
+
+        rev-parse <good sha>:<absent path>  -> 128
+        rev-parse <bad sha>:<present path>  -> 128
+        ls-tree --name-only <good sha> -- <absent path>   -> 0, no output
+        ls-tree --name-only <good sha> -- <present path>  -> 0, prints the path
+        ls-tree --name-only <bad sha>  -- <path>          -> 128
+
+    A caller that must fail closed on an unreadable repo, yet treat a genuinely
+    absent file as benign, needs exactly that separation — see
+    ``references.deletion._is_cited``, where collapsing the two would make every
+    hard-delete impossible on any workspace that has never cited anything.
+    """
+    proc = _git(repo_dir, "ls-tree", "--name-only", commit_sha, "--", path)
+    if proc.returncode != 0:
+        raise GitCommitError(
+            f"cannot list {path!r} at {commit_sha} in {repo_dir}: {proc.stderr.strip()}"
+        )
+    return bool(proc.stdout.strip())
+
+
 def read_branch_file(repo_dir: Path, branch: str, path: str) -> tuple[str, str]:
     """Return ``(commit_sha, text)`` for *path* on one local branch snapshot.
 

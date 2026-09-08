@@ -318,6 +318,19 @@ async def lifespan(app: FastAPI):
         )
         app.state.scheduler = scheduler
         app.state.app_loop = _asyncio.get_running_loop()
+        # Ownership is checked at startup and then never again: `is_held()` had
+        # exactly one caller, the /healthz field, which tells a monitor and stops
+        # nothing. A lock lost mid-run therefore left this process firing every
+        # tick while another instance could take the lock — the second scheduler
+        # the single-instance constraint forbids. The watchdog acts on it.
+        if scheduler_lock is not None:
+            from grant_lab.scheduler import start_scheduler_lock_watchdog
+
+            _watchdog_thread, _watchdog_stop = start_scheduler_lock_watchdog(
+                scheduler_lock, scheduler
+            )
+        else:
+            _watchdog_thread, _watchdog_stop = None, None
     except BaseException:
         if scheduler_lock is not None:
             scheduler_lock.release()
@@ -366,6 +379,13 @@ async def lifespan(app: FastAPI):
         # _SafeBackgroundScheduler, whose shutdown() is a documented no-op when the
         # scheduler was never started (the start=False path taken by whichever
         # replica loses the advisory lock).
+        # Stop the ownership watchdog BEFORE the scheduler shutdown below, so a
+        # tick landing mid-teardown cannot log a spurious "lock lost" for a lock
+        # we are about to release on purpose.
+        if _watchdog_stop is not None:
+            _watchdog_stop.set()
+            if _watchdog_thread is not None:
+                await _asyncio.to_thread(_watchdog_thread.join, 5.0)
         await _asyncio.to_thread(scheduler.shutdown, wait=True)
         # Release the single-instance advisory lock (closes its dedicated
         # connection). Done after the scheduler stops so no in-flight job is

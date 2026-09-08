@@ -200,7 +200,15 @@ def logout(
             revoked = False
             with session_factory() as db:
                 user = db.get(User, data.user_id)
-                if user is not None:
+                # The epoch must MATCH, not merely be signature-valid. Verifying
+                # the signature alone let a cookie that an earlier logout, an
+                # admin disable or a password reset had already revoked bump the
+                # epoch again — so whoever still held a dead cookie could log the
+                # real user out of the session that replaced it, repeatedly.
+                # `get_current_user` has always made this comparison
+                # (auth/dependencies.py); this route reached past it for the
+                # cookie and never did.
+                if user is not None and (user.session_epoch or 0) == data.session_epoch:
                     user.session_epoch = (user.session_epoch or 0) + 1
                     db.commit()
                     revoked = True
@@ -212,6 +220,7 @@ def logout(
                 # surface and collab.permissions pulls the whole collab stack (pycrdt) with it.
                 # Pinned by tests/architecture/test_match_edition_process_cut.py.
                 from grant_lab.proposal_assist.collab.permissions import signal_user_revocation
+
                 signal_user_revocation(request, data.user_id)
     response.delete_cookie(
         "session", path="/", httponly=True, secure=settings.cookie_secure, samesite="lax"
