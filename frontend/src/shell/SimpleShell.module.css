@@ -8,15 +8,29 @@
   background: var(--app-editor);
 }
 
+/* The BAR is full-bleed so its ground and its bottom rule span the window; the
+   ROW inside it is capped, so the brand lines up with the feed's rail and the
+   account menu with the card's right edge. Before this split, the bar's content
+   sat hard against the window edge while the feed sat in a 60rem column, and on
+   a display much wider than the 1440px the spec was drawn for they were half a
+   screen apart. */
 .topbar {
+  background: var(--app-titlebar);
+  border-bottom: 1px solid var(--app-border);
+}
+
+.topbarInner {
   display: flex;
   align-items: center;
   gap: 1.5rem;
   flex-wrap: wrap;
-  padding: 0 1rem;
   min-height: 48px;
-  background: var(--app-titlebar);
-  border-bottom: 1px solid var(--app-border);
+  /* Same container, same padding, same box-sizing (Mantine sets border-box
+     globally) as TriageFeed's .layout — all three are required for the edges to
+     actually coincide. */
+  max-width: var(--match-container);
+  margin: 0 auto;
+  padding: 0 1rem;
 }
 
 .brand {
@@ -29,6 +43,24 @@
   min-height: 44px;
   display: inline-flex;
   align-items: center;
+}
+
+.brandMark {
+  display: inline-flex;
+  /* Optical, not geometric: the mark's own bounding box sits a hair high beside
+     cap-height text. */
+  margin-right: 0.4rem;
+}
+
+/* The edition, not the product. Quiet enough that "Grant Lab" reads first,
+   present enough to answer "which part of it am I in". Greyscale, like
+   everything here that is not a deadline or an action. */
+.edition {
+  color: var(--app-muted-chrome);
+  font-size: 0.9rem;
+  /* The nav's margin-right:auto pushes the account menu right; this sits with
+     the brand, so it must not absorb that gap. */
+  margin-left: -1rem;
 }
 
 .nav {

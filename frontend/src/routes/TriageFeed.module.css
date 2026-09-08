@@ -10,7 +10,7 @@
   grid-template-columns: 240px minmax(0, 1fr);
   gap: 2rem;
   align-items: start;
-  max-width: 960px;
+  max-width: var(--match-container);
   margin: 0 auto;
   padding: 1.5rem 1rem 4rem;
 }
@@ -164,6 +164,33 @@
 
 .cardTitle a:hover {
   text-decoration: underline;
+}
+
+/* --- the match score --- */
+
+/* Greyscale, no band, no pill. §5 reserves colour for deadline urgency, and the
+   score sits two lines above the deadline: a coloured score would compete with
+   the one cue the reader is meant to read fastest. The weight and the tabular
+   figures do the work instead, so a column of scores reads as a column. */
+.cardScore {
+  margin: 0.15rem 0 0;
+  font-size: 0.85rem;
+  color: var(--app-muted);
+}
+
+.scoreValue {
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--app-text);
+  /* Same advance width for every digit, so 100 / 92 / 8 line up down the feed
+     instead of shimmering. */
+  font-variant-numeric: tabular-nums;
+}
+
+.scoreScale {
+  /* The denominator stays quiet: it is there to fix the SCALE, once, not to be
+     re-read on every card. */
+  color: var(--app-muted);
 }
 
 /* --- the decision note, on the row --- */

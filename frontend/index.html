@@ -7,13 +7,24 @@
     <!--
       SHARED BY BOTH EDITIONS. There is one index.html and one build entry point;
       the edition split happens at the router alias (vite.config.ts), long after
-      this <title> is fixed. So the Call Match tab reads "Grant Lab" even though
-      SimpleShell's brand says "Call Match". Left as-is deliberately: renaming the
-      product surface is a naming decision for the humans shipping release 1, not
-      a defect to patch. If it should differ per edition, this is the place —
-      vite's transformIndexHtml or an env-driven %VITE_APP_TITLE% placeholder.
+      this <title> is fixed.
+
+      DECIDED 2026-09-08. "Grant Lab" leads on every surface and the match
+      edition names itself beside it, so the tab reads "Grant Lab - Call Match"
+      there and plain "Grant Lab" in full. The rewrite is vite.config.ts's
+      `editionTitle` plugin — the transformIndexHtml route this comment used to
+      suggest.
+
+      The data-edition-title attribute is that plugin's ANCHOR, and it is an
+      attribute rather than the tag's text for a measured reason: the first
+      version of this comment quoted the title tag verbatim, so the plugin's
+      String.replace matched THE COMMENT, rewrote it, and left the real title
+      alone. The tab said "Grant Lab" in both editions and the build passed. An
+      attribute cannot be mentioned in prose by accident, and the plugin now
+      throws when it does not match exactly once, so removing this attribute
+      fails the build instead of silently disabling the feature.
     -->
-    <title>Grant Lab</title>
+    <title data-edition-title>Grant Lab</title>
   </head>
   <body>
     <div id="root"></div>
