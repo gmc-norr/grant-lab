@@ -57,14 +57,21 @@ const REQUIRED = [
   "/src/routes/Cockpit",
   "/src/routes/Workspace",
   "/src/routes/AdminDrafting",
-  "/src/routes/AdminGoldenSet",
+  // "/src/routes/AdminGoldenSet" left this list on 2026-09-07, with the script's
+  // own entry: router.simple.tsx mounts the page, so the match bundle contains
+  // that module by design and excluding it made the bundle gate red on correct
+  // code. REQUIRED is a minimum, so this file stayed green while the SCRIPT
+  // failed -- the pair only agrees because both were edited.
   "/src/routes/AdminDeletedWorkspace",
   // The six per-file /src/shell/ entries. Per-file and not "/src/shell/" because
   // the match edition legitimately ships SimpleShell + BrandMark out of that
   // directory.
   //
   // THREE of them — ActivityBar, TitleBar and nav-items — carry gate 4's
-  // whole-file EXEMPTions (noCockpitLinks.test.tsx:60-62), so without those a
+  // whole-file EXEMPTions (noCockpitLinks.test.tsx's EXEMPT, entries
+  // "shell/ActivityBar", "shell/TitleBar" and "shell/nav-items" -- named rather
+  // than cited by line, because a line range rots on the next edit and this one
+  // already had), so without those a
   // SimpleShell that imported ActivityBar would render nav-items' live
   // `to: "/cockpit"` with BOTH gates green. The other three (AppShell, Sidebar,
   // StatusBar) are here for the ordinary reason that they are full-edition

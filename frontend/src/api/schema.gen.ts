@@ -953,6 +953,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/calls/{call_id}/note": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set Decision Note
+         * @description Write the user's reason onto an EXISTING decision.
+         *
+         *     404, not an upsert, when there is no decision row (D5): `state` is NOT NULL
+         *     and constrained to saved|hidden, so creating one here would make this
+         *     endpoint guess a decision the user did not make.
+         *
+         *     DOES NOT TOUCH `decided_at`, `decided_by` or `state`. A note is not a new
+         *     decision, and the Saved/Hidden lists are ordered by `decided_at` (Phase 2
+         *     decision D12) -- bumping it would silently reorder the list under a user as
+         *     they annotate it. Both neighbouring endpoints DO set decided_at in their
+         *     upsert, which is exactly why the UPDATE below names `note` and nothing else.
+         *
+         *     Whitespace-only is stored as NULL (D8), so "has a note" has one answer.
+         */
+        put: operations["set_decision_note_api_calls__call_id__note_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/calls/{call_id}/save": {
         parameters: {
             query?: never;
@@ -975,9 +1007,10 @@ export interface paths {
          *     on a missing row DO UPDATE and DO NOTHING are indistinguishable -- the
          *     behaviour this chooses is only observable on the flip: saving a HIDDEN call
          *     must move it to saved, where DO NOTHING would answer 200 and leave it
-         *     hidden. All THREE columns move: `decided_at` because this IS a new decision
-         *     and Saved/Hidden are ordered by it (D12), `decided_by` because it records
-         *     who pressed the key (D4).
+         *     hidden. `decided_at` moves because this IS a new decision and Saved/Hidden
+         *     are ordered by it (D12), `decided_by` because it records who pressed the key
+         *     (D4), and `note` because a flip is a new decision and the old decision's
+         *     reasoning must not be filed against it (D9).
          *
          *     The conflict target is the full (user_id, profile_id, call_id) key, so this
          *     upsert can only ever touch the caller's own row -- a colleague holding their
@@ -3085,6 +3118,10 @@ export interface components {
             deadline: string | null;
             /** Deadline Local Date */
             deadline_local_date: string | null;
+            /** Decision Note */
+            decision_note: string | null;
+            /** Decision State */
+            decision_state: ("saved" | "hidden") | null;
             /** External Id */
             external_id: string | null;
             /** Id */
@@ -3210,6 +3247,8 @@ export interface components {
             deadline: string | null;
             /** Deadline Local Date */
             deadline_local_date: string | null;
+            /** Decision Note */
+            decision_note: string | null;
             /** Escalated */
             escalated: boolean;
             /** Id */
@@ -3252,6 +3291,11 @@ export interface components {
             profile_name: string;
             /** Reason */
             reason: string;
+            /**
+             * User Notes
+             * @default []
+             */
+            user_notes: string[];
         };
         /** ChangePasswordIn */
         ChangePasswordIn: {
@@ -3450,6 +3494,27 @@ export interface components {
             pagination: components["schemas"]["PaginationOut"];
             ranking: components["schemas"]["RankingOut"];
             summary: components["schemas"]["SummaryOut"];
+        };
+        /**
+         * DecisionNoteIn
+         * @description The user's own words about one decision.
+         *
+         *     The field is `note`, not `decision_note`, and the asymmetry with
+         *     `CallOut.decision_note` is deliberate (D6). The collision that forces the
+         *     longer name exists on `CallOut`, which carries `applicant_note_count` --
+         *     the MODEL's inferred things-to-check -- right beside it. A single-field body
+         *     on an endpoint already named /note has no such neighbour.
+         */
+        DecisionNoteIn: {
+            /** Expected State */
+            expected_state?: ("saved" | "hidden") | null;
+            /** Note */
+            note?: string | null;
+        };
+        /** DecisionNoteOut */
+        DecisionNoteOut: {
+            /** Decision Note */
+            decision_note: string | null;
         };
         /** DeepCheckOut */
         DeepCheckOut: {
@@ -9684,6 +9749,124 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CallHideOut"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Method Not Allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    set_decision_note_api_calls__call_id__note_put: {
+        parameters: {
+            query: {
+                profile_id: number;
+            };
+            header?: never;
+            path: {
+                call_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DecisionNoteIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionNoteOut"];
                 };
             };
             /** @description Bad Request */

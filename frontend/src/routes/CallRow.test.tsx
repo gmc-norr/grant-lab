@@ -33,6 +33,15 @@ afterEach(() => {
   edition.isMatch = false;
 });
 
+// A FULL literal, not a partial behind `as CallItem`. The assertion was a hole
+// in the only typechecker this project has: `pnpm run build` runs tsc over
+// `src`, and a cast tells it to stop looking -- so every field CallOut has
+// gained since this file was written was missing here and nothing said so.
+// Concretely, when `decision_note` landed on CallOut (2026-09-07), a
+// null-guarded read of `call.decision_note` typechecked against a fixture that
+// supplied `undefined` -- a value the API cannot produce -- and a row that
+// rendered its note only for `!== null` would have been green here while being
+// wrong in production. Keep it a literal: the compile error IS the reminder.
 function call(over: Partial<CallItem> = {}): CallItem {
   return {
     id: 3,
@@ -40,10 +49,22 @@ function call(over: Partial<CallItem> = {}): CallItem {
     source_name: "Vinnova",
     source_slug: "vinnova",
     deadline: null,
+    deadline_local_date: null,
     published_at: null,
     aggregate_score: 82,
+    programme: null,
+    budget_min: null,
+    budget_max: null,
+    currency: null,
+    url: "https://example.org/calls/3",
+    summary: null,
+    keywords: [],
+    criteria: [],
+    applicant_note_count: 0,
+    escalated: false,
+    decision_note: null,
     ...over,
-  } as CallItem;
+  };
 }
 
 function renderRow(ui: React.ReactElement, url = "/") {

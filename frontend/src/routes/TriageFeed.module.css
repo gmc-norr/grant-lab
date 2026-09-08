@@ -166,6 +166,55 @@
   text-decoration: underline;
 }
 
+/* --- the decision note, on the row --- */
+
+/* Directly under the title, above the funder line: in Saved and Hidden the
+   reason the reader wrote is what they are scanning the list FOR, so it sits
+   where the eye already is rather than at the bottom of the card. */
+.cardNote {
+  margin: 0.25rem 0 0;
+}
+
+/* Both affordances are BUTTONS, not text plus a pencil: the note itself is the
+   control, so there is one target instead of two and nothing to hunt for. They
+   are styled as text rather than as chrome -- an existing reason should read as
+   a sentence on the card, not as a form field. */
+.noteText,
+.noteAdd {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* CLAMPED. A note is up to 1000 characters (D8) and this renders on every
+   collapsed row, so an unclamped paragraph-length reason on fifty hidden calls
+   destroys the scanning the note is on the row to serve. Two lines, then an
+   ellipsis; the whole text is one click away in the editor, and `title` gives
+   it to a hover without a second control. */
+.noteText {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  color: var(--app-text);
+}
+
+.noteAdd {
+  color: var(--app-muted);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+}
+
+.noteText:hover,
+.noteAdd:hover {
+  color: var(--app-accent-bright);
+}
+
 .cardMeta,
 .cardFacts {
   margin: 0.25rem 0 0;

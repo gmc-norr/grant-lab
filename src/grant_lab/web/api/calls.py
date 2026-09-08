@@ -6,7 +6,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, select
+from sqlalchemy import case, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import joinedload
 
@@ -124,6 +124,12 @@ class CallOut(BaseModel):
     # Its OWN column, not `applicant_note_count > 0`: an escalation can succeed
     # and still carry zero notes when the analysis failed or was capped.
     escalated: bool
+    # The user's OWN words about their own decision (spec 2026-09-07). NOT
+    # `note`: `applicant_note_count` above is the MODEL's inferred
+    # things-to-check, a different thing on the same object. Non-null only on
+    # the saved and hidden views -- inbox and archive do not join the decision
+    # row at all, so this is None there by construction, not by accident.
+    decision_note: str | None
 
 
 class SummaryOut(BaseModel):
@@ -199,6 +205,29 @@ class CallDetailCallOut(BaseModel):
     url: str
     keywords: list[str]
     summary: str | None
+    # The CALLER'S OWN words about their own decision on this call, for the
+    # `?profile=` in scope (spec 2026-09-07 §5: "`CallDetail` -- beside the
+    # existing hide/undo control"). Same three-column scope as the list
+    # projection -- (user_id, profile_id, call_id) -- so a colleague reading the
+    # same profile's call page never sees it. None when there is no `?profile=`,
+    # when that profile is unreadable or inactive, when there is no decision
+    # row, and when the row's note is NULL: all four are "nothing to show", and
+    # a status that told them apart would make `?profile=` an oracle.
+    #
+    # Without this the page is CREATE-ONLY: arriving from the Hidden view and
+    # pressing "Hide this call" re-hides `hidden -> hidden`, which PRESERVES the
+    # note, and the strip would then open EMPTY over it -- one Enter replaces a
+    # reason the golden set exists to read, unseen.
+    decision_note: str | None
+    # WHICH decision that note belongs to -- 'saved' | 'hidden', None when
+    # undecided. Same three-column scope, read off the SAME row.
+    #
+    # The page held its hide/undo state for the session only, and that state was
+    # all it had: on a RELOAD it forgot, rendered "Hide this call" over an
+    # already-hidden call, offered no Undo, and had nowhere to put the
+    # `decision_note` it was being handed (PD-31b). A note the server sends and
+    # the page cannot render is worse than one it never sent.
+    decision_state: Literal["saved", "hidden"] | None
 
 
 class CallDetailNoteOut(BaseModel):
@@ -269,6 +298,28 @@ class CallDecisionOut(BaseModel):
     state: Literal["saved", "hidden"] | None
 
 
+class DecisionNoteIn(BaseModel):
+    """The user's own words about one decision.
+
+    The field is `note`, not `decision_note`, and the asymmetry with
+    `CallOut.decision_note` is deliberate (D6). The collision that forces the
+    longer name exists on `CallOut`, which carries `applicant_note_count` --
+    the MODEL's inferred things-to-check -- right beside it. A single-field body
+    on an endpoint already named /note has no such neighbour.
+    """
+
+    note: str | None = Field(default=None, max_length=1000)
+    # The state the CLIENT believed it was annotating. Optional, so a curl
+    # user is not forced to know it; ALWAYS sent by the strip, which holds it
+    # in the target it was created with. This closes the stale-write race in
+    # the endpoint below.
+    expected_state: Literal["saved", "hidden"] | None = None
+
+
+class DecisionNoteOut(BaseModel):
+    decision_note: str | None
+
+
 class CallDecisionCountsOut(BaseModel):
     inbox: int
     saved: int
@@ -317,9 +368,9 @@ def hide_call(
         _readable_active_profile_or_404(session, user, profile_id)
         # DO UPDATE, not DO NOTHING. The row now carries a STATE: hiding a call
         # the user had saved must flip it, and DO NOTHING would silently leave
-        # it saved while returning 200. All THREE columns move — `decided_at`
-        # because this IS a new decision and the Saved/Hidden lists order by it
-        # (D12), `decided_by` because it records who pressed the key.
+        # it saved while returning 200. `decided_at` moves because this IS a
+        # new decision and the Saved/Hidden lists order by it (D12),
+        # `decided_by` because it records who pressed the key.
         session.execute(
             pg_insert(CallDecision)
             .values(
@@ -331,7 +382,33 @@ def hide_call(
             )
             .on_conflict_do_update(
                 index_elements=["user_id", "profile_id", "call_id"],
-                set_={"state": "hidden", "decided_at": func.now(), "decided_by": user.id},
+                # state, decided_at, decided_by AND note. `note` joined them
+                # because a flip IS a new decision --
+                # this block already moves decided_at and decided_by for that
+                # reason -- and one decision's reasoning must not be filed
+                # against a different one (D9). Without it, hide->save->hide
+                # resurrects a note about a state the user has twice left, and
+                # hands it to the golden set as fresh evidence.
+                set_={
+                    "state": "hidden",
+                    "decided_at": func.now(),
+                    "decided_by": user.id,
+                    # Cleared ONLY on a real flip. An unconditional None would
+                    # also wipe the note on hidden -> hidden, and `h` is a
+                    # keyboard key people press twice -- so a double-tap would
+                    # silently destroy the reason just typed. In ON CONFLICT DO
+                    # UPDATE a TABLE-QUALIFIED column reference is the EXISTING
+                    # row's value (`call_decisions.state`, which is what
+                    # SQLAlchemy emits for `CallDecision.state`); `excluded.state`
+                    # is the proposed one. A truly BARE `state` is not a third
+                    # meaning -- Postgres rejects it as ambiguous. That
+                    # distinction is what makes this comparison meaningful, and
+                    # anyone hand-writing this upsert in raw SQL needs it.
+                    "note": case(
+                        (CallDecision.state != "hidden", None),
+                        else_=CallDecision.note,
+                    ),
+                },
             )
         )
         session.commit()
@@ -398,9 +475,10 @@ def save_call(
     on a missing row DO UPDATE and DO NOTHING are indistinguishable -- the
     behaviour this chooses is only observable on the flip: saving a HIDDEN call
     must move it to saved, where DO NOTHING would answer 200 and leave it
-    hidden. All THREE columns move: `decided_at` because this IS a new decision
-    and Saved/Hidden are ordered by it (D12), `decided_by` because it records
-    who pressed the key (D4).
+    hidden. `decided_at` moves because this IS a new decision and Saved/Hidden
+    are ordered by it (D12), `decided_by` because it records who pressed the key
+    (D4), and `note` because a flip is a new decision and the old decision's
+    reasoning must not be filed against it (D9).
 
     The conflict target is the full (user_id, profile_id, call_id) key, so this
     upsert can only ever touch the caller's own row -- a colleague holding their
@@ -422,7 +500,18 @@ def save_call(
             )
             .on_conflict_do_update(
                 index_elements=["user_id", "profile_id", "call_id"],
-                set_={"state": "saved", "decided_at": func.now(), "decided_by": user.id},
+                # See hide_call: `note` is cleared because a flip is a new
+                # decision (D9).
+                set_={
+                    "state": "saved",
+                    "decided_at": func.now(),
+                    "decided_by": user.id,
+                    # See hide_call: cleared on a real flip only (D9).
+                    "note": case(
+                        (CallDecision.state != "saved", None),
+                        else_=CallDecision.note,
+                    ),
+                },
             )
         )
         session.commit()
@@ -470,6 +559,64 @@ def unsave_call(
         )
         session.commit()
     return CallDecisionOut(state=None)
+
+
+@router.put("/calls/{call_id}/note", response_model=DecisionNoteOut)
+def set_decision_note(
+    request: Request,
+    call_id: int,
+    body: DecisionNoteIn,
+    profile_id: int = Query(...),
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    """Write the user's reason onto an EXISTING decision.
+
+    404, not an upsert, when there is no decision row (D5): `state` is NOT NULL
+    and constrained to saved|hidden, so creating one here would make this
+    endpoint guess a decision the user did not make.
+
+    DOES NOT TOUCH `decided_at`, `decided_by` or `state`. A note is not a new
+    decision, and the Saved/Hidden lists are ordered by `decided_at` (Phase 2
+    decision D12) -- bumping it would silently reorder the list under a user as
+    they annotate it. Both neighbouring endpoints DO set decided_at in their
+    upsert, which is exactly why the UPDATE below names `note` and nothing else.
+
+    Whitespace-only is stored as NULL (D8), so "has a note" has one answer.
+    """
+    sf = request.app.state.session_factory
+    with sf() as session:
+        if session.get(Call, call_id) is None:
+            raise HTTPException(status_code=404, detail="call not found")
+        _readable_active_profile_or_404(session, user, profile_id)
+        note = (body.note or "").strip() or None
+        where = [
+            CallDecision.user_id == user.id,
+            CallDecision.profile_id == profile_id,
+            CallDecision.call_id == call_id,
+        ]
+        # ONE conditional UPDATE, not a SELECT then an assignment. Read-then-
+        # write is a stale-write race, and it is reachable by ONE user with two
+        # tabs: read a SAVED decision here, flip it to hidden over there (which
+        # clears the note, D9), and this write then commits "we should apply"
+        # onto the HIDDEN decision -- exactly the misfiling D9 exists to
+        # prevent. (call_id, profile_id) does not identify WHICH decision was
+        # annotated. The state does.
+        stmt = update(CallDecision).where(*where).values(note=note)
+        if body.expected_state is not None:
+            stmt = stmt.where(CallDecision.state == body.expected_state)
+        if session.execute(stmt).rowcount == 0:
+            # "No decision" and "the decision moved under you" are both
+            # rowcount 0, and only a second read tells them apart. They are
+            # different answers: 404 means there is nothing to write to, 409
+            # means the user's words are fine but belong to a decision that no
+            # longer exists in that state.
+            current = session.scalar(select(CallDecision.state).where(*where))
+            session.rollback()
+            if current is None:
+                raise HTTPException(status_code=404, detail="decision not found")
+            raise HTTPException(status_code=409, detail="decision changed")
+        session.commit()
+    return DecisionNoteOut(decision_note=note)
 
 
 @router.get("/calls/hidden", response_model=HiddenListOut)
@@ -584,6 +731,8 @@ def get_call_detail(
         ranking = None
         criteria: list[CallRankingCriterion] = []
         profile_obj: Profile | None = None
+        decision_note: str | None = None
+        decision_state: str | None = None
         # This route resolves `?profile=` ITSELF — it never goes through
         # `dashboard.resolve_profile_selection` — so it composes the read rule
         # here. It used to resolve by is_active ALONE, which made it the
@@ -600,6 +749,27 @@ def get_call_detail(
             p = session.get(Profile, profile_id)
             if p is not None and p.is_active and can_read_profile(session, user, p.id):
                 profile_obj = p
+                # ALL THREE columns, exactly as the list projection joins them
+                # (`build_dashboard_view`): `user_id` is the one that keeps a
+                # colleague's reason off this page, and it is the one the
+                # golden-set miner deliberately omits -- so it is the one a
+                # copy-paste from there would drop. `(user_id, profile_id,
+                # call_id)` is unique, so this is at most one row.
+                # BOTH columns off the ONE row. The state is what tells the
+                # page it is looking at a decided call at all: without it the
+                # page learns that only from its own session state, so after a
+                # RELOAD it rendered "Hide this call" over an already-hidden
+                # call, offered no Undo, and had nowhere to put the note it was
+                # being handed (PD-31b).
+                decision_row = session.execute(
+                    select(CallDecision.state, CallDecision.note).where(
+                        CallDecision.user_id == user.id,
+                        CallDecision.profile_id == profile_id,
+                        CallDecision.call_id == call_id,
+                    )
+                ).one_or_none()
+                if decision_row is not None:
+                    decision_state, decision_note = decision_row
                 ranking = session.execute(
                     select(CallRanking).where(
                         CallRanking.call_id == call_id,
@@ -661,6 +831,8 @@ def get_call_detail(
             url=call.url,
             keywords=list(call.keywords or []),
             summary=call.summary,
+            decision_note=decision_note,
+            decision_state=decision_state,
         )
 
         ranking_out = None
@@ -762,7 +934,7 @@ def get_calls(
         # on a full page. It runs INSIDE this `with sf() as session` block
         # because `dashboard.calls` holds instances attached to this session.
         # tests/web/test_calls_list_query_count.py is the gate.
-        call_ids = [call.id for call, _ in dashboard.calls]
+        call_ids = [call.id for call, _, _ in dashboard.calls]
         criteria_by_call: dict[int, list[CallRankingCriterion]] = defaultdict(list)
         if criteria_profile_id is not None and call_ids:
             for crit in session.execute(
@@ -808,8 +980,9 @@ def get_calls(
                 # is an AttributeError on the commonest row there is.
                 applicant_note_count=(0 if ranking is None else len(ranking.applicant_notes or [])),
                 escalated=bool(ranking is not None and ranking.escalated),
+                decision_note=decision_note,
             )
-            for call, ranking in dashboard.calls
+            for call, ranking, decision_note in dashboard.calls
         ]
         facets = FacetsOut(
             sources=[SourceFacet(slug=s.slug, name=s.name) for s in dashboard.sources],

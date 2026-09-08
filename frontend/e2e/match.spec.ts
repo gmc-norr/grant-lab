@@ -19,11 +19,12 @@ import { expect, test, type Page } from "@playwright/test";
 // tests/architecture/test_edition_surface.py.
 //
 // Routes release 1 excludes, used below and kept in step with
-// src/router.simple.test.tsx and src/noCockpitLinks.test.tsx.
+// src/router.simple.test.tsx and src/noCockpitLinks.test.tsx. /admin/golden-set
+// left all three lists on 2026-09-07 — the router mounts it now, so it is in
+// IN_SHELL_ROUTES below and the walk visits it like any other release-1 page.
 const EXCLUDED_PREFIXES = [
   "/cockpit",
   "/admin/drafting",
-  "/admin/golden-set",
   "/admin/deleted-workspaces",
 ];
 
@@ -58,6 +59,11 @@ const CALLS = {
       keywords: [],
       criteria: [],
       applicant_note_count: 0,
+      // Required on CallOut since the 2026-09-07 note endpoint (Task 3). This
+      // file is typechecked NOWHERE — frontend/tsconfig.json includes only
+      // `src` — so a missing required field here is not a build error, it is a
+      // fixture that silently stops resembling the wire.
+      decision_note: null,
       escalated: false,
     },
   ],
@@ -103,6 +109,11 @@ const CALL_DETAIL = {
     url: "https://example.invalid/call",
     keywords: ["dna"],
     summary: "Sum.",
+    // Required on CallDetailCallOut since the 2026-09-07 review fix: the page
+    // seeds the note box from it, so a fixture without it stops resembling the
+    // wire silently -- this file is typechecked NOWHERE (frontend/tsconfig.json
+    // includes only `src`), exactly as CALLS above says.
+    decision_note: null,
   },
   ranking: null,
   criteria: [],
@@ -240,6 +251,36 @@ const ADMIN_DASH = {
 // The decision surface, whose QUERY STRING is half of what the request means:
 // `profile_id` is what makes a decision per-profile, and a client that dropped
 // it would look identical in a path-only log while 422-ing against the server.
+// AdminGoldenSetOut. The catch-all's `{}` would take the page into react-router's
+// error boundary (`data.triples.length` on undefined), which gotoRendered catches
+// — so this is the difference between the walk visiting the page and the walk
+// reporting "/admin/golden-set crashed".
+const GOLDEN_SET = {
+  triples: [
+    {
+      id: 1,
+      call_id: 1,
+      profile_id: 1,
+      call_title: "Genomics Grant",
+      profile_name: "Group A",
+      expected_score: 30,
+      note: "Wrong disease area.",
+    },
+  ],
+  candidates: [
+    {
+      call_id: 2,
+      profile_id: 1,
+      call_title: "Materials Grant",
+      profile_name: "Group A",
+      aggregate_score: 74,
+      embed_similarity: 0.21,
+      reason: "dismissed_high_score",
+      user_notes: ["Not our field at all."],
+    },
+  ],
+};
+
 const DECISION_PATH = /^\/api\/calls\/(?:\d+\/(?:save|hide)|decisions\/counts)$/;
 
 async function mockApi(page: Page, seen: string[] = []): Promise<string[]> {
@@ -258,6 +299,7 @@ async function mockApi(page: Page, seen: string[] = []): Promise<string[]> {
     if (url.pathname === "/api/admin/dashboard") return json(ADMIN_DASH);
     if (url.pathname === "/api/admin/users") return json(ADMIN_USERS);
     if (url.pathname === "/api/admin/users/pending") return json(ADMIN_PENDING);
+    if (url.pathname === "/api/admin/golden-set") return json(GOLDEN_SET);
     if (url.pathname === "/api/me/settings") return json(SETTINGS);
     if (url.pathname === "/api/profiles") return json(PROFILES);
     if (/^\/api\/profiles\/\d+$/.test(url.pathname)) return json(PROFILE);
@@ -290,6 +332,10 @@ const IN_SHELL_ROUTES = [
   "/admin",
   "/admin/users",
   "/admin/users/pending",
+  // Mounted 2026-09-07. It is in the WALK, not merely in the subnav assertion
+  // below: the subnav test reads hrefs off /admin and would pass just as well
+  // against a link that resolves to the soft 404.
+  "/admin/golden-set",
 ];
 // PreAuthLayout's pages. They render inside their own <main> (PreAuthLayout.tsx)
 // and make no authenticated call, so they need no session.
@@ -383,20 +429,24 @@ test("every mounted release-1 route renders exactly one main landmark", async ({
   // release-1 pages render their own, and the unit test that should have caught it
   // asserted getByRole("main") against a harness child of <p>calls page</p> — so it
   // passed only because the fake child had no landmark. The assertion lives inside
-  // gotoRendered, so this test is the coverage claim: all fifteen routes, not two.
+  // gotoRendered, so this test is the coverage claim: every route in ALL_ROUTES,
+  // not two. The live count is the assertion below -- do not repeat it in prose.
   await mockApi(page);
   for (const path of ALL_ROUTES) await gotoRendered(page, path);
-  expect(ALL_ROUTES.length).toBe(15); // the count is the claim; keep it in step with the router
+  expect(ALL_ROUTES.length).toBe(16); // the count is the claim; keep it in step with the router
 });
 
-test("the admin subnav offers only the three sections release 1 mounts", async ({ page }) => {
+test("the admin subnav offers only the four sections release 1 mounts", async ({ page }) => {
   await mockApi(page);
   await page.goto("/admin");
   const nav = page.getByRole("navigation", { name: "Admin sections" });
   await expect(nav).toBeVisible({ timeout: 10_000 });
+  // In AdminNav.tsx's LINKS order, which puts Golden set SECOND — ahead of
+  // Users, because /admin/drafting is what MATCH_EXCLUDED removes from between
+  // them. Written from the array, not from what reads nicely.
   expect(await nav.locator("a[href]").evaluateAll((as) =>
     as.map((a) => a.getAttribute("href") ?? ""),
-  )).toEqual(["/admin", "/admin/users", "/admin/users/pending"]);
+  )).toEqual(["/admin", "/admin/golden-set", "/admin/users", "/admin/users/pending"]);
 });
 
 test("an excluded route renders the in-app soft 404, not a cockpit", async ({ page }) => {
@@ -679,6 +729,7 @@ function feedCall(id: number, title: string, opts: { deadlineDays?: number } = {
       },
     ],
     applicant_note_count: 0,
+    decision_note: null, // required on CallOut since Task 3; see CALLS above
     escalated: false,
   };
 }

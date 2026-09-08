@@ -108,7 +108,13 @@ def test_api_calls_returns_seeded_call_shape(authed_client, pg_session_factory):
         "criteria",
         "applicant_note_count",
         "escalated",
+        # Added 2026-09-07. This request sends no `view`, so it is the ARCHIVE:
+        # no decision join, hence the null asserted below. The key is still
+        # present -- CallOut has no optional fields, and an absent key would be
+        # a different contract from a null one for the SPA's typed client.
+        "decision_note",
     }
+    assert item["decision_note"] is None
     assert item["source_slug"] == src_slug
     assert item["source_name"] == src_name
     assert item["aggregate_score"] == 82

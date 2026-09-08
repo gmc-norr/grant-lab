@@ -2,7 +2,6 @@ import { Alert, Anchor, Box, Button, Card, Code, Group, Table, Text, Title } fro
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
-import { isMatchEdition } from "../edition";
 import {
   useAdminDashboard,
   useFetchSource,
@@ -162,14 +161,13 @@ export function AdminDashboard() {
 
       <Card component="section" withBorder radius="md" p="md" my="md">
         <Title order={2} size="h5" mb="sm">Ranking quality — Kendall's τ (last run)</Title>
-        {/* /admin/golden-set is not mounted in the match edition (router.simple.tsx),
-            so the link is gated rather than deleted — the full edition keeps it.
-            noCockpitLinks.test.tsx EXEMPTs this file (a source scan cannot tell a
-            gated literal from an ungated one); AdminDashboard.test.tsx pins both
-            branches instead. */}
-        {!isMatchEdition && (
-          <Text mb="sm"><Anchor component={Link} to="/admin/golden-set">Manage golden set →</Anchor></Text>
-        )}
+        {/* UNGATED since 2026-09-07: router.simple.tsx mounts /admin/golden-set in
+            the match edition too, so the `!isMatchEdition` guard that used to wrap
+            this link would now hide a page release 1 can actually reach — and this
+            card's tau number is the reason someone goes there. AdminDashboard
+            .test.tsx flips the edition and asserts the link is present either way,
+            which is what reddens if a gate comes back. */}
+        <Text mb="sm"><Anchor component={Link} to="/admin/golden-set">Manage golden set →</Anchor></Text>
         {d.golden_set_report ? (
           <Box component="dl" m={0}>
             <Text component="dt" size="xs" c="dimmed" mt="xs">Curated triples</Text><Text component="dd" size="sm" m={0}>{d.golden_set_report.n_fixture}</Text>

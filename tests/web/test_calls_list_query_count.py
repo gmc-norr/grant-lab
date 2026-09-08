@@ -27,6 +27,7 @@ from sqlalchemy import event, select
 
 from grant_lab.db.models import (
     Call,
+    CallDecision,
     CallRanking,
     CallRankingCriterion,
     Profile,
@@ -159,6 +160,29 @@ def _add_call(
         return c.id
 
 
+def _decide(pg_session_factory, *, call_id: int, user_id: int, profile_id: int, state: str):
+    """One decision row, WITH a note.
+
+    Without the note the saved/hidden gates below would compare two runs over
+    rows that have nothing to project -- the column would be selected and come
+    back NULL every time, which is the same statement count a real N+1 on an
+    empty column would also produce. Seeding a note is what makes the measured
+    query the one the user actually gets.
+    """
+    with pg_session_factory() as s:
+        s.add(
+            CallDecision(
+                user_id=user_id,
+                profile_id=profile_id,
+                call_id=call_id,
+                state=state,
+                note=f"reason for {call_id}",
+                decided_by=user_id,
+            )
+        )
+        s.commit()
+
+
 @contextmanager
 def _statement_counter(app):
     """Count every cursor execute on the engine the app actually uses.
@@ -231,6 +255,75 @@ def test_the_list_costs_the_same_number_of_statements_at_1_and_10_calls(
     ]
 
     assert n10 == n1, f"page cost scales with row count: N1={n1} N10={n10}"
+
+
+def _decision_view_costs_the_same_at_1_and_10(make_app, pg_session_factory, *, state: str):
+    """The 1-vs-10 body of the test above, over a DECISION view.
+
+    Identical shape on purpose: same warm-up burn, same equality (not a
+    ceiling), same proof that the criteria path really ran. The only changes
+    are the `view` parameter and a decision row -- with a note -- for every
+    seeded call, without which the view returns zero rows and the comparison
+    measures an empty page.
+    """
+    uid, (pid,) = _seed_user_and_profiles(pg_session_factory)
+    app = make_app()
+    c = _client(app, uid)
+    url = f"/api/calls?profile={pid}&view={state}"
+
+    # The first call on a fresh Engine pays for dialect initialization and pool
+    # warm-up, which are cursor executes too. Burn them before measuring, or N1
+    # carries a constant N10 does not and the equality below is not the property
+    # under test.
+    first = _add_call(pg_session_factory, tag="unranked", profile_id=None)
+    _decide(pg_session_factory, call_id=first, user_id=uid, profile_id=pid, state=state)
+    c.get(url)
+
+    n1, body1 = _measure(c, app, url)
+    assert len(body1["items"]) == 1
+    # The note is really on the wire: a view returning rows with a NULL third
+    # column would satisfy the count equality while projecting nothing.
+    assert body1["items"][0]["decision_note"] == f"reason for {first}"
+
+    for i in range(9):
+        cid = _add_call(
+            pg_session_factory,
+            tag=f"r{i}",
+            profile_id=pid,
+            criteria=("topic_fit", "budget", "eligibility"),
+        )
+        _decide(pg_session_factory, call_id=cid, user_id=uid, profile_id=pid, state=state)
+    n10, body10 = _measure(c, app, url)
+    assert len(body10["items"]) == 10
+
+    # The criteria path really ran -- otherwise this compares two runs of code
+    # that never touched a criterion row.
+    ranked = _by_title(body10)["Card call r0"]
+    assert [x["criterion"] for x in sorted(ranked["criteria"], key=lambda x: x["criterion"])] == [
+        "budget",
+        "eligibility",
+        "topic_fit",
+    ]
+    assert all(i["decision_note"] for i in body10["items"])
+
+    assert n10 == n1, f"page cost scales with row count: N1={n1} N10={n10}"
+
+
+def test_the_hidden_view_costs_the_same_number_of_statements_at_1_and_10_calls(
+    make_app, pg_session_factory
+):
+    """G8. Per-row growth is what an N+1 looks like; comparing `hidden` against
+    `inbox` compares two DIFFERENT queries and would miss it entirely."""
+    _decision_view_costs_the_same_at_1_and_10(make_app, pg_session_factory, state="hidden")
+
+
+def test_the_saved_view_costs_the_same_number_of_statements_at_1_and_10_calls(
+    make_app, pg_session_factory
+):
+    """G8, the other decision view. `saved` and `hidden` take the same branch in
+    build_dashboard_view, but the branch is keyed on `view` and only a test per
+    view proves that neither name fell out of it."""
+    _decision_view_costs_the_same_at_1_and_10(make_app, pg_session_factory, state="saved")
 
 
 def test_the_gate_would_be_vacuous_without_a_profile(make_app, pg_session_factory):
@@ -522,9 +615,10 @@ def test_notes_are_counted_when_present(make_app, pg_session_factory):
 
 
 def test_an_unranked_call_reports_zero_notes_and_not_escalated(make_app, pg_session_factory):
-    """`view.calls` is `list[tuple[Call, CallRanking | None]]`: the ranked query
-    is an OUTER join, so a call with no ranking row for the selected profile
-    still appears with `ranking=None`."""
+    """`view.calls` is `list[tuple[Call, CallRanking | None, str | None]]`: the
+    ranked query is an OUTER join, so a call with no ranking row for the
+    selected profile still appears with `ranking=None`. (The third slot is the
+    decision note, non-None only on the saved/hidden views.)"""
     uid, (pid,) = _seed_user_and_profiles(pg_session_factory)
     _add_call(pg_session_factory, tag="noranking", profile_id=None)
     app = make_app()

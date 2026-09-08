@@ -1,10 +1,13 @@
 // frontend/src/routes/TriageCard.tsx
+import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
+import { useSetDecisionNote } from "../api/calls";
 import type { CallItem } from "../api/dashboard";
 import type { TriageView } from "../api/decisions";
 import { CriterionChips } from "../components/CriterionChips";
 import { DeadlineLocal, deadlineLocalView } from "./Deadline";
+import { DecisionNoteStrip } from "./DecisionNoteStrip";
 import styles from "./TriageFeed.module.css";
 
 // One call in the triage feed, in spec §5's field order — *what is this, what
@@ -58,6 +61,134 @@ function daysLeftText(call: CallItem): string | null {
   if (days < 0) return null;
   if (days === 0) return "today";
   return days === 1 ? "1 day left" : `${days} days left`;
+}
+
+// THE REASON, ON THE ROW IT BELONGS TO (D2, D4). Two halves, and the second is
+// the one that is easy to leave out: the feed's strip appears once, at the
+// moment of the decision, and is deliberately ignorable (D2) -- so a surface
+// that only DISPLAYS an existing note is a surface most people can never write
+// on. "I'll say why later" has to be reachable from the row itself.
+//
+// Saved and Hidden only, and only with a profile resolved: a note hangs off a
+// `call_decisions` row whose `profile_id` is NOT NULL, and the Inbox has no
+// such row -- an affordance there would offer to annotate a decision that does
+// not exist, and the endpoint would 404.
+//
+// Its own component, not a branch inside TriageCard, so `useSetDecisionNote`
+// is mounted on the rows that can actually write and on no others.
+function DecisionNote({
+  call,
+  profileId,
+  state,
+}: {
+  call: CallItem;
+  profileId: number;
+  state: "saved" | "hidden";
+}) {
+  const [editing, setEditing] = useState(false);
+  const setNote = useSetDecisionNote();
+  const note = call.decision_note;
+  // WHETHER THE CARET STILL BELONGS IN THE BOX, across the remount a save
+  // causes. The click that opens the editor puts it there; an Enter-commit
+  // leaves it there; a BLUR-commit means the user went somewhere else and the
+  // remount must not fetch them back.
+  //
+  // This ref is why the fix lives here and not in the strip: the key below
+  // remounts the strip on every successful save, so the strip's own refs are
+  // thrown away exactly when this bit is needed. THIS component is not
+  // remounted -- it is the same `DecisionNote` for the same row -- so it is
+  // where the bit can survive.
+  //
+  // A ref rather than state, deliberately: it must not schedule a render (a
+  // render mid-typing is how the seed goes stale), and it is read during the
+  // render the key change triggers, by which time `onCommit` has already
+  // written it synchronously.
+  const keepCaret = useRef(true);
+
+  if (editing) {
+    return (
+      <DecisionNoteStrip
+        // KEYED ON THE NOTE, not only on the call. `initialNote` is read into
+        // useState on MOUNT and never again -- it is a seed, not a controlled
+        // value. The feed gets away with that because it replaces the strip
+        // per decision; a ROW does not, because its note changes underneath an
+        // editor that stays open. The everyday way that happens is
+        // normalisation: the strip trims before sending (D8), so "  padded  "
+        // is stored as "padded", and without this key the box keeps the
+        // padding for the rest of the session and every later Enter re-sends a
+        // note the server already holds.
+        key={`${call.id}:${note ?? ""}`}
+        target={{ callId: call.id, profileId, title: call.title, state }}
+        // OPTIONAL on the strip because Task 6 only ever creates. Passed here
+        // because this surface EDITS, and a strip with no way to receive the
+        // current value can only ever replace it from blank.
+        initialNote={note}
+        // The box is here because the user CLICKED for it, and that click
+        // unmounted the button they clicked -- so without this, focus falls to
+        // <body> while a text box is visibly open, the feed's window listener
+        // stays live, and `u` on that row deletes the decision the note hangs
+        // off (D4). See the prop's comment on DecisionNoteStrip.
+        //
+        // NOT a bare `autoFocus`, and that is the composition bug this pair
+        // fixes. Both halves are individually right -- the key stops a stale
+        // seed, the focus effect stops an unfocused-but-open box leaving the
+        // feed's `u` live over the decision the note hangs off -- and together
+        // they stole the caret back after EVERY successful save. Measured
+        // 2026-09-07: after a blur-commit the caret returned to the box the
+        // user had left, `isEditableTarget` then stood the window listener
+        // down, and `j`/`k`/`s`/`h`/`u` were silently dead (D2 promises the
+        // opposite); with a second row's editor open, the yanked caret sent
+        // that row's reason into THIS row's note -- the mis-filing D10 and D11
+        // exist to prevent, arriving through focus instead of through ids.
+        autoFocus={keepCaret.current}
+        onCommit={(via) => {
+          keepCaret.current = via === "enter";
+        }}
+        // expectedState is the ROW's, supplied by the caller rather than read
+        // off the strip: the strip must not carry two ways to say which
+        // decision it is about (D11). The server 409s a note filed against a
+        // decision that has flipped since the box was opened.
+        onSave={(args) => setNote.mutateAsync({ ...args, expectedState: state })}
+        onDismiss={() => setEditing(false)}
+      />
+    );
+  }
+
+  return (
+    <p className={styles.cardNote}>
+      {note !== null ? (
+        <button
+          type="button"
+          data-field="decision-note"
+          className={styles.noteText}
+          // The rendered text is clamped to two lines; this gives the whole of
+          // it to a hover without adding a second control to the row.
+          title={note}
+          // RE-ARM. `keepCaret` is false after a blur-commit, and this click is
+          // the user coming back -- without this, reopening an editor that was
+          // last left by clicking away would open unfocused, which is the
+          // data-loss state `autoFocus` exists to prevent.
+          onClick={() => {
+            keepCaret.current = true;
+            setEditing(true);
+          }}
+        >
+          {note}
+        </button>
+      ) : (
+        <button
+          type="button"
+          className={styles.noteAdd}
+          onClick={() => {
+            keepCaret.current = true;
+            setEditing(true);
+          }}
+        >
+          Add note
+        </button>
+      )}
+    </p>
+  );
 }
 
 // THE URL IS THE STATE (D11). Both parameters travel to the detail page: the
@@ -119,6 +250,20 @@ export function TriageCard({
       <h2 className={styles.cardTitle}>
         <Link to={detailTo}>{call.title}</Link>
       </h2>
+
+      {/* UNDER THE TITLE, and OUTSIDE the `expanded` block.
+          NOT the same choice the Save/Hide row makes -- that row renders only
+          when view === "inbox", and the control these two views actually have,
+          "Return to inbox", is INSIDE `expanded` and pinned there by
+          TriageCard.test.tsx's "does not offer it on a collapsed card either".
+          So this inverts the precedent for Saved and Hidden, deliberately: a
+          note is a scanning aid, not a decision, and the reason is what the
+          reader is scanning Hidden FOR. An affordance only on the focused card
+          would mean reaching any other call's reason requires moving the cursor
+          there first. Decided on that, not on the Save/Hide row. */}
+      {view !== "inbox" && profileId !== null && (
+        <DecisionNote call={call} profileId={profileId} state={view} />
+      )}
 
       <p className={styles.cardMeta}>
         <span data-field="funder">{call.source_name ?? "Unknown funder"}</span>

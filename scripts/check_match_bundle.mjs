@@ -7,12 +7,13 @@
  * module under an excluded directory is in it.
  *
  * Measured on this repo, 2026-09-03, against the EIGHT-prefix list this file
- * shipped with that day. The list below now has 14 entries — the three Admin
- * prefixes and the six per-file /src/shell/ ones were added afterwards, each for
- * a defect recorded in the run log — so these three numbers describe a strictly
+ * shipped with that day. The list below now has 13 entries — two Admin prefixes
+ * and the six per-file /src/shell/ ones were added afterwards, each for
+ * a defect recorded in the run log (a third Admin prefix, AdminGoldenSet, was
+ * added then and removed again on 2026-09-07 when release 1 began mounting it) — so these three numbers describe a strictly
  * WEAKER gate than the one running today. They are kept because they are what was
  * actually measured; the current list's own number is printed on every run
- * ("0 under 14 excluded paths"). Do not read 81/0/19 as current.
+ * ("0 under 13 excluded paths"). Do not read 81/0/19 as current.
  *
  *   full build           703 modules,  81 excluded  (the gate has teeth)
  *   match build          384 modules,   0 excluded  (clean)
@@ -20,8 +21,8 @@
  *
  * The plan that specified this gate predicted 73 / 251 / 446. All three numbers
  * were re-measured here and none was smoothed over: 73 is exactly the first four
- * prefixes (49+19+2+3) — the three Admin prefixes add the other 4, so the shipped
- * list is strictly stronger; and 251 came from a prototype router, since
+ * prefixes (49+19+2+3) — the Admin prefixes then in the list added the other 4,
+ * so the shipped list is strictly stronger; and 251 came from a prototype router, since
  * router.simple.tsx did not exist when the plan was written. 384 is 47 app
  * modules plus 337 node_modules, 259 of them @mantine/core.
  *
@@ -69,7 +70,12 @@ const EXCLUDED = [
   "/src/routes/Cockpit",
   "/src/routes/Workspace",
   "/src/routes/AdminDrafting",
-  "/src/routes/AdminGoldenSet",
+  // "/src/routes/AdminGoldenSet" was here until 2026-09-07. router.simple.tsx
+  // mounts /admin/golden-set now, so the match bundle MUST contain that module
+  // and this entry made `pnpm run build:match && pnpm run check:bundle` fail on
+  // correct code. It is the sixth list naming the golden set and the only one
+  // outside frontend/src+e2e, which is why a grep over those two trees does not
+  // find it: keep it in step with checkMatchBundle.test.ts's REQUIRED.
   "/src/routes/AdminDeletedWorkspace",
   // The full edition's VS Code shell. NOT "/src/shell/" — the match edition
   // legitimately ships SimpleShell.tsx, SimpleShell.module.css and BrandMark.tsx

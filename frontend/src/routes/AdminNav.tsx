@@ -3,16 +3,20 @@ import { NavLink } from "react-router-dom";
 import { isMatchEdition } from "../edition";
 import styles from "./AdminNav.module.css";
 
-// Release 1 mounts only /admin, /admin/users and /admin/users/pending
-// (router.simple.tsx). Linking to the others would render tabs that resolve to
-// the in-app soft 404. These are GATED, not deleted — the full edition still
-// needs them.
+// Release 1 mounts /admin, /admin/golden-set, /admin/users and
+// /admin/users/pending (router.simple.tsx). Linking to the others would render
+// tabs that resolve to the in-app soft 404. These are GATED, not deleted — the
+// full edition still needs them.
+//
+// /admin/golden-set left this list on 2026-09-07, when router.simple.tsx began
+// mounting it: the golden set is the ranking system's own evaluation surface,
+// not proposal assist, and match is the only edition that ships.
 //
 // noCockpitLinks.test.tsx EXEMPTs this file: a source scan cannot tell a gated
 // string literal from an ungated one, so both halves of this gate are pinned by
-// AdminNav.test.tsx instead — the match case that the three are absent, and the
+// AdminNav.test.tsx instead — the match case that the two are absent, and the
 // full case that all six render.
-const MATCH_EXCLUDED = ["/admin/drafting", "/admin/golden-set", "/admin/deleted-workspaces"];
+const MATCH_EXCLUDED = ["/admin/drafting", "/admin/deleted-workspaces"];
 
 const LINKS: { to: string; label: string }[] = [
   { to: "/admin", label: "Operational health" },

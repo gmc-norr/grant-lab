@@ -167,7 +167,10 @@ REQUIRED_SCENARIOS = [
     "signing out reaches the logout endpoint and leaves for /login",
     "no rendered link anywhere in release 1 points into the excluded half",
     "every mounted release-1 route renders exactly one main landmark",
-    "the admin subnav offers only the three sections release 1 mounts",
+    # Renamed 2026-09-07 (three -> four): router.simple.tsx mounts
+    # /admin/golden-set in the match edition now. A RENAME, not an addition, so
+    # the len(titles) == len(REQUIRED_SCENARIOS) equality below still balances.
+    "the admin subnav offers only the four sections release 1 mounts",
     "an excluded route renders the in-app soft 404, not a cockpit",
     "the light ground is actually PAINTED, not merely declared",
     "no critical a11y violations on the release-1 landing page",
@@ -243,7 +246,7 @@ def test_the_match_spec_actually_asserts_things():
     src = "\n".join(_spec_source_lines())
     expects = len(EXPECT_SITE.findall(src))
     assert expects == 128, (
-        f"the browser smoke has {expects} expect() calls, this gate pins 120 — "
+        f"the browser smoke has {expects} expect() calls, this gate pins 128 — "
         "if the change was deliberate, re-measure and update the number here"
     )
     # The two release-1 CRITICALs the spec exists to catch, in live code.
@@ -259,7 +262,7 @@ def test_the_match_spec_actually_asserts_things():
 # plan's). oxlint has no type information either, so no-floating-promises cannot
 # fire. So deleting one `await` in front of a Playwright web-first assertion:
 #
-#   * keeps the assertion-site count above at exactly 120,
+#   * keeps the assertion-site count above at exactly 128,
 #   * typechecks nowhere, lints nowhere,
 #   * and produces a promise nobody ever settles — an assertion that can never
 #     fail, in a file whose entire job is to fail.

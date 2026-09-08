@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
-import { useHideCall, useUnhideCall } from "../api/calls";
+import { useHideCall, useSetDecisionNote, useUnhideCall } from "../api/calls";
 import { dashboardParamsFrom, useDashboard, type CallItem } from "../api/dashboard";
 import {
   useDecisionCounts,
@@ -10,6 +10,7 @@ import {
   useUnsaveCall,
   type TriageView,
 } from "../api/decisions";
+import { DecisionNoteStrip, type NoteTarget } from "./DecisionNoteStrip";
 import { TriageCard } from "./TriageCard";
 import { TriageEmptyProfile } from "./TriageEmptyProfile";
 import styles from "./TriageFeed.module.css";
@@ -142,6 +143,18 @@ export function TriageFeed() {
   const unsave = useUnsaveCall();
   const hide = useHideCall();
   const unhide = useUnhideCall();
+  const setNote = useSetDecisionNote();
+
+  // WHICH decision the note strip is about, or null for no strip. Held here
+  // rather than derived from the cursor, because the cursor moves and the
+  // decision it was created for does not (D10) -- see DecisionNoteStrip's own
+  // header. Set ONLY in a decision's onSuccess, below.
+  //
+  // `seed` rides in the SAME state object rather than beside it: the strip
+  // opens over a note that may already exist, and a second useState cleared by
+  // its own functional update in `undecide` is exactly how the two would come
+  // to disagree about which call they describe.
+  const [noteTarget, setNoteTarget] = useState<(NoteTarget & { seed: string | null }) | null>(null);
 
   const [focusIndex, setFocusIndex] = useState(0);
   const cardEls = useRef<(HTMLElement | null)[]>([]);
@@ -191,13 +204,58 @@ export function TriageFeed() {
       if (isFetching) return;
       const args = { id: call.id, profileId };
       // Both hooks invalidate ["calls"] AND ["decision-counts"] themselves (see
-      // invalidateDecisions). Nothing is added per call here on purpose: a
-      // mutate-level onSuccess is dropped when this component unmounts before
-      // the request lands, which on a keyboard triage loop is the normal case.
-      if (kind === "save") save.mutate(args);
-      else hide.mutate(args);
+      // invalidateDecisions). NOTHING CACHE-RELATED is added per call here on
+      // purpose: a mutate-level onSuccess is dropped when this component
+      // unmounts before the request lands, which on a keyboard triage loop is
+      // the normal case.
+      //
+      // The note strip is the one thing that IS mutate-level, and it has to be:
+      // it is per-call state on THIS component, so a hook-level callback in
+      // api/calls.ts (shared with CallDetail, which has no strip) is the wrong
+      // home for it, and the drop case is exactly the case where there is no
+      // feed left to render a strip on.
+      //
+      // ON SUCCESS, NEVER OPTIMISTICALLY (D10). A failed hide that still opened
+      // a strip would solicit a note for a decision that did not happen, and
+      // the note endpoint would then 404 on a row that was never created.
+      const nextState = kind === "save" ? "saved" : "hidden";
+      // THE NOTE THAT IS ALREADY THERE, or null. `h` on an already-hidden card
+      // in the Hidden view re-runs the upsert, whose CASE PRESERVES the note
+      // through `hidden -> hidden` -- so an unseeded box would open empty over
+      // a stored reason and the first Enter would replace it unseen.
+      //
+      // A FLIP is the opposite case and must NOT be seeded: `s` on a hidden
+      // card writes `hidden -> saved`, which by D9 CLEARS the note server-side,
+      // so seeding there would show text the server has just discarded and
+      // re-save it on the next Enter. `view` is the row's current state in the
+      // two views that have one, so `view === nextState` is exactly "same
+      // state, note preserved"; the Inbox matches neither and carries no
+      // decision row to have a note on.
+      const seed = view === nextState ? (call.decision_note ?? null) : null;
+      const onDecided = () =>
+        setNoteTarget({
+          callId: call.id,
+          profileId,
+          title: call.title,
+          state: nextState,
+          seed,
+        });
+      // onSuccess, never optimistically (D10): a failed hide must not solicit a
+      // note for a decision that did not happen, and the note endpoint would
+      // then 404 on a row that never existed.
+      //
+      // In practice this fires LATER than "the POST resolved". Both hooks
+      // return invalidateDecisions(qc)'s promise from their hook-level
+      // onSuccess, and TanStack v5 awaits that before running mutate-level
+      // callbacks -- so the strip appears once the list and the counts have
+      // settled, together with the list update rather than ahead of it.
+      // Measured 2026-09-07: holding the list refetch holds the strip. That
+      // reads better, but it means a hung refetch delays the prompt, which is
+      // the window D2 exists for. Recorded so the coupling is a choice.
+      if (kind === "save") save.mutate(args, { onSuccess: onDecided });
+      else hide.mutate(args, { onSuccess: onDecided });
     },
-    [hide, isFetching, profileId, save],
+    [hide, isFetching, profileId, save, view],
   );
 
   // UN-DECIDE (D2): back to undecided, which is the ABSENCE of a decision row —
@@ -209,8 +267,14 @@ export function TriageFeed() {
       // See decide()'s comment: this is the guard the button actually needs.
       if (isFetching) return;
       const args = { id: call.id, profileId };
-      if (view === "saved") unsave.mutate(args);
-      else if (view === "hidden") unhide.mutate(args);
+      // A note belongs to its decision and dies with it (D4), so un-deciding
+      // the call the strip is about leaves a box whose write can only 404.
+      // Cleared on SUCCESS, symmetrically with decide(): a failed un-decide has
+      // changed nothing.
+      const onUndecided = () =>
+        setNoteTarget((t) => (t !== null && t.callId === call.id ? null : t));
+      if (view === "saved") unsave.mutate(args, { onSuccess: onUndecided });
+      else if (view === "hidden") unhide.mutate(args, { onSuccess: onUndecided });
       // The Inbox has no decision row to delete, so `u` there does nothing.
     },
     [isFetching, profileId, unhide, unsave, view],
@@ -366,6 +430,32 @@ export function TriageFeed() {
       <div className={styles.column}>
         {data.ranking.pending > 0 && (
           <p className={styles.status}>Scoring {data.ranking.pending} calls…</p>
+        )}
+
+        {/* OUTSIDE the items.length branch, so the strip survives the list
+            emptying under it -- deciding the last card in a view is precisely
+            when a reason is worth asking for.
+
+            KEYED by the decision, so the next one REPLACES the strip rather
+            than re-labelling it: a fresh instance starts with an empty box and
+            its own bound target, and the outgoing instance's in-flight write
+            keeps the ids it was created with and is not cancelled (D10).
+
+            expectedState comes from THIS closure's noteTarget, not from the
+            strip: the strip must not carry two ways to say which decision it
+            is about (D11).
+
+            NO autoFocus, and that is D2 itself: this strip appears on its own
+            after a keypress the user made, and grabbing the caret would turn
+            `h h h` into typed text in the first box. */}
+        {noteTarget !== null && (
+          <DecisionNoteStrip
+            key={`${noteTarget.callId}:${noteTarget.state}`}
+            target={noteTarget}
+            initialNote={noteTarget.seed}
+            onSave={(args) => setNote.mutateAsync({ ...args, expectedState: noteTarget.state })}
+            onDismiss={() => setNoteTarget(null)}
+          />
         )}
 
         {items.length === 0 ? (
