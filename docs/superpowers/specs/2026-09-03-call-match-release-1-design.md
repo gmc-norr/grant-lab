@@ -217,6 +217,38 @@ because it carries the quote. The design is therefore:
 The band (high / medium / low) is retained for sorting and for the digest, but
 the raw aggregate is not shown in the UI.
 
+> **REVERSED 2026-09-08 — the raw score IS shown, on every card.**
+>
+> The argument above is sound about the *expanded* card, where the chips genuinely
+> replace the number. It never addressed the other 39 rows. The chips render only
+> when a card is expanded, so the feed as built carried **no match signal at all**
+> on a collapsed row — title, funder, days left. The list is sorted by
+> `aggregate_score DESC NULLS LAST` and nothing on screen said so, which left the
+> reader unable to answer "how good is this one?" without expanding each in turn.
+> That is a worse failure than the one §4.2 set out to prevent: a number you can
+> argue with beats a ranking you cannot see.
+>
+> Both are shown now. The chips were right and are kept; the score is added
+> beside the title, on collapsed and expanded cards alike.
+>
+> Two constraints shaped how, and neither is negotiable:
+>
+> * **Greyscale, no band.** §5 reserves colour for deadline urgency, and the
+>   score sits two lines above the deadline. `components/MatchBadge.tsx` — the
+>   full edition's colour-banded pill — is therefore NOT reused, even though
+>   nothing bars it from the match bundle. Weight and tabular figures carry it.
+> * **A number, not a band.** The repo already holds **four disagreeing cutoffs**:
+>   MatchBadge (≥80 / ≥60), `web/dashboard.py` `DASHBOARD_HIGH_SCORE_THRESHOLD`
+>   (70), `digest/assemble.py` `DIGEST_TOP_THRESHOLD` (60) and
+>   `DIGEST_BORDERLINE_LOWER` (45). Rendering a band meant inventing a fifth and
+>   making "good match" mean a fifth thing. The number needs no cutoff.
+>
+> The gate in `TriageCard.test.tsx` was inverted, not deleted: it now asserts the
+> score renders *and* that the chips survive *and* that no `[data-band]` appears.
+> **The public-board gate (§9, "Public endpoint gates") is untouched** — a wall display in a corridor
+> still carries no score field of any type, and that is a different question from
+> what a logged-in researcher sees.
+
 **Most of this is already built — on the detail page.**
 `frontend/src/routes/CallDetailBody.tsx:145-171` already renders one card per
 criterion carrying its label, its rating, its `rationale` and its

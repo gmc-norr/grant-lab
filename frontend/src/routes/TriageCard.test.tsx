@@ -1,6 +1,3 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -46,7 +43,9 @@ function call(over: Partial<CallItem> = {}): CallItem {
   };
 }
 
-function crit(over: Partial<Criterion> & { criterion: string; rating: string }): Criterion {
+function crit(
+  over: Partial<Criterion> & { criterion: string; rating: string },
+): Criterion {
   return {
     label: over.criterion,
     is_topic_fit: over.criterion === "topic_fit",
@@ -60,7 +59,9 @@ function crit(over: Partial<Criterion> & { criterion: string; rating: string }):
 // A local date N days from now, in Europe/Stockholm — the same clock
 // deadlineLocalView reads, so "12 days left" is 12 here too.
 function localDateIn(days: number): string {
-  const today = new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Stockholm" });
+  const today = new Date().toLocaleDateString("sv-SE", {
+    timeZone: "Europe/Stockholm",
+  });
   return new Date(new Date(today + "T00:00:00Z").getTime() + days * 86_400_000)
     .toISOString()
     .slice(0, 10);
@@ -89,11 +90,21 @@ describe("gate 1 — what a card shows", () => {
     expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent(
       "Precision oncology in clinical practice",
     );
-    expect(container.querySelector('[data-field="funder"]')).toHaveTextContent("Cancerfonden");
-    expect(container.querySelector('[data-field="deadline"]')).toHaveTextContent("2027-03-01");
+    expect(container.querySelector('[data-field="funder"]')).toHaveTextContent(
+      "Cancerfonden",
+    );
+    expect(
+      container.querySelector('[data-field="deadline"]'),
+    ).toHaveTextContent("2027-03-01");
     // The feed's j/k move REAL focus onto this element and address it by id.
-    expect(container.querySelector("article")).toHaveAttribute("data-call-id", "1");
-    expect(container.querySelector("article")).toHaveAttribute("tabindex", "-1");
+    expect(container.querySelector("article")).toHaveAttribute(
+      "data-call-id",
+      "1",
+    );
+    expect(container.querySelector("article")).toHaveAttribute(
+      "tabindex",
+      "-1",
+    );
   });
 
   it("orders the fields the way §5's table does: what is this, what does it fund, why is it here", () => {
@@ -111,7 +122,11 @@ describe("gate 1 — what a card shows", () => {
           summary: "Supports clinical implementation studies.",
           keywords: ["oncology"],
           criteria: [
-            crit({ criterion: "topic_fit", rating: "5", quoted_evidence: "clinical genomics" }),
+            crit({
+              criterion: "topic_fit",
+              rating: "5",
+              quoted_evidence: "clinical genomics",
+            }),
           ],
           escalated: true,
           applicant_note_count: 3,
@@ -141,7 +156,10 @@ describe("gate 2 — the common case: every optional field absent", () => {
     // budget field null — the SHAPE most calls arrive in.
     const { container } = renderWithProviders(
       <TriageCard
-        call={call({ deadline: "2027-03-01T12:00:00Z", deadline_local_date: "2027-03-01" })}
+        call={call({
+          deadline: "2027-03-01T12:00:00Z",
+          deadline_local_date: "2027-03-01",
+        })}
         expanded
         profileId={7}
         view="inbox"
@@ -153,20 +171,22 @@ describe("gate 2 — the common case: every optional field absent", () => {
     // The ACTUAL copy, not a testid: §5 asks for a sentence that reads as a fact
     // about the source, and a gate that only checked the attribute would pass
     // over an empty <p data-field="no-summary" />.
-    expect(noSummary).toHaveTextContent("This source publishes no description with the call.");
-    // ...and a link OUT, which is the other half of §5's requirement.
-    expect(screen.getByRole("link", { name: /read it at the funder/i })).toHaveAttribute(
-      "href",
-      "https://example.org/calls/1",
+    expect(noSummary).toHaveTextContent(
+      "This source publishes no description with the call.",
     );
+    // ...and a link OUT, which is the other half of §5's requirement.
+    expect(
+      screen.getByRole("link", { name: /read it at the funder/i }),
+    ).toHaveAttribute("href", "https://example.org/calls/1");
     // Nothing empty is left behind: no chips row, no keyword row, no programme
     // separator dangling after the funder.
     expect(container.querySelector("[data-criterion]")).toBeNull();
     expect(container.querySelector('[data-field="keywords"]')).toBeNull();
     expect(container.querySelector('[data-field="programme"]')).toBeNull();
-    expect(container.querySelector('[data-field="funder"]')?.parentElement?.textContent).toBe(
-      "Vinnova",
-    );
+    expect(
+      container.querySelector('[data-field="funder"]')?.parentElement
+        ?.textContent,
+    ).toBe("Vinnova");
   });
 
   it("prints the summary itself when the source did publish one", () => {
@@ -193,22 +213,30 @@ describe("gate 12 — the URL is the state, and the card's link preserves it (D1
     // ?view= for where its back link returns to; dropping either strands the
     // reader on a page that cannot get them back where they were.
     renderWithProviders(
-      <TriageCard call={call({ id: 1 })} expanded profileId={7} view="hidden" />,
+      <TriageCard
+        call={call({ id: 1 })}
+        expanded
+        profileId={7}
+        view="hidden"
+      />,
     );
-    expect(screen.getByRole("link", { name: /precision oncology/i })).toHaveAttribute(
-      "href",
-      "/calls/1?profile=7&view=hidden",
-    );
+    expect(
+      screen.getByRole("link", { name: /precision oncology/i }),
+    ).toHaveAttribute("href", "/calls/1?profile=7&view=hidden");
   });
 
   it("carries the view alone when no profile is resolved", () => {
     renderWithProviders(
-      <TriageCard call={call({ id: 42 })} expanded profileId={null} view="inbox" />,
+      <TriageCard
+        call={call({ id: 42 })}
+        expanded
+        profileId={null}
+        view="inbox"
+      />,
     );
-    expect(screen.getByRole("link", { name: /precision oncology/i })).toHaveAttribute(
-      "href",
-      "/calls/42?view=inbox",
-    );
+    expect(
+      screen.getByRole("link", { name: /precision oncology/i }),
+    ).toHaveAttribute("href", "/calls/42?view=inbox");
   });
 });
 
@@ -242,7 +270,9 @@ describe("gate 9 (button half) — Return to inbox (D2)", () => {
         onUndecide={() => {}}
       />,
     );
-    expect(screen.queryByRole("button", { name: "Return to inbox" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Return to inbox" }),
+    ).toBeNull();
   });
 
   it("does not offer it on a collapsed card either", () => {
@@ -255,18 +285,26 @@ describe("gate 9 (button half) — Return to inbox (D2)", () => {
         onUndecide={() => {}}
       />,
     );
-    expect(screen.queryByRole("button", { name: "Return to inbox" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Return to inbox" }),
+    ).toBeNull();
   });
 });
 
 describe("the fields that are conditional", () => {
   it("omits the separator with the programme, and prints both when there is one", () => {
     const { container: without } = renderWithProviders(
-      <TriageCard call={call({ source_name: "Vinnova" })} expanded profileId={7} view="inbox" />,
+      <TriageCard
+        call={call({ source_name: "Vinnova" })}
+        expanded
+        profileId={7}
+        view="inbox"
+      />,
     );
-    expect(without.querySelector('[data-field="funder"]')?.parentElement?.textContent).toBe(
-      "Vinnova",
-    );
+    expect(
+      without.querySelector('[data-field="funder"]')?.parentElement
+        ?.textContent,
+    ).toBe("Vinnova");
     const { container: with_ } = renderWithProviders(
       <TriageCard
         call={call({ source_name: "Vinnova", programme: "UDI" })}
@@ -275,53 +313,77 @@ describe("the fields that are conditional", () => {
         view="inbox"
       />,
     );
-    expect(with_.querySelector('[data-field="funder"]')?.parentElement?.textContent).toBe(
-      "Vinnova · UDI",
-    );
+    expect(
+      with_.querySelector('[data-field="funder"]')?.parentElement?.textContent,
+    ).toBe("Vinnova · UDI");
   });
 
   it("shows a budget RANGE when min differs from max, and one figure when they agree", () => {
     const { container: range } = renderWithProviders(
       <TriageCard
-        call={call({ budget_min: 100_000, budget_max: 250_000, currency: "SEK" })}
+        call={call({
+          budget_min: 100_000,
+          budget_max: 250_000,
+          currency: "SEK",
+        })}
         expanded
         profileId={7}
         view="inbox"
       />,
     );
-    expect(range.querySelector('[data-field="budget"]')).toHaveTextContent("100,000 – 250,000 SEK");
+    expect(range.querySelector('[data-field="budget"]')).toHaveTextContent(
+      "100,000 – 250,000 SEK",
+    );
     const { container: flat } = renderWithProviders(
       <TriageCard
-        call={call({ budget_min: 250_000, budget_max: 250_000, currency: "SEK" })}
+        call={call({
+          budget_min: 250_000,
+          budget_max: 250_000,
+          currency: "SEK",
+        })}
         expanded
         profileId={7}
         view="inbox"
       />,
     );
-    expect(flat.querySelector('[data-field="budget"]')).toHaveTextContent("250,000 SEK");
-    expect(flat.querySelector('[data-field="budget"]')?.textContent).not.toContain("–");
+    expect(flat.querySelector('[data-field="budget"]')).toHaveTextContent(
+      "250,000 SEK",
+    );
+    expect(
+      flat.querySelector('[data-field="budget"]')?.textContent,
+    ).not.toContain("–");
   });
 
   it("counts the days left beside the deadline, and prints none for a closed call", () => {
     const { container: open } = renderWithProviders(
       <TriageCard
-        call={call({ deadline: "2099-01-01T00:00:00Z", deadline_local_date: localDateIn(12) })}
+        call={call({
+          deadline: "2099-01-01T00:00:00Z",
+          deadline_local_date: localDateIn(12),
+        })}
         expanded
         profileId={7}
         view="inbox"
       />,
     );
-    expect(open.querySelector('[data-field="days-left"]')).toHaveTextContent("12 days left");
+    expect(open.querySelector('[data-field="days-left"]')).toHaveTextContent(
+      "12 days left",
+    );
     const { container: closed } = renderWithProviders(
       <TriageCard
-        call={call({ deadline: "2020-01-01T00:00:00Z", deadline_local_date: localDateIn(-9) })}
+        call={call({
+          deadline: "2020-01-01T00:00:00Z",
+          deadline_local_date: localDateIn(-9),
+        })}
         expanded
         profileId={7}
         view="inbox"
       />,
     );
     expect(closed.querySelector('[data-field="days-left"]')).toBeNull();
-    expect(closed.querySelector('[data-field="deadline"]')).toHaveTextContent(/^Closed ·/);
+    expect(closed.querySelector('[data-field="deadline"]')).toHaveTextContent(
+      /^Closed ·/,
+    );
   });
 
   it("offers 'N things to check' only for an escalated call that actually has notes", () => {
@@ -333,9 +395,9 @@ describe("the fields that are conditional", () => {
         view="inbox"
       />,
     );
-    expect(both.container.querySelector('[data-field="things-to-check"]')).toHaveTextContent(
-      "3 things to check",
-    );
+    expect(
+      both.container.querySelector('[data-field="things-to-check"]'),
+    ).toHaveTextContent("3 things to check");
     const noNotes = renderWithProviders(
       <TriageCard
         call={call({ escalated: true, applicant_note_count: 0 })}
@@ -344,7 +406,9 @@ describe("the fields that are conditional", () => {
         view="inbox"
       />,
     );
-    expect(noNotes.container.querySelector('[data-field="things-to-check"]')).toBeNull();
+    expect(
+      noNotes.container.querySelector('[data-field="things-to-check"]'),
+    ).toBeNull();
     const notEscalated = renderWithProviders(
       <TriageCard
         call={call({ escalated: false, applicant_note_count: 3 })}
@@ -353,7 +417,9 @@ describe("the fields that are conditional", () => {
         view="inbox"
       />,
     );
-    expect(notEscalated.container.querySelector('[data-field="things-to-check"]')).toBeNull();
+    expect(
+      notEscalated.container.querySelector('[data-field="things-to-check"]'),
+    ).toBeNull();
   });
 
   it("collapses to title, funder and days left when it is not the focused card", () => {
@@ -366,7 +432,11 @@ describe("the fields that are conditional", () => {
           summary: "Supports clinical implementation studies.",
           keywords: ["oncology"],
           criteria: [
-            crit({ criterion: "topic_fit", rating: "5", quoted_evidence: "clinical genomics" }),
+            crit({
+              criterion: "topic_fit",
+              rating: "5",
+              quoted_evidence: "clinical genomics",
+            }),
           ],
         })}
         expanded={false}
@@ -378,7 +448,9 @@ describe("the fields that are conditional", () => {
     expect(container.querySelector('[data-field="funder"]')).not.toBeNull();
     expect(container.querySelector('[data-field="summary"]')).toBeNull();
     expect(container.querySelector("[data-criterion]")).toBeNull();
-    expect(container.querySelector('[data-field="matched-sentence"]')).toBeNull();
+    expect(
+      container.querySelector('[data-field="matched-sentence"]'),
+    ).toBeNull();
   });
 
   it("gives the matched sentence prime space, in the funder's own words", () => {
@@ -406,30 +478,31 @@ describe("the fields that are conditional", () => {
         view="inbox"
       />,
     );
-    expect(container.querySelector('[data-field="matched-sentence"]')).toHaveTextContent(
-      "clinical genomics and molecular tumour boards",
-    );
+    expect(
+      container.querySelector('[data-field="matched-sentence"]'),
+    ).toHaveTextContent("clinical genomics and molecular tumour boards");
   });
 });
 
-describe("gate 8 — no raw score on the card", () => {
-  // Spec §4.2 keeps the BAND for sorting and the digest and shows the NUMBER
-  // nowhere. Task 6 removed it from the detail page; this is the same guarantee
-  // on the one screen §4.2 is actually about.
+describe("gate 8 — the raw score IS on the card", () => {
+  // REVERSED 2026-09-08. Spec §4.2 originally kept the band for sorting and the
+  // digest and showed the number nowhere, and this gate asserted the card
+  // neither rendered nor named `aggregate_score`. The customer's objection was
+  // the one the spec never answered: the criterion chips appear only on the ONE
+  // expanded card, so the other rows carried no match signal at all. Sort order
+  // was the only ranking cue and nothing on screen said so.
   //
-  // TWO assertions, because each one alone has a hole big enough to drive B25b
-  // through:
+  // What did NOT change, and is still asserted here:
+  //   - the chips are still there. Showing a number must not cost the reasons;
+  //     that trade is what §4.2 was right about.
+  //   - no band, no colour. §5 reserves colour for deadline urgency, so
+  //     [data-band] — MatchBadge's own hook — must stay absent.
   //
-  //   - the RENDER check can only prove that THIS fixture's score string is
-  //     absent. It passes for free on a fixture whose aggregate_score is null,
-  //     and it would false-POSITIVE if the score collided with a legitimate
-  //     number on the card. Hence: score 87, deadline 12 days out, budget
-  //     100,000–250,000, topic_fit 5/5, 3 notes — 87 appears nowhere by accident.
-  //   - the SOURCE check cannot be dodged by a fixture at all, but it is a string
-  //     scan: `call["aggregate" + "_score"]` walks straight past it (B25c). It is
-  //     a smoke; (c) is the gate.
-  //
-  // Together they cover both mistakes. Neither subsumes the other.
+  // The "87" scoping note from the old gate still applies in reverse: assertions
+  // are scoped to [data-field="score"], never to `container`, because
+  // MantineProvider injects ~8 kB of CSS whose text contains "87" (rgba
+  // components, the 87.99375em breakpoint). A container-wide search for the
+  // number would pass on a card that renders nothing at all.
   const scored = call({
     aggregate_score: 87,
     deadline: "2099-01-01T00:00:00Z",
@@ -452,38 +525,65 @@ describe("gate 8 — no raw score on the card", () => {
     ],
   });
 
-  it("renders the criterion chips instead — and no band, no badge, no raw number", () => {
+  it("shows the score, with its scale, and still shows the criterion chips", () => {
     const { container } = renderWithProviders(
       <TriageCard call={scored} expanded profileId={7} view="inbox" />,
     );
-    // The card is NOT vacuously clean: the reason-shaped answer is present.
-    expect([...container.querySelectorAll("[data-criterion]")].map((el) => el.textContent)).toEqual(
-      ["Topic fit 5/5", "Eligibility ✓"],
+    expect(container.querySelector('[data-field="score"]')?.textContent).toBe(
+      "87",
     );
-    // MatchBadge's own hook — the full edition's pill sets data-band.
-    expect(container.querySelector("[data-band]")).toBeNull();
-    // ...and the number itself is nowhere in the CARD's own text.
-    //
-    // Scoped to the <article>, not to `container`: MantineProvider injects ~8 kB
-    // of CSS custom properties into a <style> inside the render container, and
-    // its text contains "87" (rgba components, the 87.99375em breakpoint, ...).
-    // A container-wide `not.toContain("87")` therefore fails on CORRECT code —
-    // measured on this branch. Any "no bare number" gate written against the
-    // whole container is a false positive waiting to happen (T7-2).
-    const card = container.querySelector("article");
-    expect(card).not.toBeNull();
-    expect(card?.textContent).not.toContain("87");
+    // The denominator: a bare 87 beside a "5/5" chip reads as a different scale.
+    expect(container.querySelector("article")?.textContent).toContain(
+      "/ 100 match",
+    );
+    // Not traded for the reasons — both, or this change made the card worse.
+    expect(
+      [...container.querySelectorAll("[data-criterion]")].map(
+        (el) => el.textContent,
+      ),
+    ).toEqual(["Topic fit 5/5", "Eligibility ✓"]);
   });
 
-  it("does not name aggregate_score in its source at all", () => {
-    const src = readFileSync(join(import.meta.dirname, "TriageCard.tsx"), "utf8");
-    // Comments say the word on purpose (they explain WHY it is absent), so the
-    // scan is over the code with comment lines stripped.
-    const code = src
-      .split("\n")
-      .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*"))
-      .join("\n");
-    expect(code).not.toContain("aggregate_score");
+  it("shows it on a COLLAPSED card too — the row that could not be scanned", () => {
+    // The reason this change exists. The chips render only when expanded, so a
+    // score that also hid on collapse would leave the feed exactly as it was.
+    const { container } = renderWithProviders(
+      // `expanded` is REQUIRED, not optional: omitting it renders collapsed at
+      // runtime and vitest is happy, but `pnpm run build` is the only
+      // typechecker here and it is a TS2741. Say false out loud.
+      <TriageCard call={scored} expanded={false} profileId={7} view="inbox" />,
+    );
+    expect(container.querySelector("[data-criterion]")).toBeNull();
+    expect(container.querySelector('[data-field="score"]')?.textContent).toBe(
+      "87",
+    );
+  });
+
+  it("stays greyscale — no band, no pill", () => {
+    // §5: colour is reserved for deadline urgency. [data-band] is
+    // components/MatchBadge.tsx's own hook, so this catches the obvious
+    // regression of reaching for the full edition's coloured pill.
+    const { container } = renderWithProviders(
+      <TriageCard call={scored} expanded profileId={7} view="inbox" />,
+    );
+    expect(container.querySelector("[data-band]")).toBeNull();
+  });
+
+  it("renders NO score when the pair has no ranking row", () => {
+    // null is not zero. An unranked call must carry no score rather than a "0"
+    // that reads as a judgement the ranker never made.
+    const { container } = renderWithProviders(
+      <TriageCard
+        call={call({ aggregate_score: null })}
+        expanded
+        profileId={7}
+        view="inbox"
+      />,
+    );
+    expect(container.querySelector('[data-field="score"]')).toBeNull();
+    expect(container.querySelector("article")?.textContent).not.toContain(
+      "/ 100 match",
+    );
   });
 });
 
@@ -562,14 +662,19 @@ describe("gate 16 — the decision note on the card", () => {
         view="saved"
       />,
     );
-    expect(container.querySelector('[data-field="decision-note"]')).toHaveTextContent(
-      "worth a look in autumn",
-    );
+    expect(
+      container.querySelector('[data-field="decision-note"]'),
+    ).toHaveTextContent("worth a look in autumn");
   });
 
   it("offers NOTHING in the Inbox — no note, no Add-note control", () => {
     const { container } = renderWithProviders(
-      <TriageCard call={call({ decision_note: null })} expanded profileId={7} view="inbox" />,
+      <TriageCard
+        call={call({ decision_note: null })}
+        expanded
+        profileId={7}
+        view="inbox"
+      />,
     );
     expect(screen.queryByRole("button", { name: /add note/i })).toBeNull();
     expect(container.querySelector('[data-field="decision-note"]')).toBeNull();
@@ -582,7 +687,12 @@ describe("gate 16 — the decision note on the card", () => {
     // the test above for free — the API never sends a note on the inbox view,
     // so that fixture proves nothing about which condition is doing the work.
     const { container } = renderWithProviders(
-      <TriageCard call={call({ decision_note: "leaked" })} expanded profileId={7} view="inbox" />,
+      <TriageCard
+        call={call({ decision_note: "leaked" })}
+        expanded
+        profileId={7}
+        view="inbox"
+      />,
     );
     expect(container.querySelector('[data-field="decision-note"]')).toBeNull();
     expect(screen.queryByText("leaked")).toBeNull();
@@ -603,7 +713,10 @@ describe("gate 16 — the decision note on the card", () => {
       />,
     );
     await userEvent.click(screen.getByRole("button", { name: /add note/i }));
-    await userEvent.type(screen.getByRole("textbox"), "because it duplicates 2024{Enter}");
+    await userEvent.type(
+      screen.getByRole("textbox"),
+      "because it duplicates 2024{Enter}",
+    );
     await waitFor(() =>
       expect(put).toHaveBeenCalledWith("/api/calls/{call_id}/note", {
         params: { path: { call_id: 42 }, query: { profile_id: 7 } },
@@ -628,10 +741,17 @@ describe("gate 16 — the decision note on the card", () => {
     // can be got wrong alone.
     stubPut("x");
     const { unmount } = renderWithProviders(
-      <TriageCard call={call({ id: 42, decision_note: null })} expanded profileId={7} view="hidden" />,
+      <TriageCard
+        call={call({ id: 42, decision_note: null })}
+        expanded
+        profileId={7}
+        view="hidden"
+      />,
     );
     await userEvent.click(screen.getByRole("button", { name: /add note/i }));
-    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox")));
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("textbox")),
+    );
     unmount();
 
     renderWithProviders(
@@ -643,7 +763,9 @@ describe("gate 16 — the decision note on the card", () => {
       />,
     );
     await userEvent.click(screen.getByRole("button", { name: "wrong field" }));
-    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox")));
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("textbox")),
+    );
   });
 
   it("keeps the caret across the remount a successful save causes", async () => {
@@ -674,7 +796,9 @@ describe("gate 16 — the decision note on the card", () => {
         view="hidden"
       />,
     );
-    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox")));
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("textbox")),
+    );
   });
 
   it("edits an existing note through the same strip, seeded with what is already there", async () => {
@@ -751,7 +875,9 @@ describe("gate 16 — the decision note on the card", () => {
     // to be legible, and jest-dom prints "   padded reason   " and "padded
     // reason" identically once the terminal has eaten the padding.
     await waitFor(() =>
-      expect((screen.getByRole("textbox") as HTMLInputElement).value).toBe("padded reason"),
+      expect((screen.getByRole("textbox") as HTMLInputElement).value).toBe(
+        "padded reason",
+      ),
     );
   });
 

@@ -16,13 +16,22 @@ import styles from "./TriageFeed.module.css";
 // days left, which is the whole reason the feed is one column instead of a
 // mail-client split.
 //
-// NO RAW AGGREGATE, EVER. Spec §4.2 keeps the band for sorting and the digest
-// and shows the number nowhere; §5's table lists ten fields and the aggregate is
-// not one of them. This file therefore does not read that field at all, and
-// TriageCard.test.tsx asserts BOTH halves of it — the rendered <article> does not
-// contain the score, and this SOURCE does not name it. The RENDER check is the
-// one with teeth: the source scan is a string scan, so a computed key walks
-// straight past it.
+// THE SCORE IS SHOWN. Spec §4.2 originally replaced the number with named
+// reasons ("a number invites argument about the number; named reasons invite
+// agreement or correction") and a gate here asserted the card neither rendered
+// nor named `aggregate_score`. Reversed 2026-09-08 on the customer's call: the
+// reasons only appear on the ONE expanded card, so the other 39 rows in the feed
+// carried no match signal at all and the list could not be scanned. Sort order
+// was the only ranking cue and it is invisible.
+//
+// GREYSCALE, and no band. Two separate reasons:
+//   * §5 reserves colour for deadline urgency alone, so a coloured score pill
+//     would spend the one signal the reader is meant to read fastest. This is
+//     why components/MatchBadge.tsx — the full edition's banded pill — is NOT
+//     reused here even though nothing bars it from the match bundle.
+//   * The repo holds FOUR disagreeing cutoffs (MatchBadge >=80/>=60,
+//     dashboard.py >=70, digest >=60, digest borderline >=45). Rendering a band
+//     would have meant inventing a fifth. The number needs no cutoff.
 
 function budgetText(call: CallItem): string | null {
   const { budget_min: lo, budget_max: hi, currency } = call;
@@ -37,7 +46,9 @@ function budgetText(call: CallItem): string | null {
     // "500 000 – 500 000" reads as two numbers a reader has to compare.
     return lo === hi ? `${fmt(lo)}${cur}` : `${fmt(lo)} – ${fmt(hi)}${cur}`;
   }
-  return lo != null ? `From ${fmt(lo)}${cur}` : `Up to ${fmt(hi as number)}${cur}`;
+  return lo != null
+    ? `From ${fmt(lo)}${cur}`
+    : `Up to ${fmt(hi as number)}${cur}`;
 }
 
 // The matched sentence: the funder's own words, which spec §5 calls "the
@@ -147,7 +158,9 @@ function DecisionNote({
         // off the strip: the strip must not carry two ways to say which
         // decision it is about (D11). The server 409s a note filed against a
         // decision that has flipped since the box was opened.
-        onSave={(args) => setNote.mutateAsync({ ...args, expectedState: state })}
+        onSave={(args) =>
+          setNote.mutateAsync({ ...args, expectedState: state })
+        }
         onDismiss={() => setEditing(false)}
       />
     );
@@ -193,7 +206,11 @@ function DecisionNote({
 // THE URL IS THE STATE (D11). Both parameters travel to the detail page: the
 // profile because it decides which ranking the page shows, the view because the
 // page's back link has to return the reader to the list they came from.
-function detailHref(id: number, profileId: number | null, view: TriageView): string {
+function detailHref(
+  id: number,
+  profileId: number | null,
+  view: TriageView,
+): string {
   const params = new URLSearchParams();
   if (profileId != null) params.set("profile", String(profileId));
   params.set("view", view);
@@ -249,6 +266,20 @@ export function TriageCard({
       <h2 className={styles.cardTitle}>
         <Link to={detailTo}>{call.title}</Link>
       </h2>
+
+      {/* null = no ranking row for this (call, profile) yet, which is not a zero
+          and must not read as one. The unranked card simply carries no score,
+          the same way an absent budget renders nothing rather than an em-dash. */}
+      {call.aggregate_score !== null && (
+        <p className={styles.cardScore}>
+          <span data-field="score" className={styles.scoreValue}>
+            {call.aggregate_score}
+          </span>
+          {/* The denominator is not decoration: a bare "71" beside a "5/5" topic
+              chip reads as a different scale every time. */}
+          <span className={styles.scoreScale}> / 100 match</span>
+        </p>
+      )}
 
       {/* UNDER THE TITLE, and OUTSIDE the `expanded` block.
           NOT the same choice the Save/Hide row makes -- that row renders only
@@ -349,7 +380,11 @@ export function TriageCard({
               only: an inbox card has no decision row to delete. */}
           {view !== "inbox" && onUndecide && (
             <p className={styles.cardActions}>
-              <button type="button" className={styles.undecide} onClick={() => onUndecide(call)}>
+              <button
+                type="button"
+                className={styles.undecide}
+                onClick={() => onUndecide(call)}
+              >
                 Return to inbox
               </button>
             </p>
