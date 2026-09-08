@@ -46,50 +46,59 @@ export function SimpleShell() {
   // the match bundle and redden gate 1.
   const logout = useLogout();
   const signOut = () =>
-    logout.mutate(undefined, { onSuccess: () => window.location.assign("/login") });
+    logout.mutate(undefined, {
+      onSuccess: () => window.location.assign("/login"),
+    });
 
   return (
     <div className={styles.shell}>
       <header className={styles.topbar}>
-        <Link to="/" className={styles.brand}>
-          Call Match
-        </Link>
-        <nav className={styles.nav} aria-label="Main">
-          {DESTINATIONS.filter((d) => !d.adminOnly || isAdmin).map((d) => (
-            <NavLink
-              key={d.to}
-              to={d.to}
-              end={d.end}
-              className={styles.link}
-              // NavLink sets aria-current="page" itself when active; the test
-              // asserts on that rather than on a class name.
-            >
-              {d.label}
-            </NavLink>
-          ))}
-        </nav>
-        <Menu position="bottom-end" withinPortal>
-          <Menu.Target>
-            {/* The accessible name must CONTAIN the visible text (WCAG 2.5.3,
+        {/* The capped row inside the full-bleed bar. A plain div, not a
+            landmark: <header> already is one, and nesting a second changes
+            nothing for a screen reader but adds a stop to tab through. */}
+        <div className={styles.topbarInner}>
+          <Link to="/" className={styles.brand}>
+            Call Match
+          </Link>
+          <nav className={styles.nav} aria-label="Main">
+            {DESTINATIONS.filter((d) => !d.adminOnly || isAdmin).map((d) => (
+              <NavLink
+                key={d.to}
+                to={d.to}
+                end={d.end}
+                className={styles.link}
+                // NavLink sets aria-current="page" itself when active; the test
+                // asserts on that rather than on a class name.
+              >
+                {d.label}
+              </NavLink>
+            ))}
+          </nav>
+          <Menu position="bottom-end" withinPortal>
+            <Menu.Target>
+              {/* The accessible name must CONTAIN the visible text (WCAG 2.5.3,
                 label-in-name) or a voice-control user cannot say what they see.
                 A bare aria-label="Account menu" would replace the email
                 outright. */}
-            <UnstyledButton
-              className={styles.link}
-              aria-label={email ? `Account menu for ${email}` : "Account menu"}
-            >
-              {email ?? "Account"}
-            </UnstyledButton>
-          </Menu.Target>
-          <Menu.Dropdown>
-            <Menu.Item component={Link} to="/me">
-              Settings
-            </Menu.Item>
-            <Menu.Item onClick={signOut} disabled={logout.isPending}>
-              Sign out
-            </Menu.Item>
-          </Menu.Dropdown>
-        </Menu>
+              <UnstyledButton
+                className={styles.link}
+                aria-label={
+                  email ? `Account menu for ${email}` : "Account menu"
+                }
+              >
+                {email ?? "Account"}
+              </UnstyledButton>
+            </Menu.Target>
+            <Menu.Dropdown>
+              <Menu.Item component={Link} to="/me">
+                Settings
+              </Menu.Item>
+              <Menu.Item onClick={signOut} disabled={logout.isPending}>
+                Sign out
+              </Menu.Item>
+            </Menu.Dropdown>
+          </Menu>
+        </div>
       </header>
       {/* A plain div, NOT <main>: every release-1 page renders its own <main>
           landmark (Dashboard.tsx:18, CallDetail.tsx:31, Settings.tsx:39,

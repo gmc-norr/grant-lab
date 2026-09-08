@@ -37,6 +37,12 @@
 :root:root {
   color-scheme: light;
 
+  /* The reading container. ONE home for the width, because the top bar and the
+     feed must line up and two hard-coded 960s drift apart the first time one is
+     touched. 60rem is the value AdminNav.module.css already uses, so the three
+     agree by construction rather than by coincidence. */
+  --match-container: 60rem;
+
   /* Surfaces. Off-white, not pure white: less glare under office lighting, and
      it lets a genuinely white card lift off the page. */
   --app-editor: #faf9f7;
