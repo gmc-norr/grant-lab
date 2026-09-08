@@ -199,6 +199,81 @@ def probe_scheduler_lock(engine: Engine) -> tuple[SchedulerLock | None, str]:
     return SchedulerLock(conn), "acquired"
 
 
+#: How often the watchdog asks whether we still own the single-instance lock.
+#: Between two checks this process can be a second scheduler, so the interval is
+#: the width of that window — short enough to matter, long enough that the ping
+#: is noise on the connection the lock already holds open.
+SCHEDULER_LOCK_WATCHDOG_SECONDS = 30.0
+
+
+def enforce_scheduler_lock(lock: SchedulerLock, scheduler: BackgroundScheduler) -> bool:
+    """One ownership check. True while the lock is ours; on loss, stop the scheduler.
+
+    Losing the lock is not "maybe". The lock is session-level, so a dead session
+    has ALREADY released it server-side and another instance can take it while
+    this one keeps firing ingestion, the digest and the ranking drain — exactly
+    the second scheduler the single-instance constraint exists to prevent
+    (CLAUDE.md, and ``build_scheduler``'s own docstring). Until this existed,
+    nothing acted on ``is_held()`` at all: the only caller was the /healthz
+    field, which reports the loss to a monitor and changes nothing here.
+
+    Deliberately does NOT re-acquire. Re-acquiring would be *safe* — a
+    successful ``pg_try_advisory_lock`` proves nobody else holds it — but a
+    shut-down APScheduler cannot be restarted, so resuming means rebuilding the
+    scheduler and rewiring every tick. That is a larger change than the safety
+    property needs. The log line says restart the process, and it means it.
+    """
+    if lock.is_held():
+        return True
+    _logger.error(
+        "scheduler.lock_lost_stopping",
+        extra={
+            "event": "scheduler_lock_lost_stopping",
+            "detail": (
+                "the connection holding the single-instance advisory lock is dead, "
+                "so Postgres has released the lock and another instance may already "
+                "hold it — stopping this process's scheduler. HTTP keeps serving and "
+                "/healthz reports scheduler_lock=false. Restart this instance to "
+                "resume scheduled work."
+            ),
+        },
+    )
+    scheduler.shutdown(wait=False)
+    return False
+
+
+def start_scheduler_lock_watchdog(
+    lock: SchedulerLock,
+    scheduler: BackgroundScheduler,
+    *,
+    interval_seconds: float = SCHEDULER_LOCK_WATCHDOG_SECONDS,
+    stop_event: threading.Event | None = None,
+) -> tuple[threading.Thread, threading.Event]:
+    """Run ``enforce_scheduler_lock`` on a daemon thread until it says stop.
+
+    A plain thread, not an APScheduler job: a job that shuts down its own
+    scheduler is reentrancy nobody should have to reason about, and this check
+    must keep working even when every executor worker is blocked on an LLM pass
+    — which is the whole reason SCHEDULER_EXECUTOR_MAX_WORKERS is 30.
+
+    Returns the thread and the event that stops it, so the lifespan can join it
+    before tearing the scheduler down.
+    """
+    stop = stop_event if stop_event is not None else threading.Event()
+
+    def _run() -> None:
+        while not stop.wait(interval_seconds):
+            try:
+                if not enforce_scheduler_lock(lock, scheduler):
+                    return
+            except Exception:  # noqa: BLE001 — a watchdog that dies is worse than a slow one
+                _logger.exception("scheduler lock watchdog tick failed")
+
+    thread = threading.Thread(target=_run, name="scheduler-lock-watchdog", daemon=True)
+    thread.start()
+    return thread, stop
+
+
 class _SafeBackgroundScheduler(BackgroundScheduler):
     """BackgroundScheduler that silently ignores shutdown() when not running.
 

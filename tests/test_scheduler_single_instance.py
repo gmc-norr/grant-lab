@@ -12,9 +12,11 @@ daily ingest / weekly digest.
 
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 
 from grant_lab.config import Settings
 from grant_lab.scheduler import (
@@ -260,3 +262,146 @@ def test_is_held_goes_false_when_the_lock_backend_dies(pg_url, caplog):
     finally:
         engine_a.dispose()
         engine_b.dispose()
+
+
+def _started_scheduler():
+    from apscheduler.schedulers.background import BackgroundScheduler
+
+    sched = BackgroundScheduler(timezone="Europe/Stockholm")
+    sched.start()
+    return sched
+
+
+def test_a_lost_lock_stops_the_scheduler(pg_url, caplog):
+    """Losing the lock must stop this process from running scheduled work.
+
+    `is_held()` has told the truth since review A9 S5, but nothing acted on it:
+    its only caller was the /healthz field, which informs a monitor and stops
+    nothing. So a killed lock backend left this process firing ingestion, the
+    digest and the ranking drain while another instance could take the freed
+    lock — two schedulers, which the single-instance constraint forbids.
+    """
+    import logging
+
+    from sqlalchemy import create_engine, text
+
+    from grant_lab.scheduler import enforce_scheduler_lock
+
+    engine_a = create_engine(pg_url)
+    engine_b = create_engine(pg_url)
+    sched = _started_scheduler()
+    try:
+        lock = try_acquire_scheduler_lock(engine_a)
+        assert isinstance(lock, SchedulerLock)
+
+        # While the lock is ours the scheduler is left alone.
+        assert enforce_scheduler_lock(lock, sched) is True
+        assert sched.running is True
+
+        pid = lock._connection.execute(text("SELECT pg_backend_pid()")).scalar()
+        with engine_b.connect() as conn_b:
+            conn_b.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+
+        with caplog.at_level(logging.ERROR):
+            assert enforce_scheduler_lock(lock, sched) is False
+        assert sched.running is False, "the scheduler kept running without the lock"
+        stopping = [
+            r for r in caplog.records if r.__dict__.get("event") == "scheduler_lock_lost_stopping"
+        ]
+        assert len(stopping) == 1
+
+        # The lock really is free, so the instance that takes it is now the only
+        # one with a running scheduler.
+        with engine_b.connect() as conn_b:
+            assert (
+                conn_b.execute(
+                    text("SELECT pg_try_advisory_lock(hashtext('call-manager-scheduler'))")
+                ).scalar()
+                is True
+            )
+    finally:
+        if sched.running:
+            sched.shutdown(wait=False)
+        engine_a.dispose()
+        engine_b.dispose()
+
+
+def test_the_watchdog_stops_the_scheduler_when_the_lock_dies(pg_url):
+    """The thread that carries the check. A watchdog nobody starts is the state
+    this code was already in."""
+    from sqlalchemy import create_engine, text
+
+    from grant_lab.scheduler import start_scheduler_lock_watchdog
+
+    engine_a = create_engine(pg_url)
+    engine_b = create_engine(pg_url)
+    sched = _started_scheduler()
+    thread = stop = None
+    try:
+        lock = try_acquire_scheduler_lock(engine_a)
+        assert isinstance(lock, SchedulerLock)
+        thread, stop = start_scheduler_lock_watchdog(lock, sched, interval_seconds=0.05)
+
+        # Negative control: a healthy lock leaves the scheduler alone across many
+        # ticks. Without this the test would pass on a watchdog that stops the
+        # scheduler unconditionally.
+        time.sleep(0.5)
+        assert sched.running is True
+
+        pid = lock._connection.execute(text("SELECT pg_backend_pid()")).scalar()
+        with engine_b.connect() as conn_b:
+            conn_b.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+
+        deadline = time.monotonic() + 10
+        while sched.running and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert sched.running is False, "the watchdog never stopped the scheduler"
+        thread.join(timeout=5)
+        assert thread.is_alive() is False, "the watchdog thread must exit once it has acted"
+    finally:
+        if stop is not None:
+            stop.set()
+        if thread is not None:
+            thread.join(timeout=5)
+        if sched.running:
+            sched.shutdown(wait=False)
+        engine_a.dispose()
+        engine_b.dispose()
+
+
+def _watchdog_threads():
+    import threading
+
+    return [t for t in threading.enumerate() if t.name == "scheduler-lock-watchdog"]
+
+
+def test_the_lifespan_actually_starts_the_watchdog(
+    monkeypatch, pg_url, pg_session_factory, test_client_factory
+):
+    """The wiring, not the mechanism.
+
+    Every other test here drives `enforce_scheduler_lock` and
+    `start_scheduler_lock_watchdog` directly, so all of them stay green on an
+    app that never calls either — which is precisely the state this branch found
+    the code in. Boot the real app and look for the thread.
+    """
+    from grant_lab.main import create_app
+
+    monkeypatch.setenv("DATABASE_URL", pg_url)
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+    app = create_app()
+
+    before = _watchdog_threads()
+    with TestClient(app):
+        assert app.state.scheduler_lock is not None, "this instance must own the lock"
+        running = [t for t in _watchdog_threads() if t not in before]
+        assert len(running) == 1, "the lifespan did not start the lock watchdog"
+        assert running[0].is_alive() is True
+        watchdog = running[0]
+
+    # And the lifespan stops it again, so a torn-down app leaves no thread pinging
+    # a connection its engine has disposed.
+    watchdog.join(timeout=10)
+    assert watchdog.is_alive() is False, "the lifespan left the watchdog running"
