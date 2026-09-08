@@ -301,3 +301,82 @@ def test_detail_requires_auth(monkeypatch, pg_url, pg_session_factory):
     with TestClient(app) as client:
         r = client.get(f"/api/calls/{cid}")
     assert r.status_code == 401
+
+
+def test_detail_returns_the_callers_own_decision_state(monkeypatch, pg_url, pg_session_factory):
+    """PD-31b. The page can SHOW a note but not know it is looking at a hidden
+    call, because it learns that only from its own session state -- so after a
+    RELOAD it reads "Hide this call", offers no Undo, and the note it now
+    receives has nowhere to render. `decision_note` without `decision_state` is
+    half a fix.
+    """
+    cid = _seed_call(pg_session_factory)
+    app = _setup(monkeypatch, pg_url)
+    client, uid = _login(app, pg_session_factory)
+    pid = _seed_profile(pg_session_factory, owner_id=uid)
+    with client:
+        assert client.post(f"/api/calls/{cid}/hide", params={"profile_id": pid}).status_code == 200
+        r = client.get(f"/api/calls/{cid}?profile={pid}")
+    assert r.status_code == 200
+    assert r.json()["call"]["decision_state"] == "hidden"
+
+
+def test_detail_decision_state_reports_saved_too(monkeypatch, pg_url, pg_session_factory):
+    """Not hard-coded to "hidden". A saved call carries a note as well (the
+    strip is offered on `s`), and a field that only ever answers one value
+    cannot tell the page which decision it is annotating."""
+    cid = _seed_call(pg_session_factory)
+    app = _setup(monkeypatch, pg_url)
+    client, uid = _login(app, pg_session_factory)
+    pid = _seed_profile(pg_session_factory, owner_id=uid)
+    with client:
+        assert client.post(f"/api/calls/{cid}/save", params={"profile_id": pid}).status_code == 200
+        r = client.get(f"/api/calls/{cid}?profile={pid}")
+    assert r.json()["call"]["decision_state"] == "saved"
+
+
+def test_detail_decision_state_is_null_when_undecided(monkeypatch, pg_url, pg_session_factory):
+    """Undecided is the ABSENCE of a row. The POPULATED control is the two tests
+    above: the same fixture answers "hidden" and "saved", so this null is the
+    missing row, not an empty database."""
+    cid = _seed_call(pg_session_factory)
+    app = _setup(monkeypatch, pg_url)
+    client, uid = _login(app, pg_session_factory)
+    pid = _seed_profile(pg_session_factory, owner_id=uid)
+    with client:
+        r = client.get(f"/api/calls/{cid}?profile={pid}")
+    assert r.json()["call"]["decision_state"] is None
+
+
+def test_detail_never_shows_another_users_decision_state(
+    monkeypatch, pg_url, pg_session_factory
+):
+    """Same three-column scope as the note. `user_id` is the predicate a
+    copy-paste from the golden-set miner would drop -- the miner omits it on
+    purpose -- and dropping it here would show a colleague's decision as the
+    caller's own."""
+    from grant_lab.db.models import CallDecision, User
+
+    cid = _seed_call(pg_session_factory)
+    app = _setup(monkeypatch, pg_url)
+    client, uid = _login(app, pg_session_factory)
+    pid = _seed_profile(pg_session_factory, owner_id=uid)
+    with pg_session_factory() as s:
+        other = User(status="active", email="colleague-state@umu.se")
+        s.add(other)
+        s.flush()
+        s.add(
+            CallDecision(
+                user_id=other.id,
+                profile_id=pid,
+                call_id=cid,
+                state="hidden",
+                note="THEIRS",
+                decided_by=other.id,
+            )
+        )
+        s.commit()
+    with client:
+        r = client.get(f"/api/calls/{cid}?profile={pid}")
+    assert r.json()["call"]["decision_state"] is None
+    assert "THEIRS" not in r.text

@@ -3120,6 +3120,8 @@ export interface components {
             deadline_local_date: string | null;
             /** Decision Note */
             decision_note: string | null;
+            /** Decision State */
+            decision_state: ("saved" | "hidden") | null;
             /** External Id */
             external_id: string | null;
             /** Id */

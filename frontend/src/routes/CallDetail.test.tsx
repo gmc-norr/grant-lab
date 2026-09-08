@@ -418,3 +418,82 @@ it("leaves no box soliciting a reason once the hide is undone (D4)", async () =>
   await screen.findByRole("button", { name: /hide this call/i });
   expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
 });
+
+// --- PD-31b: THE RELOAD CASE -------------------------------------------------
+// Every test above reaches the hidden state by CLICKING. That is the one path
+// the page could already handle, because the click is what filled its session
+// state. A reader who refreshes, follows a bookmark, or clicks a Hidden card's
+// title arrives with no session state at all -- and the page rendered "Hide
+// this call" over an already-hidden call, offered no Undo, and had nowhere to
+// put the `decision_note` it was being handed.
+const HIDDEN_ON_ARRIVAL = {
+  ...RANKED,
+  call: {
+    ...RANKED.call,
+    decision_state: "hidden" as const,
+    decision_note: "not eligible — materials science",
+  },
+};
+
+function arriveAt(data: unknown) {
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data, error: undefined } as never);
+  renderDetail("/calls/5?profile=7");
+}
+
+it("knows the call is already hidden on arrival, with no prior click", async () => {
+  arriveAt(HIDDEN_ON_ARRIVAL);
+  expect(await screen.findByRole("button", { name: /undo/i })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /hide this call/i })).not.toBeInTheDocument();
+});
+
+it("shows the note it already carries, on arrival, without being asked", async () => {
+  arriveAt(HIDDEN_ON_ARRIVAL);
+  expect(await screen.findByText("not eligible — materials science")).toBeInTheDocument();
+});
+
+it("offers Add note on arrival at a hidden call that has none", async () => {
+  // D12: the strip is deliberately ignorable, so MOST hidden calls arrive here
+  // with no note. Offering the editor only where a note already exists makes
+  // "add a note later" unreachable on this page.
+  arriveAt({ ...HIDDEN_ON_ARRIVAL, call: { ...HIDDEN_ON_ARRIVAL.call, decision_note: null } });
+  expect(await screen.findByRole("button", { name: /add note/i })).toBeInTheDocument();
+});
+
+it("an undecided call still offers Hide, not Undo", async () => {
+  // THE NEGATIVE CONTROL. Without it, a component that simply always rendered
+  // Undo would pass all three tests above.
+  arriveAt({ ...RANKED, call: { ...RANKED.call, decision_state: null, decision_note: null } });
+  expect(await screen.findByRole("button", { name: /hide this call/i })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /undo/i })).not.toBeInTheDocument();
+});
+
+it("Undo after arrival wins over the state the server sent", async () => {
+  // The server's answer is the SEED, not the truth for the rest of the session:
+  // this page's query key is ["call", id, profile], which invalidateQueries
+  // (["calls"]) does not prefix-match, so nothing refetches after the DELETE.
+  // Deferring to `call.decision_state` forever would put the Undo straight back.
+  arriveAt(HIDDEN_ON_ARRIVAL);
+  vi.spyOn(clientMod.api, "DELETE").mockResolvedValue({ data: { hidden: false }, error: undefined } as never);
+  fireEvent.click(await screen.findByRole("button", { name: /undo/i }));
+  expect(await screen.findByRole("button", { name: /hide this call/i })).toBeInTheDocument();
+});
+
+it("shows the note it just saved, not the one the page loaded with", async () => {
+  // `useSetDecisionNote` invalidates ["calls"]; this page's key is
+  // ["call", id, profile], which that does not prefix-match -- so
+  // `call.decision_note` stays at its page-load value for the whole session.
+  // Without a local override, closing the editor puts the OLD text back on
+  // screen and the writer believes their edit was lost.
+  arriveAt(HIDDEN_ON_ARRIVAL);
+  vi.spyOn(clientMod.api, "PUT").mockResolvedValue({
+    data: { decision_note: "budget far too small" }, error: undefined,
+  } as never);
+  fireEvent.click(await screen.findByRole("button", { name: /not eligible/i }));
+  const box = await screen.findByRole("textbox");
+  await userEvent.clear(box);
+  await userEvent.type(box, "budget far too small{Enter}");
+  await act(async () => { await Promise.resolve(); });
+  fireEvent.keyDown(box, { key: "Escape" });
+  expect(await screen.findByText("budget far too small")).toBeInTheDocument();
+  expect(screen.queryByText("not eligible — materials science")).not.toBeInTheDocument();
+});

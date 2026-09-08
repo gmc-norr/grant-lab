@@ -219,6 +219,15 @@ class CallDetailCallOut(BaseModel):
     # note, and the strip would then open EMPTY over it -- one Enter replaces a
     # reason the golden set exists to read, unseen.
     decision_note: str | None
+    # WHICH decision that note belongs to -- 'saved' | 'hidden', None when
+    # undecided. Same three-column scope, read off the SAME row.
+    #
+    # The page held its hide/undo state for the session only, and that state was
+    # all it had: on a RELOAD it forgot, rendered "Hide this call" over an
+    # already-hidden call, offered no Undo, and had nowhere to put the
+    # `decision_note` it was being handed (PD-31b). A note the server sends and
+    # the page cannot render is worse than one it never sent.
+    decision_state: Literal["saved", "hidden"] | None
 
 
 class CallDetailNoteOut(BaseModel):
@@ -723,6 +732,7 @@ def get_call_detail(
         criteria: list[CallRankingCriterion] = []
         profile_obj: Profile | None = None
         decision_note: str | None = None
+        decision_state: str | None = None
         # This route resolves `?profile=` ITSELF — it never goes through
         # `dashboard.resolve_profile_selection` — so it composes the read rule
         # here. It used to resolve by is_active ALONE, which made it the
@@ -745,13 +755,21 @@ def get_call_detail(
                 # golden-set miner deliberately omits -- so it is the one a
                 # copy-paste from there would drop. `(user_id, profile_id,
                 # call_id)` is unique, so this is at most one row.
-                decision_note = session.scalar(
-                    select(CallDecision.note).where(
+                # BOTH columns off the ONE row. The state is what tells the
+                # page it is looking at a decided call at all: without it the
+                # page learns that only from its own session state, so after a
+                # RELOAD it rendered "Hide this call" over an already-hidden
+                # call, offered no Undo, and had nowhere to put the note it was
+                # being handed (PD-31b).
+                decision_row = session.execute(
+                    select(CallDecision.state, CallDecision.note).where(
                         CallDecision.user_id == user.id,
                         CallDecision.profile_id == profile_id,
                         CallDecision.call_id == call_id,
                     )
-                )
+                ).one_or_none()
+                if decision_row is not None:
+                    decision_state, decision_note = decision_row
                 ranking = session.execute(
                     select(CallRanking).where(
                         CallRanking.call_id == call_id,
@@ -814,6 +832,7 @@ def get_call_detail(
             keywords=list(call.keywords or []),
             summary=call.summary,
             decision_note=decision_note,
+            decision_state=decision_state,
         )
 
         ranking_out = None
