@@ -138,9 +138,22 @@ describe("SimpleShell", () => {
     expect(account).toHaveTextContent("p@umu.se");
   });
 
-  it("keeps the brand as a link home", () => {
+  it("keeps the brand as a link home, named Grant Lab", () => {
     renderAt("/profiles");
-    expect(screen.getByRole("link", { name: "Call Match" })).toHaveAttribute("href", "/");
+    // "Grant Lab", not "Grant Lab Call Match": the mark is aria-hidden (it
+    // carries its own aria-label and would say the name twice) and the edition
+    // label sits OUTSIDE the anchor, because it names a product, not a
+    // destination.
+    expect(screen.getByRole("link", { name: "Grant Lab" })).toHaveAttribute("href", "/");
+  });
+
+  it("shows the edition beside the product, and it is not a link", () => {
+    // The decision of 2026-09-08: Grant Lab leads on every surface, and this
+    // header — the only one that used to say something else — names which part
+    // of it you are in. Both must be visible; only one is navigable.
+    renderAt("/");
+    expect(screen.getByText("Call Match")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Call Match" })).not.toBeInTheDocument();
   });
 
   it("offers Sign out in the account menu and it invokes the logout mutation", async () => {

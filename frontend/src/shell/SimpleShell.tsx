@@ -2,6 +2,7 @@ import { Menu, UnstyledButton } from "@mantine/core";
 import { Link, NavLink, Outlet } from "react-router-dom";
 
 import { useLogout } from "../api/auth";
+import { BrandMark } from "./BrandMark";
 import { useSession } from "../api/session";
 // The match edition's light ground. Imported HERE, not in main.tsx, so it enters
 // the module graph only through router.simple.tsx — the full build never sees it.
@@ -57,9 +58,30 @@ export function SimpleShell() {
             landmark: <header> already is one, and nesting a second changes
             nothing for a screen reader but adds a stop to tab through. */}
         <div className={styles.topbarInner}>
+          {/* GRANT LAB LEADS, Call Match names the edition. Decided 2026-09-08;
+              index.html's comment had flagged this as "a naming decision for the
+              humans shipping release 1, not a defect to patch".
+
+              Every other surface already said Grant Lab — the login screen, the
+              corridor board, the alert emails' [Grant Lab] subject prefix, the
+              OpenAPI title and the browser tab. This header was the only place
+              that said something else, and the only one carrying no BrandMark,
+              so a user went logo+Grant Lab (login) -> bare "Call Match" (app)
+              and back to Grant Lab on the board.
+
+              Only "Grant Lab" is the LINK. "Call Match" is a label, not a
+              destination, so putting it inside the anchor would promise a page
+              that does not exist and make the link's accessible name read
+              "Grant Lab Call Match". The mark is aria-hidden because it carries
+              aria-label="Grant Lab" of its own and would otherwise say the name
+              twice. */}
           <Link to="/" className={styles.brand}>
-            Call Match
+            <span aria-hidden="true" className={styles.brandMark}>
+              <BrandMark size={18} />
+            </span>
+            Grant Lab
           </Link>
+          <span className={styles.edition}>Call Match</span>
           <nav className={styles.nav} aria-label="Main">
             {DESTINATIONS.filter((d) => !d.adminOnly || isAdmin).map((d) => (
               <NavLink

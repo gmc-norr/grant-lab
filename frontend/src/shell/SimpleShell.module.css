@@ -45,6 +45,24 @@
   align-items: center;
 }
 
+.brandMark {
+  display: inline-flex;
+  /* Optical, not geometric: the mark's own bounding box sits a hair high beside
+     cap-height text. */
+  margin-right: 0.4rem;
+}
+
+/* The edition, not the product. Quiet enough that "Grant Lab" reads first,
+   present enough to answer "which part of it am I in". Greyscale, like
+   everything here that is not a deadline or an action. */
+.edition {
+  color: var(--app-muted-chrome);
+  font-size: 0.9rem;
+  /* The nav's margin-right:auto pushes the account menu right; this sits with
+     the brand, so it must not absorb that gap. */
+  margin-left: -1rem;
+}
+
 .nav {
   display: flex;
   gap: 0.25rem;

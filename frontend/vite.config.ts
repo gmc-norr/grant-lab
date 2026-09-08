@@ -38,6 +38,39 @@ function moduleManifest(): PluginOption {
 // through to the default-to-backend proxy below (-> uvicorn -> FastAPI real 404
 // for unknowns). Route ownership comes from the generated manifest.
 // configureServer runs in dev only (vite build never calls it).
+// The tab title, per edition. index.html is SHARED — one file, one build entry
+// — and the edition split happens at the router alias below, long after that
+// <title> is fixed. Its own comment named this as the place to fix it if the
+// two should differ, and 2026-09-08 decided they should: "Grant Lab" leads
+// everywhere, and the match tab says which part of it you have open. That
+// matters most with several tabs of the same app, which is the state a
+// researcher triaging calls is actually in.
+function editionTitle(edition: "match" | "full"): PluginOption {
+  const title = edition === "match" ? "Grant Lab — Call Match" : "Grant Lab";
+  // Anchored on the ATTRIBUTE, not on the tag's text. Measured 2026-09-08: the
+  // first version matched the literal `<title>` tag, index.html's own comment
+  // quoted that literal to explain the mechanism, String.replace takes the FIRST
+  // occurrence — so the plugin rewrote the comment and left the title alone, in
+  // both editions, with the build green. Prose can quote a tag; it does not
+  // carry an attribute by accident.
+  const ANCHOR = /<title data-edition-title>[^<]*<\/title>/g;
+  return {
+    name: "edition-title",
+    transformIndexHtml(html: string) {
+      const hits = html.match(ANCHOR)?.length ?? 0;
+      // Throwing is the point. A silent no-op here ships the wrong tab title and
+      // nothing anywhere goes red — which is exactly how the bug above survived
+      // its own first build.
+      if (hits !== 1) {
+        throw new Error(
+          `edition-title: expected exactly one <title data-edition-title> in index.html, found ${hits}`,
+        );
+      }
+      return html.replace(ANCHOR, `<title data-edition-title>${title}</title>`);
+    },
+  };
+}
+
 function spaIndexFallback(): PluginOption {
   return {
     name: "spa-index-fallback",
@@ -86,7 +119,7 @@ export default defineConfig(({ mode }) => {
   const ROUTER_FILE = APP_EDITION === "match" ? "src/router.simple.tsx" : "src/router.tsx";
 
   return {
-  plugins: [react(), spaIndexFallback(), moduleManifest()],
+  plugins: [react(), editionTitle(APP_EDITION), spaIndexFallback(), moduleManifest()],
   resolve: {
     alias: {
       "virtual:app-router": resolve(__dirname, ROUTER_FILE),
