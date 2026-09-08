@@ -7,6 +7,7 @@ citations keep resolving.
 """
 
 import json
+import subprocess
 import uuid
 
 import pytest
@@ -337,3 +338,148 @@ def test_hard_delete_writes_audit_event(pg_session_factory, tmp_path):
             for e in s.scalars(select(WorkspaceEvent).where(WorkspaceEvent.workspace_id == wsid))
         }
         assert "reference.deleted" in kinds
+
+
+_GIT_ENV = {
+    "GIT_AUTHOR_NAME": "t",
+    "GIT_AUTHOR_EMAIL": "t@t",
+    "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@t",
+    "PATH": "/usr/bin:/bin",
+}
+
+
+def _git(repo_dir, *args):
+    subprocess.run(["git", *args], cwd=repo_dir, check=True, env=_GIT_ENV, capture_output=True)
+
+
+def _commit_ledger(repo_dir, rows, message):
+    _write_ledger(repo_dir, rows)
+    _git(repo_dir, "add", "citations.json")
+    _git(repo_dir, "commit", "-q", "-m", message)
+
+
+def test_reference_cited_on_ANOTHER_branch_is_not_hard_deleted(pg_session_factory, tmp_path):
+    """A reference uncited on the checked-out branch but cited on a sibling
+    branch must NOT be hard-deleted.
+
+    References and their stored bytes are workspace-scoped, but citations.json
+    is a versioned file: each branch has its own. Judging "uncited" from the
+    working tree alone asks one branch about every branch's evidence, and a
+    hard-delete destroys the chunks and bytes the sibling branch still needs to
+    resolve its citations.
+    """
+    wsid = _make_ws(pg_session_factory)
+    storage = ReferenceStorage(root=tmp_path)
+    rid = _seed_reference(pg_session_factory, wsid, storage, tmp_path)
+    repo_dir = tmp_path / str(wsid) / "repo"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    _git(repo_dir, "init", "-q", "-b", "main", ".")
+
+    # main does not cite the reference; feature does.
+    _commit_ledger(repo_dir, [], "main: no citations")
+    _git(repo_dir, "checkout", "-q", "-b", "feature")
+    _commit_ledger(repo_dir, [{"id": "ev-1", "reference_id": str(rid)}], "feature: cite it")
+    _git(repo_dir, "checkout", "-q", "main")
+
+    byte_path = storage.path_for(workspace_id=wsid, reference_id=rid, suffix=".pdf")
+
+    with pg_session_factory() as s:
+        outcome = delete_or_tombstone_reference(
+            session=s,
+            repo_dir=repo_dir,
+            reference_id=rid,
+            workspace_id=wsid,
+            storage=storage,
+        )
+
+    assert outcome == "tombstoned"
+    with pg_session_factory() as s:
+        ref = s.get(Reference, rid)
+        assert ref is not None
+        assert ref.tombstoned_at is not None
+        assert s.query(ReferenceChunk).filter(ReferenceChunk.reference_id == rid).count() == 1
+    assert byte_path.exists()
+
+
+def test_uncited_on_EVERY_branch_still_hard_deletes(pg_session_factory, tmp_path):
+    """The negative control for the cross-branch check.
+
+    Widening "cited?" to every branch must not quietly turn hard-delete into
+    dead code. In a REAL git repo with several branches, none of which cites the
+    reference, the delete must still be a delete — bytes, chunks and row gone.
+    Without this test the cross-branch fix could fail closed on every real
+    workspace and the rest of the file would still be green, because every other
+    hard-delete test here runs against a directory that is not a repo at all.
+    """
+    wsid = _make_ws(pg_session_factory)
+    storage = ReferenceStorage(root=tmp_path)
+    rid = _seed_reference(pg_session_factory, wsid, storage, tmp_path)
+    repo_dir = tmp_path / str(wsid) / "repo"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    _git(repo_dir, "init", "-q", "-b", "main", ".")
+
+    _commit_ledger(repo_dir, [], "main: no citations")
+    _git(repo_dir, "checkout", "-q", "-b", "feature")
+    _commit_ledger(repo_dir, [{"id": "ev-1", "reference_id": str(uuid.uuid4())}], "other ref")
+    # A third branch that predates citations.json entirely — an absent file on a
+    # branch must contribute nothing, not fail closed.
+    _git(repo_dir, "checkout", "-q", "--orphan", "empty")
+    _git(repo_dir, "rm", "-q", "-f", "citations.json")
+    _git(repo_dir, "commit", "-q", "--allow-empty", "-m", "empty: no ledger at all")
+    _git(repo_dir, "checkout", "-q", "main")
+
+    byte_path = storage.path_for(workspace_id=wsid, reference_id=rid, suffix=".pdf")
+
+    with pg_session_factory() as s:
+        outcome = delete_or_tombstone_reference(
+            session=s,
+            repo_dir=repo_dir,
+            reference_id=rid,
+            workspace_id=wsid,
+            storage=storage,
+        )
+
+    assert outcome == "deleted"
+    with pg_session_factory() as s:
+        assert s.get(Reference, rid) is None
+        assert s.query(ReferenceChunk).filter(ReferenceChunk.reference_id == rid).count() == 0
+    assert not byte_path.exists()
+
+
+def test_corrupt_ledger_on_ANOTHER_branch_fails_closed(pg_session_factory, tmp_path):
+    """A sibling branch whose citations.json will not parse must fail closed.
+
+    The checked-out branch's ledger is valid and cites nothing, so the only
+    thing standing between this reference and a hard-delete is the unreadable
+    ledger on `feature` — which might cite it.
+    """
+    wsid = _make_ws(pg_session_factory)
+    storage = ReferenceStorage(root=tmp_path)
+    rid = _seed_reference(pg_session_factory, wsid, storage, tmp_path)
+    repo_dir = tmp_path / str(wsid) / "repo"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    _git(repo_dir, "init", "-q", "-b", "main", ".")
+
+    _commit_ledger(repo_dir, [], "main: no citations")
+    _git(repo_dir, "checkout", "-q", "-b", "feature")
+    (repo_dir / "citations.json").write_text("{not valid json", encoding="utf-8")
+    _git(repo_dir, "add", "citations.json")
+    _git(repo_dir, "commit", "-q", "-m", "feature: corrupt ledger")
+    _git(repo_dir, "checkout", "-q", "main")
+
+    byte_path = storage.path_for(workspace_id=wsid, reference_id=rid, suffix=".pdf")
+
+    with pg_session_factory() as s:
+        outcome = delete_or_tombstone_reference(
+            session=s,
+            repo_dir=repo_dir,
+            reference_id=rid,
+            workspace_id=wsid,
+            storage=storage,
+        )
+
+    assert outcome == "tombstoned"
+    with pg_session_factory() as s:
+        assert s.get(Reference, rid).tombstoned_at is not None
+    assert byte_path.exists()

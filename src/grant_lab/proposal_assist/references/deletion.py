@@ -1,8 +1,8 @@
 """Delete-vs-tombstone policy for references (Slice 2 Task 8).
 
-A reference that is cited by ANY evidence row in the workspace's citations.json
-must NOT be hard-deleted — doing so would orphan those citations and break
-resolution. Instead it is *tombstoned* (``references.tombstoned_at`` set):
+A reference that is cited by ANY evidence row in ANY of the workspace's
+branches' citations.json must NOT be hard-deleted — doing so would orphan those
+citations and break resolution. Instead it is *tombstoned* (``references.tombstoned_at`` set):
 bytes, chunks, and metadata are retained so existing citations keep resolving,
 while the reference is filtered out of discovery (list/search) and can no longer
 be newly cited (see ``insert_citation_impl``).
@@ -26,6 +26,12 @@ from typing import TYPE_CHECKING
 
 from grant_lab.db.models import Reference, ReferenceChunk, WorkspaceEvent
 from grant_lab.proposal_assist.analysis.invalidation import on_reference_unavailable
+from grant_lab.proposal_assist.citations.gitio import (
+    GitCommitError,
+    branch_tips,
+    path_exists_at_commit,
+    read_file_at_commit,
+)
 from grant_lab.proposal_assist.citations.ledger import load_ledger
 from grant_lab.proposal_assist.ports.artifacts import CITATIONS_FILENAME
 
@@ -54,9 +60,10 @@ def delete_or_tombstone_reference(
     different workspace (IDOR defense — a cross-workspace id is treated as
     not-found).
 
-    The cited check reads ``repo_dir / citations.json`` and looks for any
-    evidence row whose ``reference_id`` equals this reference's id. An absent or
-    empty ledger means "uncited".
+    The cited check reads the working tree's ``citations.json`` AND every local
+    branch's committed copy, looking for any evidence row whose ``reference_id``
+    equals this reference's id. Ledgers absent everywhere mean "uncited"; see
+    ``_is_cited`` for why one branch cannot answer for all of them.
 
     ``storage`` is the byte-cleanup seam. When ``None`` (and a hard-delete is
     needed) only the DB rows are removed; callers that own the filesystem should
@@ -156,17 +163,30 @@ def delete_or_tombstone_reference(
 
 
 def _is_cited(repo_dir: Path, reference_id: uuid.UUID) -> bool:
-    """True if any evidence row in citations.json references this id.
+    """True if ANY branch's citations.json references this id.
 
-    - Missing file → False (not cited; safe to delete).
-    - Unreadable file (OSError, e.g. permission denied, directory in place of
-      file) → True (fail-closed): cannot confirm the reference is uncited, so
-      must NOT hard-delete on uncertainty.
-    - Ledger present but unparseable (ValueError from load_ledger) → True
-      (fail-closed): a corrupt ledger might reference this id; do not
-      hard-delete on uncertainty.
-    - Ledger present and parseable, no row matches reference_id → False.
+    The working tree holds one branch's ledger at a time, but a Reference — its
+    row, its chunks, and its stored bytes — is workspace-scoped and shared by
+    every branch. Asking only the checked-out branch therefore lets a
+    hard-delete on `main` destroy the evidence a sibling branch still cites, and
+    the sibling cannot get it back: the bytes are gone from storage.
+
+    So the answer is the union of the working tree and every local branch tip.
+    Fail-closed throughout — anything we cannot read might cite this id:
+
+    - Working-tree file missing → contributes nothing (an absent ledger is an
+      empty ledger everywhere else in this codebase too).
+    - Working-tree file unreadable (OSError) or corrupt (ValueError) → True.
+    - Not a git repository at all → the working tree is the whole answer. This
+      is the shape the unit tests and any pre-git workspace have.
+    - A git repository whose refs cannot be read → True.
+    - A branch with no citations.json in its tree → contributes nothing.
+    - A branch whose citations.json cannot be read or parsed → True.
     """
+    return _worktree_cites(repo_dir, reference_id) or _branches_cite(repo_dir, reference_id)
+
+
+def _worktree_cites(repo_dir: Path, reference_id: uuid.UUID) -> bool:
     citations_path = repo_dir / CITATIONS_FILENAME
     if not citations_path.exists():
         return False
@@ -177,5 +197,34 @@ def _is_cited(repo_dir: Path, reference_id: uuid.UUID) -> bool:
         # Fail closed: an unreadable (OSError) or corrupt (ValueError) ledger
         # might reference this id — do not hard-delete on uncertainty.
         return True
+    return _ledger_cites(ledger, reference_id)
+
+
+def _branches_cite(repo_dir: Path, reference_id: uuid.UUID) -> bool:
+    try:
+        tips = branch_tips(repo_dir)
+    except (GitCommitError, OSError):
+        # Not a git repository (git exits 128 under the discovery ceiling), or
+        # the directory does not exist. Either way there are no branches to
+        # widen the search with, and the working tree already had its say.
+        return False
+
+    for sha in tips.values():
+        try:
+            present = path_exists_at_commit(repo_dir, sha, CITATIONS_FILENAME)
+        except (GitCommitError, OSError):
+            return True  # fail closed: the repo moved or broke under us
+        if not present:
+            continue  # a branch that has never cited anything
+        try:
+            ledger = load_ledger(read_file_at_commit(repo_dir, sha, CITATIONS_FILENAME))
+        except (GitCommitError, OSError, ValueError):
+            return True  # fail closed: unreadable or corrupt ledger on a branch
+        if _ledger_cites(ledger, reference_id):
+            return True
+    return False
+
+
+def _ledger_cites(ledger: dict, reference_id: uuid.UUID) -> bool:
     target = str(reference_id)
     return any(row.get("reference_id") == target for row in ledger["evidence"])
