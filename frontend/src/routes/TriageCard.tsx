@@ -108,16 +108,15 @@ function DecisionNote({
   if (editing) {
     return (
       <DecisionNoteStrip
-        // KEYED ON THE NOTE, not only on the call. `initialNote` is read into
-        // useState on MOUNT and never again -- it is a seed, not a controlled
-        // value. The feed gets away with that because it replaces the strip
-        // per decision; a ROW does not, because its note changes underneath an
-        // editor that stays open. The everyday way that happens is
-        // normalisation: the strip trims before sending (D8), so "  padded  "
-        // is stored as "padded", and without this key the box keeps the
-        // padding for the rest of the session and every later Enter re-sends a
-        // note the server already holds.
-        key={`${call.id}:${note ?? ""}`}
+        // KEYED ON THE CALL ONLY. This used to include the note, to make the
+        // strip re-seed when the stored value changed underneath it (the strip
+        // trims before sending, D8, so "  padded  " is stored as "padded").
+        // But the note's everyday change is this editor's OWN acknowledgement,
+        // so the key turned each save into a remount mid-sentence: type
+        // "First", press Enter, keep typing, and the PUT's return snapped the
+        // box back to "First". The strip now adopts a new `initialNote` itself,
+        // and only while the box is clean.
+        key={call.id}
         target={{ callId: call.id, profileId, title: call.title, state }}
         // OPTIONAL on the strip because Task 6 only ever creates. Passed here
         // because this surface EDITS, and a strip with no way to receive the

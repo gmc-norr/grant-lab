@@ -82,10 +82,9 @@ export function DecisionNoteStrip({
 }: Props) {
   const inputId = useId();
   const input = useRef<HTMLInputElement | null>(null);
-  // Read on MOUNT only -- this is the seed, not a controlled value. Safe in the
-  // feed, which keys the strip per target. Task 7 mounts it on a row whose note
-  // can change underneath it: give it a `key` that covers the note, or it shows
-  // the stale one.
+  // Read on MOUNT as the seed, then RE-ADOPTED by the effect below whenever the
+  // server's value changes AND the box is clean. Not a controlled value: while
+  // the user is typing, what they typed wins.
   const [value, setValue] = useState(initialNote ?? "");
   const [error, setError] = useState<string | null>(null);
   // What the server is believed to already hold. Enter AND blur both commit
@@ -93,6 +92,34 @@ export function DecisionNoteStrip({
   // the blur that follows it, and a blur with nothing typed sends a no-op
   // request on every strip anyone ever ignores.
   const committed = useRef<string | null>(normalize(initialNote ?? ""));
+  // ADOPT A NEW SERVER VALUE ONLY WHEN THE BOX IS CLEAN.
+  //
+  // The note really can change underneath an open editor: the strip trims
+  // before sending (D8), so "  padded  " is stored as "padded" and the box must
+  // not keep the padding for the rest of the session. Task 7 first solved that
+  // by KEYING the strip on the note, which made every change a remount -- and a
+  // remount re-seeds from `initialNote`.
+  //
+  // The everyday way the note changes is this editor's OWN acknowledgement,
+  // followed by the list refetch that re-renders the row. So the remount landed
+  // mid-sentence: type "First", press Enter, keep typing, and the moment the
+  // PUT came back the box snapped to "First" and everything after it was gone.
+  // The user watched their own words disappear, with no error and no undo.
+  //
+  // Clean means the visible text still normalises to what the server is
+  // believed to hold. Compared NORMALISED, or "  padded  " reads as dirty
+  // against "padded" and the trim never lands.
+  useEffect(() => {
+    const next = initialNote ?? "";
+    if (normalize(value) === committed.current) setValue(next);
+    // Either way the server now holds `next`, so a later blur compares against
+    // the right baseline instead of re-sending a note that is already stored.
+    committed.current = normalize(next);
+    // `value` is deliberately NOT a dependency: this must fire when the SERVER
+    // value changes, never on a keystroke -- which is the whole point.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialNote]);
+
   // The strip is REPLACED by the next decision while a write may still be in
   // flight (D10: the request is not cancelled). Its failure still belongs to
   // the mutation, but there is no longer a strip to show it on.

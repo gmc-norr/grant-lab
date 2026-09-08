@@ -508,6 +508,27 @@ describe("gate 16 — the decision note on the card", () => {
     } as never);
   }
 
+  it("does not discard typing that happened while the save was in flight", async () => {
+    // THE ACKNOWLEDGEMENT IS A REMOUNT. The editor is keyed on the note, and
+    // `initialNote` is a mount-only seed -- so when the PUT lands and the list
+    // refetch hands this card `decision_note: "First"`, the key changes, the
+    // strip remounts, and everything typed after the Enter is replaced by the
+    // value the server just confirmed. The user watches their own words vanish.
+    stubPut("First");
+    const props = { expanded: true, profileId: 7, view: "hidden" as const };
+    const { rerender } = renderWithProviders(
+      <TriageCard call={call({ decision_note: null })} {...props} />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: /add note/i }));
+    const box = screen.getByRole("textbox");
+    await userEvent.type(box, "First{Enter}");
+    await userEvent.type(box, " with more detail");
+    // The write lands and the list refetch re-renders this row with the SAVED
+    // note -- the everyday case, not a contrived one.
+    rerender(<TriageCard call={call({ decision_note: "First" })} {...props} />);
+    expect(screen.getByRole("textbox")).toHaveValue("First with more detail");
+  });
+
   it("prints the note under the title in Hidden", () => {
     const { container } = renderWithProviders(
       <TriageCard
