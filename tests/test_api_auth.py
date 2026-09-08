@@ -253,3 +253,46 @@ def test_logout_without_cookie_is_noop_200(monkeypatch, pg_url, pg_session_facto
     with TestClient(app) as c:
         r = c.post("/api/auth/logout")
     assert r.status_code == 200 and r.json() == {"ok": True}
+
+
+def test_a_stale_cookie_cannot_log_out_a_newer_session(monkeypatch, pg_url, pg_session_factory):
+    """`/auth/logout` must ignore a cookie whose epoch is already revoked.
+
+    It verifies the SIGNATURE and then bumps the epoch, but never compares the
+    cookie's epoch to the user's — the check that `get_current_user` does
+    (auth/dependencies.py). So a cookie that logout, an admin disable, or a
+    password reset already revoked still carried the power to revoke everything
+    issued since: whoever holds a dead cookie can log the real user out, again
+    and again, and each attempt kills the session they just created.
+    """
+    app = _app(monkeypatch, pg_url)
+    uid = _user(
+        app.state.session_factory, email="stale@umu.se", status="active", password="correct-horse-1"
+    )
+    stale = app.state.session_signer.make(user_id=uid, session_epoch=0)
+
+    with TestClient(app) as c:
+        c.cookies.set("session", stale)
+        assert c.post("/api/auth/logout").status_code == 200
+    with pg_session_factory() as s:
+        assert s.get(User, uid).session_epoch == 1
+
+    # The user logs in again: a fresh cookie at epoch 1. 403 (not 401) is what
+    # says the epoch check accepted it — this account is simply not an admin.
+    with TestClient(app) as c:
+        c.cookies.set("session", app.state.session_signer.make(user_id=uid, session_epoch=1))
+        assert c.get("/api/admin/users").status_code == 403
+
+    # The stale epoch-0 cookie is replayed. It must change nothing.
+    with TestClient(app) as c:
+        c.cookies.set("session", stale)
+        assert c.post("/api/auth/logout").status_code == 200
+    with pg_session_factory() as s:
+        assert s.get(User, uid).session_epoch == 1, (
+            "a revoked cookie revoked the session that replaced it"
+        )
+
+    # And the real session still works.
+    with TestClient(app) as c:
+        c.cookies.set("session", app.state.session_signer.make(user_id=uid, session_epoch=1))
+        assert c.get("/api/admin/users").status_code == 403
