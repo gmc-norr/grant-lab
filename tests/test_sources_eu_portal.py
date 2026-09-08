@@ -1,4 +1,6 @@
+import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
 import pytest
@@ -6,431 +8,472 @@ import pytest
 from grant_lab.sources.eu_portal import EUPortalAdapter
 from grant_lab.sources.types import AdapterError
 
-_FAKE_OK_BODY = {
-    "results": [
-        {
-            "identifier": "HORIZON-HLTH-2026-DISEASE-03-15",
-            "title": "AI for early disease detection",
-            "summary": "Calls supporting AI methods for early-stage disease detection.",
-            "deadlineDate": "2026-09-15T17:00:00Z",
-            "budgetTotal": 12000000,
-            "currency": "EUR",
-            "programmeName": "Horizon Europe",
-            "keywords": ["health", "ai", "diagnostics"],
-            "publicationDate": "2026-04-01T00:00:00Z",
-            "url": "https://ec.europa.eu/info/funding-tenders/opportunities/portal/screen/opportunities/topic-details/HORIZON-HLTH-2026-DISEASE-03-15",
-        }
-    ],
-    "totalResults": 1,
-}
+# A page captured verbatim from the live SEDIA search API on 2026-09-08, with
+# only the two huge HTML fields truncated. Using real bytes rather than a
+# hand-written dict is the point: the old adapter read `item["title"]`, and in
+# the real payload that key is present and None.
+_FIXTURE = json.loads(
+    Path(__file__).parent.joinpath("fixtures/eu_portal_search_page.json").read_text()
+)
+
+_SINCE = datetime(2026, 1, 1, tzinfo=UTC)
 
 
-def _mock_transport(status: int = 200, body=None, raise_exc=None):
+def _meta(**overrides) -> dict:
+    """One synthetic result, shaped like SEDIA: every metadata value a list."""
+    metadata = {
+        "identifier": ["HORIZON-HLTH-2026-DISEASE-03-15"],
+        "title": ["AI for early disease detection"],
+        "url": [
+            "https://ec.europa.eu/info/funding-tenders/opportunities/portal/screen/"
+            "opportunities/topic-details/HORIZON-HLTH-2026-DISEASE-03-15"
+        ],
+        "status": ["31094502"],
+        "deadlineDate": ["2026-09-15T17:00:00.000+0000"],
+        "startDate": ["2026-04-01T00:00:00.000+0000"],
+        "descriptionByte": ["<p>Expected Outcome:</p><p>Better diagnostics.</p>"],
+        "keywords": ["HORIZON-HLTH-2026-DISEASE-03-15", "health", "diagnostics"],
+    }
+    metadata.update(overrides)
+    return {"url": None, "title": None, "metadata": metadata}
+
+
+def _body(results, total=None) -> dict:
+    return {
+        "results": results,
+        "totalResults": total if total is not None else len(results),
+        "pageSize": 100,
+        "pageNumber": 1,
+    }
+
+
+def _mock_transport(status: int = 200, body=None, raise_exc=None, record: list | None = None):
     def handler(request):
+        if record is not None:
+            record.append(request)
         if raise_exc is not None:
             raise raise_exc
-        return httpx.Response(status, json=body if body is not None else _FAKE_OK_BODY)
+        return httpx.Response(status, json=body if body is not None else _FIXTURE)
 
     return httpx.MockTransport(handler)
 
 
-def _mock_html_transport(status: int = 200, html: str = ""):
-    """Mock transport for the topic-detail page scrape (full_text).
+def _adapter(**kwargs) -> EUPortalAdapter:
+    kwargs.setdefault("transport", _mock_transport())
+    return EUPortalAdapter(base_url="https://api.tech.ec.europa.eu", **kwargs)
 
-    Default returns a 404 so existing tests stay hermetic without caring
-    about full_text. Pass html=... to assert extraction.
+
+# ---------------------------------------------------------------------------
+# The request shape — the two things that make the live API fail
+# ---------------------------------------------------------------------------
+
+
+def test_query_parts_are_typed_as_json():
+    """Untyped multipart parts make the live API answer HTTP 500.
+
+    Verified against api.tech.ec.europa.eu on 2026-09-08: the same request with
+    the `;type=application/json` suffix removed returns
+    `{"type":"throwable","message":"An internal error occurred"}`. This gate
+    exists so a "simplification" to `data=` cannot land silently green.
     """
+    seen: list[httpx.Request] = []
+    list(_adapter(transport=_mock_transport(record=seen)).fetch_new_calls(since=_SINCE))
 
-    def handler(request):
-        return httpx.Response(status, text=html)
+    assert seen, "no request was issued"
+    raw = seen[0].content
+    assert seen[0].headers["content-type"].startswith("multipart/form-data")
+    for part in (b'name="query"', b'name="languages"'):
+        assert part in raw, f"{part!r} missing from the multipart body"
+    # One typed part per field, and no more.
+    assert raw.count(b"Content-Type: application/json") == 2
 
-    return httpx.MockTransport(handler)
 
+def test_query_filters_to_open_and_forthcoming_grant_topics():
+    seen: list[httpx.Request] = []
+    list(_adapter(transport=_mock_transport(record=seen)).fetch_new_calls(since=_SINCE))
 
-def test_fetch_yields_normalized_calls():
-    adapter = EUPortalAdapter(
-        base_url="https://ec.europa.eu",
-        transport=_mock_transport(),
-        extraction_transport=_mock_html_transport(status=404),
+    raw = seen[0].content.decode("utf-8", errors="replace")
+    start = raw.index('name="query"')
+    query = json.loads(
+        raw[raw.index("{", start) : raw.rindex("}", start, raw.index('name="languages"')) + 1]
     )
-    out = list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
-    assert len(out) == 1
+    terms = {
+        key: value for clause in query["bool"]["must"] for key, value in clause["terms"].items()
+    }
+    # type=1 is grant topics. type=2 (EuropeAid tenders) and type=8 (legacy
+    # competitive-calls) carry no `descriptionByte` and stale deadlines.
+    assert terms["type"] == ["1"]
+    assert sorted(terms["status"]) == ["31094501", "31094502"]
+
+
+def test_api_key_and_paging_go_in_the_query_string():
+    seen: list[httpx.Request] = []
+    list(_adapter(transport=_mock_transport(record=seen)).fetch_new_calls(since=_SINCE))
+
+    params = seen[0].url.params
+    assert params["apiKey"] == "SEDIA"
+    assert params["pageSize"] == "100"
+    assert params["pageNumber"] == "1"
+
+
+# ---------------------------------------------------------------------------
+# Normalization, against the captured live page
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_yields_normalized_calls_from_the_live_payload():
+    out = list(_adapter().fetch_new_calls(since=_SINCE))
+
+    assert len(out) == 2
     c = out[0]
-    assert c.external_id == "HORIZON-HLTH-2026-DISEASE-03-15"
-    assert c.title.startswith("AI for early")
-    assert c.deadline == datetime(2026, 9, 15, 17, 0, tzinfo=UTC)
-    assert c.published_at == datetime(2026, 4, 1, tzinfo=UTC)
-    assert c.budget_max == 12000000
+    assert c.external_id == "HORIZON-MSCA-2027-COFUND-01-01"
+    assert c.title == "MSCA COFUND 2027"
+    assert c.deadline == datetime(2027, 4, 6, tzinfo=UTC)
+    assert c.published_at == datetime(2026, 12, 8, tzinfo=UTC)
+    assert c.programme == "Horizon Europe"
     assert c.currency == "EUR"
-    assert "ai" in c.keywords
-    assert c.raw["identifier"] == "HORIZON-HLTH-2026-DISEASE-03-15"
+    assert c.url.endswith("/HORIZON-MSCA-2027-COFUND-01-01")
 
 
-def test_fetch_skips_records_missing_required_fields():
-    body = {
-        "results": [
-            {"identifier": "OK-1", "title": "ok", "url": "https://example.org/ok-1"},
-            {"identifier": "BAD-1"},  # missing title and url
-            {"title": "no id"},
-        ]
-    }
-    adapter = EUPortalAdapter(
-        base_url="https://x",
-        transport=_mock_transport(body=body),
-        extraction_transport=_mock_html_transport(status=404),
-    )
-    out = list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
-    assert [c.external_id for c in out] == ["OK-1"]
+def test_title_is_read_from_metadata_not_the_top_level():
+    """The real payload carries a top-level `title` key whose value is None.
 
-
-def test_fetch_skips_records_with_unsafe_url_scheme():
-    """Defense in depth: javascript:/data: URLs would render as click-to-XSS
-    in the dashboard template. Adapter must drop them at ingest time."""
-    body = {
-        "results": [
-            {
-                "identifier": "OK-1",
-                "title": "ok",
-                "url": "https://example.org/ok-1",
-            },
-            {
-                "identifier": "XSS-1",
-                "title": "click me",
-                "url": "javascript:alert(document.cookie)",
-            },
-            {
-                "identifier": "DATA-1",
-                "title": "data url",
-                "url": "data:text/html,<script>alert(1)</script>",
-            },
-        ]
-    }
-    adapter = EUPortalAdapter(
-        base_url="https://x",
-        transport=_mock_transport(body=body),
-        extraction_transport=_mock_html_transport(status=404),
-    )
-    out = list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
-    assert [c.external_id for c in out] == ["OK-1"]
-
-
-def test_http_error_raises_adapter_error():
-    adapter = EUPortalAdapter(base_url="https://x", transport=_mock_transport(status=503))
-    with pytest.raises(AdapterError):
-        list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
-
-
-def test_network_failure_raises_adapter_error():
-    adapter = EUPortalAdapter(
-        base_url="https://x",
-        transport=_mock_transport(raise_exc=httpx.ConnectError("boom")),
-    )
-    with pytest.raises(AdapterError):
-        list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
-
-
-def test_eu_portal_adapter_populates_full_text():
-    """Plan F: the topic-detail HTML page is scraped for the call body and
-    its main content lands in `full_text`."""
-    html = """
-    <html>
-      <head><title>Topic detail</title></head>
-      <body>
-        <nav>nav junk we should not see</nav>
-        <main>
-          <article>
-            <h1>AI for early disease detection</h1>
-            <p>This topic supports the development of AI-driven methods
-            for detecting diseases at an early stage in clinical care.</p>
-            <p>Eligible projects must demonstrate translational potential
-            and a clear plan for hospital-scale validation.</p>
-          </article>
-        </main>
-        <footer>footer junk we should not see</footer>
-      </body>
-    </html>
+    The pre-2026-09-08 parser read that key, so every record was skipped as
+    incomplete. Assert the trap is still present in the fixture, so this test
+    cannot quietly stop testing anything.
     """
-    adapter = EUPortalAdapter(
-        base_url="https://ec.europa.eu",
-        transport=_mock_transport(),
-        extraction_transport=_mock_html_transport(status=200, html=html),
-    )
-    out = list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
-    assert len(out) == 1
-    nc = out[0]
-    assert nc.full_text is not None
-    assert "AI-driven methods" in nc.full_text
-    assert "translational potential" in nc.full_text
+    assert "title" in _FIXTURE["results"][0]
+    assert _FIXTURE["results"][0]["title"] is None
+
+    out = list(_adapter().fetch_new_calls(since=_SINCE))
+    assert out[0].title == "MSCA COFUND 2027"
 
 
-def test_existing_call_with_full_text_is_not_rescraped():
-    """Reliability: an EU call already ingested WITH full_text must NOT be
-    re-scraped on every run — that's hundreds of serial blocking HTTP calls.
-    The orchestrator passes a `needs_body(identifier)` predicate built from a
-    cheap DB query; when it returns False the adapter skips the scrape (the
-    extraction transport would raise if hit)."""
+def test_offset_without_a_colon_parses():
+    """SEDIA emits `+0000`, not `+00:00`.
 
-    def boom(request):
-        raise AssertionError("extraction transport must not be called for an existing call")
-
-    # needs_body returns False for the one identifier in _FAKE_OK_BODY → skip.
-    already_have = {"HORIZON-HLTH-2026-DISEASE-03-15"}
-
-    adapter = EUPortalAdapter(
-        base_url="https://ec.europa.eu",
-        transport=_mock_transport(),
-        extraction_transport=httpx.MockTransport(boom),
-    )
-    out = list(
-        adapter.fetch_new_calls(
-            since=datetime(2026, 1, 1, tzinfo=UTC),
-            needs_body=lambda identifier: identifier not in already_have,
-        )
-    )
-    assert len(out) == 1
-    # full_text left None — we did not scrape; upsert coalesce preserves the
-    # existing body in the DB.
-    assert out[0].full_text is None
+    Python 3.12 parses that directly, so this is a characterization test: it
+    pins the fixture's real format against a future interpreter or a rewrite
+    of `_parse_iso` that stops accepting it.
+    """
+    assert _FIXTURE["results"][0]["metadata"]["deadlineDate"][0].endswith("+0000")
+    out = list(_adapter().fetch_new_calls(since=_SINCE))
+    assert out[0].deadline == datetime(2027, 4, 6, tzinfo=UTC)
 
 
-def test_new_call_is_scraped_even_with_needs_body():
-    """A brand-new call (needs_body returns True) IS scraped for its body."""
-    html = "<html><body><main><article><p>Brand new body text here.</p>"
-    html += "</article></main></body></html>"
-    adapter = EUPortalAdapter(
-        base_url="https://ec.europa.eu",
-        transport=_mock_transport(),
-        extraction_transport=_mock_html_transport(status=200, html=html),
-    )
-    out = list(
-        adapter.fetch_new_calls(
-            since=datetime(2026, 1, 1, tzinfo=UTC),
-            needs_body=lambda identifier: True,
-        )
-    )
-    assert len(out) == 1
+# ---------------------------------------------------------------------------
+# The body: descriptionByte, no page scraping
+# ---------------------------------------------------------------------------
+
+
+def test_full_text_comes_from_the_search_response_with_no_extra_request():
+    """The body arrives with the search hit; there is no topic-detail scrape.
+
+    One request per page, and nothing else. A regression that reintroduced
+    per-call scraping would push this count to 1 + len(results).
+    """
+    seen: list[httpx.Request] = []
+    out = list(_adapter(transport=_mock_transport(record=seen)).fetch_new_calls(since=_SINCE))
+
+    assert len(seen) == 1
     assert out[0].full_text is not None
-    assert "Brand new body text" in out[0].full_text
+    assert "Expected Outcome" in out[0].full_text
 
 
-def test_fetch_paginates_across_multiple_pages():
-    """Pagination: the adapter must follow pageNumber until the result set is
-    exhausted, not stop after the first page. Before the fix a single GET read
-    only page 1 and silently dropped everything beyond it."""
+def test_bullet_list_items_survive_the_html_flattening():
+    """trafilatura drops `<ul>` bullets; lxml does not.
 
-    # Two full pages then a short page. Page size is 100; a full page returns
-    # 100 results so the adapter knows to request the next one.
-    def _page(items):
-        return {"results": items, "totalResults": 205}
-
-    page1 = _page(
-        [
-            {
-                "identifier": f"P1-{i}",
-                "title": f"call {i}",
-                "url": f"https://ec.europa.eu/topic/{i}",
-            }
-            for i in range(100)
+    Measured on this same fixture text: trafilatura.extract returned 4115 of
+    5058 characters, losing every list item — and list items are where the
+    expected outcomes live. This gate fails if the flattener is swapped back.
+    """
+    item = _meta(
+        descriptionByte=[
+            "<p>Expected Outcome:</p><ul><li>Deeper skills and competences;</li>"
+            "<li>Improved employability prospects.</li></ul>"
         ]
     )
-    page2 = _page(
-        [
-            {
-                "identifier": f"P2-{i}",
-                "title": f"call {i}",
-                "url": f"https://ec.europa.eu/topic/2-{i}",
-            }
-            for i in range(100)
-        ]
+    out = list(
+        _adapter(transport=_mock_transport(body=_body([item]))).fetch_new_calls(since=_SINCE)
     )
-    page3 = _page(
-        [
-            {
-                "identifier": f"P3-{i}",
-                "title": f"call {i}",
-                "url": f"https://ec.europa.eu/topic/3-{i}",
-            }
-            for i in range(5)
-        ]
+
+    assert "Deeper skills and competences" in out[0].full_text
+    assert "Improved employability prospects" in out[0].full_text
+
+
+def test_adjacent_blocks_do_not_weld_together():
+    item = _meta(descriptionByte=["<p>First sentence.</p><p>Second sentence.</p>"])
+    out = list(
+        _adapter(transport=_mock_transport(body=_body([item]))).fetch_new_calls(since=_SINCE)
     )
-    pages = {1: page1, 2: page2, 3: page3}
 
-    def handler(request):
-        # pageNumber is in the query string.
-        page_number = int(dict(request.url.params).get("pageNumber", "1"))
-        return httpx.Response(200, json=pages.get(page_number, {"results": []}))
+    assert "First sentence.\nSecond sentence." in out[0].full_text
+    assert "sentence.Second" not in out[0].full_text
 
-    adapter = EUPortalAdapter(
-        base_url="https://ec.europa.eu",
-        transport=httpx.MockTransport(handler),
-        extraction_transport=_mock_html_transport(status=404),
+
+def test_unparseable_description_degrades_to_none():
+    item = _meta(descriptionByte=["   "])
+    out = list(
+        _adapter(transport=_mock_transport(body=_body([item]))).fetch_new_calls(since=_SINCE)
     )
-    out = list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
-    assert len(out) == 205
-    ids = {c.external_id for c in out}
-    assert "P1-0" in ids
-    assert "P2-99" in ids
-    assert "P3-4" in ids
+
+    assert len(out) == 1, "a bad body must not drop the call"
+    assert out[0].full_text is None
+    assert out[0].summary is None
 
 
-def test_fetch_pagination_stops_on_empty_page():
-    """If a page comes back empty, pagination terminates even when
-    totalResults claims more remain (defensive against a bad upstream count)."""
-    page1 = {
-        "results": [
-            {"identifier": f"A-{i}", "title": "t", "url": f"https://ec.europa.eu/a/{i}"}
-            for i in range(100)
-        ],
-        "totalResults": 999999,  # lies — there is no page 2
+def test_conditions_boilerplate_is_not_appended_to_the_body():
+    """`topicConditions` repeats near-verbatim across calls.
+
+    Folding it into full_text would push thousands of identical characters into
+    every call's embedding and make the corpus less separable.
+    """
+    marker = "General conditions"
+    assert marker in _FIXTURE["results"][0]["metadata"]["topicConditions"][0]
+
+    out = list(_adapter().fetch_new_calls(since=_SINCE))
+    assert marker not in (out[0].full_text or "")
+
+
+# ---------------------------------------------------------------------------
+# Derived fields
+# ---------------------------------------------------------------------------
+
+
+def test_summary_is_the_opening_of_the_body_and_marks_its_cut():
+    long_body = "<p>" + ("Advanced diagnostics research. " * 40) + "</p>"
+    item = _meta(descriptionByte=[long_body])
+    out = list(
+        _adapter(transport=_mock_transport(body=_body([item]))).fetch_new_calls(since=_SINCE)
+    )
+
+    summary = out[0].summary
+    assert summary.startswith("Advanced diagnostics research.")
+    assert summary.endswith("…")
+    assert len(summary) <= 501  # 500 chars plus the ellipsis
+    assert "\n" not in summary
+
+
+def test_short_body_becomes_the_summary_verbatim():
+    item = _meta(descriptionByte=["<p>Better diagnostics for rare disease.</p>"])
+    out = list(
+        _adapter(transport=_mock_transport(body=_body([item]))).fetch_new_calls(since=_SINCE)
+    )
+
+    assert out[0].summary == "Better diagnostics for rare disease."
+
+
+def _actions(record_index: int) -> list[dict]:
+    raw = _FIXTURE["results"][record_index]["metadata"]["budgetOverview"][0]
+    return [
+        action for actions in json.loads(raw)["budgetTopicActionMap"].values() for action in actions
+    ]
+
+
+def test_budget_uses_per_grant_contribution_not_the_yearly_envelope():
+    """`Call.budget_min/max` are matched against a research profile's own
+    budget range — the size of project a group wants to run — so they must be
+    the per-grant contribution bounds, not the call's yearly envelope.
+
+    The second fixture record discriminates them: its own action contributes
+    8 000 000 per grant while its yearly envelopes run to 24 000 000 and sum to
+    far more. Reading the envelope shows up here as a wrong number.
+    """
+    envelopes = {
+        int(amount)
+        for action in _actions(1)
+        for amount in (action.get("budgetYearMap") or {}).values()
     }
+    assert max(envelopes) == 24_000_000, "fixture no longer discriminates the two fields"
 
-    def handler(request):
-        page_number = int(dict(request.url.params).get("pageNumber", "1"))
-        if page_number == 1:
-            return httpx.Response(200, json=page1)
-        return httpx.Response(200, json={"results": [], "totalResults": 999999})
-
-    adapter = EUPortalAdapter(
-        base_url="https://ec.europa.eu",
-        transport=httpx.MockTransport(handler),
-        extraction_transport=_mock_html_transport(status=404),
-    )
-    out = list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
-    assert len(out) == 100
+    out = list(_adapter().fetch_new_calls(since=_SINCE))
+    assert out[1].budget_max == 8_000_000
+    assert out[1].budget_max != max(envelopes)
+    assert out[1].budget_max != sum(envelopes)
 
 
-def test_budget_accepts_float_and_coerces_to_int():
-    """Codex: budgetMin/budgetTotal serialized as floats (12000000.0) were
-    dropped by the old `isinstance(..., int)` check. Accept int|float (not
-    bool) and coerce to int."""
-    body = {
-        "results": [
-            {
-                "identifier": "BUDGET-FLOAT",
-                "title": "t",
-                "url": "https://ec.europa.eu/budget-float",
-                "budgetMin": 250000.0,
-                "budgetTotal": 12000000.5,
-            }
-        ],
-        "totalResults": 1,
-    }
-    adapter = EUPortalAdapter(
-        base_url="https://ec.europa.eu",
-        transport=_mock_transport(body=body),
-        extraction_transport=_mock_html_transport(status=404),
-    )
-    out = list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
-    assert len(out) == 1
-    assert out[0].budget_min == 250000
-    assert out[0].budget_max == 12000000
+def test_budget_ignores_the_sibling_topics_sharing_the_parent_call():
+    """`budgetTopicActionMap` holds every topic of the PARENT CALL.
+
+    Summing the whole map gave HORIZON-CL5-2027-03-D5-05 the range
+    2 000 000 - 13 500 000, which belongs to the parent call, not the topic.
+    The topic's own action is one of eleven, so this record can tell a
+    correctly-scoped read from a whole-map read.
+    """
+    actions = _actions(1)
+    identifier = _FIXTURE["results"][1]["metadata"]["identifier"][0]
+    mine = [a for a in actions if str(a["action"]).split(" - ")[0].strip() == identifier]
+    assert len(actions) == 11 and len(mine) == 1, "fixture no longer has sibling topics"
+
+    whole_map_min = min(a["minContribution"] for a in actions if a["minContribution"])
+    whole_map_max = max(a["maxContribution"] for a in actions if a["maxContribution"])
+    assert (whole_map_min, whole_map_max) == (2_000_000, 13_500_000)
+
+    out = list(_adapter().fetch_new_calls(since=_SINCE))
+    assert (out[1].budget_min, out[1].budget_max) == (8_000_000, 8_000_000)
 
 
-def test_budget_rejects_bool_and_non_numeric():
-    """`isinstance(True, int)` is True — a JSON bool must NOT be coerced to a
-    budget. Non-numeric strings are also dropped to None."""
-    body = {
-        "results": [
-            {
-                "identifier": "BUDGET-BAD",
-                "title": "t",
-                "url": "https://ec.europa.eu/budget-bad",
-                "budgetMin": True,
-                "budgetTotal": "lots",
-            }
-        ],
-        "totalResults": 1,
-    }
-    adapter = EUPortalAdapter(
-        base_url="https://ec.europa.eu",
-        transport=_mock_transport(body=body),
-        extraction_transport=_mock_html_transport(status=404),
-    )
-    out = list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
+def test_zero_contribution_means_unstated_not_zero_euros():
+    """The first record's only action states 0/0 — "not published", not free."""
+    assert [(a["minContribution"], a["maxContribution"]) for a in _actions(0)] == [(0, 0)]
+
+    out = list(_adapter().fetch_new_calls(since=_SINCE))
     assert out[0].budget_min is None
     assert out[0].budget_max is None
 
 
-def test_eu_portal_adapter_full_text_none_on_failure():
-    """If the topic-detail page returns 404, full_text is None and the
-    NormalizedCall is still produced — ranking can fall back to summary."""
-    adapter = EUPortalAdapter(
-        base_url="https://ec.europa.eu",
-        transport=_mock_transport(),
-        extraction_transport=_mock_html_transport(status=404),
+def test_malformed_budget_json_degrades_to_none():
+    item = _meta(budgetOverview=["{not json"])
+    out = list(
+        _adapter(transport=_mock_transport(body=_body([item]))).fetch_new_calls(since=_SINCE)
     )
-    out = list(adapter.fetch_new_calls(since=datetime(2026, 1, 1, tzinfo=UTC)))
+
     assert len(out) == 1
-    nc = out[0]
-    assert nc.full_text is None
-    # The rest of the normalized record is unaffected.
-    assert nc.external_id == "HORIZON-HLTH-2026-DISEASE-03-15"
-    assert nc.summary is not None
+    assert out[0].budget_min is None and out[0].budget_max is None
 
 
-def test_eu_portal_caps_scrapes_per_tick():
-    """On first run, if needs_body returns True for all items, the per-tick
-    scrape cap limits how many topic-detail pages are scraped — remaining
-    items get full_text=None and pick up bodies next tick."""
-    # Build 5 items all needing bodies; cap is 2.
-    n_items = 5
-    cap = 2
-    body = {
-        "results": [
-            {"identifier": f"ID-{i}", "title": f"call {i}", "url": f"https://ec.europa.eu/topic/{i}"}
-            for i in range(n_items)
-        ],
-        "totalResults": n_items,
-    }
-    scrape_count = [0]
-
-    def counting_html_handler(request):
-        scrape_count[0] += 1
-        return httpx.Response(
-            200,
-            text="<html><body><main><article><p>body text</p></article></main></body></html>",
-        )
-
-    adapter = EUPortalAdapter(
-        base_url="https://ec.europa.eu",
-        transport=_mock_transport(body=body),
-        extraction_transport=httpx.MockTransport(counting_html_handler),
-        max_body_scrapes=cap,
+def test_keywords_drop_the_identifiers_and_keep_subject_terms():
+    out = list(
+        _adapter(transport=_mock_transport(body=_body([_meta()]))).fetch_new_calls(since=_SINCE)
     )
-    out = list(adapter.fetch_new_calls(
-        since=datetime(2026, 1, 1, tzinfo=UTC),
-        needs_body=lambda _: True,
-    ))
-    assert len(out) == n_items
-    assert scrape_count[0] == cap
-    # Only the first `cap` items have full_text; the rest are None.
-    scraped = [c for c in out if c.full_text is not None]
-    assert len(scraped) == cap
+    assert out[0].keywords == ["health", "diagnostics"]
 
 
-def test_eu_portal_wall_clock_budget_stops_scraping():
-    """A zero wall-clock budget means no scrapes happen at all (budget exhausted
-    immediately); all items get full_text=None."""
-    body = {
-        "results": [
-            {"identifier": f"ID-{i}", "title": f"call {i}", "url": f"https://ec.europa.eu/topic/{i}"}
-            for i in range(3)
-        ],
-        "totalResults": 3,
-    }
+def test_keywords_are_empty_when_the_payload_lists_only_identifiers():
+    # Both captured records carry exactly their own and their parent call's id.
+    out = list(_adapter().fetch_new_calls(since=_SINCE))
+    assert out[0].keywords == []
 
-    def boom_handler(request):
-        raise AssertionError("no scrape should occur when budget is 0")
 
-    adapter = EUPortalAdapter(
-        base_url="https://ec.europa.eu",
-        transport=_mock_transport(body=body),
-        extraction_transport=httpx.MockTransport(boom_handler),
-        body_scrape_wall_clock_s=0.0,
+def test_programme_falls_back_to_the_raw_prefix_when_unmapped():
+    item = _meta(identifier=["NEWPROG-2030-TOPIC-01"])
+    out = list(
+        _adapter(transport=_mock_transport(body=_body([item]))).fetch_new_calls(since=_SINCE)
     )
-    out = list(adapter.fetch_new_calls(
-        since=datetime(2026, 1, 1, tzinfo=UTC),
-        needs_body=lambda _: True,
-    ))
-    assert len(out) == 3
-    assert all(c.full_text is None for c in out)
+
+    assert out[0].programme == "NEWPROG"
+
+
+@pytest.mark.parametrize(
+    ("identifier", "expected"),
+    [("LIFE-2027-X", "LIFE Programme"), ("DIGITAL-2027-X", "Digital Europe Programme")],
+)
+def test_programme_maps_known_prefixes(identifier, expected):
+    item = _meta(identifier=[identifier])
+    out = list(
+        _adapter(transport=_mock_transport(body=_body([item]))).fetch_new_calls(since=_SINCE)
+    )
+
+    assert out[0].programme == expected
+
+
+# ---------------------------------------------------------------------------
+# Skips and failures
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_skips_records_missing_required_fields():
+    body = _body([_meta(identifier=[]), _meta(title=[]), _meta()])
+    out = list(_adapter(transport=_mock_transport(body=body)).fetch_new_calls(since=_SINCE))
+
+    assert len(out) == 1
+
+
+def test_fetch_skips_a_record_with_no_metadata_object():
+    body = _body([{"url": "https://ec.europa.eu/x", "title": "no metadata here"}, _meta()])
+    out = list(_adapter(transport=_mock_transport(body=body)).fetch_new_calls(since=_SINCE))
+
+    assert len(out) == 1
+    assert out[0].external_id == "HORIZON-HLTH-2026-DISEASE-03-15"
+
+
+def test_fetch_skips_records_with_unsafe_url_scheme():
+    body = _body([_meta(url=["javascript:alert(1)"]), _meta()])
+    out = list(_adapter(transport=_mock_transport(body=body)).fetch_new_calls(since=_SINCE))
+
+    assert len(out) == 1
+    assert out[0].url.startswith("https://")
+
+
+def test_http_error_raises_adapter_error():
+    adapter = _adapter(transport=_mock_transport(status=500, body={"error": "boom"}))
+    with pytest.raises(AdapterError):
+        list(adapter.fetch_new_calls(since=_SINCE))
+
+
+def test_network_failure_raises_adapter_error():
+    adapter = _adapter(transport=_mock_transport(raise_exc=httpx.ConnectError("no route")))
+    with pytest.raises(AdapterError):
+        list(adapter.fetch_new_calls(since=_SINCE))
+
+
+def test_non_json_body_raises_adapter_error():
+    def handler(request):
+        return httpx.Response(200, text="<html>gateway</html>")
+
+    adapter = _adapter(transport=httpx.MockTransport(handler))
+    with pytest.raises(AdapterError):
+        list(adapter.fetch_new_calls(since=_SINCE))
+
+
+# ---------------------------------------------------------------------------
+# Pagination
+# ---------------------------------------------------------------------------
+
+
+def _paging_transport(pages: list[list[dict]], total: int, record: list | None = None):
+    def handler(request):
+        if record is not None:
+            record.append(request)
+        page_number = int(request.url.params["pageNumber"])
+        results = pages[page_number - 1] if page_number <= len(pages) else []
+        return httpx.Response(200, json={"results": results, "totalResults": total})
+
+    return httpx.MockTransport(handler)
+
+
+def test_fetch_paginates_until_totalresults_is_reached():
+    full_page = [_meta(identifier=[f"HORIZON-P1-{i}"]) for i in range(100)]
+    second = [_meta(identifier=[f"HORIZON-P2-{i}"]) for i in range(5)]
+    seen: list[httpx.Request] = []
+    adapter = _adapter(transport=_paging_transport([full_page, second], total=105, record=seen))
+
+    out = list(adapter.fetch_new_calls(since=_SINCE))
+
+    assert len(out) == 105
+    assert [int(r.url.params["pageNumber"]) for r in seen] == [1, 2]
+
+
+def test_fetch_stops_on_a_short_page_even_if_total_disagrees():
+    """A server that overstates totalResults must not make us spin."""
+    seen: list[httpx.Request] = []
+    adapter = _adapter(transport=_paging_transport([[_meta()]], total=9999, record=seen))
+
+    out = list(adapter.fetch_new_calls(since=_SINCE))
+
+    assert len(out) == 1
+    assert len(seen) == 1
+
+
+def test_fetch_stops_on_an_empty_page():
+    full_page = [_meta(identifier=[f"HORIZON-P1-{i}"]) for i in range(100)]
+    seen: list[httpx.Request] = []
+    adapter = _adapter(transport=_paging_transport([full_page, []], total=9999, record=seen))
+
+    out = list(adapter.fetch_new_calls(since=_SINCE))
+
+    assert len(out) == 100
+    assert [int(r.url.params["pageNumber"]) for r in seen] == [1, 2]
+
+
+def test_needs_body_is_accepted_and_costs_no_extra_request():
+    """The protocol still passes `needs_body`; this adapter has no second
+    request to skip, so it must neither error nor change the request count."""
+    seen: list[httpx.Request] = []
+    adapter = _adapter(transport=_mock_transport(record=seen))
+
+    out = list(adapter.fetch_new_calls(since=_SINCE, needs_body=lambda _id: False))
+
+    assert len(out) == 2
+    assert len(seen) == 1
+    assert out[0].full_text is not None

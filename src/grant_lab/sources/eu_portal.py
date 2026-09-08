@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import json
 import logging
-import time
+import re
 from collections.abc import Iterator
 from datetime import UTC, datetime
 
 import httpx
+from lxml import html as lxml_html
 
-from grant_lab.sources.extraction import fetch_html_main_content
 from grant_lab.sources.types import (
     AdapterError,
     NeedsBody,
@@ -19,54 +20,151 @@ from grant_lab.sources.types import (
 
 _logger = logging.getLogger(__name__)
 
-# v3.0 search endpoint returns OPEN + FORTHCOMING calls in JSON form.
-# Pin a versioned path so a portal-side rev to v4 is a deliberate code change.
-_SEARCH_PATH = "/info/funding-tenders/opportunities/api/v3.0/notices/search"
+# ---------------------------------------------------------------------------
+# 2026-09-08: the v3.0 endpoint is GONE
+# ---------------------------------------------------------------------------
+# This adapter used to POST to
+#   https://ec.europa.eu/info/funding-tenders/opportunities/api/v3.0/notices/search
+# That path now returns 404 (the portal home page itself still returns 200, so
+# the site is up — only the API moved). The source had therefore NEVER
+# succeeded: `sources.last_fetched_at` was NULL with 14 consecutive failures.
+#
+# The portal's own SPA now reads from the Commission's shared SEDIA search API:
+#   POST https://api.tech.ec.europa.eu/search-api/prod/rest/search?apiKey=SEDIA
+#
+# Three things about that API are easy to get wrong, all verified live:
+#
+# 1. `apiKey=SEDIA` is NOT a credential. It is the database selector — the
+#    portal's public JavaScript sends the same literal string. There is no
+#    secret to configure and nothing to rotate.
+#
+# 2. The `query` and `languages` multipart parts MUST carry
+#    `Content-Type: application/json`. Sent untyped, the API answers
+#    HTTP 500 `{"type":"throwable","message":"An internal error occurred"}` —
+#    a server error that looks like an outage but is actually a request the
+#    server refused to parse. httpx expresses the typing as the 3-tuple
+#    `(None, value, "application/json")`; the leading None suppresses the
+#    filename parameter, matching curl's `-F 'query=...;type=application/json'`.
+#
+# 3. Every useful field lives under `metadata` as a SINGLE-ELEMENT LIST, and
+#    the top-level `title` is None. Reading `item["title"]` — which the old
+#    parser did — yields nothing for every record.
+# ---------------------------------------------------------------------------
 
-# Page size per request and a hard cap on page count. The cap is a defensive
-# guard against an upstream that never decrements its remaining-results count
-# (which would otherwise spin forever). 200 * 100 = 20k calls is far beyond
-# the realistic OPEN+FORTHCOMING set.
+_SEARCH_PATH = "/search-api/prod/rest/search"
+
+# The database selector, not a secret. See note 1 above.
+_API_KEY = "SEDIA"
+
+# Status codes, decoded by cross-checking `startDate` against the wall clock on
+# a live sample of 100 records: every 31094502 had already started and every
+# 31094501 but one had not.
+_STATUS_FORTHCOMING = "31094501"
+_STATUS_OPEN = "31094502"
+
+# `type` partitions the SEDIA index. Measured live on 2026-09-08 with the
+# open+forthcoming status filter applied:
+#   type=1  1214 grant topics    <- what this adapter wants
+#   type=2    25 EuropeAid procurement tenders (service contracts, no body)
+#   type=8   168 legacy "competitive-call" rows, deadlines years in the past
+#   type=0  1539 rows keyed by opaque UUID
+# Only type=1 carries `descriptionByte`; the others parse to a title and a
+# stale date. Fetching them would add noise to the ranker, not coverage.
+_TYPE_GRANT_TOPIC = "1"
+
+# The server silently clamps pageSize to 100 (asking for 150 returns 100), so
+# state the real ceiling rather than a wish. _MAX_PAGES is the same defensive
+# guard as before: 200 * 100 = 20k records, far beyond the ~1.2k live set, so a
+# server that never stops paginating cannot spin us forever.
 _PAGE_SIZE = 100
 _MAX_PAGES = 200
 
-# Per-tick scrape budget caps. On a first run with 20k items, scraping every
-# body in one blocking tick is impractical (hours of serial HTTP). Instead we
-# cap the number of topic-detail scrapes per `fetch_new_calls` call; items
-# that hit the cap get full_text=None this tick and are picked up next tick.
-_MAX_BODY_SCRAPES_PER_TICK = 300  # max topic-detail page scrapes per tick
-_BODY_SCRAPE_WALL_CLOCK_S = 300.0  # 5-minute wall-clock budget per tick
+# Summary length. The API gives no abstract — item-level `summary` is just the
+# parent call's title — so we take the opening of the call body verbatim.
+_SUMMARY_CHARS = 500
 
-# ---------------------------------------------------------------------------
-# Plan F (full-text ingestion) — investigation outcome
-# ---------------------------------------------------------------------------
-# The EU Funding & Tenders portal's search API (v3.0 /notices/search) returns
-# only a brief abstract per topic in `summary`. Inspection of the existing
-# canned fixtures (tests/test_sources_eu_portal.py::_FAKE_OK_BODY) shows the
-# only string-valued body field is `summary` — there is no `description`,
-# `topicDescription`, `objectives`, `expectedImpact`, `additionalInfo`,
-# `callConditions`, or `topicConditions` field present in the payload the
-# adapter consumes. The substantive call body lives on the topic-detail HTML
-# page that `url` points at.
-#
-# Outcome: B — scrape the topic-detail page via `fetch_html_main_content`
-# as a best-effort fallback to populate `full_text`. On scrape failure the
-# adapter logs and proceeds with `full_text=None`; ranking still works using
-# the `summary` field.
-# ---------------------------------------------------------------------------
+# Tags whose end should become a line break when flattening the description
+# HTML. Without this, `text_content()` welds the last word of one bullet onto
+# the first word of the next.
+_BLOCK_XPATH = "|".join(
+    f"//{tag}"
+    for tag in (
+        "p",
+        "div",
+        "li",
+        "ul",
+        "ol",
+        "br",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "tr",
+        "table",
+        "section",
+    )
+)
+
+# Identifier prefix -> readable programme name. `metadata.frameworkProgramme`
+# is an opaque numeric code (43108390, 43152860, ...) with no label anywhere in
+# the payload, but the prefix of `identifier` tracks it exactly: on the live
+# 100-record sample all 89 rows coded 43108390 were the 89 rows whose
+# identifier began "HORIZON". Deriving from the prefix needs no code table to
+# stay in sync, and an unknown programme degrades to its own prefix rather than
+# to None.
+_PROGRAMME_NAMES = {
+    "HORIZON": "Horizon Europe",
+    "DIGITAL": "Digital Europe Programme",
+    "LIFE": "LIFE Programme",
+    "CREA": "Creative Europe",
+    "ERASMUS": "Erasmus+",
+    "CEF": "Connecting Europe Facility",
+    "EU4H": "EU4Health",
+    "ISF": "Internal Security Fund",
+    "AMIF": "Asylum, Migration and Integration Fund",
+    "SMP": "Single Market Programme",
+    "JUST": "Justice Programme",
+    "CERV": "Citizens, Equality, Rights and Values",
+    "EDF": "European Defence Fund",
+    "EUBA": "EU Budget — pilot projects and preparatory actions",
+    "IMREG": "Interregional Innovation Investments",
+    "RFCS": "Research Fund for Coal and Steel",
+    "UCPM": "Union Civil Protection Mechanism",
+}
+
+
+def _first(metadata: dict, key: str) -> str | None:
+    """Read a SEDIA metadata field.
+
+    Every value in `metadata` is a list, almost always of length one. Return
+    the first non-empty entry as a string, or None. Tolerates a bare scalar so
+    a shape change upstream degrades instead of raising.
+    """
+    value = metadata.get(key)
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _parse_iso(value: str | None) -> datetime | None:
-    """Parse the portal's ISO timestamps into tz-aware UTC.
+    """Parse a SEDIA timestamp into tz-aware UTC.
 
-    The portal mostly emits 'Z' suffix; treat naive parses as UTC since the
-    spec mandates UTC storage.
+    SEDIA emits `2027-04-06T00:00:00.000+0000` — a UTC offset with no colon.
+    Python 3.12's `fromisoformat` accepts that form directly (verified against
+    this interpreter, alongside `+00:00` and `Z`), so no pre-normalisation is
+    needed. An earlier revision carried a regex to insert the colon; it was
+    removed after a mutation showed the test suite could not tell whether it
+    was there.
     """
     if not value:
         return None
     try:
-        # `fromisoformat` accepts 'Z' suffix on Python 3.11+.
-        dt = datetime.fromisoformat(value)
+        dt = datetime.fromisoformat(value.strip())
     except ValueError:
         return None
     if dt.tzinfo is None:
@@ -74,26 +172,165 @@ def _parse_iso(value: str | None) -> datetime | None:
     return dt.astimezone(UTC)
 
 
-def _coerce_budget(value) -> int | None:
-    """Coerce a budget field to int. Accepts int or float (the portal often
-    serializes amounts as floats, e.g. 12000000.0); rejects bool and anything
-    non-numeric. Returns None when the value isn't a usable number.
+def _html_to_text(fragment: str | None) -> str | None:
+    """Flatten a SEDIA description fragment to plain text.
+
+    NOT `trafilatura.extract`, which this module already depends on elsewhere:
+    trafilatura is tuned for article pages and, measured on a real
+    `descriptionByte`, silently DROPPED every `<ul>` bullet — 4115 characters
+    out of 5058, and the bullets are where the actual expected outcomes are.
+    lxml keeps everything; all it needs is block-level line breaks.
     """
-    if isinstance(value, bool):
+    if not fragment or not fragment.strip():
         return None
-    if isinstance(value, (int, float)):
-        return int(value)
-    return None
+    try:
+        doc = lxml_html.fromstring(fragment)
+        for bad in doc.xpath("//script|//style"):
+            parent = bad.getparent()
+            if parent is not None:
+                parent.remove(bad)
+        for element in doc.xpath(_BLOCK_XPATH):
+            element.tail = "\n" + (element.tail or "")
+        raw = doc.text_content()
+    except Exception as e:  # noqa: BLE001 — lxml raises many types on bad markup
+        _logger.warning(
+            "eu_portal.description_parse_failed",
+            extra={"event": "description_parse_failed", "error": str(e)},
+        )
+        return None
+    lines = [line.strip() for line in raw.splitlines()]
+    text = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+    return text or None
+
+
+def _summarize(text: str | None, *, limit: int = _SUMMARY_CHARS) -> str | None:
+    """Take the opening of the call body as the summary.
+
+    The API supplies no abstract: item-level `summary` and `content` both hold
+    the parent call's title (e.g. "MSCA COFUND 2027"), which is not a
+    description of anything. Rather than synthesise one, quote the start of the
+    body verbatim and mark the cut. Cutting on a word boundary keeps the last
+    word whole.
+    """
+    if not text:
+        return None
+    flat = " ".join(text.split())
+    if len(flat) <= limit:
+        return flat
+    head = flat[:limit]
+    boundary = head.rfind(" ")
+    if boundary > limit // 2:
+        head = head[:boundary]
+    return head.rstrip(" ,;:") + "…"
+
+
+def _budget_bounds(raw: str | None, identifier: str) -> tuple[int | None, int | None]:
+    """Extract per-grant funding bounds from `metadata.budgetOverview`.
+
+    The field is a JSON *string* holding a nested map of actions. Two numbers
+    are available per action and they are NOT interchangeable:
+
+      * `budgetYearMap`     — the whole call's envelope (e.g. 51 251 165 EUR)
+      * min/maxContribution — what a single project may request
+
+    We take the per-grant pair, because `Call.budget_min/budget_max` are
+    matched against the SAME fields on a research profile, where they mean "the
+    size of project this group wants to run". Storing a 51M call envelope there
+    would compare a programme against a project. Measured on 100 live records,
+    scoped as below: every topic matched an action of its own, and 85 of them
+    carried non-zero contribution bounds.
+
+    Zero means "not stated" in this payload, not "zero euros".
+
+    The map is keyed by the PARENT CALL's topics, so a topic's own record
+    carries every sibling topic's budget too — reading the whole map gave
+    HORIZON-CL5-2027-03-D5-05 and -D5-06 the identical span 2M-13.5M, which is
+    the parent call's range, not either topic's. Each action's `action` string
+    begins with the topic identifier it belongs to ("HORIZON-... - HORIZON-TMA-
+    MSCA-Cofund-D ..."), and on a live 100-record sample every single topic
+    matched at least one action that way. So select by identifier and fall back
+    to nothing rather than to the parent's span: a wrong number here is worse
+    than a missing one, because the profile match would silently use it.
+    """
+    if not raw:
+        return (None, None)
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return (None, None)
+    if not isinstance(parsed, dict):
+        return (None, None)
+    mins: list[int] = []
+    maxes: list[int] = []
+    action_map = parsed.get("budgetTopicActionMap")
+    if not isinstance(action_map, dict):
+        return (None, None)
+    for actions in action_map.values():
+        if not isinstance(actions, list):
+            continue
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            # "<topic identifier> - <type of action> <label>"
+            owner = str(action.get("action") or "").split(" - ")[0].strip()
+            if owner != identifier:
+                continue
+            for key, sink in (("minContribution", mins), ("maxContribution", maxes)):
+                value = action.get(key)
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    continue
+                as_int = int(value)
+                if as_int > 0:
+                    sink.append(as_int)
+    return (min(mins) if mins else None, max(maxes) if maxes else None)
+
+
+def _keywords(metadata: dict) -> list[str]:
+    """Real subject terms from `metadata.keywords`.
+
+    The list leads with the topic's own identifier and its parent call's
+    identifier — "HORIZON-MSCA-2027-COFUND-01-01", "HORIZON-MSCA-2027-COFUND-01"
+    — before any actual subject term. Those are already stored as
+    `external_id`; repeating them as keywords would put the identifier into the
+    embedding text twice and tell the ranker nothing.
+    """
+    raw = metadata.get("keywords")
+    if not isinstance(raw, list):
+        return []
+    identifiers = {
+        value
+        for value in (_first(metadata, "identifier"), _first(metadata, "callIdentifier"))
+        if value
+    }
+    out: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, str):
+            continue
+        term = entry.strip()
+        if not term or term in identifiers or term in out:
+            continue
+        out.append(term)
+    return out
+
+
+def _programme(metadata: dict) -> str | None:
+    identifier = _first(metadata, "identifier")
+    if not identifier:
+        return None
+    prefix = identifier.split("-", 1)[0].upper()
+    return _PROGRAMME_NAMES.get(prefix, prefix or None)
 
 
 class EUPortalAdapter:
-    """SourceAdapter for the EU Funding & Tenders Portal.
+    """SourceAdapter for the EU Funding & Tenders Portal, via the SEDIA search API.
 
-    EU portal's search API returns only a brief abstract; full call body is
-    on the topic-detail HTML page. We scrape via `fetch_html_main_content`
-    as a fallback to populate `full_text`. The scrape transport is injected
-    separately from the API transport so tests can mock the two endpoints
-    independently.
+    The search response carries the full call body in `metadata.descriptionByte`,
+    so this adapter does NO page scraping. The previous version fetched every
+    topic-detail HTML page one at a time and needed a per-tick scrape cap and a
+    wall-clock budget to stay tractable; all of that is gone, along with the
+    `extraction_transport` seam it existed for. `needs_body` is still accepted
+    because the SourceAdapter protocol passes it, and is ignored: there is no
+    second request to skip.
     """
 
     slug = "eu_portal"
@@ -103,89 +340,48 @@ class EUPortalAdapter:
         *,
         base_url: str,
         transport: httpx.BaseTransport | None = None,
-        extraction_transport: httpx.BaseTransport | None = None,
         timeout: float = 30.0,
-        max_body_scrapes: int = _MAX_BODY_SCRAPES_PER_TICK,
-        body_scrape_wall_clock_s: float = _BODY_SCRAPE_WALL_CLOCK_S,
     ):
         self._base_url = base_url.rstrip("/")
         self._transport = transport
-        self._extraction_transport = extraction_transport
         self._timeout = timeout
-        self._max_body_scrapes = max_body_scrapes
-        self._body_scrape_wall_clock_s = body_scrape_wall_clock_s
+
+    def _query_parts(self) -> dict[str, tuple[None, str, str]]:
+        """Build the typed multipart body. See note 2 at the top of this file —
+        untyped parts make the API answer 500."""
+        query = {
+            "bool": {
+                "must": [
+                    {"terms": {"type": [_TYPE_GRANT_TOPIC]}},
+                    {"terms": {"status": [_STATUS_FORTHCOMING, _STATUS_OPEN]}},
+                ]
+            }
+        }
+        return {
+            "query": (None, json.dumps(query), "application/json"),
+            "languages": (None, json.dumps(["en"]), "application/json"),
+        }
 
     def fetch_new_calls(
         self, since: datetime, *, needs_body: NeedsBody | None = None
     ) -> Iterator[NormalizedCall]:
-        # `needs_body(identifier) -> bool`: the orchestrator builds this from a
-        # cheap DB query of which calls already have a non-null `full_text`.
-        # When it returns False we SKIP the topic-detail scrape entirely — the
-        # body is already in the DB and upsert.py coalesces None over the
-        # existing value. This turns the per-run cost from "scrape every call"
-        # (hundreds of serial blocking HTTP+parse calls) into "scrape only
-        # brand-new / body-less calls". When `needs_body` is None (e.g. CLI
-        # one-shots that don't wire it), we fall back to always scraping, the
-        # pre-fix behavior.
-        #
-        # Per-tick scrape cap: on a first run (20k items all needing bodies),
-        # scraping every one serially in a single tick would take hours.
-        # We cap at _max_body_scrapes items and _body_scrape_wall_clock_s
-        # seconds per tick. Items that hit the cap get full_text=None this tick
-        # and are retried next tick (needs_body returns True again).
-        scrapes_this_tick = 0
-        scrape_deadline = time.monotonic() + self._body_scrape_wall_clock_s
-
-        def capped_needs_body(identifier: str) -> bool:
-            nonlocal scrapes_this_tick
-            if scrapes_this_tick >= self._max_body_scrapes:
-                _logger.debug(
-                    "eu_portal.scrape_cap_hit",
-                    extra={"event": "scrape_cap_hit", "external_id": identifier},
-                )
-                return False
-            if time.monotonic() >= scrape_deadline:
-                _logger.debug(
-                    "eu_portal.scrape_deadline_hit",
-                    extra={"event": "scrape_deadline_hit", "external_id": identifier},
-                )
-                return False
-            # Only increment when we actually allow a scrape (i.e. when the
-            # caller's predicate also says True). Check the upstream predicate
-            # first so we don't burn budget on items that don't need bodies.
-            if needs_body is not None and not needs_body(identifier):
-                return False
-            scrapes_this_tick += 1
-            return True
-
-        #
-        # Repeated `status` params (status=OPEN&status=FORTHCOMING) are the
-        # safest cross-API encoding — comma-separated values get URL-encoded
-        # to %2C and not all servers reverse that.
-        params = [("status", "OPEN"), ("status", "FORTHCOMING")]
-        # `since` is informational at this endpoint — server-side filtering
-        # by date isn't always honored. The orchestrator's idempotent upsert
-        # tolerates fetching the full set on every run.
-        # TODO (post-Plan 3): a periodic reaper should mark calls absent from
-        # consecutive fetches as stale, so the dashboard doesn't accumulate
-        # CLOSED entries indefinitely. Currently the orchestrator is
-        # additive-only — by design at v1 — but worth scheduling once the
-        # ranking and digest layers exist.
+        # `since` is informational: this API has no "modified since" filter, and
+        # the orchestrator's upsert is idempotent, so every run fetches the full
+        # open+forthcoming set. `needs_body` is unused — see the class docstring.
         seen = 0
         try:
             api_transport = self._transport
             if api_transport is None:
                 api_transport = pinned_transport_for(self._base_url)
-                # pinned_transport_for pins the API base URL to prevent DNS rebinding.
-                # Tests always inject self._transport so this branch is production-only.
+                # pinned_transport_for pins the API base URL to prevent DNS
+                # rebinding. Tests always inject self._transport, so this branch
+                # is production-only.
                 if api_transport is None:
                     # None is the REFUSAL signal (unsafe scheme, a blocked IP in
                     # any DNS answer, or DNS failure) — and `httpx.Client(
                     # transport=None)` builds the DEFAULT transport, so passing
                     # it through would connect UNPINNED on exactly the inputs the
-                    # check rejected. Fail closed: a refused or unresolvable base
-                    # URL aborts the tick. `sources/extraction.py` already does
-                    # this; these two adapters did not.
+                    # check rejected. Fail closed.
                     raise AdapterError(
                         f"EU Portal fetch refused: {self._base_url} is unsafe or "
                         "could not be resolved to a pinnable public address"
@@ -195,23 +391,18 @@ class EUPortalAdapter:
                 transport=api_transport,
                 timeout=self._timeout,
             ) as client:
-                # Paginate: the search API returns one page of `results` at a
-                # time. A single GET silently truncated to the first page,
-                # dropping every call beyond it. Loop over pageNumber until we
-                # exhaust the result set (empty page, or seen >= totalResults),
-                # bounded by _MAX_PAGES so a misbehaving server can't spin us
-                # forever.
                 for page_number in range(1, _MAX_PAGES + 1):
-                    page_params = [
-                        *params,
-                        ("pageSize", str(_PAGE_SIZE)),
-                        ("pageNumber", str(page_number)),
-                    ]
-                    # The v3.0 search endpoint expects a query body; `text="*"`
-                    # matches all notices (server-side date/status filtering is
-                    # applied via the params above).
                     resp = request_with_retry(
-                        client, "POST", _SEARCH_PATH, params=page_params, json={"text": "*"}
+                        client,
+                        "POST",
+                        _SEARCH_PATH,
+                        params={
+                            "apiKey": _API_KEY,
+                            "text": "***",
+                            "pageSize": str(_PAGE_SIZE),
+                            "pageNumber": str(page_number),
+                        },
+                        files=self._query_parts(),
                     )
                     resp.raise_for_status()
                     payload = resp.json()
@@ -220,7 +411,7 @@ class EUPortalAdapter:
                     if not results:
                         break
                     for item in results:
-                        normalized = self._normalize(item, needs_body=capped_needs_body)
+                        normalized = self._normalize(item)
                         if normalized is not None:
                             yield normalized
                     seen += len(results)
@@ -236,17 +427,28 @@ class EUPortalAdapter:
         except ValueError as e:  # JSON decode
             raise AdapterError(f"EU Portal returned non-JSON body: {e}") from e
 
-    def _normalize(
-        self, item: dict, *, needs_body: NeedsBody | None = None
-    ) -> NormalizedCall | None:
-        # Required fields per our contract.
-        external_id = item.get("identifier")
-        title = item.get("title")
-        url = item.get("url")
+    def _normalize(self, item: dict) -> NormalizedCall | None:
+        metadata = item.get("metadata")
+        if not isinstance(metadata, dict):
+            _logger.info(
+                "eu_portal.skip_incomplete",
+                extra={
+                    "event": "skip_incomplete",
+                    "fields_present": sorted(item.keys()) if isinstance(item, dict) else [],
+                },
+            )
+            return None
+
+        external_id = _first(metadata, "identifier")
+        title = _first(metadata, "title")
+        # `metadata.url` and the item-level `url` agree in the live payload;
+        # prefer the metadata one and fall back, so one going missing is not
+        # fatal.
+        url = _first(metadata, "url") or (item.get("url") if isinstance(item, dict) else None)
         if not (external_id and title and url):
             _logger.info(
                 "eu_portal.skip_incomplete",
-                extra={"event": "skip_incomplete", "fields_present": list(item.keys())},
+                extra={"event": "skip_incomplete", "fields_present": sorted(metadata.keys())},
             )
             return None
         # Defense in depth against stored XSS — see is_safe_url docstring.
@@ -257,29 +459,30 @@ class EUPortalAdapter:
             )
             return None
 
-        # Best-effort scrape of the topic-detail page for the call body —
-        # but only when the body is actually needed. `needs_body` returns
-        # False for calls already ingested with a non-null `full_text`, so we
-        # skip the (blocking, serial) scrape and let upsert's coalesce keep the
-        # existing body. When `needs_body` is None we always scrape (CLI /
-        # pre-fix behavior). `fetch_html_main_content` returns None on HTTP
-        # error / empty extraction (and logs); ranking can still use `summary`.
-        full_text: str | None = None
-        if needs_body is None or needs_body(str(external_id)):
-            full_text = fetch_html_main_content(str(url), transport=self._extraction_transport)
+        # `descriptionByte` is the call body. `topicConditions` and `supportInfo`
+        # are deliberately NOT appended: both are legal/administrative
+        # boilerplate that repeats near-verbatim across calls (2 distinct
+        # openings across 5 sampled records), so including them would push the
+        # same thousands of characters into every call's embedding and make the
+        # corpus LESS separable, not more.
+        full_text = _html_to_text(_first(metadata, "descriptionByte"))
+        budget_min, budget_max = _budget_bounds(
+            _first(metadata, "budgetOverview"), str(external_id)
+        )
 
         return NormalizedCall(
             external_id=str(external_id),
             url=str(url),
             title=str(title),
-            summary=item.get("summary"),
+            summary=_summarize(full_text),
             full_text=full_text,
-            deadline=_parse_iso(item.get("deadlineDate")),
-            budget_min=_coerce_budget(item.get("budgetMin")),
-            budget_max=_coerce_budget(item.get("budgetTotal")),
-            currency=item.get("currency"),
-            programme=item.get("programmeName"),
-            keywords=list(item.get("keywords") or []),
-            published_at=_parse_iso(item.get("publicationDate")),
+            deadline=_parse_iso(_first(metadata, "deadlineDate")),
+            budget_min=budget_min,
+            budget_max=budget_max,
+            # The payload states no currency; every SEDIA budget figure is euro.
+            currency="EUR",
+            programme=_programme(metadata),
+            keywords=_keywords(metadata),
+            published_at=_parse_iso(_first(metadata, "startDate")),
             raw=item,
         )
