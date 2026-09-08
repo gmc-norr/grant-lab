@@ -101,7 +101,12 @@ class Settings(BaseSettings):
     # one rate-limit bucket (the inner proxy's fixed IP). Only consulted when
     # trusted_proxy is True. Must be >= 1.
     trusted_proxy_hops: int = Field(default=1, ge=1, alias="TRUSTED_PROXY_HOPS")
-    eu_portal_base_url: str = Field(default="https://ec.europa.eu", alias="EU_PORTAL_BASE_URL")
+    # The EU Funding & Tenders search API lives on the Commission's shared
+    # SEDIA host, NOT on ec.europa.eu. The old ec.europa.eu v3.0 path now
+    # 404s; see the header comment in sources/eu_portal.py.
+    eu_portal_base_url: str = Field(
+        default="https://api.tech.ec.europa.eu", alias="EU_PORTAL_BASE_URL"
+    )
     vinnova_base_url: str = Field(default="https://data.vinnova.se", alias="VINNOVA_BASE_URL")
     admin_alert_email: str | None = Field(default=None, alias="ADMIN_ALERT_EMAIL")
     stale_source_alert_days: int = Field(

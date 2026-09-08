@@ -1,0 +1,128 @@
+{
+  "apiVersion": "2.154",
+  "pageNumber": 1,
+  "pageSize": 100,
+  "totalResults": 2,
+  "results": [
+    {
+      "url": "https://ec.europa.eu/info/funding-tenders/opportunities/portal/screen/opportunities/topic-details/HORIZON-MSCA-2027-COFUND-01-01",
+      "title": null,
+      "summary": "MSCA COFUND 2027",
+      "content": "MSCA COFUND 2027",
+      "database": "SEDIA",
+      "language": "en",
+      "reference": "50132976TOPICSen",
+      "metadata": {
+        "identifier": [
+          "HORIZON-MSCA-2027-COFUND-01-01"
+        ],
+        "title": [
+          "MSCA COFUND 2027"
+        ],
+        "callIdentifier": [
+          "HORIZON-MSCA-2027-COFUND-01"
+        ],
+        "callTitle": [
+          "MSCA COFUND 2027"
+        ],
+        "status": [
+          "31094501"
+        ],
+        "deadlineDate": [
+          "2027-04-06T00:00:00.000+0000"
+        ],
+        "startDate": [
+          "2026-12-08T00:00:00.000+0000"
+        ],
+        "frameworkProgramme": [
+          "43108390"
+        ],
+        "programmePeriod": [
+          "2021 - 2027"
+        ],
+        "type": [
+          "1"
+        ],
+        "keywords": [
+          "HORIZON-MSCA-2027-COFUND-01-01",
+          "HORIZON-MSCA-2027-COFUND-01"
+        ],
+        "budgetOverview": [
+          "{\"budgetYearsColumns\":[\"2027\"],\"budgetTopicActionMap\":{\"112956\":[{\"action\":\"HORIZON-MSCA-2027-COFUND-01-01 - HORIZON-TMA-MSCA-Cofund-D HORIZON TMA MSCA Cofund Doctoral programme\",\"expectedGrants\":0,\"minContribution\":0,\"maxContribution\":0,\"budgetYearMap\":{\"2027\":\"51251165\"},\"plannedOpeningDate\":\"2026-12-08\",\"deadlineModel\":\"single-stage\",\"deadlineDates\":[\"2027-04-06\"]}]}}"
+        ],
+        "descriptionByte": [
+          "<p class=\"topicdescriptionkind\">Expected Outcome:</p><p>Projects results are expected to contribute to the following outcomes:</p><p>For supported doctoral candidates </p><ul level=\"0\"><li>Deeper and more diverse set of research-related and transferable skills and competences;</li><li>Improved employability and career prospects both within academia and beyond;</li><li>New mind-sets and approaches to R&amp;I work forged through international, inter-sectoral and interdisciplinary experience;</li><li>Enhanced networking and communication capacities with scientific peers, as well as with the general public that will increase and broaden the research and innovation impact.</li> </ul><p>For participating organisations</p><ul level=\"0\"><li>Enhanced quality and sustainability of research training;</li><li>Increased global attractiveness, visibility and reputation of the participating organisation(s);</li><li>Stronger R&amp;I capacity and output among participating organisations;</li><li>Increased contribution of the participating organisations to the local, regional and/or national socio-economic ecosystems;</li><li>Regular feedback of research results into teaching and education at partic"
+        ],
+        "topicConditions": [
+          "<div class=\"eui-u-mt-l>\"><h4>General conditions</h4><div><h4>1. Admissibility Conditions: Proposal page limit and layout</h4><div class=\"eui-u-mt-s\"><p><strong><em>﻿</em></strong>described in <a href=\"https://ec.europa.eu/info/funding-tenders/opportunities/docs/2021-2027/horizon/wp-call/2026-2027/wp-15-general-annexes_horizon-2026-2027_en.pdf\" rel=\"noopener noreferrer\" target=\"_blank\">Annex A</a> and <a href=\"https://ec.europa.eu/info/funding-tenders/opportunities/docs/2021-2027/horizon/wp-call/2026-2027/wp-15-general-annexes_horizon-2026-2027_en.pdf\" rel=\"noopener noreferrer\" target=\"_blank\">Annex E</a> of the Horizon Europe Work Programme General Annexes.</p><p><strong>Proposal page limits and layout:</strong> described in Part B of the Application Form available in the Submission System.</p></div></div><div><h4>2. Eligible Countries</h4><div class=\"eui-u-mt-s\"><p>described in <a href=\"https://ec.europa.eu/info/funding-tenders/opportunities/docs/2021-2027/horizon/wp-call/2026-2027/wp-15-general-annexes_horizon-2026-2027_en.pdf\" rel=\"noopener noreferrer\" target=\"_blank\">Annex B</a> of the Work Programme General Annexes.</p><p>A number of non-EU/non-Associated Countries that are no"
+        ],
+        "url": [
+          "https://ec.europa.eu/info/funding-tenders/opportunities/portal/screen/opportunities/topic-details/HORIZON-MSCA-2027-COFUND-01-01"
+        ],
+        "deadlineModel": [
+          "single-stage"
+        ]
+      }
+    },
+    {
+      "url": "https://ec.europa.eu/info/funding-tenders/opportunities/portal/screen/opportunities/topic-details/HORIZON-CL5-2027-03-D5-05",
+      "title": null,
+      "summary": "Higher Voltage, Megawatt Charging System compatible, modular powertrain for Heavy Duty Vehicles (HDV) (2ZERO Partnership)",
+      "content": "Higher Voltage, Megawatt Charging System compatible, modular powertrain for Heavy Duty Vehicles (HDV) (2ZERO Partnership)",
+      "database": "SEDIA",
+      "language": "en",
+      "reference": "50130852TOPICSen",
+      "metadata": {
+        "identifier": [
+          "HORIZON-CL5-2027-03-D5-05"
+        ],
+        "title": [
+          "Higher Voltage, Megawatt Charging System compatible, modular powertrain for Heavy Duty Vehicles (HDV) (2ZERO Partnership)"
+        ],
+        "callIdentifier": [
+          "HORIZON-CL5-2027-03"
+        ],
+        "callTitle": [
+          "MOBILITY"
+        ],
+        "status": [
+          "31094501"
+        ],
+        "deadlineDate": [
+          "2027-04-14T00:00:00.000+0000"
+        ],
+        "startDate": [
+          "2026-12-15T00:00:00.000+0000"
+        ],
+        "frameworkProgramme": [
+          "43108390"
+        ],
+        "programmePeriod": [
+          "2021 - 2027"
+        ],
+        "type": [
+          "1"
+        ],
+        "keywords": [
+          "HORIZON-CL5-2027-03-D5-05",
+          "HORIZON-CL5-2027-03"
+        ],
+        "budgetOverview": [
+          "{\"budgetYearsColumns\":[\"2027\"],\"budgetTopicActionMap\":{\"112963\":[{\"action\":\"HORIZON-CL5-2027-03-D5-17 - HORIZON-RIA HORIZON  Research and Innovation Actions\",\"expectedGrants\":2,\"minContribution\":7000000,\"maxContribution\":7000000,\"budgetYearMap\":{\"2027\":\"14000000\"},\"plannedOpeningDate\":\"2026-12-15\",\"deadlineModel\":\"single-stage\",\"deadlineDates\":[\"2027-04-14\"]}],\"112965\":[{\"action\":\"HORIZON-CL5-2027-03-D5-06 - HORIZON-IA HORIZON Innovation Actions\",\"expectedGrants\":1,\"minContribution\":8000000,\"maxContribution\":8000000,\"budgetYearMap\":{\"2027\":\"8000000\"},\"plannedOpeningDate\":\"2026-12-15\",\"deadlineModel\":\"single-stage\",\"deadlineDates\":[\"2027-04-14\"]}],\"112964\":[{\"action\":\"HORIZON-CL5-2027-03-D5-05 - HORIZON-IA HORIZON Innovation Actions\",\"expectedGrants\":2,\"minContribution\":8000000,\"maxContribution\":8000000,\"budgetYearMap\":{\"2027\":\"16000000\"},\"plannedOpeningDate\":\"2026-12-15\",\"deadlineModel\":\"single-stage\",\"deadlineDates\":[\"2027-04-14\"]}],\"112967\":[{\"action\":\"HORIZON-CL5-2027-03-D5-04 - HORIZON-IA HORIZON Innovation Actions\",\"expectedGrants\":1,\"minContribution\":13500000,\"maxContribution\":13500000,\"budgetYearMap\":{\"2027\":\"13500000\"},\"plannedOpeningDate\":\"2026-12-15\",\"deadlineModel\":\"single-stage\",\"deadlineDates\":[\"2027-04-14\"]}],\"112966\":[{\"action\":\"HORIZON-CL5-2027-03-D5-03 - HORIZON-IA HORIZON Innovation Actions\",\"expectedGrants\":4,\"minContribution\":5000000,\"maxContribution\":7000000,\"budgetYearMap\":{\"2027\":\"24000000\"},\"plannedOpeningDate\":\"2026-12-15\",\"deadlineModel\":\"single-stage\",\"deadlineDates\":[\"2027-04-14\"]}],\"112969\":[{\"action\":\"HORIZON-CL5-2027-03-D5-15 - HORIZON-CSA HORIZON Coordination and Support Actions\",\"expectedGrants\":1,\"minContribution\":2000000,\"maxContribution\":2000000,\"budgetYearMap\":{\"2027\":\"2000000\"},\"plannedOpeningDate\":\"2026-12-15\",\"deadlineModel\":\"single-stage\",\"deadlineDates\":[\"2027-04-14\"]}],\"112968\":[{\"action\":\"HORIZON-CL5-2027-03-D5-08 - HORIZON-RIA HORIZON  Research and Innovation Actions\",\"expectedGrants\":2,\"minContribution\":2500000,\"maxContribution\":2500000,\"budgetYearMap\":{\"2027\":\"5000000\"},\"plannedOpeningDate\":\"2026-12-15\",\"deadlineModel\":\"single-stage\",\"deadlineDates\":[\"2027-04-14\"]}],\"112971\":[{\"action\":\"HORIZON-CL5-2027-03-D5-18 - HORIZON-IA HORIZON Innovation Actions\",\"expectedGrants\":2,\"minContribution\":10000000,\"maxContribution\":10000000,\"budgetYearMap\":{\"2027\":\"20000000\"},\"plannedOpeningDate\":\"2026-12-15\",\"deadlineModel\":\"single-stage\",\"deadlineDates\":[\"2027-04-14\"]}],\"112970\":[{\"action\":\"HORIZON-CL5-2027-03-D5-20 - HORIZON-RIA HORIZON  Research and Innovation Actions\",\"expectedGrants\":2,\"minContribution\":3500000,\"maxContribution\":3500000,\"budgetYearMap\":{\"2027\":\"7000000\"},\"plannedOpeningDate\":\"2026-12-15\",\"deadlineModel\":\"single-stage\",\"deadlineDates\":[\"2027-04-14\"]}],\"112973\":[{\"action\":\"HORIZON-CL5-2027-03-D5-14 - HORIZON-IA HORIZON Innovation Actions\",\"expectedGrants\":1,\"minContribution\":6500000,\"maxContribution\":6500000,\"budgetYearMap\":{\"2027\":\"6500000\"},\"plannedOpeningDate\":\"2026-12-15\",\"deadlineModel\":\"single-stage\",\"deadlineDates\":[\"2027-04-14\"]}],\"112972\":[{\"action\":\"HORIZON-CL5-2027-03-D5-16 - HORIZON-IA HORIZON Innovation Actions\",\"expectedGrants\":2,\"minContribution\":7500000,\"maxContribution\":7500000,\"budgetYearMap\":{\"2027\":\"15000000\"},\"plannedOpeningDate\":\"2026-12-15\",\"deadlineModel\":\"single-stage\",\"deadlineDates\":[\"2027-04-14\"]}]}}"
+        ],
+        "descriptionByte": [
+          "<p class=\"topicdescriptionkind\">Expected Outcome:</p><p>Project results are expected to contribute to all of the following expected outcomes:</p><ul level=\"0\"><li>Demonstrated integration potential and modularity of next level advanced high-voltage systems to benefit cost of Commercial Vehicles (CV) in particular for the Heavy-Duty Vehicles (HDV) segment.</li><li>Improved energy efficiency and higher utilization potential of HDV (ensuring full operational capability for the intended usage models) via high-voltage powertrain configurations.</li><li>Demonstrated benefits of high-voltage systems also for fast charging and auxiliary components. </li> </ul><p class=\"topicdescriptionkind\">Scope:</p><p>Major challenges still faced by Heavy Duty Battery Electric Vehicles (HD-BEV) are cost and fast charging. As electric vehicles become more attractive through Total Cost of Ownership (TCO), significantly higher acquisition costs remain, partly caused by the wide spectrum of usage scenarios and a relatively low number of vehicles, which makes development costs a significant factor for vehicle price.</p><p>Proposed actions are expected to address all of the following aspects:</p><ul level=\"0\">"
+        ],
+        "topicConditions": [
+          "<div class=\"eui-u-mt-l>\"><h4>General conditions</h4><div><h4>1. Admissibility Conditions: Proposal page limit and layout</h4><div class=\"eui-u-mt-s\"><p><strong><em>﻿</em></strong>described in <a href=\"https://ec.europa.eu/info/funding-tenders/opportunities/docs/2021-2027/horizon/wp-call/2026-2027/wp-15-general-annexes_horizon-2026-2027_en.pdf\" rel=\"noopener noreferrer\" target=\"_blank\">Annex A</a> and <a href=\"https://ec.europa.eu/info/funding-tenders/opportunities/docs/2021-2027/horizon/wp-call/2026-2027/wp-15-general-annexes_horizon-2026-2027_en.pdf\" rel=\"noopener noreferrer\" target=\"_blank\">Annex E</a> of the Horizon Europe Work Programme General Annexes.</p><p><strong>Proposal page limits and layout:</strong> described in Part B of the Application Form available in the Submission System.</p></div></div><div><h4>2. Eligible Countries</h4><div class=\"eui-u-mt-s\"><p>described in <a href=\"https://ec.europa.eu/info/funding-tenders/opportunities/docs/2021-2027/horizon/wp-call/2026-2027/wp-15-general-annexes_horizon-2026-2027_en.pdf\" rel=\"noopener noreferrer\" target=\"_blank\">Annex B</a> of the Work Programme General Annexes.</p><p>A number of non-EU/non-Associated Countries that are no"
+        ],
+        "url": [
+          "https://ec.europa.eu/info/funding-tenders/opportunities/portal/screen/opportunities/topic-details/HORIZON-CL5-2027-03-D5-05"
+        ],
+        "deadlineModel": [
+          "single-stage"
+        ]
+      }
+    }
+  ]
+}
