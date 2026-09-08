@@ -18,6 +18,11 @@ _FIXTURE = json.loads(
 
 _SINCE = datetime(2026, 1, 1, tzinfo=UTC)
 
+# Pinned "now" for every adapter under test. Without it the expiry filter would
+# make these tests pass today and fail next year, which is a worse failure than
+# a red one because it arrives without a change.
+_NOW = datetime(2026, 9, 8, tzinfo=UTC)
+
 
 def _meta(**overrides) -> dict:
     """One synthetic result, shaped like SEDIA: every metadata value a list."""
@@ -60,6 +65,7 @@ def _mock_transport(status: int = 200, body=None, raise_exc=None, record: list |
 
 def _adapter(**kwargs) -> EUPortalAdapter:
     kwargs.setdefault("transport", _mock_transport())
+    kwargs.setdefault("now", _NOW)
     return EUPortalAdapter(base_url="https://api.tech.ec.europa.eu", **kwargs)
 
 
@@ -477,3 +483,82 @@ def test_needs_body_is_accepted_and_costs_no_extra_request():
     assert len(out) == 2
     assert len(seen) == 1
     assert out[0].full_text is not None
+
+
+# ---------------------------------------------------------------------------
+# Deadlines and expiry
+# ---------------------------------------------------------------------------
+
+
+def test_a_call_whose_every_round_has_closed_is_dropped():
+    """590 of 1214 live topics are in this state despite the API reporting them
+    open or forthcoming, so the deadline is the only trustworthy signal."""
+    body = _body([_meta(deadlineDate=["2026-03-01T00:00:00.000+0000"]), _meta()])
+    out = list(_adapter(transport=_mock_transport(body=body)).fetch_new_calls(since=_SINCE))
+
+    assert len(out) == 1
+    assert out[0].deadline == datetime(2026, 9, 15, 17, 0, tzinfo=UTC)
+
+
+def test_a_call_with_a_later_open_round_survives_a_closed_early_round():
+    """The bug this catches: reading only entry [0] reports the FIRST round.
+
+    PERI-2026-ANTI-COUNTERFEIT is live with rounds 2026-04-21 and 2026-09-15;
+    on entry [0] alone it looks expired and would be thrown away.
+    """
+    item = _meta(deadlineDate=["2026-04-21T00:00:00.000+0000", "2026-09-15T00:00:00.000+0000"])
+    out = list(
+        _adapter(transport=_mock_transport(body=_body([item]))).fetch_new_calls(since=_SINCE)
+    )
+
+    assert len(out) == 1, "a call with an open later round must not be dropped"
+    assert out[0].deadline == datetime(2026, 9, 15, tzinfo=UTC)
+
+
+def test_the_earliest_open_round_is_the_one_reported():
+    """Not the last, and not the first — the one an applicant is working to."""
+    item = _meta(
+        deadlineDate=[
+            "2026-01-10T00:00:00.000+0000",
+            "2026-11-30T00:00:00.000+0000",
+            "2027-11-30T00:00:00.000+0000",
+        ]
+    )
+    out = list(
+        _adapter(transport=_mock_transport(body=_body([item]))).fetch_new_calls(since=_SINCE)
+    )
+
+    assert out[0].deadline == datetime(2026, 11, 30, tzinfo=UTC)
+
+
+def test_a_call_with_no_deadline_at_all_is_kept():
+    """ "No deadline stated" is not "expired"; dropping these would lose calls
+    the ranker can still judge, and `_timeline` already passes them."""
+    out = list(
+        _adapter(transport=_mock_transport(body=_body([_meta(deadlineDate=[])]))).fetch_new_calls(
+            since=_SINCE
+        )
+    )
+
+    assert len(out) == 1
+    assert out[0].deadline is None
+
+
+def test_expiry_is_judged_against_the_injected_clock():
+    """Same payload, two instants, opposite outcomes — so the filter is really
+    reading the clock and not some property of the fixture."""
+    body = _body([_meta(deadlineDate=["2026-09-15T00:00:00.000+0000"])])
+
+    before = list(
+        _adapter(
+            transport=_mock_transport(body=body), now=datetime(2026, 9, 8, tzinfo=UTC)
+        ).fetch_new_calls(since=_SINCE)
+    )
+    after = list(
+        _adapter(
+            transport=_mock_transport(body=body), now=datetime(2026, 9, 20, tzinfo=UTC)
+        ).fetch_new_calls(since=_SINCE)
+    )
+
+    assert len(before) == 1
+    assert after == []

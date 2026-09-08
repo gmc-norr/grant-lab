@@ -173,6 +173,41 @@ label anywhere in the payload. The prefix of `identifier` tracks it exactly: all
 prefix table needs no reference-data call to stay in sync, and an unmapped
 programme degrades to its own prefix rather than to NULL.
 
+## 5a. Half the feed is already expired
+
+The API's own status filter is not a filter on whether you can still apply.
+Measured across all 1214 open-or-forthcoming topics on 2026-09-08:
+
+```
+every deadline round already closed   591
+at least one round still open         623
+no deadline stated at all               0
+```
+
+352 of the closed ones are flagged **forthcoming**. So `status` cannot be
+trusted for this and the deadline is the only usable signal.
+
+`deadlineDate` is a **list**, not a value — 1117 topics carry one entry, 75 carry
+two, and the rest up to ten (two-stage calls, and rolling calls with a deadline
+per cut-off round). Reading entry `[0]`, which the obvious `_first` helper does,
+reports the *first* round: six live topics have a closed early round and an open
+later one, e.g. `PERI-2026-ANTI-COUNTERFEIT` (2026-04-21, then 2026-09-15). On
+entry `[0]` alone those look expired and would be thrown away. The adapter
+reports the earliest round still open, falling back to the last one so "expired"
+stays distinguishable from "no deadline stated".
+
+Expired calls are dropped at ingest. **This saves no LLM money** —
+`rank_pair` short-circuits a FAILing timeline gate before any model call, local
+or remote. What it saves is one local embedding per call, one `ranking_jobs` row
+per active profile, and 591 rows of dashboard noise. It also closes the one path
+by which an expired call *does* reach a model: a profile `must_include` keyword
+match deliberately bypasses the timeline gate.
+
+A call with **no** deadline stated is kept, not dropped — `_timeline` already
+passes those, and treating silence as expiry would lose calls the ranker can
+still judge. No live topic is currently in that state, which is exactly why it
+needs a test rather than an assumption.
+
 ## 6. Deliberately out of scope
 
 **Nothing surfaces a dead source.** This is the finding with the longest reach
@@ -208,6 +243,10 @@ red when the fix was mutated away — observed, not predicted.
 | G7 | budget excludes sibling topics of the parent call | drop the owner filter | 2 |
 | G8 | keywords drop the identifiers | keep every entry | 2 |
 | G9 | conditions boilerplate stays out of the body | append `topicConditions` | 1 |
+| G10 | a call whose every round has closed is dropped | never drop an expired call | 2 |
+| G11 | a closed early round does not expire an open later one | read entry `[0]` only | 2 |
+| G12 | the earliest **open** round is reported | report the last round | 1 |
+| G13 | a call with no deadline is kept | drop those too | 1 |
 
 Two mutations were run and **did not** redden, which is recorded because it
 changed the code:
@@ -227,13 +266,13 @@ changed the code:
 
 ```
 060a2022  tests/test_sources_eu_portal.py   15 collected
-branch    tests/test_sources_eu_portal.py   32 collected   (+17)
+branch    tests/test_sources_eu_portal.py   37 collected   (+22)
 ```
 
 Backend total on the base is **5530 passed, 1 skipped**. That figure was
 measured at `51c0fcb6`; `git diff --stat 51c0fcb6 060a2022` is two documents
 and nothing else, so it carries to this base rather than being re-asserted.
-Expected total on the branch is therefore 5547.
+Expected total on the branch is therefore 5552.
 
 The `1 skipped` is the real-SDK test gated on `ANTHROPIC_API_KEY`. It stays 1 —
 `0 skipped` would mean a live paid API call ran.

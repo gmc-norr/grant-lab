@@ -172,6 +172,43 @@ def _parse_iso(value: str | None) -> datetime | None:
     return dt.astimezone(UTC)
 
 
+def _deadlines(metadata: dict) -> list[datetime]:
+    """Every parseable entry of `metadata.deadlineDate`, in payload order.
+
+    NOT a single value. Measured across all 1214 live topics: 1117 carry one
+    deadline, 75 carry two, and the rest run up to ten — two-stage calls and
+    rolling calls with a deadline per cut-off round. Reading only entry [0]
+    (which `_first` would do) reports the FIRST round, so a call whose early
+    round has closed but whose later round is still open looks expired. Six
+    live topics were in exactly that state, e.g. PERI-2026-ANTI-COUNTERFEIT
+    with rounds 2026-04-21 and 2026-09-15.
+    """
+    raw = metadata.get("deadlineDate")
+    if not isinstance(raw, list):
+        raw = [raw] if raw else []
+    out = []
+    for entry in raw:
+        parsed = _parse_iso(str(entry) if entry is not None else None)
+        if parsed is not None:
+            out.append(parsed)
+    return sorted(out)
+
+
+def _pick_deadline(deadlines: list[datetime], now: datetime) -> datetime | None:
+    """The deadline a would-be applicant is actually working towards.
+
+    The earliest round still open; if every round has closed, the last one, so
+    the caller can tell "expired" from "no deadline stated" — a call with no
+    deadline at all is NOT expired, and must not be filtered out.
+    """
+    if not deadlines:
+        return None
+    for deadline in deadlines:
+        if deadline > now:
+            return deadline
+    return deadlines[-1]
+
+
 def _html_to_text(fragment: str | None) -> str | None:
     """Flatten a SEDIA description fragment to plain text.
 
@@ -341,10 +378,14 @@ class EUPortalAdapter:
         base_url: str,
         transport: httpx.BaseTransport | None = None,
         timeout: float = 30.0,
+        now: datetime | None = None,
     ):
         self._base_url = base_url.rstrip("/")
         self._transport = transport
         self._timeout = timeout
+        # Injectable so the expiry tests state a fixed instant instead of
+        # depending on the wall clock and rotting next year.
+        self._now = now
 
     def _query_parts(self) -> dict[str, tuple[None, str, str]]:
         """Build the typed multipart body. See note 2 at the top of this file —
@@ -369,6 +410,7 @@ class EUPortalAdapter:
         # the orchestrator's upsert is idempotent, so every run fetches the full
         # open+forthcoming set. `needs_body` is unused — see the class docstring.
         seen = 0
+        now = self._now or datetime.now(UTC)
         try:
             api_transport = self._transport
             if api_transport is None:
@@ -411,7 +453,7 @@ class EUPortalAdapter:
                     if not results:
                         break
                     for item in results:
-                        normalized = self._normalize(item)
+                        normalized = self._normalize(item, now=now)
                         if normalized is not None:
                             yield normalized
                     seen += len(results)
@@ -427,7 +469,7 @@ class EUPortalAdapter:
         except ValueError as e:  # JSON decode
             raise AdapterError(f"EU Portal returned non-JSON body: {e}") from e
 
-    def _normalize(self, item: dict) -> NormalizedCall | None:
+    def _normalize(self, item: dict, *, now: datetime) -> NormalizedCall | None:
         metadata = item.get("metadata")
         if not isinstance(metadata, dict):
             _logger.info(
@@ -459,6 +501,31 @@ class EUPortalAdapter:
             )
             return None
 
+        # Drop a call whose every round has already closed. Measured on the
+        # live feed: 590 of 1214 topics the API reports as open-or-forthcoming
+        # have no round left — the portal's own status field says otherwise for
+        # 352 of them, so the deadline is the only trustworthy signal.
+        #
+        # This costs no LLM money either way: `rank_pair` short-circuits a
+        # FAILing timeline gate before any model call. What it saves is a local
+        # embedding per call, a ranking_jobs row per active profile, and 590
+        # rows of dashboard noise. It also closes the one path where an expired
+        # call DOES reach the LLM — a profile `must_include` keyword match
+        # bypasses the timeline gate on purpose.
+        #
+        # A call with NO deadline stated is not expired and is kept.
+        deadline = _pick_deadline(_deadlines(metadata), now)
+        if deadline is not None and deadline <= now:
+            _logger.info(
+                "eu_portal.skip_expired",
+                extra={
+                    "event": "skip_expired",
+                    "external_id": str(external_id),
+                    "deadline": deadline.isoformat(),
+                },
+            )
+            return None
+
         # `descriptionByte` is the call body. `topicConditions` and `supportInfo`
         # are deliberately NOT appended: both are legal/administrative
         # boilerplate that repeats near-verbatim across calls (2 distinct
@@ -476,7 +543,7 @@ class EUPortalAdapter:
             title=str(title),
             summary=_summarize(full_text),
             full_text=full_text,
-            deadline=_parse_iso(_first(metadata, "deadlineDate")),
+            deadline=deadline,
             budget_min=budget_min,
             budget_max=budget_max,
             # The payload states no currency; every SEDIA budget figure is euro.
