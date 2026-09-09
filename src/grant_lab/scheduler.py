@@ -470,6 +470,7 @@ def build_scheduler(
             # Soft per-tick wall-clock budget (B11 Defect 6) so an
             # escalation-heavy batch can't monopolize the scheduler slot.
             tick_budget_seconds=settings.ranking_tick_budget_seconds,
+            logprobs_enabled=settings.ranking_logprobs_enabled,
         )
 
     sched.add_job(

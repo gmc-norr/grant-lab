@@ -56,9 +56,7 @@ def test_ev_logs_when_noops_with_logprobs_present(caplog):
                 "index": 0,
                 "message": {"role": "assistant", "content": content},
                 "logprobs": {
-                    "content": [
-                        {"token": "4", "logprob": -0.1, "bytes": [52], "top_logprobs": []}
-                    ]
+                    "content": [{"token": "4", "logprob": -0.1, "bytes": [52], "top_logprobs": []}]
                 },
             }
         ]
@@ -273,3 +271,198 @@ def test_none_when_parsed_rating_mismatches_covering_token():
     ]
     env = _char_tokens(content, rating_top_logprobs=top, rating_char="4")
     assert extract_topic_expected(env, 3) is None
+
+
+# ---------------------------------------------------------------------------
+# Thinking models: the logprobs stream is LONGER than message.content
+# ---------------------------------------------------------------------------
+
+
+def _prepend_thought(env: dict, thought: str) -> dict:
+    """Put a reasoning trace in front of the logprobs tokens, leaving
+    `message.content` alone — exactly what Gemma 4 emits.
+
+    Measured against gemma4:e4b-it-q4_K_M on 2026-09-09: `message.content` was
+    1130 chars of JSON while the logprobs stream was 4501 chars, opening with
+    `<|channel>thought\nHere's a thinking process...`; the content began at
+    offset 3371 of the stream. Every pre-existing test in this file builds a
+    stream that EQUALS the content, so none of them can see this.
+    """
+    thought_tokens = [
+        {
+            "token": ch,
+            "bytes": list(ch.encode("utf-8")),
+            "logprob": -0.01,
+            "top_logprobs": [{"token": ch, "logprob": -0.01, "bytes": list(ch.encode("utf-8"))}],
+        }
+        for ch in thought
+    ]
+    choice = env["choices"][0]
+    choice["logprobs"]["content"] = thought_tokens + choice["logprobs"]["content"]
+    return env
+
+
+_THOUGHT = (
+    "<|channel>thought\nHere's a thinking process to arrive at the desired JSON output:\n"
+    "1. Analyze the Profile: the rating should be 5 for a genomics group.\n"
+)
+
+
+def test_ev_binds_when_the_stream_carries_a_reasoning_trace():
+    """The regression: a thinking model's logprobs stream is not the content.
+
+    Offsets are found in `message.content` but walked over the token stream, so
+    without a shift the walk lands somewhere inside the reasoning trace, the
+    covering token is a word rather than the rating digit, and EV returns None
+    for EVERY ranking. Measured on the live database before the fix:
+    0 of 592 `call_rankings` rows had `topic_fit_expected` populated.
+    """
+    content = '{"topic_fit": {"rating": 4, "rationale": "good fit"}}'
+    top = [
+        {"token": "4", "logprob": math.log(0.6), "bytes": [52]},
+        {"token": "3", "logprob": math.log(0.4), "bytes": [51]},
+    ]
+    env = _prepend_thought(
+        _char_tokens(content, rating_top_logprobs=top, rating_char="4"), _THOUGHT
+    )
+
+    ev = extract_topic_expected(env, 4)
+
+    assert ev is not None, "EV must bind even when the stream carries a reasoning trace"
+    assert ev == pytest.approx(0.6 * 4 + 0.4 * 3, abs=1e-6)
+
+
+def test_the_thought_prefix_really_shifts_the_offsets():
+    """Negative control for the fixture itself.
+
+    If `_prepend_thought` did not actually move the rating digit's position in
+    the stream, the test above would pass on the broken code and prove nothing.
+    """
+    content = '{"topic_fit": {"rating": 4, "rationale": "good fit"}}'
+    top = [{"token": "4", "logprob": math.log(0.6), "bytes": [52]}]
+    plain = _char_tokens(content, rating_top_logprobs=top, rating_char="4")
+    n_plain = len(plain["choices"][0]["logprobs"]["content"])
+
+    shifted = _prepend_thought(
+        _char_tokens(content, rating_top_logprobs=top, rating_char="4"), _THOUGHT
+    )
+    n_shifted = len(shifted["choices"][0]["logprobs"]["content"])
+
+    assert n_shifted == n_plain + len(_THOUGHT)
+    assert shifted["choices"][0]["message"]["content"] == content, "content must stay clean"
+
+
+def test_ev_still_binds_when_the_stream_equals_the_content():
+    """A non-thinking model must keep working — the shift is zero there."""
+    content = '{"topic_fit": {"rating": 2, "rationale": "partial"}}'
+    top = [
+        {"token": "2", "logprob": math.log(0.7), "bytes": [50]},
+        {"token": "1", "logprob": math.log(0.3), "bytes": [49]},
+    ]
+    env = _char_tokens(content, rating_top_logprobs=top, rating_char="2")
+
+    ev = extract_topic_expected(env, 2)
+
+    assert ev == pytest.approx(0.7 * 2 + 0.3 * 1, abs=1e-6)
+
+
+def test_ev_declines_when_the_content_is_absent_from_the_stream():
+    """Fail closed: if the stream cannot be aligned to the content at all, EV
+    must return None rather than weight an arbitrary token."""
+    content = '{"topic_fit": {"rating": 4, "rationale": "good fit"}}'
+    top = [
+        {"token": "4", "logprob": math.log(0.6), "bytes": [52]},
+        {"token": "3", "logprob": math.log(0.4), "bytes": [51]},
+    ]
+    env = _char_tokens(content, rating_top_logprobs=top, rating_char="4")
+    # Truncate the stream so the content no longer appears in it.
+    env["choices"][0]["logprobs"]["content"] = env["choices"][0]["logprobs"]["content"][5:]
+
+    assert extract_topic_expected(env, 4) is None
+
+
+def test_a_thought_that_quotes_the_json_does_not_capture_the_alignment():
+    """Models rehearse their answer inside the reasoning trace.
+
+    When the trace contains a verbatim copy of the final JSON, the FIRST
+    occurrence in the stream is the rehearsal and the LAST is the answer the
+    model actually returned. Aligning on the first would weight a token from
+    the rehearsal — a different position, whose top_logprobs are not the
+    rating's.
+    """
+    content = '{"topic_fit": {"rating": 4, "rationale": "good fit"}}'
+    top = [
+        {"token": "4", "logprob": math.log(0.6), "bytes": [52]},
+        {"token": "3", "logprob": math.log(0.4), "bytes": [51]},
+    ]
+    # The trace quotes the answer, then the answer itself follows.
+    rehearsal = f"I will answer with {content} — checking it over now.\n"
+    env = _prepend_thought(
+        _char_tokens(content, rating_top_logprobs=top, rating_char="4"), rehearsal
+    )
+    stream = env["choices"][0]["logprobs"]["content"]
+    joined = "".join(bytes(t["bytes"]).decode("utf-8") for t in stream)
+    assert joined.find(content) != joined.rfind(content), "fixture must contain two copies"
+
+    ev = extract_topic_expected(env, 4)
+
+    assert ev == pytest.approx(0.6 * 4 + 0.4 * 3, abs=1e-6)
+
+
+def test_an_unalignable_stream_does_not_weight_whatever_sits_at_offset_zero():
+    """The hazard the fail-closed branch exists for.
+
+    A stream that does not contain the content cannot be aligned. Falling back
+    to offset 0 would weight whichever token happens to start the stream — and
+    if that token IS the rating digit, every later sanity check passes and EV
+    returns a number computed from an unrelated position. Constructed here so
+    the wrong answer is a *plausible* one, which is what makes it dangerous.
+    """
+    content = '{"topic_fit": {"rating": 4, "rationale": "good fit"}}'
+    rating_offset = content.index('"rating":') + len('"rating": ')
+    # A stream whose token at `rating_offset` is the digit 4 with real
+    # top_logprobs, but which does not contain `content` anywhere.
+    decoy = "x" * rating_offset + "4" + "y" * 10
+    tokens = []
+    for i, ch in enumerate(decoy):
+        tok = {"token": ch, "bytes": list(ch.encode("utf-8")), "logprob": -0.01}
+        tok["top_logprobs"] = (
+            [
+                {"token": "4", "logprob": math.log(0.6), "bytes": [52]},
+                {"token": "3", "logprob": math.log(0.4), "bytes": [51]},
+            ]
+            if i == rating_offset
+            else [{"token": ch, "logprob": -0.01, "bytes": list(ch.encode("utf-8"))}]
+        )
+        tokens.append(tok)
+    env = {
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "logprobs": {"content": tokens},
+            }
+        ]
+    }
+    assert content not in decoy, "fixture must be unalignable"
+
+    assert extract_topic_expected(env, 4) is None
+
+
+def test_content_offset_in_stream_contract():
+    """Direct contract for the aligner, since `extract_topic_expected` masks
+    some of its outcomes behind later checks."""
+    from grant_lab.ranking.ev import _content_offset_in_stream
+
+    def tok(ch):
+        return {"token": ch, "bytes": list(ch.encode("utf-8"))}
+
+    # Stream equals the content -> zero shift.
+    assert _content_offset_in_stream([tok(c) for c in "abc"], "abc") == 0
+    # Content preceded by a trace -> shift by the trace length.
+    assert _content_offset_in_stream([tok(c) for c in "xxabc"], "abc") == 2
+    # Content absent -> None, not 0.
+    assert _content_offset_in_stream([tok(c) for c in "xxx"], "abc") is None
+    # A junk entry makes the stream uninterpretable -> None, not a silent skip
+    # that would shift every following offset by the junk token's width.
+    assert _content_offset_in_stream([tok("a"), "not-a-token", tok("b")], "ab") is None
