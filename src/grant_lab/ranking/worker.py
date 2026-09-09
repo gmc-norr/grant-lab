@@ -47,6 +47,7 @@ def drain_queue(
     remote_daily_cap: int = 100,
     batch_size: int = 10,
     tick_budget_seconds: float | None = None,
+    logprobs_enabled: bool = False,
     _clock=None,
 ) -> int:
     """Claim up to `batch_size` pending jobs, rank each, persist, mark
@@ -234,6 +235,7 @@ def drain_queue(
                         now=datetime.now(UTC),
                         embedding_threshold=embedding_threshold,
                         embedding_hard_fail_threshold=embedding_hard_fail_threshold,
+                        logprobs_enabled=logprobs_enabled,
                         remote_client=effective_remote,
                         escalation_min_score=escalation_min_score,
                     )

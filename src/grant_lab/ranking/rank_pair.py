@@ -74,6 +74,7 @@ def rank_pair(
     embedding_hard_fail_threshold: float | None = None,
     remote_client=None,  # AnthropicClient | None
     escalation_min_score: int = 45,
+    logprobs_enabled: bool = False,
 ) -> RankResult:
     """Run gates → local LLM → parse → verify quotes → aggregate →
     (maybe) escalate to the remote LLM. Returns a structured RankResult.
@@ -135,14 +136,22 @@ def rank_pair(
     if gates.embedding.status == GateStatus.FAIL and not must_include_match:
         return _gate_fail_result(gates, "embedding", must_include_match, embed_similarity=embed_sim)
 
-    # Local Gemma always runs first (logprobs on — Phase 3). enable_analysis
-    # stays False on the local path: Gemma's smaller capacity produces
-    # lower-quality prose; cheaper to leave it as rating-only.
+    # Local Gemma always runs first. enable_analysis stays False on the local
+    # path: Gemma's smaller capacity produces lower-quality prose; cheaper to
+    # leave it as rating-only.
+    #
+    # logprobs (Phase 3) are OPT-IN. Requesting them makes the server emit the
+    # top 10 alternatives for EVERY generated token — a 6KB response becomes
+    # 1.2MB and a 21s call becomes 127s — and only ONE token's block is ever
+    # read (the topic_fit rating digit). See RANKING_LOGPROBS_ENABLED for the
+    # measurement that set the default. With them off, extract_topic_expected
+    # returns None through its silent no-logprobs branch and aggregate() falls
+    # back to argmax, which is the same path the remote Sonnet ranker uses.
+    logprobs_kwargs = {"logprobs": True, "top_logprobs": 10} if logprobs_enabled else {}
     local_envelope = client.chat(
         messages=build_messages(profile=profile, call=call, enable_analysis=False),
         response_format={"type": "json_object"},
-        logprobs=True,
-        top_logprobs=10,
+        **logprobs_kwargs,
     )
     local_content = local_envelope["choices"][0]["message"]["content"]
     local_parsed = parse_response(local_content, verification_text=_build_verification_text(call))

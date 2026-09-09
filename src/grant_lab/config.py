@@ -101,7 +101,12 @@ class Settings(BaseSettings):
     # one rate-limit bucket (the inner proxy's fixed IP). Only consulted when
     # trusted_proxy is True. Must be >= 1.
     trusted_proxy_hops: int = Field(default=1, ge=1, alias="TRUSTED_PROXY_HOPS")
-    eu_portal_base_url: str = Field(default="https://ec.europa.eu", alias="EU_PORTAL_BASE_URL")
+    # The EU Funding & Tenders search API lives on the Commission's shared
+    # SEDIA host, NOT on ec.europa.eu. The old ec.europa.eu v3.0 path now
+    # 404s; see the header comment in sources/eu_portal.py.
+    eu_portal_base_url: str = Field(
+        default="https://api.tech.ec.europa.eu", alias="EU_PORTAL_BASE_URL"
+    )
     vinnova_base_url: str = Field(default="https://data.vinnova.se", alias="VINNOVA_BASE_URL")
     admin_alert_email: str | None = Field(default=None, alias="ADMIN_ALERT_EMAIL")
     stale_source_alert_days: int = Field(
@@ -710,6 +715,23 @@ class Settings(BaseSettings):
         description="Local aggregate score at/above which a pair re-runs on the "
         "remote model. Mirrors DIGEST_BORDERLINE_LOWER so every digest-worthy "
         "call gets the Sonnet second opinion + analysis.",
+    )
+    ranking_logprobs_enabled: bool = Field(
+        default=False,
+        alias="RANKING_LOGPROBS_ENABLED",
+        description=(
+            "Ask the local ranker for per-token logprobs so ranking/ev.py can "
+            "replace the integer topic_fit rating with a probability-weighted "
+            "expected value, un-quantising aggregate_score from multiples of "
+            "20. OFF by default because it is measured at ~6x the wall-clock "
+            "cost (127s vs 21s per ranking on gemma4:e4b-it-q4_K_M, 8000-char "
+            "call, idle 2080 Ti: the response grows from 6KB to 1.2MB) while "
+            "buying under 3 points of score movement at temperature 0 — far "
+            "too little to cross RANKING_ESCALATION_MIN_SCORE, which sits 5 "
+            "points from the nearest reachable score. Turn ON for a model "
+            "whose rating distribution is less peaked, or if the temperature "
+            "is raised."
+        ),
     )
     ranking_remote_daily_cap: int = Field(
         default=100,
