@@ -55,7 +55,21 @@ def _expected_value(content: str, tokens: list, parsed_rating: int) -> float | N
     if rating_offset is None:
         return None
 
-    covering = _token_covering_offset(tokens, rating_offset)
+    # The offset above is measured in `message.content`. The token stream is a
+    # DIFFERENT string on a thinking model: Gemma 4 emits its reasoning channel
+    # into the logprobs stream while `content` holds only the final JSON.
+    # Measured on gemma4:e4b-it-q4_K_M, 2026-09-09: content 1130 chars, stream
+    # 4501, content starting at stream offset 3371. Walking an unshifted offset
+    # therefore lands inside the reasoning trace — the covering token came back
+    # as " thinking", the digit sanity check failed, and EV returned None for
+    # every ranking (0 of 592 `call_rankings` rows had topic_fit_expected).
+    stream_offset = _content_offset_in_stream(tokens, content)
+    if stream_offset is None:
+        # The stream cannot be aligned to the content. Fail closed rather than
+        # weight whatever token happens to sit at the unshifted offset.
+        return None
+
+    covering = _token_covering_offset(tokens, stream_offset + rating_offset)
     if covering is None:
         return None
     # Sanity: the covering token must be the parsed rating digit, tolerating
@@ -92,22 +106,55 @@ def _digit_of(tok: object) -> int | None:
     return None
 
 
+def _token_text(tok: object) -> str | None:
+    """The text a logprobs token contributes, preferring its UTF-8 bytes.
+
+    Returns None for anything that is not a token dict, so callers can fail
+    closed instead of silently treating junk as an empty string.
+    """
+    if not isinstance(tok, dict):
+        return None
+    raw = tok.get("bytes")
+    if isinstance(raw, list):
+        try:
+            return bytes(raw).decode("utf-8")
+        except (ValueError, TypeError):
+            pass
+    text = tok.get("token", "")
+    return text if isinstance(text, str) else None
+
+
+def _content_offset_in_stream(tokens: list, content: str) -> int | None:
+    """Where `content` begins inside the concatenated token stream.
+
+    0 for a model whose stream is exactly its content; the length of the
+    reasoning trace for a thinking model. None when `content` does not occur in
+    the stream at all — a shape this code cannot interpret, so the caller must
+    decline rather than guess.
+    """
+    parts: list[str] = []
+    for tok in tokens:
+        text = _token_text(tok)
+        if text is None:
+            return None
+        parts.append(text)
+    stream = "".join(parts)
+    # rfind, not find: the reasoning trace often quotes the JSON it is about to
+    # emit, and the authoritative copy is the LAST one — the one the model
+    # actually returned as its content.
+    index = stream.rfind(content)
+    return index if index >= 0 else None
+
+
 def _token_covering_offset(tokens: list, target: int) -> dict | None:
     """Walk tokens accumulating character offsets (from each token's UTF-8
     bytes, falling back to its text) and return the token whose span covers
     `target`."""
     pos = 0
     for tok in tokens:
-        if not isinstance(tok, dict):
+        text = _token_text(tok)
+        if text is None:
             return None
-        raw = tok.get("bytes")
-        if isinstance(raw, list):
-            try:
-                text = bytes(raw).decode("utf-8")
-            except (ValueError, TypeError):
-                text = tok.get("token", "")
-        else:
-            text = tok.get("token", "")
         end = pos + len(text)
         if pos <= target < end:
             return tok
