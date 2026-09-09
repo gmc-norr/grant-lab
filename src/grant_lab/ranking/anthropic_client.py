@@ -44,7 +44,7 @@ class AnthropicClient:
         self,
         *,
         api_key: str,
-        model: str = "claude-sonnet-4-6",
+        model: str = "claude-sonnet-5",
         max_tokens: int = 4096,
         timeout: float = 120.0,
     ):

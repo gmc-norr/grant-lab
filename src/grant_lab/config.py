@@ -708,7 +708,7 @@ class Settings(BaseSettings):
             "bounded by this clean path, not reaped while still streaming."
         ),
     )
-    remote_rank_model: str = Field(default="claude-sonnet-4-6", alias="REMOTE_RANK_MODEL")
+    remote_rank_model: str = Field(default="claude-sonnet-5", alias="REMOTE_RANK_MODEL")
     ranking_escalation_min_score: int = Field(
         default=45,
         alias="RANKING_ESCALATION_MIN_SCORE",
@@ -734,10 +734,17 @@ class Settings(BaseSettings):
         ),
     )
     ranking_remote_daily_cap: int = Field(
-        default=100,
+        default=150,
         alias="RANKING_REMOTE_DAILY_CAP",
         description="Max remote escalation attempts per Europe/Stockholm day "
-        "(counted from ranking_remote_attempts). Guardrail for backfill spikes.",
+        "(counted from ranking_remote_attempts). Guardrail for backfill spikes. "
+        "Raised 100 -> 150 on 2026-09-09 when REMOTE_RANK_MODEL moved from "
+        "claude-sonnet-4-6 ($3/$15 per MTok) to claude-sonnet-5 ($2/$10) -- the "
+        "2/3 price ratio makes 150 escalations cost what 100 did, so this is a "
+        "cost-neutral raise, not a budget increase. It was chosen because the "
+        "cap was being HIT: on 2026-09-09, 33 pairs scoring >= "
+        "RANKING_ESCALATION_MIN_SCORE were denied escalation after the 100th "
+        "attempt and shipped with a Gemma-only score and no analysis.",
     )
     email_transport: str = Field(
         default="",

@@ -329,9 +329,9 @@ def build_scheduler(
     embedding_pregate_threshold: float,
     embedding_hard_fail_threshold: float | None = None,
     anthropic_api_key: str | None = None,
-    remote_rank_model: str = "claude-sonnet-4-6",
+    remote_rank_model: str = "claude-sonnet-5",
     ranking_escalation_min_score: int = 45,
-    ranking_remote_daily_cap: int = 100,
+    ranking_remote_daily_cap: int = 150,
     embed_client: OllamaEmbedClient,
     digest_email_client: EmailClient | None = None,
     digest_settings=None,  # duck-typed: needs .digest_dry_run, .admin_dashboard_url

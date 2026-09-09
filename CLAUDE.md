@@ -90,5 +90,5 @@ Two tiers. The ranking/extraction interfaces are deliberately prompt-in/JSON-out
 - Citation audit also defaults to local Ollama (`CITATION_LLM_PROVIDER`).
 
 **Hosted — Anthropic; opt-in, requires `ANTHROPIC_API_KEY` (disabled when unset):**
-- Remote-rank escalation: pairs whose local aggregate score clears `RANKING_ESCALATION_MIN_SCORE` are re-ranked by **`claude-sonnet-4-6`** (`REMOTE_RANK_MODEL`), capped per day.
+- Remote-rank escalation: pairs whose local aggregate score clears `RANKING_ESCALATION_MIN_SCORE` are re-ranked by **`claude-sonnet-5`** (`REMOTE_RANK_MODEL`), capped per day.
 - Proposal-assist drafting: **Claude Agent SDK** adapter with **`claude-opus-5`** (`PROPOSAL_ASSIST_LLM_MODEL`).
