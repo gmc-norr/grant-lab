@@ -1,8 +1,10 @@
 // frontend/src/routes/TriageFeed.tsx
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Alert, NativeSelect, Title } from "@mantine/core";
 import { Link, useSearchParams } from "react-router-dom";
 
 import { useHideCall, useSetDecisionNote, useUnhideCall } from "../api/calls";
+import { apiErrorMessage } from "../api/client";
 import { dashboardParamsFrom, useDashboard, type CallItem } from "../api/dashboard";
 import {
   useDecisionCounts,
@@ -13,6 +15,7 @@ import {
 import { DecisionNoteStrip, type NoteTarget } from "./DecisionNoteStrip";
 import { TriageCard } from "./TriageCard";
 import { TriageEmptyProfile } from "./TriageEmptyProfile";
+import { TriageToolbar } from "./TriageToolbar";
 import styles from "./TriageFeed.module.css";
 
 // The match edition's index screen (spec §5). A single ~680 px expanding column
@@ -53,6 +56,7 @@ function isEditableTarget(target: EventTarget | null): boolean {
   if (el === null) return false;
   if (el.closest("input") !== null) return true;
   if (el.closest("textarea") !== null) return true;
+  if (el.closest("select") !== null) return true;
   if (el.closest('[contenteditable]:not([contenteditable="false"])') !== null) return true;
   return false;
 }
@@ -119,7 +123,7 @@ function EmptyPageView({ total, prevHref }: { total: number | null; prevHref: st
 }
 
 export function TriageFeed() {
-  const [sp] = useSearchParams();
+  const [sp, setSp] = useSearchParams();
   const params = dashboardParamsFrom(sp);
   // A PROJECTION of the wire's four views onto the feed's three, NOT a second
   // sanitiser: dashboardParamsFrom has already dropped anything that is not one
@@ -144,6 +148,7 @@ export function TriageFeed() {
   const hide = useHideCall();
   const unhide = useUnhideCall();
   const setNote = useSetDecisionNote();
+  const decisionError = [save, unsave, hide, unhide].find(mutation => mutation.isError)?.error;
 
   // WHICH decision the note strip is about, or null for no strip. Held here
   // rather than derived from the cursor, because the cursor moves and the
@@ -176,7 +181,7 @@ export function TriageFeed() {
   useEffect(() => {
     setFocusIndex(0);
     hasMoved.current = false;
-  }, [view, params.page]);
+  }, [view, params.page, profileId]);
 
   // The card actually holding focus, so the effect below re-runs when a
   // decision changes WHICH call sits at `focused` even though the numeric
@@ -203,6 +208,10 @@ export function TriageFeed() {
       // that button on stale rows while the next view's fetch is in flight.
       if (isFetching) return;
       const args = { id: call.id, profileId };
+      save.reset();
+      hide.reset();
+      unsave.reset();
+      unhide.reset();
       // Both hooks invalidate ["calls"] AND ["decision-counts"] themselves (see
       // invalidateDecisions). NOTHING CACHE-RELATED is added per call here on
       // purpose: a mutate-level onSuccess is dropped when this component
@@ -255,7 +264,7 @@ export function TriageFeed() {
       if (kind === "save") save.mutate(args, { onSuccess: onDecided });
       else hide.mutate(args, { onSuccess: onDecided });
     },
-    [hide, isFetching, profileId, save, view],
+    [hide, isFetching, profileId, save, unhide, unsave, view],
   );
 
   // UN-DECIDE (D2): back to undecided, which is the ABSENCE of a decision row —
@@ -425,12 +434,23 @@ export function TriageFeed() {
             ))}
           </ul>
         )}
+        <div className={styles.mobilePicker}>
+          <NativeSelect label="Matching profile" value={String(profileId)} onChange={event => setSp(new URLSearchParams({ profile: event.currentTarget.value, view }))} data={data.facets.profiles.map(item => ({ value: String(item.id), label: item.name }))} />
+        </div>
       </nav>
 
       <div className={styles.column}>
+        <Title order={1} size="h3" mb="sm">{view === "inbox" ? "Your matches" : view === "saved" ? "Saved opportunities" : "Hidden calls"}</Title>
+        <TriageToolbar key={`${params.q ?? ""}:${profileId}`} sources={data.facets.sources} view={view} />
+        {decisionError && (
+          <Alert role="alert" color="red" mb="md">
+            {apiErrorMessage(decisionError, "Your decision could not be saved.")} Your call is unchanged. Please try again.
+          </Alert>
+        )}
         {data.ranking.pending > 0 && (
           <p className={styles.status}>Scoring {data.ranking.pending} calls…</p>
         )}
+        {data.ranking.failed > 0 && <Alert role="alert" color="yellow" mt="sm">Some calls could not be matched. Results may be incomplete.</Alert>}
 
         {/* OUTSIDE the items.length branch, so the strip survives the list
             emptying under it -- deciding the last card in a view is precisely
@@ -466,7 +486,9 @@ export function TriageFeed() {
           (params.page ?? 1) > 1 && (counts.data?.[view] ?? 1) > 0 ? (
             <EmptyPageView total={counts.data ? counts.data[view] : null} prevHref={prevPageHref()} />
           ) : (
-            <EmptyView view={view} profileName={profileName} />
+            params.q || params.source ? <p className={styles.status}>No calls match these filters.</p> :
+              data.ranking.pending > 0 || data.ranking.failed > 0 ? <p className={styles.status}>No matches available yet.</p> :
+              <EmptyView view={view} profileName={profileName} />
           )
         ) : (
           <>
@@ -475,7 +497,8 @@ export function TriageFeed() {
                 <li key={call.id}>
                   <TriageCard
                     call={call}
-                    expanded={i === focused}
+                    expanded={i === focused && (view !== "saved" || sp.get("layout") === "expanded")}
+                    returnSearch={sp.toString()}
                     profileId={profileId}
                     view={view}
                     onUndecide={undecide}

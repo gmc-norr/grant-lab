@@ -103,12 +103,13 @@ export function SimpleShell() {
                 A bare aria-label="Account menu" would replace the email
                 outright. */}
               <UnstyledButton
-                className={styles.link}
+                className={`${styles.link} ${styles.account}`}
                 aria-label={
                   email ? `Account menu for ${email}` : "Account menu"
                 }
               >
-                {email ?? "Account"}
+                <span className={styles.accountEmail}>{email ?? "Account"}</span>
+                <span className={`codicon codicon-account ${styles.accountIcon}`} aria-hidden="true" />
               </UnstyledButton>
             </Menu.Target>
             <Menu.Dropdown>

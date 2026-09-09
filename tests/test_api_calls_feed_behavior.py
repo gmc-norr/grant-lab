@@ -16,6 +16,7 @@ sticky-default WRITE path (``POST /api/me/default-profile`` —
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -182,6 +183,46 @@ def test_sort_by_deadline(monkeypatch, pg_url, pg_session_factory):
         body = c.get("/api/calls?sort=deadline").json()
     # Soonest deadline first: Vin one (45d) < EU two (75d) < EU one (105d).
     assert _titles(body) == ["Vin one", "EU two", "EU one"]
+
+
+@pytest.mark.parametrize("view", ["archive", "saved", "hidden"])
+def test_explicit_deadline_sort_with_profile(monkeypatch, pg_url, pg_session_factory, view):
+    app = _app(monkeypatch, pg_url)
+    _seed_open_calls(pg_session_factory)
+    client, user_id, profile_id = _login(app, pg_session_factory, profile=True)
+    with pg_session_factory() as session:
+        calls = session.scalars(select(Call).order_by(Call.id)).all()
+        for index, call in enumerate(calls):
+            session.add(
+                CallRanking(
+                    call_id=call.id,
+                    profile_id=profile_id,
+                    aggregate_score=90 - index,
+                    rationale="match",
+                    model="test",
+                    prompt_version="test",
+                    raw_response={},
+                )
+            )
+            if view != "archive":
+                session.add(
+                    CallDecision(
+                        user_id=user_id, profile_id=profile_id, call_id=call.id, state=view
+                    )
+                )
+        session.commit()
+    with client:
+        response = client.get(
+            "/api/calls",
+            params={"profile": profile_id, "view": view, "sort": "deadline", "limit": 2},
+        )
+        assert response.status_code == 200
+        assert _titles(response.json()) == ["Vin one", "EU two"]
+        next_page = client.get(
+            "/api/calls",
+            params={"profile": profile_id, "view": view, "sort": "deadline", "limit": 2, "page": 2},
+        )
+        assert _titles(next_page.json()) == ["EU one"]
 
 
 def test_invalid_sort_is_422(monkeypatch, pg_url, pg_session_factory):
@@ -717,37 +758,55 @@ def _seed_search_corpus(pg_session_factory):
         s.add_all(
             [
                 Call(
-                    source_id=vn.id, external_id="S1", url="s1",
+                    source_id=vn.id,
+                    external_id="S1",
+                    url="s1",
                     title="Oncology research",
-                    published_at=datetime(2026, 4, 1, tzinfo=UTC), deadline=deadline,
+                    published_at=datetime(2026, 4, 1, tzinfo=UTC),
+                    deadline=deadline,
                 ),
                 Call(
-                    source_id=vn.id, external_id="S2", url="s2",
+                    source_id=vn.id,
+                    external_id="S2",
+                    url="s2",
                     title="Generic grant",
                     summary="Funds cancer immunotherapy work",
-                    published_at=datetime(2026, 4, 2, tzinfo=UTC), deadline=deadline,
+                    published_at=datetime(2026, 4, 2, tzinfo=UTC),
+                    deadline=deadline,
                 ),
                 Call(
-                    source_id=vn.id, external_id="S3", url="s3",
+                    source_id=vn.id,
+                    external_id="S3",
+                    url="s3",
                     title="Infra call",
                     full_text="Detailed body mentions proteomics methods",
-                    published_at=datetime(2026, 4, 3, tzinfo=UTC), deadline=deadline,
+                    published_at=datetime(2026, 4, 3, tzinfo=UTC),
+                    deadline=deadline,
                 ),
                 Call(
-                    source_id=vn.id, external_id="S4", url="s4",
+                    source_id=vn.id,
+                    external_id="S4",
+                    url="s4",
                     title="Keyword call",
                     keywords=["genomics", "sequencing"],
-                    published_at=datetime(2026, 4, 4, tzinfo=UTC), deadline=deadline,
+                    published_at=datetime(2026, 4, 4, tzinfo=UTC),
+                    deadline=deadline,
                 ),
                 Call(
-                    source_id=vn.id, external_id="S5", url="s5",
+                    source_id=vn.id,
+                    external_id="S5",
+                    url="s5",
                     title="Discount 50% bonus grant_id",
-                    published_at=datetime(2026, 4, 5, tzinfo=UTC), deadline=deadline,
+                    published_at=datetime(2026, 4, 5, tzinfo=UTC),
+                    deadline=deadline,
                 ),
                 Call(
-                    source_id=vn.id, external_id="S6", url="s6",
+                    source_id=vn.id,
+                    external_id="S6",
+                    url="s6",
                     title="Number 5012 grantXid plan",
-                    published_at=datetime(2026, 4, 6, tzinfo=UTC), deadline=deadline,
+                    published_at=datetime(2026, 4, 6, tzinfo=UTC),
+                    deadline=deadline,
                 ),
             ]
         )
@@ -886,7 +945,7 @@ def test_min_score_floor_keeps_only_scored_at_or_above(monkeypatch, pg_url, pg_s
     _seed_scored(pg_session_factory, pid)  # High=85, Low=15, Unranked=None
     with c:
         body = c.get(f"/api/calls?profile={pid}&min_score=60").json()
-    assert _titles(body) == ["High score"]          # 85 >= 60; 15 and unranked dropped
+    assert _titles(body) == ["High score"]  # 85 >= 60; 15 and unranked dropped
     assert body["pagination"]["total"] == 1
 
 
@@ -927,5 +986,5 @@ def test_min_score_does_not_narrow_summary_badges(monkeypatch, pg_url, pg_sessio
     _seed_scored(pg_session_factory, pid)  # all three calls are OPEN (no deadline)
     with c:
         body = c.get(f"/api/calls?profile={pid}&min_score=80").json()
-    assert _titles(body) == ["High score"]            # list narrowed by the floor
-    assert body["summary"]["open_count"] == 3         # badge still counts all open calls
+    assert _titles(body) == ["High score"]  # list narrowed by the floor
+    assert body["summary"]["open_count"] == 3  # badge still counts all open calls

@@ -35,6 +35,7 @@
     "@tiptap/react": "3.27.1",
     "@uiw/codemirror-theme-vscode": "4.25.10",
     "@vscode/codicons": "0.0.45",
+    "ics": "3.12.0",
     "lib0": "0.2.117",
     "openapi-fetch": "0.17.0",
     "react": "19.2.7",

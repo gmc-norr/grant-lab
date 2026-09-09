@@ -134,6 +134,10 @@ def get_public_board(request: Request, slug: str):
             "page_seconds": board.page_seconds,
         }
 
+    return board_display_payload(rows, board_fields)
+
+
+def board_display_payload(rows, board_fields) -> PublicBoardOut:
     items = []
     for row in rows:
         items.append(

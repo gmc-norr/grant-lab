@@ -127,6 +127,7 @@ it("the bundle gate's ALLOWED_APP_DIRS is exactly the areas release 1 declares",
   ]);
   expect(arrayEntries("ALLOWED_APP_ROOT_FILES").sort()).toEqual([
     "App.tsx",
+    "edition.ts",
     "main.tsx",
     "router.simple.tsx",
   ]);

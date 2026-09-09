@@ -97,3 +97,16 @@
   flex: 1 1 auto;
   min-width: 0;
 }
+
+.accountIcon { display: none; }
+.account { max-width: 15rem; }
+.accountEmail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 40rem) {
+  .topbarInner { gap: 0.5rem; }
+  .edition { margin-left: 0; font-size: 0.8rem; }
+  .account { margin-left: auto; }
+  .accountEmail { display: none; }
+  .accountIcon { display: inline; }
+  .nav { order: 1; flex-basis: 100%; justify-content: space-between; }
+  .link { padding: 0.4rem 0.6rem; }
+}

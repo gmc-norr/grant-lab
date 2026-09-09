@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.routing import Match
 
+from grant_lab.web.middleware import build_csp
 from grant_lab.web.spa_routes import is_spa_route
 
 SPA_DIR = Path(__file__).resolve().parent / "spa"  # src/grant_lab/web/spa
@@ -112,6 +113,23 @@ def mount_spa(app: FastAPI, *, spa_mode: str, edition: str) -> None:
         path = "/" + full_path
         if is_spa_route(path):
             if request.method in ("GET", "HEAD"):
+                parts = full_path.split("/")
+                board_display = len(parts) == 2 and parts[0] == "b"
+                draft_preview = (
+                    len(parts) == 2
+                    and parts[0] == "boards"
+                    and parts[1].isdigit()
+                    and request.query_params.get("preview") == "1"
+                )
+                if board_display or draft_preview:
+                    return FileResponse(
+                        index,
+                        headers={
+                            "Content-Security-Policy": build_csp(allow_same_origin_frame=True),
+                            "X-Frame-Options": "SAMEORIGIN",
+                            "Cache-Control": "private, no-store",
+                        },
+                    )
                 return FileResponse(index)
             raise HTTPException(status_code=405, headers={"Allow": "GET, HEAD"})
         # Non-SPA path. Distinguish a real route hit with the WRONG method (405)

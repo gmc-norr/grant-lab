@@ -5,6 +5,9 @@ import type { ProfileDetail as Detail } from "../api/profiles";
 import { useProfile } from "../api/profiles";
 import { ProfileTransferCard } from "./ProfileTransferCard";
 import { ProfileVisibilityCard } from "./ProfileVisibilityCard";
+import { isMatchEdition } from "../edition";
+
+function label(value: string) { return isMatchEdition ? value.replaceAll("_", " ").replace(/^./, first => first.toUpperCase()) : value; }
 
 function Chips({ items }: { items: string[] }) {
   if (items.length === 0) return <>—</>;
@@ -12,7 +15,7 @@ function Chips({ items }: { items: string[] }) {
     <>
       {items.map((c, i) => (
         <Badge key={i} variant="default" tt="none" radius="xl" size="sm" mr={4} mt={4}>
-          {c}
+          {label(c)}
         </Badge>
       ))}
     </>
@@ -69,11 +72,11 @@ function DetailView({ p }: { p: Detail }) {
       <Anchor component={Link} to="/profiles" size="sm">
         ← All profiles
       </Anchor>
-      <Group justify="space-between" align="flex-start" wrap="nowrap" gap="md" my="md">
+      <Group justify="space-between" align="flex-start" wrap="wrap" gap="md" my="md">
         <div>
           <Title order={1}>{p.name}</Title>
           <Text c="dimmed" size="sm">
-            {p.kind}
+            {label(p.kind)}
             {p.level ? ` · ${p.level}` : ""}
           </Text>
         </div>
@@ -81,14 +84,14 @@ function DetailView({ p }: { p: Detail }) {
           <Button component={Link} to={`/?profile=${p.id}`}>
             Ranked feed →
           </Button>
-          <Button component={Link} variant="default" to={`/profiles/${p.id}/edit`}>
+          {p.can_edit && <Button component={Link} variant="default" to={`/profiles/${p.id}/edit`}>
             Edit
-          </Button>
+          </Button>}
         </Group>
       </Group>
 
-      {p.can_edit && <ProfileVisibilityCard profileId={p.id} visibility={p.visibility} />}
-      {p.can_edit && (
+      {!isMatchEdition && p.can_edit && <ProfileVisibilityCard profileId={p.id} visibility={p.visibility} />}
+      {!isMatchEdition && p.can_edit && (
         <ProfileTransferCard profileId={p.id} outgoingLostRead={p.outgoing_lost_read} />
       )}
 
@@ -127,7 +130,7 @@ function DetailView({ p }: { p: Detail }) {
             Profile
           </Title>
           <Box component="dl" m={0}>
-            {p.org_type && (<><Text component="dt" size="xs" c="dimmed" mt="xs">Organization type</Text><Text component="dd" size="sm" m={0}>{p.org_type}</Text></>)}
+            {p.org_type && (<><Text component="dt" size="xs" c="dimmed" mt="xs">Organization type</Text><Text component="dd" size="sm" m={0}>{label(p.org_type)}</Text></>)}
             {p.capabilities.length > 0 && (<><Text component="dt" size="xs" c="dimmed" mt="xs">Capabilities</Text><Text component="dd" size="sm" m={0}><Chips items={p.capabilities} /></Text></>)}
             {p.patient_populations.length > 0 && (<><Text component="dt" size="xs" c="dimmed" mt="xs">Patient populations</Text><Text component="dd" size="sm" m={0}><Chips items={p.patient_populations} /></Text></>)}
             {p.scale && (<><Text component="dt" size="xs" c="dimmed" mt="xs">Scale</Text><Text component="dd" size="sm" m={0}>{p.scale}</Text></>)}
@@ -142,6 +145,10 @@ function DetailView({ p }: { p: Detail }) {
           </Box>
         </Card>
       )}
+      {isMatchEdition && p.can_edit && <>
+        <ProfileVisibilityCard profileId={p.id} visibility={p.visibility} />
+        <details className="match-options"><summary>Ownership</summary><ProfileTransferCard profileId={p.id} outgoingLostRead={p.outgoing_lost_read} /></details>
+      </>}
     </Box>
   );
 }

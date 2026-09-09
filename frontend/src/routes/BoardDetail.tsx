@@ -5,7 +5,7 @@ import {
 } from "@mantine/core";
 import { useDebouncedValue } from "@mantine/hooks";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import { apiErrorMessage } from "../api/client";
 import {
@@ -16,12 +16,14 @@ import {
 import { useSession } from "../api/session";
 import { BoardQueue } from "./BoardQueue";
 import { Deadline } from "./Deadline";
+import { BoardDraftPreview } from "./BoardDraftPreview";
 
 export function BoardDetail() {
   const { id } = useParams();
   const boardId = Number(id);
   const board = useBoard(boardId);
   const session = useSession();
+  const [params] = useSearchParams();
 
   if (board.isLoading) return <Text p="md">Loading…</Text>;
   if (board.isError || !board.data) {
@@ -57,6 +59,7 @@ export function BoardDetail() {
   // anyway as cheap insurance against a future change (e.g. adding
   // placeholderData to `useBoard` to remove the loading flash) that would
   // make the remount stop happening for free.
+  if (params.get("preview") === "1") return <BoardDraftPreview boardId={boardId} />;
   return (
     <DetailView
       key={board.data.id}
@@ -79,9 +82,9 @@ function DetailView({ board, isAdmin }: { board: Board; isAdmin: boolean }) {
             {board.orientation} · {board.approved_count} approved
           </Text>
         </div>
-        <Anchor href={`/b/${board.slug}`} target="_blank" rel="noreferrer" size="sm">
+        {board.is_published && <Anchor href={`/b/${board.slug}`} target="_blank" rel="noreferrer" size="sm">
           View public board →
-        </Anchor>
+        </Anchor>}
       </Group>
 
       {board.owner_undeliverable && (
@@ -197,16 +200,9 @@ const TARGET_SIZE = {
   portrait: { width: 1080, height: 1920 },
 } as const;
 
-/* A REAL render at the REAL size, scaled to fit -- not a mock-up of one. The
-   iframe loads the same `/b/:slug` route the corridor screen runs, so what is
-   on this panel is what is on the wall, including any overflow.
-
-   Opt-in behind a button: it boots a second copy of the SPA, which is not a
-   cost worth paying on every visit to this page.
-
-   Published boards only. `/b/:slug` reads the PUBLIC endpoint, which 404s for
-   an unpublished board -- so the preview would be an honest blank rectangle
-   that looks exactly like a broken one. Better to say why. */
+/* Render at the authored size, scaled to fit. Drafts use an edit-gated
+  endpoint with the same presentation as the public board. Loading the
+  second SPA is opt-in. */
 function BoardPreview({ board }: { board: Board }) {
   const [shown, setShown] = useState(false);
   const [width, setWidth] = useState(0);
@@ -234,20 +230,13 @@ function BoardPreview({ board }: { board: Board }) {
         <Title order={2} size="h5">
           Preview at {target.width}x{target.height}
         </Title>
-        {board.is_published && (
-          <Button size="compact-sm" variant="light" onClick={() => setShown((s) => !s)}>
-            {shown ? "Hide preview" : "Show preview"}
-          </Button>
-        )}
+        <Button size="compact-sm" variant="light" onClick={() => setShown((s) => !s)}>
+          {shown ? "Hide preview" : "Show preview"}
+        </Button>
       </Group>
-      {!board.is_published ? (
+      {!shown ? (
         <Text size="sm" c="dimmed" data-field="preview-unpublished">
-          Publish this board to preview it. The preview renders the real wall
-          screen, which reads the public address.
-        </Text>
-      ) : !shown ? (
-        <Text size="sm" c="dimmed">
-          Renders the actual {board.orientation} wall at full size, scaled to fit.
+          {board.is_published ? "Published board" : "Private draft preview"}
         </Text>
       ) : (
         <div ref={box} style={{ width: "100%" }} data-field="preview-frame">
@@ -261,8 +250,9 @@ function BoardPreview({ board }: { board: Board }) {
             }}
           >
             <iframe
+              key={`${board.updated_at}:${board.approved_count}`}
               title={`${board.title} at ${target.width}x${target.height}`}
-              src={`/b/${board.slug}`}
+              src={board.is_published ? `/b/${board.slug}` : `/boards/${board.id}?preview=1`}
               style={{
                 width: target.width,
                 height: target.height,

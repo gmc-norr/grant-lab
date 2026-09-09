@@ -159,8 +159,7 @@ def test_the_e2e_match_script_drives_the_match_spec():
 # from passing: a deleted scenario is now a named absence, and the titles say what
 # release-1 property each one holds. Keep in step with frontend/e2e/match.spec.ts.
 #
-# The first fifteen are edition SHAPE (which router compiled in, which links
-# render, which palette paints); the last ten are the triage feed itself.
+# Covers edition shape, matching workflows, mobile layouts, and board display.
 REQUIRED_SCENARIOS = [
     "the release-1 shell renders, and the dashboard lists calls",
     "clicking a call row opens that call's own page",
@@ -180,6 +179,10 @@ REQUIRED_SCENARIOS = [
     "moving the sharing control sends the position it was moved TO, both ways",
     "adding a viewer by email POSTs that address and lists the person back",
     "a non-viewer's profile list has no trace of the private profile",
+    "profile setup is compact and mobile profile actions fit",
+    "detail decisions, scoped sharing and deadline export are usable",
+    "a failed decision stays visible with an error",
+    "search and deadline order survive the detail round trip",
     "the triage feed renders the rail, its counts and the focused call's card",
     "pressing s saves the focused call, and Saved is where it lands",
     "pressing h hides the focused call, and Hidden keeps it rather than dropping it",
@@ -194,6 +197,7 @@ REQUIRED_SCENARIOS = [
     # page growing to 2292px at 1920x1080 with realistic funding titles, which
     # puts the whole second row below a screen nobody can scroll.
     "the corridor board fits 1920x1080 with realistic long titles",
+    "the portrait board keeps long titles readable beside full-size QR codes",
 ]
 
 
@@ -222,10 +226,10 @@ EXPECT_SITE = re.compile(r"\bexpect(\.soft|\.poll)?\(")
 
 
 def test_the_match_spec_actually_asserts_things():
-    """`pnpm run e2e:match` over twenty-five empty test bodies exits 0. This is the
+    """`pnpm run e2e:match` over empty test bodies exits 0. This is the
     count that stops that.
 
-    **128 assertion sites in live code, MEASURED 2026-09-07** by running this
+    **148 assertion sites in live code, MEASURED 2026-09-08** by running this
     test's own regex over the comment-stripped spec, and written down as what the
     command printed — not remembered. (An earlier draft of this line said 40 from
     memory and failed on its first run.) It was 34 until Task 8 added the
@@ -245,8 +249,8 @@ def test_the_match_spec_actually_asserts_things():
     behavioural mutation per scenario in the app source it drives (Task 9 step 3)."""
     src = "\n".join(_spec_source_lines())
     expects = len(EXPECT_SITE.findall(src))
-    assert expects == 128, (
-        f"the browser smoke has {expects} expect() calls, this gate pins 128 — "
+    assert expects == 148, (
+        f"the browser smoke has {expects} expect() calls, this gate pins 148 — "
         "if the change was deliberate, re-measure and update the number here"
     )
     # The two release-1 CRITICALs the spec exists to catch, in live code.
@@ -262,7 +266,7 @@ def test_the_match_spec_actually_asserts_things():
 # plan's). oxlint has no type information either, so no-floating-promises cannot
 # fire. So deleting one `await` in front of a Playwright web-first assertion:
 #
-#   * keeps the assertion-site count above at exactly 128,
+#   * keeps the assertion-site count above unchanged,
 #   * typechecks nowhere, lints nowhere,
 #   * and produces a promise nobody ever settles — an assertion that can never
 #     fail, in a file whose entire job is to fail.
@@ -456,9 +460,7 @@ def _run_lines_for(tmp_path, monkeypatch, mutation: str | None) -> list[str]:
     return _run_lines()
 
 
-def test_the_mutation_harness_preserves_the_command_when_it_changes_nothing(
-    tmp_path, monkeypatch
-):
+def test_the_mutation_harness_preserves_the_command_when_it_changes_nothing(tmp_path, monkeypatch):
     """The positive control. Without it, a harness that mangled the YAML would
     make every rejection below pass for the wrong reason."""
     assert any(_SMOKE in line for line in _run_lines_for(tmp_path, monkeypatch, None))

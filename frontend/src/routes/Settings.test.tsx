@@ -20,6 +20,21 @@ function mockGet(payload = SETTINGS) {
   return vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: payload, error: undefined } as never);
 }
 
+it("preserves settings and reports failed name and subscription saves", async () => {
+  mockGet();
+  const failure = { error: { error: { code: "internal_error", message: "Service unavailable" } } };
+  vi.spyOn(clientMod.api, "POST").mockResolvedValue(failure as never);
+  vi.spyOn(clientMod.api, "PUT").mockResolvedValue(failure as never);
+  renderWithProviders(<Settings />);
+  fireEvent.change(await screen.findByDisplayValue("Pär"), { target: { value: "Keep this name" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save name" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Service unavailable");
+  expect(screen.getByDisplayValue("Keep this name")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Save subscriptions" }));
+  await waitFor(() => expect(screen.getAllByRole("alert")).toHaveLength(2));
+  expect(screen.getByRole("checkbox", { name: "Group A" })).toBeChecked();
+});
+
 it("renders the sections from the settings read-model", async () => {
   mockGet();
   renderWithProviders(<Settings />);

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Progress, Text } from "@mantine/core";
 import { useParams } from "react-router-dom";
 
-import { usePublicBoard, type PublicBoardItemOut } from "../api/publicBoard";
+import { usePublicBoard, type PublicBoardItemOut, type PublicBoardOut } from "../api/publicBoard";
 import { BoardCard, closesInText } from "./BoardCard";
 import { deadlineLocalView } from "./Deadline";
 import styles from "./BoardScreen.module.css";
@@ -34,6 +34,10 @@ function nearestDeadlineLocal(items: PublicBoardItemOut[]): string | null {
 export function BoardScreen() {
   const { slug = "" } = useParams();
   const board = usePublicBoard(slug);
+  return <BoardPresentation board={board} />;
+}
+
+export function BoardPresentation({ board }: { board: PublicBoardOut | null }) {
   const [page, setPage] = useState(0);
   // No dependency on `board` deliberately: this must force a render on its
   // own schedule so `isOpen` below is re-evaluated against the CURRENT date
@@ -94,7 +98,7 @@ export function BoardScreen() {
   );
 
   return (
-    <div className={styles.screen} data-board-state="live">
+    <div className={styles.screen} data-board-state="live" data-orientation={board.orientation}>
       <header className={styles.header}>
         <Text component="h1" className={styles.title}>
           {board.title}

@@ -4,6 +4,8 @@ import { Link, useNavigate } from "react-router-dom";
 
 import { useCreateProfile, type ProfileCreateBody } from "../api/profiles";
 import { StructuredFields, type StructuredValues } from "./StructuredFields";
+import { isMatchEdition } from "../edition";
+import { ProfileOptions } from "./ProfileOptions";
 
 const LEVELS = [
   ["", "(unspecified)"], ["lab", "Lab"], ["group", "Research group"], ["department", "Department"],
@@ -45,15 +47,14 @@ export function ProfileNew() {
       </Anchor>
       <Title order={1} mt="xs">Create a profile</Title>
       <Text c="dimmed" size="sm" mb="md">
-        Pick a kind, add seed data, and the local LLM drafts a description plus rubric. You can edit before it
-        goes live.
+        {isMatchEdition ? "Your research interests and funding preferences" : "Pick a kind, add seed data, and the local LLM drafts a description plus rubric. You can edit before it goes live."}
       </Text>
       <form onSubmit={submit}>
         <Stack gap="sm">
           <TextInput label="Profile name" required maxLength={200} value={name}
                      placeholder="e.g. Digital Pathology Lab" onChange={(e) => setName(e.currentTarget.value)} />
           <NativeSelect
-            label="Kind"
+            label={isMatchEdition ? "Profile for" : "Kind"}
             data={[
               { value: "organizational_unit", label: "Organizational unit" },
               { value: "individual", label: "Individual researcher" },
@@ -61,23 +62,28 @@ export function ProfileNew() {
             value={kind}
             onChange={(e) => setKind(e.currentTarget.value)}
           />
-          {kind === "organizational_unit" && (
+          {(kind === "organizational_unit" || isMatchEdition) && (
             <>
-              <NativeSelect label="Level" data={LEVELS.map(([value, label]) => ({ value, label }))}
-                            value={level} onChange={(e) => setLevel(e.currentTarget.value)} />
-              <Textarea label="Mission / strategy / capabilities" description="(free text)" rows={4}
+              {!isMatchEdition && <NativeSelect label="Level" data={LEVELS.map(([value, label]) => ({ value, label }))}
+                            value={level} onChange={(e) => setLevel(e.currentTarget.value)} />}
+              <Textarea label={isMatchEdition ? "What do you research?" : "Mission / strategy / capabilities"} rows={4}
                         value={missionText} onChange={(e) => setMissionText(e.currentTarget.value)} />
             </>
           )}
-          <StructuredFields kind={kind} values={struct} onChange={setS} />
+          {isMatchEdition && <Textarea label="Research areas" rows={2} value={struct.areas} onChange={event => setS("areas", event.currentTarget.value)} />}
+          <ProfileOptions>
+          <StructuredFields kind={kind} values={struct} onChange={setS} hideAreas={isMatchEdition} />
+          </ProfileOptions>
+          <ProfileOptions title="Publications and previous grants">
           <Textarea label="Member ORCIDs" description="(one per line; for an individual, your own)" rows={2}
                     value={orcids} placeholder="0000-0001-2345-6789" onChange={(e) => setOrcids(e.currentTarget.value)} />
           <Textarea label="Members by name" description="(one per line: Last F | Affiliation)" rows={2}
                     value={namesAffiliations} onChange={(e) => setNamesAffiliations(e.currentTarget.value)} />
           <Textarea label="Pasted past grants" description="(optional, titles + abstracts)" rows={4}
                     value={pastedGrants} onChange={(e) => setPastedGrants(e.currentTarget.value)} />
+          </ProfileOptions>
           <Group gap="sm" align="center">
-            <Button type="submit" disabled={create.isPending}>Bootstrap profile</Button>
+            <Button type="submit" disabled={create.isPending}>{isMatchEdition ? "Create profile" : "Bootstrap profile"}</Button>
             {create.isError && (
               <Text role="alert" c="red" size="sm">
                 {(create.error as Error | null)?.message ?? "Couldn't create the profile."}

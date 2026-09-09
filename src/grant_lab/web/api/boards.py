@@ -47,6 +47,7 @@ from sqlalchemy.orm.exc import ObjectDeletedError
 from grant_lab.auth.dependencies import get_current_user
 from grant_lab.boards.alerts import owner_undeliverable_map
 from grant_lab.boards.auto_publish import board_selection, qualifying_count
+from grant_lab.boards.public import public_board_items
 from grant_lab.boards.qr import QrCode, qr_for
 from grant_lab.boards.queue import board_queue
 from grant_lab.db.models import (
@@ -59,6 +60,7 @@ from grant_lab.db.models import (
     User,
 )
 from grant_lab.web.api.profiles import _profile_for_edit
+from grant_lab.web.api.public_boards import PublicBoardOut, board_display_payload
 from grant_lab.web.profile_access import readable_profile_ids
 
 router = APIRouter(tags=["boards"])
@@ -235,6 +237,27 @@ def _lock_board_row(session, board: Board) -> None:
         session.refresh(board, with_for_update=True)
     except ObjectDeletedError as exc:
         raise HTTPException(status_code=404, detail="board not found") from exc
+
+
+@router.get("/boards/{board_id}/preview", response_model=PublicBoardOut)
+def preview_board(
+    request: Request,
+    response: Response,
+    board_id: int,
+    user: User = Depends(get_current_user),  # noqa: B008
+):
+    response.headers["Cache-Control"] = "private, no-store"
+    with request.app.state.session_factory() as session:
+        board = _board_for_edit(session, board_id=board_id, user=user)
+        rows = public_board_items(session, board_id=board_id)
+        fields = {
+            "title": board.title,
+            "orientation": board.orientation,
+            "items_per_page": board.items_per_page,
+            "max_pages": board.max_pages,
+            "page_seconds": board.page_seconds,
+        }
+    return board_display_payload(rows, fields)
 
 
 @router.get("/boards", response_model=BoardsListOut)
@@ -1035,11 +1058,11 @@ def approve_items(
             pre_cap = pre_board.items_per_page * pre_board.max_pages
             if likely_new and len(seen) + len(likely_new) > pre_cap:
                 likely_new = []
-            pre_urls = set(
-                pre_session.execute(
-                    select(Call.url).where(Call.id.in_(likely_new))
-                ).scalars()
-            ) if likely_new else set()
+            pre_urls = (
+                set(pre_session.execute(select(Call.url).where(Call.id.in_(likely_new))).scalars())
+                if likely_new
+                else set()
+            )
         for pre_url in pre_urls:
             if pre_url:
                 prefetch[pre_url] = qr_for(pre_url)
@@ -1092,9 +1115,7 @@ def approve_items(
             )
             next_position = 0 if existing_max is None else existing_max + 1
             urls = dict(
-                session.execute(
-                    select(Call.id, Call.url).where(Call.id.in_(new_ids))
-                ).all()
+                session.execute(select(Call.id, Call.url).where(Call.id.in_(new_ids))).all()
             )
             # The encode does NOT run here. It happened before this
             # transaction opened, in the prefetch pass at the top of this
@@ -1232,9 +1253,7 @@ def unapprove_item(
         # too -- uniform behaviour beats a rule that depends on a mode, and it
         # means flipping a board to auto later does not resurrect everything
         # its owner ever removed.
-        session.merge(
-            BoardSuppression(board_id=board.id, call_id=call_id, suppressed_by=user.id)
-        )
+        session.merge(BoardSuppression(board_id=board.id, call_id=call_id, suppressed_by=user.id))
         session.commit()
     return Response(status_code=204)
 

@@ -506,6 +506,8 @@ def build_dashboard_view(
                 Call.published_at.desc().nullslast(),
                 Call.id.desc(),
             )
+        if sort == "deadline":
+            stmt = stmt.order_by(None).order_by(closed_expr.asc(), *_order_for(sort))
         stmt = stmt.limit(limit).offset(offset)
     else:
         stmt = (

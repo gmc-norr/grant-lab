@@ -17,7 +17,9 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from grant_lab.web.api.errors import envelope_dict, is_api_path
 
 
-def build_csp(dev: bool = False, ws_origin: str | None = None) -> str:
+def build_csp(
+    dev: bool = False, ws_origin: str | None = None, *, allow_same_origin_frame: bool = False
+) -> str:
     """Content-Security-Policy for the dashboard.
 
     ``script-src 'self'`` (no ``'unsafe-inline'``) is the high-value line —
@@ -64,7 +66,7 @@ def build_csp(dev: bool = False, ws_origin: str | None = None) -> str:
             connect,
             "form-action 'self'",
             "base-uri 'self'",
-            "frame-ancestors 'none'",
+            "frame-ancestors 'self'" if allow_same_origin_frame else "frame-ancestors 'none'",
             "object-src 'none'",
         ]
     )

@@ -153,7 +153,7 @@ if (leaked.length > 0) {
 // is not caught by this half, and is exactly what the EXCLUDED blocklist above is for.
 // The two halves cover different mistakes and neither subsumes the other.
 const ALLOWED_APP_DIRS = ["api/", "components/", "routes/", "shell/", "theme/"];
-const ALLOWED_APP_ROOT_FILES = ["App.tsx", "main.tsx", "router.simple.tsx"];
+const ALLOWED_APP_ROOT_FILES = ["App.tsx", "main.tsx", "router.simple.tsx", "edition.ts"];
 
 const appModules = modules
   .map((m) => m.split("\\").join("/"))

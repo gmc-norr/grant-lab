@@ -105,6 +105,7 @@ _EXPECTED_ROUTES = frozenset(
         # which is the board's own candidate pool, so it is edit-gated like
         # every other {board_id} route rather than added to an exempt set.
         ("get", "/boards/{board_id}/auto-preview"),
+        ("get", "/boards/{board_id}/preview"),
         ("get", "/boards/{board_id}/queue"),
         ("get", "/boards/{board_id}/items"),
         ("post", "/boards/{board_id}/items"),

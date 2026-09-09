@@ -109,6 +109,18 @@
 
 .column {
   max-width: 680px;
+  min-width: 0;
+}
+
+.mobilePicker { display: none; }
+
+@media (max-width: 40rem) {
+  .layout { padding: 1rem 1rem 3rem; }
+  .rail { position: static; }
+  .railList { flex-direction: row; }
+  .railList > li { flex: 1; min-width: 0; }
+  .railProfile, .picker { display: none; }
+  .mobilePicker { display: block; margin-top: 0.5rem; }
 }
 
 .feed {

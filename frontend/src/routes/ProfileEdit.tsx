@@ -4,6 +4,8 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { useProfile, useUpdateProfile, type ProfileDetail, type ProfileUpdateBody } from "../api/profiles";
 import { StructuredFields, type StructuredValues } from "./StructuredFields";
+import { isMatchEdition } from "../edition";
+import { ProfileOptions } from "./ProfileOptions";
 
 const LEVELS = [
   ["", "(unspecified)"], ["lab", "Lab"], ["group", "Research group"], ["department", "Department"],
@@ -78,8 +80,7 @@ function EditForm({ p, pid }: { p: ProfileDetail; pid: number }) {
       </Anchor>
       <Title order={1} mt="xs">Edit {p.name}</Title>
       <Text c="dimmed" size="sm" mb="md">
-        Description feeds the semantic similarity gate. Areas, budgets, TRL, must-include and exclusions feed the
-        deterministic rubric gates. Saving kicks off a backfill of the last 90 days against this profile.
+        {isMatchEdition ? "Research interests and funding preferences" : "Description feeds the semantic similarity gate. Areas, budgets, TRL, must-include and exclusions feed the deterministic rubric gates. Saving kicks off a backfill of the last 90 days against this profile."}
       </Text>
       {drafting && (
         <Paper withBorder radius="md" p="sm" mb="md" bg="var(--app-sidebar)">
@@ -104,25 +105,28 @@ function EditForm({ p, pid }: { p: ProfileDetail; pid: number }) {
       <form onSubmit={submit}>
         <Fieldset disabled={locked}>
           <Stack gap="sm">
-            <Textarea label="Description" description="Changing this triggers a background re-embed." rows={6}
+            <Textarea label="Description" description={isMatchEdition ? undefined : "Changing this triggers a background re-embed."} rows={6}
                       value={description} onChange={(e) => setDescription(e.currentTarget.value)} />
+            {isMatchEdition && <Textarea label="Research areas" rows={3} value={struct.areas} onChange={event => setS("areas", event.currentTarget.value)} />}
+            <ProfileOptions>
             {p.kind === "organizational_unit" && (
               <NativeSelect label="Level" data={LEVELS.map(([value, label]) => ({ value, label }))}
                             value={level} onChange={(e) => setLevel(e.currentTarget.value)} />
             )}
-            <StructuredFields kind={p.kind} values={struct} onChange={setS} disabled={locked} />
+            <StructuredFields kind={p.kind} values={struct} onChange={setS} disabled={locked} hideAreas={isMatchEdition} />
             <TextInput label="Budget min" value={budgetMin} onChange={(e) => setBudgetMin(e.currentTarget.value)} />
             <TextInput label="Budget max" value={budgetMax} onChange={(e) => setBudgetMax(e.currentTarget.value)} />
             <NativeSelect label="Currency" data={CURRENCIES.map((c) => ({ value: c, label: c || "(unknown)" }))}
                           value={currency} onChange={(e) => setCurrency(e.currentTarget.value)} />
             <TextInput label="Technology Readiness Level — min" description="(1–9)" value={trlMin} onChange={(e) => setTrlMin(e.currentTarget.value)} />
             <TextInput label="Technology Readiness Level — max" description="(1–9)" value={trlMax} onChange={(e) => setTrlMax(e.currentTarget.value)} />
-            <Textarea label="Must-include keywords" description="(one per line; bypass the timeline gate)" rows={3}
+            <Textarea label="Must-include keywords" description={isMatchEdition ? undefined : "(one per line; bypass the timeline gate)"} rows={3}
                       value={mustInclude} onChange={(e) => setMustInclude(e.currentTarget.value)} />
             <Textarea label="Hard exclusions" description="(one per line)" rows={3}
                       value={hardExclusions} onChange={(e) => setHardExclusions(e.currentTarget.value)} />
+            </ProfileOptions>
             <Group gap="sm" align="center">
-              <Button type="submit" disabled={locked || update.isPending}>Save and re-rank</Button>
+              <Button type="submit" disabled={locked || update.isPending}>{isMatchEdition ? "Save preferences" : "Save and re-rank"}</Button>
               <Anchor component={Link} to={`/profiles/${pid}`} size="sm">Cancel</Anchor>
               {update.isError && (
                 <Text role="alert" c="red" size="sm">

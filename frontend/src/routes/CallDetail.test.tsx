@@ -72,6 +72,61 @@ const RANKED = {
   best_profile_id: 7,
 };
 
+it("MATCH shows a saved call's note and lets the reader return it to the inbox", async () => {
+  edition.isMatch = true;
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({
+    data: { ...RANKED, call: { ...RANKED.call, decision_state: "saved", decision_note: "Discuss with the team" } },
+  } as never);
+  const remove = vi.spyOn(clientMod.api, "DELETE").mockResolvedValue({ data: { state: null } } as never);
+  renderDetail();
+  expect(await screen.findByText("Saved to this profile")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Discuss with the team" })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Return to inbox" }));
+  await waitFor(() => expect(remove).toHaveBeenCalledWith("/api/calls/{call_id}/save", {
+    params: { path: { call_id: 5 }, query: { profile_id: 7 } },
+  }));
+  expect(await screen.findByRole("button", { name: "Save" })).toBeEnabled();
+});
+
+it("MATCH keeps a failed save visible and retryable", async () => {
+  edition.isMatch = true;
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: RANKED } as never);
+  const save = vi.spyOn(clientMod.api, "POST").mockResolvedValue({
+    error: { error: { code: "internal_error", message: "Service unavailable" } },
+  } as never);
+  renderDetail();
+  await userEvent.click(await screen.findByRole("button", { name: /^Save$/ }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Service unavailable");
+  expect(screen.queryByText("Saved to this profile")).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: /^Save$/ }));
+  expect(save).toHaveBeenCalledTimes(2);
+});
+
+it("MATCH disables both decisions when no profile is selected", async () => {
+  edition.isMatch = true;
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: RANKED } as never);
+  renderDetail("/calls/5");
+  expect(await screen.findByRole("button", { name: /^Save$/ })).toBeDisabled();
+  expect(screen.getByRole("button", { name: /^Hide$/ })).toBeDisabled();
+});
+
+it("MATCH waits for a note acknowledgement before changing the decision", async () => {
+  edition.isMatch = true;
+  vi.spyOn(clientMod.api, "GET").mockResolvedValue({
+    data: { ...RANKED, call: { ...RANKED.call, decision_state: "saved", decision_note: null } },
+  } as never);
+  let acknowledge!: (reply: never) => void;
+  vi.spyOn(clientMod.api, "PUT").mockImplementation(() => new Promise(resolve => { acknowledge = resolve; }));
+  renderDetail();
+  await userEvent.click(await screen.findByRole("button", { name: "Add note" }));
+  await userEvent.type(screen.getByRole("textbox", { name: /Why did you save/ }), "Discuss with the team{Enter}");
+  expect(screen.getByRole("button", { name: /^Hide$/ })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Return to inbox" })).toBeDisabled();
+  await act(async () => acknowledge({ data: { decision_note: "Discuss with the team" } } as never));
+  expect(screen.getByRole("button", { name: /^Hide$/ })).toBeEnabled();
+  expect(screen.getByRole("textbox", { name: /Why did you save/ })).toHaveValue("Discuss with the team");
+});
+
 it("renders the ranking hero, analyst notes, and criterion why-string", async () => {
   vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: RANKED, error: undefined } as never);
   renderDetail();

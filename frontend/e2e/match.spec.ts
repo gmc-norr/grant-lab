@@ -370,7 +370,7 @@ async function hrefsOn(page: Page): Promise<string[]> {
 test("the release-1 shell renders, and the dashboard lists calls", async ({ page }) => {
   await mockApi(page);
   await page.goto("/");
-  await expect(page.getByRole("link", { name: "Call Match" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Grant Lab" })).toBeVisible();
   // The SimpleShell nav, not the full edition's activity-bar rail.
   const nav = page.getByRole("navigation", { name: "Main" });
   await expect(nav.getByRole("link", { name: "Calls" })).toBeVisible();
@@ -454,7 +454,7 @@ test("an excluded route renders the in-app soft 404, not a cockpit", async ({ pa
   await page.goto("/cockpit/new");
   await expect(page.getByRole("alert")).toContainText("Not found");
   // The shell is still there — a soft 404 inside the app, not a blank document.
-  await expect(page.getByRole("link", { name: "Call Match" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Grant Lab" })).toBeVisible();
 });
 
 test("the light ground is actually PAINTED, not merely declared", async ({ page }) => {
@@ -465,7 +465,7 @@ test("the light ground is actually PAINTED, not merely declared", async ({ page 
   // SimpleShell.module.css's .shell background.
   await mockApi(page);
   await page.goto("/");
-  await expect(page.getByRole("link", { name: "Call Match" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Grant Lab" })).toBeVisible();
   const bg = await page.evaluate(() => {
     const shell = document.querySelector("header")?.parentElement;
     return shell ? getComputedStyle(shell).backgroundColor : null;
@@ -851,6 +851,65 @@ async function mockTriage(
 const railOf = (page: Page) => page.getByRole("navigation", { name: "Triage views" });
 const cardsOf = (page: Page) => page.locator("article[data-call-id]");
 
+test("profile setup is compact and mobile profile actions fit", async ({ page }) => {
+  await mockApi(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await gotoRendered(page, "/profiles/new");
+  await expect(page.getByRole("button", { name: "Create profile" })).toBeInViewport();
+  await expect(page.getByLabel("Organization type")).toBeHidden();
+  await page.getByText("Eligibility and funding preferences", { exact: true }).click();
+  await expect(page.getByLabel("Organization type")).toBeVisible();
+  await gotoRendered(page, "/profiles/1");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  await expect(page.getByRole("link", { name: "Edit", exact: true })).toBeInViewport();
+  await page.screenshot({ path: "test-results/match-profile-mobile.png", fullPage: true });
+});
+
+test("detail decisions, scoped sharing and deadline export are usable", async ({ page, context }) => {
+  await mockApi(page);
+  await page.route("**/api/calls/1?*", route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...CALL_DETAIL, call: { ...CALL_DETAIL.call, decision_state: "saved", decision_note: "Discuss with the team", deadline: "2027-10-25T17:30:00+01:00", deadline_local_date: "2027-10-25" } }) }));
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await gotoRendered(page, "/calls/1?profile=1&view=saved");
+  await expect(page.getByText("Saved to this profile")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Discuss with the team" })).toBeVisible();
+  await page.getByRole("button", { name: "Copy link" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Link copied" })).toBeVisible();
+  const copied = await page.evaluate(() => navigator.clipboard.readText());
+  expect(new URL(copied).search).toBe("?profile=1");
+  const downloading = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Add to calendar" }).click();
+  const download = await downloading;
+  expect(download.suggestedFilename()).toBe("call-1-deadline.ics");
+  const stream = await download.createReadStream();
+  const chunks = [];
+  for await (const chunk of stream!) chunks.push(chunk);
+  const content = Buffer.concat(chunks).toString();
+  expect(content).toContain("DTSTART:20271025T163000Z");
+  expect(content).not.toContain("Discuss with the team");
+  await page.screenshot({ path: "test-results/match-call-detail.png", fullPage: true });
+});
+
+test("a failed decision stays visible with an error", async ({ page }) => {
+  await mockApi(page);
+  await page.route("**/api/calls/1/save?*", route => route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: { code: "internal_error", message: "Service unavailable" } }) }));
+  await gotoRendered(page, "/?profile=1");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Service unavailable");
+  await expect(page.getByRole("link", { name: "Genomics Grant" })).toBeVisible();
+});
+
+test("search and deadline order survive the detail round trip", async ({ page }) => {
+  await mockApi(page);
+  await gotoRendered(page, "/?profile=1");
+  await page.getByRole("searchbox", { name: "Search calls" }).fill("genomics");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Order" }).selectOption("deadline");
+  await page.getByRole("link", { name: "Genomics Grant" }).click();
+  await page.getByRole("link", { name: "← All calls" }).click();
+  await expect(page.getByRole("searchbox", { name: "Search calls" })).toHaveValue("genomics");
+  await expect(page.getByRole("combobox", { name: "Order" })).toHaveValue("deadline");
+});
+
 test("the triage feed renders the rail, its counts and the focused call's card", async ({
   page,
 }) => {
@@ -995,11 +1054,11 @@ test("the detail round trip lands back in the view it left", async ({ page }) =>
   await card.getByRole("link", { name: "Genomics Grant" }).click();
   // BOTH parameters travel: the profile because it decides which ranking the
   // page shows, the view because the back link has to know where to return to.
-  await expect(page).toHaveURL(/\/calls\/1\?profile=1&view=hidden$/);
+  await expect(page).toHaveURL(url => url.pathname === "/calls/1" && url.searchParams.get("profile") === "1" && url.searchParams.get("view") === "hidden");
   await expect(page.getByRole("heading", { name: "Genomics Grant" })).toBeVisible();
 
   await page.getByRole("link", { name: "← All calls" }).click();
-  await expect(page).toHaveURL(/\/\?profile=1&view=hidden$/);
+  await expect(page).toHaveURL(url => url.pathname === "/" && url.searchParams.get("profile") === "1" && url.searchParams.get("view") === "hidden");
   await expect(railOf(page).getByRole("link", { name: /Hidden/ })).toHaveAttribute(
     "aria-current",
     "page",
@@ -1247,4 +1306,23 @@ test("the corridor board fits 1920x1080 with realistic long titles", async ({ pa
 
   const titleText = await cards.first().locator('[data-field="title"]').innerText();
   expect(titleText.trim().length).toBeGreaterThan(20);
+});
+
+test("the portrait board keeps long titles readable beside full-size QR codes", async ({ page }) => {
+  await page.setViewportSize({ width: 1080, height: 1920 });
+  await mockApi(page);
+  await page.route("**/api/public/boards/**", route => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ ...LONG_BOARD, title: "Clinical funding opportunities", orientation: "portrait", items_per_page: 4, items: LONG_BOARD.items.slice(0, 4) }),
+  }));
+  await page.goto("/b/portrait-slug");
+  const cards = page.locator('[data-field="board-card"]');
+  await expect(cards).toHaveCount(4);
+  const clipped = await cards.locator('[data-field="title"]').evaluateAll(titles => titles.filter(title => title.scrollHeight > title.clientHeight + 1).map(title => title.textContent));
+  expect(clipped).toEqual([]);
+  const geometry = await page.evaluate(() => ({ width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight }));
+  expect(geometry).toEqual({ width: 1080, height: 1920 });
+  const qrWidths = await cards.locator("svg").evaluateAll(codes => codes.map(code => code.getBoundingClientRect().width));
+  expect(Math.min(...qrWidths)).toBeGreaterThanOrEqual(170);
 });

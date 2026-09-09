@@ -1,10 +1,12 @@
 // frontend/src/routes/CallDetailBody.tsx
 import { Anchor, Badge, Box, Button, Card, Code, Group, Stack, Text, Title } from "@mantine/core";
 import { Link } from "react-router-dom";
+import type { ReactNode } from "react";
 
 import type { CallDetail } from "../api/calls";
 import { isMatchEdition } from "../edition";
 import { DeadlineLocal } from "./Deadline";
+import { MatchCallOverview } from "./MatchCallOverview";
 
 function budgetText(c: { budget_min: number | null; budget_max: number | null; currency: string | null }): string {
   if (c.budget_min == null && c.budget_max == null) return "—";
@@ -49,7 +51,8 @@ const GRID_AUTOFILL = (min: string) => ({
 // match edition through the criterion breakdown below, which §4.2 keeps
 // (web/call_detail_view.py writes "Cosine similarity 0.420 (pass threshold 0.30)."
 // into a criterion `detail`).
-export function CallDetailBody({ call, ranking, criteria, best_profile_id }: CallDetail) {
+export function CallDetailBody({ call, ranking, criteria, best_profile_id, actions }: CallDetail & { actions?: ReactNode }) {
+  if (isMatchEdition) return <MatchCallOverview {...{ call, ranking, criteria, best_profile_id, actions }} />;
   const startParams = new URLSearchParams({ call_id: String(call.id), call_title: call.title });
   if (best_profile_id != null) startParams.set("profile_id", String(best_profile_id));
 

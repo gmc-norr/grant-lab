@@ -4,6 +4,9 @@ import { useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { useCallDetail, useHideCall, useSetDecisionNote, useUnhideCall } from "../api/calls";
+import { isMatchEdition } from "../edition";
+import { CallDecisionActions } from "./CallDecisionActions";
+import { CallFollowUp } from "./CallFollowUp";
 import { CallDetailBody } from "./CallDetailBody";
 import { DecisionNoteStrip } from "./DecisionNoteStrip";
 
@@ -70,9 +73,19 @@ export function CallDetail() {
     <Stack component="main" maw="52rem" mx="auto" px="xs" pt="md" pb="xl" gap="lg">
       <Anchor component={Link} to={backTo} size="sm">← All calls</Anchor>
 
-      <CallDetailBody {...data} />
+      <CallDetailBody {...data} actions={isMatchEdition ? <>
+        <CallDecisionActions
+          key={`${call.id}:${profile}`}
+          callId={call.id}
+          profileId={profile}
+          title={call.title}
+          initialState={call.decision_state ?? null}
+          initialNote={call.decision_note ?? null}
+        />
+        <CallFollowUp key={`follow-up:${call.id}:${profile}`} call={call} profileId={profile} />
+      </> : undefined} />
 
-      <Group component="section" aria-label="Hide this call" align="center" gap="sm">
+      {!isMatchEdition && <Group component="section" aria-label="Hide this call" align="center" gap="sm">
         {hidden !== null ? (
           <>
             <Text span c="dimmed">Call hidden.</Text>
@@ -189,7 +202,7 @@ export function CallDetail() {
             </Text>
           </>
         )}
-      </Group>
+      </Group>}
     </Stack>
   );
 }

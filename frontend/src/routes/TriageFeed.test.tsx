@@ -128,6 +128,27 @@ function renderFeed(route = "/", extra: ReactNode = null, qc = new QueryClient()
   };
 }
 
+it("reports failed decisions without removing the call", async () => {
+  const { post } = stub();
+  post.mockResolvedValue({ error: { error: { code: "internal_error", message: "Service unavailable" } } } as never);
+  renderFeed();
+  await screen.findByText("Call one");
+  await userEvent.click(screen.getAllByRole("button", { name: /^Save$/ })[0]);
+  expect(await screen.findByRole("alert")).toHaveTextContent("Service unavailable");
+  expect(screen.getByText("Call one")).toBeInTheDocument();
+});
+
+it("search and deadline controls update the API query and reset pagination", async () => {
+  const { get } = stub();
+  renderFeed("/?profile=7&page=3");
+  await screen.findByText("Call one");
+  fireEvent.change(screen.getByRole("searchbox", { name: "Search calls" }), { target: { value: "oncology" } });
+  await userEvent.click(screen.getByRole("button", { name: /^Search$/ }));
+  await waitFor(() => expect(get).toHaveBeenCalledWith("/api/calls", { params: { query: expect.objectContaining({ q: "oncology", page: 1, profile: "7" }) } }));
+  fireEvent.change(screen.getByRole("combobox", { name: "Order" }), { target: { value: "deadline" } });
+  await waitFor(() => expect(get).toHaveBeenCalledWith("/api/calls", { params: { query: expect.objectContaining({ q: "oncology", sort: "deadline", page: 1 }) } }));
+});
+
 // Structural, not `ReturnType<typeof vi.spyOn>`: openapi-fetch's ClientMethod is
 // generic over every path in the schema, so vi.spyOn's inferred instance type is
 // not assignable to any hand-written spy alias. vitest does not typecheck — only
@@ -431,7 +452,7 @@ describe("gate 5 — inbox zero is a designed screen", () => {
     renderFeed("/?page=2");
     await screen.findByText(/nothing left on this page/i);
     expect(screen.queryByText(/inbox zero/i)).toBeNull();
-    expect(screen.getByText(/50 calls are still waiting/i)).toBeInTheDocument();
+    expect(await screen.findByText(/50 calls are still waiting/i)).toBeInTheDocument();
     // Page two of a self-healing inbox is a dead end without a way back: page
     // one has refilled and nothing else on this screen points at it.
     expect(screen.getByRole("link", { name: /previous page/i })).toBeInTheDocument();
@@ -902,7 +923,7 @@ describe("reviewer Minor 3 — the cursor also resets when the PAGE changes, not
     // the click, so a reset effect keyed on `[view]` alone would carry a
     // page-1 cursor straight onto page 2.
     stub({ hasNext: true });
-    const { container } = renderFeed("/?view=saved&profile=7");
+    const { container } = renderFeed("/?view=saved&profile=7&layout=expanded");
     await screen.findByText("Call one");
 
     fireEvent.keyDown(document.body, { key: "j" });

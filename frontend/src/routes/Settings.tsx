@@ -15,6 +15,7 @@ import {
 } from "@mantine/core";
 
 import type { AccountSettings } from "../api/account";
+import { apiErrorMessage } from "../api/client";
 import {
   useAccountSettings,
   useChangePassword,
@@ -100,6 +101,7 @@ function NameSection({ initial }: { initial: string }) {
                 Saved.
               </Text>
             )}
+            {update.isError && <Text role="alert" c="red" size="sm">{apiErrorMessage(update.error, "Couldn't save your name. Please try again.")}</Text>}
           </Group>
         </Stack>
       </form>
@@ -227,12 +229,15 @@ function SubscriptionsSection({ profiles }: { profiles: AccountSettings["profile
                 label={p.name}
                 checked={checked.has(p.id)}
                 onChange={(e) =>
+                  {
+                  const isChecked = e.currentTarget.checked;
                   setChecked((prev) => {
                     const nextSet = new Set(prev);
-                    if (e.currentTarget.checked) nextSet.add(p.id);
+                    if (isChecked) nextSet.add(p.id);
                     else nextSet.delete(p.id);
                     return nextSet;
-                  })
+                  });
+                  }
                 }
               />
             ))}
@@ -246,6 +251,7 @@ function SubscriptionsSection({ profiles }: { profiles: AccountSettings["profile
                 Saved.
               </Text>
             )}
+            {save.isError && <Text role="alert" c="red" size="sm">{apiErrorMessage(save.error, "Couldn't save subscriptions. Please try again.")}</Text>}
           </Group>
         </Stack>
       </form>

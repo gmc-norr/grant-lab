@@ -228,6 +228,7 @@ export function TriageCard({
   onFocus,
   busy = false,
   cardRef,
+  returnSearch,
 }: {
   call: CallItem;
   expanded: boolean;
@@ -239,8 +240,12 @@ export function TriageCard({
   onFocus?: () => void;
   busy?: boolean;
   cardRef?: (el: HTMLElement | null) => void;
+  returnSearch?: string;
 }) {
-  const detailTo = detailHref(call.id, profileId, view);
+  const detailParams = new URLSearchParams(returnSearch);
+  if (profileId !== null) detailParams.set("profile", String(profileId));
+  detailParams.set("view", view);
+  const detailTo = returnSearch ? `/calls/${call.id}?${detailParams.toString()}` : detailHref(call.id, profileId, view);
   const budget = budgetText(call);
   const days = daysLeftText(call);
   const quote = matchedSentence(call);

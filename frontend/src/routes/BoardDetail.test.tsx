@@ -154,6 +154,17 @@ it("an admin sees a publish control", async () => {
   expect(screen.getByRole("button", { name: /^publish$/i })).toBeInTheDocument();
 });
 
+it("reloads an open draft preview after saving board settings", async () => {
+  renderDetail({ putResult: { data: { ...BOARD, orientation: "portrait", items_per_page: 4, updated_at: "2026-01-02T00:00:00Z" } } });
+  await userEvent.click(await screen.findByRole("button", { name: "Show preview" }));
+  const previous = screen.getByTitle("Corridor board at 1920x1080");
+  await userEvent.click(screen.getByRole("button", { name: "Save settings" }));
+  const refreshed = await screen.findByTitle("Corridor board at 1080x1920");
+  expect(refreshed).not.toBe(previous);
+  expect(previous).not.toBeInTheDocument();
+  expect(refreshed).toHaveAttribute("src", "/boards/1?preview=1");
+});
+
 it("the publish confirmation names what becomes public", async () => {
   const user = userEvent.setup();
   renderDetail({ admin: true, board: { ...BOARD, approved_count: 5 } });
@@ -749,14 +760,13 @@ it("a portrait board previews at portrait dimensions", async () => {
   expect(frame).toHaveStyle({ width: "1080px", height: "1920px" });
 });
 
-it("an unpublished board says why it cannot be previewed, rather than showing a blank", async () => {
-  // `/b/:slug` reads the PUBLIC endpoint, which 404s while the board is
-  // unpublished -- so the iframe would render an honest empty rectangle that
-  // looks exactly like a broken board.
+it("an unpublished board previews privately without publishing", async () => {
   renderDetail({ board: { ...BOARD, is_published: false } });
   await screen.findByText("Corridor board");
   expect(document.querySelector('[data-field="preview-unpublished"]')).toHaveTextContent(
-    /publish this board to preview it/i,
+    /private draft preview/i,
   );
-  expect(screen.queryByRole("button", { name: /show preview/i })).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: /show preview/i }));
+  expect(await screen.findByTitle(/corridor board at 1920x1080/i)).toHaveAttribute("src", "/boards/1?preview=1");
+  expect(clientMod.api.PUT).not.toHaveBeenCalled();
 });
