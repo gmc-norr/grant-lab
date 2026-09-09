@@ -93,7 +93,7 @@ def test_rank_pair_clean_pass_with_logprobs():
             },
         ],
     )
-    r = rank_pair(client=client, profile=profile, call=call, now=_NOW)
+    r = rank_pair(client=client, profile=profile, call=call, now=_NOW, logprobs_enabled=True)
     assert isinstance(r, RankResult)
     # 4.0 (essentially argmax with strong probability) × 20 = 80
     assert 75 <= r.score <= 85
@@ -859,10 +859,117 @@ def test_rank_pair_populates_expected_value_from_logprobs():
         content=json.loads(content),
         logprobs=_logprobs_for(content, rating_char="4", top=top),
     )
-    r = rank_pair(client=client, profile=profile, call=call, now=_NOW)
+    # logprobs_enabled=True is now REQUIRED: the default stopped asking for
+    # logprobs (RANKING_LOGPROBS_ENABLED), and a transport mock would happily
+    # return a block nobody requested, so without this the test would assert a
+    # state production can no longer reach.
+    r = rank_pair(client=client, profile=profile, call=call, now=_NOW, logprobs_enabled=True)
     # EV = 4*0.6 + 3*0.4 = 3.6 → round(3.6*20) = 72 (NOT the argmax 80)
     assert r.topic_fit_expected is not None
     assert abs(r.topic_fit_expected - 3.6) < 1e-6
     assert r.score == 72
     # raw_response must NOT carry the full logprobs block.
     assert "logprobs" not in r.raw_response.get("choices", [{}])[0]
+
+
+# ---------------------------------------------------------------------------
+# RANKING_LOGPROBS_ENABLED — the request must not ask for what nobody reads
+# ---------------------------------------------------------------------------
+
+
+class _RecordingClient:
+    """Captures the kwargs rank_pair passes to `chat` and returns a canned
+    envelope. Not a transport mock: the assertion is about the REQUEST shape,
+    which an httpx-level mock would hide behind serialization."""
+
+    model = "gemma4:e4b-it-q4_K_M"
+
+    def __init__(self, content: dict, logprobs=None):
+        body = {
+            "model": self.model,
+            "choices": [
+                {"index": 0, "message": {"role": "assistant", "content": json.dumps(content)}}
+            ],
+        }
+        if logprobs is not None:
+            body["choices"][0]["logprobs"] = {"content": logprobs}
+        self._body = body
+        self.calls: list[dict] = []
+
+    def chat(self, **kwargs):
+        self.calls.append(kwargs)
+        return self._body
+
+
+_CLEAN = {
+    "topic_fit": {"rating": 4, "rationale": "ok", "quoted_evidence": "T"},
+    "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+    "exclusions": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+}
+
+# The alternatives attached to the rating digit: 60% on "4", 40% on "3".
+_EV_TOP = [
+    {"token": "4", "logprob": math.log(0.6), "bytes": [52]},
+    {"token": "3", "logprob": math.log(0.4), "bytes": [51]},
+]
+
+
+def test_logprobs_are_not_requested_by_default():
+    """Measured at ~6x wall clock (127s vs 21s per ranking) for under 3 points
+    of score movement, so the default must not pay for them."""
+    client = _RecordingClient(_CLEAN)
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+
+    rank_pair(client=client, profile=profile, call=call, now=_NOW)
+
+    assert len(client.calls) == 1
+    assert "logprobs" not in client.calls[0]
+    assert "top_logprobs" not in client.calls[0]
+
+
+def test_logprobs_are_requested_when_the_setting_is_on():
+    client = _RecordingClient(_CLEAN)
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+
+    rank_pair(client=client, profile=profile, call=call, now=_NOW, logprobs_enabled=True)
+
+    assert client.calls[0]["logprobs"] is True
+    assert client.calls[0]["top_logprobs"] == 10
+
+
+def test_with_logprobs_off_the_score_is_the_plain_rating():
+    """Falling back to argmax is the SUPPORTED path — it is the one the remote
+    Sonnet ranker already takes — so turning the setting off must degrade
+    cleanly, not blank the score."""
+    client = _RecordingClient(_CLEAN)
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+
+    result = rank_pair(client=client, profile=profile, call=call, now=_NOW)
+
+    assert result.topic_fit_expected is None
+    assert result.score == 4 * 20
+
+
+def test_with_logprobs_on_the_score_is_the_expected_value():
+    """The other direction: on, the score must actually move off the multiple
+    of 20 — otherwise the setting would be inert and this pair of tests would
+    pass on code that ignores it entirely.
+
+    The stream must CONTAIN the content: since the thinking-token fix, EV
+    aligns the rating offset against the joined token stream and fails closed
+    when it cannot find the content there."""
+    client = _RecordingClient(
+        _CLEAN,
+        logprobs=_logprobs_for(json.dumps(_CLEAN), rating_char="4", top=_EV_TOP)["content"],
+    )
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+
+    result = rank_pair(client=client, profile=profile, call=call, now=_NOW, logprobs_enabled=True)
+
+    assert result.topic_fit_expected is not None
+    assert result.score != 4 * 20
+    assert result.score == round((0.6 * 4 + 0.4 * 3) * 20)
