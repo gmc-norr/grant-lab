@@ -8,7 +8,8 @@ Each adapter normalizes one funding-body's API into `NormalizedCall`
 When writing a new adapter, populate `full_text` in this order of preference:
 
 1. **Use the source's API** if it returns the call body (e.g., Vinnova's
-   `WebTextLista[*].TextSv`). Fastest, most stable, structured.
+   `WebTextLista`). Fastest, most stable, structured. If the source ships the
+   body in several languages, prefer English — the ranker is English-primary.
 
 2. **Fetch the source's call-detail endpoint** if it's a separate API call
    (some funding bodies have list+detail endpoints; the body is in detail).
