@@ -58,9 +58,13 @@ def _build_summary(item: dict) -> str | None:
     """Compose a brief summary from `Beskrivning` (+ English blurb if distinct).
 
     Vinnova's `Beskrivning` is title-length (40-70 chars). The substantive
-    body lives in `WebTextLista[*].TextSv` and is now routed to `full_text`
-    by `_build_full_text` — keeping `summary` lightweight for list views and
+    body lives in `WebTextLista` and is now routed to `full_text` by
+    `_build_full_text` — keeping `summary` lightweight for list views and
     leaving full body text for the ranker / detail page.
+
+    Unlike title and body, summary deliberately keeps BOTH languages: it is
+    two short blurbs, so carrying the Swedish costs almost nothing and keeps
+    the original wording in front of Swedish-speaking staff.
     """
     parts: list[str] = []
     beskr = item.get("Beskrivning")
@@ -72,21 +76,49 @@ def _build_summary(item: dict) -> str | None:
     return "\n\n".join(parts) if parts else None
 
 
-def _build_full_text(item: dict) -> str | None:
-    """Join `WebTextLista[*].TextSv` paragraphs into the call body.
+def _pick_title(item: dict) -> str | None:
+    """Prefer Vinnova's English title, falling back to the Swedish one.
 
-    Vinnova's API returns the full call body inline, so no scraping is
-    required — we just concatenate the Swedish paragraphs in order. Returns
-    None if the list is missing, empty, or contains no usable text.
+    Both the ranker (Gemma is English-primary) and the dashboard read this
+    field, so English wins wherever Vinnova supplied it. A round carrying
+    only one of the two is still a complete round.
     """
-    parts: list[str] = []
-    for entry in item.get("WebTextLista") or []:
-        if not isinstance(entry, dict):
-            continue
-        text = entry.get("TextSv")
-        if isinstance(text, str) and text.strip():
-            parts.append(text.strip())
-    return "\n\n".join(parts) if parts else None
+    for key in ("TitelEngelska", "Titel"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _build_full_text(item: dict) -> str | None:
+    """Join `WebTextLista` paragraphs into the call body, preferring English.
+
+    Vinnova's API returns the full call body inline — no scraping required —
+    and returns each paragraph twice, as `TextSv` and `TextEn`. Measured on
+    2026-09-21 against the 56 live rounds: 52 carry a complete English
+    translation, 0 carry a Swedish-only body, and no round had mismatched
+    paragraph counts.
+
+    English is chosen only when it covers at least as many paragraphs as
+    Swedish. A partial translation falls back to Swedish wholesale, because
+    picking per-paragraph would either drop an untranslated paragraph or
+    splice two languages into one body.
+
+    Returns None if the list is missing, empty, or carries no usable text.
+    """
+    entries = [e for e in item.get("WebTextLista") or [] if isinstance(e, dict)]
+
+    def paragraphs(key: str) -> list[str]:
+        return [
+            entry[key].strip()
+            for entry in entries
+            if isinstance(entry.get(key), str) and entry[key].strip()
+        ]
+
+    swedish = paragraphs("TextSv")
+    english = paragraphs("TextEn")
+    chosen = english if english and len(english) >= len(swedish) else swedish
+    return "\n\n".join(chosen) if chosen else None
 
 
 class VinnovaAdapter:
@@ -97,9 +129,11 @@ class VinnovaAdapter:
 
     Both endpoints are unauthenticated (no API key required).
 
-    The API returns the full call body inline in ``WebTextLista[*].TextSv``
-    on the round endpoint; that prose is populated into ``full_text``. No
-    HTML scraping or PDF extraction is needed for this source.
+    The API returns the full call body inline in ``WebTextLista`` on the
+    round endpoint; that prose is populated into ``full_text``. No HTML
+    scraping or PDF extraction is needed for this source. Every field comes
+    in Swedish and English — see ``_pick_title`` / ``_build_full_text`` for
+    which one wins.
     """
 
     slug = "vinnova"
@@ -240,7 +274,7 @@ class VinnovaAdapter:
         now_utc = datetime.now(UTC)
 
         external_id = item.get("Diarienummer")
-        title = item.get("Titel")
+        title = _pick_title(item)
         if not external_id or not title:
             _logger.info(
                 "vinnova.skip_incomplete",
