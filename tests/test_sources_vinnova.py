@@ -108,7 +108,8 @@ def test_open_round_is_normalized_correctly():
     assert len(out) == 1
     c = out[0]
     assert c.external_id == "ROUND-OPEN"
-    assert c.title == "Open round"
+    # _ROUND_OPEN carries TitelEngelska; the adapter prefers it over `Titel`.
+    assert c.title == "Open round (en)"
     # _ROUND_OPEN has both Beskrivning and BeskrivningEngelska; _build_summary
     # concatenates them.
     assert c.summary == "Lots of detail.\n\nLots of detail (en)."
@@ -521,3 +522,112 @@ def test_vinnova_adapter_full_text_none_when_no_webtextlista():
     nc = out[0]
     assert nc.summary == "Just a description."
     assert nc.full_text is None
+
+
+# ---------------------------------------------------------------------------
+# Language preference: Vinnova ships every call in Swedish AND English on the
+# same record (measured 2026-09-21: 52 of 56 live calls carry a complete
+# English translation, 0 carry a Swedish-only body). The ranker and the
+# dashboard both read English, so the adapter prefers it and falls back to
+# Swedish only where Vinnova left the English side empty.
+# ---------------------------------------------------------------------------
+
+
+def _round_payload(**overrides) -> dict:
+    """A minimal round that survives every skip-check, for language tests."""
+    base = {
+        "Diarienummer": "LANG-1",
+        "Titel": "Planeringsbidrag inför en internationell ansökan",
+        "Stangningsdatum": "2099-12-31T14:00:00",
+        "Oppningsdatum": "2026-04-01T00:00:00",
+        "Publik": 1,
+        "Webbsida": 1,
+        "LankLista": [{"URL": "https://vinnova.se/lang"}],
+    }
+    base.update(overrides)
+    return base
+
+
+def _one(round_item: dict):
+    """Drive the adapter over a single round and return the NormalizedCall."""
+    routes = {
+        "/api/utlysningar/2026-01-01": [
+            {
+                "Diarienummer": "P",
+                "Titel": "T",
+                "AnsokningsomgangDnrLista": [{"DiarienummerAnsokningsomgang": "LANG-1"}],
+            },
+        ],
+        "/api/ansokningsomgangar/LANG-1": [round_item],
+    }
+    out = list(
+        _make(transport=_mock_transport(routes)).fetch_new_calls(
+            since=datetime(2026, 1, 1, tzinfo=UTC)
+        )
+    )
+    return out[0] if out else None
+
+
+def test_title_prefers_the_english_title():
+    nc = _one(_round_payload(TitelEngelska="Planning grant for international proposal"))
+    assert nc is not None
+    assert nc.title == "Planning grant for international proposal"
+
+
+def test_title_falls_back_to_swedish_when_vinnova_left_english_empty():
+    nc = _one(_round_payload(TitelEngelska="   "))
+    assert nc is not None
+    assert nc.title == "Planeringsbidrag inför en internationell ansökan"
+
+
+def test_a_round_carrying_only_an_english_title_is_not_skipped_as_incomplete():
+    """`Titel` alone used to be the completeness gate. An English-only record
+    is a complete record — dropping it loses a real call."""
+    item = _round_payload(TitelEngelska="English only")
+    del item["Titel"]
+    nc = _one(item)
+    assert nc is not None
+    assert nc.title == "English only"
+
+
+def test_full_text_prefers_the_english_body():
+    nc = _one(
+        _round_payload(
+            WebTextLista=[
+                {"TextSv": "Stöd för att utveckla en ansökan.", "TextEn": "Support to develop."},
+                {"TextSv": "Projektet kan pågå i 12 månader.", "TextEn": "May last 12 months."},
+            ]
+        )
+    )
+    assert nc is not None
+    assert nc.full_text == "Support to develop.\n\nMay last 12 months."
+
+
+def test_full_text_falls_back_to_the_swedish_body_when_there_is_no_english():
+    nc = _one(
+        _round_payload(
+            WebTextLista=[
+                {"TextSv": "Stöd för att utveckla en ansökan."},
+                {"TextSv": "Projektet kan pågå i 12 månader."},
+            ]
+        )
+    )
+    assert nc is not None
+    assert nc.full_text == "Stöd för att utveckla en ansökan.\n\nProjektet kan pågå i 12 månader."
+
+
+def test_a_partial_english_body_falls_back_to_swedish_rather_than_losing_a_paragraph():
+    """Preferring English per-paragraph would either drop the untranslated
+    paragraph or splice two languages together. Completeness wins: if English
+    covers fewer paragraphs than Swedish, the whole body stays Swedish."""
+    nc = _one(
+        _round_payload(
+            WebTextLista=[
+                {"TextSv": "Stöd för att utveckla en ansökan.", "TextEn": "Support to develop."},
+                {"TextSv": "Projektet kan pågå i 12 månader."},
+            ]
+        )
+    )
+    assert nc is not None
+    assert nc.full_text == "Stöd för att utveckla en ansökan.\n\nProjektet kan pågå i 12 månader."
+    assert "Support to develop." not in nc.full_text
