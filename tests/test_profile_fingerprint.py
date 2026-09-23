@@ -1,8 +1,10 @@
 import json
+from types import SimpleNamespace
 
-from grant_lab.db.models import Profile, ProfileKind, User
+from grant_lab.db.models import Call, Profile, ProfileKind, User
 from grant_lab.profiles.fingerprint import (
     FINGERPRINT_VERSION,
+    call_embedding_fingerprint,
     embedding_fingerprint,
     rank_fingerprint,
 )
@@ -207,3 +209,63 @@ def test_the_version_tag_is_v2():
     p = _profile()
     assert embedding_fingerprint(p).startswith("v2:")
     assert rank_fingerprint(p).startswith("v2:")
+
+
+# --- call_embedding_fingerprint (GATE 2) ---------------------------------
+#
+# What a call's stored `embedding` describes: hashes build_call_text's OUTPUT,
+# exactly as embedding_fingerprint above hashes build_profile_text's. A later
+# plan (ranking freshness) calls call_embedding_fingerprint with a duck-typed
+# SQLAlchemy Row rather than a Call ORM instance, so these tests exercise both
+# shapes.
+
+
+def _call(**kw):
+    base = dict(
+        source_id=1,
+        external_id="ext-1",
+        url="https://example.org/call",
+        title="Liver regeneration call",
+        summary="Funding for liver regeneration research",
+        full_text="Full text body about liver regeneration.",
+    )
+    base.update(kw)
+    return Call(**base)
+
+
+def test_call_embedding_fingerprint_equal_text_hashes_equally():
+    a = _call()
+    b = _call()
+    assert call_embedding_fingerprint(a) == call_embedding_fingerprint(b)
+
+
+def test_call_embedding_fingerprint_changes_when_summary_changes():
+    """Load-bearing leg: any function that returns a constant (or that hashes
+    only its own prefix) passes the version-tag test above but fails here --
+    only a genuine dependency on build_call_text's OUTPUT can pass this."""
+    a = _call(summary="Funding for liver regeneration research")
+    b = _call(summary="Funding for pancreatic regeneration research")
+    assert call_embedding_fingerprint(a) != call_embedding_fingerprint(b)
+
+
+def test_call_embedding_fingerprint_starts_with_the_version_tag():
+    c = _call()
+    assert call_embedding_fingerprint(c).startswith(f"{FINGERPRINT_VERSION}:")
+
+
+def test_call_embedding_fingerprint_agrees_between_orm_and_duck_typed_row():
+    """The signature is `call_embedding_fingerprint(call) -> str`, not
+    `(call: Call) -> str`: it must not require an ORM instance. Pin that an
+    ORM Call and a duck-typed object exposing the same three attributes hash
+    identically."""
+    orm_call = _call(
+        title="Liver regeneration call",
+        summary="Funding for liver regeneration research",
+        full_text="Full text body about liver regeneration.",
+    )
+    row = SimpleNamespace(
+        title="Liver regeneration call",
+        summary="Funding for liver regeneration research",
+        full_text="Full text body about liver regeneration.",
+    )
+    assert call_embedding_fingerprint(orm_call) == call_embedding_fingerprint(row)

@@ -31,7 +31,7 @@ import hashlib
 import json
 from typing import Any
 
-from grant_lab.embeddings.similarity import build_profile_text
+from grant_lab.embeddings.similarity import build_call_text, build_profile_text
 
 FINGERPRINT_VERSION = "v2"
 LEGACY_SENTINEL = "legacy"
@@ -85,6 +85,17 @@ def embedding_fingerprint(profile) -> str:
     performed by hand once already. Hashing the output makes it automatic.
     """
     return _digest(build_profile_text(profile))
+
+
+def call_embedding_fingerprint(call) -> str:
+    """What a call's stored `embedding` describes.
+
+    Hashes build_call_text's OUTPUT, exactly as embedding_fingerprint hashes
+    build_profile_text's. That is what makes editing the composer -- or
+    CALL_TEXT_FULL_TEXT_LIMIT -- invalidate every call vector, even though such
+    an edit changes no column. A hash over title/summary/full_text could not.
+    """
+    return _digest(build_call_text(call))
 
 
 def rank_fingerprint(profile) -> str:
