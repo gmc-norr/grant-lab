@@ -17,7 +17,7 @@ from sqlalchemy import or_, select
 
 from grant_lab.db.models import Call, Profile
 from grant_lab.embeddings.similarity import build_call_text, build_profile_text
-from grant_lab.profiles.fingerprint import embedding_fingerprint
+from grant_lab.profiles.fingerprint import call_embedding_fingerprint, embedding_fingerprint
 from grant_lab.ranking.ollama_client import LLMError
 
 if TYPE_CHECKING:
@@ -37,15 +37,21 @@ def refresh_call_embedding(
     """Embed a single call. Returns True on success, False on LLM error
     or missing call. Caller commits the session.
 
-    When `force=True` and the embed call raises LLMError, BOTH `embedding`
-    and `embedding_model` are nulled out. Force mode means "the existing
-    vector is no longer correct" (e.g., the embedded text format changed).
-    Leaving the row with its OLD vector AND current `embedding_model` would
-    make it invisible to the daily refresh tick (which selects on
-    NULL-or-mismatched-model) — silent permanent staleness. Nulling lets
-    the daily tick retry tomorrow; meanwhile the embedding gate sees None
-    → UNKNOWN → falls back to the LLM, which is safer than ranking against
-    a known-stale vector.
+    `embedding_fingerprint` moves with the vector, always: it is stamped
+    alongside `embedding`/`embedding_model` on every successful embed, and
+    nulled alongside them on every force-mode failure. A fingerprint that
+    outlived its vector would claim "fresh" about a row that has none, and
+    the widened staleness scan would then skip that row forever.
+
+    When `force=True` and the embed call raises LLMError, ALL THREE of
+    `embedding`, `embedding_model` and `embedding_fingerprint` are nulled
+    out. Force mode means "the existing vector is no longer correct" (e.g.,
+    the embedded text format changed). Leaving the row with its OLD vector
+    AND current `embedding_model` would make it invisible to the daily
+    refresh tick (which selects on NULL-or-mismatched-model) — silent
+    permanent staleness. Nulling lets the daily tick retry tomorrow;
+    meanwhile the embedding gate sees None → UNKNOWN → falls back to the
+    LLM, which is safer than ranking against a known-stale vector.
 
     ``_http`` — optional persistent :class:`httpx.Client` for batch callers
     (see :meth:`OllamaEmbedClient.session`). When supplied, the same TCP
@@ -75,9 +81,11 @@ def refresh_call_embedding(
         if force:
             call.embedding = None
             call.embedding_model = None
+            call.embedding_fingerprint = None
         return False
     call.embedding = result.vector
     call.embedding_model = embed_client.model
+    call.embedding_fingerprint = call_embedding_fingerprint(call)
     return True
 
 

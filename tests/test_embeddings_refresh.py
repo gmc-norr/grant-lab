@@ -12,6 +12,7 @@ from grant_lab.embeddings.refresh import (
     refresh_missing_embeddings_tick,
     refresh_profile_embedding,
 )
+from grant_lab.profiles.fingerprint import call_embedding_fingerprint
 from grant_lab.ranking.ollama_client import LLMError
 
 
@@ -79,6 +80,28 @@ def test_refresh_call_embedding_writes_vector_and_model(pg_session_factory):
         assert c.embedding is not None
         assert len(c.embedding) == 1024
         assert c.embedding_model == "bge-m3"
+
+
+def test_refresh_call_embedding_writes_fingerprint(pg_session_factory):
+    """Gate 3 (spec D6): the fingerprint written on a successful embed must
+    describe the SAME text that was just embedded, mirroring the guarantee
+    refresh_profile_embedding already gives profiles. Task 4's widened scan
+    reads a mismatched fingerprint as stale -- so this must actually equal
+    call_embedding_fingerprint(call), not just be non-NULL."""
+    with pg_session_factory() as s:
+        cid = _seed_call(s, title="FingerprintWrite")
+        s.commit()
+    client = _fake_client(vec=[0.5] * 1024)
+
+    with pg_session_factory() as s:
+        ok = refresh_call_embedding(s, client, cid)
+        s.commit()
+    assert ok is True
+
+    with pg_session_factory() as s:
+        c = s.get(Call, cid)
+        assert c.embedding_fingerprint is not None
+        assert c.embedding_fingerprint == call_embedding_fingerprint(c)
 
 
 def test_refresh_call_embedding_returns_false_on_llm_error(pg_session_factory, caplog):
@@ -365,6 +388,49 @@ def test_refresh_call_embedding_clears_columns_on_force_mode_failure(pg_session_
         # Both columns nulled — daily tick can re-select on embedding IS NULL
         assert c.embedding is None
         assert c.embedding_model is None
+
+
+def test_refresh_call_embedding_clears_fingerprint_on_force_mode_failure(pg_session_factory):
+    """Gate 4 (spec D6): a force=True embed that fails must NULL the
+    fingerprint along with embedding/embedding_model. A fingerprint that
+    outlives its vector claims "fresh" about a row that has none, which
+    would hide the row from Task 4's widened scan forever.
+
+    Seeds embedding/embedding_model/embedding_fingerprint directly on the
+    row (not via a real successful refresh_call_embedding call), so this
+    gate exercises ONLY the force-failure branch and stays independent of
+    the success path -- otherwise a mutation that deletes the success
+    path's own fingerprint write would also fail this test's own
+    precondition, coupling two gates that must stay separable (see M1)."""
+    with pg_session_factory() as s:
+        cid = _seed_call(s, title="ForceFailFingerprint")
+        s.flush()
+        c = s.get(Call, cid)
+        c.embedding = [0.5] * 1024
+        c.embedding_model = "bge-m3"
+        c.embedding_fingerprint = call_embedding_fingerprint(c)
+        s.commit()
+
+    with pg_session_factory() as s:
+        c = s.get(Call, cid)
+        assert c.embedding is not None
+        assert c.embedding_model is not None
+        assert c.embedding_fingerprint is not None  # precondition: not vacuous
+
+    failing_client = MagicMock()
+    failing_client.model = "bge-m3"
+    failing_client.embed.side_effect = LLMError("ollama down")
+
+    with pg_session_factory() as s:
+        ok = refresh_call_embedding(s, failing_client, cid, force=True)
+        s.commit()
+    assert ok is False
+
+    with pg_session_factory() as s:
+        c = s.get(Call, cid)
+        assert c.embedding is None
+        assert c.embedding_model is None
+        assert c.embedding_fingerprint is None
 
 
 def test_refresh_call_embedding_default_mode_failure_preserves_columns(pg_session_factory):
