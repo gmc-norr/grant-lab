@@ -105,8 +105,11 @@ def test_assemble_returns_none_when_no_subscriptions(pg_session_factory, now):
 def test_assemble_returns_none_when_buckets_empty(pg_session_factory, now):
     with pg_session_factory() as s:
         uid, pid = _seed_user_with_profile(s)
-        # Seed a call but score it BELOW borderline (40)
-        _seed_call(s, title="LowScore", score=40, profile_id=pid)
+        # Seed a call but score it BELOW borderline. 20 is the highest
+        # reachable score under the 40 floor (topic_fit 1 x 20); 40 itself is
+        # now IN the band — see
+        # test_a_score_of_40_lands_in_the_borderline_bucket.
+        _seed_call(s, title="LowScore", score=20, profile_id=pid)
         s.commit()
     with pg_session_factory() as s:
         payload = assemble_for_user(s, user_id=uid, now=now)
@@ -322,6 +325,29 @@ def test_assemble_borderline_only_when_no_top(pg_session_factory, now):
     assert payload is not None
     border = [e for e in payload.sections[0].entries if e.bucket == "borderline"]
     assert len(border) == 2
+
+
+def test_a_score_of_40_lands_in_the_borderline_bucket(pg_session_factory, now):
+    """40 is the only reachable score below the old 45 floor, so the floor
+    silently excluded a whole rating.
+
+    `aggregate_score` is `topic_fit * 20` over an integer rating, so the
+    reachable values are 0/20/40/50/60/80/100 — nothing sits between 40 and
+    45. A floor of 45 therefore meant "50 or better", and a topic_fit of 2
+    dropped into the same invisible pile as a 0. Measured on 2026-09-21: 4 of
+    679 ranked pairs scored exactly 40, among them EU call 493 (microbiome for
+    early cancer prediction), which Sonnet had rated 2/5 with a written
+    rationale nobody could see.
+    """
+    with pg_session_factory() as s:
+        uid, pid = _seed_user_with_profile(s)
+        _seed_call(s, title="Forty", score=40, profile_id=pid)
+        s.commit()
+    with pg_session_factory() as s:
+        payload = assemble_for_user(s, user_id=uid, now=now)
+    assert payload is not None
+    border = [e for e in payload.sections[0].entries if e.bucket == "borderline"]
+    assert [e.score for e in border] == [40]
 
 
 def test_assemble_excludes_hidden(pg_session_factory, now):

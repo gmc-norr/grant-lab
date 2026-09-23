@@ -25,7 +25,26 @@ from grant_lab.web.profile_access import readable_profile_ids
 DIGEST_TOP_THRESHOLD = 60
 
 
-DIGEST_BORDERLINE_LOWER = 45
+# The borderline floor must sit ON a reachable score, not between two of them.
+# `aggregate_score` is `topic_fit * 20` over an INTEGER rating, so the only
+# values a ranking can take are 0/20/40/50/60/80/100 (50 is the
+# eligibility=unclear cap). Nothing lies between 40 and 45, so the former
+# floor of 45 silently meant "50 or better" and a topic_fit of 2 fell into the
+# same invisible pile as a 0 — it appeared in NO bucket and the digest treated
+# it as nothing to send.
+#
+# Lowered 45 -> 40 on 2026-09-21. Measured before the change: of 679 ranked
+# pairs, 30 scored 50 (the entire old band) and 4 scored exactly 40. One of
+# those 4 was EU call 493, "Microbiome for early cancer prediction", which the
+# remote model had rated 2/5 WITH a written rationale — a judgement worth
+# showing as a maybe, which the floor threw away.
+#
+# This deliberately NO LONGER mirrors RANKING_ESCALATION_MIN_SCORE (45). The
+# two numbers answer different questions: escalation asks "is this worth paying
+# the remote model for?", this band asks "is this worth a human's eyes?". A
+# score of 40 is frequently the remote model's OWN verdict after it demoted a
+# local 60, so escalating 40s would only re-demote them out of the band again.
+DIGEST_BORDERLINE_LOWER = 40
 DIGEST_BUCKET_SIZE = 5
 # must_include is the user's escape hatch, so it gets a larger cap than the
 # score buckets — but it MUST be bounded. A broad term ("cancer", "research")

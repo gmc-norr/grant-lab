@@ -22,7 +22,7 @@ readability. Two things answer that here:
 
 P_org is the control on purpose: it is the DEFAULT visibility, it is what every
 profile in the live database is today, and a digest that lost it would be the
-loudest possible day-one break. `seed_ranked_calls` scores P_org at 41 — below
+loudest possible day-one break. `seed_ranked_calls` scores P_org at 20 — below
 `DIGEST_BORDERLINE_LOWER` — so this file seeds a second call, ranked against
 P_org alone, to give the control a section of its own.
 """

@@ -690,7 +690,12 @@ def seed_ranked_calls(pg_session_factory, world: World) -> RankedWorld:
     """
     spec = {
         # profile id: (score, budget_min, budget_max, trl_min, trl_max)
-        world.p_org: (41, 111_111, 222_222, 2, 5),
+        # P_org is scored below DIGEST_BORDERLINE_LOWER on purpose (see
+        # test_profile_access_digest's module docstring). 20 not 41: the floor
+        # moved 45 -> 40, and 20 is a score the ranker can actually produce
+        # (topic_fit * 20), so this stays below the band without sitting in the
+        # 41-44 gap that no real ranking ever lands in.
+        world.p_org: (20, 111_111, 222_222, 2, 5),
         world.p_priv: (62, 555_555, 666_666, 4, 8),
         world.p_secret: (93, 777_777, 888_888, 6, 9),
     }
