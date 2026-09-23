@@ -218,6 +218,14 @@ on every ingest run, blocked only by an already-active job — so a re-ingested
 call is re-ranked that same run. The permanent-staleness property that makes the
 embedding bug worth fixing does not hold here. Revisit only with a measured case.
 
+> **Amended 2026-09-24.** The measured case arrived: that nightly re-enqueue re-ranks
+> the whole open feed and re-pays Sonnet for the same pairs daily.
+> `2026-09-24-ranking-freshness-design.md` removes it, and so removes the mitigation
+> this paragraph relies on. Call-side ranking freshness is carried there by
+> `call_rankings.call_fingerprint`, which hashes this slice's
+> `calls.embedding_fingerprint`. Build this slice first. The paragraph above stays as
+> written, as the record of what held on 2026-09-08.
+
 **A settings/KV table for cursor persistence.** `_embeddings_tick`'s existing
 comment already decided this: the cursor is an in-process resume hint, a restart
 resets it to 0, and that is "slower but never skips a row". D9 inherits the
