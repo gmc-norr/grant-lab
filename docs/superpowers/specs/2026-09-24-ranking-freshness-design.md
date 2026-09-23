@@ -1,7 +1,10 @@
 # Ranking freshness — one completed ranking per input revision
 
-**Status:** rev 2, unbuilt. Rev 2 closes three gaps an outside review found in rev 1
-(§1.8); the measured evidence for each is below it.
+**Status:** rev 3, unbuilt. Rev 2 closes three gaps an outside review found in rev 1
+(§1.8); the measured evidence for each is below it. Rev 3 makes three changes found
+while writing the build plan: the remote model id leaves the scoring fingerprint (D3),
+backfill enqueues every open pair of its profile (D4, D5), and the call query projects
+two raw keys instead of loading raw (D4).
 **Base:** branch `chore/ranking-sonnet-5-cap-150` @ `0cb8a8a0` (the running app's code;
 not yet on master).
 **Depends on:** `2026-09-08-call-embedding-freshness` (plan merged as `060a2022`,
@@ -226,24 +229,38 @@ stale. Payload:
 | `embedding_threshold`, `embedding_hard_fail_threshold` | decide gate FAIL vs LLM (gap 3) |
 | `escalation_min_score` | decides whether a pair wants a second reading |
 | `logprobs_enabled` | changes the topic expected value, so the score |
-| local model id (`client.model`), remote model id (`remote_client.model`) | a model swap re-ranks automatically |
+| local model id (`client.model`) | a Gemma swap re-ranks automatically: one night of local work |
 
-Rev 1 left model ids out and made the admin button the lever. Rev 2 includes them. A
-swap is exactly when every stored score stops describing the running scorer, and the
-cost is bounded: one night of local rankings, and Sonnet capped per day.
+**The remote model id is deliberately out (rev 3).** Rev 2 put it in, which would have
+re-ranked every open pair whenever the API key was added or removed, because the id is
+absent without a client. That contradicts D6's rule that adding a key does not start a
+paid backlog nobody chose. A `REMOTE_RANK_MODEL` swap is therefore a deliberate, paid
+act, done with the admin button (D5), which shows the count first.
 
 **The chokepoint is `drain_queue`'s signature.** Every setting reaches ranking as a
-keyword parameter of `drain_queue`, threaded from `scheduler.py`. G25 classifies every
-parameter as either *in the payload* (the list above) or *no effect on a stored result*:
-`session_factory`, `batch_size`, `tick_budget_seconds`, `remote_daily_cap` (it decides
-*when* an escalation runs, which D6 handles), `_clock`. A new parameter that nobody
-classified turns G25 red. Measured on the base: `drain_queue` has 11 keyword
-parameters: 6 in the payload (`client`, `remote_client`, `embedding_threshold`,
-`embedding_hard_fail_threshold`, `escalation_min_score`, `logprobs_enabled`) and the 5
-above. No module on the ranking path (`rank_pair`, `criteria`, `aggregate`, `prompt`,
-`worker`, `must_include`, `ev`, both clients) reads `Settings` or `get_settings`
-directly (grep, 0 hits), so the signature really is the only way in. The enqueue paths compute the same fingerprint from `Settings`,
-so D10 includes a parity gate.
+keyword parameter of `drain_queue`, threaded from `scheduler.py`. Measured on the base,
+it has 11 keyword parameters. G25 sorts every one into exactly one of three classes:
+
+| Class | Parameters |
+|---|---|
+| in the scoring payload | `client`, `embedding_threshold`, `embedding_hard_fail_threshold`, `escalation_min_score`, `logprobs_enabled` |
+| handled by escalation state (D6) | `remote_client`, `remote_daily_cap` |
+| no effect on a stored result | `session_factory`, `batch_size`, `tick_budget_seconds`, `_clock` |
+
+A new parameter that nobody classified turns G25 red. No module on the ranking path
+(`rank_pair`, `criteria`, `aggregate`, `prompt`, `worker`, `must_include`, `ev`, both
+clients) reads `Settings` or `get_settings` directly (grep, 0 hits), so the signature
+really is the only way in.
+
+**The enqueue side never reads `Settings` for this.** The worker stamps from its own
+parameters, and tests run it with non-default ones (`embedding_threshold=0.0`). If the
+enqueue side read `Settings`, every test pair, and any production pair after a mapping
+drift in `main.py`, would look stale forever. So the scheduler builds one
+`ScoringConfig` from the *same locals* it hands `drain_queue`, and passes it to ingest
+and reconcile. G26 pins that wiring. Only the ingest CLI, which has no scheduler, builds
+it from `Settings`. If the two sides ever disagree, the failure is wasted work (every
+pair looks stale every night), never a stale ranking kept, and §5's jobs-per-day
+measurement shows it.
 
 **`SCORING_VERSION` is a convention, and the spec says so.** A change to
 `criteria.py`, `aggregate.py` or `parse_response` that changes results must bump it. No
@@ -269,15 +286,34 @@ Its callers:
 |---|---|---|---|---|
 | ingest (`bulk_enqueue_for_calls`) | touched ∩ open | active | applied | applied |
 | 04:00 reconcile | open | active | applied | applied |
-| `backfill_profile` from `post_edit` / `bootstrap_worker` | open | the one profile | applied | applied |
-| admin "Re-rank everything" | open | active | **bypassed** | **bypassed** |
+| `backfill_profile` (from `post_edit`, `bootstrap_worker`, admin) | open | the one profile | **bypassed** | **bypassed** |
+
+**Why backfill bypasses both (rev 3).** Backfill runs only after a human act. `post_edit`
+fires only when `rank_inputs_changed`, i.e. the profile fingerprint moved, so every pair
+of that profile is already stale by the profile arm. `bootstrap_worker` runs for a
+profile with no rankings. The admin button is the override by definition (D5). The
+freshness check would select every open pair anyway, and skipping it keeps the scoring
+config out of the web layer. Suppression by input (D7) would not fire after a profile
+edit either, because the stamps differ. The one difference is a legacy failed job with
+NULL stamps, retried once per human edit, and that is bounded.
 
 Fingerprints are Python over row content, so they are computed in Python and passed to
 one bulk `INSERT … SELECT`: call fingerprints as arrays
 (`unnest(:call_ids, :call_fps)`), profile fingerprints as today's `VALUES` list, and the
-scoring fingerprint as one scalar. The call select is column-limited and must not load
-`Call.embedding`, the same rule the profile side follows. Measured load: 2.51 MB of text
-across the 475 open calls (average 5,532 characters, maximum 36,399).
+scoring fingerprint as one scalar. The call select is column-limited. It must not load
+`Call.embedding`, the same rule the profile side follows, and it must not load `raw`
+whole: across the 475 open calls, raw is 13.33 MB (maximum 69 KB per call) against
+2.51 MB of text (average 5,532 characters, maximum 36,399). The select projects the
+`RANKED_RAW_KEYS` in SQL with `jsonb_build_object(...) AS raw`, so the fingerprint reads
+`row.raw` on both a loaded `Call` and a narrowed row, through one code path. G27 pins
+that the two agree, mirroring `tests/test_ranking_queue_row_parity.py` on the profile
+side.
+
+**The NULL trap in the currency test.** "Not pending" must be written
+`cr.escalation_state IS DISTINCT FROM 'pending'`, not `NOT (cr.escalation_state =
+'pending' AND …)`. With the second form, a NULL state (the normal case) makes the whole
+currency test NULL, so every fresh pair reads as stale and F1 comes back silently. G1
+catches it, because a fresh pair's state is NULL.
 
 `enqueue_for_pair` has no production caller (only a docstring mentions it). Leave it
 alone.
@@ -285,10 +321,12 @@ alone.
 ### D5. The admin button is the override
 
 `POST /admin/rerank` ("Re-rank everything") re-ranks every open pair, ignoring both
-freshness and suppression. It is the lever for an unversioned code change or a run
-someone does not trust. The estimate becomes exactly `open calls × active profiles`, and
-the label changes from "last {backfill_days} days" to "open calls". `backfill_profile`
-gains an explicit `force` parameter. Only the admin endpoint passes `True`.
+freshness and suppression. It is the lever for an unversioned code change, a remote
+model swap, or a run someone does not trust. It keeps calling `backfill_profile` per
+active profile, and D4 makes that "every open pair, no checks". The estimate becomes
+exactly `open calls × active profiles`. In `AdminDashboardOut`, `recent_calls_count`
+becomes `open_calls_count` and `backfill_days` goes (`BACKFILL_DAYS` no longer exists).
+The label changes from "last {backfill_days} days" to "open calls".
 
 ### D6. Escalation is tracked apart from freshness (gap 1)
 
@@ -449,7 +487,7 @@ it must reject (`measure-dont-predict` Rule 2).
 
 | # | Gate | What trivially passes it |
 |---|---|---|
-| G1 | An unchanged call re-ingested enqueues **no** job (F1) | an ingest that touched nothing: assert `touched_call_ids` non-empty |
+| G1 | An unchanged call re-ingested enqueues **no** job (F1), with `escalation_state` NULL and a remote client configured (the NULL trap, D4) | an ingest that touched nothing: assert `touched_call_ids` non-empty |
 | G2 | A call whose `summary` changed enqueues exactly its pairs | enqueue-everything (G1 rejects it) |
 | G3 | A change to raw outside `RANKED_RAW_KEYS` enqueues nothing | a fingerprint that ignores raw entirely (G4 rejects it) |
 | G4 | A change to `raw.trl_min` enqueues | — |
@@ -465,8 +503,9 @@ it must reject (`measure-dont-predict` Rule 2).
 |---|---|---|
 | G8 | A `PROMPT_VERSION` change makes every open pair stale | stamping the literal instead of recomputing |
 | G24 | Changing `embedding_hard_fail_threshold` (0.20 → 0.10) makes every open pair stale, and a pair at cosine 0.15 re-ranks from gate-fail to LLM-scored | a pair outside [0.10, 0.20): pin its cosine |
-| G25 | Every `drain_queue` keyword parameter is in the scoring payload or on the explicit no-effect list; mutation: add a parameter → red | an empty classification list: assert both lists are non-empty and the union equals the signature |
-| G26 | The scoring fingerprint the enqueue paths compute from `Settings` equals the one the worker stamps from its parameters | a test that builds both from one shared helper call and never compares production wiring |
+| G25 | Every `drain_queue` keyword parameter is in exactly one of D3's three classes, and the payload class equals `ScoringConfig.for_drain`'s parameters; mutation: add a parameter → red | an empty class: assert all three are non-empty and their union equals the signature |
+| G26 | In the real `build_scheduler`, the `ScoringConfig` handed to ingest and reconcile equals `ScoringConfig.for_drain` over the kwargs the `rank:drain` job hands `drain_queue`, with and without a remote client | a test that builds both from one shared helper call and never runs the scheduler's closures |
+| G27 | A narrowed call row (the freshness select) and a loaded `Call` give byte-identical `call_rank_fingerprint`s, with `trl_min`, `embedding_fingerprint` and `embedding_model` all set | NULLs everywhere: `_canonical` drops them from both payloads, so set real values |
 
 **Escalation completion (gap 1)**
 
@@ -508,6 +547,18 @@ before it is rewritten, which is also the cheapest proof that the change landed:
   (asserts the timeline override note; check what else it covers before rewriting)
 - `tests/architecture/test_criterion_vocabulary.py::test_the_gate_tuple_scan_finds_the_four_gates`
 - `frontend/src/components/CriterionChips.test.tsx`: the `timeline` / `too_soon` chip case
+- `tests/test_ranking_queue.py::test_reconcile_ignores_old_calls` and
+  `::test_reconcile_ignores_calls_with_null_published_at` (the window is now openness)
+- `tests/test_ranking_backfill.py::test_backfill_enqueues_jobs_for_recent_calls` and
+  `::test_backfill_skips_pair_with_recent_dead_lettered_job` (backfill bypasses both, D4)
+- `tests/architecture/test_criterion_vocabulary.py::test_neither_criterion_scan_alone_is_the_whole_vocabulary`
+  and `::test_the_frontend_criteria_scan_finds_a_real_list` (seven criteria become six;
+  the label map keeps seven, because `timeline` stays a reason code)
+- `tests/test_api_admin_dashboard.py::test_dashboard_rerank_estimate_is_product` and the
+  `AdminDashboard.test.tsx` fixture (`recent_calls_count` / `backfill_days`)
+
+Signature changes, not contract changes: every `reconcile_missing_rankings(...)` and
+`run_ingestion(...)` call in the tests gains the new `ctx=` / `freshness=` argument.
 
 `tests/test_ranking_aggregate.py` also uses `too_soon` as a fixture reason in its
 short-circuit test. That test survives with `expired`.
