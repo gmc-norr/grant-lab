@@ -124,6 +124,15 @@ class Call(Base):
         nullable=True,
     )
     embedding_model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # What `embedding` describes: "v2:" + sha256 of build_call_text(self).
+    # Moves with `embedding` and `embedding_model` in every branch of
+    # refresh_call_embedding. NULL means unknown -> the daily tick treats
+    # the row as stale and re-embeds it.
+    #
+    # NOT covered by ck_calls_embedding_model_paired, and must not be: on
+    # deploy every existing row has a vector and a NULL fingerprint, so a
+    # paired constraint would fail migration 0080.
+    embedding_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     source: Mapped[Source] = relationship(back_populates="calls")
 

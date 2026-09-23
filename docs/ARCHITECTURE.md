@@ -57,7 +57,7 @@ Read this before claiming two tables share, or do not share, a rule.
 | `call_rankings` | `CallRanking` | 18 | 2 | 0 | 1 |
 | `call_rubrics` | `CallRubric` | 7 | 1 | 0 | 0 |
 | `call_section_extracts` | `CallSectionExtract` | 7 | 1 | 1 | 0 |
-| `calls` | `Call` | 19 | 1 | 1 | 7 |
+| `calls` | `Call` | 20 | 1 | 1 | 7 |
 | `chat_summaries` | `ChatSummary` | 7 | 2 | 0 | 1 |
 | `chat_turns` | `ChatTurn` | 9 | 1 | 1 | 2 |
 | `citation_audit_verdicts` | `CitationAuditVerdict` | 7 | 1 | 1 | 2 |
