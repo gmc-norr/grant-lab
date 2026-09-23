@@ -58,3 +58,9 @@ frontend/.playwright/
 
 # local uvicorn log from the run skill (transient, like .e2e-vite.log above)
 app.log
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+
+jev_api.txt
+
