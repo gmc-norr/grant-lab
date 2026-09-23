@@ -260,20 +260,27 @@ it("with no ?profile= the hide button is disabled, hints why, and posts nothing"
 });
 
 it("renders deadline_local_date instead of slicing the UTC string", async () => {
+  // The date must stay in the FUTURE relative to the real clock. This fixture
+  // used to be 2026-09-15/16, which made the test a time bomb: once that day
+  // passed the page began rendering "Closed 2026-09-16" and the exact-text
+  // match broke, five days later, in a test about timezone slicing that has
+  // nothing to do with expiry. 2099 keeps the only property under test — the
+  // UTC instant (22:00Z on the 15th) falls on the 16th in local time, so the
+  // page must print the local date, not `deadline.slice(0, 10)`.
   const withDeadline = {
     ...RANKED,
     call: {
       ...RANKED.call,
-      deadline: "2026-09-15T22:00:00Z",
-      deadline_local_date: "2026-09-16",
+      deadline: "2099-09-15T22:00:00Z",
+      deadline_local_date: "2099-09-16",
     },
   };
   vi.spyOn(clientMod.api, "GET").mockResolvedValue({ data: withDeadline, error: undefined } as never);
   renderDetail();
   await screen.findByRole("heading", { name: "Genomics Grant" });
-  // The local date (2026-09-16) must appear, not the UTC slice (2026-09-15).
-  expect(screen.getByText("2026-09-16")).toBeInTheDocument();
-  expect(screen.queryByText("2026-09-15")).not.toBeInTheDocument();
+  // The local date (2099-09-16) must appear, not the UTC slice (2099-09-15).
+  expect(screen.getByText("2099-09-16")).toBeInTheDocument();
+  expect(screen.queryByText("2099-09-15")).not.toBeInTheDocument();
 });
 
 // -------------------------------------------------------------------------
