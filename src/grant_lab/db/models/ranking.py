@@ -191,8 +191,8 @@ class RankingJob(Base):
         ),
         # Non-active row query indexes (migration 0057):
         # ix_ranking_jobs_call_profile — correlated NOT EXISTS on (call_id,
-        # profile_id) for failed rows in reconcile_missing_rankings, and the
-        # _ranking_counts JOIN key.
+        # profile_id) for failed rows in ranking/freshness.py::enqueue_stale_pairs,
+        # and the _ranking_counts JOIN key.
         Index("ix_ranking_jobs_call_profile", "call_id", "profile_id"),
         # ix_ranking_jobs_profile_status — (profile_id, status) grouping used
         # by _ranking_counts and per-profile status breakdown queries.

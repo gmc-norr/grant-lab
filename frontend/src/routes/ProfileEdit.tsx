@@ -120,7 +120,7 @@ function EditForm({ p, pid }: { p: ProfileDetail; pid: number }) {
                           value={currency} onChange={(e) => setCurrency(e.currentTarget.value)} />
             <TextInput label="Technology Readiness Level — min" description="(1–9)" value={trlMin} onChange={(e) => setTrlMin(e.currentTarget.value)} />
             <TextInput label="Technology Readiness Level — max" description="(1–9)" value={trlMax} onChange={(e) => setTrlMax(e.currentTarget.value)} />
-            <Textarea label="Must-include keywords" description={isMatchEdition ? undefined : "(one per line; bypass the timeline gate)"} rows={3}
+            <Textarea label="Must-include keywords" description={isMatchEdition ? undefined : "(one per line; skips the topic-similarity check — won't rescue a call whose deadline has passed)"} rows={3}
                       value={mustInclude} onChange={(e) => setMustInclude(e.currentTarget.value)} />
             <Textarea label="Hard exclusions" description="(one per line)" rows={3}
                       value={hardExclusions} onChange={(e) => setHardExclusions(e.currentTarget.value)} />

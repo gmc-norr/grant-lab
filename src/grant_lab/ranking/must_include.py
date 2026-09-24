@@ -1,10 +1,10 @@
 """Shared must_include matching semantics for the ranking and digest paths.
 
 `must_include` is a profile's force-include escape hatch: a matching call
-bypasses the timeline/embedding gates so it still reaches the local Gemma
-ranker (and sometimes a billed Sonnet escalation), AND the same matching feeds
-the weekly email digest. The two paths MUST stay semantically identical or a
-call could force-include on one path and not the other.
+bypasses the topic-similarity (embedding) gate so it still reaches the local
+Gemma ranker (and sometimes a billed Sonnet escalation), AND the same matching
+feeds the weekly email digest. The two paths MUST stay semantically identical
+or a call could force-include on one path and not the other.
 
 Two rules, defined here so neither path can drift:
 

@@ -112,10 +112,11 @@ def rank_fingerprint(profile) -> str:
     `embedding_fingerprint` is in the payload so that editing build_profile_text
     -- which changes no text field -- still invalidates rankings. Usually that
     costs no extra re-rank round, because the worker defers a pair whose vector
-    has not caught up (ranking/worker.py:184-190). It is NOT a guarantee: that
-    deferral has two deliberate escapes, and a ranking written through either
-    one is stamped with a fingerprint the vector does not yet match, so the
-    pair re-ranks once more when the vector settles.
+    has not caught up (the deferral block in `drain_queue`, gated by
+    `_STALE_VECTOR_MAX_DEFER_HOURS`, ranking/worker.py). It is NOT a guarantee:
+    that deferral has two deliberate escapes, and a ranking written through
+    either one is stamped with a fingerprint the vector does not yet match, so
+    the pair re-ranks once more when the vector settles.
 
       * A NULL `embedding_fingerprint` proceeds. It means unknown provenance,
         not a mismatch: on first deploy every profile has a vector and a NULL

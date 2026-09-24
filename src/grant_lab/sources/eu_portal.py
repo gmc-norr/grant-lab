@@ -509,9 +509,9 @@ class EUPortalAdapter:
         # This costs no LLM money either way: `rank_pair` short-circuits a
         # FAILing timeline gate before any model call. What it saves is a local
         # embedding per call, a ranking_jobs row per active profile, and 590
-        # rows of dashboard noise. It also closes the one path where an expired
-        # call DOES reach the LLM — a profile `must_include` keyword match
-        # bypasses the timeline gate on purpose.
+        # rows of dashboard noise. A profile `must_include` keyword match
+        # bypasses only the topic-similarity gate, not this one — it still
+        # cannot reach the LLM once a call is dropped here as expired.
         #
         # A call with NO deadline stated is not expired and is kept.
         deadline = _pick_deadline(_deadlines(metadata), now)
