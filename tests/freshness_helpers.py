@@ -19,6 +19,7 @@ from grant_lab.db.models import (
     User,
 )
 from grant_lab.embeddings.client import EmbedResult
+from grant_lab.ranking.freshness import FreshnessContext, ScoringConfig
 from grant_lab.ranking.ollama_client import LLMError, OllamaClient
 
 _seq = {"n": 0}
@@ -64,8 +65,8 @@ def make_call(session, *, source_slug: str = "vinnova", **kw) -> Call:
         external_id=kw.pop("external_id", f"FRESH-{n}"),
         url=f"https://example.org/calls/fresh-{n}",
         title=kw.pop("title", "Precision medicine programme"),
-        summary="Funding for AI-based diagnostics.",
-        full_text="Body about eligibility, scope, budget.",
+        summary=kw.pop("summary", "Funding for AI-based diagnostics."),
+        full_text=kw.pop("full_text", "Body about eligibility, scope, budget."),
         # reconcile_missing_rankings filters on published_at >= now-90d and
         # excludes NULL published_at entirely.
         published_at=kw.pop("published_at", datetime.now(UTC)),
@@ -160,3 +161,21 @@ def ollama_clean() -> OllamaClient:
         model="gemma4:e4b-it-q4_K_M",
         transport=httpx.MockTransport(handler),
     )
+
+
+def scoring_for(client=None, **over) -> ScoringConfig:
+    """The ScoringConfig a drain_queue(client=client, embedding_threshold=0.0,
+    ...defaults) run stamps. Keep in step with how the tests below call drain."""
+    kw = dict(
+        client=client,
+        embedding_threshold=0.0,
+        embedding_hard_fail_threshold=None,
+        escalation_min_score=45,
+        logprobs_enabled=False,
+    )
+    kw.update(over)
+    return ScoringConfig.for_drain(**kw)
+
+
+def ctx_for(client=None, *, remote_enabled: bool = False, **over) -> FreshnessContext:
+    return FreshnessContext(scoring=scoring_for(client, **over), remote_enabled=remote_enabled)
