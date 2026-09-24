@@ -250,11 +250,12 @@ def test_a_recent_non_parse_failure_on_the_same_inputs_does_not_suppress(session
 
 @pytest.mark.parametrize("kind", ["service", "error"])
 def test_a_null_stamped_non_parse_failure_does_not_suppress_pair_wide(session, kind):
-    """NULL stamps are pair-wide ONLY on a pre-0081 row (failure_kind NULL too).
-    A `service` row with NULL stamps is what requeue_stuck_running writes (the
-    process died before any capture); an `error` one is a failure before
-    capture. Read as pre-0081, a worker restart mid-drain would silence the
-    pair for DEAD_LETTER_SUPPRESS_DAYS (mutation M-I1c)."""
+    """A NULL-stamped row suppresses pair-wide ONLY when its kind says so: a
+    pre-0081 row (failure_kind NULL too) or a `crash` dead-letter
+    (tests/test_ranking_queue.py). An `error` row with NULL stamps is a
+    failure before capture, and a `service` one must not suppress either.
+    Read as pre-0081, a failure before capture would silence the pair for
+    DEAD_LETTER_SUPPRESS_DAYS (mutation M-I1c)."""
     ctx = ctx_for()
     p, c = make_profile(session), make_call(session, deadline=FUTURE)
     _failed_job(session, c, p, days_ago=2, kind=kind, stamps=None)

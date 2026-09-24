@@ -194,39 +194,68 @@ def test_requeue_stuck_running_dead_letters_persistent_crasher(pg_session_factor
     assert "crash loop" in (row.last_error or "")
 
 
-def test_a_stuck_running_dead_letter_is_a_service_failure_that_never_suppresses(
-    pg_session_factory, profile_factory
-):
-    """Spec D7 amendment (final review I1). The reaper dead-letters a job whose
-    process died mid-job: the service failed, not the pair. It is written
-    failure_kind='service' with NULL stamps (nothing was captured), and the
-    next reconcile enqueues the pair. Read as a pre-0081 row (NULL stamps),
-    a worker restart during a drain would silence the pair for 7 days."""
-    profile_id, _ = profile_factory()
+def _crash_to_dead_letter(pg_session_factory, *, call_id: int, profile_id: int) -> None:
+    """Drive the pair's job to the reaper's dead-letter the real way: a claimed
+    job stuck RUNNING on its last attempt, then requeue_stuck_running."""
     with pg_session_factory() as s:
-        call_id = _seed_call(s)
         enqueue_for_pair(s, call_id=call_id, profile_id=profile_id)
-        claimed = claim_pending_jobs(s, limit=1)
+        (job,) = claim_pending_jobs(s, limit=1)
         s.execute(
             update(RankingJob)
-            .where(RankingJob.id == claimed[0].id)
+            .where(RankingJob.id == job.id)
             .values(attempts=4, updated_at=datetime.now(UTC) - _PAST_STUCK)
         )
         s.commit()
-
     with pg_session_factory() as s:
         assert requeue_stuck_running(s) == 1
         s.commit()
 
+
+def test_a_stuck_running_dead_letter_is_a_crash_with_no_stamps(pg_session_factory, profile_factory):
+    """Spec D7 amendment (final review I1, fix round 1). The reaper dead-letters
+    a job that has crashed the worker MAX_ATTEMPTS times: the crash loop its
+    own docstring describes, which will recur. It is written
+    failure_kind='crash' with NULL stamps (whatever the dead worker captured
+    died with it)."""
+    profile_id, _ = profile_factory()
+    with pg_session_factory() as s:
+        call_id = _seed_call(s)
+        s.commit()
+    _crash_to_dead_letter(pg_session_factory, call_id=call_id, profile_id=profile_id)
+
     with pg_session_factory() as s:
         row = s.execute(select(RankingJob)).scalar_one()
-        assert (row.status, row.failure_kind) == (RankingJobStatus.FAILED, "service")
+        assert (row.status, row.failure_kind) == (RankingJobStatus.FAILED, "crash")
         assert (row.profile_fingerprint, row.call_fingerprint, row.scoring_fingerprint) == (
             None,
             None,
             None,
         )
+
+
+def test_a_crash_dead_letter_suppresses_its_pair_wholesale(pg_session_factory, profile_factory):
+    """Spec D7 amendment (fix round 1). A crash loop re-armed every night would
+    kill the worker MAX_ATTEMPTS more times per night, so a `crash` dead-letter
+    suppresses its pair for DEAD_LETTER_SUPPRESS_DAYS -- pair-wide, because the
+    row has no stamps to key on. Built through the real requeue_stuck_running.
+    The second call, with no failed job, is the population control: reconcile
+    enqueues it and only it."""
+    profile_id, _ = profile_factory()
+    with pg_session_factory() as s:
+        crashed = _seed_call(s)
+        control = _seed_call_with(s, external_id="Q-CONTROL", published=datetime.now(UTC))
+        s.commit()
+    _crash_to_dead_letter(pg_session_factory, call_id=crashed, profile_id=profile_id)
+
+    with pg_session_factory() as s:
         assert reconcile_missing_rankings(s, ctx=CTX) == 1
+        pending = [
+            j.call_id
+            for j in s.execute(
+                select(RankingJob).where(RankingJob.status == RankingJobStatus.PENDING)
+            ).scalars()
+        ]
+        assert pending == [control]
 
 
 def _seed_call_with(s, *, external_id: str, published: datetime | None) -> int:

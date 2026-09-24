@@ -38,15 +38,17 @@ def upgrade() -> None:
     # keeps today's pair-wide 7-day suppression for those rows.
     for col in ("profile_fingerprint", "call_fingerprint", "scoring_fingerprint"):
         op.add_column("ranking_jobs", sa.Column(col, sa.Text(), nullable=True))
-    # Spec D7 amendment (final review I1): WHY a job failed. Only a 'parse'
-    # failure (deterministic at temperature 0) suppresses its pair; 'service'
-    # (the model service, or a worker that died mid-job) and 'error' (anything
-    # else) never do. NULL on every pre-0081 row, which keeps the old rule.
+    # Spec D7 amendment (final review I1): WHY a job failed. A 'parse' failure
+    # (deterministic at temperature 0) suppresses its pair on the same inputs;
+    # a 'crash' (the reaper's dead-letter of a job that crashed the worker
+    # MAX_ATTEMPTS times) suppresses it pair-wide; 'service' (the model
+    # service) and 'error' (anything else) never do. NULL on every pre-0081
+    # row, which keeps the old rule.
     op.add_column("ranking_jobs", sa.Column("failure_kind", sa.Text(), nullable=True))
     op.create_check_constraint(
         "ck_ranking_jobs_failure_kind",
         "ranking_jobs",
-        "failure_kind IS NULL OR failure_kind IN ('parse','service','error')",
+        "failure_kind IS NULL OR failure_kind IN ('parse','service','error','crash')",
     )
     # Spec D8: the writer no longer produces a timeline criterion row. Closed
     # pairs are never re-ranked, so without this their stale chip would stay.

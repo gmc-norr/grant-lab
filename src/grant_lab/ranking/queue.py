@@ -185,10 +185,12 @@ def requeue_stuck_running(session: Session, *, max_attempts: int = MAX_ATTEMPTS)
             status=RankingJobStatus.FAILED,
             attempts=RankingJob.attempts + 1,
             last_error="dead-lettered: stuck RUNNING past max_attempts (worker crash loop)",
-            # The process died mid-job: not the pair's fault, so this never
-            # suppresses it (ranking spec D7 amendment, final review I1).
-            # No stamps: whatever the dead worker captured died with it.
-            failure_kind="service",
+            # This job crashed the worker max_attempts times: the crash loop
+            # described above, which WILL recur. 'crash' suppresses the pair
+            # pair-wide for DEAD_LETTER_SUPPRESS_DAYS (ranking spec D7
+            # amendment, final review I1). No stamps: whatever the dead worker
+            # captured died with it, so it cannot be keyed on inputs.
+            failure_kind="crash",
             updated_at=now,
         )
     )
@@ -251,13 +253,15 @@ def mark_done(session: Session, job_id: int) -> None:
 # Why a ranking job failed (ranking spec D7 amendment, final review I1). The
 # vocabulary of ranking_jobs.failure_kind (CHECK ck_ranking_jobs_failure_kind):
 #   parse   -- the local model's output did not parse (ParseError). Deterministic
-#              at temperature 0: the only kind that suppresses its pair.
-#   service -- the model service failed (LLMError: refused, timeout, HTTP error),
-#              or the worker died mid-job (requeue_stuck_running). Not the pair's
-#              fault; never suppresses.
+#              at temperature 0: suppresses its pair on the SAME inputs.
+#   service -- the model service failed (LLMError: refused, timeout, HTTP error).
+#              Not the pair's fault; never suppresses.
 #   error   -- anything else. Never suppresses: a bug should stay visible, and a
 #              transient database error should retry.
-FAILURE_KINDS = ("parse", "service", "error")
+#   crash   -- requeue_stuck_running's dead-letter: the job crashed the worker
+#              MAX_ATTEMPTS times and will again. Suppresses pair-wide (no stamps).
+# mark_failed takes all but `crash`: a worker that reached it did not crash.
+MARK_FAILED_KINDS = ("parse", "service", "error")
 
 
 def mark_failed(
@@ -273,11 +277,12 @@ def mark_failed(
     terminal status (dead-letter). Otherwise revert to PENDING with
     incremented attempts so the queue retries it on the next tick.
 
-    `failure_kind` is one of FAILURE_KINDS, written on EVERY call: the last
+    `failure_kind` is one of MARK_FAILED_KINDS, written on EVERY call: the last
     failure's kind is what a FAILED row carries. NULL is reserved for rows
     written before migration 0081, which enqueue_stale_pairs reads (with NULL
-    stamps) as the old pair-wide rule, so None or an unknown kind raises
-    ValueError before anything is written.
+    stamps) as the old pair-wide rule, and 'crash' (pair-wide too) is the
+    reaper's alone, so None, 'crash' or an unknown kind raises ValueError
+    before anything is written.
 
     `stamps` = (profile, call, scoring) fingerprints the job failed ON. Dead-
     letter suppression (ranking/freshness.py, spec D7) compares them with the
@@ -292,9 +297,9 @@ def mark_failed(
 
     `error` is truncated to `_LAST_ERROR_MAX` chars so a stray traceback
     doesn't blow up row size (the column is unbounded TEXT)."""
-    if failure_kind not in FAILURE_KINDS:
+    if failure_kind not in MARK_FAILED_KINDS:
         raise ValueError(
-            f"mark_failed needs a failure_kind in {FAILURE_KINDS}, got {failure_kind!r}"
+            f"mark_failed needs a failure_kind in {MARK_FAILED_KINDS}, got {failure_kind!r}"
         )
     if stamps is not None and (
         len(stamps) != 3 or not all(isinstance(s, str) and s for s in stamps)

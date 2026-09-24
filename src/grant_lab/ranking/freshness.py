@@ -35,8 +35,9 @@ _logger = logging.getLogger(__name__)
 # re-ranks every open pair once, on the next ingest or 04:00 reconcile.
 SCORING_VERSION = "1"
 
-# How long a job that terminally failed to PARSE suppresses a retry of the SAME
-# inputs (spec D7 and its I1 amendment; a service or other failure never does).
+# How long a dead-lettered job suppresses its pair (spec D7 and its I1
+# amendment): a PARSE failure on the SAME inputs, or a CRASH loop pair-wide.
+# A service or other failure never suppresses.
 DEAD_LETTER_SUPPRESS_DAYS = 7
 
 # parse_error escalation failures allowed per input revision (spec D6).
@@ -222,8 +223,9 @@ def enqueue_stale_pairs(
     arm) AND call_fingerprint AND scoring_fingerprint match, AND no escalation
     is owed while a remote client can pay it. Suppressed (spec D7, amended for
     final review I1) = a job in the last DEAD_LETTER_SUPPRESS_DAYS that failed
-    to PARSE on the SAME inputs, or a pre-0081 failed row (no kind, no stamps:
-    the old pair-wide rule). A `service` or `error` failure never suppresses.
+    to PARSE on the SAME inputs, or was dead-lettered as a `crash` loop
+    (pair-wide), or a pre-0081 failed row (no kind, no stamps: the old
+    pair-wide rule). A `service` or `error` failure never suppresses.
     """
     if call_ids is not None and not call_ids:
         return 0
@@ -293,13 +295,20 @@ def enqueue_stale_pairs(
                      AND rj.profile_fingerprint = want.fingerprint
                      AND rj.call_fingerprint = wc.fingerprint
                      AND rj.scoring_fingerprint = :scoring_fp)
-                    -- (b) A pre-0081 row: no kind AND no stamps. Keeps the old
+                    -- (b) A crash loop: requeue_stuck_running dead-lettered a
+                    -- job that crashed the worker MAX_ATTEMPTS times, and it
+                    -- will again. Pair-wide: its stamps are NULL (the worker
+                    -- never reached capture-and-fail), so they are not read.
+                    -- A NULL kind makes this NULL (not matched); arm (c)
+                    -- decides that row.
+                    OR rj.failure_kind = 'crash'
+                    -- (c) A pre-0081 row: no kind AND no stamps. Keeps the old
                     -- pair-wide rule; lapses DEAD_LETTER_SUPPRESS_DAYS after
                     -- deploy. IS NULL is never NULL itself. `failure_kind IS
-                    -- NULL` is what keeps a NULL-stamped 'service' row (the
-                    -- stuck-RUNNING dead-letter) or 'error' row (a failure
-                    -- before capture) from suppressing pair-wide. A NULL kind
-                    -- with stamps (never written) matches neither arm.
+                    -- NULL` is what keeps a NULL-stamped 'error' row (a
+                    -- failure before capture) or 'service' row from
+                    -- suppressing pair-wide. A NULL kind with stamps (never
+                    -- written) matches no arm.
                     OR (rj.failure_kind IS NULL AND rj.profile_fingerprint IS NULL)
                   )
               )

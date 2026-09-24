@@ -74,7 +74,7 @@ def test_failure_kind_is_nullable_and_checked_live_and_in_the_orm(migrated_engin
     assert "ck_ranking_jobs_failure_kind" in orm
 
 
-def test_failure_kind_accepts_the_three_kinds_and_rejects_an_unknown_value(pg_session_factory):
+def test_failure_kind_accepts_the_known_kinds_and_rejects_an_unknown_value(pg_session_factory):
     """Seeded on purpose, like the escalation_state test above: an INSERT ...
     SELECT over empty tables would raise nothing and pass vacuously."""
     from tests.freshness_helpers import make_call, make_profile
@@ -83,7 +83,7 @@ def test_failure_kind_accepts_the_three_kinds_and_rejects_an_unknown_value(pg_se
         p, c = make_profile(s), make_call(s)
         job = RankingJob(call_id=c.id, profile_id=p.id, status=RankingJobStatus.FAILED)
         s.add(job)
-        for kind in ("parse", "service", "error", None):
+        for kind in ("parse", "service", "error", "crash", None):
             job.failure_kind = kind
             s.flush()  # each known kind (and NULL) is accepted
         job.failure_kind = "timeout"

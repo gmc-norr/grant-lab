@@ -361,13 +361,15 @@ def test_mark_failed_writes_all_three_stamps_or_none(pg_session_factory, pair):
 # --- failure kinds (spec D7 amendment, final review I1) -----------------------
 
 
-@pytest.mark.parametrize("kind", [None, "bogus", "PARSE"])
+@pytest.mark.parametrize("kind", [None, "bogus", "PARSE", "crash"])
 def test_mark_failed_refuses_a_missing_or_unknown_failure_kind(pg_session_factory, pair, kind):
     """A NULL failure_kind is reserved for rows written before 0081, which
     enqueue_stale_pairs reads (with NULL stamps) as the pair-wide legacy rule.
     A caller that did not classify its failure must fail loudly here, not
-    write a row that silences the pair for DEAD_LETTER_SUPPRESS_DAYS. Refused
-    before anything is written."""
+    write a row that silences the pair for DEAD_LETTER_SUPPRESS_DAYS. `crash`
+    is refused too: it suppresses pair-wide, and only the reaper can know a
+    job crashed (a worker that reached mark_failed did not). Refused before
+    anything is written."""
     with pg_session_factory() as s:
         job_id = s.execute(select(RankingJob.id)).scalar_one()
         with pytest.raises(ValueError, match="failure_kind"):

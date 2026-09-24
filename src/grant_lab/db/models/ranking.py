@@ -198,7 +198,7 @@ class RankingJob(Base):
         # by _ranking_counts and per-profile status breakdown queries.
         Index("ix_ranking_jobs_profile_status", "profile_id", "status"),
         CheckConstraint(
-            "failure_kind IS NULL OR failure_kind IN ('parse','service','error')",
+            "failure_kind IS NULL OR failure_kind IN ('parse','service','error','crash')",
             name="ck_ranking_jobs_failure_kind",
         ),
     )
@@ -227,9 +227,10 @@ class RankingJob(Base):
     call_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
     scoring_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
     # WHY its last failure happened (spec D7 amendment, final review I1):
-    # 'parse' | 'service' | 'error'. Only 'parse' suppresses the pair.
-    # Written by every mark_failed call and by requeue_stuck_running's
-    # dead-letter ('service'); NULL only on rows from before migration 0081.
+    # 'parse' (suppresses on the same inputs) | 'crash' (suppresses pair-wide)
+    # | 'service' | 'error' (never suppress). Written by every mark_failed call
+    # and by requeue_stuck_running's dead-letter ('crash'); NULL only on rows
+    # from before migration 0081.
     failure_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
