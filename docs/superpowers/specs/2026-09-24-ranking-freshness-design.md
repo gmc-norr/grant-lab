@@ -410,7 +410,7 @@ suppression outright (D5).
 > | `failure_kind` | Written when | Suppresses? |
 > |---|---|---|
 > | `parse` | the local model's output did not parse (`ParseError`) | yes, when all three stamps equal the pair's current inputs: deterministic at temperature 0 |
-> | `crash` | `requeue_stuck_running` dead-lettered the job: it crashed the worker `MAX_ATTEMPTS` times (the crash loop that dead-letter exists to stop) | yes, pair-wide: the worker never reached capture-and-fail, so the row has no stamps to key on. This is the pre-branch rule for crash loops |
+> | `crash` | `requeue_stuck_running` dead-lettered a job that `mark_failed` never reached: it crashed the worker `MAX_ATTEMPTS` times (the crash loop that dead-letter exists to stop). A job with an earlier kind keeps that kind (and its stamps) when the reaper dead-letters it, because `attempts` counts `mark_failed` runs too: a job that failed as `service` in an outage and was then caught `RUNNING` by a restart is not a crash loop | yes, pair-wide: the worker never reached capture-and-fail, so the row has no stamps to key on. This is the pre-branch rule for crash loops |
 > | `service` | the model service failed (`LLMError`: refused, timeout, HTTP error) | never |
 > | `error` | any other exception in the worker (and the call-or-profile-vanished case) | never: a bug should stay visible, and a transient database error should retry |
 > | NULL | only rows written before this column existed | yes, pair-wide, as before; lapses within 7 days of deploy |
@@ -592,7 +592,7 @@ it must reject (`measure-dont-predict` Rule 2).
 | G10 | All three stamps match, run produces no analysis → prior analysis kept | never preserving (G9 alone passes on it) |
 | G11 | Ingest does not re-enqueue a pair that failed 2 days ago on the **same** inputs | a fixture with no failed job |
 | G22 | The same failed pair **is** re-enqueued once its call fingerprint changes (gap 2) | suppressing nothing (G11 rejects it) |
-| G28 | A pair whose job dead-lettered on a service failure is re-enqueued by the next ingest/reconcile; the same pair dead-lettered on a parse failure with the same inputs is not; a pair whose job the reaper dead-lettered as a `crash` loop is not either, pair-wide (D7 amendment, I1; added 2026-09-24) | suppression that ignores `failure_kind`; a crash row built by hand instead of through `requeue_stuck_running` |
+| G28 | A pair whose job dead-lettered on a service failure is re-enqueued by the next ingest/reconcile; the same pair dead-lettered on a parse failure with the same inputs is not; a pair whose job the reaper dead-lettered as a `crash` loop is not either, pair-wide; a job that failed as `service` and was then reaped keeps `service` and is re-enqueued (D7 amendment, I1; added 2026-09-24) | suppression that ignores `failure_kind`; a crash row built by hand instead of through `requeue_stuck_running` |
 | G23 | Admin re-rank enqueues a suppressed pair and a fresh pair; estimate = open × active (gap 2, D5) | a fixture with only stale, unsuppressed pairs |
 | G12 | Deadline in 5 days → timeline PASS, LLM runs, score not zeroed; deadline passed → FAIL **even with a must_include match** | a fixture whose must_include never matches |
 | G16 | Migration 0081 deletes `timeline` criterion rows and nothing else | a database with no `timeline` rows: seed one, and seed one `budget` row that must survive |

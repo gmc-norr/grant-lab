@@ -258,6 +258,45 @@ def test_a_crash_dead_letter_suppresses_its_pair_wholesale(pg_session_factory, p
         assert pending == [control]
 
 
+def test_a_reaped_job_that_failed_on_the_service_keeps_its_kind(
+    pg_session_factory, profile_factory
+):
+    """Spec D7 amendment (I1, fix round 2). attempts counts mark_failed runs
+    too, so a job that failed as `service` in an Ollama outage and was then
+    caught RUNNING by an app restart reaches the reaper's dead-letter. It is
+    not a crash loop: it keeps `service`, and the next reconcile enqueues its
+    pair again. Written as `crash`, the restart would hide the pair for
+    DEAD_LETTER_SUPPRESS_DAYS -- the outage gap I1 closed."""
+    profile_id, _ = profile_factory()
+    with pg_session_factory() as s:
+        call_id = _seed_call(s)
+        enqueue_for_pair(s, call_id=call_id, profile_id=profile_id)
+        (job,) = claim_pending_jobs(s, limit=1)
+        mark_failed(s, job.id, error="Ollama 503", terminal=False, failure_kind="service")
+        (job,) = claim_pending_jobs(s, limit=1)
+        s.execute(
+            update(RankingJob)
+            .where(RankingJob.id == job.id)
+            .values(attempts=4, updated_at=datetime.now(UTC) - _PAST_STUCK)
+        )
+        s.commit()
+    with pg_session_factory() as s:
+        assert requeue_stuck_running(s) == 1
+        s.commit()
+
+    with pg_session_factory() as s:
+        row = s.execute(select(RankingJob)).scalar_one()
+        assert (row.status, row.failure_kind) == (RankingJobStatus.FAILED, "service")
+        assert reconcile_missing_rankings(s, ctx=CTX) == 1
+        pending = [
+            j.call_id
+            for j in s.execute(
+                select(RankingJob).where(RankingJob.status == RankingJobStatus.PENDING)
+            ).scalars()
+        ]
+        assert pending == [call_id]
+
+
 def _seed_call_with(s, *, external_id: str, published: datetime | None) -> int:
     src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
     c = Call(

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, text, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -185,12 +185,16 @@ def requeue_stuck_running(session: Session, *, max_attempts: int = MAX_ATTEMPTS)
             status=RankingJobStatus.FAILED,
             attempts=RankingJob.attempts + 1,
             last_error="dead-lettered: stuck RUNNING past max_attempts (worker crash loop)",
-            # This job crashed the worker max_attempts times: the crash loop
+            # A job whose every attempt crashed the worker is the crash loop
             # described above, which WILL recur. 'crash' suppresses the pair
             # pair-wide for DEAD_LETTER_SUPPRESS_DAYS (ranking spec D7
             # amendment, final review I1). No stamps: whatever the dead worker
             # captured died with it, so it cannot be keyed on inputs.
-            failure_kind="crash",
+            # attempts also counts mark_failed runs, so a job that failed
+            # as 'service' in an outage and was then caught RUNNING by a
+            # restart lands here too. It keeps its last kind (and stamps):
+            # only a job mark_failed never reached (NULL kind) is a crash.
+            failure_kind=func.coalesce(RankingJob.failure_kind, "crash"),
             updated_at=now,
         )
     )
@@ -258,8 +262,10 @@ def mark_done(session: Session, job_id: int) -> None:
 #              Not the pair's fault; never suppresses.
 #   error   -- anything else. Never suppresses: a bug should stay visible, and a
 #              transient database error should retry.
-#   crash   -- requeue_stuck_running's dead-letter: the job crashed the worker
-#              MAX_ATTEMPTS times and will again. Suppresses pair-wide (no stamps).
+#   crash   -- requeue_stuck_running's dead-letter of a job mark_failed never
+#              reached: it crashed the worker MAX_ATTEMPTS times and will again.
+#              Suppresses pair-wide (no stamps). A job with an earlier kind
+#              keeps it when the reaper dead-letters it.
 # mark_failed takes all but `crash`: a worker that reached it did not crash.
 MARK_FAILED_KINDS = ("parse", "service", "error")
 
