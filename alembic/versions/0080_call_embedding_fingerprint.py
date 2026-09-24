@@ -23,8 +23,9 @@ def upgrade() -> None:
     )
     # Deliberately NOT grandfathered, mirroring migration 0075's
     # profiles.embedding_fingerprint: NULL means stale, and every call is
-    # re-embedded on the first tick after deploy. Measured at authoring time
-    # this is 58 calls against a local Ollama -- seconds, not the
+    # re-embedded on the first tick after deploy. This was 58 calls when the
+    # spec was written (2026-09-08); 686 on 2026-09-24, when this migration
+    # was authored -- either way, seconds against a local Ollama, not the
     # profile-count x 90-days-of-calls cost a full re-RANK would be. See
     # docs/superpowers/specs/2026-09-08-call-embedding-freshness.md, D4.
     #

@@ -280,7 +280,11 @@ def embeddings_tick_calls_fail(
 
 
 def test_a_tick_capped_by_the_call_half_still_resets_the_profile_cursor(
-    pg_session_factory, fake_embedder_calls_fail, embeddings_tick_calls_fail, tiny_tick
+    pg_session_factory,
+    fake_embedder_calls_fail,
+    embeddings_tick_calls_fail,
+    tiny_tick,
+    tiny_tick_call_cursors,
 ):
     """GATE 9c — the regression the joint flag introduced.
 
@@ -329,6 +333,18 @@ def test_a_tick_capped_by_the_call_half_still_resets_the_profile_cursor(
     for _ in range(4):
         embeddings_tick_calls_fail()
 
+    # The premise, checked rather than assumed: the CALL half held every tick
+    # at the cap, so its cursor only ever advances -- it must never fall back
+    # to 0 after the first tick. This has already been lost silently once
+    # (the corpus was five calls before the twenty above); if it regresses
+    # again, the call scan runs off its own table mid-run, the joint
+    # `scan_exhausted` goes True on that tick, and the frozen profile cursor
+    # gets reset by the SAME accident this gate exists to catch -- which
+    # would make the assertion below pass for the wrong reason.
+    assert 0 not in tiny_tick_call_cursors[1:], (
+        "the call half did not hold every tick at the cap -- the call cursor "
+        f"returned to 0 after the first tick; values passed: {tiny_tick_call_cursors}"
+    )
     assert _is_current(pg_session_factory, profile_ids[0]), (
         "the call half held the tick at max_batches, so the joint scan_exhausted "
         "stayed False and the profile cursor froze past the last profile; the "

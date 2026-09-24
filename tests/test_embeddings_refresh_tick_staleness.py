@@ -451,6 +451,33 @@ def test_editing_build_call_text_invalidates_every_call_fingerprint(
             assert c.embedding_fingerprint == call_embedding_fingerprint(c)
 
 
+def test_a_pre_0080_call_with_a_current_vector_and_null_fingerprint_re_embeds(
+    pg_session_factory, fake_embedder
+):
+    """Spec G9 -- the first tick after migration 0080 re-embeds every call,
+    because NULL is stale (D4, no grandfathering). Migration 0080 adds no
+    server_default and no backfill, so a call that already has a current
+    vector and model -- exactly what every pre-0080 row looks like -- comes
+    out with `embedding_fingerprint IS NULL`. The staleness predicate must
+    treat that NULL as stale on its own, not only via `embedding_is_null`
+    (which is False here, since the vector is present) or a model mismatch
+    (also absent). A predicate that reads a NULL fingerprint as "nothing to
+    compare, so current" would leave every pre-0080 call permanently stale.
+    """
+    with pg_session_factory() as s:
+        c = make_call(s, title="Pre-0080 call")
+        c.embedding = [0.2] * 1024
+        c.embedding_model = fake_embedder.model
+        assert c.embedding_fingerprint is None
+        cid = c.id
+        s.commit()
+    refresh_missing_embeddings_tick(session_factory=pg_session_factory, embed_client=fake_embedder)
+    assert fake_embedder.calls == 1
+    with pg_session_factory() as s:
+        c = s.get(Call, cid)
+        assert c.embedding_fingerprint == call_embedding_fingerprint(c)
+
+
 def test_the_call_staleness_decision_does_not_load_the_vector(pg_session_factory, fake_embedder):
     """Spec D5 -- the call-side twin of
     test_the_staleness_decision_does_not_load_the_vector.
