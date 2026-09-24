@@ -185,25 +185,29 @@ def refresh_missing_embeddings_tick(
     work none of them, and breaking on that stops the drain at page one with
     the rest of the table unrepaired.
 
-    The summary carries TWO termination flags, one joint and one per-half:
+    The summary carries THREE termination flags, one joint and one per half:
 
     - `scan_exhausted`: True when the drain ran off the end of BOTH tables,
       False when it stopped on `max_batches`. This is the drain's own
-      termination condition. Do NOT key a profile cursor on it: a tick held
-      capped by the CALL half reports False while the profile scan is long
+      termination condition. Do NOT key either cursor on it: a tick held
+      capped by one half reports False while the other half's scan is long
       finished, which froze the profile cursor until it was fixed.
     - `profile_scan_exhausted`: True when the PROFILE half examined no rows on
       the batch the drain stopped at, i.e. the profile cursor is past the last
-      profile id. This is the one the daily caller keys its cursor on.
+      profile id. The daily caller keys its profile cursor on this.
+    - `call_scan_exhausted`: the same, for the CALL half. The daily caller
+      keys its call cursor on this.
 
-    They are not interchangeable, and reading one for the other is a bug this
-    module has already shipped once. `scan_exhausted` sums both halves, so a
-    tick held at `max_batches` by the CALL half reports False even when the
-    profile half ran off the end of its own table on the very first batch. A
-    caller that reset the profile cursor on `scan_exhausted` therefore carried
-    a cursor past the last profile FOREVER while any call kept failing to
-    embed, and a profile that went stale behind it was never repaired. See
-    `_embeddings_tick` in scheduler.py.
+    They are not interchangeable, and reading the joint flag for a per-half
+    one is a bug this module has already shipped once. `scan_exhausted` sums
+    both halves, so a tick held at `max_batches` by the CALL half reports False
+    even when the profile half ran off the end of its own table on the very
+    first batch. A caller that reset the profile cursor on `scan_exhausted`
+    therefore carried a cursor past the last profile FOREVER while any call
+    kept failing to embed, and a profile that went stale behind it was never
+    repaired. The call cursor has the mirror hazard: a tick held at the cap by
+    the PROFILE half reports False while the call scan finished on its first
+    batch. See `_embeddings_tick` in scheduler.py.
 
     A single batch processes at most `batch_size` rows. Before this drain
     loop, recovery after a model swap silently took (backlog / batch_size)
@@ -263,6 +267,14 @@ def refresh_missing_embeddings_tick(
         # repairs. One tick is lost and the state self-corrects; False here
         # means "not proven exhausted", not "rows remain".
         "profile_scan_exhausted": False,
+        # The CALL half's own exhaustion: the profile flag above, mirrored in
+        # every respect — overwritten by every batch, set on the non-force
+        # drain only (a force-mode consumer reading it would KeyError), and
+        # with the same benign one-tick edge when the cap lands exactly on the
+        # last call row. The joint flag cannot stand in for it either: a tick
+        # held at the cap by the PROFILE half reports `scan_exhausted` False
+        # while the call scan ran off the end of its table on the first batch.
+        "call_scan_exhausted": False,
     }
     # Walk forward with id-cursors so each batch processes NEW rows. This
     # both lets us drain a backlog larger than one batch AND avoids re-trying
@@ -314,14 +326,15 @@ def refresh_missing_embeddings_tick(
         # and the final page — the one past the last id — returns nothing on
         # both halves, making `examined` 0.
         #
-        # `examined` is JOINT. Whether the PROFILE half is done is a separate
+        # `examined` is JOINT. Whether EACH half is done is a separate
         # question, answered by that half alone, and the daily caller needs
-        # the per-half answer to decide about the profile cursor.
+        # the per-half answers to decide about each cursor.
         totals["profile_scan_exhausted"] = summary["profiles_seen"] == 0
+        totals["call_scan_exhausted"] = summary["calls_seen"] == 0
         examined = summary["calls_seen"] + summary["profiles_seen"]
         if examined == 0:
-            # examined == 0 implies profiles_seen == 0, so the per-half flag
-            # set just above is already True on this path.
+            # examined == 0 implies calls_seen == 0 and profiles_seen == 0, so
+            # both per-half flags set just above are already True on this path.
             totals["scan_exhausted"] = True
             break
         cursor_call_id = summary["max_call_id"]
@@ -371,23 +384,26 @@ def _refresh_missing_embeddings_batch(
     the row's text. Per-row try/except so one bad row doesn't kill the
     batch. Returns a summary dict for logging.
 
-    Codex H2 fix: scoping by `embedding IS NULL OR embedding_model != current`
-    means a model swap (env change of EMBEDDING_MODEL) is recovered by the
-    daily tick within at most 24 h. Operators can run the backfill CLI
+    Neither half filters in SQL: each reads every row past its cursor and
+    applies the staleness test above per row, in Python. A model swap (env
+    change of EMBEDDING_MODEL, Codex H2) therefore makes every row stale and
+    the daily tick recovers it, up to `batch_size * _TICK_MAX_BATCHES` rows a
+    tick and the rest on later ticks. Operators can run the backfill CLI
     (`python -m grant_lab.embeddings.cli backfill`) for immediate refresh.
 
-    Plan F Task 7: when `force=True`, the NULL/mismatch filter is dropped and
-    every row is re-embedded. Used after deploys that change the text being
-    embedded (e.g., Plan F's full_text rollout). The blank-title and
-    blank-description guards are KEPT under force=True — otherwise rows with
-    no embeddable text would infinite-loop the backfill (select NULL → no-op
-    early-return → still NULL → re-select).
+    `force=True` (Plan F Task 7) skips the staleness test: every call past the
+    cursor goes to refresh_call_embedding (a call with no embeddable text
+    counts as failed and is left unwritten), and every profile with
+    embeddable text is re-embedded (a blank profile is skipped). Used after
+    deploys that change the text being embedded (e.g., Plan F's full_text
+    rollout).
 
-    `after_call_id` / `after_profile_id` are id-cursors used by the backfill
-    CLI to walk forward through the table when force=True (without them, the
-    same rows would be re-selected every iteration). The summary includes
-    `max_call_id` / `max_profile_id` so the caller can advance the cursor.
-    Default 0 = start from the beginning (matches the daily-tick behavior).
+    `after_call_id` / `after_profile_id` are id-cursors: the drain loop
+    advances them batch to batch, the daily scheduler carries them across
+    capped ticks, and the backfill CLI walks them when force=True (without
+    them, the same rows would be re-selected every iteration). The summary
+    includes `max_call_id` / `max_profile_id` so the caller can advance the
+    cursor. Default 0 = start from the beginning.
 
     Migration 0075: the PROFILE half no longer narrows in SQL. "Current"
     now also means `embedding_fingerprint` describes the row's present text,

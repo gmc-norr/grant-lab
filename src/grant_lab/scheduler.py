@@ -543,41 +543,36 @@ def build_scheduler(
     # profile scan was widened (spec 5(a)) it is a scan of the WHOLE table, so
     # a long prefix of fresh profiles can consume the whole allowance.
     #
-    # NOT carried for CALLS, and that is deliberate: a call that failed to
-    # embed stays NULL and is MEANT to be retried by the next tick from 0,
-    # which a carried cursor would prevent.
+    # The CALL cursor is carried for the same reason, since migration 0080
+    # (spec 2026-09-08 D9). Until then the call half was narrowed in SQL
+    # (`embedding IS NULL OR embedding_model != current`): a call that embedded
+    # was never returned again, a capped call drain had recorded its progress
+    # in the DATA, and restarting at 0 cost nothing — so no call cursor was
+    # carried. The call half now examines every call row, as the profile half
+    # does, and a tick that restarted it at 0 could never reach past
+    # `batch_size * _TICK_MAX_BATCHES` (40,000) calls. Carrying it also ends
+    # the old bound on persistently-failing calls, which stayed in the SQL
+    # candidate set and re-consumed the allowance on every tick ahead of the
+    # rows behind them: the cursor now passes a failed call like any other, and
+    # it is retried once per full pass of the table, when the cursor resets.
     #
-    # The bound, stated as a bound rather than as a guarantee: the call half is
-    # narrowed in SQL (`embedding IS NULL OR embedding_model != current`), so a
-    # call that embedded successfully is never returned again and a capped call
-    # drain has recorded its progress in the DATA. What the predicate does NOT
-    # exclude is a row that keeps FAILING — it records nothing, so it stays in
-    # the candidate set and re-consumes the allowance on every tick, ahead of
-    # the rows behind it. Measured at batch_size=1, max_batches=3: three
-    # always-failing calls ahead of one good call leave the good call
-    # unembedded after six ticks. The batch_size matters and is why that figure
-    # is quoted with it -- the SAME corpus at the production batch_size=200
-    # embeds the good call on the FIRST tick. It takes more than
-    # `max_batches * batch_size` (40,000 at production settings)
-    # persistently-failing calls per tick for this to bite, which is a scale
-    # bound, not an impossibility.
-    #
-    # Held in this closure, not in the database. The scheduler is in-process
-    # and single-instance (a hard constraint), so one process owns this value
-    # and no other writer exists; the repo has no settings/KV table to put it
-    # in and adding one for a resume hint would be the larger change. The cost
-    # is that a process restart resets it to 0, which is exactly today's
-    # behaviour — the next tick re-walks from the start, which is slower but
-    # never skips a row.
+    # Both are held in this closure, not in the database. The scheduler is
+    # in-process and single-instance (a hard constraint), so one process owns
+    # these values and no other writer exists; the repo has no settings/KV
+    # table to put them in and adding one for a resume hint would be the larger
+    # change. The cost is that a process restart resets both to 0 — the next
+    # tick re-walks from the start, which is slower but never skips a row.
+    embeddings_after_call_id = 0
     embeddings_after_profile_id = 0
 
     def _embeddings_tick() -> None:
-        nonlocal embeddings_after_profile_id
+        nonlocal embeddings_after_call_id, embeddings_after_profile_id
         try:
             summary = refresh_missing_embeddings_tick(
                 session_factory=session_factory,
                 embed_client=embed_client,
                 batch_size=200,
+                after_call_id=embeddings_after_call_id,
                 after_profile_id=embeddings_after_profile_id,
             )
         except Exception as e:  # noqa: BLE001
@@ -592,17 +587,28 @@ def build_scheduler(
         #
         # Keyed on the PROFILE half's own exhaustion, NOT on the drain's joint
         # `scan_exhausted`. The joint flag sums both halves, so a tick held at
-        # `max_batches` by the CALL half (a call that keeps failing to embed
-        # stays in the candidate set and is re-examined every batch, forever)
-        # reports False even when the profile half ran off the end of its own
-        # table on the first batch. Keying on it froze this cursor past the
-        # last profile id for as long as any call kept failing — measured
-        # after_profile_id values [0, 2, 2, 2, 2, 2] across six ticks — so a
-        # profile that went stale behind it was never repaired. Pinned by
-        # tests/test_scheduler_embedding_cursor.py (gate 9c).
+        # `max_batches` by the CALL half (then: a call that kept failing to
+        # embed stayed in the SQL candidate set and was re-examined every
+        # batch; since 0080: more calls past the call cursor than one tick
+        # examines) reports False even when the profile half ran off the end
+        # of its own table on the first batch. Keying on it froze this cursor
+        # past the last profile id for as long as any call kept failing —
+        # measured after_profile_id values [0, 2, 2, 2, 2, 2] across six ticks
+        # — so a profile that went stale behind it was never repaired. Pinned
+        # by tests/test_scheduler_embedding_cursor.py (gate 9c).
         embeddings_after_profile_id = (
             0 if summary["profile_scan_exhausted"] else summary["max_profile_id"]
         )
+        # The call cursor, by the same rule and for both of the same reasons,
+        # each mirrored. Reset only on an exhausted CALL scan: a call re-ingested
+        # (or failing to embed) behind the high-water mark must be reachable
+        # again. And keyed on the CALL half's own `call_scan_exhausted`, never
+        # the joint flag: a tick held at the cap by the PROFILE half reports
+        # `scan_exhausted` False while the call scan ran off the end of its table
+        # on the first batch, which would freeze this cursor past the last call
+        # id — gate 9c's bug the other way round. Pinned by G6-G8 in the same
+        # test module (G8 is 9c's mirror).
+        embeddings_after_call_id = 0 if summary["call_scan_exhausted"] else summary["max_call_id"]
         # No need to re-log the summary — refresh_missing_embeddings_tick already does.
 
     sched.add_job(

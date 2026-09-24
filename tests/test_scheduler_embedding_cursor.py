@@ -15,6 +15,13 @@ GATE 9c pins the regression that first fix introduced: the drain's
 profiles), so keying the PROFILE cursor on it froze that cursor forever on any
 tick held at the cap by the CALL half. Its corpus is five always-failing calls
 and two profiles.
+
+G6-G8 (spec `2026-09-08-call-embedding-freshness.md` §4 D9, §5) are the same
+three gates for the CALL cursor. Since migration 0080 the call half examines
+every call row, so a tick that restarts it at id 0 can never reach past
+`batch_size * max_batches` calls; the scheduler now carries `after_call_id` and
+resets it on the call half's own `call_scan_exhausted`. G8 is 9c's mirror: a
+tick held at the cap by the PROFILE half must still reset the CALL cursor.
 """
 
 from __future__ import annotations
@@ -23,9 +30,9 @@ import pytest
 
 import grant_lab.scheduler as scheduler_mod
 from grant_lab.config import Settings
-from grant_lab.db.models import Profile
+from grant_lab.db.models import Call, Profile
 from grant_lab.embeddings.refresh import refresh_missing_embeddings_tick
-from grant_lab.profiles.fingerprint import embedding_fingerprint
+from grant_lab.profiles.fingerprint import call_embedding_fingerprint, embedding_fingerprint
 from grant_lab.ranking.ollama_client import LLMError
 from tests.freshness_helpers import FakeEmbedder, make_call, make_profile
 
@@ -50,7 +57,31 @@ def _settings_env(monkeypatch):
 
 
 @pytest.fixture()
-def tiny_tick(monkeypatch):
+def _tick_cursors(monkeypatch):
+    """Drive the scheduler's tick at batch_size=1, max_batches=3, recording
+    BOTH cursors the scheduler hands it. `tiny_tick` and
+    `tiny_tick_call_cursors` are the two views onto one recording; they must
+    share it, because only one wrapper can be patched in.
+
+    `after_call_id` is recorded as the value the real function will USE: a
+    scheduler that omits the argument gets the default 0, which is exactly the
+    restart-from-zero behaviour the call-cursor gates exist to catch.
+    """
+    seen: dict[str, list[int]] = {"after_profile_id": [], "after_call_id": []}
+
+    def _small(**kwargs):
+        seen["after_profile_id"].append(kwargs["after_profile_id"])
+        seen["after_call_id"].append(kwargs.get("after_call_id", 0))
+        kwargs["batch_size"] = 1
+        kwargs["max_batches"] = 3
+        return refresh_missing_embeddings_tick(**kwargs)
+
+    monkeypatch.setattr(scheduler_mod, "refresh_missing_embeddings_tick", _small)
+    return seen
+
+
+@pytest.fixture()
+def tiny_tick(_tick_cursors):
     """Drive the scheduler's tick at batch_size=1, max_batches=3.
 
     The scheduler hardcodes batch_size=200 and takes the default
@@ -64,16 +95,15 @@ def tiny_tick(monkeypatch):
     passed, in order, one per tick — the evidence a frozen cursor shows up in
     directly rather than only through its consequences.
     """
-    seen_cursors: list[int] = []
+    return _tick_cursors["after_profile_id"]
 
-    def _small(**kwargs):
-        seen_cursors.append(kwargs["after_profile_id"])
-        kwargs["batch_size"] = 1
-        kwargs["max_batches"] = 3
-        return refresh_missing_embeddings_tick(**kwargs)
 
-    monkeypatch.setattr(scheduler_mod, "refresh_missing_embeddings_tick", _small)
-    return seen_cursors
+@pytest.fixture()
+def tiny_tick_call_cursors(_tick_cursors):
+    """`tiny_tick`'s twin for the CALL cursor: the `after_call_id` values the
+    scheduler passed (or, when it passed none, the 0 the tick defaulted to),
+    in order, one per tick."""
+    return _tick_cursors["after_call_id"]
 
 
 @pytest.fixture()
@@ -311,4 +341,202 @@ def test_the_call_half_being_capped_does_not_freeze_the_profile_cursor_sequence(
     assert tiny_tick == [0, 0, 0], (
         "a tick capped by the CALL half must still reset the profile cursor once "
         "the profile half has run off the end of its own table"
+    )
+
+
+# --- G6-G8: the CALL cursor -----------------------------------------------------
+
+
+def _seed_five_fresh_calls(session_factory, embedder) -> list[int]:
+    """Five calls, all embedded and fingerprinted against their own text, and
+    no profiles, so every batch's `examined` is the call half alone."""
+    with session_factory() as s:
+        ids = [make_call(s, title=f"Fresh call {i}").id for i in range(5)]
+        s.commit()
+    refresh_missing_embeddings_tick(session_factory=session_factory, embed_client=embedder)
+    return ids
+
+
+def _call_goes_stale(session_factory, call_id: int) -> None:
+    """A re-ingest rewrote the text under a current vector — the state migration
+    0080 made the call half able to see."""
+    with session_factory() as s:
+        s.get(Call, call_id).summary = "Rewritten by a later ingest"
+        s.commit()
+
+
+def _call_is_current(session_factory, call_id: int) -> bool:
+    with session_factory() as s:
+        c = s.get(Call, call_id)
+        return c.embedding_fingerprint == call_embedding_fingerprint(c)
+
+
+def test_a_capped_tick_resumes_the_call_cursor_instead_of_restarting_at_zero(
+    pg_session_factory, fake_embedder, embeddings_tick, tiny_tick_call_cursors
+):
+    """G6 (plan Gate 9) — the call-side twin of GATE 9a.
+
+    Five fresh calls, a cap of three batches of one row. The first tick
+    examines ids[0..2] and stops on the cap having done no work. If the
+    scheduler does not carry the call cursor, the second tick restarts at
+    after_call_id=0 and halts at the same wall, and the stale ids[4] is never
+    reached. At production settings the wall is row 40,001 of the calls table.
+    """
+    ids = _seed_five_fresh_calls(pg_session_factory, fake_embedder)
+    _call_goes_stale(pg_session_factory, ids[4])
+
+    embeddings_tick()  # examines ids[0], ids[1], ids[2] -> hits max_batches
+    embeddings_tick()  # must resume after ids[2] and reach ids[4]
+
+    assert tiny_tick_call_cursors == [0, ids[2]], (
+        "the second tick must resume the call scan after the last call the capped "
+        f"tick examined (ids[2]={ids[2]}); after_call_id values passed: "
+        f"{tiny_tick_call_cursors}"
+    )
+    assert _call_is_current(pg_session_factory, ids[4]), (
+        "the capped tick restarted at after_call_id=0 and stalled at the same wall"
+    )
+
+
+def test_an_exhausted_call_scan_resets_the_call_cursor_so_a_call_going_stale_behind_it_is_revisited(
+    pg_session_factory, fake_embedder, embeddings_tick, tiny_tick_call_cursors
+):
+    """G7 (plan Gate 10) — the call-side twin of GATE 9b.
+
+    A carried cursor that never goes back to 0 makes every call behind the
+    high-water mark permanently unreachable, which is worse than the wall it
+    removes. Once the call scan runs off the end of its table, the cursor must
+    reset.
+    """
+    ids = _seed_five_fresh_calls(pg_session_factory, fake_embedder)
+
+    embeddings_tick()  # capped, stops after ids[2]
+    embeddings_tick()  # ids[3], ids[4], then an empty page -> call scan EXHAUSTED
+
+    _call_goes_stale(pg_session_factory, ids[0])
+    embeddings_tick()  # only reaches ids[0] if the exhausted scan reset the cursor
+
+    assert tiny_tick_call_cursors[2] == 0, (
+        "an exhausted call scan must hand the next tick after_call_id=0; values "
+        f"passed: {tiny_tick_call_cursors}"
+    )
+    assert _call_is_current(pg_session_factory, ids[0]), (
+        "an exhausted call scan left the cursor at the high-water mark, so a call "
+        "that goes stale behind it is never revisited"
+    )
+
+
+_UNEMBEDDABLE_PROFILE = "UNEMBEDDABLE-PROFILE"
+
+
+class _ProfilesFailEmbedder(FakeEmbedder):
+    """Embeds calls, refuses profiles — `_CallsFailEmbedder` the other way round.
+
+    A profile that fails to embed records nothing, so it stays stale. What
+    holds the drain at `max_batches` here is simply that the profile half
+    returns a row on every batch (the drain breaks only on a batch that
+    EXAMINES nothing); the profile cursor walks forward across ticks, so the
+    corpus needs more profiles than the ticks under test examine.
+    """
+
+    def embed(self, text, _client=None):
+        if _UNEMBEDDABLE_PROFILE in text:
+            self.calls += 1
+            raise LLMError("ollama refused this profile")
+        return super().embed(text, _client=_client)
+
+
+@pytest.fixture()
+def fake_embedder_profiles_fail():
+    return _ProfilesFailEmbedder()
+
+
+@pytest.fixture()
+def embeddings_tick_profiles_fail(
+    pg_session_factory, fake_embedder_profiles_fail, _settings_env, tiny_tick
+):
+    """`embeddings_tick`, but wired to the embedder that refuses profiles."""
+    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
+
+    settings = Settings()
+    controller = build_workspace_controller(settings=settings, session_factory=pg_session_factory)
+    sched = scheduler_mod.build_scheduler(
+        session_factory=pg_session_factory,
+        settings=settings,
+        alerter=_NullAlerter(),
+        ollama_url="http://localhost:11434",
+        gemma_model="gemma4:e4b-q8",
+        ranking_tick_seconds=60,
+        ranking_queue_batch=10,
+        embedding_pregate_threshold=0.30,
+        embed_client=fake_embedder_profiles_fail,
+        workspace_controller=controller,
+        start=False,
+    )
+    job = sched.get_job("embeddings:refresh-missing")
+    assert job is not None
+    try:
+        yield job.func
+    finally:
+        sched.shutdown(wait=False)
+
+
+def test_a_tick_capped_by_the_profile_half_still_resets_the_call_cursor(
+    pg_session_factory,
+    fake_embedder_profiles_fail,
+    embeddings_tick_profiles_fail,
+    tiny_tick,
+    tiny_tick_call_cursors,
+):
+    """G8 (plan Gate 11) — GATE 9c's mirror, the same bug the other way round.
+
+    Corpus: two fresh calls and ten always-failing profiles. At batch_size=1 /
+    max_batches=3 the call half runs off the end of its two-row table on the
+    third batch of EVERY tick, while the profile half returns a row on every
+    batch of all three ticks (3 ticks x 3 batches = 9 examined, one to spare),
+    so `examined` is never 0 and every tick stops on the cap.
+
+    Keyed on the JOINT `scan_exhausted`, the scheduler would read "rows still
+    ahead" and carry `after_call_id=ids[1]` into every later tick — [0, ids[1],
+    ids[1]] — and a call that goes stale behind that frozen cursor would never
+    be repaired while the profile half stays capped. The call cursor must reset
+    on the CALL half's own exhaustion.
+    """
+    with pg_session_factory() as s:
+        call_ids = [make_call(s, title=f"Fresh call {i}").id for i in range(2)]
+        s.commit()
+    # Seed the calls current BEFORE the profiles exist, so the corpus starts
+    # with the call half genuinely clean and only the profiles are unworkable.
+    refresh_missing_embeddings_tick(
+        session_factory=pg_session_factory, embed_client=fake_embedder_profiles_fail
+    )
+    assert all(_call_is_current(pg_session_factory, cid) for cid in call_ids)
+
+    with pg_session_factory() as s:
+        profile_ids = [
+            make_profile(s, description=f"{_UNEMBEDDABLE_PROFILE} {i}").id for i in range(10)
+        ]
+        s.commit()
+
+    embeddings_tick_profiles_fail()  # capped by the profiles; call half exhausted on batch 3
+    _call_goes_stale(pg_session_factory, call_ids[0])  # behind the call high-water mark
+    embeddings_tick_profiles_fail()  # capped by the profiles again
+    embeddings_tick_profiles_fail()
+
+    # The premise, checked rather than assumed: the PROFILE half held every
+    # tick at the cap, walking its own cursor forward three rows a tick. If
+    # this fails, the corpus no longer exercises the bug and the assertions
+    # below would pass vacuously.
+    assert tiny_tick == [0, profile_ids[2], profile_ids[5]], (
+        f"the profile half did not hold every tick at the cap; after_profile_id "
+        f"values passed: {tiny_tick}"
+    )
+    assert tiny_tick_call_cursors == [0, 0, 0], (
+        "a tick capped by the PROFILE half must still reset the call cursor once "
+        "the call half has run off the end of its own table; after_call_id values "
+        f"passed: {tiny_tick_call_cursors}"
+    )
+    assert _call_is_current(pg_session_factory, call_ids[0]), (
+        "the profile half held the tick at max_batches, so the call cursor froze "
+        "past the last call and a call that went stale behind it was never repaired"
     )
