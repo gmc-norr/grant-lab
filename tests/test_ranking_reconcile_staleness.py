@@ -10,7 +10,7 @@ from grant_lab.db.models import CallRanking, Profile, RankingJob
 from grant_lab.profiles.fingerprint import rank_fingerprint
 from grant_lab.ranking.queue import reconcile_missing_rankings
 from grant_lab.ranking.worker import drain_queue
-from tests.freshness_helpers import enqueue_job, make_call, make_profile, ollama_clean
+from tests.freshness_helpers import ctx_for, enqueue_job, make_call, make_profile, ollama_clean
 
 
 @pytest.fixture()
@@ -51,7 +51,7 @@ def test_a_matching_fingerprint_is_not_re_enqueued(session, ranked_pair):
     cr.profile_fingerprint = rank_fingerprint(profile)
     session.query(RankingJob).delete()
     session.commit()
-    assert reconcile_missing_rankings(session) == 0
+    assert reconcile_missing_rankings(session, ctx=ctx_for(ollama_clean())) == 0
 
 
 def test_a_differing_fingerprint_is_re_enqueued(session, ranked_pair):
@@ -61,7 +61,7 @@ def test_a_differing_fingerprint_is_re_enqueued(session, ranked_pair):
     cr.profile_fingerprint = "v1:something_else_entirely"
     session.query(RankingJob).delete()
     session.commit()
-    assert reconcile_missing_rankings(session) >= 1
+    assert reconcile_missing_rankings(session, ctx=ctx_for(ollama_clean())) >= 1
     assert _jobs(session, call_id, profile_id) == 1
 
 
@@ -81,7 +81,7 @@ def test_a_legacy_pair_with_an_untouched_profile_is_skipped(session, ranked_pair
     cr.ranked_at = profile.updated_at
     session.query(RankingJob).delete()
     session.commit()
-    assert reconcile_missing_rankings(session) == 0
+    assert reconcile_missing_rankings(session, ctx=ctx_for(ollama_clean())) == 0
 
 
 def test_a_legacy_pair_whose_profile_was_edited_IS_re_enqueued(session, ranked_pair):
@@ -94,7 +94,7 @@ def test_a_legacy_pair_whose_profile_was_edited_IS_re_enqueued(session, ranked_p
     cr.ranked_at = profile.updated_at - dt.timedelta(days=1)
     session.query(RankingJob).delete()
     session.commit()
-    assert reconcile_missing_rankings(session) >= 1
+    assert reconcile_missing_rankings(session, ctx=ctx_for(ollama_clean())) >= 1
 
 
 def test_a_null_fingerprint_after_deploy_is_treated_as_stale(session, ranked_pair):
@@ -105,7 +105,7 @@ def test_a_null_fingerprint_after_deploy_is_treated_as_stale(session, ranked_pai
     cr.profile_fingerprint = None
     session.query(RankingJob).delete()
     session.commit()
-    assert reconcile_missing_rankings(session) >= 1
+    assert reconcile_missing_rankings(session, ctx=ctx_for(ollama_clean())) >= 1
 
 
 def test_no_active_profiles_issues_no_insert(session, ranked_pair):
@@ -118,4 +118,4 @@ def test_no_active_profiles_issues_no_insert(session, ranked_pair):
     """
     session.query(Profile).update({Profile.is_active: False})
     session.commit()
-    assert reconcile_missing_rankings(session) == 0
+    assert reconcile_missing_rankings(session, ctx=ctx_for(ollama_clean())) == 0

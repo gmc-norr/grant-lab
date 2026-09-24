@@ -67,8 +67,8 @@ def make_call(session, *, source_slug: str = "vinnova", **kw) -> Call:
         title=kw.pop("title", "Precision medicine programme"),
         summary=kw.pop("summary", "Funding for AI-based diagnostics."),
         full_text=kw.pop("full_text", "Body about eligibility, scope, budget."),
-        # reconcile_missing_rankings filters on published_at >= now-90d and
-        # excludes NULL published_at entirely.
+        # No deadline = open, which is the window reconcile, ingest and backfill
+        # use since ranking spec 2026-09-24 D4; published_at no longer bounds it.
         published_at=kw.pop("published_at", datetime.now(UTC)),
         **kw,
     )

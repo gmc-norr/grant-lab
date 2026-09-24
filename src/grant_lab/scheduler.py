@@ -27,6 +27,7 @@ from grant_lab.embeddings.refresh import refresh_missing_embeddings_tick
 from grant_lab.ingestion.alerts import ConsecutiveFailureTracker, check_stale_sources
 from grant_lab.ingestion.orchestrator import run_ingestion
 from grant_lab.ranking.anthropic_client import AnthropicClient
+from grant_lab.ranking.freshness import FreshnessContext, ScoringConfig
 
 if TYPE_CHECKING:
     # Annotation only — `from __future__ import annotations` makes it a string,
@@ -385,6 +386,30 @@ def build_scheduler(
         },
     )
 
+    ollama = OllamaClient(base_url=ollama_url, model=gemma_model)
+    # Build the remote rank client once if an API key is configured.
+    # None ⇒ rank_pair never escalates regardless of score — the safe
+    # default for environments without billing or network access to
+    # Anthropic. See ranking/anthropic_client.py for the escalation
+    # semantics inside rank_pair.
+    anthropic_client: AnthropicClient | None = None
+    if anthropic_api_key:
+        anthropic_client = AnthropicClient(api_key=anthropic_api_key, model=remote_rank_model)
+
+    # Ranking freshness (spec D3/D4): ingest and reconcile judge "current" with
+    # the SAME scorer values the rank:drain job below hands drain_queue. Built
+    # from these locals, never from Settings, so the two cannot drift (gate G26).
+    freshness = FreshnessContext(
+        scoring=ScoringConfig.for_drain(
+            client=ollama,
+            embedding_threshold=embedding_pregate_threshold,
+            embedding_hard_fail_threshold=embedding_hard_fail_threshold,
+            escalation_min_score=ranking_escalation_min_score,
+            logprobs_enabled=settings.ranking_logprobs_enabled,
+        ),
+        remote_enabled=anthropic_client is not None,
+    )
+
     for cfg in SOURCES:
         # Capture cfg by default-arg to avoid late-binding in the closure.
         # Without `_cfg=cfg`, every job's closure would resolve `cfg` at
@@ -398,6 +423,7 @@ def build_scheduler(
                 adapter=adapter,
                 alerter=alerter,
                 embed_client=embed_client,
+                freshness=freshness,
             )
 
         sched.add_job(
@@ -446,16 +472,6 @@ def build_scheduler(
             coalesce=True,
             misfire_grace_time=6 * 3600,
         )
-
-    ollama = OllamaClient(base_url=ollama_url, model=gemma_model)
-    # Build the remote rank client once if an API key is configured.
-    # None ⇒ rank_pair never escalates regardless of score — the safe
-    # default for environments without billing or network access to
-    # Anthropic. See ranking/anthropic_client.py for the escalation
-    # semantics inside rank_pair.
-    anthropic_client: AnthropicClient | None = None
-    if anthropic_api_key:
-        anthropic_client = AnthropicClient(api_key=anthropic_api_key, model=remote_rank_model)
 
     def _rank_drain_job() -> None:
         drain_queue(
@@ -626,12 +642,12 @@ def build_scheduler(
         # Closes the orchestrator's step-1-succeeded-but-step-3-failed gap
         # (see ingestion/orchestrator.py atomicity caveats). A mid-flight
         # crash leaves calls ingested but no ranking jobs queued; this
-        # daily sweep enqueues any (recent call × active profile) pair
+        # daily sweep enqueues any (open call × active profile) pair
         # whose ranking is missing or no longer current, and that has no
         # active RankingJob.
         try:
             with session_factory() as session:
-                n = reconcile_missing_rankings(session)
+                n = reconcile_missing_rankings(session, ctx=freshness)
                 session.commit()
                 if n:
                     _logger.info(

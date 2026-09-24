@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -21,7 +21,7 @@ from grant_lab.db.models import (
     WorkspaceEvent,
 )
 from grant_lab.digest.send import week_start as _week_start
-from grant_lab.ranking.backfill import BACKFILL_DAYS, backfill_profile
+from grant_lab.ranking.backfill import backfill_profile
 from grant_lab.scheduler import trigger_job_now
 
 router = APIRouter()
@@ -156,8 +156,7 @@ class AdminDashboardOut(BaseModel):
     queue_counts: QueueCountsOut
     rerank_estimate: int
     active_profiles_count: int
-    recent_calls_count: int
-    backfill_days: int
+    open_calls_count: int
     digest: DigestPanelOut
     embedding_coverage: EmbeddingCoverageOut
     golden_set_report: GoldenSetReportOut | None
@@ -196,9 +195,10 @@ def admin_dashboard(
         active_profiles_count = session.execute(
             select(func.count(Profile.id)).where(Profile.is_active.is_(True))
         ).scalar_one()
-        recent_cutoff = datetime.now(UTC) - timedelta(days=BACKFILL_DAYS)
-        recent_calls_count = session.execute(
-            select(func.count(Call.id)).where(Call.published_at >= recent_cutoff)
+        open_calls_count = session.execute(
+            select(func.count(Call.id)).where(
+                or_(Call.deadline.is_(None), Call.deadline > func.now())
+            )
         ).scalar_one()
 
         digest_ctx = _digest_panel_context(session)
@@ -230,10 +230,9 @@ def admin_dashboard(
     return AdminDashboardOut(
         sources=sources,
         queue_counts=queue_counts,
-        rerank_estimate=active_profiles_count * recent_calls_count,
+        rerank_estimate=active_profiles_count * open_calls_count,
         active_profiles_count=active_profiles_count,
-        recent_calls_count=recent_calls_count,
-        backfill_days=BACKFILL_DAYS,
+        open_calls_count=open_calls_count,
         digest=digest,
         embedding_coverage=coverage,
         golden_set_report=golden,

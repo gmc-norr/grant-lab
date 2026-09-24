@@ -10,7 +10,7 @@ from grant_lab.db.models import (
     RankingJobStatus,
     Source,
 )
-from grant_lab.profiles.fingerprint import rank_fingerprint
+from grant_lab.profiles.fingerprint import call_rank_fingerprint, rank_fingerprint
 from grant_lab.ranking.queue import (
     _STUCK_AFTER,
     claim_pending_jobs,
@@ -20,10 +20,12 @@ from grant_lab.ranking.queue import (
     reconcile_missing_rankings,
     requeue_stuck_running,
 )
+from tests.freshness_helpers import ctx_for
 
 # Rewind comfortably past the stuck threshold so these tests stay correct if
 # _STUCK_AFTER is retuned.
 _PAST_STUCK = _STUCK_AFTER + timedelta(minutes=1)
+CTX = ctx_for()
 
 
 def _seed_call(s) -> int:
@@ -217,7 +219,7 @@ def test_reconcile_enqueues_missing_pair(pg_session_factory, profile_factory):
         s.commit()
 
     with pg_session_factory() as s:
-        n = reconcile_missing_rankings(s)
+        n = reconcile_missing_rankings(s, ctx=CTX)
         s.commit()
 
     assert n == 1
@@ -259,12 +261,14 @@ def test_reconcile_skips_already_ranked_pair(pg_session_factory, profile_factory
                 prompt_version="v3.0",
                 raw_response={},
                 profile_fingerprint=rank_fingerprint(s.get(Profile, profile_id)),
+                call_fingerprint=call_rank_fingerprint(s.get(Call, call_id)),
+                scoring_fingerprint=CTX.scoring.fingerprint(),
             )
         )
         s.commit()
 
     with pg_session_factory() as s:
-        n = reconcile_missing_rankings(s)
+        n = reconcile_missing_rankings(s, ctx=CTX)
         s.commit()
 
     assert n == 0
@@ -285,7 +289,7 @@ def test_reconcile_skips_pair_with_active_job(pg_session_factory, profile_factor
         s.commit()
 
     with pg_session_factory() as s:
-        n = reconcile_missing_rankings(s)
+        n = reconcile_missing_rankings(s, ctx=CTX)
         s.commit()
 
     assert n == 0
@@ -305,15 +309,15 @@ def test_reconcile_ignores_inactive_profile(pg_session_factory, profile_factory)
         s.commit()
 
     with pg_session_factory() as s:
-        n = reconcile_missing_rankings(s)
+        n = reconcile_missing_rankings(s, ctx=CTX)
         s.commit()
 
     assert n == 0
 
 
-def test_reconcile_ignores_old_calls(pg_session_factory, profile_factory):
-    """Older-than-cutoff calls are out of scope — a profile that created
-    yesterday shouldn't trigger a re-ranking of a 2-year-old call."""
+def test_reconcile_includes_an_open_call_published_long_ago(pg_session_factory, profile_factory):
+    """The window is openness, not publication date (spec F3): a call published
+    a year ago with no deadline is still open, so its missing ranking is owed."""
     profile_factory()
     with pg_session_factory() as s:
         _seed_call_with(
@@ -324,26 +328,36 @@ def test_reconcile_ignores_old_calls(pg_session_factory, profile_factory):
         s.commit()
 
     with pg_session_factory() as s:
-        n = reconcile_missing_rankings(s)
+        n = reconcile_missing_rankings(s, ctx=CTX)
         s.commit()
 
-    assert n == 0
+    assert n == 1
 
 
-def test_reconcile_ignores_calls_with_null_published_at(pg_session_factory, profile_factory):
-    """We key the cutoff off published_at; a NULL means we can't bound
-    its age, so we leave it to the normal backfill-on-demand path (same
-    behavior as backfill_profile)."""
+def test_reconcile_includes_a_call_with_null_published_at(pg_session_factory, profile_factory):
+    """The window is openness, not publication date (spec F3): a NULL
+    published_at says nothing about whether the call is open, so it is in."""
     profile_factory()
     with pg_session_factory() as s:
         _seed_call_with(s, external_id="RC-6", published=None)
         s.commit()
 
     with pg_session_factory() as s:
-        n = reconcile_missing_rankings(s)
+        n = reconcile_missing_rankings(s, ctx=CTX)
         s.commit()
 
-    assert n == 0
+    assert n == 1
+
+
+def test_reconcile_ignores_a_closed_call(pg_session_factory, profile_factory):
+    """G7 through the wrapper."""
+    profile_factory()
+    with pg_session_factory() as s:
+        cid = _seed_call_with(s, external_id="RC-CLOSED", published=datetime.now(UTC))
+        s.get(Call, cid).deadline = datetime.now(UTC) - timedelta(days=1)
+        s.commit()
+    with pg_session_factory() as s:
+        assert reconcile_missing_rankings(s, ctx=CTX) == 0
 
 
 def _seed_failed_job(s, *, call_id: int, profile_id: int, updated_at: datetime) -> None:
@@ -379,7 +393,7 @@ def test_reconcile_skips_pair_with_recent_dead_lettered_job(pg_session_factory, 
         s.commit()
 
     with pg_session_factory() as s:
-        n = reconcile_missing_rankings(s)
+        n = reconcile_missing_rankings(s, ctx=CTX)
         s.commit()
 
     assert n == 0
@@ -414,7 +428,7 @@ def test_reconcile_re_enqueues_pair_with_old_dead_lettered_job(pg_session_factor
         s.commit()
 
     with pg_session_factory() as s:
-        n = reconcile_missing_rankings(s)
+        n = reconcile_missing_rankings(s, ctx=CTX)
         s.commit()
 
     assert n == 1

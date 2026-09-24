@@ -28,6 +28,7 @@ from grant_lab.config import Settings
 from grant_lab.embeddings.client import OllamaEmbedClient
 from grant_lab.ingestion.alerts import ConsecutiveFailureTracker
 from grant_lab.ingestion.orchestrator import IngestionResult, run_ingestion
+from grant_lab.ranking.freshness import FreshnessContext
 from grant_lab.sources.registry import build_adapter, known_slugs
 
 _logger = logging.getLogger(__name__)
@@ -80,6 +81,7 @@ def _run_for_source(
         session_factory=session_factory,
         embed_client=embed_client,
         alerter=alerter,
+        freshness=FreshnessContext.from_settings(settings),
     )
 
 

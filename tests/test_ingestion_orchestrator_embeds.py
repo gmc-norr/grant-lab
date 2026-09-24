@@ -28,6 +28,7 @@ from grant_lab.ingestion.alerts import ConsecutiveFailureTracker
 from grant_lab.ingestion.orchestrator import run_ingestion
 from grant_lab.ranking.ollama_client import LLMError
 from grant_lab.sources.types import NormalizedCall
+from tests.freshness_helpers import ctx_for
 
 
 def _embed_result(vec: list[float]) -> EmbedResult:
@@ -102,6 +103,7 @@ def test_orchestrator_embeds_touched_calls_before_enqueueing_ranking_jobs(
     embed_client.embed.side_effect = _capture_then_embed
 
     run_ingestion(
+        freshness=ctx_for(),
         session_factory=pg_session_factory,
         adapter=adapter,
         alerter=_alerter(),
@@ -140,12 +142,14 @@ def test_orchestrator_re_embeds_touched_calls_even_when_already_present(
 
     # Run twice with the same NormalizedCall payload.
     run_ingestion(
+        freshness=ctx_for(),
         session_factory=pg_session_factory,
         adapter=_StaticAdapter([call]),
         alerter=_alerter(),
         embed_client=embed_client,
     )
     run_ingestion(
+        freshness=ctx_for(),
         session_factory=pg_session_factory,
         adapter=_StaticAdapter([call]),
         alerter=_alerter(),
@@ -177,6 +181,7 @@ def test_orchestrator_continues_enqueue_when_embed_fails(
     embed_client = _embed_client(raises=LLMError("ollama is down"))
 
     run_ingestion(
+        freshness=ctx_for(),
         session_factory=pg_session_factory,
         adapter=adapter,
         alerter=_alerter(),
@@ -213,6 +218,7 @@ def test_orchestrator_continues_when_embed_raises_unexpected_exception(
     embed_client = _embed_client(raises=RuntimeError("unexpected"))
 
     run_ingestion(
+        freshness=ctx_for(),
         session_factory=pg_session_factory,
         adapter=adapter,
         alerter=_alerter(),
@@ -251,6 +257,7 @@ def test_orchestrator_step1_failure_skips_embed_and_enqueue(
     embed_client = _embed_client()
 
     run_ingestion(
+        freshness=ctx_for(),
         session_factory=pg_session_factory,
         adapter=_FailingAdapter(),
         alerter=_alerter(),
@@ -304,6 +311,7 @@ def test_orchestrator_step3_failure_invokes_alerter(
     alerter = MagicMock()
 
     run_ingestion(
+        freshness=ctx_for(),
         session_factory=pg_session_factory,
         adapter=adapter,
         alerter=alerter,

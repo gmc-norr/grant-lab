@@ -110,16 +110,29 @@ def test_dashboard_rerank_estimate_is_product(
                     url=f"https://x/e{i}",
                     title="T",
                     published_at=datetime.now(UTC) - timedelta(days=5),
+                    deadline=datetime(2099, 1, 1, tzinfo=UTC),
                 )
             )
+        # A closed call: the estimate counts open calls (spec D5), not recent ones.
+        s.add(
+            Call(
+                source_id=src.id,
+                external_id="E-closed",
+                url="https://x/e-closed",
+                title="T",
+                published_at=datetime.now(UTC) - timedelta(days=5),
+                deadline=datetime.now(UTC) - timedelta(days=1),
+            )
+        )
         s.commit()
     app = _setup(monkeypatch, pg_url)
     c, _ = _admin(app, pg_session_factory, test_client_factory)
     body = c.get("/api/admin/dashboard").json()
     assert body["active_profiles_count"] == 2
-    assert body["recent_calls_count"] == 3
+    assert body["open_calls_count"] == 3
     assert body["rerank_estimate"] == 6
-    assert body["backfill_days"] == 90
+    assert "backfill_days" not in body
+    assert "recent_calls_count" not in body
 
 
 def test_dashboard_digest_panel(monkeypatch, pg_url, pg_session_factory, test_client_factory):

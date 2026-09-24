@@ -19,6 +19,7 @@ from grant_lab.db.models import (
 from grant_lab.embeddings.client import EmbedResult
 from grant_lab.ranking.ollama_client import OllamaClient
 from grant_lab.ranking.worker import drain_queue as _drain_queue
+from tests.freshness_helpers import ctx_for
 
 # drain_queue now requires embedding_threshold (no module-level default).
 # Mirrors Settings.embedding_pregate_threshold default of 0.30.
@@ -305,6 +306,7 @@ def test_e2e_ingest_then_drain_short_circuits_when_embedding_dissimilar(
 
     # Step 1: ingest + embed + enqueue.
     ingest_result = run_ingestion(
+        freshness=ctx_for(),
         session_factory=pg_session_factory,
         adapter=adapter,
         alerter=alerter,
@@ -404,6 +406,7 @@ def test_e2e_ingest_then_drain_invokes_llm_when_embedding_similar(
     )
 
     run_ingestion(
+        freshness=ctx_for(),
         session_factory=pg_session_factory,
         adapter=adapter,
         alerter=alerter,

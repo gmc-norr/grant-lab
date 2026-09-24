@@ -8,6 +8,7 @@ from grant_lab.embeddings.client import EmbedResult
 from grant_lab.ingestion.alerts import ConsecutiveFailureTracker
 from grant_lab.ingestion.orchestrator import run_ingestion
 from grant_lab.sources.types import AdapterError, NormalizedCall
+from tests.freshness_helpers import ctx_for
 
 
 def _embed_client():
@@ -40,6 +41,7 @@ def test_successful_ingest_enqueues_one_job_per_active_profile(pg_session_factor
     )
 
     run_ingestion(
+        freshness=ctx_for(),
         session_factory=pg_session_factory,
         adapter=adapter,
         alerter=alerter,
@@ -71,6 +73,7 @@ def test_inactive_profile_does_not_get_jobs(pg_session_factory, profile_factory)
     alerter = ConsecutiveFailureTracker(threshold=3, sender=sender, admin_email=None)
     adapter = _StaticAdapter([NormalizedCall(external_id="V-1", url="https://x", title="T")])
     run_ingestion(
+        freshness=ctx_for(),
         session_factory=pg_session_factory,
         adapter=adapter,
         alerter=alerter,
@@ -96,6 +99,7 @@ def test_ingestion_failure_does_not_enqueue_jobs(pg_session_factory, profile_fac
             raise AdapterError("boom")
 
     run_ingestion(
+        freshness=ctx_for(),
         session_factory=pg_session_factory,
         adapter=_Failing(),
         alerter=alerter,

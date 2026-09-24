@@ -14,6 +14,7 @@ from grant_lab.embeddings.client import OllamaEmbedClient
 from grant_lab.embeddings.refresh import refresh_call_embedding
 from grant_lab.ingestion.alerts import ConsecutiveFailureTracker
 from grant_lab.ingestion.upsert import upsert_call
+from grant_lab.ranking.freshness import FreshnessContext
 from grant_lab.ranking.queue import bulk_enqueue_for_calls
 from grant_lab.sources.types import AdapterError, SourceAdapter
 
@@ -51,6 +52,7 @@ def run_ingestion(
     adapter: SourceAdapter,
     alerter: ConsecutiveFailureTracker,
     embed_client: OllamaEmbedClient,
+    freshness: FreshnessContext,
 ) -> IngestionResult:
     """Run one adapter end-to-end.
 
@@ -73,8 +75,8 @@ def run_ingestion(
         UNKNOWN gate that falls through to the LLM, so a missing embedding
         is a graceful degradation (LLM still runs as the safe fallback).
 
-      Step 3 (one transaction): enqueue ranking jobs for touched calls
-        × active profiles.
+      Step 3 (one transaction): enqueue the touched calls' STALE pairs
+        (ranking/freshness.py).
 
     The split exists so the ranking worker (which polls every 60s) never
     sees a job whose call/profile pair has a NULL embedding because the
@@ -247,7 +249,8 @@ def run_ingestion(
                 )
                 # Don't abort — enqueue the job anyway. UNKNOWN gate → LLM runs.
 
-        # --- Step 3: enqueue ranking jobs (one transaction, one statement) ---
+        # --- Step 3: enqueue the touched calls' STALE pairs (ranking/freshness.py;
+        # one transaction, one statement) ---
         # Perf (D2-2): replaced the N×M per-pair enqueue_for_pair loop with a
         # single bulk INSERT … CROSS JOIN unnest(:call_ids) … active profiles.
         # Same ON CONFLICT DO NOTHING idempotency as the per-pair helper, same
@@ -260,7 +263,7 @@ def run_ingestion(
         # in step 1, so the next ingest tick won't re-discover these calls.
         try:
             with session_factory() as session:
-                bulk_enqueue_for_calls(session, touched_call_ids)
+                bulk_enqueue_for_calls(session, touched_call_ids, ctx=freshness)
                 session.commit()
         except Exception as e:  # noqa: BLE001 — must not crash the scheduler
             error_msg = f"step 3 (enqueue) failed: {e}"

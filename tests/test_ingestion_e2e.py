@@ -11,6 +11,7 @@ from grant_lab.ingestion.alerts import ConsecutiveFailureTracker
 from grant_lab.ingestion.orchestrator import run_ingestion
 from grant_lab.main import create_app
 from grant_lab.sources.types import NormalizedCall
+from tests.freshness_helpers import ctx_for
 
 
 class _FakeAdapter:
@@ -50,6 +51,7 @@ def test_end_to_end_ingest_and_browse(monkeypatch, pg_url, pg_session_factory):
     embed_client.model = "bge-m3"
     embed_client.embed.return_value = EmbedResult(vector=[0.1] * 1024, embedded_chars=1)
     result = run_ingestion(
+        freshness=ctx_for(),
         session_factory=pg_session_factory,
         adapter=_FakeAdapter(),
         alerter=alerter,

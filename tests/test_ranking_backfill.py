@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select, update
 
 from grant_lab.db.models import Call, Profile, RankingJob, RankingJobStatus, Source
-from grant_lab.ranking.backfill import BACKFILL_DAYS, backfill_profile
+from grant_lab.ranking.backfill import backfill_profile
 
 
 def _seed_calls(s, ages_days):
@@ -22,17 +22,27 @@ def _seed_calls(s, ages_days):
     s.commit()
 
 
-def test_backfill_enqueues_jobs_for_recent_calls(pg_session_factory, profile_factory):
+def test_backfill_enqueues_every_open_call_whatever_its_age(pg_session_factory, profile_factory):
+    """Spec D4: the window is openness. Published 1 day or 400 days ago is the same.
+
+    The CLOSED call is the 30-day one, and the assertion names which calls got
+    jobs: closing the 400-day call instead, or counting only, passes the old
+    90-day publication window too (BF-0 and BF-1 either way)."""
     profile_id, _ = profile_factory()
     with pg_session_factory() as s:
-        _seed_calls(s, ages_days=[1, 30, 89, BACKFILL_DAYS + 5, 200])
-
+        _seed_calls(s, ages_days=[1, 30, 400])
+        s.execute(
+            update(Call)
+            .where(Call.external_id == "BF-1")
+            .values(deadline=datetime.now(UTC) - timedelta(days=1))
+        )  # closed
+        s.commit()
     backfill_profile(session_factory=pg_session_factory, profile_id=profile_id)
-
     with pg_session_factory() as s:
-        jobs = s.execute(select(RankingJob)).scalars().all()
-        # Three calls within the BACKFILL_DAYS window
-    assert len(jobs) == 3
+        enqueued = s.execute(
+            select(Call.external_id).join(RankingJob, RankingJob.call_id == Call.id)
+        ).scalars()
+        assert sorted(enqueued) == ["BF-0", "BF-2"]
 
 
 def test_backfill_skips_inactive_profile(pg_session_factory, profile_factory):
@@ -62,14 +72,14 @@ def test_backfill_is_idempotent(pg_session_factory, profile_factory):
     assert len(jobs) == 2  # not 4 — partial unique index dedups
 
 
-def test_backfill_skips_pair_with_recent_dead_lettered_job(pg_session_factory, profile_factory):
-    """A terminally-FAILED (dead-lettered) pair must not be re-enqueued by
-    backfill — otherwise every backfill run re-tries a pair that already
-    burned all its attempts. An OLD failed job (past the window) is still
-    eligible again."""
+def test_backfill_bypasses_dead_letter_suppression(pg_session_factory, profile_factory):
+    """Spec D4: backfill runs only after a human act (a profile edit that changed
+    its rank inputs, a new profile's bootstrap, or the admin "Re-rank
+    everything" override), so a dead-lettered pair -- recent or old -- is
+    enqueued again. Suppression belongs to the automatic paths only."""
     profile_id, _ = profile_factory()
     with pg_session_factory() as s:
-        # call 0: recent dead-letter → suppressed; call 1: old dead-letter → eligible
+        # call 0: recent dead-letter; call 1: old dead-letter. Both are enqueued.
         _seed_calls(s, ages_days=[1, 1])
         calls = s.execute(select(Call).order_by(Call.external_id)).scalars().all()
         recent_call, old_call = calls[0], calls[1]
@@ -98,6 +108,5 @@ def test_backfill_skips_pair_with_recent_dead_lettered_job(pg_session_factory, p
             .scalars()
             .all()
         )
-    # Only the old-dead-letter call gets re-enqueued.
-    assert len(pending) == 1
-    assert pending[0].call_id == old_call.id
+    assert len(pending) == 2
+    assert {j.call_id for j in pending} == {recent_call.id, old_call.id}

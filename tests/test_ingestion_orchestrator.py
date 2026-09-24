@@ -9,6 +9,7 @@ from grant_lab.embeddings.client import EmbedResult
 from grant_lab.ingestion.alerts import ConsecutiveFailureTracker
 from grant_lab.ingestion.orchestrator import run_ingestion
 from grant_lab.sources.types import AdapterError, NormalizedCall
+from tests.freshness_helpers import ctx_for
 
 
 def _embed_client():
@@ -53,6 +54,7 @@ def test_successful_run_persists_and_advances_timestamp(pg_session_factory):
     )
 
     result = run_ingestion(
+        freshness=ctx_for(),
         session_factory=pg_session_factory,
         adapter=adapter,
         alerter=_alerter(sender),
@@ -75,6 +77,7 @@ def test_second_run_updates_existing_and_inserts_new(pg_session_factory):
         [NormalizedCall(external_id="V-1", url="https://example.org/u", title="OLD")]
     )
     run_ingestion(
+        freshness=ctx_for(),
         session_factory=pg_session_factory,
         adapter=a1,
         alerter=_alerter(sender),
@@ -88,6 +91,7 @@ def test_second_run_updates_existing_and_inserts_new(pg_session_factory):
         ]
     )
     result = run_ingestion(
+        freshness=ctx_for(),
         session_factory=pg_session_factory,
         adapter=a2,
         alerter=_alerter(sender),
@@ -108,6 +112,7 @@ def test_failure_rolls_back_and_does_not_advance_timestamp(pg_session_factory):
         ).scalar_one()
 
     result = run_ingestion(
+        freshness=ctx_for(),
         session_factory=pg_session_factory,
         adapter=adapter,
         alerter=_alerter(sender),
@@ -135,6 +140,7 @@ def test_three_consecutive_failures_alert_admin(pg_session_factory):
     adapter = _FailingAdapter()
     for _ in range(3):
         run_ingestion(
+            freshness=ctx_for(),
             session_factory=pg_session_factory,
             adapter=adapter,
             alerter=alerter,
@@ -155,6 +161,7 @@ def test_unknown_source_slug_raises(pg_session_factory):
 
     with pytest.raises(LookupError):
         run_ingestion(
+            freshness=ctx_for(),
             session_factory=pg_session_factory,
             adapter=_BadSlug(),
             alerter=_alerter(sender),
@@ -187,6 +194,7 @@ def test_orchestrator_enqueues_one_job_per_active_profile(pg_session_factory, pr
             )
 
     run_ingestion(
+        freshness=ctx_for(),
         session_factory=pg_session_factory,
         adapter=_FakeAdapter(),
         alerter=MagicMock(),

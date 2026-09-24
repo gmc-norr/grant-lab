@@ -59,6 +59,7 @@ def test_rerank_enqueues_for_active_profiles(
                 url="https://x/r",
                 title="T",
                 published_at=datetime.now(UTC) - timedelta(days=10),
+                deadline=datetime(2099, 1, 1, tzinfo=UTC),
             )
         )
         s.commit()
@@ -69,6 +70,66 @@ def test_rerank_enqueues_for_active_profiles(
     assert r.json() == {"enqueued": 1}  # one ACTIVE PROFILE, not job count
     with pg_session_factory() as s:
         assert len(s.execute(select(RankingJob)).scalars().all()) == 1
+
+
+def test_rerank_enqueues_fresh_and_suppressed_open_pairs_but_not_closed(
+    monkeypatch, pg_url, pg_session_factory, profile_factory, test_client_factory
+):
+    """G23 (gap 2, D5): the override ignores freshness AND suppression."""
+    from grant_lab.db.models import CallRanking, Profile, RankingJobStatus
+    from grant_lab.profiles.fingerprint import call_rank_fingerprint, rank_fingerprint
+    from tests.freshness_helpers import ctx_for
+
+    pid, _ = profile_factory()
+    ctx = ctx_for()
+    with pg_session_factory() as s:
+        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
+        fresh, suppressed, closed = (
+            Call(source_id=src.id, external_id=e, url=f"https://x/{e}", title=e, deadline=d)
+            for e, d in (
+                ("FRESH", datetime(2099, 1, 1, tzinfo=UTC)),
+                ("SUPP", datetime(2099, 1, 1, tzinfo=UTC)),
+                ("CLOSED", datetime.now(UTC) - timedelta(days=1)),
+            )
+        )
+        s.add_all([fresh, suppressed, closed])
+        s.flush()
+        s.add(
+            CallRanking(
+                call_id=fresh.id,
+                profile_id=pid,
+                aggregate_score=60,
+                rationale="",
+                model="m",
+                prompt_version="v5.0",
+                raw_response={},
+                profile_fingerprint=rank_fingerprint(s.get(Profile, pid)),
+                call_fingerprint=call_rank_fingerprint(fresh),
+                scoring_fingerprint=ctx.scoring.fingerprint(),
+            )
+        )
+        s.add(
+            RankingJob(
+                call_id=suppressed.id,
+                profile_id=pid,
+                status=RankingJobStatus.FAILED,
+                attempts=5,
+                last_error="x",
+            )
+        )
+        s.commit()
+        want = {fresh.id, suppressed.id}
+    app = _setup(monkeypatch, pg_url)
+    c, _ = _admin(app, pg_session_factory, test_client_factory)
+    assert c.post("/api/admin/rerank").status_code == 200
+    with pg_session_factory() as s:
+        pending = {
+            j.call_id
+            for j in s.execute(
+                select(RankingJob).where(RankingJob.status == RankingJobStatus.PENDING)
+            ).scalars()
+        }
+    assert pending == want
 
 
 def test_rerank_requires_admin(monkeypatch, pg_url, pg_session_factory, test_client_factory):
