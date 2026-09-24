@@ -153,7 +153,12 @@ def test_refresh_profile_embedding_writes_vector_and_model(pg_session_factory):
 
 def test_refresh_missing_embeddings_tick_processes_only_nulls(pg_session_factory):
     """Tick batches NULL-embedding rows. Already-embedded rows with the
-    SAME model are skipped (the mismatch case is tested separately)."""
+    SAME model are skipped (the mismatch case is tested separately).
+
+    Migration 0080: "already embedded" now also means a fingerprint of the
+    call's present text. A NULL fingerprint is stale by design (it is how the
+    first tick after deploy re-embeds every call), so the seed stamps it.
+    """
     client = _fake_client(vec=[0.1] * 1024)
     with pg_session_factory() as s:
         c1 = _seed_call(s, title="MissTick1")
@@ -161,6 +166,7 @@ def test_refresh_missing_embeddings_tick_processes_only_nulls(pg_session_factory
         # c2 already has embedding under the SAME model — should be skipped
         s.get(Call, c2).embedding = [0.9] * 1024
         s.get(Call, c2).embedding_model = "bge-m3"
+        s.get(Call, c2).embedding_fingerprint = call_embedding_fingerprint(s.get(Call, c2))
         p1 = _seed_profile(s, name="MissTick3")
         s.commit()
 
@@ -326,8 +332,8 @@ def test_refresh_missing_tick_force_false_default_skips_already_embedded(pg_sess
     matching model are no longer enough, the embedding_fingerprint must also
     describe the row's present text. A NULL fingerprint is stale by design (it
     is how the first tick after deploy re-embeds the corpus), so this seed now
-    stamps the fingerprint too. The CALL half is unchanged -- calls have no
-    fingerprint column.
+    stamps the fingerprint too. Migration 0080 did the same for calls, so the
+    call seed stamps its fingerprint as well.
     """
     from grant_lab.profiles.fingerprint import embedding_fingerprint
 
@@ -336,6 +342,7 @@ def test_refresh_missing_tick_force_false_default_skips_already_embedded(pg_sess
         s.flush()
         s.get(Call, cid).embedding = [0.9] * 1024
         s.get(Call, cid).embedding_model = "bge-m3"
+        s.get(Call, cid).embedding_fingerprint = call_embedding_fingerprint(s.get(Call, cid))
         pid = _seed_profile(s, name="ForceFalse2")
         s.flush()
         prof = s.get(Profile, pid)

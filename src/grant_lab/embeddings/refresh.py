@@ -13,7 +13,7 @@ import logging
 from typing import TYPE_CHECKING
 
 import httpx
-from sqlalchemy import or_, select
+from sqlalchemy import select
 
 from grant_lab.db.models import Call, Profile
 from grant_lab.embeddings.similarity import build_call_text, build_profile_text
@@ -46,12 +46,15 @@ def refresh_call_embedding(
     When `force=True` and the embed call raises LLMError, ALL THREE of
     `embedding`, `embedding_model` and `embedding_fingerprint` are nulled
     out. Force mode means "the existing vector is no longer correct" (e.g.,
-    the embedded text format changed). Leaving the row with its OLD vector
-    AND current `embedding_model` would make it invisible to the daily
-    refresh tick (which selects on NULL-or-mismatched-model) — silent
-    permanent staleness. Nulling lets the daily tick retry tomorrow;
-    meanwhile the embedding gate sees None → UNKNOWN → falls back to the
-    LLM, which is safer than ranking against a known-stale vector.
+    the embedded text format changed). Leaving the row with its OLD vector,
+    current `embedding_model` AND matching fingerprint would make it
+    invisible to the daily refresh tick, whose staleness test is exactly
+    those three — silent permanent staleness. (Since migration 0080 the
+    fingerprint alone catches a force run prompted by a text-format change;
+    nulling still covers every other reason to force.) Nulling lets the
+    daily tick retry tomorrow; meanwhile the embedding gate sees None →
+    UNKNOWN → falls back to the LLM, which is safer than ranking against a
+    known-stale vector.
 
     ``_http`` — optional persistent :class:`httpx.Client` for batch callers
     (see :meth:`OllamaEmbedClient.session`). When supplied, the same TCP
@@ -227,6 +230,7 @@ def refresh_missing_embeddings_tick(
     totals = {
         "calls_embedded": 0,
         "calls_failed": 0,
+        "calls_seen": 0,
         "profiles_embedded": 0,
         "profiles_failed": 0,
         "profiles_seen": 0,
@@ -278,6 +282,7 @@ def refresh_missing_embeddings_tick(
         for key in (
             "calls_embedded",
             "calls_failed",
+            "calls_seen",
             "profiles_embedded",
             "profiles_failed",
             "profiles_seen",
@@ -287,16 +292,24 @@ def refresh_missing_embeddings_tick(
         totals["max_profile_id"] = max(totals["max_profile_id"], summary["max_profile_id"])
         # Break on rows EXAMINED, not rows worked. A page in which nothing was
         # stale is progress, not exhaustion: breaking on "processed == 0" here
-        # would discard the advanced cursor two lines below, and every later
-        # tick would restart at after_profile_id=0 and halt at the same wall.
-        # Once the candidate set is widened, that page is the common case.
+        # would stop the drain at the first page with nothing to do, discard
+        # the cursors advanced two lines below, and leave every stale row
+        # behind that page unrepaired. With both halves widened, that page is
+        # the common case. Pinned per half by
+        # test_a_stale_profile_behind_a_full_fresh_page_is_still_reached and
+        # test_a_stale_call_behind_a_full_fresh_page_is_still_reached.
         #
-        # Termination still holds. The call half is SQL-narrowed, so
-        # calls_embedded + calls_failed IS the number of call rows examined.
-        # The profile half is not, which is why it contributes profiles_seen.
-        # Whenever a page returns rows, the batch advances that cursor strictly
-        # (to max(profile_ids), or to max(row ids) when nothing was workable),
-        # and every returned id is > the cursor it started from. So each
+        # Termination still holds, by the same argument on both halves.
+        # Neither half narrows in SQL any more (profiles since migration 0075,
+        # calls since 0080): each returns every row past its cursor and decides
+        # staleness per row in Python. So a half's worked count (embedded +
+        # failed) is NOT the number of rows it examined -- a page of fresh rows
+        # works none of them -- which is why `examined` sums calls_seen and
+        # profiles_seen, the rows each half's page actually returned. Whenever
+        # a half's page returns rows, the batch advances that half's cursor
+        # strictly (calls: to the largest id on the page; profiles: to
+        # max(profile_ids), or to max(row ids) when nothing was workable), and
+        # every returned id is > the cursor it started from. So each
         # non-breaking iteration consumes at least one row of a finite table,
         # and the final page — the one past the last id — returns nothing on
         # both halves, making `examined` 0.
@@ -305,7 +318,7 @@ def refresh_missing_embeddings_tick(
         # question, answered by that half alone, and the daily caller needs
         # the per-half answer to decide about the profile cursor.
         totals["profile_scan_exhausted"] = summary["profiles_seen"] == 0
-        examined = summary["calls_embedded"] + summary["calls_failed"] + summary["profiles_seen"]
+        examined = summary["calls_seen"] + summary["profiles_seen"]
         if examined == 0:
             # examined == 0 implies profiles_seen == 0, so the per-half flag
             # set just above is already True on this path.
@@ -331,6 +344,18 @@ def _digest_for_row(row) -> str:
     return embedding_fingerprint(row)
 
 
+def _digest_for_call_row(row) -> str:
+    """call_embedding_fingerprint() over a column-limited Row rather than a Call.
+
+    The call-side twin of `_digest_for_row`, and like it a thin wrapper, never
+    a second implementation: the digest this scan compares must be the one
+    refresh_call_embedding stamps. Both build_call_text and
+    call_embedding_fingerprint duck-type on `.title`, `.summary` and
+    `.full_text`, which the Row exposes.
+    """
+    return call_embedding_fingerprint(row)
+
+
 def _refresh_missing_embeddings_batch(
     *,
     session_factory,
@@ -340,10 +365,11 @@ def _refresh_missing_embeddings_batch(
     after_call_id: int = 0,
     after_profile_id: int = 0,
 ) -> dict[str, int]:
-    """One batch: scan for NULL-embedding rows AND rows whose embedding_model
-    differs from the currently-configured model — embed both. Per-row
-    try/except so one bad row doesn't kill the batch. Returns a summary
-    dict for logging.
+    """One batch: examine the rows past each cursor and embed the stale ones —
+    a NULL embedding, an embedding_model that differs from the currently
+    configured model, or an embedding_fingerprint that no longer describes
+    the row's text. Per-row try/except so one bad row doesn't kill the
+    batch. Returns a summary dict for logging.
 
     Codex H2 fix: scoping by `embedding IS NULL OR embedding_model != current`
     means a model swap (env change of EMBEDDING_MODEL) is recovered by the
@@ -370,6 +396,11 @@ def _refresh_missing_embeddings_batch(
     made per row. The summary therefore carries `profiles_seen` — rows
     examined, distinct from rows embedded or failed — because the drain loop
     can no longer read "worked nothing" as "nothing left".
+
+    Migration 0080 did the same to the CALL half, for the same reason: a
+    call's `embedding_fingerprint` hashes `build_call_text`, which is Python.
+    The summary carries `calls_seen` alongside `profiles_seen`, and the drain
+    loop sums the two.
     """
     current_model = embed_client.model
     summary = {
@@ -377,27 +408,76 @@ def _refresh_missing_embeddings_batch(
         "calls_failed": 0,
         "profiles_embedded": 0,
         "profiles_failed": 0,
-        # Rows EXAMINED, not rows worked. The drain loop breaks on this: with
-        # the staleness decision made in Python, a page can legitimately
-        # examine rows without working any, and that is progress.
+        # Rows EXAMINED, not rows worked, one count per half. The drain loop
+        # breaks on their sum: with the staleness decision made in Python, a
+        # page can legitimately examine rows without working any, and that is
+        # progress.
+        "calls_seen": 0,
         "profiles_seen": 0,
         "max_call_id": after_call_id,
         "max_profile_id": after_profile_id,
     }
 
     with session_factory() as session:
-        call_q = select(Call.id)
-        if not force:
-            call_q = call_q.where(
-                or_(Call.embedding.is_(None), Call.embedding_model != current_model)
+        # Migration 0080: the staleness decision moved into Python, as it did
+        # for profiles in 0075, because a call's fingerprint hashes
+        # build_call_text, which is Python and cannot be evaluated in SQL. So
+        # every call past the cursor is examined and decided per row below.
+        #
+        # Do NOT select Call wholesale or Call.embedding: that parses the
+        # 1024-dim vector of every row examined just to decide whether to
+        # replace it. Carry `embedding IS NULL` as a computed boolean instead,
+        # as the profile half does.
+        #
+        # `full_text` is loaded WHOLE, with no SQL-side left(). build_call_text
+        # already cuts it at CALL_TEXT_FULL_TEXT_LIMIT, and that cut must live
+        # in exactly one place: a second, SQL-side cut is a second copy of the
+        # limit, and the day the two disagree the fingerprint computed here
+        # stops matching the one refresh_call_embedding stamps from the whole
+        # row, so every call longer than the SQL cut re-embeds on every tick
+        # (and the backfill CLI's default loop, which stops only on a pass
+        # that embeds nothing, never stops). The price is reading every call's
+        # whole full_text once per tick; at the size measured on the app
+        # database on 2026-09-24 (686 calls, 81 of them over the 8000-char
+        # limit, the longest 35,859 chars) that is a few MB.
+        #
+        # No SQL title pre-filter either: a call with a blank/whitespace title
+        # but an embeddable summary/full_text must still be embedded.
+        # refresh_call_embedding skips (returns False) only when ALL parts are
+        # empty, keeping the embeddability rule in one place.
+        call_q = (
+            select(
+                Call.id,
+                Call.title,
+                Call.summary,
+                Call.full_text,
+                Call.embedding_fingerprint,
+                Call.embedding_model,
+                Call.embedding.is_(None).label("embedding_is_null"),
             )
-        # No SQL title pre-filter: a call with a blank/whitespace title but an
-        # embeddable summary/full_text must still be embedded. build_call_text
-        # composes title+summary+full_text and refresh_call_embedding skips
-        # (returns False) only when ALL are empty — mirrors the profile path
-        # below, keeping the embeddability rule in one place (no SQL duplicate).
-        call_q = call_q.where(Call.id > after_call_id).order_by(Call.id).limit(batch_size)
-        call_ids = session.execute(call_q).scalars().all()
+            .where(Call.id > after_call_id)
+            .order_by(Call.id)
+            .limit(batch_size)
+        )
+        call_rows = session.execute(call_q).all()
+    summary["calls_seen"] = len(call_rows)
+
+    call_ids = []
+    for r in call_rows:
+        if force:
+            # Force sends every row past the cursor to refresh_call_embedding,
+            # embeddable or not -- unchanged by 0080, since force never
+            # narrowed: a blank call counts as failed there. The backfill
+            # CLI's force loop stops on a batch that processed (embedded +
+            # failed) nothing, so dropping blank rows here could end it early.
+            call_ids.append(r.id)
+            continue
+        if (
+            r.embedding_is_null
+            or r.embedding_model != current_model
+            or r.embedding_fingerprint != _digest_for_call_row(r)
+        ):
+            call_ids.append(r.id)
     # D2-3 perf: reuse one HTTP connection across the entire call-id batch
     # instead of opening/closing a fresh TCP socket per embed call.
     with embed_client.session() as http:
@@ -409,8 +489,13 @@ def _refresh_missing_embeddings_batch(
                 summary["calls_embedded"] += 1
             else:
                 summary["calls_failed"] += 1
-    if call_ids:
-        summary["max_call_id"] = max(call_ids)
+    if call_rows:
+        # Past every row EXAMINED, not only the ones worked: each was either
+        # worked above or judged current, so nothing on this page needs
+        # re-reading this tick. (A row that failed stays stale behind the
+        # cursor; a later tick retries it.) Under force every row is worked,
+        # so this equals max(call_ids), the CLI's cursor contract.
+        summary["max_call_id"] = max(r.id for r in call_rows)
 
     with session_factory() as session:
         # The staleness decision moved into Python because build_profile_text
