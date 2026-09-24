@@ -11,7 +11,7 @@ from sqlalchemy import select
 import grant_lab.scheduler as scheduler_mod
 from grant_lab.auth.email import InMemoryEmailSender
 from grant_lab.config import Settings
-from grant_lab.db.models import RankingJob, RankingJobStatus
+from grant_lab.db.models import CallRanking, RankingJob, RankingJobStatus
 from grant_lab.embeddings.client import EmbedResult
 from grant_lab.ingestion.alerts import ConsecutiveFailureTracker
 from grant_lab.ingestion.orchestrator import run_ingestion
@@ -85,6 +85,14 @@ def test_an_unchanged_call_reingested_is_not_re_ranked(pg_session_factory, profi
         batch_size=10,
     )
     assert _pending(pg_session_factory) == 0
+    # The drain RANKED the pair, stamped. `_pending == 0` alone also holds for a
+    # dead-lettered job, and suppression (same inputs) would then keep the
+    # unchanged re-ingest below quiet too -- a pass with nothing ranked.
+    with pg_session_factory() as s:
+        rk = s.execute(select(CallRanking)).scalar_one_or_none()
+        assert rk is not None, "the drain did not rank the pair"
+        assert rk.call_fingerprint is not None
+        assert rk.scoring_fingerprint == ctx.scoring.fingerprint()
 
     _ingest(pg_session_factory, "Same text.", ctx)
     assert _pending(pg_session_factory) == 0, "an unchanged call was re-enqueued"
@@ -118,6 +126,9 @@ def _settings_env(monkeypatch):
     monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
     monkeypatch.setenv("APP_BASE_URL", "http://testserver")
     monkeypatch.setenv("DRAFTING_ADAPTER", "fake")
+    # Not the default (False): a FreshnessContext that hard-coded
+    # logprobs_enabled=False would otherwise agree with the drain by accident.
+    monkeypatch.setenv("RANKING_LOGPROBS_ENABLED", "true")
 
 
 SCORING_PARAMS = (

@@ -110,7 +110,8 @@ def test_dashboard_rerank_estimate_is_product(
                     url=f"https://x/e{i}",
                     title="T",
                     published_at=datetime.now(UTC) - timedelta(days=5),
-                    deadline=datetime(2099, 1, 1, tzinfo=UTC),
+                    # NULL is open too: one of the three has no deadline.
+                    deadline=None if i == 0 else datetime(2099, 1, 1, tzinfo=UTC),
                 )
             )
         # A closed call: the estimate counts open calls (spec D5), not recent ones.

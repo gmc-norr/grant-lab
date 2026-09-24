@@ -90,17 +90,20 @@ def run_ingestion(
       - Step 1 succeeds, process killed before step 2/3 → calls inserted,
         no jobs queued. Next ingest tick won't re-discover the same calls
         (last_fetched_at was advanced atomically with the inserts; upsert
-        is a no-op on no-change anyway). The daily refresh-missing tick
-        eventually catches the missing embeddings; an admin must manually
-        rerank to queue ranking jobs.
+        is a no-op on no-change anyway). The daily 03:30 refresh-missing tick
+        catches the missing embeddings, and the 04:00 reconcile
+        (reconcile_missing_rankings) enqueues every stale pair over all open
+        calls -- a pair with no ranking is stale -- so no manual rerank is
+        needed.
       - Step 2 partial failure (one embed call raises) → loop continues to
-        next call; step 3 still runs; failed-embed calls go through LLM
-        via the UNKNOWN gate when their job drains.
+        next call; step 3 still runs and enqueues that call's pairs if they
+        are stale (a new or changed call's always are); a missing vector
+        goes through the LLM via the UNKNOWN gate when the job drains.
       - Step 3 crash (DB error during enqueue) → calls embedded, no jobs
         queued. Caught and recorded as `error_msg`; the alerter fires via
-        record_failure. Admin must manually rerank to recover (the next
-        ingest tick won't re-discover these calls because last_fetched_at
-        was advanced in step 1).
+        record_failure. The next ingest tick won't re-discover these calls
+        (last_fetched_at was advanced in step 1); the 04:00 reconcile
+        enqueues their stale pairs, as for the step-1 crash above.
 
     This matches the prior single-commit's behavior under mid-flight crash
     (which also left no jobs queued), so no atomicity regression.
@@ -247,20 +250,26 @@ def run_ingestion(
                         "error": str(e),
                     },
                 )
-                # Don't abort — enqueue the job anyway. UNKNOWN gate → LLM runs.
+                # Don't abort. Step 3 still judges this call: its pairs are
+                # enqueued if stale (a new or changed call's always are), and a
+                # missing vector falls through to the LLM via the UNKNOWN gate.
 
         # --- Step 3: enqueue the touched calls' STALE pairs (ranking/freshness.py;
-        # one transaction, one statement) ---
-        # Perf (D2-2): replaced the N×M per-pair enqueue_for_pair loop with a
-        # single bulk INSERT … CROSS JOIN unnest(:call_ids) … active profiles.
-        # Same ON CONFLICT DO NOTHING idempotency as the per-pair helper, same
-        # pattern as reconcile_missing_rankings. Saves (|calls| × |profiles|) - 1
-        # round-trips (e.g. 50 calls × 3 profiles = 150→1 statements).
+        # one transaction, at most three statements) ---
+        # enqueue_stale_pairs reads the active profiles and the touched OPEN
+        # calls (two column-limited SELECTs), then issues ONE bulk INSERT …
+        # SELECT over (call × profile) that skips every pair whose ranking is
+        # current. Perf (D2-2) still holds: the statement count does not grow
+        # with |calls| × |profiles| (50 calls × 3 profiles: 150 per-pair
+        # INSERTs → 3 statements). ON CONFLICT DO NOTHING on the partial unique
+        # index keeps it idempotent, as with the per-pair enqueue_for_pair.
         # Wrap in try/except so an enqueue-time DB error (lock contention,
         # transient connection drop) is recorded as `error_msg` rather than
-        # propagating out and bypassing the alerter below. Recovery on this
-        # branch requires a manual rerank — last_fetched_at already advanced
-        # in step 1, so the next ingest tick won't re-discover these calls.
+        # propagating out and bypassing the alerter below. The next ingest tick
+        # won't re-discover these calls (last_fetched_at already advanced in
+        # step 1), but no manual rerank is needed: the 04:00 reconcile enqueues
+        # every stale pair over all open calls, and a pair with no ranking is
+        # stale.
         try:
             with session_factory() as session:
                 bulk_enqueue_for_calls(session, touched_call_ids, ctx=freshness)
