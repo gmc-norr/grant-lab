@@ -98,6 +98,19 @@ def test_a_missing_ranking_is_enqueued(session):
     assert _pending(session) == [(c.id, p.id)]
 
 
+def test_a_changed_profile_is_enqueued(session):
+    """The profile arm of D4's currency check (G2's counterpart on the profile
+    side: no numbered gate names it, but `OR cr.profile_fingerprint =
+    want.fingerprint` is exactly as load-bearing as the call-fingerprint
+    compare G2 pins)."""
+    ctx = ctx_for()
+    p, c = make_profile(session), make_call(session, deadline=FUTURE)
+    _stamp(session, c, p, ctx)
+    p.description = "Rewritten focus."
+    session.flush()
+    assert enqueue_stale_pairs(session, ctx=ctx, call_ids=[c.id]) == 1
+
+
 def test_a_changed_summary_is_enqueued(session):
     """G2."""
     ctx = ctx_for()
@@ -146,11 +159,15 @@ def test_a_closed_call_is_not_enqueued(session):
     assert enqueue_stale_pairs(session, ctx=ctx) == 0
 
 
-def test_null_stamps_are_stale(session):
-    """G13: every pre-0081 row has NULL call/scoring stamps."""
+@pytest.mark.parametrize("field", ["call_fingerprint", "scoring_fingerprint"])
+def test_null_stamps_are_stale(session, field):
+    """G13: every pre-0081 row has NULL call/scoring stamps. Parametrized over
+    both stamps: a NULL `scoring_fingerprint` alone must be stale too, not
+    just a NULL `call_fingerprint` -- `cr.scoring_fingerprint = :scoring_fp`
+    is a separate AND clause and needs its own case."""
     ctx = ctx_for()
     p, c = make_profile(session), make_call(session, deadline=FUTURE)
-    _stamp(session, c, p, ctx, call_fingerprint=None)
+    _stamp(session, c, p, ctx, **{field: None})
     assert enqueue_stale_pairs(session, ctx=ctx, call_ids=[c.id]) == 1
 
 
@@ -275,7 +292,13 @@ def test_the_narrowed_call_row_and_the_loaded_call_agree(session):
     c.embedding_model = "bge-m3"
     c.embedding = [0.0] * 1024  # ck: embedding and embedding_model are paired
     session.commit()
+    # expire_on_commit=False (pg_session_factory) means session.get() below
+    # would otherwise hand back the SAME in-memory object commit() just wrote,
+    # not a real load -- expire_all() forces the next get() to hit the DB, so
+    # the comparison is genuinely Row-vs-loaded-Call.
+    session.expire_all()
     loaded = session.get(Call, c.id)
     (row,) = F._call_rows(session, [c.id])
     assert call_rank_fingerprint(row) == call_rank_fingerprint(loaded)
     assert "metadata" not in (row.raw or {}), "the select loaded raw whole"
+    assert "embedding" not in row._fields, "the select loaded the 1024-dim vector"

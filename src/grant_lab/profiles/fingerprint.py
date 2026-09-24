@@ -148,11 +148,11 @@ def rank_fingerprint(profile) -> str:
             # knows about model identity; this is what carries it into ranking
             # freshness.
             #
-            # Every caller must supply this column. ranking/queue.py passes a
-            # column-limited Row, not a Profile; direct attribute access here is
-            # deliberate so a missing column fails loudly at the boundary
-            # instead of silently hashing None. tests/test_ranking_queue_row_parity.py
-            # is the gate.
+            # Every caller must supply this column. ranking/freshness.py's
+            # _profile_rows passes a column-limited Row, not a Profile; direct
+            # attribute access here is deliberate so a missing column fails
+            # loudly at the boundary instead of silently hashing None.
+            # tests/test_ranking_queue_row_parity.py is the gate.
             "embedding_model": profile.embedding_model,
         }
     )
