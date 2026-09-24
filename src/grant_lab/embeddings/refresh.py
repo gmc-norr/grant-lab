@@ -109,8 +109,10 @@ def refresh_profile_embedding(
     on-topic calls.
 
     Same `force=True` semantics as refresh_call_embedding: on LLMError
-    in force mode, NULL both columns so the daily tick can re-pick the
-    row up via its NULL filter. See that helper for the full rationale.
+    in force mode, NULL all three of `embedding`, `embedding_model` and
+    `embedding_fingerprint`, so the daily tick's per-row staleness test
+    (a NULL vector is stale) picks the row up again. See that helper for
+    the full rationale.
 
     ``_http`` — optional persistent :class:`httpx.Client` for batch callers.
     See :func:`refresh_call_embedding` for usage notes.

@@ -13,8 +13,12 @@ tick at batch_size=1 / max_batches=3 and the corpus is five profiles.
 GATE 9c pins the regression that first fix introduced: the drain's
 `scan_exhausted` is a property of BOTH halves (`examined` sums calls and
 profiles), so keying the PROFILE cursor on it froze that cursor forever on any
-tick held at the cap by the CALL half. Its corpus is five always-failing calls
-and two profiles.
+tick held at the cap by the CALL half. Its corpus is two profiles and
+always-failing calls: twenty in the consequence test, because the scheduler now
+carries the CALL cursor too (G6 below), so failing calls are walked past rather
+than re-read from 0 every tick, and a small corpus runs the call scan off its
+table every other tick. On those ticks the joint flag is True and resets the
+frozen profile cursor by accident, which hides the bug.
 
 G6-G8 (spec `2026-09-08-call-embedding-freshness.md` §4 D9, §5) are the same
 three gates for the CALL cursor. Since migration 0080 the call half examines
@@ -221,11 +225,16 @@ class _CallsFailEmbedder(FakeEmbedder):
     """Embeds profiles, refuses calls.
 
     A call that fails to embed records nothing (`refresh_call_embedding`
-    returns False without writing), so it stays in the call half's
-    NULL-or-mismatched-model predicate and is re-examined by every batch of
-    every tick. That is what holds the drain at `max_batches` forever, which
-    is the condition this gate needs: capped for a reason that has nothing to
-    do with the profile half.
+    returns False without writing), so it stays stale. The drain breaks only on
+    a batch that EXAMINES nothing, so while calls remain ahead of the call
+    cursor the call half returns a row every batch and holds the drain at
+    `max_batches` -- the condition this gate needs: capped for a reason that
+    has nothing to do with the profile half.
+
+    Not forever, though. The scheduler carries the call cursor across ticks,
+    so these calls are walked past a batch at a time and the call scan resets
+    once it runs off the end of the table. A gate that needs every tick capped
+    must seed more calls than its ticks examine.
     """
 
     def embed(self, text, _client=None):
@@ -275,11 +284,19 @@ def test_a_tick_capped_by_the_call_half_still_resets_the_profile_cursor(
 ):
     """GATE 9c — the regression the joint flag introduced.
 
-    Corpus: two profiles and five calls that always fail to embed. At
+    Corpus: two profiles and twenty calls that always fail to embed. At
     batch_size=1 / max_batches=3 the profile half runs off the end of its own
     table on the third batch of the FIRST tick, but the call half still
-    returns a row every batch, so `examined` is never 0 and the drain always
-    stops on the cap.
+    returns a row on every batch of all six ticks, so `examined` is never 0
+    and every tick stops on the cap.
+
+    The twenty is load-bearing: six ticks of three one-row batches examine 18
+    calls, and two more keep the call scan unfinished after the last tick. The
+    scheduler carries the CALL cursor (G6), so failing calls are walked past
+    rather than re-read from 0 every tick. With the original five, the second
+    tick ran the call scan off its table, the joint flag went True and reset
+    the frozen profile cursor by accident on every other tick, and the
+    joint-flag mutant passed this test (measured on bf4f7194).
 
     Keyed on the JOINT `scan_exhausted`, the scheduler therefore reads "rows
     still ahead" and carries `after_profile_id=2` into every later tick — the
@@ -300,7 +317,7 @@ def test_a_tick_capped_by_the_call_half_still_resets_the_profile_cursor(
     assert all(_is_current(pg_session_factory, pid) for pid in profile_ids)
 
     with pg_session_factory() as s:
-        for i in range(5):
+        for i in range(20):
             make_call(s, title=f"{_UNEMBEDDABLE} {i}")
         s.commit()
 
@@ -324,9 +341,14 @@ def test_the_call_half_being_capped_does_not_freeze_the_profile_cursor_sequence(
 ):
     """GATE 9c, stated on the cursor itself rather than on its consequence.
 
-    Same corpus. Every tick's profile half runs off the end of the two-row
-    table, so every tick must be handed `after_profile_id=0`. A frozen cursor
-    shows up here as [0, 2, 2, ...].
+    Two profiles and five always-failing calls, three ticks. Every tick's
+    profile half runs off the end of the two-row table, so every tick must be
+    handed `after_profile_id=0`, and a frozen cursor shows up as any nonzero
+    entry. Five calls suffice for this form, unlike the consequence test: the
+    call half holds the FIRST tick at the cap, so the joint-flag mutant hands
+    the second tick `after_profile_id=2`. Measured [0, 2, 0] now that the call
+    cursor is carried (the second tick runs the call scan off its table and
+    resets the cursor by accident); [0, 2, 2] before it was.
     """
     with pg_session_factory() as s:
         for i in range(2):
