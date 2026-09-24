@@ -34,8 +34,7 @@ const DASH = {
   queue_counts: { pending: 2, running: 0, done: 5, failed: 1 },
   rerank_estimate: 6,
   active_profiles_count: 2,
-  recent_calls_count: 3,
-  backfill_days: 90,
+  open_calls_count: 3,
   digest: {
     last_sent_at: null,
     runs_this_week: 0,
@@ -60,7 +59,7 @@ it("renders source health, queue counts and coverage", async () => {
   expect(await screen.findByText("Vinnova")).toBeInTheDocument();
   expect(screen.getByText("bounced@umu.se")).toBeInTheDocument();
   expect(screen.getByText(/1\/3 embedded/)).toBeInTheDocument();
-  expect(screen.getByText(/up to ~6/)).toBeInTheDocument();
+  expect(screen.getByText(/Enqueues 6 ranking jobs/)).toBeInTheDocument();
 });
 
 it("renders a clean error state when the read-model fails", async () => {

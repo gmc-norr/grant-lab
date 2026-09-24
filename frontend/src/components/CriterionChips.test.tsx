@@ -39,7 +39,6 @@ const ALL: Criterion[] = [
   crit({ criterion: "eligibility", rating: "unclear", label: "Eligibility" }),
   crit({ criterion: "embedding", rating: "pass", label: "Topic similarity" }),
   crit({ criterion: "exclusions", rating: "pass", label: "Exclusions" }),
-  crit({ criterion: "timeline", rating: "pass", label: "Timeline" }),
   crit({ criterion: "topic_fit", rating: "4", label: "Topic fit" }),
   crit({ criterion: "trl", rating: "unknown", label: "Technology Readiness Level" }),
 ];
@@ -49,10 +48,10 @@ function chips(container: HTMLElement): HTMLElement[] {
 }
 
 describe("how many chips", () => {
-  it("renders one chip per criterion for a full seven-criterion row, in reading order", () => {
+  it("renders one chip per criterion for a full six-criterion row, in reading order", () => {
     // B20 killer: `criteria.slice(0, 6)` renders six.
     const { container } = render(<CriterionChips criteria={ALL} />);
-    expect(chips(container)).toHaveLength(7);
+    expect(chips(container)).toHaveLength(6);
     expect(chips(container).map((el) => el.dataset.criterion)).toEqual([...CRITERIA]);
   });
 
@@ -60,10 +59,10 @@ describe("how many chips", () => {
     // ranking/worker.py returns on the first FAIL, so a one-chip row is normal
     // data, not a degenerate case (D-B3).
     const { container } = render(
-      <CriterionChips criteria={[crit({ criterion: "timeline", rating: "fail", label: "Timeline" })]} />,
+      <CriterionChips criteria={[crit({ criterion: "budget", rating: "fail", label: "Budget" })]} />,
     );
     expect(chips(container)).toHaveLength(1);
-    expect(chips(container)[0]).toHaveTextContent("Timeline ✗");
+    expect(chips(container)[0]).toHaveTextContent("Budget ✗");
     expect(chips(container)[0].dataset.tone).toBe("fail");
   });
 
@@ -192,12 +191,14 @@ describe("expansion", () => {
   it("labels a reason-code rationale as a code, not as reasoning", () => {
     render(
       <CriterionChips
-        criteria={[crit({ criterion: "timeline", rating: "fail", label: "Timeline", rationale: "too_soon" })]}
+        criteria={[
+          crit({ criterion: "budget", rating: "unknown", label: "Budget", rationale: "currency_mismatch" }),
+        ]}
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: /Timeline/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Budget/ }));
     expect(screen.getByText("Reason code:")).toBeInTheDocument();
-    expect(screen.getByText("too_soon").tagName).toBe("CODE");
+    expect(screen.getByText("currency_mismatch").tagName).toBe("CODE");
     expect(screen.queryByText("The model's reasoning:")).not.toBeInTheDocument();
   });
 

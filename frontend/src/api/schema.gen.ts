@@ -2742,16 +2742,14 @@ export interface components {
         AdminDashboardOut: {
             /** Active Profiles Count */
             active_profiles_count: number;
-            /** Backfill Days */
-            backfill_days: number;
             /** Calibration Warning */
             calibration_warning: string | null;
             digest: components["schemas"]["DigestPanelOut"];
             embedding_coverage: components["schemas"]["EmbeddingCoverageOut"];
             golden_set_report: components["schemas"]["GoldenSetReportOut"] | null;
+            /** Open Calls Count */
+            open_calls_count: number;
             queue_counts: components["schemas"]["QueueCountsOut"];
-            /** Recent Calls Count */
-            recent_calls_count: number;
             /** Rerank Estimate */
             rerank_estimate: number;
             /** Sources */

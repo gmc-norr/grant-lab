@@ -50,7 +50,7 @@ export function AdminDashboard() {
 
   const onRerank = () => {
     if (!window.confirm(
-      `This enqueues up to ~${d.rerank_estimate} ranking jobs and may take a while. Continue?`
+      `This enqueues ${d.rerank_estimate} ranking jobs and may take a while. Continue?`
     )) return;
     rerank.mutate(undefined, { onSuccess: () => setBanner({ kind: "ok", text: OK_RERANK }) });
   };
@@ -109,11 +109,11 @@ export function AdminDashboard() {
           <Box><Text c="dimmed" size="xs">Failed</Text><Text fz="1.4rem" fw={700}>{d.queue_counts.failed}</Text></Box>
         </Group>
         <Button size="xs" variant="default" disabled={rerank.isPending} onClick={onRerank}>
-          Re-rank everything (last {d.backfill_days} days × active profiles)
+          Re-rank everything (open calls × active profiles)
         </Button>
         <Text c="dimmed" size="sm" mt="xs">
-          Enqueues up to ~{d.rerank_estimate} ranking jobs ({d.active_profiles_count} active
-          profiles × {d.recent_calls_count} recent calls; upper bound).
+          Enqueues {d.rerank_estimate} ranking jobs ({d.active_profiles_count} active profiles
+          × {d.open_calls_count} open calls).
         </Text>
       </Card>
 

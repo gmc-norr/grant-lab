@@ -291,7 +291,7 @@ def test_the_label_map_scan_finds_the_seven_labels():
 
 def test_the_frontend_criteria_scan_finds_a_real_list():
     found = frontend_criteria(CHIPS.read_text())
-    assert len(found) == len(set(found)) == 7, found
+    assert len(found) == len(set(found)) == 6, found
     assert "topic_fit" in found
 
 

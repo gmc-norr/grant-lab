@@ -21,7 +21,6 @@ export const CRITERIA = [
   "topic_fit",
   "eligibility",
   "exclusions",
-  "timeline",
   "budget",
   "trl",
   "embedding",
@@ -30,13 +29,16 @@ export const CRITERIA = [
 type Tone = "pass" | "fail" | "unsure";
 
 // Rating -> tone. Measured from the source, NOT from spec §4.2, which lists six
-// criteria and four ratings. ranking/worker.py writes a seventh criterion
-// ("embedding" -> "Topic similarity"), and ranking/criteria.py's GateStatus
-// gives the four GATE criteria a third state, "unknown", that the spec does not
-// mention. A chip built to the spec falls through on every gate that could not
-// judge — which is most of them, because the gates return UNKNOWN whenever the
-// source adapter left budget or TRL null. The other half of the same gate pins
-// these keys against GateStatus ∪ ranking/prompt.py's validator tuples.
+// criteria and four ratings. ranking/worker.py writes a sixth criterion
+// ("embedding" -> "Topic similarity") in place of the spec's "timeline" — the
+// worker no longer writes a timeline row at all (ranking spec D8: the timeline
+// gate fails only on expiry, not on a per-run criterion), and
+// ranking/criteria.py's GateStatus gives the three GATE criteria (budget, trl,
+// embedding) a third state, "unknown", that the spec does not mention. A chip
+// built to the spec falls through on every gate that could not judge — which is
+// most of them, because the gates return UNKNOWN whenever the source adapter
+// left budget or TRL null. The other half of the same gate pins these keys
+// against GateStatus ∪ ranking/prompt.py's validator tuples.
 const TONE: Record<string, Tone> = {
   pass: "pass",
   fail: "fail",
