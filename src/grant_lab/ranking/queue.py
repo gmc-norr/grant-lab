@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import case, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -184,7 +184,21 @@ def requeue_stuck_running(session: Session, *, max_attempts: int = MAX_ATTEMPTS)
         .values(
             status=RankingJobStatus.FAILED,
             attempts=RankingJob.attempts + 1,
-            last_error="dead-lettered: stuck RUNNING past max_attempts (worker crash loop)",
+            # A job that keeps an earlier kind keeps its message too, so an
+            # outage row does not read as a crash loop.
+            last_error=case(
+                (
+                    RankingJob.failure_kind.is_(None),
+                    "dead-lettered: stuck RUNNING past max_attempts (worker crash loop)",
+                ),
+                else_=func.left(
+                    func.concat(
+                        "dead-lettered: stuck RUNNING past max_attempts; last failure: ",
+                        RankingJob.last_error,
+                    ),
+                    _LAST_ERROR_MAX,
+                ),
+            ),
             # A job whose every attempt crashed the worker is the crash loop
             # described above, which WILL recur. 'crash' suppresses the pair
             # pair-wide for DEAD_LETTER_SUPPRESS_DAYS (ranking spec D7
@@ -293,7 +307,8 @@ def mark_failed(
     `stamps` = (profile, call, scoring) fingerprints the job failed ON. Dead-
     letter suppression (ranking/freshness.py, spec D7) compares them with the
     pair's current inputs, so a corrected call is retried at once. None when
-    the failure happened before they were captured.
+    the failure happened before they were captured; it writes three NULLs, so
+    no earlier attempt's stamps survive on the row.
 
     All three or none, never a partial set: enqueue_stale_pairs suppresses on a
     `parse` failure only when all three stamps equal the current inputs. A
@@ -319,8 +334,9 @@ def mark_failed(
         "failure_kind": failure_kind,
         "updated_at": datetime.now(UTC),
     }
-    if stamps is not None:
-        values["profile_fingerprint"], values["call_fingerprint"], values["scoring_fingerprint"] = (
-            stamps
-        )
+    # None writes three NULLs rather than leaving an earlier attempt's stamps:
+    # the row describes its last failure, all or none.
+    values["profile_fingerprint"], values["call_fingerprint"], values["scoring_fingerprint"] = (
+        stamps if stamps is not None else (None, None, None)
+    )
     session.execute(update(RankingJob).where(RankingJob.id == job_id).values(**values))

@@ -438,6 +438,21 @@ suppression outright (D5).
 > suppressed. It costs at most one re-run per ingest or reconcile run (in practice one or
 > two a night), each bounded by `MAX_ATTEMPTS`, until the call closes. Classifying them
 > `parse` would need a distinct exception type; not done.
+>
+> **Known limitation (final I1 review, finding 1).** The reaper writes `crash` only for a
+> job with no earlier kind. A real crash loop whose job had one `mark_failed` on an
+> earlier attempt (say a refused call to Ollama) keeps that kind, so the first
+> dead-letter does not suppress. The next job row starts with a NULL kind and becomes
+> `crash` after `MAX_ATTEMPTS` more crashes. The protection comes one enqueue cycle late:
+> up to `MAX_ATTEMPTS` more process deaths. Accepted, because the other way round (an
+> outage row read as a crash) hides the pair for 7 days.
+>
+> **Known limitation (final I1 review, finding 2).** A failure that recurs *after*
+> `rank_pair` returns, such as a bug writing the merged result or the criteria rows,
+> is `error` and never suppresses. The escalation ledger commits first, so each retry
+> can pay Sonnet again: up to `MAX_ATTEMPTS` calls per pair per ingest or reconcile run,
+> within `RANKING_REMOTE_DAILY_CAP`. Before this amendment the pair stopped for 7 days.
+> It is a bug to fix, and it shows in the first-week `failure_kind` counts (§6).
 
 ### D8. Timeline changes (§2)
 

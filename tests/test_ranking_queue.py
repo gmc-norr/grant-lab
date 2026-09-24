@@ -266,13 +266,23 @@ def test_a_reaped_job_that_failed_on_the_service_keeps_its_kind(
     caught RUNNING by an app restart reaches the reaper's dead-letter. It is
     not a crash loop: it keeps `service`, and the next reconcile enqueues its
     pair again. Written as `crash`, the restart would hide the pair for
-    DEAD_LETTER_SUPPRESS_DAYS -- the outage gap I1 closed."""
+    DEAD_LETTER_SUPPRESS_DAYS -- the outage gap I1 closed. Stamped with the
+    pair's current inputs, as a real outage row is, so a suppression rule
+    that ignored the kind would hide it. Its last_error keeps the outage's
+    message, not the crash-loop one."""
     profile_id, _ = profile_factory()
     with pg_session_factory() as s:
         call_id = _seed_call(s)
         enqueue_for_pair(s, call_id=call_id, profile_id=profile_id)
         (job,) = claim_pending_jobs(s, limit=1)
-        mark_failed(s, job.id, error="Ollama 503", terminal=False, failure_kind="service")
+        stamps = (
+            rank_fingerprint(s.get(Profile, profile_id)),
+            call_rank_fingerprint(s.get(Call, call_id)),
+            CTX.scoring.fingerprint(),
+        )
+        mark_failed(
+            s, job.id, error="Ollama 503", terminal=False, failure_kind="service", stamps=stamps
+        )
         (job,) = claim_pending_jobs(s, limit=1)
         s.execute(
             update(RankingJob)
@@ -287,6 +297,7 @@ def test_a_reaped_job_that_failed_on_the_service_keeps_its_kind(
     with pg_session_factory() as s:
         row = s.execute(select(RankingJob)).scalar_one()
         assert (row.status, row.failure_kind) == (RankingJobStatus.FAILED, "service")
+        assert "Ollama 503" in row.last_error and "crash loop" not in row.last_error
         assert reconcile_missing_rankings(s, ctx=CTX) == 1
         pending = [
             j.call_id
@@ -295,6 +306,37 @@ def test_a_reaped_job_that_failed_on_the_service_keeps_its_kind(
             ).scalars()
         ]
         assert pending == [call_id]
+
+
+def test_mark_failed_without_stamps_clears_an_earlier_attempts_stamps(
+    pg_session_factory, profile_factory
+):
+    """All or none, per row (final I1 review, finding 4): a failure before
+    capture writes NULL stamps, so a FAILED row never carries the inputs of
+    an earlier attempt that failed differently."""
+    profile_id, _ = profile_factory()
+    with pg_session_factory() as s:
+        call_id = _seed_call(s)
+        enqueue_for_pair(s, call_id=call_id, profile_id=profile_id)
+        (job,) = claim_pending_jobs(s, limit=1)
+        mark_failed(
+            s,
+            job.id,
+            error="bad json",
+            terminal=False,
+            failure_kind="parse",
+            stamps=("p", "c", "s"),
+        )
+        (job,) = claim_pending_jobs(s, limit=1)
+        mark_failed(s, job.id, error="boom", terminal=True, failure_kind="error")
+        s.commit()
+        row = s.execute(select(RankingJob)).scalar_one()
+        assert (row.failure_kind, row.profile_fingerprint, row.call_fingerprint) == (
+            "error",
+            None,
+            None,
+        )
+        assert row.scoring_fingerprint is None
 
 
 def _seed_call_with(s, *, external_id: str, published: datetime | None) -> int:
