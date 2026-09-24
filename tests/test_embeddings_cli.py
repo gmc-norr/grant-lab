@@ -11,11 +11,23 @@ from grant_lab.db.models import Call, Profile, ProfileKind, Source, User
 from grant_lab.embeddings.cli import backfill_main
 from grant_lab.embeddings.client import EmbedResult
 from grant_lab.embeddings.refresh import refresh_missing_embeddings_tick as _real_tick
-from grant_lab.profiles.fingerprint import call_embedding_fingerprint
+from grant_lab.profiles.fingerprint import call_embedding_fingerprint, embedding_fingerprint
+
+_user_seq = {"n": 0}
 
 
 def _embed_result(vec: list[float]) -> EmbedResult:
     return EmbedResult(vector=vec, embedded_chars=1)
+
+
+def _make_user(s) -> User:
+    """A fresh User, unique per call within a test — Profile.created_by is
+    a real FK and each Profile below needs its own owner."""
+    _user_seq["n"] += 1
+    u = User(email=f"5b-cli-{_user_seq['n']}@umu.se")
+    s.add(u)
+    s.flush()
+    return u
 
 
 def _seed(s, *, n_calls: int = 3, n_profiles: int = 2) -> None:
@@ -297,8 +309,10 @@ def test_cli_backfill_force_keeps_going_after_first_all_failed_batch(pg_session_
     assert exit_code == 1
 
 
-def _capped_tick(**kwargs):
-    """Wrap the real tick, forcing max_batches down to 2.
+def _make_capped_tick(*, max_ticks: int = 20):
+    """Build a fresh wrapper around the real tick, forcing max_batches down
+    to 2, with its OWN call counter (never shared across tests — a module-
+    level counter would leak state between tests sharing this helper).
 
     Task 5b gates: `backfill_main` never passes `max_batches`, so it always
     ran at the production default (`_TICK_MAX_BATCHES` = 200) with the
@@ -309,28 +323,55 @@ def _capped_tick(**kwargs):
     handful of rows can exceed it, instead of faking the tick's return
     value (which would test the CLI's arithmetic, not its behavior against
     the real staleness/cursor code Task 4/5 changed).
+
+    Review round 1 #3: a misimplementation of the non-force termination
+    (e.g. freezing one cursor at 0) previously showed up as a ~120s
+    pytest-timeout hang rather than a clear failure. `max_ticks` fails fast
+    with a readable message instead — both gates below need 3 CLI-level
+    tick() calls to finish under the real fix, so 20 is comfortably above
+    that and still fails in well under a second against a tiny corpus.
     """
-    kwargs["max_batches"] = 2
-    return _real_tick(**kwargs)
+    calls = {"n": 0}
+
+    def _tick(**kwargs):
+        calls["n"] += 1
+        assert calls["n"] <= max_ticks, (
+            f"backfill did not terminate: exceeded {max_ticks} tick() calls"
+        )
+        kwargs["max_batches"] = 2
+        return _real_tick(**kwargs)
+
+    return _tick
 
 
 def test_cli_backfill_reaches_stale_calls_beyond_one_ticks_cap(pg_session_factory):
-    """Gate 5b-1: a non-force CLI run must reach a stale call beyond one
-    tick's cap (here batch_size=1 * max_batches=2 = 2 rows/tick).
+    """Gate 5b-1: a non-force CLI run must reach stale calls AND stale
+    profiles beyond one tick's cap (here batch_size=1 * max_batches=2 =
+    2 rows/half/tick), and both cursors must be carried correctly.
 
-    Before the Task 5b fix, non-force mode passed `after_call_id=0` to
-    every tick call, so the second (and every later) CLI-loop iteration
-    re-read the SAME lowest-id prefix instead of advancing past it. Two
-    fresh calls occupy exactly that prefix here, so the first tick call's
-    2-row cap is spent finding nothing to do, and the old "no successful
-    embeds -> stop" rule broke the CLI loop immediately, before the three
-    stale calls beyond the cap were ever examined.
+    Before the Task 5b fix, non-force mode passed `after_call_id=0` /
+    `after_profile_id=0` to every tick call, so the second (and every
+    later) CLI-loop iteration re-read the SAME lowest-id prefix instead of
+    advancing past it. Two fresh calls occupy exactly that prefix here, so
+    the first tick call's cap is spent finding nothing to do on the call
+    side, and the old "no successful embeds -> stop" rule broke the CLI
+    loop immediately, before the stale call beyond the cap was examined.
+
+    Review round 1 #2: the call and profile corpora are deliberately
+    ASYMMETRIC (3 calls, 5 profiles) so the call half runs off the end of
+    its table (`call_scan_exhausted` True) a full tick before the profile
+    half does. That catches two mutants the earlier symmetric corpus let
+    through: (a) freezing `after_profile_id` at 0 in non-force mode, and
+    (b) breaking the outer loop on `summary["call_scan_exhausted"]` alone
+    instead of the joint `summary["scan_exhausted"]` — either one would
+    stop this run with `StaleProfileCLI-2` never embedded.
     """
     with pg_session_factory() as s:
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
         # Two calls already fresh under the current model + fingerprint —
         # lowest ids, so a 2-row capped scan consumes them first and does
-        # no work.
+        # no work. Only ONE stale call follows (asymmetric vs. 3 stale
+        # profiles below), so the call half exhausts first.
         for i in range(2):
             c = Call(
                 source_id=src.id,
@@ -345,26 +386,52 @@ def test_cli_backfill_reaches_stale_calls_beyond_one_ticks_cap(pg_session_factor
             c.embedding = [0.5] * 1024
             c.embedding_model = "bge-m3"
             c.embedding_fingerprint = call_embedding_fingerprint(c)
-        # Three stale calls beyond one tick's cap.
+        s.add(
+            Call(
+                source_id=src.id,
+                external_id="5b1-stale-0",
+                url="https://x/5b1-stale-0",
+                title="StaleCLI-0",
+                summary="x",
+                published_at=datetime.now(UTC),
+            )
+        )
+        # Two profiles already fresh, three stale beyond the cap — the
+        # profile half still has work after the call half is done.
+        for i in range(2):
+            p = Profile(
+                name=f"5b1-fresh-profile-{i}",
+                kind=ProfileKind.ORGANIZATIONAL_UNIT,
+                description=f"FreshProfileCLI-{i}",
+                structured={},
+                created_by=_make_user(s).id,
+            )
+            s.add(p)
+            s.flush()
+            p.embedding = [0.5] * 1024
+            p.embedding_model = "bge-m3"
+            p.embedding_fingerprint = embedding_fingerprint(p)
         for i in range(3):
             s.add(
-                Call(
-                    source_id=src.id,
-                    external_id=f"5b1-stale-{i}",
-                    url=f"https://x/5b1-stale-{i}",
-                    title=f"StaleCLI-{i}",
-                    summary="x",
-                    published_at=datetime.now(UTC),
+                Profile(
+                    name=f"5b1-stale-profile-{i}",
+                    kind=ProfileKind.ORGANIZATIONAL_UNIT,
+                    description=f"StaleProfileCLI-{i}",
+                    structured={},
+                    created_by=_make_user(s).id,
                 )
             )
         s.commit()
 
-    # Record embed count/identity on the FAKE embedder — never assert via
-    # the DB vector, which a hollow "write NULL anyway" path could satisfy.
-    embedded_texts: list[str] = []
+    # Record embed identity on the FAKE embedder — never assert via the DB
+    # vector, which a hollow "write NULL anyway" path could satisfy. Both
+    # build_call_text (title + "\n\n" + summary) and build_profile_text (bare
+    # description here, no areas/org) put the identifying marker first, so
+    # splitting on "\n\n" recovers an exact per-row title/description.
+    embedded_titles: list[str] = []
 
     def _embed_side_effect(text, _client=None):
-        embedded_texts.append(text)
+        embedded_titles.append(text.split("\n\n")[0])
         return _embed_result([0.5] * 1024)
 
     fake_client = MagicMock()
@@ -373,16 +440,21 @@ def test_cli_backfill_reaches_stale_calls_beyond_one_ticks_cap(pg_session_factor
 
     with (
         patch("grant_lab.embeddings.cli._build_embed_client", return_value=fake_client),
-        patch("grant_lab.embeddings.cli.refresh_missing_embeddings_tick", side_effect=_capped_tick),
+        patch(
+            "grant_lab.embeddings.cli.refresh_missing_embeddings_tick",
+            side_effect=_make_capped_tick(),
+        ),
     ):
         exit_code = backfill_main(
             argv=["backfill", "--batch-size", "1"],
             session_factory=pg_session_factory,
         )
     assert exit_code == 0
-    assert len(embedded_texts) == 3
-    assert all("StaleCLI" in t for t in embedded_texts)
-    assert not any("FreshCLI" in t for t in embedded_texts)
+    # Exact per-row expectation: each stale row embedded exactly once, no
+    # fresh row embedded at all — a superset/subset mismatch (missed row,
+    # double-embed, or a fresh row slipping through) fails this equality.
+    expected = sorted(["StaleCLI-0", "StaleProfileCLI-0", "StaleProfileCLI-1", "StaleProfileCLI-2"])
+    assert sorted(embedded_titles) == expected
 
 
 def test_cli_backfill_persistent_call_failure_does_not_block_later_calls(pg_session_factory):
@@ -421,14 +493,15 @@ def test_cli_backfill_persistent_call_failure_does_not_block_later_calls(pg_sess
             )
         s.commit()
 
-    embedded_texts: list[str] = []
+    embedded_titles: list[str] = []
     fail_count = {"n": 0}
 
     def _embed_side_effect(text, _client=None):
-        if "AlwaysFailCLI" in text:
+        title = text.split("\n\n")[0]
+        if title == "AlwaysFailCLI":
             fail_count["n"] += 1
             raise LLMError("ollama down")
-        embedded_texts.append(text)
+        embedded_titles.append(title)
         return _embed_result([0.5] * 1024)
 
     fake_client = MagicMock()
@@ -437,7 +510,10 @@ def test_cli_backfill_persistent_call_failure_does_not_block_later_calls(pg_sess
 
     with (
         patch("grant_lab.embeddings.cli._build_embed_client", return_value=fake_client),
-        patch("grant_lab.embeddings.cli.refresh_missing_embeddings_tick", side_effect=_capped_tick),
+        patch(
+            "grant_lab.embeddings.cli.refresh_missing_embeddings_tick",
+            side_effect=_make_capped_tick(),
+        ),
     ):
         exit_code = backfill_main(
             argv=["backfill", "--batch-size", "1"],
@@ -447,5 +523,7 @@ def test_cli_backfill_persistent_call_failure_does_not_block_later_calls(pg_sess
     # The cursor moves past a failing row regardless of outcome, so it is
     # attempted exactly once across the whole run, never retried forever.
     assert fail_count["n"] == 1
-    assert len(embedded_texts) == 3
-    assert all("AfterFailCLI" in t for t in embedded_texts)
+    # Exact per-row expectation: each row after the failing one embedded
+    # exactly once, nothing else — not just "AfterFailCLI is a substring".
+    expected = sorted(["AfterFailCLI-0", "AfterFailCLI-1", "AfterFailCLI-2"])
+    assert sorted(embedded_titles) == expected

@@ -61,7 +61,9 @@ def backfill_main(argv: list[str] | None = None, *, session_factory=None) -> int
     """
     parser = argparse.ArgumentParser(prog="grant_lab.embeddings.cli")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    p_backfill = sub.add_parser("backfill", help="Embed all NULL or model-mismatched rows.")
+    p_backfill = sub.add_parser(
+        "backfill", help="Embed all NULL, model-mismatched, or fingerprint-mismatched rows."
+    )
     p_backfill.add_argument("--batch-size", type=int, default=200)
     p_backfill.add_argument(
         "--force",

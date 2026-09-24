@@ -402,7 +402,7 @@ def _refresh_missing_embeddings_batch(
 
     `after_call_id` / `after_profile_id` are id-cursors: the drain loop
     advances them batch to batch, the daily scheduler carries them across
-    capped ticks, and the backfill CLI walks them when force=True (without
+    capped ticks, and the backfill CLI walks them in both modes (without
     them, the same rows would be re-selected every iteration). The summary
     includes `max_call_id` / `max_profile_id` so the caller can advance the
     cursor. Default 0 = start from the beginning.
@@ -453,8 +453,11 @@ def _refresh_missing_embeddings_batch(
         # limit, and the day the two disagree the fingerprint computed here
         # stops matching the one refresh_call_embedding stamps from the whole
         # row, so every call longer than the SQL cut re-embeds on every tick
-        # (and the backfill CLI's default loop, which stops only on a pass
-        # that embeds nothing, never stops). The price is reading every call's
+        # and every backfill CLI pass, forever — the row never becomes
+        # "current" no matter how many times it's re-embedded. (The CLI's
+        # own non-force termination is cursor-exhaustion, not "found nothing
+        # stale", so a run still completes one pass; it just repeats this
+        # cost every time.) The price is reading every call's
         # whole full_text once per tick; at the size measured on the app
         # database on 2026-09-24 (686 calls, 81 of them over the 8000-char
         # limit, the longest 35,859 chars) that is a few MB.
