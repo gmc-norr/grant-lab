@@ -132,6 +132,12 @@ def drain_queue(
 
     processed = 0
     for idx, (job_id, call_id, profile_id, attempts) in enumerate(claimed):
+        # This job's (profile, call, scoring) fingerprints, once captured below.
+        # Reset per job so the outer handlers never stamp a failure with the
+        # previous job's inputs: a failure before capture stays NULL (the
+        # pair-wide dead-letter rule), one after it is keyed on its inputs
+        # (ranking spec D7).
+        stamps: tuple[str, str, str] | None = None
         # Soft per-tick budget (B11 Defect 6): once exceeded, stop and hand the
         # remaining claimed-but-untouched jobs back to PENDING (no attempt
         # burned) so the next tick processes them. Checked BEFORE the job so a
@@ -364,7 +370,7 @@ def drain_queue(
         except LLMError as e:
             terminal = (attempts + 1) >= MAX_ATTEMPTS
             with session_factory() as session:
-                mark_failed(session, job_id, error=str(e), terminal=terminal)
+                mark_failed(session, job_id, error=str(e), terminal=terminal, stamps=stamps)
                 session.commit()
             _logger.warning(
                 "ranking.job_failed",
@@ -379,7 +385,13 @@ def drain_queue(
         except Exception as e:  # noqa: BLE001 — worker must not crash the scheduler
             terminal = (attempts + 1) >= MAX_ATTEMPTS
             with session_factory() as session:
-                mark_failed(session, job_id, error=f"{type(e).__name__}: {e}", terminal=terminal)
+                mark_failed(
+                    session,
+                    job_id,
+                    error=f"{type(e).__name__}: {e}",
+                    terminal=terminal,
+                    stamps=stamps,
+                )
                 session.commit()
             _logger.exception(
                 "ranking.job_unexpected",
@@ -443,17 +455,17 @@ def _write_criteria_rows(session, job_call_id, job_profile_id, r: RankResult) ->
     now = datetime.now(UTC)
 
     # Gate rows — write up to and including the failing one (or all if no gate failed).
-    # Iteration order MUST match rank_pair's / aggregate's short-circuit
-    # precedence: budget → trl → embedding (the timeline gate is not written as
-    # a row: on an open call it could only say "pass"; ranking spec D8. Its
-    # place in the precedence is between trl and embedding, so a timeline FAIL
-    # still stops the write there -- see the loop). When several gates FAIL,
-    # aggregate() picks the *first* in that precedence as the headline
-    # aggregate_reason; if this loop iterated in a different order it would
-    # stop at (and write a FAIL row for) a different gate than the headline,
-    # so the breakdown's terminal FAIL row would contradict aggregate_reason.
-    # Keeping the two orders identical guarantees the row we stop at is the
-    # one the headline reason names. (The breakdown UI renders rows in this
+    # Iteration order MUST match rank_pair's short-circuit precedence:
+    # budget → trl → timeline → embedding. On any gate FAIL rank_pair returns
+    # the first failing gate in that order as the headline aggregate_reason,
+    # before aggregate() runs -- aggregate() checks timeline first, but never
+    # sees a gate FAIL on this path, so its order is not the one to match. If
+    # this loop iterated in a different order it would stop at (and write a
+    # FAIL row for) a different gate than the headline, so the breakdown's
+    # terminal FAIL row would contradict aggregate_reason. The timeline gate is
+    # not written as a row (on an open call it could only say "pass"; ranking
+    # spec D8), but it keeps its place: a timeline FAIL stops the write between
+    # trl and embedding (see the loop). (The breakdown UI renders rows in this
     # written order — embedding still lands last, after the cheap structural
     # gates it depends on having passed.)
     gate_results = [

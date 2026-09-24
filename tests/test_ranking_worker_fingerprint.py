@@ -99,6 +99,51 @@ def test_the_stamp_is_captured_before_rank_pair_not_after(session, session_facto
         assert cr.profile_fingerprint == before, "the worker stamped a profile the ranker never saw"
 
 
+def test_the_call_stamp_is_captured_before_rank_pair_not_after(
+    session, session_factory, monkeypatch
+):
+    """The call-side twin of the test above (ranking spec D9).
+
+    The edit lands on the very `Call` instance the worker holds, right after
+    the real rank_pair returns: what a session.refresh after a concurrent edit
+    would do. A separate-session commit (the profile test's shape) would stay
+    invisible to that loaded instance, so a stamp recomputed after rank_pair
+    would still pass; this shape does not let it.
+    """
+    from grant_lab.db.models import Call
+    from grant_lab.profiles.fingerprint import call_rank_fingerprint
+    from grant_lab.ranking import worker as worker_mod
+
+    p = make_profile(session, description="Liver disease", structured={"areas": ["AI"]})
+    c = make_call(session)
+    enqueue_job(session, call_id=c.id, profile_id=p.id)
+    session.commit()
+    pid, cid = p.id, c.id
+    before = call_rank_fingerprint(c)
+
+    real_rank_pair = worker_mod.rank_pair
+
+    def rank_then_edit(**kw):
+        result = real_rank_pair(**kw)
+        kw["call"].summary = "EDITED MID FLIGHT"
+        return result
+
+    monkeypatch.setattr(worker_mod, "rank_pair", rank_then_edit)
+    drain_queue(
+        session_factory=session_factory,
+        client=ollama_clean(),
+        embedding_threshold=0.0,
+        batch_size=1,
+    )
+
+    with session_factory() as fresh:
+        row = fresh.get(Call, cid)
+        assert row.summary == "EDITED MID FLIGHT", "the mid-flight edit did not land"
+        assert call_rank_fingerprint(row) != before
+        cr = fresh.get(CallRanking, (cid, pid))
+        assert cr.call_fingerprint == before, "the worker stamped a call the ranker never saw"
+
+
 def test_retained_analysis_is_dropped_when_the_profile_changed(
     session, session_factory, ranked_pair, fake_rank_client
 ):

@@ -444,9 +444,9 @@ def test_worker_writes_embedding_criterion_row_on_gate_fail(
     """When the embedding gate FAILs (cosine below threshold, no must_include
     override), the CallRankingCriterion table must include a row for
     'embedding' with rating='fail'. Without this row, the call-detail page
-    would render three "pass" rows for timeline/budget/trl and leave the
-    operator wondering why the headline score is 0 — Codex finding from
-    Plan D bug review."""
+    would render two "pass" rows for budget/trl and leave the operator
+    wondering why the headline score is 0 — Codex finding from Plan D bug
+    review."""
     from grant_lab.ranking import worker as worker_mod
     from grant_lab.ranking.criteria import GateResult, Gates, GateStatus
     from grant_lab.ranking.rank_pair import RankResult
@@ -498,11 +498,14 @@ def test_worker_criteria_terminal_fail_row_matches_aggregate_reason(
     """When multiple gates FAIL, the terminal FAIL row written to the
     breakdown must name the SAME gate as the headline aggregate_reason.
 
-    aggregate() picks budget over timeline (its short-circuit precedence is
-    budget → trl → timeline → embedding). _write_criteria_rows must iterate
-    in that same precedence, otherwise — with both budget and timeline
-    failing — it would stop at timeline and write a 'timeline' FAIL row that
-    contradicts the 'budget' headline. Regression for that divergence."""
+    rank_pair returns the first failing gate in its short-circuit precedence
+    (budget → trl → timeline → embedding) as the headline, before aggregate()
+    runs, so with budget and timeline both failing the headline is 'budget'.
+    _write_criteria_rows must iterate in that same precedence and stop at the
+    budget FAIL row. Timeline has no row since ranking spec D8, but it keeps
+    its place in the order: a loop that honoured the expired stop before the
+    budget row would write no FAIL row at all, and the breakdown would not
+    name the 'budget' headline. Regression for that divergence."""
     from grant_lab.ranking import worker as worker_mod
     from grant_lab.ranking.criteria import GateResult, Gates, GateStatus
     from grant_lab.ranking.rank_pair import RankResult
@@ -511,8 +514,9 @@ def test_worker_criteria_terminal_fail_row_matches_aggregate_reason(
         cid, pid = _seed(s)
         s.commit()
 
-    # Both timeline AND budget FAIL. aggregate's precedence makes budget the
-    # headline reason; the breakdown must stop at budget, not timeline.
+    # Both timeline AND budget FAIL. rank_pair's precedence makes budget the
+    # headline reason (this stub stands in for it); the breakdown must stop at
+    # budget.
     stub_result = RankResult(
         score=0,
         reason="budget",

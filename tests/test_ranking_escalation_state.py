@@ -2,19 +2,28 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from sqlalchemy import select
 
-from grant_lab.db.models import Call, CallRanking, RankingJob, RankingJobStatus
+from grant_lab.db.models import Call, CallRanking, Profile, RankingJob, RankingJobStatus
 from grant_lab.profiles.fingerprint import call_rank_fingerprint, rank_fingerprint
 from grant_lab.ranking import worker as worker_mod
 from grant_lab.ranking.criteria import GateResult, Gates, GateStatus
+from grant_lab.ranking.ollama_client import LLMError
 from grant_lab.ranking.prompt import Parsed, ParseError
 from grant_lab.ranking.queue import enqueue_for_pair, mark_failed
 from grant_lab.ranking.rank_pair import RankResult
 from grant_lab.ranking.remote_attempts import record_attempt
 from grant_lab.ranking.worker import drain_queue
-from tests.freshness_helpers import make_call, make_profile, ollama_clean, scoring_for
+from tests.freshness_helpers import (
+    enqueue_job,
+    make_call,
+    make_profile,
+    ollama_clean,
+    scoring_for,
+)
 
 
 class _Remote:
@@ -65,8 +74,20 @@ def pair(pg_session_factory):
         return c.id, p.id
 
 
-def _drain(sf, monkeypatch, stub, *, remote=_Remote, cap=150):
-    monkeypatch.setattr(worker_mod, "rank_pair", lambda **kw: stub)
+def _drain(sf, monkeypatch, stub, *, remote=_Remote, cap=150, expect_remote=None):
+    """`expect_remote`: None = no check; True/False = rank_pair must (not) be
+    handed a remote client. The stub ignores the client otherwise, so without
+    this a test about the cap cannot tell whether the cap bound at all."""
+
+    def _rank_pair(**kw):
+        if expect_remote is not None and (kw["remote_client"] is not None) != expect_remote:
+            pytest.fail(
+                f"rank_pair got remote_client={kw['remote_client']!r}; the daily cap "
+                f"did not act as this test assumes (expected a client: {expect_remote})"
+            )
+        return stub
+
+    monkeypatch.setattr(worker_mod, "rank_pair", _rank_pair)
     drain_queue(
         session_factory=sf,
         client=None,
@@ -93,18 +114,21 @@ def test_a_cap_withheld_escalation_is_pending_then_completes(pg_session_factory,
     with pg_session_factory() as s:
         record_attempt(s, call_id=pair[0], profile_id=pair[1], model="m", outcome="success")
         s.commit()
-    _drain(pg_session_factory, monkeypatch, _stub(), cap=1)
+    # The cap (1) is reached: rank_pair must run WITHOUT the remote client.
+    _drain(pg_session_factory, monkeypatch, _stub(), cap=1, expect_remote=False)
     assert (
         _row(pg_session_factory, pair).escalation_state,
         _row(pg_session_factory, pair).escalation_failures,
     ) == ("pending", 0)
 
     _requeue(pg_session_factory, pair)
+    # The next day, with cap left: the remote client is handed over again.
     _drain(
         pg_session_factory,
         monkeypatch,
         _stub(escalated=True, attempted=True, outcome="success"),
         cap=150,
+        expect_remote=True,
     )
     assert _row(pg_session_factory, pair).escalation_state is None
 
@@ -144,7 +168,13 @@ def test_a_new_revision_resets_the_count(pg_session_factory, monkeypatch, pair):
 
 
 def test_no_remote_configured_owes_nothing(pg_session_factory, monkeypatch, pair):
-    """G21."""
+    """G21. Starts from a PENDING row with a failure counted, so the column
+    defaults (NULL, 0) cannot satisfy it: the worker must clear both."""
+    _drain(pg_session_factory, monkeypatch, _stub(attempted=True, outcome="parse_error"))
+    r = _row(pg_session_factory, pair)
+    assert (r.escalation_state, r.escalation_failures) == ("pending", 1)
+
+    _requeue(pg_session_factory, pair)
     _drain(pg_session_factory, monkeypatch, _stub(), remote=None)
     r = _row(pg_session_factory, pair)
     assert (r.escalation_state, r.escalation_failures) == (None, 0)
@@ -182,8 +212,6 @@ def test_a_terminal_failure_is_stamped_with_its_inputs(pg_session_factory, monke
     with pg_session_factory() as s:
         job = s.execute(select(RankingJob)).scalar_one()
         call = s.get(Call, pair[0])
-        from grant_lab.db.models import Profile
-
         prof = s.get(Profile, pair[1])
         assert job.status == RankingJobStatus.FAILED
         assert (job.profile_fingerprint, job.call_fingerprint, job.scoring_fingerprint) == (
@@ -191,6 +219,86 @@ def test_a_terminal_failure_is_stamped_with_its_inputs(pg_session_factory, monke
             call_rank_fingerprint(call),
             scoring_for(None).fingerprint(),
         )
+
+
+def _set_attempts(sf, job_id: int, attempts: int) -> None:
+    with sf() as s:
+        s.get(RankingJob, job_id).attempts = attempts
+        s.commit()
+
+
+def _raise_unexpected(**kw):
+    raise RuntimeError("an unexpected bug inside rank_pair")
+
+
+@pytest.mark.parametrize("handler", ["unexpected", "llm_error"])
+def test_a_failure_after_capture_is_stamped_in_the_outer_handlers(
+    pg_session_factory, monkeypatch, pair, handler
+):
+    """Spec D7 for failures the inner `except (LLMError, ParseError)` does not
+    see. `unexpected`: rank_pair raises a non-LLM error (the `except Exception`
+    handler). `llm_error`: an LLMError after rank_pair returned (the outer
+    `except LLMError` handler). Both happen after the stamps are captured, so
+    the dead letter is keyed on its inputs, not pair-wide."""
+    with pg_session_factory() as s:
+        job_id = s.execute(select(RankingJob.id)).scalar_one()
+    _set_attempts(pg_session_factory, job_id, 4)  # MAX_ATTEMPTS is 5: terminal
+
+    if handler == "unexpected":
+        monkeypatch.setattr(worker_mod, "rank_pair", _raise_unexpected)
+    else:
+        monkeypatch.setattr(worker_mod, "rank_pair", lambda **kw: _stub(wanted=False))
+
+        def _llm_error(*a, **kw):
+            raise LLMError("ollama dropped the connection")
+
+        monkeypatch.setattr(worker_mod, "_write_criteria_rows", _llm_error)
+
+    drain_queue(
+        session_factory=pg_session_factory, client=None, embedding_threshold=0.0, batch_size=10
+    )
+    with pg_session_factory() as s:
+        job = s.get(RankingJob, job_id)
+        assert job.status == RankingJobStatus.FAILED
+        expected_error = "RuntimeError" if handler == "unexpected" else "ollama dropped"
+        assert expected_error in job.last_error, "the failure took a different path"
+        assert _job_stamps(job) == (
+            rank_fingerprint(s.get(Profile, pair[1])),
+            call_rank_fingerprint(s.get(Call, pair[0])),
+            scoring_for(None).fingerprint(),
+        )
+
+
+def test_a_failure_before_capture_is_never_stamped_with_another_jobs_inputs(
+    pg_session_factory, monkeypatch, pair
+):
+    """The per-job reset. Job A ranks (its stamps are captured); job B then
+    fails before capture. B must stay NULL (spec D7's pair-wide rule), never
+    carry A's inputs -- which describe a different pair."""
+    with pg_session_factory() as s:
+        job_a = s.execute(select(RankingJob.id)).scalar_one()
+        s.get(RankingJob, job_a).updated_at = datetime.now(UTC) - timedelta(minutes=5)
+        job_b = enqueue_job(s, call_id=make_call(s).id, profile_id=make_profile(s).id)
+        s.get(RankingJob, job_b).attempts = 4  # terminal on this failure
+        s.commit()
+
+    real_touch = worker_mod.touch_running_job
+
+    def _touch(session, job_id):
+        if job_id == job_b:
+            raise RuntimeError("the database went away before capture")
+        return real_touch(session, job_id)
+
+    monkeypatch.setattr(worker_mod, "touch_running_job", _touch)
+    monkeypatch.setattr(worker_mod, "rank_pair", lambda **kw: _stub(wanted=False))
+    drain_queue(
+        session_factory=pg_session_factory, client=None, embedding_threshold=0.0, batch_size=10
+    )
+    with pg_session_factory() as s:
+        a, b = s.get(RankingJob, job_a), s.get(RankingJob, job_b)
+        assert a.status == RankingJobStatus.DONE, "job A must rank first, capturing stamps"
+        assert b.status == RankingJobStatus.FAILED
+        assert _job_stamps(b) == (None, None, None)
 
 
 def _job_stamps(job: RankingJob) -> tuple[str | None, str | None, str | None]:

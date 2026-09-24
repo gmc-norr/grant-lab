@@ -6,35 +6,38 @@ the colour and symbol the chip gets). Together they are the only place in the SP
 that enumerates this vocabulary, and nothing in the type system connects either of
 them to the backend: `call_ranking_criteria.criterion` and `.rating` are bare
 `String` columns with no CHECK and no enum, and the OpenAPI schema types both
-`string`. So an eighth criterion is a two-line change in `ranking/worker.py`, and a
+`string`. So a new criterion is a two-line change in `ranking/worker.py`, and a
 fifth rating is one line in `ranking/criteria.py`, and both silently ship a wrong
 chip.
 
 WHY THIS FILE EXISTS, precisely: the failure it catches already happened once, on
 paper. The design spec (§4.2) enumerates SIX criteria and FOUR ratings. The source
-writes SEVEN and FIVE shapes -- `ranking/worker.py` writes an `embedding` criterion
+wrote SEVEN and FIVE shapes -- `ranking/worker.py` writes an `embedding` criterion
 the spec never mentions, and `ranking/criteria.py`'s `GateStatus` has a third
 state, `unknown`, for every gate that could not judge. A component built to the
 spec is wrong on arrival, and no test in either language would have said so.
+(Since the ranking-freshness slice the worker writes SIX criteria -- no `timeline`
+row, ranking spec D8 -- and they are still not the design spec's six: `embedding`
+is among them.)
 
 TWO SOURCES PER HALF, AND THE SECOND IS THE POINT.
 
-Criteria. A `criterion=` scan of worker.py sees THREE of the seven:
+Criteria. A `criterion=` scan of worker.py sees THREE of the six:
 
     criterion=name,             <- a VARIABLE, in the gate loop
     criterion="topic_fit",
     criterion="eligibility",
     criterion="exclusions",
 
-The four gate criteria are string literals several lines above, in the
+The three gate criteria are string literals several lines above, in the
 `gate_results` tuple list that loop iterates. An earlier draft of this gate
-scanned only `criterion=` and would have pinned three of seven while reporting
-success. So the scan collects the first element of every tuple in the
+scanned only `criterion=` and would have pinned three of the then seven while
+reporting success. So the scan collects the first element of every tuple in the
 `gate_results` assignment AS WELL, and unions the two -- and
 `test_neither_criterion_scan_alone_is_the_whole_vocabulary` below is what stops the
 tuple half from being quietly dropped again.
 
-Ratings. `worker.py` writes `gr.status.value` for the four gates, so the gate
+Ratings. `worker.py` writes `gr.status.value` for the three gates, so the gate
 vocabulary is `GateStatus`'s members; the three LLM criteria's ratings are whatever
 `ranking/prompt.py`'s parser lets through, which is exactly its
 `<name>_rating not in ("pass", "fail", ...)` validator tuples. Neither source alone
@@ -69,7 +72,7 @@ KNOWN BLIND SPOTS, written down rather than implied:
     writes an unrelated membership test in that file, so the narrow scan is
     deliberate and is pinned by BOTH a set control and a count control below.
 
-A legitimate eighth criterion reddens FOUR exact-count controls at once. That is
+A legitimate new criterion reddens FOUR exact-count controls at once. That is
 deliberate: equality, not a floor. Adding a criterion is a four-file change and
 this file is one of them.
 """
@@ -89,7 +92,7 @@ CRITERIA_PY = REPO / "src" / "grant_lab" / "ranking" / "criteria.py"
 PROMPT = REPO / "src" / "grant_lab" / "ranking" / "prompt.py"
 CHIPS = REPO / "frontend" / "src" / "components" / "CriterionChips.tsx"
 
-# The name of the list `worker.py` iterates to write the four gate criteria.
+# The name of the list `worker.py` iterates to write the three gate criteria.
 GATE_LIST = "gate_results"
 # The enum whose `.value` `worker.py` writes as a gate criterion's rating.
 GATE_ENUM = "GateStatus"
@@ -125,7 +128,7 @@ def label_keys(src: str) -> set[str]:
 
 
 def gate_tuple_names(src: str) -> set[str]:
-    """The first element of every tuple in `gate_results` -- the four gates."""
+    """The first element of every tuple in `gate_results` -- the three gates."""
     value = _assigned_value(src, GATE_LIST)
     assert isinstance(value, ast.List), f"{GATE_LIST} is no longer a list literal"
     names: set[str] = set()
@@ -163,7 +166,7 @@ def gate_status_values(src: str) -> set[str]:
     """`ranking/criteria.py::GateStatus`' string members -- the GATE ratings.
 
     `worker.py` writes `rating=gr.status.value`, so this enum IS the rating
-    vocabulary for budget / trl / timeline / embedding.
+    vocabulary for budget / trl / embedding.
     """
     for node in ast.walk(ast.parse(src)):
         if isinstance(node, ast.ClassDef) and node.name == GATE_ENUM:
@@ -259,10 +262,10 @@ def test_the_gate_tuple_scan_finds_the_three_gates():
     assert gate_tuple_names(WORKER.read_text()) == {"budget", "trl", "embedding"}
 
 
-def test_the_criterion_kwarg_scan_sees_only_three_of_seven():
-    """The measurement this whole file is built on. `criterion=name` at the top
-    of the gate loop is a VARIABLE, so a `criterion=` scan -- the obvious one --
-    misses four of the seven."""
+def test_the_criterion_kwarg_scan_sees_only_three_of_six():
+    """The measurement this whole file is built on. `criterion=name` in the gate
+    loop is a VARIABLE, so a `criterion=` scan -- the obvious one -- misses the
+    three gates of the six."""
     assert criterion_kwarg_literals(WORKER.read_text()) == {
         "topic_fit",
         "eligibility",
@@ -281,6 +284,8 @@ def test_neither_criterion_scan_alone_is_the_whole_vocabulary():
 
 
 def test_the_label_map_scan_finds_the_seven_labels():
+    """Seven, one more than the worker writes: `timeline` keeps its label as the
+    reason code of an expired call's aggregate_reason (ranking spec D8)."""
     assert len(label_keys(FILTERS.read_text())) == 7
 
 
@@ -350,8 +355,8 @@ def test_the_frontend_tone_scan_refuses_a_renamed_map():
 
 def test_the_chip_row_covers_every_criterion_the_worker_writes():
     """COVERAGE, not subset: every criterion the backend can write must be in the
-    frontend list. An eighth criterion added to `gate_results` the way the
-    existing four were added goes red here."""
+    frontend list. A new criterion added to `gate_results` the way the
+    existing three were added goes red here."""
     backend = backend_criteria(WORKER.read_text())
     missing = backend - set(frontend_criteria(CHIPS.read_text()))
     assert missing == set(), (
