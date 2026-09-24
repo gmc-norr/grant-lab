@@ -35,7 +35,8 @@ _logger = logging.getLogger(__name__)
 # re-ranks every open pair once, on the next ingest or 04:00 reconcile.
 SCORING_VERSION = "1"
 
-# How long a terminally-failed job suppresses a retry of the SAME inputs (spec D7).
+# How long a job that terminally failed to PARSE suppresses a retry of the SAME
+# inputs (spec D7 and its I1 amendment; a service or other failure never does).
 DEAD_LETTER_SUPPRESS_DAYS = 7
 
 # parse_error escalation failures allowed per input revision (spec D6).
@@ -219,9 +220,10 @@ def enqueue_stale_pairs(
 
     Current (spec D4) = the profile arm (fingerprint, or the bounded 'legacy'
     arm) AND call_fingerprint AND scoring_fingerprint match, AND no escalation
-    is owed while a remote client can pay it. Suppressed (spec D7) = a failed
-    job in the last DEAD_LETTER_SUPPRESS_DAYS on the SAME inputs, or with NULL
-    stamps (pre-0081 rows keep the old pair-wide rule).
+    is owed while a remote client can pay it. Suppressed (spec D7, amended for
+    final review I1) = a job in the last DEAD_LETTER_SUPPRESS_DAYS that failed
+    to PARSE on the SAME inputs, or a pre-0081 failed row (no kind, no stamps:
+    the old pair-wide rule). A `service` or `error` failure never suppresses.
     """
     if call_ids is not None and not call_ids:
         return 0
@@ -269,15 +271,37 @@ def enqueue_stale_pairs(
                   AND (cr.escalation_state IS DISTINCT FROM 'pending'
                        OR NOT CAST(:remote_enabled AS boolean))
               )
+              -- Dead-letter suppression (spec D7, amended for final review I1).
+              -- Inside NOT EXISTS a NULL predicate means "this failed row does
+              -- not match", so every NULL below fails OPEN: the pair is
+              -- retried, never silenced. The three current fingerprints (want,
+              -- wc, the scoring bind) are computed in Python and never NULL.
               AND NOT EXISTS (
                 SELECT 1 FROM ranking_jobs rj
                 WHERE rj.call_id = wc.call_id AND rj.profile_id = p.id
                   AND rj.status = 'failed'
                   AND rj.updated_at > :dead_letter_cutoff
-                  AND (rj.profile_fingerprint IS NULL
-                       OR (rj.profile_fingerprint = want.fingerprint
-                           AND rj.call_fingerprint = wc.fingerprint
-                           AND rj.scoring_fingerprint = :scoring_fp))
+                  AND (
+                    -- (a) A PARSE failure on these exact inputs: deterministic
+                    -- at temperature 0, so a re-run would fail the same way.
+                    -- 'service'/'error' make the first term FALSE, and
+                    -- FALSE AND NULL is FALSE, so their stamps are never
+                    -- consulted. A NULL kind makes it NULL (not matched). A
+                    -- NULL stamp on a parse row (mark_failed never writes one)
+                    -- makes it NULL too: retried.
+                    (rj.failure_kind = 'parse'
+                     AND rj.profile_fingerprint = want.fingerprint
+                     AND rj.call_fingerprint = wc.fingerprint
+                     AND rj.scoring_fingerprint = :scoring_fp)
+                    -- (b) A pre-0081 row: no kind AND no stamps. Keeps the old
+                    -- pair-wide rule; lapses DEAD_LETTER_SUPPRESS_DAYS after
+                    -- deploy. IS NULL is never NULL itself. `failure_kind IS
+                    -- NULL` is what keeps a NULL-stamped 'service' row (the
+                    -- stuck-RUNNING dead-letter) or 'error' row (a failure
+                    -- before capture) from suppressing pair-wide. A NULL kind
+                    -- with stamps (never written) matches neither arm.
+                    OR (rj.failure_kind IS NULL AND rj.profile_fingerprint IS NULL)
+                  )
               )
             ON CONFLICT (call_id, profile_id)
               WHERE status IN ('pending', 'running') DO NOTHING

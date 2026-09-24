@@ -184,6 +184,7 @@ embedding-gate bypass is unchanged.
 | `call_rankings` | `escalation_state TEXT NULL`, `CHECK (escalation_state IN ('pending','gave_up'))` | D6; NULL = nothing outstanding |
 | `call_rankings` | `escalation_failures SMALLINT NOT NULL DEFAULT 0` | D6; counts within one input revision |
 | `ranking_jobs` | `profile_fingerprint`, `call_fingerprint`, `scoring_fingerprint`, all `TEXT NULL` | D7; the inputs a failed job failed on |
+| `ranking_jobs` | `failure_kind TEXT NULL`, `CHECK (failure_kind IS NULL OR failure_kind IN ('parse','service','error'))` | D7 amendment (I1, added 2026-09-24); why it failed; NULL = pre-0081 row |
 
 No grandfathering: a NULL `call_fingerprint` or `scoring_fingerprint` is stale, as 0075
 decided for the cheap case. Cost of that first re-rank: 475 open pairs × 1 profile = 475
@@ -388,6 +389,45 @@ pair-wide rule, which is time-bounded. A corrected call, a prompt bump or a mode
 changes a fingerprint and ends the suppression at once. The admin button bypasses
 suppression outright (D5).
 
+> **Amended 2026-09-24 (final review, I1).** The rule above suppresses a pair for any
+> terminal failure on its current inputs, including one the pair did not cause. A
+> connection-refused `LLMError` from local Ollama fails a job at once, and `mark_failed`
+> puts it at the back of the queue, so a ~15-minute Ollama outage exhausts
+> `MAX_ATTEMPTS` (5). The job goes FAILED stamped with its current inputs, and ingest and
+> the 04:00 reconcile then skip the pair for 7 days. The final reviewer ran it (RAN, base
+> `3a081dab` vs head `bec93508`): Ollama down for 5 drains then back, and the next night
+> the head enqueued 0 of 3 new calls where the base re-enqueued all 3. A call with a
+> short window could close unranked.
+>
+> D7 did not carry over D6's own distinction: a *service* failure is not the pair's
+> fault. The failures that motivated suppression (§1.6: 7 pairs, 42 failures) were all
+> deterministic local parse errors. So a failed job now records **why** it failed, in
+> `ranking_jobs.failure_kind TEXT NULL`, with `CHECK (failure_kind IS NULL OR
+> failure_kind IN ('parse','service','error'))`, added to migration 0081 itself (0081 had
+> never run on the live database):
+>
+> | `failure_kind` | Written when | Suppresses? |
+> |---|---|---|
+> | `parse` | the local model's output did not parse (`ParseError`) | yes, when all three stamps equal the pair's current inputs: deterministic at temperature 0 |
+> | `service` | the model service failed (`LLMError`: refused, timeout, HTTP error), or `requeue_stuck_running` dead-lettered a job whose process died mid-job | never |
+> | `error` | any other exception in the worker (and the call-or-profile-vanished case) | never: a bug should stay visible, and a transient database error should retry |
+> | NULL | only rows written before this column existed | yes, pair-wide, as before; lapses within 7 days of deploy |
+>
+> `mark_failed` requires a kind and writes it on every call, so a FAILED row carries its
+> last failure's kind. It refuses NULL or an unknown kind, and it keeps the all-or-none
+> stamp rule. The suppression rule now reads:
+>
+> > a failed job updated within `DEAD_LETTER_SUPPRESS_DAYS` suppresses its pair **only
+> > if** (a) `failure_kind = 'parse'` and its three stamps equal the pair's current three
+> > fingerprints, **or** (b) `failure_kind` and `profile_fingerprint` are both NULL (a
+> > pre-0081 row).
+>
+> A NULL stamp alone no longer means pair-wide: the stuck-RUNNING dead-letter and a
+> failure before capture both have NULL stamps, and both are `service` or `error`. Retries
+> of a non-parse failure stay bounded: one enqueue per ingest or reconcile per night, and
+> `MAX_ATTEMPTS` per job. Escalation is separate and unchanged: a Sonnet `llm_error`
+> already does not count toward `gave_up` (D6) and does not fail the job.
+
 ### D8. Timeline changes (§2)
 
 - `criteria._timeline`: FAIL only when `deadline <= now` (`expired`). `TIMELINE_MIN_DAYS`
@@ -472,6 +512,20 @@ If step 2 ships before step 1's first tick, rankings are stamped with a NULL cal
 `embedding_fingerprint`, and every open pair re-ranks once more after the tick. That
 costs one extra night and gives no wrong result, but ordering avoids it.
 
+**Added 2026-09-24 (final review, I1).** Three more rules for step 2:
+
+- **Stop the app while 0081 runs.** 0081 deletes the `timeline` criterion rows (D8).
+  The old worker, still draining, would write them again, including on closed calls,
+  which are never re-ranked, so their stale chip would stay.
+- **Do not deploy on a Sunday night.** The first ingest and reconcile enqueue every open
+  pair, and the Monday 07:00 digest would then run in the middle of that drain.
+- **For the first week, count failed jobs per day by `failure_kind`** (D7 amendment):
+  `SELECT date_trunc('day', updated_at), failure_kind, count(*) FROM ranking_jobs WHERE
+  status = 'failed' GROUP BY 1, 2 ORDER BY 1, 2`. A `parse` pair should fail at most
+  once per `DEAD_LETTER_SUPPRESS_DAYS` on unchanged inputs (the §1.6 pairs). `service`
+  means an outage: the next ingest or reconcile re-enqueues the pair, and it should rank
+  once the service is back. `error` is a bug to read.
+
 **Amendment:** the 2026-09-08 spec's §6 carries a dated note pointing here. Its
 paragraph stays as written, as the record of what held then.
 
@@ -525,12 +579,13 @@ it must reject (`measure-dont-predict` Rule 2).
 | G10 | All three stamps match, run produces no analysis → prior analysis kept | never preserving (G9 alone passes on it) |
 | G11 | Ingest does not re-enqueue a pair that failed 2 days ago on the **same** inputs | a fixture with no failed job |
 | G22 | The same failed pair **is** re-enqueued once its call fingerprint changes (gap 2) | suppressing nothing (G11 rejects it) |
+| G28 | A pair whose job dead-lettered on a service failure is re-enqueued by the next ingest/reconcile; the same pair dead-lettered on a parse failure with the same inputs is not (D7 amendment, I1; added 2026-09-24) | suppression that ignores `failure_kind` |
 | G23 | Admin re-rank enqueues a suppressed pair and a fresh pair; estimate = open × active (gap 2, D5) | a fixture with only stale, unsuppressed pairs |
 | G12 | Deadline in 5 days → timeline PASS, LLM runs, score not zeroed; deadline passed → FAIL **even with a must_include match** | a fixture whose must_include never matches |
 | G16 | Migration 0081 deletes `timeline` criterion rows and nothing else | a database with no `timeline` rows: seed one, and seed one `budget` row that must survive |
 
 G1/G2, G9/G10, G11/G22 and G17/G21 are pairs: each catches one failure direction the
-other alone would miss.
+other alone would miss. G28's two legs are a pair in the same way.
 
 ---
 

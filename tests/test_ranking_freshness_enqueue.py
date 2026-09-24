@@ -1,4 +1,4 @@
-"""Spec D4, D6 (enqueue half), D7. Gates G1-G4, G6, G7, G11, G13, G15, G22, G24, G27."""
+"""Spec D4, D6 (enqueue half), D7. Gates G1-G4, G6, G7, G11, G13, G15, G22, G24, G27, G28a-d."""
 
 from __future__ import annotations
 
@@ -53,13 +53,15 @@ def _pending(session) -> list[tuple[int, int]]:
     )
 
 
-def _failed_job(session, call, profile, *, days_ago: float, stamps=None) -> None:
+def _failed_job(session, call, profile, *, days_ago: float, kind: str | None, stamps=None) -> None:
+    """`kind` is ranking_jobs.failure_kind; None only for a pre-0081-shaped row."""
     job = RankingJob(
         call_id=call.id,
         profile_id=profile.id,
         status=RankingJobStatus.FAILED,
         attempts=5,
         last_error="dead-lettered",
+        failure_kind=kind,
     )
     if stamps is not None:
         job.profile_fingerprint, job.call_fingerprint, job.scoring_fingerprint = stamps
@@ -227,34 +229,71 @@ def test_escalation_state_decides_whether_a_fresh_pair_is_due(
 
 
 def test_a_recent_failure_on_the_same_inputs_suppresses(session):
-    """G11."""
+    """G11, and G28b: a PARSE failure on the same inputs. Deterministic at
+    temperature 0, so re-running it would fail the same way."""
     ctx = ctx_for()
     p, c = make_profile(session), make_call(session, deadline=FUTURE)
-    _failed_job(session, c, p, days_ago=2, stamps=_stamps(c, p, ctx))
+    _failed_job(session, c, p, days_ago=2, kind="parse", stamps=_stamps(c, p, ctx))
     assert enqueue_stale_pairs(session, ctx=ctx) == 0
 
 
-def test_a_recent_failure_on_other_inputs_does_not_suppress(session):
-    """G22 (gap 2): the corrected call is retried at once."""
+@pytest.mark.parametrize("kind", ["service", "error"])
+def test_a_recent_non_parse_failure_on_the_same_inputs_does_not_suppress(session, kind):
+    """G28a (`service`) and G28c (`error`), spec D7 amendment I1. Same stamps as
+    G11, other kind: an Ollama outage that exhausts MAX_ATTEMPTS is not the
+    pair's fault, and a bug should stay visible. Neither silences the pair."""
     ctx = ctx_for()
     p, c = make_profile(session), make_call(session, deadline=FUTURE)
-    _failed_job(session, c, p, days_ago=2, stamps=_stamps(c, p, ctx))
+    _failed_job(session, c, p, days_ago=2, kind=kind, stamps=_stamps(c, p, ctx))
+    assert enqueue_stale_pairs(session, ctx=ctx) == 1
+
+
+@pytest.mark.parametrize("kind", ["service", "error"])
+def test_a_null_stamped_non_parse_failure_does_not_suppress_pair_wide(session, kind):
+    """NULL stamps are pair-wide ONLY on a pre-0081 row (failure_kind NULL too).
+    A `service` row with NULL stamps is what requeue_stuck_running writes (the
+    process died before any capture); an `error` one is a failure before
+    capture. Read as pre-0081, a worker restart mid-drain would silence the
+    pair for DEAD_LETTER_SUPPRESS_DAYS (mutation M-I1c)."""
+    ctx = ctx_for()
+    p, c = make_profile(session), make_call(session, deadline=FUTURE)
+    _failed_job(session, c, p, days_ago=2, kind=kind, stamps=None)
+    assert enqueue_stale_pairs(session, ctx=ctx) == 1
+
+
+def test_a_recent_failure_on_other_inputs_does_not_suppress(session):
+    """G22 (gap 2): the corrected call is retried at once. A `parse` failure,
+    the only kind that suppresses at all: with any other kind this passes
+    without reaching the stamp compare."""
+    ctx = ctx_for()
+    p, c = make_profile(session), make_call(session, deadline=FUTURE)
+    _failed_job(session, c, p, days_ago=2, kind="parse", stamps=_stamps(c, p, ctx))
     c.summary = "Corrected text."
     session.flush()
     assert enqueue_stale_pairs(session, ctx=ctx) == 1
 
 
 def test_a_legacy_failure_with_null_stamps_suppresses_pair_wide(session):
+    """G28d: a pre-0081-shaped row (no kind, no stamps) keeps the old pair-wide
+    rule; it lapses within DEAD_LETTER_SUPPRESS_DAYS of deploy."""
     ctx = ctx_for()
     p, c = make_profile(session), make_call(session, deadline=FUTURE)
-    _failed_job(session, c, p, days_ago=2, stamps=None)
+    _failed_job(session, c, p, days_ago=2, kind=None, stamps=None)
     assert enqueue_stale_pairs(session, ctx=ctx) == 0
 
 
 def test_an_old_failure_no_longer_suppresses(session):
+    """A `parse` failure (the kind that would otherwise suppress) past the window."""
     ctx = ctx_for()
     p, c = make_profile(session), make_call(session, deadline=FUTURE)
-    _failed_job(session, c, p, days_ago=F.DEAD_LETTER_SUPPRESS_DAYS + 1, stamps=_stamps(c, p, ctx))
+    _failed_job(
+        session,
+        c,
+        p,
+        days_ago=F.DEAD_LETTER_SUPPRESS_DAYS + 1,
+        kind="parse",
+        stamps=_stamps(c, p, ctx),
+    )
     assert enqueue_stale_pairs(session, ctx=ctx) == 1
 
 

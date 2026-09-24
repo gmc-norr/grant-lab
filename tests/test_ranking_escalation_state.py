@@ -1,9 +1,11 @@
-"""Spec D6 at the worker, and D7's stamps. Gates G17-G21."""
+"""Spec D6 at the worker, and D7's stamps and failure kinds. Gates G17-G21, G28e."""
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 from sqlalchemy import select
 
@@ -11,13 +13,15 @@ from grant_lab.db.models import Call, CallRanking, Profile, RankingJob, RankingJ
 from grant_lab.profiles.fingerprint import call_rank_fingerprint, rank_fingerprint
 from grant_lab.ranking import worker as worker_mod
 from grant_lab.ranking.criteria import GateResult, Gates, GateStatus
-from grant_lab.ranking.ollama_client import LLMError
+from grant_lab.ranking.freshness import enqueue_stale_pairs
+from grant_lab.ranking.ollama_client import LLMError, OllamaClient
 from grant_lab.ranking.prompt import Parsed, ParseError
-from grant_lab.ranking.queue import enqueue_for_pair, mark_failed
+from grant_lab.ranking.queue import MAX_ATTEMPTS, enqueue_for_pair, mark_failed
 from grant_lab.ranking.rank_pair import RankResult
 from grant_lab.ranking.remote_attempts import record_attempt
 from grant_lab.ranking.worker import drain_queue
 from tests.freshness_helpers import (
+    ctx_for,
     enqueue_job,
     make_call,
     make_profile,
@@ -262,6 +266,8 @@ def test_a_failure_after_capture_is_stamped_in_the_outer_handlers(
         assert job.status == RankingJobStatus.FAILED
         expected_error = "RuntimeError" if handler == "unexpected" else "ollama dropped"
         assert expected_error in job.last_error, "the failure took a different path"
+        # Spec D7 amendment (I1): neither outer handler's failure suppresses.
+        assert job.failure_kind == ("error" if handler == "unexpected" else "service")
         assert _job_stamps(job) == (
             rank_fingerprint(s.get(Profile, pair[1])),
             call_rank_fingerprint(s.get(Call, pair[0])),
@@ -273,8 +279,8 @@ def test_a_failure_before_capture_is_never_stamped_with_another_jobs_inputs(
     pg_session_factory, monkeypatch, pair
 ):
     """The per-job reset. Job A ranks (its stamps are captured); job B then
-    fails before capture. B must stay NULL (spec D7's pair-wide rule), never
-    carry A's inputs -- which describe a different pair."""
+    fails before capture. B must stay NULL (nothing was captured for it),
+    never carry A's inputs -- which describe a different pair."""
     with pg_session_factory() as s:
         job_a = s.execute(select(RankingJob.id)).scalar_one()
         s.get(RankingJob, job_a).updated_at = datetime.now(UTC) - timedelta(minutes=5)
@@ -327,7 +333,7 @@ def test_mark_failed_refuses_a_partial_set_of_stamps(pg_session_factory, pair, s
     with pg_session_factory() as s:
         job_id = s.execute(select(RankingJob.id)).scalar_one()
         with pytest.raises(ValueError, match="all three"):
-            mark_failed(s, job_id, error="boom", terminal=True, stamps=stamps)
+            mark_failed(s, job_id, error="boom", terminal=True, stamps=stamps, failure_kind="parse")
         s.commit()
     with pg_session_factory() as s:
         job = s.get(RankingJob, job_id)
@@ -340,11 +346,139 @@ def test_mark_failed_writes_all_three_stamps_or_none(pg_session_factory, pair):
     no set leaves all three NULL (spec D7's pair-wide rule)."""
     with pg_session_factory() as s:
         job_id = s.execute(select(RankingJob.id)).scalar_one()
-        mark_failed(s, job_id, error="boom", terminal=False)
+        mark_failed(s, job_id, error="boom", terminal=False, failure_kind="error")
         s.commit()
     with pg_session_factory() as s:
         assert _job_stamps(s.get(RankingJob, job_id)) == (None, None, None)
-        mark_failed(s, job_id, error="boom", terminal=True, stamps=("p", "c", "s"))
+        mark_failed(
+            s, job_id, error="boom", terminal=True, stamps=("p", "c", "s"), failure_kind="parse"
+        )
         s.commit()
     with pg_session_factory() as s:
         assert _job_stamps(s.get(RankingJob, job_id)) == ("p", "c", "s")
+
+
+# --- failure kinds (spec D7 amendment, final review I1) -----------------------
+
+
+@pytest.mark.parametrize("kind", [None, "bogus", "PARSE"])
+def test_mark_failed_refuses_a_missing_or_unknown_failure_kind(pg_session_factory, pair, kind):
+    """A NULL failure_kind is reserved for rows written before 0081, which
+    enqueue_stale_pairs reads (with NULL stamps) as the pair-wide legacy rule.
+    A caller that did not classify its failure must fail loudly here, not
+    write a row that silences the pair for DEAD_LETTER_SUPPRESS_DAYS. Refused
+    before anything is written."""
+    with pg_session_factory() as s:
+        job_id = s.execute(select(RankingJob.id)).scalar_one()
+        with pytest.raises(ValueError, match="failure_kind"):
+            mark_failed(s, job_id, error="boom", terminal=True, failure_kind=kind)
+        s.commit()
+    with pg_session_factory() as s:
+        job = s.get(RankingJob, job_id)
+        assert (job.status, job.failure_kind) == (RankingJobStatus.PENDING, None)
+
+
+def test_mark_failed_writes_the_kind_of_every_failure(pg_session_factory, pair):
+    """The last failure's kind is what a FAILED row carries: a service blip on
+    an early attempt must not stick to a job whose final attempt failed to
+    parse."""
+    with pg_session_factory() as s:
+        job_id = s.execute(select(RankingJob.id)).scalar_one()
+        mark_failed(s, job_id, error="refused", terminal=False, failure_kind="service")
+        s.commit()
+    with pg_session_factory() as s:
+        assert s.get(RankingJob, job_id).failure_kind == "service"
+        mark_failed(
+            s,
+            job_id,
+            error="exclusions missing",
+            terminal=True,
+            stamps=("p", "c", "s"),
+            failure_kind="parse",
+        )
+        s.commit()
+    with pg_session_factory() as s:
+        job = s.get(RankingJob, job_id)
+        assert (job.status, job.failure_kind) == (RankingJobStatus.FAILED, "parse")
+
+
+_GEMMA = "gemma4:e4b-it-q4_K_M"
+
+
+def _refusing_ollama(seen: list) -> OllamaClient:
+    """Local Ollama is down: every request is refused (the final review's probe)."""
+
+    def handler(request):
+        seen.append(request)
+        raise httpx.ConnectError("[Errno 111] Connection refused", request=request)
+
+    return OllamaClient(base_url="http://x", model=_GEMMA, transport=httpx.MockTransport(handler))
+
+
+def _unparseable_ollama(seen: list) -> OllamaClient:
+    """Gemma answers, but without `exclusions`: the spec §1.6 parse failure."""
+    content = json.dumps(
+        {
+            "topic_fit": {"rating": 4, "rationale": "AI match", "quoted_evidence": None},
+            "eligibility": {"rating": "pass", "rationale": "ok", "quoted_evidence": None},
+        }
+    )
+    body = {
+        "model": _GEMMA,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json=body)
+
+    return OllamaClient(base_url="http://x", model=_GEMMA, transport=httpx.MockTransport(handler))
+
+
+@pytest.mark.parametrize(
+    "make_client, kind, error_text, enqueued",
+    [
+        (_refusing_ollama, "service", "Connection refused", 1),
+        (_unparseable_ollama, "parse", "exclusions missing", 0),
+    ],
+    ids=["service", "parse"],
+)
+def test_a_dead_letter_suppresses_its_pair_only_after_a_parse_failure(
+    pg_session_factory, pair, make_client, kind, error_text, enqueued
+):
+    """G28e, end to end: the real worker, a real OllamaClient, the real rule.
+
+    `service`: Ollama refuses every connection until the job exhausts
+    MAX_ATTEMPTS and dead-letters, as a ~15-minute outage does. The FAILED row
+    is stamped with its inputs, and the next ingest/reconcile must still
+    enqueue the pair: before fix I1 it was silenced for 7 days. `parse`: Gemma
+    answers without `exclusions` on every attempt; the same inputs fail the
+    same way at temperature 0, so the pair stays suppressed. Each leg is the
+    other's population control (same fixture, same context)."""
+    seen: list = []
+    client = make_client(seen)
+    for _ in range(MAX_ATTEMPTS):
+        drain_queue(
+            session_factory=pg_session_factory,
+            client=client,
+            embedding_threshold=0.0,
+            batch_size=10,
+        )
+    assert len(seen) == MAX_ATTEMPTS, "every attempt must reach the model"
+    with pg_session_factory() as s:
+        job = s.execute(select(RankingJob)).scalar_one()
+        assert (job.status, job.attempts) == (RankingJobStatus.FAILED, MAX_ATTEMPTS)
+        assert error_text in job.last_error, "the failure took a different path"
+        assert job.failure_kind == kind
+        assert _job_stamps(job) == (
+            rank_fingerprint(s.get(Profile, pair[1])),
+            call_rank_fingerprint(s.get(Call, pair[0])),
+            scoring_for(client).fingerprint(),
+        )
+        assert enqueue_stale_pairs(s, ctx=ctx_for(client)) == enqueued

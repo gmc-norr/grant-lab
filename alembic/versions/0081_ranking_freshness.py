@@ -38,6 +38,16 @@ def upgrade() -> None:
     # keeps today's pair-wide 7-day suppression for those rows.
     for col in ("profile_fingerprint", "call_fingerprint", "scoring_fingerprint"):
         op.add_column("ranking_jobs", sa.Column(col, sa.Text(), nullable=True))
+    # Spec D7 amendment (final review I1): WHY a job failed. Only a 'parse'
+    # failure (deterministic at temperature 0) suppresses its pair; 'service'
+    # (the model service, or a worker that died mid-job) and 'error' (anything
+    # else) never do. NULL on every pre-0081 row, which keeps the old rule.
+    op.add_column("ranking_jobs", sa.Column("failure_kind", sa.Text(), nullable=True))
+    op.create_check_constraint(
+        "ck_ranking_jobs_failure_kind",
+        "ranking_jobs",
+        "failure_kind IS NULL OR failure_kind IN ('parse','service','error')",
+    )
     # Spec D8: the writer no longer produces a timeline criterion row. Closed
     # pairs are never re-ranked, so without this their stale chip would stay.
     op.execute("DELETE FROM call_ranking_criteria WHERE criterion = 'timeline'")
@@ -46,6 +56,8 @@ def upgrade() -> None:
 def downgrade() -> None:
     # The deleted timeline rows are not restored: they were derived data, and
     # the next re-rank on the old code writes them again.
+    op.drop_constraint("ck_ranking_jobs_failure_kind", "ranking_jobs", type_="check")
+    op.drop_column("ranking_jobs", "failure_kind")
     for col in ("scoring_fingerprint", "call_fingerprint", "profile_fingerprint"):
         op.drop_column("ranking_jobs", col)
     op.drop_constraint("ck_call_rankings_escalation_state", "call_rankings", type_="check")

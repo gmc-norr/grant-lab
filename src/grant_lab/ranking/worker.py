@@ -134,9 +134,9 @@ def drain_queue(
     for idx, (job_id, call_id, profile_id, attempts) in enumerate(claimed):
         # This job's (profile, call, scoring) fingerprints, once captured below.
         # Reset per job so the outer handlers never stamp a failure with the
-        # previous job's inputs: a failure before capture stays NULL (the
-        # pair-wide dead-letter rule), one after it is keyed on its inputs
-        # (ranking spec D7).
+        # previous job's inputs: a failure before capture stays NULL, one after
+        # it is keyed on its inputs (ranking spec D7). Only a `parse` failure,
+        # which always happens after capture, suppresses on those stamps.
         stamps: tuple[str, str, str] | None = None
         # Soft per-tick budget (B11 Defect 6): once exceeded, stop and hand the
         # remaining claimed-but-untouched jobs back to PENDING (no attempt
@@ -172,6 +172,9 @@ def drain_queue(
                         job_id,
                         error="call or profile vanished",
                         terminal=True,
+                        # Not a parse failure, so it never suppresses. There is
+                        # no pair left to enqueue anyway.
+                        failure_kind="error",
                     )
                     session.commit()
                     continue
@@ -272,6 +275,12 @@ def drain_queue(
                         error=f"ranking failed: {e}",
                         terminal=terminal,
                         stamps=stamps,
+                        # A ParseError is this pair's output failing, and at
+                        # temperature 0 the same inputs fail the same way: it
+                        # may suppress the pair. An LLMError is the service
+                        # failing (an Ollama outage exhausts MAX_ATTEMPTS in
+                        # minutes) and never does (spec D7 amendment, I1).
+                        failure_kind="parse" if isinstance(e, ParseError) else "service",
                     )
                     session.commit()
                     continue
@@ -370,7 +379,14 @@ def drain_queue(
         except LLMError as e:
             terminal = (attempts + 1) >= MAX_ATTEMPTS
             with session_factory() as session:
-                mark_failed(session, job_id, error=str(e), terminal=terminal, stamps=stamps)
+                mark_failed(
+                    session,
+                    job_id,
+                    error=str(e),
+                    terminal=terminal,
+                    stamps=stamps,
+                    failure_kind="service",
+                )
                 session.commit()
             _logger.warning(
                 "ranking.job_failed",
@@ -391,6 +407,9 @@ def drain_queue(
                     error=f"{type(e).__name__}: {e}",
                     terminal=terminal,
                     stamps=stamps,
+                    # A bug should stay visible and a transient database error
+                    # should retry: never suppresses (spec D7 amendment, I1).
+                    failure_kind="error",
                 )
                 session.commit()
             _logger.exception(
