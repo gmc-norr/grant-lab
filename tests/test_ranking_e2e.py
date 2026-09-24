@@ -80,8 +80,9 @@ def _ollama_canned():
 
 
 def test_e2e_pipeline(pg_session_factory):
-    """Enqueue a v2 job → drain → verify CallRanking + 4 criteria rows
-    (timeline pass + topic_fit + eligibility + exclusions) + score 100."""
+    """Enqueue a v2 job → drain → verify CallRanking + the 3 LLM criteria rows
+    (topic_fit + eligibility + exclusions) + score 100. No timeline row is
+    written (ranking spec D8)."""
     with pg_session_factory() as s:
         u = User(email="e2e@umu.se")
         s.add(u)
@@ -137,11 +138,10 @@ def test_e2e_pipeline(pg_session_factory):
     assert ranking.prompt_version == "v5.0"
 
     by_name = {c.criterion: c for c in criteria}
-    assert set(by_name.keys()) >= {"topic_fit", "eligibility", "exclusions", "timeline"}
+    assert set(by_name.keys()) >= {"topic_fit", "eligibility", "exclusions"}
     assert by_name["topic_fit"].rating == "5"
     assert by_name["topic_fit"].quoted_evidence == "AI for medical imaging"
     assert by_name["eligibility"].rating == "pass"
-    assert by_name["timeline"].rating == "pass"
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +336,7 @@ def test_e2e_ingest_then_drain_short_circuits_when_embedding_dissimilar(
             .scalars()
             .all()
         )
-        # Criterion rows: at minimum the pre-LLM gates (timeline + embedding
+        # Criterion rows: at minimum the pre-LLM gates (budget + trl + embedding
         # FAIL) — embedding FAIL stops further evaluation.
         criteria = s.execute(select(CallRankingCriterion)).scalars().all()
 
@@ -430,4 +430,4 @@ def test_e2e_ingest_then_drain_invokes_llm_when_embedding_similar(
     assert ranking.embed_similarity > 0.9
     # Per-criterion rows for both the gates AND the LLM rubric exist.
     criterion_names = {c.criterion for c in criteria}
-    assert {"timeline", "topic_fit", "eligibility", "exclusions"} <= criterion_names
+    assert {"embedding", "topic_fit", "eligibility", "exclusions"} <= criterion_names

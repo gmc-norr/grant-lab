@@ -6,8 +6,13 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.orm import sessionmaker
 
 from grant_lab.db.models import Call, CallRanking, CallRankingCriterion, Profile, RankingJob
-from grant_lab.profiles.fingerprint import embedding_fingerprint, rank_fingerprint
+from grant_lab.profiles.fingerprint import (
+    call_rank_fingerprint,
+    embedding_fingerprint,
+    rank_fingerprint,
+)
 from grant_lab.ranking.criteria import GateStatus
+from grant_lab.ranking.freshness import ScoringConfig, next_escalation_state
 from grant_lab.ranking.ollama_client import LLMError, OllamaClient
 from grant_lab.ranking.prompt import ParseError
 from grant_lab.ranking.queue import (
@@ -112,6 +117,18 @@ def drain_queue(
 
         _clock = time.monotonic
     tick_start = _clock()
+
+    # The scorer's settings, hashed once per tick (ranking spec D3). Built from
+    # THIS function's parameters, never from Settings, so the stamp says what
+    # this worker actually ran with. scheduler.py hands ingest and reconcile a
+    # ScoringConfig built from the same values (gate G26).
+    captured_scoring = ScoringConfig.for_drain(
+        client=client,
+        embedding_threshold=embedding_threshold,
+        embedding_hard_fail_threshold=embedding_hard_fail_threshold,
+        escalation_min_score=escalation_min_score,
+        logprobs_enabled=logprobs_enabled,
+    ).fingerprint()
 
     processed = 0
     for idx, (job_id, call_id, profile_id, attempts) in enumerate(claimed):
@@ -227,6 +244,8 @@ def drain_queue(
                 # future refactor introducing a commit or a session.refresh in
                 # between cannot silently stamp a profile the ranker never saw.
                 captured_fingerprint = rank_fingerprint(profile)
+                captured_call_fingerprint = call_rank_fingerprint(call)
+                stamps = (captured_fingerprint, captured_call_fingerprint, captured_scoring)
                 try:
                     result = rank_pair(
                         client=client,
@@ -246,6 +265,7 @@ def drain_queue(
                         job_id,
                         error=f"ranking failed: {e}",
                         terminal=terminal,
+                        stamps=stamps,
                     )
                     session.commit()
                     continue
@@ -279,38 +299,39 @@ def drain_queue(
                 # would silently rank on a meaningless number).
                 new_sim = result.embed_similarity
 
-                # Preserve a previously-recorded analysis when this run
-                # produced None (e.g. a re-rank under Gemma after a
-                # previous Sonnet run, or a gate-fail re-rank where the
-                # LLM never ran). Without this, dropping below the
-                # cosine threshold or short-circuiting on a new gate
-                # would silently clobber the richer Sonnet analysis with
-                # NULLs. analysis_model travels with the preserved text
-                # so attribution can never point at the wrong backend.
+                # One input revision = all three stamps equal (ranking spec D9).
+                # Advice and escalation failures carry over only within one.
+                existing = session.get(CallRanking, (call_id, profile_id))
+                same_revision = (
+                    existing is not None
+                    and existing.profile_fingerprint == captured_fingerprint
+                    and existing.call_fingerprint == captured_call_fingerprint
+                    and existing.scoring_fingerprint == captured_scoring
+                )
+
+                # Preserve a previously-recorded analysis when this run produced
+                # none (a local-only run, or a gate-fail re-rank), and only when it
+                # still describes THESE inputs. The analysis is ONE attributable
+                # unit (summary + applicant_notes + analysis_model): restore the
+                # triple together, never graft one run's summary onto another's
+                # notes. Advice about an old call text or an old profile must not
+                # be stamped as current (Astra #3).
                 new_summary = result.summary
                 new_notes = result.applicant_notes
                 new_analysis_model = result.analysis_model
-                # The analysis is ONE attributable unit (summary + applicant_notes
-                # + analysis_model). Preserve the prior run's analysis ONLY when
-                # THIS run produced none of it (both fields None — e.g. a gate-fail
-                # re-rank where the LLM never ran, or a cosine short-circuit), and
-                # restore the triple TOGETHER. A run that produced EITHER field
-                # keeps its own triple verbatim — otherwise a partial result would
-                # graft this run's summary onto the prior run's applicant_notes
-                # under a single analysis_model, mis-attributing one of them.
-                if new_summary is None and new_notes is None:
-                    existing = session.get(CallRanking, (call_id, profile_id))
-                    # Only inherit advice that describes THIS profile. After an
-                    # edit the retained triple describes the old one, and
-                    # stamping it with the new fingerprint would make it
-                    # permanently invisible to repair.
-                    if (
-                        existing is not None
-                        and existing.profile_fingerprint == captured_fingerprint
-                    ):
-                        new_summary = existing.summary
-                        new_notes = existing.applicant_notes
-                        new_analysis_model = existing.analysis_model
+                if new_summary is None and new_notes is None and same_revision:
+                    new_summary = existing.summary
+                    new_notes = existing.applicant_notes
+                    new_analysis_model = existing.analysis_model
+
+                escalation_state, escalation_failures = next_escalation_state(
+                    wanted=result.escalation_wanted,
+                    escalated=result.escalated,
+                    remote_configured=remote_client is not None,
+                    remote_withheld=remote_client is not None and effective_remote is None,
+                    outcome=result.escalation_outcome,
+                    prev_failures=existing.escalation_failures if same_revision else 0,
+                )
 
                 session.merge(
                     CallRanking(
@@ -330,6 +351,10 @@ def drain_queue(
                         escalated=result.escalated,
                         escalated_from_score=result.escalated_from_score,
                         profile_fingerprint=captured_fingerprint,
+                        call_fingerprint=captured_call_fingerprint,
+                        scoring_fingerprint=captured_scoring,
+                        escalation_state=escalation_state,
+                        escalation_failures=escalation_failures,
                         ranked_at=datetime.now(UTC),
                     )
                 )
@@ -370,11 +395,7 @@ def drain_queue(
 
 def _rank_summary(r: RankResult) -> str:
     """One-line summary for the rationale column (the per-criterion
-    rationales live in CallRankingCriterion).
-
-    When must_include overrode a failing timeline gate, the summary
-    explicitly notes that — otherwise users see a high score on a
-    deadline-imminent call with no warning."""
+    rationales live in CallRankingCriterion)."""
     if r.reason == "embedding":
         # Surface the cosine value to 3 decimals so admins can see exactly
         # how far the call sat below the threshold and tune accordingly.
@@ -387,20 +408,19 @@ def _rank_summary(r: RankResult) -> str:
         f"Eligibility: {r.parsed.eligibility_rating} · "
         f"Exclusions: {r.parsed.exclusions_rating}"
     )
-    if r.must_include_override and r.gates.timeline.status == GateStatus.FAIL:
-        base += f" · (must-include override; timeline: {r.gates.timeline.reason})"
     return base
 
 
 def _write_criteria_rows(session, job_call_id, job_profile_id, r: RankResult) -> None:
     """Write sparse CallRankingCriterion rows. Only the criteria actually
-    evaluated up to (and including) the failing gate are inserted.
+    evaluated up to (and including) the failing gate are inserted. The
+    timeline gate never gets a row (ranking spec D8); when it fails (the call
+    expired) the write stops after trl, where timeline sits in the precedence.
 
     Special case: when r.must_include_override is True AND the failing gate
-    was timeline OR embedding, we DO continue past that row to write the
-    subsequent rows (and the LLM rows when reached), because the LLM was
-    actually called (rank_pair's must_include bypass extends the bypass to
-    the embedding gate, mirroring the timeline bypass).
+    was embedding, we DO continue past that row to write the subsequent rows
+    (and the LLM rows when reached), because the LLM was actually called
+    (rank_pair's must_include bypass covers the embedding gate).
 
     Deletes prior-run rows first so the breakdown UI never displays a
     mix of fresh and stale criteria. Wrapped in the same transaction as
@@ -424,8 +444,11 @@ def _write_criteria_rows(session, job_call_id, job_profile_id, r: RankResult) ->
 
     # Gate rows — write up to and including the failing one (or all if no gate failed).
     # Iteration order MUST match rank_pair's / aggregate's short-circuit
-    # precedence: budget → trl → timeline → embedding. When several gates
-    # FAIL, aggregate() picks the *first* in that precedence as the headline
+    # precedence: budget → trl → embedding (the timeline gate is not written as
+    # a row: on an open call it could only say "pass"; ranking spec D8. Its
+    # place in the precedence is between trl and embedding, so a timeline FAIL
+    # still stops the write there -- see the loop). When several gates FAIL,
+    # aggregate() picks the *first* in that precedence as the headline
     # aggregate_reason; if this loop iterated in a different order it would
     # stop at (and write a FAIL row for) a different gate than the headline,
     # so the breakdown's terminal FAIL row would contradict aggregate_reason.
@@ -436,27 +459,34 @@ def _write_criteria_rows(session, job_call_id, job_profile_id, r: RankResult) ->
     gate_results = [
         ("budget", r.gates.budget),
         ("trl", r.gates.trl),
-        ("timeline", r.gates.timeline),
         ("embedding", r.gates.embedding),
     ]
     for name, gr in gate_results:
+        if name == "embedding" and r.gates.timeline.status == GateStatus.FAIL:
+            # The expired guard sits between trl and embedding in the
+            # precedence. It stops the write as a failing gate row would, but
+            # has no row of its own: the headline aggregate_reason='timeline'
+            # names it. Writing on would add an embedding row -- a FAIL one,
+            # at worst -- for a gate rank_pair never acted on, and the terminal
+            # FAIL row would then contradict the headline.
+            return
         session.add(
             CallRankingCriterion(
                 call_id=job_call_id,
                 profile_id=job_profile_id,
                 criterion=name,
                 rating=gr.status.value,
-                # 'too_soon' | 'expired' | 'currency_mismatch' | 'topic_dissimilar' | None
+                # 'currency_mismatch' | 'topic_dissimilar' | 'topic_borderline' | None
                 rationale=gr.reason,
                 quoted_evidence=None,
                 ranked_at=now,
             )
         )
         if gr.status == GateStatus.FAIL:
-            # Continue past timeline OR embedding FAIL when must_include_override
-            # is set — rank_pair bypasses both for must_include matches and
+            # Continue past an embedding FAIL when must_include_override is
+            # set — rank_pair bypasses that gate for must_include matches and
             # the LLM was actually called, so we have parsed criteria to write.
-            if name in ("timeline", "embedding") and r.must_include_override:
+            if name == "embedding" and r.must_include_override:
                 continue
             return  # stop — subsequent criteria not evaluated
 

@@ -133,7 +133,7 @@ def test_worker_writes_call_ranking_with_aggregate_and_reason(pg_session_factory
 
 
 def test_worker_writes_sparse_criterion_rows_clean_path(pg_session_factory):
-    """Clean pass — all 3 LLM criteria + 4 gate criteria get rows."""
+    """Clean pass — all 3 LLM criteria + 3 gate criteria get rows."""
     with pg_session_factory() as s:
         cid, pid = _seed(s)
         s.commit()
@@ -143,22 +143,21 @@ def test_worker_writes_sparse_criterion_rows_clean_path(pg_session_factory):
     with pg_session_factory() as s:
         criteria = s.execute(select(CallRankingCriterion)).scalars().all()
     by_name = {c.criterion: c for c in criteria}
-    # All 3 LLM criteria + 4 gates that ran are written.
+    # All 3 LLM criteria + 3 gates that ran are written (no timeline row, spec D8).
     assert "topic_fit" in by_name
     assert by_name["topic_fit"].rating == "4"
     assert "eligibility" in by_name
     assert by_name["eligibility"].rating == "pass"
     assert "exclusions" in by_name
     assert by_name["exclusions"].rating == "pass"
-    assert "timeline" in by_name
-    assert by_name["timeline"].rating == "pass"
 
 
 def test_worker_short_circuit_writes_up_to_failing_gate_row(pg_session_factory):
-    """If timeline fails AND no must_include match, rows are written up to and
-    including the timeline FAIL — i.e. the gates that precede timeline in the
-    short-circuit precedence (budget, trl, both PASS here) plus timeline=fail.
-    No LLM row, no embedding row (timeline short-circuits before it)."""
+    """If timeline fails (the call has expired), rows are written for the gates
+    that precede timeline in the short-circuit precedence (budget, trl, both
+    PASS here). The timeline FAIL itself writes no row (spec D8; the headline
+    aggregate_reason names it). No LLM row, no embedding row (timeline
+    short-circuits before it)."""
     with pg_session_factory() as s:
         u = User(email="sc@umu.se")
         s.add(u)
@@ -173,7 +172,7 @@ def test_worker_short_circuit_writes_up_to_failing_gate_row(pg_session_factory):
         s.add(p)
         s.flush()
         src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
-        # Deadline tomorrow → timeline FAIL.
+        # Deadline yesterday → timeline FAIL (expired; a deadline tomorrow now PASSes).
         from datetime import timedelta
 
         c = Call(
@@ -181,7 +180,7 @@ def test_worker_short_circuit_writes_up_to_failing_gate_row(pg_session_factory):
             external_id="SC",
             url="https://x",
             title="T",
-            deadline=datetime.now(UTC) + timedelta(days=1),
+            deadline=datetime.now(UTC) - timedelta(days=1),
             published_at=datetime.now(UTC),
         )
         s.add(c)
@@ -213,80 +212,49 @@ def test_worker_short_circuit_writes_up_to_failing_gate_row(pg_session_factory):
     assert r.aggregate_reason == "timeline"
     by_name = {c.criterion: c for c in criteria}
     # budget + trl precede timeline in precedence (neither FAILs here), then
-    # the timeline FAIL stops the sparse write. The terminal FAIL row matches
-    # the headline aggregate_reason; no embedding/LLM rows past the stop.
-    assert set(by_name.keys()) == {"budget", "trl", "timeline"}
-    assert by_name["timeline"].rating == "fail"
+    # the timeline FAIL stops the sparse write without a row of its own; the
+    # headline aggregate_reason names it. No embedding/LLM rows past the stop.
+    assert set(by_name.keys()) == {"budget", "trl"}
 
 
-def test_worker_must_include_with_failing_timeline_persists_llm_score(
-    pg_session_factory,
-):
-    """Regression for Codex H1: a must_include match with a failing timeline
-    gate must (a) get an LLM call, (b) persist a non-zero CallRanking score
-    based on the LLM topic_fit, NOT zero from the timeline-fail short-circuit,
-    and (c) have all four criterion rows (timeline=fail + LLM topic/eligibility/
-    exclusions) — NOT just the timeline row."""
+def test_worker_scores_a_call_closing_tomorrow_and_writes_no_timeline_row(pg_session_factory):
+    """G12 at the worker: a real score, and no timeline criterion row (spec D8)."""
     from datetime import timedelta
 
     with pg_session_factory() as s:
-        u = User(email="mi@umu.se")
-        s.add(u)
-        s.flush()
-        # Profile has must_include=["pathology"].
-        p = Profile(
-            name="MI",
-            kind=ProfileKind.ORGANIZATIONAL_UNIT,
-            description="",
-            structured={
-                "areas": ["pathology"],
-                "hard_exclusions": [],
-                "must_include": ["pathology"],
-            },
-            created_by=u.id,
-        )
-        s.add(p)
-        s.flush()
-        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
-        # Title contains "pathology" → must_include match.
-        # Deadline tomorrow → timeline gate FAILs.
-        c = Call(
-            source_id=src.id,
-            external_id="MI",
-            url="https://x",
-            title="Pathology funding announcement",
-            summary="Open call.",
-            deadline=datetime.now(UTC) + timedelta(days=1),
-            published_at=datetime.now(UTC),
-        )
-        s.add(c)
-        s.flush()
-        s.add(
-            RankingJob(
-                call_id=c.id,
-                profile_id=p.id,
-                status=RankingJobStatus.PENDING,
-            )
-        )
+        cid, pid = _seed(s)
+        s.get(Call, cid).deadline = datetime.now(UTC) + timedelta(days=1)
         s.commit()
 
     drain_queue(session_factory=pg_session_factory, client=_ollama_clean(), batch_size=10)
 
     with pg_session_factory() as s:
         ranking = s.execute(select(CallRanking)).scalar_one()
-        criteria = s.execute(select(CallRankingCriterion)).scalars().all()
-
-    # The LLM ran, so the score is the LLM topic_fit ≈ 80 (4/5 × 20),
-    # NOT zero (which is what would happen without the override).
+        names = {c.criterion for c in s.execute(select(CallRankingCriterion)).scalars()}
     assert ranking.aggregate_score >= 70
-    assert ranking.aggregate_reason is None
-    by_name = {c.criterion: c for c in criteria}
-    # All criteria present — the timeline=fail row exists for diagnostics
-    # AND the LLM rows are written despite the gate failure.
-    assert by_name["timeline"].rating == "fail"
-    assert by_name["topic_fit"].rating == "4"
-    assert by_name["eligibility"].rating == "pass"
-    assert by_name["exclusions"].rating == "pass"
+    assert "timeline" not in names
+    assert {"budget", "trl", "embedding", "topic_fit", "eligibility", "exclusions"} <= names
+
+
+def test_worker_expired_call_scores_zero_even_with_must_include(pg_session_factory):
+    """G12: must_include no longer rescues a closed call."""
+    from datetime import timedelta
+
+    with pg_session_factory() as s:
+        cid, pid = _seed(s)
+        s.get(Profile, pid).structured = {
+            "areas": ["AI"],
+            "hard_exclusions": [],
+            "must_include": ["funding"],
+        }
+        s.get(Call, cid).deadline = datetime.now(UTC) - timedelta(days=1)
+        s.commit()
+
+    drain_queue(session_factory=pg_session_factory, client=_ollama_clean(), batch_size=10)
+
+    with pg_session_factory() as s:
+        ranking = s.execute(select(CallRanking)).scalar_one()
+    assert (ranking.aggregate_score, ranking.aggregate_reason) == (0, "timeline")
 
 
 def test_worker_rerank_clears_stale_criterion_rows(pg_session_factory):
@@ -297,12 +265,12 @@ def test_worker_rerank_clears_stale_criterion_rows(pg_session_factory):
         cid, pid = _seed(s)
         s.commit()
 
-    # First run: clean pass, all 7 criteria written.
+    # First run: clean pass, all 6 criteria written.
     drain_queue(session_factory=pg_session_factory, client=_ollama_clean(), batch_size=10)
 
     with pg_session_factory() as s:
         criteria_after_first = s.execute(select(CallRankingCriterion)).scalars().all()
-    assert len(criteria_after_first) == 7  # 4 gates (timeline/budget/trl/embedding) + 3 LLM rows
+    assert len(criteria_after_first) == 6  # 3 gates (budget/trl/embedding) + 3 LLM rows
     by_name = {c.criterion: c for c in criteria_after_first}
     assert by_name["topic_fit"].rating == "4"
 
@@ -340,11 +308,10 @@ def test_worker_rerank_clears_stale_criterion_rows(pg_session_factory):
     by_name = {c.criterion: c for c in criteria_after_second}
     # CRITICAL: stale topic_fit / eligibility / exclusions (LLM rows) and the
     # embedding row are GONE. The timeline short-circuit writes the gates that
-    # precede it in precedence (budget, trl — both PASS) plus timeline=fail.
-    assert set(by_name.keys()) == {"budget", "trl", "timeline"}
+    # precede it in precedence (budget, trl — both PASS), and no row of its own.
+    assert set(by_name.keys()) == {"budget", "trl"}
     assert "topic_fit" not in by_name
     assert "embedding" not in by_name
-    assert by_name["timeline"].rating == "fail"
 
 
 def test_worker_writes_embed_similarity_on_clean_path(pg_session_factory, monkeypatch):
@@ -470,58 +437,6 @@ def test_worker_summary_renders_embedding_fail_reason():
     assert "0.180" in summary
 
 
-def test_worker_must_include_override_appears_in_summary(pg_session_factory):
-    """Codex N1: when must_include bypasses the timeline gate, the rationale
-    one-line summary must surface that fact so users aren't surprised by a
-    high score on a deadline-imminent call."""
-    from datetime import timedelta
-
-    with pg_session_factory() as s:
-        u = User(email="ovr@umu.se")
-        s.add(u)
-        s.flush()
-        p = Profile(
-            name="OVR",
-            kind=ProfileKind.ORGANIZATIONAL_UNIT,
-            description="",
-            structured={
-                "areas": ["pathology"],
-                "hard_exclusions": [],
-                "must_include": ["pathology"],
-            },
-            created_by=u.id,
-        )
-        s.add(p)
-        s.flush()
-        src = s.execute(select(Source).where(Source.slug == "vinnova")).scalar_one()
-        c = Call(
-            source_id=src.id,
-            external_id="OVR",
-            url="https://x",
-            title="Pathology funding",
-            summary="Open call.",
-            deadline=datetime.now(UTC) + timedelta(days=1),
-            published_at=datetime.now(UTC),
-        )
-        s.add(c)
-        s.flush()
-        s.add(
-            RankingJob(
-                call_id=c.id,
-                profile_id=p.id,
-                status=RankingJobStatus.PENDING,
-            )
-        )
-        s.commit()
-
-    drain_queue(session_factory=pg_session_factory, client=_ollama_clean(), batch_size=10)
-
-    with pg_session_factory() as s:
-        ranking = s.execute(select(CallRanking)).scalar_one()
-    assert "must-include override" in ranking.rationale
-    assert "timeline" in ranking.rationale
-
-
 def test_worker_writes_embedding_criterion_row_on_gate_fail(
     pg_session_factory,
     monkeypatch,
@@ -567,10 +482,9 @@ def test_worker_writes_embedding_criterion_row_on_gate_fail(
     with pg_session_factory() as s:
         criteria = s.execute(select(CallRankingCriterion)).scalars().all()
     by_name = {c.criterion: c for c in criteria}
-    # Exactly four gate rows — the three preceding gates that PASSed plus
+    # Exactly three gate rows — the two preceding gates that PASSed plus
     # the failing embedding row. No LLM rows because parsed is None.
-    assert set(by_name.keys()) == {"timeline", "budget", "trl", "embedding"}
-    assert by_name["timeline"].rating == "pass"
+    assert set(by_name.keys()) == {"budget", "trl", "embedding"}
     assert by_name["budget"].rating == "pass"
     assert by_name["trl"].rating == "pass"
     assert by_name["embedding"].rating == "fail"

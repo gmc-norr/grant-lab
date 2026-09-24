@@ -43,7 +43,7 @@ def _criterion_detail(
         days = delta.days
         if days < 0:
             return f"Deadline passed {-days} day(s) ago ({call.deadline.date()})."
-        return f"Deadline {call.deadline.date()} — {days} day(s) away (minimum 14 day window)."
+        return f"Deadline {call.deadline.date()} — {days} day(s) away."
     if name == "budget":
         c_min, c_max = call.budget_min, call.budget_max
         p_min, p_max = p.get("budget_min"), p.get("budget_max")

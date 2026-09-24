@@ -255,8 +255,8 @@ def frontend_tone_keys(src: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def test_the_gate_tuple_scan_finds_the_four_gates():
-    assert gate_tuple_names(WORKER.read_text()) == {"budget", "trl", "timeline", "embedding"}
+def test_the_gate_tuple_scan_finds_the_three_gates():
+    assert gate_tuple_names(WORKER.read_text()) == {"budget", "trl", "embedding"}
 
 
 def test_the_criterion_kwarg_scan_sees_only_three_of_seven():
@@ -277,7 +277,7 @@ def test_neither_criterion_scan_alone_is_the_whole_vocabulary():
     src = WORKER.read_text()
     tuples, kwargs = gate_tuple_names(src), criterion_kwarg_literals(src)
     assert tuples.isdisjoint(kwargs), tuples & kwargs
-    assert len(tuples | kwargs) == len(tuples) + len(kwargs) == 7
+    assert len(tuples | kwargs) == len(tuples) + len(kwargs) == 6
 
 
 def test_the_label_map_scan_finds_the_seven_labels():

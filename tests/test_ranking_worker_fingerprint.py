@@ -96,9 +96,7 @@ def test_the_stamp_is_captured_before_rank_pair_not_after(session, session_facto
         assert row.description == "EDITED MID FLIGHT", "the mid-flight edit did not land"
         assert rank_fingerprint(row) != before
         cr = fresh.get(CallRanking, (cid, pid))
-        assert cr.profile_fingerprint == before, (
-            "the worker stamped a profile the ranker never saw"
-        )
+        assert cr.profile_fingerprint == before, "the worker stamped a profile the ranker never saw"
 
 
 def test_retained_analysis_is_dropped_when_the_profile_changed(
@@ -166,3 +164,58 @@ def test_retained_analysis_survives_when_the_profile_did_not_change(
         assert cr.summary == "Advice that is still current"
         assert cr.applicant_notes == [{"note": "still good"}]
         assert cr.analysis_model == "claude-sonnet-4-6"
+
+
+def test_retained_analysis_is_dropped_when_the_call_changed(
+    session, session_factory, ranked_pair, fake_rank_client
+):
+    """G9 (Astra #3): advice about the old call text must not survive a call edit."""
+    from grant_lab.db.models import Call
+
+    call_id, profile_id, _ = ranked_pair
+    cr = session.get(CallRanking, (call_id, profile_id))
+    cr.summary, cr.applicant_notes, cr.analysis_model = (
+        "Old advice",
+        [{"note": "old"}],
+        "claude-sonnet-5",
+    )
+    session.commit()
+    with session_factory() as other:
+        other.get(Call, call_id).summary = "The funder rewrote the scope."
+        other.commit()
+    enqueue_for_pair(session, call_id=call_id, profile_id=profile_id)
+    session.commit()
+    drain_queue(
+        session_factory=session_factory,
+        client=fake_rank_client,
+        embedding_threshold=0.0,
+        batch_size=1,
+    )
+    with session_factory() as fresh:
+        cr = fresh.get(CallRanking, (call_id, profile_id))
+        assert (cr.summary, cr.applicant_notes, cr.analysis_model) == (None, None, None)
+
+
+def test_retained_analysis_is_dropped_when_the_scoring_settings_changed(
+    session, session_factory, ranked_pair, fake_rank_client
+):
+    """G9, the scoring side."""
+    call_id, profile_id, _ = ranked_pair
+    cr = session.get(CallRanking, (call_id, profile_id))
+    cr.summary, cr.applicant_notes, cr.analysis_model = (
+        "Old advice",
+        [{"note": "old"}],
+        "claude-sonnet-5",
+    )
+    session.commit()
+    enqueue_for_pair(session, call_id=call_id, profile_id=profile_id)
+    session.commit()
+    drain_queue(
+        session_factory=session_factory,
+        client=fake_rank_client,
+        embedding_threshold=0.05,
+        batch_size=1,
+    )
+    with session_factory() as fresh:
+        cr = fresh.get(CallRanking, (call_id, profile_id))
+        assert cr.summary is None

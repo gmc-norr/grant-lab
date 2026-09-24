@@ -401,21 +401,44 @@ def mark_done(session: Session, job_id: int) -> None:
     )
 
 
-def mark_failed(session: Session, job_id: int, *, error: str, terminal: bool) -> None:
+def mark_failed(
+    session: Session,
+    job_id: int,
+    *,
+    error: str,
+    terminal: bool,
+    stamps: tuple[str, str, str] | None = None,
+) -> None:
     """Mark a job failed. If terminal=True, transition to the FAILED
     terminal status (dead-letter). Otherwise revert to PENDING with
     incremented attempts so the queue retries it on the next tick.
 
+    `stamps` = (profile, call, scoring) fingerprints the job failed ON. Dead-
+    letter suppression (ranking/freshness.py, spec D7) compares them with the
+    pair's current inputs, so a corrected call is retried at once. None when
+    the failure happened before they were captured.
+
+    All three or none, never a partial set: enqueue_stale_pairs reads a failed
+    job as pre-0081 (pair-wide) only when `profile_fingerprint IS NULL`, and as
+    the same inputs only when all three equal the current ones. A partial set
+    matches neither arm, so its pair would be retried every day. A partial or
+    empty set raises ValueError before anything is written.
+
     `error` is truncated to `_LAST_ERROR_MAX` chars so a stray traceback
     doesn't blow up row size (the column is unbounded TEXT)."""
+    if stamps is not None and (
+        len(stamps) != 3 or not all(isinstance(s, str) and s for s in stamps)
+    ):
+        raise ValueError(f"mark_failed needs all three stamps or none, got {stamps!r}")
     new_status = RankingJobStatus.FAILED if terminal else RankingJobStatus.PENDING
-    session.execute(
-        update(RankingJob)
-        .where(RankingJob.id == job_id)
-        .values(
-            status=new_status,
-            attempts=RankingJob.attempts + 1,
-            last_error=(error or "")[:_LAST_ERROR_MAX],
-            updated_at=datetime.now(UTC),
+    values: dict[str, object] = {
+        "status": new_status,
+        "attempts": RankingJob.attempts + 1,
+        "last_error": (error or "")[:_LAST_ERROR_MAX],
+        "updated_at": datetime.now(UTC),
+    }
+    if stamps is not None:
+        values["profile_fingerprint"], values["call_fingerprint"], values["scoring_fingerprint"] = (
+            stamps
         )
-    )
+    session.execute(update(RankingJob).where(RankingJob.id == job_id).values(**values))
