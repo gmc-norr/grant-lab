@@ -56,8 +56,8 @@ def aggregate(
     if gates.trl.status == GateStatus.FAIL:
         return AggregateResult(0, "trl")
     # Embedding pre-gate: cheaper than LLM but pricier than timeline/budget/
-    # TRL, so it runs LAST among the rule-based gates. Bypassed by
-    # must_include for the same reason as timeline (both are topic gates).
+    # TRL, so it runs LAST among the rule-based gates. The only gate
+    # must_include bypasses: a profile keyword forces the topic in.
     if not must_include_override and gates.embedding.status == GateStatus.FAIL:
         return AggregateResult(0, "embedding")
 

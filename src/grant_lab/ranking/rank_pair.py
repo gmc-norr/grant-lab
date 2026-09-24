@@ -363,7 +363,8 @@ def _call_matches_must_include(profile, call) -> bool:
     into `full_text`, a must_include term that lives only in the body
     text would otherwise be silently missed.
 
-    Spec line 282: must-include calls bypass the timeline gate (only)."""
+    A match bypasses the embedding gate only; it never rescues a closed call
+    (ranking-freshness spec §2)."""
     from grant_lab.ranking.must_include import compile_term_pattern, normalize_must_terms
 
     structured = profile.structured or {}
