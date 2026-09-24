@@ -133,7 +133,7 @@ def rank_pair(
     if gates.timeline.status == GateStatus.FAIL:
         return _gate_fail_result(gates, "timeline", must_include_match, embed_similarity=embed_sim)
     # Embedding fail short-circuits ONLY when must_include doesn't match
-    # (mirrors the timeline bypass — must_include is a topic-force-include).
+    # (the only gate must_include bypasses — it forces the topic in).
     if gates.embedding.status == GateStatus.FAIL and not must_include_match:
         return _gate_fail_result(gates, "embedding", must_include_match, embed_similarity=embed_sim)
 
