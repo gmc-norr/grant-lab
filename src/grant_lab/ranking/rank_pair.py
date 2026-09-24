@@ -62,6 +62,11 @@ class RankResult:
     escalation_attempted: bool = False
     escalation_outcome: str | None = None  # 'success'|'llm_error'|'parse_error'
     analysis_model: str | None = None
+    # The local outcome qualifies for a second reading -- score >=
+    # escalation_min_score, or eligibility 'fail' with topic >= 3 -- whether or
+    # not a remote client was available (ranking spec D6). The worker uses it to
+    # tell "owed" from "not needed".
+    escalation_wanted: bool = False
 
 
 def rank_pair(
@@ -81,12 +86,8 @@ def rank_pair(
 
     Rule-based-gate handling:
       - Budget FAIL or TRL FAIL → short-circuit, no LLM call.
-      - Timeline FAIL → short-circuit UNLESS the call matches one of the
-        profile's must_include keywords, in which case timeline is bypassed
-        (spec line 282) and the LLM is consulted. The bypass is propagated
-        as `must_include_override=True` to aggregate() and through the
-        result so the worker's criteria-row writer doesn't bail at the
-        timeline-fail row either.
+      - Timeline FAIL (the call has closed) → short-circuit, no LLM call.
+      - Embedding FAIL → short-circuit UNLESS the call matches a must_include keyword.
 
     Outcome-based escalation (Phase 4):
       Local Gemma ALWAYS runs first (logprobs on, enable_analysis=False).
@@ -128,8 +129,8 @@ def rank_pair(
         return _gate_fail_result(gates, "budget", must_include_match, embed_similarity=embed_sim)
     if gates.trl.status == GateStatus.FAIL:
         return _gate_fail_result(gates, "trl", must_include_match, embed_similarity=embed_sim)
-    # Timeline fail short-circuits ONLY when must_include doesn't match.
-    if gates.timeline.status == GateStatus.FAIL and not must_include_match:
+    # Timeline FAIL (a closed call) short-circuits unconditionally (ranking spec §2).
+    if gates.timeline.status == GateStatus.FAIL:
         return _gate_fail_result(gates, "timeline", must_include_match, embed_similarity=embed_sim)
     # Embedding fail short-circuits ONLY when must_include doesn't match
     # (mirrors the timeline bypass — must_include is a topic-force-include).
@@ -173,10 +174,10 @@ def rank_pair(
     # Escalate on OUTCOME, not cosine: a promising local score, or the
     # eligibility-fail-but-strong-topic combination (Codex R3 — Gemma
     # misreads eligibility legalese; Sonnet adjudicates).
-    should_escalate = remote_client is not None and (
-        local_agg.score >= escalation_min_score
-        or (local_parsed.eligibility_rating == "fail" and local_parsed.topic_fit_rating >= 3)
+    escalation_wanted = local_agg.score >= escalation_min_score or (
+        local_parsed.eligibility_rating == "fail" and local_parsed.topic_fit_rating >= 3
     )
+    should_escalate = remote_client is not None and escalation_wanted
 
     if not should_escalate:
         return RankResult(
@@ -197,6 +198,7 @@ def rank_pair(
             escalated_from_score=None,
             escalation_attempted=False,
             escalation_outcome=None,
+            escalation_wanted=escalation_wanted,
         )
 
     # Escalate: re-run on the remote client with analysis enabled. No
@@ -234,6 +236,7 @@ def rank_pair(
             embed_sim,
             topic_expected,
             outcome=outcome,
+            escalation_wanted=escalation_wanted,
         )
 
     remote_llm = LLMResult(
@@ -265,6 +268,7 @@ def rank_pair(
         escalated_from_score=local_agg.score,
         escalation_attempted=True,
         escalation_outcome="success",
+        escalation_wanted=True,
     )
 
 
@@ -279,6 +283,7 @@ def _local_with_failed_escalation(
     topic_expected: float | None,
     *,
     outcome: str,
+    escalation_wanted: bool,
 ) -> RankResult:
     """Local result surviving a failed remote escalation: identical to the
     no-escalation local return except attempted=True + the failure class."""
@@ -300,6 +305,7 @@ def _local_with_failed_escalation(
         escalated_from_score=None,
         escalation_attempted=True,
         escalation_outcome=outcome,
+        escalation_wanted=escalation_wanted,
     )
 
 

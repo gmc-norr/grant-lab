@@ -35,7 +35,7 @@ def test_aggregate_clean_pass_uses_topic_argmax_times_20():
 
 def test_aggregate_timeline_fail_short_circuits():
     g = Gates(
-        timeline=GateResult(GateStatus.FAIL, reason="too_soon"),
+        timeline=GateResult(GateStatus.FAIL, reason="expired"),
         budget=GateResult(GateStatus.PASS),
         trl=GateResult(GateStatus.PASS),
         embedding=GateResult(GateStatus.UNKNOWN),
@@ -45,19 +45,18 @@ def test_aggregate_timeline_fail_short_circuits():
     assert r.reason == "timeline"
 
 
-def test_aggregate_timeline_fail_ignored_with_must_include_override():
-    """Spec line 282: must_include calls bypass the timeline gate. The
-    LLM's verdict carries through even though timeline FAILED."""
+def test_aggregate_timeline_fail_is_not_bypassed_by_must_include():
+    """Spec §2 / D8: a closed call has nothing to rescue. must_include still
+    bypasses the EMBEDDING gate only."""
     g = Gates(
-        timeline=GateResult(GateStatus.FAIL, reason="too_soon"),
+        timeline=GateResult(GateStatus.FAIL, reason="expired"),
         budget=GateResult(GateStatus.PASS),
         trl=GateResult(GateStatus.PASS),
         embedding=GateResult(GateStatus.UNKNOWN),
     )
     r = aggregate(g, _llm_clean(topic_argmax=5), must_include_override=True)
-    # 5 × 20 = 100, not 0.
-    assert r.score == 100
-    assert r.reason is None
+    assert r.score == 0
+    assert r.reason == "timeline"
 
 
 def test_aggregate_budget_fail_still_short_circuits_even_with_override():

@@ -103,11 +103,12 @@ def test_rank_pair_clean_pass_with_logprobs():
 
 
 def test_rank_pair_short_circuits_on_gate_fail():
-    """Timeline gate fails (deadline tomorrow) — no LLM call."""
+    """Timeline gate fails (deadline expired) — no LLM call. Ranking spec §2:
+    the gate no longer fails on a merely-soon deadline, only a closed one."""
     profile = _Profile(structured={"areas": [], "hard_exclusions": []})
     from datetime import timedelta
 
-    call = _Call(deadline=_NOW + timedelta(days=1))
+    call = _Call(deadline=_NOW - timedelta(days=1))
 
     # Build a client that asserts it's NEVER called.
     def handler(request):
@@ -392,54 +393,53 @@ def test_rank_pair_uses_argmax_times_20():
     assert r.reason is None
 
 
-def test_rank_pair_must_include_bypasses_timeline_gate():
-    """A call matching a must_include keyword still gets LLM-scored even when
-    the timeline gate would have FAILed (deadline tomorrow)."""
+def test_rank_pair_scores_a_call_closing_tomorrow():
+    """G12: deadline tomorrow is a real score, not a timeline zero."""
     from datetime import timedelta
 
-    profile = _Profile(
-        structured={
-            "areas": [],
-            "hard_exclusions": [],
-            "must_include": ["pathology"],
-        }
-    )
-    call = _Call(
-        title="Pathology funding announcement",
-        summary="x",
-        deadline=_NOW + timedelta(days=1),  # would fail timeline gate
-    )
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(title="Pathology funding", summary="x", deadline=_NOW + timedelta(days=1))
     client = _ollama_mock(
         content={
             "topic_fit": {"rating": 4, "rationale": "ok"},
             "eligibility": {"rating": "pass"},
             "exclusions": {"rating": "pass"},
-        },
-        logprobs=[
-            {
-                "token": "4",
-                "logprob": -0.1,
-                "top_logprobs": [
-                    {"token": "4", "logprob": -0.1},
-                    {"token": "3", "logprob": -2.5},
-                ],
-            },
-        ],
+        }
     )
     r = rank_pair(client=client, profile=profile, call=call, now=_NOW)
-    # Bypassed timeline → got an LLM score, not 0.
-    assert r.score >= 60
+    assert r.score == 80
     assert r.reason is None
-    # Gates were still evaluated (for diagnostic display).
-    assert r.gates.timeline.status.value == "fail"
-    # The override flag is set so the worker's criteria-row writer knows to
-    # continue past the timeline-fail row instead of bailing.
+    assert r.gates.timeline.status.value == "pass"
+
+
+def test_rank_pair_expired_call_fails_even_with_must_include():
+    """G12: must_include no longer rescues a closed call, and the LLM never runs."""
+    from datetime import timedelta
+
+    profile = _Profile(
+        structured={"areas": [], "hard_exclusions": [], "must_include": ["pathology"]}
+    )
+    call = _Call(title="Pathology funding", summary="x", deadline=_NOW - timedelta(days=1))
+    client = _ollama_mock(
+        content={
+            "topic_fit": {"rating": 5, "rationale": "x"},
+            "eligibility": {"rating": "pass"},
+            "exclusions": {"rating": "pass"},
+        }
+    )
+    r = rank_pair(client=client, profile=profile, call=call, now=_NOW)
+    assert r.score == 0
+    assert r.reason == "timeline"
+    assert r.parsed is None
     assert r.must_include_override is True
 
 
 def test_rank_pair_must_include_match_requires_term_in_text():
     """Profile has must_include keywords but call text doesn't contain any —
-    behaves like a normal pair (timeline FAIL → score=0)."""
+    must_include_override stays False even though the call is expired
+    (ranking spec §2/D8: nothing bypasses an expired timeline any more, so
+    the expired deadline here only sets up the score=0 short-circuit; the
+    override flag is still driven purely by text matching)."""
     from datetime import timedelta
 
     profile = _Profile(
@@ -452,7 +452,7 @@ def test_rank_pair_must_include_match_requires_term_in_text():
     call = _Call(
         title="Unrelated call about EVs",
         summary="vehicle electrification",
-        deadline=_NOW + timedelta(days=1),  # timeline FAIL
+        deadline=_NOW - timedelta(days=1),  # timeline FAIL (expired)
     )
 
     # LLM should NOT be called.
@@ -973,3 +973,120 @@ def test_with_logprobs_on_the_score_is_the_expected_value():
     assert result.topic_fit_expected is not None
     assert result.score != 4 * 20
     assert result.score == round((0.6 * 4 + 0.4 * 3) * 20)
+
+
+# ---------------------------------------------------------------------------
+# Ranking freshness Task 5 — escalation_wanted
+# ---------------------------------------------------------------------------
+
+
+def _content(topic, elig="pass"):
+    return {
+        "topic_fit": {"rating": topic, "rationale": "x"},
+        "eligibility": {"rating": elig},
+        "exclusions": {"rating": "pass"},
+    }
+
+
+def test_escalation_is_wanted_without_a_remote_client():
+    """Spec D6: `escalation_wanted` is the local outcome, not remote availability.
+    Without it the worker cannot tell a cap-withheld escalation from none."""
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    r = rank_pair(
+        client=_ollama_mock(content=_content(4)),
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=None,
+        escalation_min_score=45,
+    )
+    assert r.score == 80
+    assert r.escalation_wanted is True
+    assert r.escalation_attempted is False
+
+
+def test_escalation_is_wanted_for_an_eligibility_fail_with_strong_topic():
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    r = rank_pair(
+        client=_ollama_mock(content=_content(3, "fail")),
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=None,
+        escalation_min_score=45,
+    )
+    assert r.score == 0
+    assert r.escalation_wanted is True
+
+
+def test_escalation_is_not_wanted_below_the_threshold():
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    r = rank_pair(
+        client=_ollama_mock(content=_content(2)),
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=None,
+        escalation_min_score=45,
+    )
+    assert r.score == 40
+    assert r.escalation_wanted is False
+
+
+def test_a_successful_escalation_is_also_wanted():
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    r = rank_pair(
+        client=_ollama_mock(content=_content(4)),
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=_remote_mock(),
+        escalation_min_score=45,
+    )
+    assert r.escalated is True
+    assert r.escalation_wanted is True
+
+
+def test_a_failed_escalation_is_still_wanted():
+    from grant_lab.ranking.ollama_client import LLMError
+
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    remote = _remote_mock()
+    remote.chat.side_effect = LLMError("credit")
+    r = rank_pair(
+        client=_ollama_mock(content=_content(4)),
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=remote,
+        escalation_min_score=45,
+    )
+    assert r.escalation_outcome == "llm_error"
+    assert r.escalation_wanted is True
+
+
+def test_lowering_the_hard_fail_threshold_moves_a_pair_from_zero_to_scored():
+    """G24, the reviewer's probe as a test. Same pair, same model output; only
+    the hard-fail threshold moves (0.20 -> 0.10), and the score moves from a
+    gate-fail 0 to an LLM score. No call or profile fingerprint input changed,
+    which is why the scoring fingerprint exists (spec gap 3)."""
+    import math
+
+    p_vec = [1.0] + [0.0] * 1023
+    c_vec = [0.15, math.sqrt(1 - 0.15**2)] + [0.0] * 1022  # cosine 0.15
+    profile = _make_profile(embedding=p_vec, embedding_model="bge-m3")
+    call = _make_call(embedding=c_vec, embedding_model="bge-m3", deadline_days=400)
+    client = _ollama_mock(content=_content(4))
+    strict = rank_pair(
+        client=client, profile=profile, call=call, now=_NOW, embedding_hard_fail_threshold=0.20
+    )
+    loose = rank_pair(
+        client=client, profile=profile, call=call, now=_NOW, embedding_hard_fail_threshold=0.10
+    )
+    assert (strict.score, strict.reason) == (0, "embedding")
+    assert (loose.score, loose.reason) == (80, None)

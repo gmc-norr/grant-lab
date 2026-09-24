@@ -50,10 +50,22 @@ def test_timeline_passes_when_deadline_is_15_days_away():
     assert g.timeline.status == GateStatus.PASS
 
 
-def test_timeline_fails_when_deadline_is_13_days_away():
+def test_timeline_passes_when_deadline_is_13_days_away():
+    """Spec §2: urgency is not suitability. The 14-day zeroing is gone."""
     g = evaluate_gates(_profile(), _Call(deadline=_NOW + timedelta(days=13)), now=_NOW)
+    assert g.timeline.status == GateStatus.PASS
+    assert g.timeline.reason is None
+
+
+def test_timeline_passes_one_minute_before_the_deadline():
+    g = evaluate_gates(_profile(), _Call(deadline=_NOW + timedelta(minutes=1)), now=_NOW)
+    assert g.timeline.status == GateStatus.PASS
+
+
+def test_timeline_fails_exactly_at_the_deadline():
+    g = evaluate_gates(_profile(), _Call(deadline=_NOW), now=_NOW)
     assert g.timeline.status == GateStatus.FAIL
-    assert g.timeline.reason == "too_soon"
+    assert g.timeline.reason == "expired"
 
 
 def test_timeline_fails_when_deadline_passed():

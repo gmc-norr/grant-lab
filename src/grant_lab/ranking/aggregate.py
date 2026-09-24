@@ -42,14 +42,14 @@ def aggregate(
 ) -> AggregateResult:
     """Combine gates + LLM into a final score per the v2 spec's aggregation table.
 
-    `must_include_override=True` skips the timeline AND embedding short-circuits
-    (spec line 282 — must_include is a force-include for *topic*: a profile
-    keyword match means the user explicitly wants this call regardless of
-    deadline urgency or low cosine similarity to the profile description).
+    `must_include_override=True` skips the embedding short-circuit only (a
+    profile keyword forces the TOPIC in). The timeline gate now fails only on a
+    closed call, and nothing rescues a closed call (ranking spec §2).
     Budget/TRL FAILs still zero the score even with override.
     """
-    # Rule-based gates short-circuit (timeline conditional on override).
-    if not must_include_override and gates.timeline.status == GateStatus.FAIL:
+    # Rule-based gates short-circuit (timeline unconditional -- a closed call
+    # has nothing to rescue it).
+    if gates.timeline.status == GateStatus.FAIL:
         return AggregateResult(0, "timeline")
     if gates.budget.status == GateStatus.FAIL:
         return AggregateResult(0, "budget")

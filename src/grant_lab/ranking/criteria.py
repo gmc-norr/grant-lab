@@ -18,10 +18,8 @@ elsewhere (see `rank_pair`) and pass the float in. This keeps
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import StrEnum
-
-TIMELINE_MIN_DAYS = 14
 
 
 class GateStatus(StrEnum):
@@ -33,7 +31,8 @@ class GateStatus(StrEnum):
 @dataclass(frozen=True)
 class GateResult:
     status: GateStatus
-    reason: str | None = None  # 'too_soon' | 'expired' | 'currency_mismatch' | None
+    # 'expired' | 'currency_mismatch' | 'topic_dissimilar' | 'topic_borderline' | None
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -97,13 +96,16 @@ def evaluate_gates(
 
 
 def _timeline(deadline: datetime | None, now: datetime) -> GateResult:
-    if deadline is None:
+    """FAIL only once the call has closed (ranking spec §2).
+
+    Urgency is not suitability: a call closing in five days is scored like any
+    other, and the dashboard's live deadline colour carries the urgency. A
+    clock-dependent verdict also cannot survive re-ranking on input change --
+    nothing would revisit a pair when it crossed a day threshold.
+    """
+    if deadline is None or deadline > now:
         return GateResult(GateStatus.PASS)
-    if deadline <= now:
-        return GateResult(GateStatus.FAIL, reason="expired")
-    if deadline < now + timedelta(days=TIMELINE_MIN_DAYS):
-        return GateResult(GateStatus.FAIL, reason="too_soon")
-    return GateResult(GateStatus.PASS)
+    return GateResult(GateStatus.FAIL, reason="expired")
 
 
 def _budget(profile, call) -> GateResult:
