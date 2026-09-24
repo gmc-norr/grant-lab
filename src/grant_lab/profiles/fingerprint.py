@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC
 from typing import Any
 
 from grant_lab.embeddings.similarity import build_call_text, build_profile_text
@@ -153,5 +154,55 @@ def rank_fingerprint(profile) -> str:
             # instead of silently hashing None. tests/test_ranking_queue_row_parity.py
             # is the gate.
             "embedding_model": profile.embedding_model,
+        }
+    )
+
+
+# The raw keys ranking reads from Call.structured (which IS Call.raw). The one
+# enumeration ranking spec D2 cannot avoid: raw carries source metadata that
+# changes between fetches of an unchanged call, so hashing it whole would
+# re-rank the feed nightly. tests/test_call_rank_fingerprint.py records the
+# keys rank_pair actually reads and fails if one is missing here.
+RANKED_RAW_KEYS: tuple[str, ...] = ("trl_min", "trl_max")
+
+
+def _instant(value):
+    """A datetime as one canonical UTC string, whatever zone it arrived in."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat()
+
+
+def call_rank_fingerprint(call) -> str:
+    """What a stored ranking describes on the call side (ranking spec D2).
+
+    Every NormalizedCall content field except external_id (identity) and raw,
+    plus the RANKED_RAW_KEYS projection of raw, plus the call's own vector
+    identity (embedding_fingerprint + embedding_model), because the cosine gate
+    reads the vector.
+
+    `call` may be a loaded Call or a narrowed row from ranking/freshness.py
+    whose `raw` is already the projection. Both give the same bytes;
+    tests/test_ranking_freshness_enqueue.py (G27) pins that.
+    """
+    raw = call.raw or {}
+    return _digest(
+        {
+            "url": call.url,
+            "title": call.title,
+            "summary": call.summary,
+            "full_text": call.full_text,
+            "deadline": _instant(call.deadline),
+            "budget_min": call.budget_min,
+            "budget_max": call.budget_max,
+            "currency": call.currency,
+            "programme": call.programme,
+            "keywords": list(call.keywords or []),
+            "published_at": _instant(call.published_at),
+            "raw": {k: raw.get(k) for k in RANKED_RAW_KEYS},
+            "embedding_fingerprint": call.embedding_fingerprint,
+            "embedding_model": call.embedding_model,
         }
     )
