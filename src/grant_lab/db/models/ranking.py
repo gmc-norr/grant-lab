@@ -114,6 +114,10 @@ class CallRanking(Base):
             text("aggregate_score DESC NULLS LAST"),
             postgresql_using="btree",
         ),
+        CheckConstraint(
+            "escalation_state IN ('pending','gave_up')",
+            name="ck_call_rankings_escalation_state",
+        ),
     )
 
     call_id: Mapped[int] = mapped_column(
@@ -161,6 +165,17 @@ class CallRanking(Base):
     # predates migration 0075. NULL after 0075 means a bug, and reconcile
     # treats it as stale so the bug is loud rather than silent.
     profile_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Which call content this ranking describes: call_rank_fingerprint(), taken
+    # BEFORE rank_pair ran. NULL = stale (migration 0081 leaves every old row NULL).
+    call_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Which scorer settings produced it: ScoringConfig.fingerprint() (spec D3).
+    scoring_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Whether its second reading is still owed (spec D6). NULL = nothing outstanding.
+    escalation_state: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # parse_error escalation failures within ONE input revision (spec D6).
+    escalation_failures: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, server_default=text("0"), default=0
+    )
 
 
 class RankingJob(Base):
@@ -202,6 +217,11 @@ class RankingJob(Base):
         SmallInteger, nullable=False, default=0, server_default=text("0")
     )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The inputs a terminally-failed job failed ON (spec D7). Written by
+    # mark_failed(stamps=...); NULL on rows from before migration 0081.
+    profile_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    call_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scoring_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

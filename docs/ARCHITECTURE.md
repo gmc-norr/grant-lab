@@ -54,7 +54,7 @@ Read this before claiming two tables share, or do not share, a rule.
 | `branches` | `Branch` | 5 | 1 | 0 | 0 |
 | `call_decisions` | `CallDecision` | 8 | 4 | 1 | 3 |
 | `call_ranking_criteria` | `CallRankingCriterion` | 7 | 2 | 0 | 0 |
-| `call_rankings` | `CallRanking` | 18 | 2 | 0 | 1 |
+| `call_rankings` | `CallRanking` | 22 | 2 | 1 | 1 |
 | `call_rubrics` | `CallRubric` | 7 | 1 | 0 | 0 |
 | `call_section_extracts` | `CallSectionExtract` | 7 | 1 | 1 | 0 |
 | `calls` | `Call` | 20 | 1 | 1 | 7 |
@@ -75,7 +75,7 @@ Read this before claiming two tables share, or do not share, a rule.
 | `profile_viewers` | `ProfileViewer` | 3 | 2 | 0 | 0 |
 | `profiles` | `Profile` | 16 | 2 | 4 | 2 |
 | `proposed_changes` | `ProposedChange` | 19 | 4 | 4 | 2 |
-| `ranking_jobs` | `RankingJob` | 8 | 2 | 0 | 4 |
+| `ranking_jobs` | `RankingJob` | 11 | 2 | 0 | 4 |
 | `ranking_remote_attempts` | `RankingRemoteAttempt` | 6 | 2 | 1 | 1 |
 | `reference_chunks` | `ReferenceChunk` | 8 | 2 | 0 | 2 |
 | `references` | `Reference` | 28 | 2 | 6 | 2 |
