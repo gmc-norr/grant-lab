@@ -1,20 +1,16 @@
-"""The gate for the invariant `ranking/queue.py:165-171` states in a comment and
-nothing executes: the narrowed Row must produce a byte-identical rank_fingerprint
-to a loaded Profile.
+"""The gate for the invariant `ranking/freshness.py::_profile_rows` states in a
+comment and nothing executes: the narrowed Row must produce a byte-identical
+rank_fingerprint to a loaded Profile.
 
-It reads the column list out of reconcile_missing_rankings' own source, so it
-cannot drift from the code it guards.
+It reads the rows out of `_profile_rows` itself, so it cannot drift from the
+code it guards.
 """
 
-import inspect
-import re
-
 import pytest
-from sqlalchemy import select
 
 from grant_lab.db.models import Profile, ProfileKind, User
 from grant_lab.profiles.fingerprint import rank_fingerprint
-from grant_lab.ranking import queue as Q
+from grant_lab.ranking import freshness as F
 
 
 @pytest.fixture()
@@ -40,24 +36,27 @@ def test_the_narrowed_row_and_the_loaded_profile_agree(session):
     # ck_profiles_embedding_model_paired (db/models/profiles.py:72-75) enforces
     # (embedding IS NULL) = (embedding_model IS NULL), so setting one without
     # the other fails at commit.
-    p = Profile(name="Hepatology", kind=ProfileKind.ORGANIZATIONAL_UNIT, level="group",
-                description="Liver disease", structured={"areas": ["liver"]},
-                budget_currency="SEK", created_by=u.id, visibility="private",
-                embedding=[0.0] * 1024, embedding_model="bge-m3",
-                embedding_fingerprint="v2:" + "0" * 64)
+    p = Profile(
+        name="Hepatology",
+        kind=ProfileKind.ORGANIZATIONAL_UNIT,
+        level="group",
+        description="Liver disease",
+        structured={"areas": ["liver"]},
+        budget_currency="SEK",
+        created_by=u.id,
+        visibility="private",
+        embedding=[0.0] * 1024,
+        embedding_model="bge-m3",
+        embedding_fingerprint="v2:" + "0" * 64,
+    )
     session.add(p)
     session.commit()
 
     loaded = session.get(Profile, p.id)
-    # The function is reconcile_missing_rankings (queue.py:113), NOT enqueue_reconcile.
-    src = inspect.getsource(Q.reconcile_missing_rankings)
-    block = src.split("profiles = session.execute(", 1)[1].split(").where(Profile.is_active", 1)[0]
-    cols = re.findall(r"Profile\.(\w+)", block)
-    assert cols, "could not read queue.py's column list"
-    row = session.execute(
-        select(*[getattr(Profile, c) for c in cols]).where(Profile.id == p.id)
-    ).one()
+    # The rows reconcile/ingest actually hash, from the function that builds them.
+    rows = [r for r in F._profile_rows(session) if r.id == p.id]
+    assert len(rows) == 1, "the active-profile select did not return the seeded profile"
+    row = rows[0]
     assert rank_fingerprint(row) == rank_fingerprint(loaded), (
-        f"queue.py's narrowed SELECT {cols} does not carry every column "
-        f"rank_fingerprint reads"
+        "freshness._profile_rows does not carry every column rank_fingerprint reads"
     )

@@ -11,8 +11,19 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
-from grant_lab.profiles.fingerprint import _digest
+from sqlalchemy import Text, func, literal, or_, select, text
+from sqlalchemy.orm import Session
+
+from grant_lab.db.models import Call, Profile
+from grant_lab.profiles.fingerprint import (
+    LEGACY_SENTINEL,
+    RANKED_RAW_KEYS,
+    _digest,
+    call_rank_fingerprint,
+    rank_fingerprint,
+)
 from grant_lab.ranking.prompt import PROMPT_VERSION
 
 _logger = logging.getLogger(__name__)
@@ -144,3 +155,134 @@ def next_escalation_state(
     # Withheld by the daily cap, llm_error (the SERVICE failed), or no attempt
     # recorded: owed, and not this pair's fault.
     return "pending", prev_failures
+
+
+def _profile_rows(session: Session):
+    """Active profiles, column-limited: rank_fingerprint never reads the vector.
+    tests/test_ranking_queue_row_parity.py pins that these rows hash like
+    loaded Profiles."""
+    return session.execute(
+        select(
+            Profile.id,
+            Profile.name,
+            Profile.kind,
+            Profile.description,
+            Profile.structured,
+            Profile.budget_currency,
+            Profile.embedding_fingerprint,
+            Profile.embedding_model,
+        ).where(Profile.is_active.is_(True))
+    ).all()
+
+
+def _open_calls():
+    return or_(Call.deadline.is_(None), Call.deadline > func.now())
+
+
+def _call_rows(session: Session, call_ids: list[int] | None):
+    """Open calls, column-limited: never Call.embedding, and never raw whole
+    (13 MB across the open feed, spec D4). `raw` here is the RANKED_RAW_KEYS
+    projection, so call_rank_fingerprint reads it exactly as it reads a loaded
+    Call's raw. G27 pins that."""
+    projection = func.jsonb_build_object(
+        *[part for k in RANKED_RAW_KEYS for part in (literal(k, type_=Text), Call.raw[k])]
+    ).label("raw")
+    stmt = select(
+        Call.id,
+        Call.url,
+        Call.title,
+        Call.summary,
+        Call.full_text,
+        Call.deadline,
+        Call.budget_min,
+        Call.budget_max,
+        Call.currency,
+        Call.programme,
+        Call.keywords,
+        Call.published_at,
+        Call.embedding_fingerprint,
+        Call.embedding_model,
+        projection,
+    ).where(_open_calls())
+    if call_ids is not None:
+        stmt = stmt.where(Call.id.in_(call_ids))
+    return session.execute(stmt).all()
+
+
+def enqueue_stale_pairs(
+    session: Session, *, ctx: FreshnessContext, call_ids: list[int] | None = None
+) -> int:
+    """Enqueue every stale, unsuppressed (open call x active profile) pair.
+
+    `call_ids=None` means every open call (the 04:00 reconcile); a list limits
+    the candidates (ingest). Returns the number of jobs inserted. Does not commit.
+
+    Current (spec D4) = the profile arm (fingerprint, or the bounded 'legacy'
+    arm) AND call_fingerprint AND scoring_fingerprint match, AND no escalation
+    is owed while a remote client can pay it. Suppressed (spec D7) = a failed
+    job in the last DEAD_LETTER_SUPPRESS_DAYS on the SAME inputs, or with NULL
+    stamps (pre-0081 rows keep the old pair-wide rule).
+    """
+    if call_ids is not None and not call_ids:
+        return 0
+    profiles = _profile_rows(session)
+    if not profiles:
+        # An empty VALUES list is a syntax error.
+        return 0
+    calls = _call_rows(session, call_ids)
+    if not calls:
+        return 0
+
+    values_sql = ", ".join(f"(:pid_{i}, :pfp_{i})" for i in range(len(profiles)))
+    params: dict[str, object] = {
+        "call_ids": [c.id for c in calls],
+        "call_fps": [call_rank_fingerprint(c) for c in calls],
+        "scoring_fp": ctx.scoring.fingerprint(),
+        "remote_enabled": ctx.remote_enabled,
+        "legacy": LEGACY_SENTINEL,
+        "dead_letter_cutoff": datetime.now(UTC) - timedelta(days=DEAD_LETTER_SUPPRESS_DAYS),
+    }
+    for i, prof in enumerate(profiles):
+        params[f"pid_{i}"] = prof.id
+        params[f"pfp_{i}"] = rank_fingerprint(prof)
+
+    result = session.execute(
+        text(
+            f"""
+            INSERT INTO ranking_jobs (call_id, profile_id, status)
+            SELECT wc.call_id, p.id, 'pending'
+            FROM unnest(CAST(:call_ids AS bigint[]), CAST(:call_fps AS text[]))
+                 AS wc(call_id, fingerprint)
+            CROSS JOIN (VALUES {values_sql}) AS want(profile_id, fingerprint)
+            JOIN profiles p ON p.id = want.profile_id
+            WHERE p.is_active = true
+              AND NOT EXISTS (
+                SELECT 1 FROM call_rankings cr
+                WHERE cr.call_id = wc.call_id AND cr.profile_id = p.id
+                  AND ((cr.profile_fingerprint = :legacy AND cr.ranked_at >= p.updated_at)
+                       OR cr.profile_fingerprint = want.fingerprint)
+                  AND cr.call_fingerprint = wc.fingerprint
+                  AND cr.scoring_fingerprint = :scoring_fp
+                  -- IS DISTINCT FROM, never `NOT (state = 'pending' AND ...)`:
+                  -- a NULL state (the normal case) would make this whole test
+                  -- NULL and every fresh pair stale (spec D4, "the NULL trap").
+                  AND (cr.escalation_state IS DISTINCT FROM 'pending'
+                       OR NOT CAST(:remote_enabled AS boolean))
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM ranking_jobs rj
+                WHERE rj.call_id = wc.call_id AND rj.profile_id = p.id
+                  AND rj.status = 'failed'
+                  AND rj.updated_at > :dead_letter_cutoff
+                  AND (rj.profile_fingerprint IS NULL
+                       OR (rj.profile_fingerprint = want.fingerprint
+                           AND rj.call_fingerprint = wc.fingerprint
+                           AND rj.scoring_fingerprint = :scoring_fp))
+              )
+            ON CONFLICT (call_id, profile_id)
+              WHERE status IN ('pending', 'running') DO NOTHING
+            """
+        ),
+        params,
+    )
+    return result.rowcount or 0
