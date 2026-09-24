@@ -78,7 +78,8 @@ def test_0081_deletes_timeline_rows_only_and_leaves_stamps_null(migrated_engine,
             ).scalar_one()
             uid = conn.execute(
                 text(
-                    "INSERT INTO users (email, status) VALUES ('m0081@umu.se','active') RETURNING id"
+                    "INSERT INTO users (email, status) "
+                    "VALUES ('m0081@umu.se','active') RETURNING id"
                 )
             ).scalar_one()
             pid = conn.execute(
@@ -105,7 +106,8 @@ def test_0081_deletes_timeline_rows_only_and_leaves_stamps_null(migrated_engine,
             for crit in ("timeline", "budget"):
                 conn.execute(
                     text(
-                        "INSERT INTO call_ranking_criteria (call_id, profile_id, criterion, rating) "
+                        "INSERT INTO call_ranking_criteria "
+                        "(call_id, profile_id, criterion, rating) "
                         "VALUES (:c,:p,:k,'pass')"
                     ),
                     {"c": cid, "p": pid, "k": crit},
@@ -116,7 +118,8 @@ def test_0081_deletes_timeline_rows_only_and_leaves_stamps_null(migrated_engine,
             crits = set(
                 conn.execute(
                     text(
-                        "SELECT criterion FROM call_ranking_criteria WHERE call_id=:c AND profile_id=:p"
+                        "SELECT criterion FROM call_ranking_criteria "
+                        "WHERE call_id=:c AND profile_id=:p"
                     ),
                     {"c": cid, "p": pid},
                 ).scalars()
