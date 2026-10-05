@@ -21,3 +21,16 @@ def test_cosine_threshold_setting_removed(monkeypatch):
     _env(monkeypatch)
     s = Settings()
     assert not hasattr(s, "remote_rank_cosine_threshold")
+
+
+def test_every_daily_cap_default_is_the_settings_default():
+    """27d487f4 raised the setting and build_scheduler's default but left
+    drain_queue at 150 (fixed in 19ee7513). Pin all three together."""
+    import inspect
+
+    from grant_lab.ranking.worker import drain_queue
+    from grant_lab.scheduler import build_scheduler
+
+    want = Settings.model_fields["ranking_remote_daily_cap"].default
+    assert inspect.signature(drain_queue).parameters["remote_daily_cap"].default == want
+    assert inspect.signature(build_scheduler).parameters["ranking_remote_daily_cap"].default == want
