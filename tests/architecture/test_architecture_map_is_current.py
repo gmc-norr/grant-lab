@@ -66,3 +66,29 @@ def test_the_active_uniqueness_section_carries_the_real_predicate(table, predica
     assert any(f"`{predicate}`" in ln for ln in row), (
         f"{table}'s predicate in the map is not {predicate!r}: {row}"
     )
+
+
+def _status_vocabularies(rendered: str) -> str:
+    section = rendered.split("### Status vocabularies", 1)[1]
+    return section.split("\n### ", 1)[0]
+
+
+@pytest.mark.parametrize(
+    "constraint",
+    [
+        "ck_call_rankings_escalation_state",  # 0081: pending -> gave_up (spec D6)
+        "ck_call_decisions_state",
+        "ck_turn_jobs_status",  # a `status` column, listed before this change too
+    ],
+)
+def test_state_columns_are_listed_with_the_status_vocabularies(constraint):
+    """A `state` column is a lifecycle vocabulary just like a `status` one.
+    The filter matched only the substring "status", so 0081's
+    escalation_state never appeared (final review minor, 2026-09-24)."""
+    assert f"`{constraint}`" in _status_vocabularies(_generator().render())
+
+
+def test_the_status_filter_does_not_match_inside_a_longer_word():
+    """`state` must end the word: `ck_collab_artifact_state_artifact` constrains
+    an artifact name, not a lifecycle."""
+    assert "ck_collab_artifact_state_artifact" not in _status_vocabularies(_generator().render())

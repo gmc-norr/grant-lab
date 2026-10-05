@@ -96,11 +96,13 @@ Read this before claiming two tables share, or do not share, a rule.
 
 ### Status vocabularies
 
-Every CHECK constraining a `status`-like column. Divergence here is a real defect.
+Every CHECK constraining a `status`- or `state`-like column. Divergence here is a real defect.
 
 | table | constraint | vocabulary |
 |---|---|---|
 | `attachment_jobs` | `ck_attachment_jobs_status` | `status IN ('queued','running','completed','failed')` |
+| `call_decisions` | `ck_call_decisions_state` | `state IN ('saved','hidden')` |
+| `call_rankings` | `ck_call_rankings_escalation_state` | `escalation_state IN ('pending','gave_up')` |
 | `citation_llm_usage` | `ck_citation_llm_usage_status` | `status IN ('ok','failed','timeout')` |
 | `claim_analysis_jobs` | `ck_claim_analysis_jobs_status` | `status IN ('queued','running','done','failed','superseded')` |
 | `coherence_jobs` | `ck_coherence_jobs_status` | `status IN ('queued','running','completed','failed')` |

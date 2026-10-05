@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ast
 import pathlib
+import re
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -245,13 +246,19 @@ def render() -> str:
 
     A("### Status vocabularies")
     A("")
-    A("Every CHECK constraining a `status`-like column. Divergence here is a real defect.")
+    A(
+        "Every CHECK constraining a `status`- or `state`-like column. "
+        "Divergence here is a real defect."
+    )
     A("")
     A("| table | constraint | vocabulary |")
     A("|---|---|---|")
     for t in sorted(tables, key=lambda x: x.table):
         for nm, expr in t.checks:
-            if "status" in expr.lower() or "status" in (nm or "").lower():
+            # `state` must end its word: escalation_state yes, a table named
+            # collab_artifact_state (ck_collab_artifact_state_artifact) no.
+            text = f"{nm or ''} {expr}".lower()
+            if "status" in text or re.search(r"state\b", text):
                 A(f"| `{t.table}` | `{nm}` | `{expr}` |")
     A("")
 
