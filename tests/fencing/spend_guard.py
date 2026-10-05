@@ -485,6 +485,18 @@ def stale_pins() -> list[str]:
 # The package re-export AND the class's own module: importing from the
 # submodule was invisible (review 2026-10-05).
 _LLM_SPEND_MODULES = ("grant_lab.db.models", "grant_lab.db.models.spend")
+_LLM_SPEND_TARGETS = {f"{m}.LlmSpend" for m in _LLM_SPEND_MODULES}
+
+
+def _resolve_from(node: ast.ImportFrom, path: Path) -> str:
+    """The absolute module an ImportFrom names; a relative one resolves
+    against the file's package under SRC."""
+    if not node.level:
+        return node.module or ""
+    # The containing directory, for a module and for an __init__.py alike.
+    package = list(path.relative_to(SRC).with_suffix("").parts)[:-1]
+    base = package[: len(package) - (node.level - 1)]
+    return ".".join(base + ([node.module] if node.module else []))
 
 
 def llm_spend_writers() -> list[str]:
@@ -506,26 +518,29 @@ def llm_spend_writers() -> list[str]:
     out: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
         tree = ast.parse(path.read_text())
-        local_names: set[str] = set()
-        module_aliases: set[str] = set()
+        # Every import binding, name -> the dotted path it stands for, so any
+        # chain (`models.spend.LlmSpend`, `grant_lab.db.models.LlmSpend`, an
+        # alias, a relative import) expands to a full path before it is
+        # compared (review 2026-10-05, round 3).
+        bindings: dict[str, str] = {}
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
-                mod = node.module or ""
+                mod = _resolve_from(node, path)
                 for alias in node.names:
-                    if mod in _LLM_SPEND_MODULES and alias.name == "LlmSpend":
-                        local_names.add(alias.asname or alias.name)
-                    elif f"{mod}.{alias.name}" in _LLM_SPEND_MODULES:
-                        module_aliases.add(alias.asname or alias.name)
+                    bindings[alias.asname or alias.name] = f"{mod}.{alias.name}"
             elif isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.name in _LLM_SPEND_MODULES:
-                        module_aliases.add(alias.asname or alias.name)
+                    if alias.asname:
+                        bindings[alias.asname] = alias.name
+                    else:
+                        top = alias.name.split(".")[0]
+                        bindings[top] = top
         hit = False
         for node in ast.walk(tree):
-            if isinstance(node, ast.Name) and node.id in local_names or (
-                isinstance(node, ast.Attribute)
-                and node.attr == "LlmSpend"
-                and _dotted_name(node.value) in module_aliases
+            dotted = _dotted_name(node) if isinstance(node, ast.Name | ast.Attribute) else None
+            head, _, rest = (dotted or "").partition(".")
+            if head in bindings and (
+                bindings[head] + (f".{rest}" if rest else "") in _LLM_SPEND_TARGETS
             ):
                 hit = True
             elif isinstance(node, ast.ClassDef) and node.name == "LlmSpend":

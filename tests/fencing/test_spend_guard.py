@@ -373,6 +373,44 @@ def test_real_import_shapes_are_still_accepted(tmp_path, monkeypatch, label, sou
                 return sp.LlmSpend(**k)
             """,
         ),
+        (
+            # Round 3, finding 4: chains through a parent package or a plain
+            # `import a.b.c`, and relative imports.
+            "package_chain",
+            """
+            from grant_lab.db import models
+
+            def mk(**k):
+                return models.spend.LlmSpend(**k)
+            """,
+        ),
+        (
+            "full_chain",
+            """
+            import grant_lab.db.models
+
+            def mk(**k):
+                return grant_lab.db.models.spend.LlmSpend(**k)
+            """,
+        ),
+        (
+            "full_chain_reexport",
+            """
+            import grant_lab.db.models.spend
+
+            def mk(**k):
+                return grant_lab.db.models.LlmSpend(**k)
+            """,
+        ),
+        (
+            "relative",
+            """
+            from .db.models.spend import LlmSpend
+
+            def mk(**k):
+                return LlmSpend(**k)
+            """,
+        ),
     ],
 )
 def test_every_write_shape_is_seen(tmp_path, monkeypatch, label, source):
