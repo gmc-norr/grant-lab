@@ -13,10 +13,12 @@ import pytest
 
 from grant_lab.ranking.anthropic_client import (
     AnthropicClient,
+    UnusableReplyError,
     _split_system,
     _strip_markdown_fence,
 )
 from grant_lab.ranking.ollama_client import LLMError
+from grant_lab.ranking.prompt import ParseError
 
 
 def _fake_response(text: str, *, stop_reason: str = "end_turn", model: str = "claude-sonnet-4-6"):
@@ -128,6 +130,35 @@ def test_chat_without_a_schema_sends_no_output_config(response_format):
     with patch.object(client._client.messages, "create", return_value=_fake_response("{}")) as mock:
         _call_chat(client, response_format=response_format)
     assert "output_config" not in mock.call_args.kwargs
+
+
+def test_chat_returns_a_schema_reply_without_stripping_fences():
+    """A structured-output reply is the JSON itself. The fence stripper would
+    cut a valid reply whose prose contains a ``` pair down to the fenced word
+    (final review 2026-10-05, finding 3)."""
+    client = AnthropicClient(api_key="sk-test")
+    reply = json.dumps({"summary": "Submit the ```json``` form."})
+    response_format = {"type": "json_schema", "json_schema": {"name": "x", "schema": {}}}
+    with patch.object(client._client.messages, "create", return_value=_fake_response(reply)):
+        env = _call_chat(client, response_format=response_format)
+    assert env["choices"][0]["message"]["content"] == reply
+
+
+@pytest.mark.parametrize("stop_reason", ["refusal", "max_tokens"])
+def test_an_unusable_reply_is_both_a_service_and_a_parse_failure(stop_reason):
+    """A refusal or a truncated reply recurs on the same inputs, so rank_pair
+    must count it as parse_error (toward gave_up), not llm_error (pending every
+    night). It stays an LLMError for proposal-assist and citations, which
+    catch only that (final review 2026-10-05, finding 4)."""
+    client = AnthropicClient(api_key="sk-test")
+    resp = _fake_response("{", stop_reason=stop_reason)
+    with (
+        patch.object(client._client.messages, "create", return_value=resp),
+        pytest.raises(UnusableReplyError) as raised,
+    ):
+        _call_chat(client)
+    assert isinstance(raised.value, LLMError)
+    assert isinstance(raised.value, ParseError)
 
 
 def test_chat_handles_empty_system():

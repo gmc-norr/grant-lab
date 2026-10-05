@@ -27,8 +27,19 @@ import re
 import anthropic
 
 from grant_lab.ranking.ollama_client import LLMError
+from grant_lab.ranking.prompt import ParseError
 
 _logger = logging.getLogger(__name__)
+
+
+class UnusableReplyError(LLMError, ParseError):
+    """The model answered, but not with a usable reply: it refused, or it hit
+    max_tokens mid-reply. Retrying the same inputs gets the same answer.
+
+    Both parents on purpose. rank_pair reads a ParseError as `parse_error`,
+    which counts toward an escalation's gave_up (spec D6); as a plain LLMError
+    it was `llm_error`, owed again every night until the call closed. The
+    proposal-assist and citation callers catch only LLMError and still do."""
 
 
 class AnthropicClient:
@@ -124,16 +135,19 @@ class AnthropicClient:
             # propagate) and failing the whole worker job.
             raise LLMError(f"anthropic API error ({type(e).__name__}): {e}") from e
 
-        # max_tokens truncation: the model hit the output cap mid-generation,
-        # so `content` is a partial (almost always invalid) JSON fragment.
-        # Letting it flow on would fail parse_response → ParseError → 5 paid
-        # retries → dead-letter, none of which can help: the truncation is
-        # deterministic for this prompt + max_tokens. Surface as LLMError now,
-        # before extracting text. (LLMError still retries via the worker, but
-        # the fix for a persistently-too-long response is to raise max_tokens,
-        # not to keep re-billing the same truncating call. Logged loudly.)
+        # A refusal or a max_tokens truncation: `content` is no usable reply
+        # (a truncated one is a partial JSON fragment). Both are deterministic
+        # enough for these inputs that retrying cannot help, so raise
+        # UnusableReplyError before extracting text: rank_pair counts it as a
+        # parse_error toward gave_up. The fix for a persistently too-long reply
+        # is to raise max_tokens, not to keep re-billing the same call.
+        if response.stop_reason == "refusal":
+            details = getattr(response, "stop_details", None)
+            raise UnusableReplyError(
+                f"anthropic refused (category={getattr(details, 'category', None)})"
+            )
         if response.stop_reason == "max_tokens":
-            raise LLMError(
+            raise UnusableReplyError(
                 f"anthropic response truncated at max_tokens={self._max_tokens} "
                 f"(output_tokens={response.usage.output_tokens}); "
                 "raise AnthropicClient max_tokens — retrying cannot help"
@@ -147,7 +161,10 @@ class AnthropicClient:
                 f"anthropic response had no text content blocks "
                 f"(blocks: {[b.type for b in response.content]})"
             )
-        content = _strip_markdown_fence(text_blocks[0].text)
+        # A structured-output reply is the JSON itself; the fence stripper could
+        # only cut a valid one (a ``` pair inside its prose).
+        text = text_blocks[0].text
+        content = text if output_config else _strip_markdown_fence(text)
 
         return {
             "model": response.model,

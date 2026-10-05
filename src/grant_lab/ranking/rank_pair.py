@@ -215,7 +215,9 @@ def rank_pair(
             remote_content, verification_text=_build_verification_text(call)
         )
     except (LLMError, ParseError) as e:
-        outcome = "llm_error" if isinstance(e, LLMError) else "parse_error"
+        # ParseError first: an UnusableReplyError (refusal, truncation) is both,
+        # and it recurs on the same inputs, so it counts toward gave_up.
+        outcome = "parse_error" if isinstance(e, ParseError) else "llm_error"
         # NB: never use "message" as an extra key — reserved LogRecord attribute.
         _logger.warning(
             "ranking.escalation_failed",

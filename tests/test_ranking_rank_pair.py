@@ -1119,3 +1119,26 @@ def test_lowering_the_hard_fail_threshold_moves_a_pair_from_zero_to_scored():
     )
     assert (strict.score, strict.reason) == (0, "embedding")
     assert (loose.score, loose.reason) == (80, None)
+
+
+def test_an_unusable_remote_reply_counts_as_a_parse_failure():
+    """A refusal or truncation (UnusableReplyError) is both an LLMError and a
+    ParseError. It recurs on the same inputs, so it must count toward gave_up
+    as parse_error, not stay pending every night as llm_error (final review
+    2026-10-05, finding 4)."""
+    from grant_lab.ranking.anthropic_client import UnusableReplyError
+
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    remote = _remote_mock()
+    remote.chat.side_effect = UnusableReplyError("anthropic refused")
+    r = rank_pair(
+        client=_ollama_mock(content=_content(4)),
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=remote,
+        escalation_min_score=45,
+    )
+    assert r.escalation_outcome == "parse_error"
+    assert r.escalated is False
