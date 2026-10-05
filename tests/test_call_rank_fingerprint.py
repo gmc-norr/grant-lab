@@ -134,13 +134,15 @@ def test_ranking_reads_only_the_ranked_raw_keys():
 
 
 @pytest.fixture
-def stockholm_local_time(monkeypatch):
+def stockholm_local_time():
     """Read as LOCAL time, a naive datetime shifts by the zone's offset. Pin a
-    non-UTC zone so that mistake shows on a UTC CI runner too."""
-    monkeypatch.setenv("TZ", "Europe/Stockholm")
-    time.tzset()
-    yield
-    monkeypatch.undo()
+    non-UTC zone so that mistake shows on a UTC CI runner too. Its own
+    MonkeyPatch: undoing the shared one would also undo other fixtures'
+    patches before their teardown."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("TZ", "Europe/Stockholm")
+        time.tzset()
+        yield
     time.tzset()
 
 
