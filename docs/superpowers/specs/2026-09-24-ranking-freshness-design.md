@@ -483,6 +483,18 @@ The 03:30 tick then refreshes the vector, the fingerprint no longer matches, and
 04:00 reconcile re-ranks the pair. That self-heals at the cost of one extra ranking,
 only when an embed fails.
 
+**Amendment 2026-10-05 (final review minor): an `EMBEDDING_MODEL` swap costs two full
+re-ranks, not one extra ranking.** A swap leaves every call's vector on the old model
+until it is re-embedded, and the call stamp includes `embedding_model` and
+`embedding_fingerprint`. The startup calibration warning also says the swap needs new
+`EMBEDDING_PREGATE_THRESHOLD` / `EMBEDDING_HARD_FAIL_THRESHOLD` values, and those are in
+the scoring fingerprint. So the 03:00 and 03:15 ingests re-rank every open pair they
+touch against the old call vectors, the 03:30 tick re-embeds every call, and the 04:00
+reconcile re-ranks every open pair again, each round paying its Sonnet escalations. **Runbook:** right after the
+restart that changes `EMBEDDING_MODEL`, run `uv run python -m grant_lab.embeddings.cli
+backfill` before any ingest. Every call vector is then current before anything re-ranks,
+and the pairs re-rank once.
+
 ### D10. Sonnet `temperature=0` — dropped
 
 The design session asked for it to steady re-rank-to-re-rank noise. Claude Sonnet 5
@@ -556,6 +568,13 @@ costs one extra night and gives no wrong result, but ordering avoids it.
 
 **Amendment:** the 2026-09-08 spec's §6 carries a dated note pointing here. Its
 paragraph stays as written, as the record of what held then.
+
+**For a future `git bisect` (added 2026-10-05).** The branch was merged as built, not
+squashed, and two of its commits fail tests on their own: `f5871123` and `64db38c3` each
+fail the same 3 tests in `tests/test_ranking_worker.py` (full suite: 3 failed, 5677
+passed, 1 skipped). The next commit, `4f9a3a67`, passes them again. Every other commit
+from `d19b4267` to `01502d7b` passes that file, and `efbda75c` passes the full suite
+(5704 passed, 1 skipped). Mark the two with `git bisect skip`.
 
 ---
 
