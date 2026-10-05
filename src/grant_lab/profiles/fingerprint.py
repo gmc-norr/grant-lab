@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import Any
 
 from grant_lab.embeddings.similarity import build_call_text, build_profile_text
@@ -167,7 +167,7 @@ def rank_fingerprint(profile) -> str:
 RANKED_RAW_KEYS: tuple[str, ...] = ("trl_min", "trl_max")
 
 
-def _instant(value):
+def _instant(value: datetime | None) -> str | None:
     """A datetime as one canonical UTC string, whatever zone it arrived in."""
     if value is None:
         return None

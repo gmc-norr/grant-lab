@@ -118,6 +118,23 @@ def test_from_settings_matches_the_mapping_main_py_uses():
     assert ScoringConfig.from_settings(s) == _cfg()
 
 
+@pytest.mark.parametrize("key, remote_enabled", [("sk-x", True), ("", False), (None, False)])
+def test_freshness_context_from_settings(key, remote_enabled):
+    """The ingest CLI's context: the same scorer as ScoringConfig.from_settings,
+    and an escalation is owed only when a key is configured."""
+    s = SimpleNamespace(
+        gemma_model="gemma4:e4b-it-q4_K_M",
+        embedding_pregate_threshold=0.30,
+        embedding_hard_fail_threshold=0.20,
+        ranking_escalation_min_score=45,
+        ranking_logprobs_enabled=False,
+        anthropic_api_key=key,
+    )
+    ctx = F.FreshnessContext.from_settings(s)
+    assert ctx.scoring == ScoringConfig.from_settings(s)
+    assert ctx.remote_enabled is remote_enabled
+
+
 @pytest.mark.parametrize(
     "kw, expected",
     [

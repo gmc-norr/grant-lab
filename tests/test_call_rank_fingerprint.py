@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -130,3 +131,25 @@ def test_ranking_reads_only_the_ranked_raw_keys():
     )
     assert rec.read, "ranking read nothing from call.structured -- the gate is hollow"
     assert rec.read <= set(RANKED_RAW_KEYS), rec.read - set(RANKED_RAW_KEYS)
+
+
+@pytest.fixture
+def stockholm_local_time(monkeypatch):
+    """Read as LOCAL time, a naive datetime shifts by the zone's offset. Pin a
+    non-UTC zone so that mistake shows on a UTC CI runner too."""
+    monkeypatch.setenv("TZ", "Europe/Stockholm")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+@pytest.mark.parametrize("field", ["deadline", "published_at"])
+def test_a_naive_datetime_hashes_as_the_same_utc_instant(stockholm_local_time, field):
+    """Postgres returns aware datetimes, but a naive one (a raw driver row, a
+    fixture) must hash as UTC, never as local time (final review minor:
+    _instant's naive branch was untested)."""
+    naive = datetime(2026, 10, 1, 12, 0)
+    assert call_rank_fingerprint(_call(**{field: naive})) == call_rank_fingerprint(
+        _call(**{field: naive.replace(tzinfo=UTC)})
+    )
