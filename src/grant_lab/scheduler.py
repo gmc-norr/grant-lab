@@ -332,7 +332,7 @@ def build_scheduler(
     anthropic_api_key: str | None = None,
     remote_rank_model: str = "claude-sonnet-5",
     ranking_escalation_min_score: int = 45,
-    ranking_remote_daily_cap: int = 150,
+    ranking_remote_daily_cap: int = 300,
     embed_client: OllamaEmbedClient,
     digest_email_client: EmailClient | None = None,
     digest_settings=None,  # duck-typed: needs .digest_dry_run, .admin_dashboard_url

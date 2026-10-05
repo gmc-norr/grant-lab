@@ -734,7 +734,7 @@ class Settings(BaseSettings):
         ),
     )
     ranking_remote_daily_cap: int = Field(
-        default=150,
+        default=300,
         alias="RANKING_REMOTE_DAILY_CAP",
         description="Max remote escalation attempts per Europe/Stockholm day "
         "(counted from ranking_remote_attempts). Guardrail for backfill spikes. "
@@ -744,7 +744,11 @@ class Settings(BaseSettings):
         "cost-neutral raise, not a budget increase. It was chosen because the "
         "cap was being HIT: on 2026-09-09, 33 pairs scoring >= "
         "RANKING_ESCALATION_MIN_SCORE were denied escalation after the 100th "
-        "attempt and shipped with a Gemma-only score and no analysis.",
+        "attempt and shipped with a Gemma-only score and no analysis. "
+        "Raised 150 -> 300 on 2026-10-05: since ranking freshness "
+        "(2026-09-24) a day uses 0-27 attempts (09-25..10-04), so the cap binds "
+        "only on a full re-rank, and 150 split the 09-24 re-rank (223 "
+        "attempts that day) over two days.",
     )
     email_transport: str = Field(
         default="",

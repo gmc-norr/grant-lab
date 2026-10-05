@@ -14,7 +14,7 @@ def test_escalation_settings_have_defaults(monkeypatch):
     _env(monkeypatch)
     s = Settings()
     assert s.ranking_escalation_min_score == 45
-    assert s.ranking_remote_daily_cap == 150
+    assert s.ranking_remote_daily_cap == 300
 
 
 def test_cosine_threshold_setting_removed(monkeypatch):
