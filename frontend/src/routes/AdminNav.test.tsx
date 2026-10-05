@@ -133,4 +133,7 @@ it("every admin link the match edition renders is a route the match router mount
 
   expect(hrefs.length).toBeGreaterThan(0); // a nav rendering nothing must not pass
   expect(hrefs.filter((h) => !mounted.has(h))).toEqual([]);
-});
+  // The dynamic import of the whole match route table counts against this
+  // test's timeout (a static import would not). 1.5 s alone, but over the 5 s
+  // default in a loaded full run (2026-10-05, failed on 01502d7b and after).
+}, 20_000);
