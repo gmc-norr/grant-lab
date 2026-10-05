@@ -484,16 +484,20 @@ The 03:30 tick then refreshes the vector, the fingerprint no longer matches, and
 only when an embed fails.
 
 **Amendment 2026-10-05 (final review minor): an `EMBEDDING_MODEL` swap costs two full
-re-ranks, not one extra ranking.** A swap leaves every call's vector on the old model
-until it is re-embedded, and the call stamp includes `embedding_model` and
-`embedding_fingerprint`. The startup calibration warning also says the swap needs new
-`EMBEDDING_PREGATE_THRESHOLD` / `EMBEDDING_HARD_FAIL_THRESHOLD` values, and those are in
-the scoring fingerprint. So the 03:00 and 03:15 ingests re-rank every open pair they
-touch against the old call vectors, the 03:30 tick re-embeds every call, and the 04:00
-reconcile re-ranks every open pair again, each round paying its Sonnet escalations. **Runbook:** right after the
-restart that changes `EMBEDDING_MODEL`, run `uv run python -m grant_lab.embeddings.cli
-backfill` before any ingest. Every call vector is then current before anything re-ranks,
-and the pairs re-rank once.
+re-ranks, not one extra ranking.** Both stamps carry the vector's model:
+`call_rank_fingerprint` and `rank_fingerprint` each hash `embedding_model`. The 03:00
+and 03:15 ingests re-embed every call they touch with the new model before they enqueue
+(`run_ingestion` step 2), but not the profiles, which only the 03:30 tick, the backfill
+CLI or bootstrap re-embed. So the ingests re-rank the pairs they touch with the cosine
+gate off (`_safe_cosine` returns None across models), the 03:30 tick re-embeds the
+profiles and changes their stamp, and the 04:00 reconcile re-ranks every open pair
+again, each round paying its Sonnet escalations. The swap's new
+`EMBEDDING_PREGATE_THRESHOLD` / `EMBEDDING_HARD_FAIL_THRESHOLD`, which the startup
+calibration warning asks for, change the scoring fingerprint too. **Runbook:** right
+after the restart that changes `EMBEDDING_MODEL`, run `uv run python -m
+grant_lab.embeddings.cli backfill` before any ingest. It re-embeds calls and profiles
+whose model does not match, so every vector is current before anything re-ranks, and
+the pairs re-rank once.
 
 ### D10. Sonnet `temperature=0` — dropped
 
