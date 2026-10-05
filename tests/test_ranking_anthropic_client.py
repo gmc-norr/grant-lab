@@ -144,21 +144,36 @@ def test_chat_returns_a_schema_reply_without_stripping_fences():
     assert env["choices"][0]["message"]["content"] == reply
 
 
+_SCHEMA_FORMAT = {"type": "json_schema", "json_schema": {"name": "x", "schema": {}}}
+
+
 @pytest.mark.parametrize("stop_reason", ["refusal", "max_tokens"])
-def test_an_unusable_reply_is_both_a_service_and_a_parse_failure(stop_reason):
-    """A refusal or a truncated reply recurs on the same inputs, so rank_pair
-    must count it as parse_error (toward gave_up), not llm_error (pending every
-    night). It stays an LLMError for proposal-assist and citations, which
-    catch only that (final review 2026-10-05, finding 4)."""
+def test_an_unusable_ranking_reply_is_both_a_service_and_a_parse_failure(stop_reason):
+    """A refused or truncated ranking reply recurs on the same inputs, so
+    rank_pair must count it as parse_error (toward gave_up), not llm_error
+    (pending every night). Still an LLMError, as truncation always was
+    (final review 2026-10-05, finding 4)."""
     client = AnthropicClient(api_key="sk-test")
     resp = _fake_response("{", stop_reason=stop_reason)
     with (
         patch.object(client._client.messages, "create", return_value=resp),
         pytest.raises(UnusableReplyError) as raised,
     ):
-        _call_chat(client)
+        _call_chat(client, response_format=_SCHEMA_FORMAT)
     assert isinstance(raised.value, LLMError)
     assert isinstance(raised.value, ParseError)
+
+
+def test_a_refusal_without_a_schema_still_returns_its_text():
+    """Proposal-assist compaction, citations and the extractors send no
+    schema. A refusal there kept its old behaviour: the text comes back. Raising
+    would turn compaction's retry-every-tick into an unrecorded re-bill
+    (second review 2026-10-05, finding 1)."""
+    client = AnthropicClient(api_key="sk-test")
+    resp = _fake_response("partial answer", stop_reason="refusal")
+    with patch.object(client._client.messages, "create", return_value=resp):
+        env = _call_chat(client)
+    assert env["choices"][0]["message"]["content"] == "partial answer"
 
 
 def test_chat_handles_empty_system():
@@ -339,8 +354,9 @@ def test_strip_markdown_fence_skips_unparseable_trailing_block():
 
 
 def test_chat_strips_markdown_fence_from_response():
-    """End-to-end: Sonnet returns ```json{...}``` → envelope content
-    is the parseable raw JSON, not the fenced version."""
+    """A caller without a schema (the extractors, citations) gets
+    ```json{...}``` back as the raw JSON, not the fenced version. The ranker
+    sends a schema and skips this path."""
     client = AnthropicClient(api_key="sk-test")
     fenced = '```json\n{"topic_fit": {"rating": 4}}\n```'
     with patch.object(client._client.messages, "create", return_value=_fake_response(fenced)):

@@ -38,8 +38,9 @@ class UnusableReplyError(LLMError, ParseError):
 
     Both parents on purpose. rank_pair reads a ParseError as `parse_error`,
     which counts toward an escalation's gave_up (spec D6); as a plain LLMError
-    it was `llm_error`, owed again every night until the call closed. The
-    proposal-assist and citation callers catch only LLMError and still do."""
+    it was `llm_error`, owed again every night until the call closed. Every
+    other caller catches Exception, so the second parent changes nothing for
+    them, and a refusal raises this only on a schema request."""
 
 
 class AnthropicClient:
@@ -141,7 +142,9 @@ class AnthropicClient:
         # UnusableReplyError before extracting text: rank_pair counts it as a
         # parse_error toward gave_up. The fix for a persistently too-long reply
         # is to raise max_tokens, not to keep re-billing the same call.
-        if response.stop_reason == "refusal":
+        # Refusal only on a schema request (the ranker): callers without one
+        # (compaction, citations, extractors) keep getting the text back.
+        if output_config and response.stop_reason == "refusal":
             details = getattr(response, "stop_details", None)
             raise UnusableReplyError(
                 f"anthropic refused (category={getattr(details, 'category', None)})"
