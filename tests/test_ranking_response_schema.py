@@ -76,6 +76,29 @@ def test_every_rating_the_schema_allows_parses():
             assert getattr(parse_response(json.dumps(reply)), f"{name}_rating") == rating
 
 
+_CANDIDATES = (-1, 0, 1, 2, 3, 4, 5, 6, True, "4", "pass", "fail", "unclear", "maybe", None)
+
+
+@pytest.mark.parametrize("name", _CRITERIA)
+def test_the_schema_allows_a_rating_exactly_when_the_parser_does(name):
+    """Both directions. A schema narrower than the parser is silent: dropping
+    "unclear" would force Sonnet to call an ambiguous call pass or fail, and
+    nothing would fail to parse (final review 2026-10-05, finding 2)."""
+    for rating in _CANDIDATES:
+        reply = _reply(**{name: _criterion(rating)})
+        try:
+            jsonschema.validate(reply, RANK_RESPONSE_SCHEMA)
+            schema_ok = True
+        except jsonschema.ValidationError:
+            schema_ok = False
+        try:
+            parse_response(json.dumps(reply))
+            parser_ok = True
+        except ParseError:
+            parser_ok = False
+        assert schema_ok == parser_ok, (name, rating, schema_ok, parser_ok)
+
+
 @pytest.mark.parametrize(
     "name,rating",
     [("topic_fit", 6), ("topic_fit", "4"), ("eligibility", "maybe"), ("exclusions", "unclear")],
