@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 
 import * as clientMod from "../api/client";
+import type { components } from "../api/schema.gen";
 import { renderWithProviders } from "../test-utils";
 import { AdminDashboard } from "./AdminDashboard";
 
@@ -29,7 +30,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-const DASH = {
+const DASH: components["schemas"]["AdminDashboardOut"] = {
   sources: [{ name: "Vinnova", slug: "vinnova", last_fetched_at: null, call_count: 3 }],
   queue_counts: { pending: 2, running: 0, done: 5, failed: 1 },
   rerank_estimate: 6,
@@ -98,7 +99,9 @@ it("rerank confirms before posting", async () => {
   const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
   renderWithProviders(<AdminDashboard />);
   await userEvent.click(await screen.findByRole("button", { name: /re-rank everything/i }));
-  expect(confirm).toHaveBeenCalled();
+  // An upper bound, not an exact count: pairs already queued are skipped
+  // (ON CONFLICT DO NOTHING in ranking/backfill.py).
+  expect(confirm).toHaveBeenCalledWith(expect.stringContaining("up to 6 ranking jobs"));
   expect(post).not.toHaveBeenCalled();  // declined -> no POST
 });
 

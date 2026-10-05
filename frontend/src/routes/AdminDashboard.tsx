@@ -50,7 +50,7 @@ export function AdminDashboard() {
 
   const onRerank = () => {
     if (!window.confirm(
-      `This enqueues ${d.rerank_estimate} ranking jobs and may take a while. Continue?`
+      `This enqueues up to ${d.rerank_estimate} ranking jobs and may take a while. Continue?`
     )) return;
     rerank.mutate(undefined, { onSuccess: () => setBanner({ kind: "ok", text: OK_RERANK }) });
   };
