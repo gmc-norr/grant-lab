@@ -237,3 +237,27 @@ def test_successful_record_resets_failure_streak(pg_session_factory, monkeypatch
     for _ in range(n - 1):
         res = svc.complete_json(workspace_id=wsid, op="metadata_extract", system="s", user="u")
         assert res.cap_exceeded is False
+
+
+def test_a_failure_after_a_billed_reply_records_its_usage(pg_session_factory):
+    """A reply cut off at max_tokens (AnthropicClient._billed) or one that fails
+    to parse (StructuredLLM) carries the billed usage on `.usage`; the failed row
+    records it, cache tokens included, instead of 0 (review 2026-10-05)."""
+    import pytest
+
+    exc = ValueError("cut off")
+    exc.usage = {
+        "prompt_tokens": 40,
+        "completion_tokens": 7,
+        "cache_read_input_tokens": 10,
+        "cache_creation_input_tokens": 5,
+    }
+    wsid = _ws(pg_session_factory)
+    svc = CitationLLMService(
+        session_factory=pg_session_factory, llm=_BoomLLM(exc), settings=_settings()
+    )
+    with pytest.raises(ValueError):
+        svc.complete_json(workspace_id=wsid, op="metadata_extract", system="s", user="u")
+    rows = _rows(pg_session_factory, wsid)
+    assert len(rows) == 1 and rows[0].status == "failed"
+    assert (rows[0].tokens_in, rows[0].tokens_out) == (55, 7)

@@ -113,3 +113,15 @@ def test_complete_json_raises_on_non_dict_json():
     client = _FakeClient("[1, 2, 3]")
     with pytest.raises(CitationLLMOutputError):
         StructuredLLM(client, "fake-model").complete_json(system="s", user="u")
+
+
+@pytest.mark.parametrize("content", ["not json at all", "[1, 2, 3]"])
+def test_a_reply_that_fails_to_parse_still_carries_its_billed_usage(content):
+    """The call was answered and billed before parsing failed. The service
+    records `.usage` instead of 0 (review 2026-10-05, finding 5)."""
+    usage = {"prompt_tokens": 10, "completion_tokens": 4}
+    with pytest.raises(Exception) as raised:
+        StructuredLLM(_FakeClient(content, usage=usage), "fake-model").complete_json(
+            system="s", user="u"
+        )
+    assert raised.value.usage == usage

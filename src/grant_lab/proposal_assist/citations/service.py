@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from sqlalchemy.orm import sessionmaker
 
 from grant_lab.config import Settings
-from grant_lab.proposal_assist.citations.llm import LLMUsage, StructuredLLM
+from grant_lab.proposal_assist.citations.llm import LLMUsage, StructuredLLM, tokens_from_usage
 from grant_lab.proposal_assist.citations.usage import check_citation_caps, record_usage
 from grant_lab.proposal_assist.turns.caps import check_global_daily_token_cap
 
@@ -98,8 +98,14 @@ class CitationLLMService:
             # propagate TimeoutError directly. Refinement deferred to Slice 3.
             self._note_record(self._safe_record(workspace_id, op, "timeout", 0, 0, None))
             raise
-        except Exception:
-            self._note_record(self._safe_record(workspace_id, op, "failed", 0, 0, None))
+        except Exception as e:
+            # An error raised after the API answered carries the billed usage
+            # (AnthropicClient._billed, StructuredLLM's parse failure); 0 only
+            # when the call never got an answer.
+            tokens_in, tokens_out = tokens_from_usage(getattr(e, "usage", None) or {})
+            self._note_record(
+                self._safe_record(workspace_id, op, "failed", tokens_in, tokens_out, None)
+            )
             raise
 
         # Success: record usage. If the ledger write fails here the tokens were

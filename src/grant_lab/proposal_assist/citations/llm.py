@@ -37,6 +37,20 @@ class LLMResult:
     model: str
 
 
+def tokens_from_usage(usage: dict) -> tuple[int, int]:
+    """(tokens_in, tokens_out) from an envelope's `usage`. Anthropic reports
+    cache-read / cache-creation tokens SEPARATELY from prompt_tokens; true input
+    usage is their sum. Those fields are present but may be None (not absent)
+    when caching isn't used, so coerce None -> 0. Ollama omits them entirely
+    (the `or 0` handles both)."""
+    tokens_in = (
+        int(usage.get("prompt_tokens") or 0)
+        + int(usage.get("cache_read_input_tokens") or 0)
+        + int(usage.get("cache_creation_input_tokens") or 0)
+    )
+    return tokens_in, int(usage.get("completion_tokens") or 0)
+
+
 class StructuredLLM:
     def __init__(self, client, model: str) -> None:
         self._client = client
@@ -51,24 +65,19 @@ class StructuredLLM:
         )
         content = resp["choices"][0]["message"]["content"]
         usage = resp.get("usage") or {}
-        # Anthropic reports cache-read / cache-creation tokens SEPARATELY from
-        # prompt_tokens; true input usage is their sum. Those fields are present
-        # but may be None (not absent) when caching isn't used, so coerce
-        # None -> 0. Ollama omits them entirely (the `or 0` handles both).
-        tokens_in = (
-            int(usage.get("prompt_tokens") or 0)
-            + int(usage.get("cache_read_input_tokens") or 0)
-            + int(usage.get("cache_creation_input_tokens") or 0)
-        )
-        parsed = json.loads(content)
-        if not isinstance(parsed, dict):
-            raise CitationLLMOutputError(f"expected a JSON object, got {type(parsed).__name__}")
+        tokens_in, tokens_out = tokens_from_usage(usage)
+        try:
+            parsed = json.loads(content)
+            if not isinstance(parsed, dict):
+                raise CitationLLMOutputError(f"expected a JSON object, got {type(parsed).__name__}")
+        except Exception as e:
+            # Answered and billed before parsing failed: the service records
+            # this instead of 0.
+            e.usage = usage
+            raise
         return LLMResult(
             data=parsed,
-            usage=LLMUsage(
-                tokens_in=tokens_in,
-                tokens_out=int(usage.get("completion_tokens") or 0),
-            ),
+            usage=LLMUsage(tokens_in=tokens_in, tokens_out=tokens_out),
             model=resp.get("model", self.model),
         )
 
