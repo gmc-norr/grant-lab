@@ -49,7 +49,7 @@ def drain_queue(
     embedding_hard_fail_threshold: float | None = None,
     remote_client=None,  # AnthropicClient | None
     escalation_min_score: int = 45,
-    remote_daily_cap: int = 150,
+    remote_daily_cap: int = 300,
     batch_size: int = 10,
     tick_budget_seconds: float | None = None,
     logprobs_enabled: bool = False,
