@@ -427,15 +427,15 @@ def test_a_timeout_is_an_llm_error_and_a_timeout_error():
     on, so callers that record spend mark it `timeout`, not a free failure:
     compaction counts it toward its retry limit, and citations' existing
     `except TimeoutError` branch records it (review 2026-10-05, finding 1)."""
-    import anthropic
     import httpx
 
     from grant_lab.ranking.anthropic_client import AnthropicTimeoutError
 
     client = AnthropicClient(api_key="sk-test")
-    timeout = anthropic.APITimeoutError(request=httpx.Request("POST", "https://api.example"))
     with (
-        patch.object(client._client.messages, "create", side_effect=timeout),
+        patch.object(
+            client._client.messages, "create", side_effect=_timeout(httpx.ReadTimeout("r"))
+        ),
         pytest.raises(AnthropicTimeoutError) as raised,
     ):
         _call_chat(client)
@@ -443,8 +443,40 @@ def test_a_timeout_is_an_llm_error_and_a_timeout_error():
     assert isinstance(raised.value, TimeoutError)
 
 
+@pytest.mark.parametrize("cause", ["connect", "pool", "write"])
+def test_a_timeout_before_the_request_was_read_is_a_plain_connection_error(cause):
+    """A connect, pool or write timeout never delivered the request, so nothing
+    was billed: a plain LLMError, not a TimeoutError. Counting it as possibly
+    billed let a 15-minute network outage stop compaction for 24 h (review
+    2026-10-05, round 3, finding 1)."""
+    import httpx
+
+    exc = {
+        "connect": httpx.ConnectTimeout("c"),
+        "pool": httpx.PoolTimeout("p"),
+        "write": httpx.WriteTimeout("w"),
+    }[cause]
+    client = AnthropicClient(api_key="sk-test")
+    with (
+        patch.object(client._client.messages, "create", side_effect=_timeout(exc)),
+        pytest.raises(LLMError) as raised,
+    ):
+        _call_chat(client)
+    assert not isinstance(raised.value, TimeoutError)
+
+
 def test_max_retries_reaches_the_sdk():
     """Compaction's tick already retries every 300 s; SDK retries on top
     multiplied each billed attempt by three (review 2026-10-05)."""
     assert AnthropicClient(api_key="sk-test", max_retries=0)._client.max_retries == 0
     assert AnthropicClient(api_key="sk-test")._client.max_retries == 2
+
+
+def _timeout(cause):
+    """anthropic.APITimeoutError as the SDK raises it: from the httpx timeout."""
+    import anthropic
+    import httpx
+
+    exc = anthropic.APITimeoutError(request=httpx.Request("POST", "https://api.example"))
+    exc.__cause__ = cause
+    return exc

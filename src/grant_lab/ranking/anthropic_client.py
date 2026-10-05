@@ -25,6 +25,7 @@ import logging
 import re
 
 import anthropic
+import httpx
 
 from grant_lab.ranking.ollama_client import LLMError
 from grant_lab.ranking.prompt import ParseError
@@ -44,10 +45,16 @@ class UnusableReplyError(LLMError, ParseError):
 
 
 class AnthropicTimeoutError(LLMError, TimeoutError):
-    """The client gave up waiting. The server may still have finished, and
-    billed, the reply, so callers that record spend mark it `timeout` rather
-    than a free failure (compaction counts it toward its retry limit;
-    citations' `except TimeoutError` branch records it)."""
+    """The client gave up waiting for a reply to a request it had sent. The
+    server may still have finished, and billed, the reply, so callers that
+    record spend mark it `timeout` rather than a free failure (compaction counts
+    it toward its retry limit; citations' `except TimeoutError` branch records
+    it). Note TimeoutError is an OSError: an `except OSError` around a chat()
+    call would catch this too."""
+
+
+# httpx timeouts that fire before the request reached the server.
+_UNSENT_TIMEOUTS = (httpx.ConnectTimeout, httpx.PoolTimeout, httpx.WriteTimeout)
 
 
 class AnthropicClient:
@@ -140,7 +147,13 @@ class AnthropicClient:
             req_id = getattr(e.response, "headers", {}).get("request-id", "")
             raise LLMError(f"anthropic {e.status_code} (request_id={req_id}): {e.message}") from e
         except anthropic.APITimeoutError as e:
-            # Before APIConnectionError, which it subclasses.
+            # Before APIConnectionError, which it subclasses. Only a timeout
+            # WAITING FOR THE REPLY may have been billed; a connect, pool or
+            # write timeout never delivered the request, so it is an ordinary
+            # connection error (counting it would let an outage stop
+            # compaction for a day).
+            if isinstance(e.__cause__, _UNSENT_TIMEOUTS):
+                raise LLMError(f"anthropic connection timeout: {e}") from e
             raise AnthropicTimeoutError(f"anthropic timeout: {e}") from e
         except anthropic.APIConnectionError as e:
             raise LLMError(f"anthropic connection error: {e}") from e

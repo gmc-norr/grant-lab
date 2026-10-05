@@ -110,9 +110,10 @@ def count_billed_attempts(
     money: any recorded tokens, whatever the status, or a `timeout` (the
     server may have finished and billed a reply the client gave up on). A
     failure with no tokens never got an answer and cost nothing. compaction.py
-    passes `since` = its last summary, so an `ok` row after it is a billed call
-    whose summary write failed. It lives here because this module is the
-    ledger's only reader and writer (tests/fencing/test_spend_guard.py)."""
+    passes `since` = the later of 24 h ago and the workspace's last summary, so
+    an `ok` row after it is a billed call whose summary write failed. It lives
+    here because this module is the ledger's only reader and writer
+    (tests/fencing/test_spend_guard.py)."""
     return session.scalar(
         select(func.count())
         .select_from(LlmSpend)

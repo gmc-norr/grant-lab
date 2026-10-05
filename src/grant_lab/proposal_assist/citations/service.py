@@ -92,10 +92,11 @@ class CitationLLMService:
         try:
             result = self._llm.complete_json(system=system, user=user)
         except TimeoutError:
-            # NOTE: OllamaClient/AnthropicClient currently wrap transport
-            # timeouts as LLMError (httpx.TimeoutException does NOT subclass
-            # builtin TimeoutError), so this branch only fires for clients that
-            # propagate TimeoutError directly. Refinement deferred to Slice 3.
+            # AnthropicClient raises AnthropicTimeoutError (an LLMError AND a
+            # TimeoutError) for a timeout waiting on a sent request, which may
+            # have been billed, so it lands here. OllamaClient still wraps its
+            # timeouts as a plain LLMError (httpx.TimeoutException does not
+            # subclass the builtin TimeoutError), which the branch below takes.
             self._note_record(self._safe_record(workspace_id, op, "timeout", 0, 0, None))
             raise
         except Exception as e:

@@ -286,32 +286,35 @@ _FAILED = dict(status="failed", tokens_in=900, hours_ago=1)
 
 
 @pytest.mark.parametrize(
-    "rows,summary_after,elsewhere,called",
+    "rows,summary,elsewhere,called",
     [
         # Three billed failures today: stop paying.
-        (dict(_FAILED, n=3), False, False, False),
+        (dict(_FAILED, n=3), None, False, False),
         # Two: one more try.
-        (dict(_FAILED, n=2), False, False, True),
+        (dict(_FAILED, n=2), None, False, True),
         # Older than 24 h: the window has passed.
-        (dict(_FAILED, n=3, hours_ago=25), False, False, True),
+        (dict(_FAILED, n=3, hours_ago=25), None, False, True),
         # Unbilled (the call never answered): retrying is free.
-        (dict(_FAILED, n=3, tokens_in=0), False, False, True),
+        (dict(_FAILED, n=3, tokens_in=0), None, False, True),
         # Timeouts: the server may have finished and billed (finding 1).
-        (dict(_FAILED, n=3, status="timeout", tokens_in=0), False, False, False),
+        (dict(_FAILED, n=3, status="timeout", tokens_in=0), None, False, False),
         # Billed "ok" rows with no summary after them: the call succeeded but the
         # summary write failed, every tick (finding 6).
-        (dict(_FAILED, n=3, status="ok"), False, False, False),
+        (dict(_FAILED, n=3, status="ok"), None, False, False),
         # A summary written after the failures: compaction works again, the old
         # failures no longer count (finding 2).
-        (dict(_FAILED, n=3), True, False, True),
+        (dict(_FAILED, n=3), "after", False, True),
+        # A summary BEFORE three new billed failures: they count (round 3,
+        # finding 2; a stop that any summary today switched off went unseen).
+        (dict(_FAILED, n=3), "before", False, False),
         # Three billed failures in ANOTHER workspace, or of another kind here:
         # none of this workspace's compaction business (finding 3).
-        (dict(_FAILED, n=3), False, "workspace", True),
-        (dict(_FAILED, n=3, kind="chat_turn"), False, False, True),
+        (dict(_FAILED, n=3), None, "workspace", True),
+        (dict(_FAILED, n=3, kind="chat_turn"), None, False, True),
     ],
 )
 def test_the_tick_stops_retrying_a_compaction_that_keeps_costing(
-    pg_session_factory, monkeypatch, _settings_env, rows, summary_after, elsewhere, called
+    pg_session_factory, monkeypatch, _settings_env, rows, summary, elsewhere, called
 ):
     """A compaction that fails after the API answered (cut off, timed out, or
     the summary write failing) fails the same way on every 300 s tick, and
@@ -330,16 +333,20 @@ def test_the_tick_stops_retrying_a_compaction_that_keeps_costing(
             other, _ = _workspace_needing_compaction(s, "other@umu.se")
             target = other.id
         _spend_rows(s, target, **rows)
-        if summary_after:
-            s.add(
-                ChatSummary(
-                    workspace_id=ws.id,
-                    summary="earlier",
-                    summarized_through=turns[0].id,
-                    tokens=1,
-                    model="claude-opus-5",
-                )
+        if summary:
+            row = ChatSummary(
+                workspace_id=ws.id,
+                summary="earlier",
+                summarized_through=turns[0].id,
+                tokens=1,
+                model="claude-opus-5",
             )
+            s.add(row)
+            s.flush()
+            if summary == "before":
+                from datetime import UTC, datetime, timedelta
+
+                row.created_at = datetime.now(UTC) - timedelta(hours=2)
         s.commit()
         ws_id = ws.id
     client = MagicMock()
@@ -358,9 +365,14 @@ def test_the_tick_stops_retrying_a_compaction_that_keeps_costing(
     assert any("retry@umu.se turn 1" in m for m in contents) is called, ws_id
 
 
-def test_a_timed_out_compaction_is_recorded_as_a_timeout(pg_session_factory, _settings_env):
-    """The real client's timeout reaches compact_workspace as a TimeoutError and
-    is recorded `timeout`, which the tick counts as possibly billed."""
+@pytest.mark.parametrize("cause,status", [("read", "timeout"), ("connect", "failed")])
+def test_a_timed_out_compaction_is_recorded_by_whether_it_may_have_been_billed(
+    pg_session_factory, _settings_env, cause, status
+):
+    """The real client: a READ timeout (the request was sent; the server may
+    have finished and billed) is recorded `timeout`, which the tick counts. A
+    connect timeout never sent the request: a free `failed` row the tick does
+    not count, so an outage keeps retrying."""
     from unittest.mock import patch
 
     import anthropic
@@ -376,6 +388,7 @@ def test_a_timed_out_compaction_is_recorded_as_a_timeout(pg_session_factory, _se
         ws_id = ws.id
     client = AnthropicClient(api_key="sk-test", model="claude-opus-5", max_retries=0)
     timeout = anthropic.APITimeoutError(request=httpx.Request("POST", "https://api.example"))
+    timeout.__cause__ = httpx.ReadTimeout("read") if cause == "read" else httpx.ConnectTimeout("c")
     with (
         patch.object(client._client.messages, "create", side_effect=timeout),
         pytest.raises(LLMError),
@@ -388,7 +401,7 @@ def test_a_timed_out_compaction_is_recorded_as_a_timeout(pg_session_factory, _se
         )
     with pg_session_factory() as s:
         row = s.execute(select(LlmSpend).where(LlmSpend.kind == "compaction")).scalar_one()
-        assert row.status == "timeout"
+        assert row.status == status
 
 
 def test_the_scheduled_compaction_client_does_not_retry_on_its_own(monkeypatch):
