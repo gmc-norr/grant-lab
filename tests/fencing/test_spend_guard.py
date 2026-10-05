@@ -344,6 +344,35 @@ def test_real_import_shapes_are_still_accepted(tmp_path, monkeypatch, label, sou
                 return s.bulk_insert_mappings(LlmSpend, rows)
             """,
         ),
+        (
+            # The class's own module, not the package re-export: it was invisible
+            # (review 2026-10-05, finding 4).
+            "submodule",
+            """
+            from grant_lab.db.models.spend import LlmSpend
+
+            def mk(**k):
+                return LlmSpend(**k)
+            """,
+        ),
+        (
+            "submodule_alias",
+            """
+            from grant_lab.db.models import spend as sp
+
+            def mk(**k):
+                return sp.LlmSpend(**k)
+            """,
+        ),
+        (
+            "submodule_import",
+            """
+            import grant_lab.db.models.spend as sp
+
+            def mk(**k):
+                return sp.LlmSpend(**k)
+            """,
+        ),
     ],
 )
 def test_every_write_shape_is_seen(tmp_path, monkeypatch, label, source):

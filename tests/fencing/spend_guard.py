@@ -482,6 +482,11 @@ def stale_pins() -> list[str]:
     return sorted(stale)
 
 
+# The package re-export AND the class's own module: importing from the
+# submodule was invisible (review 2026-10-05).
+_LLM_SPEND_MODULES = ("grant_lab.db.models", "grant_lab.db.models.spend")
+
+
 def llm_spend_writers() -> list[str]:
     """Modules under src/ that touch the `LlmSpend` class at all.
 
@@ -507,13 +512,13 @@ def llm_spend_writers() -> list[str]:
             if isinstance(node, ast.ImportFrom):
                 mod = node.module or ""
                 for alias in node.names:
-                    if mod == "grant_lab.db.models" and alias.name == "LlmSpend":
+                    if mod in _LLM_SPEND_MODULES and alias.name == "LlmSpend":
                         local_names.add(alias.asname or alias.name)
-                    elif f"{mod}.{alias.name}" == "grant_lab.db.models":
+                    elif f"{mod}.{alias.name}" in _LLM_SPEND_MODULES:
                         module_aliases.add(alias.asname or alias.name)
             elif isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.name == "grant_lab.db.models":
+                    if alias.name in _LLM_SPEND_MODULES:
                         module_aliases.add(alias.asname or alias.name)
         hit = False
         for node in ast.walk(tree):
