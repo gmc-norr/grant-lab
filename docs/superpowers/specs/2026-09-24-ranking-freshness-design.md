@@ -488,7 +488,7 @@ re-ranks, not one extra ranking.** Both stamps carry the vector's model:
 `call_rank_fingerprint` and `rank_fingerprint` each hash `embedding_model`. The 03:00
 and 03:15 ingests re-embed every call they touch with the new model before they enqueue
 (`run_ingestion` step 2), but not the profiles, which only the 03:30 tick, the backfill
-CLI or bootstrap re-embed. So the ingests re-rank the pairs they touch with the cosine
+CLI, bootstrap or a profile edit re-embed. So the ingests re-rank the pairs they touch with the cosine
 gate off (`_safe_cosine` returns None across models), the 03:30 tick re-embeds the
 profiles and changes their stamp, and the 04:00 reconcile re-ranks every open pair
 again, each round paying its Sonnet escalations. The swap's new
