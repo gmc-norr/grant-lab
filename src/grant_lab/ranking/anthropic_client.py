@@ -144,25 +144,38 @@ class AnthropicClient:
         # is to raise max_tokens, not to keep re-billing the same call.
         # Refusal only on a schema request (the ranker): callers without one
         # (compaction, citations, extractors) keep getting the text back.
+        #
+        # Every raise from here on is AFTER Anthropic billed the call, so each
+        # carries the usage (_billed): a caller that records spend on failure
+        # (compaction) would otherwise store 0 and the global cap never see it.
         if output_config and response.stop_reason == "refusal":
             details = getattr(response, "stop_details", None)
-            raise UnusableReplyError(
-                f"anthropic refused (category={getattr(details, 'category', None)})"
+            raise _billed(
+                UnusableReplyError(
+                    f"anthropic refused (category={getattr(details, 'category', None)})"
+                ),
+                response,
             )
         if response.stop_reason == "max_tokens":
-            raise UnusableReplyError(
-                f"anthropic response truncated at max_tokens={self._max_tokens} "
-                f"(output_tokens={response.usage.output_tokens}); "
-                "raise AnthropicClient max_tokens — retrying cannot help"
+            raise _billed(
+                UnusableReplyError(
+                    f"anthropic response truncated at max_tokens={self._max_tokens} "
+                    f"(output_tokens={response.usage.output_tokens}); "
+                    "raise AnthropicClient max_tokens — retrying cannot help"
+                ),
+                response,
             )
 
         # Extract first text block. Tool calls / thinking blocks shouldn't
         # appear here (we don't request them), but guard anyway.
         text_blocks = [b for b in response.content if b.type == "text"]
         if not text_blocks:
-            raise LLMError(
-                f"anthropic response had no text content blocks "
-                f"(blocks: {[b.type for b in response.content]})"
+            raise _billed(
+                LLMError(
+                    f"anthropic response had no text content blocks "
+                    f"(blocks: {[b.type for b in response.content]})"
+                ),
+                response,
             )
         # A structured-output reply is the JSON itself; the fence stripper could
         # only cut a valid one (a ``` pair inside its prose).
@@ -178,15 +191,24 @@ class AnthropicClient:
                     "finish_reason": _map_stop_reason(response.stop_reason),
                 }
             ],
-            "usage": {
-                "prompt_tokens": response.usage.input_tokens,
-                "completion_tokens": response.usage.output_tokens,
-                "cache_read_input_tokens": getattr(response.usage, "cache_read_input_tokens", 0),
-                "cache_creation_input_tokens": getattr(
-                    response.usage, "cache_creation_input_tokens", 0
-                ),
-            },
+            "usage": _usage(response),
         }
+
+
+def _usage(response) -> dict:
+    """The envelope's `usage`, in OllamaClient's (OpenAI) key names."""
+    return {
+        "prompt_tokens": response.usage.input_tokens,
+        "completion_tokens": response.usage.output_tokens,
+        "cache_read_input_tokens": getattr(response.usage, "cache_read_input_tokens", 0),
+        "cache_creation_input_tokens": getattr(response.usage, "cache_creation_input_tokens", 0),
+    }
+
+
+def _billed(exc: LLMError, response) -> LLMError:
+    """Attach the billed usage to an error raised after the API answered."""
+    exc.usage = _usage(response)
+    return exc
 
 
 def _output_config(response_format: dict | None) -> dict | None:

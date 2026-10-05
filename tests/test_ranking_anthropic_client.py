@@ -400,3 +400,23 @@ def test_chat_raises_on_max_tokens_truncation():
     ):
         _call_chat(client)
     assert "max_tokens" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "stop_reason,blocks", [("max_tokens", "text"), ("end_turn", "none"), ("refusal", "text")]
+)
+def test_an_error_raised_after_the_api_answered_carries_the_billed_usage(stop_reason, blocks):
+    """Anthropic billed the call before the client raised. Callers that record
+    spend on failure (compaction) read `.usage` instead of storing 0."""
+    client = AnthropicClient(api_key="sk-test")
+    resp = _fake_response("{", stop_reason=stop_reason)
+    if blocks == "none":
+        resp.content = []
+    response_format = _SCHEMA_FORMAT if stop_reason == "refusal" else None
+    with (
+        patch.object(client._client.messages, "create", return_value=resp),
+        pytest.raises(LLMError) as raised,
+    ):
+        _call_chat(client, response_format=response_format)
+    assert raised.value.usage["prompt_tokens"] == 120
+    assert raised.value.usage["completion_tokens"] == 80

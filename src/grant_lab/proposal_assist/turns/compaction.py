@@ -25,6 +25,7 @@ import json
 import logging
 import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
@@ -32,13 +33,30 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from grant_lab.config import Settings
 from grant_lab.db.models import ChatSummary, ChatTurn, Workspace
-from grant_lab.proposal_assist.spend import record_spend
+from grant_lab.proposal_assist.spend import count_billed_failures, record_spend
 from grant_lab.proposal_assist.turns.caps import (
     GlobalTokenCapExceeded,
     check_global_daily_token_cap,
 )
 
 logger = logging.getLogger(__name__)
+
+# A compaction that fails after the API answered (a reply cut off at
+# max_tokens, a refusal) fails the same way on every tick, and every try is
+# billed. After this many BILLED failures in the trailing 24 h the tick skips
+# the workspace. Unbilled failures (the call never answered) cost nothing and
+# do not count, so an outage still retries every tick.
+COMPACTION_MAX_BILLED_FAILURES_PER_DAY = 3
+
+
+def _billed_compaction_failures_today(session: Session, workspace_id: uuid.UUID) -> int:
+    return count_billed_failures(
+        session,
+        workspace_id=workspace_id,
+        kind="compaction",
+        since=datetime.now(UTC) - timedelta(hours=24),
+    )
+
 
 _COMPACTION_PROMPT = """You are summarizing a portion of a proposal-drafting conversation.
 
@@ -192,7 +210,7 @@ def compact_workspace(
         # remove. Found by an outside review of the shipped branch.
         summary_text = envelope["choices"][0]["message"]["content"]
         used_model = envelope.get("model") or getattr(summarizer_client, "model", "unknown")
-    except Exception:
+    except Exception as exc:
         # Record the attempt on a FRESH session: `s` is still bound here (Python's
         # `with` does not scope its target) but it is the read session already
         # closed above, and SQLAlchemy 2.0 happily writes through a closed
@@ -203,7 +221,11 @@ def compact_workspace(
         # SUCCEEDED and decoding threw, the tokens were really spent and are
         # right here; recording zero would be the same undercount this ledger
         # exists to remove.
-        usage = (envelope or {}).get("usage") or {}
+        # An error raised AFTER the API answered (a reply cut off at
+        # max_tokens, no text) carries the billed usage on `.usage`
+        # (AnthropicClient._billed); without it this stored 0 and the global
+        # cap never saw spend that a failing compaction re-billed every tick.
+        usage = (envelope or {}).get("usage") or getattr(exc, "usage", None) or {}
         with session_factory() as fail_s:
             record_spend(
                 fail_s,
@@ -300,6 +322,17 @@ def run_compaction_tick(
         with session_factory() as s:
             if not needs_compaction(s, wsid, settings=settings):
                 continue
+            failures = _billed_compaction_failures_today(s, wsid)
+        if failures >= COMPACTION_MAX_BILLED_FAILURES_PER_DAY:
+            logger.warning(
+                "compaction_tick: skipping a workspace whose compaction keeps failing",
+                extra={
+                    "event": "compaction_skipped_repeated_failures",
+                    "workspace_id": str(wsid),
+                    "billed_failures_24h": failures,
+                },
+            )
+            continue
         if client is None:
             client = summarizer_client_factory()
         try:

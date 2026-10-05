@@ -42,7 +42,7 @@ SpendKind = Literal[
 ]
 SpendStatus = Literal["ok", "failed", "timeout"]
 
-__all__ = ["SpendKind", "SpendStatus", "record_spend", "sum_spend_today"]
+__all__ = ["SpendKind", "SpendStatus", "count_billed_failures", "record_spend", "sum_spend_today"]
 
 
 def record_spend(
@@ -97,3 +97,28 @@ def sum_spend_today(
         stmt = stmt.where(LlmSpend.workspace_id == workspace_id)
     row = session.execute(stmt).one()
     return int(row[0]), int(row[1])
+
+
+def count_billed_failures(
+    session: Session,
+    *,
+    workspace_id: uuid.UUID,
+    kind: SpendKind,
+    since: datetime,
+) -> int:
+    """Failed calls of `kind` for this workspace since `since` that were billed
+    (any tokens recorded). A failure with no tokens never got an answer and cost
+    nothing. compaction.py uses it to stop re-billing a summary that keeps
+    failing; it lives here because this module is the ledger's only reader and
+    writer (tests/fencing/test_spend_guard.py)."""
+    return session.scalar(
+        select(func.count())
+        .select_from(LlmSpend)
+        .where(
+            LlmSpend.workspace_id == workspace_id,
+            LlmSpend.kind == kind,
+            LlmSpend.status == "failed",
+            LlmSpend.tokens_in + LlmSpend.tokens_out > 0,
+            LlmSpend.created_at >= since,
+        )
+    )

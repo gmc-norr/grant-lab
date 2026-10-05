@@ -66,9 +66,7 @@ def run_compaction(pg_session_factory, monkeypatch, _settings_env):
             else:
                 ws = s.get(Workspace, workspace_id)
             for i in range(3):
-                make_chat_turn(
-                    s, ws, role="user", content={"type": "text", "text": f"turn {i}"}
-                )
+                make_chat_turn(s, ws, role="user", content={"type": "text", "text": f"turn {i}"})
             s.commit()
         client = _stub_summarizer_client(
             tokens_in=tokens_in, tokens_out=tokens_out, outcome=outcome
@@ -97,9 +95,7 @@ def run_compaction_tick(pg_session_factory, monkeypatch, _settings_env):
         with pg_session_factory() as s:
             ws = make_workspace(s, owner=make_user(s, email="tick@umu.se"))
             for i in range(3):
-                make_chat_turn(
-                    s, ws, role="user", content={"type": "text", "text": f"tick {i}"}
-                )
+                make_chat_turn(s, ws, role="user", content={"type": "text", "text": f"tick {i}"})
             s.commit()
         client = _stub_summarizer_client(tokens_in=10, tokens_out=5, outcome="ok")
         return _run_compaction_tick(
@@ -155,9 +151,7 @@ def at_cap(pg_session_factory, monkeypatch, _settings_env):
             # Un-summarized turns so compact_workspace reaches the cap check
             # rather than returning None for "no turns to summarize".
             for i in range(3):
-                make_chat_turn(
-                    s, ws, role="user", content={"type": "text", "text": f"c{i}"}
-                )
+                make_chat_turn(s, ws, role="user", content={"type": "text", "text": f"c{i}"})
             s.commit()
             return ws.id
 
@@ -211,3 +205,116 @@ def test_a_failed_compaction_still_records(pg_session_factory, run_compaction):
         row = s.execute(select(LlmSpend).where(LlmSpend.kind == "compaction")).scalar_one()
         assert row.status == "failed"
         assert (row.tokens_in, row.tokens_out) == (0, 0)
+
+
+def test_a_compaction_cut_off_after_the_api_answered_records_the_billed_usage(
+    pg_session_factory, _settings_env
+):
+    """The REAL AnthropicClient: the reply hit max_tokens, so the client raises
+    after Anthropic has billed the call. The failed row used to store 0 tokens,
+    so the global cap never saw the spend and the tick re-billed it every 300 s
+    (second review 2026-10-05). The error now carries the usage."""
+    from unittest.mock import MagicMock, patch
+
+    from grant_lab.config import Settings
+    from grant_lab.ranking.anthropic_client import AnthropicClient
+    from grant_lab.ranking.ollama_client import LLMError
+
+    with pg_session_factory() as s:
+        ws = make_workspace(s, owner=make_user(s, email="cutoff@umu.se"))
+        for i in range(3):
+            make_chat_turn(s, ws, role="user", content={"type": "text", "text": f"t{i}"})
+        s.commit()
+        ws_id = ws.id
+    client = AnthropicClient(api_key="sk-test", model="claude-opus-5")
+    block = MagicMock(type="text", text="partial")
+    reply = MagicMock(content=[block], model="claude-opus-5", stop_reason="max_tokens")
+    reply.usage = MagicMock(
+        input_tokens=900,
+        output_tokens=4096,
+        cache_read_input_tokens=0,
+        cache_creation_input_tokens=0,
+    )
+    with (
+        patch.object(client._client.messages, "create", return_value=reply),
+        pytest.raises(LLMError),
+    ):
+        compact_workspace(
+            session_factory=pg_session_factory,
+            workspace_id=ws_id,
+            summarizer_client=client,
+            settings=Settings(),
+        )
+    with pg_session_factory() as s:
+        row = s.execute(select(LlmSpend).where(LlmSpend.kind == "compaction")).scalar_one()
+        assert (row.status, row.tokens_in, row.tokens_out) == ("failed", 900, 4096)
+
+
+def _workspace_needing_compaction(s, email):
+    ws = make_workspace(s, owner=make_user(s, email=email))
+    for i in range(3):
+        make_chat_turn(s, ws, role="user", content={"type": "text", "text": f"b{i}"})
+    return ws
+
+
+def _failed_compactions(s, ws_id, n, *, tokens_in, hours_ago=1, status="failed"):
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+
+    for _ in range(n):
+        record_spend(
+            s,
+            workspace_id=ws_id,
+            kind="compaction",
+            status=status,
+            tokens_in=tokens_in,
+            tokens_out=0,
+        )
+    s.flush()
+    s.execute(
+        update(LlmSpend)
+        .where(LlmSpend.workspace_id == ws_id, LlmSpend.kind == "compaction")
+        .values(created_at=datetime.now(UTC) - timedelta(hours=hours_ago))
+    )
+
+
+@pytest.mark.parametrize(
+    "n,tokens_in,hours_ago,status,called",
+    [
+        (3, 900, 1, "failed", False),  # three billed failures today: stop paying
+        (2, 900, 1, "failed", True),  # two: one more try
+        (3, 900, 25, "failed", True),  # older than 24 h: the window has passed
+        (3, 0, 1, "failed", True),  # unbilled (the call never answered): retrying is free
+        (3, 900, 1, "ok", True),  # successful compactions are not failures
+    ],
+)
+def test_the_tick_stops_retrying_a_compaction_that_keeps_failing_billed(
+    pg_session_factory, monkeypatch, _settings_env, n, tokens_in, hours_ago, status, called
+):
+    """A compaction that fails after the API answered (cut off, refused) fails
+    the same way on every 300 s tick, and each try is billed. After
+    COMPACTION_MAX_BILLED_FAILURES_PER_DAY billed failures in the trailing
+    24 h the tick skips that workspace."""
+    from unittest.mock import MagicMock
+
+    from grant_lab.config import Settings
+
+    monkeypatch.setenv("COMPACTION_TURN_THRESHOLD", "2")
+    with pg_session_factory() as s:
+        ws = _workspace_needing_compaction(s, "retry@umu.se")
+        _failed_compactions(s, ws.id, n, tokens_in=tokens_in, hours_ago=hours_ago, status=status)
+        s.commit()
+    client = MagicMock()
+    client.model = "claude-opus-5"
+    client.chat.return_value = {
+        "choices": [{"message": {"role": "assistant", "content": "A summary."}}],
+        "model": "claude-opus-5",
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }
+    _run_compaction_tick(
+        session_factory=pg_session_factory,
+        summarizer_client_factory=lambda: client,
+        settings=Settings(),
+    )
+    assert client.chat.called is called
