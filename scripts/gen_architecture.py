@@ -191,6 +191,14 @@ def parse_gate_allowlists() -> list[tuple[str, int]]:
     return out
 
 
+def _is_status_like(nm: str | None, expr: str) -> bool:
+    """A CHECK on a lifecycle column: `status` anywhere, or `state` as a whole
+    word or after `_`. escalation_state yes; ck_collab_artifact_state_artifact
+    (a table name) and a word like `estate` no."""
+    text = f"{nm or ''} {expr}".lower()
+    return "status" in text or re.search(r"(?<![a-z0-9])state\b", text) is not None
+
+
 def render() -> str:
     tables = parse_models()
     L: list[str] = []
@@ -255,10 +263,7 @@ def render() -> str:
     A("|---|---|---|")
     for t in sorted(tables, key=lambda x: x.table):
         for nm, expr in t.checks:
-            # `state` must end its word: escalation_state yes, a table named
-            # collab_artifact_state (ck_collab_artifact_state_artifact) no.
-            text = f"{nm or ''} {expr}".lower()
-            if "status" in text or re.search(r"state\b", text):
+            if _is_status_like(nm, expr):
                 A(f"| `{t.table}` | `{nm}` | `{expr}` |")
     A("")
 
