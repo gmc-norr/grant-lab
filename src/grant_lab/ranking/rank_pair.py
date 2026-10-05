@@ -18,6 +18,7 @@ from grant_lab.ranking.prompt import (
     ParseError,
     build_messages,
     parse_response,
+    rank_response_format,
 )
 
 _logger = logging.getLogger(__name__)
@@ -207,7 +208,7 @@ def rank_pair(
     try:
         remote_envelope = remote_client.chat(
             messages=build_messages(profile=profile, call=call, enable_analysis=True),
-            response_format={"type": "json_object"},
+            response_format=rank_response_format(),
         )
         remote_content = remote_envelope["choices"][0]["message"]["content"]
         remote_parsed = parse_response(

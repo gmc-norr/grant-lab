@@ -7,6 +7,7 @@ from functools import partial
 import httpx
 
 from grant_lab.ranking.ollama_client import OllamaClient
+from grant_lab.ranking.prompt import rank_response_format
 from grant_lab.ranking.rank_pair import RankResult
 from grant_lab.ranking.rank_pair import rank_pair as _rank_pair
 
@@ -192,6 +193,34 @@ def test_rank_pair_escalates_when_local_score_at_or_above_threshold():
     assert r.analysis_model == "claude-sonnet-4-6"
     assert r.escalation_attempted is True
     assert r.escalation_outcome == "success"
+
+
+def test_rank_pair_holds_only_the_remote_reply_to_the_rank_schema():
+    """The escalation asks for schema-constrained JSON (structured outputs);
+    the local Gemma call keeps plain JSON mode."""
+    profile = _Profile(structured={"areas": [], "hard_exclusions": []})
+    call = _Call(deadline=_NOW.replace(year=2099))
+    local = _ollama_mock(
+        content={
+            "topic_fit": {"rating": 4, "rationale": "ok"},
+            "eligibility": {"rating": "pass"},
+            "exclusions": {"rating": "pass"},
+        }
+    )
+    from unittest.mock import MagicMock
+
+    local.chat = MagicMock(wraps=local.chat)
+    remote = _remote_mock()
+    rank_pair(
+        client=local,
+        profile=profile,
+        call=call,
+        now=_NOW,
+        remote_client=remote,
+        escalation_min_score=45,
+    )
+    assert remote.chat.call_args.kwargs["response_format"] == rank_response_format()
+    assert local.chat.call_args.kwargs["response_format"] == {"type": "json_object"}
 
 
 def test_rank_pair_does_not_escalate_below_threshold_clean_eligibility():

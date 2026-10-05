@@ -107,6 +107,29 @@ def test_chat_applies_prompt_caching_to_system_block():
     assert system[0]["cache_control"]["type"] == "ephemeral"
 
 
+def test_chat_sends_a_json_schema_response_format_as_output_config():
+    """Structured outputs: the API then guarantees JSON matching the schema.
+    Without it Sonnet wrote ~10% of rankings with a stray `;` (2026-10-05)."""
+    client = AnthropicClient(api_key="sk-test")
+    schema = {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
+    response_format = {"type": "json_schema", "json_schema": {"name": "x", "schema": schema}}
+    with patch.object(client._client.messages, "create", return_value=_fake_response("{}")) as mock:
+        _call_chat(client, response_format=response_format)
+    assert mock.call_args.kwargs["output_config"] == {
+        "format": {"type": "json_schema", "schema": schema}
+    }
+
+
+@pytest.mark.parametrize("response_format", [None, {"type": "json_object"}])
+def test_chat_without_a_schema_sends_no_output_config(response_format):
+    """Proposal-assist and citations share this client and send no schema;
+    their requests must not change."""
+    client = AnthropicClient(api_key="sk-test")
+    with patch.object(client._client.messages, "create", return_value=_fake_response("{}")) as mock:
+        _call_chat(client, response_format=response_format)
+    assert "output_config" not in mock.call_args.kwargs
+
+
 def test_chat_handles_empty_system():
     """Some callers may build a single-user-turn message list. We must
     not break by passing an empty system list to Anthropic."""

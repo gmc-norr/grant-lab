@@ -135,6 +135,60 @@ In addition to the rating fields, populate `summary` and `applicant_notes`:
     criteria weightings. Skip categories with nothing notable; do not
     pad. Each `text` should be one concise sentence."""
 
+
+def _criterion_schema(rating: dict) -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "rating": rating,
+            "rationale": {"type": "string"},
+            "quoted_evidence": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        },
+        "required": ["rating", "rationale", "quoted_evidence"],
+        "additionalProperties": False,
+    }
+
+
+# The analysis-mode reply (the remote escalation) as a JSON schema, sent as
+# structured outputs so the API guarantees parseable JSON. Free-hand, Sonnet
+# broke ~10% of replies, e.g. a stray `;` after `summary` (probe 2026-10-05).
+# It allows exactly what parse_response accepts; the API takes no numeric
+# ranges, so the 0-5 rating is an enum. Categories are sorted: a frozenset's
+# order changes between processes, and the schema must not.
+RANK_RESPONSE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "topic_fit": _criterion_schema({"type": "integer", "enum": [0, 1, 2, 3, 4, 5]}),
+        "eligibility": _criterion_schema({"type": "string", "enum": ["pass", "fail", "unclear"]}),
+        "exclusions": _criterion_schema({"type": "string", "enum": ["pass", "fail"]}),
+        "summary": {"type": "string"},
+        "applicant_notes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "enum": sorted(_ANALYSIS_CATEGORIES)},
+                    "text": {"type": "string"},
+                },
+                "required": ["category", "text"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["topic_fit", "eligibility", "exclusions", "summary", "applicant_notes"],
+    "additionalProperties": False,
+}
+
+
+def rank_response_format() -> dict:
+    """RANK_RESPONSE_SCHEMA in the OpenAI `response_format` shape the ranking
+    clients take. AnthropicClient sends it as structured outputs."""
+    return {
+        "type": "json_schema",
+        "json_schema": {"name": "call_ranking", "strict": True, "schema": RANK_RESPONSE_SCHEMA},
+    }
+
+
 # EVERY call field is fenced inside the explicit CALL_BODY markers (mirrored
 # by the SECURITY note in the system prompt) so the model can tell where the
 # untrusted external call text begins and ends, and treat all of it — title,

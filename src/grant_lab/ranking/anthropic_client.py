@@ -58,7 +58,7 @@ class AnthropicClient:
         self,
         *,
         messages: list[dict],
-        response_format: dict | None = None,  # accepted for parity, currently unused
+        response_format: dict | None = None,
     ) -> dict:
         """Run a ranking turn. Returns the OpenAI ChatCompletion envelope.
 
@@ -73,10 +73,12 @@ class AnthropicClient:
         <str>}}], "model": self.model}` — the shape `rank_pair` already
         knows how to destructure.
 
-        `response_format` is accepted to match OllamaClient's signature
-        but ignored — Anthropic doesn't expose an OpenAI-style JSON-mode
-        toggle, and the existing prompt already pins JSON output via
-        explicit schema instructions.
+        `response_format` takes OllamaClient's (OpenAI) shape. A
+        `json_schema` one is sent as structured outputs (`output_config`),
+        so the API guarantees JSON matching it; the remote ranker sends
+        prompt.rank_response_format(). Anything else (`json_object`, None)
+        sends nothing: Anthropic has no plain JSON mode, and proposal-assist
+        and citations share this client without a schema.
         """
         system_text, user_msgs = _split_system(messages)
 
@@ -98,11 +100,13 @@ class AnthropicClient:
                 else []
             )
 
+            output_config = _output_config(response_format)
             response = self._client.messages.create(
                 model=self.model,
                 max_tokens=self._max_tokens,
                 system=system_blocks,
                 messages=user_msgs,
+                **({"output_config": output_config} if output_config else {}),
             )
         except anthropic.APIStatusError as e:
             # Wrap into LLMError so the worker's existing retry/dead-letter
@@ -163,6 +167,14 @@ class AnthropicClient:
                 ),
             },
         }
+
+
+def _output_config(response_format: dict | None) -> dict | None:
+    """An OpenAI `json_schema` response_format as Anthropic structured
+    outputs; None for any other format."""
+    if not response_format or response_format.get("type") != "json_schema":
+        return None
+    return {"format": {"type": "json_schema", "schema": response_format["json_schema"]["schema"]}}
 
 
 def _split_system(messages: list[dict]) -> tuple[str, list[dict]]:
