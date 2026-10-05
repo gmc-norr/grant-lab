@@ -140,7 +140,6 @@ def next_escalation_state(
     wanted: bool,
     escalated: bool,
     remote_configured: bool,
-    remote_withheld: bool,
     outcome: str | None,
     prev_failures: int,
 ) -> tuple[str | None, int]:

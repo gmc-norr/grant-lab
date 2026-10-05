@@ -343,7 +343,6 @@ def drain_queue(
                     wanted=result.escalation_wanted,
                     escalated=result.escalated,
                     remote_configured=remote_client is not None,
-                    remote_withheld=remote_client is not None and effective_remote is None,
                     outcome=result.escalation_outcome,
                     prev_failures=existing.escalation_failures if same_revision else 0,
                 )
