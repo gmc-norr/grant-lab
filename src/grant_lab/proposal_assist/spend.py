@@ -25,7 +25,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from grant_lab.db.models import LlmSpend
@@ -42,7 +42,7 @@ SpendKind = Literal[
 ]
 SpendStatus = Literal["ok", "failed", "timeout"]
 
-__all__ = ["SpendKind", "SpendStatus", "count_billed_failures", "record_spend", "sum_spend_today"]
+__all__ = ["SpendKind", "SpendStatus", "count_billed_attempts", "record_spend", "sum_spend_today"]
 
 
 def record_spend(
@@ -99,26 +99,27 @@ def sum_spend_today(
     return int(row[0]), int(row[1])
 
 
-def count_billed_failures(
+def count_billed_attempts(
     session: Session,
     *,
     workspace_id: uuid.UUID,
     kind: SpendKind,
     since: datetime,
 ) -> int:
-    """Failed calls of `kind` for this workspace since `since` that were billed
-    (any tokens recorded). A failure with no tokens never got an answer and cost
-    nothing. compaction.py uses it to stop re-billing a summary that keeps
-    failing; it lives here because this module is the ledger's only reader and
-    writer (tests/fencing/test_spend_guard.py)."""
+    """Rows of `kind` for this workspace since `since` that may have cost
+    money: any recorded tokens, whatever the status, or a `timeout` (the
+    server may have finished and billed a reply the client gave up on). A
+    failure with no tokens never got an answer and cost nothing. compaction.py
+    passes `since` = its last summary, so an `ok` row after it is a billed call
+    whose summary write failed. It lives here because this module is the
+    ledger's only reader and writer (tests/fencing/test_spend_guard.py)."""
     return session.scalar(
         select(func.count())
         .select_from(LlmSpend)
         .where(
             LlmSpend.workspace_id == workspace_id,
             LlmSpend.kind == kind,
-            LlmSpend.status == "failed",
-            LlmSpend.tokens_in + LlmSpend.tokens_out > 0,
-            LlmSpend.created_at >= since,
+            or_(LlmSpend.tokens_in + LlmSpend.tokens_out > 0, LlmSpend.status == "timeout"),
+            LlmSpend.created_at > since,
         )
     )

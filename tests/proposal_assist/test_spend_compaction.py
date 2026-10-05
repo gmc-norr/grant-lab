@@ -252,12 +252,15 @@ def test_a_compaction_cut_off_after_the_api_answered_records_the_billed_usage(
 
 def _workspace_needing_compaction(s, email):
     ws = make_workspace(s, owner=make_user(s, email=email))
-    for i in range(3):
-        make_chat_turn(s, ws, role="user", content={"type": "text", "text": f"b{i}"})
-    return ws
+    turns = [
+        make_chat_turn(s, ws, role="user", content={"type": "text", "text": f"{email} turn {i}"})
+        for i in range(3)
+    ]
+    return ws, turns
 
 
-def _failed_compactions(s, ws_id, n, *, tokens_in, hours_ago=1, status="failed"):
+def _spend_rows(s, ws_id, n, *, status, tokens_in, hours_ago, kind="compaction"):
+    """n compaction-ledger rows, `hours_ago` old."""
     from datetime import UTC, datetime, timedelta
 
     from sqlalchemy import update
@@ -266,7 +269,7 @@ def _failed_compactions(s, ws_id, n, *, tokens_in, hours_ago=1, status="failed")
         record_spend(
             s,
             workspace_id=ws_id,
-            kind="compaction",
+            kind=kind,
             status=status,
             tokens_in=tokens_in,
             tokens_out=0,
@@ -274,37 +277,71 @@ def _failed_compactions(s, ws_id, n, *, tokens_in, hours_ago=1, status="failed")
     s.flush()
     s.execute(
         update(LlmSpend)
-        .where(LlmSpend.workspace_id == ws_id, LlmSpend.kind == "compaction")
+        .where(LlmSpend.workspace_id == ws_id, LlmSpend.kind == kind)
         .values(created_at=datetime.now(UTC) - timedelta(hours=hours_ago))
     )
 
 
+_FAILED = dict(status="failed", tokens_in=900, hours_ago=1)
+
+
 @pytest.mark.parametrize(
-    "n,tokens_in,hours_ago,status,called",
+    "rows,summary_after,elsewhere,called",
     [
-        (3, 900, 1, "failed", False),  # three billed failures today: stop paying
-        (2, 900, 1, "failed", True),  # two: one more try
-        (3, 900, 25, "failed", True),  # older than 24 h: the window has passed
-        (3, 0, 1, "failed", True),  # unbilled (the call never answered): retrying is free
-        (3, 900, 1, "ok", True),  # successful compactions are not failures
+        # Three billed failures today: stop paying.
+        (dict(_FAILED, n=3), False, False, False),
+        # Two: one more try.
+        (dict(_FAILED, n=2), False, False, True),
+        # Older than 24 h: the window has passed.
+        (dict(_FAILED, n=3, hours_ago=25), False, False, True),
+        # Unbilled (the call never answered): retrying is free.
+        (dict(_FAILED, n=3, tokens_in=0), False, False, True),
+        # Timeouts: the server may have finished and billed (finding 1).
+        (dict(_FAILED, n=3, status="timeout", tokens_in=0), False, False, False),
+        # Billed "ok" rows with no summary after them: the call succeeded but the
+        # summary write failed, every tick (finding 6).
+        (dict(_FAILED, n=3, status="ok"), False, False, False),
+        # A summary written after the failures: compaction works again, the old
+        # failures no longer count (finding 2).
+        (dict(_FAILED, n=3), True, False, True),
+        # Three billed failures in ANOTHER workspace, or of another kind here:
+        # none of this workspace's compaction business (finding 3).
+        (dict(_FAILED, n=3), False, "workspace", True),
+        (dict(_FAILED, n=3, kind="chat_turn"), False, False, True),
     ],
 )
-def test_the_tick_stops_retrying_a_compaction_that_keeps_failing_billed(
-    pg_session_factory, monkeypatch, _settings_env, n, tokens_in, hours_ago, status, called
+def test_the_tick_stops_retrying_a_compaction_that_keeps_costing(
+    pg_session_factory, monkeypatch, _settings_env, rows, summary_after, elsewhere, called
 ):
-    """A compaction that fails after the API answered (cut off, refused) fails
-    the same way on every 300 s tick, and each try is billed. After
-    COMPACTION_MAX_BILLED_FAILURES_PER_DAY billed failures in the trailing
-    24 h the tick skips that workspace."""
+    """A compaction that fails after the API answered (cut off, timed out, or
+    the summary write failing) fails the same way on every 300 s tick, and
+    each try is billed. After COMPACTION_MAX_BILLED_ATTEMPTS billed attempts
+    since the last summary, within 24 h, the tick skips the workspace."""
     from unittest.mock import MagicMock
 
     from grant_lab.config import Settings
+    from grant_lab.db.models import ChatSummary
 
     monkeypatch.setenv("COMPACTION_TURN_THRESHOLD", "2")
     with pg_session_factory() as s:
-        ws = _workspace_needing_compaction(s, "retry@umu.se")
-        _failed_compactions(s, ws.id, n, tokens_in=tokens_in, hours_ago=hours_ago, status=status)
+        ws, turns = _workspace_needing_compaction(s, "retry@umu.se")
+        target = ws.id
+        if elsewhere == "workspace":
+            other, _ = _workspace_needing_compaction(s, "other@umu.se")
+            target = other.id
+        _spend_rows(s, target, **rows)
+        if summary_after:
+            s.add(
+                ChatSummary(
+                    workspace_id=ws.id,
+                    summary="earlier",
+                    summarized_through=turns[0].id,
+                    tokens=1,
+                    model="claude-opus-5",
+                )
+            )
         s.commit()
+        ws_id = ws.id
     client = MagicMock()
     client.model = "claude-opus-5"
     client.chat.return_value = {
@@ -317,4 +354,88 @@ def test_the_tick_stops_retrying_a_compaction_that_keeps_failing_billed(
         summarizer_client_factory=lambda: client,
         settings=Settings(),
     )
-    assert client.chat.called is called
+    contents = [str(c.kwargs["messages"]) for c in client.chat.call_args_list]
+    assert any("retry@umu.se turn 1" in m for m in contents) is called, ws_id
+
+
+def test_a_timed_out_compaction_is_recorded_as_a_timeout(pg_session_factory, _settings_env):
+    """The real client's timeout reaches compact_workspace as a TimeoutError and
+    is recorded `timeout`, which the tick counts as possibly billed."""
+    from unittest.mock import patch
+
+    import anthropic
+    import httpx
+
+    from grant_lab.config import Settings
+    from grant_lab.ranking.anthropic_client import AnthropicClient
+    from grant_lab.ranking.ollama_client import LLMError
+
+    with pg_session_factory() as s:
+        ws, _ = _workspace_needing_compaction(s, "timeout@umu.se")
+        s.commit()
+        ws_id = ws.id
+    client = AnthropicClient(api_key="sk-test", model="claude-opus-5", max_retries=0)
+    timeout = anthropic.APITimeoutError(request=httpx.Request("POST", "https://api.example"))
+    with (
+        patch.object(client._client.messages, "create", side_effect=timeout),
+        pytest.raises(LLMError),
+    ):
+        compact_workspace(
+            session_factory=pg_session_factory,
+            workspace_id=ws_id,
+            summarizer_client=client,
+            settings=Settings(),
+        )
+    with pg_session_factory() as s:
+        row = s.execute(select(LlmSpend).where(LlmSpend.kind == "compaction")).scalar_one()
+        assert row.status == "timeout"
+
+
+def test_the_scheduled_compaction_client_does_not_retry_on_its_own(monkeypatch):
+    """The tick is the retry. SDK retries on top made each billed attempt
+    three (review 2026-10-05, finding 1). Built through the real
+    build_scheduler, as test_kill_switch does."""
+    from unittest.mock import MagicMock
+
+    from grant_lab.config import Settings
+    from grant_lab.proposal_assist.drafting.factory import build_workspace_controller
+    from grant_lab.scheduler import build_scheduler
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://x:y@127.0.0.1/z")
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-at-least-16-chars")
+    monkeypatch.setenv("ALLOWED_EMAIL_DOMAINS", "umu.se")
+    monkeypatch.setenv("APP_BASE_URL", "http://testserver")
+    monkeypatch.setenv("DRAFTING_ENABLED", "true")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")
+    monkeypatch.setenv("DRAFTING_ADAPTER", "fake")
+    settings = Settings()
+    calls: list = []
+    monkeypatch.setattr(
+        "grant_lab.proposal_assist.turns.compaction.run_compaction_tick",
+        lambda **kw: calls.append(kw),
+    )
+
+    def session_factory():
+        return None
+
+    sched = build_scheduler(
+        session_factory=session_factory,
+        settings=settings,
+        alerter=MagicMock(),
+        ollama_url=settings.ollama_url,
+        gemma_model=settings.gemma_model,
+        ranking_tick_seconds=settings.ranking_tick_seconds,
+        ranking_queue_batch=settings.ranking_queue_batch,
+        embedding_pregate_threshold=settings.embedding_pregate_threshold,
+        embed_client=MagicMock(model="bge-m3"),
+        workspace_controller=build_workspace_controller(
+            settings=settings, session_factory=session_factory
+        ),
+        start=False,
+    )
+    try:
+        sched.get_job("compaction_tick").func()
+    finally:
+        sched.shutdown(wait=False)
+    (kw,) = calls
+    assert kw["summarizer_client_factory"]()._client.max_retries == 0

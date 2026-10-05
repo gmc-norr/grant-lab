@@ -420,3 +420,31 @@ def test_an_error_raised_after_the_api_answered_carries_the_billed_usage(stop_re
         _call_chat(client, response_format=response_format)
     assert raised.value.usage["prompt_tokens"] == 120
     assert raised.value.usage["completion_tokens"] == 80
+
+
+def test_a_timeout_is_an_llm_error_and_a_timeout_error():
+    """The server may have finished (and billed) a reply the client gave up
+    on, so callers that record spend mark it `timeout`, not a free failure:
+    compaction counts it toward its retry limit, and citations' existing
+    `except TimeoutError` branch records it (review 2026-10-05, finding 1)."""
+    import anthropic
+    import httpx
+
+    from grant_lab.ranking.anthropic_client import AnthropicTimeoutError
+
+    client = AnthropicClient(api_key="sk-test")
+    timeout = anthropic.APITimeoutError(request=httpx.Request("POST", "https://api.example"))
+    with (
+        patch.object(client._client.messages, "create", side_effect=timeout),
+        pytest.raises(AnthropicTimeoutError) as raised,
+    ):
+        _call_chat(client)
+    assert isinstance(raised.value, LLMError)
+    assert isinstance(raised.value, TimeoutError)
+
+
+def test_max_retries_reaches_the_sdk():
+    """Compaction's tick already retries every 300 s; SDK retries on top
+    multiplied each billed attempt by three (review 2026-10-05)."""
+    assert AnthropicClient(api_key="sk-test", max_retries=0)._client.max_retries == 0
+    assert AnthropicClient(api_key="sk-test")._client.max_retries == 2

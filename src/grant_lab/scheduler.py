@@ -1342,9 +1342,13 @@ def build_scheduler(
         from grant_lab.proposal_assist.turns.compaction import run_compaction_tick
 
         def make_summarizer_client() -> AnthropicClient:
+            # The tick IS the retry (every 300 s, capped by
+            # COMPACTION_MAX_BILLED_ATTEMPTS); SDK retries on top made each
+            # billed attempt three.
             return AnthropicClient(
                 api_key=settings.anthropic_api_key,
                 model=settings.proposal_assist_llm_model,
+                max_retries=0,
             )
 
         if not settings.anthropic_api_key:

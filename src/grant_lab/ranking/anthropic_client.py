@@ -43,6 +43,13 @@ class UnusableReplyError(LLMError, ParseError):
     them, and a refusal raises this only on a schema request."""
 
 
+class AnthropicTimeoutError(LLMError, TimeoutError):
+    """The client gave up waiting. The server may still have finished, and
+    billed, the reply, so callers that record spend mark it `timeout` rather
+    than a free failure (compaction counts it toward its retry limit;
+    citations' `except TimeoutError` branch records it)."""
+
+
 class AnthropicClient:
     """Thin wrapper for anthropic.messages.create() that returns the
     OpenAI-compatible envelope shape OllamaClient produces.
@@ -59,10 +66,16 @@ class AnthropicClient:
         model: str = "claude-sonnet-5",
         max_tokens: int = 4096,
         timeout: float = 120.0,
+        max_retries: int = 2,
     ):
         # api_key kept off the instance so repr() doesn't accidentally
         # echo it; the SDK closes over it.
-        self._client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
+        # max_retries is the SDK's own (default 2). A caller that already
+        # retries on a schedule (compaction's tick) passes 0, or each billed
+        # attempt becomes three.
+        self._client = anthropic.Anthropic(
+            api_key=api_key, timeout=timeout, max_retries=max_retries
+        )
         self.model = model
         self._max_tokens = max_tokens
 
@@ -126,6 +139,9 @@ class AnthropicClient:
             # request_id when present — invaluable for support tickets.
             req_id = getattr(e.response, "headers", {}).get("request-id", "")
             raise LLMError(f"anthropic {e.status_code} (request_id={req_id}): {e.message}") from e
+        except anthropic.APITimeoutError as e:
+            # Before APIConnectionError, which it subclasses.
+            raise AnthropicTimeoutError(f"anthropic timeout: {e}") from e
         except anthropic.APIConnectionError as e:
             raise LLMError(f"anthropic connection error: {e}") from e
         except anthropic.APIError as e:
