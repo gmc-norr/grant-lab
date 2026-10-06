@@ -2593,6 +2593,14 @@ export interface paths {
          *     Monitoring should treat any non-200 as "do not route traffic / page
          *     operator." We ping the database with `SELECT 1` so an unreachable DB
          *     surfaces as 503 instead of being silently invisible.
+         *
+         *     A process that does not hold the single-instance lock is a 503 too, unless
+         *     it was booted as a deliberate standby (SCHEDULER_STANDBY_OK=true). Since
+         *     93a5ea26 the watchdog STOPS the scheduler when the lock is lost, so a 200
+         *     there meant HTTP up, zero scheduled work, and every status-code monitor
+         *     green (review 2026-10-06 M12). The same holds for a process whose lock
+         *     probe failed at boot: no scheduler ever started, and only a restart fixes
+         *     it. The body still says why.
          */
         get: operations["healthz_healthz_get"];
         put?: never;
