@@ -54,6 +54,20 @@ generation fence for disable, restore and purge.
 
 ## Whole-project architecture reviews
 
+**[reviews/2026-10-06-whole-project-review.md](reviews/2026-10-06-whole-project-review.md)**
+*What is still wrong at `c94f2de3`, 228 commits after the 2026-09-05 review, once every prior
+open finding is re-run and every subsystem is mutated rather than read?* Nine worktree-isolated
+reviewers plus coordinator-run baselines and three read-only probes of the live database.
+**94 prior-open findings: 57 fixed, 7 partial, 26 still open (none High), 4 n/a.** ~120
+mutations; all but ~10 reddened the named test. Three live Highs the gates cannot see: **the CI
+`test` job has never executed on GitHub** (the `google/osv-scanner-action` pin points at the repo
+root, which has no `runs:`; 63 commits unpushed; 25 pip + 4 high pnpm advisories unrun);
+**Phase 0 setup bills Opus with no cap check and no ledger row**; and **every EU call closes in
+the feed at 02:00 Stockholm on its last day, not 17:00 Brussels** (670 of 676 stored EU
+deadlines sit at 00:00 UTC). Grade **B+**, unchanged. Carries the Sonnet 5.5 ledger
+measurement (44/44 success, max 1077 output tokens of 4096), the corridor-wall re-run (8/8
+titles at height 0 at 1366x768), and the full re-verification table in Appendix A9.
+
 **[reviews/2026-09-05-architecture-review.md](reviews/2026-09-05-architecture-review.md)**
 *What is the architecture at `ed1153a3`, after review §7 closed and the Call Match
 edition split landed — and does the split hold at the process boundary?* Measured, not
