@@ -13,6 +13,13 @@ from grant_lab.proposal_assist.phases.setup import run_phase0_tick
 from tests.proposal_assist.conftest import make_call, make_workspace
 
 
+class _UNCAPPED:
+    """The two fields the tick's global-cap check reads, set out of reach."""
+
+    global_daily_token_cap_input = 10**12
+    global_daily_token_cap_output = 10**12
+
+
 def _section_envelope() -> dict:
     return {
         "choices": [
@@ -80,6 +87,7 @@ def test_run_phase0_tick_drains_one_queued_job(
         extractor_version="sections-v1",
         rubric_extractor_version="rubric-v1",
         workspaces_dir=str(tmp_path / "repos"),
+        settings=_UNCAPPED,
     )
 
     with pg_session_factory() as s:
@@ -100,6 +108,7 @@ def test_run_phase0_tick_is_a_noop_when_queue_empty(
         extractor_version="sections-v1",
         rubric_extractor_version="rubric-v1",
         workspaces_dir=str(tmp_path / "repos"),
+        settings=_UNCAPPED,
     )
     # No assertion needed — absence of exception is the contract.
 
@@ -122,6 +131,7 @@ def test_run_phase0_tick_does_not_build_client_when_queue_empty(
         extractor_version="sections-v1",
         rubric_extractor_version="rubric-v1",
         workspaces_dir=str(tmp_path / "repos"),
+        settings=_UNCAPPED,
     )
     assert factory_calls["n"] == 0
 

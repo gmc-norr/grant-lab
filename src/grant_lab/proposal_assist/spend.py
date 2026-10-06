@@ -12,11 +12,13 @@ Rules for callers:
     looked" are different facts; a missing row cannot express the second.
   * The caller commits. This only adds to the session, so the row normally lands
     in the same transaction as the job's own status change and cannot half-happen.
-  * ONE deliberate exception: turns/compaction.py commits its success row on its
-    own session BEFORE writing the summary. Atomicity is the wrong priority once
-    the money is already spent — a failure persisting the summary must not roll
-    the row back with it. Prefer the same transaction; break it only where the
-    spend would otherwise be lost, and say so at the call site.
+  * TWO deliberate exceptions: turns/compaction.py commits its success row on
+    its own session BEFORE writing the summary, and phases/setup.py commits each
+    extractor's row before the locked persist (which a cancel, a delete or a
+    re-ingest can roll back). Atomicity is the wrong priority once the money is
+    already spent — a failure persisting the result must not roll the row back
+    with it. Prefer the same transaction; break it only where the spend would
+    otherwise be lost, and say so at the call site.
 """
 
 from __future__ import annotations
@@ -39,6 +41,9 @@ SpendKind = Literal[
     "review",
     "uncited_claims",
     "citation",
+    # Phase 0 workspace setup: the section and rubric extractors, one Opus call
+    # each per new call (review 2026-10-06 H2 — they billed outside the ledger).
+    "setup",
 ]
 SpendStatus = Literal["ok", "failed", "timeout"]
 

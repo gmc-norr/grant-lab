@@ -857,9 +857,13 @@ def build_scheduler(
             return
 
         def make_client() -> AnthropicClient:
+            # The job's MAX_SETUP_ATTEMPTS is the retry. SDK retries on top made
+            # each attempt up to three billed Opus calls (review 2026-10-06 H2),
+            # exactly as compaction's tick found.
             return AnthropicClient(
                 api_key=settings.anthropic_api_key,
                 model=settings.proposal_assist_llm_model,
+                max_retries=0,
             )
 
         # Deferred: importing the proposal-assist stack at module scope made a match
@@ -873,6 +877,7 @@ def build_scheduler(
             extractor_version=settings.extractor_version,
             rubric_extractor_version=settings.rubric_extractor_version,
             workspaces_dir=settings.workspaces_dir,
+            settings=settings,
         )
 
     sched.add_job(

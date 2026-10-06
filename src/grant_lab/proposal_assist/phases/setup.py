@@ -31,9 +31,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol, TypeVar
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from grant_lab.db.models import (
@@ -63,6 +64,8 @@ from grant_lab.proposal_assist.hashing import source_text_hash
 from grant_lab.proposal_assist.ports.errors import UnfencedInvocation
 from grant_lab.proposal_assist.ports.stamp import FenceStamp
 from grant_lab.proposal_assist.row_locks import RowLockTimeout, bounded_lock_waits
+from grant_lab.proposal_assist.spend import SpendStatus, record_spend
+from grant_lab.proposal_assist.turns.caps import check_global_daily_token_cap
 
 logger = logging.getLogger(__name__)
 
@@ -292,6 +295,49 @@ class _AnthropicClientLike(Protocol):
     ) -> dict: ...
 
 
+class _MeteredClient:
+    """The worker's client, seen through a meter: what the LAST chat() billed.
+
+    `usage` is the envelope's on success, the error's `.usage` when the API
+    answered and the client then raised (AnthropicClient's `_billed`), and None
+    when no reply came back. `called` says whether chat() was reached at all, so
+    a failure before any request writes no ledger row claiming one.
+    """
+
+    def __init__(self, inner: _AnthropicClientLike) -> None:
+        self._inner = inner
+        self.model = inner.model
+        self.usage: dict | None = None
+        self.called = False
+
+    def chat(self, *, messages: list[dict], response_format: dict | None = None) -> dict:
+        self.called = True
+        self.usage = None
+        try:
+            envelope = self._inner.chat(messages=messages, response_format=response_format)
+        except Exception as exc:
+            self.usage = getattr(exc, "usage", None)
+            raise
+        self.usage = envelope.get("usage") if isinstance(envelope, dict) else None
+        return envelope
+
+
+def _tokens(usage: dict | None) -> tuple[int, int]:
+    """(tokens_in, tokens_out). Anthropic reports cache reads and cache writes
+    apart from prompt_tokens, and the extractors' system prompt is cacheable,
+    so true input is the sum (as citations/llm.py tokens_from_usage does)."""
+    usage = usage or {}
+    tokens_in = (
+        int(usage.get("prompt_tokens") or 0)
+        + int(usage.get("cache_read_input_tokens") or 0)
+        + int(usage.get("cache_creation_input_tokens") or 0)
+    )
+    return tokens_in, int(usage.get("completion_tokens") or 0)
+
+
+_T = TypeVar("_T")
+
+
 def claim_next_setup_job(*, session: Session) -> WorkspaceSetupJob | None:
     """Claim the oldest queued job under SELECT FOR UPDATE SKIP LOCKED.
     Sets status='running', started_at, and claimed_at_generation. Caller commits.
@@ -371,6 +417,72 @@ class Phase0Worker:
         "proposal-plan.md",
         "proposal.md",
     )
+
+    def _metered(
+        self,
+        job_id: uuid.UUID,
+        workspace_id: uuid.UUID,
+        compute: Callable[[_AnthropicClientLike], _T],
+    ) -> tuple[_T, dict[str, Any] | None]:
+        """Run one extractor so its `setup` ledger row lands on EVERY terminal
+        path (review 2026-10-06 H2: these two Opus calls per new workspace used
+        to reach no ledger and no cap).
+
+        A failure writes its row here and re-raises: `failed` with whatever the
+        API billed (a reply that then fails to parse still cost its tokens), or
+        `timeout` (the server may have finished and billed a reply the client
+        gave up on). A success returns `(result, usage)` and the CALLER writes
+        the `ok` row in a `finally` after its locked persist. Not before it:
+        llm_spend.workspace_id is a foreign key, so the insert takes FOR KEY
+        SHARE on the workspace row and would queue behind any FOR UPDATE holder
+        ahead of _m3's job-row lock (test_m3_holds_the_job_row_before_it_blocks_
+        on_the_workspace_row). Not inside it: a cancel, a delete or a re-ingest
+        rolls that transaction back, and the money is already spent."""
+        meter = _MeteredClient(self.client)
+        try:
+            result = compute(meter)
+        except Exception as exc:
+            if meter.called:
+                status: SpendStatus = "timeout" if isinstance(exc, TimeoutError) else "failed"
+                self._record_spend(job_id, workspace_id, status, meter.usage)
+            raise
+        return result, meter.usage
+
+    def _record_spend(
+        self,
+        job_id: uuid.UUID,
+        workspace_id: uuid.UUID,
+        status: SpendStatus,
+        usage: dict[str, Any] | None,
+    ) -> None:
+        """Its OWN transaction, deliberately (spend.py names this exception):
+        the locked persist that follows rolls back on a cancel, a delete or a
+        re-ingest, and the money is already spent by then. A failure to write
+        is logged, never raised: raising on the success path would fail the job
+        and bill the same call again on retry, and on a failure path it would
+        mask the real error."""
+        tokens_in, tokens_out = _tokens(usage)
+        try:
+            with self.session_factory() as s:
+                record_spend(
+                    s,
+                    workspace_id=workspace_id,
+                    kind="setup",
+                    status=status,
+                    tokens_in=tokens_in,
+                    tokens_out=tokens_out,
+                    model=self.client.model,
+                    ref_id=job_id,
+                )
+                s.commit()
+        except SQLAlchemyError:
+            logger.exception(
+                "phase0 setup job %s: could not record %s spend (%d in / %d out)",
+                job_id,
+                status,
+                tokens_in,
+                tokens_out,
+            )
 
     def _workspace_repo_dir(self, workspace_id) -> Path:
         return Path(self.workspaces_dir) / str(workspace_id) / "repo"
@@ -545,54 +657,65 @@ class Phase0Worker:
                 session=s, call=call, extractor_version=self.extractor_version
             )
 
-        sections = (
-            None if fresh else compute_section_extracts(call_text=call_text, client=self.client)
+        computed = (
+            None
+            if fresh
+            else self._metered(
+                job_id,
+                workspace_id,
+                lambda client: compute_section_extracts(call_text=call_text, client=client),
+            )
         )
+        sections = None if computed is None else computed[0]
 
         # _bounded_lock_waits wraps the WHOLE transaction, commit included: the
         # workspace row is held from the acquisition below until COMMIT, and the
         # persist DELETE further down waits on row locks of its own.
-        with self.session_factory() as s, _bounded_lock_waits(s):
-            ws = s.get(Workspace, workspace_id, with_for_update=True)
-            if ws is None or ws.soft_deleted_at is not None:
-                raise WorkspaceGoneDuringSetup(f"workspace {workspace_id} deleted")
-            _refuse_stale_claim(ws, claimed_generation)
-            # Workspace row THEN Call row — the normative order. Two
-            # workspaces sharing a Call therefore queue rather than
-            # deadlock, and neither inverts against the delete
-            # transaction's workspace-row update.
-            call = s.get(Call, call_id, with_for_update=True)
-            if call is None:
-                raise RuntimeError(f"call {call_id} not found")
-            if source_text_hash(call.full_text or "") != pinned:
-                raise CallSourceChanged(
-                    f"call {call_id} was re-ingested during setup of workspace {workspace_id}"
-                )
+        try:
+            with self.session_factory() as s, _bounded_lock_waits(s):
+                ws = s.get(Workspace, workspace_id, with_for_update=True)
+                if ws is None or ws.soft_deleted_at is not None:
+                    raise WorkspaceGoneDuringSetup(f"workspace {workspace_id} deleted")
+                _refuse_stale_claim(ws, claimed_generation)
+                # Workspace row THEN Call row — the normative order. Two
+                # workspaces sharing a Call therefore queue rather than
+                # deadlock, and neither inverts against the delete
+                # transaction's workspace-row update.
+                call = s.get(Call, call_id, with_for_update=True)
+                if call is None:
+                    raise RuntimeError(f"call {call_id} not found")
+                if source_text_hash(call.full_text or "") != pinned:
+                    raise CallSourceChanged(
+                        f"call {call_id} was re-ingested during setup of workspace {workspace_id}"
+                    )
 
-            # Re-check under the lock: another worker may have made the cache
-            # fresh while we computed. Snapshot the canonical rows instead of
-            # overwriting them with our now-redundant payload.
-            if sections is not None and not section_extracts_are_fresh(
-                session=s, call=call, extractor_version=self.extractor_version
-            ):
-                persist_section_extracts(
-                    session=s,
-                    call=call,
-                    sections=sections,
-                    model=self.client.model,
-                    extractor_version=self.extractor_version,
-                    source_hash=pinned,
-                )
-                s.flush()
+                # Re-check under the lock: another worker may have made the cache
+                # fresh while we computed. Snapshot the canonical rows instead of
+                # overwriting them with our now-redundant payload.
+                if sections is not None and not section_extracts_are_fresh(
+                    session=s, call=call, extractor_version=self.extractor_version
+                ):
+                    persist_section_extracts(
+                        session=s,
+                        call=call,
+                        sections=sections,
+                        model=self.client.model,
+                        extractor_version=self.extractor_version,
+                        source_hash=pinned,
+                    )
+                    s.flush()
 
-            rows = s.scalars(
-                select(CallSectionExtract).where(CallSectionExtract.call_id == call_id)
-            ).all()
-            snapshot = {r.section: r.extract_text for r in rows}
-            for name in SECTION_NAMES:
-                snapshot.setdefault(name, "")
-            ws.section_extracts = snapshot
-            s.commit()
+                rows = s.scalars(
+                    select(CallSectionExtract).where(CallSectionExtract.call_id == call_id)
+                ).all()
+                snapshot = {r.section: r.extract_text for r in rows}
+                for name in SECTION_NAMES:
+                    snapshot.setdefault(name, "")
+                ws.section_extracts = snapshot
+                s.commit()
+        finally:
+            if computed is not None:
+                self._record_spend(job_id, workspace_id, "ok", computed[1])
 
     def _m3(
         self,
@@ -635,67 +758,82 @@ class Phase0Worker:
                 session=s, call=call, extractor_version=self.rubric_extractor_version
             )
 
-        payload = None if fresh else compute_rubric(call_text=call_text, client=self.client)
+        computed = (
+            None
+            if fresh
+            else self._metered(
+                job_id,
+                workspace_id,
+                lambda client: compute_rubric(call_text=call_text, client=client),
+            )
+        )
+        payload = None if computed is None else computed[0]
 
         # _bounded_lock_waits wraps the WHOLE transaction, commit included: the
         # job and workspace rows are held from the acquisitions below until
         # COMMIT, and the rubric persist can wait on CallRubric's unique index.
-        with self.session_factory() as s, _bounded_lock_waits(s):
-            # job → ws → call: see the docstring's "Lock order" note.
-            job = s.get(WorkspaceSetupJob, job_id, with_for_update=True)
-            if job is None or job.status != "running":
-                raise WorkspaceGoneDuringSetup(f"job {job_id} is no longer running (a cancel won)")
+        try:
+            with self.session_factory() as s, _bounded_lock_waits(s):
+                # job → ws → call: see the docstring's "Lock order" note.
+                job = s.get(WorkspaceSetupJob, job_id, with_for_update=True)
+                if job is None or job.status != "running":
+                    raise WorkspaceGoneDuringSetup(
+                        f"job {job_id} is no longer running (a cancel won)"
+                    )
 
-            ws = s.get(Workspace, workspace_id, with_for_update=True)
-            if ws is None or ws.soft_deleted_at is not None:
-                raise WorkspaceGoneDuringSetup(f"workspace {workspace_id} deleted")
-            _refuse_stale_claim(ws, claimed_generation)
-            call = s.get(Call, call_id, with_for_update=True)
-            if call is None:
-                raise RuntimeError(f"call {call_id} not found")
-            if source_text_hash(call.full_text or "") != pinned:
-                raise CallSourceChanged(
-                    f"call {call_id} was re-ingested during setup of workspace {workspace_id}"
+                ws = s.get(Workspace, workspace_id, with_for_update=True)
+                if ws is None or ws.soft_deleted_at is not None:
+                    raise WorkspaceGoneDuringSetup(f"workspace {workspace_id} deleted")
+                _refuse_stale_claim(ws, claimed_generation)
+                call = s.get(Call, call_id, with_for_update=True)
+                if call is None:
+                    raise RuntimeError(f"call {call_id} not found")
+                if source_text_hash(call.full_text or "") != pinned:
+                    raise CallSourceChanged(
+                        f"call {call_id} was re-ingested during setup of workspace {workspace_id}"
+                    )
+
+                if payload is not None and not rubric_is_fresh(
+                    session=s, call=call, extractor_version=self.rubric_extractor_version
+                ):
+                    persist_rubric(
+                        session=s,
+                        call=call,
+                        payload=payload,
+                        model=self.client.model,
+                        extractor_version=self.rubric_extractor_version,
+                        source_hash=pinned,
+                    )
+                    s.flush()
+
+                template = s.get(CallRubric, call_id)
+                if template is None:
+                    raise RuntimeError(f"rubric template for call {call_id} not found after fresh")
+
+                ws.rubric_criteria = template.criteria
+                ws.rubric_funder_notes = template.funder_notes
+                ws.rubric_updated_at = datetime.now(UTC)
+
+                s.add(
+                    WorkspaceEvent(
+                        workspace_id=ws.id,
+                        kind="rubric_initialized",
+                        payload={
+                            "criteria": template.criteria,
+                            "funder_notes": template.funder_notes,
+                            "seeded_from_call_rubrics_extracted_at": (
+                                template.extracted_at.isoformat()
+                            ),
+                        },
+                    )
                 )
 
-            if payload is not None and not rubric_is_fresh(
-                session=s, call=call, extractor_version=self.rubric_extractor_version
-            ):
-                persist_rubric(
-                    session=s,
-                    call=call,
-                    payload=payload,
-                    model=self.client.model,
-                    extractor_version=self.rubric_extractor_version,
-                    source_hash=pinned,
-                )
-                s.flush()
-
-            template = s.get(CallRubric, call_id)
-            if template is None:
-                raise RuntimeError(f"rubric template for call {call_id} not found after fresh")
-
-            ws.rubric_criteria = template.criteria
-            ws.rubric_funder_notes = template.funder_notes
-            ws.rubric_updated_at = datetime.now(UTC)
-
-            s.add(
-                WorkspaceEvent(
-                    workspace_id=ws.id,
-                    kind="rubric_initialized",
-                    payload={
-                        "criteria": template.criteria,
-                        "funder_notes": template.funder_notes,
-                        "seeded_from_call_rubrics_extracted_at": (
-                            template.extracted_at.isoformat()
-                        ),
-                    },
-                )
-            )
-
-            # Yield to the owner's rubric review. No completed_at — not terminal.
-            job.status = "waiting_for_rubric_review"
-            s.commit()
+                # Yield to the owner's rubric review. No completed_at — not terminal.
+                job.status = "waiting_for_rubric_review"
+                s.commit()
+        finally:
+            if computed is not None:
+                self._record_spend(job_id, workspace_id, "ok", computed[1])
 
     def _fail(self, job_id: uuid.UUID, exc: BaseException) -> None:
         """Record the outcome of a failed run in its own short transaction.
@@ -793,6 +931,7 @@ def run_phase0_tick(
     extractor_version: str,
     rubric_extractor_version: str,
     workspaces_dir: str,
+    settings,
 ) -> None:
     """Scheduler-friendly tick: open one session, claim+drain at most one job.
 
@@ -800,6 +939,14 @@ def run_phase0_tick(
     client-construction cost on every empty tick. A short race window
     between peek and claim is benign: worst case the client is built and
     immediately unused.
+
+    Then checks the org-wide daily token cap, as every other hosted spender
+    does before it spends (review 2026-10-06 H2). A tripped cap is not a
+    failure: nothing is claimed, no attempt is charged, and the job waits in
+    'queued' until the Stockholm day rolls over. Like the other callers this is
+    a guardrail, not an exact ledger — a job that passes near the cap may
+    overshoot it by its own two calls. `settings` needs only the two
+    global_daily_token_cap_* fields.
     """
     with session_factory() as session:
         # First recover any job abandoned in 'running' by a crashed worker —
@@ -811,7 +958,18 @@ def run_phase0_tick(
         has_work = session.scalar(
             select(WorkspaceSetupJob.id).where(WorkspaceSetupJob.status == "queued").limit(1)
         )
-    if has_work is None:
+        if has_work is None:
+            return
+        cap = check_global_daily_token_cap(session, settings=settings)
+    if not cap.allowed:
+        logger.warning(
+            "phase0 tick deferred: global daily token cap (%s; in %d/%d, out %d/%d)",
+            cap.reason,
+            cap.used_in,
+            cap.cap_in,
+            cap.used_out,
+            cap.cap_out,
+        )
         return
 
     worker = Phase0Worker(

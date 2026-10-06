@@ -48,7 +48,7 @@ class LlmSpend(Base):
     __table_args__ = (
         CheckConstraint(
             "kind IN ('chat_turn','compaction','coherence','evaluator','review',"
-            "'uncited_claims','citation')",
+            "'uncited_claims','citation','setup')",
             name="ck_llm_spend_kind",
         ),
         CheckConstraint("status IN ('ok','failed','timeout')", name="ck_llm_spend_status"),
