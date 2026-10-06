@@ -76,7 +76,12 @@ artifacts = ["src/grant_lab/web/spa/**/*"]
 # cooldown (pnpm-workspace.yaml `minimumReleaseAge: 10080` minutes = 7 days), so
 # a freshly-published (or freshly-compromised) artifact still has to age before
 # this project will resolve it. Keep that week when bumping again.
-exclude-newer = "2026-08-03T00:00:00Z"
+#
+# 2026-10-06: bumped to 2026-09-29 (again 7 days back) for the same reason — the
+# CI test job had never run (bad osv-scanner-action path, review 2026-10-06 H1),
+# and pip-audit stood at 25 advisories in anyio/urllib3/httpx2/httpcore2/pyjwt.
+# Only those five packages were upgraded (`uv lock --upgrade-package …`).
+exclude-newer = "2026-09-29T00:00:00Z"
 # Hold mcp on 1.x. It is TRANSITIVE (claude-agent-sdk requires it) and the
 # cooldown bump above made mcp 2.0.0 resolvable, but the advisory being closed
 # (PYSEC-2026-3483) is fixed in 1.28.1 — a major bump is more than the fix needs.
@@ -144,6 +149,7 @@ no-build-package = [
     "httpx",
     "httpx-sse",
     "httpx2",
+    "httpx2-jsfetch",
     "idna",
     "iniconfig",
     "itsdangerous",

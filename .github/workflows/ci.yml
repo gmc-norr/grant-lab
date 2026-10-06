@@ -53,7 +53,7 @@ jobs:
 
       - name: OSV-Scanner (uv.lock)
         # google/osv-scanner-action ships no moving major tag; pin the latest v1.x release.
-        uses: google/osv-scanner-action@764c91816374ff2d8fc2095dab36eecd42d61638 # v1.9.2
+        uses: google/osv-scanner-action/osv-scanner-action@764c91816374ff2d8fc2095dab36eecd42d61638 # v1.9.2
         with:
           scan-args: "--lockfile=uv.lock"
 
@@ -127,7 +127,7 @@ jobs:
         run: cd frontend && pnpm audit || true
 
       - name: OSV-Scanner (pnpm-lock.yaml)
-        uses: google/osv-scanner-action@764c91816374ff2d8fc2095dab36eecd42d61638 # v1.9.2
+        uses: google/osv-scanner-action/osv-scanner-action@764c91816374ff2d8fc2095dab36eecd42d61638 # v1.9.2
         with:
           scan-args: "--lockfile=frontend/pnpm-lock.yaml"
 
