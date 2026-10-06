@@ -1,10 +1,11 @@
 import { QueryClient } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { queryWrapper as wrapper } from "../test-utils";
 import * as clientMod from "./client";
 import { useCallDetail, useHideCall, useSetDecisionNote } from "./calls";
+import { useSaveCall } from "./decisions";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -93,4 +94,43 @@ it("useSetDecisionNote PUTs the note and invalidates ['calls'] but NOT ['decisio
   // hook's whole onSuccess left all 148 files green (measured 2026-09-07), and
   // "making it consistent" with invalidateDecisions is the natural wrong fix.
   expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["decision-counts"] });
+});
+
+// Review 2026-10-06 M9. The call page is keyed ["call", id, profile], which a
+// ["calls"] invalidation does not prefix-match, so re-opening a call within
+// App.tsx's 20 s staleTime showed the PRE-decision state and offered Save/Hide
+// again. Behavioural, not "was invalidateQueries called with X": the cached
+// page itself must come out stale.
+describe("a decision or a note marks the cached call page stale", () => {
+  function primed() {
+    const qc = new QueryClient();
+    qc.setQueryData(["call", 5, 7], DETAIL);
+    qc.setQueryData(["call", 9, null], DETAIL); // another call, another profile
+    return qc;
+  }
+  const stale = (qc: QueryClient, key: unknown[]) => qc.getQueryState(key)?.isInvalidated;
+
+  it("hide", async () => {
+    vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { hidden: true }, error: undefined } as never);
+    const qc = primed();
+    const { result } = renderHook(() => useHideCall(), { wrapper: wrapper(qc) });
+    await result.current.mutateAsync({ id: 5, profileId: 7 });
+    expect(stale(qc, ["call", 5, 7])).toBe(true);
+  });
+
+  it("save", async () => {
+    vi.spyOn(clientMod.api, "POST").mockResolvedValue({ data: { state: "saved" }, error: undefined } as never);
+    const qc = primed();
+    const { result } = renderHook(() => useSaveCall(), { wrapper: wrapper(qc) });
+    await result.current.mutateAsync({ id: 5, profileId: 7 });
+    expect(stale(qc, ["call", 5, 7])).toBe(true);
+  });
+
+  it("note", async () => {
+    vi.spyOn(clientMod.api, "PUT").mockResolvedValue({ data: { decision_note: "why" }, error: undefined } as never);
+    const qc = primed();
+    const { result } = renderHook(() => useSetDecisionNote(), { wrapper: wrapper(qc) });
+    await result.current.mutateAsync({ id: 5, profileId: 7, note: "why", expectedState: "saved" });
+    expect(stale(qc, ["call", 5, 7])).toBe(true);
+  });
 });

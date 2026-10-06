@@ -35,10 +35,13 @@ export function decisionCountsKey(profileId: number | null, filters: CountsFilte
   return ["decision-counts", profileId, filters] as const;
 }
 
-// ONE place that says what a decision invalidates, because it is TWO caches and
-// forgetting the second is invisible: the feed refetches, the rail does not, and
-// the counts sit one triage behind for the rest of the session (App.tsx's
-// staleTime is 20 s).
+// ONE place that says what a decision invalidates, because it is THREE caches and
+// forgetting one is invisible: the feed refetches, the rail does not, and the
+// counts sit one triage behind for the rest of the session (App.tsx's staleTime
+// is 20 s). The third is the call page, keyed ["call", id, profile] — which
+// ["calls"] does NOT prefix-match — so without it a call re-opened within 20 s
+// of deciding showed the pre-decision state and offered Save/Hide again
+// (review 2026-10-06 M9).
 //
 // Every decision hook calls this in its OWN `onSuccess` — `useSaveCall` and
 // `useUnsaveCall` below, and `useHideCall`/`useUnhideCall` in api/calls.ts, which
@@ -52,6 +55,7 @@ export function decisionCountsKey(profileId: number | null, filters: CountsFilte
 export function invalidateDecisions(qc: QueryClient) {
   return Promise.all([
     qc.invalidateQueries({ queryKey: ["calls"] }),
+    qc.invalidateQueries({ queryKey: ["call"] }),
     qc.invalidateQueries({ queryKey: ["decision-counts"] }),
   ]);
 }

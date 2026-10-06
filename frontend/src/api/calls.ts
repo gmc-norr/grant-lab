@@ -91,8 +91,9 @@ export type NoteArgs = {
 // and the four above it: a note changes no count and moves no call between
 // views, so invalidating ["decision-counts"] here would refetch three counts on
 // every committed note for no observable change. ["calls"] IS invalidated --
-// the Saved and Hidden rows carry `decision_note`, so the list is the one cache
-// that goes stale when a note is written.
+// the Saved and Hidden rows carry `decision_note` -- and so is ["call"], the
+// call page, which carries the note too and which ["calls"] does not
+// prefix-match (review 2026-10-06 M9).
 export function useSetDecisionNote() {
   const qc = useQueryClient();
   return useMutation({
@@ -103,6 +104,10 @@ export function useSetDecisionNote() {
           body: { note, expected_state: expectedState },
         }),
       ),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["calls"] }),
+    onSuccess: () =>
+      Promise.all([
+        qc.invalidateQueries({ queryKey: ["calls"] }),
+        qc.invalidateQueries({ queryKey: ["call"] }),
+      ]),
   });
 }

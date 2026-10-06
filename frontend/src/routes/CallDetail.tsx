@@ -29,9 +29,10 @@ export function CallDetail() {
   // is "hidden by this session" and remembers the profile the hide was made ON
   // so Undo deletes the same row even if the URL changes underneath us;
   // "undecided" is "un-hidden by this session" and must WIN over the seed --
-  // this page's query key is ["call", id, profile], which
-  // invalidateQueries(["calls"]) does not prefix-match, so nothing refetches
-  // after the DELETE and a plain `??` would put the Undo straight back.
+  // until the refetch lands, `call.decision_state` is still the old answer and
+  // a plain `??` would put the Undo straight back. (Decisions now invalidate
+  // this page's ["call", id, profile] key too -- review 2026-10-06 M9 -- so
+  // the seed catches up; before that nothing refetched at all.)
   const [override, setOverride] = useState<
     { id: number; profileId: number } | "undecided" | null
   >(null);
@@ -42,10 +43,9 @@ export function CallDetail() {
   const [noteOpen, setNoteOpen] = useState(false);
   // What the note IS, after this session's edits. `undefined` means "nothing
   // committed here yet, use the server's value". Needed for the same reason as
-  // `override`: the note mutation invalidates ["calls"], which does not
-  // prefix-match this page's ["call", id, profile] key, so `call.decision_note`
-  // stays at its page-load value for the whole session. Without this, closing
-  // the editor would show the text the note USED to be.
+  // `override`: until the refetch the note mutation triggers lands,
+  // `call.decision_note` is still its old value, and closing the editor would
+  // show the text the note USED to be.
   const [noteOverride, setNoteOverride] = useState<string | null | undefined>(undefined);
   const { data, isLoading, isError, error } = useCallDetail(callId, profile);
 
