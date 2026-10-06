@@ -63,6 +63,17 @@ PINNED: dict[tuple[str, str], str] = {
         "pass_runner.py:364, jobs.py:184) and a reaped-then-late-finalized run "
         "reaches it twice, so an append-only row here would double-count"
     ),
+    (
+        "grant_lab/ranking/remote_attempts.py",
+        "record_attempt",
+    ): (
+        "this IS the remote-ranking ledger's writer, the ranking twin of record_spend: "
+        "one RankingRemoteAttempt row per billed Sonnet escalation, which "
+        "count_today() sums for RANKING_REMOTE_DAILY_CAP. It gained tokens_in/out in "
+        "migration 0085 (review 2026-10-06 M1). llm_spend cannot hold these rows -- "
+        "its workspace_id is a NOT NULL FK and a ranking belongs to no workspace -- "
+        "and the global proposal-assist cap has never covered ranking"
+    ),
 }
 
 
