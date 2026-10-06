@@ -113,6 +113,10 @@ def build_citation_llm(settings: Settings) -> StructuredLLM:
                 model=model,
                 max_tokens=settings.citation_llm_max_output_tokens,
                 timeout=settings.citation_llm_timeout_seconds,
+                # No SDK retries: one read timeout was up to three billed
+                # requests behind one zero-token `timeout` row (review
+                # 2026-10-06 M7). Compaction and Phase 0 pin the same.
+                max_retries=0,
             ),
             model,
         )
