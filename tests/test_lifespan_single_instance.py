@@ -63,7 +63,9 @@ def test_standby_flag_boots_without_the_scheduler_and_says_so(
             assert standby.state.scheduler_lock is None
             assert not standby.state.scheduler.running
             # Visible to a monitor: the standby says it does not hold the lock.
-            assert client_b.get("/healthz").json() == {"status": "ok", "scheduler_lock": False}
+            r = client_b.get("/healthz")
+            assert r.status_code == 200, "a deliberate standby is healthy for HTTP"
+            assert r.json() == {"status": "ok", "scheduler_lock": False}
         warned = [
             r for r in caplog.records if r.__dict__.get("event") == "scheduler_lock_not_acquired"
         ]

@@ -1,6 +1,7 @@
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 
@@ -10,10 +11,9 @@ router = APIRouter()
 class HealthOut(BaseModel):
     status: str
     # True only in the ONE process that holds the single-instance advisory
-    # lock and whose lock connection is still alive. A standby
-    # (SCHEDULER_STANDBY_OK) reports False; so does an instance whose lock
-    # backend died under it (review 2026-09-02 §2.6(b)) — the status code stays
-    # 200 because HTTP still works, the field is what a monitor alerts on.
+    # lock and whose lock connection is still alive (review 2026-09-02
+    # §2.6(b)). False is a 503 unless this is a deliberate standby
+    # (SCHEDULER_STANDBY_OK) — see healthz.
     scheduler_lock: bool
 
 
@@ -25,6 +25,14 @@ def healthz(request: Request) -> HealthOut:
     Monitoring should treat any non-200 as "do not route traffic / page
     operator." We ping the database with `SELECT 1` so an unreachable DB
     surfaces as 503 instead of being silently invisible.
+
+    A process that does not hold the single-instance lock is a 503 too, unless
+    it was booted as a deliberate standby (SCHEDULER_STANDBY_OK=true). Since
+    93a5ea26 the watchdog STOPS the scheduler when the lock is lost, so a 200
+    there meant HTTP up, zero scheduled work, and every status-code monitor
+    green (review 2026-10-06 M12). The same holds for a process whose lock
+    probe failed at boot: no scheduler ever started, and only a restart fixes
+    it. The body still says why.
     """
     engine = request.app.state.engine
     try:
@@ -36,4 +44,10 @@ def healthz(request: Request) -> HealthOut:
         logging.getLogger(__name__).warning("healthz db check failed: %s", exc)
         raise HTTPException(status_code=503, detail="db unavailable") from exc
     lock = getattr(request.app.state, "scheduler_lock", None)
-    return HealthOut(status="ok", scheduler_lock=lock is not None and lock.is_held())
+    held = lock is not None and lock.is_held()
+    if not held and not request.app.state.settings.scheduler_standby_ok:
+        return JSONResponse(
+            status_code=503,
+            content=HealthOut(status="scheduler_lock_not_held", scheduler_lock=False).model_dump(),
+        )
+    return HealthOut(status="ok", scheduler_lock=held)

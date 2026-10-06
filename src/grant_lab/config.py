@@ -333,7 +333,8 @@ class Settings(BaseSettings):
             "per-process state. When another process already holds the "
             "single-instance advisory lock, startup is FATAL by default. Set true "
             "to boot an HTTP-only standby instead: it serves requests, runs no "
-            "scheduler, and /healthz reports scheduler_lock=false."
+            "scheduler, and /healthz answers 200 with scheduler_lock=false. Without "
+            "this flag a process that does not hold the lock answers /healthz 503."
         ),
     )
     collab_kill_switch: bool = Field(

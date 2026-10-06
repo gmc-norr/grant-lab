@@ -34,7 +34,8 @@ A PostgreSQL advisory lock enforces this at startup — a second process (a seco
 worker, a second replica) finds the lock held and **refuses to start**. Set
 `SCHEDULER_STANDBY_OK=true` only for a deliberate HTTP-only standby that runs no
 scheduler; `GET /healthz` reports `scheduler_lock` so a monitor can tell which process
-holds it.
+holds it. A process that loses the lock while running stops its scheduler and answers
+`/healthz` with **503** (a standby answers 200) — restart it.
 
 ## Local development
 
